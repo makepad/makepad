@@ -74,10 +74,11 @@ import android.text.SpannableStringBuilder;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -569,6 +570,12 @@ class MakepadSurface
     @SuppressWarnings("deprecation")
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
+        // API 36 still passes the back key on to us after the activity's back callback got it as Back.
+        if (keyCode == KeyEvent.KEYCODE_BACK
+            && getContext() instanceof MakepadActivity
+            && ((MakepadActivity) getContext()).mBackGoesThroughCallback) {
+            return true;
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
@@ -1018,6 +1025,16 @@ public class MakepadActivity
     private static int sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     //% MAIN_ACTIVITY_BODY
 
+    /** False while MakepadNative has no native implementation yet (a host that binds it late). */
+    protected boolean nativesReady() {
+        return true;
+    }
+
+    /** Called instead of starting up when `nativesReady()` was false; the activity then finishes. */
+    protected void onNativesNotReady() {}
+
+    private boolean mNativesDeferred = false;
+
     private MakepadSurface view;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private InputManager mInputManager;
@@ -1074,6 +1091,15 @@ public class MakepadActivity
     private SelectionHandleView mSelectionHandleStart;
     private SelectionHandleView mSelectionHandleEnd;
     private int mSelectionHandleSizePx;
+
+    // back callback (API 33+), whose gesture states and edge match onBackGesture in android_jni.rs
+    private static final int BACK_GESTURE_START = 0;
+    private static final int BACK_GESTURE_MOVE = 1;
+    private static final int BACK_GESTURE_CANCEL = 2;
+    private static final int BACK_EDGE_NONE = 2;
+    private OnBackInvokedCallback mBackCallback;
+    // Set by the callback's first call, since the system ignores it unless the manifest opts in.
+    boolean mBackGoesThroughCallback;
 
     static {
         System.loadLibrary("makepad");
@@ -1226,6 +1252,16 @@ public class MakepadActivity
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        if (!nativesReady()) {
+            // a host that binds MakepadNative late (the makepad run host APK) is not booted in this
+            // process, e.g. the system restored this activity after killing the process: nothing
+            // of this activity may touch MakepadNative; the host starts its boot and this ends
+            mNativesDeferred = true;
+            super.onCreate(savedInstanceState);
+            onNativesNotReady();
+            finish();
+            return;
+        }
         if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
             mWebSocketsThread = new HandlerThread("WebSocketsThread");
             mWebSocketsThread.start();
@@ -1247,9 +1283,6 @@ public class MakepadActivity
                 | LayoutParams.SOFT_INPUT_STATE_UNCHANGED
         );
 
-        // Default state: content below system bars (status bar visible).
-        // Apps that want fullscreen can request CxOsOp::FullscreenWindow which
-        // calls applyFullScreen(true) to hide bars and extend content behind them.
 
         view = new MakepadSurface(this);
         // Put it inside a parent layout which can resize it using padding
@@ -1330,11 +1363,90 @@ public class MakepadActivity
         mSelectionHandleOverlay.addView(mSelectionHandleEnd);
 
         setContentView(mRootLayout);
+
+        // Default state: edge to edge, the bars visible and transparent over the
+        // app's drawing, their size reported as safe-area insets. Apps that want
+        // fullscreen can request CxOsOp::FullscreenWindow which calls
+        // applyFullScreen(true) to hide the bars.
+        applyEdgeToEdge();
         restoreWarmResumeSurfaceSnapshotIfAvailable();
         updateTaskDescription();
 
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
+
+        // If the manifest opts in, API 33+ sends Back here instead of to onBackPressed(). On 34+ we also
+        // hear the gesture's progress, through reflection since we compile against SDK 33.
+        if (Build.VERSION.SDK_INT >= 33) {
+            mBackCallback = MakepadNative::onBackPressed;
+            if (Build.VERSION.SDK_INT >= 34) {
+                try {
+                    Class<?> callbackClass = Class.forName("android.window.OnBackAnimationCallback");
+                    Class<?> backEventClass = Class.forName("android.window.BackEvent");
+                    Method getTouchX = backEventClass.getMethod("getTouchX");
+                    Method getTouchY = backEventClass.getMethod("getTouchY");
+                    Method getProgress = backEventClass.getMethod("getProgress");
+                    Method getSwipeEdge = backEventClass.getMethod("getSwipeEdge");
+                    int[] surfaceOrigin = new int[2];
+                    int[] swipeEdge = new int[1];
+                    mBackCallback = (OnBackInvokedCallback) Proxy.newProxyInstance(
+                        MakepadActivity.class.getClassLoader(),
+                        new Class<?>[] { callbackClass },
+                        (proxy, method, args) -> {
+                            String name = method.getName();
+                            switch (name) {
+                                case "onBackStarted":
+                                case "onBackProgressed":
+                                    mBackGoesThroughCallback = true;
+                                    float touchX = (float) getTouchX.invoke(args[0]);
+                                    float touchY = (float) getTouchY.invoke(args[0]);
+                                    swipeEdge[0] = (int) getSwipeEdge.invoke(args[0]);
+                                    // A back button press comes as a touch at (0, 0), not the NaN BackEvent's docs promise.
+                                    if (touchX == 0 && touchY == 0) {
+                                        touchX = Float.NaN;
+                                        touchY = Float.NaN;
+                                        swipeEdge[0] = BACK_EDGE_NONE;
+                                    }
+                                    // BackEvent's touch point is on the screen, but touches are relative to the surface.
+                                    view.getLocationOnScreen(surfaceOrigin);
+                                    MakepadNative.onBackGesture(
+                                        name.equals("onBackStarted") ? BACK_GESTURE_START : BACK_GESTURE_MOVE,
+                                        touchX - surfaceOrigin[0],
+                                        touchY - surfaceOrigin[1],
+                                        (float) getProgress.invoke(args[0]),
+                                        swipeEdge[0],
+                                        SystemClock.uptimeMillis());
+                                    return null;
+                                case "onBackCancelled":
+                                    MakepadNative.onBackGesture(
+                                        BACK_GESTURE_CANCEL,
+                                        Float.NaN,
+                                        Float.NaN,
+                                        0,
+                                        swipeEdge[0],
+                                        SystemClock.uptimeMillis());
+                                    return null;
+                                case "onBackInvoked":
+                                    MakepadNative.onBackPressed();
+                                    return null;
+                                // The dispatcher keeps callbacks in a map, so the proxy answers these itself.
+                                case "hashCode":
+                                    return System.identityHashCode(proxy);
+                                case "equals":
+                                    return proxy == args[0];
+                                case "toString":
+                                    return "MakepadBackAnimationCallback";
+                                default:
+                                    return null;
+                            }
+                        });
+                } catch (ReflectiveOperationException e) {
+                    Log.w(LOG_TAG, "Predictive back is unavailable, so Back won't animate", e);
+                }
+            }
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, mBackCallback);
+        }
 
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
@@ -1349,10 +1461,24 @@ public class MakepadActivity
         boolean isEmulator = this.isEmulator();
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
-        String kernelVersion = this.getKernelVersion();
         int sdkVersion = Build.VERSION.SDK_INT;
+        boolean nightMode = isNightMode(getResources().getConfiguration());
 
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
+        // Makepad ignores the kernel version, but the slot stays so the native
+        // signature doesn't change.
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
+        sendDisplayRotation();
+        // Landscape to reverse landscape (a half turn) changes no configuration,
+        // so onConfigurationChanged never hears of it: the display listener does.
+        android.hardware.display.DisplayManager displays =
+            (android.hardware.display.DisplayManager) getSystemService(android.content.Context.DISPLAY_SERVICE);
+        if (displays != null) {
+            displays.registerDisplayListener(new android.hardware.display.DisplayManager.DisplayListener() {
+                @Override public void onDisplayAdded(int displayId) {}
+                @Override public void onDisplayRemoved(int displayId) {}
+                @Override public void onDisplayChanged(int displayId) { sendDisplayRotation(); }
+            }, null);
+        }
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -1401,7 +1527,15 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        if (mNativesDeferred) {
+            super.onDestroy();
+            return;
+        }
         unregisterPhysicalKeyboardListener();
+        if (mBackCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
+            mBackCallback = null;
+        }
         if (mCameraPreviewOverlay != null) {
             for (Long videoId : mCameraPreviewViews.keySet()) {
                 MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);
@@ -2068,6 +2202,74 @@ public class MakepadActivity
         });
     }
 
+    private static boolean isNightMode(android.content.res.Configuration config) {
+        return (config.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    // The system switched between light and dark while the app runs. The
+    // manifest lists uiMode in configChanges, so the activity is not recreated;
+    // Cx is told, and its night_mode follows.
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration config) {
+        super.onConfigurationChanged(config);
+        if (mNativesDeferred) {
+            return;
+        }
+        MakepadNative.onNightModeChanged(isNightMode(config));
+        sendDisplayRotation();
+    }
+
+    // The display's rotation (Surface.ROTATION_0..270 = 0..3): camera frames are
+    // turned upright against it.
+    @SuppressWarnings("deprecation")
+    private void sendDisplayRotation() {
+        try {
+            MakepadNative.onDisplayRotation(getWindowManager().getDefaultDisplay().getRotation());
+        } catch (Throwable t) {
+            Log.w("Makepad", "display rotation unavailable: " + t);
+        }
+    }
+
+    // Edge to edge: the surface draws behind the status bar, the navigation /
+    // gesture bar and the display cutout, whatever the Android version (from
+    // Android 15 with targetSdk 35 the system enforces it; below that this
+    // makes older systems behave the same). The bars are transparent and
+    // unscrimmed, so the app's own background shows through them, and the
+    // bar + cutout insets reach Cx as safe-area insets
+    // (MakepadSystemInsets), so layouts keep their content clear of them.
+    @SuppressWarnings("deprecation")
+    private void applyEdgeToEdge() {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 28) {
+            // ALWAYS (API 30+) lets the content use the cutout area on every
+            // edge, SHORT_EDGES is its API 28-29 form.
+            window.getAttributes().layoutInDisplayCutoutMode =
+                Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+        } else {
+            View decorView = window.getDecorView();
+            decorView.setSystemUiVisibility(decorView.getSystemUiVisibility()
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(0);
+        window.setNavigationBarColor(0);
+        if (Build.VERSION.SDK_INT >= 29) {
+            // No translucent scrim behind the 3-button navigation bar.
+            window.setNavigationBarContrastEnforced(false);
+            window.setStatusBarContrastEnforced(false);
+        }
+        applySystemBarAppearance();
+    }
+
     @SuppressWarnings("deprecation")
     private void applyFullScreen(boolean fullscreen) {
         View decorView = getWindow().getDecorView();
@@ -2101,14 +2303,12 @@ public class MakepadActivity
             }
         }
         else {
+            applyEdgeToEdge();
             if (Build.VERSION.SDK_INT >= 30) {
-                getWindow().setDecorFitsSystemWindows(true);
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();
                 if (controller != null) {
                     controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
                 }
-            } else {
-                decorView.setSystemUiVisibility(0);
             }
         }
 
@@ -2334,7 +2534,6 @@ public class MakepadActivity
     }
 
     // `cx.open_url`: hand the URL to whatever the system opens it with.
-    // Hosted child processes of a window manager ask the WM for this.
     public void openUrl(final String url) {
         runOnUiThread(new Runnable() {
             public void run() {
@@ -2700,6 +2899,14 @@ public class MakepadActivity
             return null;
         }
         return socket.read(maxBytes);
+    }
+
+    public byte[] socketStreamPeerFingerprint(long id) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return null;
+        }
+        return socket.peerFingerprint();
     }
 
     public int socketStreamWrite(long id, byte[] message) {
@@ -3111,6 +3318,36 @@ public class MakepadActivity
         };
     }
 
+    /// The largest frame the HEVC encoder that MediaCodec.createEncoderByType("video/hevc") picks
+    /// (the first one in the regular list) takes: its width (which == 0) or height (which == 1),
+    /// 0 when there is none. The image tile libraries size their pages to fit it.
+    public int hevcEncoderMaxSize(int which) {
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                if (!info.isEncoder()) continue;
+                for (String t : info.getSupportedTypes()) {
+                    if (!"video/hevc".equalsIgnoreCase(t)) continue;
+                    MediaCodecInfo.VideoCapabilities vc = info.getCapabilitiesForType(t).getVideoCapabilities();
+                    if (vc == null) return 0;
+                    int w = vc.getSupportedWidths().getUpper().intValue();
+                    int h = vc.getSupportedHeights().getUpper().intValue();
+                    // The widest frame the encoder takes at its tallest height, and the other way:
+                    // the upper bounds alone may not be a supported pair (3840 wide and 3840 tall,
+                    // but not 3840x3840).
+                    int align = Math.max(2, vc.getHeightAlignment());
+                    if (which == 0) {
+                        while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                        return w;
+                    }
+                    while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                    return h;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);
@@ -3201,21 +3438,6 @@ public class MakepadActivity
             || Build.PRODUCT == "sdk"
             || Build.PRODUCT == "google_sdk"
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
-    }
-
-    private String getKernelVersion() {
-        try {
-            Process process = Runtime.getRuntime().exec("uname -r");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            StringBuilder stringBuilder = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                stringBuilder.append(line);
-            }
-            return stringBuilder.toString();
-        } catch (IOException e) {
-            return "Unknown";
-        }
     }
     
     

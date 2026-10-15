@@ -358,11 +358,18 @@ pub fn syllables(p: &[Ph]) -> Vec<Syllable> {
 /// this score through `align` gives the frames the line is trained on, so
 /// training and rendering share one alignment rule.
 pub fn score_from_words(words: &[SungWord], f0: &[f32], singer: usize) -> SingScore {
+    score_from_words_by_word(words, f0, singer).0
+}
+
+/// [`score_from_words`] and, per note, the index of the word it sings (a
+/// word-level front end groups a word's syllable notes back together).
+pub fn score_from_words_by_word(words: &[SungWord], f0: &[f32], singer: usize) -> (SingScore, Vec<usize>) {
     let nf = f0.len();
     let fr = |t: f32| ((t * 100.0).round().max(0.0) as usize).min(nf);
     let mut notes: Vec<Note> = Vec::new();
+    let mut word_of = Vec::new();
     let mut prev_end = 0.0f32;
-    for w in words {
+    for (wi, w) in words.iter().enumerate() {
         let syl = syllables(&w.phones);
         let (fs, fe) = (fr(w.start.max(prev_end)), fr(w.end));
         if fe <= fs {
@@ -387,6 +394,7 @@ pub fn score_from_words(words: &[SungWord], f0: &[f32], singer: usize) -> SingSc
             m.sort_by(|x, y| x.partial_cmp(y).unwrap());
             let midi = m.get(m.len() / 2).map(|v| v.round()).or(notes.last().map(|n| n.midi)).unwrap_or(60.0);
             notes.push(Note { start: a, dur: b - a, midi, vel: 0.8, syllable: Some(s) });
+            word_of.push(wi);
         }
         prev_end = end;
     }
@@ -397,7 +405,7 @@ pub fn score_from_words(words: &[SungWord], f0: &[f32], singer: usize) -> SingSc
             notes[k - 1].dur += gap;
         }
     }
-    SingScore { notes, singer }
+    (SingScore { notes, singer }, word_of)
 }
 
 /// The score's frames from the segment start (`align` with the first note's

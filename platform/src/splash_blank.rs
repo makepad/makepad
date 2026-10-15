@@ -12,9 +12,8 @@
 //! live-reload overrides) so a build tool can check the result behaves
 //! the same before it blanks the same ranges in the wasm.
 
-use std::collections::HashMap;
 
-pub use crate::makepad_script::top_use::{top_statements, TopStatement};
+pub use makepad_script_census::top_use::{top_statements, TopStatement};
 
 /// Per `script_mod!` block (by file, line and column, as `ScriptModKey`),
 /// its original text and its text with unused definitions blanked.
@@ -85,10 +84,10 @@ impl BlankList {
 
 /// The blank list of a finished run: in every `script_mod!` block, the
 /// top-level definitions whose objects the heap no longer reaches from
-/// what Rust holds ([`crate::makepad_script::top_use`]).
+/// what Rust holds ([`makepad_script_census::top_use`]).
 pub fn compute_blank_list(vm: &mut crate::makepad_script::vm::ScriptVm) -> BlankList {
     let mut list = BlankList::default();
-    for block in crate::makepad_script::top_use::top_use(vm) {
+    for block in makepad_script_census::top_use::top_use(vm) {
         let unused: Vec<&TopStatement> = block.statements.iter().filter(|(_, used)| *used == Some(false)).map(|(s, _)| s).collect();
         if unused.is_empty() {
             continue;
@@ -168,7 +167,7 @@ pub fn blank_statements(code: &str, blank: &[&TopStatement]) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| code.to_string())
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl crate::Cx {
     /// `MAKEPAD_SPLASH_BLANK=<file>`: every block the list names evaluates
     /// its blanked text from here on (a build tool's check of a blank list
@@ -182,13 +181,13 @@ impl crate::Cx {
                 return;
             }
         };
-        let mut overrides = self.script_data.live_reload.script_mod_overrides.borrow_mut();
-        let mut by_key: HashMap<crate::makepad_script::vm::ScriptModKey, String> = HashMap::new();
+        let overrides = &self.script_data.live_reload.script_mod_overrides;
+        let mut by_key: std::collections::HashMap<crate::makepad_script::vm::ScriptModKey, String> = std::collections::HashMap::new();
         for b in list.blocks {
-            by_key.insert(crate::makepad_script::vm::ScriptModKey { file: b.file, line: b.line, column: b.column }, b.blanked);
+            by_key.insert(crate::makepad_script::vm::ScriptModKey::new(&b.file, b.line, b.column), b.blanked);
         }
         let n = by_key.len();
-        overrides.extend(by_key);
+        for (key, code) in by_key { overrides.insert(&key, &code); }
         crate::log!("splash blank: {n} blocks run blanked ({path})");
     }
 }

@@ -122,8 +122,7 @@ impl ScriptHandleGc for CadSolidHandle {
 
 fn new_cad_solid(vm: &mut ScriptVm, solid: Solid) -> ScriptValue {
     let ty = vm.handle_type(id!(cad_solid));
-    vm.bx
-        .heap
+    vm.heap_mut()
         .new_handle(ty, Box::new(CadSolidHandle { solid }))
         .into()
 }
@@ -135,15 +134,11 @@ fn solid_from_value(vm: &mut ScriptVm, value: ScriptValue) -> Option<Solid> {
 }
 
 fn args_value(vm: &mut ScriptVm, args: ScriptObject, index: usize) -> ScriptValue {
-    vm.bx
-        .heap
-        .vec_value(args, index, vm.bx.threads.cur_ref().trap.pass())
+    vm.vec_value_trap(args, index)
 }
 
 fn self_value(vm: &mut ScriptVm, args: ScriptObject) -> ScriptValue {
-    vm.bx
-        .heap
-        .value(args, id!(self).into(), vm.bx.threads.cur_ref().trap.pass())
+    vm.value_trap(args, id!(self))
 }
 
 fn arg_f64(vm: &mut ScriptVm, args: ScriptObject, index: usize, default: f64) -> f64 {
@@ -172,7 +167,7 @@ fn arg_bool(vm: &mut ScriptVm, args: ScriptObject, index: usize, default: bool) 
     if value.is_nil() {
         default
     } else {
-        vm.bx.heap.cast_to_bool(value)
+        vm.heap().cast_to_bool(value)
     }
 }
 
@@ -383,11 +378,10 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
 fn script_value_to_string(vm: &mut ScriptVm, value: ScriptValue) -> String {
     let mut out = String::new();
     let mut recur = Vec::new();
-    vm.bx
-        .heap
+    vm.heap()
         .to_debug_string(value, &mut recur, &mut out, false, 0);
     if let Some(err) = value.as_err() {
-        if let Some(loc) = vm.bx.code.ip_to_loc(err.ip) {
+        if let Some(loc) = vm.ip_to_loc(err.ip) {
             if !out.is_empty() {
                 return format!("{}: {}", loc, out);
             }
@@ -693,18 +687,10 @@ fn eval_cad_script_in_vm(
         source_without_intermediate_previews(source)
     };
     let code = format!("use mod.std.*\nuse mod.cad.*\n{}", source);
-    let script_mod = ScriptMod {
-        cargo_manifest_path: String::new(),
-        module_path: String::new(),
-        file: "cad_editor".to_string(),
-        line: 1,
-        column: 0,
-        code,
-        values: Vec::new(),
-    };
+    let script_mod = ScriptMod::new("", "", "cad_editor", 1, 0, &code, &[]);
     clear_cad_script_output();
-    let previous_silence_errors = vm.bx.silence_errors;
-    vm.bx.silence_errors = previous_silence_errors || allow_progressive_preview;
+    let previous_silence_errors = vm.set_silence_errors(false);
+    vm.set_silence_errors(previous_silence_errors || allow_progressive_preview);
     let value = vm.eval(script_mod);
     let result = if value.is_err() {
         Err(script_value_to_string(vm, value))
@@ -732,14 +718,14 @@ fn eval_cad_script_in_vm(
         })
     };
     vm.drain_errors();
-    vm.bx.silence_errors = previous_silence_errors;
+    vm.set_silence_errors(previous_silence_errors);
     result
 }
 
 fn eval_cad_script(source: &str, allow_progressive_preview: bool) -> Result<Solid, String> {
     let mut host = ScriptVmHost::new((), ());
     let mut vm = ScriptVm {
-        host: &mut host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     };
     cad_script_mod(&mut vm);
@@ -1595,7 +1581,7 @@ fn ai_worker_loop(command_rx: Receiver<AiWorkerCommand>, event_tx: Sender<AiWork
                 ProviderEvent::FunctionCall { .. } => Some(AiWorkerEvent::Error(
                     "AI provider requested an unsupported function".to_string(),
                 )),
-                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => None,
+                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) | ProviderEvent::FunctionCallPartial { .. } => None,
             };
             if let Some(event) = event {
                 if !emit_ai_worker_event(&event_tx, event) {

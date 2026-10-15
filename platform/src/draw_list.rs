@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::os::web::{CxOsDrawCall, CxOsDrawList};
 use crate::recording_buffer::{CpuReservation, RecordingBudget, RecordingBuffer};
 use crate::{
     cx::Cx,
@@ -12,7 +14,6 @@ use crate::{
     makepad_live_id::LiveId,
     makepad_math::*,
     makepad_script::*,
-    os::{CxOsDrawCall, CxOsDrawList},
     script::vm::*,
     texture::{Texture, TextureFormat, TextureId, TextureUpdated},
     uniform_buffer::UniformBuffer,
@@ -326,6 +327,10 @@ impl DrawList {
 impl ScriptHook for DrawList {}
 impl ScriptApply for DrawList {}
 impl ScriptNew for DrawList {
+    fn script_type_id_static() -> ScriptTypeId {
+        const ID: ScriptTypeId = ScriptTypeId::of_path(concat!(module_path!(), "::DrawList"));
+        ID
+    }
     fn script_new(vm: &mut ScriptVm) -> Self {
         Self::new(vm.cx_mut())
     }
@@ -409,7 +414,6 @@ impl Cx {
             upload_needed: item < target.draw_items.len() && target.draw_items[item].retained_upload_needed(),
         }
     }
-
 
     pub fn recycle_instance_uploads(
         &self,
@@ -923,18 +927,18 @@ impl CxDrawListPool {
         &mut self,
         pool: &crate::thread::TaskPool,
         frame: u64,
-        mut take_backend: impl FnMut(&mut CxOsDrawCall) -> P,
+        mut take_backend: impl FnMut(&mut CxDrawItem) -> P,
     ) -> bool {
         self.retire_free_items_with_ids(pool, frame, |_, _, os| take_backend(os))
     }
-    /// The software queue model keeps backend allocations outside CxOsDrawCall.
+    /// The HAL keeps backend allocations outside each draw item.
     /// Give it the exact physical item being retired, under the same reserved
     /// worker service and generation checks as a native backend.
     pub fn retire_free_items_with_ids<P: Send + 'static>(
         &mut self,
         pool: &crate::thread::TaskPool,
         frame: u64,
-        mut take_backend: impl FnMut(DrawListId, usize, &mut CxOsDrawCall) -> P,
+        mut take_backend: impl FnMut(DrawListId, usize, &mut CxDrawItem) -> P,
     ) -> bool {
         self.publish_instance_retirement_pending();
         if self.1.retirement_frame == Some(frame) {
@@ -1029,7 +1033,7 @@ impl CxDrawListPool {
                 };
                 let item = &mut self.0.pool[id.0].draw_items.buffer[index];
                 batch.items[count] = Some((
-                    Some(take_backend(id, index, &mut item.os)),
+                    Some(take_backend(id, index, item)),
                     item.retained_instances.take(),
                     item.instances.take(),
                     None,
@@ -1114,7 +1118,6 @@ impl CxDrawListPool {
         // The backing lease goes now, not at the next collection: a detached
         // item may never be collected again (a suspended stream), and it
         // must not pin the block's buffer until its list retires.
-        let released = item.os.take_backing();
         // The lease goes with the adapter publication: the item becomes an
         // immediate with zero bytes, the collector serves it, and the backend
         // retires its buffer through the completed-reader path (contract §3.4).
@@ -1130,9 +1133,6 @@ impl CxDrawListPool {
         let items = &self[id].draw_items;
         items.clean_leaf.set(false);
         items.instance_counters.set(None);
-        if let Some(backing) = released {
-            self.1.backing_releases.push(backing);
-        }
         true
     }
 
@@ -1151,10 +1151,6 @@ impl CxDrawListPool {
         // again until the list re-recorded (the reclaim path resets both).
         self[id].draw_items.clean_leaf.set(false);
         self[id].draw_items.instance_counters.set(None);
-        let released = self[id].draw_items[index].os.take_backing();
-        if let Some(backing) = released {
-            self.1.backing_releases.push(backing);
-        }
         let item = &mut self[id].draw_items[index];
         item.retained_gpu_evicted = true;
         item.retained_instance_id = 0;
@@ -1171,7 +1167,6 @@ impl CxDrawListPool {
             call.instance_dirty = true;
         }
     }
-
 
     /// Publish a current receipt, including after the last bounded backend
     /// service or on a frame with no dirty passes. The previous publication
@@ -1236,11 +1231,21 @@ impl CxDrawListPool {
         self[id].draw_items.clean_leaf.set(false);
         self[id].draw_items.instance_counters.set(None);
         self[id].draw_list_uniforms = Default::default();
+        self[id].recorded = false;
+        self[id].retain_empty = false;
         self[id].zbias_hold = None;
         self[id].reset_zbias = false;
         self[id].upload_priority = 2;
+        self[id].owner = crate::gpu_ledger::innermost_owner();
         self[id].gpu_eviction_distance = f64::INFINITY;
+        self[id].glyph_uses.clear();
+        #[cfg(target_arch = "wasm32")]
         self[id].reset_draw_item_uniform_caches();
+    }
+
+    /// Every live draw list.
+    pub fn iter_live(&self) -> impl Iterator<Item = &CxDrawList> + '_ {
+        self.id_iter().map(|id| &self[id])
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -1384,7 +1389,7 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
     }
 }
 
-#[derive(Default, Clone, Script, ScriptHook)]
+#[derive(Default, Clone, Script, ScriptHook, Copy)]
 #[repr(C)]
 pub struct DrawCallUniforms {
     #[live]
@@ -1397,10 +1402,17 @@ pub struct DrawCallUniforms {
     pub pad3: f32,
 }
 
+crate::makepad_math::impl_gpu_pod!(DrawCallUniforms,
+    zbias: f32,
+    pad1: f32,
+    pad2: f32,
+    pad3: f32,
+);
+
 impl DrawCallUniforms {
     // The array length is in f32 elements, not bytes, hence the >> 2.
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
-        unsafe { std::mem::transmute(self) }
+        crate::makepad_math::bytemuck::cast_ref(self)
     }
     /*
     pub fn get_local_scroll(&self) -> Vec4f {
@@ -1495,9 +1507,7 @@ pub struct CxDrawItem {
     /// a tile sheet needs without re-recording or re-uploading anything;
     /// the backends draw one call per range. Empty: every instance.
     /// Per backend: Metal draws one `drawIndexedPrimitives … baseInstance`
-    /// per range; the gpusim raster submits the ranged instances; OpenGL,
-    /// D3D11, WebGL and Vulkan draw the whole item (ranges ignored: more
-    /// work, the same pixels).
+    /// per range; other backends consume ranges from the frame packet.
     pub instance_ranges: Vec<std::ops::Range<u32>>,
     /// The residency lease of the DL-1 contract: a ready shared-instance
     /// block and the instance range this item draws from it (`attach_shared`
@@ -1505,6 +1515,7 @@ pub struct CxDrawItem {
     /// construction). Until DL-5 deletes the retained path, the attached
     /// block also drives the old fields through its adapter publication.
     pub shared: Option<(crate::shared_instances::SharedInstances, std::ops::Range<usize>)>,
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsDrawCall,
 }
 
@@ -1841,7 +1852,7 @@ impl CxDrawCall {
     }
 }
 
-#[derive(Clone, Script, ScriptHook)]
+#[derive(Clone, Script, ScriptHook, Copy)]
 #[repr(C)]
 pub struct DrawListUniforms {
     #[live]
@@ -1855,6 +1866,14 @@ pub struct DrawListUniforms {
     #[live]
     pub pad2: f32,
 }
+
+crate::makepad_math::impl_gpu_pod!(DrawListUniforms,
+    view_transform: Mat4f,
+    view_clip: Vec4f,
+    view_shift: Vec2f,
+    pad1: f32,
+    pad2: f32,
+);
 
 impl Default for DrawListUniforms {
     fn default() -> Self {
@@ -1871,7 +1890,7 @@ impl Default for DrawListUniforms {
 impl DrawListUniforms {
     // The array length is in f32 elements, not bytes, hence the >> 2.
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>() >> 2] {
-        unsafe { std::mem::transmute(self) }
+        crate::makepad_math::bytemuck::cast_ref(self)
     }
 }
 
@@ -2103,6 +2122,7 @@ impl CxDrawItems {
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
+                #[cfg(target_arch = "wasm32")]
                 os: CxOsDrawCall::default(),
             }));
         }
@@ -2243,10 +2263,7 @@ impl CxDrawItems {
     }
     /// Binding changes backend residency/uniform stamps, never instance
     /// dirtiness or child topology. Upload/recording mutations use IndexMut.
-    #[cfg(all(
-        not(gpusim),
-        any(target_os = "macos", target_os = "ios", target_os = "tvos")
-    ))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn binding_mut(&mut self, index: usize) -> &mut CxDrawItem {
         self.queue_recording_release(index);
         &mut self.buffer[index]
@@ -2299,6 +2316,7 @@ impl CxDrawItems {
                 instance_ranges: Vec::new(),
                 instance_upload_pending: false,
                 shared: None,
+                #[cfg(target_arch = "wasm32")]
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
             }));
@@ -2342,6 +2360,9 @@ pub struct CxDrawList {
     recording_metadata: Option<Arc<CpuReservation>>,
     upload_collection: std::cell::RefCell<InstanceUploadCollection>,
     pub debug_id: LiveId,
+    /// The innermost `gpu_owner` scope open when the list was made: the owner its draws carry to
+    /// the HAL's ledger and profiler.
+    pub owner: Option<&'static str>,
     pub debug_dump: bool,
     pub debug_dump_count: u32,
     /// Copy admission order, independent of painter order: pointer, visible,
@@ -2351,6 +2372,11 @@ pub struct CxDrawList {
     /// Owners with a custom projection update this with their demand census.
     pub gpu_eviction_distance: f64,
     pub reset_zbias: bool,
+    /// The glyphs this list's instances draw (session font, glyph, request kind), as the text
+    /// drawn into it looked them up; cleared when the list is recorded again. Under the HAL a
+    /// glyph's curves or pixels live in the host's store: while this list is alive (painted
+    /// again from its kept instances or not) its glyphs stay in use.
+    pub glyph_uses: Vec<[u32; 3]>,
 
     /// Depth floor for this draw list and everything drawn under it, in
     /// `world.z` units. `0.0` — every ordinary list — costs one compare and
@@ -2368,13 +2394,21 @@ pub struct CxDrawList {
     /// A list with a floor raises the running counter to it on entry
     /// (`raise_zbias_to_floor`), so every draw call beneath it — including
     /// nested plain draw lists, which inherit the same counter — starts above
-    /// the band the body was using. Set by `DrawList2d::begin_overlay_inner`;
+    /// the band the body was using. Set by `DrawList2d::begin_overlay_reuse / begin_popup_overlay`;
     /// see the constants there for the scheme and its headroom.
     pub overlay_z_lift: f32,
 
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
+    /// The list was recorded since it was allocated.
+    pub recorded: bool,
+    /// Opt-in: a list recorded empty (its owner drew nothing) keeps that
+    /// recording like one that drew, and is not recorded again until
+    /// something asks. Off by default: a widget that drew nothing has no area
+    /// a later `redraw()` could reach, and would never draw again (a cached
+    /// HUD part sets it; its widgets always record an area).
+    pub retain_empty: bool,
     /// Replaced on every recording, including repeated recordings in one redraw.
     pub recording_gen: u64,
     pub draw_pass_id: Option<DrawPassId>,
@@ -2390,6 +2424,9 @@ pub struct CxDrawList {
     /// created rather than the order they are drawn. `Overlay::end` turns
     /// these into `draw_item_reorder`.
     pub overlay_order: u64,
+    /// The overlay tier it was begun in (0 content, 1 popup, 2 cursor);
+    /// `Overlay::end` sorts by (tier, `overlay_order`).
+    pub overlay_tier: u8,
 
     pub draw_list_uniforms: DrawListUniforms,
     /// Replaced when this list is recorded or its uniform block is changed.
@@ -2414,6 +2451,7 @@ pub struct CxDrawList {
     /// the counter.
     pub zbias_hold: Option<u32>,
 
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsDrawList,
     /// The rect areas this list has recorded, kept across a re-record the
     /// way instance buffers are: a new record overwrites from the front and
@@ -2432,7 +2470,6 @@ pub struct CxRectArea {
 
 impl CxDrawList {
 
-
     #[inline]
     pub fn set_uniform_view_transform(&mut self, transform: &Mat4f, uniforms_gen: u64) {
         debug_assert_ne!(uniforms_gen, 0);
@@ -2440,9 +2477,9 @@ impl CxDrawList {
         self.uniforms_gen = uniforms_gen;
     }
 
+    #[cfg(target_arch = "wasm32")]
     #[inline]
     fn reset_draw_item_uniform_caches(&mut self) {
-        #[cfg(any(target_arch = "wasm32", test))]
         for item in &mut self.draw_items.buffer {
             item.os.uniforms_recording_gen = None;
             item.os.draw_call_uniforms_gen = None;
@@ -2783,7 +2820,6 @@ impl CxDrawList {
             .unwrap_or_else(|| self.draw_items.len())
     }
 
-
     pub fn draw_item_id_at_order_index(&self, order_index: usize) -> Option<usize> {
         let draw_item_id = if let Some(reorder) = self.draw_item_reorder.as_ref() {
             *reorder.get(order_index)?
@@ -2799,8 +2835,10 @@ impl CxDrawList {
         debug_assert_ne!(recording_gen, 0);
         debug_assert_ne!(uniforms_gen, 0);
         self.redraw_id = redraw_id;
+        self.recorded = true;
         self.recording_gen = recording_gen;
         self.uniforms_gen = uniforms_gen;
+        #[cfg(target_arch = "wasm32")]
         self.reset_draw_item_uniform_caches();
         self.draw_items.clear();
         if let Some(mut order) = self.draw_item_reorder.take() {
@@ -2809,6 +2847,7 @@ impl CxDrawList {
         }
         self.rect_area_count = 0;
         self.find_appendable_draw_shader_check.clear();
+        self.glyph_uses.clear();
     }
 
     /// Record a rect area for the current record and return its id: the
@@ -3127,15 +3166,6 @@ mod retained_sub_list_tests {
         drop(reused);
         let pool = cx.task_pool();
         for frame in 0..100 {
-            #[cfg(gpusim)]
-            let pending = {
-                let serial = cx.gpusim_simulated_submit();
-                cx.gpusim_simulated_complete_with_storage(serial, |id, item| {
-                    backend_slots.remove(&(id, item))
-                });
-                cx.draw_lists.has_pending_instance_retirements()
-            };
-            #[cfg(not(gpusim))]
             let pending = cx
                 .draw_lists
                 .retire_free_items_with_ids(&pool, frame, |id, item, _| {
@@ -3639,19 +3669,27 @@ mod uniform_generation_tests {
         let first_item = cx.draw_lists[first_id]
             .draw_items
             .push_item(1, CxDrawKind::DrawCall(test_draw_call(first_gen)));
+        #[cfg(target_arch = "wasm32")]
+        {
         first_item.os.uniforms_recording_gen = Some(first_gen);
         first_item.os.draw_call_uniforms_gen = Some(first_gen);
         first_item.os.user_uniforms_gen = Some(first_gen);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = first_item;
 
         drop(first_list);
         let reused_list = DrawList::new(&mut cx);
         let reused_id = reused_list.id();
         assert_eq!(first_id.index(), reused_id.index());
         assert_ne!(first_id.generation(), reused_id.generation());
+        #[cfg(target_arch = "wasm32")]
+        {
         let retained_item = &cx.draw_lists[reused_id].draw_items.buffer[0];
         assert_eq!(retained_item.os.uniforms_recording_gen, None);
         assert_eq!(retained_item.os.draw_call_uniforms_gen, None);
         assert_eq!(retained_item.os.user_uniforms_gen, None);
+        }
 
         let recording_gen = cx.next_uniform_gen();
         let list_uniforms_gen = cx.next_uniform_gen();
@@ -3676,6 +3714,7 @@ mod uniform_generation_tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn clear_draw_items_resets_uniform_upload_generations() {
         let mut draw_list = CxDrawList::default();
         let item = draw_list

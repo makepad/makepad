@@ -330,7 +330,7 @@ impl Widget for DropSlider {
                 // turtle content at the overlay root, then SHIFT the whole
                 // list to hang under the chip. (draw_abs into a bare
                 // overlay list renders nothing — learned the hard way.)
-                draw_list.begin_overlay_reuse(cx);
+                draw_list.begin_popup_overlay(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
                 self.draw_panel.begin(

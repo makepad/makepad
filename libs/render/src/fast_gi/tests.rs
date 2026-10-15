@@ -21,13 +21,13 @@ fn gi_shaders_compile_without_errors() {
     use makepad_draw::makepad_platform::makepad_script::script_eval;
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.with_vm(|vm| {
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         makepad_draw::script_mod(vm);
-        vm.bx.heap.new_module(id!(prelude));
+        vm.heap_mut().new_module(id!(prelude));
         script_eval!(vm, {
             mod.prelude.widgets_internal = {..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw}
         });
-        vm.bx.heap.new_module(id!(widgets));
+        vm.heap_mut().new_module(id!(widgets));
         makepad_render_graph::pass_stdlib(vm);
         crate::local_shadows::sampling::script_mod(vm);
         crate::clustered::script_mod(vm);
@@ -56,7 +56,7 @@ fn gi_shaders_compile_without_errors() {
             ("cube receiver", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCube)})),
             ("model receiver", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinned)})),
         ] {
-            let errors = vm.bx.heap.string_with(result, |_h, v| v.to_string()).expect("compile result string");
+            let errors = vm.heap().string_with(result, |_h, v| v.to_string()).expect("compile result string");
             assert!(errors.is_empty(), "{name}: {errors}");
         }
     });

@@ -174,6 +174,12 @@ impl LocalService {
         request
     }
 
+    /// Every voice the node can speak with (`GET /voices`); an older node has no
+    /// such route and the caller falls back to the built-in catalogue.
+    pub fn list_voices(&self) -> Result<Vec<crate::protocol::VoiceJson>, AssetAiError> {
+        Ok(self.get_json::<crate::protocol::VoicesJson>("/voices")?.voices)
+    }
+
     fn get_json<T: DeJson>(&self, path: &str) -> Result<T, AssetAiError> {
         let url = format!("{}{}", self.base_url, path);
         let response = http_fetch(&self.get_request(&url))?;

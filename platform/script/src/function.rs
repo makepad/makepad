@@ -1,13 +1,16 @@
+use makepad_relax_api::relax_api;
 use crate::suggest::format_value_type;
 use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
+#[relax_api(plain)]
 #[derive(Debug, Clone, Copy)]
 pub struct NativeId {
     pub index: u32,
 }
 
+#[relax_api(plain)]
 #[derive(Clone)]
 pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
 
@@ -32,10 +35,18 @@ impl ScriptFnRef {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Debug, Clone, Copy)]
+#[repr(C, u8)]
 pub enum ScriptFnPtr {
     Script(ScriptIp),
     Native(NativeId),
+}
+
+impl ScriptFnPtr {
+    pub fn script_ip(&self) -> Option<ScriptIp> {
+        if let Self::Script(ip) = self { Some(*ip) } else { None }
+    }
 }
 
 impl ScriptRefOptionExt for Option<ScriptFnRef> {
@@ -78,14 +89,23 @@ impl ScriptHeap {
 
     #[inline]
     pub fn as_fn(&self, ptr: ScriptObject) -> Option<ScriptFnPtr> {
-        let object = &self.objects[ptr];
-        object.tag.as_fn()
+        if self.is_fn(ptr) { Some(self.fn_ptr(ptr)) } else { None }
+    }
+
+    /// The pointer of a function object. Call `is_fn` first for arbitrary objects.
+    #[inline]
+    pub fn fn_ptr(&self, ptr: ScriptObject) -> ScriptFnPtr {
+        self.obj_info(ptr).tag.as_fn().expect("expected a function object")
+    }
+
+    #[inline]
+    pub fn fn_script_ip(&self, ptr: ScriptObject) -> Option<ScriptIp> {
+        self.obj_info(ptr).tag.fn_script_ip()
     }
 
     #[inline]
     pub fn is_fn(&self, ptr: ScriptObject) -> bool {
-        let object = &self.objects[ptr];
-        object.tag.is_fn()
+        self.obj_info(ptr).tag.is_fn()
     }
 
     #[inline]

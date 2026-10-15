@@ -114,6 +114,10 @@ pub struct AdaptiveView {
     /// The most recent size of the parent.
     #[rust]
     parent_size: Vec2d,
+
+    /// Window size used by the most recent draw-time selection.
+    #[rust]
+    screen_size: Vec2d,
 }
 
 pub struct WidgetVariant {
@@ -182,7 +186,7 @@ impl ScriptHook for AdaptiveView {
                             if let Some(id) = kv.key.as_id() {
                                 if let Some(template_obj) = kv.value.as_object() {
                                     self.templates
-                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                        .insert(id, vm.new_object_ref(template_obj));
                                 }
 
                                 if id != id!(Desktop) && id != id!(Mobile) {
@@ -237,8 +241,10 @@ impl Widget for AdaptiveView {
         let parent_size = cx.peek_walk_turtle(walk).size;
         let parent_size_has_changed = parent_size != self.parent_size;
 
-        if parent_size_has_changed || self.should_reapply_selector {
+        let screen_size = cx.display_context.screen_size;
+        if parent_size_has_changed || screen_size != self.screen_size || self.should_reapply_selector {
             self.parent_size = parent_size;
+            self.screen_size = screen_size;
             self.apply_selector(cx);
             self.should_reapply_selector = false;
         }

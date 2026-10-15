@@ -71,8 +71,8 @@ fn attachment_clips_are_independent_and_aggregate_light_admission_is_atomic() {
     let model=crate::StaticModel::parse_glb(&crate::asset_morph::tests::fixture(false,true)).unwrap();
     let part=&model.anim_parts[0];
     let mut states=ModelStates::default();
-    states.clips.insert(ModelTarget::Attachment(0),ModelClipPlayback{name:Some("pulse".into()),time:1.,looping:false,weight:1.});
-    states.clips.insert(ModelTarget::Attachment(1),ModelClipPlayback{name:Some("pulse".into()),time:0.5,looping:false,weight:1.});
+    states.clips.insert(StateTarget::Attachment(0),ModelClipPlayback{name:Some("pulse".into()),time:1.,looping:false,weight:1.});
+    states.clips.insert(StateTarget::Attachment(1),ModelClipPlayback{name:Some("pulse".into()),time:0.5,looping:false,weight:1.});
     assert_eq!(states.transform(&ModelTarget::Attachment(0),"fixture",part).v[12],2.);
     assert_eq!(states.transform(&ModelTarget::Attachment(1),"fixture",part).v[12],0.);
     let mut renderer=Renderer::default();renderer.set_clustered_lighting(true);

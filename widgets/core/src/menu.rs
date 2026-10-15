@@ -1245,7 +1245,7 @@ impl Widget for MenuLayer {
             }
         }
 
-        self.draw_list.begin_overlay_reuse(cx);
+        self.draw_list.begin_popup_overlay(cx);
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(pass, Layout::flow_down());
 

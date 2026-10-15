@@ -12,9 +12,10 @@
 //!
 //! cargo run --release -p makepad-script-compute --example bench_dispatch
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::kernel::{compile, Kernel};
-use makepad_script_compute::admission::{JobBudget, Origin};
-use makepad_script_compute::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
+use makepad_script_compute_sched::admission::{JobBudget, Origin};
+use makepad_script_compute_sched::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,7 +41,7 @@ fn time(mut f: impl FnMut()) -> f64 {
     }).collect())
 }
 
-fn bind<'a>(k: &'a Kernel, cheap: bool, input: &'a [f32], out: &'a mut [f32], out2: &'a mut [f32]) -> makepad_script_compute::kernel::Call<'a> {
+fn bind<'a>(k: &'a Kernel, cheap: bool, input: &'a [f32], out: &'a mut [f32], out2: &'a mut [f32]) -> makepad_script_compute_sched::kernel::Call<'a> {
     let mut c = k.call();
     if cheap {
         c.input("x", input).unwrap();

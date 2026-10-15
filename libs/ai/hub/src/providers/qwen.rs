@@ -14,7 +14,7 @@
 //! - `/models` entries for chat models carry `"domain": "chat"` and the
 //!   existing `available` / `unavailable_reason` fields.
 //! - `POST /generate` accepts `{"model", "domain": "chat", "chat_system",
-//!   "chat_messages": [{"role", "text"}...], "max_tokens"?, "thinking"?}`. `prompt` is
+//!   "chat_messages": [{"role", "text", "images"?}...], "max_tokens"?, "thinking"?}`. `prompt` is
 //!   also set (last user text) for forward compatibility.
 //! - `GET /job/<id>` gains `"partial_text"`: the assistant text so far, a
 //!   monotonically growing prefix of the final text. The final text is the
@@ -37,9 +37,8 @@ use crate::chat_wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind
 use crate::providers::fleet_http;
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json::{self as json, Value};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
-#[path = "qwen_vision.rs"]
-mod vision;
 
 /// Transport seam so the provider is deterministic under test. The real
 /// implementation is [`HttpFleetTransport`]; tests script one.
@@ -270,6 +269,12 @@ impl FleetPickCache {
             .any(|(b, until)| b == base && Instant::now() < *until)
     }
 
+    /// Forget which nodes failed: the network changed (another Wi-Fi, a
+    /// hotspot), so what was unreachable a moment ago may answer now.
+    pub fn forget_dead(&self) {
+        self.lock().dead_until.clear();
+    }
+
     fn mark_dead(&self, base: &str) {
         let until = Instant::now() + DEAD_TTL;
         let mut state = self.lock();
@@ -349,6 +354,10 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// The worker that accepted this conversation, independent of the
     /// process-wide discovery cache and other conversations' choices.
     home: Option<(String, String, bool)>,
+    /// Each probed node's per-conversation token ceiling (its /health
+    /// `lanes.context_per_slot`, else the loaded context), so a session can
+    /// keep its prompt inside it instead of being refused.
+    contexts: std::collections::HashMap<String, u64>,
     /// Conversation identity for lane stickiness — one per provider
     /// instance, which is one per session. Travels as `chat_session`.
     conversation: String,
@@ -359,23 +368,9 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// history strips thinking for storage and display; this mirror exists
     /// because the KV cannot (the recurrent layers never rewind).
     wire: Vec<WireTurn>,
-    images: Vec<crate::providers::provider::ToolImage>,
-    vision: Option<vision::VisionTurn>,
-    vision_base: Option<String>,
-    /// The row the running vision review will annotate, as the session's
-    /// history holds it.
-    vision_row: Option<(ChatRole, String)>,
-    /// Vision observations by the history row they annotate. The session
-    /// rebuilds every round from its own history, which never holds them:
-    /// without this, the round after a tool call (and every later turn)
-    /// answered as if the image had never been seen.
-    observed: Vec<Observation>,
-}
-
-struct Observation {
-    role: ChatRole,
-    row: String,
-    block: String,
+    pending_images: Vec<String>,
+    /// Re-send pictures on their original history rows to preserve the KV prefix.
+    row_images: Vec<(ChatRole, String, Vec<String>)>,
 }
 
 /// One wire turn: the session-history role it mirrors, and the exact text
@@ -413,6 +408,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         bases: Vec<String>,
         picks: std::sync::Arc<FleetPickCache>,
     ) -> FleetQwenChatProvider<T> {
+        let mut bases = bases;
+        crate::hub_order::order(&mut bases);
         FleetQwenChatProvider {
             transport,
             bases,
@@ -435,29 +432,51 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             cancel_signal: None,
             picks,
             home: None,
+            contexts: std::collections::HashMap::new(),
             conversation: Self::conversation_id(),
             wire: Vec::new(),
-            images: Vec::new(),
-            vision: None,
-            vision_base: None,
-            vision_row: None,
-            observed: Vec::new(),
+            pending_images: Vec::new(),
+            row_images: Vec::new(),
         }
     }
 
-    /// Put each remembered observation block back on the row it annotated.
-    /// Rows compacted out of the history drop their observations for good.
-    fn with_observations(&mut self, input: &TurnInput) -> TurnInput {
-        let mut input = input.clone();
-        self.observed.retain(|seen| {
-            let Some(row) = input.messages.iter_mut().rev().find(|m| m.role == seen.role
-                && m.text.strip_prefix(seen.row.as_str()).is_some_and(|rest| rest.is_empty() || rest == seen.block)) else { return false };
-            // An input already carrying the block (a vision round's own
-            // continuation) keeps it once.
-            if row.text.len() == seen.row.len() { row.text.push_str(&seen.block); }
-            true
+    fn remember_images(&mut self, input: &TurnInput) -> Result<(), String> {
+        self.row_images.retain(|(role, text, _)| {
+            input.messages.iter().any(|m| m.role == *role && m.text == *text)
         });
-        input
+        if self.pending_images.is_empty() { return Ok(()); }
+        let row = input.messages.iter().rev().find(|m| m.role == ChatRole::User)
+            .ok_or("cannot attach pictures without a user message")?;
+        let index = self.row_images.iter().position(|(role, text, _)| *role == row.role && *text == row.text)
+            .unwrap_or_else(|| {
+                self.row_images.push((row.role, row.text.clone(), Vec::new()));
+                self.row_images.len() - 1
+            });
+        let images = &mut self.row_images[index].2;
+        for image in std::mem::take(&mut self.pending_images) {
+            if !images.contains(&image) { images.push(image); }
+        }
+        let mut trimmed = false;
+        // Tool continuations can add more pictures to the same user row.
+        if images.len() > crate::protocol::MAX_CHAT_IMAGES {
+            images.drain(..images.len() - crate::protocol::MAX_CHAT_IMAGES);
+            trimmed = true;
+        }
+        let mut distinct = HashSet::new();
+        let mut oldest = 0;
+        for (index, (_, _, images)) in self.row_images.iter().enumerate().rev() {
+            distinct.extend(images.iter().map(String::as_str));
+            if distinct.len() > crate::protocol::MAX_CHAT_IMAGES {
+                oldest = index + 1;
+                break;
+            }
+        }
+        drop(distinct);
+        self.row_images.drain(..oldest);
+        if trimmed || oldest > 0 {
+            eprintln!("[fleet-qwen] dropped oldest pictures to fit the chat image limit");
+        }
+        Ok(())
     }
 
     /// Require this exact advertised fleet model id when supplied.
@@ -476,7 +495,6 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         self
     }
 
-    #[cfg(any(feature = "llm", test))]
     pub(crate) fn with_cancel_signal(mut self, signal: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.cancel_signal = Some(signal);
         self
@@ -498,6 +516,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// (both called on every send) do not pay connect-timeouts on dead boxes
     /// twice. Recently-failed bases are skipped for [`DEAD_TTL`], and the
     /// scan stops at the first usable node (last-good first).
+    /// The token ceiling of the node this conversation runs on (or, before
+    /// it has one, the smallest probed), when its health said.
+    pub fn context_tokens(&self) -> Option<usize> {
+        let at_home = self.home.as_ref().and_then(|home| self.contexts.get(&home.0));
+        at_home.or_else(|| self.contexts.values().min()).map(|n| *n as usize)
+    }
+
     fn probe(&mut self) -> Result<(String, String, bool), String> {
         if let Some(home) = &self.home {
             if self.bases.contains(&home.0) && !self.picks.is_dead(&home.0)
@@ -523,7 +548,10 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         let mut reasons = Vec::new();
         let mut order = self.bases.clone();
         if let Some(last) = self.picks.last_base() {
-            if let Some(i) = order.iter().position(|b| b == &last) {
+            // The last good node goes first, but never ahead of a better tier
+            // (this machine's hub, a pinned hub): the ranking is the election.
+            let better_tier_exists = order.first().is_some_and(|f| crate::hub_order::tier(f) < crate::hub_order::tier(&last));
+            if let Some(i) = order.iter().position(|b| b == &last).filter(|_| !better_tier_exists) {
                 let good = order.remove(i);
                 order.insert(0, good);
             }
@@ -537,9 +565,21 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // home queues the turn behind whatever those lanes are doing —
         // measured tonight as one runaway think-loop starving every other
         // conversation on the box.
+        // The hub tiers (this machine, pinned, LAN) are the outer loop: the ladder
+        // below only chooses WITHIN a tier, so a busy-but-local hub is never passed
+        // over for a lane-rich LAN node. A tier that yields nothing falls to the next.
+        let mut tiers: Vec<(u8, Vec<String>)> = Vec::new();
+        for base in order {
+            let t = crate::hub_order::tier(&base);
+            match tiers.last_mut() {
+                Some((last, group)) if *last == t => group.push(base),
+                _ => tiers.push((t, vec![base])),
+            }
+        }
+        for (_, group) in tiers {
         let mut preferred = PickLadder::default();
         let mut fallback = PickLadder::default();
-        for base in order {
+        for base in group {
             if self.picks.is_dead(&base) {
                 reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
@@ -561,6 +601,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if let Some((base, model, text_fallback)) = preferred.best().or_else(|| self.preferred_model.is_none().then(|| fallback.best()).flatten()) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
+        }
         }
         // STALE-OK: the LAN to a busy GPU box drops the odd connect, and a
         // probe window can catch two drops in a row. A node that served
@@ -629,8 +670,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // Lane contention rides along with the probe we already pay for —
         // never its own request. Absence is meaningful (one lane), so it is
         // recorded as absence.
+        let context = health.get("lanes").and_then(|lanes| lanes.get("context_per_slot")).and_then(Value::as_u64).filter(|n| *n > 0)
+            .or_else(|| health.get("llm_context_loaded").and_then(Value::as_u64).filter(|n| *n > 0));
+        if let Some(context) = context {
+            self.contexts.insert(base.to_string(), context);
+        }
         let lanes = parse_lanes(&health);
-        let mut tier = match lanes {
+        let tier = match lanes {
             Some((active, total)) if active < total => HomeTier::FreeLane,
             Some(_) => HomeTier::FullLanes,
             None => HomeTier::NoLanes,
@@ -648,16 +694,6 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             reasons.push(format!("{base}: malformed models response"));
             return None;
         };
-        // A cold chat load evicts the separate vision model on this node.
-        // Prefer another eligible node before tearing down a warm image worker.
-        if tier == HomeTier::NoLanes
-            && rows.iter().any(|row| {
-                row.get("domain").and_then(Value::as_str) == Some("vision")
-                    && row.get("state").and_then(Value::as_str) == Some("loaded")
-            })
-        {
-            tier = HomeTier::VisionResident;
-        }
         if !has_chat {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
@@ -878,7 +914,6 @@ struct PickLadder {
     free: Option<(String, String, bool)>,
     full: Option<(String, String, bool)>,
     laneless: Option<(String, String, bool)>,
-    vision: Option<(String, String, bool)>,
 }
 
 impl PickLadder {
@@ -887,7 +922,6 @@ impl PickLadder {
             HomeTier::FreeLane if self.free.is_none() => self.free = Some(pick),
             HomeTier::FullLanes if self.full.is_none() => self.full = Some(pick),
             HomeTier::NoLanes if self.laneless.is_none() => self.laneless = Some(pick),
-            HomeTier::VisionResident if self.vision.is_none() => self.vision = Some(pick),
             _ => {}
         }
     }
@@ -896,7 +930,6 @@ impl PickLadder {
         self.free
             .or(self.full)
             .or(self.laneless)
-            .or(self.vision)
     }
 }
 
@@ -908,7 +941,6 @@ enum HomeTier {
     FreeLane,
     FullLanes,
     NoLanes,
-    VisionResident,
 }
 
 fn preferred_rank(id: &str) -> usize {
@@ -969,38 +1001,25 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
 
     fn attach_tool_images(&mut self, images: Vec<crate::providers::provider::ToolImage>) -> Result<(), String> {
         crate::providers::provider::validate_tool_images(&images)?;
-        if self.vision.is_some() { return Err("vision review is still running".into()); }
-        self.images = images;
+        self.pending_images = images.into_iter().map(|image| {
+            String::from_utf8(makepad_base64::base64_encode(&image.png, &makepad_base64::BASE64_STANDARD))
+                .expect("base64 is ASCII")
+        }).collect();
         Ok(())
     }
 
     fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
-        if self.vision.is_some() { return Err("vision review is still running".into()); }
-        let patched;
-        let input = if self.observed.is_empty() { input } else { patched = self.with_observations(input); &patched };
-        if !self.images.is_empty() {
-            if self.active.is_some() || self.pending.is_some() { return Err("a turn is already in flight".into()); }
-            // Prefer the node that actually completed the last visual review.
-            // Keep chat routing independent; switching its model just to review
-            // another frame would discard a warm vision worker on small cards.
-            let mut bases = self.bases.clone();
-            if let Some(index) = self.vision_base.as_ref().and_then(|base| bases.iter().position(|b| b == base)) { bases.swap(0, index); }
-            let chat_base = self.probe().ok().map(|pick| pick.0);
-            self.vision_row = input.messages.last().map(|m| (m.role, m.text.clone()));
-            self.vision = Some(vision::VisionTurn::new(
-                input.clone(),
-                std::mem::take(&mut self.images),
-                bases,
-                self.conversation.clone(),
-                chat_base,
-            ));
-            return Ok(());
-        }
         if self.active.is_some() || self.pending.is_some() {
             return Err("a turn is already in flight".to_string());
         }
         tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
+        if text_fallback && (!self.pending_images.is_empty() || self.row_images.iter().any(|(role, text, _)| {
+            input.messages.iter().any(|m| m.role == *role && m.text == *text)
+        })) {
+            return Err("this node's model cannot look at pictures".into());
+        }
+        self.remember_images(input)?;
         // Older nodes do not advertise the prefill shape, so retain the
         // historical model/request inference only as a compatibility fallback.
         let inferred_open_think = self.thinking != Some(false)
@@ -1058,11 +1077,16 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let messages: Vec<Value> = self
             .wire
             .iter()
-            .map(|w| {
-                json::obj(vec![
+            .zip(&input.messages)
+            .map(|(w, m)| {
+                let mut fields = vec![
                     ("role", json::s(w.wire_role)),
                     ("text", json::s(w.text.clone())),
-                ])
+                ];
+                if let Some((_, _, images)) = self.row_images.iter().find(|(role, text, _)| *role == m.role && *text == m.text) {
+                    fields.push(("images", Value::Arr(images.iter().cloned().map(json::s).collect())));
+                }
+                json::obj(fields)
             })
             .collect();
         let last_user = input
@@ -1111,24 +1135,6 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         if self.cancelled() {
             self.cancel();
             return Vec::new();
-        }
-        if let Some(mut vision) = self.vision.take() {
-            match vision.poll(&mut self.transport) {
-                vision::Poll::Pending(event) => { self.vision = Some(vision); return event.into_iter().collect(); }
-                vision::Poll::Failed(message) => return vec![ProviderEvent::Error(message)],
-                vision::Poll::Ready(input, base) => {
-                    self.vision_base = base;
-                    if let (Some((role, row)), Some(last)) = (self.vision_row.take(), input.messages.last()) {
-                        if let Some(block) = last.text.strip_prefix(row.as_str()).filter(|b| !b.is_empty()) {
-                            self.observed.push(Observation { role, row, block: block.to_string() });
-                        }
-                    }
-                    return match self.begin_turn(&input) {
-                        Ok(()) => vec![ProviderEvent::Status { note: "local vision complete · continuing with Qwen".into(), permille: 0 }],
-                        Err(message) => vec![ProviderEvent::Error(message)],
-                    };
-                }
-            }
         }
         if self.pending.is_some() {
             return self.poll_submission();
@@ -1329,9 +1335,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
     }
 
     fn cancel(&mut self) {
-        self.images.clear();
-        self.vision_row = None;
-        if let Some(mut vision) = self.vision.take() { vision.cancel(&mut self.transport); }
+        self.pending_images.clear();
         self.pending = None;
         // The next history can replace the unsubmitted user/tool tail.
         // Rebuild it cold instead of reusing that tail by role alone.
@@ -1370,6 +1374,8 @@ fn job_status_note(status: &Value) -> Option<(String, u16)> {
         .unwrap_or_default();
     let note = match state {
         "queued" => "queued behind another GPU job".to_string(),
+        "running" if stage_l.contains("not responding") => stage.to_string(),
+        "running" if stage_l.starts_with("waiting for gpu memory") => stage.to_string(),
         "running" if is_active_download(&stage_l, permille) => {
             format!("downloading{what} {pct}%", pct = permille / 10)
         }
@@ -1385,6 +1391,7 @@ fn job_status_note(status: &Value) -> Option<(String, u16)> {
                 else { "processing conversation" };
             format!("{action} {pct}%")
         }
+        "running" if stage_l.starts_with("decode") => "generating".to_string(),
         _ => return None,
     };
     Some((note, permille))
@@ -1766,25 +1773,36 @@ mod wire_transcript_tests {
         assert!(body.get("thinking").is_none());
     }
 
-    /// The session rebuilds each round from its own history, which never
-    /// holds vision observations. The provider puts them back on the row
-    /// they annotate: the round after a tool call, and later turns, still
-    /// know what the image showed.
     #[test]
-    fn vision_observations_follow_their_row_into_later_rounds() {
-        let mut p = FleetQwenChatProvider::new(Scripted::default(), vec!["http://n1:1".into()]);
-        let block = "\n\nLOCAL VISION OBSERVATIONS: a red and white coaster".to_string();
-        p.observed.push(Observation { role: ChatRole::User, row: "what colour is the coaster?".into(), block: block.clone() });
-        let tool = ChatMessage { role: ChatRole::Tool, text: "world.list: 3 placements".into() };
-        let later = TurnInput::new("SYS", vec![user("what colour is the coaster?"), tool.clone()]);
-        let patched = p.with_observations(&later);
-        assert_eq!(patched.messages[0].text, format!("what colour is the coaster?{block}"));
-        assert_eq!(patched.messages[1], tool);
-        // Already carrying it (the vision round's own input): not doubled.
-        assert_eq!(p.with_observations(&patched).messages[0].text, patched.messages[0].text);
-        // Compacted out of the history: forgotten.
-        p.with_observations(&TurnInput::new("SYS", vec![user("next")]));
-        assert!(p.observed.is_empty());
+    fn inline_images_follow_their_user_row_into_later_turns() {
+        let transport = Scripted::default();
+        transport.replies.borrow_mut().push_back("\n</think>\n\nA red coaster.".into());
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()]);
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=";
+        let png = makepad_base64::base64_decode(b64.as_bytes()).unwrap();
+        provider.attach_tool_images(vec![crate::providers::provider::ToolImage {
+            label: "coaster".into(),
+            png: png.into(),
+        }]).unwrap();
+        let question = "what colour is the coaster?";
+        let mut input = TurnInput::new("SYS", vec![user(question)]);
+        input.dynamic_context = "current scene".into();
+        provider.begin_turn(&input).unwrap();
+        let first = transport.generates.borrow()[0].clone();
+        let first_user = first.get("chat_messages").and_then(Value::as_arr).unwrap().last().unwrap();
+        assert_eq!(first_user.get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(first_user.get("images"), Some(&Value::Arr(vec![json::s(b64)])));
+        drain_done(&mut provider);
+
+        let later = TurnInput::new("SYS", vec![user(question), assistant("A red coaster."), user("what shape is it?")]);
+        provider.begin_turn(&later).unwrap();
+        let generated = transport.generates.borrow();
+        let messages = generated[1].get("chat_messages").and_then(Value::as_arr).unwrap();
+        assert_eq!(messages[0], *first_user, "the original wire row and pictures stay unchanged");
+        let last = messages.last().unwrap();
+        assert_eq!(last.get("role").and_then(Value::as_str), Some("user"));
+        assert_eq!(last.get("text").and_then(Value::as_str), Some("what shape is it?"));
+        assert!(last.get("images").is_none());
     }
 
     #[test]

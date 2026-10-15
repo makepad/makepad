@@ -609,7 +609,7 @@ impl ServerConfig {
             unsafe { DeleteSecurityContext(&mut ctx) };
             return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
         }
-        Ok(ServerStream { tcp, cred, ctx, client: None, sizes, incoming, plain: Vec::new(), plain_pos: 0, closed: false })
+        Ok(ServerStream { tcp, cred, ctx, client: None, sizes, incoming, plain: Vec::new(), plain_pos: 0, closed: false, pending: Vec::new(), pending_pos: 0 })
     }
 }
 
@@ -634,6 +634,9 @@ pub struct ServerStream {
     plain: Vec<u8>,
     plain_pos: usize,
     closed: bool,
+    /// Encrypted bytes of a record whose send timed out, resumed before anything new is encrypted.
+    pending: Vec<u8>,
+    pending_pos: usize,
 }
 
 unsafe impl Send for ServerStream {}
@@ -841,6 +844,8 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStre
         plain: Vec::new(),
         plain_pos: 0,
         closed: false,
+        pending: Vec::new(),
+        pending_pos: 0,
     };
     let mut have_ctx = false;
     let mut buf = vec![0u8; 16 * 1024];
@@ -964,11 +969,37 @@ impl Read for ServerStream {
     }
 }
 
+impl ServerStream {
+    /// Sends what an earlier write left of its encrypted record. A send timeout keeps the rest
+    /// (`pending_pos` marks how far it got) and returns `WouldBlock`; call again to resume.
+    fn drain_pending(&mut self) -> io::Result<()> {
+        while self.pending_pos < self.pending.len() {
+            match self.tcp.write(&self.pending[self.pending_pos..]) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
+                Ok(n) => self.pending_pos += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS send timed out")),
+                Err(e) => return Err(e),
+            }
+        }
+        self.pending.clear();
+        self.pending_pos = 0;
+        Ok(())
+    }
+}
+
+/// Write contract (resumable across write timeouts, like OpenSSL's same-buffer retry): `write`
+/// first sends what an earlier record left unsent; if that times out it returns `WouldBlock`
+/// having consumed nothing, and the caller retries the same data. Otherwise it encrypts one
+/// record of `data` into `pending` and returns its plaintext length: the data is accepted from
+/// then on, even if sending the record timed out part way. The rest goes out on the next
+/// `write` or `flush`, which a caller keeps calling until it stops returning `WouldBlock`.
 impl Write for ServerStream {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         if data.is_empty() {
             return Ok(0);
         }
+        self.drain_pending()?;
         let n = data.len().min(self.sizes.max_message as usize);
         let header = self.sizes.header as usize;
         let trailer = self.sizes.trailer as usize;
@@ -987,11 +1018,19 @@ impl Write for ServerStream {
             return Err(status_error("EncryptMessage", st));
         }
         let total = (bufs[0].cb + bufs[1].cb + bufs[2].cb) as usize;
-        self.tcp.write_all(&msg[..total])?;
+        msg.truncate(total);
+        self.pending = msg;
+        self.pending_pos = 0;
+        match self.drain_pending() {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.drain_pending()?;
         self.tcp.flush()
     }
 }

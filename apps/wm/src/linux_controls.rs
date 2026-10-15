@@ -4,15 +4,19 @@
 //! Two display settings are the UI's own to apply, with only their
 //! *persistence* going to the worker:
 //!
-//! * The display scale: the slider's release goes to
-//!   `Cx::set_window_dpi_override` on the main window (the platform rewrites
-//!   the geometry and every child tile follows). The saved value is applied
-//!   once at start-up, when the window exists, unless the person is already
-//!   at the slider or has set a scale this session.
+//! * The display scale: a preset goes to `Cx::set_window_dpi_override` on
+//!   the main window (the platform rewrites the geometry and every child
+//!   tile follows). The saved value is applied once at start-up, when the
+//!   window exists, unless the person has set a scale this session.
 //! * The display layout (`display-layout`, see `shell::display_layout`):
-//!   screen order, main screen, per-screen modes and the render-on GPU.
-//!   The WM keeps a working copy; every edit updates it and queues the
-//!   whole file for saving (one slot, newest intent). At start-up the
+//!   screen order, main screen, per-screen modes, mirror and the render-on
+//!   GPU. The WM keeps a working copy; every edit updates it and queues the
+//!   whole file for saving (one slot, newest intent). A screen's mode
+//!   is tried first (`shell::display_menu`): sent at once, then kept by the
+//!   person within 15 s or reverted; a failure is reported under its screen
+//!   and the previous one sent again. Only a kept one reaches the layout.
+//!   Extended / Mirror reinitialises no output: it applies at once and is
+//!   saved when the renderer takes it. At start-up the
 //!   saved layout is restored as a safety net behind the session script's
 //!   environment (`restore_plan`): order and modes once, on the first
 //!   display generation that has a laid-out desktop; the main screen
@@ -27,16 +31,18 @@
 //!   (process-wide, mouse and touchpad separately). The saved values are
 //!   applied once at start-up unless the person already set that device
 //!   this session; a late read never undoes a speed set here.
-use crate::{shell, App, ClientId};
+use crate::{shell, App};
 use makepad_widgets::*;
 use makepad_widgets::makepad_platform::linux_input::{
     set_pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
+use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayCommand};
 use shell::display_layout::{
     env_restore_plan, fill_slots, is_joining, restore_plan, restore_waiting, screen_key, screen_rows,
-    screens_span_gpus, DisplayLayout, RestoreOp, ScreenEntry, ScreenKey,
+    DisplayLayout, RestoreOp, SavedPace, ScreenEntry, ScreenKey,
 };
+use shell::display_menu::{Change, DisplayTrials, TrialOut};
 use shell::panels::{PanelKind, ShellPanel};
 use shell::system_linux::{
     validate_display_source, validate_gpu_choice, BatteryStatus, CommandResult, GpuInfo, Seq,
@@ -60,9 +66,11 @@ const RESTART_SAVE_TIMEOUT: f64 = 5.0;
 pub enum ControlAction {
     OutputVolume(u32),
     InputVolume(u32),
-    Brightness(u32),
-    /// The display scale in hundredths (130 = 1.30×), emitted on release.
+    /// The display scale in hundredths (130 = 1.30×): a preset or the
+    /// slider's release, applied and saved.
     DpiScale(u32),
+    /// The scale slider while dragged: applied, not saved.
+    DpiScaleLive(u32),
     /// Make screen `name` the main screen (where the dock goes): a
     /// connector name from the renderer's inventory.
     DisplaySource(String),
@@ -70,18 +78,24 @@ pub enum ControlAction {
     /// (connector names, a neighbour swap of the drawn order): applied
     /// through `linux_set_display_order` and saved.
     DisplayOrder(Vec<String>),
-    /// Show screen `name` in `mode` (the renderer's mode syntax), or its
-    /// fastest native mode with `None`: applied live and saved.
-    DisplayMode { name: String, mode: Option<String> },
+    /// Try a screen's mode: sent at once, saved only once kept
+    /// (`DisplayKeep`), reverted by `DisplayRevert` or after 15 s.
+    DisplayTry(Change),
+    /// Extended, or Mirror sized for a screen: it reinitialises no output,
+    /// so it is sent at once with no confirm and saved once the renderer
+    /// takes it.
+    DisplayArrangement(DisplayArrangement),
+    DisplayKeep,
+    DisplayRevert,
+    /// Which screen paces the frames: applied at once (no modeset, so no
+    /// confirm) and saved.
+    DisplayPacing(DisplayPacing),
     /// Render-on GPU: `Some(identity)` as `GpuInfo::identity` gives it,
     /// `None` for Auto (the display GPU). While the screens span GPUs the
     /// renderer cannot switch live, so it is only saved for the next
     /// start; otherwise it is applied now and saved once the switch
     /// finishes.
     GpuChoice(Option<String>),
-    /// Live per-app GPU for this running client: `None` follows the
-    /// compositor. Not persisted.
-    AppGpuChoice { client: ClientId, choice: Option<String> },
     /// Pointer speed in hundredths (100 = 1.00×). Applied on every update;
     /// `touchpad` selects the device (`false` mouse, `true` touchpad).
     PointerSpeed { touchpad: bool, value: u32 },
@@ -141,9 +155,6 @@ pub struct LinuxControls {
     /// mode request: the reacquire it starts can outlast the main screen's
     /// 5 s confirm, so the confirm waits for it (`main_restore_confirms`).
     layout_restore_sent_at: Option<(u64, f64)>,
-    /// Accepted compositor switch whose persistence waits until
-    /// `finish_linux_gpu_choice`. `Some(None)` is the display GPU.
-    gpu_after_commit: Option<Option<String>>,
     /// Newest unsent pointer speed per device (0 mouse, 1 touchpad).
     pointer_save: [Option<u32>; 2],
     /// The person set that device's speed this session; a start-up read
@@ -178,6 +189,9 @@ pub struct LinuxControls {
     /// The sequence of the `SaveDisplayLayout` a restart (or an ordinary
     /// edit) is waiting on, until its outcome (success or failure) lands.
     layout_save_seq: Option<Seq>,
+    /// The mode change being tried, a pending Extended / Mirror switch and the notes under the
+    /// Display menu's controls.
+    trials: DisplayTrials,
 }
 
 /// `slot`'s layout to send now: nothing until the start-up read has been
@@ -322,7 +336,9 @@ impl LinuxControls {
                 held.len()
             );
         }
-        let outstanding = plan.iter().any(|op| !matches!(op, RestoreOp::Main(_)));
+        // Pacing is sent once like the rest but never holds the restore open:
+        // it changes no screen's place.
+        let outstanding = plan.iter().any(|op| !matches!(op, RestoreOp::Main(_) | RestoreOp::Pacing(_)));
         let settled = main_restore_confirms(self.layout_restore_sent_at, generation, now);
         let last = self.layout_restore_sent_at.map_or(since, |(_, sent)| sent.max(since));
         if laid_out && !waiting && !outstanding && settled {
@@ -389,59 +405,6 @@ impl App {
         cx.set_window_dpi_override(window_id, Some(hundredths as f64 / 100.0));
         self.linux_controls.reanchor_frame = cx.new_next_frame();
         true
-    }
-
-    /// Map a sysfs identity `<pci> <vendor>:<device>` onto a Vulkan UUID
-    /// from the cached GPU snapshot. PCI address and vendor/device must
-    /// all match; vendor/device alone is never enough.
-    fn resolve_gpu_uuid(&self, cx: &Cx, identity: &str) -> Result<[u8; 16], String> {
-        let (pci, ids) = identity.split_once(' ').ok_or_else(|| "GPU identity is not `<pci-address> <vendor>:<device>`".to_string())?;
-        let (vendor, device) = ids.split_once(':').ok_or_else(|| "GPU identity is not `<pci-address> <vendor>:<device>`".to_string())?;
-        let vendor_id = u32::from_str_radix(vendor, 16).map_err(|_| "GPU vendor id is not hexadecimal".to_string())?;
-        let device_id = u32::from_str_radix(device, 16).map_err(|_| "GPU device id is not hexadecimal".to_string())?;
-        let snapshot = cx.linux_gpu_snapshot();
-        let mut found = None;
-        for gpu in &snapshot.devices {
-            let Some(address) = gpu.pci_address.as_deref().filter(|a| !a.is_empty()) else {
-                continue;
-            };
-            if address == pci && gpu.vendor_id == vendor_id && gpu.device_id == device_id {
-                if found.is_some() {
-                    return Err("GPU identity matches more than one device".into());
-                }
-                found = Some(gpu.uuid);
-            }
-        }
-        found.ok_or_else(|| "GPU is not available".into())
-    }
-
-    /// Compositor `None` is the snapshot's display GPU. An identity uses
-    /// the same snapshot match as a per-app choice.
-    fn resolve_compositor_uuid(&self, cx: &Cx, choice: Option<&str>) -> Result<[u8; 16], String> {
-        match choice {
-            None => cx
-                .linux_gpu_snapshot()
-                .display
-                .as_ref()
-                .map(|gpu| gpu.uuid)
-                .ok_or_else(|| "Display GPU is not available".into()),
-            Some(identity) => self.resolve_gpu_uuid(cx, identity),
-        }
-    }
-
-    /// Persistence for an accepted compositor switch. Root calls this
-    /// once the transition finishes. Failure drops the pending save.
-    pub(crate) fn finish_linux_gpu_choice(&mut self, cx: &mut Cx, success: bool) {
-        let pending = self.linux_controls.gpu_after_commit.take();
-        if success {
-            if let Some(choice) = pending {
-                self.linux_controls.edit_layout(None, |layout| layout.render_on = choice);
-            }
-        }
-        if !self.linux_gpu.notice.is_empty() {
-            self.linux_controls.notice = self.linux_gpu.notice.clone();
-        }
-        self.poll_linux_controls(cx);
     }
 
     /// Ask the renderer for a source. `Ok` means the request is queued,
@@ -524,6 +487,9 @@ impl App {
         if self.linux_controls.reanchor_frame.is_event(event).is_some() {
             self.reanchor_shell_panel(cx);
         }
+        if let Event::LinuxDisplayResult(ev) = event {
+            self.display_result(cx, &ev.command, &ev.result);
+        }
         if let Event::WindowGeomChange(ev) = event {
             if Some(ev.window_id) != self.main_window_id(cx) {
                 return;
@@ -546,6 +512,14 @@ impl App {
     pub(crate) fn linux_control(&mut self, cx: &mut Cx, action: ControlAction) {
         self.poll_linux_controls(cx);
         let action = match action {
+            ControlAction::DpiScaleLive(value) => {
+                let value = value.clamp(DISPLAY_SCALE_MIN, DISPLAY_SCALE_MAX);
+                self.linux_controls.dpi_user_set = true;
+                self.linux_controls.dpi_loaded_applied = true;
+                self.apply_dpi_scale(cx, value);
+                self.redraw_all(cx);
+                return;
+            }
             ControlAction::DpiScale(value) => {
                 // The scale is applied here whatever the worker's state: the
                 // person sees it at once, and only the saving can fail.
@@ -592,9 +566,61 @@ impl App {
                 self.redraw_all(cx);
                 return;
             }
-            ControlAction::DisplayMode { name, mode } => {
+            ControlAction::DisplayTry(change) => {
                 self.linux_controls.notice.clear();
-                self.apply_display_mode(cx, &name, mode);
+                let displays = cx.linux_display_snapshot();
+                let running = match &change {
+                    Change::Mode { name, .. } => Change::Mode {
+                        name: name.clone(),
+                        mode: displays.outputs.iter().find(|o| o.name == *name).and_then(|o| {
+                            self.linux_controls.trials.selected_mode(name, o.mode_override.as_deref()).map(str::to_string)
+                        }),
+                    },
+                };
+                let out = self.linux_controls.trials.begin(change, running, cx.linux_display_generation(), Cx::monotonic_now());
+                self.apply_trial_out(cx, out);
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DisplayArrangement(arrangement) => {
+                self.linux_controls.notice.clear();
+                let displays = cx.linux_display_snapshot();
+                if self.linux_controls.trials.switch_arrangement(arrangement.clone(), &displays.arrangement) {
+                    // Saved once the renderer takes it (`display_result`).
+                    match cx.linux_set_display_arrangement(&arrangement) {
+                        Ok(()) => log!("wm: display arrangement {arrangement:?} asked"),
+                        Err(message) => {
+                            log!("wm: display arrangement {arrangement:?} refused: {message}");
+                            self.linux_controls.trials.arrangement_refused(&arrangement, &message, &displays);
+                        }
+                    }
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DisplayPacing(pacing) => {
+                self.linux_controls.notice.clear();
+                // Saved once the renderer takes it (`display_result`).
+                match cx.linux_set_display_pacing(&pacing) {
+                    Ok(()) => log!("wm: display pacing {pacing:?} asked"),
+                    Err(message) => self.linux_controls.notice = format!("Pace by: {message}"),
+                }
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DisplayKeep => {
+                let out = self.linux_controls.trials.keep();
+                self.apply_trial_out(cx, out);
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DisplayRevert => {
+                let out = self.linux_controls.trials.revert(Cx::monotonic_now());
+                self.apply_trial_out(cx, out);
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
                 return;
@@ -605,53 +631,13 @@ impl App {
             }
             ControlAction::GpuChoice(choice) => {
                 self.linux_controls.notice.clear();
-                let invalid = choice.as_deref().and_then(|identity| validate_gpu_choice(identity).err());
-                if let Some(message) = invalid {
+                if let Some(message) = choice.as_deref().and_then(|identity| validate_gpu_choice(identity).err()) {
                     self.linux_controls.notice = format!("Render on: {message}");
-                } else if let Some(displays) = Some(cx.linux_display_snapshot()).filter(screens_span_gpus) {
-                    // The renderer cannot switch while screens on other GPUs
-                    // are part of the desktop: the choice is for the next
-                    // start ("Restart desktop now" applies it).
-                    log!("wm: render on {} saved for the next start", choice.as_deref().unwrap_or("auto"));
+                } else {
+                    let displays = cx.linux_display_snapshot();
                     self.linux_controls.gpu_user_set = true;
                     self.linux_controls.edit_layout(Some(&displays), |layout| layout.render_on = choice);
-                } else {
-                    match self.resolve_compositor_uuid(cx, choice.as_deref()) {
-                        Err(message) => self.linux_controls.notice = format!("Render on: {message}"),
-                        Ok(uuid) => match self.change_compositor_gpu(cx, uuid) {
-                            Err(message) => self.linux_controls.notice = format!("Render on: {message}"),
-                            Ok(()) => {
-                                self.linux_controls.gpu_user_set = true;
-                                if self.linux_gpu.active() {
-                                    self.linux_controls.gpu_after_commit = Some(choice);
-                                } else {
-                                    self.linux_controls
-                                        .edit_layout(None, |layout| layout.render_on = choice);
-                                }
-                            }
-                        },
-                    }
-                }
-                self.poll_linux_controls(cx);
-                self.redraw_all(cx);
-                return;
-            }
-            ControlAction::AppGpuChoice { client, choice } => {
-                self.linux_controls.notice.clear();
-                let uuid = match choice.as_deref() {
-                    None => Ok(None),
-                    Some(identity) => match validate_gpu_choice(identity) {
-                        Err(message) => Err(message),
-                        Ok(identity) => self.resolve_gpu_uuid(cx, identity).map(Some),
-                    },
-                };
-                match uuid {
-                    Err(message) => self.linux_controls.notice = format!("App GPU: {message}"),
-                    Ok(uuid) => {
-                        if let Err(message) = self.change_app_gpu(cx, client, uuid) {
-                            self.linux_controls.notice = format!("App GPU: {message}");
-                        }
-                    }
+                    self.linux_controls.notice = "GPU choice saved; restart the desktop to apply it".into();
                 }
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
@@ -679,15 +665,17 @@ impl App {
             match action {
                 ControlAction::OutputVolume(value) => { controller.set_output_volume(value); }
                 ControlAction::InputVolume(value) => { controller.set_input_volume(value); }
-                // Keep a visible panel while adjusting from the desktop.
-                ControlAction::Brightness(value) => { controller.set_brightness(value.max(1)); }
                 ControlAction::DpiScale(_)
+                | ControlAction::DpiScaleLive(_)
                 | ControlAction::DisplaySource(_)
                 | ControlAction::DisplayOrder(_)
-                | ControlAction::DisplayMode { .. }
+                | ControlAction::DisplayTry(_)
+                | ControlAction::DisplayArrangement(_)
+                | ControlAction::DisplayKeep
+                | ControlAction::DisplayRevert
+                | ControlAction::DisplayPacing(_)
                 | ControlAction::RestartDesktop
                 | ControlAction::GpuChoice(_)
-                | ControlAction::AppGpuChoice { .. }
                 | ControlAction::PointerSpeed { .. } => {}
                 ControlAction::Command(command) => {
                     if state.waiting.len() < 32 {
@@ -707,9 +695,6 @@ impl App {
 
     pub(crate) fn poll_linux_controls(&mut self, cx: &mut Cx) {
         if self.gallery { return; }
-        let gpu_busy = self.linux_gpu.active();
-        let gpu_notice = (gpu_busy && !self.linux_gpu.notice.is_empty()).then(|| self.linux_gpu.notice.clone());
-        let gpu_app = self.linux_gpu_app_status();
         let state = &mut self.linux_controls;
         if !state.attempted {
             state.attempted = true;
@@ -869,8 +854,8 @@ impl App {
             .map(|p| (p.dpi_adjusting(), p.open == Some(PanelKind::Monitor), p.display_source_pending.clone()))
             .unwrap_or((false, false, None));
         if let Some(value) = initial_scale {
-            // Not under a drag: a saved value landing mid-preview would move
-            // the window under the slider. It waits for the next poll.
+            // Not under a drag: a saved value landing mid-drag would move the
+            // window under the slider. It waits for the next poll.
             if !adjusting && self.main_window_id(cx).is_some() {
                 self.linux_controls.dpi_loaded_applied = true;
                 log!("wm: applying saved display scale {value}");
@@ -891,13 +876,21 @@ impl App {
         // open Display panel, a saved source to ask for, a request to
         // confirm. Immutable cached snapshots, no lock, no Vulkan, no
         // filesystem. GPU identity is only for the open Display readout.
-        let displays = (monitor_open || restore_pending || pending.is_some())
+        let trying = self.linux_controls.trials.trial.is_some() || self.linux_controls.trials.restoring.is_some();
+        let displays = (monitor_open || restore_pending || pending.is_some() || trying)
             .then(|| cx.linux_display_snapshot());
-        let gpus = monitor_open.then(|| cx.linux_gpu_snapshot());
         if let (true, Some(displays)) = (restore_pending, displays.as_ref()) {
             let order_env = snapshot.as_ref().and_then(|s| s.order_env.as_deref());
             let modes_env = snapshot.as_ref().and_then(|s| s.modes_env.as_deref());
-            changed |= self.restore_display_layout(cx, displays, adjusting, order_env, modes_env);
+            changed |= self.restore_display_layout(cx, displays, order_env, modes_env);
+        }
+        // The change being tried: up, failed, or out of time.
+        if let Some(displays) = displays.as_ref() {
+            let before = self.linux_controls.trials.clone();
+            let out = self.linux_controls.trials.observe(displays, cx.linux_display_generation(), Cx::monotonic_now());
+            self.linux_controls.trials.forget_missing(displays);
+            self.apply_trial_out(cx, out);
+            changed |= self.linux_controls.trials != before;
         }
         let actual_dpi = self.main_window_dpi(cx);
         let state = &mut self.linux_controls;
@@ -932,29 +925,17 @@ impl App {
                     changed = true;
                 }
             }
-            if let Some(gpus) = gpus {
-                if panel.gpu_snapshot != gpus {
-                    panel.gpu_snapshot = gpus;
-                    changed = true;
-                }
-            }
-            if panel.gpu_busy != gpu_busy {
-                panel.gpu_busy = gpu_busy;
-                changed = true;
-            }
-            if panel.gpu_app != gpu_app {
-                if panel.gpu_app.as_ref().map(|app| app.0) != gpu_app.as_ref().map(|app| app.0) {
-                    // A list drawn for one client cannot silently acquire
-                    // another client's label when keyboard focus changes.
-                    panel.close_gpu_lists();
-                }
-                panel.gpu_app = gpu_app;
-                changed = true;
-            }
-            if let Some(notice) = gpu_notice {
-                state.notice = notice;
-            }
             panel.system_notice = state.notice.clone();
+            if panel.display_trials != state.trials {
+                panel.display_trials = state.trials.clone();
+                changed = true;
+            }
+            // The revert countdown ticks with the 1 s status poll.
+            let now = Cx::monotonic_now();
+            if state.trials.seconds_left(now) != state.trials.seconds_left(panel.display_now) {
+                changed = true;
+            }
+            panel.display_now = now;
             // The saved render-on GPU as this session last set it, else as
             // the worker read it.
             let render_on = match (state.layout.as_ref(), snapshot.as_ref()) {
@@ -978,7 +959,6 @@ impl App {
                 let audio = &snapshot.audio;
                 self.bar_sample.volume = audio.default_output().map(|d| d.percent);
                 self.bar_sample.muted = audio.default_output().is_some_and(|d| d.muted);
-                self.bar_sample.brightness = snapshot.brightness.percent();
                 self.bar_sample.battery = snapshot.power.percent.map(|percent| shell::bar::Battery {
                     percent,
                     charging: snapshot.power.status == BatteryStatus::Charging,
@@ -986,7 +966,6 @@ impl App {
                 panel.data.volume = self.bar_sample.volume;
                 panel.data.muted = self.bar_sample.muted;
                 panel.data.input_volume = audio.default_input().map(|d| d.percent);
-                panel.data.brightness = self.bar_sample.brightness;
                 panel.data.battery = self.bar_sample.battery;
                 panel.system = snapshot;
             }
@@ -1032,30 +1011,124 @@ impl App {
         }
     }
 
-    /// A screen's mode from the panel: applied live (the screen is
-    /// reacquired) and saved as that screen's `mode=`, or cleared for
-    /// Automatic.
-    fn apply_display_mode(&mut self, cx: &mut Cx, name: &str, mode: Option<String>) {
-        match cx.linux_set_display_mode(name, mode.as_deref()) {
-            Ok(()) => {
-                log!("wm: display mode {} for {name}", mode.as_deref().unwrap_or("automatic"));
-                self.linux_controls.layout_set_by_person();
-                let displays = cx.linux_display_snapshot();
-                match displays.outputs.iter().find(|o| o.name == name).and_then(screen_key) {
-                    Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| {
-                        if !layout.screens.iter().any(|entry| entry.key == key) {
-                            layout.screens.push(ScreenEntry { key: key.clone(), main: false, mode: None });
+    /// Carry out what the Display menu's trials ask for: send a change to
+    /// the renderer (a refusal goes back to the trials, which may ask for
+    /// the previous one), or save a kept one in the layout.
+    fn apply_trial_out(&mut self, cx: &mut Cx, out: Vec<TrialOut>) {
+        let mut queue: std::collections::VecDeque<TrialOut> = out.into();
+        while let Some(step) = queue.pop_front() {
+            match step {
+                TrialOut::Send(change) => {
+                    let sent = match &change {
+                        Change::Mode { name, mode } => cx.linux_set_display_mode(name, mode.as_deref()),
+                    };
+                    match sent {
+                        Ok(()) => log!("wm: display: trying {change:?}"),
+                        Err(message) => {
+                            log!("wm: display: {change:?} refused: {message}");
+                            let displays = cx.linux_display_snapshot();
+                            queue.extend(self.linux_controls.trials.refused(&change, &message, &displays, Cx::monotonic_now()));
                         }
-                        layout.set_mode(&key, mode);
-                    }),
-                    None => log!("wm: mode for {name} not saved: it is no longer listed or its card has no PCI address"),
+                    }
                 }
-            }
-            Err(message) => {
-                self.linux_controls.notice = format!("Mode for {name}: {message}");
-                log!("wm: display mode for {name} refused: {message}");
+                TrialOut::Save(change) => self.save_kept_change(cx, change),
             }
         }
+    }
+
+    /// A kept mode goes into the layout and is saved.
+    fn save_kept_change(&mut self, cx: &mut Cx, change: Change) {
+        log!("wm: display: kept {change:?}");
+        let displays = cx.linux_display_snapshot();
+        self.linux_controls.layout_set_by_person();
+        match change {
+            Change::Mode { name, mode } => match displays.outputs.iter().find(|o| o.name == name).and_then(screen_key) {
+                Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| {
+                    if !layout.screens.iter().any(|entry| entry.key == key) {
+                        layout.screens.push(ScreenEntry { key: key.clone(), main: false, mode: None });
+                    }
+                    layout.set_mode(&key, mode);
+                }),
+                None => log!("wm: mode for {name} not saved: it is no longer listed or its card has no PCI address"),
+            },
+        }
+    }
+
+    /// An arrangement the renderer took goes into the layout and is saved.
+    fn save_arrangement(&mut self, cx: &mut Cx, arrangement: &DisplayArrangement) {
+        log!("wm: display arrangement {arrangement:?}");
+        let displays = cx.linux_display_snapshot();
+        self.linux_controls.layout_set_by_person();
+        match arrangement {
+            DisplayArrangement::Extended => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = None),
+            DisplayArrangement::Mirror { optimise_for } => {
+                match displays.outputs.iter().find(|o| o.name == *optimise_for).and_then(screen_key) {
+                    Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = Some(key)),
+                    None => log!("wm: mirror for {optimise_for} not saved: it is no longer listed or its card has no PCI address"),
+                }
+            }
+        }
+    }
+
+    /// A pacing the renderer took goes into the layout and is saved.
+    fn save_pacing(&mut self, cx: &mut Cx, pacing: &DisplayPacing) {
+        log!("wm: display pacing {pacing:?}");
+        let displays = cx.linux_display_snapshot();
+        let pace = match pacing {
+            DisplayPacing::Auto => Some(SavedPace::Auto),
+            DisplayPacing::Slowest => Some(SavedPace::Slowest),
+            DisplayPacing::Fastest => Some(SavedPace::Fastest),
+            DisplayPacing::Screen(name) => {
+                displays.outputs.iter().find(|o| o.name == *name).and_then(screen_key).map(SavedPace::Screen)
+            }
+        };
+        match pace {
+            Some(pace) => self.linux_controls.edit_layout(Some(&displays), |layout| layout.pace = pace),
+            None => log!("wm: pacing {pacing:?} not saved: the screen is gone or its card has no PCI address"),
+        }
+    }
+
+    /// The renderer's answer to a display request: a refused try goes back
+    /// to the trials.
+    fn display_result(&mut self, cx: &mut Cx, command: &LinuxDisplayCommand, result: &Result<(), String>) {
+        if let LinuxDisplayCommand::Pacing(pacing) = command {
+            match result {
+                Ok(()) => self.save_pacing(cx, pacing),
+                Err(message) => {
+                    self.linux_controls.notice = format!("Pace by: {message}");
+                    log!("wm: display pacing {pacing:?} refused: {message}");
+                }
+            }
+            self.poll_linux_controls(cx);
+            self.redraw_all(cx);
+            return;
+        }
+        if let LinuxDisplayCommand::Arrangement(arrangement) = command {
+            match result {
+                Ok(()) => self.save_arrangement(cx, arrangement),
+                Err(message) => {
+                    log!("wm: display arrangement {arrangement:?} refused: {message}");
+                    let displays = cx.linux_display_snapshot();
+                    self.linux_controls.trials.arrangement_refused(arrangement, message, &displays);
+                }
+            }
+            self.poll_linux_controls(cx);
+            self.redraw_all(cx);
+            return;
+        }
+        let Err(message) = result else { return };
+        let change = match command {
+            LinuxDisplayCommand::Mode { name, mode } => Change::Mode { name: name.clone(), mode: mode.clone() },
+            LinuxDisplayCommand::Arrangement(_)
+            | LinuxDisplayCommand::Source(_)
+            | LinuxDisplayCommand::Order(_)
+            | LinuxDisplayCommand::Pacing(_) => return,
+        };
+        let displays = cx.linux_display_snapshot();
+        let out = self.linux_controls.trials.refused(&change, message, &displays, Cx::monotonic_now());
+        self.apply_trial_out(cx, out);
+        self.poll_linux_controls(cx);
+        self.redraw_all(cx);
     }
 
     /// The start-up restore of the saved layout, against this poll's
@@ -1075,21 +1148,19 @@ impl App {
         &mut self,
         cx: &mut Cx,
         displays: &LinuxDisplaySnapshot,
-        adjusting: bool,
         order_env: Option<&str>,
         modes_env: Option<&str>,
     ) -> bool {
+        if displays.outputs.is_empty() {
+            // No inventory yet (the empty snapshot before the first one also
+            // reads as not direct). Wait; nothing is decided or logged until then.
+            return false;
+        }
         if !displays.direct {
             // The desktop owns the outputs: nothing to arrange.
             log!("wm: saved display layout not applied: the desktop owns the outputs");
             self.linux_controls.layout_restore_done = true;
             self.linux_controls.source_loaded_applied = true;
-            return false;
-        }
-        if displays.outputs.is_empty() || adjusting {
-            // No inventory yet, or the scale slider is held: a layout
-            // change moves the window as a scale change does. Wait;
-            // nothing is decided or logged until then.
             return false;
         }
         let layout = self.linux_controls.layout.clone().unwrap_or_default();
@@ -1114,6 +1185,18 @@ impl App {
                     log!("wm: applying saved mode {label} for {name}");
                     if let Err(message) = cx.linux_set_display_mode(name, mode.as_deref()) {
                         log!("wm: saved mode {label} for {name} refused: {message}");
+                    }
+                }
+                RestoreOp::Arrangement(arrangement) => {
+                    log!("wm: applying saved arrangement {arrangement:?}");
+                    if let Err(message) = cx.linux_set_display_arrangement(arrangement) {
+                        log!("wm: saved arrangement {arrangement:?} refused: {message}");
+                    }
+                }
+                RestoreOp::Pacing(pacing) => {
+                    log!("wm: applying saved pacing {pacing:?}");
+                    if let Err(message) = cx.linux_set_display_pacing(pacing) {
+                        log!("wm: saved pacing {pacing:?} refused: {message}");
                     }
                 }
                 RestoreOp::Main(_) => {}
@@ -1191,7 +1274,6 @@ impl App {
         self.linux_controls.dpi_save = None;
         self.linux_controls.layout_save = None;
         self.linux_controls.layout_save_seq = None;
-        self.linux_controls.gpu_after_commit = None;
         self.linux_controls.pointer_save = [None; 2];
         // `restart_requested` is left as it is: `Event::Shutdown`'s glue
         // reads it right after this call to pick the exit code.
@@ -1336,21 +1418,21 @@ mod tests {
         // not joining), so only its mode is asked for.
         let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", None, false);
         peer.status = "failed: no free display plane can present the selected mode".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
         let ops = step(&mut c, &layout, &snap, 1, 1.0);
         assert_eq!(ops, vec![RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))]);
         assert!(!c.layout_restore_done, "done before the mode it asked for was seen");
         // Generation 2: retired, reacquiring with the new mode.
         peer.mode_override = Some("3840x2160@30".to_string());
         peer.status = "retired: reacquiring after hotplug event".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
         // Joining again: the order is seeded so it rejoins on its side.
         let mut sent = step(&mut c, &layout, &snap, 2, 2.0);
         assert!(!c.layout_restore_done);
         // Generation 3: back at 4K30, but on the right.
         let mut placed_peer = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((3840, 0)), false);
         placed_peer.mode_override = Some("3840x2160@30".to_string());
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer.clone(), own.clone()], ..Default::default() };
         sent.extend(step(&mut c, &layout, &snap, 3, 3.0));
         assert!(sent_order(&sent), "the order must still be sent: {sent:?}");
         assert!(!c.layout_restore_done, "the arrangement still differs");
@@ -1358,7 +1440,7 @@ mod tests {
         placed_peer.desktop_position = Some((0, 0));
         let mut own_right = own.clone();
         own_right.desktop_position = Some((3840, 0));
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer, own_right] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![placed_peer, own_right], ..Default::default() };
         assert!(step(&mut c, &layout, &snap, 4, 4.0).is_empty());
         assert!(!c.layout_restore_done, "not settled 1 s after the send");
         assert!(step(&mut c, &layout, &snap, 4, 9.0).is_empty());
@@ -1374,7 +1456,7 @@ mod tests {
         let mut c = LinuxControls::default();
         let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
         let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((0, 0)), false);
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
         let ops = step(&mut c, &layout, &snap, 1, 1.0);
         assert!(ops.contains(&RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))));
         assert!(!c.layout_restore_done);
@@ -1382,12 +1464,12 @@ mod tests {
         peer.desktop_position = None;
         peer.active = false;
         peer.status = "retired: reacquiring after hotplug event".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
         step(&mut c, &layout, &snap, 2, 2.0);
         assert!(!c.layout_restore_done);
         let mut back = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((3840, 0)), false);
         back.mode_override = Some("3840x2160@30".to_string());
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![back.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![back.clone(), own.clone()], ..Default::default() };
         let mut sent = c.layout_restore_sent.clone();
         sent.extend(step(&mut c, &layout, &snap, 3, 3.0));
         assert!(sent_order(&sent), "the order was never sent: {sent:?}");
@@ -1412,7 +1494,7 @@ mod tests {
         // masks the order mismatch this test wants to see.
         let dp1 = screen("card0-DP-1", "0000:00:02.0", Some((3840, 0)), true);
         let dp2 = screen("card1-DP-2", "0000:01:00.0", Some((0, 0)), false);
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![dp2, dp1] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![dp2, dp1], ..Default::default() };
         // Sanity: unpinned, the file and the running order disagree.
         let mut unpinned = LinuxControls::default();
         let ops = unpinned.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, None);
@@ -1431,7 +1513,7 @@ mod tests {
         let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
         let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", None, false);
         peer.status = "failed: no free display plane can present the selected mode".to_string();
-        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()], ..Default::default() };
         // A pin naming a different screen leaves this one's Mode alone.
         let mut other_pinned = LinuxControls::default();
         let ops =

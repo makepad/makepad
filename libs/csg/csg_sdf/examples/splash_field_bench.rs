@@ -1,0 +1,194 @@
+//! Splash field microbenchmark: the Splash interpreter vs the field
+//! compiled by the kernel compiler (native code where the host has a
+//! backend, its interpreter elsewhere) vs a native Rust closure, over 1M
+//! points.
+//!
+//!   cargo run -p makepad-csg-sdf --example splash_field_bench --release
+//!
+//! Expressions:
+//! - scalar SDF: sin(x)*cos(z) - y + 0.3*sin(5x)*sin(5y)*sin(5z)
+//! - vector-heavy: two-sphere min with normalize/dot/packed sin,
+//!   in both vec3-parameter (packed) and hand-scalarized forms.
+
+use makepad_csg_sdf::{SdfSplashExpr, SplashPoint};
+use makepad_script::makepad_math::Vec3f;
+use makepad_script::*;
+use std::time::Instant;
+
+const N: usize = 1_000_000;
+
+fn test_vm() -> ScriptVm<'static> {
+    let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
+}
+
+/// Evaluates the script and returns the fn value ROOTED (a bare eval
+/// result is unrooted; a later eval could recycle its object slot).
+fn eval_fn(vm: &mut ScriptVm, name: &str, code: &str) -> (ScriptFnRef, ScriptValue) {
+    vm.capture_errors();
+    let v = vm.eval(ScriptMod::new("", "", &name, 0, 0, &code, &[]));
+    let errors = vm.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    let obj = v.as_object().expect("script did not yield a fn");
+    (vm.heap_mut().new_fn_ref(obj), v)
+}
+
+fn points() -> Vec<f32> {
+    let mut out = Vec::with_capacity(N * 3);
+    let mut state = 0x12345678u32;
+    for _ in 0..N * 3 {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        out.push((state >> 8) as f32 / (1 << 24) as f32 * 4.0 - 2.0);
+    }
+    out
+}
+
+fn time<F: FnMut()>(mut f: F) -> f64 {
+    // Warmup + best of 3.
+    f();
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        f();
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    best
+}
+
+fn checksum(out: &[f32]) -> f64 {
+    out.iter().step_by(997).map(|v| *v as f64).sum()
+}
+
+fn main() {
+    let mut vm = test_vm();
+    let pts = points();
+
+    // ---- scalar SDF expression ------------------------------------------
+    println!("== scalar SDF: sin(x)*cos(z) - y + 0.3*sin(5x)*sin(5y)*sin(5z), {N} points ==");
+    let code = "use mod.math.*\nlet f = |x, y, z| sin(x) * cos(z) - y + 0.3 * sin(5 * x) * sin(5 * y) * sin(5 * z)\n(f)";
+    let (_root, fn_value) = eval_fn(&mut vm, "bench_scalar", code);
+    let t_compile = Instant::now();
+    let compiled = SdfSplashExpr::compile(&mut vm, fn_value.as_object().unwrap(), SplashPoint::Xyz, &[]).expect("compiles");
+    println!("compile: {:.3} ms", t_compile.elapsed().as_secs_f64() * 1e3);
+
+    let mut out = vec![0f32; N];
+
+    // Native closure (f64 scalar arithmetic, f32 trig roundtrips).
+    let native = |x: f64, y: f64, z: f64| -> f64 {
+        let s = |v: f64| (v as f32).sin() as f64;
+        let c = |v: f64| (v as f32).cos() as f64;
+        s(x) * c(z) - y + 0.3 * s(5.0 * x) * s(5.0 * y) * s(5.0 * z)
+    };
+    let t_native = time(|| {
+        for i in 0..N {
+            out[i] = native(
+                pts[i * 3] as f64,
+                pts[i * 3 + 1] as f64,
+                pts[i * 3 + 2] as f64,
+            ) as f32;
+        }
+    });
+    println!("native closure:   {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_native * 1e3, t_native / N as f64 * 1e9, checksum(&out));
+
+    let t_kernel = time(|| compiled.distance_batch(&pts, &mut out));
+    println!("kernel:           {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_kernel * 1e3, t_kernel / N as f64 * 1e9, checksum(&out));
+
+    // Splash interpreter over a subsample (per-point vm.call), scaled.
+    let interp_n = 20_000;
+    let t_interp = time(|| {
+        for i in 0..interp_n {
+            let r = vm.call(
+                fn_value,
+                &[
+                    (pts[i * 3] as f64).into(),
+                    (pts[i * 3 + 1] as f64).into(),
+                    (pts[i * 3 + 2] as f64).into(),
+                ],
+            );
+            out[i] = r.as_number().unwrap() as f32;
+        }
+    });
+    let t_interp_scaled = t_interp / interp_n as f64 * N as f64;
+    println!(
+        "splash interp:    {:8.2} ms  ({:6.1} ns/pt)  [{} points, scaled]",
+        t_interp_scaled * 1e3,
+        t_interp / interp_n as f64 * 1e9,
+        interp_n
+    );
+    println!(
+        "ratios: interp/kernel = {:.1}x   kernel/native = {:.2}x   interp/native = {:.0}x",
+        t_interp_scaled / t_kernel,
+        t_kernel / t_native,
+        t_interp_scaled / t_native
+    );
+
+    // ---- vector-heavy expression ----------------------------------------
+    println!();
+    println!("== vector-heavy: min(len(p-c1), len(p-c2)) - 0.8 + 0.05*dot(normalize(p), sin(p*4)), {N} points ==");
+    let vcode = "use mod.math.*\nuse mod.pod.*\nlet f = |p| min(length(p - vec3(0.5, 0.2, 0.1)), length(p - vec3(0.0 - 0.4, 0.1, 0.0 - 0.3))) - 0.8 + 0.05 * dot(normalize(p), sin(p * 4.0))\n(f)";
+    let (_vroot, vfn) = eval_fn(&mut vm, "bench_vec", vcode);
+    let compiled_v = SdfSplashExpr::compile(&mut vm, vfn.as_object().unwrap(), SplashPoint::Vec3, &[]).expect("compiles");
+
+    // The same expression hand-scalarized (what the compiler would do
+    // without packed lanes).
+    let scode = "use mod.math.*\nlet f = |x, y, z| {\n\
+        let dx1 = x - 0.5\nlet dy1 = y - 0.2\nlet dz1 = z - 0.1\n\
+        let dx2 = x + 0.4\nlet dy2 = y - 0.1\nlet dz2 = z + 0.3\n\
+        let l1 = sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1)\n\
+        let l2 = sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)\n\
+        let ln = sqrt(x * x + y * y + z * z)\n\
+        let nx = x / ln\nlet ny = y / ln\nlet nz = z / ln\n\
+        min(l1, l2) - 0.8 + 0.05 * (nx * sin(x * 4.0) + ny * sin(y * 4.0) + nz * sin(z * 4.0))\n}\n(f)";
+    let (_sroot, sfn) = eval_fn(&mut vm, "bench_scalarized", scode);
+    let compiled_s = SdfSplashExpr::compile(&mut vm, sfn.as_object().unwrap(), SplashPoint::Xyz, &[]).expect("compiles");
+
+    let native_v = |x: f32, y: f32, z: f32| -> f64 {
+        let l1 = ((x - 0.5) * (x - 0.5) + (y - 0.2) * (y - 0.2) + (z - 0.1) * (z - 0.1)).sqrt();
+        let l2 = ((x + 0.4) * (x + 0.4) + (y - 0.1) * (y - 0.1) + (z + 0.3) * (z + 0.3)).sqrt();
+        let ln = (x * x + y * y + z * z).sqrt();
+        let d = (x / ln) * (x * 4.0).sin() + (y / ln) * (y * 4.0).sin() + (z / ln) * (z * 4.0).sin();
+        (l1.min(l2) as f64) - 0.8 + 0.05 * d as f64
+    };
+    let t_native_v = time(|| {
+        for i in 0..N {
+            out[i] = native_v(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]) as f32;
+        }
+    });
+    println!("native closure:   {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_native_v * 1e3, t_native_v / N as f64 * 1e9, checksum(&out));
+
+    let t_packed = time(|| compiled_v.distance_batch(&pts, &mut out));
+    println!("kernel vec3:      {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_packed * 1e3, t_packed / N as f64 * 1e9, checksum(&out));
+
+    let t_scalar = time(|| compiled_s.distance_batch(&pts, &mut out));
+    println!("kernel scalarized:{:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_scalar * 1e3, t_scalar / N as f64 * 1e9, checksum(&out));
+
+    let interp_n = 10_000;
+    let t_interp_v = time(|| {
+        for i in 0..interp_n {
+            let p = Vec3f {
+                x: pts[i * 3],
+                y: pts[i * 3 + 1],
+                z: pts[i * 3 + 2],
+            }
+            .script_to_value(&mut vm);
+            let r = vm.call(vfn, &[p]);
+            out[i] = r.as_number().unwrap() as f32;
+        }
+    });
+    let t_interp_v_scaled = t_interp_v / interp_n as f64 * N as f64;
+    println!(
+        "splash interp:    {:8.2} ms  ({:6.1} ns/pt)  [{} points, scaled]",
+        t_interp_v_scaled * 1e3,
+        t_interp_v / interp_n as f64 * 1e9,
+        interp_n
+    );
+    println!(
+        "ratios: interp/vec3 = {:.1}x   vec3/native = {:.2}x   scalarized/vec3 = {:.2}x",
+        t_interp_v_scaled / t_packed,
+        t_packed / t_native_v,
+        t_scalar / t_packed
+    );
+}

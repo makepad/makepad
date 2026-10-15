@@ -19,7 +19,7 @@
 //!
 //! Mouse: a press on the menu button opens the menu, a press on a
 //! workspace focuses it, a press on a tray/status module opens its panel,
-//! and the wheel over audio/monitor steps volume/brightness — the same
+//! and the wheel over audio steps the volume — the same
 //! gestures as the original.
 
 use makepad_widgets::*;
@@ -31,9 +31,9 @@ use super::{alpha, fade, ShellTokens};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarModule {
     Menu,
+    /// The theme button: opens the Theme dropdown.
     Style,
-    Appearance,
-    Workspace(usize),
+    Space(usize),
     /// `widgets/ActiveWindow.qml` — not in the stock `shell.json` center
     /// list, but our bar carries it right after the workspaces.
     ActiveWindow,
@@ -45,6 +45,8 @@ pub enum BarModule {
     Tray(usize),
     Bluetooth,
     Network,
+    /// The AI hub panel's button.
+    Hub,
     Audio,
     Monitor,
     Power,
@@ -123,23 +125,23 @@ pub fn drawn_segments(r: Rect, segments: &[BarSegment]) -> Vec<(usize, Rect)> {
         .collect()
 }
 
-/// One layout's workspace cluster: the active workspace (shown as a dot,
-/// even when empty) and every populated one, by number (workspace 10 reads
-/// "0"); empty ones are hidden. The second Vec is the workspace each cell
-/// stands for, what a click on it maps to.
+/// One display's space cluster: every space in order, the shown one as a dot
+/// (even when empty), the others by number ("F" for a fullscreen space); the
+/// second Vec is the space index each cell stands for, what a click on it
+/// maps to.
 pub fn workspace_cells(layout: &crate::layout::WmLayout) -> (Vec<WorkspaceCell>, Vec<usize>) {
     let mut cells = Vec::new();
     let mut shown = Vec::new();
-    for i in 0..crate::layout::WORKSPACES {
-        let populated = !layout.clients_on(i).is_empty();
-        if i != layout.active && !populated {
-            continue;
-        }
+    for (i, sp) in layout.spaces.items().iter().enumerate() {
         shown.push(i);
+        let label = match layout.spaces.desktop_number(i) {
+            Some(n) => format!("{n}"),
+            None => "F".to_string(),
+        };
         cells.push(WorkspaceCell {
-            label: format!("{}", (i + 1) % 10),
-            occupied: populated,
-            focused: i == layout.active,
+            label,
+            occupied: !layout.clients_on(sp.slot).is_empty(),
+            focused: i == layout.spaces.cur(),
         });
     }
     (cells, shown)
@@ -160,8 +162,6 @@ pub struct Indicator {
 /// it with fixtures. Nothing in here is sampled by the widget itself.
 #[derive(Clone, Debug, Default)]
 pub struct BarData {
-    pub style: crate::desktop::DesktopStyle,
-    pub dark: bool,
     pub workspaces: Vec<WorkspaceCell>,
     pub indicators: Vec<Indicator>,
     /// The focused window's title (`ActiveWindow.qml`).
@@ -179,12 +179,13 @@ pub struct BarData {
     pub network: Option<bool>,
     pub volume: Option<u32>,
     pub muted: bool,
-    pub brightness: Option<u32>,
     pub battery: Option<Battery>,
     /// The module whose panel is open — it wears the accent pill.
     pub open_panel: Option<BarModule>,
     /// The window is maximized: the middle control shows "restore".
     pub maximized: bool,
+    /// Some model of the AI hub is working: its icon pulses.
+    pub hub_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,8 +198,6 @@ impl BarData {
     /// The fixture the gallery (and `plugins/dev-gallery`) draws with.
     pub fn fixture() -> Self {
         Self {
-            style: Default::default(),
-            dark: false,
             workspaces: vec![
                 WorkspaceCell {
                     label: "1".into(),
@@ -237,13 +236,13 @@ impl BarData {
             network: Some(true),
             volume: Some(62),
             muted: false,
-            brightness: Some(80),
             battery: Some(Battery {
                 percent: 87,
                 charging: true,
             }),
             open_panel: None,
             maximized: false,
+            hub_active: false,
         }
     }
 }
@@ -297,7 +296,9 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let out = std::process::Command::new(cmd).args(args).output().ok()?;
+        let mut command = std::process::Command::new(cmd);
+        makepad_app_registry::child_env::scrub(&mut command);
+        let out = command.args(args).output().ok()?;
         if !out.status.success() {
             return None;
         }
@@ -475,7 +476,7 @@ pub fn sample_network() -> Option<bool> {
             .map(|s| s.trim().to_string())?;
         Some(run("ipconfig", &["getifaddr", &dev]).map(|s| !s.trim().is_empty()) == Some(true))
     }
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     {
         // A default route in the kernel's table, read straight from procfs:
         // no process, no daemon. Wired or wireless alike — the Wi-Fi
@@ -486,7 +487,7 @@ pub fn sample_network() -> Option<bool> {
             fields.next().is_some() && fields.next() == Some("00000000")
         }))
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", not(target_env = "ohos")))))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -580,23 +581,28 @@ pub fn segment_rects(r: Rect, spans: &[(f64, f64)]) -> Vec<Rect> {
         .collect()
 }
 
-/// The left cluster of segment `seg` drawn into `r`: the menu button then
-/// one pill per workspace, as hit rects, and the x the style switch starts
-/// at. Pure, so the bar's layout is tested without a window.
+/// The left cluster of segment `seg` drawn into `r`: with the launcher (the
+/// omarchy style) the menu button then one pill per workspace, as hit rects;
+/// without it nothing, the theme button comes first. And the x the theme
+/// button starts at. Pure, so the bar's layout is tested without a window.
 pub fn left_cluster(
     seg: usize,
     r: Rect,
     pad_left: f64,
     canvas: f64,
     workspaces: usize,
+    launcher: bool,
 ) -> (Vec<(usize, BarModule, Rect)>, f64) {
     let mut hits = Vec::with_capacity(workspaces + 1);
     let mut x = r.pos.x + pad_left.max(EDGE_MARGIN);
+    if !launcher {
+        return (hits, x);
+    }
     let menu_w = (canvas + MENU_MARGIN * 2.0).max(12.0);
     hits.push((seg, BarModule::Menu, rect(x, r.pos.y, menu_w, r.size.y)));
     x += menu_w;
     for i in 0..workspaces {
-        hits.push((seg, BarModule::Workspace(i), rect(x, r.pos.y, WS_WIDTH, r.size.y)));
+        hits.push((seg, BarModule::Space(i), rect(x, r.pos.y, WS_WIDTH, r.size.y)));
         x += WS_WIDTH + WS_SPACING;
     }
     (hits, x + WS_TRAILING)
@@ -657,6 +663,13 @@ pub enum ShellBarAction {
 /// before secondary — a mouse reporting both bits on the same event (some
 /// drivers do, for a chorded click) still reads as the tertiary button,
 /// matching `ActiveWindow.qml`'s own `Qt.MiddleButton` branch order.
+use crate::scroll_gesture::Gesture as ScrollGesture;
+
+fn mix_color(a: Vec4f, b: Vec4f, t: f32) -> Vec4f {
+    let t = t.clamp(0.0, 1.0);
+    vec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t)
+}
+
 fn press_action(seg: usize, module: BarModule, button: MouseButton) -> ShellBarAction {
     if button.contains(MouseButton::MIDDLE) {
         ShellBarAction::MiddlePress(seg, module)
@@ -723,6 +736,18 @@ pub struct ShellBar {
     /// ([`window_controls_default`]; the gallery turns it on to show them).
     #[rust]
     pub window_controls: bool,
+    /// The omarchy style's left cluster (launcher button, workspaces, the
+    /// focused window's title); every other style has the theme button alone.
+    #[rust]
+    pub launcher: bool,
+    /// The hub icon's pulse: its frame loop (only while a model works) and the clock it reads.
+    #[rust]
+    pulse_frame: NextFrame,
+    #[rust]
+    pulse_t: f64,
+    /// One wheel action per scroll gesture (touchpad flicks and momentum).
+    #[rust]
+    wheel: ScrollGesture,
 }
 
 impl ShellBar {
@@ -754,6 +779,7 @@ impl ShellBar {
             },
             data.bluetooth.is_some(),
         ));
+        v.push((BarModule::Hub, Ico::Chip, true));
         v.push((
             BarModule::Network,
             match data.network {
@@ -770,7 +796,7 @@ impl ShellBar {
         v.push((
             BarModule::Monitor,
             Ico::Monitor,
-            data.brightness.is_some(),
+            true,
         ));
         v.push((
             BarModule::Power,
@@ -849,11 +875,11 @@ impl ShellBar {
 
         // ---- left: menu, workspaces
         let pad_left = if first { self.pad_left } else { 0.0 };
-        let (left, mut x) = left_cluster(seg, r, pad_left, canvas, data.workspaces.len());
-        let menu_rect = left[0].2;
-        self.d
-            .icon_centered(cx, Ico::Menu, menu_rect, canvas, fg);
-        for (ws, (_, _, cell)) in data.workspaces.iter().zip(&left[1..]) {
+        let (left, mut x) = left_cluster(seg, r, pad_left, canvas, data.workspaces.len(), self.launcher);
+        if let Some((_, _, menu_rect)) = left.first().copied() {
+            self.d.icon_centered(cx, Ico::Menu, menu_rect, canvas, fg);
+        }
+        for (ws, (_, _, cell)) in data.workspaces.iter().zip(left.iter().skip(1)) {
             let cell = *cell;
             let lit = ws.occupied || ws.focused;
             let color = fade(fg, if lit { 1.0 } else { 0.5 });
@@ -876,24 +902,15 @@ impl ShellBar {
             }
         }
         self.hits.extend(left);
-        let style_label = format!("{}  ▾", data.style.label());
-        let style_width = self.d.measure(cx, false, tok.font.body, &style_label) + 18.0;
-        let style_rect = rect(x, r.pos.y, style_width, r.size.y);
-        self.d.label(cx, style_rect, false, tok.font.body, fg, super::ui::HAlign::Center, &style_label);
+        // The theme button: one icon, the left cluster's last item.
+        let style_rect = rect(x, r.pos.y, (canvas + MENU_MARGIN * 2.0).max(12.0), r.size.y);
+        self.d.icon_centered(cx, Ico::Palette, style_rect, canvas, fg);
         self.hits.push((seg, BarModule::Style, style_rect));
-        x += style_width + 6.0;
+        x += style_rect.size.x + 6.0;
 
-        if data.style.supports_dark() {
-            let label=if data.dark {"Dark"}else{"Light"};
-            let width=self.d.measure(cx,false,tok.font.body,label)+18.0;
-            let button=rect(x,r.pos.y,width,r.size.y);
-            self.d.label(cx,button,false,tok.font.body,fg,super::ui::HAlign::Center,label);
-            self.hits.push((seg, BarModule::Appearance,button));
-            x+=width+6.0;
-        }
         // The active window's title: `min(280, implicitWidth) + controlPaddingX*2`,
         // `body` at α .85, elided right, with the full title in the tooltip.
-        if let Some(title) = data.active_window.as_deref() {
+        if let Some(title) = data.active_window.as_deref().filter(|_| self.launcher) {
             let text_w = self
                 .d
                 .measure(cx, false, tok.font.body, title)
@@ -1027,10 +1044,13 @@ impl ShellBar {
                 cx_ctrl += WINDOW_CONTROL_WIDTH;
             }
         }
+        if data.hub_active {
+            self.pulse_frame = cx.new_next_frame();
+        }
         let modules = Self::right_modules(data);
         let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            #[cfg(target_os = "linux")]
             if *module == BarModule::Power {
                 if let Some(battery) = data.battery {
                     let label = format!("{}%{}", battery.percent, if battery.charging { " +" } else { "" });
@@ -1055,6 +1075,11 @@ impl ShellBar {
             if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
+            if *module == BarModule::Hub && data.hub_active {
+                // A slow breath between the text colour and the accent.
+                let k = (0.5 - 0.5 * (self.pulse_t * std::f64::consts::TAU / 1.6).cos()) as f32;
+                color = mix_color(vec4(0.22, 0.65, 0.35, 1.0), vec4(0.40, 0.88, 0.52, 1.0), k);
+            }
             self.d.icon_centered(cx, *ico, cell, canvas, color);
             self.hits.push((seg, *module, cell));
         }
@@ -1077,10 +1102,9 @@ impl ShellBar {
     /// The tooltip a module shows after 400ms of hover.
     fn tooltip_for(data: &BarData, module: BarModule) -> String {
         match module {
-            BarModule::Style => "Choose operating system style".into(),
-            BarModule::Appearance => "Toggle light / dark appearance".into(),
+            BarModule::Style => "Theme".into(),
             BarModule::Menu => "Applications".into(),
-            BarModule::Workspace(i) => format!("Workspace {}", i + 1),
+            BarModule::Space(i) => format!("Space {}", i + 1),
             BarModule::ActiveWindow => data.active_window
                 .clone()
                 .unwrap_or_default(),
@@ -1104,6 +1128,7 @@ impl ShellBar {
                 (Some(v), _) => format!("Volume {}%", v),
                 (None, _) => "Audio unavailable".into(),
             },
+            BarModule::Hub => if data.hub_active { "AI hub: working".into() } else { "AI hub".into() },
             BarModule::Monitor => "Display".into(),
             BarModule::Power => match data.battery {
                 Some(b) if b.charging => format!("Battery {}%, charging", b.percent),
@@ -1198,6 +1223,10 @@ impl Widget for ShellBar {
             return;
         }
         let bar_rect = self.screen;
+        if let Some(ne) = self.pulse_frame.is_event(event) {
+            self.pulse_t = ne.time;
+            self.redraw(cx);
+        }
         if let Some(ne) = self.next_frame.is_event(event) {
             if self.hover.is_some() {
                 let dt = if self.last_time <= 0.0 {
@@ -1244,12 +1273,11 @@ impl Widget for ShellBar {
                 }
             }
             Event::Scroll(e) => {
-                if contains(bar_rect, e.abs) && e.scroll.y.abs() > 0.5 {
-                    if let Some(module) = self.module_at(e.abs) {
-                        cx.widget_action(
-                            self.uid,
-                            ShellBarAction::Wheel(module, -e.scroll.y.signum()),
-                        );
+                if contains(bar_rect, e.abs) {
+                    if let Some(dir) = self.wheel.feed(e.phase, e.scroll.y, 0.5) {
+                        if let Some(module) = self.module_at(e.abs) {
+                            cx.widget_action(self.uid, ShellBarAction::Wheel(module, -dir));
+                        }
                     }
                 }
             }
@@ -1261,6 +1289,17 @@ impl Widget for ShellBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_the_launcher_the_left_cluster_is_empty_and_the_theme_button_comes_first() {
+        let r = rect(0.0, 0.0, 1920.0, 26.0);
+        let (hits, x) = left_cluster(0, r, 0.0, 16.0, 4, false);
+        assert!(hits.is_empty());
+        assert_eq!(x, EDGE_MARGIN);
+        let (with, x_with) = left_cluster(0, r, 0.0, 16.0, 4, true);
+        assert_eq!(with.len(), 5);
+        assert!(x_with > x);
+    }
 
     #[test]
     fn the_same_flyout_pressed_on_another_segment_moves() {
@@ -1326,26 +1365,27 @@ mod tests {
         let mut l = crate::layout::WmLayout::new();
         let area = crate::layout::LRect::new(0.0, 0.0, 1000.0, 800.0);
         l.insert_on(0, 1, area, 4.0);
-        l.insert_on(3, 2, area, 4.0);
-        l.insert_on(9, 3, area, 4.0);
-        // The active workspace is the empty second one.
-        l.switch_workspace(1);
+        l.new_desktop().unwrap();
+        l.new_desktop().unwrap();
+        l.insert_on(2, 2, area, 4.0);
+        l.enter_fullscreen_space(1, area, 4.0);
+        l.show_slot(1);
         l
     }
 
-    /// Omarchy's cluster: the active workspace (a dot, even when empty),
-    /// the populated ones by number (workspace 10 reads "0"), the empty
-    /// ones hidden; `shown` maps each cell back to its workspace.
+    /// The cluster: every space in order, the shown one a dot; `shown` maps
+    /// each cell back to its space.
     #[test]
-    fn workspace_cells_show_the_active_and_the_populated_workspaces() {
+    fn space_cells_show_every_space_in_order() {
         let (cells, shown) = workspace_cells(&layout_fixture());
-        assert_eq!(shown, vec![0, 1, 3, 9]);
+        // Desktop 1, its fullscreen space, desktop 2 (shown, empty), desktop 3.
+        assert_eq!(shown, vec![0, 1, 2, 3]);
         let labels: Vec<&str> = cells.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, vec!["1", "2", "4", "0"]);
+        assert_eq!(labels, vec!["1", "F", "2", "3"]);
         let occupied: Vec<bool> = cells.iter().map(|c| c.occupied).collect();
-        assert_eq!(occupied, vec![true, false, true, true]);
+        assert_eq!(occupied, vec![false, true, false, true]);
         let focused: Vec<bool> = cells.iter().map(|c| c.focused).collect();
-        assert_eq!(focused, vec![false, true, false, false]);
+        assert_eq!(focused, vec![false, false, true, false]);
     }
 
     /// No segments, or one, is today's bar: the whole strip, whatever x
@@ -1359,8 +1399,8 @@ mod tests {
         let data = BarData::fixture();
         let canvas = 16.0;
         let n = data.workspaces.len();
-        let (bare, bare_x) = left_cluster(0, r, 0.0, canvas, n);
-        let (one, one_x) = left_cluster(0, segment_rects(r, &[(400.0, 1520.0)])[0], 0.0, canvas, n);
+        let (bare, bare_x) = left_cluster(0, r, 0.0, canvas, n, true);
+        let (one, one_x) = left_cluster(0, segment_rects(r, &[(400.0, 1520.0)])[0], 0.0, canvas, n, true);
         assert_eq!(bare, one);
         assert_eq!(bare_x, one_x);
         // Today's arithmetic: the menu off the edge margin, then the pills.
@@ -1368,7 +1408,7 @@ mod tests {
         assert_eq!(bare[0], (0, BarModule::Menu, rect(EDGE_MARGIN, 0.0, menu_w, 26.0)));
         for i in 0..n {
             let x = EDGE_MARGIN + menu_w + i as f64 * (WS_WIDTH + WS_SPACING);
-            assert_eq!(bare[1 + i], (0, BarModule::Workspace(i), rect(x, 0.0, WS_WIDTH, 26.0)));
+            assert_eq!(bare[1 + i], (0, BarModule::Space(i), rect(x, 0.0, WS_WIDTH, 26.0)));
         }
         assert_eq!(bare_x, EDGE_MARGIN + menu_w + n as f64 * (WS_WIDTH + WS_SPACING) + WS_TRAILING);
     }
@@ -1382,16 +1422,16 @@ mod tests {
         let r = rect(0.0, 0.0, 3840.0, 26.0);
         let segs = segment_rects(r, &[(400.0, 1920.0), (1920.0, 3800.0)]);
         assert_eq!(segs, vec![rect(0.0, 0.0, 1920.0, 26.0), rect(1920.0, 0.0, 1920.0, 26.0)]);
-        let (mut hits, _) = left_cluster(0, segs[0], 0.0, 16.0, 3);
-        hits.extend(left_cluster(1, segs[1], 0.0, 16.0, 2).0);
+        let (mut hits, _) = left_cluster(0, segs[0], 0.0, 16.0, 3, true);
+        hits.extend(left_cluster(1, segs[1], 0.0, 16.0, 2, true).0);
         let center = |seg: usize, m: BarModule| {
             let r = hits.iter().find(|(s, mm, _)| *s == seg && *mm == m).unwrap().2;
             dvec2(r.pos.x + r.size.x * 0.5, r.pos.y + r.size.y * 0.5)
         };
         // Segment 1's cluster starts off ITS left edge.
         assert_eq!(hits.iter().find(|(s, m, _)| *s == 1 && *m == BarModule::Menu).unwrap().2.pos.x, 1920.0 + EDGE_MARGIN);
-        assert_eq!(hit_at_in(&hits, center(1, BarModule::Workspace(1))), Some((1, BarModule::Workspace(1))));
-        assert_eq!(hit_at_in(&hits, center(0, BarModule::Workspace(1))), Some((0, BarModule::Workspace(1))));
+        assert_eq!(hit_at_in(&hits, center(1, BarModule::Space(1))), Some((1, BarModule::Space(1))));
+        assert_eq!(hit_at_in(&hits, center(0, BarModule::Space(1))), Some((0, BarModule::Space(1))));
         assert_eq!(hit_at_in(&hits, center(1, BarModule::Menu)), Some((1, BarModule::Menu)));
         assert_eq!(hit_at_in(&hits, dvec2(1000.0, 13.0)), None);
     }

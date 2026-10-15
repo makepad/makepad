@@ -1,9 +1,12 @@
 use std::{
     fmt,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -12,7 +15,9 @@ use std::{fs::File, io::Read};
 #[derive(Clone)]
 pub enum SharedBytes {
     Owned(Rc<Vec<u8>>),
-    Mapped(Rc<MappedBytes>),
+    /// A read-only file mapping. Shared by `Arc`, so a thread that is handed the mapping can
+    /// build its own `SharedBytes` over it ([`SharedBytes::from_mapped`]).
+    Mapped(Arc<MappedBytes>),
 }
 
 impl SharedBytes {
@@ -23,6 +28,24 @@ impl SharedBytes {
 
     pub fn from_vec(data: Vec<u8>) -> Self {
         Self::from_owned(Rc::new(data))
+    }
+
+    /// Bytes over a mapping another holder keeps (the mapping stays alive as long as any holder).
+    pub fn from_mapped(mapped: Arc<MappedBytes>) -> Self {
+        Self::Mapped(mapped)
+    }
+
+    /// The mapping behind file-mapped bytes.
+    pub fn mapped(&self) -> Option<&Arc<MappedBytes>> {
+        match self {
+            SharedBytes::Mapped(data) => Some(data),
+            SharedBytes::Owned(_) => None,
+        }
+    }
+
+    /// The file these bytes are mapped from (`None` for owned bytes).
+    pub fn path(&self) -> Option<&Path> {
+        self.mapped().map(|m| m.path())
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -65,10 +88,10 @@ impl SharedBytes {
             let path = path.as_ref();
             let mut file = File::open(path)?;
             let len = file_len(&file, path)?;
-            match MappedBytes::map_file(&file, len) {
+            match MappedBytes::map_file(&file, len, path) {
                 Ok(mapped) => {
                     MMAP_HITS.fetch_add(1, Ordering::Relaxed);
-                    Ok(Self::Mapped(Rc::new(mapped)))
+                    Ok(Self::Mapped(Arc::new(mapped)))
                 }
                 Err(_) => {
                     MMAP_FALLBACKS.fetch_add(1, Ordering::Relaxed);
@@ -86,6 +109,25 @@ impl SharedBytes {
                 "mmap loading is unsupported on wasm32",
             ))
         }
+    }
+
+    /// Maps a nonempty file range read-only without taking ownership of the descriptor.
+    /// The descriptor may be closed afterwards; the backing file must remain unchanged.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub fn map_fd_range(fd: std::os::fd::RawFd, offset: u64, len: usize) -> io::Result<Self> {
+        Self::map_fd_range_named(fd, offset, len, "")
+    }
+
+    /// [`Self::map_fd_range`] for a range with a name another component can open again (an APK
+    /// asset, `apk:<asset path>`): `path()` reports it.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub fn map_fd_range_named(fd: std::os::fd::RawFd, offset: u64, len: usize, name: &str) -> io::Result<Self> {
+        let mapped = MappedBytes {
+            inner: os::MappedBytesInner::map_fd_range(fd, offset, len)?,
+            path: PathBuf::from(name),
+        };
+        MMAP_HITS.fetch_add(1, Ordering::Relaxed);
+        Ok(Self::Mapped(Arc::new(mapped)))
     }
 
     pub fn stats() -> SharedBytesStats {
@@ -127,14 +169,34 @@ pub struct SharedBytesStats {
 
 pub struct MappedBytes {
     inner: os::MappedBytesInner,
+    path: PathBuf,
 }
+
+// SAFETY: the mapping is private and read-only; nothing writes through it, so any thread may read it.
+unsafe impl Send for MappedBytes {}
+unsafe impl Sync for MappedBytes {}
 
 impl MappedBytes {
     #[cfg(not(target_arch = "wasm32"))]
-    fn map_file(file: &File, len: usize) -> io::Result<Self> {
+    fn map_file(file: &File, len: usize, path: &Path) -> io::Result<Self> {
         Ok(Self {
             inner: os::MappedBytesInner::map_file(file, len)?,
+            path: path.to_path_buf(),
         })
+    }
+
+    /// Maps the file read-only (no fallback to reading it).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        let len = file_len(&file, path)?;
+        Self::map_file(&file, len, path)
+    }
+
+    /// The file this is mapped from.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -209,6 +271,13 @@ mod os {
     const MAP_FAILED: *mut c_void = !0usize as *mut c_void;
 
     unsafe extern "C" {
+        #[cfg_attr(
+            all(
+                any(target_os = "linux", target_os = "android"),
+                target_pointer_width = "32"
+            ),
+            link_name = "mmap64"
+        )]
         fn mmap(
             addr: *mut c_void,
             length: usize,
@@ -218,11 +287,14 @@ mod os {
             offset: OffT,
         ) -> *mut c_void;
         fn munmap(addr: *mut c_void, length: usize) -> c_int;
+        fn getpagesize() -> c_int;
     }
 
     pub struct MappedBytesInner {
         ptr: *const u8,
         len: usize,
+        mapping: *mut c_void,
+        mapped_len: usize,
     }
 
     impl MappedBytesInner {
@@ -243,6 +315,53 @@ mod os {
             Ok(Self {
                 ptr: ptr.cast::<u8>(),
                 len,
+                mapping: ptr,
+                mapped_len: len,
+            })
+        }
+
+        pub fn map_fd_range(fd: c_int, offset: u64, len: usize) -> io::Result<Self> {
+            let offset = OffT::try_from(offset).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "file offset exceeds off_t")
+            })?;
+            if len == 0 || len > isize::MAX as usize || offset.checked_add(len as OffT).is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "empty or overflowing file range",
+                ));
+            }
+            let page_size = unsafe { getpagesize() };
+            if page_size <= 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let slice_offset = (offset % OffT::from(page_size)) as usize;
+            let mapped_len = len
+                .checked_add(slice_offset)
+                .filter(|len| *len <= isize::MAX as usize)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "mapped range exceeds address space",
+                    )
+                })?;
+            let ptr = unsafe {
+                mmap(
+                    ptr::null_mut(),
+                    mapped_len,
+                    PROT_READ,
+                    MAP_PRIVATE,
+                    fd,
+                    offset - slice_offset as OffT,
+                )
+            };
+            if ptr == MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                ptr: unsafe { ptr.cast::<u8>().add(slice_offset) },
+                len,
+                mapping: ptr,
+                mapped_len,
             })
         }
 
@@ -253,7 +372,7 @@ mod os {
 
     impl Drop for MappedBytesInner {
         fn drop(&mut self) {
-            let _ = unsafe { munmap(self.ptr.cast_mut().cast::<c_void>(), self.len) };
+            let _ = unsafe { munmap(self.mapping, self.mapped_len) };
         }
     }
 }

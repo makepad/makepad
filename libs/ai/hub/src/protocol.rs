@@ -48,6 +48,17 @@ pub struct HealthJson {
     /// VRAM admission safety reserve in MB (see the server residency policy);
     /// a heavy model loads only when fresh free VRAM >= estimate + reserve.
     pub vram_reserve_mb: Option<u64>,
+    /// The chat model's context window set through `POST /llm/context`
+    /// (absent until set), the window of the loaded session (absent when none),
+    /// and the largest the node accepts. Absent on services predating the op.
+    pub llm_context_configured: Option<u64>,
+    pub llm_context_loaded: Option<u64>,
+    pub llm_context_max: Option<u64>,
+    /// Attention KV precision ("q8" | "f16") a session built now gets, and
+    /// the one of the loaded session (absent when none). Absent on services
+    /// predating the setting.
+    pub llm_kv: Option<String>,
+    pub llm_kv_loaded: Option<String>,
     /// Max queued jobs before POST /generate refuses with 409 "queue full".
     pub queue_limit: Option<u64>,
     /// Largest accepted JSON body for job submission. Missing on services
@@ -213,11 +224,19 @@ pub struct LorasJson {
 // POST /generate
 // ---------------------------------------------------------------------------
 
-/// One turn of a conversational `/generate` request (`role` + `text`).
+/// One turn of a conversational `/generate` request (`role` + `text`, and
+/// on a user turn optionally `images`: base64 PNG or JPEG pictures the turn
+/// shows the model, placed before its text the way Qwen-VL's template does).
+///
+/// A client resends a turn's images with that turn on every later request
+/// (the history is re-sent whole); the node identifies each picture by its
+/// bytes, so a conversation that keeps them stays a prefix hit and nothing is
+/// encoded twice.
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
 pub struct ChatMessageJson {
     pub role: String,
     pub text: String,
+    pub images: Option<Vec<String>>,
 }
 
 /// Empty-think prefill so Qwen3 / Qwen3.6 skip the think block.
@@ -276,6 +295,18 @@ pub fn think_prefill_for_model(model_id: &str) -> &'static str {
         }
     } else {
         CHAT_THINK_PREFILL
+    }
+}
+
+/// The prefill for one chat request: `thinking: Some(false)` closes the think block
+/// on models that open it by default (Qwen3.8 ignores `/no_think`), `Some(true)`
+/// keeps it open whatever the node's `MAKEPAD_ASSET_AI_CHAT_THINK` says, `None`
+/// leaves the node's setting.
+pub fn think_prefill_for_request(model_id: &str, thinking: Option<bool>) -> &'static str {
+    match thinking {
+        Some(false) if model_uses_open_think(model_id) => CHAT_THINK_PREFILL_BRIEF_38,
+        Some(true) if model_uses_open_think(model_id) => CHAT_THINK_PREFILL_OPEN,
+        _ => think_prefill_for_model(model_id),
     }
 }
 
@@ -343,6 +374,70 @@ pub fn assistant_history_text(text: &str) -> &str {
     after["</think>".len()..].trim_start_matches(['\n', '\r'])
 }
 
+/// Opens a picture's place in a rendered chat prompt. The node splits the
+/// prompt at these markers and feeds the picture's vision-tower embeddings
+/// where the marker stands; the key between open and close names the picture
+/// (see [`chat_image_key`]), so identical history renders identically and the
+/// resident KV stays a prefix of the next prompt.
+pub const CHAT_IMAGE_OPEN: &str = "<|vision_start|><|image_pad|>";
+pub const CHAT_IMAGE_CLOSE: &str = "<|vision_end|>";
+/// Pictures one chat request may carry (all turns together).
+pub const MAX_CHAT_IMAGES: usize = 8;
+
+/// A picture's identity in a rendered prompt: 64-bit FNV-1a of its base64
+/// text, as 16 hex digits.
+pub fn chat_image_key(b64: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in b64.trim().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+pub fn chat_image_marker(key: &str) -> String {
+    format!("{CHAT_IMAGE_OPEN}{key}{CHAT_IMAGE_CLOSE}")
+}
+
+/// Splits a rendered chat prompt into text pieces and picture keys, in
+/// order. The `<|vision_start|>` / `<|vision_end|>` tokens stay in the text
+/// on either side of the picture (that is what the model was trained on); the
+/// `<|image_pad|>` + key between them is where the picture's embeddings go.
+/// A marker with a malformed key is left as text.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PromptPiece<'a> {
+    Text(&'a str),
+    Image(&'a str),
+}
+
+pub fn split_chat_images(prompt: &str) -> Vec<PromptPiece<'_>> {
+    const VISION_START: &str = "<|vision_start|>";
+    let mut out = Vec::new();
+    let mut text_start = 0usize;
+    let mut scan = 0usize;
+    while let Some(at) = prompt[scan..].find(CHAT_IMAGE_OPEN) {
+        let open = scan + at;
+        let key_start = open + CHAT_IMAGE_OPEN.len();
+        let key_end = key_start + 16;
+        let well_formed = prompt.len() >= key_end + CHAT_IMAGE_CLOSE.len()
+            && prompt.is_char_boundary(key_end)
+            && prompt[key_start..key_end].bytes().all(|b| b.is_ascii_hexdigit())
+            && prompt[key_end..].starts_with(CHAT_IMAGE_CLOSE);
+        if !well_formed {
+            scan = key_start;
+            continue;
+        }
+        out.push(PromptPiece::Text(&prompt[text_start..open + VISION_START.len()]));
+        out.push(PromptPiece::Image(&prompt[key_start..key_end]));
+        text_start = key_end;
+        scan = key_end;
+    }
+    if text_start < prompt.len() {
+        out.push(PromptPiece::Text(&prompt[text_start..]));
+    }
+    out
+}
+
 /// Prefix-stable ChatML for multi-turn chat. Previous assistant turns are
 /// reconstructed with the same think-prefill the generation prompt used, so
 /// `prompt_n + reply + CHAT_COMMIT_SUFFIX` is a prefix of `prompt_{n+1}`.
@@ -390,6 +485,9 @@ pub fn assemble_chat_prompt_with_think(
                 out.push_str(kept);
             }
         } else {
+            for image in m.images.iter().flatten() {
+                out.push_str(&chat_image_marker(&chat_image_key(image)));
+            }
             out.push_str(&m.text);
         }
         out.push_str("<|im_end|>\n");
@@ -569,6 +667,11 @@ pub struct GenerateRequestJson {
     pub voice: Option<String>,
     /// Speaking-rate multiplier, 0.25..=4.0. Default 1.0.
     pub speed: Option<f64>,
+    /// Speech: stream the audio. The node publishes each clause as its own
+    /// `audio/wav` artifact in `JobStatusJson::partial_artifacts` as soon as it is
+    /// rendered, so playback can start at the first clause; the final artifacts
+    /// (the whole take and its word timings) are unchanged.
+    pub stream: Option<bool>,
     /// Language for speech models: ISO 639-1 (`"en"`) or a BCP-47 tag.
     /// STT (`whisper`): the spoken language; TTS: the voice language when
     /// `voice` is unset. Absent = the model default (English).
@@ -591,6 +694,17 @@ pub struct GenerateRequestJson {
     /// generation driven by `prompt` alone. The music description (genre,
     /// BPM, key, vocal and arrangement detail) rides in `prompt`.
     pub lyrics: Option<String>,
+    /// Music domain, score-planning models (yue2): an ABC-notation score to
+    /// render instead of planning one — typically a score returned by an
+    /// earlier job, with chords/melody edited. Absent = the model plans it.
+    pub score: Option<String>,
+    /// Score planning mode (yue2): `"full"` (chord-annotated ABC, default),
+    /// `"melody"` (melody-only ABC, recommended for covers) or `"off"` (no
+    /// symbolic plan).
+    pub score_mode: Option<String>,
+    /// `true` = plan and return the score only (no audio), so it can be
+    /// shown/edited and rendered later with `score`.
+    pub score_only: Option<bool>,
 
     // -- mesh domain (trellis backend) --
     /// FaithC retopo grid resolution (16..=512) applied to the output GLB;
@@ -872,6 +986,10 @@ pub struct JobStatusJson {
     /// instead of fetching the text artifact. Absent on image/audio/mesh
     /// jobs and on services that have not implemented the chat contract.
     pub partial_text: Option<String>,
+    /// Artifacts a streaming job has produced so far, oldest first (see
+    /// `GenerateRequestJson::stream`). Absent on jobs that do not stream and on
+    /// services that predate the field.
+    pub partial_artifacts: Option<Vec<ArtifactRefJson>>,
     /// Present exactly while `state == "live"`: live-session frame counters,
     /// updated at up to 10 Hz by the worker (the same rate the `stats`
     /// websocket message uses for the per-frame timing detail this doesn't
@@ -1163,8 +1281,36 @@ pub struct ErrorJson {
 mod warm_history_tests {
     use super::*;
 
+    #[test]
+    fn chat_images_render_as_markers_and_split_back() {
+        let png = "iVBORw0KGgo=".to_string();
+        let messages = vec![ChatMessageJson {
+            role: "user".into(),
+            text: "what is this?".into(),
+            images: Some(vec![png.clone()]),
+        }];
+        let prompt = assemble_chat_prompt("sys", &messages);
+        let key = chat_image_key(&png);
+        assert!(prompt.contains(&chat_image_marker(&key)));
+        let pieces = split_chat_images(&prompt);
+        assert_eq!(pieces.len(), 3);
+        match (&pieces[0], &pieces[1], &pieces[2]) {
+            (PromptPiece::Text(a), PromptPiece::Image(k), PromptPiece::Text(b)) => {
+                assert!(a.ends_with("<|im_start|>user\n<|vision_start|>"));
+                assert_eq!(*k, key);
+                assert!(b.starts_with("<|vision_end|>what is this?<|im_end|>"));
+            }
+            _ => panic!("unexpected pieces"),
+        }
+        // No pictures: one text piece, the whole prompt.
+        assert_eq!(split_chat_images("plain"), vec![PromptPiece::Text("plain")]);
+        // A malformed key stays text.
+        let odd = format!("{CHAT_IMAGE_OPEN}zz{CHAT_IMAGE_CLOSE}");
+        assert_eq!(split_chat_images(&odd), vec![PromptPiece::Text(&odd)]);
+    }
+
     fn msg(role: &str, text: &str) -> ChatMessageJson {
-        ChatMessageJson {
+        ChatMessageJson { images: None,
             role: role.to_string(),
             text: text.to_string(),
         }
@@ -1463,11 +1609,102 @@ pub struct TranscriptSegmentJson {
 pub struct TranscriptJson {
     pub text: String,
     pub segments: Vec<TranscriptSegmentJson>,
+    /// The detected language (ISO 639-1) when the request asked for
+    /// `language: "auto"`; absent otherwise, and from nodes that predate it.
+    pub language: Option<String>,
+}
+
+/// `domain: "words"` on an stt job: the transcript with every word timed
+/// from the decoder's cross-attention (DTW over the alignment heads), and
+/// each segment's text tokens, so a client can re-align the same text
+/// against a narrower window ([`ForceAlignRequestJson`]) without the
+/// transcription changing.
+pub const STT_MODE_WORDS: &str = "words";
+/// `domain: "force_align"` on an stt job: teacher-forced alignment of known
+/// token lists over windows of the input audio. The windows ride as the
+/// named input [`FORCE_ALIGN_WINDOWS_INPUT`] (`application/json`,
+/// [`ForceAlignRequestJson`]); the answer is one [`ForceAlignJson`].
+pub const STT_MODE_FORCE_ALIGN: &str = "force_align";
+pub const FORCE_ALIGN_WINDOWS_INPUT: &str = "windows";
+
+/// One word and when it is sung or spoken, in milliseconds.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct WordSpanJson {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// Mean attention mass of the word's tokens, 0..1: low means the model
+    /// was not looking at the audio when it placed the word.
+    pub score: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct AlignedSegmentJson {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    pub words: Vec<WordSpanJson>,
+    /// The segment's text token ids, in order.
+    pub tokens: Vec<i32>,
+}
+
+/// The artifact of a [`STT_MODE_WORDS`] job.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct AlignedTranscriptJson {
+    pub segments: Vec<AlignedSegmentJson>,
+}
+
+/// One teacher-forced window: input samples (at 16 kHz, after the job's
+/// downmix and resample) `start..end`, after `lead_pad` samples of silence.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ForceWindowJson {
+    pub start: u64,
+    pub end: u64,
+    pub lead_pad: u64,
+    pub tokens: Vec<i32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct ForceAlignRequestJson {
+    pub windows: Vec<ForceWindowJson>,
+}
+
+/// One window's words, times from the window's own start (its pad
+/// included); absent when the alignment failed.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ForcedWindowJson {
+    pub words: Option<Vec<WordSpanJson>>,
+}
+
+/// The artifact of a [`STT_MODE_FORCE_ALIGN`] job: one entry per window, in
+/// request order.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct ForceAlignJson {
+    pub windows: Vec<ForcedWindowJson>,
 }
 
 // ---------------------------------------------------------------------------
 // Text-to-speech (speech domain) word timings artifact
 // ---------------------------------------------------------------------------
+
+/// One installed text-to-speech voice, as `GET /voices` lists it.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct VoiceJson {
+    /// The pack name a `speech` job takes as `voice` (`bm_daniel`, `zf_001`).
+    pub id: String,
+    pub name: String,
+    /// BCP-47: `en-US`, `en-GB`, `zh-CN`.
+    pub language: String,
+    /// `female`, `male` or `unknown`.
+    pub gender: String,
+    /// Which Kokoro release speaks it: `kokoro-v1.0` or `kokoro-v1.1-zh`.
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct VoicesJson {
+    pub voices: Vec<VoiceJson>,
+}
 
 /// `SpeechTimingsJson::format`.
 pub const SPEECH_TIMINGS_FORMAT: &str = "tts-timings";

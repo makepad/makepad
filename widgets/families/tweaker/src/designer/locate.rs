@@ -14,8 +14,7 @@
 
 use super::text::{self, Node};
 use crate::makepad_draw::makepad_platform::live_reload::{scan_script_mods, ScriptModBlock};
-use crate::makepad_draw::makepad_platform::makepad_script::tokenizer::{ScriptToken, ScriptTokenizer};
-use crate::makepad_draw::makepad_platform::makepad_script::ScriptSource;
+use crate::makepad_draw::makepad_platform::makepad_script::tokenizer::{ScriptToken, ScriptTokenTag, ScriptTokenizer};
 use crate::makepad_draw::*;
 use crate::widget::*;
 
@@ -44,31 +43,25 @@ pub fn locate_widget(cx: &mut Cx, widget: &WidgetRef, text: Option<&str>) -> Res
     // 1. The runtime side: which file, which token, and the token stream the
     //    runtime compiled.
     let (file, mod_line, token_index, runtime_tokens) = cx.with_vm(|vm| {
-        let made_at = vm.bx.heap.object_data(source).made_at;
+        let made_at = vm.heap().made_at(source);
         if made_at.is_unknown() {
             return Err("the widget's source was built by Rust, not by a literal".to_string());
         }
-        let bodies = vm.bx.code.bodies.borrow();
-        let Some(body) = bodies.get(made_at.body as usize) else {
+        if made_at.body as usize >= vm.bx.body_count() {
             return Err("the widget's source body is gone".to_string());
-        };
-        let ScriptSource::Mod(script_mod) = &body.source else {
+        }
+        let body = vm.bx.body_module_read(made_at.body as usize);
+        let Some(script_mod) = body.module() else {
             return Err("the widget's source is not a script_mod! block".to_string());
         };
-        let Some(token_index) = body
-            .parser
-            .source_map
-            .get(made_at.index as usize)
-            .copied()
-            .flatten()
-        else {
+        let Some(token_index) = body.token_index(made_at.index as usize) else {
             return Err("the literal's instruction maps to no token".to_string());
         };
         let Some(file) = Cx::resolve_script_mod_path(script_mod) else {
-            return Err(format!("the source file {} is not on disk here", script_mod.file));
+            return Err(format!("the source file {} is not on disk here", script_mod.view().file));
         };
-        let tokens: Vec<ScriptToken> = body.tokenizer.tokens.iter().map(|t| t.token).collect();
-        Ok((file, script_mod.line, token_index as usize, tokens))
+        let tokens: Vec<ScriptToken> = body.tokens().iter().map(|t| *t.token()).collect();
+        Ok((file, script_mod.view().line, token_index as usize, tokens))
     })?;
 
     // 2. The file side.
@@ -85,9 +78,9 @@ pub fn locate_widget(cx: &mut Cx, widget: &WidgetRef, text: Option<&str>) -> Res
     // 3. Align the two token streams.
     let mut tokenizer = ScriptTokenizer::default();
     cx.with_vm(|vm| {
-        tokenizer.tokenize(&block.code, &mut vm.bx.heap);
+        tokenizer.tokenize(&block.code, vm.heap_mut());
     });
-    let file_tokens: Vec<ScriptToken> = tokenizer.tokens.iter().map(|t| t.token).collect();
+    let file_tokens: Vec<ScriptToken> = tokenizer.tokens_ref().iter().map(|t| *t.token()).collect();
     if let Some(at) = first_mismatch(&runtime_tokens, &file_tokens) {
         return Err(format!(
             "{}: the file no longer matches what runs (first difference at token {}); build or preview it first",
@@ -137,29 +130,28 @@ fn first_mismatch(a: &[ScriptToken], b: &[ScriptToken]) -> Option<usize> {
 }
 
 fn is_end(t: &ScriptToken) -> bool {
-    matches!(t, ScriptToken::End | ScriptToken::StreamEnd)
+    matches!(t.kind(), ScriptTokenTag::End | ScriptTokenTag::StreamEnd)
 }
 
 /// Token equality by kind and literal value. Strings compare by kind only:
 /// their values are heap handles, and a string that changed still leaves the
 /// structure in place, which is what the locator needs.
 fn same_token(a: &ScriptToken, b: &ScriptToken) -> bool {
-    use ScriptToken::*;
-    match (a, b) {
-        (Identifier(x), Identifier(y)) | (Operator(x), Operator(y)) | (Separator(x), Separator(y)) => x == y,
-        (OpenCurly, OpenCurly)
-        | (CloseCurly, CloseCurly)
-        | (OpenRound, OpenRound)
-        | (CloseRound, CloseRound)
-        | (OpenSquare, OpenSquare)
-        | (CloseSquare, CloseSquare)
-        | (StringUnfinished, StringUnfinished)
-        | (String(_), String(_)) => true,
-        (F32(x), F32(y)) | (F16(x), F16(y)) => x.to_bits() == y.to_bits(),
-        (F64(x), F64(y)) => x.to_bits() == y.to_bits(),
-        (U32(x), U32(y)) | (Color(x), Color(y)) | (RustValue(x), RustValue(y)) => x == y,
-        (I32(x), I32(y)) => x == y,
-        (U40(x), U40(y)) => x == y,
+    use ScriptTokenTag::*;
+    if a.kind() != b.kind() { return false; }
+    match a.kind() {
+        Identifier => a.identifier() == b.identifier(),
+        Operator => a.operator() == b.operator(),
+        Separator => a.separator() == b.separator(),
+        OpenCurly | CloseCurly | OpenRound | CloseRound | OpenSquare | CloseSquare | StringUnfinished | String => true,
+        F32 => a.as_f32().unwrap().to_bits() == b.as_f32().unwrap().to_bits(),
+        F16 => a.as_f16().unwrap().to_bits() == b.as_f16().unwrap().to_bits(),
+        F64 => a.as_f64().unwrap().to_bits() == b.as_f64().unwrap().to_bits(),
+        U32 => a.as_u32() == b.as_u32(),
+        I32 => a.as_i32() == b.as_i32(),
+        U40 => a.as_u40() == b.as_u40(),
+        Color => a.as_color() == b.as_color(),
+        RustValue => a.as_rust_value() == b.as_rust_value(),
         _ => false,
     }
 }
@@ -205,18 +197,18 @@ pub fn widget_source_file(cx: &mut Cx, widget: &WidgetRef) -> Result<String, Str
         return Err("the widget has no script source".to_string());
     }
     cx.with_vm(|vm| {
-        let made_at = vm.bx.heap.object_data(source).made_at;
+        let made_at = vm.heap().made_at(source);
         if made_at.is_unknown() {
             return Err("the widget's source was built by Rust, not by a literal".to_string());
         }
-        let bodies = vm.bx.code.bodies.borrow();
-        let Some(body) = bodies.get(made_at.body as usize) else {
+        let body = vm.bx.body_module_read(made_at.body as usize);
+        if !body.exists() {
             return Err("the widget's source body is gone".to_string());
         };
-        let ScriptSource::Mod(script_mod) = &body.source else {
+        let Some(script_mod) = body.module() else {
             return Err("the widget's source is not a script_mod! block".to_string());
         };
         Cx::resolve_script_mod_path(script_mod)
-            .ok_or_else(|| format!("the source file {} is not on disk here", script_mod.file))
+            .ok_or_else(|| format!("the source file {} is not on disk here", script_mod.view().file))
     })
 }

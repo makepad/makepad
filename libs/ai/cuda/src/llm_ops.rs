@@ -30,8 +30,10 @@ pub mod names {
     pub const DEQUANT_ROWS_BF16: &str = "dequant_rows_bf16";
     pub const CAST_F32_BF16: &str = "cast_f32_bf16";
     pub const CAST_F32_F16_SPLIT: &str = "cast_f32_f16_split";
+    pub const CAST_CONTIGUOUS: &str = "cast_contiguous";
     pub const MUL_MAT_BATCHED: &str = "mul_mat_batched";
     pub const GET_ROWS_F32: &str = "get_rows_f32";
+    pub const GET_ROWS_16: &str = "get_rows_16";
     pub const GET_ROWS_QUANT: &str = "get_rows_quant";
     pub const SET_ROWS: &str = "set_rows";
     pub const SOFTMAX_MASK: &str = "softmax_mask";
@@ -284,6 +286,14 @@ mod ffi {
             d_nb3: usize,
             stream: Stream,
         ) -> CudaError;
+        pub fn mkllm_cast_contiguous(
+            src_type: i32, dst_type: i32, src: *const c_void, dst: *mut c_void,
+            n: usize, stream: Stream,
+        ) -> CudaError;
+        pub fn mkllm_get_rows_16(
+            is_bf16: i32, src: *const c_void, rows: *const i32, dst: *mut c_void,
+            ne0: i32, nrows: i32, src_nb1: usize, dst_nb1: usize, stream: Stream,
+        ) -> CudaError;
         pub fn mkllm_get_rows_f32(
             src: *const c_void,
             rows: *const i32,
@@ -303,6 +313,16 @@ mod ffi {
             nrows: i32,
             src_nb1: usize,
             dst_nb1: usize,
+            stream: Stream,
+        ) -> CudaError;
+        pub fn mkllm_dequant_q8_0_f16(
+            src: *const c_void,
+            dst: *mut c_void,
+            ne0: i32,
+            ne1: i32,
+            ne2: i32,
+            nb1: usize,
+            nb2: usize,
             stream: Stream,
         ) -> CudaError;
         pub fn mkllm_set_rows(
@@ -909,6 +929,16 @@ cuda_forward!(mul_mat_batched(
     stream: Stream,
 ) -> CudaError { mkllm_mul_mat_batched });
 
+cuda_forward!(cast_contiguous(
+    src_type: i32, dst_type: i32, src: *const c_void, dst: *mut c_void,
+    n: usize, stream: Stream,
+) -> CudaError { mkllm_cast_contiguous });
+
+cuda_forward!(get_rows_16(
+    is_bf16: i32, src: *const c_void, rows: *const i32, dst: *mut c_void,
+    ne0: i32, nrows: i32, src_nb1: usize, dst_nb1: usize, stream: Stream,
+) -> CudaError { mkllm_get_rows_16 });
+
 cuda_forward!(get_rows_f32(
     src: *const c_void,
     rows: *const i32,
@@ -931,6 +961,17 @@ cuda_forward!(get_rows_quant(
     dst_nb1: usize,
     stream: Stream,
 ) -> CudaError { mkllm_get_rows_quant });
+
+cuda_forward!(dequant_q8_0_f16(
+    src: *const c_void,
+    dst: *mut c_void,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    nb1: usize,
+    nb2: usize,
+    stream: Stream,
+) -> CudaError { mkllm_dequant_q8_0_f16 });
 
 cuda_forward!(set_rows(
     dst_is_f16: i32,

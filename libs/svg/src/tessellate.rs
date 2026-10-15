@@ -107,6 +107,8 @@ pub struct Tessellator {
     /// prefilter in the fill-side sign probe so the original cost can be
     /// measured. Never set in production.
     disable_probe_bbox: bool,
+    /// The flattened path's own fill rule (`VectorPath::fill_rule`).
+    path_fill_rule: Option<crate::path::FillRule>,
 }
 
 /// Per-stage timing of a single `fill()` call, in nanoseconds.
@@ -153,9 +155,49 @@ impl Tessellator {
         (min_x, min_y, max_x, max_y)
     }
 
+    /// Segments of the most recently flattened path, without allocating.
+    /// Fills implicitly close every contour with at least three points;
+    /// strokes retain open endpoints and explicitly closed contours.
+    pub fn flattened_segments(
+        &self,
+        close_for_fill: bool,
+    ) -> impl Iterator<Item = ([f32; 2], [f32; 2])> + '_ {
+        let min_points = if close_for_fill { 3 } else { 2 };
+        self.paths.iter().flat_map(move |path| {
+            let count = if path.count < min_points {
+                0
+            } else if close_for_fill || path.closed {
+                path.count
+            } else {
+                path.count - 1
+            };
+            (0..count).map(move |i| {
+                let a = self.points[path.first + i];
+                let b = self.points[path.first + (i + 1) % path.count];
+                ([a.x, a.y], [b.x, b.y])
+            })
+        })
+    }
+
+    /// Number of flattened contours with enough points to contribute to a fill.
+    pub fn fill_contour_count(&self) -> usize {
+        self.paths.iter().filter(|path| path.count >= 3).count()
+    }
+
+    /// Match fill()'s rule after flatten() has applied explicit contour winding.
+    pub fn uses_nonzero_fill(&self) -> bool {
+        if let Some(rule) = self.path_fill_rule {
+            return matches!(rule, crate::path::FillRule::NonZero);
+        }
+        self.paths
+            .iter()
+            .any(|path| path.count >= 3 && path.has_explicit_winding)
+    }
+
     pub fn flatten(&mut self, path: &VectorPath, tess_tol: f32) {
         self.points.clear();
         self.paths.clear();
+        self.path_fill_rule = path.fill_rule;
         let dist_tol = 0.01;
         for cmd in &path.cmds {
             match *cmd {
@@ -1070,11 +1112,7 @@ impl Tessellator {
             return;
         }
 
-        let fill_rule = if self
-            .paths
-            .iter()
-            .any(|sp| sp.count >= 3 && sp.has_explicit_winding)
-        {
+        let fill_rule = if self.uses_nonzero_fill() {
             FillRule::NonZero
         } else {
             FillRule::EvenOdd
@@ -1262,11 +1300,7 @@ impl Tessellator {
         if valid_paths.is_empty() {
             return;
         }
-        let fill_rule = if self
-            .paths
-            .iter()
-            .any(|sp| sp.count >= 3 && sp.has_explicit_winding)
-        {
+        let fill_rule = if self.uses_nonzero_fill() {
             FillRule::NonZero
         } else {
             FillRule::EvenOdd
@@ -1437,99 +1471,6 @@ impl Tessellator {
                 sign = if area >= 0.0 { 1.0 } else { -1.0 };
             }
             valid_paths[i].2 = sign;
-        }
-    }
-
-    /// Generate shadow geometry for arbitrary filled shapes.
-    /// Like fill() but with a wide fringe (3*blur) for gaussian falloff.
-    /// The v coordinate encodes normalized distance from edge: 1.0 = inside, 0.0 = outer limit.
-    /// stroke_dist is repurposed to carry the blur radius for the shader.
-    pub fn fill_shadow(
-        &mut self,
-        blur: f32,
-        line_join: LineJoin,
-        miter_limit: f32,
-        verts: &mut Vec<VVertex>,
-        indices: &mut Vec<u32>,
-    ) {
-        let expand = blur * 3.0;
-        // Ensure CCW winding so that dmx/dmy normals point outward.
-        // prepare_points no longer auto-corrects winding for paths
-        // without explicit winding, so we must enforce it here.
-        for pi in 0..self.paths.len() {
-            let sp = &self.paths[pi];
-            let first = sp.first;
-            let count = sp.count;
-            if count >= 3 {
-                let area = poly_area(&self.points[first..first + count]);
-                if area < 0.0 {
-                    self.points[first..first + count].reverse();
-                }
-            }
-        }
-        self.calculate_joins(expand, line_join, miter_limit);
-        verts.clear();
-        indices.clear();
-        for pi in 0..self.paths.len() {
-            let sp = &self.paths[pi];
-            let first = sp.first;
-            let count = sp.count;
-            if count < 3 {
-                continue;
-            }
-            // Determine outward direction sign from contour winding.
-            // For CCW (area >= 0), dmx/dmy points outward.
-            // For CW (area < 0), dmx/dmy points inward.
-            // We want to push fringe outward, so use sign * dmx.
-            let area = poly_area(&self.points[first..first + count]);
-            let sign: f32 = if area >= 0.0 { 1.0 } else { -1.0 };
-            // convex fan at original path positions (fully opaque, v=1.0)
-            let base = verts.len() as u32;
-            for j in 0..count {
-                let pt = self.points[first + j];
-                // u=0.5 (opaque in AA formula), v=1.0 (inside)
-                let mut v = VVertex::new(pt.x, pt.y, 0.5, 1.0);
-                v.stroke_dist = blur; // carry blur radius
-                verts.push(v);
-            }
-            for j in 2..count as u32 {
-                indices.push(base);
-                indices.push(base + j - 1);
-                indices.push(base + j);
-            }
-            // wide fringe for shadow falloff
-            let fringe_base = verts.len() as u32;
-            for j in 0..count {
-                let p1 = self.points[first + j];
-                // inner: at path edge (v=1.0, will be fully opaque)
-                let mut vi = VVertex::new(p1.x, p1.y, 0.5, 1.0);
-                vi.stroke_dist = blur;
-                verts.push(vi);
-                // outer: pushed outward, clamped to expand distance
-                let mut ox = sign * p1.dmx * expand;
-                let mut oy = sign * p1.dmy * expand;
-                let ol = (ox * ox + oy * oy).sqrt();
-                if ol > expand {
-                    let s = expand / ol;
-                    ox *= s;
-                    oy *= s;
-                }
-                let mut vo = VVertex::new(p1.x + ox, p1.y + oy, 0.0, 0.0);
-                vo.stroke_dist = blur;
-                verts.push(vo);
-            }
-            // stitch fringe strip
-            for j in 0..count as u32 {
-                let j1 = if j + 1 < count as u32 { j + 1 } else { 0 };
-                let a = fringe_base + j * 2;
-                let b = fringe_base + j1 * 2;
-                indices.push(a);
-                indices.push(a + 1);
-                indices.push(b);
-                indices.push(a + 1);
-                indices.push(b + 1);
-                indices.push(b);
-            }
         }
     }
 }

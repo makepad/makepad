@@ -16,7 +16,7 @@
 //!   percentage on the right and a `PanelSlider`, then the device rows.
 //! * **power** — `space(380)`: hero with the big percentage, a `space(8)`
 //!   progress bar, the stat pairs, then the POWER PROFILE buttons.
-//! * **monitor** — `space(380)`: hero, BRIGHTNESS and TEXT SIZE sliders,
+//! * **monitor** — `space(380)`: hero, the TEXT SIZE slider,
 //!   the SCALE pills and the display rows.
 //!
 //! What a Mac can answer cheaply is answered for real (volume, battery,
@@ -26,21 +26,23 @@
 use makepad_widgets::*;
 
 use super::bar::BarModule;
+use crate::hub_glow::GlowTracker;
+use std::time::Instant;
 use super::ui::{contains, cut_top, inset, rect, DrawShellFill, Ico, ShellDraw};
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 use super::wifi_linux::{
-    KeyOutcome, RadioState, Security, StationState, WifiCommand, WifiHit, WifiPhase, WifiUi,
+    HotspotAsk, KeyOutcome, RadioState, Security, StationState, WifiCommand, WifiHit, WifiPhase, WifiUi,
 };
 use super::{alpha, darker, CtrlState, ShellTokens};
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 #[path = "panels_linux.rs"]
 mod linux;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 use {std::sync::Arc, super::system_linux::SystemSnapshot};
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_widgets::makepad_platform::linux_gpu::LinuxGpuSnapshot;
+#[cfg(target_os = "linux")]
+use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
 
 // ======================================================================
 // Civil dates — the calendar grid needs real date maths, no chrono.
@@ -138,6 +140,7 @@ pub enum PanelKind {
     Monitor,
     Network,
     Bluetooth,
+    Hub,
 }
 
 impl PanelKind {
@@ -149,6 +152,7 @@ impl PanelKind {
             BarModule::Monitor => PanelKind::Monitor,
             BarModule::Network => PanelKind::Network,
             BarModule::Bluetooth => PanelKind::Bluetooth,
+            BarModule::Hub => PanelKind::Hub,
             _ => return None,
         })
     }
@@ -161,6 +165,7 @@ impl PanelKind {
             PanelKind::Monitor => BarModule::Monitor,
             PanelKind::Network => BarModule::Network,
             PanelKind::Bluetooth => BarModule::Bluetooth,
+            PanelKind::Hub => BarModule::Hub,
         }
     }
 
@@ -183,7 +188,6 @@ pub struct PanelData {
     pub battery: Option<super::bar::Battery>,
     pub battery_cycles: Option<u32>,
     pub power_source: String,
-    pub brightness: Option<u32>,
     pub displays: Vec<String>,
     pub text_size: f64,
     pub network: Option<String>,
@@ -191,6 +195,8 @@ pub struct PanelData {
     /// The month the calendar is showing.
     pub view: (i64, u32),
     pub today: (i64, u32, u32),
+    /// The AI hub, as last read (only while its panel is open).
+    pub hub: crate::hub_control::HubSnapshot,
 }
 
 impl Default for PanelData {
@@ -204,13 +210,13 @@ impl Default for PanelData {
             battery: None,
             battery_cycles: None,
             power_source: String::new(),
-            brightness: None,
             displays: Vec::new(),
             text_size: 12.0,
             network: None,
             bluetooth: None,
             view: (y, m),
             today: (y, m, d),
+            hub: Default::default(),
         }
     }
 }
@@ -232,13 +238,13 @@ impl PanelData {
             }),
             battery_cycles: Some(214),
             power_source: "AC Power".into(),
-            brightness: Some(80),
             displays: vec!["Built-in Retina Display".into()],
             text_size: 12.0,
             network: Some("Ethernet".into()),
             bluetooth: Some(true),
             view: (y, m),
             today: (y, m, d),
+            hub: Default::default(),
         }
     }
 
@@ -256,21 +262,6 @@ impl PanelData {
             v if v >= 30 => "Easy listening",
             v if v >= 15 => "Murmur",
             _ => "Whisper",
-        }
-    }
-
-    /// The brightness mood names of the display panel.
-    pub fn brightness_mood(&self) -> &'static str {
-        match self.brightness {
-            None => "Fixed brightness",
-            Some(v) if v >= 95 => "Sun blast",
-            Some(v) if v >= 80 => "Solar flare",
-            Some(v) if v >= 65 => "Golden hour",
-            Some(v) if v >= 45 => "Even day",
-            Some(v) if v >= 30 => "Soft glow",
-            Some(v) if v >= 20 => "Lamp light",
-            Some(v) if v >= 10 => "Candlelit",
-            _ => "Night owl",
         }
     }
 }
@@ -295,15 +286,16 @@ script_mod! {
 pub enum ShellPanelAction {
     SetVolume(u32),
     ToggleMute,
-    SetBrightness(u32),
     SetTextSize(f64),
     Close,
+    /// A command for the AI hub.
+    Hub(crate::hub_control::HubCommand),
     /// The Wi-Fi dropdown's intent (Linux). The WM turns it into a worker
     /// command; a `ConnectWithPassphrase` is completed from the panel's own
     /// field so the passphrase never rides in an action.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     Wifi(WifiCommand),
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     System(crate::linux_controls::ControlAction),
     #[default]
     None,
@@ -315,54 +307,81 @@ enum Hit {
     VolumeSlider,
     InputSlider,
     MuteToggle,
-    BrightnessSlider,
     TextSizeSlider,
     PrevMonth,
     NextMonth,
     Today,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// A model row's Load / Unload button.
+    HubModel(usize),
+    /// The KV precision switch: true is q8.
+    HubKv(bool),
+    /// The context size's step: true is the next size up.
+    HubContext(bool),
+    /// The WM's hub child: stop and start it again.
+    HubRestart,
+    /// Open or close the list of chat models.
+    HubPickOpen,
+    /// A chat model of that list (index into `hub_chat_models`).
+    HubPick(usize),
+    #[cfg(target_os = "linux")]
     Wifi(WifiHit),
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     DevicePicker(bool),
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     Device(bool, usize),
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     InputMute,
-    /// The Display panel's DPI slider: previews while held, applies on release.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// The scale slider: live while dragged, saved on release.
+    #[cfg(target_os = "linux")]
     DpiScaleSlider,
+    /// The arrangement switch: `false` Extended, `true` Mirror.
+    #[cfg(target_os = "linux")]
+    Arrangement(bool),
+    /// In Mirror, the screen (row) the desktop is sized for.
+    #[cfg(target_os = "linux")]
+    OptimiseFor(usize),
     /// A screen row's move button: the row (left to right) and the
     /// direction, -1 left or +1 right.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     ScreenMove(usize, i32),
     /// A screen row's "Make main".
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     ScreenMain(usize),
-    /// A screen row's mode picker, and a row of its unfolded list.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    ScreenModePicker(usize),
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    ScreenMode(usize),
+    /// A screen row's resolution and refresh pickers.
+    #[cfg(target_os = "linux")]
+    ScreenResolution(usize),
+    #[cfg(target_os = "linux")]
+    ScreenRate(usize),
+    /// A chip of the unfolded picker (`chooser_changes`).
+    #[cfg(target_os = "linux")]
+    ChooserItem(usize),
+    /// The Pace by picker, and a chip of its unfolded list (`pace_targets`).
+    #[cfg(target_os = "linux")]
+    PacePicker,
+    #[cfg(target_os = "linux")]
+    PaceItem(usize),
+    /// Keep or revert the change being tried.
+    #[cfg(target_os = "linux")]
+    TrialKeep,
+    #[cfg(target_os = "linux")]
+    TrialRevert,
     /// "Restart desktop now", then its confirm and cancel.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     RestartDesktop,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     RestartConfirm,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     RestartCancel,
     /// The "Render on" row and its list: Auto (display GPU), then the GPUs.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     GpuPicker,
-    /// The focused app's GPU row and its list: Follow compositor, then the GPUs.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    AppGpuPicker,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     Gpu(usize),
     /// Opens or closes the Display panel's Mouse & touchpad subview.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     PointerSettings,
     /// Pointer speed slider: `false` mouse, `true` touchpad.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     PointerSpeedSlider(bool),
 }
 
@@ -432,169 +451,158 @@ pub struct ShellPanel {
     dragging: Option<Hit>,
     #[rust]
     pub inert: bool,
+    /// Which hub models light up (see `hub_glow`), its clock, and the frame loop that
+    /// runs only while something glows.
+    #[rust]
+    glow: GlowTracker,
+    /// The hub panel's chat model list is open (the WM's hub child: a pick restarts it).
+    #[rust]
+    hub_pick: bool,
+    #[rust]
+    glow_clock: Option<Instant>,
+    #[rust]
+    glow_frame: NextFrame,
     /// The Wi-Fi dropdown's state (Linux): the iwd snapshot, the password
     /// prompt, the notice line. Fed by the WM from the worker's events.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub wifi: WifiUi,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub system: Arc<SystemSnapshot>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub system_notice: String,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     device_picker: Option<bool>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     device_scroll: usize,
     /// The main window's actual layout scale as the WM last read it off the
     /// platform (`window_geom.dpi_factor`) — never the saved value. Zero
     /// until the first read; the panel then shows the launch default.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub current_dpi: f64,
-    /// The scale under the pointer while the DPI slider is held, in
-    /// hundredths. Applied on release; dropped when the flyout closes or
-    /// Escape cancels, so the window never moves under a drag.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    pub dpi_preview: Option<u32>,
     /// What the renderer sees: the connected screens and their place in
     /// the wide desktop, and whether the WM drives them or the desktop does.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub display_snapshot: LinuxDisplaySnapshot,
-    /// The compositor GPU as the renderer reports it. Cached from
-    /// `cx.linux_gpu_snapshot`; not inferred from the output list.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    pub gpu_snapshot: LinuxGpuSnapshot,
-    /// A compositor or per-app GPU switch is in progress.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    pub gpu_busy: bool,
-    /// Focused running native child: id, label, policy override, actual UUID.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    pub gpu_app: Option<(crate::ClientId, String, Option<[u8; 16]>, [u8; 16])>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    display_scroll: usize,
-    /// The display list did not fit the card: the wheel scrolls it.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    display_overflow: bool,
     /// The screen rect when the anchor was taken: a re-laid-out window
     /// moves the anchor with its edge until the bar's fresh rect arrives.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     anchor_screen: Rect,
     /// The connector names behind the drawn screen rows (left to right,
     /// then the screens outside the desktop), so a click lands on the
     /// screen that was shown, never on whatever a fresh inventory put at
     /// that index.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     screen_targets: Vec<String>,
     /// How many of `screen_targets` are in the desktop (the movable ones).
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     screen_placed: usize,
-    /// The screen whose mode list is unfolded, by name.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    /// The screen whose picker is unfolded, by name, and which picker.
+    #[cfg(target_os = "linux")]
     #[rust]
-    mode_picker: Option<String>,
-    /// The unfolded mode list's first shown row.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    chooser: Option<(String, Chooser)>,
+    /// The change behind each drawn `Hit::ChooserItem`, bound at draw time.
+    #[cfg(target_os = "linux")]
     #[rust]
-    mode_scroll: usize,
-    /// The unfolded mode list did not fit: the wheel scrolls it.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    chooser_changes: Vec<Change>,
+    /// The change being tried and the notes, as the WM last polled them,
+    /// and when (`Cx::monotonic_now`), for the revert countdown.
+    #[cfg(target_os = "linux")]
     #[rust]
-    mode_overflow: bool,
-    /// The mode behind each drawn `Hit::ScreenMode` row (`None` is
-    /// Automatic) and the screen they are for, bound at draw time.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub display_trials: DisplayTrials,
+    #[cfg(target_os = "linux")]
     #[rust]
-    mode_targets: Vec<Option<String>>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    pub display_now: f64,
+    /// The Pace by list is unfolded; the choice behind each drawn chip.
+    #[cfg(target_os = "linux")]
     #[rust]
-    mode_target_screen: Option<String>,
+    pace_open: bool,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pace_targets: Vec<DisplayPacing>,
     /// "Restart desktop now" was pressed once and asks to confirm.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     restart_confirm: bool,
     /// The restart was confirmed and is waiting for the display layout
     /// save to land before the process exits (`LinuxControls::restart_requested`,
     /// mirrored here every poll). The restart row shows "Restarting…"
     /// while this holds, in place of the button or the confirm step.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub restart_waiting: bool,
     /// The saved render-on GPU (`None` is Auto): the WM's working layout,
     /// so a pick shows at once. The render-on list checks it.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub render_on_saved: Option<String>,
     /// The compositor GPU list is unfolded.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     gpu_picker: bool,
-    /// The focused-app GPU list is unfolded.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    app_gpu_picker: bool,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     gpu_scroll: usize,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     gpu_overflow: bool,
     /// The choice behind each drawn `Hit::Gpu` row: `None` is Auto / Follow
     /// compositor, `Some` a GPU's sysfs identity — bound at draw time.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     gpu_targets: Vec<Option<String>>,
-    /// Client captured when the app GPU list opened, so a focus change
-    /// cannot retarget the drawn rows.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    gpu_target_client: Option<crate::ClientId>,
     /// The Display panel is showing the Mouse & touchpad subview.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pointer_settings: bool,
     /// A source the renderer was asked for and has not yet named as the
     /// primary, with when it was asked. The WM clears it on observation
     /// or reports it after a bounded wait.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     pub display_source_pending: Option<(String, f64)>,
     /// Escape cancelled a scale preview: its key-up is taken too, so no
     /// tile sees half a key press.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[rust]
     swallow_escape_up: bool,
+    /// The scale slider's drag: the scale when it started (Escape goes
+    /// back to it), the track in device pixels and the scale last applied.
+    /// The window re-lays out under the drag, so the pointer is read in
+    /// device pixels against where the track was: the value follows the
+    /// hand, not the moving card.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    dpi_drag: Option<DpiDrag>,
 }
 
 impl ShellPanel {
     pub fn toggle(&mut self, cx: &mut Cx, kind: PanelKind, anchor: Rect) {
+        // A scale drag the flyout leaves mid-way is saved where it got to.
+        #[cfg(target_os = "linux")]
+        self.dpi_drag_end(cx);
         let was_open = self.open;
         if self.open == Some(kind) {
             self.open = None;
         } else {
             self.open = Some(kind);
             self.anchor = anchor;
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            #[cfg(target_os = "linux")]
             {
                 self.anchor_screen = self.screen;
                 // The outputs and compositor GPU as of this open; the WM
                 // refreshes them while the panel stays up.
                 if kind == PanelKind::Monitor {
                     self.display_snapshot = cx.linux_display_snapshot();
-                    self.gpu_snapshot = cx.linux_gpu_snapshot();
                 }
             }
         }
@@ -610,14 +618,37 @@ impl ShellPanel {
             return;
         }
         self.anchor = anchor;
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         {
             self.anchor_screen = self.screen;
         }
         self.redraw(cx);
     }
 
+    /// Seconds on the glow clock (it starts with the first read).
+    fn glow_now(&mut self) -> f64 {
+        self.glow_clock.get_or_insert_with(Instant::now).elapsed().as_secs_f64()
+    }
+
+    /// A new hub snapshot: the glow follows it, and the panel redraws when something
+    /// changed, glows, or a "used Ns ago" note moved. An idle hub redraws nothing.
+    pub fn hub_update(&mut self, cx: &mut Cx, snap: crate::hub_control::HubSnapshot) {
+        let now = self.glow_now();
+        self.glow.update(&snap, now);
+        let notes = self.glow.notes_changed(now);
+        let changed = self.data.hub != snap;
+        if changed {
+            self.data.hub = snap;
+        }
+        if changed || notes || self.glow.animating(now) {
+            self.redraw(cx);
+        }
+    }
+
     pub fn close(&mut self, cx: &mut Cx) {
+        // A scale drag the flyout leaves mid-way is saved where it got to.
+        #[cfg(target_os = "linux")]
+        self.dpi_drag_end(cx);
         let was_open = self.open;
         self.open = None;
         self.left_panel(was_open);
@@ -626,7 +657,7 @@ impl ShellPanel {
 
     /// The bar re-laid out (a DPI change, a resize): follow the module.
     /// True when the card moved.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     pub fn reanchor(&mut self, cx: &mut Cx, anchor: Rect) -> bool {
         if self.open.is_none() || (self.anchor == anchor && self.anchor_screen == self.screen) {
             return false;
@@ -642,7 +673,7 @@ impl ShellPanel {
     /// (`reanchor`, the next frame), keep a right-cluster module at its
     /// distance from the right edge and the clock at the centre, so the
     /// card never spends a frame off its module or off the screen.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     fn follow_screen(&mut self, kind: PanelKind, screen: Rect) {
         if self.anchor_screen.size.x <= 0.0 || self.anchor.size.x <= 0.0 {
             self.anchor_screen = screen;
@@ -666,25 +697,21 @@ impl ShellPanel {
     /// preview) goes now.
     fn left_panel(&mut self, was_open: Option<PanelKind>) {
         self.dragging = None;
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         {
             self.device_picker = None;
             self.device_scroll = 0;
-            self.dpi_preview = None;
-            self.display_scroll = 0;
-            self.mode_picker = None;
-            self.mode_scroll = 0;
-            self.mode_targets.clear();
-            self.mode_target_screen = None;
+            self.chooser = None;
+            self.chooser_changes.clear();
+            self.pace_open = false;
+            self.pace_targets.clear();
             self.restart_confirm = false;
             self.gpu_picker = false;
-            self.app_gpu_picker = false;
             self.gpu_scroll = 0;
             self.gpu_targets.clear();
-            self.gpu_target_client = None;
             self.pointer_settings = false;
         }
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         if was_open == Some(PanelKind::Network) && self.open != Some(PanelKind::Network) {
             self.wifi.on_close();
         }
@@ -698,7 +725,7 @@ impl ShellPanel {
         let w = kind.content_width() + self.tokens.spacing.popup_padding * 2.0;
         // A window narrower than the card (a small screen at a large
         // scale) gets the card fitted between the margins, not clipped.
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         let w = w.min((screen.size.x - margin * 2.0).max(0.0));
         panel_card_rect(self.anchor, screen, w, height, margin, self.tokens.bar.size_horizontal)
     }
@@ -730,13 +757,13 @@ impl ShellPanel {
                 .cursor_surface(cx, r, &tok.controls, true, false);
         }
         let track = inset(r, 6.0);
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+        #[cfg(not(target_os = "linux"))]
         let fg = if enabled {
             tok.popups.text
         } else {
             alpha(tok.popups.text, 0.4)
         };
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+        #[cfg(not(target_os = "linux"))]
         self.d.panel_slider(
             cx,
             track,
@@ -746,7 +773,7 @@ impl ShellPanel {
             tok.popups.background,
             hot && enabled,
         );
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         self.d.system_slider(cx, track, &tok, progress, enabled, hot);
         if enabled { self.hits.push((hit, r)); }
     }
@@ -776,6 +803,17 @@ impl ShellPanel {
 
     /// "Not available on this OS" — the honest reading of a panel whose
     /// service does not exist here.
+    /// The hub child's Restart button at the right of `row`; its width.
+    fn hub_restart_button(&mut self, cx: &mut Cx2d, row: Rect) -> f64 {
+        let tok = self.tokens;
+        let w = self.d.button_width(cx, &tok, false, "Restart", tok.font.body_small);
+        let r = rect(row.pos.x + row.size.x - w, row.pos.y + 3.0, w, row.size.y - 6.0);
+        let state = if self.hot == Some(Hit::HubRestart) { CtrlState::Hover } else { CtrlState::Normal };
+        self.d.button(cx, r, &tok, state, None, "Restart", tok.font.body_small, tok.popups.text, true);
+        self.hits.push((Hit::HubRestart, r));
+        w
+    }
+
     fn unavailable(&mut self, cx: &mut Cx2d, r: Rect, what: &str) {
         let tok = self.tokens;
         self.d.label(
@@ -813,19 +851,20 @@ impl ShellPanel {
             PanelKind::Monitor => self.monitor_height(),
             PanelKind::Network => self.network_height(),
             PanelKind::Bluetooth => 150.0,
+            PanelKind::Hub => self.hub_height(),
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
         // the border too; otherwise the full plan never fits and the
         // arrangement picture is dropped even on a tall desktop. The screen clamp and
         // the compact fallback still apply.
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         let height = if kind == PanelKind::Monitor {
             height + tok.popups.border_width * 2.0
         } else {
             height
         };
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         self.follow_screen(kind, window);
         let card = self.card_rect(screen, kind, height);
         self.card = card;
@@ -838,10 +877,10 @@ impl ShellPanel {
             PanelKind::Power => self.draw_power(cx, body),
             PanelKind::Monitor => self.draw_monitor(cx, body),
             // Linux: the Wi-Fi dropdown over iwd (shell/wifi_linux.rs).
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            #[cfg(target_os = "linux")]
             PanelKind::Network => self.draw_wifi(cx, body),
             // Elsewhere the panel keeps its honest "no service here" reading.
-            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+            #[cfg(not(target_os = "linux"))]
             PanelKind::Network => {
                 let (hero, rest) = cut_top(body, 40.0);
                 let net = self.data.network.clone();
@@ -863,6 +902,7 @@ impl ShellPanel {
                     "Wi-Fi scanning and DNS switching need NetworkManager.",
                 );
             }
+            PanelKind::Hub => self.draw_hub(cx, body),
             PanelKind::Bluetooth => {
                 let (hero, rest) = cut_top(body, 40.0);
                 let on = self.data.bluetooth.unwrap_or(false);
@@ -1081,7 +1121,7 @@ impl ShellPanel {
 
     // ------------------------------------------------------------- audio
 
-    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+    #[cfg(not(target_os = "linux"))]
     fn draw_audio(&mut self, cx: &mut Cx2d, body: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
@@ -1193,7 +1233,262 @@ impl ShellPanel {
 
     // ------------------------------------------------------------- power
 
-    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+    fn hub_height(&self) -> f64 {
+        let h = &self.data.hub;
+        if !h.available {
+            return match &h.process {
+                Some(p) => 40.0 + 12.0 + p.phase.reason().map_or(0.0, |r| r.lines().take(HUB_REASON_LINES).count() as f64 * 16.0 + 6.0) + 34.0,
+                None => 40.0 + 12.0 + 40.0,
+            };
+        }
+        let policy = if h.policy.is_some() { 18.0 } else { 0.0 };
+        let process = if h.process.is_some() { 30.0 + if self.hub_pick { hub_chat_models(h).len() as f64 * 26.0 } else { 0.0 } } else { 0.0 };
+        let activity = h.activity.len().max(1) as f64 * 20.0;
+        let recent = h.recent.len().min(3) as f64 * 16.0;
+        let context = if h.models.iter().any(|m| Some(&m.id) == h.chat_model.as_ref()) { 30.0 } else { 0.0 };
+        40.0 + 12.0 + 38.0 + policy + process + 22.0 + h.models.len() as f64 * 34.0 + context + 12.0 + 22.0 + activity + 20.0 + recent
+    }
+
+    /// The AI hub panel: GPU memory, the models with Load / Unload, what is
+    /// working now and what finished, the context size and the KV switch.
+    fn draw_hub(&mut self, cx: &mut Cx2d, body: Rect) {
+        use crate::hub_control::{KvPrecision, ModelState};
+        use super::ui::HAlign;
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let hub = self.data.hub.clone();
+        let now = self.glow_now();
+        if self.glow.animating(now) {
+            self.glow_frame = cx.new_next_frame();
+        }
+        let (hero, rest) = cut_top(body, 40.0);
+        let status = hub.status();
+        self.d.panel_hero(cx, hero, &tok, fg, Ico::Chip, "AI hub", &status, 0.0);
+        let (sep, rest) = cut_top(rest, 12.0);
+        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
+        if !hub.available {
+            match &hub.process {
+                // The WM's own hub on its way up, or down: why, and Restart.
+                Some(p) => {
+                    let mut rest = rest;
+                    if let Some(reason) = p.phase.reason() {
+                        for line in reason.lines().take(HUB_REASON_LINES) {
+                            let (row, r2) = cut_top(rest, 16.0);
+                            rest = r2;
+                            self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, line);
+                        }
+                        rest = cut_top(rest, 6.0).1;
+                    }
+                    let (row, _) = cut_top(rest, 34.0);
+                    self.hub_restart_button(cx, row);
+                }
+                None => self.unavailable(cx, rest, "Start the AI hub to see its models."),
+            }
+            return;
+        }
+        // GPU memory.
+        let (row, rest) = cut_top(rest, 22.0);
+        let gib = |mb: u32| mb as f64 / 1024.0;
+        self.d.label(cx, row, true, tok.font.caption, darker(fg, 1.4), HAlign::Left, "GPU memory");
+        self.d.label(cx, row, false, tok.font.caption, fg, HAlign::Right,
+            &format!("{:.1} / {:.1} GiB, {:.1} free", gib(hub.gpu_used_mb), gib(hub.gpu_total_mb), gib(hub.gpu_total_mb.saturating_sub(hub.gpu_used_mb))));
+        let (bar_row, rest) = cut_top(rest, 16.0);
+        let track = rect(bar_row.pos.x, bar_row.pos.y + 4.0, bar_row.size.x, 8.0);
+        self.d.solid(cx, track, alpha(fg, 0.12));
+        let used = if hub.gpu_total_mb > 0 { (hub.gpu_used_mb as f64 / hub.gpu_total_mb as f64).clamp(0.0, 1.0) } else { 0.0 };
+        self.d.solid(cx, rect(track.pos.x, track.pos.y, track.size.x * used, track.size.y), fg);
+        // Models, grouped by what they do (the hub sorts them): a type icon, the name, one
+        // line on what it does with its state and GPU footprint, Load / Unload. The chat
+        // model's context setting sits under it, capped by what the GPU budget allows.
+        // What the hub's memory policy did last: a variant run, a chat model unloaded for a job.
+        let rest = match &hub.policy {
+            Some(note) => {
+                let (row, rest) = cut_top(rest, 18.0);
+                self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, note);
+                rest
+            }
+            None => rest,
+        };
+        // The WM's own hub: the chat model it loads at start (a pick restarts it), and Restart.
+        let rest = match &hub.process {
+            Some(p) => {
+                let (row, mut rest) = cut_top(rest, 30.0);
+                let restart_w = self.hub_restart_button(cx, row);
+                let pick_w = self.d.button_width(cx, &tok, false, "Change", tok.font.body_small);
+                let pick = rect(row.pos.x + row.size.x - restart_w - 6.0 - pick_w, row.pos.y + 3.0, pick_w, row.size.y - 6.0);
+                let state = if self.hub_pick { CtrlState::Selected } else if self.hot == Some(Hit::HubPickOpen) { CtrlState::Hover } else { CtrlState::Normal };
+                self.d.button(cx, pick, &tok, state, None, "Change", tok.font.body_small, fg, true);
+                self.hits.push((Hit::HubPickOpen, pick));
+                self.d.label(cx, rect(row.pos.x, row.pos.y, 80.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Chat model");
+                let name = if p.model.is_empty() { "none at start" } else { p.model.as_str() };
+                self.d.label_elided(cx, rect(row.pos.x + 80.0, row.pos.y, (pick.pos.x - 8.0 - row.pos.x - 80.0).max(0.0), row.size.y), false, tok.font.body_small, fg, HAlign::Left, name);
+                if self.hub_pick {
+                    for (i, id) in hub_chat_models(&hub).iter().enumerate() {
+                        let (row, r2) = cut_top(rest, 26.0);
+                        rest = r2;
+                        let r = rect(row.pos.x + 80.0, row.pos.y + 2.0, row.size.x - 80.0, row.size.y - 4.0);
+                        let state = if *id == p.model { CtrlState::Selected } else if self.hot == Some(Hit::HubPick(i)) { CtrlState::Hover } else { CtrlState::Normal };
+                        self.d.button(cx, r, &tok, state, None, id, tok.font.body_small, fg, false);
+                        self.hits.push((Hit::HubPick(i), r));
+                    }
+                }
+                rest
+            }
+            None => rest,
+        };
+        let (head, mut rest) = cut_top(rest, 22.0);
+        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Models");
+        for (i, m) in hub.models.iter().enumerate() {
+            let (row, r2) = cut_top(rest, 34.0);
+            rest = r2;
+            let (label, state, disabled) = match m.state {
+                ModelState::Loaded => ("Unload", CtrlState::Normal, false),
+                ModelState::Unloaded | ModelState::Error => ("Load", CtrlState::Normal, false),
+                ModelState::Loading => ("Loading", CtrlState::Disabled, true),
+                ModelState::Downloading => ("Getting", CtrlState::Disabled, true),
+            };
+            // Three columns that never overlap: [icon + name / what it does] takes what is
+            // left and elides, [state / GPU size] and [Load] have fixed widths on the right.
+            const GAP: f64 = 10.0;
+            const ICON: f64 = 18.0;
+            let g = self.glow.row(&m.id, now);
+            let k = (0.5 - 0.5 * (now * std::f64::consts::TAU / 1.4).cos()) as f32;
+            let lit = g.strength * if g.working { 0.8 + 0.2 * k } else { 1.0 };
+            if g.strength > 0.0 {
+                self.d.solid(cx, rect(row.pos.x - 6.0, row.pos.y + 1.0, row.size.x + 12.0, row.size.y - 2.0), vec4(0.30, 0.78, 0.42, 0.95 * lit));
+            }
+            let w = self.d.button_width(cx, &tok, false, "Unload", tok.font.body_small);
+            let button = rect(row.pos.x + row.size.x - w, row.pos.y + 4.0, w, row.size.y - 8.0);
+            let state = if !disabled && self.hot == Some(Hit::HubModel(i)) { CtrlState::Hover } else { state };
+            let lit_now = self.glow.row(&m.id, now).strength;
+            let label_fg = if lit_now > 0.0 { lerp_color(fg, vec4(0.02, 0.14, 0.06, 1.0), lit_now) } else { fg };
+            if lit_now > 0.0 {
+                // On the green the button is a darker pad with dark ink (the themed
+                // button's own label colour is light).
+                self.d.solid(cx, button, vec4(0.02, 0.14, 0.06, 0.14 * lit_now));
+                self.d.label(cx, button, true, tok.font.body_small, label_fg, HAlign::Center, label);
+            } else {
+                self.d.button(cx, button, &tok, state, None, label, tok.font.body_small, label_fg, true);
+            }
+            if !disabled {
+                self.hits.push((Hit::HubModel(i), button));
+            }
+            let state_w = ["downloading", "on disk", "loaded", "loading", "failed", "99.9 GiB"]
+                .iter()
+                .map(|t| self.d.measure(cx, false, tok.font.caption, t))
+                .fold(0.0f64, f64::max)
+                .ceil();
+            let state_col = rect(button.pos.x - GAP - state_w, row.pos.y, state_w, row.size.y);
+            let dim = if m.state == ModelState::Loaded { fg } else { darker(fg, 1.4) };
+            // A working model lights up: a soft wash and edge in the accent that breathes,
+            // an accent icon and name, a live line. It fades out after the work.
+            // Computing = a calm green row (brightness breathes), dark text on it.
+            let ink = vec4(0.02, 0.14, 0.06, 1.0);
+            let dim = if g.strength > 0.0 { lerp_color(dim, ink, g.strength) } else { dim };
+            let sub = if g.strength > 0.0 { lerp_color(darker(fg, 1.4), ink, g.strength) } else { darker(fg, 1.4) };
+            self.d.icon(cx, hub_icon(m.kind), rect(row.pos.x, row.pos.y + (row.size.y - ICON) * 0.5, ICON, ICON), dim);
+            let text_x = row.pos.x + ICON + 8.0;
+            let text = rect(text_x, row.pos.y, (state_col.pos.x - GAP - text_x).max(0.0), row.size.y);
+            let (top, bottom) = (rect(text.pos.x, text.pos.y + 2.0, text.size.x, 15.0), rect(text.pos.x, text.pos.y + 17.0, text.size.x, 14.0));
+            self.d.label_elided(cx, top, false, tok.font.body_small, dim, HAlign::Left, &m.name);
+            if let Some(live) = &g.live {
+                self.d.label_elided(cx, bottom, false, tok.font.caption, ink, HAlign::Left, live);
+            } else if let Some(used) = &g.used {
+                self.d.label_elided(cx, bottom, false, tok.font.caption, sub, HAlign::Left, &format!("{} \u{b7} {}", m.kind.what(), used));
+            } else {
+                self.d.label_elided(cx, bottom, false, tok.font.caption, sub, HAlign::Left, m.kind.what());
+            }
+            let state = match m.state {
+                ModelState::Loaded => "loaded",
+                ModelState::Loading => "loading",
+                ModelState::Downloading => "downloading",
+                ModelState::Error => "failed",
+                ModelState::Unloaded => "on disk",
+            };
+            let (stop, sbottom) = (rect(state_col.pos.x, top.pos.y, state_col.size.x, top.size.y), rect(state_col.pos.x, bottom.pos.y, state_col.size.x, bottom.size.y));
+            self.d.label(cx, stop, false, tok.font.caption, dim, HAlign::Right, state);
+            if m.state == ModelState::Loaded && m.gpu_mb > 0 {
+                self.d.label(cx, sbottom, false, tok.font.caption, sub, HAlign::Right, &format!("{:.1} GiB", gib(m.gpu_mb)));
+            }
+            if Some(&m.id) != hub.chat_model.as_ref() {
+                continue;
+            }
+            // This model's context: a step down / up through the sizes the hub offers, up
+            // to what fits next to the UI; then the KV precision.
+            let (row, r2) = cut_top(rest, 30.0);
+            rest = r2;
+            let step = self.d.button_width(cx, &tok, false, "+", tok.font.body_small).max(24.0);
+            let mut x = row.pos.x + 26.0;
+            self.d.label_elided(cx, rect(x, row.pos.y, 52.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Context");
+            x += 56.0;
+            let can_up = hub_context_up(&hub).is_some();
+            for (label, up) in [("-", false), ("+", true)] {
+                let r = rect(x, row.pos.y + 3.0, step, row.size.y - 6.0);
+                let enabled = if up { can_up } else { hub.context_options.iter().any(|c| *c < hub.context) };
+                let state = if !enabled { CtrlState::Disabled } else if self.hot == Some(Hit::HubContext(up)) { CtrlState::Hover } else { CtrlState::Normal };
+                self.d.button(cx, r, &tok, state, None, label, tok.font.body_small, fg, true);
+                if enabled {
+                    self.hits.push((Hit::HubContext(up), r));
+                }
+                x += step + 4.0;
+                if !up {
+                    self.d.label(cx, rect(x, row.pos.y, 48.0, row.size.y), true, tok.font.body_small, fg, HAlign::Center, &kilo(hub.context));
+                    x += 48.0 + 4.0;
+                }
+            }
+            let max = match m.context_fit {
+                Some(0) => "no room next to the UI".to_string(),
+                Some(fit) => format!("max {}", kilo(fit)),
+                None => String::new(),
+            };
+            let kw = self.d.button_width(cx, &tok, false, "f16", tok.font.body_small);
+            self.d.label_elided(cx, rect(x + 4.0, row.pos.y, ((row.pos.x + row.size.x - 2.0 * kw - 10.0) - (x + 4.0)).max(0.0), row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, &max);
+            for (k, q8) in [(KvPrecision::F16, false), (KvPrecision::Q8, true)] {
+                let kx = row.pos.x + row.size.x - kw * (2.0 - q8 as u8 as f64);
+                let r = rect(kx, row.pos.y + 3.0, kw, row.size.y - 6.0);
+                let state = if hub.kv == k { CtrlState::Selected } else if self.hot == Some(Hit::HubKv(q8)) { CtrlState::Hover } else { CtrlState::Normal };
+                self.d.button(cx, r, &tok, state, None, k.name(), tok.font.body_small, fg, true);
+                self.hits.push((Hit::HubKv(q8), r));
+            }
+        }
+        // Activity.
+        let (sep, rest) = cut_top(rest, 12.0);
+        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
+        let (head, mut rest) = cut_top(rest, 22.0);
+        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Working now");
+        if hub.activity.is_empty() {
+            let (row, r2) = cut_top(rest, 20.0);
+            rest = r2;
+            self.d.label(cx, row, false, tok.font.body_small, darker(fg, 1.4), HAlign::Left, "Nothing");
+        }
+        for a in &hub.activity {
+            let (row, r2) = cut_top(rest, 20.0);
+            rest = r2;
+            let rate = match (a.tokens_per_s, a.progress) {
+                (Some(t), _) => format!("{:.0} tok/s", t),
+                (None, Some(p)) => format!("{:.0}%", p * 100.0),
+                _ => String::new(),
+            };
+            let rate_w = self.d.measure(cx, false, tok.font.body_small, &rate);
+            let left = rect(row.pos.x, row.pos.y, (row.size.x - rate_w - 10.0).max(0.0), row.size.y);
+            self.d.label_elided(cx, left, false, tok.font.body_small, fg, HAlign::Left, &format!("{} for {}", a.model, a.app));
+            self.d.label(cx, row, false, tok.font.body_small, fg, HAlign::Right, &rate);
+        }
+        // Recent requests.
+        let (head, mut rest) = cut_top(rest, 20.0);
+        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Recent");
+        for q in hub.recent.iter().take(3) {
+            let (row, r2) = cut_top(rest, 16.0);
+            rest = r2;
+            let r = if q.ok { format!("{} ms", q.millis) } else { format!("{} ms, failed", q.millis) };
+            let r_w = self.d.measure(cx, false, tok.font.caption, &r);
+            let left = rect(row.pos.x, row.pos.y, (row.size.x - r_w - 10.0).max(0.0), row.size.y);
+            self.d.label_elided(cx, left, false, tok.font.caption, darker(fg, 1.4), HAlign::Left, &format!("{} for {}", q.model, q.app));
+            self.d.label(cx, row, false, tok.font.caption, darker(fg, 1.4), HAlign::Right, &r);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn draw_power(&mut self, cx: &mut Cx2d, body: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
@@ -1315,31 +1610,13 @@ impl ShellPanel {
 
     // ----------------------------------------------------------- monitor
 
-    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+    #[cfg(not(target_os = "linux"))]
     fn draw_monitor(&mut self, cx: &mut Cx2d, body: Rect) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let (hero, rest) = cut_top(body, 40.0);
-        let mood = self.data.brightness_mood();
         self.d
-            .panel_hero(cx, hero, &tok, fg, Ico::Monitor, "Display", mood, 0.0);
-
-        let (sep, rest) = cut_top(rest, tok.spacing.panel_gap);
-        self.d.separator(cx, sep, fg, 0.12);
-        let (header, rest) = cut_top(rest, 18.0);
-        let value = match self.data.brightness {
-            Some(v) => format!("{}%", v),
-            None => "--".into(),
-        };
-        self.section_header(cx, header, "BRIGHTNESS", &value);
-        let (row, rest) = cut_top(rest, 28.0);
-        self.slider_row(
-            cx,
-            row,
-            Hit::BrightnessSlider,
-            self.data.brightness.unwrap_or(0) as f64 / 100.0,
-            self.data.brightness.is_some(),
-        );
+            .panel_hero(cx, hero, &tok, fg, Ico::Monitor, "Display", "Text size and screens", 0.0);
 
         let (sep, rest) = cut_top(rest, tok.spacing.panel_gap);
         self.d.separator(cx, sep, fg, 0.12);
@@ -1404,9 +1681,9 @@ impl ShellPanel {
             return 0.0;
         };
         let track = inset(*r, 6.0);
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        #[cfg(target_os = "linux")]
         return ((p.x - track.pos.x - 6.0) / (track.size.x - 12.0).max(1.0)).clamp(0.0, 1.0);
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+        #[cfg(not(target_os = "linux"))]
         ((p.x - track.pos.x) / track.size.x.max(1.0)).clamp(0.0, 1.0)
     }
 }
@@ -1420,14 +1697,272 @@ impl ShellPanel {
 // (shell/wifi_linux.rs), which the WM feeds from the iwd worker.
 // ======================================================================
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 const WIFI_MAX_ROWS: usize = 7;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 const WIFI_ROW_H: f64 = 28.0;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 const WIFI_ADDR_ROW_H: f64 = 20.0;
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+// ----------------------------------------------------------------------
+// The hotspot section of the Wi-Fi dropdown (Linux): the switch, what it
+// costs, and while it runs the join code, the password, the address and
+// the devices on it. State and wording come from `self.wifi`
+// (shell/wifi_linux.rs); the logic is shell/hotspot_linux.rs.
+// ----------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+const HS_LINE_H: f64 = 16.0;
+#[cfg(target_os = "linux")]
+const HS_CHARS: usize = 58;
+#[cfg(target_os = "linux")]
+const HS_QR_PX: f64 = 164.0;
+#[cfg(target_os = "linux")]
+const HS_BLOCK_H: f64 = 172.0;
+#[cfg(target_os = "linux")]
+const HS_MAX_CLIENTS: usize = 4;
+
+#[cfg(target_os = "linux")]
+impl ShellPanel {
+    /// The lines under the switch: what it costs, or why it is off limits.
+    fn hotspot_note(&self) -> Vec<String> {
+        use super::hotspot_linux::{wrap_text, Capability};
+        let h = &self.wifi.snapshot.hotspot;
+        match &h.capability {
+            Capability::Unsupported(why) if !h.ap_mode => wrap_text(why, HS_CHARS, 3),
+            _ if h.ap_mode => Vec::new(),
+            _ => wrap_text(
+                "Turning it on replaces your Wi-Fi connection: this laptop and the phone have no internet. Turning it off rejoins the network.",
+                HS_CHARS,
+                3,
+            ),
+        }
+    }
+
+    /// The question being asked, as lines.
+    fn hotspot_ask_lines(&self) -> Vec<String> {
+        use super::hotspot_linux::wrap_text;
+        match self.wifi.hotspot_ask {
+            None => Vec::new(),
+            Some(HotspotAsk::Enable) => {
+                let from = match self.wifi.snapshot.connected_name() {
+                    Some(n) => format!("Wi-Fi to {n}"),
+                    None => "Wi-Fi".to_string(),
+                };
+                wrap_text(
+                    &format!("Turn on the hotspot? {from} is switched off while it runs, so this laptop has no internet. It comes back when you turn the hotspot off."),
+                    HS_CHARS,
+                    4,
+                )
+            }
+            Some(HotspotAsk::Regenerate) => wrap_text(
+                "Connected devices will be disconnected and must rejoin with the new password.",
+                HS_CHARS,
+                3,
+            ),
+        }
+    }
+
+    fn hotspot_height(&self) -> f64 {
+        let snap = &self.wifi.snapshot;
+        if snap.unavailable.is_some() || !self.wifi.have_snapshot {
+            return 0.0;
+        }
+        let h = &snap.hotspot;
+        let mut total = self.tokens.spacing.panel_gap + 18.0 + 28.0 + self.hotspot_note().len() as f64 * HS_LINE_H;
+        let ask = self.hotspot_ask_lines().len();
+        if ask > 0 {
+            total += 6.0 + ask as f64 * HS_LINE_H + 6.0 + 28.0;
+        }
+        if h.ap_mode {
+            total += 6.0 + HS_BLOCK_H + 6.0 + 20.0 + 20.0 + h.clients.len().min(HS_MAX_CLIENTS) as f64 * 18.0;
+        }
+        total
+    }
+
+    fn draw_hotspot(&mut self, cx: &mut Cx2d, rest: Rect) {
+        let snap = self.wifi.snapshot.clone();
+        if snap.unavailable.is_some() || !self.wifi.have_snapshot {
+            return;
+        }
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let dim = darker(fg, 1.4);
+        let accent = tok.bar.active;
+        let px = tok.font.body_small;
+        let md = tok.spacing.md;
+        let h = snap.hotspot.clone();
+        let usable = self.wifi.hotspot_usable();
+        let waiting = self.wifi.hotspot_wait.is_some();
+
+        let (sep, rest) = cut_top(rest, tok.spacing.panel_gap);
+        self.d.separator(cx, sep, fg, 0.12);
+        let (header, rest) = cut_top(rest, 18.0);
+        self.section_header(cx, header, "HOTSPOT", "");
+
+        // ---- the switch row: the network name, its state, the switch
+        let (row, rest) = cut_top(rest, 28.0);
+        let switch = self.d.toggle_switch(
+            cx,
+            dvec2(row.pos.x + row.size.x - 42.0, row.pos.y + (row.size.y - 22.0) * 0.5),
+            &tok,
+            h.ap_mode,
+            if usable { fg } else { alpha(fg, 0.4) },
+        );
+        let state = if waiting {
+            "Working\u{2026}"
+        } else if h.started {
+            "On"
+        } else if h.ap_mode {
+            "Starting\u{2026}"
+        } else {
+            "Off"
+        };
+        let sw = self.d.measure(cx, false, px, state);
+        self.d.label(
+            cx,
+            rect(switch.pos.x - md - sw, row.pos.y, sw, row.size.y),
+            false,
+            px,
+            dim,
+            super::ui::HAlign::Right,
+            state,
+        );
+        self.d.label_elided(
+            cx,
+            rect(row.pos.x + 4.0, row.pos.y, (switch.pos.x - md - sw - 12.0 - row.pos.x).max(0.0), row.size.y),
+            h.ap_mode,
+            tok.font.body,
+            if usable { fg } else { alpha(fg, 0.5) },
+            super::ui::HAlign::Left,
+            &h.ssid,
+        );
+        if usable && !waiting {
+            self.hits.push((Hit::Wifi(WifiHit::HotspotToggle), row));
+        }
+
+        // ---- what it costs, or why it cannot be used
+        let mut rest = rest;
+        for line in self.hotspot_note() {
+            let (r, next) = cut_top(rest, HS_LINE_H);
+            rest = next;
+            self.d.label_elided(cx, r, false, tok.font.caption, dim, super::ui::HAlign::Left, &line);
+        }
+
+        // ---- the question
+        let ask = self.hotspot_ask_lines();
+        if !ask.is_empty() {
+            let yes = match self.wifi.hotspot_ask {
+                Some(HotspotAsk::Regenerate) => "Regenerate",
+                _ => "Turn on",
+            };
+            let (_, next) = cut_top(rest, 6.0);
+            rest = next;
+            for line in &ask {
+                let (r, next) = cut_top(rest, HS_LINE_H);
+                rest = next;
+                self.d.label_elided(cx, r, false, tok.font.caption, fg, super::ui::HAlign::Left, line);
+            }
+            let (_, next) = cut_top(rest, 6.0);
+            let (brow, next) = cut_top(next, 28.0);
+            rest = next;
+            let cw = self.d.button_width(cx, &tok, false, "Cancel", px).max(72.0);
+            let cancel = rect(brow.pos.x + brow.size.x - cw, brow.pos.y, cw, brow.size.y);
+            let yw = self.d.button_width(cx, &tok, false, yes, px).max(96.0);
+            let confirm = rect(cancel.pos.x - md - yw, brow.pos.y, yw, brow.size.y);
+            self.wifi_button(cx, confirm, WifiHit::HotspotConfirm, yes, false, fg);
+            self.wifi_button(cx, cancel, WifiHit::HotspotCancel, "Cancel", false, fg);
+        }
+
+        if !h.ap_mode {
+            return;
+        }
+
+        // ---- the join code, the network, the password
+        let (_, next) = cut_top(rest, 6.0);
+        let (block, next) = cut_top(next, HS_BLOCK_H);
+        rest = next;
+        let mut right_x = block.pos.x;
+        if let Some((_, qr)) = self.wifi.hotspot_qr.as_ref() {
+            let cells = (qr.size + 8) as f64;
+            let m = (HS_QR_PX / cells).floor().max(1.0);
+            let side = m * cells;
+            let origin = dvec2(block.pos.x, block.pos.y + (HS_BLOCK_H - side) * 0.5);
+            let white = vec4(1.0, 1.0, 1.0, 1.0);
+            let black = vec4(0.0, 0.0, 0.0, 1.0);
+            self.d.solid(cx, rect(origin.x, origin.y, side, side), white);
+            for y in 0..qr.size {
+                let mut x = 0;
+                while x < qr.size {
+                    if !qr.get(x, y) {
+                        x += 1;
+                        continue;
+                    }
+                    let start = x;
+                    while x < qr.size && qr.get(x, y) {
+                        x += 1;
+                    }
+                    self.d.solid(
+                        cx,
+                        rect(
+                            origin.x + (start + 4) as f64 * m,
+                            origin.y + (y + 4) as f64 * m,
+                            (x - start) as f64 * m,
+                            m,
+                        ),
+                        black,
+                    );
+                }
+            }
+            right_x = block.pos.x + side + 14.0;
+        }
+        let col = rect(right_x, block.pos.y, (block.pos.x + block.size.x - right_x).max(0.0), block.size.y);
+        let (r, col_rest) = cut_top(col, 14.0);
+        self.d.label(cx, r, false, tok.font.caption, dim, super::ui::HAlign::Left, "NETWORK");
+        let (r, col_rest) = cut_top(col_rest, 18.0);
+        self.d.label_elided(cx, r, true, px, fg, super::ui::HAlign::Left, &h.ssid);
+        let (_, col_rest) = cut_top(col_rest, 4.0);
+        let (r, mut col_rest) = cut_top(col_rest, 14.0);
+        self.d.label(cx, r, false, tok.font.caption, dim, super::ui::HAlign::Left, "PASSWORD");
+        match h.passphrase.as_deref() {
+            Some(pass) => {
+                let words: Vec<&str> = pass.split('-').collect();
+                for (i, w) in words.iter().enumerate() {
+                    let (r, next) = cut_top(col_rest, 22.0);
+                    col_rest = next;
+                    let text = if i + 1 < words.len() { format!("{w}-") } else { (*w).to_string() };
+                    self.d.label_elided(cx, r, true, 18.0, fg, super::ui::HAlign::Left, &text);
+                }
+                let (_, next) = cut_top(col_rest, 6.0);
+                let (r, _) = cut_top(next, 28.0);
+                let bw = self.d.button_width(cx, &tok, false, "Regenerate", px).max(96.0);
+                let btn = rect(r.pos.x, r.pos.y, bw.min(r.size.x), r.size.y);
+                self.wifi_button(cx, btn, WifiHit::HotspotRegenerate, "Regenerate", waiting, fg);
+            }
+            None => {
+                let (r, _) = cut_top(col_rest, 22.0);
+                self.d.label_elided(cx, r, false, px, accent, super::ui::HAlign::Left, "No password stored");
+            }
+        }
+
+        // ---- address and devices
+        let (r, next) = cut_top(rest, 20.0);
+        rest = next;
+        self.info_pair(cx, r, "Address", h.ip.as_deref().unwrap_or("waiting for an address"));
+        let (r, next) = cut_top(rest, 20.0);
+        rest = next;
+        self.info_pair(cx, r, "Devices", &h.clients.len().to_string());
+        for c in h.clients.iter().take(HS_MAX_CLIENTS) {
+            let (r, next) = cut_top(rest, 18.0);
+            rest = next;
+            self.d.label(cx, r, false, tok.font.caption, dim, super::ui::HAlign::Left, &c.ip);
+            self.d.label(cx, r, false, tok.font.caption, dim, super::ui::HAlign::Right, &c.mac);
+        }
+    }
+}
+
+
+#[cfg(target_os = "linux")]
 impl ShellPanel {
     /// The action row's height for the current state.
     fn wifi_action_height(&self) -> f64 {
@@ -1460,6 +1995,7 @@ impl ShellPanel {
             + 18.0
             + rows * WIFI_ROW_H
             + self.wifi_action_height()
+            + self.hotspot_height()
     }
 
     fn draw_wifi(&mut self, cx: &mut Cx2d, body: Rect) {
@@ -1495,6 +2031,7 @@ impl ShellPanel {
             match snap.radio {
                 RadioState::NoDevice => "No Wi-Fi device".to_string(),
                 RadioState::Off => "Off".to_string(),
+                RadioState::On if snap.hotspot.ap_mode => format!("Hotspot {}", if snap.hotspot.started { "on" } else { "starting\u{2026}" }),
                 RadioState::On => match snap.state {
                     StationState::Connected => {
                         format!("Connected to {}", snap.connected_name().unwrap_or("network"))
@@ -1566,6 +2103,7 @@ impl ShellPanel {
             match snap.radio {
                 RadioState::NoDevice => Some("No Wi-Fi device found".to_string()),
                 RadioState::Off => Some("Wi-Fi is off".to_string()),
+                RadioState::On if snap.hotspot.ap_mode => Some("Wi-Fi is off while the hotspot is on".to_string()),
                 RadioState::On if snap.networks.is_empty() => Some(
                     if scanning {
                         "Scanning\u{2026}"
@@ -1643,7 +2181,9 @@ impl ShellPanel {
             }
         }
 
-        self.draw_wifi_action(cx, rest);
+        let (action, after) = cut_top(rest, self.wifi_action_height());
+        self.draw_wifi_action(cx, action);
+        self.draw_hotspot(cx, after);
     }
 
     /// Four signal bars, `lit` of them in the foreground.
@@ -1828,6 +2368,10 @@ impl ShellPanel {
                 }
             }
             WifiHit::Dismiss => self.wifi.dismiss_notice(),
+            WifiHit::HotspotToggle => command = self.wifi.hotspot_toggle(),
+            WifiHit::HotspotRegenerate => self.wifi.hotspot_regenerate_ask(),
+            WifiHit::HotspotConfirm => command = self.wifi.hotspot_confirm(),
+            WifiHit::HotspotCancel => self.wifi.hotspot_cancel(),
         }
         if let Some(cmd) = command {
             cx.widget_action(self.uid, ShellPanelAction::Wifi(cmd));
@@ -1843,33 +2387,18 @@ impl ShellPanel {
 
     /// The keys the flyout takes before the WM binds, the AI pane and the
     /// tiles (lib.rs routes them here first): the Wi-Fi prompt's, and
-    /// Escape while a scale preview is held, a Display list is unfolded or
-    /// a restart asks to confirm.
+    /// Escape while a Display picker or list is unfolded or a restart asks
+    /// to confirm.
     pub fn wants_keys(&self) -> bool {
         self.open == Some(PanelKind::Network)
-            || self.dpi_preview.is_some()
-            || self.mode_picker.is_some()
+            || self.chooser.is_some()
+            || self.pace_open
+            || self.dpi_drag.is_some()
             || self.restart_confirm
             || self.gpu_picker
-            || self.app_gpu_picker
+
             || self.pointer_settings
             || self.swallow_escape_up
-    }
-
-    /// The DPI slider is held or its preview is up: a saved scale landing
-    /// now would move the window under the pointer, so the WM waits.
-    pub fn dpi_adjusting(&self) -> bool {
-        self.dpi_preview.is_some() || self.dragging == Some(Hit::DpiScaleSlider)
-    }
-
-    /// Drop an unapplied scale preview; the flyout stays, nothing is
-    /// emitted, and a release that follows applies nothing.
-    fn cancel_dpi_preview(&mut self, cx: &mut Cx) {
-        self.dpi_preview = None;
-        if self.dragging == Some(Hit::DpiScaleSlider) {
-            self.dragging = None;
-        }
-        self.redraw(cx);
     }
 
     /// The key-up half of a consumed Escape, and every key-up while the
@@ -1882,32 +2411,34 @@ impl ShellPanel {
         self.secret_input_active()
     }
 
-    /// The keyboard while a flyout wants it: Escape cancels a held scale
-    /// preview; with the Wi-Fi dropdown up the prompt owns the keys
-    /// (`WifiUi::key`), otherwise Escape closes the dropdown. True when
-    /// the key was consumed.
+    /// The keyboard while a flyout wants it: with the Wi-Fi dropdown up
+    /// the prompt owns the keys (`WifiUi::key`), otherwise Escape folds an
+    /// unfolded Display picker or closes the dropdown. True when the key
+    /// was consumed.
     pub fn key(&mut self, cx: &mut Cx, e: &KeyEvent) -> bool {
-        if e.key_code == KeyCode::Escape && self.dpi_preview.is_some() {
-            self.cancel_dpi_preview(cx);
-            self.swallow_escape_up = true;
-            return true;
+        // Escape during a scale drag puts the scale back where it was.
+        if e.key_code == KeyCode::Escape {
+            if let Some(drag) = self.dpi_drag.take() {
+                self.dragging = None;
+                self.system_action(cx, crate::linux_controls::ControlAction::DpiScaleLive(drag.start));
+                self.swallow_escape_up = true;
+                return true;
+            }
         }
-        // Escape folds a screen's mode list, or drops a restart confirm;
-        // the Display panel stays.
-        if e.key_code == KeyCode::Escape && (self.mode_picker.is_some() || self.restart_confirm) {
-            self.close_mode_list();
+        // Escape folds a screen's picker, or drops a restart confirm; the
+        // Display panel stays.
+        if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.restart_confirm) {
+            self.close_chooser();
             self.restart_confirm = false;
             self.swallow_escape_up = true;
             self.redraw(cx);
             return true;
         }
         // Same for the compositor / app GPU list.
-        if e.key_code == KeyCode::Escape && (self.gpu_picker || self.app_gpu_picker) {
+        if e.key_code == KeyCode::Escape && (self.gpu_picker) {
             self.gpu_picker = false;
-            self.app_gpu_picker = false;
             self.gpu_scroll = 0;
             self.gpu_targets.clear();
-            self.gpu_target_client = None;
             self.swallow_escape_up = true;
             self.redraw(cx);
             return true;
@@ -1960,11 +2491,7 @@ impl ShellPanel {
     /// dropdown shows.
     pub fn wants_scroll(&self, p: Vec2d) -> bool {
         (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
-            || (self.open == Some(PanelKind::Monitor)
-                && (self.display_overflow
-                    || (self.mode_picker.is_some() && self.mode_overflow)
-                    || ((self.gpu_picker || self.app_gpu_picker) && self.gpu_overflow))
-                && contains(self.card, p))
+            || (self.open == Some(PanelKind::Monitor) && self.gpu_picker && self.gpu_overflow && contains(self.card, p))
             || (self.open == Some(PanelKind::Network)
             && contains(self.card, p)
             && self.wifi.snapshot.networks.len() > WIFI_MAX_ROWS)
@@ -1981,10 +2508,10 @@ impl ShellPanel {
     }
 }
 
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(not(target_os = "linux"))]
 impl ShellPanel {
     fn audio_height(&self) -> f64 { 300.0 }
-    fn monitor_height(&self) -> f64 { 300.0 }
+    fn monitor_height(&self) -> f64 { 240.0 }
     fn network_height(&self) -> f64 {
         150.0
     }
@@ -2008,34 +2535,29 @@ impl Widget for ShellPanel {
         if self.inert || self.open.is_none() {
             return;
         }
+        if self.glow_frame.is_event(event).is_some() {
+            self.redraw(cx);
+        }
         match event {
             Event::MouseMove(e) => {
                 if let Some(hit) = self.dragging {
                     let v = self.slider_value(hit, e.abs);
                     match hit {
-                        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                        #[cfg(target_os = "linux")]
                         Hit::InputSlider => self.system_action(cx, crate::linux_controls::ControlAction::InputVolume((v * 100.0).round() as u32)),
                         Hit::VolumeSlider => cx.widget_action(
                             self.uid,
                             ShellPanelAction::SetVolume((v * 100.0).round() as u32),
                         ),
-                        Hit::BrightnessSlider => cx.widget_action(
-                            self.uid,
-                            ShellPanelAction::SetBrightness((v * 100.0).round() as u32),
-                        ),
-                        // A preview only: the window is re-laid out on release.
-                        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                        Hit::DpiScaleSlider => {
-                            self.dpi_preview = Some(Self::dpi_from_slider(v));
-                            self.redraw(cx);
-                        }
-                        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                        #[cfg(target_os = "linux")]
                         Hit::PointerSpeedSlider(touchpad) => {
                             self.system_action(cx, crate::linux_controls::ControlAction::PointerSpeed {
                                 touchpad,
                                 value: Self::pointer_from_slider(v),
                             });
                         }
+                        #[cfg(target_os = "linux")]
+                        Hit::DpiScaleSlider => self.dpi_drag_to(cx, e.abs),
                         _ => {}
                     }
                     return;
@@ -2054,7 +2576,7 @@ impl Widget for ShellPanel {
                     return;
                 }
                 match self.hit_at(e.abs) {
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    #[cfg(target_os = "linux")]
                     Some(Hit::Wifi(hit)) => self.wifi_press(cx, hit),
                     Some(Hit::VolumeSlider) => {
                         self.dragging = Some(Hit::VolumeSlider);
@@ -2062,14 +2584,6 @@ impl Widget for ShellPanel {
                         cx.widget_action(
                             self.uid,
                             ShellPanelAction::SetVolume((v * 100.0).round() as u32),
-                        );
-                    }
-                    Some(Hit::BrightnessSlider) => {
-                        self.dragging = Some(Hit::BrightnessSlider);
-                        let v = self.slider_value(Hit::BrightnessSlider, e.abs);
-                        cx.widget_action(
-                            self.uid,
-                            ShellPanelAction::SetBrightness((v * 100.0).round() as u32),
                         );
                     }
                     Some(Hit::TextSizeSlider) => {
@@ -2081,27 +2595,24 @@ impl Widget for ShellPanel {
                     // The input level is read-only here: this OS has no
                     // cheap way to set it, so the row shows and does not lie.
                     Some(Hit::InputSlider) => {
-                        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                        #[cfg(target_os = "linux")]
                         {
                             self.dragging = Some(Hit::InputSlider);
                             let v = self.slider_value(Hit::InputSlider, e.abs);
                             self.system_action(cx, crate::linux_controls::ControlAction::InputVolume((v * 100.0).round() as u32));
                         }
                     }
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    #[cfg(target_os = "linux")]
                     Some(hit @ (Hit::DevicePicker(_) | Hit::Device(_, _) | Hit::InputMute
-                        | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenModePicker(_) | Hit::ScreenMode(_)
+                        | Hit::Arrangement(_) | Hit::OptimiseFor(_)
+                        | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenResolution(_) | Hit::ScreenRate(_)
+                        | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
-                        | Hit::GpuPicker | Hit::AppGpuPicker
+                        | Hit::GpuPicker
                         | Hit::Gpu(_) | Hit::PointerSettings)) => self.system_press(cx, hit),
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                    Some(Hit::DpiScaleSlider) => {
-                        self.dragging = Some(Hit::DpiScaleSlider);
-                        let v = self.slider_value(Hit::DpiScaleSlider, e.abs);
-                        self.dpi_preview = Some(Self::dpi_from_slider(v));
-                        self.redraw(cx);
-                    }
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+                    #[cfg(target_os = "linux")]
+                    Some(Hit::DpiScaleSlider) => self.dpi_drag_begin(cx, e.abs),
+                    #[cfg(target_os = "linux")]
                     Some(hit @ Hit::PointerSpeedSlider(touchpad)) => {
                         self.dragging = Some(hit);
                         let v = self.slider_value(hit, e.abs);
@@ -2109,6 +2620,46 @@ impl Widget for ShellPanel {
                             touchpad,
                             value: Self::pointer_from_slider(v),
                         });
+                    }
+                    Some(Hit::HubModel(i)) => {
+                        use crate::hub_control::{HubCommand, ModelState};
+                        if let Some(m) = self.data.hub.models.get(i) {
+                            let cmd = match m.state {
+                                ModelState::Loaded => Some(HubCommand::Unload(m.id.clone())),
+                                ModelState::Unloaded | ModelState::Error => Some(HubCommand::Load(m.id.clone())),
+                                ModelState::Loading | ModelState::Downloading => None,
+                            };
+                            if let Some(cmd) = cmd {
+                                cx.widget_action(self.uid, ShellPanelAction::Hub(cmd));
+                            }
+                        }
+                    }
+                    Some(Hit::HubContext(up)) => {
+                        let hub = &self.data.hub;
+                        let now = hub.context;
+                        let next = if up { hub_context_up(hub) } else { hub.context_options.iter().rev().copied().find(|c| *c < now) };
+                        if let Some(c) = next {
+                            cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetContext(c)));
+                        }
+                    }
+                    Some(Hit::HubRestart) => {
+                        cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::Restart));
+                    }
+                    Some(Hit::HubPickOpen) => {
+                        self.hub_pick = !self.hub_pick;
+                        self.redraw(cx);
+                    }
+                    Some(Hit::HubPick(i)) => {
+                        let picked = hub_chat_models(&self.data.hub).get(i).cloned();
+                        self.hub_pick = false;
+                        if let Some(model) = picked.filter(|m| self.data.hub.process.as_ref().is_some_and(|p| p.model != *m)) {
+                            cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetModel(model)));
+                        }
+                        self.redraw(cx);
+                    }
+                    Some(Hit::HubKv(q8)) => {
+                        let kv = if q8 { crate::hub_control::KvPrecision::Q8 } else { crate::hub_control::KvPrecision::F16 };
+                        cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetKv(kv)));
                     }
                     Some(Hit::MuteToggle) => {
                         cx.widget_action(self.uid, ShellPanelAction::ToggleMute);
@@ -2132,30 +2683,17 @@ impl Widget for ShellPanel {
                 }
             }
             Event::MouseUp(_) => {
-                // The DPI slider applies on release only, so the window is
-                // never re-laid out under a drag in progress.
-                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                if self.dragging == Some(Hit::DpiScaleSlider) {
-                    self.dragging = None;
-                    if let Some(value) = self.dpi_preview.take() {
-                        self.system_action(cx, crate::linux_controls::ControlAction::DpiScale(value));
-                    }
-                    self.redraw(cx);
-                }
+                #[cfg(target_os = "linux")]
+                self.dpi_drag_end(cx);
                 self.dragging = None;
             }
-            // Escape on a held scale preview is taken by `key`, routed
-            // ahead of every other key handler by the WM (lib.rs), not here.
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            #[cfg(target_os = "linux")]
             Event::Scroll(e) => {
                 if self.wants_scroll(e.abs) {
                     if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
                     else if self.open == Some(PanelKind::Monitor) {
-                        // An unfolded list takes the wheel while it is the
-                        // thing that overflows.
-                        if self.mode_picker.is_some() && self.mode_overflow { self.mode_scroll_by(cx, e.scroll.y); }
-                        else if (self.gpu_picker || self.app_gpu_picker) && self.gpu_overflow { self.gpu_scroll_by(cx, e.scroll.y); }
-                        else { self.display_scroll_by(cx, e.scroll.y); }
+                        // The unfolded Render on list is the one thing that can overflow.
+                        self.gpu_scroll_by(cx, e.scroll.y);
                     }
                     else { self.wifi_scroll(cx, e.scroll.y); }
                 }
@@ -2167,7 +2705,7 @@ impl Widget for ShellPanel {
     /// What a remote snapshot (`/snap`) reads off the open flyout: the
     /// Wi-Fi dropdown's nonsecret state, so a proof can see its rows and
     /// prompt without a picture. A typed password is never part of it.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     fn text(&self) -> String {
         match self.open {
             Some(PanelKind::Network) => self.wifi.summary(),
@@ -2216,10 +2754,6 @@ mod tests {
         d.muted = false;
         d.volume = Some(0);
         assert_eq!(d.volume_mood(), "Silenced");
-        d.brightness = Some(80);
-        assert_eq!(d.brightness_mood(), "Solar flare");
-        d.brightness = None;
-        assert_eq!(d.brightness_mood(), "Fixed brightness");
     }
 
     #[test]
@@ -2228,5 +2762,72 @@ mod tests {
         assert_eq!(PanelKind::for_module(BarModule::Menu), None);
         assert_eq!(PanelKind::Clock.content_width(), 560.0);
         assert_eq!(PanelKind::Audio.content_width(), 380.0);
+    }
+}
+
+fn lerp_color(a: Vec4f, b: Vec4f, t: f32) -> Vec4f {
+    let t = t.clamp(0.0, 1.0);
+    vec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t)
+}
+
+/// The panel's icon for what a hub model does.
+fn hub_icon(kind: crate::hub_control::ModelKind) -> Ico {
+    use crate::hub_control::ModelKind;
+    match kind {
+        ModelKind::Chat => Ico::Prompt,
+        ModelKind::Vision => Ico::Photo,
+        ModelKind::SpeechToText => Ico::Mic,
+        ModelKind::TextToSpeech => Ico::Speaker,
+        ModelKind::Image => Ico::Palette,
+        ModelKind::Music => Ico::Pulse,
+        ModelKind::Stems => Ico::Headphone,
+        ModelKind::Video => Ico::Play,
+        ModelKind::Mesh | ModelKind::Other => Ico::Chip,
+    }
+}
+
+/// The next larger context the hub offers that still fits next to the UI (the chat
+/// model's `context_fit`; unknown = not capped).
+fn hub_context_up(hub: &crate::hub_control::HubSnapshot) -> Option<u32> {
+    let fit = hub.models.iter().find(|m| Some(&m.id) == hub.chat_model.as_ref()).and_then(|m| m.context_fit);
+    hub.context_options.iter().copied().find(|c| *c > hub.context && fit.is_none_or(|f| *c <= f))
+}
+
+/// Lines of a hub crash's or failed build's reason the panel shows.
+const HUB_REASON_LINES: usize = 6;
+
+/// The chat models of the hub's registry, for the WM's chat model pick.
+fn hub_chat_models(hub: &crate::hub_control::HubSnapshot) -> Vec<String> {
+    hub.chat_models.clone()
+}
+
+/// 49152 -> "48k".
+fn kilo(tokens: u32) -> String {
+    if tokens >= 1024 && tokens % 1024 == 0 { format!("{}k", tokens / 1024) } else { tokens.to_string() }
+}
+
+#[cfg(test)]
+mod hub_panel_tests {
+    use super::*;
+    use crate::hub_control::{HubSnapshot, ModelInfo, ModelKind, ModelState};
+
+    fn hub(fit: Option<u32>) -> HubSnapshot {
+        HubSnapshot {
+            available: true,
+            models: vec![ModelInfo { id: "q".into(), name: "q".into(), kind: ModelKind::Chat, state: ModelState::Loaded, context_fit: fit, gpu_mb: 0, device: String::new() }],
+            context: 32768,
+            chat_model: Some("q".into()),
+            context_options: vec![16384, 32768, 49152, 65536],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_context_steps_up_only_as_far_as_the_budget_allows() {
+        assert_eq!(hub_context_up(&hub(Some(57344))), Some(49152));
+        assert_eq!(hub_context_up(&hub(Some(40000))), None);
+        assert_eq!(hub_context_up(&hub(None)), Some(49152), "not known yet: not capped");
+        assert_eq!(kilo(49152), "48k");
+        assert_eq!(hub_icon(ModelKind::SpeechToText), Ico::Mic);
     }
 }

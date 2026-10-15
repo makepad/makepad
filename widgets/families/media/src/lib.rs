@@ -1,4 +1,4 @@
-//! Video, the playback bar, level meters, the marquee, content placeholders
+//! Video, the video player and its glass controls, the playback bar, level meters, the marquee, content placeholders
 //! and media frames.
 //!
 //! A family crate of `makepad-widgets`: it builds on `makepad-widgets-core`
@@ -17,7 +17,9 @@ pub mod marquee;
 pub mod media;
 pub mod placeholder;
 pub mod playback_bar;
+pub mod player_controls;
 pub mod video;
+pub mod video_player;
 
 /// Registers the family, after every widget of the core, in the order the
 /// core registered these widgets before they moved here.
@@ -28,6 +30,8 @@ pub fn media_mod(vm: &mut ScriptVm) {
     crate::placeholder::script_mod(vm);
     crate::media::script_mod(vm);
     crate::video::script_mod(vm);
+    crate::player_controls::script_mod(vm);
+    crate::video_player::script_mod(vm);
 }
 
 // The pooled test contexts and the whole registration the tests build on:

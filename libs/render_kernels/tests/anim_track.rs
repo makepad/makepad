@@ -4,7 +4,7 @@
 
 use makepad_csg_math::portable as pm;
 use makepad_render_kernels::anim::{ease_id, pack_track, TrackEase, CURVES};
-use makepad_render_kernels::compute::sched::{InlineExecutor, Job, Priority};
+use makepad_render_kernels::dispatch::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::engine;
 use std::time::Instant;
 

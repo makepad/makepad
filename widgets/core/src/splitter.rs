@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_micro_serde::*,
@@ -220,7 +220,6 @@ script_mod! {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Script, ScriptHook, Default, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAxis {
     #[pick]
     #[default]
@@ -229,7 +228,6 @@ pub enum SplitterAxis {
 }
 
 #[derive(Clone, Copy, Debug, Script, ScriptHook, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAlign {
     #[live(50.0)]
     FromA(f64),
@@ -654,6 +652,7 @@ impl Widget for Splitter {
                     },
                 );
                 self.drag_moved = false;
+                cx.claim_finger_drag(fe.digit_id);
             }
             Hit::FingerUp(f) => {
                 self.drag_start_align = None;

@@ -28,7 +28,7 @@
 //! move the span. Home and End send that handle to its own limit, and the
 //! bracket keys choose which handle the keyboard has.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::measure,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -610,9 +610,8 @@ impl Widget for RangeSlider {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_range) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let start = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64();
-                let end = vm.bx.heap.vec_value(args_obj, 1, trap).as_f64();
+                let start = vm.vec_value_trap(args_obj, 0).as_f64();
+                let end = vm.vec_value_trap(args_obj, 1).as_f64();
                 if let (Some(start), Some(end)) = (start, end) {
                     vm.with_cx_mut(|cx| self.set_range(cx, start, end));
                 }
@@ -722,6 +721,7 @@ impl Widget for RangeSlider {
                 self.put(r);
                 self.active_is_end = matches!(grab, Grab::End);
                 self.grab = Some(grab);
+                cx.claim_finger_drag(fe.digit_id);
                 self.animator_play(cx, ids!(drag.on));
                 cx.widget_action(uid, RangeSliderAction::StartSlide);
                 self.slided(cx);

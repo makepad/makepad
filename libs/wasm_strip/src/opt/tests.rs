@@ -1,13 +1,139 @@
-//! Per-pass tests on small modules written in the text format.
+//! Per-pass tests on small modules built directly in the binary format.
 
 use super::*;
 use ir::*;
 
-fn wat(text: &str) -> Vec<u8> {
-    let buf = wast::parser::ParseBuffer::new(text).unwrap();
-    let mut module = wast::parser::parse::<wast::Wat>(&buf).unwrap();
-    module.encode().unwrap()
+// A deliberately small, independent binary encoder for these fixtures. It
+// does not use the optimiser's encoder, so roundtrip_is_exact tests both sides.
+mod binary {
+    pub const I32: u8 = 0x7f;
+    pub const I64: u8 = 0x7e;
+    pub const FUNCREF: u8 = 0x70;
+
+    pub fn uint(mut n: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            out.push(byte | if n == 0 { 0 } else { 128 });
+            if n == 0 { return out; }
+        }
+    }
+
+    fn string(s: &str) -> Vec<u8> {
+        [uint(s.len() as u32), s.as_bytes().to_vec()].concat()
+    }
+
+    fn vector(items: &[Vec<u8>]) -> Vec<u8> {
+        [uint(items.len() as u32), items.concat()].concat()
+    }
+
+    pub fn op(opcode: u8, n: u32) -> Vec<u8> {
+        [vec![opcode], uint(n)].concat()
+    }
+
+    pub fn konst(mut n: i32) -> Vec<u8> {
+        let mut out = vec![0x41];
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            let done = (n == 0 && byte & 64 == 0) || (n == -1 && byte & 64 != 0);
+            out.push(byte | if done { 0 } else { 128 });
+            if done { return out; }
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Wasm {
+        sections: std::collections::BTreeMap<u8, Vec<Vec<u8>>>,
+        names: Vec<Vec<u8>>,
+        customs: Vec<Vec<u8>>,
+    }
+
+    impl Wasm {
+        pub fn new(types: &[(&[u8], &[u8])]) -> Self {
+            let mut m = Self::default();
+            for (params, results) in types {
+                m.entry(1, [vec![0x60], uint(params.len() as u32), params.to_vec(),
+                    uint(results.len() as u32), results.to_vec()].concat());
+            }
+            m
+        }
+        fn entry(&mut self, section: u8, bytes: Vec<u8>) -> &mut Self {
+            self.sections.entry(section).or_default().push(bytes);
+            self
+        }
+        pub fn import(&mut self, name: &str, kind: u8, ty: &[u8]) -> &mut Self {
+            self.entry(2, [string("env"), string(name), vec![kind], ty.to_vec()].concat())
+        }
+        pub fn func(&mut self, ty: u32, locals: &[u8], body: &[u8]) -> &mut Self {
+            self.entry(3, uint(ty));
+            // One local declaration per local is valid and leaves the optimiser
+            // opportunities to compact declarations as well as instructions.
+            let locals: Vec<_> = locals.iter().map(|ty| vec![1, *ty]).collect();
+            let body = [vector(&locals), body.to_vec(), vec![0x0b]].concat();
+            self.entry(10, [uint(body.len() as u32), body].concat())
+        }
+        pub fn export(&mut self, name: &str, kind: u8, index: u32) -> &mut Self {
+            self.entry(7, [string(name), vec![kind], uint(index)].concat())
+        }
+        pub fn name(&mut self, index: u32, name: &str) -> &mut Self {
+            self.names.push([uint(index), string(name)].concat());
+            self
+        }
+        pub fn memory(&mut self, min: u32, max: Option<u32>, shared: bool) -> &mut Self {
+            let mut limits = vec![u8::from(max.is_some()) | if shared { 2 } else { 0 }];
+            limits.extend(uint(min));
+            if let Some(max) = max { limits.extend(uint(max)); }
+            self.entry(5, limits)
+        }
+        pub fn table(&mut self, size: u32) -> &mut Self {
+            self.entry(4, [vec![FUNCREF, 0], uint(size)].concat())
+        }
+        pub fn global(&mut self, value: i32) -> &mut Self {
+            self.entry(6, [vec![I32, 1], konst(value), vec![0x0b]].concat())
+        }
+        pub fn elem(&mut self, functions: &[u32]) -> &mut Self {
+            self.entry(9, [vec![0], konst(0), vec![0x0b],
+                vector(&functions.iter().map(|n| uint(*n)).collect::<Vec<_>>())].concat())
+        }
+        pub fn data(&mut self, offset: Option<i32>, bytes: &[u8]) -> &mut Self {
+            let mode = match offset {
+                Some(offset) => [vec![0], konst(offset), vec![0x0b]].concat(),
+                None => vec![1],
+            };
+            self.entry(11, [mode, uint(bytes.len() as u32), bytes.to_vec()].concat())
+        }
+        pub fn custom(&mut self, name: &str, bytes: &[u8]) -> &mut Self {
+            self.customs.push([string(name), bytes.to_vec()].concat());
+            self
+        }
+        pub fn finish(&self) -> Vec<u8> {
+            fn section(out: &mut Vec<u8>, id: u8, bytes: &[u8]) {
+                out.push(id);
+                out.extend(uint(bytes.len() as u32));
+                out.extend(bytes);
+            }
+            let mut out = b"\0asm\x01\0\0\0".to_vec();
+            for (&id, entries) in &self.sections {
+                if id == 10 {
+                    if let Some(data) = self.sections.get(&11) {
+                        section(&mut out, 12, &uint(data.len() as u32));
+                    }
+                }
+                section(&mut out, id, &vector(entries));
+            }
+            if !self.names.is_empty() {
+                let names = vector(&self.names);
+                let payload = [string("name"), vec![1], uint(names.len() as u32), names].concat();
+                section(&mut out, 0, &payload);
+            }
+            for custom in &self.customs { section(&mut out, 0, custom); }
+            out
+        }
+    }
 }
+use binary::{konst, op, Wasm, FUNCREF, I32, I64};
 
 fn only(set: impl Fn(&mut OptimizeOptions)) -> OptimizeOptions {
     let mut opts = OptimizeOptions {
@@ -36,23 +162,16 @@ fn optimize(bytes: &[u8], opts: &OptimizeOptions) -> Module {
 
 #[test]
 fn roundtrip_is_exact() {
-    let bytes = wat(r#"(module
-        (type (func (param i32) (result i32)))
-        (import "env" "f" (func (type 0)))
-        (memory 1 2 shared)
-        (global (mut i32) (i32.const 0))
-        (table 2 funcref)
-        (elem (i32.const 0) func 0 1)
-        (func (type 0)
-            local.get 0
-            i32.atomic.load offset=4
-            v128.const i32x4 1 2 3 4
-            i32x4.extract_lane 2
-            i32.add
-            i32.const 0 i32.const 0 i32.const 0 memory.fill
-            local.get 0
-            call_indirect (type 0))
-        (data "hello"))"#);
+    let bytes = Wasm::new(&[(&[I32], &[I32])])
+        .import("f", 0, &[0]).memory(1, Some(2), true).global(0).table(2).elem(&[0, 1])
+        .func(0, &[], &[
+            0x20, 0, // local.get 0
+            0xfe, 0x10, 2, 4, // i32.atomic.load offset=4
+            0xfd, 0x0c, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0,
+            0xfd, 0x1b, 2, 0x6a, // i32x4.extract_lane 2; i32.add
+            0x41, 0, 0x41, 0, 0x41, 0, 0xfc, 11, 0, // memory.fill
+            0x20, 0, 0x11, 0, 0, // local.get 0; call_indirect
+        ]).data(None, b"hello").finish();
     let module = ir::decode(&bytes).unwrap();
     ir::validate_module(&module).unwrap();
     assert_eq!(encode::encode(&module), bytes);
@@ -62,39 +181,38 @@ fn roundtrip_is_exact() {
 fn validator_refuses() {
     let bad = [
         // Wrong operand type.
-        r#"(module (func (result i32) i64.const 1))"#,
+        Wasm::new(&[(&[], &[I32])]).func(0, &[], &[0x42, 1]).finish(),
         // Atomic accesses must be naturally aligned.
-        r#"(module (memory 1 1 shared) (func (result i32) i32.const 0 i32.atomic.load align=2))"#,
+        Wasm::new(&[(&[], &[I32])]).memory(1, Some(1), true)
+            .func(0, &[], &[0x41, 0, 0xfe, 0x10, 1, 0]).finish(),
         // ref.func of an undeclared function.
-        r#"(module (func) (func (result funcref) ref.func 0))"#,
+        Wasm::new(&[(&[], &[]), (&[], &[FUNCREF])])
+            .func(0, &[], &[]).func(1, &[], &[0xd2, 0]).finish(),
         // Lane index out of range.
-        r#"(module (func (result i64) v128.const i64x2 0 0 i64x2.extract_lane 2))"#,
+        Wasm::new(&[(&[], &[I64])]).func(0, &[], &[
+            0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0xfd, 0x1d, 2,
+        ]).finish(),
         // Branch to a missing label.
-        r#"(module (func block br 2 end))"#,
+        Wasm::new(&[(&[], &[])]).func(0, &[], &[0x02, 0x40, 0x0c, 2, 0x0b]).finish(),
     ];
-    for (i, text) in bad.iter().enumerate() {
-        let buf = wast::parser::ParseBuffer::new(text).unwrap();
-        let mut module = wast::parser::parse::<wast::Wat>(&buf).unwrap();
-        // The text encoder checks some of these itself.
-        if let Ok(bytes) = module.encode() {
-            assert!(wasm_validate(&bytes).is_err(), "case {i} accepted");
-        }
+    for (i, bytes) in bad.iter().enumerate() {
+        assert!(wasm_validate(bytes).is_err(), "case {i} accepted");
     }
-    let good = wat(r#"(module (func (result i64) v128.const i64x2 0 0 i64x2.extract_lane 1))"#);
+    let good = Wasm::new(&[(&[], &[I64])]).func(0, &[], &[
+        0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0xfd, 0x1d, 1, // v128.const; i64x2.extract_lane 1
+    ]).finish();
     wasm_validate(&good).unwrap();
 }
 
 #[test]
 fn dce_removes_unreachable_code_and_imports() {
-    let bytes = wat(r#"(module
-        (import "env" "used" (func $used))
-        (import "env" "unused" (func $unused))
-        (import "env" "g" (global $g i32))
-        (global $dead (mut i32) (i32.const 1))
-        (func $root (export "root") call $used call $a)
-        (func $a)
-        (func $dead1 call $dead2 global.get $dead drop)
-        (func $dead2 call $unused))"#);
+    let bytes = Wasm::new(&[(&[], &[])])
+        .import("used", 0, &[0]).import("unused", 0, &[0]).import("g", 3, &[I32, 0])
+        .global(1).func(0, &[], &[0x10, 0, 0x10, 3]).export("root", 0, 2)
+        .func(0, &[], &[]).func(0, &[], &[0x10, 5, 0x23, 1, 0x1a])
+        .func(0, &[], &[0x10, 1]).finish();
     let module = optimize(&bytes, &only(|o| o.dce = true));
     assert_eq!(module.imports.len(), 1);
     assert_eq!(module.funcs.len(), 2);
@@ -106,14 +224,11 @@ fn dce_removes_unreachable_code_and_imports() {
 fn dce_keeps_only_callable_table_entries() {
     // Only (i32)->i32 is called indirectly: the () entries become a stub
     // and the stubs at the segment's ends become empty slots.
-    let bytes = wat(r#"(module
-        (type $t (func (param i32) (result i32)))
-        (table 4 funcref)
-        (elem (i32.const 0) func $n1 $f $n2 $n3)
-        (func $n1) (func $n2) (func $n3)
-        (func $f (type $t) local.get 0)
-        (func (export "call") (param i32) (result i32)
-            local.get 0 local.get 0 call_indirect (type $t)))"#);
+    let bytes = Wasm::new(&[(&[I32], &[I32]), (&[], &[])])
+        .table(4).elem(&[0, 3, 1, 2])
+        .func(1, &[], &[]).func(1, &[], &[]).func(1, &[], &[])
+        .func(0, &[], &[0x20, 0])
+        .func(0, &[], &[0x20, 0, 0x20, 0, 0x11, 0, 0]).export("call", 0, 4).finish();
     let module = optimize(&bytes, &only(|o| o.dce = true));
     let ElemItems::Funcs(items) = &module.elems[0].items else {
         panic!()
@@ -129,24 +244,17 @@ fn dce_keeps_only_callable_table_entries() {
     assert_eq!(module.funcs.len(), 2);
 
     // An exported table keeps every entry.
-    let bytes = wat(r#"(module
-        (table (export "t") 2 funcref)
-        (elem (i32.const 0) func $a $b)
-        (func $a) (func $b))"#);
+    let bytes = Wasm::new(&[(&[], &[])]).table(2).export("t", 1, 0).elem(&[0, 1])
+        .func(0, &[], &[]).func(0, &[], &[]).finish();
     let module = optimize(&bytes, &only(|o| o.dce = true));
     assert_eq!(module.funcs.len(), 2);
 }
 
 #[test]
 fn dce_stubs_interior_entries() {
-    let bytes = wat(r#"(module
-        (type $t (func (param i32) (result i32)))
-        (table 3 funcref)
-        (elem (i32.const 0) func $f $n $f)
-        (func $n (param i64))
-        (func $f (type $t) local.get 0)
-        (func (export "call") (param i32) (result i32)
-            local.get 0 local.get 0 call_indirect (type $t)))"#);
+    let bytes = Wasm::new(&[(&[I32], &[I32]), (&[I64], &[])])
+        .table(3).elem(&[1, 0, 1]).func(1, &[], &[]).func(0, &[], &[0x20, 0])
+        .func(0, &[], &[0x20, 0, 0x20, 0, 0x11, 0, 0]).export("call", 0, 2).finish();
     let module = optimize(&bytes, &only(|o| o.dce = true));
     let ElemItems::Funcs(items) = &module.elems[0].items else {
         panic!()
@@ -158,11 +266,10 @@ fn dce_stubs_interior_entries() {
 
 #[test]
 fn dce_drops_unused_passive_segments() {
-    let bytes = wat(r#"(module
-        (memory 1)
-        (data $used "abc")
-        (data $unused "def")
-        (func (export "init") i32.const 0 i32.const 0 i32.const 3 memory.init $used))"#);
+    let bytes = Wasm::new(&[(&[], &[])]).memory(1, None, false)
+        .data(None, b"abc").data(None, b"def")
+        .func(0, &[], &[0x41, 0, 0x41, 0, 0x41, 3, 0xfc, 8, 0, 0])
+        .export("init", 0, 0).finish();
     let module = optimize(&bytes, &only(|o| o.dce = true));
     assert_eq!(module.datas.len(), 1);
     assert_eq!(module.datas[0].bytes, b"abc");
@@ -170,12 +277,10 @@ fn dce_drops_unused_passive_segments() {
 
 #[test]
 fn merge_and_compact() {
-    let bytes = wat(r#"(module
-        (type $a (func (param i32) (result i32)))
-        (type $b (func (param i32) (result i32)))
-        (func $x (export "x") (type $a) local.get 0 i32.const 1 i32.add)
-        (func $y (export "y") (type $b) local.get 0 i32.const 1 i32.add)
-        (func (export "z") (result i32) i32.const 2 call $y))"#);
+    let bytes = Wasm::new(&[(&[I32], &[I32]), (&[I32], &[I32]), (&[], &[I32])])
+        .func(0, &[], &[0x20, 0, 0x41, 1, 0x6a]).export("x", 0, 0)
+        .func(1, &[], &[0x20, 0, 0x41, 1, 0x6a]).export("y", 0, 1)
+        .func(2, &[], &[0x41, 2, 0x10, 1]).export("z", 0, 2).finish();
     let module = optimize(&bytes, &only(|o| o.merge = true));
     assert_eq!(module.funcs.len(), 2);
     assert_eq!(module.exports[0].index, module.exports[1].index);
@@ -188,23 +293,22 @@ fn merge_and_compact() {
 
 #[test]
 fn compact_puts_hot_functions_in_one_byte_indices() {
-    let mut text = String::from("(module\n");
+    let mut binary = Wasm::new(&[(&[], &[])]);
     for i in 0..200 {
-        text.push_str(&format!("(func $f{i} (export \"f{i}\"))\n"));
+        binary.func(0, &[], &[]).export(&format!("f{i}"), 0, i);
     }
-    text.push_str("(func (export \"hot_caller\")");
-    for _ in 0..10 {
-        text.push_str(" call $f199");
-    }
-    text.push_str("))");
-    let module = optimize(&wat(&text), &only(|o| o.compact = true));
+    let body = op(0x10, 199).repeat(10);
+    binary.func(0, &[], &body).export("hot_caller", 0, 200);
+    let module = optimize(&binary.finish(), &only(|o| o.compact = true));
     let hot = module.exports.iter().find(|e| e.name == "f199").unwrap();
     assert!(hot.index < 128);
 }
 
 #[test]
 fn strip_keeps_names_on_request() {
-    let bytes = wat(r#"(module (func $kept (export "e")) (func $gone) (@custom "extra" "x"))"#);
+    let bytes = Wasm::new(&[(&[], &[])])
+        .func(0, &[], &[]).name(0, "kept").export("e", 0, 0)
+        .func(0, &[], &[]).name(1, "gone").custom("extra", b"x").finish();
     let opts = OptimizeOptions {
         keep_names: true,
         ..OptimizeOptions::default()
@@ -221,12 +325,11 @@ fn strip_keeps_names_on_request() {
 
 #[test]
 fn order_keeps_index_classes_and_behaviour_shape() {
-    let mut text = String::from("(module\n");
+    let mut binary = Wasm::new(&[(&[], &[I32])]);
     for i in 0..140 {
-        text.push_str(&format!("(func (export \"f{i}\") (result i32) i32.const {})\n", 139 - i));
+        binary.func(0, &[], &konst(139 - i)).export(&format!("f{i}"), 0, i as u32);
     }
-    text.push(')');
-    let bytes = wat(&text);
+    let bytes = binary.finish();
     let module = optimize(&bytes, &only(|o| o.order = true));
     // Below 128 nothing moves; above, bodies are sorted.
     assert_eq!(module.exports[0].index, 0);
@@ -244,9 +347,9 @@ fn order_keeps_index_classes_and_behaviour_shape() {
 fn invalid_pass_output_is_reverted() {
     // A pass's invalid result is caught by the per-pass validation; here
     // the input itself is fine, so nothing may be reverted.
-    let bytes = wat(r#"(module (func (export "f") (param i32) (result i32)
-        (local i32 i32)
-        local.get 0 local.set 1 local.get 1 local.set 2 local.get 2))"#);
+    let bytes = Wasm::new(&[(&[I32], &[I32])])
+        .func(0, &[I32, I32], &[0x20, 0, 0x21, 1, 0x20, 1, 0x21, 2, 0x20, 2])
+        .export("f", 0, 0).finish();
     let (_, report) = wasm_optimize_checked(&bytes, &OptimizeOptions::default()).unwrap();
     assert!(report.passes.iter().all(|pass| pass.reverted.is_none()));
     assert!(report.output_bytes < report.input_bytes);
@@ -256,26 +359,20 @@ fn invalid_pass_output_is_reverted() {
 fn units_never_used_are_cut_with_their_data() {
     // app::widget registers (script_mod, param i32) and draws; only its
     // registration ran. app::main and app::kept ran after.
-    let bytes = wat(r#"(module
-        (memory (export "memory") 1)
-        (table 2 funcref)
-        (elem (i32.const 0) func $_RNvNtCs1_3app6widget4draw $_RNvNtCs1_3app4kept4used)
-        (func $_RNvNtCs1_3app6widget10script_mod (param i32)
-            i32.const 1024 i32.const 12 call $_RNvNtCs1_3app6widget4draw drop)
-        (func $_RNvNtCs1_3app6widget4draw (param i32 i32) (result i32)
-            local.get 0 i32.load8_u)
-        (func $_RNvNtCs1_3app4kept4used (param i32 i32) (result i32)
-            i32.const 2048 i32.load8_u)
-        (func $_RNvNtCs1_3app4main3run (export "run") (param i32) (result i32)
-            local.get 0 call $_RNvNtCs1_3app6widget10script_mod
-            local.get 0
-            if (result i32)
-                i32.const 1 i32.const 2 call $_RNvNtCs1_3app6widget4draw
-            else
-                i32.const 1 i32.const 2 call $_RNvNtCs1_3app4kept4used
-            end)
-        (data (i32.const 1024) "SPLASHSOURCE...........................................................................")
-        (data (i32.const 2048) "KEEP"))"#);
+    let bytes = Wasm::new(&[(&[I32], &[]), (&[I32, I32], &[I32]), (&[I32], &[I32])])
+        .memory(1, None, false).export("memory", 2, 0).table(2).elem(&[1, 2])
+        .func(0, &[], &[konst(1024), konst(12), vec![0x10, 1, 0x1a]].concat())
+        .name(0, "_RNvNtCs1_3app6widget10script_mod")
+        .func(1, &[], &[0x20, 0, 0x2d, 0, 0]).name(1, "_RNvNtCs1_3app6widget4draw")
+        .func(1, &[], &[konst(2048), vec![0x2d, 0, 0]].concat())
+        .name(2, "_RNvNtCs1_3app4kept4used")
+        .func(2, &[], &[
+            0x20, 0, 0x10, 0, 0x20, 0, 0x04, I32,
+            0x41, 1, 0x41, 2, 0x10, 1, 0x05,
+            0x41, 1, 0x41, 2, 0x10, 2, 0x0b,
+        ]).name(3, "_RNvNtCs1_3app4main3run").export("run", 0, 3)
+        .data(Some(1024), b"SPLASHSOURCE...........................................................................")
+        .data(Some(2048), b"KEEP").finish();
     let coverage = units::Coverage::parse(
         "2\t_RNvNtCs1_3app4main3run\n2\t_RNvNtCs1_3app4kept4used\n1\t_RNvNtCs1_3app6widget10script_mod\n",
     );
@@ -306,27 +403,17 @@ fn units_never_used_are_cut_with_their_data() {
 fn panics_become_traps_with_their_sites() {
     // `get` checks its index and panics through `$panic` (which logs and
     // never returns) with a message and a location in the data.
-    let bytes = wat(r#"(module
-        (import "env" "log" (func $log (param i32 i32)))
-        (memory (export "memory") 1)
-        (func $panic (param i32 i32 i32)
-            local.get 0 local.get 1 call $log
-            unreachable)
-        (func $get (export "get") (param i32) (result i32)
-            local.get 0
-            i32.const 4
-            i32.ge_u
-            if
-                i32.const 120 i32.const 18 i32.const 160
-                call $panic
-                unreachable
-            end
-            local.get 0
-            i32.const 2
-            i32.mul)
-        (data (i32.const 100) "src/lib.rs")
-        (data (i32.const 120) "index out of range")
-        (data (i32.const 160) "\64\00\00\00\0a\00\00\00\0c\00\00\00\05\00\00\00"))"#);
+    let bytes = Wasm::new(&[(&[I32, I32], &[]), (&[I32, I32, I32], &[]), (&[I32], &[I32])])
+        .import("log", 0, &[0]).name(0, "log").memory(1, None, false).export("memory", 2, 0)
+        .func(1, &[], &[0x20, 0, 0x20, 1, 0x10, 0, 0x00]).name(1, "panic")
+        .func(2, &[], &[
+            vec![0x20, 0, 0x41, 4, 0x4f, 0x04, 0x40],
+            konst(120), konst(18), konst(160),
+            vec![0x10, 1, 0x00, 0x0b, 0x20, 0, 0x41, 2, 0x6c],
+        ].concat()).name(2, "get").export("get", 0, 2)
+        .data(Some(100), b"src/lib.rs").data(Some(120), b"index out of range")
+        .data(Some(160), &[100u32, 10, 12, 5].iter().flat_map(|n| n.to_le_bytes()).collect::<Vec<_>>())
+        .finish();
     let opts = OptimizeOptions { panic_trap: true, symbols: true, ..OptimizeOptions::default() };
     let (out, report) = wasm_optimize_checked(&bytes, &opts).unwrap();
     assert!(report.passes.iter().all(|p| p.reverted.is_none()), "{}", report.to_text());
@@ -362,14 +449,11 @@ fn panics_become_traps_with_their_sites() {
 
 #[test]
 fn waits_answer_at_once_where_a_thread_may_not_block() {
-    let bytes = wat(r#"(module
-        (memory 1 2 shared)
-        (func (export "w32") (param i32 i32) (result i32)
-            local.get 0 local.get 1 i64.const -1 memory.atomic.wait32 offset=8)
-        (func (export "w64") (param i32 i64) (result i32)
-            local.get 0 local.get 1 i64.const -1 memory.atomic.wait64)
-        (func (export "n") (param i32) (result i32)
-            local.get 0 i32.const 1 memory.atomic.notify))"#);
+    let bytes = Wasm::new(&[(&[I32, I32], &[I32]), (&[I32, I64], &[I32]), (&[I32], &[I32])])
+        .memory(1, Some(2), true)
+        .func(0, &[], &[0x20, 0, 0x20, 1, 0x42, 0x7f, 0xfe, 1, 2, 8]).export("w32", 0, 0)
+        .func(1, &[], &[0x20, 0, 0x20, 1, 0x42, 0x7f, 0xfe, 2, 3, 0]).export("w64", 0, 1)
+        .func(2, &[], &[0x20, 0, 0x41, 1, 0xfe, 0, 2, 0]).export("n", 0, 2).finish();
     let module = optimize(&bytes, &only(|_| {}));
     let waits = |m: &Module| m.funcs.iter().flat_map(|f| f.body.iter()).filter(|i| matches!(i, Instr::Atomic(1 | 2, _))).count();
     // The two waits now sit only in the two helpers, behind the flag.
@@ -385,6 +469,6 @@ fn waits_answer_at_once_where_a_thread_may_not_block() {
     let again = wasm_guard_waits(&encode::encode(&module)).unwrap();
     assert_eq!(again, encode::encode(&module));
     // An unshared memory has nothing to guard.
-    let plain = optimize(&wat(r#"(module (memory 1) (func (result i32) i32.const 0))"#), &only(|_| {}));
+    let plain = optimize(&Wasm::new(&[(&[], &[I32])]).memory(1, None, false).func(0, &[], &konst(0)).finish(), &only(|_| {}));
     assert!(plain.exports.is_empty() && plain.globals.is_empty());
 }

@@ -22,6 +22,10 @@ use crate::history::DriveLog;
 use crate::layers;
 use crate::layers::{LayerState, WindUpdate};
 use crate::maps_root::{self, RoutePaths};
+use crate::network::{self, NetworkState};
+use makepad_widgets::makepad_platform::home::makepad_home;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use crate::nav::native::{self as nav_data, NavData, NavLoad, RadarData};
 use crate::nav::{ActiveNav, NavAction, NavTick};
 use crate::overlays::{self, TerrainLayer};
@@ -89,6 +93,9 @@ pub struct RouteView {
     nav: Option<NavData>,
     #[rust]
     radar: Option<RadarData>,
+    /// The rain radar poller runs once rain is first asked for.
+    #[rust]
+    radar_worker_started: bool,
     #[rust]
     trip: TripModel,
     #[rust]
@@ -128,6 +135,15 @@ pub struct RouteView {
     /// Last nav banner instruction spoken, so each maneuver is announced once.
     #[rust]
     last_spoken_banner: String,
+    /// Online, or cache-only by the switch or for want of a network.
+    #[rust]
+    network: NetworkState,
+    /// Re-reads the machine's interfaces and routes (network.rs).
+    #[rust]
+    network_timer: Timer,
+    /// The radar and wind workers fetch only while this is true.
+    #[rust]
+    network_allowed: Arc<AtomicBool>,
 }
 
 impl RouteView {
@@ -179,21 +195,20 @@ impl RouteView {
         log!("maps root: {}", paths.maps.display());
         self.layers.set_maps_root(paths.maps.clone());
         self.drive_log.set_dir(paths.history.clone());
-        #[cfg(not(target_arch = "wasm32"))]
-        let radar_cache = paths.radar_cache();
         self.paths = Some(paths);
+        // Before any source is installed: offline, the map's archives come
+        // up cache-only and no first frame ever asks the network.
+        self.network = NetworkState {
+            forced_offline: network::forced_offline(&makepad_home()),
+            present: network::network_present(),
+        };
+        self.apply_network(cx);
+        self.network_timer = cx.start_interval(network::RECHECK_SECONDS);
         // Applies the theme above (chrome + map + checkboxes) and reflects
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
         // layers popover.
         self.apply_layers(cx);
         self.adopt_map_source(cx);
-        #[cfg(not(target_arch = "wasm32"))]
-        nav_data::start_radar_worker(
-            cx.thread_spawner(),
-            cx.task_pool(),
-            self.radar_rx.sender(),
-            radar_cache,
-        );
         self.assistant.start(cx);
         let status = self.assistant.status_text();
         self.set_status(cx, &status);
@@ -233,6 +248,7 @@ impl RouteView {
     /// The end of the instance: the location watch, the drive record.
     /// Workers end with their receivers when the view is dropped.
     pub fn shutdown(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.network_timer);
         self.cancel_location_timeout(cx);
         if self.location_state.stop() {
             cx.stop_location_updates();
@@ -247,14 +263,14 @@ impl RouteView {
         let Some(paths) = self.paths.clone() else {
             return;
         };
-        let nav_basename = nav_data::nav_basename(&paths.maps);
-        if let Some(basename) = nav_basename.clone() {
-            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, paths.chargers());
+        let nav_basenames = nav_data::nav_basenames(&paths.maps);
+        if !nav_basenames.is_empty() {
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), nav_basenames.clone(), paths.chargers());
         }
         let map = self.map(cx);
         if let Some(basename) = self.provisioner.ensure_source(cx, &map, &paths.maps) {
-            if nav_basename.is_none() {
-                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, paths.chargers());
+            if nav_basenames.is_empty() {
+                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), vec![basename], paths.chargers());
             }
         }
         self.refresh_testmap_ui(cx);
@@ -600,6 +616,9 @@ impl RouteView {
     /// Execute one broker tool and apply any layer/nav changes it made.
     /// The desktop bus (ai.rs) and the module's executor come in here too.
     pub(crate) fn execute_tool(&mut self, cx: &mut Cx, name: &str, input: &str) -> Result<String, String> {
+        if name == "weather_now" {
+            self.ensure_radar_worker(cx);
+        }
         let map = self.map(cx);
         let history_dir = self.paths.as_ref().map(|p| p.history.clone()).unwrap_or_default();
         let mut nav_action = None;
@@ -629,6 +648,58 @@ impl RouteView {
             None => {}
         }
         result
+    }
+
+    /// Offline or online everywhere the network is used: the map's and the
+    /// terrain's archives, the radar and wind workers, the assistant's
+    /// image search and cloud escalation, the tools.
+    fn apply_network(&mut self, cx: &mut Cx) {
+        let offline = self.network.offline();
+        log!("network: {}", self.network.describe());
+        self.network_allowed
+            .store(!offline, Ordering::Relaxed);
+        self.map(cx).set_cache_only(cx, offline);
+        self.terrain_layer.set_cache_only(offline);
+        self.layers.offline = offline;
+        self.assistant.set_offline(offline);
+        self.view
+            .check_box(cx, ids!(net_offline))
+            .set_active(cx, self.network.forced_offline, Animate::No);
+    }
+
+    /// The machine gained or lost its network (or the switch moved).
+    fn update_network(&mut self, cx: &mut Cx, next: NetworkState) {
+        if next == self.network {
+            return;
+        }
+        let was_offline = self.network.offline();
+        self.network = next;
+        self.apply_network(cx);
+        if was_offline != next.offline() {
+            let line = next.describe().to_string();
+            self.push_line(cx, &line);
+        }
+    }
+
+    /// The KNMI rain radar polls the network once a minute, so it starts
+    /// only when something asks for rain (the layer, or the nowcast tool),
+    /// never at launch: an offline Route makes no requests of its own.
+    fn ensure_radar_worker(&mut self, cx: &mut Cx) {
+        if self.radar_worker_started {
+            return;
+        }
+        self.radar_worker_started = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(paths) = &self.paths {
+            nav_data::start_radar_worker(
+                cx.thread_spawner(),
+                cx.task_pool(),
+                self.radar_rx.sender(),
+                paths.radar_cache(),
+                self.network_allowed.clone(),
+            );
+        }
+        let _ = cx;
     }
 
     // --- Turn-by-turn navigation -------------------------------------------
@@ -867,6 +938,7 @@ impl RouteView {
             });
         }
         let check_ids = [
+            ids!(net_offline),
             ids!(layer_rain),
             ids!(layer_wind),
             ids!(layer_terrain),
@@ -931,6 +1003,7 @@ impl RouteView {
 
         let bbox = nav_data::radar_display_bbox();
         if self.layers.rain {
+            self.ensure_radar_worker(cx);
             if let Some(radar) = &self.radar {
                 if !radar.display_frames.is_empty() {
                     map.set_rain_frames(
@@ -956,7 +1029,12 @@ impl RouteView {
                     .as_ref()
                     .map(|p| p.wind_cache())
                     .unwrap_or_default();
-                layers::start_wind_worker(cx.thread_spawner(), self.wind_rx.sender(), cache);
+                layers::start_wind_worker(
+                    cx.thread_spawner(),
+                    self.wind_rx.sender(),
+                    cache,
+                    self.network_allowed.clone(),
+                );
             }
             if let Some(update) = &self.layers.wind_cache {
                 map.set_wind_field(
@@ -992,7 +1070,11 @@ impl RouteView {
         let ui = self.ui(cx);
         if let Some(card) = self.provisioner.card() {
             if card.can_start && self.view.button(cx, ids!(testmap_start)).clicked(actions) {
-                self.provisioner.start(cx);
+                if self.network.offline() {
+                    self.set_status(cx, "Offline: the test map download needs the network");
+                } else {
+                    self.provisioner.start(cx);
+                }
                 self.refresh_testmap_ui(cx);
             }
             if self.view.button(cx, ids!(testmap_dismiss)).clicked(actions) {
@@ -1007,6 +1089,13 @@ impl RouteView {
         }
         for event in self.assistant.handle_actions(cx, &ui, actions) {
             self.on_assistant_event(cx, event);
+        }
+        if let Some(on) = self.view.check_box(cx, ids!(net_offline)).changed(actions) {
+            if let Err(error) = network::set_forced_offline(&makepad_home(), on) {
+                log!("network: cannot save the offline switch: {error}");
+            }
+            let next = NetworkState { forced_offline: on, ..self.network };
+            self.update_network(cx, next);
         }
         if self.view.button(cx, ids!(layers_button)).clicked(actions) {
             self.layers_panel_open = !self.layers_panel_open;
@@ -1118,6 +1207,10 @@ impl RouteView {
 impl Widget for RouteView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.ensure_started(cx);
+        if self.network_timer.is_event(event).is_some() {
+            let next = NetworkState { present: network::network_present(), ..self.network };
+            self.update_network(cx, next);
+        }
         if let Some(theme) = self.theme_preference.restored(event) {
             self.layers.theme = theme;
             self.layers.dirty = false;
@@ -1180,8 +1273,7 @@ impl Widget for RouteView {
         if self.nav_frame.is_event(event).is_some() {
             self.tick_nav_sim(cx);
         }
-        let ui = self.ui(cx);
-        for assistant_event in self.assistant.handle_event(cx, &ui, event) {
+        for assistant_event in self.assistant.handle_event(cx, event) {
             self.on_assistant_event(cx, assistant_event);
         }
         // The provisioner owns polling and adoption of the native bake.
@@ -1189,7 +1281,7 @@ impl Widget for RouteView {
         let provisioner_update = self.provisioner.handle_event(cx, &map);
         if let Some(basename) = provisioner_update.nav_basename {
             let chargers = self.paths.as_ref().map(|p| p.chargers()).unwrap_or_default();
-            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, chargers);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), vec![basename], chargers);
             self.push_entry(
                 cx,
                 EntryKind::Info,

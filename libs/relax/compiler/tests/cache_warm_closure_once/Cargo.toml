@@ -1,0 +1,7 @@
+[package]
+name = "cache-warm-closure-once"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]

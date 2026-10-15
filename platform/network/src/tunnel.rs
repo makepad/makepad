@@ -295,7 +295,7 @@ pub fn client_credentials(dir: &Path, addr: &str) -> io::Result<ClientCredential
     let missing = |what: &str, path: &Path| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("no tunnel {what} for {} in {} (see tools/remote/TUNNEL.md)", host_of(addr), path.display()),
+            format!("no tunnel {what} for {} in {} (see libs/remote/TUNNEL.md)", host_of(addr), path.display()),
         )
     };
     let psk_text = fs::read_to_string(&psk_path).map_err(|_| missing("key", &psk_path))?;
@@ -436,6 +436,10 @@ impl TunnelConn {
 
     pub fn set_read_timeout(&self, t: Option<std::time::Duration>) -> io::Result<()> {
         self.stream.set_read_timeout(t)
+    }
+
+    pub fn set_write_timeout(&self, t: Option<std::time::Duration>) -> io::Result<()> {
+        self.stream.set_write_timeout(t)
     }
 }
 

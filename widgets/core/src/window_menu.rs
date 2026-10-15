@@ -77,9 +77,7 @@ impl ScriptHook for WindowMenu {
                         if let Some(id) = kv.key.as_id() {
                             // Check if this is a MenuItem by checking its type
                             if let Some(val_obj) = kv.value.as_object() {
-                                if vm
-                                    .bx
-                                    .heap
+                                if vm.heap()
                                     .type_matches_id(val_obj, MenuItem::script_type_id_static())
                                 {
                                     let item = MenuItem::script_from_value(vm, kv.value);

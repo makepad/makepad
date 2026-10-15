@@ -6,7 +6,8 @@
 
 use crate::layouts::BodyRecord;
 use crate::time::{SimTime, StepDt};
-use makepad_render_kernels::compute::kernel::{Kernel, Layout};
+use makepad_render_kernels::compute::kernel::KernelRef;
+use makepad_render_kernels::RecordLayout;
 use std::sync::Arc;
 
 /// A collider.
@@ -68,7 +69,7 @@ pub enum SpawnFrom {
 /// A kernel as the stepper runs it.
 #[derive(Clone)]
 pub struct KernelCall {
-    pub kernel: Arc<Kernel>,
+    pub kernel: KernelRef,
     /// The buffer the stepper reads back (a spawn's Body records, a sim's
     /// state).
     pub buffer: String,
@@ -125,7 +126,7 @@ pub struct SpawnDesc {
 #[derive(Clone, Debug)]
 pub struct SimDesc {
     pub name: String,
-    pub state: Layout,
+    pub state: RecordLayout,
     pub count: u32,
     /// Physics steps per sim step (a sim's own step must be a whole
     /// multiple of the stepper's).

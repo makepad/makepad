@@ -82,9 +82,25 @@ fn main() {
     let mut max_sec = 0.0;
     let mut max_tokens = None;
     let mut bench_repeat = 1usize;
+    let mut backend = None;
+    let mut language: Option<String> = None;
+    let mut audio_ctx = None;
+    let mut no_timestamps = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--backend" => {
+                let value = args.next().expect("--backend requires a value");
+                assert!(matches!(value.as_str(), "cpu" | "cuda" | "metal" | "vulkan"), "unknown backend: {value}");
+                std::env::set_var("MAKEPAD_WHISPER_BACKEND", &value);
+                backend = Some(value);
+            }
+            "--language" => language = Some(args.next().expect("--language requires a value")),
+            "--no-timestamps" => no_timestamps = true,
+            "--audio-ctx" => {
+                audio_ctx = Some(args.next().expect("--audio-ctx requires a value")
+                    .parse::<usize>().expect("invalid --audio-ctx value"));
+            }
             "--max-seconds" => {
                 max_sec = args
                     .next()
@@ -111,7 +127,8 @@ fn main() {
             "--help" | "-h" => {
                 eprintln!(
                     "usage: whisper-test [model.bin] [clip.wav] \
-                     [--max-seconds N] [--max-tokens N] [--bench-repeat N]"
+                     [--max-seconds N] [--max-tokens N] [--bench-repeat N] \
+                     [--backend cpu|cuda|metal|vulkan] [--language en|zh] [--audio-ctx N] [--no-timestamps]"
                 );
                 return;
             }
@@ -122,6 +139,16 @@ fn main() {
     }
     let model_path = model_path.unwrap_or_else(|| "ggml-large-v3-turbo.bin".into());
     let wav_path = wav_path.unwrap_or_else(|| "local/whisper.cpp/samples/jfk.wav".into());
+
+    let selected = makepad_ai_speech::whisper::accel_backend_name();
+    eprintln!("backend: {selected}");
+    if let Some(requested) = &backend {
+        assert_eq!(selected, requested, "requested backend is unavailable");
+    }
+    if let Some(ctx) = audio_ctx {
+        makepad_ai_speech::whisper::set_audio_ctx(ctx);
+        eprintln!("audio_ctx: {ctx}");
+    }
 
     eprintln!("loading model: {}", model_path);
     let t0 = std::time::Instant::now();
@@ -137,6 +164,8 @@ fn main() {
     }
 
     let mut params = WhisperParams::default();
+    if let Some(language) = language { params.language = language; }
+    params.no_timestamps = no_timestamps;
     if let Some(max_tokens) = max_tokens {
         params.max_tokens = max_tokens;
         eprintln!("using max_tokens={}", max_tokens);
@@ -160,6 +189,11 @@ fn main() {
             total
         );
         makepad_ai_speech::whisper::print_profiling();
+        let actual = makepad_ai_speech::whisper::accel_backend_name();
+        eprintln!("backend after transcription: {actual}");
+        if let Some(requested) = &backend {
+            assert_eq!(actual, requested, "backend failed during transcription");
+        }
 
         if run + 1 == bench_repeat {
             for seg in &segments {

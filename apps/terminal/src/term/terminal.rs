@@ -13,7 +13,7 @@ use crate::term::parser::{Action, Csi, Dcs, Esc};
 use crate::term::screen::{CursorStyle, SavedCursor, Screen};
 use crate::term::sgr::{attributes, Attribute};
 use crate::term::style::{StyleColor, StyleFlags};
-use crate::term::unicode::{char_width, grapheme_break, GraphemeState};
+use makepad_cell_width::{char_width, grapheme_break, GraphemeState};
 
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 

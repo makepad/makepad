@@ -5,7 +5,7 @@ use makepad_widgets::*;
 app_main!(App);
 
 const SINGLE_FRAME_GIF: &[u8] = include_bytes!("../makepad_gifs/single_frame.gif");
-const ANIMATED_GIF: &[u8] = include_bytes!("../makepad_gifs/giphy.gif");
+const ANIMATED_GIF: &[u8] = include_bytes!("../makepad_gifs/spinner.gif");
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -154,9 +154,9 @@ mod tests {
         let image = ImageBuffer::from_gif(ANIMATED_GIF).unwrap();
         let animation = image.animation.unwrap();
 
-        // The embedded giphy.gif is 480 x 265 with 31 image descriptors.
-        assert_eq!(animation.width, 480);
-        assert_eq!(animation.height, 265);
-        assert_eq!(animation.num_frames, 31);
+        // spinner.gif (makepad_gifs/make_spinner_gif.py) is 96 x 96 with 12 frames.
+        assert_eq!(animation.width, 96);
+        assert_eq!(animation.height, 96);
+        assert_eq!(animation.num_frames, 12);
     }
 }

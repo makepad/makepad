@@ -1,0 +1,4 @@
+# v1: body edit after the await: the suspended future resumes in the new code (72), fresh = 42
+v1 patch out=file
+# v2: state layout changed: the suspended future finishes on the old code (72), fresh = 43
+v2 patch|reinst out=file

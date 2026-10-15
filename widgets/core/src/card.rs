@@ -50,7 +50,7 @@
 //! mean a card is not a way to make its footer bigger.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     view::ViewWidgetRefExt,

@@ -321,9 +321,30 @@ pub struct StyleSheet {
 struct Envelope {
     makepad_style: StyleSheet,
 }
+/// What a heap wears. `Inherited` is the sheet the window system handed
+/// down (`MAKEPAD_WIDGET_STYLE`, a WM's `makepad_style` event); `Picked` is
+/// what the app or somebody using it chose, `None` being the plain theme.
+/// A pick stands: the window system's sheet neither comes back over it on
+/// the next read nor replaces it when the system look changes.
+#[derive(Clone, Debug, PartialEq)]
+enum Worn {
+    Inherited(StyleSheet),
+    Picked(Option<StyleSheet>),
+}
+impl Worn {
+    fn sheet(&self) -> Option<&StyleSheet> {
+        match self {
+            Worn::Inherited(sheet) => Some(sheet),
+            Worn::Picked(sheet) => sheet.as_ref(),
+        }
+    }
+}
 #[derive(Default)]
 struct Styles {
-    heaps: HashMap<usize, StyleSheet>,
+    heaps: HashMap<usize, Worn>,
+    /// The window system's family (the environment's sheet, then its makepad_style
+    /// events), whatever the app picked for itself: `None` until read.
+    system: Option<Option<DesktopStyle>>,
 }
 
 impl StyleSheet {
@@ -392,35 +413,70 @@ pub(crate) fn gc_heaps(cx: &mut Cx, heaps: &[usize]) {
         .heaps
         .retain(|key, _| !heaps.contains(key));
 }
+/// Wear `sheet` from now on: the app's (or its user's) pick, which the
+/// window system's sheet does not override.
 pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
-    crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
-    let key = vm.bx.heap.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.insert(key, sheet);
+    wear(vm, Worn::Picked(Some(sheet)));
 }
-/// Take the sheet off again, so the next evaluation runs under the plain
-/// theme. `install` had no way back: an app that lets somebody try a sheet
-/// could put one on and never return to what it started with. A sheet named
-/// by `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) comes back on the next read, as it would have
-/// arrived in the first place.
+/// Take the sheet off: the next evaluation runs under the plain theme, and
+/// stays there. The plain theme is a pick like any sheet, so a sheet named by
+/// `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) or sent by the WM
+/// does not come back over it.
 pub fn uninstall(vm: &mut ScriptVm) {
-    let key = vm.bx.heap.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.remove(&key);
+    wear(vm, Worn::Picked(None));
+}
+fn wear(vm: &mut ScriptVm, worn: Worn) {
+    if let Some(sheet) = worn.sheet() {
+        crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
+    }
+    let key = vm.heap_key();
+    vm.cx_mut().global::<Styles>().heaps.insert(key, worn);
+}
+/// What a VM wears, taken to put back later: the sheet and whether it was
+/// picked or handed down by the window system, so a tool that tries other
+/// sheets and returns leaves an app that followed the system following it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wearing(Option<Worn>);
+impl Wearing {
+    pub fn sheet(&self) -> Option<&StyleSheet> {
+        self.0.as_ref().and_then(Worn::sheet)
+    }
+}
+/// What `vm` wears now (the environment's sheet adopted first, as any read).
+pub fn wearing(vm: &mut ScriptVm) -> Wearing {
+    current(vm);
+    let key = vm.heap_key();
+    Wearing(worn(vm.cx_mut(), key))
+}
+/// Put back what [`wearing`] took.
+pub fn put_back(vm: &mut ScriptVm, wearing: Wearing) {
+    match wearing.0 {
+        Some(worn) => wear(vm, worn),
+        None => {
+            let key = vm.heap_key();
+            vm.cx_mut().global::<Styles>().heaps.remove(&key);
+        }
+    }
+}
+/// What the heap `key` wears, if it has settled on anything yet.
+fn worn(cx: &mut Cx, key: usize) -> Option<Worn> {
+    cx.global::<Styles>().heaps.get(&key).cloned()
 }
 /// The sheet installed on the heap `key`, if any: what a VM allocated from
 /// that one inherits.
 pub(crate) fn sheet_of_heap(cx: &mut Cx, key: usize) -> Option<StyleSheet> {
-    cx.global::<Styles>().heaps.get(&key).cloned()
+    worn(cx, key)?.sheet().cloned()
 }
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
-    let key = vm.bx.heap.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
-        return Some(sheet);
+    let key = vm.heap_key();
+    if let Some(worn) = worn(vm.cx_mut(), key) {
+        return worn.sheet().cloned();
     }
     // Opt-in only. Picking a sheet from OsType restyled every app that had
     // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
     // without `script_mod` got the theme half of it and not the widget half.
     let sheet = env_sheet()?;
-    install(vm, sheet.clone());
+    wear(vm, Worn::Inherited(sheet.clone()));
     Some(sheet)
 }
 /// The sheet the environment names. `MAKEPAD_WIDGET_STYLE_FILE` is a
@@ -439,30 +495,34 @@ fn env_sheet() -> Option<StyleSheet> {
 }
 /// Read just the active appearance without cloning the Splash and SVG payloads.
 pub fn current_name(vm: &mut ScriptVm) -> Option<String> {
-    let key = vm.bx.heap.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return Some(sheet.name.clone());
+    let key = vm.heap_key();
+    if let Some(worn) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.name.clone());
     }
     current(vm).map(|sheet| sheet.name)
 }
+/// The window system's family: the sheet the environment names (the WM hands every app
+/// its look) or the WM's newest style event, independent of what the app picked for
+/// itself. What the window's controls follow under a window manager (window.rs): they are
+/// the WM's chrome, drawn by the app. `None` without a window system's sheet.
+pub fn system_style(cx: &mut Cx) -> Option<DesktopStyle> {
+    if let Some(system) = cx.global::<Styles>().system {
+        return system;
+    }
+    let system = env_sheet().map(|sheet| sheet.family);
+    cx.global::<Styles>().system = Some(system);
+    system
+}
 /// The active family, without copying a stylesheet or its assets.
 pub fn current_style(vm: &mut ScriptVm) -> DesktopStyle {
-    let key=vm.bx.heap.heap_key();
-    if let Some(sheet)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return sheet.family;
+    let key=vm.heap_key();
+    if let Some(worn)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.family).unwrap_or_default();
     }
     current(vm).map(|sheet| sheet.family).unwrap_or_default()
 }
 fn evaluate(vm: &mut ScriptVm, sheet: &StyleSheet, phase: &str, code: String) {
-    vm.eval(ScriptMod {
-        cargo_manifest_path: sheet.resources.clone(),
-        module_path: format!("desktop_style_{}_{}", sheet.name, phase),
-        file: format!("themes/{}/{phase}.splash", sheet.name),
-        line: 0,
-        column: 0,
-        code,
-        values: vec![],
-    });
+    vm.eval(ScriptMod::new(&sheet.resources, &format!("desktop_style_{}_{}", sheet.name, phase), &format!("themes/{}/{phase}.splash", sheet.name), 0, 0, &code, &[]));
 }
 pub fn apply_theme(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
@@ -471,7 +531,7 @@ pub fn apply_theme(vm: &mut ScriptVm) {
         // names them, so they are brought into line with what this one set.
         let roles = {
             let theme = vm.module(id!(theme));
-            let mut read = |key: &str| vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color();
+            let mut read = |key: &str| vm.value(theme, LiveId::from_str(key)).as_color();
             crate::theme_tokens::sheet_roles_script(&sheet.theme, &mut read)
         };
         evaluate(vm, &sheet, "roles", roles);
@@ -506,7 +566,7 @@ pub fn apply_widgets(vm: &mut ScriptVm) {
 fn without_unregistered_widgets(vm: &mut ScriptVm, code: &str) -> String {
     let widgets = vm.module(id!(widgets));
     let registered = |vm: &mut ScriptVm, name: &str| {
-        let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+        let value = vm.value(widgets, LiveId::from_str(name));
         !(value.is_nil() || value.is_err())
     };
     // How far a line opens (or closes) brackets, its comment left out.
@@ -589,9 +649,10 @@ fn resolved_entries(heap: &ScriptHeap, obj: ScriptObject) -> Vec<(String, Script
     let mut keys: Vec<ScriptValue> = Vec::new();
     let mut at = Some(obj);
     while let Some(o) = at {
-        for (key, _) in heap.map_ref(o).iter() {
-            if !keys.contains(key) {
-                keys.push(*key);
+        for e in heap.map_entries(o) {
+            let key = e.key;
+            if !keys.contains(&key) {
+                keys.push(key);
             }
         }
         at = heap.proto(o).as_object();
@@ -635,7 +696,7 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
     let text_style = script_eval!(vm, {mod.text.TextStyle});
     let widgets = vm.module(id!(stock_widgets));
     let font = "TextStyle{font_family: FontFamily{latin := FontMember{res: crate_resource(\"self:resources/Inter.ttf\") weight: 400.0 asc: 0.0 desc: 0.0}} font_size: 19.0 line_spacing: 1.7}";
-    let heap = &vm.bx.heap;
+    let heap = vm.heap();
     let is = |value: ScriptValue, proto: ScriptValue| {
         let mut at = value.as_object();
         while let Some(o) = at {
@@ -698,7 +759,7 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
     tokens.push_str("true\n");
 
     let mut writes = String::from("use mod.prelude.widgets_internal.*\n");
-    let mut names: Vec<String> = heap.map_ref(widgets).iter().filter_map(|(key, _)| key.as_id().map(|id| id.to_string())).collect();
+    let mut names: Vec<String> = heap.map_entries(widgets).into_iter().filter_map(|e| e.key.as_id().map(|id| id.to_string())).collect();
     names.sort();
     let mut seen: std::collections::HashSet<ScriptObject> = std::collections::HashSet::new();
     // Every object once, through the first path that reaches it: a write
@@ -716,12 +777,12 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
         let value = heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
         if let Some(o) = value.as_object() {
             if writable_name(name) && !spare(name) && !heap.is_fn(o) {
-                stack.push((o, format!("mod.widgets.{name}"), 0, heap.object_data(o).made_at.body));
+                stack.push((o, format!("mod.widgets.{name}"), 0, heap.made_at(o).body));
             }
         }
     }
     while let Some((obj, path, depth, body)) = stack.pop() {
-        if !seen.insert(obj) || heap.object_data(obj).tag.is_immutable() {
+        if !seen.insert(obj) || heap.is_immutable(obj) {
             continue;
         }
         for (name, value) in resolved_entries(heap, obj) {
@@ -732,7 +793,7 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
                 writes.push_str(&format!("{path}.{name} = {text}\n"));
             }
         }
-        let own = heap.map_ref(obj).iter().map(|(key, value)| (*key, value.value)).chain(heap.vec_ref(obj).iter().map(|entry| (entry.key, entry.value)));
+        let own = heap.map_entries(obj).into_iter().map(|e| (e.key, e.value)).chain(heap.vec_ref(obj).iter().map(|entry| (entry.key, entry.value)));
         let mut children = Vec::new();
         for (key, value) in own {
             let Some(name) = key.as_id().map(|id| id.to_string()) else { continue };
@@ -740,7 +801,7 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
                 continue;
             }
             if let Some(child) = value.as_object() {
-                if depth < 8 && !heap.is_fn(child) && heap.object_data(child).made_at.body == body {
+                if depth < 8 && !heap.is_fn(child) && heap.made_at(child).body == body {
                     children.push((child, format!("{path}.{name}"), depth + 1, body));
                 }
             }
@@ -767,7 +828,7 @@ pub fn everything_sheet(vm: &mut ScriptVm, spare: &dyn Fn(&str) -> bool) -> Styl
 /// the stock one tell apart. See [`everything_sheet`].
 #[doc(hidden)]
 pub fn resolution(vm: &mut ScriptVm, root: ScriptValue, what: &str) -> Vec<String> {
-    let heap = &vm.bx.heap;
+    let heap = vm.heap();
     fn text(heap: &ScriptHeap, value: ScriptValue) -> String {
         if let Some(color) = value.as_color() {
             format!("#{color:08x}")
@@ -775,26 +836,31 @@ pub fn resolution(vm: &mut ScriptVm, root: ScriptValue, what: &str) -> Vec<Strin
             heap.string_with(value, |_, s| format!("{s:?}")).unwrap_or_default()
         } else if let Some(pod) = value.as_pod() {
             let (ty, words) = heap.pod_data(pod);
-            format!("{:?}{words:?}", ty.name)
+            format!("{:?}{words:?}", ty.name())
         } else if let Some(array) = value.as_array() {
-            match heap.array_storage(array) {
-                makepad_script::ScriptArrayStorage::ScriptValue(items) => {
-                    let items: Vec<String> = items
-                        .iter()
-                        .map(|item| match item.as_object() {
-                            Some(o) => match heap.as_fn(o) {
-                                Some(face) => format!("fn {face:?}"),
-                                None => "{..}".into(),
-                            },
-                            None => text(heap, *item),
-                        })
-                        .collect();
-                    format!("[{}]", items.join(", "))
-                }
-                makepad_script::ScriptArrayStorage::F32(items) => format!("{items:?}"),
-                makepad_script::ScriptArrayStorage::U32(items) => format!("{items:?}"),
-                makepad_script::ScriptArrayStorage::U16(items) => format!("{items:?}"),
-                makepad_script::ScriptArrayStorage::U8(items) => format!("{items:?}"),
+            if let Some((front, back)) = heap.array_values(array) {
+                let items: Vec<String> = front
+                    .iter()
+                    .chain(back)
+                    .map(|item| match item.as_object() {
+                        Some(o) => match heap.as_fn(o) {
+                            Some(face) => format!("fn {face:?}"),
+                            None => "{..}".into(),
+                        },
+                        None => text(heap, *item),
+                    })
+                    .collect();
+                format!("[{}]", items.join(", "))
+            } else if let Some(items) = heap.array_f32(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u32(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u16(array) {
+                format!("{items:?}")
+            } else if let Some(items) = heap.array_u8(array) {
+                format!("{items:?}")
+            } else {
+                unreachable!("unsupported array storage kind")
             }
         } else {
             format!("{value:?}")
@@ -868,12 +934,20 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Some(sheet) = StyleSheet::parse(json) else {
         return;
     };
+    // The window system's look: it restyles an app that wears the system
+    // sheet (or has not read one yet), never one that picked its own. Its
+    // family is the window controls' style either way (`system_style`).
+    cx.global::<Styles>().system = Some(Some(sheet.family));
     let changed = cx.with_vm(|vm| {
-        if current(vm).as_ref() == Some(&sheet) {
-            return false;
+        let key = vm.heap_key();
+        match worn(vm.cx_mut(), key) {
+            Some(Worn::Picked(_)) => false,
+            Some(Worn::Inherited(worn)) if worn == sheet => false,
+            _ => {
+                wear(vm, Worn::Inherited(sheet));
+                true
+            }
         }
-        install(vm, sheet);
-        true
     });
     if changed {
         cx.request_style_reload();
@@ -885,6 +959,22 @@ mod tests {
     use super::*;
 
     use crate::sheet_checks;
+
+    /// A tool that tries a sheet and goes back (the Tweaker's lab and
+    /// builder, a token resolve) leaves an app that wore the window system's
+    /// sheet still following the system, not holding that sheet as a pick.
+    #[test]
+    fn put_back_keeps_a_system_sheet_the_systems() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let send = |cx: &mut Cx, id: &str| handle_event(cx, &Event::Custom(StyleSheet::named(id).unwrap().to_json()));
+        send(&mut cx, "macos");
+        let before = cx.with_vm(wearing);
+        cx.with_vm(|vm| install(vm, StyleSheet::named("windows").unwrap()));
+        cx.with_vm(|vm| put_back(vm, before));
+        send(&mut cx, "macos-dark");
+        assert_eq!(cx.with_vm(current_name).as_deref(), Some("macos-dark"), "put_back turned the system's sheet into a pick");
+    }
 
     /// A row of fields is one height, under every sheet in the catalogue.
     #[test]
@@ -955,10 +1045,7 @@ mod tests {
                 let errors = vm.take_errors();
                 assert!(errors.is_empty(), "{}: {:?}", style.id(), errors);
                 let theme = vm.module(id!(theme));
-                let radius = vm
-                    .bx
-                    .heap
-                    .value(theme, id!(corner_radius).into(), NoTrap)
+                let radius = vm.value(theme, id!(corner_radius))
                     .as_f64()
                     .unwrap();
                 assert_eq!(
@@ -985,14 +1072,12 @@ mod tests {
             crate::script_mod(vm);
             for (style, dark) in [DesktopStyle::Macos, DesktopStyle::Windows, DesktopStyle::Ios, DesktopStyle::Android].into_iter().flat_map(|s| [false, true, false].map(|d|(s,d))) {
                 install(vm, StyleSheet::load(style.sheet(dark)));
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 assert!(vm.take_errors().is_empty());
                 let theme = vm.module(id!(theme));
                 assert_eq!(
-                    vm.bx
-                        .heap
-                        .value(theme, id!(color_bg_app).into(), NoTrap)
+                    vm.value(theme, id!(color_bg_app))
                         .as_color(),
                     Some(match (style, dark) {
                         (DesktopStyle::Macos, true) => 0x28282aff, (DesktopStyle::Macos, false) => 0xecececff,
@@ -1002,22 +1087,14 @@ mod tests {
                     })
                 );
                 let widgets = vm.module(id!(widgets));
-                let button = vm
-                    .bx
-                    .heap
-                    .value(widgets, id!(Button).into(), NoTrap)
+                let button = vm.value(widgets, id!(Button))
                     .as_object()
                     .unwrap();
-                let draw = vm
-                    .bx
-                    .heap
-                    .value(button, id!(draw_bg).into(), NoTrap)
+                let draw = vm.value(button, id!(draw_bg))
                     .as_object()
                     .unwrap();
                 assert_eq!(
-                    vm.bx
-                        .heap
-                        .value(draw, id!(border_radius).into(), NoTrap)
+                    vm.value(draw, id!(border_radius))
                         .as_f64(),
                     Some(match style {DesktopStyle::Macos=>3.0,DesktopStyle::Ios=>22.0,DesktopStyle::Android=>24.0,_=>4.0})
                 );
@@ -1098,7 +1175,7 @@ mod tests {
             let shows = |vm: &mut ScriptVm| {
                 let window = script_eval!(vm, {mod.widgets.Window{}});
                 let obj = window.as_object().expect("a window object");
-                vm.bx.heap.value(obj, id!(show_bg).into(), NoTrap).as_bool()
+                vm.value(obj, id!(show_bg)).as_bool()
             };
             assert_eq!(shows(vm), Some(false), "the stock window draws no ground");
             let ground = StyleSheet {
@@ -1119,13 +1196,13 @@ mod tests {
                 icons: Vec::new(),
             };
             install(vm, ground);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(crate::script_mod);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "the ground sheet does not evaluate: {errors:?}");
             assert_eq!(shows(vm), Some(true), "the sheet's ground is on");
             let source = script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Window.draw_bg, "hlsl", false)});
-            let text = vm.bx.heap.string_with(source, |_heap, text| text.to_string()).expect("source");
+            let text = vm.heap().string_with(source, |_heap, text| text.to_string()).expect("source");
             assert!(!text.starts_with("ERRORS"), "the sheet's ground does not compile: {text}");
             assert!(text.contains("_grain("), "the window draws the sheet's pixel, not its own");
             // And a switch back to a sheet without a ground turns it off.
@@ -1183,7 +1260,7 @@ mod tests {
                 icons: Vec::new(),
             };
             install(vm, sheet);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(crate::script_mod);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "the example sheet does not evaluate: {errors:?}");
@@ -1191,7 +1268,7 @@ mod tests {
                 ("Readout", "_digit(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Readout.draw_bg, "hlsl", false)})),
                 ("Lamp", "_sd_chamfer(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Lamp.draw_bg, "hlsl", false)})),
             ] {
-                let text = vm.bx.heap.string_with(value, |_heap, text| text.to_string()).expect("source");
+                let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("source");
                 assert!(!text.starts_with("ERRORS"), "{name} does not compile under the example: {text}");
                 assert!(text.contains(own), "{name} does not draw the sheet's face");
             }
@@ -1212,7 +1289,7 @@ mod tests {
         let live = ["Button", "TextInput", "CheckBox", "DropDown", "ScrollBar", "Label"]
             .into_iter()
             .flat_map(|name| {
-                let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                let value = vm.value(widgets, LiveId::from_str(name));
                 resolution(vm, value, name)
             })
             .collect();
@@ -1241,7 +1318,7 @@ mod tests {
             assert!(sheet.theme.lines().count() > 400, "the sheet sets only {} tokens", sheet.theme.lines().count());
             assert!(sheet.widgets.lines().count() > 5_000, "the sheet sets only {} leaves", sheet.widgets.lines().count());
             install(vm, sheet);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(crate::script_mod);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "the sheet does not evaluate: {errors:?}");

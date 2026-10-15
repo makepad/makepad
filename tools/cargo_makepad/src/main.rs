@@ -14,8 +14,6 @@ mod desktop_bundle;
 #[cfg(not(target_arch = "wasm32"))]
 mod font_assets;
 #[cfg(not(target_arch = "wasm32"))]
-mod open_harmony;
-#[cfg(not(target_arch = "wasm32"))]
 mod server_manager;
 #[cfg(not(target_arch = "wasm32"))]
 mod tunnel;
@@ -41,8 +39,6 @@ pub use makepad_network;
 pub use makepad_shell;
 #[cfg(not(target_arch = "wasm32"))]
 pub use makepad_wasm_strip;
-#[cfg(not(target_arch = "wasm32"))]
-use open_harmony::*;
 #[cfg(not(target_arch = "wasm32"))]
 use tunnel::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -224,37 +220,6 @@ fn show_help() {
     println!("    android [options] expand-sdk");
     println!("    android [options] remove-sdk-sources");
     println!();
-    println!("Open Harmony commands:");
-    println!();
-    println!(
-        "    ohos [options] install-toolchain             Install the toolchain needed with rustup"
-    );
-    println!(
-        "    ohos [options] deveco <cargo args>           Create a DevEco project for Open Harmony OS"
-    );
-    println!(
-        "    ohos [options] build <cargo args>            Build  DevEco project and output the Hap package for the Open Harmony OS"
-    );
-    println!(
-        "    ohos [options] run <cargo args>              Run the Hap package on a open harmony device via hdc"
-    );
-    println!(
-        "    ohos [options] hilog <cargo args>            Get hilog from open harmony device via hdc"
-    );
-    println!("    ohos [options] cdylib <cargo args>           Build makepad shared library only");
-    println!();
-    println!("    [options]:");
-    println!();
-    println!(
-        "       --arch='aarch64'                          The target architecture for the OHOS target device (defaults to the current architecture)."
-    );
-    println!(
-        "       --deveco-home='deveco_path'               The path of DevEco program, this parameter can also be specified by environment variable \"DEVECO_HOME\""
-    );
-    println!(
-        "       --remote='<hdcip:port>'                   Remote hdc service, this parameter can also be specified by environment variable \"HDC_REMOTE\""
-    );
-    println!();
     println!("Desktop commands:");
     println!();
     println!(
@@ -307,7 +272,7 @@ fn show_help() {
     println!();
     println!("Tunnel commands:");
     println!();
-    println!("    (the server is `makepad-remote --server`; keys and pins: tools/remote/TUNNEL.md)");
+    println!("    (the server is `makepad-remote --server`; keys and pins: libs/remote/TUNNEL.md)");
     println!(
         "    tunnel <ip:port> cargo <args...>             Sync changed files and run cargo through tunnel"
     );
@@ -321,19 +286,6 @@ fn show_help() {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
-
-    // `RUSTC_WRAPPER` mode for the Android super-app pack: cargo runs the
-    // `makepad-dyn-rustc` link to this binary as `makepad-dyn-rustc <rustc>
-    // <args…>`. Both the name and the env var must say so: a bare inherited
-    // env var never diverts an ordinary `cargo makepad` command.
-    let invoked_as_wrapper = args
-        .first()
-        .and_then(|a| std::path::Path::new(a).file_stem())
-        .map(|stem| stem == "makepad-dyn-rustc")
-        .unwrap_or(false);
-    if invoked_as_wrapper && std::env::var_os("MAKEPAD_DYN_RUSTC_WRAPPER").is_some() && args.len() > 1 {
-        android_rustc_wrapper(&args[1..]);
-    }
 
     // Skip the first argument if it's the binary path or 'cargo'
     let args = if args.len() > 1
@@ -359,7 +311,7 @@ fn main() -> Result<(), Cow<'static, str>> {
     // rebuilds; packaged builds are shipped, so they are built whole
     // (every cargo this process spawns inherits the override). An explicit
     // CARGO_PROFILE_RELEASE_INCREMENTAL in the environment still wins.
-    let packaging = matches!(args[0].as_str(), "android" | "apple" | "wasm" | "ohos")
+    let packaging = matches!(args[0].as_str(), "android" | "apple" | "wasm")
         || (args[0] == "desktop" && args.get(1).map(String::as_str) == Some("build"));
     if packaging && std::env::var_os("CARGO_PROFILE_RELEASE_INCREMENTAL").is_none() {
         std::env::set_var("CARGO_PROFILE_RELEASE_INCREMENTAL", "false");
@@ -370,7 +322,6 @@ fn main() -> Result<(), Cow<'static, str>> {
         "desktop" => handle_desktop(&args[1..]),
         "wasm" => handle_wasm(&args[1..]),
         "apple" => handle_apple(&args[1..]),
-        "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
         "tunnel" => handle_tunnel(&args[1..]),
         unsupported => {

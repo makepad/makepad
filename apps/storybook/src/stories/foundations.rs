@@ -10,7 +10,6 @@
 //! cards and stacks at every step, and controls beside rulers.
 use crate::makepad_widgets::animator::Ease;
 use crate::makepad_widgets::file_tree::*;
-use crate::makepad_widgets::makepad_script::trap::NoTrap;
 use makepad_widgets_tweaker::reflect::{theme_values, ThemeVal};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
@@ -705,7 +704,7 @@ pub fn theme_ease(cx: &mut Cx, name: &str) -> Ease {
     let key = LiveId::from_str(name);
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+        let value = vm.value(theme, key);
         Ease::script_from_value(vm, value)
     })
 }

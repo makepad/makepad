@@ -30,11 +30,10 @@ const P2: f32 = -2.7667332906e-3; /* -0xb55215.0p-32 */
 ///
 /// Calculate the exponential of `x`, that is, *e* raised to the power `x`
 /// (where *e* is the base of the natural system of logarithms, approximately 2.71828).
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn expf(mut x: f32) -> f32 {
     select_implementation! {
         name: x87_expf,
-        use_arch_required: x86_no_sse,
+        use_arch_required: all(target_arch = "x86", not(target_feature = "sse")),
         args: x,
     }
 

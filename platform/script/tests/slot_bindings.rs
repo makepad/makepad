@@ -6,22 +6,17 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn run(name: &str, code: &str) -> (ScriptValue, Vec<String>) {
     let mut vm = test_vm();
     vm.bx.captured_errors = Some(Vec::new());
     let value = vm.with_instruction_limit(1_000_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: format!("slot_bindings_{name}"),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", &format!("slot_bindings_{name}"), 0, 0, &code, &[]))
     });
     let mut errs: Vec<String> = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| format!("{e:?}")).collect();
     errs.extend(vm.take_errors().into_iter().map(|e| format!("{e:?}")));

@@ -22,7 +22,7 @@
 //! Slots are per thread (each thread's instance has its own table), so the
 //! registry is thread local.
 
-use crate::AudioShader;
+use crate::{AudioShader, AudioShaderBody};
 use makepad_script_compute::wasm::{self as backend, Entry, Target};
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ pub fn module(shaders: &[&AudioShader], target: Target) -> Option<Vec<u8>> {
 }
 
 /// Words of the `frame` scratch a call of `shader`'s entry needs (its
-/// `scratch` from [`AudioShader::new_scratch`] is always large enough).
+/// `scratch` of [`AudioShader::scratch_words`] words is always large enough).
 pub fn frame_words(shader: &AudioShader) -> usize {
     backend::frame_words(&shader.render, false)
 }
@@ -88,8 +88,8 @@ pub(crate) fn run_slot(shader: &AudioShader, slot: u32, ctx: &mut [u32], state: 
 
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn recorded() -> &'static (std::sync::mpsc::Sender<Arc<AudioShader>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShader>>>) {
-    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Arc<AudioShader>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShader>>>)> = std::sync::OnceLock::new();
+fn recorded() -> &'static (std::sync::mpsc::Sender<Arc<AudioShaderBody>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShaderBody>>>) {
+    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Arc<AudioShaderBody>>, std::sync::Mutex<std::sync::mpsc::Receiver<Arc<AudioShaderBody>>>)> = std::sync::OnceLock::new();
     Q.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         (tx, std::sync::Mutex::new(rx))
@@ -105,12 +105,34 @@ pub fn record_compiled(on: bool) {
 /// The shaders compiled while recording, since the last call. Several
 /// compiles of one program each appear; dedupe by
 /// [`AudioShader::program_key`].
-pub fn take_recorded() -> Vec<Arc<AudioShader>> {
-    let Ok(rx) = recorded().1.lock() else { return Vec::new() };
-    rx.try_iter().collect()
+#[inline(always)]
+pub fn take_recorded() -> Vec<crate::AudioShaderRef> {
+    let mut batch = take_recorded_batch();
+    let mut shaders = Vec::new();
+    while let Some(shader) = batch.next_shader() {
+        shaders.push(shader);
+    }
+    shaders
 }
 
-pub(crate) fn note_compiled(shader: &Arc<AudioShader>) {
+/// An owned recording batch; its Arc values are never read by the caller.
+pub struct RecordedShaders(std::vec::IntoIter<Arc<AudioShaderBody>>);
+
+impl RecordedShaders {
+    pub fn next_shader(&mut self) -> Option<crate::AudioShaderRef> {
+        self.0.next().map(crate::AudioShaderRef::from_arc)
+    }
+}
+
+pub fn take_recorded_batch() -> Box<RecordedShaders> {
+    let shaders: Vec<_> = match recorded().1.lock() {
+        Ok(rx) => rx.try_iter().collect(),
+        Err(_) => Vec::new(),
+    };
+    Box::new(RecordedShaders(shaders.into_iter()))
+}
+
+pub(crate) fn note_compiled(shader: &Arc<AudioShaderBody>) {
     if RECORDING.load(std::sync::atomic::Ordering::Relaxed) {
         recorded().0.send(shader.clone()).ok();
     }

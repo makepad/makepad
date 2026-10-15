@@ -2014,7 +2014,6 @@ mod tests {
     }
     use super::*;
     use crate::makepad_script::script;
-    use crate::makepad_script::trap::NoTrap;
 
     fn metrics() -> LineMetrics {
         LineMetrics { line_length: 20.0, line_step: 5.0, line_min: 6.0, hover_extra: 10.0, current_extra: 4.0 }
@@ -2029,15 +2028,13 @@ mod tests {
     /// restate it.
     fn theme_ease(vm: &mut ScriptVm, token: &str) -> Ease {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(token));
         Ease::script_from_value(vm, value)
     }
 
     fn theme_number(vm: &mut ScriptVm, token: &str) -> f64 {
         let theme = vm.module(id!(theme));
-        vm.bx
-            .heap
-            .value(theme, LiveId::from_str(token).into(), NoTrap)
+        vm.value(theme, LiveId::from_str(token))
             .as_f64()
             .unwrap_or_else(|| panic!("the theme has no number {token}"))
     }
@@ -2163,9 +2160,7 @@ mod tests {
                     mod.shader.test_compile_draw_source(mod.widgets.LineMenu.draw_label, "glsl", false)
                 })),
             ] {
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");

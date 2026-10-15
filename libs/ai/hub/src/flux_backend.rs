@@ -61,13 +61,45 @@ pub struct FluxBackend {
     worker: Option<(u64, flux_worker::FluxWorker)>,
 }
 
-/// File name (relative to the ComfyUI-style `checkpoints/` dir) resolved
-/// from the registry entry once `ensure_loaded` has the file on disk. The
-/// canonical flux models are combined single-file FP8 checkpoints carrying
-/// all four components (DiT FP8 + T5XXL FP8 + CLIP-L FP16 + VAE F32).
+/// The files resolved from the registry entry once `ensure_loaded` has
+/// them on disk: a combined single-file FP8 checkpoint carrying all four
+/// components (DiT FP8 + T5XXL FP8 + CLIP-L FP16 + VAE F32), or a split
+/// model whose DiT is a block-quant GGUF under `unet/` beside the shared
+/// `text_encoders/` (clip_l, t5xxl) and `vae/` files other flux entries pin.
 struct ReadyFiles {
     cache_dir: PathBuf,
-    checkpoint_name: String,
+    files: FluxFiles,
+}
+
+enum FluxFiles {
+    Checkpoint(String),
+    Split { unet: String, vae: String, clip_l: String, t5xxl: String },
+}
+
+impl FluxFiles {
+    fn of(spec: &ModelSpec) -> Result<FluxFiles, AssetAiError> {
+        if spec.files.iter().any(|file| file.cache_as.starts_with("unet/")) {
+            return Ok(FluxFiles::Split {
+                unet: name_under(spec, "unet", None)?,
+                vae: name_under(spec, "vae", None)?,
+                clip_l: name_under(spec, "text_encoders", Some("clip_l"))?,
+                t5xxl: name_under(spec, "text_encoders", Some("t5xxl"))?,
+            });
+        }
+        Ok(FluxFiles::Checkpoint(name_under(spec, "checkpoints", None)?))
+    }
+
+    fn bundle(&self, roots: &ComfyModelRoots) -> Result<FluxResolvedBundle, DiffusionError> {
+        match self {
+            FluxFiles::Checkpoint(name) => FluxResolvedBundle::from_checkpoint(roots.checkpoints_dir.join(name)),
+            FluxFiles::Split { unet, vae, clip_l, t5xxl } => FluxResolvedBundle::from_split(
+                roots.unet_dir.join(unet),
+                roots.vae_dir.join(vae),
+                Some(roots.text_encoders_dir.join(clip_l)),
+                Some(roots.text_encoders_dir.join(t5xxl)),
+            ),
+        }
+    }
 }
 
 /// True when this machine can actually execute the canonical FP8 flux tier:
@@ -193,9 +225,12 @@ impl ContentBackend for FluxBackend {
         }
         // Idempotent: after the first success only the presence check runs.
         ctx.ensure_files()?;
+        // The T5 tokenizer table, downloaded with the model (not in git).
+        makepad_ai_flux::t5::load_tokenizer_from(ctx.cache_dir)
+            .map_err(|e| AssetAiError::Backend(format!("model {}: {e}", ctx.spec.id)))?;
         self.ready = Some(ReadyFiles {
             cache_dir: ctx.cache_dir.to_path_buf(),
-            checkpoint_name: name_under(ctx.spec, "checkpoints", None)?,
+            files: FluxFiles::of(ctx.spec)?,
         });
         Ok(())
     }
@@ -218,10 +253,7 @@ impl ContentBackend for FluxBackend {
         progress("prepare", 0.01);
         cancel.check()?;
         let roots = ComfyModelRoots::new(&ready.cache_dir);
-        let bundle = FluxResolvedBundle::from_checkpoint(
-            roots.checkpoints_dir.join(&ready.checkpoint_name),
-        )
-        .map_err(diffusion_err)?;
+        let bundle = ready.files.bundle(&roots).map_err(diffusion_err)?;
         // LoRA adapters live in the operator drop-box next to the model
         // cache; a missing name fails the job loudly with the available
         // list rather than rendering an un-adapted image.
@@ -393,11 +425,6 @@ mod flux_worker {
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<FluxWorker>)> =
         std::sync::Mutex::new((0, None));
 
-    /// Upper bound on a release acknowledgement. Generous because the release
-    /// queues behind whatever the thread is doing; a real free of a resident
-    /// FP8 stack is well under a second.
-    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
     /// Frees EVERY device allocation this pipeline thread owns — on this
     /// thread, the only place they can be freed from.
     ///
@@ -501,17 +528,11 @@ mod flux_worker {
             self.tx.send(WorkerCmd::Release(ack_tx)).map_err(|_| {
                 FluxWorkerError::WorkerGone("flux worker thread is gone".to_string())
             })?;
-            ack_rx
-                .recv_timeout(RELEASE_TIMEOUT)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Disconnected => FluxWorkerError::WorkerGone(
-                        "flux worker dropped the release reply".to_string(),
-                    ),
-                    mpsc::RecvTimeoutError::Timeout => FluxWorkerError::Other(format!(
-                        "flux worker did not acknowledge the device release within {}s",
-                        RELEASE_TIMEOUT.as_secs()
-                    )),
-                })
+            // The release queues behind whatever the thread is doing, so it is
+            // waited for while the worker lives; only its death is a failure.
+            crate::progress_watch::release_reply(&ack_rx, "flux").map_err(|_| {
+                FluxWorkerError::WorkerGone("flux worker dropped the release reply".to_string())
+            })
         }
 
         /// Blocks until the generation finishes, forwarding progress events

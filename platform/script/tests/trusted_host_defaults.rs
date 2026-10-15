@@ -9,7 +9,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new((), ())));
     let mut vm = ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     };
     vm.bx.captured_errors = Some(Vec::new());
@@ -17,11 +17,7 @@ fn test_vm() -> ScriptVm<'static> {
 }
 
 fn eval(vm: &mut ScriptVm, name: &str, code: &str) -> ScriptValue {
-    vm.eval(ScriptMod {
-        file: format!("trusted_host_{name}.splash"),
-        code: format!("{code}\n;"),
-        ..Default::default()
-    })
+    vm.eval(ScriptMod::new("", "", &format!("trusted_host_{name}.splash"), 0, 0, &format!("{code}\n;"), &[]))
 }
 
 /// A host-side error with no script running: Rust calls a value that is not a

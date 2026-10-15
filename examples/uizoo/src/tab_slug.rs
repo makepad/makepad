@@ -126,7 +126,7 @@ script_mod! {
     mod.widgets.DemoSlug = UIZooTabLayout_B{
         desc +: {
             Markdown{
-                body: "# SLUG\n\nThese demos compare the same text widget below and above the current Linux SLUG cutoff.\n\nOnly the text size changes between the left and right columns. On Linux, the left column should stay on the raster/MSDF text path while the right column should switch to SLUG. On other platforms, both columns may already use SLUG.\n\nThe lower diagnostic section intentionally adds redundant large-text probes so we can tell whether Linux SLUG failures are tied to glyph shape, color source, or custom `get_color()` logic."
+                body: "# SLUG\n\nAll text draws as SLUG curves on every platform and size. These demos compare the same text widget at a small and a large size.\n\nOnly the text size changes between the left and right columns; both should look the same apart from scale. The lower diagnostic section adds large-text probes for glyph shape, color source and custom `get_color()` logic."
             }
         }
         demos +: {
@@ -135,8 +135,8 @@ script_mod! {
             UIZooRowH{
                 align: Align{x: 0. y: 0.}
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Below Linux cutoff"}
-                    SlugDemoNote{text: "32 px Label text. Expected to stay on the normal text path on Linux."}
+                    SlugDemoTitle{text: "Small"}
+                    SlugDemoNote{text: "32 px Label text."}
                     Label{
                         draw_text +: {
                             text_style +: {
@@ -147,8 +147,8 @@ script_mod! {
                     }
                 }
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Above Linux cutoff"}
-                    SlugDemoNote{text: "192 px Label text. Expected to use SLUG on Linux."}
+                    SlugDemoTitle{text: "Large"}
+                    SlugDemoNote{text: "192 px Label text."}
                     Label{
                         draw_text +: {
                             text_style +: {
@@ -166,7 +166,7 @@ script_mod! {
             UIZooRowH{
                 align: Align{x: 0. y: 0.}
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Gradient below cutoff"}
+                    SlugDemoTitle{text: "Gradient small"}
                     SlugDemoNote{text: "32 px LabelGradientX text."}
                     LabelGradientX{
                         draw_text +: {
@@ -180,7 +180,7 @@ script_mod! {
                     }
                 }
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Gradient above cutoff"}
+                    SlugDemoTitle{text: "Gradient large"}
                     SlugDemoNote{text: "192 px LabelGradientX text."}
                     LabelGradientX{
                         draw_text +: {
@@ -197,11 +197,11 @@ script_mod! {
 
             Hr{}
             H4{text: "Custom Text Shader"}
-            P{text: "Both sides use the same Label shader override. This makes it easy to compare custom get_color logic across non-SLUG and SLUG rendering on Linux."}
+            P{text: "Both sides use the same Label shader override. This compares custom get_color logic at two sizes."}
             UIZooRowH{
                 align: Align{x: 0. y: 0.}
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Custom shader below cutoff"}
+                    SlugDemoTitle{text: "Custom shader small"}
                     SlugDemoNote{text: "32 px Label with a custom get_color function."}
                     Label{
                         draw_text +: {
@@ -217,7 +217,7 @@ script_mod! {
                     }
                 }
                 SlugDemoCard{
-                    SlugDemoTitle{text: "Custom shader above cutoff"}
+                    SlugDemoTitle{text: "Custom shader large"}
                     SlugDemoNote{text: "192 px Label with the same custom get_color function."}
                     Label{
                         draw_text +: {
@@ -236,11 +236,11 @@ script_mod! {
 
             Hr{}
             H4{text: "LinkLabel"}
-            P{text: "This row uses the same interactive text widget at two sizes so you can compare the path switch on Linux with built-in link styling."}
+            P{text: "This row uses the same interactive text widget at two sizes with built-in link styling."}
             UIZooRowH{
                 align: Align{x: 0. y: 0.}
                 SlugDemoCard{
-                    SlugDemoTitle{text: "LinkLabel below cutoff"}
+                    SlugDemoTitle{text: "LinkLabel small"}
                     SlugDemoNote{text: "28 px LinkLabel text."}
                     LinkLabel{
                         draw_text +: {
@@ -255,7 +255,7 @@ script_mod! {
                     }
                 }
                 SlugDemoCard{
-                    SlugDemoTitle{text: "LinkLabel above cutoff"}
+                    SlugDemoTitle{text: "LinkLabel large"}
                     SlugDemoNote{text: "144 px LinkLabel text."}
                     LinkLabel{
                         draw_text +: {
@@ -273,7 +273,7 @@ script_mod! {
 
             Hr{}
             H4{text: "Diagnostic Matrix"}
-            P{text: "These extra probes all stay above the Linux SLUG cutoff. They are meant to help isolate whether the disappearing text is tied to plain single-color Labels, inherited theme colors, custom get_color logic, or specific glyph shapes."}
+            P{text: "These extra probes use large text. They are meant to help isolate whether the disappearing text is tied to plain single-color Labels, inherited theme colors, custom get_color logic, or specific glyph shapes."}
 
             H4{text: "Color Source Probes"}
             P{text: "Same large Label widget, same text, different color sources. If only some of these disappear after SLUG promotion, that narrows the bug quickly."}

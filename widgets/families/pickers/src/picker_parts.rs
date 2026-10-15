@@ -328,7 +328,6 @@ mod tests {
         // defaults are the shaders registered here, so those have to be
         // standing first. The order is only a list of calls in lib.rs, and
         // nothing else says when it has been sorted.
-        let lib = crate::FAMILY_LIB;
         let calls = crate::widgets_mod_source();
         let at = |module: &str| {
             calls.find(&format!("crate::{module}::script_mod(vm);"))

@@ -337,6 +337,13 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
             // A new text block after tool calls starts on its own line (an
             // MCP-tool turn narrates between calls).
             let event = v.get("event");
+            if event.and_then(|e| e.get("type")).and_then(Value::as_str) == Some("content_block_start") {
+                let block = event.and_then(|e| e.get("content_block"));
+                if matches!(block.and_then(|b| b.get("type")).and_then(Value::as_str), Some("tool_use" | "server_tool_use")) {
+                    let name = block.and_then(|b| b.get("name")).and_then(Value::as_str).unwrap_or("tool");
+                    events.push(ProviderEvent::Status { note: format!("Using {name}…"), permille: 0 });
+                }
+            }
             if event.and_then(|e| e.get("type")).and_then(Value::as_str) == Some("content_block_start")
                 && event.and_then(|e| e.get("content_block")).and_then(|b| b.get("type")).and_then(Value::as_str) == Some("text")
                 && !state.collected.is_empty() && !state.collected.ends_with('\n')
@@ -366,6 +373,9 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
                         events.push(ProviderEvent::Delta(text.to_string()));
                     }
                 }
+                Some("input_json_delta") => {
+                    events.push(ProviderEvent::Status { note: "Writing tool arguments…".into(), permille: 0 });
+                }
                 _ => {}
             }
         }
@@ -378,6 +388,10 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
                 v.get("message").and_then(|m| m.get("content")).and_then(Value::as_arr)
             {
                 for block in content {
+                    if matches!(block.get("type").and_then(Value::as_str), Some("tool_use" | "server_tool_use")) {
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        events.push(ProviderEvent::Status { note: format!("Using {name}…"), permille: 0 });
+                    }
                     if block.get("type").and_then(Value::as_str) == Some("text") {
                         if let Some(t) = block.get("text").and_then(Value::as_str) {
                             full.push_str(t);
@@ -396,6 +410,16 @@ pub fn parse_stream_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEven
                     state.collected = full;
                 }
             }
+        }
+        Some("user") => {
+            if v.get("message").and_then(|m| m.get("content")).and_then(Value::as_arr)
+                .is_some_and(|blocks| blocks.iter().any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")))
+            {
+                events.push(ProviderEvent::Status { note: "Tool result received".into(), permille: 0 });
+            }
+        }
+        Some("tool_progress") => {
+            events.push(ProviderEvent::Status { note: "Tool is running…".into(), permille: 0 });
         }
         Some("result") => {
             close_think(state, &mut events);
@@ -650,5 +674,24 @@ mod tests {
         assert_eq!(text, "<think>hmm.</think>\nhi there");
         assert!(matches!(all.last(), Some(ProviderEvent::Done { text }) if text == "hi there"));
         assert_eq!(state.session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn tool_activity_is_reported_as_status_events() {
+        let mut state = ParseState::default();
+        let mut notes = Vec::new();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"tool_progress"}"#,
+        ] {
+            let (events, _) = parse_stream_line(&json::parse(line.as_bytes()).unwrap(), &mut state);
+            notes.extend(events.into_iter().filter_map(|e| match e {
+                ProviderEvent::Status { note, .. } => Some(note),
+                _ => None,
+            }));
+        }
+        assert_eq!(notes, ["Using Read…", "Writing tool arguments…", "Tool result received", "Tool is running…"]);
     }
 }

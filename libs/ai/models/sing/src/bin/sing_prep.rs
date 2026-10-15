@@ -110,6 +110,7 @@ fn lyrics(src: &Path, out: &Path) {
 }
 
 fn main() {
+    makepad_ai_speech::g2p::data::load_default().unwrap_or_else(|e| panic!("{e}"));
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 4 && args[1] == "lyrics" {
         std::fs::create_dir_all(&args[3]).unwrap();

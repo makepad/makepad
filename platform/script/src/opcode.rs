@@ -1,5 +1,7 @@
+use makepad_relax_api::relax_api;
 use std::fmt;
 
+#[relax_api(plain)]
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub struct OpcodeArgs(pub(crate) u32);
 
@@ -75,6 +77,7 @@ impl OpcodeArgs {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Opcode(pub u8);
 impl Opcode {
@@ -262,6 +265,14 @@ impl Opcode {
     // `var name = value` in a slot-compiled body: LET_SLOT for the VM, a
     // mutable binding for the shader compiler.
     pub const VAR_SLOT: Self = Self(142); // arg = slot; stack [id, value] -> [], slot = value
+
+    // Named-child slots through a dotted path (`a.b.c +: {..}`, `a.b.c := v`):
+    // the stack holds [parent, name] and the parent is a value, not `me`.
+    /// `+:` read: the proto for the block, as PROTO_INHERIT_READ finds it on `me`
+    /// (the instance copy of what the parent holds, else the type default).
+    pub const FIELD_SLOT_READ: Self = Self(143); // stack [parent, name] -> [parent, name, proto]
+    /// `:=` through a path: replace the parent's named vec child in place, else append.
+    pub const ASSIGN_FIELD_VEC: Self = Self(144); // stack [parent, name, value] -> [nil]
 }
 
 impl fmt::Debug for OpcodeArgs {
@@ -458,6 +469,8 @@ impl Opcode {
             Self::ASSIGN_SLOT_MOD => Some("slot%="),
             Self::NIL_ARM => Some("nil_arm"),
             Self::VAR_SLOT => Some("var_slot"),
+            Self::FIELD_SLOT_READ => Some("<field_slot_rd>"),
+            Self::ASSIGN_FIELD_VEC => Some(".:="),
             _ => None,
         }
     }

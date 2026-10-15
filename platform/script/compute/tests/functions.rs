@@ -2,20 +2,19 @@
 //! element's own state (its index, the output record's address, its
 //! locals) survives the calls on every backend.
 
-use makepad_script_compute::kernel::{compile_with, FieldTy, Layout, LayoutField};
+use makepad_script_compute_sched::kernel::KernelExt;
+use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::{compile_with, FieldTy};
 use makepad_script_compute::Backend;
 
-fn segment() -> Layout {
-    Layout {
-        name: "Segment".into(),
-        stride: 11,
-        fields: vec![
-            LayoutField { name: "a".into(), ty: FieldTy::Vec3, offset: 0 },
-            LayoutField { name: "b".into(), ty: FieldTy::Vec3, offset: 3 },
-            LayoutField { name: "color".into(), ty: FieldTy::Vec4, offset: 6 },
-            LayoutField { name: "width".into(), ty: FieldTy::F32, offset: 10 },
-        ],
-    }
+fn segment() -> LayoutView<'static> {
+    const FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "a", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "b", ty: FieldTy::Vec3, offset: 3 },
+        LayoutFieldView { name: "color", ty: FieldTy::Vec4, offset: 6 },
+        LayoutFieldView { name: "width", ty: FieldTy::F32, offset: 10 },
+    ];
+    LayoutView { name: "Segment", stride: 11, fields: FIELDS }
 }
 
 const SRC: &str = r#"

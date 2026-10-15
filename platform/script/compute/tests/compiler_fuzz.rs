@@ -4,8 +4,10 @@
 //! interpreted with bit-equal results, never writing outside its buffers
 //! (guard words on both sides of every buffer).
 
-use makepad_script_compute::admission::{DeviceLimits, JobBudget, Ledger, Origin};
-use makepad_script_compute::kernel::{compile_with, Access, FieldTy, Kernel, Layout, LayoutField};
+use makepad_script_compute_sched::kernel::KernelExt;
+use makepad_script_compute_sched::admission::{DeviceLimits, JobBudget, Ledger, Origin};
+use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::{compile_with, Access, FieldTy, Kernel};
 use makepad_script_compute::Backend;
 
 const CORPUS: &[&str] = &[
@@ -43,16 +45,13 @@ impl Rng {
     }
 }
 
-fn layouts() -> Vec<Layout> {
-    vec![Layout {
-        name: "Inst".into(),
-        stride: 8,
-        fields: vec![
-            LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 },
-            LayoutField { name: "phase".into(), ty: FieldTy::F32, offset: 4 },
-            LayoutField { name: "id".into(), ty: FieldTy::I32, offset: 5 },
-        ],
-    }]
+fn layouts() -> Vec<LayoutView<'static>> {
+    const FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "phase", ty: FieldTy::F32, offset: 4 },
+        LayoutFieldView { name: "id", ty: FieldTy::I32, offset: 5 },
+    ];
+    vec![LayoutView { name: "Inst", stride: 8, fields: FIELDS }]
 }
 
 fn char_boundary(s: &str, mut at: usize) -> usize {

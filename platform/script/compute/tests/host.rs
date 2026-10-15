@@ -2,52 +2,54 @@
 //! kernels, clamped slices, failures that never unwind into kernel code,
 //! and the validator's checks.
 
-use makepad_script_compute::host::{self, HostError, HostFn, HostSlice, SliceSig, Tier};
+use makepad_script_compute::host::{self, ErrorSink, HostCallbacks, HostCallFrame, HostFn, SliceSig, Tier};
 use makepad_script_compute::ir::{self, Op, Program, Region, Regions, SliceArg, Stmt, Ty, Val};
-use makepad_script_compute::kernel::{compile, compile_with, Kernel};
-use makepad_script_compute::sched::{InlineExecutor, Job};
+use makepad_script_compute::kernel::{compile, compile_with, KernelRef};
+use makepad_script_compute_sched::sched::{InlineExecutor, Job};
 use makepad_script_compute::Backend;
-use std::sync::Arc;
 
-fn sum3(args: &[u32], _s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
+
+unsafe extern "C-unwind" fn sum3(_context: *mut (), frame: &mut HostCallFrame, _errors: ErrorSink<'_>) -> bool {
+    let (args, _s, rets) = frame.parts();
     rets[0] = (f32::from_bits(args[0]) + f32::from_bits(args[1]) + f32::from_bits(args[2])).to_bits();
-    Ok(())
+    true
 }
 
-fn boom(_args: &[u32], _s: &[HostSlice], _rets: &mut [u32]) -> Result<(), HostError> {
+unsafe extern "C-unwind" fn boom(_context: *mut (), frame: &mut HostCallFrame, _errors: ErrorSink<'_>) -> bool {
+    let (_args, _s, _rets) = frame.parts();
     panic!("a host component bug");
 }
 
 /// Writes `value` to every word of its slice; returns the words written.
-fn fill(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
+unsafe extern "C-unwind" fn fill(_context: *mut (), frame: &mut HostCallFrame, _errors: ErrorSink<'_>) -> bool {
+    let (args, s, rets) = frame.parts();
     for i in 0..s[0].len() {
         s[0].set(i, args[0]);
     }
     rets[0] = s[0].len() as u32;
-    Ok(())
+    true
 }
 
 fn register() {
     for f in [
-        HostFn { name: "test.sum3", params: &[Ty::F32, Ty::F32, Ty::F32], slices: &[], rets: &[Ty::F32], cost: |_| 4, misses: 0, tier: Tier::X, call: sum3, doc: "" },
-        HostFn { name: "test.boom", params: &[Ty::I32], slices: &[], rets: &[Ty::I32], cost: |_| 4, misses: 0, tier: Tier::X, call: boom, doc: "" },
+        HostFn { name: "test.sum3", params: &[Ty::F32, Ty::F32, Ty::F32], slices: &[], rets: &[Ty::F32], callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), scalar_cost, sum3) }, misses: 0, tier: Tier::X, doc: "" },
+        HostFn { name: "test.boom", params: &[Ty::I32], slices: &[], rets: &[Ty::I32], callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), scalar_cost, boom) }, misses: 0, tier: Tier::X, doc: "" },
         HostFn {
             name: "test.fill",
             params: &[Ty::I32],
             slices: &[SliceSig { max_words: 8, writable: true }],
             rets: &[Ty::I32],
-            cost: |l| 16 + l[0] as u64,
+            callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), fill_cost, fill) },
             misses: 1,
             tier: Tier::D,
-            call: fill,
             doc: "test.fill(buf, off, words, value)",
         },
     ] {
-        host::register(f).unwrap();
+        host::register(f).into_result().unwrap();
     }
 }
 
-fn run(k: &Arc<Kernel>, n: usize, out: &str, words: usize, extra: &[(&str, usize)]) -> (Vec<u32>, Vec<Vec<u32>>, bool) {
+fn run(k: &KernelRef, n: usize, out: &str, words: usize, extra: &[(&str, usize)]) -> (Vec<u32>, Vec<Vec<u32>>, bool) {
     let mut j = Job::new(k.clone(), n);
     j.output_u32(out, vec![0; n * words]).unwrap();
     for (name, len) in extra {
@@ -217,14 +219,13 @@ fn triangulate_cost_is_honest_and_budgets_refuse_large_inputs() {
             ];
             let sl = [host::SliceRaw { buf: 0, off: 0, len: pts.len() as u32 }, host::SliceRaw { buf: 1, off: 0, len: tris.len() as u32 }];
             let mut rets = [0u32];
-            let t0 = std::time::Instant::now();
             assert!(host::invoke(f, &[], &sl, &mut rets, &bufs));
-            let took = t0.elapsed();
             assert_eq!(rets[0] as usize, n - 2, "{} points", n);
-            // Charged at the native rate (0.5 ns per op): the real time fits.
-            let declared_ns = h.cost_of(&[pts.len() as u32, tris.len() as u32]) / 2;
-            eprintln!("triangulate {} points: {:.3} ms, declared {:.3} ms", n, took.as_secs_f64() * 1e3, declared_ns as f64 / 1e6);
-            assert!((took.as_nanos() as u64) < declared_ns, "{} points took {:?}, declared {} ns", n, took, declared_ns);
+            // Honest: the ops it counts on this input stay within what it
+            // declares (the same on every machine).
+            let declared = h.cost_of(&[pts.len() as u32, tris.len() as u32]);
+            let ran = host::triangulate_ops(&pts);
+            assert!(ran <= declared, "{} points ran {} ops, declared {}", n, ran, declared);
             // A per-call limit below the input's cost refuses it before it runs.
             let limit = h.cost_of(&[pts.len() as u32, tris.len() as u32]) - 1;
             let mut rets = [7u32];
@@ -246,3 +247,7 @@ fn triangulate_cost_is_honest_and_budgets_refuse_large_inputs() {
     assert!(!j.run(&InlineExecutor, 1).unwrap().host_error);
     assert_eq!(j.out_u32("o").unwrap(), &[513]);
 }
+
+// Stateless callbacks retain no borrowed state.
+unsafe extern "C-unwind" fn scalar_cost(_: *mut (), _: *const u32, _: usize) -> u64 { 4 }
+unsafe extern "C-unwind" fn fill_cost(_: *mut (), words: *const u32, len: usize) -> u64 { 16 + std::slice::from_raw_parts(words, len)[0] as u64 }

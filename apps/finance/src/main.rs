@@ -59,7 +59,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         theme::install(vm);
         chart::script_mod(vm);
         view::script_mod(vm);

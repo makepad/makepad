@@ -86,14 +86,10 @@ impl Cx {
     /// Shaders whose GPU pipelines are still compiling (0 where the
     /// backend compiles synchronously).
     pub fn pipelines_pending(&self) -> usize {
-        #[cfg(all(target_vendor = "apple", not(gpusim)))]
-        {
-            self.metal_pipelines_pending()
-        }
-        #[cfg(any(not(target_vendor = "apple"), gpusim))]
-        {
-            0
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.frames.pipelines_pending() }
+        #[cfg(target_arch = "wasm32")]
+        { 0 }
     }
 
     /// Whether a draw shader can draw now. Metal builds pipelines
@@ -104,15 +100,13 @@ impl Cx {
     /// the RGBA16Float (HDR target) pipeline too, and starts building it.
     /// True where the backend compiles synchronously.
     pub fn draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
-        #[cfg(all(target_vendor = "apple", not(gpusim)))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            self.metal_draw_shader_ready(shader, float16)
+            let _ = float16;
+            self.is_draw_shader_window_ready(shader)
         }
-        #[cfg(any(not(target_vendor = "apple"), gpusim))]
-        {
-            let _ = (shader, float16);
-            true
-        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (shader, float16); true }
     }
 
     /// Draws left out of frames so far because they were not ready (their

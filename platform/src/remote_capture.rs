@@ -62,10 +62,6 @@ const FALLBACK_AUDIO_RATE: u32 = 48_000;
 
 pub(super) enum Pixels {
     /// A backend readback: `stride` bytes per row, in `order` (Metal).
-    #[cfg_attr(
-        not(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos"))),
-        allow(dead_code)
-    )]
     Raw {
         data: Arc<[u8]>,
         stride: usize,

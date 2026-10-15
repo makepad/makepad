@@ -4,7 +4,7 @@
 //! and the per-client presentation bookkeeping the WM drives (which face was
 //! asked for, whether the client has confirmed it with a frame of the right
 //! size), so the rules are testable without a window manager running.
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use makepad_widgets::*;
 use std::collections::HashMap;
 
@@ -182,8 +182,8 @@ pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'stati
 /// every launch target is reachable from exactly one card.
 pub const LIBRARY_GROUPS: [(&str, &[&str]); 5] = [
     ("Utilities", &["clock", "weather", "calculator", "terminal", "files", "task"]),
-    ("Creativity", &["photos", "mixer", "score", "fab", "fabric"]),
-    ("Productivity", &["sheets", "finance", "mail", "notes", "calendar", "reminders", "browser", "route", "studio"]),
+    ("Creativity", &["photos", "camera", "mixer", "score", "fab", "fabric"]),
+    ("Productivity", &["sheets", "finance", "mail", "notes", "calendar", "reminders", "browser", "route"]),
     ("Media", &["video", "image", "pdf"]),
     ("Other", &[]),
 ];
@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(two.tiles[0].rect, all.tiles[0].rect);
         assert_eq!(two.tiles[1].rect, all.tiles[2].rect);
         // The build's tile apps follow what it can launch.
-        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false, dylibs: false };
+        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false, mobile: false };
         assert_eq!(tile_apps(&linked), vec![("photos", TileKind::Wide)]);
     }
 
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn android_home_keeps_its_favorites_row_on_its_side() {
         let android = crate::desktop::DesktopStyle::Android;
-        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, dylibs: false };
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false };
         let size = phone_size(android);
         let side = Rect { pos: dvec2(0.0, 32.0), size: dvec2(size.y, size.x - 32.0) };
         let layout = PhoneSurface::home_layout(android, side, PhoneChrome::Simulated, &launchable);
@@ -761,7 +761,7 @@ mod tests {
         let ios = crate::desktop::DesktopStyle::Ios;
         let m = HomeMetrics::of(ios);
         assert_eq!((m.tile_gap, m.favorites_gap, m.landscape_tile_max, m.tile_radius, m.card_radius, m.card_gap), (14.0, 20.0, None, 44.0, 52.0, 22.0));
-        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, dylibs: false };
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false };
         let size = phone_size(ios);
         let upright = Rect { pos: dvec2(0.0, 32.0), size: size - dvec2(0.0, 32.0) };
         let layout = PhoneSurface::home_layout(ios, upright, PhoneChrome::Simulated, &launchable);

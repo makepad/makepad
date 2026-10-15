@@ -285,7 +285,7 @@ pub struct BuildResult {
 }
 
 impl BuildResult {
-    /// The signed, zipaligned APK the build produced.
+    /// The signed, zipaligned APK the build produced (run-host prints it).
     pub fn apk(&self) -> &Path {
         &self.dst_apk
     }
@@ -293,8 +293,7 @@ impl BuildResult {
 
 /// The NDK clang cargo links `android_target` with: the value of the
 /// target's `CARGO_TARGET_<TRIPLE>_LINKER`. cargo hashes this string into
-/// every fingerprint, so a tree that must stay Fresh elsewhere (the
-/// super-app's on-device target/) records exactly this path.
+/// every fingerprint.
 pub fn android_linker_path(
     sdk_dir: &Path,
     host_os: HostOs,
@@ -329,12 +328,68 @@ pub fn android_rustflags(
     compose_android_rustflags(existing, &cfg_flag, prefer_dynamic)
 }
 
-fn main_java(url: &str) -> String {
+fn main_java(url: &str, host: bool) -> String {
+    // Restored activities must load the HAL before super.onCreate delivers native callbacks.
+    let host_hooks = if host {
+        r#"
+            static { System.loadLibrary("makepad"); }
+            @Override
+            public void onCreate(android.os.Bundle state){
+                super.onCreate(state);
+                dev.makepad.run.RunActivity.ensureBoot(this);
+                showBootScreen();
+            }
+            // Until the program's first frame (or a failure) the person sees what the phone is doing,
+            // never a blank surface.
+            private void showBootScreen(){
+                final android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+                box.setOrientation(android.widget.LinearLayout.VERTICAL);
+                box.setGravity(android.view.Gravity.CENTER);
+                box.setBackgroundColor(0xFF14161F);
+                final android.widget.ProgressBar spin = new android.widget.ProgressBar(this);
+                spin.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xFFFF8C1A));
+                box.addView(spin, new android.widget.LinearLayout.LayoutParams(130, 130));
+                final android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                bar.setMax(1000);
+                bar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFFFF8C1A));
+                bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(0x22FFFFFF));
+                android.widget.LinearLayout.LayoutParams bp = new android.widget.LinearLayout.LayoutParams(520, 12);
+                bp.topMargin = 60;
+                box.addView(bar, bp);
+                final android.widget.TextView l1 = new android.widget.TextView(this);
+                final android.widget.TextView l2 = new android.widget.TextView(this);
+                for (android.widget.TextView t : new android.widget.TextView[]{l1, l2}) {
+                    t.setTextColor(0xFF8E93A8); t.setGravity(android.view.Gravity.CENTER);
+                    t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
+                    box.addView(t);
+                }
+                l1.setTextColor(0xFFC9CCDA); l1.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15);
+                l1.setPadding(0, 30, 0, 6);
+                addContentView(box, new android.view.ViewGroup.LayoutParams(-1, -1));
+                final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                h.post(new Runnable(){ public void run(){
+                    String[] s = dev.makepad.run.RunActivity.status().split("\\|", 6);
+                    if (s[0].equals("ready")) { ((android.view.ViewGroup) box.getParent()).removeView(box); return; }
+                    if (s[0].equals("failed")) { l1.setText("could not start"); l2.setText(s.length > 5 ? s[5] : ""); return; }
+                    String phase = s.length > 1 && !s[1].isEmpty() ? s[1] : "starting";
+                    long done = s.length > 2 ? Long.parseLong(s[2]) : 0, total = s.length > 3 ? Long.parseLong(s[3]) : 0;
+                    String fns = s.length > 4 ? s[4] : "0";
+                    long f = Long.parseLong(fns);
+                    l1.setText(f > 0 ? phase + " \u00b7 " + java.text.NumberFormat.getIntegerInstance(java.util.Locale.US).format(f) + " fns" : phase);
+                    l2.setVisibility(android.view.View.GONE);
+                    bar.setProgress(total > 0 ? (int)(1000 * done / total) : 0);
+                    h.postDelayed(this, 100);
+                }});
+            }
+        "#
+    } else {
+        ""
+    };
     format!(
         r#"
         package {url};
         import dev.makepad.android.MakepadActivity;
-        public class MakepadApp extends MakepadActivity{{
+        public class MakepadApp extends MakepadActivity{{{host_hooks}
             public void switchActivity(){{
                 switchActivityClass(MakepadAppXr.class);
             }}
@@ -609,6 +664,119 @@ fn generate_android_wrapper_manifest(
     Ok(Some(wrapper_manifest_path))
 }
 
+/// The environment cargo builds `android_target` with: the NDK's clang as linker and C compiler,
+/// the SDK's locations, the `android_target` cfg in RUSTFLAGS.
+fn android_cargo_env(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    android_target: &AndroidTarget,
+    variant: &AndroidVariant,
+    urls: &AndroidSDKUrls,
+    prefer_dynamic: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let _ = variant;
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
+    // Derive ndk_root from ndk_prebuilt_root by going up through
+    // `toolchains/llvm/prebuilt/<host>/` (4 levels).
+    let ndk_root = ndk_prebuilt_root
+        .parent()
+        .unwrap() // prebuilt/
+        .parent()
+        .unwrap() // llvm/
+        .parent()
+        .unwrap() // toolchains/
+        .parent()
+        .unwrap() // ndk root
+        .to_path_buf();
+    let clangpp_filename = format!("{}{}-clang++", android_target.clang(), urls.sdk_version);
+
+    let bin_name = |bin_filename: &str, windows_extension: &str| {
+        host_bin_name(host_os, bin_filename, windows_extension)
+    };
+    let full_clang_path = android_linker_path(sdk_dir, host_os, urls, android_target)?;
+    let full_clangpp_path = ndk_prebuilt_root
+        .join("bin")
+        .join(bin_name(&clangpp_filename, "cmd"));
+    let full_llvm_ar_path = ndk_prebuilt_root
+        .join("bin")
+        .join(bin_name("llvm-ar", "exe"));
+    let full_llvm_ranlib_path = ndk_prebuilt_root
+        .join("bin")
+        .join(bin_name("llvm-ranlib", "exe"));
+    let toolchain = android_target.toolchain();
+
+    let rustflags = android_rustflags(
+        std::env::var("RUSTFLAGS").ok().as_deref(),
+        android_target,
+        prefer_dynamic,
+    );
+
+    let makepad_env = std::env::var("MAKEPAD_BUILD").ok().filter(|value| !value.is_empty());
+
+    let android_sdk_version = urls.sdk_version.to_string();
+    let java_home = sdk_dir.join("openjdk").to_string_lossy().to_string();
+    let mut env: Vec<(String, String)> = vec![
+        (
+            android_target.linker_env_var().to_string(),
+            full_clang_path.to_string_lossy().to_string(),
+        ),
+        (
+            "ANDROID_HOME".to_string(),
+            sdk_dir.to_string_lossy().to_string(),
+        ),
+        (
+            "ANDROID_SDK_ROOT".to_string(),
+            sdk_dir.to_string_lossy().to_string(),
+        ),
+        (
+            "ANDROID_BUILD_TOOLS_VERSION".to_string(),
+            urls.build_tools_version.to_string(),
+        ),
+        ("ANDROID_PLATFORM".to_string(), urls.platform.to_string()),
+        (
+            "ANDROID_SDK_VERSION".to_string(),
+            android_sdk_version.clone(),
+        ),
+        ("ANDROID_API_LEVEL".to_string(), android_sdk_version),
+        (
+            "ANDROID_SDK_EXTENSION".to_string(),
+            urls.sdk_extension.to_string(),
+        ),
+        ("JAVA_HOME".to_string(), java_home),
+        (
+            "ANDROID_NDK_ROOT".to_string(),
+            ndk_root.to_string_lossy().to_string(),
+        ),
+        (
+            format!("CC_{toolchain}"),
+            full_clang_path.to_string_lossy().to_string(),
+        ),
+        (
+            format!("CXX_{toolchain}"),
+            full_clangpp_path.to_string_lossy().to_string(),
+        ),
+        (
+            format!("AR_{toolchain}"),
+            full_llvm_ar_path.to_string_lossy().to_string(),
+        ),
+        (
+            format!("RANLIB_{toolchain}"),
+            full_llvm_ranlib_path.to_string_lossy().to_string(),
+        ),
+        // The aws-lc-sys crate requires the cmake builder (not the cc builder)
+        // for Android cross-compilation targets. With ANDROID_NDK_ROOT set
+        // and the full NDK installed (via --full-ndk), cmake's built-in
+        // Android module handles the cross-compilation setup automatically.
+        ("AWS_LC_SYS_CMAKE_BUILDER".to_string(), "1".to_string()),
+        ("RUSTFLAGS".to_string(), rustflags),
+    ];
+    if let Some(makepad_env) = makepad_env {
+        env.push(("MAKEPAD_BUILD".to_string(), makepad_env));
+    }
+    Ok(env)
+}
+
 fn rust_build(
     sdk_dir: &Path,
     host_os: HostOs,
@@ -639,38 +807,8 @@ fn rust_build(
     } else {
         args.to_vec()
     };
-    let (_ndk_version, ndk_prebuilt_root) =
-        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
-    // Derive ndk_root from ndk_prebuilt_root by going up through
-    // `toolchains/llvm/prebuilt/<host>/` (4 levels).
-    let ndk_root = ndk_prebuilt_root
-        .parent()
-        .unwrap() // prebuilt/
-        .parent()
-        .unwrap() // llvm/
-        .parent()
-        .unwrap() // toolchains/
-        .parent()
-        .unwrap() // ndk root
-        .to_path_buf();
     let mut font_manifest = None;
     for android_target in android_targets {
-        let clangpp_filename = format!("{}{}-clang++", android_target.clang(), urls.sdk_version);
-
-        let bin_name = |bin_filename: &str, windows_extension: &str| {
-            host_bin_name(host_os, bin_filename, windows_extension)
-        };
-        let full_clang_path = android_linker_path(sdk_dir, host_os, urls, android_target)?;
-        let full_clangpp_path = ndk_prebuilt_root
-            .join("bin")
-            .join(bin_name(&clangpp_filename, "cmd"));
-        let full_llvm_ar_path = ndk_prebuilt_root
-            .join("bin")
-            .join(bin_name("llvm-ar", "exe"));
-        let full_llvm_ranlib_path = ndk_prebuilt_root
-            .join("bin")
-            .join(bin_name("llvm-ranlib", "exe"));
-
         let toolchain = android_target.toolchain();
         let target_opt = format!("--target={toolchain}");
         let target_dir_arg = format!("--target-dir={target_dir_str}");
@@ -695,83 +833,7 @@ fn rust_build(
             args_out.push(arg);
         }
 
-        let rustflags = android_rustflags(
-            std::env::var("RUSTFLAGS").ok().as_deref(),
-            android_target,
-            prefer_dynamic,
-        );
-
-        let makepad_env = if let AndroidVariant::Quest = variant {
-            Some(match std::env::var("MAKEPAD") {
-                Ok(makepad_env) if !makepad_env.is_empty() => format!("{makepad_env}+quest"),
-                _ => "quest".to_string(),
-            })
-        } else {
-            std::env::var("MAKEPAD")
-                .ok()
-                .filter(|value| !value.is_empty())
-        };
-
-        let android_sdk_version = urls.sdk_version.to_string();
-        let java_home = sdk_dir.join("openjdk").to_string_lossy().to_string();
-        let mut env: Vec<(String, String)> = vec![
-            (
-                android_target.linker_env_var().to_string(),
-                full_clang_path.to_string_lossy().to_string(),
-            ),
-            (
-                "ANDROID_HOME".to_string(),
-                sdk_dir.to_string_lossy().to_string(),
-            ),
-            (
-                "ANDROID_SDK_ROOT".to_string(),
-                sdk_dir.to_string_lossy().to_string(),
-            ),
-            (
-                "ANDROID_BUILD_TOOLS_VERSION".to_string(),
-                urls.build_tools_version.to_string(),
-            ),
-            ("ANDROID_PLATFORM".to_string(), urls.platform.to_string()),
-            (
-                "ANDROID_SDK_VERSION".to_string(),
-                android_sdk_version.clone(),
-            ),
-            ("ANDROID_API_LEVEL".to_string(), android_sdk_version),
-            (
-                "ANDROID_SDK_EXTENSION".to_string(),
-                urls.sdk_extension.to_string(),
-            ),
-            ("JAVA_HOME".to_string(), java_home),
-            (
-                "ANDROID_NDK_ROOT".to_string(),
-                ndk_root.to_string_lossy().to_string(),
-            ),
-            (
-                format!("CC_{toolchain}"),
-                full_clang_path.to_string_lossy().to_string(),
-            ),
-            (
-                format!("CXX_{toolchain}"),
-                full_clangpp_path.to_string_lossy().to_string(),
-            ),
-            (
-                format!("AR_{toolchain}"),
-                full_llvm_ar_path.to_string_lossy().to_string(),
-            ),
-            (
-                format!("RANLIB_{toolchain}"),
-                full_llvm_ranlib_path.to_string_lossy().to_string(),
-            ),
-            // The aws-lc-sys crate requires the cmake builder (not the cc builder)
-            // for Android cross-compilation targets. With ANDROID_NDK_ROOT set
-            // and the full NDK installed (via --full-ndk), cmake's built-in
-            // Android module handles the cross-compilation setup automatically.
-            ("AWS_LC_SYS_CMAKE_BUILDER".to_string(), "1".to_string()),
-            ("RUSTFLAGS".to_string(), rustflags),
-        ];
-        if let Some(makepad_env) = makepad_env {
-            env.push(("MAKEPAD".to_string(), makepad_env));
-        }
+        let env = android_cargo_env(sdk_dir, host_os, android_target, variant, urls, prefer_dynamic)?;
         let env_refs = env
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -976,28 +1038,14 @@ pub fn resolve_min_sdk_override(
     Ok(min_sdk_version_override)
 }
 
-/// The SDK URLs `build` compiles `build_crate` with: `urls` with the
-/// package's effective min SDK (flag, else `[package.metadata.makepad.android]
-/// .min_sdk_version`) as `sdk_version`. What the NDK clang triple, the
-/// linker string and `android:minSdkVersion` come from.
-pub fn effective_sdk_urls(
-    build_crate: &str,
-    min_sdk_version_flag: Option<usize>,
-    urls: &AndroidSDKUrls,
-) -> Result<AndroidSDKUrls, String> {
-    let metadata = read_android_package_metadata(build_crate);
-    let mut effective = *urls;
-    if let Some(min) = resolve_min_sdk_override(min_sdk_version_flag, metadata.min_sdk_version, urls)? {
-        effective.sdk_version = min;
-    }
-    Ok(effective)
-}
-
 /// Inputs to `prepare_build`. Covers everything that influences the staged
 /// `tmp_dir/AndroidManifest.xml` so the file can vary per build mode (release
 /// APK vs debug APK vs Play Store AAB).
 pub struct PrepareBuildOpts<'a> {
     pub build_crate: &'a str,
+    /// The crate whose `resources/android/res` (launcher icon and the like) the
+    /// APK carries: the app itself, or for the host APK the host crate.
+    pub res_crate: &'a str,
     pub java_url: &'a str,
     pub app_label: &'a str,
     pub variant: &'a AndroidVariant,
@@ -1005,6 +1053,10 @@ pub struct PrepareBuildOpts<'a> {
     pub version_code: u32,
     pub version_name: &'a str,
     pub debuggable: bool,
+    /// The launcher activity's class (`MakepadApp`; the host APK's RunActivity), declared in the
+    /// manifest as `.<launcher_class>`
+    pub launcher_class: &'a str,
+    pub extra_activities: &'a str,
 }
 
 /// Replace `{key}` placeholders in a custom AndroidManifest template with the
@@ -1059,7 +1111,7 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
     cp_all(&cargo_manifest_dir.join("src/android/res"), &res_dir, false)?;
 
     let build_crate_dir = get_crate_dir(opts.build_crate)?;
-    let app_android_res = build_crate_dir.join("resources/android/res");
+    let app_android_res = get_crate_dir(opts.res_crate)?.join("resources/android/res");
     if app_android_res.is_dir() {
         cp_all(&app_android_res, &res_dir, false)?;
     }
@@ -1083,7 +1135,7 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
 
     let manifest_args = ManifestArgs {
         label: opts.app_label,
-        class_name: "MakepadApp",
+        class_name: opts.launcher_class,
         url: opts.java_url,
         sdk_version: opts.urls.sdk_version,
         target_sdk_version: opts.urls.target_sdk_version,
@@ -1091,6 +1143,7 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
         version_code: opts.version_code,
         version_name: opts.version_name,
         debuggable: opts.debuggable,
+        extra_activities: opts.extra_activities,
     };
 
     // Custom manifest override: if `<crate>/resources/android/AndroidManifest.xml.template`
@@ -1112,7 +1165,7 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
 
-    let main_java = main_java(opts.java_url);
+    let main_java = main_java(opts.java_url, opts.launcher_class != "MakepadApp");
     let java_path = opts.java_url.replace('.', "/");
     let java_file = tmp_dir.join(&java_path).join("MakepadApp.java");
     write_text(&java_file, &main_java)?;
@@ -1178,6 +1231,7 @@ fn compile_java(
     sdk_dir: &Path,
     build_paths: &BuildPaths,
     urls: &AndroidSDKUrls,
+    extra_sources: &[PathBuf],
 ) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1210,6 +1264,8 @@ fn compile_java(
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
+    let mut java_sources = java_sources;
+    java_sources.extend(extra_sources.iter().cloned());
 
     let mut hasher = DefaultHasher::new();
     for source in &java_sources {
@@ -1701,6 +1757,7 @@ fn add_rust_library(
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
 ) -> Result<PathBuf, String> {
+    let _ = variant;
     let cwd = std::env::current_dir().unwrap();
     let target_dir = cargo_target_dir(&cwd);
     let profile = get_profile_from_args(args);
@@ -1784,42 +1841,13 @@ fn add_rust_library(
             }
         }
     }
-    // for the quest variant add the precompiled openXR loader
-    if let AndroidVariant::Quest = variant {
-        let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-
-        for (binary_path, src_lib) in [
-            (
-                "lib/arm64-v8a/libopenxr_loader.so",
-                "quest/libopenxr_loader.so",
-            ),
-            //("lib/arm64-v8a/libktx.so", "tools/cargo_makepad/quest/libktx.so"),
-            //("lib/arm64-v8a/libktx_read.so", "tools/cargo_makepad/quest/libktx_read.so"),
-            //("lib/arm64-v8a/libobjUtil.a", "tools/cargo_makepad/quest/libobjUtil.a"),
-        ] {
-            //let binary_path = format!("lib/arm64-v8a/libopenxr_loader.so");
-            let src_lib = cargo_manifest_dir.join(src_lib);
-            let dst_lib = build_paths.out_dir.join(binary_path);
-            cp(&src_lib, &dst_lib, false)?;
-            shell_env_cap(
-                &[],
-                &build_paths.out_dir,
-                aapt_path(sdk_dir, urls).to_str().unwrap(),
-                &[
-                    "add",
-                    (build_paths.dst_unaligned_apk.to_str().unwrap()),
-                    &binary_path,
-                ],
-            )?;
-        }
-    }
 
     Ok(build_dir.unwrap())
 }
 
 fn add_resources(
     sdk_dir: &Path,
-    build_crate: &str,
+    build_crates: &[&str],
     build_paths: &BuildPaths,
     build_dir: &Path,
     android_targets: &[AndroidTarget],
@@ -1832,57 +1860,79 @@ fn add_resources(
     remove_existing_fonts(&package_root)?;
     let mut font_package = FontPackage::new(font_manifest);
 
-    let build_crate_dir = get_crate_dir(build_crate)?;
-    add_assets_dir_to_apk(
-        &build_paths.out_dir,
-        &mut assets_to_add,
-        build_crate,
-        &build_crate_dir.join("resources"),
-        "resources",
-        &mut font_package,
-    )?;
-    add_font_assets_dir_to_apk(
-        &build_paths.out_dir,
-        &mut assets_to_add,
-        build_crate,
-        &build_crate_dir.join("fonts"),
-        &build_crate_dir.join("resources"),
-        &mut font_package,
-    )?;
-
-    let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
-    for (name, dep_dir) in deps.iter() {
-        add_assets_dir_to_apk(
-            &build_paths.out_dir,
-            &mut assets_to_add,
-            name,
-            &dep_dir.join("resources"),
-            "resources",
-            &mut font_package,
-        )?;
-        add_font_assets_dir_to_apk(
-            &build_paths.out_dir,
-            &mut assets_to_add,
-            name,
-            &dep_dir.join("fonts"),
-            &dep_dir.join("resources"),
-            &mut font_package,
-        )?;
+    // each crate and the dependencies of each, once (the host APK carries several apps)
+    let mut done: HashSet<String> = HashSet::new();
+    for build_crate in build_crates {
+        let build_crate = *build_crate;
+        if done.insert(build_crate.to_string()) {
+            let build_crate_dir = get_crate_dir(build_crate)?;
+            add_assets_dir_to_apk(
+                &build_paths.out_dir,
+                &mut assets_to_add,
+                build_crate,
+                &build_crate_dir.join("resources"),
+                "resources",
+                &mut font_package,
+            )?;
+            add_font_assets_dir_to_apk(
+                &build_paths.out_dir,
+                &mut assets_to_add,
+                build_crate,
+                &build_crate_dir.join("fonts"),
+                &build_crate_dir.join("resources"),
+                &mut font_package,
+            )?;
+        }
+        let deps = get_crate_dep_dirs(build_crate, &build_dir, &android_targets[0].toolchain());
+        for (name, dep_dir) in deps.iter() {
+            if !done.insert(name.clone()) {
+                continue;
+            }
+            add_assets_dir_to_apk(
+                &build_paths.out_dir,
+                &mut assets_to_add,
+                name,
+                &dep_dir.join("resources"),
+                "resources",
+                &mut font_package,
+            )?;
+            add_font_assets_dir_to_apk(
+                &build_paths.out_dir,
+                &mut assets_to_add,
+                name,
+                &dep_dir.join("fonts"),
+                &dep_dir.join("resources"),
+                &mut font_package,
+            )?;
+        }
     }
     let _ = variant;
     font_package.finish()?.print();
 
-    let mut aapt_args = vec!["add", build_paths.dst_unaligned_apk.to_str().unwrap()];
-    for asset in &assets_to_add {
-        aapt_args.push(asset);
+    // aapt add uses one compression method for all arguments. Store fonts separately so
+    // AAsset_openFileDescriptor64 can map them; both APK paths zipalign after adding assets.
+    for store_fonts in [false, true] {
+        let mut aapt_args = vec!["add"];
+        if store_fonts {
+            aapt_args.extend(["-0", ""]);
+        }
+        aapt_args.push(build_paths.dst_unaligned_apk.to_str().unwrap());
+        let first_asset = aapt_args.len();
+        for asset in &assets_to_add {
+            if is_font_path(Path::new(asset)) == store_fonts {
+                aapt_args.push(asset);
+            }
+        }
+        if aapt_args.len() == first_asset {
+            continue;
+        }
+        shell_env_cap(
+            &[],
+            &build_paths.out_dir,
+            aapt_path(sdk_dir, urls).to_str().unwrap(),
+            &aapt_args,
+        )?;
     }
-
-    shell_env_cap(
-        &[],
-        &build_paths.out_dir,
-        aapt_path(sdk_dir, urls).to_str().unwrap(),
-        &aapt_args,
-    )?;
 
     Ok(())
 }
@@ -2321,6 +2371,7 @@ fn stage_aab_native_libs(
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
 ) -> Result<PathBuf, String> {
+    let _ = variant;
     let cwd = std::env::current_dir().unwrap();
     let target_dir = cargo_target_dir(&cwd);
     let profile = get_profile_from_args(args);
@@ -2360,15 +2411,6 @@ fn stage_aab_native_libs(
             libs_root,
             &current_build_dir,
         )?;
-    }
-    if let AndroidVariant::Quest = variant {
-        let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (rel_path, src_lib) in [("arm64-v8a/libopenxr_loader.so", "quest/libopenxr_loader.so")]
-        {
-            let src_lib = cargo_manifest_dir.join(src_lib);
-            let dst_lib = libs_root.join(rel_path);
-            cp(&src_lib, &dst_lib, false)?;
-        }
     }
     Ok(build_dir.unwrap())
 }
@@ -2679,6 +2721,7 @@ pub fn build_aab(
     // it here regardless of cargo profile so we never produce an unshippable AAB.
     let prep_opts = PrepareBuildOpts {
         build_crate,
+        res_crate: build_crate,
         java_url: &resolved.java_url,
         app_label: &resolved.app_label,
         variant,
@@ -2686,6 +2729,8 @@ pub fn build_aab(
         version_code: resolved.version_code,
         version_name: &resolved.version_name,
         debuggable: false,
+        launcher_class: "MakepadApp",
+        extra_activities: "",
     };
     let build_paths = prepare_build(&prep_opts)?;
     let aab_paths = prepare_aab_paths(build_crate, &resolved.app_label)?;
@@ -2698,7 +2743,7 @@ pub fn build_aab(
     // Reuse the existing R-class / javac / d8 pipeline; outputs `classes.dex`
     // into `build_paths.out_dir`.
     build_r_class(sdk_dir, &build_paths, urls)?;
-    compile_java(sdk_dir, &build_paths, urls)?;
+    compile_java(sdk_dir, &build_paths, urls, &[])?;
     build_dex(sdk_dir, &build_paths, urls)?;
     let classes_dex = build_paths.out_dir.join("classes.dex");
     if !classes_dex.is_file() {
@@ -2837,13 +2882,11 @@ pub fn build(
     )?;
     // For APK builds, debuggable matches the cargo profile: release -> false,
     // anything else -> true (matches the historical behavior of `cargo makepad
-    // android run`). `MAKEPAD_ANDROID_DEBUGGABLE=1` makes a release APK
-    // debuggable: `proc-pack --proc-toolchain` sets it, so `adb shell run-as`
-    // reaches the source tree the phone builds its apps from.
-    let debuggable = get_profile_from_args(args) != "release"
-        || std::env::var("MAKEPAD_ANDROID_DEBUGGABLE").map(|v| v == "1").unwrap_or(false);
+    // android run`).
+    let debuggable = get_profile_from_args(args) != "release";
     let prep_opts = PrepareBuildOpts {
         build_crate,
+        res_crate: build_crate,
         java_url: &resolved.java_url,
         app_label: &resolved.app_label,
         variant,
@@ -2851,6 +2894,8 @@ pub fn build(
         version_code: resolved.version_code,
         version_name: &resolved.version_name,
         debuggable,
+        launcher_class: "MakepadApp",
+        extra_activities: "",
     };
     let build_paths = prepare_build(&prep_opts)?;
 
@@ -2863,7 +2908,7 @@ pub fn build(
         debuggable
     );
     build_r_class(sdk_dir, &build_paths, urls)?;
-    compile_java(sdk_dir, &build_paths, urls)?;
+    compile_java(sdk_dir, &build_paths, urls, &[])?;
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_dir = add_rust_library(
@@ -2878,7 +2923,7 @@ pub fn build(
     )?;
     add_resources(
         sdk_dir,
-        build_crate,
+        &[build_crate],
         &build_paths,
         &build_dir,
         android_targets,
@@ -2894,6 +2939,263 @@ pub fn build(
         dst_apk: build_paths.dst_apk,
         java_url: resolved.java_url,
     })
+}
+
+// ============================================================================
+// The makepad run host APK (`cargo makepad android run-host`).
+//
+// Not a build of the app: the APK carries the makepad run host (libmakepad.so + the executable
+// libmakepad_exe.so that build scripts run as) and the app's source as a packed store
+// (`makepad pack-src`, stored uncompressed so the host reads it by byte range from the APK file).
+// The phone compiles the app on its first start and keeps the compiled code for the next.
+// ============================================================================
+
+/// One app of the host APK.
+pub struct HostApp {
+    pub package: String,
+    pub cargo_flags: Vec<String>,
+}
+
+/// What the host APK runs.
+pub struct HostOpts {
+    /// the apps the APK carries, each a cargo package with the cargo flags it is packed and
+    /// compiled with (`--no-default-features`); the first is the default, the launch intent's
+    /// `app` string extra picks another (`am start --es app <package>`)
+    pub apps: Vec<HostApp>,
+    /// environment variables of the app's process on the phone (`--env=KEY=VALUE`)
+    pub env: Vec<String>,
+    /// `Latin` or `International`: the app's `app_main!` font set (which fonts go in the APK)
+    pub font_set: String,
+    /// the first app is the window manager (`relax run --privileged`): it starts the other apps
+    /// as domains of the same process
+    pub privileged: bool,
+    /// font files beyond the set that the packed apps declare in their `app_main!` (`--font-asset=`)
+    pub font_assets: Vec<String>,
+}
+
+/// The name of the packed source archive in the APK's assets (jni.rs ARCHIVE_ASSET).
+const HOST_ARCHIVE_ASSET: &str = "assets/makepad-run-src.pack";
+/// The host's configuration asset (jni.rs CONF_ASSET).
+const HOST_CONF_ASSET: &str = "assets/makepad-run-host.conf";
+
+fn host_font_manifest(font_set: &str, extra: &[String]) -> Result<FontAssetManifest, String> {
+    let cwd = std::env::current_dir().unwrap();
+    // stdout only: cargo's own messages are on stderr
+    let out = std::process::Command::new("cargo")
+        .current_dir(&cwd)
+        .args(["run", "--release", "--offline", "-q", "-p", "makepad-platform", "--example", "font_manifest", "--", font_set])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("cargo run font_manifest: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("font_manifest {font_set} failed ({})", out.status));
+    }
+    let mut text = out.stdout;
+    if !text.ends_with(b"\n") { text.push(b'\n'); }
+    for asset in extra { text.extend_from_slice(format!("asset={asset}\n").as_bytes()); }
+    FontAssetManifest::parse(&text)
+}
+
+/// Re-zips `unaligned` into `out` with the source archive (stored: AAsset hands the host a file
+/// descriptor range only for an uncompressed entry) and the configuration added.
+fn add_host_payload(unaligned: &Path, out: &Path, archive: &Path, conf: &str) -> Result<(), String> {
+    let mut zin = File::open(unaligned).map_err(|e| format!("{}: {e}", unaligned.display()))?;
+    let dir = zip_read_central_directory(&mut zin).map_err(|e| format!("{}: {e:?}", unaligned.display()))?;
+    let file = File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut zout = ZipWriter::to(std::io::BufWriter::with_capacity(1 << 20, file));
+    for h in &dir.file_headers {
+        if h.file_name.starts_with("META-INF/") {
+            continue;
+        }
+        let data = h.extract(&mut zin).map_err(|e| format!("{}: {e:?}", h.file_name))?;
+        let method = if h.compression_method == COMPRESS_METHOD_UNCOMPRESSED { ZipMethod::Store } else { ZipMethod::Deflate };
+        zout.add(&h.file_name, &data, method).map_err(|e| format!("{}: {e}", h.file_name))?;
+    }
+    let bytes = fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    zout.add(HOST_ARCHIVE_ASSET, &bytes, ZipMethod::Store).map_err(|e| format!("{HOST_ARCHIVE_ASSET}: {e}"))?;
+    println!("  source archive: {:.1} MB (stored)", bytes.len() as f64 / 1e6);
+    zout.add(HOST_CONF_ASSET, conf.as_bytes(), ZipMethod::Deflate).map_err(|e| format!("{HOST_CONF_ASSET}: {e}"))?;
+    zout.finish().map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_host(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    package_name: Option<String>,
+    app_label: Option<String>,
+    version_code: Option<VersionCodeStrategy>,
+    version_name: Option<String>,
+    min_sdk_version: Option<usize>,
+    host: &HostOpts,
+    android_targets: &[AndroidTarget],
+    variant: &AndroidVariant,
+    urls: &AndroidSDKUrls,
+) -> Result<BuildResult, String> {
+    let [android_target] = android_targets else {
+        return Err("run-host builds one ABI at a time: pass --abi=aarch64".to_string());
+    };
+    let build_crate = host.apps[0].package.as_str();
+    let binary_name = get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let resolved = resolve_packaging_inputs(
+        build_crate,
+        &binary_name,
+        Some(package_name.unwrap_or_else(|| "dev.makepad.run".to_string())),
+        app_label,
+        version_code,
+        version_name,
+        min_sdk_version,
+        urls,
+    )?;
+    let mut effective_urls = *urls;
+    if let Some(min) = resolved.min_sdk_version_override {
+        effective_urls.sdk_version = min;
+    }
+    let urls = &effective_urls;
+    let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
+    let target_dir_arg = format!("--target-dir={}", target_dir.display());
+    let toolchain = android_target.toolchain();
+    let target_opt = format!("--target={toolchain}");
+    let abi = android_target.abi_identifier();
+
+    // 1. libmakepad.so links the HAL shell and Vulkan device; the packed app uses its HAL ops.
+    let env = android_cargo_env(sdk_dir, host_os, android_target, variant, urls, false)?;
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    shell_env(
+        &env_refs,
+        &cwd,
+        "rustup",
+        &["run", "stable", "cargo", "rustc", "--release", "--lib", "--crate-type=cdylib", "-p", "makepad-run-android", &target_opt, &target_dir_arg],
+    )?;
+    shell_env(
+        &env_refs,
+        &cwd,
+        "rustup",
+        &["run", "stable", "cargo", "build", "--release", "--bin", "makepad_exe", "-p", "makepad-run-android-exe", &target_opt, &target_dir_arg],
+    )?;
+    let release_dir = target_dir.join(format!("{toolchain}/release"));
+
+    // 2. the app's source as a packed store for the phone's target
+    let archive = target_dir.join("makepad-android-apk").join("makepad-run-src.pack");
+    fs::create_dir_all(archive.parent().unwrap()).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let _ = fs::remove_file(&archive);
+    let mut pack_args = vec!["run", "--release", "--offline", "-p", "makepad-run", "--", "pack-src", "--target", "aarch64-linux-android", archive.to_str().unwrap()];
+    for app in &host.apps {
+        pack_args.push(&app.package);
+        pack_args.extend(app.cargo_flags.iter().map(String::as_str));
+    }
+    shell_env(&[], &cwd, "cargo", &pack_args)?;
+
+    // 3. the APK of the host: RunActivity first, MakepadApp behind it
+    let font_manifest = host_font_manifest(&host.font_set, &host.font_assets)?;
+    let custom_template = get_crate_dir(build_crate)?.join("resources/android/AndroidManifest.xml.template");
+    if custom_template.is_file() {
+        return Err(format!("{} has its own AndroidManifest template; the host APK needs RunActivity in it", build_crate));
+    }
+    let extra_activities = r#"<activity
+                    android:name=".MakepadApp"
+                    android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                    android:exported="false"
+                    android:launchMode="singleTask"
+                    android:windowSoftInputMode="adjustNothing|stateUnchanged"
+                    android:theme="@style/MakepadLaunchTheme" />"#;
+    let prep_opts = PrepareBuildOpts {
+        build_crate,
+        res_crate: "makepad-run-android",
+        java_url: &resolved.java_url,
+        app_label: &resolved.app_label,
+        variant,
+        urls,
+        version_code: resolved.version_code,
+        version_name: &resolved.version_name,
+        // a release APK: the phone's JIT needs nothing a debuggable one adds
+        debuggable: false,
+        launcher_class: "RunActivity",
+        extra_activities,
+    };
+    let build_paths = prepare_build(&prep_opts)?;
+    println!(
+        "Building host APK (package={}, label={}, versionCode={}, versionName={}, app={})",
+        resolved.java_url, resolved.app_label, resolved.version_code, resolved.version_name, build_crate
+    );
+    build_r_class(sdk_dir, &build_paths, urls)?;
+    let run_java = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/android/java/dev/makepad/run/RunActivity.java");
+    compile_java(sdk_dir, &build_paths, urls, &[run_java])?;
+    build_dex(sdk_dir, &build_paths, urls)?;
+    build_unaligned_apk(sdk_dir, &build_paths, urls)?;
+    let build_args = vec!["--release".to_string()];
+    let build_dir = add_rust_library(sdk_dir, host_os, "makepad", &build_paths, android_targets, &build_args, variant, urls)?;
+    // the executable build scripts run as: only an app may exec from its native-library directory
+    let exe_path = format!("lib/{abi}/libmakepad_exe.so");
+    cp(&release_dir.join("makepad_exe"), &build_paths.out_dir.join(&exe_path), false)?;
+    shell_env_cap(&[], &build_paths.out_dir, aapt_path(sdk_dir, urls).to_str().unwrap(), &["add", build_paths.dst_unaligned_apk.to_str().unwrap(), &exe_path])?;
+    let packages: Vec<&str> = host.apps.iter().map(|a| a.package.as_str()).collect();
+    add_resources(sdk_dir, &packages, &build_paths, &build_dir, android_targets, variant, &font_manifest, urls)?;
+
+    // 4. the source archive and what to run, then align and sign
+    let mut conf = String::new();
+    for app in &host.apps {
+        conf.push_str(&format!("app={}\n", app.package));
+        for flag in &app.cargo_flags {
+            conf.push_str(&format!("flag={flag}\n"));
+        }
+    }
+    for e in &host.env {
+        conf.push_str(&format!("env={e}\n"));
+    }
+    if host.privileged {
+        conf.push_str("privileged=1\n");
+    }
+    let with_payload = build_paths.dst_unaligned_apk.with_extension("host.apk");
+    add_host_payload(&build_paths.dst_unaligned_apk, &with_payload, &archive, &conf)?;
+    zipalign_apk(sdk_dir, urls, &with_payload, &build_paths.dst_apk)?;
+    sign_apk_debug(sdk_dir, urls, &build_paths.dst_apk)?;
+    let apk_size = fs::metadata(&build_paths.dst_apk).map(|m| m.len()).unwrap_or(0);
+    println!("Host APK built: {} ({:.1} MB)", build_paths.dst_apk.display(), apk_size as f64 / 1e6);
+    Ok(BuildResult {
+        dst_apk: build_paths.dst_apk,
+        java_url: resolved.java_url,
+    })
+}
+
+/// Builds the host APK, installs it and starts it (`android run-host`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_host(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    package_name: Option<String>,
+    app_label: Option<String>,
+    version_code: Option<VersionCodeStrategy>,
+    version_name: Option<String>,
+    min_sdk_version: Option<usize>,
+    host: &HostOpts,
+    android_targets: &[AndroidTarget],
+    variant: &AndroidVariant,
+    urls: &AndroidSDKUrls,
+    devices: Vec<String>,
+) -> Result<(), String> {
+    let result = build_host(sdk_dir, host_os, package_name, app_label, version_code, version_name, min_sdk_version, host, android_targets, variant, urls)?;
+    let cwd = std::env::current_dir().unwrap();
+    let adb = sdk_dir.join("platform-tools/adb");
+    let adb = adb.to_str().unwrap();
+    let serials: Vec<Option<String>> = if devices.is_empty() { vec![None] } else { devices.into_iter().map(Some).collect() };
+    for serial in serials {
+        let mut install = Vec::new();
+        let mut start = Vec::new();
+        if let Some(serial) = &serial {
+            install.extend(["-s".to_string(), serial.clone()]);
+            start.extend(["-s".to_string(), serial.clone()]);
+        }
+        install.extend(["install", "--no-incremental", "-r", result.dst_apk.to_str().unwrap()].map(String::from));
+        start.extend(["shell", "am", "start", "-S", "-n", &format!("{0}/{0}.RunActivity", result.java_url)].map(String::from));
+        println!("Installing {}", result.dst_apk.display());
+        shell_env_cap(&[], &cwd, adb, &install.iter().map(String::as_str).collect::<Vec<_>>())?;
+        println!("Starting {}", result.java_url);
+        shell_env_cap(&[], &cwd, adb, &start.iter().map(String::as_str).collect::<Vec<_>>())?;
+    }
+    Ok(())
 }
 
 pub fn run(

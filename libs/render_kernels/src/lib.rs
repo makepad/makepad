@@ -42,8 +42,9 @@ pub mod topology;
 
 pub use engine::{compile, engine, install, KernelEngine};
 pub use fences::{CxFences, FrameFences, ManualFences};
-pub use layout::{kernel_layout, LayoutMapError};
+pub use layout::{kernel_layout, views, LayoutMapError, RecordField, RecordLayout};
 pub use makepad_script_compute as compute;
+pub use makepad_script_compute_sched as dispatch;
 pub use pipeline::{Pass, Pipeline, PipelineError};
 pub use ring::{DrawView, OutputRing, PublishError, RingBusy, RingStats, SlotState, WriteLease};
 pub use topology::{Topology, TopologyError};

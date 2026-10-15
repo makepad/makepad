@@ -152,8 +152,7 @@ def prepare_seed(args, output):
         clone, manifest = verify_source(args.assets)
         for name in ('makepad-source.tgz', 'cargo-cache.tar', 'source-revision.txt'):
             copy(clone/name, seed/name)
-        for name in ('makepad-app-wm', 'makepad-app-ai-hub'):
-            copy(clone/'binaries'/name, seed/name)
+        copy(clone/'binaries'/'makepad-app-wm', seed/'makepad-app-wm')
         (seed/'clone.json').write_text(json.dumps(manifest, indent=2)+'\n')
     elif args.cached_source:
         if args.include_checkout:
@@ -176,10 +175,10 @@ def prepare_seed(args, output):
         assert cef_root+'/include/cef_version.h' in members
     copy(cef_archive, seed/'cef-linux.bz2')
     (seed/'cef-directory.txt').write_text(cef_root+'\n')
-    for name in ('firstboot.sh', 'ssh.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'aihub-session.sh', 'gbelt-bind.sh'):
+    for name in ('firstboot.sh', 'ssh.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'gbelt-bind.sh'):
         copy(HERE/name, seed/name)
         subprocess.run(['/bin/bash', '-n', str(seed/name)], check=True)
-    for name in ('makepad-wm.service', 'wm.env', 'makepad-aihub.service', 'aihub.env', '70-makepad-game-hardware.rules'):
+    for name in ('makepad-wm.service', 'wm.env', 'ai-hub.conf', '70-makepad-game-hardware.rules'):
         copy(HERE/name, seed/name)
     if clone:
         # Preserve the known-working service setup. SSH and firstboot logic

@@ -1,21 +1,19 @@
 # video — a dumb video player, part of the Makepad app family (terminal, wm,
 # files, image, task, sheets, route, mixer...).
 #
-# `video <path>` opens one clip fit-to-window on a dark makepad_wm_theme
+# `video <path>` opens one clip fit-to-window on a system theme
 # background and plays it, sound and all. Space pauses, Left/Right seek
-# ±5s (Shift ±30s), Up/Down set the volume, M mutes, double-click hides
-# the chrome, Escape/Q quits. `--preview <path>` sizes the window as a
+# ±5s (Shift ±30s), Up/Down set the volume, M mutes, F hides the chrome,
+# Escape/Q quits; the glass controls (makepad-widgets' PlayerControls) do
+# the same by pointer, and a double tap on a side skips 10 s. `--preview <path>` sizes the window as a
 # popup — that is files' Quick Look. `--mute` (or MAKEPAD_VIDEO_MUTE=1, or a
 # hidden window) starts silent, so a test run never talks at whoever is
 # sitting at the machine.
 #
-# The decode path is lifted from apps/asset-ui/src/video_player.rs (a
-# detached decode thread over the platform's hardware
-# `makepad_platform::video_file` seam, a small frame ring paced against a
-# wall clock, and the soundtrack mixed into `cx.audio_output`), with the
-# VJ's NV12-on-the-GPU trick (apps/vj/src/nv12_view.rs) replacing the
-# software YUV->BGRA loop: the frames stay NV12 all the way to two plane
-# textures and the pixel shader does the colour conversion.
+# Playback is makepad-widgets' VideoPlayer: the platform's own player
+# (AVFoundation, GStreamer, Media Foundation, Android MediaPlayer) plays the
+# file, sound included, so the same app runs on the phone; the app adds its
+# keyboard, the status line and the Quick Look warm viewer.
 
 [package]
 name = "makepad-app-video"
@@ -39,7 +37,6 @@ default = ["tweaker"]
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["media"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

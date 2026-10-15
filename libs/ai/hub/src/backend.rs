@@ -40,6 +40,9 @@ pub struct GenerateParams {
     pub delay_ms: u64,
     /// Download/verify files then stop before generating (pull job).
     pub pull_only: bool,
+    /// A control-panel job (`POST /control/model`): load the model and stop,
+    /// or unload it. Never set from `/generate`.
+    pub control: Option<ModelControl>,
 
     // Binary input for chained stages (image->mesh, i2v, image->world, STT).
     /// Decoded `input_b64` bytes; empty when the request carried none.
@@ -81,6 +84,10 @@ pub struct GenerateParams {
     /// Conversation identity for KV stickiness (wire `chat_session`).
     /// Empty on legacy clients.
     pub chat_session: String,
+    /// Pictures the chat turns carry (`chat_messages[].images`), decoded,
+    /// one per distinct key; the rendered prompt holds their markers
+    /// (`crate::protocol::chat_image_marker`).
+    pub chat_images: Vec<ChatImage>,
     /// Exact subject identity which the LLM must preserve verbatim.
     pub identity_anchor: String,
     pub style: String,
@@ -93,8 +100,13 @@ pub struct GenerateParams {
     pub text: String,
     pub voice: String,
     pub speed: f32,
+    /// Speech: publish each clause as it is rendered (see `ContentBackend::set_chunk_sink`).
+    pub stream: bool,
     /// Speech language hint (`language` on the wire); "" = model default.
     pub language: String,
+    /// The request's `domain` as given: speech-to-text reads its output mode
+    /// from it (`words`, `force_align`; "" = the plain transcript).
+    pub request_domain: String,
     /// 8-slot emotion vector (indextts), validated to length 8 and clamped
     /// per-slot to [0, 1.2]; `None` = neutral.
     pub emotion: Option<[f32; 8]>,
@@ -107,6 +119,12 @@ pub struct GenerateParams {
     /// Song lyrics, optionally with `[Verse]`-style section tags on their
     /// own lines; empty = generation driven by the description alone.
     pub lyrics: String,
+    /// Supplied ABC score (yue2); empty = the model plans one.
+    pub score: String,
+    /// Score planning mode (yue2): "" = model default.
+    pub score_mode: String,
+    /// Return the planned score without rendering audio (yue2).
+    pub score_only: bool,
 
     // Mesh domain (trellis backend).
     /// FaithC retopo grid resolution for the output GLB; `None` = raw mesh.
@@ -150,6 +168,68 @@ pub struct GenerateParams {
     pub peer_sources: Vec<String>,
     /// Coordinator-minted transfer tickets (self-describing scope).
     pub peer_tickets: Vec<String>,
+}
+
+/// What a control job does to its model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelControl {
+    Load,
+    Unload,
+    /// Give `mb` of GPU memory back to the UI (`crate::gpu_yield`); the chat
+    /// model itself is unloaded only with `unload`.
+    Yield { mb: u64, unload: bool },
+}
+
+/// One picture of a chat request: its key in the rendered prompt and its
+/// PNG/JPEG bytes.
+#[derive(Clone)]
+pub struct ChatImage {
+    pub key: String,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
+impl std::fmt::Debug for ChatImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ChatImage({}, {} bytes)", self.key, self.bytes.len())
+    }
+}
+
+/// Decodes `chat_messages[].images` into one entry per distinct picture.
+fn decode_chat_images(
+    messages: Option<&[crate::protocol::ChatMessageJson]>,
+) -> Result<Vec<ChatImage>, AssetAiError> {
+    let mut out: Vec<ChatImage> = Vec::new();
+    for b64 in messages.into_iter().flatten().flat_map(|m| m.images.iter().flatten()) {
+        let key = crate::protocol::chat_image_key(b64);
+        if out.iter().any(|image| image.key == key) {
+            continue;
+        }
+        if out.len() >= crate::protocol::MAX_CHAT_IMAGES {
+            return Err(AssetAiError::Params(format!(
+                "chat_messages: at most {} pictures per request",
+                crate::protocol::MAX_CHAT_IMAGES
+            )));
+        }
+        let text = b64.trim();
+        if text.is_empty() || text.len() % 4 != 0 {
+            return Err(AssetAiError::Params(
+                "chat_messages[].images: base64 length is not a non-empty multiple of 4".to_string(),
+            ));
+        }
+        let bytes = makepad_base64::base64_decode(text.as_bytes()).map_err(|e| {
+            AssetAiError::Params(format!("chat_messages[].images: bad base64: {e:?}"))
+        })?;
+        if bytes.len() > crate::vision_backend::MAX_INPUT_BYTES {
+            return Err(AssetAiError::Params(format!(
+                "chat_messages[].images: a picture is {} bytes, over the {} byte limit",
+                bytes.len(),
+                crate::vision_backend::MAX_INPUT_BYTES
+            )));
+        }
+        crate::vision_backend::image_kind(&bytes)?;
+        out.push(ChatImage { key, bytes: std::sync::Arc::new(bytes) });
+    }
+    Ok(out)
 }
 
 /// One decoded named input (see `GenerateRequestJson::inputs`).
@@ -264,7 +344,9 @@ impl GenerateParams {
                     crate::protocol::assemble_chat_prompt_with_think(
                         request.chat_system.as_deref().unwrap_or(""),
                         messages,
-                        crate::protocol::think_prefill_for_model(&request.model),
+                        // `thinking: false` on this request closes the think block (3.8
+                        // ignores /no_think); anything else keeps the node's mode.
+                        crate::protocol::think_prefill_for_request(&request.model, request.thinking),
                     )
                 }
                 _ => request.prompt.clone().unwrap_or_default(),
@@ -292,6 +374,7 @@ impl GenerateParams {
             guidance: request.guidance.map(|v| v as f32),
             delay_ms: request.delay_ms.unwrap_or(0).min(60_000),
             pull_only: request.pull_only.unwrap_or(false),
+            control: None,
 
             input_bytes,
             input_content_type: request
@@ -329,6 +412,11 @@ impl GenerateParams {
 
             target_domain,
             chat_session: request.chat_session.clone().unwrap_or_default(),
+            chat_images: if is_chat {
+                decode_chat_images(request.chat_messages.as_deref())?
+            } else {
+                Vec::new()
+            },
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),
             style: request.style.clone().unwrap_or_default(),
             // No policy ceiling (2026-08-27, user: "if the ai wants to
@@ -347,6 +435,8 @@ impl GenerateParams {
             text: request.text.clone().unwrap_or_default(),
             voice: request.voice.clone().unwrap_or_default(),
             language: request.language.clone().unwrap_or_default(),
+            request_domain: request.domain.clone().unwrap_or_default(),
+            stream: request.stream.unwrap_or(false),
             speed: if speed.is_finite() && speed > 0.0 {
                 speed.clamp(0.25, 4.0) as f32
             } else {
@@ -384,6 +474,9 @@ impl GenerateParams {
                 .map(|v| v.clamp(0.5, 300.0)),
 
             lyrics: request.lyrics.clone().unwrap_or_default(),
+            score: request.score.clone().unwrap_or_default(),
+            score_mode: request.score_mode.clone().unwrap_or_default(),
+            score_only: request.score_only.unwrap_or(false),
 
             // 0 = raw decode mesh (escape hatch — must survive the clamp);
             // None = backend default (trellis: FaithC retopo at 256).
@@ -1451,6 +1544,13 @@ pub trait ContentBackend: Send {
         false
     }
 
+    /// Whether the backend keeps GPU memory between jobs. False for one that
+    /// uploads its weights for a job and gives them back when it ends
+    /// (Kokoro): its retire frees no GPU memory, and nothing waits for any.
+    fn holds_gpu_between_jobs(&self) -> bool {
+        true
+    }
+
     /// Release resident runtime state. Default is appropriate for stateless
     /// and subprocess backends; native heavy backends override both hooks.
     fn unload(&mut self) -> Result<(), AssetAiError> {
@@ -1459,10 +1559,12 @@ pub trait ContentBackend: Send {
 
     /// Whether a failed `generate` left resident runtime state safe to reuse.
     /// Cancellation is assumed clean by default because backends are required
-    /// to unwind at natural boundaries; ordinary errors are conservative and
+    /// to unwind at natural boundaries, and so is a refused request
+    /// (`Params`: the backend said no before touching its runtime, e.g. a
+    /// prompt too long for the context); other errors are conservative and
     /// retire residency unless a backend explicitly proves recovery.
     fn resident_is_healthy_after_error(&self, error: &AssetAiError) -> bool {
-        matches!(error, AssetAiError::Cancelled)
+        matches!(error, AssetAiError::Cancelled | AssetAiError::Params(_))
     }
 
     /// Runs one generation. `progress` reports fine-grained stages (see
@@ -1483,6 +1585,13 @@ pub trait ContentBackend: Send {
     /// which the server publishes as the job's `partial_text` so chat
     /// clients stream instead of receiving one burst at completion.
     /// Default: text does not stream; identical to `generate`.
+    /// Where a backend that renders in pieces (speech: one per clause) sends each
+    /// finished piece while the job runs; the server publishes it as a partial
+    /// artifact. Set before a job and cleared after. Default: ignored.
+    fn set_chunk_sink(&mut self, sink: Option<Box<dyn FnMut(ArtifactData) + Send>>) {
+        let _ = sink;
+    }
+
     fn generate_streamed(
         &mut self,
         params: &GenerateParams,
@@ -1595,6 +1704,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "moss" => cfg!(feature = "audio"),
         "woosh" => cfg!(feature = "audio"),
         "ace" => cfg!(feature = "audio"),
+        "yue2" => cfg!(feature = "audio"),
         "beats" => cfg!(feature = "beats-native"),
         "stems" => cfg!(feature = "stems-native"),
         "trellis" => cfg!(feature = "mesh"),
@@ -1910,6 +2020,8 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(feature = "audio")]
         "ace" => Ok(Box::new(crate::ace_backend::AceBackend::new_ace(&spec.id))),
+        #[cfg(feature = "audio")]
+        "yue2" => Ok(Box::new(crate::yue2_backend::Yue2Backend::new_native(&spec.id))),
         #[cfg(feature = "beats-native")]
         "beats" => Ok(Box::new(crate::beats_backend::BeatsBackend::new(&spec.id))),
         #[cfg(not(feature = "beats-native"))]
@@ -1941,6 +2053,11 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(not(feature = "audio"))]
         "ace" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'audio' cargo feature",
+            spec.id
+        ))),
+        #[cfg(not(feature = "audio"))]
+        "yue2" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'audio' cargo feature",
             spec.id
         ))),

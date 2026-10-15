@@ -25,7 +25,6 @@ name = "makepad_app_photos"
 path = "src/lib.rs"
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -41,7 +40,6 @@ localai = ["makepad-app-aichat?/localai"]
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The wall itself: the baked tape library and the pannable, zoomable grid.
 makepad-image-tiles = { path = "../../libs/image_tiles" }
 # The assistant: the F10 overlay in this window, and the tools the wall

@@ -195,7 +195,7 @@ pub fn checks(
     let shared = run.cargo_cache.clone();
     let mut cache = shared.lock().map_err(|e| e.to_string())?;
     // User-supplied environment changes must not reuse a canonical warm verdict.
-    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD" || key == "CARGO_TARGET_DIR");
+    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD_BUILD" || key == "CARGO_TARGET_DIR");
     if !workspace && memoize && packages.iter().all(|p| cache.checks.contains_key(&(p.clone(), check.label.clone()))) {
         return Ok(packages.iter().map(|p| (p.clone(), cache.checks[&(p.clone(), check.label.clone())].clone())).collect());
     }
@@ -300,7 +300,7 @@ mod tests {
         let host = host();
         let packages = strings(&["a", "b"]);
         let checks = cargo::target_checks(&host, &host.targets, &packages, false);
-        assert_eq!(checks.len(), 15);
+        assert_eq!(checks.len(), 14);
         for check in checks {
             let args = select_packages(&check.args, &packages);
             let opts = Options { toolchain: check.toolchain.clone(), env: check.env.clone(), ..Default::default() };
@@ -314,7 +314,7 @@ mod tests {
             expected.extend(strings(&["-p", "a", "-p", "b", "--message-format=json"]));
             if check.ty == cargo::BuildTy::BinaryBuildStd { expected.insert(0, "+nightly".into()); }
             assert_eq!(full, expected);
-            assert_eq!(check.env[0].1, match check.ty { cargo::BuildTy::LinuxDirect => "linux_direct", cargo::BuildTy::BinaryBuildStd => "lines", _ => " " });
+            assert_eq!(check.env[0].1, match check.ty { cargo::BuildTy::BinaryBuildStd => "lines", _ => " " });
             let env = cargo::target_env(Path::new("/checkout"), &[("CARGO_TARGET_DIR".into(), "/wrong".into())]);
             assert_eq!(env, vec![("CARGO_TARGET_DIR".into(), "/checkout/target".into())]);
         }
@@ -402,9 +402,10 @@ mod tests {
         assert!(Arc::ptr_eq(&hit, &cached));
         let linux = cargo::target_checks(&host(), &strings(&["x86_64-unknown-linux-gnu"]), &strings(&["a"]), false);
         child.cargo_cache.lock().unwrap().checks.insert(("a".into(), linux[0].label.clone()), Outcome::Cargo(cached.clone()));
-        let mut direct = cargo::target_checks(&host(), &strings(&["x86_64-unknown-linux-gnu"]), &strings(&["a"]), false).remove(1);
-        direct.skip = Some("not installed".into());
-        let result = super::checks(&mut child, &host(), &direct, &strings(&["a"]), false, None, &Options::default()).unwrap();
+        // a row the cache has nothing for answers its own skip reason, without cargo
+        let mut other = cargo::target_checks(&host(), &strings(&["x86_64-pc-windows-msvc"]), &strings(&["a"]), false).remove(0);
+        other.skip = Some("not installed".into());
+        let result = super::checks(&mut child, &host(), &other, &strings(&["a"]), false, None, &Options::default()).unwrap();
         assert!(matches!(&result[0].1, Outcome::Warning(s) if s == "not installed"));
         assert!(child.stages.is_empty());
         assert_eq!(std::fs::read_dir(&child.dir).unwrap().count(), 1); // only log.txt

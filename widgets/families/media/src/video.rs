@@ -1,5 +1,4 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image_cache::ImageCacheImpl,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -16,6 +15,7 @@ script_mod! {
     use mod.prelude.widgets_internal.*
 
     mod.widgets.VideoDataSource = #(VideoDataSource::script_api(vm))
+    mod.widgets.VideoFit = #(VideoFit::script_api(vm))
     mod.widgets.VideoBase = #(Video::register_widget(vm))
 
     mod.widgets.Video = set_type_default() do mod.widgets.VideoBase{
@@ -64,8 +64,8 @@ script_mod! {
             image_scale: instance(vec2(1.0, 1.0))
             image_pan: instance(vec2(0.5, 0.5))
 
-            source_size: uniform(vec2(1.0, 1.0))
-            target_size: uniform(vec2(-1.0, -1.0))
+            source_size: uniform(vec2(0.0, 0.0))
+            fit_cover: uniform(0.0)
 
             // Apply SurfaceTexture ST matrix, then sample OES (see oes_st_c* comment).
             sample_oes: fn(coord: vec2) -> vec4 {
@@ -155,166 +155,59 @@ script_mod! {
                 return vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0)
             }
 
-            get_color_scale_pan: fn() {
-                // Early return for default scaling and panning,
-                // used when walk size is not specified or non-fixed.
-                if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
-                    if self.show_thumbnail > 0.0 {
-                        return self.thumbnail_texture.sample(self.pos).xyzw
-                    } else if self.yuv_enabled > 0.5 {
-                        return self.sample_yuv(self.pos)
-                    } else if self.video_rgba_2d > 0.5 {
-                        return self.video_texture_2d.sample(self.pos)
-                    } else {
-                        return self.sample_oes(self.pos)
-                    }
-                }
-
-                let mut scale = self.image_scale
-                let pan = self.image_pan
-                let source_aspect_ratio = self.source_size.x / self.source_size.y
-                let target_aspect_ratio = self.target_size.x / self.target_size.y
-
-                // Adjust scale based on aspect ratio difference
-                if source_aspect_ratio != target_aspect_ratio {
-                    if source_aspect_ratio > target_aspect_ratio {
-                        scale.x = target_aspect_ratio / source_aspect_ratio
-                        scale.y = 1.0
-                    } else {
-                        scale.x = 1.0
-                        scale.y = source_aspect_ratio / target_aspect_ratio
-                    }
-                }
-
-                // Calculate the range for panning
-                let pan_range_x = max(0.0, 1.0 - scale.x)
-                let pan_range_y = max(0.0, 1.0 - scale.y)
-
-                // Adjust the user pan values to be within the pan range
-                let adjusted_pan_x = pan_range_x * pan.x
-                let adjusted_pan_y = pan_range_y * pan.y
-                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y)
-                let adjusted_pos = self.pos * scale + adjusted_pan
-
+            // The picture at `uv` (0..1 over the picture): the thumbnail until
+            // playback starts, then the video in whichever form it arrives.
+            sample_picture: fn(uv: vec2) -> vec4 {
                 if self.show_thumbnail > 0.5 {
-                    return self.thumbnail_texture.sample(adjusted_pos).xyzw
+                    return self.thumbnail_texture.sample(uv).xyzw
                 } else if self.yuv_enabled > 0.5 {
-                    return self.sample_yuv(adjusted_pos)
+                    return self.sample_yuv(uv)
                 } else if self.video_rgba_2d > 0.5 {
-                    return self.video_texture_2d.sample(adjusted_pos)
+                    return self.video_texture_2d.sample(uv)
                 } else {
-                    return self.sample_oes(adjusted_pos)
+                    return self.sample_oes(uv)
                 }
             }
 
+            // source_size is the picture's display size (pixel aspect and
+            // rotation applied). Contain (fit_cover 0): the whole picture,
+            // centred, with transparent bars on the two free sides. Cover
+            // (fit_cover 1): the picture fills the widget, cropped on one
+            // axis, image_pan picking which part shows.
+            get_color: fn() -> vec4 {
+                let src = self.source_size
+                let dst = self.rect_size
+                if src.x <= 0.0 || src.y <= 0.0 || dst.x <= 0.0 || dst.y <= 0.0 {
+                    return self.sample_picture(self.pos)
+                }
+                let src_aspect = src.x / src.y
+                let dst_aspect = dst.x / dst.y
+                if self.fit_cover > 0.5 {
+                    let mut scale = self.image_scale
+                    if src_aspect > dst_aspect {
+                        scale = vec2(dst_aspect / src_aspect, 1.0)
+                    } else if src_aspect < dst_aspect {
+                        scale = vec2(1.0, src_aspect / dst_aspect)
+                    }
+                    let pan_range = vec2(max(0.0, 1.0 - scale.x), max(0.0, 1.0 - scale.y))
+                    return self.sample_picture(self.pos * scale + pan_range * self.image_pan)
+                }
+                let mut size = vec2(1.0, 1.0)
+                if src_aspect > dst_aspect {
+                    size = vec2(1.0, dst_aspect / src_aspect)
+                } else {
+                    size = vec2(src_aspect / dst_aspect, 1.0)
+                }
+                let uv = (self.pos - (vec2(1.0, 1.0) - size) * 0.5) / size
+                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                return self.sample_picture(uv)
+            }
+
             pixel: fn() {
-                let color = self.get_color_scale_pan()
+                let color = self.get_color()
                 return Pal.premul(vec4(color.xyz, color.w * self.opacity))
-            }
-        }
-
-        draw_center_play_bg +: {
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let c = self.rect_size * 0.5
-                let r = min(c.x, c.y)
-                sdf.circle(c.x, c.y, r)
-                sdf.fill(Pal.premul(vec4(0.0, 0.0, 0.0, 0.5)))
-                return sdf.result
-            }
-        }
-
-        draw_center_play_icon +: {
-            color: #fff
-            text_style: theme.font_icons{
-                font_size: 20.0
-            }
-        }
-
-        draw_controls_bg +: {
-            controls_opacity: instance(0.0)
-            pixel: fn() {
-                return vec4(0.0, 0.0, 0.0, 0.6 * self.controls_opacity)
-            }
-        }
-
-        draw_play_icon +: {
-            color: #0000
-            text_style: theme.font_icons{
-                font_size: 11.0
-            }
-        }
-
-        draw_restart_icon +: {
-            color: #0000
-            text_style: theme.font_icons{
-                font_size: 10.0
-            }
-        }
-
-        draw_volume_icon +: {
-            color: #0000
-            text_style: theme.font_icons{
-                font_size: 10.0
-            }
-        }
-
-        draw_time_text +: {
-            color: #0000
-            text_style: theme.font_regular{
-                font_size: 8.0
-            }
-        }
-
-        draw_progress_bg +: {
-            controls_opacity: instance(0.0)
-            pixel: fn() {
-                return Pal.premul(vec4(1.0, 1.0, 1.0, 0.3 * self.controls_opacity))
-            }
-        }
-
-        draw_progress_fill +: {
-            controls_opacity: instance(0.0)
-            pixel: fn() {
-                return Pal.premul(vec4(1.0, 1.0, 1.0, 0.9 * self.controls_opacity))
-            }
-        }
-
-        draw_progress_thumb +: {
-            controls_opacity: instance(0.0)
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let c = self.rect_size * 0.5
-                let r = min(c.x, c.y)
-                sdf.circle(c.x, c.y, r)
-                sdf.fill(#fff)
-                return sdf.result * self.controls_opacity
-            }
-        }
-
-        draw_seek_indicator +: {
-            indicator_opacity: instance(0.0)
-            direction: uniform(0.0)
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let c = self.rect_size * 0.5
-                let sz = min(self.rect_size.x, self.rect_size.y) * 0.3
-                if self.direction > 0.5 {
-                    // Right arrow (fast-forward) - CCW winding
-                    sdf.move_to(c.x - sz, c.y - sz)
-                    sdf.line_to(c.x + sz, c.y)
-                    sdf.line_to(c.x - sz, c.y + sz)
-                    sdf.close_path()
-                    sdf.fill(#fff)
-                } else {
-                    // Left arrow (rewind) - CCW winding
-                    sdf.move_to(c.x + sz, c.y + sz)
-                    sdf.line_to(c.x - sz, c.y)
-                    sdf.line_to(c.x + sz, c.y - sz)
-                    sdf.close_path()
-                    sdf.fill(#fff)
-                }
-                return sdf.result * self.indicator_opacity
             }
         }
 
@@ -331,55 +224,6 @@ script_mod! {
             }
         }
 
-        controls_height: 32.0
-        show_controls: true
-
-        animator: Animator{
-            hover: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.3}}
-                    apply: {
-                        draw_controls_bg: {controls_opacity: 0.0}
-                        draw_play_icon: {color: #0000}
-                        draw_restart_icon: {color: #0000}
-                        draw_volume_icon: {color: #0000}
-                        draw_progress_bg: {controls_opacity: 0.0}
-                        draw_progress_fill: {controls_opacity: 0.0}
-                        draw_progress_thumb: {controls_opacity: 0.0}
-                        draw_time_text: {color: #0000}
-                    }
-                }
-                on: AnimatorState{
-                    from: {all: Forward {duration: 0.15}}
-                    apply: {
-                        draw_controls_bg: {controls_opacity: 1.0}
-                        draw_play_icon: {color: #fff}
-                        draw_restart_icon: {color: #fff}
-                        draw_volume_icon: {color: #fff}
-                        draw_progress_bg: {controls_opacity: 1.0}
-                        draw_progress_fill: {controls_opacity: 1.0}
-                        draw_progress_thumb: {controls_opacity: 1.0}
-                        draw_time_text: {color: #fff}
-                    }
-                }
-            }
-            seek_indicator: {
-                default: @hidden
-                hidden: AnimatorState{
-                    from: {all: Forward {duration: 0.4}}
-                    apply: {
-                        draw_seek_indicator: {indicator_opacity: 0.0}
-                    }
-                }
-                show: AnimatorState{
-                    from: {all: Snap}
-                    apply: {
-                        draw_seek_indicator: {indicator_opacity: 0.8}
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -400,16 +244,15 @@ script_mod! {
 ///
 /// `show_idle_thumbnail` - when true and a `thumbnail_source` is provided, shows the thumbnail while the video is idle. defaults to false.
 
-/// `show_controls` - determines if overlay controls (play/pause, restart, progress bar) appear on hover. defaults to true.
-///
-/// `controls_height` - height of the controls bar in logical pixels. defaults to 32.0.
+/// Transport controls are not this widget's: `VideoPlayer` puts the glass
+/// `PlayerControls` over a `Video`.
 
 /// Not yet supported:
 /// Widget API
 ///  - Seek to arbitrary timestamp
 ///  - Hotswap video source, `set_source(VideoDataSource)` only works if video is in Unprepared state.
 
-#[derive(Script, Widget, Animator)]
+#[derive(Script, Widget)]
 pub struct Video {
     #[uid]
     uid: WidgetUid,
@@ -427,44 +270,10 @@ pub struct Video {
     #[live]
     scale: f64,
 
-    // Center play button overlay
-    #[live]
-    draw_center_play_bg: DrawQuad,
-    #[live]
-    draw_center_play_icon: DrawText,
-
-    // Controls overlay drawing
-    #[live]
-    draw_controls_bg: DrawColor,
-    #[live]
-    draw_play_icon: DrawText,
-    #[live]
-    draw_restart_icon: DrawText,
-    #[live]
-    draw_volume_icon: DrawText,
-    #[live]
-    draw_progress_bg: DrawColor,
-    #[live]
-    draw_progress_fill: DrawColor,
-    #[live]
-    draw_progress_thumb: DrawQuad,
-    #[live]
-    draw_time_text: DrawText,
-    #[live]
-    draw_seek_indicator: DrawQuad,
     #[live]
     draw_error_bg: DrawColor,
     #[live]
     draw_error_text: DrawText,
-
-    // Controls config
-    #[live(true)]
-    show_controls: bool,
-    #[live(32.0)]
-    controls_height: f64,
-    // Animator for hover fade
-    #[apply_default]
-    animator: Animator,
 
     // Textures
     #[live]
@@ -521,6 +330,10 @@ pub struct Video {
     held_paused: bool,
     #[live(false)]
     autoplay: bool,
+    /// How the picture sits in the widget: whole and centred (Contain), or
+    /// filling it, cropped on one axis (Cover, `image_pan` picks the part).
+    #[live]
+    fit: VideoFit,
     #[live(false)]
     mute: bool,
     #[rust]
@@ -542,6 +355,9 @@ pub struct Video {
     video_width: usize,
     #[rust]
     video_height: usize,
+    /// The planes arrive a quarter turn off (yuv rotation steps 1 or 3).
+    #[rust]
+    quarter_turned: bool,
     #[rust]
     total_duration: u128,
 
@@ -554,26 +370,6 @@ pub struct Video {
     // Playback position tracking
     #[rust]
     current_position_ms: u128,
-
-    // Interaction state
-    #[rust]
-    is_dragging_progress: bool,
-    #[rust]
-    seek_indicator_direction: f64,
-    /// Whether controls are pinned visible (for touch, or click-to-pin on desktop).
-    #[rust]
-    controls_visible: bool,
-    /// Whether the mouse is currently hovering over the video (desktop only).
-    #[rust]
-    controls_hover: bool,
-    /// Number of position updates to skip after a seek (prevents stale platform positions from reverting the progress bar).
-    #[rust]
-    seek_cooldown: u32,
-    /// Manual double-tap tracking (fallback for unreliable platform tap_count on touch).
-    #[rust]
-    last_tap_time: Option<f64>,
-    #[rust]
-    last_tap_abs: DVec2,
 
     #[rust]
     id: LiveId,
@@ -886,6 +682,16 @@ impl VideoRef {
         }
         false
     }
+
+    /// The picture's size as the platform reported it (0x0 until prepared).
+    pub fn video_size(&self) -> (usize, usize) {
+        self.borrow().map_or((0, 0), |inner| (inner.video_width, inner.video_height))
+    }
+
+    /// The last decoding error the platform reported, if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.borrow().and_then(|inner| inner.last_error.clone())
+    }
 }
 
 #[derive(Clone, Debug, Script, ScriptHook, PartialEq)]
@@ -972,28 +778,23 @@ impl Widget for Video {
             }
         }
 
+        // set on every draw: a re-apply of the style (rotation, theme) puts
+        // the uniforms back to their defaults
+        let cover = if self.fit == VideoFit::Cover { 1.0 } else { 0.0 };
+        self.draw_bg.set_uniform(cx, id!(fit_cover), &[cover]);
+        let size = self.picture_size(cx);
+        self.draw_bg.set_uniform(cx, id!(source_size), &size);
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_bg.end(cx);
 
         self.sync_native_camera_preview(cx);
 
-        if self.show_controls {
-            self.draw_center_play_button(cx);
-            self.draw_controls(cx);
-        }
-
-        // Draw seek indicator overlay (centered on left or right half of video)
-        self.draw_seek_indicator(cx);
         self.draw_error_overlay(cx);
 
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.animator_handle_event(cx, event).must_redraw() {
-            self.draw_bg.redraw(cx);
-        }
-
         let uid = self.widget_uid();
         match event {
             Event::VideoYuvTexturesReady(event) => {
@@ -1035,11 +836,9 @@ impl Widget for Video {
                     // the platform may still report stale positions before the seek takes effect.
                     // Also skip 0 when we have a meaningful position — handles platforms that
                     // don't track position (Android always reports 0).
-                    if self.is_dragging_progress {
-                        // Keep our drag-set position
-                    } else if self.seek_cooldown > 0 {
-                        self.seek_cooldown -= 1;
-                    } else if event.current_position_ms > 0 {
+                    // Skip 0 when we have a meaningful position (a
+                    // platform that does not track position reports 0).
+                    if event.current_position_ms > 0 {
                         self.current_position_ms = event.current_position_ms;
                     }
                     // Update YUV shader uniforms from platform event
@@ -1064,6 +863,7 @@ impl Widget for Video {
                         id!(yuv_rotation_steps),
                         &[event.yuv.rotation_steps],
                     );
+                    self.quarter_turned = (event.yuv.rotation_steps.round() as i32) % 2 != 0;
                     // Keep every samplerExternalOES slot bound to a real OES texture.
                     // An empty video_texture + live tex_*_oes can 花屏 on NVIDIA.
                     if event.yuv.external {
@@ -1116,21 +916,6 @@ impl Widget for Video {
                             }
                         }
                     }
-                    // Android-only: pull ST matrix from texture OS state (set on
-                    // updateTexImage drain). Not part of VideoTextureUpdatedEvent.
-                    #[cfg(target_os = "android")]
-                    if let Some(texture) = self.video_texture.as_ref() {
-                        let m = cx.textures[texture.texture_id()].os.oes_st_matrix;
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c0), &[m[0], m[1], m[2], m[3]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c1), &[m[4], m[5], m[6], m[7]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c2), &[m[8], m[9], m[10], m[11]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c3), &[m[12], m[13], m[14], m[15]]);
-                    }
-
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
                         self.playback_state = PlaybackState::Playing;
@@ -1300,16 +1085,6 @@ impl Video {
         self.id = LiveId::unique();
         self.ensure_primary_texture(cx);
 
-        #[cfg(target_os = "android")]
-        if self.source_mode == VideoSourceMode::ExternalTexture {
-            match cx.os_type() {
-                OsType::Android(params) if params.is_emulator => {
-                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
-                }
-                _ => {}
-            }
-        }
-
         self.should_prepare_playback = self.autoplay;
         self.maybe_prepare_playback(cx);
     }
@@ -1320,11 +1095,6 @@ impl Video {
         // (via load_png_from_data / load_jpg_from_data) already calls set_texture
         // with a fresh GPU texture containing the decoded image. Allocating a
         // throwaway Texture::new(cx) first was just churning GPU resources.
-
-        let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
-        let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
-        self.draw_bg
-            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.show_idle_thumbnail {
             let loaded = self.load_thumbnail_image(cx);
@@ -1339,14 +1109,6 @@ impl Video {
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         self.ensure_primary_texture(cx);
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
-            // On Android, external texture mode waits for GL texture handle.
-            #[cfg(target_os = "android")]
-            if self.source_mode == VideoSourceMode::ExternalTexture
-                && self.video_texture_handle.is_none()
-            {
-                return;
-            }
-
             let source = if self.has_session_source {
                 match self.session_source_id.take() {
                     Some(session_id) => VideoSource::Session(session_id),
@@ -1419,11 +1181,6 @@ impl Video {
         self.video_tracks = event.video_tracks.clone();
         self.audio_tracks = event.audio_tracks.clone();
 
-        self.draw_bg.set_uniform(
-            cx,
-            id!(source_size),
-            &[self.video_width as f32, self.video_height as f32],
-        );
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
@@ -1436,123 +1193,32 @@ impl Video {
         }
     }
 
-    fn controls_interactable(&self) -> bool {
-        self.show_controls && (self.controls_visible || self.controls_hover)
-    }
-
-    /// Manual double-tap detection as a fallback for unreliable platform tap_count on touch.
-    /// Returns true if a double-tap is detected, and clears the tracking state.
-    /// Otherwise records this tap for future detection.
-    fn check_double_tap(&mut self, abs: DVec2, time: f64) -> bool {
-        if let Some(last_time) = self.last_tap_time {
-            let elapsed = time - last_time;
-            let dx = abs.x - self.last_tap_abs.x;
-            let dy = abs.y - self.last_tap_abs.y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if elapsed < 0.4 && dist < 80.0 {
-                self.last_tap_time = None;
-                return true;
-            }
+    /// The picture's display size for the shader's fit: the decoder's display
+    /// size (turned when the shader turns the planes a quarter), the
+    /// thumbnail's until the video reports one.
+    fn picture_size(&self, cx: &mut Cx) -> [f32; 2] {
+        if self.video_width > 0 && self.video_height > 0 {
+            let (w, h) = (self.video_width as f32, self.video_height as f32);
+            return if self.quarter_turned { [h, w] } else { [w, h] };
         }
-        self.last_tap_time = Some(time);
-        self.last_tap_abs = abs;
-        false
+        match self.thumbnail_texture.as_ref().and_then(|t| t.get_format(cx).vec_width_height()) {
+            Some((w, h)) => [w as f32, h as f32],
+            None => [0.0, 0.0],
+        }
     }
 
+    /// The picture's own presses: hold-to-pause and the secondary click.
+    /// Transport gestures belong to `PlayerControls` (see `VideoPlayer`).
     fn handle_gestures(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(fhe) => {
-                if self.show_controls {
-                    self.controls_hover = true;
-                    self.animator_play(cx, ids!(hover.on));
-                }
-                self.update_cursor(cx, fhe.abs);
+            Hit::FingerDown(fe) if fe.is_primary_hit() && self.hold_to_pause => {
+                // Only a pause this press caused is its to undo.
+                self.held_paused = self.playback_state == PlaybackState::Playing;
+                self.pause_playback(cx);
             }
-            Hit::FingerHoverOver(fhe) => {
-                self.update_cursor(cx, fhe.abs);
-            }
-            Hit::FingerHoverOut(_) => {
-                cx.set_cursor(MouseCursor::Arrow);
-                if self.show_controls {
-                    self.controls_hover = false;
-                    // Don't hide controls if they're pinned visible or during drag
-                    if !self.is_dragging_progress && !self.controls_visible {
-                        self.animator_play(cx, ids!(hover.off));
-                    }
-                }
-            }
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
-
-                // Double-tap detection: use platform tap_count OR manual fallback
-                let is_double_tap = if fe.tap_count >= 2 {
-                    self.last_tap_time = None;
-                    true
-                } else {
-                    self.check_double_tap(fe.abs, fe.time)
-                };
-
-                // Double-tap on video area: seek forward/backward
-                // Only when actively playing/paused (not when center play button is showing)
-                if self.show_controls
-                    && is_double_tap
-                    && !self.should_show_center_play()
-                    && !(self.controls_interactable() && self.hit_test_controls(cx, fe.abs))
-                {
-                    let video_rect = self.draw_bg.area().rect(cx);
-                    let mid_x = video_rect.pos.x + video_rect.size.x * 0.5;
-                    if fe.abs.x < mid_x {
-                        self.seek_backward(cx);
-                    } else {
-                        self.seek_forward(cx);
-                    }
-                } else if self.controls_interactable() && self.hit_test_progress_bar(cx, fe.abs) {
-                    // Start dragging progress bar
-                    self.is_dragging_progress = true;
-                    self.seek_to_position_from_x(cx, fe.abs.x);
-                } else if self.controls_interactable() && self.hit_test_controls(cx, fe.abs) {
-                    // Will be handled on FingerUp
-                } else if !self.show_controls && self.hold_to_pause {
-                    // Only a pause this press caused is its to undo.
-                    self.held_paused = self.playback_state == PlaybackState::Playing;
-                    self.pause_playback(cx);
-                }
-            }
-            Hit::FingerMove(fe) => {
-                if self.is_dragging_progress {
-                    self.seek_to_position_from_x(cx, fe.abs.x);
-                }
-            }
-            // Taken away: no seek, no play toggle, no controls toggle — but a
-            // hold that paused playback lets go of it.
-            Hit::FingerUp(fe) if fe.is_primary_hit() && fe.cancelled => {
-                self.is_dragging_progress = false;
-                if std::mem::take(&mut self.held_paused) {
-                    self.resume_playback(cx);
-                }
-            }
+            // Released or taken away: a hold that paused playback lets go.
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                if self.is_dragging_progress {
-                    self.is_dragging_progress = false;
-                    self.seek_to_position_from_x(cx, fe.abs.x);
-                } else if self.should_show_center_play() && fe.tap_count < 2 {
-                    // Center play button is showing — tap anywhere to start playback
-                    self.toggle_play_pause(cx);
-                } else if self.controls_interactable() && self.hit_test_controls_click(cx, fe.abs) {
-                    // Control click handled
-                } else if self.show_controls
-                    && fe.tap_count < 2
-                    && !self.hit_test_controls(cx, fe.abs)
-                {
-                    // Single tap outside controls bar: toggle pinned visibility
-                    self.controls_visible = !self.controls_visible;
-                    if self.controls_visible {
-                        self.animator_play(cx, ids!(hover.on));
-                    } else if !self.controls_hover {
-                        self.animator_play(cx, ids!(hover.off));
-                    }
-                } else if !self.show_controls && self.hold_to_pause {
-                    self.held_paused = false;
+                if std::mem::take(&mut self.held_paused) {
                     self.resume_playback(cx);
                 }
             }
@@ -1562,44 +1228,7 @@ impl Video {
             Hit::FingerLongPress(lp) => {
                 self.handle_secondary_click(cx, scope, lp.abs, Default::default());
             }
-            Hit::KeyDown(ke) => {
-                self.handle_key_seek(cx, &ke);
-            }
             _ => (),
-        }
-    }
-
-    fn seek_backward(&mut self, cx: &mut Cx) {
-        let seek_step_ms: u128 = 5000;
-        let new_pos = self.current_position_ms.saturating_sub(seek_step_ms);
-        cx.seek_video_playback(self.id, new_pos as u64);
-        self.current_position_ms = new_pos;
-        self.seek_cooldown = 5;
-        self.seek_indicator_direction = 0.0;
-        self.animator_play(cx, ids!(seek_indicator.show));
-        self.animator_play(cx, ids!(seek_indicator.hidden));
-        self.redraw(cx);
-    }
-
-    fn seek_forward(&mut self, cx: &mut Cx) {
-        let seek_step_ms: u128 = 5000;
-        let new_pos = (self.current_position_ms + seek_step_ms).min(self.total_duration);
-        cx.seek_video_playback(self.id, new_pos as u64);
-        self.current_position_ms = new_pos;
-        self.seek_cooldown = 5;
-        self.seek_indicator_direction = 1.0;
-        self.animator_play(cx, ids!(seek_indicator.show));
-        self.animator_play(cx, ids!(seek_indicator.hidden));
-        self.redraw(cx);
-    }
-
-    fn handle_key_seek(&mut self, cx: &mut Cx, ke: &KeyEvent) {
-        match ke.key_code {
-            KeyCode::ArrowLeft => self.seek_backward(cx),
-            KeyCode::ArrowRight => self.seek_forward(cx),
-            KeyCode::Space => self.toggle_play_pause(cx),
-            KeyCode::KeyM => self.toggle_mute(cx),
-            _ => {}
         }
     }
 
@@ -1769,229 +1398,6 @@ impl Video {
         }
     }
 
-    fn should_show_center_play(&self) -> bool {
-        matches!(
-            self.playback_state,
-            PlaybackState::Unprepared
-                | PlaybackState::Preparing
-                | PlaybackState::Prepared
-                | PlaybackState::Completed
-        )
-    }
-
-    fn draw_center_play_button(&mut self, cx: &mut Cx2d) {
-        if !self.should_show_center_play() {
-            return;
-        }
-
-        let video_rect = self.draw_bg.area().rect(cx);
-        if video_rect.size.x <= 0.0 || video_rect.size.y <= 0.0 {
-            return;
-        }
-
-        let btn_size = 48.0;
-        let btn_x = video_rect.pos.x + (video_rect.size.x - btn_size) * 0.5;
-        let btn_y = video_rect.pos.y + (video_rect.size.y - btn_size) * 0.5;
-
-        // Draw semi-transparent circle background
-        self.draw_center_play_bg.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(btn_x, btn_y),
-                size: dvec2(btn_size, btn_size),
-            },
-        );
-
-        // Measure the glyph to center it precisely within the circle
-        let glyph = "\u{f04b}"; // fa-play
-        let laid_out =
-            self.draw_center_play_icon
-                .layout(cx, 0.0, 0.0, None, false, Align::default(), glyph);
-        let glyph_w = laid_out.size_in_lpxs.width as f64;
-        let glyph_h = laid_out.size_in_lpxs.height as f64;
-        // Nudge right by 2px — play triangles are geometrically centered but
-        // perceptually look left-shifted due to the pointed right edge.
-        let icon_x = btn_x + (btn_size - glyph_w) * 0.5 + 2.0;
-        let icon_y = btn_y + (btn_size - glyph_h) * 0.5;
-        self.draw_center_play_icon
-            .draw_abs(cx, dvec2(icon_x, icon_y), glyph);
-    }
-
-    fn draw_controls(&mut self, cx: &mut Cx2d) {
-        let video_rect = self.draw_bg.area().rect(cx);
-        if video_rect.size.x <= 0.0 || video_rect.size.y <= 0.0 {
-            return;
-        }
-
-        let ch = self.controls_height;
-        let bar_y = video_rect.pos.y + video_rect.size.y - ch;
-
-        // Begin the controls bar as a layout at absolute position (bottom of video)
-        self.draw_controls_bg.begin(
-            cx,
-            Walk {
-                abs_pos: Some(dvec2(video_rect.pos.x, bar_y)),
-                width: Size::Fixed(video_rect.size.x),
-                height: Size::Fixed(ch),
-                ..Walk::default()
-            },
-            Layout {
-                flow: Flow::right(),
-                align: Align { x: 0.0, y: 0.5 },
-                spacing: 8.0,
-                padding: Inset {
-                    left: 8.0,
-                    right: 12.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                },
-                clip_x: true,
-                clip_y: true,
-                ..Layout::default()
-            },
-        );
-
-        let icon_walk = Walk::fit();
-
-        // Play/pause icon (FontAwesome)
-        let play_glyph = if matches!(self.playback_state, PlaybackState::Playing) {
-            "\u{f04c}" // fa-pause
-        } else {
-            "\u{f04b}" // fa-play
-        };
-        self.draw_play_icon.draw_walk(
-            cx,
-            Walk {
-                width: Size::Fixed(14.0),
-                ..icon_walk
-            },
-            Align::default(),
-            play_glyph,
-        );
-
-        // Restart icon (FontAwesome)
-        self.draw_restart_icon
-            .draw_walk(cx, icon_walk, Align::default(), "\u{f048}"); // fa-backward-step
-
-        // Volume icon (FontAwesome)
-        let volume_glyph = if self.audio_state == AudioState::Muted {
-            "\u{f6a9}" // fa-volume-mute
-        } else {
-            "\u{f028}" // fa-volume-up
-        };
-        self.draw_volume_icon.draw_walk(
-            cx,
-            Walk {
-                width: Size::Fixed(14.0),
-                ..icon_walk
-            },
-            Align::default(),
-            volume_glyph,
-        );
-
-        // Progress bar track (Fill width to take remaining space)
-        self.draw_progress_bg.draw_walk(
-            cx,
-            Walk {
-                width: Size::fill(),
-                height: Size::Fixed(4.0),
-                margin: Inset {
-                    left: 0.0,
-                    right: 4.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                },
-                ..Walk::default()
-            },
-        );
-
-        // Time text (fixed width so fill doesn't consume its space)
-        let time_text = format!(
-            "{} / {}",
-            Self::format_time_ms(self.current_position_ms),
-            Self::format_time_ms(self.total_duration),
-        );
-        self.draw_time_text.draw_walk(
-            cx,
-            Walk {
-                width: Size::Fixed(80.0),
-                height: Size::fit(),
-                ..Walk::default()
-            },
-            Align::default(),
-            &time_text,
-        );
-
-        self.draw_controls_bg.end(cx);
-
-        // Draw progress fill and thumb AFTER end() so the layout alignment is finalized
-        let progress_rect = self.draw_progress_bg.area().rect(cx);
-        if progress_rect.size.x > 0.0 {
-            let progress = if self.total_duration > 0 {
-                (self.current_position_ms as f64) / (self.total_duration as f64)
-            } else {
-                0.0
-            };
-            let fill_w = progress_rect.size.x * progress.min(1.0);
-            self.draw_progress_fill.draw_abs(
-                cx,
-                Rect {
-                    pos: progress_rect.pos,
-                    size: dvec2(fill_w, progress_rect.size.y),
-                },
-            );
-
-            let thumb_size = 10.0;
-            self.draw_progress_thumb.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(
-                        progress_rect.pos.x + fill_w - thumb_size * 0.5,
-                        progress_rect.pos.y + (progress_rect.size.y - thumb_size) * 0.5,
-                    ),
-                    size: dvec2(thumb_size, thumb_size),
-                },
-            );
-        }
-    }
-
-    fn format_time_ms(ms: u128) -> String {
-        let total_seconds = (ms / 1000) as u64;
-        let minutes = total_seconds / 60;
-        let seconds = total_seconds % 60;
-        format!("{:02}:{:02}", minutes, seconds)
-    }
-
-    fn draw_seek_indicator(&mut self, cx: &mut Cx2d) {
-        let video_rect = self.draw_bg.area().rect(cx);
-        if video_rect.size.x <= 0.0 || video_rect.size.y <= 0.0 {
-            return;
-        }
-
-        let indicator_size = 48.0;
-        let center_y = video_rect.pos.y + (video_rect.size.y - indicator_size) * 0.5;
-
-        // Position on left or right half depending on direction
-        let center_x = if self.seek_indicator_direction > 0.5 {
-            video_rect.pos.x + video_rect.size.x * 0.75 - indicator_size * 0.5
-        } else {
-            video_rect.pos.x + video_rect.size.x * 0.25 - indicator_size * 0.5
-        };
-
-        self.draw_seek_indicator.set_uniform(
-            cx,
-            id!(direction),
-            &[self.seek_indicator_direction as f32],
-        );
-        self.draw_seek_indicator.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(center_x, center_y),
-                size: dvec2(indicator_size, indicator_size),
-            },
-        );
-    }
-
     fn draw_error_overlay(&mut self, cx: &mut Cx2d) {
         let Some(error_text) = self.last_error.as_ref() else {
             return;
@@ -2041,132 +1447,6 @@ impl Video {
             .draw_abs(cx, dvec2(text_x, text_y), msg);
     }
 
-    fn seek_to_position_from_x(&mut self, cx: &mut Cx, abs_x: f64) {
-        let progress_rect = self.draw_progress_bg.area().rect(cx);
-        if progress_rect.size.x <= 0.0 || self.total_duration == 0 {
-            return;
-        }
-        let fraction = ((abs_x - progress_rect.pos.x) / progress_rect.size.x).clamp(0.0, 1.0);
-        let position_ms = (fraction * self.total_duration as f64) as u64;
-        cx.seek_video_playback(self.id, position_ms);
-        self.current_position_ms = position_ms as u128;
-        self.seek_cooldown = 5;
-        self.redraw(cx);
-    }
-
-    fn update_cursor(&self, cx: &mut Cx, abs: Vec2d) {
-        if self.should_show_center_play() {
-            // Center play button visible — whole area is clickable
-            cx.set_cursor(MouseCursor::Hand);
-        } else if self.controls_interactable() && self.hit_test_controls(cx, abs) {
-            cx.set_cursor(MouseCursor::Hand);
-        } else {
-            cx.set_cursor(MouseCursor::Arrow);
-        }
-    }
-
-    fn hit_test_controls(&self, cx: &Cx, abs: Vec2d) -> bool {
-        let bar_rect = self.draw_controls_bg.area().rect(cx);
-        abs.x >= bar_rect.pos.x
-            && abs.x <= bar_rect.pos.x + bar_rect.size.x
-            && abs.y >= bar_rect.pos.y
-            && abs.y <= bar_rect.pos.y + bar_rect.size.y
-    }
-
-    fn hit_test_progress_bar(&self, cx: &Cx, abs: Vec2d) -> bool {
-        let bar_rect = self.draw_controls_bg.area().rect(cx);
-        let progress_rect = self.draw_progress_bg.area().rect(cx);
-        // Use full bar height for easier click target, but progress bar x range
-        abs.y >= bar_rect.pos.y
-            && abs.y <= bar_rect.pos.y + bar_rect.size.y
-            && abs.x >= progress_rect.pos.x
-            && abs.x <= progress_rect.pos.x + progress_rect.size.x
-    }
-
-    fn hit_test_controls_click(&mut self, cx: &mut Cx, abs: Vec2d) -> bool {
-        if !self.hit_test_controls(cx, abs) {
-            return false;
-        }
-
-        // Play/pause button — use the draw area from layout
-        let play_rect = self.draw_play_icon.area().rect(cx);
-        if abs.x >= play_rect.pos.x && abs.x <= play_rect.pos.x + play_rect.size.x {
-            self.toggle_play_pause(cx);
-            return true;
-        }
-
-        // Restart button
-        let restart_rect = self.draw_restart_icon.area().rect(cx);
-        if abs.x >= restart_rect.pos.x && abs.x <= restart_rect.pos.x + restart_rect.size.x {
-            cx.seek_video_playback(self.id, 0);
-            self.current_position_ms = 0;
-            self.seek_cooldown = 5;
-            if self.playback_state == PlaybackState::Completed {
-                self.resume_playback(cx);
-            }
-            self.redraw(cx);
-            return true;
-        }
-
-        // Volume button
-        let volume_rect = self.draw_volume_icon.area().rect(cx);
-        if abs.x >= volume_rect.pos.x && abs.x <= volume_rect.pos.x + volume_rect.size.x {
-            self.toggle_mute(cx);
-            return true;
-        }
-
-        // Progress bar region - click to seek
-        if self.hit_test_progress_bar(cx, abs) {
-            self.seek_to_position_from_x(cx, abs.x);
-            return true;
-        }
-
-        true // Click was in bar, consume it
-    }
-
-    fn toggle_play_pause(&mut self, cx: &mut Cx) {
-        match self.playback_state {
-            PlaybackState::Playing => self.pause_playback(cx),
-            PlaybackState::Paused => self.resume_playback(cx),
-            PlaybackState::Unprepared => {
-                self.begin_playback(cx);
-            }
-            PlaybackState::Preparing => {
-                // Preparation in progress — mark autoplay so playback starts
-                // as soon as preparation completes.
-                self.autoplay = true;
-            }
-            PlaybackState::Prepared => {
-                cx.begin_video_playback(self.id);
-                self.playback_state = PlaybackState::Playing;
-                if self.show_idle_thumbnail {
-                    self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
-                }
-            }
-            PlaybackState::Completed => {
-                // Seek is not coalesced with transport ops. Queue seek then
-                // resume so FIFO drain is seek → resume (not resume-from-EOS
-                // then seek).
-                cx.seek_video_playback(self.id, 0);
-                cx.resume_video_playback(self.id);
-                self.current_position_ms = 0;
-                self.seek_cooldown = 5;
-                self.playback_state = PlaybackState::Playing;
-            }
-            _ => {}
-        }
-        self.redraw(cx);
-    }
-
-    fn toggle_mute(&mut self, cx: &mut Cx) {
-        if self.audio_state == AudioState::Muted {
-            self.unmute_playback(cx);
-        } else {
-            self.mute_playback(cx);
-        }
-        self.redraw(cx);
-    }
-
     fn load_thumbnail_image(&mut self, cx: &mut Cx) -> bool {
         if let Some(ref handle_ref) = self.thumbnail_source {
             let handle = handle_ref.as_handle();
@@ -2183,6 +1463,16 @@ impl Video {
         }
         false
     }
+}
+
+/// How a [`Video`] places its picture (display aspect kept either way).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Script, ScriptHook)]
+pub enum VideoFit {
+    /// The whole picture, centred, transparent bars on the free sides.
+    #[default]
+    Contain,
+    /// The picture fills the widget, cropped on one axis.
+    Cover,
 }
 
 /// The script-facing source of the video data.

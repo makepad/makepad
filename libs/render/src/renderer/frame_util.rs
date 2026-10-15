@@ -740,10 +740,8 @@ pub(super) fn lm_probe_report(
     bytes: &[u8],
     rects: &[(crate::lightmap::LmRect, bool)],
 ) {
-    thread_local! {
-        static REFERENCE: std::cell::RefCell<Option<Vec<u8>>> =
-            const { std::cell::RefCell::new(None) };
-    }
+    // Readback callbacks run serially on the worker pool and may use different workers.
+    static REFERENCE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     let mut hash = 0xcbf29ce484222325u64;
     let mut sum = [0u64; 4];
     let mut mx = [0u8; 4];
@@ -764,10 +762,9 @@ pub(super) fn lm_probe_report(
         sum[3] as f64 / px_count,
         mx
     );
-    REFERENCE.with(|r| {
-        let mut r = r.borrow_mut();
-        let Some(prev) = r.as_ref() else {
-            *r = Some(bytes.to_vec());
+    (|| {
+        let Some(prev) = REFERENCE.get() else {
+            let _ = REFERENCE.set(bytes.to_vec());
             return;
         };
         if prev.len() != bytes.len() {
@@ -819,5 +816,5 @@ pub(super) fn lm_probe_report(
             worst_at.1,
             worst_at.2
         );
-    });
+    })();
 }

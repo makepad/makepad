@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 /// Whether `MAKEPAD_RUN=collect-web` asks for a collect run (desktop only).
 fn collect_web_requested() -> bool {
-    cfg!(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))
+    cfg!(not(target_arch = "wasm32"))
         && std::env::var("MAKEPAD_RUN").as_deref() == Ok("collect-web")
 }
 
@@ -288,13 +288,13 @@ pub trait Scanner {
 }
 
 /// Frames drawn before the scan (the first layout and draw settle).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 const WARMUP_FRAMES: usize = 2;
 /// Frames drawn after it (spawned content draws, scanners finish).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 const SETTLE_FRAMES: usize = 2;
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Warmup,
@@ -307,9 +307,9 @@ enum Phase {
 pub struct Collector {
     scan: ScanEvent,
     scanners: Vec<Box<dyn Scanner>>,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     frames: usize,
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     phase: Phase,
 }
 
@@ -318,9 +318,9 @@ impl Collector {
         Collector {
             scan: ScanEvent::default(),
             scanners: Vec::new(),
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+            #[cfg(not(target_arch = "wasm32"))]
             frames: 0,
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+            #[cfg(not(target_arch = "wasm32"))]
             phase: Phase::Warmup,
         }
     }
@@ -350,15 +350,15 @@ impl Cx {
     /// script's `census`), from now on: before the first script module.
     /// A collect run does this itself; an app's own analysis calls it.
     pub fn record_module_census(&mut self) {
-        self.with_vm(|vm| vm.census_record());
+        self.with_vm(|vm| makepad_script_census::census_record(vm));
     }
 
     /// The script modules registered and used since
     /// [`Self::record_module_census`]; ends the recording. `app_crates`
     /// (crate names as in module paths) are the app's own: all their
     /// modules are used, and what they name.
-    pub fn module_census(&mut self, app_crates: &[&str]) -> Option<makepad_script::census::ModuleUse> {
-        self.with_vm(|vm| makepad_script::census::census_used_from(vm, app_crates))
+    pub fn module_census(&mut self, app_crates: &[&str]) -> Option<makepad_script_census::ModuleUse> {
+        self.with_vm(|vm| makepad_script_census::census_used_from(vm, app_crates))
     }
 
     /// Collect mode from the environment: called once as the Cx is made,
@@ -370,14 +370,14 @@ impl Cx {
         }
         self.collect = Some(Box::new(Collector::new()));
         self.record_module_census();
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+        #[cfg(not(target_arch = "wasm32"))]
         self.record_shader_pack(true);
         crate::log!("collect-web: collecting into {}", collect_dir().display());
     }
 
     /// After every draw of a collect run: drive the scan, then write the
     /// manifest and quit.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn collect_after_draw(&mut self) {
         let Some(c) = self.collect.as_mut() else { return };
         c.frames += 1;
@@ -414,7 +414,7 @@ impl Cx {
         }
     }
 
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn collect_finish(&mut self) {
         let Some(c) = self.collect.as_mut() else { return };
         let scan = c.scan.clone();
@@ -427,7 +427,8 @@ impl Cx {
         let app = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().replace('-', "_"))).unwrap_or_default();
         let modules = self.module_census(&[app.as_str()]).unwrap_or_default();
         let shaders = self.take_shader_pack();
-        let shader_list: Vec<(u64, String)> = crate::shader_pack::read_shader_pack(&shaders).map(|e| e.into_iter().map(|e| (e.key, e.name)).collect()).unwrap_or_default();
+        let pack = crate::makepad_script::shader_pack::inspect_shader_pack(&shaders);
+        let shader_list: Vec<(u64, String)> = (0..pack.len()).filter_map(|i| pack.entry(i)).map(|e| (e.key(), e.name().to_owned())).collect();
         let entries = shader_list.len();
         let frames = self.collect.as_ref().map_or(0, |c| c.frames);
         let dir = collect_dir();
@@ -452,17 +453,17 @@ impl Cx {
 }
 
 /// Where the manifest goes: `MAKEPAD_COLLECT`, else `./makepad-collect`.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn collect_dir() -> std::path::PathBuf {
     std::env::var_os("MAKEPAD_COLLECT").map(Into::into).unwrap_or_else(|| "makepad-collect".into())
 }
 
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))]
+#[cfg(target_arch = "wasm32")]
 pub fn collect_dir() -> std::path::PathBuf {
     "makepad-collect".into()
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn manifest_of(s: &ScanState, shaders: Vec<u8>, shader_count: usize, frames: usize) -> makepad_web_manifest::Manifest {
     use makepad_web_manifest::*;
     let mut m = Manifest::default();

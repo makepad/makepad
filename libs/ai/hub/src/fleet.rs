@@ -254,11 +254,19 @@ pub fn role_allows(base_url: &str, domain: &str) -> bool {
     fleet_roles().allows(base_url, domain)
 }
 
+#[cfg(test)]
+pub(crate) fn standing_for_test(base_url: &str, domain: &str, affinity: u32) -> (bool, bool, bool, bool) {
+    role_standing(base_url, domain, affinity)
+}
+
 /// Rank prefix for a candidate: weights on disk first, then a primary box
 /// before a fallback one (see [`FleetRoles`]). Compared before everything
 /// else, so a fallback box wins only against boxes that would download.
-fn role_standing(base_url: &str, domain: &str, affinity: u32) -> (bool, bool) {
-    (affinity >= 3, !fleet_roles().is_fallback(base_url, domain))
+fn role_standing(base_url: &str, domain: &str, affinity: u32) -> (bool, bool, bool, bool) {
+    // The client election's tiers come before everything else: this machine's own
+    // hub, then a pinned one, then the LAN (see `hub_order`).
+    let tier = crate::hub_order::tier(base_url);
+    (tier == 0, tier <= 1, affinity >= 3, !fleet_roles().is_fallback(base_url, domain))
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,7 +1141,7 @@ pub fn pick_for_domain_scored(
     snapshots: &[BoxSnapshot],
     domain: &str,
 ) -> Option<(usize, String, u32)> {
-    let mut best: Option<((bool, bool), bool, bool, u32, u32, u64, usize, &str)> = None;
+    let mut best: Option<((bool, bool, bool, bool), bool, bool, u32, u32, u64, usize, &str)> = None;
     let has_compatible_real = has_compatible_real_backend(snapshots, domain, None);
     for (i, snap) in snapshots.iter().enumerate() {
         if !snap.activity_admission_open() || !role_allows(&snap.base_url, domain) {
@@ -1316,7 +1324,7 @@ fn pick_for_domain_eta_inputs(
     job_cost_units: f64,
     request: Option<&GenerateRequestJson>,
 ) -> Option<(usize, String, u64, EtaInputs)> {
-    let mut best: Option<((bool, bool), bool, u64, u32, u32, u64, usize, &str, EtaInputs)> = None;
+    let mut best: Option<((bool, bool, bool, bool), bool, u64, u32, u32, u64, usize, &str, EtaInputs)> = None;
     for candidate in admitted_domain_candidates(snapshots, domain, request, false) {
         let inputs = eta_inputs_for_candidate(candidate, job_cost_units);
         let eta_ms = estimate_eta_ms(&inputs);
@@ -1374,7 +1382,7 @@ pub fn pick_for_model_eta(
     model_id: &str,
     request: &GenerateRequestJson,
 ) -> Option<(usize, u64)> {
-    let mut best: Option<((bool, bool), u64, u32, u32, u64, usize)> = None;
+    let mut best: Option<((bool, bool, bool, bool), u64, u32, u32, u64, usize)> = None;
     for (index, snapshot) in snapshots.iter().enumerate() {
         if !snapshot.activity_admission_open() {
             continue;
@@ -1830,11 +1838,17 @@ mod tests {
         };
         let mut request = GenerateRequestJson::default();
         request.model = "sa3-sfx".to_string();
-        // A sound box with the weights beats the chat box, even a loaded one.
+        // A sound box with the weights beats the chat box, even a loaded one,
+        // when both are LAN boxes. The hub tier ranks first (this machine's
+        // hub, then a pinned one, then the LAN; see `hub_order`), so where the
+        // chat box is this machine (the test running on .165) or pinned, its
+        // loaded model serves the job here instead.
+        let chat_box_ranks_higher = crate::hub_order::tier("http://10.0.0.165:8785") < crate::hub_order::tier("http://10.0.0.100:8123");
+        let expected = Some(if chat_box_ranks_higher { 0 } else { 1 });
         let snaps = vec![sfx("http://10.0.0.165:8785", MODEL_STATE_LOADED), sfx("http://10.0.0.100:8123", MODEL_STATE_READY)];
-        assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), Some(1));
-        assert_eq!(pick_for_domain_eta_request(&snaps, "audio", &GenerateRequestJson::default()).map(|(i, ..)| i), Some(1));
-        assert_eq!(pick_for_domain(&snaps, "audio").map(|(i, _)| i), Some(1));
+        assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), expected);
+        assert_eq!(pick_for_domain_eta_request(&snaps, "audio", &GenerateRequestJson::default()).map(|(i, ..)| i), expected);
+        assert_eq!(pick_for_domain(&snaps, "audio").map(|(i, _)| i), expected);
         // One that would download loses to the chat box's cached weights.
         let snaps = vec![sfx("http://10.0.0.165:8785", MODEL_STATE_READY), sfx("http://10.0.0.100:8123", MODEL_STATE_ABSENT)];
         assert_eq!(pick_for_model_eta(&snaps, "sa3-sfx", &request).map(|(i, _)| i), Some(0));
@@ -1987,6 +2001,11 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: Some(1024),
+                llm_context_configured: None,
+                llm_context_loaded: None,
+                llm_context_max: None,
+                llm_kv: None,
+                llm_kv_loaded: None,
                 queue_limit: Some(8),
                 max_job_body_bytes: None,
                 fleet: None,
@@ -2040,6 +2059,11 @@ mod tests {
                 started_ms: None,
                 capabilities: None,
                 vram_reserve_mb: None,
+                llm_context_configured: None,
+                llm_context_loaded: None,
+                llm_context_max: None,
+                llm_kv: None,
+                llm_kv_loaded: None,
                 queue_limit: None,
                 max_job_body_bytes: None,
                 fleet: None,

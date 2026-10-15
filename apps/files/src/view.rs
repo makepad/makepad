@@ -85,7 +85,7 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            draw_bg +: {color: mod.mpf.sel border_radius: theme.corner_radius}
+            draw_bg +: {color: mod.theme.color_bg_highlight border_radius: theme.corner_radius}
         }
     }
 
@@ -107,7 +107,7 @@ script_mod! {
             seg_label := Label{
                 padding: 0
                 draw_text +: {
-                    color: mod.mpf.fg
+                    color: mod.theme.color_text
                     text_style: theme.font_regular{font_size: 10.5}
                 }
             }
@@ -122,17 +122,17 @@ script_mod! {
         padding: Inset{left: 18 right: 12}
         align: Align{y: 0.5}
         cursor: MouseCursor.Hand
-        draw_bg +: {color: mod.mpf.bg_dark}
+        draw_bg +: {color: mod.theme.color_bg_container}
         side_icon := Icon{
             icon_walk: Walk{width: 18 height: 18}
-            draw_icon +: {color: mod.mpf.fg_dim}
+            draw_icon +: {color: mod.theme.color_text_disabled}
         }
         side_title := Label{
             width: Fill
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 10.0}
             }
         }
@@ -149,12 +149,12 @@ script_mod! {
         padding: Inset{left: 18 right: 8}
         align: Align{y: 0.5}
         cursor: MouseCursor.Hand
-        draw_bg +: {color: mod.mpf.bg_dark}
+        draw_bg +: {color: mod.theme.color_bg_container}
         bm_icon := Icon{
             icon_walk: Walk{width: 13 height: 13}
             draw_icon +: {
                 svg: crate_resource("self://resources/icons/bookmark.svg")
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
             }
         }
         bm_title := Label{
@@ -162,7 +162,7 @@ script_mod! {
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 10.0}
             }
         }
@@ -176,7 +176,7 @@ script_mod! {
                 icon_walk: Walk{width: 9 height: 9}
                 draw_icon +: {
                     svg: crate_resource("self://resources/icons/close.svg")
-                    color: mod.mpf.fg_dim
+                    color: mod.theme.color_text_disabled
                 }
             }
         }
@@ -186,7 +186,7 @@ script_mod! {
         height: 26
         padding: Inset{left: 18 top: 8}
         draw_text +: {
-            color: mod.mpf.fg_dim
+            color: mod.theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8.5}
         }
     }
@@ -199,7 +199,7 @@ script_mod! {
             width: Fill
             height: 1
             margin: Inset{left: 16 right: 16}
-            draw_bg +: {color: mod.mpf.muted}
+            draw_bg +: {color: mod.theme.color_bevel_outset_2}
         }
     }
 
@@ -222,7 +222,7 @@ script_mod! {
                 icon_walk: Walk{width: 9 height: 9}
                 draw_icon +: {
                     svg: crate_resource("self://resources/icons/check.svg")
-                    color: mod.mpf.accent
+                    color: mod.theme.color_focus
                 }
             }
         }
@@ -233,7 +233,7 @@ script_mod! {
         menu_label := Label{
             width: Fill
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 10.0}
             }
         }
@@ -258,13 +258,13 @@ script_mod! {
         lg_name := Label{
             width: Fill
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
         lg_bytes := Label{
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
@@ -281,7 +281,7 @@ script_mod! {
         draw_bg +: {color: #00000000}
         chip_label := Label{
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 9.0}
             }
         }
@@ -296,7 +296,7 @@ script_mod! {
         crumb_title := Label{
             max_lines: 1
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 10.0}
             }
         }
@@ -305,7 +305,7 @@ script_mod! {
     let CrumbSep = Label{
         text: "›"
         draw_text +: {
-            color: mod.mpf.fg_dim
+            color: mod.theme.color_text_disabled
             text_style: theme.font_regular{font_size: 10.0}
         }
     }
@@ -321,13 +321,13 @@ script_mod! {
         padding: Inset{left: 12 right: 6}
         align: Align{y: 0.5}
         cursor: MouseCursor.Hand
-        draw_bg +: {color: mod.mpf.bg_dark}
+        draw_bg +: {color: mod.theme.color_bg_container}
         tab_title := Label{
             width: Fill
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
-                color: mod.mpf.fg
+                color: mod.theme.color_text
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
@@ -340,7 +340,7 @@ script_mod! {
                 icon_walk: Walk{width: 9 height: 9}
                 draw_icon +: {
                     svg: crate_resource("self://resources/icons/close.svg")
-                    color: mod.mpf.fg_dim
+                    color: mod.theme.color_text_disabled
                 }
             }
         }
@@ -355,14 +355,14 @@ script_mod! {
         padding: Inset{left: 16 right: 16 top: 7 bottom: 7}
         prop_key := Label{
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.5}
             }
         }
         prop_value := Label{
             width: Fill
             draw_text +: {
-                color: mod.mpf.fg_bright
+                color: mod.theme.color_text_hover
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
@@ -372,7 +372,7 @@ script_mod! {
     // hard corners, 28pt rows, and a hover that is the foreground at 8% with
     // accent text. No fade — a menu that animates in is a menu you wait for.
     let CtxRow = SolidView{
-        draw_bg +: {color: mod.mpf.bg}
+        draw_bg +: {color: mod.theme.color_bg_app}
         visible: false
         width: Fill
         height: Fit
@@ -382,7 +382,7 @@ script_mod! {
             width: Fill
             height: 1
             margin: Inset{top: 4 bottom: 4}
-            draw_bg +: {color: mod.mpf.muted}
+            draw_bg +: {color: mod.theme.color_bevel_outset_2}
         }
         ctx_body := SolidView{
             width: Fill
@@ -392,19 +392,19 @@ script_mod! {
             padding: Inset{left: 14 right: 14}
             align: Align{y: 0.5}
             cursor: MouseCursor.Hand
-            draw_bg +: {color: mod.mpf.bg}
+            draw_bg +: {color: mod.theme.color_bg_app}
             ctx_label := Label{
                 width: Fill
                 max_lines: 1
                 text_overflow: TextOverflow.Ellipsis
                 draw_text +: {
-                    color: mod.mpf.fg
+                    color: mod.theme.color_text
                     text_style: theme.font_regular{font_size: 9.5}
                 }
             }
             ctx_hint := Label{
                 draw_text +: {
-                    color: mod.mpf.fg_dim
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_regular{font_size: 8.5}
                 }
             }
@@ -417,7 +417,7 @@ script_mod! {
         flow: Down
         padding: Inset{left: 4 right: 4 top: 5 bottom: 5}
         draw_bg +: {
-            color: mod.mpf.bg
+            color: mod.theme.color_bg_app
             border_color: theme.color_bevel_outset_2
             border_size: 0.75
             border_radius: theme.corner_radius
@@ -431,13 +431,13 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: mod.mpf.bg_light
-            border_color: mod.mpf.muted
+            color: mod.theme.color_fg_app
+            border_color: mod.theme.color_bevel_outset_2
             border_size: 1.0
         }
         dlg_label := Label{
             draw_text +: {
-                color: mod.mpf.fg_bright
+                color: mod.theme.color_text_hover
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
@@ -451,7 +451,7 @@ script_mod! {
         padding: Inset{top: 6 bottom: 6}
         field_key := Label{
             draw_text +: {
-                color: mod.mpf.fg_dim
+                color: mod.theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.5}
             }
         }
@@ -492,7 +492,7 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Down
-                        draw_bg +: {color: mod.mpf.bg}
+                        draw_bg +: {color: mod.theme.color_bg_app}
 
                         top_bar := SolidView{
                             width: Fill
@@ -508,7 +508,7 @@ script_mod! {
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/back.svg")
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -517,7 +517,7 @@ script_mod! {
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/forward.svg")
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -530,7 +530,7 @@ script_mod! {
                                 padding: Inset{left: 5 right: 5}
                                 align: Align{y: 0.5}
                                 draw_bg +: {
-                                    color: mod.mpf.bg
+                                    color: mod.theme.color_bg_app
                                     border_color: theme.color_bevel_outset_2
                                     border_size: 0.75
                                     border_radius: theme.corner_radius
@@ -578,7 +578,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/grid.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -587,7 +587,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/list.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -596,7 +596,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/compact.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -608,7 +608,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/treemap.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -617,7 +617,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/treemap25.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -626,7 +626,7 @@ script_mod! {
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
                                             svg: crate_resource("self://resources/icons/treemap3d.svg")
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                         }
                                     }
                                 }
@@ -637,7 +637,7 @@ script_mod! {
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/search.svg")
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -647,7 +647,7 @@ script_mod! {
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/filter.svg")
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -656,7 +656,7 @@ script_mod! {
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
                                         svg: crate_resource("self://resources/icons/menu-dots.svg")
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                     }
                                 }
                             }
@@ -684,7 +684,7 @@ script_mod! {
                             flow: Right
                             spacing: 1
                             padding: Inset{left: 1}
-                            draw_bg +: {color: mod.mpf.bg}
+                            draw_bg +: {color: mod.theme.color_bg_app}
                             tab0 := TabItem{}
                             tab1 := TabItem{}
                             tab2 := TabItem{}
@@ -704,7 +704,7 @@ script_mod! {
                                 width: 196
                                 height: Fill
                                 flow: Down
-                                draw_bg +: {color: mod.mpf.bg_dark}
+                                draw_bg +: {color: mod.theme.color_bg_container}
 
                                 side_scroll := ScrollYView{
                                     width: Fill
@@ -786,7 +786,7 @@ script_mod! {
                                 width: Fill
                                 height: Fill
                                 flow: Down
-                                draw_bg +: {color: mod.mpf.bg}
+                                draw_bg +: {color: mod.theme.color_bg_app}
 
                                 empty_label := Label{
                                     visible: false
@@ -795,7 +795,7 @@ script_mod! {
                                     padding: Inset{left: 20}
                                     text: "This folder is empty"
                                     draw_text +: {
-                                        color: mod.mpf.fg_dim
+                                        color: mod.theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 10.0}
                                     }
                                 }
@@ -812,7 +812,7 @@ script_mod! {
                                         visible: false
                                         width: 258
                                         height: Fill
-                                        draw_bg +: {color: mod.mpf.bg_dark}
+                                        draw_bg +: {color: mod.theme.color_bg_container}
                                         ScrollYView{
                                             width: Fill
                                             height: Fill
@@ -822,7 +822,7 @@ script_mod! {
                                             Label{
                                                 text: "FILTER"
                                                 draw_text +: {
-                                                    color: mod.mpf.fg_dim
+                                                    color: mod.theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -841,7 +841,7 @@ script_mod! {
                                                     width: 96
                                                     text: "any size"
                                                     draw_text +: {
-                                                        color: mod.mpf.fg_dim
+                                                        color: mod.theme.color_text_disabled
                                                         text_style: theme.font_regular{font_size: 9.0}
                                                     }
                                                 }
@@ -861,7 +861,7 @@ script_mod! {
                                                     margin: Inset{right: 4}
                                                     text: "new:"
                                                     draw_text +: {
-                                                        color: mod.mpf.fg_dim
+                                                        color: mod.theme.color_text_disabled
                                                         text_style: theme.font_regular{font_size: 9.0}
                                                     }
                                                 }
@@ -888,7 +888,7 @@ script_mod! {
                                                 clear_label := Label{
                                                     text: "clear all"
                                                     draw_text +: {
-                                                        color: mod.mpf.accent
+                                                        color: mod.theme.color_focus
                                                         text_style: theme.font_regular{font_size: 9.0}
                                                     }
                                                 }
@@ -905,15 +905,15 @@ script_mod! {
                                     spacing: 12
                                     padding: Inset{left: 16 right: 12}
                                     align: Align{y: 0.5}
-                                    draw_bg +: {color: mod.mpf.bg_light}
+                                    draw_bg +: {color: mod.theme.color_fg_app}
                                     progress_track := SolidView{
                                         width: 150
                                         height: 6
-                                        draw_bg +: {color: mod.mpf.muted}
+                                        draw_bg +: {color: mod.theme.color_bevel_outset_2}
                                         progress_fill := SolidView{
                                             width: 0
                                             height: Fill
-                                            draw_bg +: {color: mod.mpf.accent}
+                                            draw_bg +: {color: mod.theme.color_focus}
                                         }
                                     }
                                     progress_label := Label{
@@ -921,7 +921,7 @@ script_mod! {
                                         max_lines: 1
                                         text_overflow: TextOverflow.Ellipsis
                                         draw_text +: {
-                                            color: mod.mpf.fg
+                                            color: mod.theme.color_text
                                             text_style: theme.font_regular{font_size: 8.5}
                                         }
                                     }
@@ -934,7 +934,7 @@ script_mod! {
                                         Label{
                                             text: "Cancel"
                                             draw_text +: {
-                                                color: mod.mpf.accent
+                                                color: mod.theme.color_focus
                                                 text_style: theme.font_regular{font_size: 8.5}
                                             }
                                         }
@@ -946,14 +946,14 @@ script_mod! {
                                     height: 24
                                     padding: Inset{left: 16 right: 16}
                                     align: Align{y: 0.5}
-                                    draw_bg +: {color: mod.mpf.bg_dark}
+                                    draw_bg +: {color: mod.theme.color_bg_container}
                                     status_label := Label{
                                         width: Fill
                                         max_lines: 1
                                         text_overflow: TextOverflow.Ellipsis
                                         text: "Loading…"
                                         draw_text +: {
-                                            color: mod.mpf.fg_dim
+                                            color: mod.theme.color_text_disabled
                                             text_style: theme.font_regular{font_size: 9}
                                         }
                                     }
@@ -965,19 +965,19 @@ script_mod! {
                                 width: 306
                                 height: Fill
                                 flow: Down
-                                draw_bg +: {color: mod.mpf.bg_dark}
+                                draw_bg +: {color: mod.theme.color_bg_container}
                                 props_header := SolidView{
                                     width: Fill
                                     height: 36
                                     flow: Right
                                     padding: Inset{left: 16 right: 10}
                                     align: Align{y: 0.5}
-                                    draw_bg +: {color: mod.mpf.bg_light}
+                                    draw_bg +: {color: mod.theme.color_fg_app}
                                     Label{
                                         width: Fill
                                         text: "Properties"
                                         draw_text +: {
-                                            color: mod.mpf.fg_bright
+                                            color: mod.theme.color_text_hover
                                             text_style: theme.font_bold{font_size: 10.0}
                                         }
                                     }
@@ -990,7 +990,7 @@ script_mod! {
                                             icon_walk: Walk{width: 10 height: 10}
                                             draw_icon +: {
                                                 svg: crate_resource("self://resources/icons/close.svg")
-                                                color: mod.mpf.fg_dim
+                                                color: mod.theme.color_text_disabled
                                             }
                                         }
                                     }
@@ -1033,8 +1033,8 @@ script_mod! {
                             flow: Down
                             padding: Inset{top: 6 bottom: 6}
                             draw_bg +: {
-                                color: mod.mpf.bg_dark
-                                border_color: mod.mpf.muted
+                                color: mod.theme.color_bg_container
+                                border_color: mod.theme.color_bevel_outset_2
                                 border_size: 1.0
                             }
                             menu_title := Label{
@@ -1042,7 +1042,7 @@ script_mod! {
                                 padding: Inset{left: 14}
                                 text: "COLUMNS"
                                 draw_text +: {
-                                    color: mod.mpf.fg_dim
+                                    color: mod.theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
@@ -1104,14 +1104,14 @@ script_mod! {
                             flow: Down
                             padding: Inset{left: 20 right: 20 top: 16 bottom: 16}
                             draw_bg +: {
-                                color: mod.mpf.bg_dark
-                                border_color: mod.mpf.muted
+                                color: mod.theme.color_bg_container
+                                border_color: mod.theme.color_bevel_outset_2
                                 border_size: 1.0
                             }
                             batch_title := Label{
                                 text: "Rename 0 files"
                                 draw_text +: {
-                                    color: mod.mpf.fg_bright
+                                    color: mod.theme.color_text_hover
                                     text_style: theme.font_regular{font_size: 11.0}
                                 }
                             }
@@ -1132,7 +1132,7 @@ script_mod! {
                                 height: Fit
                                 margin: Inset{top: 10 bottom: 10}
                                 draw_text +: {
-                                    color: mod.mpf.fg_dim
+                                    color: mod.theme.color_text_disabled
                                     text_style: theme.font_code{font_size: 8.5}
                                 }
                             }
@@ -1146,8 +1146,8 @@ script_mod! {
                                 batch_apply := DialogButton{
                                     dlg_label +: {text: "Rename"}
                                     draw_bg +: {
-                                        color: mod.mpf.sel
-                                        border_color: mod.mpf.accent
+                                        color: mod.theme.color_bg_highlight
+                                        border_color: mod.theme.color_focus
                                     }
                                 }
                             }
@@ -1165,8 +1165,8 @@ script_mod! {
                             height: 560
                             flow: Down
                             draw_bg +: {
-                                color: mod.mpf.bg_dark
-                                border_color: mod.mpf.muted
+                                color: mod.theme.color_bg_container
+                                border_color: mod.theme.color_bevel_outset_2
                                 border_size: 1.0
                             }
                             ql_header := SolidView{
@@ -1175,21 +1175,21 @@ script_mod! {
                                 flow: Right
                                 padding: Inset{left: 14 right: 14}
                                 align: Align{y: 0.5}
-                                draw_bg +: {color: mod.mpf.bg_light}
+                                draw_bg +: {color: mod.theme.color_fg_app}
                                 ql_title := Label{
                                     width: Fill
                                     max_lines: 1
                                     text_overflow: TextOverflow.Ellipsis
                                     text: "Preview"
                                     draw_text +: {
-                                        color: mod.mpf.fg_bright
+                                        color: mod.theme.color_text_hover
                                         text_style: theme.font_bold{font_size: 10.0}
                                     }
                                 }
                                 ql_hint := Label{
                                     text: "Space or Esc to close"
                                     draw_text +: {
-                                        color: mod.mpf.fg_dim
+                                        color: mod.theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 8.5}
                                     }
                                 }
@@ -1201,7 +1201,7 @@ script_mod! {
                                 ql_text := Label{
                                     width: Fill
                                     draw_text +: {
-                                        color: mod.mpf.fg
+                                        color: mod.theme.color_text
                                         text_style: theme.font_code{font_size: 8.5}
                                     }
                                 }

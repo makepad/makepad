@@ -542,8 +542,8 @@ impl ApplyCache {
         let mut parent = match &self.root {
             Some(r) => r.as_object(),
             None => {
-                let root = vm.bx.heap.new_object();
-                self.root = Some(vm.bx.heap.new_object_ref(root));
+                let root = vm.new_object();
+                self.root = Some(vm.new_object_ref(root));
                 root
             }
         };
@@ -552,8 +552,8 @@ impl ApplyCache {
             parent = match self.nodes.iter().find(|(p, k, _)| *p == parent && *k == id) {
                 Some(&(_, _, child)) => child,
                 None => {
-                    let child = vm.bx.heap.new_object();
-                    vm.bx.heap.set_value_def(parent, id.into(), child.into());
+                    let child = vm.new_object();
+                    vm.set_value_def(parent, id, child);
                     self.nodes.push((parent, id, child));
                     child
                 }
@@ -651,9 +651,9 @@ fn write_leaf(vm: &mut ScriptVm, leaf: &mut ApplyLeaf, v: TweenValue) {
     if dims == 0 {
         leaf.pod = None;
         leaf.dims = 0;
-        vm.bx.heap.set_value_def(
+        vm.set_value_def(
             leaf.parent,
-            leaf.key.into(),
+            leaf.key,
             ScriptValue::from_f64(lanes[0]),
         );
         return;
@@ -661,22 +661,20 @@ fn write_leaf(vm: &mut ScriptVm, leaf: &mut ApplyLeaf, v: TweenValue) {
     let pod = match leaf.pod {
         Some(p) if leaf.dims == dims => p,
         _ => {
-            let pods = &vm.bx.code.builtins.pod;
+            let pods = vm.pod_builtins();
             let ty = match dims {
                 2 => pods.pod_vec2f,
                 3 => pods.pod_vec3f,
                 _ => pods.pod_vec4f,
             };
-            let p = vm.bx.heap.new_pod(ty);
-            vm.bx
-                .heap
-                .set_value_def(leaf.parent, leaf.key.into(), p.into());
+            let p = vm.heap_mut().new_pod(ty);
+            vm.set_value_def(leaf.parent, leaf.key, p);
             leaf.pod = Some(p);
             leaf.dims = dims;
             p
         }
     };
-    let words = vm.bx.heap.pod_data_mut(pod);
+    let words = vm.heap_mut().pod_data_mut(pod);
     for (w, l) in words.iter_mut().zip(lanes.iter()).take(dims as usize) {
         *w = (*l as f32).to_bits();
     }

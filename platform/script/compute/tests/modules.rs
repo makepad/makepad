@@ -2,13 +2,13 @@
 //! resolve, inline and validate the same way; plus the kernel stdlib
 //! modules checked against Rust references.
 
-use makepad_script_compute::kernel::{compile, compile_with_modules, Kernel};
+use makepad_script_compute::kernel::{compile, compile_with_modules, KernelRef};
 use makepad_script_compute::module::{Module, STD};
-use makepad_script_compute::sched::{InlineExecutor, Job};
+use makepad_script_compute_sched::sched::{InlineExecutor, Job};
 use makepad_script_compute::Backend;
-use std::sync::Arc;
 
-fn run(k: &Arc<Kernel>, n: usize, inputs: &[(&str, Vec<f32>)], out: &str, words: usize) -> Vec<f32> {
+
+fn run(k: &KernelRef, n: usize, inputs: &[(&str, Vec<f32>)], out: &str, words: usize) -> Vec<f32> {
     let mut j = Job::new(k.clone(), n);
     for (name, data) in inputs {
         j.input(name, data.clone().into()).unwrap();
@@ -160,7 +160,7 @@ fn field_isolines_match_a_rust_marching_squares() {
         j.output("seg", vec![0.0; cells * 8]).unwrap();
         j.output_u32("seg_count", vec![0; cells]).unwrap();
         j.run(&InlineExecutor, 1).unwrap();
-        let flat = makepad_script_compute::kernel::compact(j.out("seg").unwrap(), j.out_u32("seg_count").unwrap(), 4, 2);
+        let flat = makepad_script_compute_sched::kernel::compact(j.out("seg").unwrap(), j.out_u32("seg_count").unwrap(), 4, 2);
         let want: Vec<f32> = isolines_ref(&g, w, h, level).into_iter().flatten().collect();
         assert!(!want.is_empty());
         assert_eq!(flat.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "level {}", level);

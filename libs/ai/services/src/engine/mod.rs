@@ -12,7 +12,8 @@
 //! - [`Model`] — the seam to whatever answers: the local engine through
 //!   the hub, a cloud provider, or a scripted model in tests. Real models
 //!   live behind the `engine` cargo feature (`models`), the local one
-//!   behind `localai` (`local_model`); the core does not need them.
+//!   the hub chat client with `engine` (`local_model`), its in-process runtime
+//!   behind `localai`; the core does not need them.
 //!
 //! A host (the aichat app, the Window overlay) wraps the core in a thin
 //! `Cx` adapter: it calls `pump` on every event and redraws when the
@@ -24,7 +25,7 @@ pub mod registry;
 
 #[cfg(feature = "engine")]
 pub mod cli_model;
-#[cfg(feature = "localai")]
+#[cfg(feature = "engine")]
 pub mod local_model;
 #[cfg(feature = "engine")]
 pub mod models;
@@ -66,6 +67,8 @@ pub enum ModelEvent {
     Delta(String),
     /// A piece of the model's reasoning, when the provider shows it.
     Thinking(String),
+    /// Whole JSON argument prefix for a preview, before the tool is dispatched.
+    ToolCallPartial { call_id: String, name: String, partial_json: String },
     /// The model asks for a tool. `call_id` is the model's own id for the
     /// call; the engine answers with exactly one result per call. `args`
     /// is a JSON object as text.

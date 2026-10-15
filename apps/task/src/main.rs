@@ -319,16 +319,10 @@ script_mod! {
 
 // ---- theme ----
 
-/// The palette the whole app paints with. Sourced from the Makepad WM theme
-/// (`MAKEPAD_WM_THEME_SPLASH`) through `makepad_wm_theme::current()`, so task matches
-/// terminal/files/wm; the fallback is a neutral charcoal.
-///
-/// The app draws with three surface roles derived from the palette's
-/// background and foreground, so any WM theme gets the same structure:
-/// `background` for rows and content, [`Theme::raised`] for bars, headers
-/// and summaries, [`Theme::well`] for plots and grouped sections. Colour is
-/// kept for data and the accent.
-#[derive(Clone, Copy, Debug)]
+/// The system theme colours used by the app's custom drawing. Bars, headers
+/// and plots derive their surfaces from the active background and foreground.
+/// The default is unpainted state until startup resolves the owning VM.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Theme {
     pub accent: Vec4f,
     /// Window, rows and content.
@@ -342,23 +336,6 @@ pub struct Theme {
     pub blue: Vec4f,
     pub cyan: Vec4f,
     pub magenta: Vec4f,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self {
-            accent: color("#4f9dff"),
-            background: color("#1b1c1f"),
-            foreground: color("#e3e4e6"),
-            muted: color("#9b9ea6"),
-            red: color("#f0657b"),
-            green: color("#5fd3a6"),
-            yellow: color("#f0b64b"),
-            blue: color("#5aa9ff"),
-            cyan: color("#56c2e6"),
-            magenta: color("#b48cf2"),
-        }
-    }
 }
 
 impl Theme {
@@ -391,79 +368,23 @@ impl Theme {
         with_alpha(self.muted, 0.72)
     }
 
-    /// Secondary text a step closer to the foreground: a palette's dim
-    /// foreground is meant for large type and goes faint at 10 pt.
-    fn legible(mut self) -> Self {
-        self.muted = mix(self.muted, self.foreground, 0.3);
-        self
-    }
-
-    /// The WM palette if one is exported, else the built-in fallback. Uses the
-    /// same scanner `makepad_wm_theme::apply` retints `mod.theme` with, so the stock
-    /// widgets and task's own drawing can never disagree.
-    #[cfg(test)]
-    fn from_environment() -> Self { Self::from_palette(makepad_wm_theme::current()) }
-    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
-        let fallback = Self::default();
-        let Some(palette) = palette else { return fallback };
-        let pick = |key: &str, default: Vec4f| palette.get(key).and_then(parse_color).unwrap_or(default);
-        // Imported omarchy themes carry their hues as the terminal palette;
-        // take those when a theme does not name the colours directly.
-        let light = pick("background", fallback.background).x > 0.5;
-        let hue = |key: &str, term: &str, default: Vec4f| {
-            let default = if light {
-                color(match key {
-                    "red" => "#d12b3a", "green" => "#39851e", "yellow" => "#986b00",
-                    "blue" => "#246bce", "cyan" => "#008398", "magenta" => "#8951bd",
-                    _ => "#246bce",
-                })
-            } else { default };
-            palette
-                .get(key)
-                .or_else(|| palette.get(term))
-                .and_then(parse_color)
-                .unwrap_or(default)
-        };
+    /// Resolve the installed theme on startup and each live style reload.
+    fn from_tokens(vm: &mut ScriptVm) -> Self {
+        let mut color = |role| theme_tokens::color(vm, role)
+            .unwrap_or_else(|| panic!("missing system theme colour: {role}"));
         Self {
-            accent: pick("accent", fallback.accent),
-            background: pick("background", fallback.background),
-            foreground: pick("foreground", fallback.foreground),
-            muted: pick("dark_foreground", fallback.muted),
-            red: hue("red", "term.color1", fallback.red),
-            green: hue("green", "term.color2", fallback.green),
-            yellow: hue("yellow", "term.color3", fallback.yellow),
-            blue: hue("blue", "term.color4", fallback.blue),
-            cyan: hue("cyan", "term.color6", fallback.cyan),
-            magenta: hue("magenta", "term.color5", fallback.magenta),
+            accent: color("color_focus"),
+            background: color("color_bg_app"),
+            foreground: color("color_text"),
+            muted: color("color_text_disabled"),
+            red: color("color_error"),
+            green: color("color_success"),
+            yellow: color("color_warning"),
+            blue: color("color_info"),
+            cyan: color("color_info"),
+            magenta: color("color_tertiary"),
         }
-        .legible()
     }
-}
-
-fn color(value: &str) -> Vec4f {
-    parse_color(value).unwrap_or(vec4(1.0, 0.0, 1.0, 1.0))
-}
-
-/// `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`.
-fn parse_color(value: &str) -> Option<Vec4f> {
-    let digits = value.trim().strip_prefix('#').unwrap_or(value.trim());
-    let rgba = match digits.len() {
-        3 | 4 => {
-            let mut expanded = String::with_capacity(8);
-            for digit in digits.chars() {
-                expanded.push(digit);
-                expanded.push(digit);
-            }
-            if digits.len() == 3 {
-                expanded.push_str("ff");
-            }
-            u32::from_str_radix(&expanded, 16).ok()?
-        }
-        6 => u32::from_str_radix(digits, 16).ok()?.checked_shl(8)? | 0xff,
-        8 => u32::from_str_radix(digits, 16).ok()?,
-        _ => return None,
-    };
-    Some(Vec4f::from_u32(rgba))
 }
 
 pub fn with_alpha(mut value: Vec4f, alpha: f32) -> Vec4f {
@@ -1378,8 +1299,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        // The Makepad WM palette retints the stock widgets before anything is built.
-        makepad_wm_theme::apply(vm);
         // The custom widgets must exist in mod.widgets before the UI below
         // does `use mod.widgets.*`.
         crate::widgets::script_mod(vm);
@@ -1388,7 +1307,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if matches!(event, Event::LiveEdit) {
-            self.model.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
+            self.model.theme = cx.with_vm(Theme::from_tokens);
             self.apply_theme(cx);
             self.density_applied = false;
             self.layout_from_window(cx);
@@ -1397,7 +1316,7 @@ impl AppMain for App {
             // Checked once: a warm-pool instance stays dormant until
             // `WmEvent::Adopted` or a real input wakes it (see `Dormancy`).
             self.dormancy = Dormancy::start(makepad_wm_api::warm_start());
-            self.model.theme = Theme::from_palette(cx.with_vm(makepad_wm_theme::current_for_vm));
+            self.model.theme = cx.with_vm(Theme::from_tokens);
             self.apply_theme(cx);
             // `--size WxH` lets a test drive the breakpoints without a WM.
             if let Some(size) = size_from_args() {
@@ -1539,18 +1458,22 @@ mod tests {
     }
 
     #[test]
-    fn colors_parse_in_every_hex_length() {
-        assert_eq!(parse_color("#fff"), parse_color("#ffffff"));
-        assert_eq!(parse_color("#7aa2f7"), parse_color("7aa2f7"));
-        assert_eq!(parse_color("#00000000").map(|c| c.w), Some(0.0));
-        assert!(parse_color("#zz").is_none());
-    }
-
-    #[test]
-    fn theme_falls_back_when_no_wm_palette_is_exported() {
-        // Nothing may panic when MAKEPAD_WM_THEME_SPLASH is unset or bogus.
-        let theme = Theme::from_environment();
-        assert!(theme.accent.w > 0.0);
+    fn theme_follows_the_installed_system_tokens() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let theme = Theme::from_tokens(vm);
+            assert_eq!(theme.accent, theme_tokens::color(vm, "color_focus").unwrap());
+            assert_eq!(theme.background, theme_tokens::color(vm, "color_bg_app").unwrap());
+            assert_eq!(theme.foreground, theme_tokens::color(vm, "color_text").unwrap());
+            assert_eq!(theme.muted, theme_tokens::color(vm, "color_text_disabled").unwrap());
+            assert_eq!(theme.red, theme_tokens::color(vm, "color_error").unwrap());
+            assert_eq!(theme.green, theme_tokens::color(vm, "color_success").unwrap());
+            assert_eq!(theme.yellow, theme_tokens::color(vm, "color_warning").unwrap());
+            assert_eq!(theme.blue, theme_tokens::color(vm, "color_info").unwrap());
+            assert_eq!(theme.cyan, theme_tokens::color(vm, "color_info").unwrap());
+            assert_eq!(theme.magenta, theme_tokens::color(vm, "color_tertiary").unwrap());
+        });
     }
 
     // ---- warm-pool dormancy ----

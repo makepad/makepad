@@ -1272,7 +1272,7 @@ mod tests {
         let errors = cx.with_vm(|vm| {
             crate::theme::widgets_script_mod(vm);
             crate::shell::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             self::script_mod(vm);
             let _ = makepad_platform::shader_error::take();
             vm.take_errors()
@@ -1295,7 +1295,7 @@ mod tests {
         for (story, (path, labels, layers)) in STORIES.iter().zip(addressed) {
             let page = cx.with_vm(|vm| {
                 let stories = vm.module(id!(stories));
-                let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+                let value = vm.value(stories, LiveId::from_str(story.dsl));
                 assert!(value.as_object().is_some(), "no template {}", story.dsl);
                 WidgetRef::script_from_value(vm, value)
             });

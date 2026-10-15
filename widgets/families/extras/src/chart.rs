@@ -549,6 +549,7 @@ impl Widget for ChartView {
             Hit::FingerDown(fe) if press_starts_pan(fe.is_primary_hit(), held_outside) => {
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_viewport = self.viewport.clone();
+                cx.claim_finger_drag(fe.digit_id);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerMove(fe) => {
@@ -615,7 +616,9 @@ impl ChartView {
     }
 
     fn zoom_at(&mut self, cx: &mut Cx, scroll: f64, abs: DVec2) {
-        let factor = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        // A wheel notch (32+ points) is one step, a touchpad's small deltas a fraction of one.
+        let step = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        let factor = f64::powf(step, (scroll.abs() / 32.0).min(1.0));
         let pr = &self.plot_rect;
         let frac_x = ((abs.x - pr.pos.x) / pr.size.x).clamp(0.0, 1.0);
         let data_x = self.viewport.x_min + frac_x * self.viewport.x_range();
@@ -2474,7 +2477,7 @@ mod tests {
         cx.with_vm(crate::script_mod);
         let chart = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str("TrendChart").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("TrendChart"));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!chart.is_empty(), "TrendChart built no widget");
@@ -2485,7 +2488,7 @@ mod tests {
     fn declared_as(cx: &mut Cx, name: &str) -> WidgetRef {
         let widget = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str(name));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!widget.is_empty(), "{name} built no widget");

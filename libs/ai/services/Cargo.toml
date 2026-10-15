@@ -8,7 +8,9 @@
 # model, routes each call to the service that owns it, and shows the result.
 #
 # `wire` + `port` are what every app links (platform-only, no widgets, no
-# model runtime). The `engine` feature is what a host links: the agent seam
+# model runtime). Without the default `platform` feature only the data
+# slice is left (`wire`, `card`, `state`, `progress_eta`, `mcp`): what a
+# headless client needs, with no makepad-platform in its graph. The `engine` feature is what a host links: the agent seam
 # and the chat backends — the person's own Claude Code / Codex CLIs, Claude
 # Desktop over MCP, the Claude API. The machine's own model (the hub's local
 # runtime: Qwen on Metal/CUDA) is the separate `localai` feature.
@@ -23,18 +25,24 @@ license = "MIT OR Apache-2.0"
 description = "What an app exposes to a central AI chat (manifest, tools, calls, results) and the engine that drives many apps from one conversation"
 
 [features]
-default = []
+default = ["platform"]
+# The port, the process's `app` service and the engine: everything that
+# talks to makepad-platform (Cx, the UI signal, the remote endpoint).
+platform = ["dep:makepad-platform", "dep:makepad-remote"]
 # The chat backends: the CLI, MCP and cloud providers from the hub. Off by
 # default so an app that only exposes a service never links them. No model
 # runtime: the hub comes without `llm`.
-engine = ["makepad-ai-hub"]
+engine = ["platform", "makepad-ai-hub"]
 # The machine's own model: Qwen through the hub's local runtime
 # (makepad-ai-llm, the Metal/CUDA stores and their kernel builds).
 localai = ["engine", "makepad-ai-hub/localai"]
 
 [dependencies]
-makepad-platform = { path = "../../../platform" }
+makepad-platform = { path = "../../../platform", optional = true }
 makepad-micro-serde = { path = "../../micro_serde" }
 makepad-strict-json = { path = "../../strict_json" }
-makepad-bounded-http = { path = "../../bounded_http" }
 makepad-ai-hub = { path = "../hub", default-features = false, optional = true }
+
+# The process's `app` service is served on its makepad-remote endpoint, which these targets lack.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+makepad-remote = { path = "../../remote", optional = true }

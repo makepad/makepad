@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 // Makepad script streaming tokenizer
 
 use crate::colorhex::hex_bytes_to_u32;
@@ -6,6 +7,8 @@ use crate::makepad_live_id::LiveId;
 use crate::makepad_live_id_macros::*;
 use crate::value::*;
 
+#[relax_api(plain)]
+#[repr(C, u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum ScriptToken {
     End,
@@ -29,6 +32,44 @@ pub enum ScriptToken {
     U40(u64),
     Color(u32),
     RustValue(u32),
+}
+
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptTokenTag { End, StreamEnd, Identifier, Operator, Separator, OpenCurly, CloseCurly, OpenRound, CloseRound, OpenSquare, CloseSquare, StringUnfinished, String, F32, U32, I32, F16, F64, U40, Color, RustValue }
+
+impl ScriptToken {
+    pub fn number_f64(&self) -> Option<f64> {
+        match self { Self::U40(v) => Some(*v as f64), Self::F64(v) => Some(*v), Self::F32(v) | Self::F16(v) => Some(*v as f64), Self::U32(v) => Some(*v as f64), Self::I32(v) => Some(*v as f64), _ => None }
+    }
+    pub fn operator_or_separator(&self) -> Option<LiveId> { match self { Self::Operator(v) | Self::Separator(v) => Some(*v), _ => None } }
+    pub fn as_identifier(&self) -> Option<LiveId> { match self { Self::Identifier(v) => Some(*v), _ => None } }
+
+    pub fn kind(&self) -> ScriptTokenTag {
+        match self {
+            Self::End => ScriptTokenTag::End,
+            Self::StreamEnd => ScriptTokenTag::StreamEnd,
+            Self::Identifier(_) => ScriptTokenTag::Identifier,
+            Self::Operator(_) => ScriptTokenTag::Operator,
+            Self::Separator(_) => ScriptTokenTag::Separator,
+            Self::OpenCurly => ScriptTokenTag::OpenCurly,
+            Self::CloseCurly => ScriptTokenTag::CloseCurly,
+            Self::OpenRound => ScriptTokenTag::OpenRound,
+            Self::CloseRound => ScriptTokenTag::CloseRound,
+            Self::OpenSquare => ScriptTokenTag::OpenSquare,
+            Self::CloseSquare => ScriptTokenTag::CloseSquare,
+            Self::StringUnfinished => ScriptTokenTag::StringUnfinished,
+            Self::String(_) => ScriptTokenTag::String,
+            Self::F32(_) => ScriptTokenTag::F32,
+            Self::U32(_) => ScriptTokenTag::U32,
+            Self::I32(_) => ScriptTokenTag::I32,
+            Self::F16(_) => ScriptTokenTag::F16,
+            Self::F64(_) => ScriptTokenTag::F64,
+            Self::U40(_) => ScriptTokenTag::U40,
+            Self::Color(_) => ScriptTokenTag::Color,
+            Self::RustValue(_) => ScriptTokenTag::RustValue,
+        }
+    }
 }
 
 impl ScriptToken {
@@ -216,6 +257,8 @@ impl ScriptToken {
     }
 }
 
+#[relax_api(plain)]
+#[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct ScriptTokenPos {
     pub token: ScriptToken,
@@ -240,6 +283,7 @@ pub struct ScriptTokenPos {
 /// The unit suffix of a number literal: what a value means (an editor picks its
 /// control by it). The token's value is in the base unit: seconds for time,
 /// radians for angles, virtual pixels for lengths.
+#[relax_api(plain)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScriptUnit {
     /// `0.12s`: seconds.
@@ -276,10 +320,21 @@ impl ScriptUnit {
 }
 
 impl ScriptTokenPos {
-    /// The token's characters in the source, as char indices.
-    pub fn span(&self) -> std::ops::Range<usize> {
-        self.start as usize..self.end as usize
+    /// Positions relative to the character `base` (a fn's first, when its
+    /// tokens move to a body of their own).
+    pub(crate) fn rebase(&mut self, base: usize) {
+        self.pos -= base.min(self.pos);
+        self.start -= (base as u32).min(self.start);
+        self.end -= (base as u32).min(self.end);
     }
+
+    pub fn token(&self) -> &ScriptToken { &self.token }
+    pub fn preceded_by_newline(&self) -> bool { self.preceded_by_newline }
+    /// The token's characters in the source, as char indices.
+    #[inline(always)]
+    pub fn span(&self) -> std::ops::Range<usize> { self.start()..self.end() }
+    pub fn start(&self) -> usize { self.start as usize }
+    pub fn end(&self) -> usize { self.end as usize }
 
     /// Where the token starts in its body's code (a character index).
     pub fn pos(&self) -> usize {
@@ -376,6 +431,7 @@ impl State {
     }
 }
 
+#[relax_api(handle, default)]
 #[derive(Default)]
 pub struct ScriptTokenizer {
     pos: usize,
@@ -416,7 +472,43 @@ pub struct ScriptLoc {
     pub col: usize,
 }
 
+#[relax_api]
 impl ScriptTokenizer {
+    /// A tokenizer holding tokens another VM read from `original` (their
+    /// positions are characters of `original`): what an adopted fn's body
+    /// reads ([`crate::vm::ScriptFnImage`]). Nothing is lexed again.
+    pub(crate) fn adopted(original: &str, tokens: Vec<ScriptTokenPos>) -> Self {
+        let mut line_starts = Vec::new();
+        let mut pos = 0usize;
+        for c in original.chars() {
+            pos += 1;
+            if c == '\n' {
+                line_starts.push(pos as u32);
+            }
+        }
+        Self { pos, tokens, original: original.to_string(), line_starts, ..Self::default() }
+    }
+
+    #[inline]
+    pub fn tokens_ref(&self) -> &[ScriptTokenPos] { self.view(0).tokens }
+
+    /// Reads the tokenizer: its tokens, and the zero-based row and column (characters) of token
+    /// `tok_index` (`found` false when it lies past the lexed source).
+    #[relax_api]
+    pub fn view(&self, tok_index: u32) -> TokenizerView<'_> {
+        let mut v = TokenizerView { tokens: &self.tokens, row: 0, col: 0, found: false };
+        if let Some(t) = self.tokens.get(tok_index as usize) {
+            let char_index = t.pos;
+            if char_index < self.pos {
+                let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+                let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+                v.row = line as u32;
+                v.col = (char_index - line_start) as u32;
+                v.found = true;
+            }
+        }
+        v
+    }
     pub fn clear(&mut self) {
         self.pos = 0;
         self.newline_pending = false;
@@ -458,14 +550,12 @@ impl ScriptTokenizer {
         Some((line as u32, (char_index - line_start) as u32))
     }
 
+    #[inline]
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
-        let char_index = self.tokens[tok_index as usize].pos;
-        if char_index >= self.pos {
-            return None;
-        }
-        let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
-        let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
-        Some((line as u32, (char_index - line_start) as u32))
+        // the index must name a token (a plain index panics past the end)
+        let v = self.view(tok_index);
+        assert!((tok_index as usize) < v.tokens.len());
+        v.found.then_some((v.row, v.col))
     }
 
 
@@ -532,10 +622,9 @@ impl ScriptTokenizer {
     /// character after it, so a source ending in one without a trailing
     /// newline lost it (`x * 100` parsed as `x *`). An unterminated string
     /// stays StringUnfinished.
+    #[inline]
     pub fn finish(&mut self, heap: &mut ScriptHeap) {
-        if self.state != State::Whitespace && !self.in_string() {
-            self.tokenize("\n", heap);
-        }
+        self.run(true, "", heap);
     }
 
     /// Streaming: push the token still being lexed at the end of the source
@@ -832,7 +921,25 @@ impl ScriptTokenizer {
         }
     }
 
+    #[inline]
     pub fn tokenize(&mut self, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+        self.run(false, new_chars, heap)
+    }
+
+    /// Lexes `new_chars` (`tokenize`: the tokens it added), or with `finish` ends the source
+    /// (`finish`: no text, an empty slice).
+    #[relax_api]
+    pub fn run(&mut self, finish: bool, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+        if finish {
+            if self.state != State::Whitespace && !self.in_string() {
+                self.tokenize_impl("\n", heap);
+            }
+            return &[];
+        }
+        self.tokenize_impl(new_chars, heap)
+    }
+
+    fn tokenize_impl(&mut self, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
         if self.provisional {
             self.provisional = false;
             self.tokens.pop();
@@ -1506,6 +1613,7 @@ impl ScriptTokenizer {
 
 /// One token of a source as the real tokenizer reads it, with the bytes it
 /// was written in. Nothing is evaluated or parsed.
+#[relax_api(handle, clone)]
 #[derive(Clone, Debug)]
 pub struct LexedToken {
     pub token: ScriptToken,
@@ -1517,32 +1625,90 @@ pub struct LexedToken {
     pub preceded_by_space: bool,
 }
 
+/// What a lexed token reads as (LexedToken::view).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct LexedTokenView<'a> {
+    pub token: &'a ScriptToken,
+    pub start: usize,
+    pub end: usize,
+    pub string: &'a str,
+    pub has_string: bool,
+    pub preceded_by_newline: bool,
+    pub preceded_by_space: bool,
+}
+
+/// What ScriptTokenizer::view answers.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct TokenizerView<'a> {
+    pub tokens: &'a [ScriptTokenPos],
+    pub row: u32,
+    pub col: u32,
+    pub found: bool,
+}
+
+#[relax_api(marked)]
+impl LexedToken {
+    #[relax_api]
+    pub fn view(&self) -> LexedTokenView<'_> {
+        LexedTokenView {
+            token: &self.token,
+            start: self.span.start,
+            end: self.span.end,
+            string: self.string.as_deref().unwrap_or(""),
+            has_string: self.string.is_some(),
+            preceded_by_newline: self.preceded_by_newline,
+            preceded_by_space: self.preceded_by_space,
+        }
+    }
+
+    #[inline(always)]
+    pub fn span(&self) -> std::ops::Range<usize> { self.start()..self.end() }
+
+    #[inline]
+    pub fn token(&self) -> &ScriptToken { self.view().token }
+    #[inline]
+    pub fn start(&self) -> usize { self.view().start }
+    #[inline]
+    pub fn end(&self) -> usize { self.view().end }
+    #[inline]
+    pub fn string(&self) -> Option<&str> { let v = self.view(); v.has_string.then_some(v.string) }
+    #[inline]
+    pub fn preceded_by_newline(&self) -> bool { self.view().preceded_by_newline }
+    #[inline]
+    pub fn preceded_by_space(&self) -> bool { self.view().preceded_by_space }
+}
+
 /// The tokens of `source`, each with its byte range. Comments are not
 /// tokens: they stay in the gaps between ranges, so a host that edits by
 /// range keeps them. This is the tokenizer a script runs on, so anything
 /// the language reads as one token is one token here.
+#[inline(always)]
 pub fn lex(source: &str) -> Vec<LexedToken> {
+    let mut out = Vec::new();
+    lex_into(source, &mut ScriptLexedOut::new(&mut out));
+    out
+}
+#[relax_api]
+pub fn lex_into(source: &str, out: &mut ScriptLexedOut) {
     let mut heap = ScriptHeap::default();
     let mut tokenizer = ScriptTokenizer::default();
     tokenizer.tokenize(source, &mut heap);
     tokenizer.finish(&mut heap);
     let mut bytes: Vec<usize> = source.char_indices().map(|(at, _)| at).collect();
     bytes.push(source.len());
-    tokenizer
-        .tokens
-        .iter()
-        .map(|pos| {
+    for pos in &tokenizer.tokens {
             let span = pos.span();
             let string = pos.token.as_string().and_then(|value| heap.string_with(value, |_, text| text.to_string()));
-            LexedToken {
+            out.push(&LexedToken {
                 token: pos.token,
                 span: bytes[span.start.min(bytes.len() - 1)]..bytes[span.end.min(bytes.len() - 1)],
                 string,
                 preceded_by_newline: pos.preceded_by_newline,
                 preceded_by_space: pos.preceded_by_space,
-            }
-        })
-        .collect()
+            });
+    }
 }
 
 #[cfg(test)]
@@ -1660,5 +1826,26 @@ mod tests {
                 "\"h\\\"i\"", "e", ":", "vec2", "(", "1", "..", "2", ")", "f", ":", "1.0f", "g", ":", "x", "->", "y", "}"
             ]
         );
+    }
+}
+
+/// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptLexedOut<'a> {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, *const LexedToken),
+    _out: std::marker::PhantomData<&'a mut Vec<LexedToken>>,
+}
+impl<'a> ScriptLexedOut<'a> {
+    #[inline(always)]
+    pub fn new(out: &'a mut Vec<LexedToken>) -> Self {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, value: *const LexedToken) {
+            (&mut *(ctx as *mut Vec<LexedToken>)).push((&*value).clone());
+        }
+        Self { ctx: out as *mut _ as *mut u8, push, _out: std::marker::PhantomData }
+    }
+    pub fn push(&mut self, value: &LexedToken) {
+        unsafe { (self.push)(self.ctx, value) }
     }
 }

@@ -9,5 +9,10 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
+makepad-live-id = { path = "../../../libs/live_id", version = "1.0.0" }
 makepad-network = { path = "../../network", version = "1.0.0" }
 makepad-script = { path = "..", version = "1.0.0" }
+
+[features]
+host-shims = []

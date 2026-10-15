@@ -418,7 +418,7 @@ impl ScriptHook for TileList {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -1184,7 +1184,7 @@ mod tests {
     fn the_tile_template_and_the_list_are_there_to_be_reached() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let tiles = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             crate::script_mod(vm);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "{errors:#?}");

@@ -15,115 +15,34 @@ pub mod cx_native;
 pub mod cx_shared;
 
 pub mod shared_framebuf;
+#[cfg(target_os = "linux")]
+pub(crate) mod hosted_gpu;
+#[cfg(target_os = "linux")]
+pub(crate) mod hosted_gpu_sender;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod termination_signal;
 
-#[cfg(all(
-    not(gpusim),
-    any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos"))
-    )
-))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 // Native-only: the launch handoff runs before any Cx (and its clock) exists.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub(crate) mod single_instance;
 
-#[cfg(gpusim)]
-// The gpusim (simulated-GPU) process backend is native-only and never compiled into a web app.
+#[cfg(not(target_arch = "wasm32"))]
+// Every native target uses the HAL command/event client.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod gpusim;
+pub mod hal;
 
-#[cfg(gpusim)]
-pub use crate::os::gpusim::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::os::hal::*;
 
-#[cfg(all(
-    not(gpusim),
-    any(target_os = "macos", target_os = "ios", target_os = "tvos")
-))]
-// Apple process backend is native-only and never compiled into a web app.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod apple;
+/// The GL function table of the GL interop API (`Cx::with_gl`).
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+pub mod gl_sys;
 
-#[cfg(all(
-    not(gpusim),
-    any(target_os = "macos", target_os = "ios", target_os = "tvos")
-))]
-pub use crate::os::apple::*;
 
-#[cfg(all(
-    not(gpusim),
-    any(target_os = "macos", target_os = "ios", target_os = "tvos")
-))]
-pub use crate::os::apple::apple_media::*;
-
-#[cfg(all(not(gpusim), target_os = "windows"))]
-// Windows process backend is native-only and never compiled into a web app.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod windows;
-
-#[cfg(all(not(gpusim), target_os = "windows"))]
-pub use crate::os::windows::*;
-
-//#[cfg(target_os = "windows")]
-//pub use crate::os::windows::windows_media::*;
-
-#[cfg(all(not(gpusim), any(target_os = "android", target_os = "linux")))]
-// Linux/Android process backends are native-only and never compiled into a web app.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod linux;
-
-#[cfg(all(not(gpusim), any(target_os = "android", target_os = "linux")))]
-pub use crate::os::linux::*;
-
-#[cfg(all(gpusim, any(target_os = "android", target_os = "linux")))]
-/// The simulated GPU keeps the process-boundary pieces of the Linux backend:
-/// shared memory, the studio IPC, DMA-BUF descriptors and the hosted swapchain
-/// sender, without any GPU driver behind them.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods, dead_code)]
-pub mod linux {
-    #[path = "libc_sys.rs"]
-    pub mod libc_sys;
-    #[path = "v4l2_sys.rs"]
-    pub mod v4l2_sys;
-    #[path = "ipc.rs"]
-    pub mod ipc;
-    #[path = "dma_buf.rs"]
-    pub mod dma_buf;
-    #[path = "hosted_gpu_sender.rs"]
-    pub mod hosted_gpu_sender;
-    // The software-buffer upload is renderer independent (a BGRA texture).
-    #[path = "presentable.rs"]
-    mod presentable;
-}
-
-#[cfg(all(test, not(gpusim), target_os = "macos"))]
-// Native Linux compatibility tests reuse OS-only timing code on macOS.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod linux_test_stub;
-
-#[cfg(all(test, not(gpusim), target_os = "macos"))]
-pub use crate::os::linux_test_stub as linux;
-
-#[cfg(all(not(gpusim), target_os = "android"))]
-pub use crate::os::linux::android::android_media::*;
-
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
-pub use crate::os::linux::linux_media::*;
-
-#[cfg(all(not(gpusim), target_env = "ohos"))]
-pub use crate::os::linux::open_harmony::oh_media::*;
-
-//#[cfg(target_os = "linux")]
-//pub use crate::os::linux::*;
-
-//#[cfg(target_os = "linux")]
-//pub use crate::os::linux::linux_media::*;
-
-#[cfg(all(not(gpusim), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub mod web;
 
-#[cfg(all(not(gpusim), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub use crate::os::web::*;

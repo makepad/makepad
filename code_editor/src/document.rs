@@ -276,6 +276,21 @@ impl CodeDocument {
         self.update_after_edit(None, None, &[delete_edit, insert_edit]);
     }
 
+    /// Highlight as the file at `path` (a rename that changed the
+    /// extension): retokenizes in place, keeping the text, history, anchors
+    /// and sessions.
+    pub fn set_language_for_path(&self, path: &str) {
+        let detection = makepad_code_language::detect_path(path, None);
+        let history = self.0.history.borrow();
+        let text = history.as_text();
+        let line_count = text.as_lines().len();
+        let mut tokenizer = Tokenizer::for_detection(detection, line_count);
+        let mut layout = self.0.layout.borrow_mut();
+        layout.tokens = vec![Vec::new(); line_count];
+        tokenizer.update(text, &mut layout.tokens);
+        *self.0.tokenizer.borrow_mut() = tokenizer;
+    }
+
     pub fn as_text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
     }

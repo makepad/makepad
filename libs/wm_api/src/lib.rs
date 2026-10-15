@@ -9,8 +9,8 @@
 //!
 //! Standalone (not hosted) the requests fall back: a preview/open spawns
 //! the associated app as its own window, title/cwd are no-ops.
-//! [`screens`]/[`set_fullscreen_span`] fall back too -- on Linux, not
-//! OHOS (direct or windowed; only the direct backend actually ever
+//! [`screens`]/[`set_fullscreen_span`] fall back too -- on Linux
+//! (direct or windowed; only the direct backend actually ever
 //! reports screens, so a span only ever resolves there) a span is
 //! resolved against [`screens`] and recorded in-process, no WM involved;
 //! see [`span_rect_for_window`] for the rect an app lays its content into.
@@ -80,6 +80,10 @@ pub enum WmEvent {
     /// (same viewer type as it was spawned for). The viewer swaps content
     /// in place — no respawn, no focus change.
     PreviewFile { path: String },
+    /// To an app that runs already: show `path`. The WM sends it when a
+    /// `WmRequest::Open` names this launch-or-focus app (Camera's last shot
+    /// opening in the Photos that is open) and brings the app up with it.
+    Open { path: String },
     /// The panel was hidden: the warm viewer UNLOADS what it was showing
     /// (drop decoders/textures/file handles, stop playback, blank state)
     /// and idles at near-zero cost until the next `PreviewFile`.
@@ -193,7 +197,7 @@ pub fn screens(cx: &Cx) -> Vec<WmScreen> {
 /// The names of the screens this window currently spans fullscreen, left
 /// to right, or `None` when it spans none. Hosted: the last
 /// [`WmEvent::Screens`]'s `span`. Standalone: the span last recorded by
-/// [`set_fullscreen_span`] (Linux, not OHOS, only), re-resolved against
+/// [`set_fullscreen_span`] (Linux only), re-resolved against
 /// the live screens (dropped, like the WM drops it, if a name no longer
 /// resolves -- e.g. after a hotplug); `None` on every other standalone
 /// backend, matching that function's fallback there.
@@ -253,7 +257,7 @@ pub fn standalone_screens(
 /// answer) it still returns `true` though no [`WmEvent::Screens`] ever
 /// follows.
 ///
-/// Standalone on Linux, not OHOS (direct or windowed; there is no WM to
+/// Standalone on Linux (direct or windowed; there is no WM to
 /// answer, and on the direct backend its one window already covers the
 /// whole wide desktop): resolves `span` against the live screens and
 /// records it directly, same-process -- [`span_rect_for_window`] then
@@ -264,7 +268,7 @@ pub fn standalone_screens(
 /// so it always lands here).
 ///
 /// Standalone on every other backend (macOS, Windows, wasm,
-/// android/ohos): not yet implemented; returns false (nothing recorded,
+/// Android): not yet implemented; returns false (nothing recorded,
 /// nothing asked) regardless of `span`.
 pub fn set_fullscreen_span(cx: &Cx, span: Option<ScreenSpan>) -> bool {
     if hosted(cx) {
@@ -275,10 +279,10 @@ pub fn set_fullscreen_span(cx: &Cx, span: Option<ScreenSpan>) -> bool {
 
 /// The span recorded by [`set_fullscreen_span`] for a standalone Linux
 /// direct app: there is no WM to hold it, so this process does.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 static STANDALONE_SPAN: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 fn standalone_set_fullscreen_span(span: Option<ScreenSpan>) -> bool {
     let screens = standalone_screens(
         &makepad_widgets_core::makepad_platform::screens(),
@@ -294,7 +298,7 @@ fn standalone_set_fullscreen_span(span: Option<ScreenSpan>) -> bool {
     ok
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 fn standalone_current_span() -> Option<Vec<String>> {
     let recorded = STANDALONE_SPAN.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let screens = standalone_screens(
@@ -304,18 +308,20 @@ fn standalone_current_span() -> Option<Vec<String>> {
     resolve_standalone_current_span(&screens, &recorded)
 }
 
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(not(target_os = "linux"))]
 fn standalone_set_fullscreen_span(_span: Option<ScreenSpan>) -> bool {
     false
 }
 
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(not(target_os = "linux"))]
 fn standalone_current_span() -> Option<Vec<String>> {
     None
 }
 
 /// True when this process is hosted as an wm tile (or a Studio run view).
 pub fn hosted(cx: &Cx) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if cx.hal_is_embedded() { return true; }
     cx.in_makepad_studio()
 }
 
@@ -329,6 +335,8 @@ pub fn warm_start() -> bool {
 /// Send a request to the window manager. Returns false when not hosted
 /// (nothing was sent; the caller may fall back).
 pub fn send(cx: &Cx, req: &WmRequest) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if cx.hal_is_embedded() { return cx.hal_send_parent_message(&req.to_json()); }
     if !hosted(cx) {
         return false;
     }

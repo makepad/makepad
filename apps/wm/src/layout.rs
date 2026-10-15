@@ -1,6 +1,8 @@
-//! The tiling layout: a dwindle (BSPWM-style) binary tree per workspace,
-//! plus the state Omarchy hangs off individual windows — floating, pinned,
-//! pseudo, fullscreen modes, groups and the special "scratchpad" workspace.
+//! The tiling layout: a dwindle (BSPWM-style) binary tree per slot of a
+//! display, plus the state Omarchy hangs off individual windows — floating,
+//! pinned, pseudo, full width, groups and the special "scratchpad" slot.
+//! Which slot is shown, and what the slots are (desktop spaces, fullscreen
+//! spaces), is the display's space list (`crate::spaces`).
 //!
 //! Behavior read from source, never guessed:
 //!
@@ -35,11 +37,12 @@
 
 pub type ClientId = u64;
 
-pub const WORKSPACES: usize = 10;
+/// Slots a display's spaces are backed by (`crate::spaces::SLOTS`).
+pub const SLOTS: usize = crate::spaces::SLOTS;
 
-/// The special workspace ("special:scratchpad"), stored after the numbered
-/// ones so every by-index helper keeps working.
-pub const SCRATCHPAD: usize = WORKSPACES;
+/// The special workspace ("special:scratchpad"), stored after the space
+/// slots so every by-index helper keeps working.
+pub const SCRATCHPAD: usize = SLOTS;
 
 /// `bin/omarchy-hyprland-window-pop` defaults: `width=${1:-1300}`,
 /// `height=${2:-900}`.
@@ -181,16 +184,28 @@ pub enum Dir {
     Down,
 }
 
-/// Omarchy binds three of Hyprland's fullscreen shapes (tiling.lua):
-/// SUPER+F `fullscreen`, SUPER+ALT+F `maximized`, and SUPER+CTRL+F
-/// `fullscreenstate 0 2` — the last one only *tells the client* it is
-/// fullscreen and leaves the layout alone, so it lives on the client flag
-/// set rather than here.
+/// What a slot shows of its one special window. `Fullscreen` is the state of
+/// a fullscreen space's slot (the window covers the whole display, nothing
+/// else is drawn); `Maximized` is SUPER+ALT+F, "full width", which fills the
+/// tile area and keeps the bar. SUPER+CTRL+F (`fullscreenstate 0 2`) only
+/// *tells the client* it is fullscreen and leaves the layout alone, so it
+/// lives on the client flag set rather than here.
+/// How a window fills the screen (see `WmLayout::window_mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WindowMode {
+    #[default]
+    Normal,
+    /// Fills the current desktop: the bar and the dock stay.
+    Maximised,
+    /// A desktop of its own, the whole screen.
+    Fullscreen,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FullscreenMode {
     #[default]
     None,
-    /// SUPER+F: covers the whole desk, the bar hides with it.
+    /// A fullscreen space: covers the whole desk, the bar hides with it.
     Fullscreen,
     /// SUPER+ALT+F ("Full width"): fills the tile area, the bar stays.
     Maximized,
@@ -209,6 +224,9 @@ pub struct FloatEntry {
     /// keeps the keyboard so its arrows keep dialing. Every focus mover
     /// (`focused_client`, `cycle_focus`, `neighbor`) skips these.
     pub no_key_focus: bool,
+    /// Taken out of the tile tree by dragging it into a spacewarp zone:
+    /// dropping it back in the centre band reinserts it (`reinsert`).
+    pub from_tree: bool,
 }
 
 /// A client taken out of one `WmLayout` (`detach`) with everything another
@@ -286,11 +304,12 @@ pub struct WmLayout {
     pub desktop: crate::desktop_layout::DesktopWindows,
     nodes: Vec<Option<Node>>,
     free: Vec<usize>,
-    /// `WORKSPACES` numbered workspaces plus the scratchpad at `SCRATCHPAD`.
+    /// `SLOTS` space slots plus the scratchpad at `SCRATCHPAD`.
     pub workspaces: Vec<Workspace>,
+    /// The slot of the space shown (always `spaces.active_slot()`).
     pub active: usize,
-    /// The previously active workspace (SUPER+CTRL+TAB "former").
-    pub former: usize,
+    /// This display's spaces, in order, and which one is shown.
+    pub spaces: crate::spaces::SpaceList,
     /// Focus history, most recent LAST (Hyprland's focus fallback):
     /// closing a window returns focus to the one focused before it, so
     /// repeated closes unwind in reverse creation/focus order.
@@ -313,6 +332,9 @@ pub struct WmLayout {
     /// and the scratchpad console reach past the gap, so they need it; when
     /// it is unset the gap is added back to `area` instead.
     outer: Option<LRect>,
+    /// The display has spacewarp edge zones: tiles, maximize and snaps use
+    /// the centre band; the zones are for parked floats.
+    zoned: bool,
 }
 
 impl Default for WmLayout {
@@ -327,9 +349,9 @@ impl WmLayout {
             desktop: Default::default(),
             nodes: Vec::new(),
             free: Vec::new(),
-            workspaces: (0..WORKSPACES + 1).map(|_| Workspace::default()).collect(),
+            workspaces: (0..SLOTS + 1).map(|_| Workspace::default()).collect(),
             active: 0,
-            former: 0,
+            spaces: crate::spaces::SpaceList::new(),
             focus_history: Vec::new(),
             floats: Vec::new(),
             float_memory: Vec::new(),
@@ -338,7 +360,27 @@ impl WmLayout {
             client_fullscreen: Vec::new(),
             scratchpad_open: false,
             outer: None,
+            zoned: false,
         }
+    }
+
+    /// Give `client` its desktop-style window if it has none: it opens in
+    /// the centre band, never in a spacewarp edge zone.
+    pub fn ensure_desktop(&mut self, client: ClientId, area: LRect) {
+        let area = self.tile_area(self.active, area);
+        self.desktop.ensure(client, area);
+    }
+
+    /// A layout for a real display: its tiles live in the centre band.
+    pub fn zoned() -> Self {
+        Self { zoned: true, ..Self::new() }
+    }
+
+    /// Where a workspace's tiles are laid out in `area`.
+    /// Only a floating desktop keeps the edge zones for parked windows: a tiling style has
+    /// no shelves, its tiles fill the whole area.
+    fn tile_area(&self, ws: usize, area: LRect) -> LRect {
+        if self.zoned && self.desktop.enabled && ws != SCRATCHPAD { crate::spacewarp::band_of(area) } else { area }
     }
 
     /// The App hands us the desk rect each time it acts, since the tile
@@ -409,27 +451,6 @@ impl WmLayout {
         None
     }
 
-    /// Hyprland's `e+1`/`e-1`: the next OCCUPIED workspace in cyclic
-    /// order (never a march through empty ones), the current workspace
-    /// included in the ring. With no other occupied workspace this
-    /// returns `from` — the cycle is a no-op, not a jump to nowhere.
-    pub fn cycle_occupied(&self, from: usize, forward: bool) -> usize {
-        for step in 1..=WORKSPACES {
-            let ws = if forward {
-                (from + step) % WORKSPACES
-            } else {
-                (from + WORKSPACES - step % WORKSPACES) % WORKSPACES
-            };
-            if ws == from {
-                break;
-            }
-            if !self.clients_on(ws).is_empty() {
-                return ws;
-            }
-        }
-        from
-    }
-
     /// Every client on a workspace — tiled (group members included) and
     /// floating — in tree order, floats last.
     pub fn clients_on(&self, ws: usize) -> Vec<ClientId> {
@@ -459,7 +480,7 @@ impl WmLayout {
             }
         }
         for f in &self.floats {
-            if f.ws == ws || (f.pinned && ws < WORKSPACES) {
+            if f.ws == ws || (f.pinned && ws < SLOTS) {
                 out.push(f.client);
             }
         }
@@ -521,8 +542,18 @@ impl WmLayout {
         self.insert_on(self.active, client, area, gap);
     }
 
+    /// Insert on a desktop: the current one, or the one a shown fullscreen space returns
+    /// to (a fullscreen space holds its one window only).
+    pub fn insert_on_desktop(&mut self, client: ClientId, area: LRect, gap: f64) {
+        let ws = match self.spaces.current().kind {
+            crate::spaces::Kind::Fullscreen { home, .. } => home,
+            crate::spaces::Kind::Desktop => self.active,
+        };
+        self.insert_on(ws, client, area, gap);
+    }
+
     pub fn insert_on(&mut self, ws: usize, client: ClientId, area: LRect, gap: f64) {
-        self.desktop.ensure(client, area);
+        self.ensure_desktop(client, area);
         self.insert_at(ws, client, area, gap, !self.desktop.enabled);
     }
 
@@ -700,6 +731,15 @@ impl WmLayout {
         if ws == Some(SCRATCHPAD) && self.clients_on(SCRATCHPAD).is_empty() {
             self.scratchpad_open = false;
         }
+        // A window that is gone takes its fullscreen space with it.
+        if let Some(i) = self.spaces.index_of_fullscreen(client) {
+            if let Some(sp) = self.spaces.get(i) {
+                self.workspaces[sp.slot] = Workspace::default();
+            }
+            self.spaces.remove(i);
+            self.tile_origin.retain(|(c, _)| *c != client);
+            self.sync_active();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -712,7 +752,7 @@ impl WmLayout {
         let mut out = Vec::new();
         if let Some(root) = self.workspaces[ws].root {
             let mut slots = Vec::new();
-            self.walk_slots(root, area, gap, &mut slots);
+            self.walk_slots(root, self.tile_area(ws, area), gap, &mut slots);
             for (idx, rect) in slots {
                 if let Some(client) = self.leaf_visible(idx) {
                     out.push((client, rect));
@@ -729,9 +769,20 @@ impl WmLayout {
     }
 
     pub fn rects_of(&self, ws: usize, area: LRect, gap: f64) -> Vec<(ClientId, LRect)> {
-        if self.desktop.enabled && ws < WORKSPACES {
+        // A fullscreen space: its one window over the whole desk, gaps
+        // included (the caller hides the bar), and nothing else.
+        if let (Some(fs), FullscreenMode::Fullscreen) =
+            (self.workspaces[ws].fullscreen, self.workspaces[ws].fullscreen_mode)
+        {
+            return vec![(fs, self.outer_rect(area, gap))];
+        }
+        if self.desktop.enabled && ws < SLOTS {
             let clients = self.clients_on(ws);
-            let mut out = self.desktop.rects(&clients, area);
+            // A maximized window fills the centre band while anything is parked,
+            // else the whole area.
+            let parked = self.desktop.windows.iter().any(|w| w.warped && !w.minimized && clients.contains(&w.client));
+            let band = if parked { self.tile_area(ws, area) } else { area };
+            let mut out = self.desktop.rects(&clients, area, band);
             // Native preview floats keep their explicit geometry and focus policy.
             for f in &self.floats {
                 if (f.ws == ws || f.pinned) && !self.desktop.minimized(f.client) && (f.pinned || self.desktop.get(f.client).is_none()) {
@@ -745,11 +796,7 @@ impl WmLayout {
         let mut out = Vec::new();
         let workspace = &self.workspaces[ws];
         match (workspace.fullscreen, workspace.fullscreen_mode) {
-            (Some(fs), FullscreenMode::Fullscreen) => {
-                // The whole desk, gaps included — the caller hides the bar.
-                out.push((fs, self.outer_rect(area, gap)));
-            }
-            (Some(fs), FullscreenMode::Maximized) => out.push((fs, area)),
+            (Some(fs), FullscreenMode::Maximized) => out.push((fs, self.tile_area(ws, area))),
             _ => {
                 for (client, slot) in self.slot_rects_of(ws, area, gap) {
                     out.push((client, self.pseudo_rect(client, slot)));
@@ -757,7 +804,7 @@ impl WmLayout {
             }
         }
         for f in &self.floats {
-            if f.ws == ws || (f.pinned && ws < WORKSPACES && f.ws != ws) {
+            if f.ws == ws || (f.pinned && ws < SLOTS && f.ws != ws) {
                 out.push((f.client, f.rect));
             }
         }
@@ -1058,7 +1105,7 @@ impl WmLayout {
         let base = if ws == SCRATCHPAD {
             self.scratchpad_area(area, gap)
         } else {
-            area
+            self.tile_area(ws, area)
         };
         let gap = if ws == SCRATCHPAD { 0.0 } else { gap };
         let mut found = None;
@@ -1153,7 +1200,7 @@ impl WmLayout {
         }
         let root = self.workspaces[ws].root?;
         let mut best: Option<DividerHit> = None;
-        self.walk_node_rects(root, area, gap, 0, &mut |idx, depth, rect| {
+        self.walk_node_rects(root, self.tile_area(ws, area), gap, 0, &mut |idx, depth, rect| {
             let Some(Node::Split { axis, ratio, .. }) = self.nodes[idx].as_ref() else {
                 return;
             };
@@ -1270,6 +1317,7 @@ impl WmLayout {
             pinned: false,
             ws,
             no_key_focus: false,
+            from_tree: false,
         });
         self.workspaces[ws].focus = Some(client);
     }
@@ -1286,6 +1334,7 @@ impl WmLayout {
             pinned: false,
             ws,
             no_key_focus: true,
+            from_tree: false,
         });
     }
 
@@ -1310,6 +1359,28 @@ impl WmLayout {
     pub fn popup_rect(&self, area: LRect, gap: f64, w: f64, h: f64) -> LRect {
         let _ = gap;
         area.centered(w, h)
+    }
+
+    /// A tiled window dragged into a zone leaves the tree as a float at
+    /// `rect` (remembering its tiled neighbour); `reinsert` brings it back.
+    pub fn float_from_tree(&mut self, client: ClientId, rect: LRect, area: LRect, gap: f64) {
+        if self.is_float(client) {
+            return;
+        }
+        self.float(client, Some(rect), area, gap);
+        if let Some(f) = self.floats.iter_mut().find(|f| f.client == client) {
+            f.from_tree = true;
+        }
+    }
+
+    /// A float that came out of the tree (`float_from_tree`) goes back into
+    /// it, next to the neighbour it left. False for any other float.
+    pub fn reinsert(&mut self, client: ClientId, area: LRect, gap: f64) -> bool {
+        if !self.floats.iter().any(|f| f.client == client && f.from_tree) {
+            return false;
+        }
+        self.unfloat(client, area, gap);
+        true
     }
 
     fn float(&mut self, client: ClientId, rect: Option<LRect>, area: LRect, gap: f64) {
@@ -1343,6 +1414,7 @@ impl WmLayout {
             pinned: false,
             ws,
             no_key_focus: false,
+            from_tree: false,
         });
         self.workspaces[ws].focus = Some(client);
     }
@@ -1467,9 +1539,10 @@ impl WmLayout {
     // Fullscreen
     // ------------------------------------------------------------------
 
-    /// SUPER+F / SUPER+ALT+F. Toggling the same mode clears it; a different
-    /// mode replaces it.
-    pub fn toggle_fullscreen_mode(&mut self, mode: FullscreenMode) {
+    /// SUPER+ALT+F, "full width": the focused window fills the tile area and
+    /// the bar stays; again puts it back. (True fullscreen is a space of its
+    /// own, `enter_fullscreen_space`.)
+    pub fn toggle_full_width(&mut self) {
         if self.desktop.enabled {
             if let Some(client) = self.focused_client() {
                 if let Some(w) = self.desktop.get_mut(client) { w.maximized = !w.maximized; }
@@ -1484,22 +1557,48 @@ impl WmLayout {
             return;
         }
         let w = &mut self.workspaces[ws];
-        if w.fullscreen == Some(focus) && w.fullscreen_mode == mode {
+        if w.fullscreen == Some(focus) && w.fullscreen_mode == FullscreenMode::Maximized {
             w.fullscreen = None;
             w.fullscreen_mode = FullscreenMode::None;
         } else {
             w.fullscreen = Some(focus);
-            w.fullscreen_mode = mode;
+            w.fullscreen_mode = FullscreenMode::Maximized;
         }
     }
 
-    /// Kept for the old call site: SUPER+F.
-    pub fn toggle_fullscreen(&mut self) {
-        self.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
+    /// `client` fills its space's usable area (the desktop window's
+    /// maximise, or a tiled workspace's full width) and is not a fullscreen
+    /// space.
+    pub fn is_maximised(&self, client: ClientId) -> bool {
+        if self.desktop.enabled {
+            return self.desktop.get(client).is_some_and(|w| w.maximized);
+        }
+        self.workspace_of(client).is_some_and(|ws| {
+            self.workspaces[ws].fullscreen == Some(client) && self.workspaces[ws].fullscreen_mode == FullscreenMode::Maximized
+        })
     }
 
-    pub fn fullscreen_mode(&self) -> FullscreenMode {
-        self.workspaces[self.active].fullscreen_mode
+    /// Maximise `client` in place, or leave it. The same state SUPER+ALT+F and
+    /// the desk's double click on a title set, for any window by name.
+    pub fn set_maximised(&mut self, client: ClientId, on: bool) {
+        if self.desktop.enabled {
+            if let Some(w) = self.desktop.get_mut(client) {
+                w.maximized = on;
+                if on {
+                    w.minimized = false;
+                }
+            }
+            return;
+        }
+        let Some(ws) = self.workspace_of(client) else { return };
+        let w = &mut self.workspaces[ws];
+        if on && w.fullscreen_mode != FullscreenMode::Fullscreen {
+            w.fullscreen = Some(client);
+            w.fullscreen_mode = FullscreenMode::Maximized;
+        } else if !on && w.fullscreen == Some(client) && w.fullscreen_mode == FullscreenMode::Maximized {
+            w.fullscreen = None;
+            w.fullscreen_mode = FullscreenMode::None;
+        }
     }
 
     /// SUPER+CTRL+F — `fullscreenstate 0 2`: the client is TOLD it is
@@ -1545,7 +1644,7 @@ impl WmLayout {
             return out;
         };
         let mut slots = Vec::new();
-        self.walk_slots(root, area, gap, &mut slots);
+        self.walk_slots(root, self.tile_area(ws, area), gap, &mut slots);
         for (idx, rect) in slots {
             if let Some(Node::Leaf {
                 clients,
@@ -1832,60 +1931,212 @@ impl WmLayout {
     }
 
     // ------------------------------------------------------------------
-    // Workspaces / scratchpad
+    // Spaces / scratchpad
     // ------------------------------------------------------------------
 
-    pub fn switch_workspace(&mut self, n: usize) {
-        if n < WORKSPACES && n != self.active {
-            self.former = self.active;
-            self.active = n;
+    /// The slot of the space shown follows the list.
+    fn sync_active(&mut self) {
+        let slot = self.spaces.active_slot();
+        if slot != self.active {
+            self.active = slot;
             // binds.hide_special_on_workspace_change = true.
             self.scratchpad_open = false;
         }
     }
 
-    /// Move the focused client to workspace `n` (follow = switch too).
-    pub fn move_focused_to(&mut self, n: usize, follow: bool) {
-        self.move_focused_to_ex(n, follow, LRect::new(0.0, 0.0, 1000.0, 600.0), 0.0);
+    /// Show the space at index `i`. False when it is already shown or there
+    /// is none.
+    pub fn goto_space(&mut self, i: usize) -> bool {
+        if i == self.spaces.cur() || !self.spaces.goto(i) {
+            return false;
+        }
+        self.sync_active();
+        true
     }
 
-    pub fn move_focused_to_ex(&mut self, n: usize, follow: bool, area: LRect, gap: f64) {
-        if n >= self.workspaces.len() {
-            return;
+    /// Show the space backed by `slot` (a window in it took the focus).
+    pub fn show_slot(&mut self, slot: usize) -> bool {
+        match self.spaces.index_of_slot(slot) {
+            Some(i) => self.goto_space(i),
+            None => false,
         }
-        let from = self.focus_ws();
-        if n == from {
-            return;
+    }
+
+    /// The index of the space that holds `client`.
+    pub fn space_of(&self, client: ClientId) -> Option<usize> {
+        self.spaces.index_of_slot(self.workspace_of(client)?)
+    }
+
+    /// A window arriving from another display keeps its desktop number.
+    pub fn ensure_desktop_slot(&mut self, slot: usize) {
+        self.spaces.ensure_desktop_slot(slot);
+    }
+
+    /// A new empty desktop at the end of the list; its index.
+    pub fn new_desktop(&mut self) -> Option<usize> {
+        self.spaces.push_desktop()
+    }
+
+    /// Put `client` into `slot`. A float keeps its rect; a tile is inserted
+    /// into the slot's tree, next to `near` when that is still tiled there.
+    /// The slot it left gets a new focus.
+    pub fn move_client_to_slot(
+        &mut self,
+        client: ClientId,
+        slot: usize,
+        area: LRect,
+        gap: f64,
+        near: Option<ClientId>,
+    ) -> bool {
+        if slot >= self.workspaces.len() {
+            return false;
         }
-        let Some(focus) = self.focused_client() else {
-            return;
+        let Some(from) = self.workspace_of(client) else {
+            return false;
         };
-        if let Some(f) = self.floats.iter_mut().find(|f| f.client == focus) {
-            f.ws = n;
+        if from == slot {
+            return true;
+        }
+        if let Some(f) = self.floats.iter_mut().find(|f| f.client == client) {
+            f.ws = slot;
             f.pinned = false;
-            self.workspaces[from].focus = self.visible_clients_on(from).first().copied();
-            self.workspaces[n].focus = Some(focus);
         } else {
-            self.detach_tile(focus);
-            if self.workspaces[from].fullscreen == Some(focus) {
+            self.detach_tile(client);
+            if self.workspaces[from].fullscreen == Some(client) {
                 self.workspaces[from].fullscreen = None;
                 self.workspaces[from].fullscreen_mode = FullscreenMode::None;
             }
-            self.workspaces[from].focus = self.visible_clients_on(from).first().copied();
-            let base = if n == SCRATCHPAD {
-                self.scratchpad_area(area, gap)
+            let (base, gap) = if slot == SCRATCHPAD {
+                (self.scratchpad_area(area, gap), 0.0)
             } else {
-                area
+                (area, gap)
             };
-            let gap = if n == SCRATCHPAD { 0.0 } else { gap };
-            self.insert_on(n, focus, base, gap);
+            if let Some(n) = near.filter(|n| self.workspace_of(*n) == Some(slot) && !self.is_float(*n)) {
+                self.workspaces[slot].focus = Some(n);
+            }
+            self.insert_on(slot, client, base, gap);
         }
+        if self.workspaces[from].focus == Some(client) {
+            self.workspaces[from].focus = self.visible_clients_on(from).first().copied();
+        }
+        self.workspaces[slot].focus = Some(client);
         if from == SCRATCHPAD && self.clients_on(SCRATCHPAD).is_empty() {
             self.scratchpad_open = false;
         }
-        if follow {
-            self.switch_workspace(n);
+        true
+    }
+
+    /// Move `client` to the desktop at index `i`. False for anything that
+    /// is not a desktop, and for a window that is fullscreen (it leaves
+    /// fullscreen first).
+    pub fn move_client_to_space(&mut self, client: ClientId, i: usize, area: LRect, gap: f64) -> bool {
+        let Some(sp) = self.spaces.get(i).filter(|s| s.is_desktop()) else {
+            return false;
+        };
+        if self.spaces.index_of_fullscreen(client).is_some() {
+            return false;
         }
+        self.move_client_to_slot(client, sp.slot, area, gap, None)
+    }
+
+    /// Remove the desktop at index `i`: its windows move to the desktop
+    /// before it (the one after, for the first) and fullscreen spaces that
+    /// came from it follow. False for anything but a desktop that is not
+    /// the last one.
+    pub fn remove_desktop(&mut self, i: usize, area: LRect, gap: f64) -> bool {
+        let Some(sp) = self.spaces.get(i).filter(|s| s.is_desktop()) else {
+            return false;
+        };
+        let Some(to) = self.spaces.previous_desktop_slot(i).filter(|_| self.spaces.desktop_count() > 1) else {
+            return false;
+        };
+        self.spaces.rehome(sp.slot, to);
+        for c in self.clients_on(sp.slot) {
+            self.move_client_to_slot(c, to, area, gap, None);
+        }
+        let shown = self.active == sp.slot;
+        self.workspaces[sp.slot] = Workspace::default();
+        self.spaces.remove(i);
+        if shown {
+            if let Some(h) = self.spaces.index_of_slot(to) {
+                self.spaces.goto(h);
+            }
+        }
+        self.sync_active();
+        true
+    }
+
+    /// Make `client` fullscreen in a space of its own, right after its
+    /// desktop, and show it. The window keeps its desk rect, parked state and
+    /// tile neighbour (they are not touched), so `leave_fullscreen_space`
+    /// puts it back as it was. Returns the new space's index; None for a
+    /// window that cannot (not on a desktop, or no free slot).
+    pub fn enter_fullscreen_space(&mut self, client: ClientId, area: LRect, gap: f64) -> Option<usize> {
+        if let Some(i) = self.spaces.index_of_fullscreen(client) {
+            self.goto_space(i);
+            return Some(i);
+        }
+        let home = self.workspace_of(client).filter(|h| *h < crate::spaces::MAX_DESKTOPS)?;
+        self.tile_origin.retain(|(c, _)| *c != client);
+        if !self.is_float(client) {
+            if let Some(neighbour) = self.tiled_sibling_of(client) {
+                self.tile_origin.push((client, neighbour));
+            }
+        }
+        let (at, slot) = self.spaces.add_fullscreen(client, home)?;
+        self.move_client_to_slot(client, slot, area, gap, None);
+        let w = &mut self.workspaces[slot];
+        w.fullscreen = Some(client);
+        w.fullscreen_mode = FullscreenMode::Fullscreen;
+        w.focus = Some(client);
+        self.goto_space(at);
+        Some(at)
+    }
+
+    /// End `client`'s fullscreen space: the window returns to its desktop
+    /// (its desk rect, parked state and tile neighbour as they were) and that
+    /// desktop is shown. Returns the desktop's index.
+    pub fn leave_fullscreen_space(&mut self, client: ClientId, area: LRect, gap: f64) -> Option<usize> {
+        let i = self.spaces.index_of_fullscreen(client)?;
+        let slot = self.spaces.get(i)?.slot;
+        let home = self.spaces.home_of(i)?;
+        let home = if self.spaces.index_of_slot(home).is_some() {
+            home
+        } else {
+            self.spaces.items().iter().find(|s| s.is_desktop())?.slot
+        };
+        let near = self.tile_origin.iter().find(|(c, _)| *c == client).map(|(_, n)| *n);
+        self.workspaces[slot].fullscreen = None;
+        self.workspaces[slot].fullscreen_mode = FullscreenMode::None;
+        self.move_client_to_slot(client, home, area, gap, near);
+        self.tile_origin.retain(|(c, _)| *c != client);
+        let shown = self.active == slot;
+        self.workspaces[slot] = Workspace::default();
+        self.spaces.remove(i);
+        let h = self.spaces.index_of_slot(home)?;
+        if shown {
+            self.spaces.goto(h);
+        }
+        self.sync_active();
+        Some(h)
+    }
+
+    /// The two ways a window fills the screen. MAXIMISED fills its current
+    /// desktop (the bar and the dock stay); FULLSCREEN is a desktop of its
+    /// own. Anything else is a normal window.
+    pub fn window_mode(&self, client: ClientId) -> WindowMode {
+        if self.is_fullscreen_space(client) {
+            WindowMode::Fullscreen
+        } else if self.is_maximised(client) {
+            WindowMode::Maximised
+        } else {
+            WindowMode::Normal
+        }
+    }
+
+    /// `client` has a fullscreen space.
+    pub fn is_fullscreen_space(&self, client: ClientId) -> bool {
+        self.spaces.index_of_fullscreen(client).is_some()
     }
 
     /// SUPER+L — flip the focused workspace's tiling layout. The
@@ -1916,7 +2167,9 @@ impl WmLayout {
 
     /// SUPER+ALT+S / SUPER+SHIFT+grave — move there, do not follow.
     pub fn move_focused_to_scratchpad(&mut self, area: LRect, gap: f64) {
-        self.move_focused_to_ex(SCRATCHPAD, false, area, gap);
+        if let Some(focus) = self.focused_client() {
+            self.move_client_to_slot(focus, SCRATCHPAD, area, gap, None);
+        }
     }
 
     /// Cycle focus to the next/previous visible client (ALT+TAB).
@@ -2127,6 +2380,13 @@ pub fn transfer_client(
     true
 }
 
+/// Tests: show slot `slot`, making a desktop for it if there is none.
+#[cfg(test)]
+pub(crate) fn go(l: &mut WmLayout, slot: usize) {
+    l.ensure_desktop_slot(slot);
+    l.show_slot(slot);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2292,23 +2552,113 @@ mod tests {
     }
 
     #[test]
-    fn workspace_cycle_visits_only_occupied() {
+    fn spaces_hold_their_own_windows_and_slides_follow_the_list() {
         let mut l = WmLayout::new();
-        l.insert(1, AREA, 0.0); // ws 0
-        l.insert_on(4, 2, AREA, 0.0); // ws 4
-        // From 0 forward: skip 1..3 (empty), land on 4; again wraps to 0.
-        assert_eq!(l.cycle_occupied(0, true), 4);
-        assert_eq!(l.cycle_occupied(4, true), 0);
-        // Backward from 0 wraps to 4 directly.
-        assert_eq!(l.cycle_occupied(0, false), 4);
-        // From an EMPTY workspace (the "cleared screen" case) either
-        // direction reaches an occupied one — Tab always brings you back.
-        assert_eq!(l.cycle_occupied(2, true), 4);
-        assert_eq!(l.cycle_occupied(2, false), 0);
-        // A lone occupied workspace cycles to itself.
-        let mut solo = WmLayout::new();
-        solo.insert(9, AREA, 0.0);
-        assert_eq!(solo.cycle_occupied(0, true), 0);
+        l.insert(1, AREA, 0.0);
+        let second = l.new_desktop().unwrap();
+        assert_eq!(second, 1);
+        assert!(l.goto_space(second));
+        l.insert(2, AREA, 0.0);
+        assert_eq!((l.active, l.clients_on(0), l.clients_on(1)), (1, vec![1], vec![2]));
+        assert!(!l.goto_space(second), "already shown");
+        assert!(l.goto_space(0));
+        assert_eq!(l.focused_client(), Some(1));
+        assert_eq!(l.space_of(2), Some(1));
+    }
+
+    #[test]
+    fn removing_a_desktop_moves_its_windows_to_the_one_before() {
+        let mut l = WmLayout::new();
+        l.insert(1, AREA, 0.0);
+        let second = l.new_desktop().unwrap();
+        l.goto_space(second);
+        l.insert(2, AREA, 0.0);
+        l.insert(3, AREA, 0.0);
+        assert!(l.remove_desktop(second, AREA, 0.0));
+        assert_eq!((l.spaces.len(), l.spaces.cur(), l.active), (1, 0, 0));
+        assert_eq!(l.clients_on(0).len(), 3);
+        assert!(!l.remove_desktop(0, AREA, 0.0), "the last desktop stays");
+    }
+
+    #[test]
+    fn a_window_moves_to_another_desktop_and_a_float_keeps_its_rect() {
+        let mut l = WmLayout::new();
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0);
+        let second = l.new_desktop().unwrap();
+        l.toggle_float(2, AREA, 0.0);
+        let rect = l.float_rect(2).unwrap();
+        assert!(l.move_client_to_space(2, second, AREA, 0.0));
+        assert_eq!((l.clients_on(0), l.clients_on(1)), (vec![1], vec![2]));
+        assert_eq!(l.float_rect(2), Some(rect));
+        assert!(!l.move_client_to_space(2, 7, AREA, 0.0));
+    }
+
+    #[test]
+    fn a_fullscreen_space_sits_after_its_desktop_and_returns_the_window_as_it_was() {
+        let mut l = abc();
+        let before = l.rects(AREA, 8.0);
+        let at = l.enter_fullscreen_space(3, AREA, 8.0).unwrap();
+        assert_eq!(at, 1);
+        assert_eq!((l.spaces.cur(), l.active), (1, crate::spaces::MAX_DESKTOPS));
+        // It covers the whole desk, gaps included, and nothing else shows.
+        let r = l.rects(AREA, 8.0);
+        assert_eq!(r, vec![(3, LRect::new(-8.0, -8.0, 1016.0, 616.0))]);
+        assert!(l.is_fullscreen_space(3));
+        assert_eq!(l.window_mode(3), WindowMode::Fullscreen);
+        // The desktop it came from shows the others.
+        assert_eq!(l.rects_of(0, AREA, 8.0).len(), 2);
+        // Back: the tile is next to the window it sat beside, as before.
+        assert_eq!(l.leave_fullscreen_space(3, AREA, 8.0), Some(0));
+        assert_eq!((l.spaces.len(), l.active), (1, 0));
+        assert_eq!(l.rects(AREA, 8.0), before);
+    }
+
+    #[test]
+    fn a_floating_window_keeps_its_rect_and_parked_flag_through_fullscreen() {
+        let mut l = WmLayout::zoned();
+        l.desktop.enabled = true;
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0);
+        let rect = LRect::new(-300.0, 100.0, 400.0, 300.0);
+        l.set_float_rect(2, rect);
+        l.desktop.get_mut(2).unwrap().warped = true;
+        l.enter_fullscreen_space(2, AREA, 0.0).unwrap();
+        assert_eq!(l.rects(AREA, 0.0).len(), 1);
+        l.leave_fullscreen_space(2, AREA, 0.0).unwrap();
+        assert_eq!(l.float_rect(2), Some(rect));
+        assert!(l.desktop.get(2).unwrap().warped);
+        assert_eq!(l.rects(AREA, 0.0).len(), 2);
+    }
+
+    #[test]
+    fn closing_a_fullscreen_window_ends_its_space() {
+        let mut l = abc();
+        l.enter_fullscreen_space(3, AREA, 0.0).unwrap();
+        l.remove(3);
+        assert_eq!((l.spaces.len(), l.spaces.cur(), l.active), (1, 0, 0));
+        assert_eq!(l.rects(AREA, 0.0).len(), 2);
+        // A hidden fullscreen space goes the same way.
+        let mut l = abc();
+        l.enter_fullscreen_space(3, AREA, 0.0).unwrap();
+        l.goto_space(0);
+        l.remove(3);
+        assert_eq!(l.spaces.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_desktop_rehomes_its_fullscreen_spaces() {
+        let mut l = abc();
+        let second = l.new_desktop().unwrap();
+        l.goto_space(second);
+        l.insert(4, AREA, 0.0);
+        l.enter_fullscreen_space(4, AREA, 0.0).unwrap();
+        // d0 d1 f(4), shown f: removing d1 sends 4's home to d0.
+        let d1 = l.spaces.index_of_slot(1).unwrap();
+        assert!(l.remove_desktop(d1, AREA, 0.0));
+        assert_eq!(l.spaces.home_of(l.spaces.index_of_fullscreen(4).unwrap()), Some(0));
+        l.leave_fullscreen_space(4, AREA, 0.0).unwrap();
+        assert_eq!(l.workspace_of(4), Some(0));
     }
 
     #[test]
@@ -2341,35 +2691,113 @@ mod tests {
         assert_eq!(rect_of(&l, 2).h, 330.0);
     }
 
+    /// Tiling and the shelves exclude each other: a tiling layout of a real display uses
+    /// its whole area (the screen minus the bar and dock, which `area` already leaves
+    /// out), never the centre band, and its tiles cover it exactly up to the gap.
     #[test]
-    fn workspaces_and_move() {
-        let mut l = WmLayout::new();
-        l.insert(1, AREA, 0.0);
-        l.insert(2, AREA, 0.0);
-        l.move_focused_to(1, true);
-        assert_eq!(l.active, 1);
-        assert_eq!(l.clients_on(1), vec![2]);
-        assert_eq!(l.clients_on(0), vec![1]);
-        l.switch_workspace(0);
-        assert_eq!(l.former, 1);
-        assert_eq!(l.focused_client(), Some(1));
+    fn a_tiling_layout_fills_the_whole_screen_area_no_shelf_zones() {
+        let band = crate::spacewarp::band_of(AREA);
+        assert!(band.x > AREA.x && band.w < AREA.w);
+        let gap = 4.0;
+        let mut l = WmLayout::zoned();
+        assert!(!l.desktop.enabled, "a tiling style");
+        l.insert(1, AREA, gap);
+        l.insert(2, AREA, gap);
+        let rects: Vec<LRect> = l.rects(AREA, gap).into_iter().map(|(_, r)| r).collect();
+        let x0 = rects.iter().map(|r| r.x).fold(f64::MAX, f64::min);
+        let x1 = rects.iter().map(|r| r.x + r.w).fold(f64::MIN, f64::max);
+        let y0 = rects.iter().map(|r| r.y).fold(f64::MAX, f64::min);
+        let y1 = rects.iter().map(|r| r.y + r.h).fold(f64::MIN, f64::max);
+        assert!((x0 - AREA.x).abs() < 1e-6 && (x1 - (AREA.x + AREA.w)).abs() < 1e-6, "{rects:?} in {AREA:?}");
+        assert!((y0 - AREA.y).abs() < 1e-6 && (y1 - (AREA.y + AREA.h)).abs() < 1e-6, "{rects:?} in {AREA:?}");
+        // side by side, exactly one gap between them
+        let covered: f64 = rects.iter().map(|r| r.w).sum();
+        assert!((covered + gap - AREA.w).abs() < 1e-6, "{rects:?}");
+        l.toggle_full_width();
+        assert_eq!(l.rects(AREA, gap)[0].1, AREA);
+        // the same layout on a floating desktop keeps the band for parked windows
+        l.toggle_full_width();
+        l.desktop.enabled = true;
+        assert_eq!(l.tile_area(l.active, AREA), band);
     }
 
     #[test]
-    fn fullscreen_modes() {
+    fn a_maximized_desktop_window_fills_the_band_only_while_something_is_parked() {
+        let band = crate::spacewarp::band_of(AREA);
+        let mut l = WmLayout::zoned();
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0);
+        l.desktop.enabled = true;
+        l.desktop.get_mut(2).unwrap().maximized = true;
+        let of = |l: &WmLayout, c| l.rects(AREA, 0.0).into_iter().find(|(k, _)| *k == c).unwrap().1;
+        assert_eq!(of(&l, 2), AREA);
+        l.desktop.get_mut(1).unwrap().warped = true;
+        assert_eq!(of(&l, 2), band);
+        l.desktop.get_mut(1).unwrap().warped = false;
+        assert_eq!(of(&l, 2), AREA);
+    }
+
+    #[test]
+    fn a_tile_dragged_out_floats_and_dropping_it_back_reinserts_it() {
+        let mut l = WmLayout::zoned();
+        l.insert(1, AREA, 0.0);
+        l.insert(2, AREA, 0.0);
+        l.float_from_tree(2, LRect::new(-300.0, 100.0, 400.0, 300.0), AREA, 0.0);
+        assert!(l.is_float(2));
+        // The remaining tile now fills the area (a tiling layout has no shelf zones).
+        assert_eq!(rect_of(&l, 1), AREA);
+        // A plain float is not reinserted; the torn-out tile is.
+        assert!(!l.reinsert(1, AREA, 0.0));
+        assert!(l.reinsert(2, AREA, 0.0));
+        assert!(!l.is_float(2));
+        assert_eq!(l.rects(AREA, 0.0).len(), 2);
+    }
+
+    #[test]
+    fn maximise_in_place_is_not_fullscreen_and_restores() {
         let mut l = abc();
-        // SUPER+ALT+F: maximized fills the tile area, gaps kept.
-        l.toggle_fullscreen_mode(FullscreenMode::Maximized);
+        assert!(!l.is_maximised(3));
+        l.set_maximised(3, true);
+        assert!(l.is_maximised(3) && !l.is_fullscreen_space(3));
+        assert_eq!(l.window_mode(3), WindowMode::Maximised);
+        assert_eq!(l.rects(AREA, 8.0), vec![(3, AREA)]);
+        l.set_maximised(3, false);
+        assert!(!l.is_maximised(3));
+        assert_eq!(l.rects(AREA, 0.0).len(), 3);
+        // Desktop windows: the centre band while something is parked, else the area.
+        let band = crate::spacewarp::band_of(AREA);
+        let mut d = WmLayout::zoned();
+        d.insert(1, AREA, 0.0);
+        d.insert(2, AREA, 0.0);
+        d.desktop.enabled = true;
+        d.set_maximised(2, true);
+        assert!(d.is_maximised(2) && !d.is_fullscreen_space(2));
+        let of = |l: &WmLayout, c| l.rects(AREA, 0.0).into_iter().find(|(k, _)| *k == c).unwrap().1;
+        assert_eq!(of(&d, 2), AREA);
+        d.desktop.get_mut(1).unwrap().warped = true;
+        assert_eq!(of(&d, 2), band);
+        d.set_maximised(2, false);
+        assert!(!d.is_maximised(2));
+        // A floating shelf's reserve stays clear at the bottom.
+        d.desktop.shelf_reserve = 88.0;
+        d.set_maximised(2, true);
+        let r = of(&d, 2);
+        assert_eq!((r.y, r.h), (AREA.y, AREA.h - 88.0));
+    }
+
+    #[test]
+    fn full_width_fills_the_tile_area_and_fullscreen_the_desk() {
+        let mut l = abc();
+        // SUPER+ALT+F: full width fills the tile area, gaps kept.
+        l.toggle_full_width();
         let r = l.rects(AREA, 8.0);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0], (3, AREA));
-        // SUPER+F from there: fullscreen covers the desk, gaps included.
-        l.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
-        let r = l.rects(AREA, 8.0);
-        assert_eq!(r[0].1, LRect::new(-8.0, -8.0, 1016.0, 616.0));
-        // Same mode again clears it.
-        l.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
+        l.toggle_full_width();
         assert_eq!(l.rects(AREA, 0.0).len(), 3);
+        // Fullscreen is a space: it covers the desk, gaps included.
+        l.enter_fullscreen_space(3, AREA, 8.0).unwrap();
+        assert_eq!(l.rects(AREA, 8.0)[0].1, LRect::new(-8.0, -8.0, 1016.0, 616.0));
     }
 
     #[test]
@@ -2517,9 +2945,9 @@ mod tests {
         // 1300x900 clamped into a 1000x600 desk, centered.
         assert_eq!(l.float_rect(3), Some(LRect::new(0.0, 0.0, 1000.0, 600.0)));
         // Pinned windows show on every workspace.
-        l.switch_workspace(4);
+        go(&mut l, 4);
         assert!(l.rects(AREA, 0.0).iter().any(|(c, _)| *c == 3));
-        l.switch_workspace(0);
+        go(&mut l, 0);
         // Again: unpin and tile back.
         l.pop_out(3, AREA, 0.0);
         assert!(!l.is_float(3));
@@ -2758,7 +3186,7 @@ mod tests {
         // While open, the scratchpad owns the focus.
         assert_eq!(l.focused_client(), Some(3));
         // A workspace change hides it (hide_special_on_workspace_change).
-        l.switch_workspace(1);
+        go(&mut l, 1);
         assert!(!l.scratchpad_open);
     }
 
@@ -2775,9 +3203,11 @@ mod tests {
     }
 
     #[test]
-    fn move_to_workspace_silently_keeps_the_view() {
+    fn move_to_space_silently_keeps_the_view() {
         let mut l = abc();
-        l.move_focused_to_ex(2, false, AREA, 0.0);
+        l.ensure_desktop_slot(2);
+        let i = l.spaces.index_of_slot(2).unwrap();
+        l.move_client_to_space(3, i, AREA, 0.0);
         assert_eq!(l.active, 0);
         assert_eq!(l.clients_on(2), vec![3]);
         assert_eq!(l.rects(AREA, 0.0).len(), 2);
@@ -2925,9 +3355,9 @@ mod tests {
         // Fullscreen covers the gaps.
         let mut l = abc();
         assert!(l.divider_at(500.0, 100.0, AREA, 10.0).is_some());
-        l.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
+        l.enter_fullscreen_space(3, AREA, 10.0).unwrap();
         assert!(l.divider_at(500.0, 100.0, AREA, 10.0).is_none());
-        l.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
+        l.leave_fullscreen_space(3, AREA, 10.0).unwrap();
         assert!(l.divider_at(500.0, 100.0, AREA, 10.0).is_some());
         // So does the scratchpad console, over its own top half.
         l.set_focus(3);
@@ -2986,7 +3416,7 @@ mod tests {
     fn right_layout() -> WmLayout {
         let mut to = WmLayout::new();
         to.insert(10, RIGHT, 0.0);
-        to.switch_workspace(2);
+        go(&mut to, 2);
         to.insert(11, RIGHT, 0.0);
         to
     }
@@ -2994,16 +3424,16 @@ mod tests {
     #[test]
     fn a_tiled_transfer_lands_focused_on_the_targets_active_workspace() {
         let mut from = abc();
-        // 3 is focused and fullscreen.
-        from.toggle_fullscreen_mode(FullscreenMode::Fullscreen);
-        assert_eq!(from.workspaces[0].fullscreen, Some(3));
+        // 3 is focused and fullscreen, in a space of its own.
+        from.enter_fullscreen_space(3, AREA, 0.0);
+        assert!(from.is_fullscreen_space(3));
         let mut to = right_layout();
         assert!(transfer_client(&mut from, &mut to, 3, (1000.0, 0.0), RIGHT, 0.0));
-        // The source keeps a focused survivor and drops the fullscreen.
+        // The source keeps a focused survivor and loses the fullscreen space.
         assert_eq!(from.clients_on(0), vec![1, 2]);
+        assert_eq!(from.spaces.len(), 1);
         // No focus history: the first survivor in tree order.
         assert_eq!(from.focused_client(), Some(1));
-        assert_eq!(from.workspaces[0].fullscreen, None);
         assert_eq!(from.workspaces[0].fullscreen_mode, FullscreenMode::None);
         assert_eq!(from.workspace_of(3), None);
         // The target shows it on its visible workspace, focused, tiled.
@@ -3231,10 +3661,10 @@ mod tests {
 
     #[test]
     fn a_tile_arriving_on_a_fullscreen_workspace_is_drawn() {
-        for mode in [FullscreenMode::Fullscreen, FullscreenMode::Maximized] {
+        {
             let mut from = abc();
             let mut to = right_layout();
-            to.toggle_fullscreen_mode(mode);
+            to.toggle_full_width();
             assert_eq!(to.workspaces[2].fullscreen, Some(11));
             transfer_client(&mut from, &mut to, 3, (1000.0, 0.0), RIGHT, 0.0);
             assert_eq!(to.workspaces[2].fullscreen, None);
@@ -3247,9 +3677,9 @@ mod tests {
         // the same rule.
         let mut from = abc();
         let mut to = right_layout();
-        to.switch_workspace(0);
-        to.toggle_fullscreen_mode(FullscreenMode::Maximized);
-        to.switch_workspace(2);
+        go(&mut to, 0);
+        to.toggle_full_width();
+        go(&mut to, 2);
         let d = from.detach(3).unwrap();
         to.adopt(0, d, (1000.0, 0.0), RIGHT, 0.0);
         assert_eq!(to.workspaces[0].fullscreen, None);
@@ -3262,7 +3692,7 @@ mod tests {
         let mut from = abc();
         from.toggle_float(3, AREA, 0.0);
         let mut to = right_layout();
-        to.toggle_fullscreen_mode(FullscreenMode::Maximized);
+        to.toggle_full_width();
         transfer_client(&mut from, &mut to, 3, (1000.0, 0.0), RIGHT, 0.0);
         assert_eq!(to.workspaces[2].fullscreen, Some(11));
         let drawn: Vec<_> = to.rects(RIGHT, 0.0).into_iter().map(|(c, _)| c).collect();

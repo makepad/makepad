@@ -8,6 +8,11 @@ use makepad_widgets::widget_async::{enter_isolate, leave_isolate};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PhonePointerPhase { Down, Move, Up, Scroll }
 
+/// How far (pt) a swipe from the bottom strip rises before it closes the settings page.
+const SETTINGS_SWIPE_HOME: f64 = 40.0;
+/// How far (pt) a finger may move on the settings page and still tap.
+const SETTINGS_TAP_SLOP: f64 = 12.0;
+
 impl App {
     pub(super) fn animate_phone(&mut self,cx:&mut Cx) {
         self.phone_frame=cx.new_next_frame();
@@ -42,8 +47,6 @@ impl App {
     /// the face it should be showing. Cheap when nothing changed; called
     /// from the phone's animation frames and after every phone action.
     pub(super) fn sync_home_tiles(&mut self, cx: &mut Cx) {
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if self.linux_gpu.active() { return; }
         if !self.state.as_ref().is_some_and(|s| s.style.target.mobile()) { return; }
         let alive: Vec<ClientId> = self.state_mut().clients.keys().copied().collect();
         self.state_mut().phone.tiles.retain_clients(|c| alive.contains(&c));
@@ -59,12 +62,7 @@ impl App {
             if let Some(client) = existing {
                 self.state_mut().phone.tiles.bind(app, client, false);
             } else if home_visible && self.state_mut().phone.tiles.may_launch(app, now) {
-                // Super-app dylibs compile on tap. Auto-starting clock /
-                // weather / photos would race provision and hide the
-                // compile card behind three silent jobs.
-                if self.apps.hosting(app) != Hosting::Dylib {
-                    self.launch_tile_client(cx, app);
-                }
+                self.launch_tile_client(cx, app);
             }
         }
         let (foreground, settled) = {
@@ -97,9 +95,9 @@ impl App {
     pub(super) fn sync_module_grounds(&mut self, cx: &mut Cx) {
         let modules: Vec<(ClientId, SplashVmId)> = self.module_host.instances().map(|i| (i.client, i.vm_id)).collect();
         for (client, vm_id) in modules {
-            let ground = cx.with_script_vm_id_trusted(vm_id, |vm| {
+            let ground = cx.with_script_vm_id(vm_id, |vm| {
                 let theme = vm.module(id!(theme));
-                vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap).as_color()
+                vm.value(theme, id!(color_bg_app)).as_color()
             }).map(|c| crate::shell::rgb((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8));
             if let Some(slot) = self.state_mut().clients.get_mut(&client) { slot.ground = ground; }
         }
@@ -152,6 +150,19 @@ impl App {
             return true;
         }
         let dpi = if self.dpi_factor > 0.0 { self.dpi_factor } else { 1.0 };
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.domains.owns(client) {
+            // A domain of this process: the face goes as an app message (queued until its window
+            // exists), the viewport straight to the HAL as the child's geometry. Its frames confirm
+            // the face by size (domains.rs, ChildFrame).
+            if !self.domains.send_message(client, json) { return false; }
+            if viewport.x >= 1.0 && viewport.y >= 1.0 {
+                self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_domain_view(cx, client, |cx, v| v.ask_size(cx, viewport, dpi)));
+            }
+            self.state_mut().phone.tiles.note_sent(client, face, viewport);
+            self.animate_phone(cx);
+            return true;
+        }
         let Some((sender, window_id)) = self.state_mut().clients.get(&client)
             .filter(|s| s.ready)
             .and_then(|s| s.sender.clone().map(|sender| (sender, s.window_id)))
@@ -167,9 +178,9 @@ impl App {
         self.state_mut().phone.tiles.note_sent(client, face, viewport);
         let ticks = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |cx, v| {
             if face == Face::Full && viewport.x >= 1.0 && viewport.y >= 1.0 {
-                v.prepare_size(cx, viewport, dpi);
+                v.hosted.prepare_size(cx, viewport, dpi);
             }
-            v.tick_counts().0
+            v.hosted.tick_counts().0
         }));
         if let Some(ticks) = ticks {
             self.state_mut().phone.tiles.set_fence(client, ticks, host::now());
@@ -208,7 +219,7 @@ impl App {
         if !tiles.is_tile_client(client) { return Some(Face::Full); }
         let dpi = if self.dpi_factor > 0.0 { self.dpi_factor } else { 1.0 };
         let size = dvec2(width as f64 / dpi, height as f64 / dpi);
-        let acked = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |_, v| v.tick_counts().1)).unwrap_or(u64::MAX);
+        let acked = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |_, v| v.hosted.tick_counts().1)).unwrap_or(u64::MAX);
         let tiles = &mut self.state_mut().phone.tiles;
         let face = tiles.note_frame_acked(client, size, acked, host::now());
         if face.is_some() {
@@ -245,8 +256,14 @@ impl App {
             if let Some(module) = self.apps.module(app_id) { self.launch_tile_module(cx, module); }
             return;
         }
-        if self.apps.hosting(app_id) == Hosting::Dylib {
-            self.launch_dylib(cx, app_id, true);
+        // a domain host (the phone under makepad run): the tile's app is a domain of this process,
+        // started like an opened one but not seated in the layout and not focused
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.domains.enabled {
+            let id = self.start_domain_client(cx, &app, &[], false);
+            self.state_mut().phone.tiles.bind(app_id, id, true);
+            log!("wm: launched {} as client {} for its home tile (domain)", app.id, id);
+            self.animate_phone(cx);
             return;
         }
         if !self.processes() { return; }
@@ -256,7 +273,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, lines) {
+        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, BuildPolicy::IfMissing, lines) {
             Ok(slot) => {
                 self.state_mut().clients.insert(id, slot);
                 // The tile widget exists from now on: its ticks drive the
@@ -305,10 +322,10 @@ impl App {
     // namespace, the old favorites rule as the first-run default.
     // --------------------------------------------------------------
 
-    /// Every app the launcher lists for this build, in its order.
+    /// Every app the launcher lists for this build, in its order, then the shell's Settings.
     fn home_app_ids(&mut self) -> Vec<String> {
         let launchable=&self.state_mut().launchable;
-        crate::shell::launcher::apps(launchable).iter().map(|a|a.id.trim_start_matches("apps.").to_string()).collect()
+        PhoneSurface::phone_apps(launchable).into_iter().map(|(id,_)|id).collect()
     }
     /// The order is valid for this build: the default until storage
     /// answers, reconciled with the apps the build has.
@@ -589,6 +606,7 @@ impl App {
         // In edit mode an icon is for arranging, not launching.
         if self.state_mut().phone.edit.active && matches!(hit,PhoneHit::App(_)) {return;}
         match hit {
+            PhoneHit::App(app) if app==SETTINGS_APP=>{crate::jit_cache::refresh();self.state_mut().phone.settings=1;}
             PhoneHit::App(app)=>{
                 // A running window of the app, a home tile's own client
                 // included: the same client opens, never a second one.
@@ -614,6 +632,13 @@ impl App {
             }
             PhoneHit::Style=>self.open_style_menu(cx),
             PhoneHit::Look(look)=>self.set_phone_look(cx,look),
+            PhoneHit::SettingsClose=>self.state_mut().phone.settings=0,
+            PhoneHit::SettingsPage=>{}
+            PhoneHit::Theme(name)=>self.set_theme(cx,&name),
+            PhoneHit::ClearCache=>self.state_mut().phone.settings=2,
+            PhoneHit::CancelClear=>self.state_mut().phone.settings=1,
+            PhoneHit::ConfirmClear=>{crate::jit_cache::request_clear();self.state_mut().phone.settings=1;}
+            PhoneHit::Restart=>crate::jit_cache::restart(),
             PhoneHit::Appearance=>{
                 let focused=self.state_mut().phone.search_focused;
                 self.toggle_desktop_appearance(cx);
@@ -642,6 +667,7 @@ impl App {
         self.animate_phone(cx);
     }
     fn phone_back(&mut self,cx:&mut Cx) {
+        if self.state_mut().phone.settings!=0 {self.state_mut().phone.settings=0;return;}
         if self.state_mut().phone.screen != PhoneScreen::App {
             self.state_mut().phone.navigate(PhoneScreen::Home);
             return;
@@ -655,6 +681,12 @@ impl App {
             if matches!(event,Event::BackPressed{handled} if !handled.get()) {self.state_mut().phone.navigate(PhoneScreen::Home);}
         }else if let Some(sender)=self.state_mut().clients.get(&client).and_then(|s|s.sender.as_ref()) {
             send_to_app(sender,vec![StudioToApp::Custom(makepad_platform::ime::HostedBack::default().to_json())]);
+        }else{
+            // a domain (the phone under makepad run): it answers through a child message
+            #[cfg(not(target_arch = "wasm32"))]
+            if !self.domains.send_message(client,makepad_platform::ime::HostedBack::default().to_json()) {
+                self.state_mut().phone.navigate(PhoneScreen::Home);
+            }
         }
     }
     fn type_phone_key(&mut self,cx:&mut Cx,key:&str) {
@@ -746,7 +778,11 @@ impl App {
             }
             let time = point.time + self.state_mut().phone.touch_time_offset;
             let handled = self.phone_pointer_at(cx, phase, point.abs, time, true, 0.0);
-            if point.state == TouchState::Start && handled && self.state_mut().phone.gesture.is_some() {
+            // The touch stays ours to its end: a gesture follows it, and the
+            // settings page acts on its release (unowned, the release would
+            // never come back here: only starting touches are looked for).
+            if point.state == TouchState::Start && handled
+                && (self.state_mut().phone.gesture.is_some() || self.state_mut().phone.settings != 0) {
                 self.state_mut().phone.touch = Some(point.uid);
             }
             if point.state == TouchState::Stop { self.state_mut().phone.touch = None; }
@@ -762,6 +798,35 @@ impl App {
         self.phone_pointer_at(cx, phase, p, time, primary, scroll)
     }
     fn phone_pointer_at(&mut self, cx: &mut Cx, phase: PhonePointerPhase, p: Vec2d, time: f64, primary: bool, scroll: f64) -> bool {
+        // The settings page takes every touch: a tap on a control acts, nothing else moves.
+        // A swipe up from the bottom strip goes home, as from an app; a drag
+        // elsewhere is no tap.
+        if self.state_mut().phone.settings!=0 {
+            if !primary {return true;}
+            match phase {
+                PhonePointerPhase::Down=>{
+                    let phone=&mut self.state_mut().phone;
+                    let bottom=phone.chrome.bottom_zone(phone.viewport,p);
+                    phone.settings_press=Some((p,bottom));
+                }
+                PhonePointerPhase::Up=>{
+                    let press=self.state_mut().phone.settings_press.take();
+                    let (from,bottom)=press.unwrap_or((p,false));
+                    if bottom && p.y<from.y-SETTINGS_SWIPE_HOME {
+                        let phone=&mut self.state_mut().phone;
+                        phone.settings=0;
+                        phone.navigate(PhoneScreen::Home);
+                    } else if (p-from).length()<=SETTINGS_TAP_SLOP {
+                        let hit=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.phone_hit(p));
+                        if let Some(hit)=hit {self.phone_action(cx,hit);}
+                    }
+                    self.animate_phone(cx);
+                    self.redraw_all(cx);
+                }
+                _=>{}
+            }
+            return true;
+        }
         if self.state_mut().phone.gesture.is_none() {
             if let Some(hit) = self.phone_toolbar_hit(cx, p) {
                 if phase == PhonePointerPhase::Down && primary { self.phone_action(cx, hit); }

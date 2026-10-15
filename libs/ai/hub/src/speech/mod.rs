@@ -24,6 +24,8 @@
 //!
 //! Audio always comes back as PCM: the app owns the device.
 
+#[cfg(feature = "tts")]
+pub(crate) mod kokoro_bank;
 mod remote;
 mod stt_worker;
 mod tts_worker;
@@ -99,9 +101,19 @@ pub struct SttConfig {
     pub engine: SttEngine,
     pub reach: SpeechReach,
     /// ISO 639-1 (`"en"`) or BCP-47; engines take what they need from it.
+    /// `"auto"` makes Whisper pick the language from the audio itself and
+    /// report it in `Transcript::language`.
     pub language: String,
-    /// `listen` mode: emit partial hypotheses when the engine can.
+    /// Whisper: text read as what was said just before; steers script and
+    /// spelling (a Simplified Chinese sentence keeps Mandarin output
+    /// Simplified). Empty for none.
+    pub prompt: String,
+    /// `listen` mode and fed PCM: emit partial hypotheses when the engine can.
     pub partial_results: bool,
+    /// Fed PCM: how much new audio (milliseconds) makes the session re-read
+    /// the utterance for a new partial. Shorter is livelier and costs more
+    /// recognition work; the engine skips ahead when it falls behind.
+    pub partial_interval_ms: u32,
     /// Prefer on-device recognition when the OS engine offers the choice.
     pub prefer_offline: bool,
     /// Ask for per-segment timing.
@@ -122,7 +134,9 @@ impl Default for SttConfig {
             engine: SttEngine::Auto,
             reach: SpeechReach::Lan,
             language: "en".to_string(),
+            prompt: String::new(),
             partial_results: true,
+            partial_interval_ms: 1000,
             prefer_offline: true,
             timestamps: true,
             single_segment: false,
@@ -170,6 +184,12 @@ pub struct TtsConfig {
     pub rate: f32,
     /// 1.0 = normal pitch; engines without pitch control ignore it.
     pub pitch: f32,
+    /// Stream: Kokoro (in-process or on a node) renders the text clause by clause
+    /// and each clause arrives as a [`TtsEvent::AudioChunk`] the moment it is
+    /// ready, ahead of the final [`TtsEvent::Audio`] (whole take + word timings).
+    /// Play the chunks and use the final event for the timings only. Engines that
+    /// cannot stream (the OS voices) send just the final event.
+    pub stream: bool,
     pub wake: Option<WakeHook>,
 }
 
@@ -182,6 +202,7 @@ impl Default for TtsConfig {
             language: "en".to_string(),
             rate: 1.0,
             pitch: 1.0,
+            stream: false,
             wake: None,
         }
     }
@@ -193,7 +214,7 @@ pub struct SttEngineInfo {
     /// `stt.whisper` or `stt.system`.
     pub pipe: PipeId,
     /// A human-readable engine name: `"whisper (ggml-large-v3-turbo.bin)"`,
-    /// `"apple-speechanalyzer"`, …
+    /// `"apple-sfspeech"`, …
     pub engine: String,
     /// The node serving it when it is not this process.
     pub remote: Option<String>,
@@ -245,17 +266,68 @@ pub enum TtsEvent {
     /// when the engine knows when it spoke them (Kokoro, in-process or on a
     /// node); `None` for the OS voices.
     Audio { utterance: u64, audio: SpeechAudio, timings: Option<Vec<WordTiming>>, secs: f64 },
+    /// One clause of a streaming `say` (`TtsConfig::stream`), in order, before `Audio`.
+    AudioChunk { utterance: u64, index: u32, audio: SpeechAudio },
     Error { utterance: u64, message: String },
 }
 
 pub(crate) enum SttMsg {
     Transcribe { utterance: u64, generation: u64, samples: Vec<f32> },
+    /// Live PCM for the utterance in progress.
+    Feed { generation: u64, samples: Vec<f32> },
+    /// The speaker stopped: recognise what was fed, as utterance `utterance`.
+    EndUtterance { utterance: u64, generation: u64 },
     Listen,
     StopListening,
 }
 
 pub(crate) enum TtsMsg {
-    Say { utterance: u64, generation: u64, text: String },
+    Say { utterance: u64, generation: u64, text: String, options: SayOptions },
+}
+
+/// What one utterance changes from the session's [`TtsConfig`]. Every field
+/// is optional: `None` keeps the session's value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SayOptions {
+    /// A [`Voice::id`] from `Ready`'s voice list.
+    pub voice: Option<String>,
+    /// Language of this utterance (ISO 639-1 or BCP-47).
+    pub language: Option<String>,
+    pub rate: Option<f32>,
+    pub pitch: Option<f32>,
+    /// Stream this utterance clause by clause (see `TtsConfig::stream`).
+    pub stream: Option<bool>,
+}
+
+impl SayOptions {
+    pub fn streaming() -> Self {
+        Self { stream: Some(true), ..Self::default() }
+    }
+
+    pub fn voice(voice: impl Into<String>) -> Self {
+        Self { voice: Some(voice.into()), ..Self::default() }
+    }
+
+    /// The session's config with this utterance's choices on top.
+    pub(crate) fn applied_to(&self, base: &TtsConfig) -> TtsConfig {
+        let mut config = base.clone();
+        if let Some(voice) = &self.voice {
+            config.voice = Some(voice.clone());
+        }
+        if let Some(language) = &self.language {
+            config.language = language.clone();
+        }
+        if let Some(rate) = self.rate {
+            config.rate = rate;
+        }
+        if let Some(pitch) = self.pitch {
+            config.pitch = pitch;
+        }
+        if let Some(stream) = self.stream {
+            config.stream = stream;
+        }
+        config
+    }
 }
 
 /// A running speech-to-text session. Dropping it ends the worker.
@@ -317,6 +389,16 @@ impl SttSession {
         self.handle.stop_listening()
     }
 
+    /// See [`SttHandle::feed`].
+    pub fn feed(&self, samples_16k: Vec<f32>) {
+        self.handle.feed(samples_16k)
+    }
+
+    /// See [`SttHandle::end_utterance`].
+    pub fn end_utterance(&self) -> u64 {
+        self.handle.end_utterance()
+    }
+
     /// See [`SttHandle::cancel`].
     pub fn cancel(&self) {
         self.handle.cancel()
@@ -357,6 +439,23 @@ impl SttHandle {
 
     pub fn stop_listening(&self) {
         let _ = self.to_worker.send(SttMsg::StopListening);
+    }
+
+    /// Live listening on PCM the caller captures (mono f32 at
+    /// [`STT_SAMPLE_RATE`]): append a chunk of the utterance in progress. While
+    /// audio keeps arriving the session re-reads what it has so far about every
+    /// `SttConfig::partial_interval_ms` and sends `SttEvent::Partial` (the whole
+    /// running hypothesis, replacing the last) when `partial_results` is on.
+    pub fn feed(&self, samples_16k: Vec<f32>) {
+        let _ = self.to_worker.send(SttMsg::Feed { generation: self.generation.load(Ordering::Relaxed), samples: samples_16k });
+    }
+
+    /// The speaker stopped: recognise everything fed since the last utterance
+    /// and send it as `SttEvent::Final` with the returned id.
+    pub fn end_utterance(&self) -> u64 {
+        let utterance = self.next_utterance.fetch_add(1, Ordering::Relaxed);
+        let _ = self.to_worker.send(SttMsg::EndUtterance { utterance, generation: self.generation.load(Ordering::Relaxed) });
+        utterance
     }
 
     /// Drop every queued utterance; one already being recognized is
@@ -428,6 +527,11 @@ impl TtsSession {
         self.handle.say(text)
     }
 
+    /// See [`TtsHandle::say_with`].
+    pub fn say_with(&self, text: impl Into<String>, options: SayOptions) -> u64 {
+        self.handle.say_with(text, options)
+    }
+
     /// See [`TtsHandle::cancel`].
     pub fn cancel(&self) {
         self.handle.cancel()
@@ -450,11 +554,19 @@ impl TtsHandle {
     /// Queue text to render. Returns the utterance id its `Audio`/`Error`
     /// will carry. Utterances render in order.
     pub fn say(&self, text: impl Into<String>) -> u64 {
+        self.say_with(text, SayOptions::default())
+    }
+
+    /// [`Self::say`] with this utterance's own voice, language, rate or pitch
+    /// on top of the session's. Voices change between utterances at no cost
+    /// beyond the first read of each voice pack.
+    pub fn say_with(&self, text: impl Into<String>, options: SayOptions) -> u64 {
         let utterance = self.next_utterance.fetch_add(1, Ordering::Relaxed);
         let _ = self.to_worker.send(TtsMsg::Say {
             utterance,
             generation: self.generation.load(Ordering::Relaxed),
             text: text.into(),
+            options,
         });
         utterance
     }
@@ -536,5 +648,16 @@ mod tests {
         assert_eq!(session.say("b"), 2);
         session.cancel();
         assert_eq!(session.handle.generation.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn say_options_override_only_what_they_name() {
+        let base = TtsConfig { voice: Some("bm_daniel".into()), rate: 1.0, ..TtsConfig::default() };
+        let none = SayOptions::default().applied_to(&base);
+        assert_eq!(none.voice.as_deref(), Some("bm_daniel"));
+        let other = SayOptions { rate: Some(1.2), ..SayOptions::voice("zf_xiaobei") }.applied_to(&base);
+        assert_eq!(other.voice.as_deref(), Some("zf_xiaobei"));
+        assert_eq!(other.rate, 1.2);
+        assert_eq!(other.language, base.language);
     }
 }

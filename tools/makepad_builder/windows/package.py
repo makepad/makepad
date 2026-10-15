@@ -53,8 +53,8 @@ def main():
     for line in tree.splitlines():
         match = re.search(r"\((/[^)]*)\)", line)
         if not match:
-            # A crates.io package of another platform (OpenHarmony's
-            # hilog-sys): resolved from Cargo.lock, never compiled here.
+            # A crates.io package of another platform: resolved from
+            # Cargo.lock, never compiled here.
             continue
         dirs.add(os.path.relpath(match.group(1), repo))
         if member is None:
@@ -139,7 +139,7 @@ def main():
             continue
         if not wanted(path, owner(path)):
             continue
-        if "/tests/" in path or path.endswith(".wast") or re.match(r"widgets/fonts/[^/]+\.ttf$", path):
+        if "/tests/" in path or path.endswith(".wast"):
             continue
         if args.worktree and not (repo / path).is_file():
             continue

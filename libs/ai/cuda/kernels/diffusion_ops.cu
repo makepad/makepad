@@ -13,6 +13,7 @@
 #include <math_constants.h>
 #include <mma.h>
 #include <stdint.h>
+#include "launch_profile.cuh"
 
 __device__ __forceinline__ float makepad_cuda_diff_warp_reduce_sum(float value) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
@@ -1952,6 +1953,21 @@ static __device__ __forceinline__ void makepad_cuda_fa2_mma_bf16(
 #endif
 }
 
+// Packed half accumulator: {lo.x, lo.y}, {hi.x, hi.y}, the same lane
+// ownership as the four f32 accumulators. This is the full-rate GeForce MMA.
+static __device__ __forceinline__ void makepad_cuda_fa2_mma_f16acc(
+        uint32_t c[2], const uint32_t a[4], uint32_t b0, uint32_t b1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+        "{%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
+        : "+r"(c[0]), "+r"(c[1])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    (void) c; (void) a; (void) b0; (void) b1;
+#endif
+}
+
 static __device__ __forceinline__ void makepad_cuda_fa2_ldmatrix_x4(
         uint32_t r[4], const __half * addr) {
     const unsigned p = static_cast<unsigned>(__cvta_generic_to_shared(addr));
@@ -1982,7 +1998,17 @@ static __device__ __forceinline__ uint32_t makepad_cuda_fa2_pack_bf16(
     return *reinterpret_cast<const uint32_t *>(&h);
 }
 
-template<bool Causal, bool UseBf16>
+static __device__ __forceinline__ uint32_t makepad_cuda_fa2_bf16_to_f16(uint32_t b) {
+    return makepad_cuda_fa2_pack(__uint_as_float(b << 16), __uint_as_float(b & 0xffff0000u));
+}
+
+static __device__ __forceinline__ void makepad_cuda_fa2_unpack(const uint32_t h[2], float f[4]) {
+    const float2 lo = __half22float2(*reinterpret_cast<const __half2 *>(&h[0]));
+    const float2 hi = __half22float2(*reinterpret_cast<const __half2 *>(&h[1]));
+    f[0] = lo.x; f[1] = lo.y; f[2] = hi.x; f[3] = hi.y;
+}
+
+template<bool Causal, bool UseBf16, bool PvF16 = false, bool QkF16 = false>
 static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
@@ -1992,13 +2018,18 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         uint32_t kv_len,
         uint32_t hidden,
         float scale,
-        int32_t window) {
+        int32_t window,
+        uint32_t kv_hidden,
+        uint32_t group) {
     extern __shared__ __align__(16) char fa2_smem[];
     __half * k_ring = reinterpret_cast<__half *>(fa2_smem);
     __half * v_ring = k_ring + 2 * FA2_STAGE;
 
     const uint32_t q0 = blockIdx.x * FA2_BR;
     const uint32_t col0 = blockIdx.y * FA_D;
+    // Grouped-query attention: query head h reads kv head h / group from a
+    // [kv_len, kv_hidden] K/V (group 1, kv_hidden == hidden: plain MHA).
+    const uint32_t kv_col0 = (blockIdx.y / group) * FA_D;
     if (q0 >= seq) {
         return;
     }
@@ -2030,6 +2061,12 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
             // lanes 0..15: rows, halves 0-7; lanes 16..31: same rows, halves 8-15.
             const __half * addr = q_sh + (lane & 15) * FA_LDQ + kk * 16 + (lane >> 4) * 8;
             makepad_cuda_fa2_ldmatrix_x4(q_frag[kk], addr);
+            if constexpr (UseBf16 && QkF16) {
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    q_frag[kk][i] = makepad_cuda_fa2_bf16_to_f16(q_frag[kk][i]);
+                }
+            }
         }
     }
     __syncthreads(); // all warps done with the staging area
@@ -2047,8 +2084,8 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
 
     const uint32_t tiles = (kv_len + FA2_BC - 1) / FA2_BC;
     // G(0): K/V tile 0 into ring stage 0.
-    makepad_cuda_fa_tile_async(k, k_ring, 0, kv_len, hidden, col0);
-    makepad_cuda_fa_tile_async(v, v_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa_tile_async(k, k_ring, 0, kv_len, kv_hidden, kv_col0);
+    makepad_cuda_fa_tile_async(v, v_ring, 0, kv_len, kv_hidden, kv_col0);
     makepad_cuda_fa_cp_commit();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
@@ -2059,9 +2096,9 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         // sync of the previous iteration.
         if (tile + 1 < tiles) {
             makepad_cuda_fa_tile_async(
-                k, k_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, hidden, col0);
+                k, k_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, kv_hidden, kv_col0);
             makepad_cuda_fa_tile_async(
-                v, v_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, hidden, col0);
+                v, v_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, kv_hidden, kv_col0);
             makepad_cuda_fa_cp_commit();
             makepad_cuda_fa_cp_wait<1>(); // G(tile) landed, G(tile+1) in flight
         } else {
@@ -2072,7 +2109,7 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         const __half * k_sh = k_ring + stage * FA2_STAGE;
         const __half * v_sh = v_ring + stage * FA2_STAGE;
 
-        // S = Q K^T: 8 n8 fragments per warp, f32 accumulators.
+        // S = Q K^T: 8 n8 fragments per warp; f32 except the QkF16 experiment.
         float s[8][4];
         #pragma unroll
         for (int j = 0; j < 8; j++) {
@@ -2083,6 +2120,7 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         }
         #pragma unroll
         for (int j = 0; j < 8; j += 2) {
+            uint32_t sh0[2] = {0, 0}, sh1[2] = {0, 0};
             #pragma unroll
             for (int kk = 0; kk < 8; kk++) {
                 // x4 non-trans on K rows = B fragments for n-tiles j, j+1:
@@ -2093,13 +2131,24 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
                     + kk * 16 + (sel & 1) * 8;
                 uint32_t b[4];
                 makepad_cuda_fa2_ldmatrix_x4(b, addr);
-                if constexpr (UseBf16) {
+                if constexpr (QkF16) {
+                    if constexpr (UseBf16) {
+                        #pragma unroll
+                        for (int i = 0; i < 4; i++) b[i] = makepad_cuda_fa2_bf16_to_f16(b[i]);
+                    }
+                    makepad_cuda_fa2_mma_f16acc(sh0, q_frag[kk], b[0], b[1]);
+                    makepad_cuda_fa2_mma_f16acc(sh1, q_frag[kk], b[2], b[3]);
+                } else if constexpr (UseBf16) {
                     makepad_cuda_fa2_mma_bf16(s[j], q_frag[kk], b[0], b[1]);
                     makepad_cuda_fa2_mma_bf16(s[j + 1], q_frag[kk], b[2], b[3]);
                 } else {
                     makepad_cuda_fa2_mma(s[j], q_frag[kk], b[0], b[1]);
                     makepad_cuda_fa2_mma(s[j + 1], q_frag[kk], b[2], b[3]);
                 }
+            }
+            if constexpr (QkF16) {
+                makepad_cuda_fa2_unpack(sh0, s[j]);
+                makepad_cuda_fa2_unpack(sh1, s[j + 1]);
             }
         }
 
@@ -2162,7 +2211,7 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
             sum_hi += p02 + p03 + p12 + p13;
             // C->A fragment identity: a0/a1 = rows (lo,hi) x keys 2q..2q+1 of
             // tile j0; a2/a3 = the same rows in tile j0+1 (keys +8).
-            if constexpr (UseBf16) {
+            if constexpr (UseBf16 && !PvF16) {
                 p_frag[kk2][0] = makepad_cuda_fa2_pack_bf16(p00, p01);
                 p_frag[kk2][1] = makepad_cuda_fa2_pack_bf16(p02, p03);
                 p_frag[kk2][2] = makepad_cuda_fa2_pack_bf16(p10, p11);
@@ -2193,6 +2242,16 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         // O += P V: 16 n8 fragments per warp, V via x4 trans loads.
         #pragma unroll
         for (int jj = 0; jj < 16; jj += 2) {
+            // Rescale in f32 above, then round once into the packed f16
+            // running accumulator for this tile's four k16 MMAs. Softmax
+            // maxima/denominators and final normalization remain f32.
+            uint32_t oh0[2], oh1[2];
+            if constexpr (PvF16) {
+                oh0[0] = makepad_cuda_fa2_pack(o_acc[jj][0], o_acc[jj][1]);
+                oh0[1] = makepad_cuda_fa2_pack(o_acc[jj][2], o_acc[jj][3]);
+                oh1[0] = makepad_cuda_fa2_pack(o_acc[jj + 1][0], o_acc[jj + 1][1]);
+                oh1[1] = makepad_cuda_fa2_pack(o_acc[jj + 1][2], o_acc[jj + 1][3]);
+            }
             #pragma unroll
             for (int kk2 = 0; kk2 < 4; kk2++) {
                 // {b0,b1} = dims 8jj.., {b2,b3} = dims 8(jj+1).. (16 keys each).
@@ -2202,13 +2261,24 @@ static __global__ void makepad_cuda_flash_attention2_f32_kernel(
                     + 8 * (jj + (sel >> 1));
                 uint32_t b[4];
                 makepad_cuda_fa2_ldmatrix_x4_trans(b, addr);
-                if constexpr (UseBf16) {
+                if constexpr (PvF16) {
+                    if constexpr (UseBf16) {
+                        #pragma unroll
+                        for (int i = 0; i < 4; i++) b[i] = makepad_cuda_fa2_bf16_to_f16(b[i]);
+                    }
+                    makepad_cuda_fa2_mma_f16acc(oh0, p_frag[kk2], b[0], b[1]);
+                    makepad_cuda_fa2_mma_f16acc(oh1, p_frag[kk2], b[2], b[3]);
+                } else if constexpr (UseBf16) {
                     makepad_cuda_fa2_mma_bf16(o_acc[jj], p_frag[kk2], b[0], b[1]);
                     makepad_cuda_fa2_mma_bf16(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
                 } else {
                     makepad_cuda_fa2_mma(o_acc[jj], p_frag[kk2], b[0], b[1]);
                     makepad_cuda_fa2_mma(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
                 }
+            }
+            if constexpr (PvF16) {
+                makepad_cuda_fa2_unpack(oh0, o_acc[jj]);
+                makepad_cuda_fa2_unpack(oh1, o_acc[jj + 1]);
             }
         }
         __syncthreads(); // all warps done with stage (tile&1) K/V reads
@@ -2264,7 +2334,7 @@ static cudaError_t makepad_cuda_require_sm80() {
     return has_sm80 ? cudaSuccess : cudaErrorNotSupported;
 }
 
-template<bool Causal, bool UseBf16>
+template<bool Causal, bool UseBf16, bool PvF16 = false, bool QkF16 = false>
 static cudaError_t makepad_cuda_flash_attention2_launch(
         const uint16_t * q,
         const uint16_t * k,
@@ -2276,7 +2346,8 @@ static cudaError_t makepad_cuda_flash_attention2_launch(
         uint32_t hidden,
         float scale,
         int32_t window,
-        cudaStream_t stream) {
+        cudaStream_t stream,
+        uint32_t kv_heads = 0) {
     const cudaError_t sm80 = makepad_cuda_require_sm80();
     if (sm80 != cudaSuccess) {
         return sm80;
@@ -2290,10 +2361,18 @@ static cudaError_t makepad_cuda_flash_attention2_launch(
     if (hidden != head_count * FA_D) {
         return cudaErrorInvalidValue;
     }
+    if (kv_heads == 0) {
+        kv_heads = head_count;
+    }
+    if (head_count % kv_heads != 0) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t kv_hidden = kv_heads * FA_D;
+    const uint32_t group = head_count / kv_heads;
     static bool smem_configured = false;
     if (!smem_configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16>,
+            makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16, PvF16, QkF16>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(FA2_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -2303,12 +2382,12 @@ static cudaError_t makepad_cuda_flash_attention2_launch(
     }
     const dim3 block(FA2_THREADS, 1, 1);
     const dim3 grid((q_len + FA2_BR - 1) / FA2_BR, head_count, 1);
-    makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16>
+    makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16, PvF16, QkF16>
         <<<grid, block, FA2_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
             reinterpret_cast<const __half *>(v),
-            out, q_len, kv_len, hidden, scale, window);
+            out, q_len, kv_len, hidden, scale, window, kv_hidden, group);
     return cudaGetLastError();
 }
 
@@ -2390,6 +2469,48 @@ extern "C" cudaError_t makepad_cuda_flash_attention2_causal_bf16(
         cudaStream_t stream) {
     return makepad_cuda_flash_attention2_launch<true, true>(
         q, k, v, out, seq, seq, head_count, hidden, scale, 0, stream);
+}
+
+// Grouped-query FA2 with bf16 tensor-core operands: q [q_len, heads*128],
+// k/v [kv_len, kv_heads*128] (no repeated K/V). causal != 0 masks key > query
+// with query i aligned to key i (self-attention prefill); 0 = every key.
+// YuE2 AR prefill (causal) and the NAR velocity pass (non-causal over the AR
+// prefix cache + the latent tokens).
+extern "C" cudaError_t makepad_cuda_flash_attention2_gqa_bf16(
+        const uint16_t * q,
+        const uint16_t * k,
+        const uint16_t * v,
+        float * out,
+        uint32_t q_len,
+        uint32_t kv_len,
+        uint32_t head_count,
+        uint32_t kv_heads,
+        float scale,
+        int32_t causal,
+        int32_t precision,
+        cudaStream_t stream) {
+    const uint32_t hidden = head_count * FA_D;
+    // GpuAttentionPrecision in launch.rs. Storage always remains bf16;
+    // only the selected MMA's register operands/accumulators change.
+    if (precision == 1) {
+        if (causal) return makepad_cuda_flash_attention2_launch<true, true, true, false>(
+            q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
+        return makepad_cuda_flash_attention2_launch<false, true, true, false>(
+            q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
+    }
+    if (precision == 2) {
+        if (causal) return makepad_cuda_flash_attention2_launch<true, true, true, true>(
+            q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
+        return makepad_cuda_flash_attention2_launch<false, true, true, true>(
+            q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
+    }
+    if (precision != 0) return cudaErrorInvalidValue;
+    if (causal) {
+        return makepad_cuda_flash_attention2_launch<true, true>(
+            q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
+    }
+    return makepad_cuda_flash_attention2_launch<false, true>(
+        q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream, kv_heads);
 }
 
 extern "C" cudaError_t makepad_cuda_flash_attention2_sliding_bf16(
@@ -3887,6 +4008,7 @@ extern "C" cudaError_t makepad_cuda_swiglu_value_gate_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
+    MakepadLaunchTiming timing("swiglu", stream, rows, n);
     makepad_cuda_swiglu_value_gate_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, total);
     return cudaGetLastError();
@@ -4411,6 +4533,25 @@ static __global__ void makepad_cuda_f32_to_bf16_rn_f16_kernel(
     }
 }
 
+// The cached bf16/f32 linear truncates f32 input to bf16. Keep that exact
+// input grid when benchmarking f16 accumulation, including negative values.
+static __global__ void makepad_cuda_f32_to_bf16_trunc_f16_kernel(
+        const float * input, uint16_t * output, uint32_t n) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float value = __uint_as_float(__float_as_uint(input[i]) & 0xffff0000u);
+        output[i] = __half_as_ushort(__float2half_rn(value));
+    }
+}
+
+extern "C" cudaError_t makepad_cuda_f32_to_bf16_trunc_f16(
+        const float * input, uint16_t * output, uint32_t n, cudaStream_t stream) {
+    if (n == 0) return cudaSuccess;
+    const uint32_t grid = static_cast<uint32_t>((static_cast<size_t>(n) + 255) / 256);
+    makepad_cuda_f32_to_bf16_trunc_f16_kernel<<<grid, 256, 0, stream>>>(input, output, n);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_cuda_f32_to_bf16_rn_f16(
         const float * input,
         uint16_t * output,
@@ -4509,6 +4650,56 @@ extern "C" cudaError_t makepad_cuda_wavenet_gate_f32(
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
     makepad_cuda_wavenet_gate_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, total);
+    return cudaGetLastError();
+}
+
+// --- Cantor kernels ----------------------------------------------------------
+// Depthwise 1-D convolution over time on row-major (rows, ch) data, zero
+// padded by (k - 1) / 2 on both sides (ConvNeXt `dwconv`, kernel 7):
+// out[t, c] = bias[c] + sum_j w[c, j] * x[t + j - pad, c].
+static __global__ void makepad_cuda_dwconv1d_f32_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ weight,
+        const float * __restrict__ bias,
+        float * __restrict__ output,
+        uint32_t rows,
+        uint32_t ch,
+        uint32_t k) {
+    const uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t t = blockIdx.y;
+    if (c >= ch || t >= rows) {
+        return;
+    }
+    const int pad = static_cast<int>((k - 1u) / 2u);
+    float acc = bias != nullptr ? bias[c] : 0.0f;
+    for (uint32_t j = 0; j < k; ++j) {
+        const int src = static_cast<int>(t) + static_cast<int>(j) - pad;
+        if (src >= 0 && src < static_cast<int>(rows)) {
+            acc = fmaf(weight[static_cast<size_t>(c) * k + j], input[static_cast<size_t>(src) * ch + c], acc);
+        }
+    }
+    output[static_cast<size_t>(t) * ch + c] = acc;
+}
+
+extern "C" cudaError_t makepad_cuda_dwconv1d_f32(
+        const float * input,
+        const float * weight,
+        const float * bias,
+        float * output,
+        uint32_t rows,
+        uint32_t ch,
+        uint32_t k,
+        cudaStream_t stream) {
+    if (rows == 0 || ch == 0) {
+        return cudaSuccess;
+    }
+    if (k == 0 || (k & 1u) == 0 || rows > 65535u) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((ch + block.x - 1) / block.x, rows, 1);
+    makepad_cuda_dwconv1d_f32_kernel<<<grid, block, 0, stream>>>(
+        input, weight, bias, output, rows, ch, k);
     return cudaGetLastError();
 }
 
@@ -5134,6 +5325,316 @@ extern "C" cudaError_t makepad_cuda_attention_gqa_decode_bf16_f32(
     const dim3 grid(beams, query_heads, 1);
     makepad_cuda_attention_gqa_decode_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         query, key, value, output, beams, sequence, query_heads, kv_heads, head_dim, scale);
+    return cudaGetLastError();
+}
+
+// Flash-decoding GQA for one query row. Each four-lane group computes one
+// position, so a warp handles eight positions and a CTA handles 32. K/V
+// loads serve every query head in the GQA group. There is no serial online
+// softmax per position: one final block reduction produces (max, sum, acc),
+// then a separate kernel merges splits. All arithmetic stays f32.
+// With eight KV heads, 32-position splits give 512 live CTAs at ctx 2048
+// and 760 at ctx 3030 (>=2 per SM on the PRO 6000 throughout ctx 2k-10k).
+// Keep the workspace geometry in launch.rs in sync with SPLIT_KV_CHUNK.
+// q [1, query_heads*128]; k/v [>= sequence, kv_heads*128]; out [1, query_heads*128].
+#define SPLIT_KV_CHUNK 32
+#define SPLIT_KV_MAX_GROUP 4
+
+static __host__ __device__ __forceinline__ uint32_t split_kv_splits(uint32_t sequence) {
+    return sequence / SPLIT_KV_CHUNK + (sequence % SPLIT_KV_CHUNK != 0);
+}
+
+struct SplitKvFloat8 {
+    float4 lo, hi;
+};
+
+static __device__ __forceinline__ SplitKvFloat8 split_kv_load8(const float *src) {
+    return {*reinterpret_cast<const float4 *>(src), *reinterpret_cast<const float4 *>(src + 4)};
+}
+
+static __device__ __forceinline__ SplitKvFloat8 split_kv_load8(const uint16_t *src) {
+    // Eight bf16 values in one aligned 16-byte transaction, expanded exactly.
+    const uint4 bits = *reinterpret_cast<const uint4 *>(src);
+    return {
+        make_float4(__uint_as_float(bits.x << 16), __uint_as_float(bits.x & 0xffff0000u),
+                    __uint_as_float(bits.y << 16), __uint_as_float(bits.y & 0xffff0000u)),
+        make_float4(__uint_as_float(bits.z << 16), __uint_as_float(bits.z & 0xffff0000u),
+                    __uint_as_float(bits.w << 16), __uint_as_float(bits.w & 0xffff0000u))
+    };
+}
+
+template <typename Cache, int GROUP>
+static __global__ void makepad_cuda_attention_gqa_decode_split_kernel(
+        const float * __restrict__ query,
+        const Cache * __restrict__ key,
+        const Cache * __restrict__ value,
+        float * __restrict__ partial,
+        uint32_t sequence,
+        uint32_t kv_heads,
+        float scale,
+        const uint32_t *sequence_device) {
+    if (sequence_device) sequence = min(sequence, *sequence_device);
+    const uint32_t kv_head = blockIdx.x;
+    const uint32_t split = blockIdx.y;
+    const uint32_t splits = gridDim.y;
+    const uint32_t warp = threadIdx.x >> 5;
+    const uint32_t lane = threadIdx.x & 31;
+    const uint32_t quad_lane = lane & 3;
+    const uint32_t position = threadIdx.x >> 2;
+    const uint32_t kv_width = kv_heads * 128;
+    const uint32_t p0 = split * SPLIT_KV_CHUNK;
+    if (p0 >= sequence) return;
+    const uint32_t p = p0 + position;
+    const bool live = p < sequence;
+
+    __shared__ float4 sm_query[GROUP][32];
+    // Pad each value row by a float4 so adjacent quads' vector stores do
+    // not collide in the same shared-memory banks. Values are staged once
+    // and reused by both (or up to four) query heads in the final reduction.
+    __shared__ float4 sm_value[SPLIT_KV_CHUNK][33];
+    __shared__ float sm_weight[GROUP][SPLIT_KV_CHUNK];
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+        reinterpret_cast<float *>(sm_query[g])[threadIdx.x] =
+            query[(kv_head * GROUP + g) * 128 + threadIdx.x] * scale;
+    }
+    __syncthreads();
+
+    float dot[GROUP] = {};
+    #pragma unroll
+    for (int tile = 0; tile < 4; ++tile) {
+        const uint32_t col = tile * 32 + quad_lane * 8;
+        SplitKvFloat8 kv = {}, vv = {};
+        if (live) {
+            const size_t offset = static_cast<size_t>(p) * kv_width + kv_head * 128 + col;
+            kv = split_kv_load8(key + offset);
+            vv = split_kv_load8(value + offset);
+        }
+        sm_value[position][col / 4] = vv.lo;
+        sm_value[position][col / 4 + 1] = vv.hi;
+        #pragma unroll
+        for (int g = 0; g < GROUP; ++g) {
+            const float4 a = sm_query[g][col / 4], b = sm_query[g][col / 4 + 1];
+            const float lo = a.x * kv.lo.x + a.y * kv.lo.y + a.z * kv.lo.z + a.w * kv.lo.w;
+            const float hi = b.x * kv.hi.x + b.y * kv.hi.y + b.z * kv.hi.z + b.w * kv.hi.w;
+            dot[g] += lo + hi;
+        }
+    }
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+        // All lanes, including the tail's inactive positions, participate.
+        dot[g] += __shfl_xor_sync(0xffffffffu, dot[g], 2, 4);
+        dot[g] += __shfl_xor_sync(0xffffffffu, dot[g], 1, 4);
+        if (quad_lane == 0) sm_weight[g][position] = live ? dot[g] : -CUDART_INF_F;
+    }
+    __syncthreads();
+
+    // One final reduction phase for the entire split. One warp per query
+    // head handles max/sum; each of its lanes owns a different position.
+    if (warp < GROUP) {
+        const float score = sm_weight[warp][lane];
+        float maximum = score;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffffu, maximum, offset));
+        }
+        const float weight = expf(score - maximum);
+        sm_weight[warp][lane] = weight;
+        const float sum = makepad_cuda_diff_warp_reduce_sum(weight);
+        if (lane == 0) {
+            float *rec = partial + (static_cast<size_t>(kv_head * GROUP + warp) * splits + split) * 130;
+            rec[0] = maximum;
+            rec[1] = sum;
+        }
+    }
+    __syncthreads();
+    // Transpose ownership for PV: thread t now owns dimension t, reading
+    // the staged V once per position and sharing it across query heads.
+    float acc[GROUP] = {};
+    #pragma unroll
+    for (int pos = 0; pos < SPLIT_KV_CHUNK; ++pos) {
+        const float v = reinterpret_cast<const float *>(sm_value[pos])[threadIdx.x];
+        #pragma unroll
+        for (int g = 0; g < GROUP; ++g) acc[g] += sm_weight[g][pos] * v;
+    }
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+        float *rec = partial + (static_cast<size_t>(kv_head * GROUP + g) * splits + split) * 130;
+        rec[2 + threadIdx.x] = acc[g];
+    }
+}
+
+template <typename Cache>
+static void split_kv_launch(
+        const float *query, const Cache *key, const Cache *value, float *workspace,
+        uint32_t sequence, uint32_t query_heads, uint32_t kv_heads, float scale,
+        const uint32_t *sequence_device, cudaStream_t stream) {
+    const dim3 grid(kv_heads, split_kv_splits(sequence), 1);
+    // Specialize the actual group size so two-head decode does not reserve
+    // registers/shared query storage or execute arithmetic for four heads.
+    switch (query_heads / kv_heads) {
+        case 1:
+            makepad_cuda_attention_gqa_decode_split_kernel<Cache, 1><<<grid, 128, 0, stream>>>(
+                query, key, value, workspace, sequence, kv_heads, scale, sequence_device);
+            break;
+        case 2:
+            makepad_cuda_attention_gqa_decode_split_kernel<Cache, 2><<<grid, 128, 0, stream>>>(
+                query, key, value, workspace, sequence, kv_heads, scale, sequence_device);
+            break;
+        case 3:
+            makepad_cuda_attention_gqa_decode_split_kernel<Cache, 3><<<grid, 128, 0, stream>>>(
+                query, key, value, workspace, sequence, kv_heads, scale, sequence_device);
+            break;
+        case 4:
+            makepad_cuda_attention_gqa_decode_split_kernel<Cache, 4><<<grid, 128, 0, stream>>>(
+                query, key, value, workspace, sequence, kv_heads, scale, sequence_device);
+            break;
+    }
+}
+
+static __global__ void makepad_cuda_attention_gqa_decode_merge_kernel(
+        const float * __restrict__ partial,
+        float * __restrict__ output,
+        uint32_t splits,
+        const uint32_t *sequence_device) {
+    const uint32_t qh = blockIdx.x;
+    const uint32_t dim = threadIdx.x;
+    const float * base = partial + static_cast<size_t>(qh) * splits * 130;
+    const uint32_t live_splits = sequence_device
+        ? min(splits, split_kv_splits(*sequence_device)) : splits;
+    __shared__ float maximum, total;
+    __shared__ float weights[128];
+
+    // Reduce split metadata in parallel, then compute each rescaling
+    // exponential once. Smaller split tiles must not multiply the merge's
+    // previous per-dimension serial expf chain. Fixed shared-memory panels
+    // handle any number of splits without a capacity-dependent allocation.
+    float mm = -CUDART_INF_F;
+    for (uint32_t s = dim; s < live_splits; s += 128) {
+        mm = fmaxf(mm, base[s * 130]);
+    }
+    mm = makepad_cuda_diff_block_reduce_max(mm);
+    if (dim == 0) maximum = mm;
+    __syncthreads();
+    float ll = 0.0f, aa = 0.0f;
+    for (uint32_t first = 0; first < live_splits; first += 128) {
+        const uint32_t count = min(128u, live_splits - first);
+        float f = 0.0f;
+        if (dim < count) {
+            const size_t offset = static_cast<size_t>(first + dim) * 130;
+            const float ms = base[offset];
+            f = ms == -CUDART_INF_F ? 0.0f : expf(ms - maximum);
+            ll += base[offset + 1] * f;
+        }
+        weights[dim] = f;
+        __syncthreads();
+        for (uint32_t s = 0; s < count; ++s) {
+            aa += base[static_cast<size_t>(first + s) * 130 + 2 + dim] * weights[s];
+        }
+        __syncthreads();
+    }
+    ll = makepad_cuda_diff_block_reduce_sum(ll);
+    if (dim == 0) total = ll;
+    __syncthreads();
+    output[qh * 128 + dim] = total > 0.0f ? aa / total : 0.0f;
+}
+
+extern "C" size_t makepad_cuda_attention_gqa_decode_split_workspace(
+        uint32_t sequence, uint32_t query_heads) {
+    const uint32_t splits = split_kv_splits(sequence);
+    return static_cast<size_t>(query_heads) * splits * 130 * sizeof(float);
+}
+
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_split_f32(
+        const float * query,
+        const float * key,
+        const float * value,
+        float * workspace,
+        float * output,
+        uint32_t sequence,
+        uint32_t query_heads,
+        uint32_t kv_heads,
+        float scale,
+        cudaStream_t stream) {
+    if (sequence == 0 || query_heads == 0 || kv_heads == 0 || query_heads % kv_heads != 0
+            || query_heads / kv_heads > SPLIT_KV_MAX_GROUP) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t splits = split_kv_splits(sequence);
+    split_kv_launch(query, key, value, workspace, sequence, query_heads, kv_heads, scale, nullptr, stream);
+    cudaError_t status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    makepad_cuda_attention_gqa_decode_merge_kernel<<<dim3(query_heads, 1, 1), dim3(128, 1, 1), 0, stream>>>(
+        workspace, output, splits, nullptr);
+    return cudaGetLastError();
+}
+
+// Fixed launch geometry for graph replay; only live cache rows are read.
+// The split grid remains (kv_heads, ceil(capacity / SPLIT_KV_CHUNK)); inactive
+// splits return immediately. Merge reads only ceil(*sequence / SPLIT_KV_CHUNK)
+// records, in the same order as the host-length path.
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_split_device_f32(
+        const float *query, const float *key, const float *value,
+        float *workspace, float *output, const uint32_t *sequence,
+        uint32_t capacity, uint32_t query_heads, uint32_t kv_heads,
+        float scale, cudaStream_t stream) {
+    if (!sequence || !capacity || !query_heads || !kv_heads
+            || query_heads % kv_heads || query_heads / kv_heads > SPLIT_KV_MAX_GROUP) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t splits = split_kv_splits(capacity);
+    {
+        MakepadLaunchTiming timing("attention.split", stream, query_heads, capacity);
+        split_kv_launch(query, key, value, workspace, capacity, query_heads, kv_heads, scale, sequence, stream);
+    }
+    cudaError_t status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    {
+        MakepadLaunchTiming timing("attention.merge", stream, query_heads, capacity);
+        makepad_cuda_attention_gqa_decode_merge_kernel<<<query_heads, 128, 0, stream>>>(
+            workspace, output, splits, sequence);
+    }
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_split_bf16(
+        const float *query, const uint16_t *key, const uint16_t *value,
+        float *workspace, float *output, uint32_t sequence,
+        uint32_t query_heads, uint32_t kv_heads, float scale, cudaStream_t stream) {
+    if (!sequence || !query_heads || !kv_heads
+            || query_heads % kv_heads || query_heads / kv_heads > SPLIT_KV_MAX_GROUP) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t splits = split_kv_splits(sequence);
+    split_kv_launch(query, key, value, workspace, sequence, query_heads, kv_heads, scale, nullptr, stream);
+    cudaError_t status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    makepad_cuda_attention_gqa_decode_merge_kernel<<<query_heads, 128, 0, stream>>>(
+        workspace, output, splits, nullptr);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_split_device_bf16(
+        const float *query, const uint16_t *key, const uint16_t *value,
+        float *workspace, float *output, const uint32_t *sequence,
+        uint32_t capacity, uint32_t query_heads, uint32_t kv_heads,
+        float scale, cudaStream_t stream) {
+    if (!sequence || !capacity || !query_heads || !kv_heads
+            || query_heads % kv_heads || query_heads / kv_heads > SPLIT_KV_MAX_GROUP) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t splits = split_kv_splits(capacity);
+    {
+        MakepadLaunchTiming timing("attention.split_bf16", stream, query_heads, capacity);
+        split_kv_launch(query, key, value, workspace, capacity, query_heads, kv_heads, scale, sequence, stream);
+    }
+    cudaError_t status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    {
+        MakepadLaunchTiming timing("attention.merge_bf16", stream, query_heads, capacity);
+        makepad_cuda_attention_gqa_decode_merge_kernel<<<query_heads, 128, 0, stream>>>(
+            workspace, output, splits, sequence);
+    }
     return cudaGetLastError();
 }
 

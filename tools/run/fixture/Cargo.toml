@@ -1,0 +1,36 @@
+[package]
+name = "relax-provided-fixture"
+version = "0.1.0"
+edition = "2021"
+description = "Relax provided-crate fixture: rustc builds the lib into the `makepad` loader (feature host-shims); `makepad run relax-provided-fixture` runs the bin with the lib bound to it"
+license = "MIT OR Apache-2.0"
+publish = false
+default-run = "relax-provided-fixture"
+
+[features]
+# the #[relax_api] wrappers and table entries; only the loader enables it
+host-shims = []
+
+[dependencies]
+makepad-relax-api = { workspace = true }
+
+[dev-dependencies]
+makepad-relax-api = { workspace = true, features = ["host-shims"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "relax-provided-fixture"
+path = "src/main.rs"
+
+# `makepad run relax-provided-fixture-guard` must stop with "a field of `Registry` is read from
+# Relax-compiled code"; under rustc it prints 1
+[[bin]]
+name = "relax-provided-fixture-guard"
+path = "src/guard.rs"
+
+# panic unwinding through frames with drop guards (driven by compiler/tests/unwind_modes.py)
+[[bin]]
+name = "relax-unwind-probe"
+path = "src/unwind_probe.rs"

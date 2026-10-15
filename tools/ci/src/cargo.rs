@@ -13,14 +13,12 @@ pub enum BuildTy {
     Binary,
     BinaryBuildStd,
     Lib,
-    LinuxDirect,
 }
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Platform {
     Web,
     Mobile,
     Desktop,
-    Embedded,
 }
 impl Platform {
     fn name(self) -> &'static str {
@@ -28,16 +26,14 @@ impl Platform {
             Self::Web => "web",
             Self::Mobile => "mobile",
             Self::Desktop => "desktop",
-            Self::Embedded => "embedded",
         }
     }
 }
 // Mirrored from cargo_makepad; the drift test below compares every row.
-pub const TOOLCHAINS: [(&str, BuildTy, Platform); 16] = [
+pub const TOOLCHAINS: [(&str, BuildTy, Platform); 15] = [
     ("aarch64-apple-darwin", BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-msvc", BuildTy::Binary, Platform::Desktop),
     ("x86_64-unknown-linux-gnu", BuildTy::Binary, Platform::Desktop),
-    ("x86_64-unknown-linux-gnu", BuildTy::LinuxDirect, Platform::Embedded),
     ("wasm32-unknown-unknown", BuildTy::Lib, Platform::Web),
     ("aarch64-linux-android", BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios", BuildTy::Binary, Platform::Mobile),
@@ -373,7 +369,6 @@ pub fn target_checks(
                 }
                 "lines"
             }
-            BuildTy::LinuxDirect => "linux_direct",
         };
         // build-std supplies the target's std itself; tier-3 targets need not
         // appear in rustup target list when nightly + rust-src are available.
@@ -381,9 +376,9 @@ pub fn target_checks(
             skip = Some("not installed".into());
         }
         result.push(TargetCheck {
-            label: if ty == BuildTy::LinuxDirect { format!("{t} (linux_direct)") } else { t.into() },
+            label: t.into(),
             ty, platform, args,
-            env: vec![("MAKEPAD".into(), makepad.into())],
+            env: vec![("MAKEPAD_BUILD".into(), makepad.into())],
             toolchain, skip,
         });
     }
@@ -521,7 +516,6 @@ mod tests {
         let targets = matrix_targets(&host.target);
         let plan = target_checks(&host, &targets, &strings(&["app"]), false);
         assert_eq!(plan.len(), TOOLCHAINS.len() - 1);
-        assert!(plan.iter().any(|p| p.ty == BuildTy::LinuxDirect && p.env == vec![("MAKEPAD".into(), "linux_direct".into())]));
         assert!(plan.iter().filter(|p| p.ty == BuildTy::BinaryBuildStd).all(|p| p.skip.as_deref() == Some("needs nightly build-std")));
         assert_eq!(plan.iter().find(|p| p.label == "x86_64-pc-windows-msvc").unwrap().skip.as_deref(), Some("not installed"));
         host.nightly = Some("nightly".into());

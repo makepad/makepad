@@ -18,7 +18,6 @@ use {
         file_dialogs::FileDialogState,
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
-        os::CxOs,
         perf_monitor::PerfMonitor,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
@@ -70,7 +69,7 @@ pub struct Cx {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) package_paths: std::collections::HashMap<String, std::path::PathBuf>,
     /// Native user-input bookkeeping for the `--remote` interface.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) remote_activity: crate::remote::RemoteActivity,
     pub(crate) font_set: crate::font_policy::FontSet,
     pub(crate) font_set_frozen: bool,
@@ -84,9 +83,15 @@ pub struct Cx {
     /// Studio instead; this is where that arrives, and it is what
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
+    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`.
     pub demo_time_repaint: bool,
+    /// `draw_pass.time` counts from here, which `Cx::pass_time` moves while no pass owes a time frame.
+    pub(crate) pass_time_origin: f64,
+    pub(crate) pass_time_rebase: bool,
     pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
+    pub(crate) gpu_admission: crate::gpu_admission::GpuLedger,
+    pub(crate) clipboard: crate::clipboard_read::ClipboardRequests,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
     /// Process memory envelope available to subsystems with large, elastic
@@ -113,6 +118,9 @@ pub struct Cx {
     pub draw_shaders: CxDrawShaders,
 
     pub new_draw_event: DrawEvent,
+    /// Run on every Event::Signal before the app sees it: subsystems above the platform
+    /// (the text system's glyph workers) react to their workers' signals.
+    pub signal_hooks: Vec<fn(&mut Cx)>,
 
     pub redraw_id: u64,
 
@@ -140,6 +148,12 @@ pub struct Cx {
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
+    /// Frame requests made so far (`Cx::frame_requests`).
+    pub(crate) frame_requests: u64,
+    /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
+    /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
+    /// wait until it is shown again (`hosted_frames_held`).
+    pub(crate) hosted_hidden: bool,
 
     pub new_actions: ActionsBuf,
 
@@ -152,7 +166,10 @@ pub struct Cx {
     */
     pub(crate) action_receiver: crate::makepad_network::mpsc::Receiver<ActionSend>,
 
-    pub os: CxOs,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub hal: crate::os::hal::HalClient,
+    #[cfg(target_arch = "wasm32")]
+    pub os: crate::os::web::CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
     pub(crate) event_handler: Rc<UnsafeCell<Box<dyn FnMut(&mut Cx, &Event)>>>,
     pub(crate) event_handler_dispatch_active: Rc<Cell<bool>>,
@@ -245,8 +262,6 @@ pub struct Cx {
     /// The same by reason: instances not yet presentable, no compiled
     /// shader, pipeline still compiling.
     pub(crate) skip_reasons: [u64; 3],
-    #[cfg(all(target_vendor = "apple", not(gpusim)))]
-    pub(crate) pipeline_skip_repaint: Option<u64>,
     /// Until then (seconds since start), a window frame with a draw skipped
     /// for a compiling pipeline is not presented: the last whole frame stays.
     pub(crate) whole_frames_until: f64,
@@ -339,8 +354,10 @@ pub struct AndroidParams {
     pub android_version: String,
     #[live]
     pub build_number: String,
+    /// The system is in dark (night) mode. Set before Startup and kept
+    /// current: a switch while the app runs updates it and re-runs `script_mod`.
     #[live]
-    pub kernel_version: String,
+    pub night_mode: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -351,22 +368,6 @@ pub struct IosParams {
     pub device_model: String,
     #[live]
     pub system_version: String,
-}
-
-#[derive(Clone, Debug, Default, Script, ScriptHook)]
-pub struct OpenHarmonyParams {
-    #[live]
-    pub files_dir: String,
-    #[live]
-    pub cache_dir: String,
-    #[live]
-    pub temp_dir: String,
-    #[live]
-    pub device_type: String,
-    #[live]
-    pub os_full_name: String,
-    #[live]
-    pub display_density: f64,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -405,8 +406,6 @@ pub enum OsType {
     Ios(IosParams),
     #[live(AndroidParams::default())]
     Android(AndroidParams),
-    #[live(OpenHarmonyParams::default())]
-    OpenHarmony(OpenHarmonyParams),
     #[live(LinuxWindowParams::default())]
     LinuxWindow(LinuxWindowParams),
     LinuxDirect,
@@ -414,13 +413,9 @@ pub enum OsType {
     Web(WebParams),
 }
 
-/// The GPU API this process renders with. On most targets that is the API the
-/// binary was built against (`MAKEPAD=…`). A desktop Linux build with the
-/// `vulkan` cargo feature carries OpenGL ES as well and chooses between them
-/// when its event loop starts (`MAKEPAD_GPU` overrides, see
-/// `os/linux/gpu_preference.rs`); `Cx::gpu_backend` reports the running API
-/// from then on, and the built default before that. An app offers the other
-/// renderer by restarting itself with `MAKEPAD_GPU` set.
+/// The GPU API this process renders with: the active HAL backend on native
+/// targets (Metal on Apple, Direct3D 11 on Windows, Vulkan or GLES on Linux),
+/// WebGL on the web. `Cx::gpu_backend` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuBackend {
     Metal,
@@ -428,14 +423,14 @@ pub enum GpuBackend {
     Vulkan,
     OpenGl,
     WebGl,
-    Gpusim,
+    Headless,
 }
 
 impl GpuBackend {
     /// Whether draw calls' scissor rectangles are applied
     /// (`CxDrawShaderOptions::scissor`); elsewhere they are ignored.
     pub fn honors_scissor(self) -> bool {
-        matches!(self, GpuBackend::Metal | GpuBackend::Vulkan)
+        matches!(self, GpuBackend::Metal | GpuBackend::Vulkan | GpuBackend::OpenGl)
     }
 
     pub fn name(self) -> &'static str {
@@ -445,7 +440,7 @@ impl GpuBackend {
             GpuBackend::Vulkan => "Vulkan",
             GpuBackend::OpenGl => "OpenGL",
             GpuBackend::WebGl => "WebGL",
-            GpuBackend::Gpusim => "simulated GPU",
+            GpuBackend::Headless => "HAL headless",
         }
     }
 }
@@ -487,14 +482,8 @@ impl OsType {
     pub fn get_cache_dir(&self) -> Option<String> {
         match self {
             OsType::Android(params) => Some(params.cache_path.clone()),
-            OsType::OpenHarmony(params) => Some(params.cache_dir.clone()),
-            // Desktop Linux (windowed or DRM/direct): persist the GL program-binary cache
-            // under the XDG cache directory so compiled shaders survive across launches.
+            // Desktop Linux (windowed or DRM/direct) uses the XDG cache directory.
             // Computed once and memoized (env lookup + directory creation).
-            //
-            // Note: the Windows backend is D3D11 and caches its compiled DXBC separately
-            // via `shader_cache_dir()` in `os/windows/d3d11.rs`, so it does not rely on
-            // this. macOS/iOS use Metal libraries and likewise do not use this path.
             OsType::LinuxWindow(_) | OsType::LinuxDirect => {
                 use std::sync::OnceLock;
                 static DIR: OnceLock<Option<String>> = OnceLock::new();
@@ -527,8 +516,6 @@ impl OsType {
             Some(params.data_path.clone())
         } else if let OsType::Ios(params) = self {
             Some(params.data_path.clone())
-        } else if let OsType::OpenHarmony(params) = self {
-            Some(params.files_dir.clone())
         } else {
             None
         }
@@ -588,7 +575,7 @@ pub(crate) fn apple_physical_memory_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub(crate) fn linux_physical_memory_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = meminfo.lines().find(|line| {
@@ -618,9 +605,9 @@ pub(crate) fn windows_physical_memory_bytes() -> Option<u64> {
         ullAvailExtendedVirtual: u64,
     }
 
-    windows_core::link!("kernel32.dll" "system" fn GlobalMemoryStatusEx(
+    #[link(name = "kernel32", kind = "raw-dylib")] extern "system" { fn GlobalMemoryStatusEx(
         status: *mut MemoryStatusEx
-    ) -> windows_core::BOOL);
+    ) -> windows::core::BOOL; }
 
     let mut status = MemoryStatusEx {
         dwLength: std::mem::size_of::<MemoryStatusEx>() as u32,
@@ -674,11 +661,11 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
 
 #[cfg(target_os = "android")]
 fn platform_memory_budget(default: usize) -> (usize, &'static str) {
-    crate::os::linux::android::android_jni::physical_memory_bytes()
+    linux_physical_memory_bytes()
         .map(|bytes| {
             (
                 memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Mobile),
-                "ActivityManager.MemoryInfo.totalMem",
+                "/proc/meminfo MemTotal",
             )
         })
         .unwrap_or((default, "default"))
@@ -696,7 +683,7 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
         .unwrap_or((default, "default"))
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 fn platform_memory_budget(default: usize) -> (usize, &'static str) {
     linux_physical_memory_bytes()
         .map(|bytes| {
@@ -708,14 +695,7 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
         .unwrap_or((default, "default"))
 }
 
-#[cfg(not(any(
-    target_arch = "wasm32",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "android",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos")),
-)))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android", target_os = "windows", target_os = "linux")))]
 fn platform_memory_budget(default: usize) -> (usize, &'static str) {
     (default, "default")
 }
@@ -915,10 +895,18 @@ impl Cx {
         self.cancel_scopes.has_press_owner()
     }
 
+    /// Whether a back swipe by a touch that starts in the event being delivered would belong
+    /// to `scope`, since Back would go to it right now. Only meaningful during that event.
+    pub fn owns_back_swipe(&self, scope: &CancelScope) -> bool {
+        self.cancel_scopes.owns_back_swipe(scope)
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        crate::os::termination_signal::install();
+        if !crate::restart::hosted() {
+            crate::os::termination_signal::install();
+        }
 
         makepad_network::install_ui_waker(Some(makepad_network::UiWaker::new(|| {
             crate::thread::wake_ui_event_loop();
@@ -941,7 +929,8 @@ impl Cx {
             updated: TextureUpdated::Full,
         });
 
-        let (executor, spawner) = executor::new_executor_and_spawner();
+        // a task woken from another thread wakes the event loop that runs it (an idle loop sleeps)
+        let (executor, spawner) = executor::new_executor_and_spawner(std::sync::Arc::new(crate::thread::wake_ui_event_loop));
         //let (live_file_change_sender, live_file_change_receiver) = crate::makepad_network::mpsc::channel();
         let (action_sender, action_receiver) = crate::makepad_network::mpsc::channel();
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
@@ -951,8 +940,13 @@ impl Cx {
         // before creating the NetworkRuntime so it picks up the real backend.
         #[cfg(target_arch = "wasm32")]
         crate::os::web_network::install_network_backend_shim();
-        #[cfg(target_os = "android")]
-        crate::os::linux::android::android_network::install_network_backend_shim();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // `--remote` / MAKEPAD_REMOTE=1: the process's makepad-remote endpoint, for every
+            // process that has a `Cx`
+            crate::remote::start_if_requested();
+        }
 
         let net = Arc::new(NetworkRuntime::new(Default::default()));
         net.set_wake_fn(Some(Arc::new(|| {
@@ -961,19 +955,21 @@ impl Cx {
 
         let script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());
         let script_vm = Box::new(ScriptVmBase::new());
-        let crate_manifests = script_vm.code.crate_manifests.clone();
-        let script_mod_overrides = script_vm.code.script_mod_overrides.clone();
+        let crate_manifests = script_vm.shared_crate_manifests();
+        let script_mod_overrides = script_vm.shared_mod_overrides();
 
         let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
             #[cfg(not(target_arch = "wasm32"))]
             package_paths: crate::os::cx_native::load_package_paths(),
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+            #[cfg(not(target_arch = "wasm32"))]
             remote_activity: Default::default(),
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
+            pass_time_origin: 0.0,
+            pass_time_rebase: true,
             mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
@@ -989,6 +985,8 @@ impl Cx {
             in_draw_event: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
+            gpu_admission: Default::default(),
+            clipboard: Default::default(),
             xr_capabilities: Default::default(),
 
             windows: Default::default(),
@@ -1003,6 +1001,7 @@ impl Cx {
             draw_shaders: Default::default(),
 
             new_draw_event: Default::default(),
+            signal_hooks: Vec::new(),
             new_actions: Default::default(),
 
             redraw_id: 1,
@@ -1025,6 +1024,8 @@ impl Cx {
             pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
+            frame_requests: 0,
+            hosted_hidden: false,
 
             post_draw_hook: None,
             collect: None,
@@ -1032,8 +1033,6 @@ impl Cx {
             window_snapshots: Vec::new(),
             pipeline_skips: 0,
             skip_reasons: [0; 3],
-            #[cfg(all(target_vendor = "apple", not(gpusim)))]
-            pipeline_skip_repaint: None,
             whole_frames_until: 0.0,
             whole_hold_began: None,
             hold_next_paint: false,
@@ -1047,7 +1046,10 @@ impl Cx {
 
             action_receiver,
 
-            os: CxOs::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            hal: crate::os::hal::HalClient::default(),
+            #[cfg(target_arch = "wasm32")]
+            os: crate::os::web::CxOs::default(),
 
             event_handler: Rc::new(UnsafeCell::new(event_handler)),
             event_handler_dispatch_active: Rc::new(Cell::new(false)),
@@ -1137,7 +1139,8 @@ pub fn startup_trace_enabled() -> bool {
 
 fn startup_t0() -> f64 {
     *STARTUP_T0.get_or_init(|| {
-        std::env::var("MAKEPAD_STARTUP_T0")
+        std::env::var("MAKEPAD_RUN_STARTUP_T0")
+            .or_else(|_| std::env::var("MAKEPAD_STARTUP_T0"))
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .unwrap_or_else(Cx::time_now)
@@ -1307,3 +1310,118 @@ impl Cx {
         }
     }
 }
+
+static FIRST_PRESENT_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a first frame reached the display.
+pub fn first_present_seen() -> bool {
+    FIRST_PRESENT_SEEN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Launcher-started windows stay invisible until their first frame.
+pub fn launched_hidden_until_first_present() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| {
+        std::env::var_os("MAKEPAD_RUN_REPORT_TO").is_some()
+            && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none()
+    })
+}
+
+/// Also tells a launcher (MAKEPAD_RUN_REPORT_TO, see `report_first_present`).
+pub fn startup_trace_first_present() {
+    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let presented_at = Cx::time_now();
+        FIRST_PRESENT_SEEN.store(true, std::sync::atomic::Ordering::Release);
+        relax_first_present();
+        report_first_present();
+        print_first_present(presented_at);
+        startup_trace("FIRST PRESENT ON GLASS");
+        startup_trace_flush("cumulative at first present");
+        crate::restart::first_present();
+    }
+}
+
+/// Relax runs the app in its own process and publishes this metadata before calling main.
+/// Cargo/rustc launches have no package marker and keep their existing stderr behavior.
+fn print_first_present(presented_at: f64) {
+    let Ok(package) = std::env::var("MAKEPAD_RUN_PACKAGE") else { return };
+    // Relax's boot progress line already printed its "ready" summary instead of this line
+    if std::env::var_os("MAKEPAD_RUN_PROGRESS").is_some() {
+        return;
+    }
+    // Capture the time in the hook, before report I/O or lazy compilation of the formatter.
+    let present_ms = (presented_at - startup_t0()).max(0.0) * 1000.0;
+    let main_ms = std::env::var("MAKEPAD_RUN_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let cache = std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
+    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache));
+}
+
+fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str) -> String {
+    format!(
+        "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {})",
+        package, present_ms / 1000.0, main_ms / 1000.0, cache
+    )
+}
+
+/// A launcher that started this app with MAKEPAD_RUN_REPORT_TO=<path> (the runner app, through
+/// `makepad run --report-to`) learns that the first frame is on glass: the line `present`
+/// appended to <path>, in the loader's progress format (the launcher times it on receipt).
+/// The launcher brings the window forward then. Any thread (presented handlers run off the
+/// main thread); a single O_APPEND write.
+fn report_first_present() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = std::env::var_os("MAKEPAD_RUN_REPORT_TO") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = f.write_all(b"present\n");
+        }
+    }
+}
+
+/// A symbol the `makepad` loader provides to the programs it runs (null in a rustc build, which
+/// has no loader): dlsym's default scope on unix; on Windows GetProcAddress on the process's own
+/// module, which makepad run answers from its loader symbols (a PE exe exports none).
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_host_symbol(name: &std::ffi::CStr) -> *mut std::ffi::c_void {
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn dlsym(
+                handle: *mut std::ffi::c_void,
+                name: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
+        }
+        #[cfg(target_os = "macos")]
+        let default = -2isize as *mut std::ffi::c_void;
+        #[cfg(not(target_os = "macos"))]
+        let default = std::ptr::null_mut();
+        dlsym(default, name.as_ptr())
+    }
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+            fn GetProcAddress(
+                module: *mut std::ffi::c_void,
+                name: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
+        }
+        GetProcAddress(GetModuleHandleW(std::ptr::null()), name.as_ptr())
+    }
+}
+
+/// Optional loader notification, like alloc_epoch's allocator-swap hook.
+/// A rustc build has no such symbol.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_first_present() {
+    let hook = relax_host_symbol(c"relax_first_present");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn relax_first_present() {}

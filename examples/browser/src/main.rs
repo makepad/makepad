@@ -1,30 +1,25 @@
 pub use makepad_widgets;
 
-use makepad_cef::BootstrapResult;
+use makepad_browser_view::{BrowserViews, ViewId};
+use makepad_widgets::image::DrawImage;
 use makepad_widgets::*;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+
+app_main!(App);
 
 const INITIAL_URL: &str = "https://makepad.nl";
+const HOSTED_URL: &str = "https://www.google.nl";
 const NATIVE_BROWSER_COUNT: usize = 20;
-
-fn startup_trace(message: &str) {
-    use std::io::Write;
-
-    let path = std::env::temp_dir().join("makepad-example-browser-startup.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{message}");
-    }
-}
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+    mod.widgets.HostedPageBase = #(HostedPage::register_widget(vm))
+    mod.widgets.HostedPage = set_type_default() do mod.widgets.HostedPageBase{
+        width: Fill
+        height: Fill
+    }
 
     mod.widgets.NativeBrowserListBase = #(NativeBrowserList::register_widget(vm))
     mod.widgets.NativeBrowserList = set_type_default() do mod.widgets.NativeBrowserListBase{
@@ -70,7 +65,6 @@ script_mod! {
                 browser := Browser{
                     width: Fill
                     height: Fill
-                    backend: BrowserBackend.Native
                     url: "https://makepad.nl"
                 }
             }
@@ -88,7 +82,7 @@ script_mod! {
         }
 
         cef_tab := DockTab{
-            name: "CEF"
+            name: "Hosted CEF"
             template: @PermanentTab
             kind: @TabCEF
         }
@@ -103,11 +97,9 @@ script_mod! {
             width: Fill
             height: Fill
 
-            cef_browser := Browser{
+            cef_browser := mod.widgets.HostedPage{
                 width: Fill
                 height: Fill
-                backend: BrowserBackend.CEF
-                url: "https://www.google.nl"
             }
         }
 
@@ -157,6 +149,63 @@ script_mod! {
                 }
             }
         }
+    }
+}
+
+/// A page of the browser host (Chromium in its own process, the one CEF
+/// path): drawn from its frame ring, sized to the widget, given its hits.
+#[derive(Script, ScriptHook, Widget)]
+pub struct HostedPage {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawImage,
+    #[rust]
+    views: Option<BrowserViews>,
+    #[rust]
+    view: Option<ViewId>,
+}
+
+impl Widget for HostedPage {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let Some(views) = &mut self.views else { return };
+        if views.handle_event(cx, event) {
+            self.draw_bg.redraw(cx);
+        }
+        let Some(view) = self.view else { return };
+        let area = self.draw_bg.area();
+        let hit = event.hits_with_capture_overload(cx, area, true);
+        if let Hit::FingerDown(_) = hit {
+            cx.set_key_focus(area);
+        }
+        let rect = area.is_valid(cx).then(|| area.rect(cx));
+        views.forward_hit(cx, view, &hit, |abs| rect.map(|rect| abs - rect.pos));
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.peek_walk_turtle(walk);
+        let views = self.views.get_or_insert_with(|| BrowserViews::new("makepad-example-browser"));
+        if self.view.is_none() {
+            self.view = views.open(HOSTED_URL, true, 0xff00_0000);
+        }
+        if let Some(view) = self.view {
+            views.set_size(view, rect.size, cx.current_dpi_factor());
+        }
+        views.service(cx);
+        match self.view.and_then(|view| views.frame(view)) {
+            Some(frame) if frame.info.width > 0 => {
+                self.draw_bg.image_scale = vec2(frame.info.width as f32 / frame.alloc[0] as f32, frame.info.height as f32 / frame.alloc[1] as f32);
+                self.draw_bg.draw_vars.set_texture(0, &frame.texture);
+            }
+            _ => self.draw_bg.draw_vars.empty_texture(0),
+        }
+        self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
     }
 }
 
@@ -273,100 +322,4 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
-}
-
-fn main() {
-    app_main();
-}
-
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
-pub fn app_main() {
-    startup_trace(&format!(
-        "start exe={} bundled_env={:?} args={:?}",
-        std::env::current_exe()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "<unresolved>".to_string()),
-        std::env::var_os("MAKEPAD_CEF_APP_BUNDLE_EXEC"),
-        std::env::args().collect::<Vec<_>>()
-    ));
-
-    if let Err(err) = makepad_cef::reexec_into_app_bundle_if_needed() {
-        startup_trace(&format!("bundle re-exec failed: {err}"));
-        panic!("CEF bundle re-exec failed: {err}");
-    }
-    startup_trace("bundle re-exec ok");
-
-    match makepad_cef::bootstrap() {
-        Ok(BootstrapResult::Continue) => {}
-        Ok(BootstrapResult::Exit(code)) => {
-            startup_trace(&format!("bootstrap exit {code}"));
-            std::process::exit(code)
-        }
-        Err(err) => {
-            startup_trace(&format!("bootstrap error: {err}"));
-            panic!("CEF bootstrap failed: {err}")
-        }
-    }
-    startup_trace("bootstrap continue");
-
-    Cx::init_log();
-    if Cx::pre_start() {
-        startup_trace("Cx::pre_start returned true");
-        return;
-    }
-    startup_trace("Cx::pre_start returned false");
-
-    if let Err(err) = makepad_cef::initialize() {
-        startup_trace(&format!("cef initialize error: {err}"));
-        panic!("CEF initialize failed: {err}");
-    }
-    startup_trace("cef initialize ok");
-
-    // What `app_main!` does for its apps: this build's package dir and icons.
-    makepad_widgets::makepad_platform::app_meta::set_app_build_meta(makepad_widgets::_app_build_meta!());
-    let app = Rc::new(RefCell::new(None));
-    let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
-        if let Event::Startup = event {
-            *app.borrow_mut() = Some(cx.with_vm(|vm| {
-                let value = <App as AppMain>::script_mod(vm);
-                let mut app = <App as ScriptNew>::script_from_value(vm, value);
-                <App as AppMain>::after_new_from_script(vm, &mut app);
-                app
-            }));
-            cx.start_hot_reload_file_observer_if_requested();
-        }
-        if let Event::LiveEdit = event {
-            let mut app_ref = app.borrow_mut();
-            if let Some(app) = app_ref.as_mut() {
-                cx.with_vm(|vm| {
-                    let value = vm.with_reload(|vm| <App as AppMain>::script_mod(vm));
-                    <App as ScriptApply>::script_apply(
-                        app,
-                        vm,
-                        &Apply::Reload,
-                        &mut Scope::empty(),
-                        value,
-                    );
-                });
-            }
-        }
-        if let Some(app) = &mut *app.borrow_mut() {
-            <dyn AppMain>::handle_event(app, cx, event);
-        }
-    }))));
-
-    let studio_http = resolve_studio_http();
-    cx.borrow_mut().init_websockets(&studio_http);
-    if should_run_stdin_loop_from_env() {
-        cx.borrow_mut().in_makepad_studio = true;
-    }
-    cx.borrow_mut().init_cx_os();
-    Cx::event_loop(cx.clone());
-    drop(cx);
-    makepad_cef::shutdown();
-}
-
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))]
-pub fn app_main() {
-    panic!("makepad-example-browser is desktop-only");
 }

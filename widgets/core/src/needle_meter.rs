@@ -9,7 +9,20 @@
 //!
 //! `needle_angle` is the one mapping from a value to an angle; the shader
 //! runs the same arithmetic, and a test holds it.
-use crate::{lamp::{amount_of, Glide}, makepad_derive_widget::*, makepad_draw::*, widget::*};
+//!
+//! The face can have glass over it that answers the pointer (`field_reach`):
+//! `draw_glass`, drawn over the face and its caption only while the reach
+//! is above zero, carries the pointer's field and the trail of drops the
+//! pointer leaves as it moves across (see `PointerGlass`), and with
+//! `glass_backdrop` reads the face under it while the trail is alive, so a
+//! sheet's glass can bend the needle and the scale. Off by default.
+use crate::{
+    lamp::{amount_of, Glide},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    pointer_field::{PointerGlass, PointerGlassSetup},
+    widget::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -40,6 +53,24 @@ script_mod! {
         label: ""
         /** dimmed, for a meter that is not live 0..1 step 1 */
         disabled: false
+        /** how far past the face the pointer's field and trail reach, in points; 0 keeps them and the glass off 0..24 step 0.5 */
+        field_reach: 0.0
+        /** how far the pointer moves between the trail's drops, in points 1..40 step 0.5 */
+        trail_spacing: 6.0
+        /** how long a drop of the trail lives, in seconds 0.2..4 step 0.05 */
+        trail_life: 1.3
+        /** while the trail is alive, the glass reads the face under it from the window's scene */
+        glass_backdrop: false
+
+        // The glass over the face, drawn only while `field_reach` is above
+        // zero; clear until a sheet gives it a pixel function. It gets the
+        // face's corner as `face_radius`.
+        draw_glass +: {
+            face_radius: instance(4.0)
+            pixel: fn() {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+        }
 
         draw_label +: {
             color: theme.color_screen_ink
@@ -206,6 +237,10 @@ pub struct NeedleMeter {
     draw_bg: DrawNeedleMeter,
     #[live]
     draw_label: DrawText,
+    /// The glass over the face and its caption, drawn only while
+    /// `field_reach` is above zero.
+    #[live]
+    draw_glass: DrawQuad,
     /// Where the needle is sent, 0 to 1 along the scale.
     #[live]
     pub value: f64,
@@ -215,6 +250,30 @@ pub struct NeedleMeter {
     pub label: String,
     #[live]
     pub disabled: bool,
+    /// How far past the face, in points, the pointer is in reach of the
+    /// glass: above zero, `draw_glass` is drawn over the face and its
+    /// caption and gets the pointer's field and the trail of drops the
+    /// pointer leaves as it moves (`pointer_field`, `trail_0` to
+    /// `trail_7` and `trail_life`, see [`PointerGlass`]). Zero, the
+    /// default, draws no glass.
+    #[live]
+    pub field_reach: f64,
+    /// How far the pointer moves between the trail's drops, in points.
+    #[live(6.0)]
+    pub trail_spacing: f64,
+    /// How long a drop of the trail lives, in seconds: the frames stop when
+    /// the newest drop is this old.
+    #[live(1.3)]
+    pub trail_life: f64,
+    /// While the trail is alive, the glass is drawn over the face on an
+    /// overlay with the window's scene of the frame bound (`has_gauss`,
+    /// slot 0 `scene_texture`, `source_size`, `source_y_flip`), so its
+    /// shader can read the face under it and bend it. At rest it is drawn
+    /// in place with nothing bound. False, the default, never lifts it.
+    #[live]
+    pub glass_backdrop: bool,
+    #[rust]
+    pointer_glass: PointerGlass,
     #[rust]
     glide: Glide,
     #[rust]
@@ -242,6 +301,15 @@ impl NeedleMeter {
     /// Where the needle stands now, on its way there.
     pub fn shown(&self) -> f64 {
         self.glide.value() as f64
+    }
+
+    fn glass_setup(&self) -> PointerGlassSetup {
+        PointerGlassSetup {
+            reach: self.field_reach.max(0.0),
+            spacing: self.trail_spacing,
+            life: self.trail_life,
+            backdrop: self.glass_backdrop,
+        }
     }
 
     fn head_for(&mut self, cx: &mut Cx) {
@@ -282,10 +350,24 @@ impl Widget for NeedleMeter {
             self.draw_label.color = rest;
         }
         self.draw_bg.end(cx);
+        if self.field_reach > 0.0 {
+            let rect = self.draw_bg.area().rect(cx);
+            let mut radius = [0.0f32];
+            self.draw_bg.get_uniform(cx, id!(border_radius), &mut radius);
+            self.draw_glass.draw_vars.set_dyn_instance(cx, id!(face_radius), &radius);
+            let setup = self.glass_setup();
+            self.pointer_glass.draw(cx, &mut self.draw_glass, rect, &setup);
+        }
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.field_reach > 0.0 {
+            let setup = self.glass_setup();
+            if self.pointer_glass.handle_event(cx, event, &mut self.draw_glass, &setup) {
+                self.draw_bg.redraw(cx);
+            }
+        }
         if let Some(ne) = self.next_frame.is_event(event) {
             let dt = (ne.time - self.last_tick).max(0.0) as f32;
             self.last_tick = ne.time;

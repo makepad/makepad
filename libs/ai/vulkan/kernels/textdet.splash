@@ -1,0 +1,359 @@
+// Channel-major maps have a four-float-aligned spatial row. Every writer
+// clears the tail, including activations whose value at zero is nonzero.
+let flat = {
+    workgroup_size: 128
+    index: fn() { return (group_id().y * 65535 + group_id().x) * 128 + local_id().x }
+    act: shader.uniform(u32)
+    act_a: shader.uniform(f32)
+    act_b: shader.uniform(f32)
+    activate: fn(v) {
+        var out = v
+        if self.act == 1 { out = max(v, vec4f(0.0)) }
+        if self.act == 2 { out = v * clamp(v + 3.0, vec4f(0.0), vec4f(6.0)) / 6.0 }
+        if self.act == 3 { out = clamp(v * self.act_a + self.act_b, vec4f(0.0), vec4f(1.0)) }
+        if self.act == 4 { out = 1.0 / (1.0 + exp(-v)) }
+        if self.act == 5 { out = v * clamp(v + 3.0, vec4f(0.0), vec4f(6.0)) / 6.0 * self.act_a + self.act_b }
+        return out
+    }
+    finish: fn(v, pixel, size) {
+        var out = self.activate(v)
+        for j in 0..4 { if pixel + j >= size { out[j] = 0.0 } }
+        return out
+    }
+}
+
+let spatial = flat{
+    x: shader.buffer(f32)
+    dst: shader.buffer_rw(vec4f)
+    ic: shader.uniform(u32)
+    ih: shader.uniform(u32)
+    iw: shader.uniform(u32)
+    xs: shader.uniform(u32)
+    channels: shader.uniform(u32)
+    oh: shader.uniform(u32)
+    ow: shader.uniform(u32)
+    os: shader.uniform(u32)
+}
+
+let conv = spatial{
+    kh: shader.uniform(u32)
+    kw: shader.uniform(u32)
+    sh: shader.uniform(u32)
+    sw: shader.uniform(u32)
+    pt: shader.uniform(u32)
+    pl: shader.uniform(u32)
+}
+
+{
+    // Kokoro's 32x32x32 tile uses 8 KiB shared memory. Flattening the tile
+    // grid also handles a wide feature map without exceeding 65535 groups.
+    textdet_gemm: flat{
+        a: shader.buffer(vec4f)
+        b: shader.buffer(vec4f)
+        bias: shader.buffer(f32)
+        dst: shader.buffer_rw(vec4f)
+        m: shader.uniform(u32)
+        n: shader.uniform(u32)
+        k: shader.uniform(u32)
+        astride: shader.uniform(u32)
+        bstride: shader.uniform(u32)
+        dstride: shader.uniform(u32)
+        col_offset: shader.uniform(u32)
+        has_bias: shader.uniform(u32)
+        aa: shader.workgroup(f32, 1024)
+        bb: shader.workgroup(vec4f, 256)
+        main: fn() {
+            let tile = group_id().y * 65535 + group_id().x
+            let tiles_n = (self.n - 1) / 32 + 1
+            let mr = (tile / tiles_n) * 32
+            let nc = (tile % tiles_n) * 8
+            if mr >= self.m { return }
+            let t = local_id().x
+            let row = t / 8
+            let col = t % 8
+            var acc0 = vec4f(0.0)
+            var acc1 = vec4f(0.0)
+            let tiles_k = (self.k - 1) / 32 + 1
+            for kt in 0..tiles_k {
+                let base = kt * 32
+                for half in 0..2 {
+                    let r = row + half * 16
+                    var av = vec4f(0.0)
+                    var bv = vec4f(0.0)
+                    if mr + r < self.m && base + col * 4 < self.k {
+                        av = self.a[(mr + r) * (self.astride / 4) + base / 4 + col]
+                    }
+                    if base + r < self.k && (nc + col) * 4 < self.n {
+                        bv = self.b[(base + r) * (self.bstride / 4) + nc + col]
+                    }
+                    for j in 0..4 { self.aa[r * 32 + col * 4 + j] = av[j] }
+                    self.bb[r * 8 + col] = bv
+                }
+                barrier()
+                for j in 0..32 {
+                    let bv = self.bb[j * 8 + col]
+                    acc0 += self.aa[row * 32 + j] * bv
+                    acc1 += self.aa[(row + 16) * 32 + j] * bv
+                }
+                barrier()
+            }
+            let pixel = (nc + col) * 4
+            if pixel < self.n {
+                if mr + row < self.m {
+                    var bv = 0.0
+                    if self.has_bias != 0 { bv = self.bias[mr + row] }
+                    self.dst[(mr + row) * (self.dstride / 4) + self.col_offset / 4 + nc + col] = self.finish(acc0 + bv, pixel, self.n)
+                }
+                if mr + row + 16 < self.m {
+                    var bv = 0.0
+                    if self.has_bias != 0 { bv = self.bias[mr + row + 16] }
+                    self.dst[(mr + row + 16) * (self.dstride / 4) + self.col_offset / 4 + nc + col] = self.finish(acc1 + bv, pixel, self.n)
+                }
+            }
+        }
+    }
+
+    textdet_im2col2d: conv{
+        col_offset: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let row = i / (self.os / 4)
+            // os is the scratch row stride; oh/ow still describe the full map.
+            let pixel = self.col_offset + (i % (self.os / 4)) * 4
+            if row < self.ic * self.kh * self.kw {
+                let channel = row / (self.kh * self.kw)
+                let ky = (row / self.kw) % self.kh
+                let kx = row % self.kw
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let iy = ((pixel + j) / self.ow) * self.sh + ky
+                        let ix = ((pixel + j) % self.ow) * self.sw + kx
+                        if iy >= self.pt && ix >= self.pl && iy - self.pt < self.ih && ix - self.pl < self.iw {
+                            value[j] = self.x[channel * self.xs + (iy - self.pt) * self.iw + ix - self.pl]
+                        }
+                    }
+                }
+                self.dst[i] = value
+            }
+        }
+    }
+
+    textdet_depthwise: conv{
+        w: shader.buffer(f32)
+        bias: shader.buffer(f32)
+        ws: shader.uniform(u32)
+        multiplier: shader.uniform(u32)
+        has_bias: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let oy = (pixel + j) / self.ow
+                        let ox = (pixel + j) % self.ow
+                        var sum = 0.0
+                        if self.has_bias != 0 { sum = self.bias[channel] }
+                        for ky in 0..self.kh {
+                            let iy = oy * self.sh + ky
+                            for kx in 0..self.kw {
+                                let ix = ox * self.sw + kx
+                                if iy >= self.pt && ix >= self.pl && iy - self.pt < self.ih && ix - self.pl < self.iw {
+                                    sum += self.w[channel * self.ws + ky * self.kw + kx] * self.x[(channel / self.multiplier) * self.xs + (iy - self.pt) * self.iw + ix - self.pl]
+                                }
+                            }
+                        }
+                        value[j] = sum
+                    }
+                }
+                self.dst[i] = self.finish(value, pixel, self.oh * self.ow)
+            }
+        }
+    }
+
+    // With kernel == stride each output has one tap. Gathering the GEMM's
+    // tap rows avoids both atomics and a separate clear of the output map.
+    textdet_shuffle: conv{
+        bias: shader.buffer(f32)
+        has_bias: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                var bias = 0.0
+                if self.has_bias != 0 { bias = self.bias[channel] }
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let oy = (pixel + j) / self.ow
+                        let ox = (pixel + j) % self.ow
+                        let row = (channel * self.kh + oy % self.kh) * self.kw + ox % self.kw
+                        value[j] = self.x[row * self.xs + (oy / self.kh) * self.iw + ox / self.kw] + bias
+                    }
+                }
+                self.dst[i] = self.finish(value, pixel, self.oh * self.ow)
+            }
+        }
+    }
+
+    // General transposed convolution: one writer per output, including gaps
+    // when stride exceeds the kernel. Visit contributors in CPU sum order.
+    textdet_transpose: conv{
+        w: shader.buffer(f32)
+        bias: shader.buffer(f32)
+        ws: shader.uniform(u32)
+        has_bias: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let oy = (pixel + j) / self.ow
+                        let ox = (pixel + j) % self.ow
+                        var iy0 = u32(0)
+                        var ix0 = u32(0)
+                        if oy >= self.kh { iy0 = (oy - self.kh) / self.sh + 1 }
+                        if ox >= self.kw { ix0 = (ox - self.kw) / self.sw + 1 }
+                        let iy1 = min(oy / self.sh + 1, self.ih)
+                        let ix1 = min(ox / self.sw + 1, self.iw)
+                        var sum = 0.0
+                        if self.has_bias != 0 { sum = self.bias[channel] }
+                        for c in 0..self.ic {
+                            for iy in iy0..iy1 {
+                                let ky = oy - iy * self.sh
+                                for ix in ix0..ix1 {
+                                    let kx = ox - ix * self.sw
+                                    let row = (channel * self.kh + ky) * self.kw + kx
+                                    sum += self.x[c * self.xs + iy * self.iw + ix] * self.w[row * self.ws + c]
+                                }
+                            }
+                        }
+                        value[j] = sum
+                    }
+                }
+                self.dst[i] = self.finish(value, pixel, self.oh * self.ow)
+            }
+        }
+    }
+
+    textdet_element: flat{
+        x: shader.buffer(vec4f)
+        other: shader.buffer(vec4f)
+        dst: shader.buffer_rw(vec4f)
+        channels: shader.uniform(u32)
+        oh: shader.uniform(u32)
+        ow: shader.uniform(u32)
+        os: shader.uniform(u32)
+        mode: shader.uniform(u32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = self.x[i]
+                if self.mode == 1 { value += self.other[i] }
+                if self.mode == 2 { value *= self.other[i] }
+                if self.mode == 3 { value *= self.other[channel].x }
+                self.dst[i] = self.finish(value, pixel, self.oh * self.ow)
+            }
+        }
+    }
+
+    // A shared-memory tree works on PowerVR too: no subgroup shuffles in
+    // loops containing barriers, which that driver's pipeline builder rejects.
+    textdet_global_avg: {
+        workgroup_size: 128
+        x: shader.buffer(vec4f)
+        dst: shader.buffer_rw(vec4f)
+        channels: shader.uniform(u32)
+        n: shader.uniform(u32)
+        xs: shader.uniform(u32)
+        partial: shader.workgroup(f32, 128)
+        main: fn() {
+            let channel = group_id().y * 65535 + group_id().x
+            if channel >= self.channels { return }
+            let lane = local_id().x
+            var col = lane
+            var sum = 0.0
+            while col < self.xs / 4 {
+                let pixel = col * 4
+                let value = self.x[channel * (self.xs / 4) + col]
+                for j in 0..4 { if pixel + j < self.n { sum += value[j] } }
+                col += 128
+            }
+            self.partial[lane] = sum
+            barrier()
+            var step = u32(64)
+            while step > 0 {
+                if lane < step { self.partial[lane] += self.partial[lane + step] }
+                barrier()
+                step = step / 2
+            }
+            if lane == 0 { self.dst[channel] = vec4f(self.partial[0] / float(self.n), 0.0, 0.0, 0.0) }
+        }
+    }
+
+    textdet_pool: spatial{
+        kernel: shader.uniform(u32)
+        stride: shader.uniform(u32)
+        pad: shader.uniform(u32)
+        is_max: shader.uniform(u32)
+        initial: shader.uniform(f32)
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let oy = (pixel + j) / self.ow
+                        let ox = (pixel + j) % self.ow
+                        var sum = self.initial
+                        var count = u32(0)
+                        for ky in 0..self.kernel {
+                            let iy = oy * self.stride + ky
+                            for kx in 0..self.kernel {
+                                let ix = ox * self.stride + kx
+                                if iy >= self.pad && ix >= self.pad && iy - self.pad < self.ih && ix - self.pad < self.iw {
+                                    let v = self.x[channel * self.xs + (iy - self.pad) * self.iw + ix - self.pad]
+                                    if self.is_max != 0 { sum = max(sum, v) } else { sum += v }
+                                    count += 1
+                                }
+                            }
+                        }
+                        if self.is_max == 0 { sum = sum / float(max(count, u32(1))) }
+                        value[j] = sum
+                    }
+                }
+                self.dst[i] = value
+            }
+        }
+    }
+
+    textdet_nearest: spatial{
+        main: fn() {
+            let i = self.index()
+            let channel = i / (self.os / 4)
+            let pixel = (i % (self.os / 4)) * 4
+            if channel < self.channels {
+                var value = vec4f(0.0)
+                for j in 0..4 {
+                    if pixel + j < self.oh * self.ow {
+                        let iy = ((pixel + j) / self.ow) * self.ih / self.oh
+                        let ix = ((pixel + j) % self.ow) * self.iw / self.ow
+                        value[j] = self.x[channel * self.xs + iy * self.iw + ix]
+                    }
+                }
+                self.dst[i] = value
+            }
+        }
+    }
+}

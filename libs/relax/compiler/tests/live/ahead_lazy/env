@@ -1,0 +1,4 @@
+# No speculation: the v2 call must compile cold itself.
+MAKEPAD_RUN_SPEC=0
+MAKEPAD_RUN_RELOAD_TRACE=1
+MAKEPAD_RUN_TRACE=lower:cold

@@ -1,0 +1,32 @@
+# code — a local coding agent as a native makepad window. The agent core
+# (agent/, crate makepad-code-agent: tools, approvals, context, sub-agents)
+# talks to a model through the AI Hub chat session and has no UI dependency;
+# src/ui is the window. The terminal front end is cli/ (makepad-code).
+
+[package]
+name = "makepad-app-code"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad Code: a local coding agent with a GPU-rendered workspace"
+default-run = "makepad-app-code"
+
+[[bin]]
+name = "makepad-app-code"
+path = "src/main.rs"
+
+[dependencies]
+makepad-code-agent = { path = "agent" }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass", "rich_text", "data", "dock"] }
+makepad-code-editor = { path = "../../code_editor" }
+# The terminal tabs: the terminal app's widget and PTY, as a library.
+makepad-app-terminal = { path = "../terminal", default-features = false }
+makepad-regex = { path = "../../libs/regex" }
+makepad-git = { path = "../../libs/git" }
+# The app table the run panel lists (ide/run.rs).
+makepad-app-registry = { path = "../../libs/app_registry" }
+
+[package.metadata.makepad.desktop]
+name = "Makepad Code"
+identifier = "nl.makepad.code"
+icon = "resources/code-icon.png"

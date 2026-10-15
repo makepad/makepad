@@ -525,6 +525,77 @@
      "revision": "44ea96fbcead75dfa908449883350ada44601791",
      "size": 17236328572,
      "sha256": "ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
+    }
+   ]
+  },
+  {
+   "id": "flux1-schnell-q4",
+   "domain": "image",
+   "backend": "flux",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+    "summary": "FLUX.1-schnell weights are Apache-2.0 (quantization by city96, same licence). Permissive use, including commercial, subject to the Apache-2.0 conditions (attribution, NOTICE retention). This stack does not host the weights.",
+    "restriction": "none"
+   },
+   "vram_gb": 18.0,
+   "note": "FLUX.1-schnell for 24 GB cards: the 4-step distilled DiT as city96's GGUF Q4_K_S (ComfyUI-GGUF reference conversion, 6.8 GB; canonical double_blocks.* names, loaded by libs/ai/models/flux flux_gguf) in a SPLIT bundle with the shared FLUX VAE (Kijai flux-vae-bf16) and the ComfyUI text encoders (clip_l + t5xxl fp8) that flux1-fill-dev already pins - same cache_as, so the blobs are shared. Measured on node 165 (RTX PRO 6000, 2026-10-13, 4 steps): 512px cold 9.4 s incl. all loads, warm 2.2 s, peak 13.6 GB; 1024px warm 7.8 s, peak 17.7 GB (CUDA pool included); vram_gb 18 is that 1024 peak, so it admits on a 24 GB card next to the UI reserve once the chat model yields. Default 4 steps. Request: prompt (+ width/height/steps/seed).",
+   "files": [
+    {
+     "role": "diffusion_model",
+     "repo": "city96/FLUX.1-schnell-gguf",
+     "path": "flux1-schnell-Q4_K_S.gguf",
+     "cache_as": "unet/flux1-schnell-Q4_K_S.gguf",
+     "revision": "f495746ed9c5efcf4661f53ef05401dceadc17d2",
+     "size": 6783943712,
+     "sha256": "4fd16477b3a5296d0cf722c4b92a9fd7f30d09ac7495826e4465d8de9c9fd973"
+    },
+    {
+     "role": "vae",
+     "repo": "Kijai/flux-fp8",
+     "path": "flux-vae-bf16.safetensors",
+     "cache_as": "vae/flux-ae-bf16.safetensors",
+     "revision": "2ef6f85f9f4b94634f995ba0bfa84fd3ab865c1d",
+     "size": 167664710,
+     "sha256": "0c0c8ac49850d6bd174107d4001685f4f6c876768a1c84dde751f2aed69f46ce"
+    },
+    {
+     "role": "clip_l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp8_e4m3fn.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 4893934904,
+     "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -550,6 +621,15 @@
      "revision": "7ec07cd0cd2cb88298a80c905ad38250e1389880",
      "size": 17246524772,
      "sha256": "8e91b68084b53a7fc44ed2a3756d821e355ac1a7b6fe29be760c1db532f3d88a"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -604,6 +684,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 9787841024,
      "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -658,6 +747,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 9787841024,
      "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -711,6 +809,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 4893934904,
      "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -1010,6 +1117,41 @@
    ]
   },
   {
+   "id": "qwen3.5-9b",
+   "domain": "text",
+   "backend": "llm",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen",
+    "summary": "Qwen3.5-9B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
+    "restriction": "none"
+   },
+   "vram_gb": 7.5,
+   "note": "The middle text model: a chat/translation model that fits next to a 4K desktop, Stage and the voice models on a 24 GB card where the 27B leaves the UI no room. Same files as qwen3.5-9b-vision (one download serves both). Dense Qwen3.5 architecture (general.architecture=qwen35 in GGUF), so it matches the in-repo Makepad-Llama model contract. UD-Q4_K_XL is 5.97 GB decimal. Apache-2.0.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.5-9B-GGUF",
+     "path": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
+     "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+     "cache_as": "llm/Qwen3.5-9B-UD-Q4_K_XL.gguf",
+     "size": 5966095584,
+     "sha256": "6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.5-9B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+     "cache_as": "llm/Qwen3.5-9B-mmproj-F16.gguf",
+     "size": 918166080,
+     "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+    }
+   ]
+  },
+  {
    "id": "qwen3.8-27b",
    "domain": "text",
    "backend": "llm",
@@ -1021,8 +1163,8 @@
     "summary": "Qwen3.8-27B (and the Unsloth GGUF used here) is Apache-2.0. Permissive use, including commercial, subject to Apache-2.0 conditions.",
     "restriction": "none"
    },
-   "vram_gb": 19.0,
-   "note": "Preferred AI Content prompt expander when its weights are already ready on a live node. Qwen3.8-27B is a dense Qwen3.5-architecture conditional-generation model (general.architecture=qwen35 in GGUF), so the text-only path matches the in-repo Makepad-Llama model contract. The upstream model also has a vision tower; this text registry entry deliberately carries only the language GGUF, while a future vision-capable serving entry may pair it with mmproj-BF16.gguf. Apache-2.0. The audited Unsloth Q4_K_M is 17.1 GB decimal (~15.9 GiB), leaving materially more headroom than UD-Q4_K_XL on a 24 GB GPU. AI Content never lets an absent/downloading copy displace the ready qwen3.5-9b fallback.",
+   "vram_gb": 18.4,
+   "note": "Preferred AI Content prompt expander when its weights are already ready on a live node. Qwen3.8-27B is a dense Qwen3.5-architecture conditional-generation model (general.architecture=qwen35 in GGUF), so the text-only path matches the in-repo Makepad-Llama model contract. The entry also carries the model's own vision tower (mmproj-F16, 0.93 GB): chat turns may carry pictures (chat_messages[].images), which the resident chat session encodes and prefills in place, so one copy of the weights serves text and pictures. Apache-2.0. The audited Unsloth Q4_K_M is 17.1 GB decimal (~15.9 GiB), leaving materially more headroom than UD-Q4_K_XL on a 24 GB GPU. AI Content never lets an absent/downloading copy displace the ready qwen3.5-9b fallback.",
    "files": [
     {
      "role": "llm-gguf",
@@ -1032,6 +1174,15 @@
      "cache_as": "llm/Qwen3.8-27B-Q4_K_M.gguf",
      "size": 17106775008,
      "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+    },
+    {
+     "role": "mmproj",
+     "repo": "unsloth/Qwen3.8-27B-GGUF",
+     "path": "mmproj-F16.gguf",
+     "revision": "fe1e2a23d973adb629709749dc4f6756df66ef10",
+     "cache_as": "llm/Qwen3.8-27B-mmproj-F16.gguf",
+     "size": 927607488,
+     "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
     }
    ]
   },
@@ -1189,7 +1340,7 @@
     "summary": "OpenAI Whisper large-v3-turbo weights in ggml format as distributed by ggerganov/whisper.cpp (MIT). Permissive use, including commercial.",
     "restriction": "none"
    },
-   "vram_gb": 2.0,
+   "vram_gb": 1.9,
    "note": "Whisper large-v3-turbo speech-to-text via the in-repo pure-Rust port (makepad-ai-speech whisper module; Metal/CUDA/CPU). Request: input_b64 audio/wav (any rate/channels, downmixed + resampled to 16 kHz) + language. Output: one application/json TranscriptJson {text, segments[{start_ms,end_ms,text}]}. The wire side of the stt.whisper pipe; apps reach it through AiHub::start_stt.",
    "files": [
     {
@@ -1478,6 +1629,33 @@
      "sha256": null,
      "local": false,
      "converts_to": "tts/bm_lewis.mkvoice"
+    },
+    {
+     "role": "g2p-us-lexicon",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/us_lexicon.bin",
+     "cache_as": "tts/us_lexicon.bin",
+     "size": 2917518,
+     "sha256": "294682efc873a8201106f4dddfcb8e1b16c5d47c0fb8ddaf00c351d62212245c",
+     "local": false
+    },
+    {
+     "role": "g2p-zh-pinyin",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/zh_pinyin.bin",
+     "cache_as": "tts/zh_pinyin.bin",
+     "size": 1393676,
+     "sha256": "4d266969277671e6f3238cde2211ab5c6956fc86e08e71e3d9a5f5fdfa3e0471",
+     "local": false
+    },
+    {
+     "role": "g2p-zh-words",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/zh_words.bin",
+     "cache_as": "tts/zh_words.bin",
+     "size": 1838159,
+     "sha256": "ab066b416e8952f97791e09c3770e417ba111df80c13336eb76d4fac0c008169",
+     "local": false
     }
    ]
   },
@@ -2665,7 +2843,7 @@
     "restriction": "community"
    },
    "vram_gb": 29.0,
-   "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served reference-tier through the official diffusers ModularPipeline (music3_worker.py subprocess; diffusers pinned to PR #14456 commit dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d per the model card). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth) are deliberately excluded. OPTIONAL reference-audio roles (music3.md): dav.pth (the official DAV encoder half) + the SimpleTuner open-rvq-encoder v4 (169M, distilled from Music3 output; MiniMax-Music3 license terms) let a 2-60 s clip on input_b64 steer the song's semantic codes every Nth frame (`strength`); text-only jobs never touch them and a box without them refuses reference jobs by name. vram_gb is full bf16 residency; MAKEPAD_MUSIC3_OFFLOAD=1 fits ~22 GB via auto CPU offload. License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
+   "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served by the native in-process engine (makepad-ai-music; needs the `audio` feature and a GPU device). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth) are deliberately excluded. OPTIONAL reference-audio roles (music3.md): dav.pth (the official DAV encoder half) + the SimpleTuner open-rvq-encoder v4 (169M, distilled from Music3 output; MiniMax-Music3 license terms) let a 2-60 s clip on input_b64 steer the song's semantic codes every Nth frame (`strength`); text-only jobs never touch them and a box without them refuses reference jobs by name. vram_gb is full bf16 residency; License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-Music3",
@@ -3140,6 +3318,89 @@
      "cache_as": "music/ACE-Step-1.5-XL/scheduler/scheduler_config.json",
      "size": 484,
      "sha256": "173036e3885cdd41b7af2d2918d4bfb316d789b2ebc17f4534b2d3d2aa824fa2"
+    }
+   ]
+  },
+  {
+   "id": "yue2-3b",
+   "domain": "music",
+   "backend": "yue2",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "CC BY-NC 4.0 (YuE2-3B and YuE2-Vae weights)",
+    "url": "https://huggingface.co/m-a-p/YuE2-3B/blob/main/LICENSE",
+    "summary": "YuE2-3B and YuE2-Vae weights: Creative Commons Attribution-NonCommercial 4.0 (the pinned LICENSE). Non-commercial use with attribution to YuE2 (m-a-p). The authors' MODEL_LICENSE in github.com/multimodal-art-projection/YuE (2026-09-16) adds an individual-creator permission: people acting in an individual capacity may generate songs and publish, sell or license those outputs, under responsible-use conditions. Commercial use of the weights by companies is excluded (separate commercial licence from the authors). Redistributing the weights stays non-commercial. The Oobleck VAE and SnakeBeta code parts are MIT (Stability AI, NVIDIA).",
+    "restriction": "non-commercial",
+    "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+   },
+   "vram_gb": 14.0,
+   "min_vram_gb": 14.0,
+   "min_compute_cap": 8.0,
+   "note": "YuE2-3B full-song generation with an editable score (lyrics + style -> 48 kHz stereo, up to 6 min): one 28-layer AR-NAR mixture-of-transformers backbone (Qwen3-shaped, 2048 hidden, GQA 16/8) writes a chord-annotated ABC score, then 25 Hz codec tokens, then 64-d acoustic latents by 32-step midpoint flow matching; the Oobleck YuE2-Vae decodes them. Native port on the in-repo CUDA store (makepad-ai-music yue2*.rs), no Python. Request: prompt = style tags, lyrics with [Verse]/[Chorus]/... sections, seed; score_mode full|melody|off (default full); score = an ABC score to render instead of planning one (the edit-and-re-render loop); score_only = return the planned score without audio; guidance = text CFG (default 1.0, 1.01 for score_mode off). The song length follows the lyrics/score; seconds is only an upper bound. Artifacts: audio/wav + the ABC score (text, .abc). Measured peak 13.1 GiB (RTX PRO 6000, 204 s song). File set pinned at m-a-p/YuE2-3B 8f24312f and m-a-p/YuE2-Vae 152733a1 (~7.8 GB). Weights CC BY-NC 4.0 (non-commercial).",
+   "files": [
+    {
+     "role": "weights",
+     "repo": "m-a-p/YuE2-3B",
+     "path": "model.safetensors",
+     "revision": "8f24312f187763b9854adeec87e437e2b03bbff1",
+     "cache_as": "music/YuE2-3B/model.safetensors",
+     "size": 7261441640,
+     "sha256": "1d55c42c1a9875c34f5d736e15078449992b044e807ce2a138e6cf289a1e59e9"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "m-a-p/YuE2-3B",
+     "path": "qwen.tiktoken",
+     "revision": "8f24312f187763b9854adeec87e437e2b03bbff1",
+     "cache_as": "music/YuE2-3B/qwen.tiktoken",
+     "size": 2561218,
+     "sha256": "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186"
+    },
+    {
+     "role": "config",
+     "repo": "m-a-p/YuE2-3B",
+     "path": "config.json",
+     "revision": "8f24312f187763b9854adeec87e437e2b03bbff1",
+     "cache_as": "music/YuE2-3B/config.json",
+     "size": 959,
+     "sha256": "ad3477bbef890bf98ae196c1e4b44779494a6231c4ab66f32708eabadf265329"
+    },
+    {
+     "role": "license",
+     "repo": "m-a-p/YuE2-3B",
+     "path": "LICENSE",
+     "revision": "8f24312f187763b9854adeec87e437e2b03bbff1",
+     "cache_as": "music/YuE2-3B/LICENSE",
+     "size": 20309,
+     "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+    },
+    {
+     "role": "notices",
+     "repo": "m-a-p/YuE2-3B",
+     "path": "THIRD_PARTY_NOTICES.md",
+     "revision": "8f24312f187763b9854adeec87e437e2b03bbff1",
+     "cache_as": "music/YuE2-3B/THIRD_PARTY_NOTICES.md",
+     "size": 793,
+     "sha256": "14d3fd9f6fee86b4260b69b0979735b99ffec8c6b4db254567047a4215cd9af3"
+    },
+    {
+     "role": "vae",
+     "repo": "m-a-p/YuE2-Vae",
+     "path": "model.safetensors",
+     "revision": "152733a19ad43aa67e367f9b5503ef8075bb5126",
+     "cache_as": "music/YuE2-Vae/model.safetensors",
+     "size": 530512720,
+     "sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    {
+     "role": "vae-config",
+     "repo": "m-a-p/YuE2-Vae",
+     "path": "config.json",
+     "revision": "152733a19ad43aa67e367f9b5503ef8075bb5126",
+     "cache_as": "music/YuE2-Vae/config.json",
+     "size": 1378,
+     "sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970"
     }
    ]
   },

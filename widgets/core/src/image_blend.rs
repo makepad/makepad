@@ -4,7 +4,7 @@
 //! included.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     image::Image,
     makepad_derive_widget::*,
     makepad_draw::*,

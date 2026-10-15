@@ -34,6 +34,6 @@ pub use modular::linear_mul_reduction;
 
 /// Hint to the compiler that the current path is cold.
 pub fn cold_path() {
-    #[cfg(intrinsics_enabled)]
+    #[cfg(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")))]
     core::intrinsics::cold_path();
 }

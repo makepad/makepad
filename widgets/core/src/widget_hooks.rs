@@ -19,7 +19,6 @@ use crate::{
     view::View,
     widget::WidgetRef,
 };
-use std::any::TypeId;
 
 /// Answers whether a family took an event before the window's own dispatch.
 pub type WindowIntercept = fn(&mut Cx, &Event, &mut View, WindowId) -> bool;
@@ -35,7 +34,7 @@ pub struct TweakerHooks {
     /// Installed as `Cx::tweak_callback` by `set_ui_root`.
     pub tweak_callback: fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>,
     /// The widget type the tree tab reports as an inspector.
-    pub inspector_type: TypeId,
+    pub inspector_type: ScriptTypeId,
     /// The design delta since `after_generation`, for the chat's Studio
     /// feedback; `None` while nothing changed.
     pub feedback_snapshot: fn(u64) -> Option<TweakFeedbackSnapshot>,
@@ -100,7 +99,7 @@ impl WidgetHooks {
     }
 
     /// Whether `type_id` is the design overlay's widget type.
-    pub fn is_inspector(cx: &Cx, type_id: Option<TypeId>) -> bool {
+    pub fn is_inspector(cx: &Cx, type_id: Option<ScriptTypeId>) -> bool {
         match (Self::tweaker(cx), type_id) {
             (Some(tweaker), Some(type_id)) => tweaker.inspector_type == type_id,
             _ => false,

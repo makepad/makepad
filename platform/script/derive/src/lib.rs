@@ -1,13 +1,8 @@
 use proc_macro::TokenStream;
 
-mod derive_scriptable;
-mod error;
-mod script;
-mod swizzle;
-use derive_scriptable::*;
-use error::*;
-use script::*;
-use swizzle::*;
+// The expansion logic lives in the library crate makepad-script-derive-impl (Rapid links it
+// directly); these are the rustc proc-macro entry points.
+use makepad_script_derive_impl::*;
 
 #[proc_macro]
 pub fn script(input: TokenStream) -> TokenStream {

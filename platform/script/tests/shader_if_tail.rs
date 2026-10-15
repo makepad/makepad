@@ -4,10 +4,13 @@
 use makepad_script::*;
 fn compile(vertex_body: &str, fragment_body: &str) -> String {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
+    let mut vm = ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    };
     vm.bx.captured_errors = Some(Vec::new());
     let code = format!("use mod.pod.*\nuse mod.math.*\nuse mod.shader\nlet sh = {{\nvertex_pos: shader.vertex_position(vec4f)\npixel: shader.fragment_output(0, vec4f)\nu_n: shader.uniform(0.0)\nv_f: shader.varying(f32)\nvertex: fn() {{\n{vertex_body}\n}}\nfragment: fn() {{\n{fragment_body}\n}}\n}}\nshader.test_compile_draw_source(sh, \"metal\", false)");
-    let value = vm.with_instruction_limit(5_000_000, |vm| vm.eval(ScriptMod { file: "x".into(), code, ..Default::default() }));
+    let value = vm.with_instruction_limit(5_000_000, |vm| vm.eval(ScriptMod::new("", "", "x", 0, 0, &code, &[])));
     vm.bx.heap.string_with(value, |_, s| s.to_string()).unwrap_or_else(|| format!("ERRORS: not a string {value:?}"))
 }
 #[test]

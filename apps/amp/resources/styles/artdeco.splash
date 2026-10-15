@@ -1,0 +1,491 @@
+// title: Art Deco
+// Art Deco — a 1930s luxury radio set in the lobby of the Chrysler Building:
+// black lacquer and polished gold, a sunburst radiating from a gold-framed
+// cinema screen, stepped (ziggurat) borders in thin gold pinstripes, cream
+// enamel inlays, a sunrise fan meter and a spectrum drawn as a skyline of
+// stepped gold towers.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: cream and gold on a black lacquer screen ----
+mod.widgets.hw_palette.screen_bg = #x0a0907
+mod.widgets.hw_palette.screen_text = #xf3e7c9
+mod.widgets.hw_palette.screen_muted = #xa9935f
+mod.widgets.hw_palette.accent = #xf0c35a
+mod.widgets.hw_palette.panel_text = #x1b150b
+mod.widgets.hw_palette.panel_muted = #x6b5a38
+mod.widgets.hw_palette.menu_bg = #x0e0c09
+mod.widgets.hw_palette.spill_color = #xffc862
+mod.widgets.hw_palette.spill_mono = 0.55
+mod.widgets.hw_palette.spill_knee = 1.4
+mod.widgets.hw_palette.caption_bg = #x080706
+mod.widgets.hw_palette.caption_text = #xd9b562
+
+// ---- the front: black lacquer, a sunburst behind the screen ----
+mod.widgets.Window.pass.clear_color = #x080706
+mod.widgets.HwChassis.draw_bg.ground = #x0e0d0b
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 0.90, 0.66, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.78, 0.36, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.5, 0.7)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.25, 0.30, 1.10)
+// The stepped distance from the edge: iso-lines are rectangles whose
+// corners step in twice (a ziggurat), `s` pt per step.
+mod.widgets.HwChassis.draw_bg.zig = fn(p: vec2, s: float) -> float {
+    let ex = min(p.x, self.rect_size.x - p.x)
+    let ey = min(p.y, self.rect_size.y - p.y)
+    let a = min(ex, ey - s * 2.0)
+    let b = min(ex - s, ey - s)
+    let c = min(ex - s * 2.0, ey)
+    return max(max(a, b), c)
+}
+mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    // The sunburst: wedges of lacquer and gold hairlines round the screen.
+    let c = vec2(s.x * 0.487, s.y * 0.22)
+    let q = p - c
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let n = 64.0
+    let f = fract(ang / 6.28318 * n)
+    let wedge = step(0.5, f)
+    let fade = smoothstep(120.0, 260.0, r) * (1.0 - smoothstep(520.0, 980.0, r))
+    var col = base * (1.0 + wedge * 0.22 * fade)
+    let dl = min(f, 1.0 - f) * (6.28318 / n) * r
+    let hair = (1.0 - smoothstep(0.25, 0.25 + px * 1.5, dl)) * fade
+    let gold = vec3(0.86, 0.66, 0.30)
+    col = mix(col, gold, hair * 0.30)
+    // Lacquer: a deep soft reflection across the top.
+    let uv = p / max(s, vec2(1.0, 1.0))
+    let t = uv.x * 0.6 + uv.y - 0.18
+    col = col + vec3(1.0, 0.92, 0.75) * exp(0.0 - (t * t) / 0.012) * 0.035
+    // A stepped gold frame round the whole front: three pinstripes.
+    let e = self.zig(p, 7.0)
+    let l1 = 1.0 - smoothstep(0.45, 0.45 + px * 1.5, abs(e - 4.0))
+    let l2 = 1.0 - smoothstep(0.30, 0.30 + px * 1.5, abs(e - 8.0))
+    let l3 = 1.0 - smoothstep(0.30, 0.30 + px * 1.5, abs(e - 11.0))
+    col = mix(col, vec3(0.95, 0.76, 0.38), clamp(l1 + l2 * 0.8 + l3 * 0.6, 0.0, 1.0))
+    return col
+}
+
+// ---- raised plates: black lacquer escutcheons with stepped gold borders ----
+mod.widgets.HwPlate.draw_bg.ground = #x121110
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 0.88, 0.60, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.78, 0.36, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.6, 0.9, 2.0, 0.85)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.55, 0.75, 0.2)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.75, 10.0, 1.0, 0.65)
+mod.widgets.HwPlate.draw_bg.sheen = vec4(0.05, 0.18, 0.28, 0.5)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.6, 0.6)
+mod.widgets.HwPlate.radius = 3
+mod.widgets.HwPlate.draw_bg.zig = fn(p: vec2, s: float) -> float {
+    let ex = min(p.x, self.rect_size.x - p.x)
+    let ey = min(p.y, self.rect_size.y - p.y)
+    let a = min(ex, ey - s * 2.0)
+    let b = min(ex - s, ey - s)
+    let c = min(ex - s * 2.0, ey)
+    return max(max(a, b), c)
+}
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let uv = p / max(s, vec2(1.0, 1.0))
+    var col = base * (1.08 - uv.y * 0.16)
+    // A fan rising from the bottom edge: fine gold rays.
+    let c = vec2(s.x * 0.5, s.y - self.inset)
+    let q = p - c
+    let r = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let f = fract(ang / 6.28318 * 44.0)
+    let fan = (1.0 - smoothstep(0.0, 1.0, abs(ang) - 1.35)) * smoothstep(20.0, 60.0, r) * (1.0 - smoothstep(s.x * 0.3, s.x * 0.62, r))
+    col = mix(col, col * 1.6 + vec3(0.05, 0.035, 0.01), step(0.5, f) * fan * 0.6)
+    let fl = min(f, 1.0 - f) * (6.28318 / 44.0) * r
+    col = mix(col, vec3(0.86, 0.66, 0.30), (1.0 - smoothstep(0.25, 0.25 + px * 1.5, fl)) * fan * 0.45)
+    let arc = 1.0 - smoothstep(0.4, 0.4 + px * 1.5, abs(r - s.x * 0.12))
+    col = mix(col, vec3(0.93, 0.74, 0.36), arc * step(abs(ang), 1.4) * 0.9)
+    // Stepped borders: a bold gold line, then two pinstripes inside.
+    let e = self.zig(p - vec2(self.inset, self.inset) * 0.0, 6.0) - self.inset
+    let l1 = 1.0 - smoothstep(0.7, 0.7 + px * 1.5, abs(e - 4.0))
+    let l2 = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(e - 7.5))
+    let l3 = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(e - 10.0))
+    let gold = vec3(0.93, 0.74, 0.36) * (1.1 - uv.y * 0.3)
+    col = mix(col, gold, clamp(l1 + l2 * 0.75 + l3 * 0.5, 0.0, 1.0))
+    return col
+}
+
+// ---- recessed wells: cream enamel inlays with a gold pinstripe ----
+mod.widgets.HwPanel.draw_bg.ground = #xe6dbbd
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(1.0, 0.98, 0.90, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.22, 0.16, 0.06, 1.0)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.78, 0.36, 1.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.7, 8.0, 0.0, 0.45)
+mod.widgets.HwPanel.draw_bg.spill = vec2(2.2, 0.6)
+mod.widgets.HwPanel.draw_bg.grain = 0.015
+mod.widgets.HwPanel.radius = 3
+mod.widgets.HwPanel.draw_bg.zig = fn(p: vec2, s: float) -> float {
+    let ex = min(p.x, self.rect_size.x - p.x)
+    let ey = min(p.y, self.rect_size.y - p.y)
+    let a = min(ex, ey - s * 2.0)
+    let b = min(ex - s, ey - s)
+    let c = min(ex - s * 2.0, ey)
+    return max(max(a, b), c)
+}
+mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    var col = base * (1.03 - uv.y * 0.08) * (1.0 + (self.hw_noise(self.world.xy * 0.03) - 0.5) * 0.04)
+    let e = self.zig(p, 5.0)
+    let l1 = 1.0 - smoothstep(0.35, 0.35 + px * 1.5, abs(e - 4.0))
+    col = mix(col, vec3(0.72, 0.53, 0.20), l1)
+    return col
+}
+
+// ---- the cinema screen's frame: stepped polished gold ----
+mod.widgets.HwBezel.draw_bg.ground = #xc89b43
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(1.0, 0.95, 0.75, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.10, 0.06, 0.01, 1.0)
+mod.widgets.HwBezel.draw_bg.glow_ink = vec4(1.0, 0.80, 0.40, 1.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.6, 6.0, 0.0, 0.5)
+mod.widgets.HwBezel.draw_bg.relief = vec4(1.2, 0.8, 1.0, 0.9)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.1, 0.4)
+mod.widgets.HwBezel.radius = 2
+mod.widgets.HwBezel.draw_bg.zig = fn(p: vec2, s: float) -> float {
+    let ex = min(p.x, self.rect_size.x - p.x)
+    let ey = min(p.y, self.rect_size.y - p.y)
+    let a = min(ex, ey - s * 2.0)
+    let b = min(ex - s, ey - s)
+    let c = min(ex - s * 2.0, ey)
+    return max(max(a, b), c)
+}
+mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let e = self.zig(p, 8.0)
+    // Three stepped tiers falling toward the picture: each lit on its
+    // upper edge, darker at its foot, a black groove between tiers.
+    let tw = 4.0
+    let tier = floor(e / tw)
+    let ft = fract(e / tw)
+    let shade = 1.15 - tier * 0.16 - ft * 0.22
+    let uv = p / max(self.rect_size, vec2(1.0, 1.0))
+    let sweep = 0.85 + 0.35 * exp(0.0 - pow(uv.x - 0.3 + uv.y * 0.2, 2.0) / 0.03)
+    var col = base * shade * sweep
+    let groove = 1.0 - smoothstep(0.0, 0.5 + px, min(ft, 1.0 - ft) * tw)
+    col = mix(col, vec3(0.12, 0.08, 0.02), groove * 0.8 * step(0.5, e))
+    return col
+}
+
+// ---- the cinema glass: a warm reflection, a soft dark rim, no scanlines ----
+// No dark rim or bulge over the picture: it reads clean and bright.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.07, 0.0, 0.0)
+mod.widgets.HwGlass.draw_bg.tint = vec4(1.0, 0.86, 0.60, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 2.0
+
+// ---- the picture's light: a golden cinema glow on the lacquer ----
+mod.widgets.HwMilk.light = 2.4
+mod.widgets.HwMilk.light_knee = 1.0
+mod.widgets.HwMilk.tint = vec4(1.0, 0.80, 0.46, 0.28)
+mod.widgets.HwSpectrum.light = 4.0
+
+// ---- the spectrum: a skyline of stepped gold towers under a sunburst ----
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let s = self.rect_size
+    let p = self.pos * s
+    let c = self.color
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    if self.part > 0.5 && self.part < 1.5 {
+        // The well: black lacquer, a sunrise of faint gold rays from the
+        // bottom centre, a stepped gold pinstripe inside the edge.
+        let o = vec2(s.x * 0.5, s.y + 10.0)
+        let q = p - o
+        let ang = atan2(q.x, 0.0 - q.y)
+        let f = fract(ang / 6.28318 * 72.0)
+        let r = length(q)
+        var col = vec3(0.035, 0.030, 0.024) * (1.0 + step(0.5, f) * 0.9 * smoothstep(30.0, 140.0, r))
+        col = col + vec3(0.36, 0.24, 0.07) * exp(0.0 - r / 150.0) * 0.55
+        let ex = min(p.x, s.x - p.x)
+        let ey = min(p.y, s.y - p.y)
+        let e = max(max(min(ex, ey - 12.0), min(ex - 6.0, ey - 6.0)), min(ex - 12.0, ey))
+        let line = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(e - 6.0))
+        col = mix(col, vec3(0.80, 0.60, 0.26), line * 0.7)
+        return vec4(col * c.w, c.w)
+    }
+    if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+        // Level rules: dotted gold.
+        let dot = step(0.55, fract(p.x / 5.0))
+        let a = dot * 0.30
+        return vec4(vec3(0.85, 0.65, 0.30) * a, a)
+    }
+    if self.part > 2.5 && self.part < 3.5 {
+        // The empty slot: faint window rows where a tower will rise.
+        let row = step(fract(p.y / 5.0), 0.2)
+        let a = row * 0.07
+        return vec4(vec3(0.9, 0.72, 0.36) * a, a)
+    }
+    if self.part > 4.5 && self.part < 5.5 {
+        // The peak: a cream beacon atop the tower.
+        let a = c.w * (1.0 - smoothstep(s.x * 0.18, s.x * 0.18 + px, abs(p.x - s.x * 0.5)))
+        return vec4(vec3(1.0, 0.95, 0.82) * a, a)
+    }
+    // A tower: a stepped crown (three tiers narrowing to a spire), floors
+    // of lit windows, a bright central pier, bronze at the foot.
+    let tier = floor(p.y / max(s.x * 0.28, 2.0))
+    let hw = s.x * 0.5 * clamp(0.22 + tier * 0.26, 0.0, 1.0)
+    let dx = abs(p.x - s.x * 0.5)
+    let inside = 1.0 - smoothstep(hw - px, hw + px, dx)
+    let up = clamp(1.0 - p.y / 160.0, 0.0, 1.0)
+    var col = mix(vec3(0.45, 0.28, 0.08), c.xyz * 1.05, 0.35 + 0.65 * up)
+    let floors = step(0.82, fract(p.y / 7.0)) * step(7.0, p.y)
+    col = col * (1.0 - floors * 0.45)
+    let win = step(abs(abs(p.x - s.x * 0.5) - s.x * 0.24), 0.6) * step(fract(p.y / 7.0), 0.6) * step(9.0, p.y)
+    col = col * (1.0 - win * 0.35)
+    let pier = 1.0 - smoothstep(0.4, 0.4 + px, dx)
+    col = mix(col, vec3(1.0, 0.94, 0.78), pier * 0.6)
+    let edge = smoothstep(hw - 1.6, hw - 0.4, dx)
+    col = col * (1.0 - edge * 0.35)
+    return vec4(col * inside, inside)
+}
+// The waveform: a double gold pinstripe.
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let outer = 1.0 - smoothstep(0.3, 0.9, abs(d - 1.7))
+    let core = 1.0 - smoothstep(0.2, 0.7, d)
+    let al = clamp(outer + core, 0.0, 1.0)
+    let col = mix(vec3(0.95, 0.74, 0.34), vec3(1.0, 0.96, 0.84), core)
+    return vec4(col * al, al)
+}
+
+// ---- keys: black lacquer caps, gold pinstripe rims, gold legends ----
+mod.widgets.HwKey.draw_bg.ground = #x141312
+mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 0.88, 0.60, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.80, 0.38, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.2, 0.9, 2.5, 0.9)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.6, 0.6, 0.85, 0.2)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.75, 6.0, 1.0, 0.7)
+mod.widgets.HwKey.draw_bg.sheen = vec4(0.06, 0.25, 0.30, 0.3)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.0, 0.55)
+mod.widgets.HwKey.draw_bg.led = vec4(7.0, 7.0, 1.8, 1.0)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.22, 0.17, 0.08, 1.0)
+mod.widgets.HwKey.radius = 3
+mod.widgets.HwKey.emissive = vec4(1.0, 0.78, 0.36, 0.2)
+mod.widgets.HwKey.draw_bg.inner = vec4(0.72, 9.0, 0.0, 0.05)
+mod.widgets.HwKey.draw_bg.key_face = fn(p: vec2, base: vec3) -> vec3 {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let s = self.rect_size
+    let uv = p / max(s, vec2(1.0, 1.0))
+    var col = base * (1.12 - uv.y * 0.25)
+    let ex = min(p.x, s.x - p.x) - self.inset
+    let ey = min(p.y, s.y - p.y) - self.inset
+    let st = 3.0
+    let e = max(max(min(ex, ey - st * 2.0), min(ex - st, ey - st)), min(ex - st * 2.0, ey))
+    let gold = vec3(0.90, 0.70, 0.33)
+    let l1 = 1.0 - smoothstep(0.35, 0.35 + px * 1.5, abs(e - 3.0))
+    col = mix(col, gold, l1 * 0.9)
+    if self.critical > 0.5 {
+        // Play and PRESETS: a second pinstripe and a sunburst behind the legend.
+        let l2 = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(e - 5.5))
+        col = mix(col, gold, l2 * 0.7)
+        let q = p - s * 0.5
+        let f = fract(atan2(q.x, 0.0 - q.y) / 6.28318 * 32.0)
+        let r = length(q)
+        let burst = step(0.5, f) * smoothstep(4.0, 10.0, r) * (1.0 - smoothstep(8.0, max(e, 9.0) + r - 6.0, r))
+        col = col + vec3(0.16, 0.11, 0.04) * step(6.5, e) * burst
+    }
+    return col
+}
+mod.widgets.HwKeyButton.draw_text.color = #xe7c26a
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffe29a
+mod.widgets.HwKeyButton.draw_text.color_down = #xfff1c8
+mod.widgets.HwKeyButton.draw_text.color_focus = #xe7c26a
+mod.widgets.HwKeyText.draw_text.color = #xe7c26a
+mod.widgets.HwKeyText.draw_text.color_hover = #xffe29a
+mod.widgets.HwKeyText.draw_text.color_down = #xfff1c8
+mod.widgets.HwKeyText.draw_text.color_focus = #xe7c26a
+mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 8.5}
+
+// ---- lamps: warm gold ----
+mod.widgets.HwDash.emissive = vec4(1.0, 0.76, 0.32, 6.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.80, 0.40, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x3a2c14
+mod.widgets.HwLed.emissive = vec4(1.0, 0.76, 0.32, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.80, 0.40, 1.0)
+
+// ---- knob: a spun gold cap on a black lacquer skirt, a gold lamp ring ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x151412
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 0.92, 0.70, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(3.0, 0.70, 0.0, 0.0)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.86, 0.66, 0.30, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.06, 0.05, 0.04, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(21.0, 1.28, 1.9, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.24, 0.18, 0.08, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(1.0, 0.80, 0.40, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.8, 9.0, 1.0, 0.7)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(0.6, 0.5)
+mod.widgets.HwKnobFace.emissive = vec4(1.0, 0.76, 0.32, 0.8)
+
+// ---- meter: a sunrise dial in cream enamel; the rays light up to the level ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x0f0e0c
+mod.widgets.HwMeterFace.draw_bg.dial_ink = vec4(0.93, 0.88, 0.74, 1.0)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(1.0, 0.78, 0.36, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(0.75, 0.12, 0.06, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.20, 0.16, 0.10, 1.0)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    let a = vec2(6.0, 6.0)
+    let b = s - a
+    let inside = step(a.x, p.x) * step(p.x, b.x) * step(a.y, p.y) * step(p.y, b.y)
+    let u = (p - a) / max(b - a, vec2(1.0, 1.0))
+    let h = b.y - a.y
+    // The pivot sits below the window: a wide sunrise over the horizon.
+    let piv = vec2(s.x * 0.5, b.y + h * 0.95)
+    let q = p - piv
+    let rq = length(q)
+    let ang = atan2(q.x, 0.0 - q.y)
+    let span = 0.78
+    let r0 = h * 0.95 + 4.0
+    let r1 = piv.y - a.y - 5.0
+    let rm = (r0 + r1) * 0.5
+    // 26 rays; the outer band follows the left channel, the inner the right.
+    let n = 26.0
+    let fa = (ang + span) / (span * 2.0) * n
+    let wi = floor(fa)
+    let wf = fract(fa)
+    let wv = (wi + 0.5) / n
+    let alt = step(0.5, fract(wi * 0.5))
+    let lvl = mix(self.level.y, self.level.x, step(rm, rq))
+    let lit = step(wv, lvl) * step(0.0, fa) * step(fa, n)
+    let hot = step(0.8, wv)
+    var dial = self.dial_ink.xyz * (0.90 + alt * 0.10)
+    let lamp = mix(vec3(1.0, 0.74, 0.28), vec3(0.88, 0.22, 0.08), hot) * (0.88 + alt * 0.18)
+    let band = step(r0, rq) * step(rq, r1)
+    dial = mix(dial, lamp, lit * band)
+    // Hairlines between the rays and between the bands.
+    let hl = min(wf, 1.0 - wf) * (span * 2.0 / n) * rq
+    let hair = (1.0 - smoothstep(0.3, 0.3 + px * 1.5, hl)) * band
+    dial = mix(dial, vec3(0.30, 0.22, 0.09), hair * 0.85)
+    let mid = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(rq - rm))
+    dial = mix(dial, vec3(0.30, 0.22, 0.09), mid * band * 0.85)
+    // Black arcs close the scale; outside it, lacquer with a gold horizon.
+    let arcs = (1.0 - smoothstep(0.5, 0.5 + px * 1.5, abs(rq - r1))) + (1.0 - smoothstep(0.5, 0.5 + px * 1.5, abs(rq - r0)))
+    let off = 1.0 - band * step(abs(ang), span)
+    dial = mix(dial, vec3(0.04, 0.035, 0.03), off)
+    let rays = step(0.5, fract(ang / 6.28318 * 90.0)) * off * step(rq, r0)
+    dial = dial + vec3(0.10, 0.07, 0.02) * rays
+    dial = mix(dial, vec3(0.08, 0.06, 0.03), clamp(arcs, 0.0, 1.0) * step(abs(ang), span) * 0.9)
+    // The needle: black, tapering, with a gold tip.
+    let lv = max(self.level.x, self.level.y)
+    let na = (lv * 2.0 - 1.0) * span
+    let dir = vec2(sin(na), 0.0 - cos(na))
+    let t = clamp(dot(q, dir), r0 - 6.0, r1 + 3.0)
+    let nd = length(q - dir * t) - 0.7
+    let tip = step(r1 - 3.0, t)
+    dial = mix(dial, mix(vec3(0.05, 0.04, 0.03), vec3(1.0, 0.85, 0.45), tip), 1.0 - smoothstep(0.0 - px, px, nd))
+    // A stepped gold frame, a warm lamp glow low in the window.
+    let ex = min(p.x - a.x, b.x - p.x)
+    let ey = min(p.y - a.y, b.y - p.y)
+    let e = max(max(min(ex, ey - 6.0), min(ex - 3.0, ey - 3.0)), min(ex - 6.0, ey))
+    let fr = 1.0 - smoothstep(0.5, 0.5 + px * 1.5, abs(e - 1.2))
+    let fr2 = 1.0 - smoothstep(0.3, 0.3 + px * 1.5, abs(e - 3.4))
+    dial = mix(dial, vec3(0.95, 0.76, 0.38), clamp(fr + fr2 * 0.6, 0.0, 1.0) * step(0.0, e))
+    dial = dial * (0.78 + 0.22 * smoothstep(0.0, 0.6, u.y + 0.2))
+    o = vec4(mix(o.xyz, dial, inside), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwMeterFace.emissive = vec4(1.0, 0.76, 0.32, 0.8)
+
+// ---- the record in the empty art well: gold label ----
+mod.widgets.HwArtBlank.draw_bg.ground = #x0e0d0b
+mod.widgets.HwArtBlank.draw_bg.vinyl = vec4(0.04, 0.035, 0.03, 1.0)
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(0.88, 0.68, 0.30, 1.0)
+
+// ---- type: gold on lacquer, black on cream enamel ----
+mod.widgets.HwCaption.draw_text.color = #xd9b25e
+mod.widgets.HwCaption.draw_text.text_style = theme.font_bold{font_size: 7.5}
+mod.widgets.HwTitle.draw_text.color = #xf2d488
+mod.widgets.HwTitle.draw_text.text_style = theme.font_bold{font_size: 14.0}
+mod.widgets.HwText.draw_text.color = #xe9dcb8
+mod.widgets.HwPanelTitle.draw_text.color = #x17120a
+mod.widgets.HwPanelText.draw_text.color = #x5c4a28
+mod.widgets.HwNavButton.draw_text.color = #x1f180c
+mod.widgets.HwNavButton.draw_bg.plate = vec4(0.55, 0.40, 0.15, 0.10)
+mod.widgets.HwNavButton.draw_bg.plate_hover = vec4(0.85, 0.62, 0.22, 0.25)
+mod.widgets.HwNavButton.draw_bg.rim = vec4(0.62, 0.45, 0.16, 0.55)
+mod.widgets.HwDisplayText.draw_text.color = #xf0cf7c
+mod.widgets.HwDisplay.draw_bg.ground = #x0b0a08
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(1.0, 0.85, 0.50, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.9, 8.0, 0.0, 0.5)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(1.0, 0.4)
+mod.widgets.HwDisplay.radius = 3
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let ex = min(p.x, self.rect_size.x - p.x)
+    let ey = min(p.y, self.rect_size.y - p.y)
+    let e = max(max(min(ex, ey - 8.0), min(ex - 4.0, ey - 4.0)), min(ex - 8.0, ey))
+    let line = 1.0 - smoothstep(0.35, 0.35 + px * 1.5, abs(e - 3.0))
+    return mix(base, vec3(0.86, 0.66, 0.30), line * 0.9)
+}
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.05, 0.045, 0.04, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(0.95, 0.75, 0.36, 0.55)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.92, 0.72, 0.34, 0.40)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(1.0, 0.82, 0.42, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #xb9a06a
+mod.widgets.HwSegmented.draw_text_selected.color = #xfff0c8
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.05, 0.045, 0.04, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.95, 0.75, 0.36, 0.45)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.95, 0.76, 0.38, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xf0d9a0
+mod.widgets.HwDropDown.draw_text.color_hover = #xfff0c8
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.05, 0.045, 0.04, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.95, 0.75, 0.36, 0.45)
+mod.widgets.HwTextInput.draw_text.color = #xf3e7c9
+mod.widgets.HwMenuLayer.draw_bg.color = vec4(0.055, 0.047, 0.035, 0.98)
+mod.widgets.HwMenuLayer.draw_bg.border_color = vec4(0.90, 0.70, 0.33, 0.8)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.30, 0.20, 0.05, 0.45)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 0.85, 0.5, 0.35)
+// The drawer's filters: gold-rimmed boxes.
+mod.widgets.HwBrowserCheck.draw_bg.border_color = #xb8923f
+mod.widgets.HwBrowserCheck.draw_bg.border_color_hover = #xf0c35a
+mod.widgets.HwBrowserCheck.draw_bg.border_color_active = #xf0c35a
+mod.widgets.HwBrowserCheck.draw_bg.mark_color_active = #xf0c35a
+mod.widgets.HwBrowserCheck.draw_text.color = #xe9d7a8
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x0a0805
+mod.widgets.hw_palette.map1 = #x4d3810
+mod.widgets.hw_palette.map2 = #xc8a040
+mod.widgets.hw_palette.map3 = #xfff0c0
+mod.widgets.hw_palette.map_strength = 0.8
+mod.widgets.hw_palette.map_default = 1.0
+// The screen filter with the THEME COLOURS key: etched glass: fine rules and a sheen.
+mod.widgets.hw_palette.screen_filter = 4.0
+mod.widgets.hw_palette.screen_filter_strength = 0.8
+mod.widgets.hw_palette.screen_cell = 4.0
+mod.widgets.hw_palette.screen_curve = 0.0
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(4.0, 0.70, 20.0, 3.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.94, 0.77, 0.38, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.03, 0.025, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(3.0, 2.0, 6.0, 0.10)
+mod.widgets.HwEqGraph.draw_curve.curve_ink = vec4(0.94, 0.77, 0.38, 1.0)
+mod.widgets.HwEqGraph.draw_curve.lip_ink = vec4(1.0, 0.93, 0.72, 0.55)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(2.0, 0.30, 0.40, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.94, 0.77, 0.38, 1.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.14, 0.0, 0.5, 0.0)
+mod.widgets.HwEqGraph.label_ink = vec4(0.94, 0.80, 0.50, 1.0)
+mod.widgets.HwEqGraph.scale_ink = vec4(0.94, 0.80, 0.50, 0.8)
+true

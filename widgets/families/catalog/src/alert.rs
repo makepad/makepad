@@ -46,7 +46,7 @@
 //! the host's job, this widget only promises never to close silently.
 
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     button::ButtonAction,
     makepad_derive_widget::*,
     makepad_draw::*,

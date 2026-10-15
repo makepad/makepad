@@ -2698,10 +2698,11 @@ impl SkinnedModel {
 
     /// First clip whose name contains `needle` (ASCII case-insensitive).
     pub fn clip_index(&self, needle: &str) -> Option<usize> {
-        let needle = needle.to_ascii_lowercase();
-        self.clips
-            .iter()
-            .position(|c| c.name.to_ascii_lowercase().contains(&needle))
+        // Compared in place: hosts resolve clips per character per frame.
+        let needle = needle.as_bytes();
+        self.clips.iter().position(|c| {
+            needle.is_empty() || c.name.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+        })
     }
 
     /// Clip whose authored name exactly matches `name`, ignoring ASCII case.
@@ -3192,7 +3193,13 @@ impl SkinnedModel {
 
     /// Joint palette for a pose: `inv(global(mesh_node)) * global(joint) * ibm`.
     pub fn palette(&self, pose: &PoseBuffer, out: &mut Vec<Mat4f>) {
-        let mut globals: Vec<Option<Mat4f>> = vec![None; self.nodes.len()];
+        // Scratch kept per thread: a palette is built per character per frame.
+        thread_local! { static GLOBALS: std::cell::RefCell<Vec<Option<Mat4f>>> = const { std::cell::RefCell::new(Vec::new()) }; }
+        GLOBALS.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let globals: &mut Vec<Option<Mat4f>> = &mut scratch;
+        globals.clear();
+        globals.resize(self.nodes.len(), None);
         fn global(
             nodes: &[Node],
             pose: &PoseBuffer,
@@ -3210,12 +3217,13 @@ impl SkinnedModel {
             globals[i] = Some(m);
             m
         }
-        let mesh_inv = global(&self.nodes, pose, &mut globals, self.mesh_node).invert();
+        let mesh_inv = global(&self.nodes, pose, globals, self.mesh_node).invert();
         out.clear();
         for (j, node) in self.joint_nodes.iter().enumerate() {
-            let g = global(&self.nodes, pose, &mut globals, *node);
+            let g = global(&self.nodes, pose, globals, *node);
             out.push(Mat4f::mul(&Mat4f::mul(&mesh_inv, &g), &self.inverse_bind[j]));
         }
+        });
     }
 
     /// The skinning matrix [`Self::palette`] gives the joint at `node` for

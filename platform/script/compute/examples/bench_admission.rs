@@ -6,6 +6,7 @@
 //!
 //! cargo run --release -p makepad-script-compute --example bench_admission
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::kernel::compile_with;
 use makepad_script_compute::Backend;
 use std::time::Instant;

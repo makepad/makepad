@@ -11,19 +11,14 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn script_mod(file: &str, code: &str) -> ScriptMod {
-    ScriptMod {
-        cargo_manifest_path: String::new(),
-        module_path: String::new(),
-        file: file.to_string(),
-        line: 0,
-        column: 0,
-        code: code.to_string(),
-        values: vec![],
-    }
+    ScriptMod::new("", "", &file, 0, 0, &code, &[])
 }
 
 fn errors(vm: &mut ScriptVm) -> Vec<String> {

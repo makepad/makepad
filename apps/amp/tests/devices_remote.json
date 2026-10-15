@@ -1,0 +1,1 @@
+{"active_device_id":"b2","devices":[{"device_id":"a1","name":"Admin\u2019s MacBook Pro","device_type":"computer","volume":100,"is_active":false,"is_self":true,"is_local":true,"is_group":false},{"device_id":"b2","name":"Kitchen speaker","device_type":"speaker","volume":40,"is_active":true,"is_self":false,"is_local":false,"is_group":false}]}

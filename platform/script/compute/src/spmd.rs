@@ -16,6 +16,7 @@
 //! code's 0/1 words, [`steps`] which integers are arithmetic sequences
 //! across lanes (contiguous and strided memory fast paths), and
 //! [`supported`] what the four-wide form declines (the scalar code runs).
+use makepad_relax_api::relax_api;
 
 use crate::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Un, Val, Var};
 use crate::lower::kernel::ELEMENT_CAP;
@@ -189,16 +190,32 @@ impl Info {
 }
 
 /// The element loop's parts, from the shape `lower_kernel` emits.
+#[relax_api(plain)]
 pub(crate) struct Shape<'a> {
     /// Top-level statements before the element loop (uniform).
     pub(crate) prelude: &'a [Stmt],
     pub(crate) element: &'a Stmt,
     /// The element counter.
     pub(crate) i: Var,
+    /// After the loop: a run's counted work (`crate::work`), the variable
+    /// each lane counted into and the ctx word their sum goes to.
+    pub(crate) post: Option<(Var, u32)>,
+}
+
+/// The counted-work postlude: `x = Get(var); ctx[word] = x`.
+fn postlude(b: &[Stmt]) -> Option<(Var, u32)> {
+    match b {
+        [Stmt::Def(x, Op::Get(var)), Stmt::Store { region: Region::Ctx, base, extent: 1, off: None, val }] if val == x => Some((*var, *base)),
+        _ => None,
+    }
 }
 
 pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
-    let (last, prelude) = p.body.split_last()?;
+    let (body_end, post) = match p.body.len().checked_sub(2).and_then(|k| postlude(&p.body[k..]).map(|post| (k, post))) {
+        Some((k, post)) => (k, Some(post)),
+        None => (p.body.len(), None),
+    };
+    let (last, prelude) = p.body[..body_end].split_last()?;
     let Stmt::Loop { cap, body } = last else { return None };
     if *cap != ELEMENT_CAP || !prelude.iter().all(|s| matches!(s, Stmt::Def(..) | Stmt::Set(..))) {
         return None;
@@ -231,7 +248,7 @@ pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
     if sets_var(body, *i) != 1 {
         return None;
     }
-    Some(Shape { prelude, element: last, i: *i })
+    Some(Shape { prelude, element: last, i: *i, post })
 }
 
 

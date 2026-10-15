@@ -55,7 +55,8 @@ impl<'a> ScriptVm<'a> {
             return None;
         }
         let ip = self.bx.threads.cur_ref().trap.ip;
-        hook(&mut self.bx.heap, op, a, b, ip)
+        let mut out = NIL;
+        unsafe { (hook.call)(hook.data, &mut self.bx.heap, &op, a, b, ip, &mut out) }.then_some(out)
     }
 
     pub(crate) fn handle_add(&mut self, opargs: OpcodeArgs) {

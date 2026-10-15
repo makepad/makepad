@@ -38,647 +38,6 @@ use {
     },
 };
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn register_draw_text_slug(vm: &mut ScriptVm) {
-    let slug_shader = DrawTextSlug::script_shader(vm);
-    let script_mod = script! {
-        use mod.pod.*
-        use mod.math.*
-        use mod.shader.*
-        use mod.draw
-        use mod.geom
-        use mod.res.*
-
-        mod.std.set_type_default() do #(slug_shader){
-            async_compile: true
-
-            vertex_pos: vertex_position(vec4f)
-            fb0: fragment_output(0, vec4f)
-
-            draw_call: uniform_buffer(draw.DrawCallUniforms)
-            draw_pass: uniform_buffer(draw.DrawPassUniforms)
-            draw_list: uniform_buffer(draw.DrawListUniforms)
-
-            geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
-
-            curve_texture: texture_2d(float)
-            band_texture: texture_2d(float)
-
-            color: #fff
-            hover: instance(0.0)
-            focus: instance(0.0)
-            down: instance(0.0)
-            disabled: instance(0.0)
-            empty: instance(0.0)
-            active: instance(0.0)
-            drag: instance(0.0)
-            pressed: instance(0.0)
-            opened: instance(0.0)
-            focussed: instance(0.0)
-            is_even: instance(0.0)
-            is_folder: instance(0.0)
-            scale: instance(1.0)
-
-            color_hover: uniform(#fff)
-            color_focus: uniform(#fff)
-            color_down: uniform(#fff)
-            color_disabled: uniform(#fff)
-            color_empty: uniform(#fff)
-            color_empty_hover: uniform(#fff)
-            color_empty_focus: uniform(#fff)
-            color_active: uniform(#fff)
-            color_drag: uniform(#fff)
-            color_pressed: uniform(#fff)
-
-            color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
-            color_2_hover: uniform(#fff)
-            color_2_focus: uniform(#fff)
-            color_2_down: uniform(#fff)
-            color_2_disabled: uniform(#fff)
-            color_2_empty: uniform(#fff)
-            color_2_empty_hover: uniform(#fff)
-            color_2_empty_focus: uniform(#fff)
-            color_2_active: uniform(#fff)
-            color_2_drag: uniform(#fff)
-            color_2_pressed: uniform(#fff)
-            use_color_2: uniform(0.0)
-
-            color_dither: uniform(0.0)
-            gradient_fill_horizontal: uniform(0.0)
-            total_chars: instance(1000000.0)
-            aa_pad_px: uniform(float(1.0))
-            slug_visibility: uniform(1.0)
-            slug_viewport_px: uniform(vec2(1.0, 1.0))
-
-            pos: varying(vec2f)
-            world: varying(vec4f)
-
-            saturate: fn(v: float) -> float {
-                return clamp(v, 0.0, 1.0)
-            }
-
-            slug_dilate: fn(pos: vec2, tex: vec2, jac: vec4, normal: vec2) -> vec4 {
-                let n = normalize(normal)
-                // The camera and list transform the GPU renders with: baked in when
-                // the text was drawn they were the previous paint's (identity for a
-                // new pass), and the first draw came out different from later ones.
-                let m = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.draw_list.view_transform)
-                let hp = m * vec4(pos.x, pos.y, 0.0, 1.0)
-                let hn = m * vec4(n.x, n.y, 0.0, 0.0)
-                let s = hp.w
-                let t = hn.w
-
-                let u = (s * hn.x - t * hp.x) * self.slug_viewport_px.x
-                let v = (s * hn.y - t * hp.y) * self.slug_viewport_px.y
-
-                let s2 = s * s
-                let st = s * t
-                let uv = u * u + v * v
-                let d = normal * (
-                    s2 * (st + sqrt(uv)) / max(uv - st * st, 0.0000001)
-                ) * self.aa_pad_px
-
-                let vpos = pos + d
-                let vtex = vec2(tex.x + dot(d, jac.xy), tex.y + dot(d, jac.zw))
-                return vec4(vtex.x, vtex.y, vpos.x, vpos.y)
-            }
-
-            vertex: fn() {
-                let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-                let p_clipped = clamp(
-                    clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
-                    self.draw_list.view_clip.xy,
-                    self.draw_list.view_clip.zw
-                )
-                let p_sample = p_clipped - self.draw_list.view_shift
-                let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
-                let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
-                let content_rect_size = vec2(
-                    max(self.rect_size.x - 2.0 * pad_lpx, 0.0001),
-                    max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
-                )
-                self.pos = vec2(
-                    (p_sample.x - content_rect_pos.x) / content_rect_size.x,
-                    (p_sample.y - content_rect_pos.y) / content_rect_size.y
-                )
-                self.world = self.draw_list.view_transform * vec4(
-                    p_clipped.x,
-                    p_clipped.y,
-                    self.glyph_depth + self.draw_call.zbias,
-                    1.
-                )
-                self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
-            }
-
-            fetch_curve_texel: fn(texel_idx: float) -> vec4 {
-                let tex_size = self.curve_texture.size()
-                let row = floor(texel_idx / tex_size.x)
-                let col = texel_idx - row * tex_size.x
-                let uv = vec2(
-                    (col + 0.5) / tex_size.x,
-                    (row + 0.5) / tex_size.y
-                )
-                return self.curve_texture.sample_nearest(uv)
-            }
-
-            fetch_band_texel: fn(texel_idx: float) -> vec4 {
-                let tex_size = self.band_texture.size()
-                let row = floor(texel_idx / tex_size.x)
-                let col = texel_idx - row * tex_size.x
-                let uv = vec2(
-                    (col + 0.5) / tex_size.x,
-                    (row + 0.5) / tex_size.y
-                )
-                return self.band_texture.sample_nearest(uv)
-            }
-
-            pick_channel: fn(v: vec4, channel: float) -> float {
-                if channel < 0.5 {
-                    return v.x
-                }
-                if channel < 1.5 {
-                    return v.y
-                }
-                if channel < 2.5 {
-                    return v.z
-                }
-                return v.w
-            }
-
-            slug_curve_offset: fn() -> float {
-                return self.t_min.x
-            }
-
-            slug_curve_count: fn() -> float {
-                return self.t_min.y
-            }
-
-            slug_band_offset: fn() -> float {
-                return self.t_max.x
-            }
-
-            slug_band_count: fn() -> float {
-                return self.t_max.y
-            }
-
-            slug_fill_flags: fn() -> float {
-                return self.atlas_plane
-            }
-
-            calc_root_code: fn(y1: float, y2: float, y3: float) -> u32 {
-                let i1 = asuint(y1) >> u32(31)
-                let i2 = asuint(y2) >> u32(30)
-                let i3 = asuint(y3) >> u32(29)
-
-                let shift = (i1 & u32(1)) | (i2 & u32(2)) | (i3 & u32(4))
-                return (u32(11892) >> shift) & u32(257)
-            }
-
-            solve_horiz_poly: fn(p12: vec4, p3: vec2) -> vec2 {
-                let a = p12.xy - p12.zw * 2.0 + p3
-                let b = p12.xy - p12.zw
-                let ra = 1.0 / a.y
-                let rb = 0.5 / b.y
-
-                let d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0))
-                let mut t1 = (b.y - d) * ra
-                let mut t2 = (b.y + d) * ra
-                if abs(a.y) < 1.0 / 65536.0 {
-                    t1 = p12.y * rb
-                    t2 = t1
-                }
-                return vec2(
-                    (a.x * t1 - b.x * 2.0) * t1 + p12.x,
-                    (a.x * t2 - b.x * 2.0) * t2 + p12.x
-                )
-            }
-
-            solve_vert_poly: fn(p12: vec4, p3: vec2) -> vec2 {
-                let a = p12.xy - p12.zw * 2.0 + p3
-                let b = p12.xy - p12.zw
-                let ra = 1.0 / a.x
-                let rb = 0.5 / b.x
-
-                let d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0))
-                let mut t1 = (b.x - d) * ra
-                let mut t2 = (b.x + d) * ra
-                if abs(a.x) < 1.0 / 65536.0 {
-                    t1 = p12.x * rb
-                    t2 = t1
-                }
-                return vec2(
-                    (a.y * t1 - b.y * 2.0) * t1 + p12.y,
-                    (a.y * t2 - b.y * 2.0) * t2 + p12.y
-                )
-            }
-
-            scan_horizontal_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
-                let limit = floor(list_count + 0.5)
-                var coverage = 0.0
-                var weight = 0.0
-
-                var j = 0.0
-                loop {
-                    if j >= limit { break }
-
-                    let packed_idx = floor(j * 0.25)
-                    let channel = j - packed_idx * 4.0
-                    let idx_data = self.fetch_band_texel(list_offset + packed_idx)
-                    let curve_idx = self.pick_channel(idx_data, channel)
-
-                    let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                    let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                    if max(max(p12.x, p12.z), p3.x) / px_size < -0.5 { break }
-
-                    let code = self.calc_root_code(p12.y, p12.w, p3.y)
-                    if code != u32(0) {
-                        let r = self.solve_horiz_poly(p12, p3) / px_size
-                        if (code & u32(1)) != u32(0) {
-                            coverage = coverage + self.saturate(r.x + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                        }
-                        if code > u32(1) {
-                            coverage = coverage - self.saturate(r.y + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                        }
-                    }
-
-                    j = j + 1.0
-                }
-
-                return vec2(coverage, weight)
-            }
-
-            scan_vertical_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
-                let limit = floor(list_count + 0.5)
-                var coverage = 0.0
-                var weight = 0.0
-
-                var j = 0.0
-                loop {
-                    if j >= limit { break }
-
-                    let packed_idx = floor(j * 0.25)
-                    let channel = j - packed_idx * 4.0
-                    let idx_data = self.fetch_band_texel(list_offset + packed_idx)
-                    let curve_idx = self.pick_channel(idx_data, channel)
-
-                    let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                    let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                    if max(max(p12.y, p12.w), p3.y) / px_size < -0.5 { break }
-
-                    let code = self.calc_root_code(p12.x, p12.z, p3.x)
-                    if code != u32(0) {
-                        let r = self.solve_vert_poly(p12, p3) / px_size
-                        if (code & u32(1)) != u32(0) {
-                            coverage = coverage - self.saturate(r.x + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                        }
-                        if code > u32(1) {
-                            coverage = coverage + self.saturate(r.y + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                        }
-                    }
-
-                    j = j + 1.0
-                }
-
-                return vec2(coverage, weight)
-            }
-
-            scan_horizontal_all: fn(sample: vec2, px_size: float) -> vec2 {
-                let limit = floor(self.slug_curve_count() + 0.5)
-                var coverage = 0.0
-                var weight = 0.0
-
-                var i = 0.0
-                loop {
-                    if i >= limit { break }
-
-                    let curve_idx = self.slug_curve_offset() + i
-                    let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                    let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                    let code = self.calc_root_code(p12.y, p12.w, p3.y)
-                    if code != u32(0) {
-                        let r = self.solve_horiz_poly(p12, p3) / px_size
-                        if (code & u32(1)) != u32(0) {
-                            coverage = coverage + self.saturate(r.x + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                        }
-                        if code > u32(1) {
-                            coverage = coverage - self.saturate(r.y + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                        }
-                    }
-
-                    i = i + 1.0
-                }
-
-                return vec2(coverage, weight)
-            }
-
-            scan_vertical_all: fn(sample: vec2, px_size: float) -> vec2 {
-                let limit = floor(self.slug_curve_count() + 0.5)
-                var coverage = 0.0
-                var weight = 0.0
-
-                var i = 0.0
-                loop {
-                    if i >= limit { break }
-
-                    let curve_idx = self.slug_curve_offset() + i
-                    let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                    let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                    let code = self.calc_root_code(p12.x, p12.z, p3.x)
-                    if code != u32(0) {
-                        let r = self.solve_vert_poly(p12, p3) / px_size
-                        if (code & u32(1)) != u32(0) {
-                            coverage = coverage - self.saturate(r.x + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                        }
-                        if code > u32(1) {
-                            coverage = coverage + self.saturate(r.y + 0.5)
-                            weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                        }
-                    }
-
-                    i = i + 1.0
-                }
-
-                return vec2(coverage, weight)
-            }
-
-            calc_coverage: fn(xcov: float, ycov: float, xwgt: float, ywgt: float) -> float {
-                let coverage = max(
-                    abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
-                    min(abs(xcov), abs(ycov))
-                )
-                if self.slug_fill_flags() >= 4096.0 {
-                    return 1.0 - abs(1.0 - fract(coverage * 0.5) * 2.0)
-                }
-                return self.saturate(coverage)
-            }
-
-            alpha_at: fn(sample: vec2, px_x: float, px_y: float) -> float {
-                // Linux uses the shared helper shader for SLUG fallback promotion.
-                // Prefer the simpler full-curve scan here to avoid correctness issues
-                // in the helper's band-accelerated path for some glyph shapes.
-                let x_scan = self.scan_horizontal_all(sample, px_x)
-                let y_scan = self.scan_vertical_all(sample, px_y)
-                return self.calc_coverage(x_scan.x, y_scan.x, x_scan.y, y_scan.y)
-            }
-
-            fragment: fn() {
-                self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
-            }
-
-            get_color: fn() {
-                let mut color = self.color
-                let mut color_hover = self.color_hover
-                let mut color_focus = self.color_focus
-                let mut color_down = self.color_down
-                let mut color_disabled = self.color_disabled
-                let mut color_empty = self.color_empty
-                let mut color_empty_hover = self.color_empty_hover
-                let mut color_empty_focus = self.color_empty_focus
-                let mut color_active = self.color_active
-                let mut color_drag = self.color_drag
-                let mut color_pressed = self.color_pressed
-
-                if (self.use_color_2 > 0.5) {
-                    let mut gradient_fill_dir = self.pos.y
-                    if (self.gradient_fill_horizontal > 0.5) {
-                        gradient_fill_dir = self.pos.x
-                    }
-                    color = mix(self.color, self.color_2, gradient_fill_dir)
-                    color_hover = mix(self.color_hover, self.color_2_hover, gradient_fill_dir)
-                    color_focus = mix(self.color_focus, self.color_2_focus, gradient_fill_dir)
-                    color_down = mix(self.color_down, self.color_2_down, gradient_fill_dir)
-                    color_disabled = mix(self.color_disabled, self.color_2_disabled, gradient_fill_dir)
-                    color_empty = mix(self.color_empty, self.color_2_empty, gradient_fill_dir)
-                    color_empty_hover = mix(self.color_empty_hover, self.color_2_empty_hover, gradient_fill_dir)
-                    color_empty_focus = mix(self.color_empty_focus, self.color_2_empty_focus, gradient_fill_dir)
-                    color_active = mix(self.color_active, self.color_2_active, gradient_fill_dir)
-                    color_drag = mix(self.color_drag, self.color_2_drag, gradient_fill_dir)
-                    color_pressed = mix(self.color_pressed, self.color_2_pressed, gradient_fill_dir)
-                }
-
-                return color
-                    .mix(
-                        color_empty
-                            .mix(color_empty_hover, self.hover)
-                            .mix(color_empty_focus, max(self.focus, self.focussed)),
-                        self.empty
-                    )
-                    .mix(color_focus, max(self.focus, self.focussed) * (1.0 - self.empty))
-                    .mix(color_active, max(self.active, self.opened))
-                    .mix(color_hover, self.hover)
-                    .mix(color_down, self.down)
-                    .mix(color_drag, self.drag)
-                    .mix(color_pressed, self.pressed)
-                    .mix(color_disabled, self.disabled)
-            }
-
-            sample_slug_pixel: fn() {
-                if self.slug_curve_count() < 0.5 {
-                    return vec4(0.0, 0.0, 0.0, 0.0)
-                }
-
-                let sample = self.pos
-                let px_x = max(abs(dFdx(sample.x)) + abs(dFdy(sample.x)), 0.00001)
-                let px_y = max(abs(dFdx(sample.y)) + abs(dFdy(sample.y)), 0.00001)
-                // One loop over the supersample grid (4x4, 2x2, or the pixel centre),
-                // so alpha_at and its four curve-scan loops are inlined once. Unrolled
-                // into 21 calls they made Adreno 630's compiler spend ~3.5 s on each
-                // text program. Offsets match the unrolled ones: (i + 0.5) / grid - 0.5 px.
-                let grid = if self.aa_4x4 > 0.5 {4.0} else if self.aa_2x2 > 0.5 {2.0} else {1.0}
-                // 1/grid is exact (1, 1/2, 1/4): offsets and the average round
-                // exactly as the unrolled sums did, and the row index is exact
-                // (no division, which some GPUs approximate).
-                let inv_grid = if self.aa_4x4 > 0.5 {0.25} else if self.aa_2x2 > 0.5 {0.5} else {1.0}
-                var alpha_sum = 0.0
-                var sample_index = 0.0
-                loop {
-                    if sample_index >= grid * grid { break }
-                    let row = floor(sample_index * inv_grid)
-                    let col = sample_index - row * grid
-                    let offset = (vec2(col, row) + 0.5 - grid * 0.5) * inv_grid * vec2(px_x, px_y)
-                    alpha_sum = alpha_sum + self.alpha_at(sample + offset, px_x, px_y)
-                    sample_index = sample_index + 1.0
-                }
-                let alpha_base = clamp(alpha_sum * inv_grid * inv_grid, 0.0, 1.0)
-                let darken = clamp(max(px_x, px_y) * self.stem_darken, 0.0, self.stem_darken_max)
-                let edge_weight = clamp(1.0 - abs(alpha_base * 2.0 - 1.0), 0.0, 1.0)
-                let alpha = clamp(alpha_base + darken * edge_weight, 0.0, 1.0)
-                let color = self.get_color()
-                return vec4(color.rgb * color.a * alpha, color.a * alpha)
-            }
-
-            pixel: fn() {
-                return self.sample_slug_pixel() * self.slug_visibility
-            }
-        }
-    };
-    vm.eval(script_mod);
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-script_mod! {
-    use mod.pod.*
-    use mod.math.*
-    use mod.shader.*
-    use mod.draw
-    use mod.geom
-    use mod.res.*
-
-    mod.text = {
-        let text = me
-        FontFamily: mod.std.set_type_default() do #(FontFamily::script_component(vm))
-        FontMember: mod.std.set_type_default() do #(FontMember::script_api(vm))
-        TextOverflow: mod.std.set_type_default() do #(TextOverflow::script_api(vm)),
-        ..me.TextOverflow,
-        TextStyle: mod.std.set_type_default() do #(TextStyle::script_api(vm)){
-            font_size: 10
-            font_family: text.FontFamily{
-                latin := text.FontMember{res: crate_resource("self:../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
-            }
-            line_spacing: 1.2
-        }
-    }
-
-    use mod.text.*
-
-
-    mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
-
-        vertex_pos: vertex_position(vec4f)
-        fb0: fragment_output(0, vec4f)
-
-        draw_call: uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: uniform_buffer(draw.DrawPassUniforms)
-        draw_list: uniform_buffer(draw.DrawListUniforms)
-
-        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
-
-        color: #fff
-        sdf_sharpness: 1.0
-        sdf_luma_bias: 0.03
-
-        pos: varying(vec2f)
-        t: varying(vec2f)
-        world: varying(vec4f)
-
-        radius: uniform(float)
-        cutoff: uniform(float)
-        total_chars: instance(1000000.0)
-
-        grayscale_texture: texture_2d(float)
-        color_texture: texture_2d(float)
-        msdf_texture: texture_2d(float)
-
-        vertex: fn() {
-            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped = clamp(
-                clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
-                self.draw_list.view_clip.xy,
-                self.draw_list.view_clip.zw
-            )
-            let p_normalized = (p_clipped - self.draw_list.view_shift - self.rect_pos) / self.rect_size
-
-            self.pos = p_normalized
-            self.t = mix(self.t_min, self.t_max, p_normalized.xy)
-            self.world = self.draw_list.view_transform * vec4(
-                p_clipped.x,
-                p_clipped.y,
-                self.glyph_depth + self.draw_call.zbias,
-                1.
-            )
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
-        }
-
-        sdf: fn(scale, p, color) {
-            let sampled = self.grayscale_texture.sample(p)
-            let s = if self.atlas_plane < 0.5 {
-                sampled.r
-            } else if self.atlas_plane < 1.5 {
-                sampled.g
-            } else if self.atlas_plane < 2.5 {
-                sampled.b
-            } else {
-                sampled.a
-            }
-            let safe_scale = max(scale, 0.0001)
-            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114))
-            var a = clamp(
-                (s - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
-                0.0,
-                1.0,
-            )
-            let bias = (0.5 - luma) * self.sdf_luma_bias
-            a = clamp(a - bias, 0.0, 1.0)
-            return a
-        }
-
-        msdf: fn(scale, p, color) {
-            let s = self.msdf_texture.sample(p)
-            let dist = s.a
-            let safe_scale = max(scale, 0.0001)
-            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114))
-            var a = clamp(
-                (dist - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
-                0.0,
-                1.0,
-            )
-            let bias = (0.5 - luma) * self.sdf_luma_bias
-            if a > self.sdf_luma_bias * 0.5 {
-                a = clamp(a - bias, 0.0, 1.0)
-            }
-            return a
-        }
-
-        get_color: fn() {
-            return self.color
-        }
-
-        fragment: fn() {
-            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
-        }
-
-        sample_text_pixel: fn() {
-            let dxt = length(dFdx(self.t))
-            let dyt = length(dFdy(self.t))
-            if self.texture_index < 0.5 {
-                let c = self.get_color()
-                let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
-                let tex_size = self.grayscale_texture.size()
-                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
-                let s = self.sdf(scale, p, c)
-                return s * vec4(c.rgb * c.a, c.a)
-            } else if self.texture_index < 1.5 {
-                let tex_size = self.color_texture.size()
-                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
-                let c = self.color_texture.sample(p)
-                return vec4(c.rgb * c.a, c.a)
-            } else {
-                let c = self.get_color()
-                let scale = (dxt + dyt) * self.msdf_texture.size().x * 0.5
-                let tex_size = self.msdf_texture.size()
-                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
-                let s = self.msdf(scale, p, c)
-                return s * vec4(c.rgb * c.a, c.a)
-            }
-        }
-
-        pixel: fn() {
-            return self.sample_text_pixel()
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 script_mod! {
     use mod.pod.*
     use mod.math.*
@@ -705,6 +64,9 @@ script_mod! {
     use mod.text.*
 
     mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
+        ..mod.glyph_coverage.SlugCoverage,
+        ..mod.glyph_coverage.AtlasCoverage
+
 
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -735,35 +97,7 @@ script_mod! {
         curve_texture: texture_2d(float)
         band_texture: texture_2d(float)
 
-        saturate: fn(v: float) -> float {
-            return clamp(v, 0.0, 1.0)
-        }
 
-        slug_dilate: fn(pos: vec2, tex: vec2, jac: vec4, normal: vec2) -> vec4 {
-            let n = normalize(normal)
-            // The camera and list transform the GPU renders with: baked in when
-            // the text was drawn they were the previous paint's (identity for a
-            // new pass), and the first draw came out different from later ones.
-            let m = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.draw_list.view_transform)
-            let hp = m * vec4(pos.x, pos.y, 0.0, 1.0)
-            let hn = m * vec4(n.x, n.y, 0.0, 0.0)
-            let s = hp.w
-            let t = hn.w
-
-            let u = (s * hn.x - t * hp.x) * self.slug_viewport_px.x
-            let v = (s * hn.y - t * hp.y) * self.slug_viewport_px.y
-
-            let s2 = s * s
-            let st = s * t
-            let uv = u * u + v * v
-            let d = normal * (
-                s2 * (st + sqrt(uv)) / max(uv - st * st, 0.0000001)
-            ) * self.aa_pad_px
-
-            let vpos = pos + d
-            let vtex = vec2(tex.x + dot(d, jac.xy), tex.y + dot(d, jac.zw))
-            return vec4(vtex.x, vtex.y, vpos.x, vpos.y)
-        }
 
         vertex: fn() {
             let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
@@ -814,86 +148,10 @@ script_mod! {
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
 
-        sdf: fn(scale, p, color) {
-            let sampled = self.grayscale_texture.sample(p);
-            let s = if self.atlas_plane < 0.5 {
-                sampled.r
-            } else if self.atlas_plane < 1.5 {
-                sampled.g
-            } else if self.atlas_plane < 2.5 {
-                sampled.b
-            } else {
-                sampled.a
-            };
-            // Convert sampled SDF to coverage (0..1). scale is source texels per screen pixel.
-            let safe_scale = max(scale, 0.0001);
-            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-            var a = clamp(
-                (s - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
-                0.0,
-                1.0,
-            );
-            // Polarity compensation:
-            // dark text on light backgrounds usually appears softer than the inverse,
-            // so we bias coverage slightly by text luminance.
-            let bias = (0.5 - luma) * self.sdf_luma_bias;
-            a = clamp(a - bias, 0.0, 1.0);
-            return a
-        }
 
-        msdf: fn(scale, p, color) {
-            let s = self.msdf_texture.sample(p);
-            // Use alpha as the coverage source to keep parity with SDF while RGB stores MSDF.
-            let dist = s.a;
-            let safe_scale = max(scale, 0.0001);
-            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-            var a = clamp(
-                (dist - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
-                0.0,
-                1.0,
-            );
-            let bias = (0.5 - luma) * self.sdf_luma_bias;
-            // Avoid lifting near-zero background alpha into visible gray quads on light text.
-            if a > self.sdf_luma_bias * 0.5 {
-                a = clamp(a - bias, 0.0, 1.0);
-            }
-            return a
-        }
 
-        fetch_curve_texel: fn(texel_idx: float) -> vec4 {
-            let tex_size = self.curve_texture.size()
-            let row = floor(texel_idx / tex_size.x)
-            let col = texel_idx - row * tex_size.x
-            let uv = vec2(
-                (col + 0.5) / tex_size.x,
-                (row + 0.5) / tex_size.y
-            )
-            return self.curve_texture.sample_nearest(uv)
-        }
 
-        fetch_band_texel: fn(texel_idx: float) -> vec4 {
-            let tex_size = self.band_texture.size()
-            let row = floor(texel_idx / tex_size.x)
-            let col = texel_idx - row * tex_size.x
-            let uv = vec2(
-                (col + 0.5) / tex_size.x,
-                (row + 0.5) / tex_size.y
-            )
-            return self.band_texture.sample_nearest(uv)
-        }
 
-        pick_channel: fn(v: vec4, channel: float) -> float {
-            if channel < 0.5 {
-                return v.x
-            }
-            if channel < 1.5 {
-                return v.y
-            }
-            if channel < 2.5 {
-                return v.z
-            }
-            return v.w
-        }
 
         slug_curve_offset: fn() -> float {
             return self.t_min.x
@@ -915,244 +173,14 @@ script_mod! {
             return self.atlas_plane
         }
 
-        calc_root_code: fn(y1: float, y2: float, y3: float) -> u32 {
-            let i1 = asuint(y1) >> u32(31)
-            let i2 = asuint(y2) >> u32(30)
-            let i3 = asuint(y3) >> u32(29)
 
-            let shift = (i1 & u32(1)) | (i2 & u32(2)) | (i3 & u32(4))
-            return (u32(11892) >> shift) & u32(257)
-        }
 
-        solve_horiz_poly: fn(p12: vec4, p3: vec2) -> vec2 {
-            let a = p12.xy - p12.zw * 2.0 + p3
-            let b = p12.xy - p12.zw
-            let ra = 1.0 / a.y
-            let rb = 0.5 / b.y
 
-            let d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0))
-            let mut t1 = (b.y - d) * ra
-            let mut t2 = (b.y + d) * ra
-            if abs(a.y) < 1.0 / 65536.0 {
-                t1 = p12.y * rb
-                t2 = t1
-            }
-            return vec2(
-                (a.x * t1 - b.x * 2.0) * t1 + p12.x,
-                (a.x * t2 - b.x * 2.0) * t2 + p12.x
-            )
-        }
 
-        solve_vert_poly: fn(p12: vec4, p3: vec2) -> vec2 {
-            let a = p12.xy - p12.zw * 2.0 + p3
-            let b = p12.xy - p12.zw
-            let ra = 1.0 / a.x
-            let rb = 0.5 / b.x
 
-            let d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0))
-            let mut t1 = (b.x - d) * ra
-            let mut t2 = (b.x + d) * ra
-            if abs(a.x) < 1.0 / 65536.0 {
-                t1 = p12.x * rb
-                t2 = t1
-            }
-            return vec2(
-                (a.y * t1 - b.y * 2.0) * t1 + p12.y,
-                (a.y * t2 - b.y * 2.0) * t2 + p12.y
-            )
-        }
 
-        scan_horizontal_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(list_count + 0.5)
-            var coverage = 0.0
-            var weight = 0.0
 
-            var j = 0.0
-            loop {
-                if j >= limit { break }
 
-                let packed_idx = floor(j * 0.25)
-                let channel = j - packed_idx * 4.0
-                let idx_data = self.fetch_band_texel(list_offset + packed_idx)
-                let curve_idx = self.pick_channel(idx_data, channel)
-
-                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                if max(max(p12.x, p12.z), p3.x) / px_size < -0.5 { break }
-
-                let code = self.calc_root_code(p12.y, p12.w, p3.y)
-                if code != u32(0) {
-                    let r = self.solve_horiz_poly(p12, p3) / px_size
-                    if (code & u32(1)) != u32(0) {
-                        coverage = coverage + self.saturate(r.x + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                    }
-                    if code > u32(1) {
-                        coverage = coverage - self.saturate(r.y + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                    }
-                }
-
-                j = j + 1.0
-            }
-
-            return vec2(coverage, weight)
-        }
-
-        scan_vertical_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(list_count + 0.5)
-            var coverage = 0.0
-            var weight = 0.0
-
-            var j = 0.0
-            loop {
-                if j >= limit { break }
-
-                let packed_idx = floor(j * 0.25)
-                let channel = j - packed_idx * 4.0
-                let idx_data = self.fetch_band_texel(list_offset + packed_idx)
-                let curve_idx = self.pick_channel(idx_data, channel)
-
-                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                if max(max(p12.y, p12.w), p3.y) / px_size < -0.5 { break }
-
-                let code = self.calc_root_code(p12.x, p12.z, p3.x)
-                if code != u32(0) {
-                    let r = self.solve_vert_poly(p12, p3) / px_size
-                    if (code & u32(1)) != u32(0) {
-                        coverage = coverage - self.saturate(r.x + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                    }
-                    if code > u32(1) {
-                        coverage = coverage + self.saturate(r.y + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                    }
-                }
-
-                j = j + 1.0
-            }
-
-            return vec2(coverage, weight)
-        }
-
-        scan_horizontal_all: fn(sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(self.slug_curve_count() + 0.5)
-            var coverage = 0.0
-            var weight = 0.0
-
-            var i = 0.0
-            loop {
-                if i >= limit { break }
-
-                let curve_idx = self.slug_curve_offset() + i
-                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                let code = self.calc_root_code(p12.y, p12.w, p3.y)
-                if code != u32(0) {
-                    let r = self.solve_horiz_poly(p12, p3) / px_size
-                    if (code & u32(1)) != u32(0) {
-                        coverage = coverage + self.saturate(r.x + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                    }
-                    if code > u32(1) {
-                        coverage = coverage - self.saturate(r.y + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                    }
-                }
-
-                i = i + 1.0
-            }
-
-            return vec2(coverage, weight)
-        }
-
-        scan_vertical_all: fn(sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(self.slug_curve_count() + 0.5)
-            var coverage = 0.0
-            var weight = 0.0
-
-            var i = 0.0
-            loop {
-                if i >= limit { break }
-
-                let curve_idx = self.slug_curve_offset() + i
-                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
-                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
-                let code = self.calc_root_code(p12.x, p12.z, p3.x)
-                if code != u32(0) {
-                    let r = self.solve_vert_poly(p12, p3) / px_size
-                    if (code & u32(1)) != u32(0) {
-                        coverage = coverage - self.saturate(r.x + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
-                    }
-                    if code > u32(1) {
-                        coverage = coverage + self.saturate(r.y + 0.5)
-                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
-                    }
-                }
-
-                i = i + 1.0
-            }
-
-            return vec2(coverage, weight)
-        }
-
-        calc_coverage: fn(xcov: float, ycov: float, xwgt: float, ywgt: float) -> float {
-            let coverage = max(
-                abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
-                min(abs(xcov), abs(ycov))
-            )
-            if self.slug_fill_flags() >= 4096.0 {
-                return 1.0 - abs(1.0 - fract(coverage * 0.5) * 2.0)
-            }
-            return self.saturate(coverage)
-        }
-
-        alpha_at: fn(sample: vec2, px_x: float, px_y: float) -> float {
-            var coverage_x = 0.0
-            var coverage_y = 0.0
-            var weight_x = 0.0
-            var weight_y = 0.0
-
-            if self.slug_band_count() > 0.5 {
-                let num_bands = max(floor(self.slug_band_count() + 0.5), 1.0)
-                let h_band_idx = clamp(floor(sample.y * num_bands), 0.0, num_bands - 1.0)
-                let v_band_idx = clamp(floor(sample.x * num_bands), 0.0, num_bands - 1.0)
-
-                let h_band_info = self.fetch_band_texel(self.slug_band_offset() + h_band_idx)
-                let h_band = self.scan_horizontal_list(
-                    floor(h_band_info.x + 0.5),
-                    h_band_info.y,
-                    sample,
-                    px_x,
-                )
-                coverage_x = h_band.x
-                weight_x = h_band.y
-
-                let v_band_info = self.fetch_band_texel(
-                    self.slug_band_offset() + num_bands + v_band_idx
-                )
-                let v_band = self.scan_vertical_list(
-                    floor(v_band_info.x + 0.5),
-                    v_band_info.y,
-                    sample,
-                    px_y,
-                )
-                coverage_y = v_band.x
-                weight_y = v_band.y
-            } else {
-                let x_scan = self.scan_horizontal_all(sample, px_x)
-                coverage_x = x_scan.x
-                weight_x = x_scan.y
-
-                let y_scan = self.scan_vertical_all(sample, px_y)
-                coverage_y = y_scan.x
-                weight_y = y_scan.y
-            }
-
-            return self.calc_coverage(coverage_x, coverage_y, weight_x, weight_y)
-        }
 
         sample_slug_pixel: fn() {
             if self.slug_curve_count() < 0.5 {
@@ -1193,11 +221,18 @@ script_mod! {
             return self.color
         }
 
+        alpha_at: fn(sample: vec2, px_x: float, px_y: float) -> float {
+            return self.alpha_at_scan(sample, px_x, px_y)
+        }
+
         fragment: fn() {
             self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip);
         }
 
         sample_text_pixel: fn() {
+            if self.texture_index < -0.5 {
+                return self.color_texture.sample(vec2(0.5, 0.5) / self.color_texture.size())
+            }
             if self.texture_index < 0.5 {
                 let dxt = length(dFdx(self.t))
                 let dyt = length(dFdy(self.t))
@@ -1260,18 +295,6 @@ pub struct DrawText {
     pending_slug_flush_generation: u64,
     #[rust]
     slug_flush_defer_depth: u64,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[rust]
-    slug_draw: Option<DrawTextSlug>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[rust]
-    slug_promotion: SlugPromotionState,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[rust]
-    slug_sync_plan: SlugDrawSyncPlan,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[rust]
-    slug_layout_pad: u64,
     #[live]
     pub text_style: TextStyle,
     #[live(1.0)]
@@ -1303,6 +326,16 @@ pub struct DrawText {
     /// this to the line style's height so mixed-font runs stay baseline-aligned.
     #[rust]
     pub align_row_height: Option<f32>,
+
+    /// The line's baseline below the row top (in unscaled lpxs) for RowAlign::Baseline;
+    /// TextFlow sets it beside `align_row_height`, so every run on a row reports one line.
+    #[rust]
+    pub align_row_baseline: Option<f32>,
+
+    /// The enclosing wrap flow's spacing when this text draws as one of its runs (see
+    /// `LayoutOptions::flow_wrap_spacing_in_lpxs`); TextFlow sets it before each run.
+    #[rust]
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
 
     /// Per-row horizontal alignment applied by the text layouter when the
     /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
@@ -1378,636 +411,85 @@ pub struct DrawText {
     pub stem_darken_max: f32,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-struct DrawTextSlug {
-    #[rust]
-    many_instances: Option<ManyInstances>,
-    #[deref]
-    draw_vars: DrawVars,
-    #[live]
-    rect_pos: Vec2f,
-    #[live]
-    rect_size: Vec2f,
-    #[live]
-    draw_clip: Vec4f,
-    #[live(1.0)]
-    depth_clip: f32,
-    #[live]
-    glyph_depth: f32,
-    #[live]
-    texture_index: f32,
-    #[live]
-    char_index: f32,
-    #[live(vec4(1., 1., 1., 1.))]
-    color: Vec4f,
-    #[live(1.0)]
-    sdf_sharpness: f32,
-    #[live(0.03)]
-    sdf_luma_bias: f32,
-    #[live]
-    t_min: Vec2f,
-    #[live]
-    t_max: Vec2f,
-    #[live]
-    atlas_plane: f32,
-    #[live]
-    pad1: f32,
-    #[live(0.0)]
-    aa_2x2: f32,
-    #[live(0.0)]
-    aa_4x4: f32,
-    #[live(0.2)]
-    stem_darken: f32,
-    #[live(0.125)]
-    stem_darken_max: f32,
-}
-
+/// A glyph as it draws: slug curves (outline text) or an atlas image (colour/bitmap glyphs,
+/// and outline text when the SDF/MSDF atlas is selected for its size).
 #[derive(Clone, Copy, Debug)]
-enum ResolvedGlyph {
+pub enum PreparedGlyph {
     Raster(RasterizedGlyph),
     Slug(crate::text::slug_atlas::SlugGlyphInfo),
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-const SLUG_HELPER_BUILDS_PER_REDRAW: usize = 1;
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Default)]
-struct SlugHelperWarmupState {
-    redraw_id: u64,
-    builds_this_redraw: usize,
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Default)]
-struct SlugHelperPrewarmState {
-    registered: bool,
-    initialized: bool,
-    requested_redraw_id: u64,
-}
-
-/// Returns true only when `area` still references live GPU instances left over from a
-/// *previous* redraw (`instance_count > 0` and a stale `redraw_id`).
-///
-/// The slug/raster text paths use this to decide whether a draw item must be redrawn to
-/// clear stale glyphs when a run switches rendering path. It must reject two cases that
-/// would otherwise cause a per-frame `redraw_area_in_draw` — i.e. a permanent ~100% CPU
-/// continuous-repaint loop:
-///   - count == 0: an empty batch (e.g. a whitespace-only run, whose glyphs have no
-///     raster image) was begun and finished this frame; there is nothing to clear.
-///   - a *valid* (current-redraw) area: the area was already drawn this frame, either by
-///     this run or by another `draw_text` call sharing the same instance (text is drawn
-///     in resumable chunks), so its draw item is up to date.
-/// `Area::is_valid` returns false for count == 0, so the explicit count check is required.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn area_holds_stale_content(area: &Area, cx: &Cx) -> bool {
-    matches!(area, Area::Instance(inst) if inst.instance_count > 0) && !area.is_valid(cx)
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Default)]
-struct SlugPromotionState {
-    redraw_id: u64,
-    saw_slug_candidates_this_redraw: bool,
-    saw_unready_this_redraw: bool,
-    allow_slug_this_redraw: bool,
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Default)]
-struct SlugDrawSyncPlan {
-    source_shader_id: Option<usize>,
-    target_shader_id: Option<usize>,
-    instance_ids: Vec<LiveId>,
-    uniform_ids: Vec<LiveId>,
-    source_has_color_2: bool,
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-impl SlugDrawSyncPlan {
-    fn ensure(&mut self, cx: &Cx, source_shader_id: usize, target_shader_id: usize) {
-        if self.source_shader_id == Some(source_shader_id)
-            && self.target_shader_id == Some(target_shader_id)
-        {
-            return;
+impl PreparedGlyph {
+    /// Still on its way from the host (a placeholder that covers nothing yet).
+    pub fn is_pending(&self) -> bool {
+        match self {
+            PreparedGlyph::Raster(r) => r.atlas_kind == AtlasKind::Unresolved,
+            PreparedGlyph::Slug(s) => s.curve_count == 0,
         }
-
-        self.source_shader_id = Some(source_shader_id);
-        self.target_shader_id = Some(target_shader_id);
-        self.instance_ids.clear();
-        self.uniform_ids.clear();
-
-        let source_shader = &cx.draw_shaders.shaders[source_shader_id];
-        let target_shader = &cx.draw_shaders.shaders[target_shader_id];
-        let source_dyn_instances = &source_shader.mapping.dyn_instances.inputs;
-        let target_dyn_instances = &target_shader.mapping.dyn_instances.inputs;
-        let source_dyn_uniforms = &source_shader.mapping.dyn_uniforms.inputs;
-        let target_dyn_uniforms = &target_shader.mapping.dyn_uniforms.inputs;
-
-        let source_has_instance = |id| source_dyn_instances.iter().any(|input| input.id == id);
-        let target_has_instance = |id| target_dyn_instances.iter().any(|input| input.id == id);
-        let source_has_uniform = |id| source_dyn_uniforms.iter().any(|input| input.id == id);
-        let target_has_uniform = |id| target_dyn_uniforms.iter().any(|input| input.id == id);
-
-        for id in [
-            live_id!(hover),
-            live_id!(focus),
-            live_id!(down),
-            live_id!(disabled),
-            live_id!(empty),
-            live_id!(active),
-            live_id!(drag),
-            live_id!(pressed),
-            live_id!(opened),
-            live_id!(focussed),
-            live_id!(is_even),
-            live_id!(is_folder),
-            live_id!(scale),
-            live_id!(total_chars),
-        ] {
-            if source_has_instance(id) && target_has_instance(id) {
-                self.instance_ids.push(id);
-            }
-        }
-
-        for id in [
-            live_id!(aa_pad_px),
-            live_id!(color_hover),
-            live_id!(color_focus),
-            live_id!(color_down),
-            live_id!(color_disabled),
-            live_id!(color_empty),
-            live_id!(color_empty_hover),
-            live_id!(color_empty_focus),
-            live_id!(color_active),
-            live_id!(color_drag),
-            live_id!(color_pressed),
-            live_id!(color_2),
-            live_id!(color_2_hover),
-            live_id!(color_2_focus),
-            live_id!(color_2_down),
-            live_id!(color_2_disabled),
-            live_id!(color_2_empty),
-            live_id!(color_2_empty_hover),
-            live_id!(color_2_empty_focus),
-            live_id!(color_2_active),
-            live_id!(color_2_drag),
-            live_id!(color_2_pressed),
-            live_id!(color_dither),
-            live_id!(gradient_fill_horizontal),
-        ] {
-            if source_has_uniform(id) && target_has_uniform(id) {
-                self.uniform_ids.push(id);
-            }
-        }
-
-        self.source_has_color_2 = source_has_uniform(live_id!(color_2));
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn slug_try_consume_helper_build_budget(cx: &mut Cx) -> bool {
-    let redraw_id = cx.redraw_id;
-    let state = cx.global::<SlugHelperWarmupState>();
-    if state.redraw_id != redraw_id {
-        state.redraw_id = redraw_id;
-        state.builds_this_redraw = 0;
-    }
-    if state.builds_this_redraw >= SLUG_HELPER_BUILDS_PER_REDRAW {
-        return false;
-    }
-    state.builds_this_redraw += 1;
-    true
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn slug_register_helper_if_needed(cx: &mut Cx) {
-    let should_register = {
-        let state = cx.global::<SlugHelperPrewarmState>();
-        if state.registered {
-            false
-        } else {
-            state.registered = true;
-            true
-        }
-    };
-    if should_register {
-        cx.with_vm(register_draw_text_slug);
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn slug_maybe_prewarm_helper(cx: &mut Cx2d) -> bool {
-    enum PrewarmAction {
-        Ready,
-        RequestFollowupRedraw,
-        TryPrewarm,
     }
 
-    let redraw_id = cx.cx.redraw_id;
-    let action = {
-        let state = cx.cx.global::<SlugHelperPrewarmState>();
-        if state.initialized {
-            PrewarmAction::Ready
-        } else if state.requested_redraw_id == 0 {
-            state.requested_redraw_id = redraw_id;
-            PrewarmAction::RequestFollowupRedraw
-        } else if state.requested_redraw_id == redraw_id {
-            PrewarmAction::RequestFollowupRedraw
-        } else {
-            PrewarmAction::TryPrewarm
-        }
-    };
-
-    match action {
-        PrewarmAction::Ready => true,
-        PrewarmAction::RequestFollowupRedraw => {
-            // A real SLUG glyph was requested; keep this frame on the raster
-            // fallback and start warming the shared helper on the next redraw.
-            cx.redraw_all();
-            false
-        }
-        PrewarmAction::TryPrewarm => {
-            if !slug_try_consume_helper_build_budget(cx.cx) {
-                cx.redraw_all();
-                return false;
-            }
-            slug_register_helper_if_needed(cx.cx);
-            {
-                let state = cx.cx.global::<SlugHelperPrewarmState>();
-                if state.initialized {
-                    return true;
-                }
-                state.initialized = true;
-            }
-            cx.cx.with_vm(|vm| {
-                let _ = DrawTextSlug::script_new_with_default(vm);
-            });
-            cx.redraw_all();
-            false
+    /// The ink box's vertical centre, in ems above the baseline (negative: above).
+    pub fn center_y_in_ems(&self) -> f32 {
+        match self {
+            PreparedGlyph::Raster(r) => (-r.origin_in_dpxs.y - r.atlas_image_bounds.size.height as f32 * 0.5) / r.dpxs_per_em,
+            PreparedGlyph::Slug(s) => -s.origin_in_ems.y - s.size_in_ems.height * 0.5,
         }
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-impl DrawText {
-    fn slug_run_is_ready(&mut self, cx: &mut Cx2d, text: &LaidoutText) -> bool {
-        let dpi_factor = cx.current_dpi_factor() as f32;
-        let redraw_id = cx.cx.redraw_id;
-        let mut has_slug_candidates = false;
-        let mut all_slug_candidates_ready = true;
-        let mut pending_slug_generation = 0;
-
-        if self.slug_promotion.redraw_id != redraw_id {
-            self.slug_promotion.allow_slug_this_redraw = self.slug_promotion.redraw_id != 0
-                && self.slug_promotion.saw_slug_candidates_this_redraw
-                && !self.slug_promotion.saw_unready_this_redraw;
-            self.slug_promotion.redraw_id = redraw_id;
-            self.slug_promotion.saw_slug_candidates_this_redraw = false;
-            self.slug_promotion.saw_unready_this_redraw = false;
-        }
-
-        for row in &text.rows {
-            for glyph in &row.glyphs {
-                let font_size_in_dpxs = glyph.font_size_in_lpxs * dpi_factor;
-                if glyph
-                    .font
-                    .has_glyph_raster_image(glyph.id, font_size_in_dpxs)
-                {
-                    continue;
-                }
-                if !cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
-                    continue;
-                }
-
-                match cx.fonts.borrow_mut().get_or_cache_slug_glyph(
-                    redraw_id,
-                    glyph.font.as_ref(),
-                    glyph.id,
-                ) {
-                    SlugGlyphCacheResult::Ready(..) => {
-                        has_slug_candidates = true;
-                    }
-                    SlugGlyphCacheResult::NeedsUpload { generation, .. } => {
-                        has_slug_candidates = true;
-                        all_slug_candidates_ready = false;
-                        pending_slug_generation = pending_slug_generation.max(generation);
-                    }
-                    SlugGlyphCacheResult::Deferred => {
-                        has_slug_candidates = true;
-                        all_slug_candidates_ready = false;
-                    }
-                    SlugGlyphCacheResult::Unavailable => {}
-                }
-            }
-        }
-
-        if pending_slug_generation != 0 {
-            self.pending_slug_flush_generation = self
-                .pending_slug_flush_generation
-                .max(pending_slug_generation);
-        }
-
-        if !has_slug_candidates {
-            return false;
-        }
-
-        self.slug_promotion.saw_slug_candidates_this_redraw = true;
-
-        if !all_slug_candidates_ready {
-            self.slug_promotion.saw_unready_this_redraw = true;
-            cx.redraw_all();
-            return false;
-        }
-
-        if !slug_maybe_prewarm_helper(cx) {
-            self.slug_promotion.saw_unready_this_redraw = true;
-            return false;
-        }
-
-        if !self.ensure_slug_draw(cx) {
-            self.slug_promotion.saw_unready_this_redraw = true;
-            cx.redraw_all();
-            return false;
-        }
-
-        if !self.slug_promotion.allow_slug_this_redraw {
-            cx.redraw_all();
-            return false;
-        }
-
-        true
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-impl ScriptHook for DrawText {
-    fn on_after_apply(
-        &mut self,
-        _vm: &mut ScriptVm,
-        apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        if apply.is_from_script() {
-            self.slug_draw = None;
-            self.slug_promotion = Default::default();
-            self.slug_sync_plan = Default::default();
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl ScriptHook for DrawText {}
 
+/// The glyphs looked up since the last call go to the draw list being recorded: while that list
+/// is alive (painted again from its kept instances or not) they stay in use (`CxDrawList::glyph_uses`).
+fn note_glyph_uses(cx: &mut Cx2d) {
+    let Some(list) = cx.draw_list_stack.last().copied() else { return };
+    let fonts = cx.fonts.clone();
+    let fonts = fonts.borrow();
+    let mut rasterizer = fonts.rasterizer().borrow_mut();
+    rasterizer.take_glyph_uses(&mut cx.cx.draw_lists[list].glyph_uses);
+}
+
+/// How a laid-out glyph draws at `dpxs_per_em`: slug curves for outline glyphs (unless the
+/// SDF/MSDF atlas is selected for this size), the atlas for colour/bitmap glyphs and outlines slug
+/// cannot hold. A glyph without an outline or image (a space) is nothing: it never asks the host
+/// for an atlas image. Also answers the slug generation a draw must upload (web), or 0.
+fn prepare_glyph(cx: &mut Cx2d, glyph: &LaidoutGlyph, dpxs_per_em: f32) -> (Option<PreparedGlyph>, u64) {
+    let raster_image = glyph.font.has_glyph_raster_image(glyph.id, dpxs_per_em);
+    if !raster_image && cx.fonts.borrow().should_use_slug_glyph(dpxs_per_em) {
+        let lookup = cx.fonts.borrow_mut().get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id);
+        match lookup {
+            SlugGlyphCacheResult::Ready(info) => return (Some(PreparedGlyph::Slug(info)), 0),
+            SlugGlyphCacheResult::NeedsUpload { generation, glyph: info } => return (Some(PreparedGlyph::Slug(info)), generation),
+            SlugGlyphCacheResult::Unavailable => {
+                if glyph.font.glyph_outline_rc(glyph.id).is_none() {
+                    return (None, 0);
+                }
+            }
+        }
+    }
+    (glyph.rasterize(dpxs_per_em).map(PreparedGlyph::Raster), 0)
+}
+
+/// `G`: [`PreparedGlyph`] (`prepare_single_line_run`, drawn by `draw_prepared_glyph_abs`), or
+/// [`RasterizedGlyph`] (`prepare_single_line_raster_run`, for shaders that sample the atlas).
 #[derive(Clone, Debug)]
-pub struct PreparedTextGlyph {
+pub struct PreparedTextGlyph<G = PreparedGlyph> {
     pub pen_x_in_lpxs: f32,
     pub offset_x_in_lpxs: f32,
     pub advance_in_lpxs: f32,
     pub font_size_in_lpxs: f32,
-    pub rasterized: RasterizedGlyph,
+    pub glyph: G,
 }
 
 #[derive(Clone, Debug)]
-pub struct PreparedTextRun {
+pub struct PreparedTextRun<G = PreparedGlyph> {
     pub width_in_lpxs: f32,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
-    pub glyphs: Vec<PreparedTextGlyph>,
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-impl DrawTextSlug {
-    fn has_open_batch(&self) -> bool {
-        self.many_instances.is_some()
-    }
-
-    fn begin_many_instances(&mut self, cx: &mut Cx2d, visibility: f32) -> bool {
-        if self.many_instances.is_some() {
-            return true;
-        }
-        self.update_draw_vars(cx);
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(slug_visibility), &[visibility]);
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
-        self.many_instances.is_some()
-    }
-
-    fn end_many_instances(&mut self, cx: &mut Cx2d, extend_area: bool) {
-        if let Some(instances) = self.many_instances.take() {
-            self.finish_many_instances(cx, instances, extend_area);
-        }
-    }
-
-    fn finish_many_instances(
-        &mut self,
-        cx: &mut Cx2d,
-        instances: ManyInstances,
-        extend_area: bool,
-    ) {
-        let new_area = cx.end_many_instances(instances);
-        let old_area = self.draw_vars.area;
-        if extend_area {
-            let extended = old_area.extend_with(cx, new_area);
-            self.draw_vars.area = cx.update_area_refs(old_area, extended);
-        } else {
-            self.draw_vars.area = cx.update_area_refs(old_area, new_area);
-        }
-    }
-
-    fn update_draw_vars(&mut self, cx: &mut Cx2d) {
-        self.draw_vars.append_group_id = cx.draw_call_group_content().0;
-        let fonts = cx.fonts.borrow();
-        self.draw_vars.texture_slots[0] = Some(fonts.slug_curve_texture().clone());
-        self.draw_vars.texture_slots[1] = Some(fonts.slug_band_texture().clone());
-        for slot in self.draw_vars.texture_slots.iter_mut().skip(2) {
-            *slot = None;
-        }
-
-        // The camera itself is read by the shader at render time
-        // (`slug_dilate`); only the viewport is the draw's.
-        let viewport = cx.current_pass_size();
-        let dpi_factor = cx.current_dpi_factor() as f32;
-        let viewport_px = [
-            (viewport.x as f32 * dpi_factor).max(1.0),
-            (viewport.y as f32 * dpi_factor).max(1.0),
-        ];
-
-        self.draw_vars
-            .set_uniform(cx.cx, live_id!(slug_viewport_px), &viewport_px);
-    }
-
-    fn draw_slug_glyph(
-        &mut self,
-        cx: &mut Cx2d,
-        draw_text: &DrawText,
-        origin_in_lpxs: Point<f32>,
-        font_size_in_lpxs: f32,
-        color: Option<Color>,
-        glyph: crate::text::slug_atlas::SlugGlyphInfo,
-    ) {
-        let Some(instances) = self.many_instances.as_mut() else {
-            return;
-        };
-
-        let bounds_in_lpxs = TextRect::new(
-            Point::new(
-                origin_in_lpxs.x + glyph.origin_in_ems.x * font_size_in_lpxs * draw_text.font_scale,
-                origin_in_lpxs.y
-                    + (-glyph.origin_in_ems.y - glyph.size_in_ems.height)
-                        * font_size_in_lpxs
-                        * draw_text.font_scale,
-            ),
-            Size::new(
-                glyph.size_in_ems.width * font_size_in_lpxs * draw_text.font_scale,
-                glyph.size_in_ems.height * font_size_in_lpxs * draw_text.font_scale,
-            ),
-        );
-
-        let pad = (draw_text.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
-        self.rect_pos = vec2(bounds_in_lpxs.origin.x - pad, bounds_in_lpxs.origin.y - pad)
-            + vec2(0.0, draw_text.temp_y_shift * font_size_in_lpxs);
-        self.rect_size = vec2(
-            bounds_in_lpxs.size.width + pad * 2.0,
-            bounds_in_lpxs.size.height + pad * 2.0,
-        );
-        self.draw_clip = draw_text.draw_clip;
-        self.depth_clip = draw_text.depth_clip;
-        self.glyph_depth = draw_text.glyph_depth;
-        self.texture_index = 3.0;
-        self.char_index = draw_text.char_index;
-        let mut source_color = [
-            draw_text.color.x,
-            draw_text.color.y,
-            draw_text.color.z,
-            draw_text.color.w,
-        ];
-        if !draw_text
-            .draw_vars
-            .get_instance_on_area(cx.cx, live_id!(color), &mut source_color)
-        {
-            draw_text
-                .draw_vars
-                .get_instance(cx.cx, live_id!(color), &mut source_color);
-        }
-        self.color = vec4(
-            source_color[0],
-            source_color[1],
-            source_color[2],
-            source_color[3],
-        );
-        self.sdf_sharpness = draw_text.sdf_sharpness;
-        self.sdf_luma_bias = draw_text.sdf_luma_bias;
-        if let Some(color) = color {
-            self.color = vec4(
-                color.r as f32,
-                color.g as f32,
-                color.b as f32,
-                color.a as f32,
-            ) / 255.0;
-        }
-        self.t_min = vec2(glyph.curve_offset as f32, glyph.curve_count as f32);
-        self.t_max = vec2(glyph.band_offset as f32, glyph.band_count as f32);
-        self.atlas_plane = glyph.fill_flags as f32;
-        self.pad1 = 0.0;
-        self.aa_2x2 = draw_text.aa_2x2;
-        self.aa_4x4 = draw_text.aa_4x4;
-        self.stem_darken = draw_text.stem_darken;
-        self.stem_darken_max = draw_text.stem_darken_max;
-        self.draw_vars
-            .set_dyn_instance(cx.cx, live_id!(scale), &[draw_text.font_scale]);
-
-        instances
-            .instances
-            .extend_from_slice(self.draw_vars.as_slice());
-    }
+    pub glyphs: Vec<PreparedTextGlyph<G>>,
 }
 
 impl DrawText {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn slug_draw_is_ready(&self, cx: &mut Cx2d) -> bool {
-        let Some(shader_id) = self
-            .slug_draw
-            .as_ref()
-            .and_then(|slug_draw| slug_draw.draw_vars.draw_shader_id)
-        else {
-            return false;
-        };
-        cx.cx.is_draw_shader_window_ready(shader_id)
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn ensure_slug_draw(&mut self, cx: &mut Cx2d) -> bool {
-        if self.slug_draw.is_some() {
-            self.sync_slug_draw_state(cx);
-            return self.slug_draw_is_ready(cx);
-        }
-
-        slug_register_helper_if_needed(cx.cx);
-        let mut created = None;
-
-        cx.cx.with_vm(|vm| {
-            let slug_draw = DrawTextSlug::script_new_with_default(vm);
-            created = Some(slug_draw);
-        });
-
-        self.slug_draw = created;
-        if self.slug_draw.is_some() {
-            if let Some(slug_draw) = self.slug_draw.as_mut() {
-                slug_draw.draw_vars.options = self.draw_vars.options.clone();
-            }
-            self.sync_slug_draw_state(cx);
-            return self.slug_draw_is_ready(cx);
-        }
-        false
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn sync_slug_draw_state(&mut self, cx: &mut Cx2d) {
-        let Some(source_shader_id) = self.draw_vars.draw_shader_id else {
-            return;
-        };
-        let Some(target_shader_id) = self
-            .slug_draw
-            .as_ref()
-            .and_then(|slug_draw| slug_draw.draw_vars.draw_shader_id)
-        else {
-            return;
-        };
-        self.slug_sync_plan
-            .ensure(cx.cx, source_shader_id.index, target_shader_id.index);
-        let Some(slug_draw) = self.slug_draw.as_mut() else {
-            return;
-        };
-        slug_draw.draw_vars.options = self.draw_vars.options.clone();
-
-        for &id in &self.slug_sync_plan.instance_ids {
-            let mut value = [0.0; 4];
-            self.draw_vars.get_instance(cx.cx, id, &mut value);
-            slug_draw.draw_vars.set_dyn_instance(cx.cx, id, &value);
-        }
-
-        for &id in &self.slug_sync_plan.uniform_ids {
-            let mut value = [0.0; 4];
-            self.draw_vars.get_uniform(cx.cx, id, &mut value);
-            slug_draw.draw_vars.set_uniform(cx.cx, id, &value);
-        }
-
-        let mut color_2 = [-1.0; 4];
-        if self.slug_sync_plan.source_has_color_2 {
-            self.draw_vars
-                .get_uniform(cx.cx, live_id!(color_2), &mut color_2);
-        }
-        slug_draw.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(use_color_2),
-            &[if color_2[0] > -0.5 { 1.0 } else { 0.0 }],
-        );
-    }
-
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, text: &str) {
         let text = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
@@ -2025,11 +507,6 @@ impl DrawText {
         if let Some(instances) = self.many_instances.take() {
             self.flush_slug_textures_if_allowed(cx);
             self.finish_many_instances(cx, instances);
-        }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(mut slug_draw) = self.slug_draw.take() {
-            slug_draw.end_many_instances(cx, self.extend_area);
-            self.slug_draw = Some(slug_draw);
         }
     }
 
@@ -2070,6 +547,10 @@ impl DrawText {
         if glyphs.is_empty() {
             return;
         }
+        // Kept glyphs (prepared runs, cached cells) are snapshots: under the HAL font service a
+        // glyph may have been on its way when it was prepared, upgraded since, or taken back.
+        // Each draw looks them up again, as laid-out text does, which also keeps them in use.
+        let rasterizer = cx.fonts.borrow().rasterizer().clone();
         // An already-open batch ran update_draw_vars when it began; running it
         // again per call dominates CPU when thousands of glyphs share a batch.
         if let Some(mut instances) = self.many_instances.take() {
@@ -2082,11 +563,12 @@ impl DrawText {
                     *origin_in_lpxs,
                     *font_size_in_lpxs,
                     None,
-                    *rasterized_glyph,
+                    rasterizer.borrow_mut().refresh_glyph(*rasterized_glyph),
                     &mut instances.instances,
                 );
             }
             self.many_instances = Some(instances);
+            note_glyph_uses(cx);
             return;
         }
 
@@ -2099,18 +581,20 @@ impl DrawText {
             glyphs.len() * self.draw_vars.as_slice().len(), storage);
 
         self.glyph_depth = self.draw_depth;
+        self.char_index = 0.0;
         self.color = color;
         for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
             self.draw_rasterized_glyph(
                 *origin_in_lpxs,
                 *font_size_in_lpxs,
                 None,
-                *rasterized_glyph,
+                rasterizer.borrow_mut().refresh_glyph(*rasterized_glyph),
                 &mut instances.instances,
             );
         }
 
         self.finish_many_instances(cx, instances);
+        note_glyph_uses(cx);
     }
 
     fn reserve_glyph_storage(
@@ -2124,6 +608,46 @@ impl DrawText {
             }
         }
         instances.reserve(additional);
+    }
+
+    /// Draws a glyph from a prepared run (kept by the caller) at `origin_in_lpxs` (the pen on
+    /// the baseline). Inside `begin_many_instances` it joins the open batch.
+    pub fn draw_prepared_glyph_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        font_size_in_lpxs: f32,
+        glyph: PreparedGlyph,
+        color: Vec4f,
+    ) {
+        let slug = match glyph {
+            PreparedGlyph::Raster(raster) => {
+                return self.draw_rasterized_glyph_abs(cx, origin_in_lpxs, font_size_in_lpxs, raster, color);
+            }
+            // a kept glyph is looked up again (curves upgraded, taken back, or still on their
+            // way when it was prepared), which also keeps it in use
+            PreparedGlyph::Slug(slug) => cx.fonts.borrow().rasterizer().borrow_mut().refresh_slug_glyph(slug),
+        };
+        let open = self.many_instances.take();
+        let batch_was_open = open.is_some();
+        let mut instances = match open {
+            Some(instances) => instances,
+            None => {
+                self.update_draw_vars(cx);
+                let Some(instances) = cx.begin_many_aligned_instances(&self.draw_vars) else { return };
+                self.glyph_depth = self.draw_depth;
+                self.char_index = 0.0;
+                instances
+            }
+        };
+        self.color = color;
+        self.draw_slug_glyph(cx, origin_in_lpxs, font_size_in_lpxs, None, slug, &mut instances.instances);
+        if batch_was_open {
+            self.many_instances = Some(instances);
+        } else {
+            self.finish_many_instances(cx, instances);
+        }
+        note_glyph_uses(cx);
     }
 
     pub fn draw_rasterized_glyph_abs(
@@ -2141,7 +665,24 @@ impl DrawText {
         );
     }
 
+    /// A drawable first line of `text` (its glyphs as they draw: slug curves, or atlas images
+    /// for colour glyphs), and its metrics.
     pub fn prepare_single_line_run(&self, cx: &mut Cx2d, text: &str) -> Option<PreparedTextRun> {
+        self.prepare_single_line_with(cx, text, |cx, glyph, dpx_per_em| prepare_glyph(cx, glyph, dpx_per_em).0)
+    }
+
+    /// The first line of `text` as atlas images, for shaders that sample the glyph atlas
+    /// (rotated, 3D and diagonal text).
+    pub fn prepare_single_line_raster_run(&self, cx: &mut Cx2d, text: &str) -> Option<PreparedTextRun<RasterizedGlyph>> {
+        self.prepare_single_line_with(cx, text, |_, glyph, dpx_per_em| glyph.rasterize(dpx_per_em))
+    }
+
+    fn prepare_single_line_with<G>(
+        &self,
+        cx: &mut Cx2d,
+        text: &str,
+        mut prepare: impl FnMut(&mut Cx2d, &LaidoutGlyph, f32) -> Option<G>,
+    ) -> Option<PreparedTextRun<G>> {
         let laidout = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         let row = laidout.rows.first()?;
         if row.glyphs.is_empty() {
@@ -2155,7 +696,7 @@ impl DrawText {
             // advances below, or scaled runs render letter-spaced/overlapped;
             // rasterize at the scaled size so scaled-up text stays crisp
             let dpx_per_em = glyph.font_size_in_lpxs * dpx_factor * self.font_scale;
-            let Some(rasterized) = glyph.rasterize(dpx_per_em) else {
+            let Some(prepared) = prepare(cx, glyph, dpx_per_em) else {
                 continue;
             };
 
@@ -2164,7 +705,7 @@ impl DrawText {
                 offset_x_in_lpxs: glyph.offset_in_lpxs() * self.font_scale,
                 advance_in_lpxs: glyph.advance_in_lpxs() * self.font_scale,
                 font_size_in_lpxs: glyph.font_size_in_lpxs * self.font_scale,
-                rasterized,
+                glyph: prepared,
             });
         }
         if glyphs.is_empty() {
@@ -2180,12 +721,28 @@ impl DrawText {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
+        self.draw_walk_keep(cx, walk, align, text).0
+    }
+
+    /// `draw_walk`, also handing back the laid-out text, for a widget that
+    /// maps points to text and back (selection).
+    pub fn draw_walk_keep(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> (Rect, Rc<LaidoutText>) {
+        self.draw_walk_restyled(cx, walk, align, text, None)
+    }
+
+    /// `draw_walk_keep`, with a chance to restyle the laid-out text before it
+    /// is drawn (a copy with some glyphs recoloured, say: a label's links).
+    /// `restyle` returns `None` to draw the layout as it is.
+    pub fn draw_walk_restyled(
+        &mut self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        align: Align,
+        text: &str,
+        restyle: Option<&dyn Fn(&LaidoutText) -> Option<LaidoutText>>,
+    ) -> (Rect, Rc<LaidoutText>) {
         let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
-
-        // For Fit-width containers with a max bound, resolve the bound so that
-        // ellipsis truncation and max_lines clamping can work. Without this, Fit
-        // layouts are unconstrained and text is laid out at full width on one line.
         if max_width_in_lpxs.is_none()
             && (self.text_overflow == TextOverflow::Ellipsis || self.max_lines > 0)
         {
@@ -2197,11 +754,14 @@ impl DrawText {
             max_width_in_lpxs =
                 self.fit_layout_width_for_walk(cx, walk, ellipsis_width_in_lpxs);
         }
-
         let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-
-        let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
-        self.draw_walk_laidout(cx, walk, &text)
+        let laid = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
+        let laid = match restyle {
+            Some(restyle) => restyle(&laid).map(Rc::new).unwrap_or(laid),
+            None => laid,
+        };
+        let rect = self.draw_walk_laidout(cx, walk, &laid);
+        (rect, laid)
     }
 
     fn max_layout_width_for_walk(&self, cx: &mut Cx2d, walk: Walk) -> Option<f32> {
@@ -2240,6 +800,32 @@ impl DrawText {
         }
     }
 
+    /// Record this draw for a UI check (only called while one is collecting).
+    fn note_text_run(&self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
+        let Some(row) = text.rows.first() else { return };
+        let Some(glyph) = row.glyphs.first() else { return };
+        let scale = self.font_scale;
+        let rect = rect(
+            origin_in_lpxs.x as f64,
+            origin_in_lpxs.y as f64,
+            (text.size_in_lpxs.width * scale) as f64,
+            (text.size_in_lpxs.height * scale) as f64,
+        );
+        let run = crate::cx_2d::TextRun {
+            owner: 0,
+            rect,
+            font_size: glyph.font_size_in_lpxs * scale,
+            cap_height: row.cap_height_in_lpxs * scale,
+            truncated: text.is_truncated,
+            color: [self.color.x, self.color.y, self.color.z, self.color.w],
+            area: Area::Empty,
+            declared_empty: false,
+        };
+        if let Some(sink) = cx.text_runs.as_mut() {
+            sink.runs.push(crate::cx_2d::TextRun { owner: sink.owner, ..run });
+        }
+    }
+
     pub fn draw_walk_laidout(
         &mut self,
         cx: &mut Cx2d,
@@ -2259,6 +845,24 @@ impl DrawText {
                 .max_height(walk)
                 .map_or(size_in_lpxs.height, |max_height| max_height as f32),
         );
+        // The ink shift moves the glyphs inside the box the walk takes, so the box,
+        // and every layout decision made from it (this call's return value included),
+        // stays exactly where it was.
+        let ink_shift_in_lpxs = if self.ink_centered {
+            laidout_text.ink_center_offset_in_lpxs() * self.font_scale
+        } else {
+            0.0
+        };
+        // The first row's baseline as drawn: its ascender, the ink shift and the
+        // glyph shift (which scales the unscaled glyph size, as `draw_glyph` does).
+        let shift_y_in_lpxs = laidout_text
+            .rows
+            .first()
+            .and_then(|row| row.glyphs.first())
+            .map_or(0.0, |glyph| glyph.font_size_in_lpxs * self.temp_y_shift);
+        let measured_baseline = laidout_text.rows.first().map(|row| {
+            row.origin_in_lpxs.y * self.font_scale + ink_shift_in_lpxs + shift_y_in_lpxs
+        });
         let turtle_rect = cx.walk_turtle(Walk {
             width: turtle::Size::Fixed(max_size_in_lpxs.width as f64),
             height: turtle::Size::Fixed(max_size_in_lpxs.height as f64),
@@ -2266,6 +870,10 @@ impl DrawText {
                 descender: -laidout_text.rows.last().unwrap().descender_in_lpxs as f64,
                 line_gap: 0.0,
                 line_scale: 1.0,
+            },
+            baseline: match walk.baseline {
+                Baseline::Auto => measured_baseline.map_or(Baseline::Auto, Baseline::At),
+                declared => declared,
             },
             ..walk
         });
@@ -2276,21 +884,22 @@ impl DrawText {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
-
-        // The ink shift moves the glyphs *inside* the box the walk just took,
-        // so the box — and every layout decision already made from it, this
-        // call's own return value included — stays exactly where it was.
-        let ink_shift_in_lpxs = if self.ink_centered {
-            laidout_text.ink_center_offset_in_lpxs() * self.font_scale
-        } else {
-            0.0
-        };
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_rect.pos.y as f32);
+        let runs_before = cx.text_runs.as_ref().map(|sink| sink.runs.len());
+        let declared_empty = turtle_rect.size.x <= 0.0 || turtle_rect.size.y <= 0.0;
         self.draw_text(
             cx,
             Point::new(origin_in_lpxs.x, origin_in_lpxs.y + ink_shift_in_lpxs),
             laidout_text,
         );
+        if let Some(before) = runs_before {
+            // The run just recorded is the walk's; its area is the draw's now.
+            let area = self.draw_vars.area;
+            if let Some(run) = cx.text_runs.as_mut().and_then(|sink| sink.runs.get_mut(before)) {
+                run.area = area;
+                run.declared_empty = declared_empty;
+            }
+        }
 
         rect(
             origin_in_lpxs.x as f64,
@@ -2344,6 +953,7 @@ impl DrawText {
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = self.resumable_first_row_min_spacing(cx) as f64;
+        let first_row_drop = self.first_row_anchor_drop(cx);
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -2379,15 +989,21 @@ impl DrawText {
             .and_then(|r| r.glyphs.first())
             .map(|g| g.font_size_in_lpxs * self.temp_y_shift)
             .unwrap_or(0.0);
+        // A run reports its line's baseline, not its own glyphs', so scaled and shifted
+        // runs keep their offsets from the line; a run outside a flow reports its own.
+        let (align_row_baseline, font_scale) = (self.align_row_baseline, self.font_scale);
+        let line_baseline = move |row: &LaidoutRow| -> f64 {
+            align_row_baseline.map_or(
+                (row.ascender_in_lpxs * font_scale + shift_y) as f64,
+                |baseline| (baseline * font_scale) as f64,
+            )
+        };
 
         // ── Decide whether to use per-row glyph batching ──
         // Per-row batching gives each visual row its own AlignEntry so that
         // finish_row alignment shifts apply independently per row. This
         // requires a fresh draw (no `many_instances` reuse buffer).
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        let per_row = self.many_instances.is_none() && text.rows.len() > 1;
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let per_row = false;
+        let per_row = !self.draws_wrapped_run_as_single_walk() && text.rows.len() > 1;
 
 
         if per_row {
@@ -2400,6 +1016,7 @@ impl DrawText {
 
             self.update_draw_vars(cx);
             self.glyph_depth = self.draw_depth;
+            self.char_index = 0.0;
             let saved_extend_area = self.extend_area;
 
             for (row_idx, row) in text.rows.iter().enumerate() {
@@ -2447,10 +1064,7 @@ impl DrawText {
 
                 // Draw this row's glyphs as a separate aligned-instance batch.
                 if let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) {
-                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                     self.draw_row(cx, row_origin, row, &mut instances.instances);
-                    #[cfg(any(target_os = "linux", target_os = "windows"))]
-                    let _ = (row_origin, row, &mut instances.instances);
                     self.finish_many_instances(cx, instances);
                 }
 
@@ -2479,7 +1093,7 @@ impl DrawText {
 
                 // Emit a per-row FinishedWalk covering this row's glyphs +
                 // callback rect-areas.
-                cx.emit_turtle_walk_with_align_height(
+                cx.emit_turtle_walk_with_role(
                     Rect {
                         pos: dvec2(row_origin.x as f64, row_top_y),
                         size: dvec2((row.width_in_lpxs * self.font_scale) as f64, row_h),
@@ -2488,6 +1102,8 @@ impl DrawText {
                     Metrics::default(),
                     self.align_row_height
                         .map(|h| (h * self.font_scale) as f64),
+                    Some(line_baseline(row)),
+                    crate::turtle::RowAlignRole::Shiftable,
                 );
             }
 
@@ -2502,6 +1118,12 @@ impl DrawText {
             self.flush_slug_textures_if_allowed(cx);
         } else {
             // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
+            // A wrapped run's rows share one batch, so the whole run drops to center its first
+            // row on taller content before it. The layout already pulled the later rows up by it.
+            let run_drop = if text.rows.len() > 1 { first_row_drop } else { 0.0 };
+            let row_top_in_lpxs = origin_in_lpxs.y as f64;
+            let origin_in_lpxs = Point::new(origin_in_lpxs.x, origin_in_lpxs.y + run_drop as f32);
+            let new_turtle_pos = new_turtle_pos + dvec2(0.0, run_drop);
             let align_list_start = cx.align_list_len();
             if callback_before_text {
                 for (row_index, row) in text.rows.iter().enumerate() {
@@ -2566,7 +1188,7 @@ impl DrawText {
                 turtle.move_to(new_turtle_pos);
                 turtle.set_wrap_spacing(wrap_spacing);
 
-                cx.emit_turtle_walk_with_align_height(
+                cx.emit_turtle_walk_with_role(
                     Rect {
                         pos: new_turtle_pos,
                         size: dvec2(
@@ -2577,6 +1199,8 @@ impl DrawText {
                     align_list_start,
                     Metrics::default(),
                     self.align_row_height.map(|h| (h * self.font_scale) as f64),
+                    Some(line_baseline(last_row)),
+                    crate::turtle::RowAlignRole::Shiftable,
                 );
             } else {
                 // The turtle's row bookkeeping must see this run's internal
@@ -2600,9 +1224,9 @@ impl DrawText {
 
                 let first_row = &text.rows[0];
                 let turtle = cx.turtle_mut();
-                turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+                turtle.move_to(dvec2(origin_in_lpxs.x as f64, row_top_in_lpxs));
                 turtle.allocate_width(used_size_in_lpxs.width as f64);
-                turtle.allocate_height(row_height(first_row));
+                turtle.allocate_height(run_drop + row_height(first_row));
 
                 // The first row's walk owns every align entry this run emitted
                 // and is immovable — shifting it would displace the later
@@ -2621,30 +1245,29 @@ impl DrawText {
                 };
                 cx.emit_turtle_walk_with_role(
                     Rect {
-                        pos: dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64),
+                        pos: dvec2(origin_in_lpxs.x as f64, row_top_in_lpxs),
                         size: dvec2(
                             (first_row.width_in_lpxs * self.font_scale) as f64,
-                            row_height(first_row),
+                            run_drop + row_height(first_row),
                         ),
                     },
                     align_list_start,
                     Metrics::default(),
-                    self.align_row_height.map(|h| (h * self.font_scale) as f64),
+                    // Padding the centering height by the drop on both sides keeps the row's
+                    // center on the dropped text's center.
+                    self.align_row_height
+                        .map(|h| (h * self.font_scale) as f64 + 2.0 * run_drop),
+                    Some(run_drop + line_baseline(first_row)),
                     first_row_role,
                 );
 
-                for row_index in 1..text.rows.len() {
-                    // A new turtle row starts at origin.y + used_height +
-                    // spacing. Anchoring the spacing to the turtle's real used
-                    // bottom — which includes any inline content on the
-                    // previous visual row that is taller than the text — lands
-                    // the turtle exactly on this laidout row's top, so turtle
-                    // geometry and glyph geometry agree at every internal row
-                    // boundary.
-                    let used_bottom = cx.turtle().origin().y + cx.turtle().used_height();
-                    let spacing = row_top(&text.rows[row_index]) - used_bottom;
-                    cx.turtle_new_line_with_spacing(spacing);
-                    cx.turtle_mut().allocate_height(row_height(&text.rows[row_index]));
+                for row in &text.rows[1..] {
+                    // Finishing a row can forgive part of its height, so rather than trusting
+                    // the advance we put the turtle right on this row's glyphs, which can't move.
+                    cx.turtle_new_line();
+                    let x = cx.turtle().pos().x;
+                    cx.turtle_mut().move_to(dvec2(x, row_top(row)));
+                    cx.turtle_mut().allocate_height(row_height(row));
                 }
 
                 let turtle = cx.turtle_mut();
@@ -2668,7 +1291,12 @@ impl DrawText {
                     },
                     empty_range,
                     Metrics::default(),
-                    Some(row_height(last_row)),
+                    // Center on the line's height like the first row does, so a scaled
+                    // run (code, sub/superscript) doesn't drag the row's center line.
+                    self.align_row_height
+                        .map(|h| (h * self.font_scale) as f64)
+                        .or(Some(row_height(last_row))),
+                    Some(line_baseline(last_row)),
                     crate::turtle::RowAlignRole::Anchor,
                 );
             }
@@ -2677,45 +1305,62 @@ impl DrawText {
         (text.rows.len(), text.is_truncated)
     }
 
-    /// Returns the `first_row_min_line_spacing_below_in_lpxs` a resumable run
-    /// passes to the layouter for the current turtle. In a centering wrap flow
-    /// this is the offset to the next turtle row (converted into layout units
-    /// by dividing out `font_scale`), so a continuation run's second row
-    /// clears inline content on its first visual row that is taller than the
-    /// text. Other flows pass zero and keep pure font-metric row spacing.
-    /// Every layout of the same run (draw, selection capture, wrap probes)
-    /// must use this same value so they share one layout-cache entry.
+    /// The floor a resumable run passes to the layouter under Center or Baseline wrapping: how
+    /// far the current row reaches below the run's first-row top (`font_scale` divided out), so
+    /// its second row clears taller inline content. Every layout of a run must pass this value.
     pub fn resumable_first_row_min_spacing(&self, cx: &Cx2d) -> f32 {
-        if matches!(
-            cx.turtle().layout().flow,
+        match cx.turtle().layout().flow {
             Flow::Right {
                 wrap: true,
                 row_align: crate::turtle::RowAlign::Center,
                 ..
+            } => {
+                // The per-row path finishes this run's first row like any other: the row is as
+                // tall as its tallest item and the text centers on it, so the floor is the row's
+                // box measured from the centered text's top; the layouter adds the wrap gap.
+                let row_height = cx.turtle().row_height();
+                let text_row_height = self
+                    .align_row_height
+                    .map(|h| (h * self.font_scale) as f64)
+                    .unwrap_or(row_height);
+                let centering = ((row_height - text_row_height) * 0.5).max(0.0);
+                ((row_height - centering) / self.font_scale.max(0.0001) as f64) as f32
             }
-        ) {
-            // When the current row holds inline content taller than the text
-            // line (pills), the following row is expected to hold the same
-            // kind of content beside this run's text, and RowAlign::Center
-            // will seat that content's center on the text's center — placing
-            // its top (row_height − text_height)/2 ABOVE the text's top. The
-            // floor therefore positions the second row's text one full
-            // current-row advance below, plus that overhang, so centered
-            // content on the next row starts exactly one wrap gap below the
-            // current row's content with zero residual shift. When the text
-            // is the tallest content, the floor equals `next_row_offset()`
-            // and pure font-metric spacing wins where it is larger.
-            let row_height = cx.turtle().row_height();
-            let text_row_height = self
-                .align_row_height
-                .map(|h| (h * self.font_scale) as f64)
-                .unwrap_or(row_height);
-            let overhang = ((row_height - text_row_height) * 0.5).max(0.0);
-            ((row_height + cx.turtle().wrap_spacing() + overhang)
-                / self.font_scale.max(0.0001) as f64) as f32
-        } else {
-            0.0
+            Flow::Right {
+                wrap: true,
+                row_align: crate::turtle::RowAlign::Baseline,
+                ..
+            } => {
+                // The per-row path seats this run's first row on the row's line, so the next
+                // row must clear whatever hangs deepest below that line.
+                let Some(baseline) = self.align_row_baseline else {
+                    return 0.0;
+                };
+                let fs = self.font_scale.max(0.0001) as f64;
+                ((baseline as f64 * fs + cx.row_baseline_descent()) / fs) as f32
+            }
+            _ => 0.0,
         }
+    }
+
+    /// Whether a wrapped run draws as one immovable batch. The per-row path (macOS, iOS,
+    /// Android, web) aligns each row on its own and needs a fresh draw.
+    fn draws_wrapped_run_as_single_walk(&self) -> bool {
+        self.many_instances.is_some()
+    }
+
+    /// How far a single-walk run's first row must sit below the turtle row's top so that
+    /// taller content before it on the row can align to it (see `Cx2d::row_anchor_drop`).
+    fn first_row_anchor_drop(&self, cx: &Cx2d) -> f64 {
+        if !self.draws_wrapped_run_as_single_walk() {
+            return 0.0;
+        }
+        self.align_row_height.map_or(0.0, |height| {
+            cx.row_anchor_drop(
+                (height * self.font_scale) as f64,
+                self.align_row_baseline.map(|baseline| (baseline * self.font_scale) as f64),
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2730,6 +1375,61 @@ impl DrawText {
         text: &str,
     ) -> Rc<LaidoutText> {
         self.text_style.font_family.ensure_fonts_loaded(cx);
+        let laidout = self.layout_loaded(
+            cx,
+            first_row_indent_in_lpxs,
+            first_row_min_line_spacing_below_in_lpxs,
+            max_width_in_lpxs,
+            wrap,
+            align,
+            text,
+        );
+        let has_missing_glyph = laidout
+            .rows
+            .iter()
+            .flat_map(|row| &row.glyphs)
+            .any(|glyph| glyph.id == 0);
+        // A glyph the family's own faces miss brings in its lazy CJK or emoji
+        // face (read from disk here, a memory map); laid out again at once,
+        // the text shows the real glyph on this very frame, not a box first.
+        if !has_missing_glyph {
+            return laidout;
+        }
+        let started = Cx::time_now();
+        if self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
+            cx,
+            text,
+            has_missing_glyph,
+        ) {
+            let laidout = self.layout_loaded(
+                cx,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
+                align,
+                text,
+            );
+            log!(
+                "lazy font face loaded and text laid out again in {:.2} ms",
+                (Cx::time_now() - started) * 1000.0
+            );
+            return laidout;
+        }
+        laidout
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_loaded(
+        &self,
+        cx: &mut Cx,
+        first_row_indent_in_lpxs: f32,
+        first_row_min_line_spacing_below_in_lpxs: f32,
+        max_width_in_lpxs: Option<f32>,
+        wrap: bool,
+        align: Align,
+        text: &str,
+    ) -> Rc<LaidoutText> {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -2747,6 +1447,7 @@ impl DrawText {
                 wrap,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing,
+                flow_wrap_spacing_in_lpxs: self.flow_wrap_spacing_in_lpxs,
                 max_rows: if self.max_lines > 0 {
                     Some(self.max_lines)
                 } else {
@@ -2756,189 +1457,13 @@ impl DrawText {
             },
         });
         drop(fonts);
-        let has_missing_glyph = laidout
-            .rows
-            .iter()
-            .flat_map(|row| &row.glyphs)
-            .any(|glyph| glyph.id == 0);
-        self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
-            cx,
-            text,
-            has_missing_glyph,
-        );
         laidout
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        {
-            self.update_draw_vars(cx);
-            self.glyph_depth = self.draw_depth;
-            let use_slug_this_frame = self.slug_run_is_ready(cx, text);
-            let slug_area_was_empty = self
-                .slug_draw
-                .as_ref()
-                .map(|slug_draw| slug_draw.draw_vars.area.is_empty())
-                .unwrap_or(true);
-            let shadow_slug_this_frame = use_slug_this_frame && slug_area_was_empty;
-
-            // If the caller opened an outer raster batch via
-            // DrawText::begin_many_instances, adopt it here. A nested
-            // cx.begin_many_aligned_instances on the same draw_item would
-            // otherwise panic, because the outer open already swapped the
-            // draw_item's `instances` Vec into its ManyInstances.
-            let mut raster_instances = self.many_instances.take();
-            let mut raster_instances_is_outer = raster_instances.is_some();
-            let mut drew_raster_this_frame = false;
-            let mut drew_slug_this_frame = false;
-
-            for row in &text.rows {
-                let row_origin = origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale;
-                for glyph in &row.glyphs {
-                    use crate::text::geom::Point;
-
-                    let glyph_origin = Point::new(
-                        row_origin.x
-                            + glyph.origin_in_lpxs.x * self.font_scale
-                            + glyph.offset_in_lpxs() * self.font_scale,
-                        row_origin.y + glyph.origin_in_lpxs.y * self.font_scale,
-                    );
-                    if !use_slug_this_frame {
-                        if raster_instances.is_none() {
-                            raster_instances = cx.begin_many_aligned_instances(&self.draw_vars);
-                            raster_instances_is_outer = false;
-                        }
-                        if let Some(instances) = raster_instances.as_mut() {
-                            drew_raster_this_frame |= self.draw_slug_raster_fallback_glyph(
-                                cx,
-                                glyph_origin,
-                                glyph,
-                                &mut instances.instances,
-                            );
-                        }
-                        continue;
-                    }
-                    match self.resolve_glyph(cx, glyph) {
-                        Some(ResolvedGlyph::Slug(slug_glyph)) => {
-                            let mut drew_slug = false;
-                            let mut needs_raster_fallback = shadow_slug_this_frame;
-                            if self.ensure_slug_draw(cx) {
-                                if let Some(instances) = raster_instances.take() {
-                                    self.finish_many_instances(cx, instances);
-                                    raster_instances_is_outer = false;
-                                }
-                                self.sync_slug_draw_state(cx);
-                                if let Some(mut slug_draw) = self.slug_draw.take() {
-                                    if slug_draw.begin_many_instances(
-                                        cx,
-                                        if shadow_slug_this_frame { 0.0 } else { 1.0 },
-                                    ) {
-                                        slug_draw.draw_slug_glyph(
-                                            cx,
-                                            self,
-                                            glyph_origin,
-                                            glyph.font_size_in_lpxs,
-                                            glyph.color,
-                                            slug_glyph,
-                                        );
-                                        self.glyph_depth += 0.000001;
-                                        self.char_index += 1.0;
-                                        drew_slug = true;
-                                        drew_slug_this_frame = true;
-                                    }
-                                    self.slug_draw = Some(slug_draw);
-                                }
-                            }
-                            if !drew_slug {
-                                needs_raster_fallback = true;
-                                cx.redraw_all();
-                            }
-                            if needs_raster_fallback {
-                                if raster_instances.is_none() {
-                                    raster_instances =
-                                        cx.begin_many_aligned_instances(&self.draw_vars);
-                                    raster_instances_is_outer = false;
-                                }
-                                if let Some(instances) = raster_instances.as_mut() {
-                                    drew_raster_this_frame |= self.draw_slug_raster_fallback_glyph(
-                                        cx,
-                                        glyph_origin,
-                                        glyph,
-                                        &mut instances.instances,
-                                    );
-                                }
-                            }
-                        }
-                        Some(ResolvedGlyph::Raster(rasterized_glyph)) => {
-                            if let Some(mut slug_draw) = self.slug_draw.take() {
-                                if slug_draw.has_open_batch() {
-                                    slug_draw.end_many_instances(cx, self.extend_area);
-                                }
-                                self.slug_draw = Some(slug_draw);
-                            }
-
-                            if raster_instances.is_none() {
-                                raster_instances = cx.begin_many_aligned_instances(&self.draw_vars);
-                                raster_instances_is_outer = false;
-                            }
-                            let Some(instances) = raster_instances.as_mut() else {
-                                continue;
-                            };
-                            self.draw_rasterized_glyph(
-                                glyph_origin,
-                                glyph.font_size_in_lpxs,
-                                glyph.color,
-                                rasterized_glyph,
-                                &mut instances.instances,
-                            );
-                            drew_raster_this_frame = true;
-                        }
-                        None => {}
-                    }
-                }
-
-                self.draw_debug_row_guides(cx, row_origin, row);
-            }
-
-            if shadow_slug_this_frame && drew_slug_this_frame {
-                cx.redraw_all();
-            }
-
-            self.flush_slug_textures_if_allowed(cx);
-            if let Some(instances) = raster_instances.take() {
-                if raster_instances_is_outer {
-                    // Hand the outer batch back so the caller's eventual
-                    // end_many_instances can finalize it.
-                    self.many_instances = Some(instances);
-                } else {
-                    self.finish_many_instances(cx, instances);
-                }
-            }
-            if let Some(mut slug_draw) = self.slug_draw.take() {
-                if slug_draw.has_open_batch() {
-                    slug_draw.end_many_instances(cx, self.extend_area);
-                }
-                if !drew_slug_this_frame {
-                    let old_area = slug_draw.draw_vars.area;
-                    if area_holds_stale_content(&old_area, cx.cx) {
-                        cx.cx.redraw_area_in_draw(old_area);
-                        slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
-                    }
-                }
-                self.slug_draw = Some(slug_draw);
-            }
-            // Don't clobber the outer batch's area if we've handed it back.
-            if !drew_raster_this_frame && self.many_instances.is_none() {
-                let old_area = self.draw_vars.area;
-                if area_holds_stale_content(&old_area, cx.cx) {
-                    cx.cx.redraw_area_in_draw(old_area);
-                    self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
-                }
-            }
-            return;
+        if cx.text_runs.is_some() {
+            self.note_text_run(cx, origin_in_lpxs, text);
         }
-
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             self.update_draw_vars(cx);
             if let Some(mut instances) = self.many_instances.take() {
@@ -2952,12 +1477,14 @@ impl DrawText {
                     );
                 }
                 self.many_instances = Some(instances);
+                note_glyph_uses(cx);
                 return;
             }
             let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
                 return;
             };
             self.glyph_depth = self.draw_depth;
+            self.char_index = 0.0;
             for row in &text.rows {
                 self.draw_row(
                     cx,
@@ -2968,23 +1495,17 @@ impl DrawText {
             }
             self.flush_slug_textures_if_allowed(cx);
             self.finish_many_instances(cx, instances);
+            note_glyph_uses(cx);
         }
     }
 
     fn flush_slug_textures_if_allowed(&mut self, cx: &mut Cx2d) {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let _ = cx;
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        return;
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         if self.slug_flush_defer_depth != 0 {
             return;
         }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         self.flush_slug_textures_if_needed(cx);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn flush_slug_textures_if_needed(&mut self, cx: &mut Cx2d) {
         if self.pending_slug_flush_generation == 0 {
             return;
@@ -3021,7 +1542,6 @@ impl DrawText {
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         self.draw_vars.texture_slots[2] = Some(fonts.msdf_texture().clone());
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             self.draw_vars.texture_slots[3] = Some(fonts.slug_curve_texture().clone());
             self.draw_vars.texture_slots[4] = Some(fonts.slug_band_texture().clone());
@@ -3086,7 +1606,6 @@ impl DrawText {
         cx.cx.debug.area(area, vec4(0.0, 0.0, 1.0, 1.0));
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn draw_row(
         &mut self,
         cx: &mut Cx2d,
@@ -3105,53 +1624,13 @@ impl DrawText {
         self.draw_debug_row_guides(cx, origin_in_lpxs, row);
     }
 
-    fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<ResolvedGlyph> {
+    fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<PreparedGlyph> {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
-        let glyph_prefers_raster_image = glyph
-            .font
-            .has_glyph_raster_image(glyph.id, font_size_in_dpxs);
-        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs)
-        {
-            let slug_lookup = {
-                let mut fonts = cx.fonts.borrow_mut();
-                fonts.get_or_cache_slug_glyph(cx.cx.redraw_id, glyph.font.as_ref(), glyph.id)
-            };
-
-            match slug_lookup {
-                SlugGlyphCacheResult::Ready(slug_glyph) => {
-                    return Some(ResolvedGlyph::Slug(slug_glyph));
-                }
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                SlugGlyphCacheResult::NeedsUpload {
-                    generation,
-                    glyph: _,
-                } => {
-                    self.pending_slug_flush_generation =
-                        self.pending_slug_flush_generation.max(generation);
-                    cx.redraw_all();
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-                SlugGlyphCacheResult::NeedsUpload {
-                    generation,
-                    glyph: slug_glyph,
-                } => {
-                    self.pending_slug_flush_generation =
-                        self.pending_slug_flush_generation.max(generation);
-                    return Some(ResolvedGlyph::Slug(slug_glyph));
-                }
-                SlugGlyphCacheResult::Deferred => {
-                    cx.redraw_all();
-                }
-                SlugGlyphCacheResult::Unavailable => {}
-            }
-        }
-
-        glyph
-            .rasterize(font_size_in_dpxs)
-            .map(ResolvedGlyph::Raster)
+        let (prepared, upload_generation) = prepare_glyph(cx, glyph, font_size_in_dpxs);
+        self.pending_slug_flush_generation = self.pending_slug_flush_generation.max(upload_generation);
+        prepared
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn draw_glyph(
         &mut self,
         cx: &mut Cx2d,
@@ -3166,7 +1645,7 @@ impl DrawText {
         );
 
         match self.resolve_glyph(cx, glyph) {
-            Some(ResolvedGlyph::Slug(slug_glyph)) => {
+            Some(PreparedGlyph::Slug(slug_glyph)) => {
                 self.draw_slug_glyph(
                     cx,
                     glyph_origin,
@@ -3176,7 +1655,7 @@ impl DrawText {
                     output,
                 );
             }
-            Some(ResolvedGlyph::Raster(rasterized_glyph)) => self.draw_rasterized_glyph(
+            Some(PreparedGlyph::Raster(rasterized_glyph)) => self.draw_rasterized_glyph(
                 glyph_origin,
                 glyph.font_size_in_lpxs,
                 glyph.color,
@@ -3187,7 +1666,6 @@ impl DrawText {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn draw_slug_glyph(
         &mut self,
         cx: &mut Cx2d,
@@ -3237,46 +1715,6 @@ impl DrawText {
         self.char_index += 1.0;
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    fn draw_slug_raster_fallback_glyph(
-        &mut self,
-        cx: &mut Cx2d,
-        origin_in_lpxs: Point<f32>,
-        glyph: &LaidoutGlyph,
-        output: &mut RecordingBuffer,
-    ) -> bool {
-        let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
-        let should_use_slug = cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs);
-        let fallback_dpxs_per_em = if should_use_slug && font_size_in_dpxs > 0.0 {
-            cx.fonts.borrow().max_rasterized_glyph_dpxs_per_em()
-        } else {
-            0.0
-        };
-        let rasterized_glyph = if should_use_slug {
-            let stable_dpxs_per_em = if fallback_dpxs_per_em > 0.0 {
-                fallback_dpxs_per_em.min(font_size_in_dpxs)
-            } else {
-                font_size_in_dpxs
-            };
-            glyph
-                .font
-                .rasterize_glyph_stable_fallback(glyph.id, stable_dpxs_per_em)
-        } else {
-            glyph.rasterize(font_size_in_dpxs)
-        };
-        let Some(rasterized_glyph) = rasterized_glyph else {
-            return false;
-        };
-        self.draw_rasterized_glyph(
-            origin_in_lpxs,
-            glyph.font_size_in_lpxs,
-            glyph.color,
-            rasterized_glyph,
-            output,
-        );
-        true
-    }
-
     fn draw_rasterized_glyph(
         &mut self,
         origin_in_lpxs: Point<f32>,
@@ -3296,12 +1734,21 @@ impl DrawText {
             AtlasKind::Grayscale => 0.0,
             AtlasKind::Color => 1.0,
             AtlasKind::Msdf => 2.0,
+            AtlasKind::Unresolved => -1.0,
         };
 
         let atlas_image_bounds = glyph.atlas_image_bounds;
         let atlas_size = glyph.atlas_size;
-        let t_min = tex_coord(glyph.atlas_image_bounds.min(), atlas_size);
-        let t_max = tex_coord(glyph.atlas_image_bounds.max(), atlas_size);
+        let (t_min, t_max) = if glyph.atlas_kind == AtlasKind::Unresolved {
+            // The image bounds below still describe the full glyph; the shader samples only
+            // the reserved transparent texel, even before we know the host atlas dimensions.
+            (Point::new(0.0, 0.0), Point::new(0.0, 0.0))
+        } else {
+            (
+                tex_coord(atlas_image_bounds.min(), atlas_size),
+                tex_coord(atlas_image_bounds.max(), atlas_size),
+            )
+        };
 
         let atlas_image_padding = glyph.atlas_image_padding;
         let atlas_image_size = atlas_image_bounds.size;
@@ -3355,22 +1802,19 @@ impl DrawText {
     pub fn set_total_chars(&mut self, cx: &mut Cx, total: f32) {
         self.draw_vars
             .set_instance_on_area(cx, live_id!(total_chars), &[total]);
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(slug_draw) = self.slug_draw.as_mut() {
-            slug_draw
-                .draw_vars
-                .set_instance_on_area(cx, live_id!(total_chars), &[total]);
-        }
     }
 
+    /// What this text drew (hit-tests and widget queries read it).
+    pub fn area(&self) -> Area {
+        self.draw_vars.area
+    }
+
+    #[track_caller]
     pub fn redraw_areas(&self, cx: &mut Cx) {
         self.draw_vars.area.redraw(cx);
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(slug_draw) = self.slug_draw.as_ref() {
-            slug_draw.draw_vars.area.redraw(cx);
-        }
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         self.redraw_areas(cx);
     }
@@ -3385,15 +1829,6 @@ impl DrawText {
     }
 
     pub fn get_aa_pad_px(&self, cx: &mut Cx) -> f32 {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if let Some(slug_draw) = self.slug_draw.as_ref() {
-            let mut value = [0.0];
-            slug_draw
-                .draw_vars
-                .get_uniform(cx, live_id!(aa_pad_px), &mut value);
-            return value[0];
-        }
-
         let mut value = [0.0];
         self.draw_vars
             .get_uniform(cx, live_id!(aa_pad_px), &mut value);
@@ -3685,7 +2120,7 @@ impl FontFamily {
                 .collect::<Vec<_>>()
         };
         for path in handles {
-            cx.load_script_resource_by_path(path);
+            load_font_resource(cx, path);
         }
         {
             let fonts_ref = fonts.borrow();
@@ -3698,12 +2133,14 @@ impl FontFamily {
         self.update_font_definitions(cx, &mut fonts_ref);
     }
 
+    /// Whether a lazy face was asked for (and, where the bytes are at hand,
+    /// is in the family now).
     fn request_lazy_fonts_for_glyph_miss(
         &self,
         cx: &mut Cx,
         text: &str,
         has_missing_glyph: bool,
-    ) {
+    ) -> bool {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let family_id = self.to_font_family_id();
         let handles = {
@@ -3724,16 +2161,58 @@ impl FontFamily {
                 .collect::<Vec<_>>()
         };
         if handles.is_empty() {
-            return;
+            return false;
         }
         for path in handles {
-            cx.load_script_resource_by_path(path);
+            load_font_resource(cx, path);
         }
 
         self.update_font_definitions(cx, &mut fonts.borrow_mut());
         // Native file reads may have completed above; wasm will redraw again
         // when the HTTP response populates the resource.
         cx.redraw_all();
+        true
+    }
+}
+
+/// Every family ends with the platform's CJK and emoji faces
+/// (`LAZY_FONT_FALLBACKS`), unless it names one of that family or that face
+/// itself: a family picked for its Latin face (a code font, a terminal's)
+/// draws Chinese and emoji like the rest of the UI instead of empty boxes.
+/// They are lazy members: nothing is opened until a CJK or emoji glyph misses
+/// in the family's own faces, so a family that never meets one costs nothing,
+/// and one whose own faces cover it (the International UI chain) never loads
+/// them.
+fn append_lazy_fallbacks(vm: &mut ScriptVm, members: &mut Vec<FontMemberDef>) {
+    if members.is_empty() {
+        return;
+    }
+    use crate::makepad_platform::script::res::crate_resource_abs_path;
+    for fallback in LAZY_FONT_FALLBACKS {
+        if members.iter().any(|member| member.lazy == Some(fallback.family)) {
+            continue;
+        }
+        let named = LAZY_FONT_FACES
+            .iter()
+            .filter(|face| face.family == fallback.family)
+            .filter_map(|face| crate_resource_abs_path(vm, face.asset.resource_path))
+            .any(|path| members.iter().any(|member| member.resource_path == path));
+        if named {
+            continue;
+        }
+        let Some(resource_path) = crate_resource_abs_path(vm, fallback.asset.resource_path) else {
+            continue;
+        };
+        members.push(FontMemberDef {
+            handle: ScriptHandle::ZERO,
+            resource_path,
+            id: fallback.asset.id.to_string(),
+            asc: fallback.asset.ascender,
+            desc: fallback.asset.descender,
+            weight: fallback.asset.weight,
+            variations: Vec::new(),
+            lazy: Some(fallback.family),
+        });
     }
 }
 
@@ -3811,24 +2290,24 @@ impl ScriptHook for FontFamily {
 
         self.members.clear();
         let selected_set = vm.cx().font_set().as_str().to_string();
-        let map = vm.bx.heap.map_ref(obj);
+        let map = vm.heap().map_entries(obj);
         self.diagnostic_role = map
-            .get(&id!(_font_role).into())
+            .iter().find(|e| e.key == id!(_font_role).into())
             .and_then(|entry| entry.value.as_id())
             .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
             .unwrap_or_else(|| "custom".to_string());
         self.diagnostic_set = map
-            .get(&id!(_font_set).into())
+            .iter().find(|e| e.key == id!(_font_set).into())
             .and_then(|entry| entry.value.as_id())
             .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
             .unwrap_or(selected_set);
 
-        let len = vm.bx.heap.vec_len(obj);
+        let len = vm.heap().vec_len(obj);
         for i in 0..len {
-            let kv = vm.bx.heap.vec_key_value(obj, i, NoTrap);
+            let kv = vm.heap().vec_key_value(obj, i, NoTrap);
             let member = FontMember::script_from_value(vm, kv.value);
             if let Some(ref handle_ref) = member.res {
-                let heap_key = vm.bx.heap.heap_key();
+                let heap_key = vm.heap_key();
                 let Some(resource_path) = vm.cx().script_data.resources
                     .path_for_handle(heap_key, handle_ref.as_handle()) else {
                     error!("Font resource is not registered in its owning script heap");
@@ -3860,6 +2339,8 @@ impl ScriptHook for FontFamily {
                 crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);
             }
         }
+
+        append_lazy_fallbacks(vm, &mut self.members);
 
         // Object and handle indices are local to a script heap. Font caches
         // belong to Cx, so identify the complete ordered family by its actual
@@ -3905,9 +2386,6 @@ mod tests {
         makepad_platform::{dvec2, Cx, DrawEvent, Inset, ScriptNew},
         turtle::{FitBound, Layout, Size, Walk},
     };
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    use super::{register_draw_text_slug, DrawTextSlug};
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     use crate::makepad_platform::{live_id, vec4, LiveId, ScriptVmCx};
 
     #[test]
@@ -3978,14 +2456,12 @@ mod tests {
         cx.end_turtle();
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn read_instance(draw_vars: &super::DrawVars, cx: &mut Cx, id: LiveId) -> [f32; 4] {
         let mut value = [0.0; 4];
         draw_vars.get_instance(cx, id, &mut value);
         value
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn draw_text_color_is_visible_through_instance_slice() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -4001,21 +2477,18 @@ mod tests {
         });
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[test]
-    fn slug_helper_color_is_visible_through_instance_slice() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            register_draw_text_slug(vm);
+}
 
-            let mut slug_draw = DrawTextSlug::script_new_with_default(vm);
-            slug_draw.color = vec4(0.15, 0.25, 0.35, 0.45);
-
-            let packed =
-                vm.with_cx_mut(|cx| read_instance(&slug_draw.draw_vars, cx, live_id!(color)));
-
-            assert_eq!(packed, [0.15, 0.25, 0.35, 0.45]);
-        });
+/// Reads a font member's resource unless `get_resource_font_bytes_by_path` can map it.
+/// Local files and stored Android assets bypass the resource table's duplicate heap copy.
+fn load_font_resource(cx: &mut Cx, path: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::path::Path::new(path).is_file() {
+        return;
     }
+    #[cfg(target_os = "android")]
+    if cx.get_resource_font_asset_bytes_by_path(path).is_some() {
+        return;
+    }
+    cx.load_script_resource_by_path(path);
 }

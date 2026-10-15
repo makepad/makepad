@@ -463,12 +463,11 @@ fn first_eos_index(token_ids: &[i32]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{ClipTokenizedPrompt, ClipTokenizer};
-    use crate::assets::{CLIP_MERGES_UTF8, T5_TOKENIZER_JSON};
+    use crate::assets::CLIP_MERGES_UTF8;
 
     #[test]
     fn exposes_generated_tokenizer_assets() {
         assert!(CLIP_MERGES_UTF8.starts_with("#version: 0.2"));
-        assert!(T5_TOKENIZER_JSON.starts_with('{'));
     }
 
     #[test]

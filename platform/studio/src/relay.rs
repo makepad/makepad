@@ -114,6 +114,12 @@ pub enum ChildRelay {
     CheckPermission(RelayPermission),
     RequestPermission(RelayPermission),
     FileDialog(RelayFileDialog),
+    /// Read the host's clipboard (the one every app of the host shares);
+    /// answered by `HostRelay::Clipboard` with the same id. APPENDED LAST.
+    ReadClipboard { request_id: u64 },
+    /// The child selected text: it becomes the host's primary selection
+    /// (Linux middle-click paste). APPENDED LAST.
+    SetPrimarySelection { text: String },
 }
 
 /// Host → child.
@@ -128,6 +134,9 @@ pub enum HostRelay {
         status: String,
     },
     FileDialog(RelayFileDialogResult),
+    /// The host clipboard's text and PNG image (empty when it has none).
+    /// APPENDED LAST.
+    Clipboard { request_id: u64, text: String, png: Vec<u8> },
 }
 
 #[cfg(test)]
@@ -148,6 +157,11 @@ mod relay_tag_tests {
         assert_eq!(tag(&ChildRelay::FileDialog(RelayFileDialog::default())), 7);
         assert_eq!(tag(&HostRelay::Http(RelayHttpEvent::Progress { request_id: 0, loaded: 0, total: 0 })), 0);
         assert_eq!(tag(&HostRelay::FileDialog(RelayFileDialogResult::default())), 2);
+        assert_eq!(tag(&ChildRelay::ReadClipboard { request_id: 0 }), 8);
+        assert_eq!(tag(&ChildRelay::SetPrimarySelection { text: String::new() }), 9);
+        assert_eq!(tag(&HostRelay::Clipboard { request_id: 0, text: String::new(), png: Vec::new() }), 3);
+        let clip = HostRelay::Clipboard { request_id: 9, text: "pasted ✓".into(), png: vec![137, 80] };
+        assert_eq!(HostRelay::deserialize_bin(&clip.serialize_bin()).unwrap(), clip);
 
         let req = ChildRelay::HttpRequest(RelayHttpRequest {
             request_id: 7,

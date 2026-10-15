@@ -177,7 +177,7 @@ mod tests {
         let story = &STORIES[0];
         let page = cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(story.dsl));
             assert!(value.as_object().is_some(), "no template {}", story.dsl);
             WidgetRef::script_from_value(vm, value)
         });

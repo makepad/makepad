@@ -28,16 +28,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use crate::host;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
-use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
-#[cfg(any(unix, test))]
-use makepad_widgets::makepad_platform::thread::CancellationToken;
-#[cfg(any(unix, test))]
-use makepad_widgets::Cx;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
+use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPolicy {
@@ -62,6 +57,7 @@ pub struct AppDef {
     /// A crate outside the root workspace (its own workspace root) needs
     /// its manifest named explicitly; relative to the checkout root.
     pub manifest: Option<String>,
+    /// WM arguments appended after the registry defaults.
     pub args: Vec<String>,
     pub policy: LaunchPolicy,
 }
@@ -148,7 +144,6 @@ fn registry_app(entry: &makepad_app_registry::AppEntry) -> AppDef {
         policy,
     );
     app.manifest = entry.manifest.map(str::to_string);
-    app.args = entry.args.iter().map(|arg| (*arg).to_string()).collect();
     match entry.id {
         // Recording default: the menu opens the demo VFS, unless the
         // person explicitly asks to browse the real disk.
@@ -263,6 +258,26 @@ pub fn word_match(haystack: &str, pattern: &str) -> bool {
     false
 }
 
+/// `sheet` with the own artwork (`<dir>/resources/icon.svg`) of every registry app the
+/// style has no bundled icon for (Stage, an app added later): the dock, the taskbars and
+/// the launcher draw the app's icon, not the generic one. Children get it with the sheet.
+#[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // the web has no registry dirs to read artwork from
+pub fn with_app_artwork(mut sheet: makepad_widgets::desktop_style::StyleSheet) -> makepad_widgets::desktop_style::StyleSheet {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(root) = repo_root() {
+        for app in registry() {
+            let name = makepad_widgets::app_icon::canonical_name(&app.id);
+            if sheet.icons.iter().any(|a| a.name == name) {
+                continue;
+            }
+            if let Ok(svg) = std::fs::read_to_string(root.join(&app.dir).join("resources/icon.svg")) {
+                sheet.icons.push(makepad_widgets::app_icon::IconAsset { name: name.into(), svg });
+            }
+        }
+    }
+    sheet
+}
+
 /// The checkout root (`makepad_app_registry::repo_root`: `MAKEPAD_WM_ROOT`,
 /// else a Builder installation's sources, else the checkout above the
 /// running exe or at/above the cwd). The WM and Stage share this answer.
@@ -274,11 +289,6 @@ pub fn repo_root() -> Option<PathBuf> {
 /// (`makepad_app_registry::built_binary`: a Builder's published one, the
 /// checkout's release build, or an installed sibling). None: not built.
 pub fn built_binary(app: &AppDef, root: Option<&Path>) -> Option<PathBuf> {
-    // Android: every app is a library the launcher runs (host.rs).
-    #[cfg(target_os = "android")]
-    if root.is_none() {
-        return resolve_bin(&app.bin);
-    }
     makepad_app_registry::built_binary(&app.target(), root)
 }
 
@@ -316,12 +326,6 @@ fn dep_info_paths(sources: &str) -> impl Iterator<Item = String> + '_ {
 /// Resolve a sibling binary of the running wm executable (`.exe` on
 /// Windows, where a bare name never exists).
 pub fn resolve_bin(bin: &str) -> Option<PathBuf> {
-    // Android: every app is a library the launcher runs (host.rs).
-    #[cfg(target_os = "android")]
-    {
-        crate::host::android_app_binary(bin).map(|(launcher, _)| launcher)
-    }
-    #[cfg(not(target_os = "android"))]
     {
         makepad_app_registry::installed_binary(bin)
     }
@@ -479,6 +483,10 @@ impl WarmPool {
     /// Retire only unused browsers on a light/dark change. Removing them
     /// from the adoption pool is immediate; the host closes their processes
     /// and refills after they exit. Deliberate retirement is not a crash.
+    /// The dark/light the WM gives browsers and apps (None before the first).
+    pub fn browser_appearance(&self) -> Option<bool> {
+        self.browser_dark
+    }
     pub fn set_browser_appearance(&mut self, dark: bool) -> Vec<ClientId> {
         let previous = self.browser_dark.replace(dark);
         if previous.is_some_and(|previous| previous != dark) {
@@ -639,13 +647,8 @@ pub struct ClientSlot {
     /// flowing to the requesting tile (files). `focus_client` refuses to
     /// focus a client with this false; every normal client defaults true.
     pub takes_focus: bool,
-    /// The child is cargo: at launch, building an app that was not built
-    /// (`build` holds what to start once it is), or the dylib compile.
-    #[allow(dead_code)]
-    pub via_cargo: bool,
-    /// The child is the `cargo build` of this app; when it succeeds the app
-    /// starts in this slot (`spawn_client`, same id, same tile).
-    pub build: Option<PendingLaunch>,
+    pub launch: Option<AppLaunch>,
+    launch_cwd: Option<PathBuf>,
     /// The newest line the child (or cargo) wrote, shown on the tile
     /// under "starting…" until the first frame arrives.
     pub status: String,
@@ -658,8 +661,12 @@ pub struct ClientSlot {
     pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
-    /// Registered through wm-start; its launcher owns the process.
+    /// Came to the WM by itself through its socket (adopt.rs): its launcher owns the
+    /// process, and the tile ends when its hub socket closes.
     pub external: bool,
+    /// One of an app's later windows (`client_windows.rs`): the app's client. No process
+    /// of its own; its sender is the app's.
+    pub parent: Option<ClientId>,
 }
 
 impl ClientSlot {
@@ -684,127 +691,41 @@ impl ClientSlot {
             open_at: Some(host::now()),
             opened_warm: false,
             takes_focus: true,
-            via_cargo: false,
-            build: None,
+            launch: None,
+            launch_cwd: None,
             status: String::new(),
             linked: false,
             linked_at: None,
             closing: None,
             pane: false,
             external: false,
+            parent: None,
         }
     }
-}
 
-/// How long a client gets to honor a close request before it is killed.
-pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
-
-/// SIGTERM-to-SIGKILL escalation gap inside `kill_child_group`, once a
-/// caller has already decided to hard-kill (past `CLOSE_GRACE`, or the
-/// client never got that far — still building when it was closed).
-pub const GROUP_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
-
-/// Put `cmd`'s child at the head of a brand-new process group (unix only):
-/// `process_group(0)` is `setpgid(0, 0)` before exec, so the pgid becomes
-/// the child's own pid. Every process it forks (a build's rustc) inherits
-/// that same pgid, so the whole tree can be reached by one negative-pid
-/// signal later.
-#[cfg(unix)]
-fn own_process_group(cmd: &mut Command) {
-    cmd.process_group(0);
-}
-
-/// `kill(2)` by hand — this crate has no `libc` dependency, and a
-/// two-liner beats pulling one in for a single syscall pair.
-#[cfg(unix)]
-mod signal {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    pub const SIGTERM: i32 = 15;
-    pub const SIGKILL: i32 = 9;
-
-    /// Signal the whole process group led by `pid` — the POSIX convention
-    /// of a negative pid.
-    pub fn kill_group(pid: i32, sig: i32) {
-        unsafe { kill(-pid, sig) };
-    }
-
-    /// `kill(pid, 0)` sends nothing; a zero return means the process (or
-    /// group leader) still exists.
-    pub fn alive(pid: i32) -> bool {
-        unsafe { kill(pid, 0) == 0 }
-    }
-}
-
-/// Kill the whole process group a `spawn_client` child heads — the fix for
-/// the leak `Child::kill()` had: through cargo, that call only ever reached
-/// cargo itself, leaving the exec'd app (and any still-building rustc)
-/// running as orphans. SIGTERM now, SIGKILL after `grace` for whatever is
-/// still alive; the escalation runs off-thread so a UI-thread caller never
-/// blocks on it. Windows keeps the plain `Child::kill()` this replaced.
-#[cfg(unix)]
-pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &TaskPool) {
-    let pid = child.id() as i32;
-    signal::kill_group(pid, signal::SIGTERM);
-    let wait = CancellationToken::new();
-    let submitted = pool.submit(Lane::Heavy, move || {
-        let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-        if signal::alive(-pid) {
-            signal::kill_group(pid, signal::SIGKILL);
-        }
-    });
-    match submitted {
-        Ok(task) => task.detach(),
-        Err(_) if signal::alive(-pid) => signal::kill_group(pid, signal::SIGKILL),
-        Err(_) => {}
-    }
-}
-
-#[cfg(not(unix))]
-pub fn kill_child_group(child: &mut Child, _grace: std::time::Duration, _pool: &TaskPool) {
-    let _ = child.kill();
-}
-
-/// Final slot teardown owns the child from here on. Signal and reap it wholly
-/// on a heavy pool worker; dropping a slot on the UI thread never waits for a
-/// process or decoder wrapper to exit.
-fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPool) {
-    #[cfg(unix)]
-    let pid = {
-        let pid = child.id() as i32;
-        signal::kill_group(pid, signal::SIGTERM);
-        pid
-    };
-    match pool.reserve(Lane::Heavy) {
-        Ok(slot) => slot
-            .submit(move || {
-                #[cfg(unix)]
-                {
-                    let wait = CancellationToken::new();
-                    let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
-                    if signal::alive(-pid) {
-                        signal::kill_group(pid, signal::SIGKILL);
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = grace;
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
-            })
-            .detach(),
-        Err(_) => {
-            #[cfg(unix)]
-            signal::kill_group(pid, signal::SIGKILL);
-            #[cfg(not(unix))]
-            let _ = child.kill();
-        }
+    /// The slot of `window_id`, a later window of the app in `owner` (client `parent`):
+    /// a window on the desk with the app's sender and no process.
+    pub fn later_window(id: ClientId, parent: ClientId, owner: &ClientSlot, window_id: usize) -> ClientSlot {
+        let mut slot = ClientSlot::module(id, &owner.app, owner.display_title());
+        slot.sender = owner.sender.clone();
+        slot.window_id = window_id;
+        slot.ground = owner.ground;
+        slot.parent = Some(parent);
+        slot
     }
 }
 
 impl ClientSlot {
+    /// The slot of an app the WM socket admitted: a window like a launched one, without a
+    /// process handle (adopt.rs).
+    pub fn adopted(id: ClientId, app: &str) -> ClientSlot {
+        let mut slot = ClientSlot::module(id, app, "");
+        slot.ready = false;
+        slot.external = true;
+        slot.status = "starting…".into();
+        slot
+    }
+
     pub fn display_title(&self) -> &str {
         if self.title.is_empty() {
             &self.app
@@ -818,41 +739,7 @@ impl ClientSlot {
 #[derive(Clone, Debug)]
 pub struct ClientLine {
     pub client: ClientId,
-    pub text: String,
-}
-
-/// Cargo (and rustc) paint their progress; a pipe usually turns that off,
-/// but a stray CSI sequence must never reach a Label.
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            if c != '\r' {
-                out.push(c);
-            }
-            continue;
-        }
-        // ESC [ … <final byte 0x40..0x7e>, or ESC ] … BEL (OSC).
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                for c in chars.by_ref() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
+    pub output: ProcessOutput,
 }
 
 /// Read a child stream into the log file and the UI channel, one line per
@@ -862,9 +749,9 @@ fn pump<R: std::io::Read + Send + 'static>(
     spawner: &ThreadSpawner,
     client: ClientId,
     stream: R,
-    mut log: Option<std::fs::File>,
+    log: Option<std::fs::File>,
     lines: Sender<ClientLine>,
-) {
+) -> Result<(), String> {
     // Each pipe lives for the child's entire lifetime. A blocking reader
     // must not occupy a finite pool worker: enough open apps would starve
     // new compile logs and even process cleanup.
@@ -872,130 +759,16 @@ fn pump<R: std::io::Read + Send + 'static>(
         name: Some(format!("wm-client-{client}-output").into()),
         ..Default::default()
     }, move || {
-        use std::io::{BufReader, Read, Write};
-        let mut bytes = BufReader::new(stream).bytes();
-        let mut line = Vec::new();
-        loop {
-            let byte = match bytes.next() {
-                Some(Ok(byte)) => Some(byte),
-                Some(Err(_)) => break,
-                None => None,
-            };
-            if let Some(byte) = byte.filter(|b| *b != b'\n' && *b != b'\r') {
-                line.push(byte);
-                continue;
+        makepad_app_registry::read_output(stream, log, |output| {
+            if lines.send(ClientLine { client, output }).is_err() {
+                return false;
             }
-            let raw = String::from_utf8_lossy(&line).into_owned();
-            line.clear();
-            let text = strip_ansi(&raw).trim().to_string();
-            // The bar's redraws are for the tile; the log keeps the lines.
-            if let Some(file) = log.as_mut().filter(|_| !text.is_empty() && !text.starts_with("Building [")) {
-                let _ = writeln!(file, "{}", raw);
-            }
-            if !text.is_empty() {
-                if lines.send(ClientLine { client, text }).is_err() {
-                    break;
-                }
-                SignalToUI::set_ui_signal();
-            }
-            if byte.is_none() {
-                break;
-            }
-        }
+            SignalToUI::set_ui_signal();
+            true
+        });
     });
-    match submitted {
-        Ok(task) => task.detach(),
-        Err(error) => makepad_widgets::log!("wm: could not queue client output pump: {error}"),
-    }
-}
-
-/// Cargo output that changes the launch panel. Compiler diagnostics stay in
-/// the client log and do not overwrite a useful build stage with source text.
-pub fn cargo_progress(raw: &str) -> Option<(String, bool)> {
-    let raw = raw.trim();
-    if raw.starts_with("Blocking waiting for file lock") {
-        Some(("waiting for another build…".into(), false))
-    } else if raw.starts_with("Running ") || raw.starts_with("Finished ") {
-        Some(("launching…".into(), true))
-    } else if let Some(rest) = raw.strip_prefix("Building [") {
-        // "=====>   ] 73/88: windows, makepad-script"
-        let (_, rest) = rest.split_once(']')?;
-        let (count, crates) = rest.trim().split_once(':').unwrap_or((rest.trim(), ""));
-        let crates = crates.trim();
-        Some((
-            if crates.is_empty() { format!("compiling {count} crates…") } else { format!("compiling {count} crates · {crates}…") },
-            false,
-        ))
-    } else if let Some(rest) = raw.strip_prefix("Compiling ") {
-        let package = rest.split(" (").next().unwrap_or(rest).trim();
-        Some((format!("compiling {package}…"), false))
-    } else if raw.starts_with("error:") || raw.starts_with("error[") {
-        Some(("build failed — see the app log".into(), false))
-    } else if raw.starts_with("extracting ")
-        || raw.starts_with("unpacking ")
-        || raw.starts_with("unpacked ")
-        || raw.starts_with("inflating ")
-        || raw.starts_with("provision")
-        || raw.starts_with("bootstrapping")
-        || raw.starts_with("aligning ")
-        || raw.starts_with("target dir ")
-        || raw.starts_with("cargo rustc")
-        || raw.starts_with("rewriting ")
-        || raw.starts_with("patch")
-    {
-        Some((raw.to_string(), false))
-    } else {
-        None
-    }
-}
-
-/// The command line that starts an app: its built binary (see
-/// `built_binary`; nothing is compiled here) with `--stdin-loop`, the app's
-/// own args, then `extra_args`.
-pub fn launch_argv(
-    app: &AppDef,
-    root: Option<&Path>,
-    extra_args: &[String],
-) -> Result<(PathBuf, Vec<String>), String> {
-    let mut args: Vec<String> = Vec::new();
-    let program = built_binary(app, root).ok_or_else(|| match root {
-        Some(_) => format!("not built yet: {}", app.bin),
-        None => format!("binary not found: {}", app.bin),
-    })?;
-    // Android: the launcher's first argument is the app library it runs;
-    // with on-device builds on (`adb shell setprop debug.makepad.wm.ondevice
-    // 1`, an APK packed with `--proc-toolchain`) it builds the app from the
-    // shipped source first — the phone's `cargo run` — and falls back to
-    // this library.
-    #[cfg(target_os = "android")]
-    if root.is_none() {
-        if let Some((_, lib)) = crate::host::android_app_binary(&app.bin) {
-            if crate::host::android_ondevice_builds() {
-                args.push("--build".to_string());
-                args.push(app.bin.clone());
-            }
-            args.push(lib.to_string_lossy().to_string());
-        }
-    }
-    args.push("--stdin-loop".to_string());
-    args.extend(app.args.iter().cloned());
-    args.extend(extra_args.iter().cloned());
-    Ok((program, args))
-}
-
-/// The build of a deck app the person opened while it was not built
-/// (`makepad_app_registry::build_argv`): `cargo build --release` of exactly
-/// its package and binary (children are ALWAYS release builds, never
-/// debug), or the Builder's own build in a Builder installation.
-pub fn build_argv(app: &AppDef, root: &Path) -> (PathBuf, Vec<String>) {
-    makepad_app_registry::build_argv(&app.target(), root)
-}
-
-
-/// What starts in a building slot once its build succeeds.
-#[derive(Clone, Debug, Default)]
-pub struct PendingLaunch {
-    pub cwd: Option<PathBuf>,
+    submitted.map_err(|error| format!("client output: {error}"))?.detach();
+    Ok(())
 }
 
 /// The log of client `id`'s process, or of its build.
@@ -1006,6 +779,7 @@ pub fn client_log(id: ClientId, build: bool) -> PathBuf {
 /// Start `program` as client `id`'s process: hidden, stdin closed, both
 /// output streams into `log` and onto its tile.
 fn spawn_process(
+    pool: &TaskPool,
     spawner: &ThreadSpawner,
     id: ClientId,
     log_path: PathBuf,
@@ -1016,21 +790,35 @@ fn spawn_process(
     // Give the process its own group (unix), so `kill_child_group` reaches
     // whatever it starts (a build's rustc). Windows: cargo holds its
     // children in a job object of its own; killing cargo ends them.
+    // (`configure` did that for an app; a build gets it here.)
     #[cfg(unix)]
-    own_process_group(&mut cmd);
+    makepad_app_host::launch::own_process_group(&mut cmd);
     host::no_console_window(&mut cmd);
     // Both streams are piped so a reader thread can put the newest line on
     // the tile — cargo talks on stderr.
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A client (or its build) never outlives the WM: it ends when the WM's UI thread, the one
+    // spawning it, goes (quit, crash or kill), as app_host's hosted children do.
+    #[cfg(target_os = "linux")]
+    makepad_app_host::launch::exit_with_parent(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("spawn {what}: {e}"))?;
+    #[cfg(windows)]
+    makepad_app_host::launch::exit_with_parent(&child);
     // Child output goes to a per-client log — silent children are
     // undebuggable — and every line also reaches the UI.
     let log = std::fs::File::create(&log_path).ok();
-    if let Some(out) = child.stdout.take() {
-        pump(spawner, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
-    }
-    if let Some(err) = child.stderr.take() {
-        pump(spawner, id, err, log, lines);
+    let result = (|| {
+        if let Some(out) = child.stdout.take() {
+            pump(spawner, id, out, log.as_ref().and_then(|file| file.try_clone().ok()), lines.clone())?;
+        }
+        if let Some(err) = child.stderr.take() {
+            pump(spawner, id, err, log, lines)?;
+        }
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = result {
+        makepad_app_host::launch::reap_child_group(child, makepad_app_host::launch::GROUP_KILL_GRACE, pool);
+        return Err(error);
     }
     Ok(child)
 }
@@ -1055,19 +843,20 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         // A warm instance is not a window yet: nothing may focus it until
         // adoption hands it a tile.
         takes_focus: !warm,
-        via_cargo: false,
-        build: None,
+        launch: None,
+        launch_cwd: None,
         status: String::new(),
         linked: false,
         linked_at: None,
         closing: None,
         pane: false,
         external: false,
+        parent: None,
     }
 }
 
-/// Spawn an app as a hub client. It must be built (`launch_argv`); an app
-/// that is not goes through `spawn_build` first.
+/// Start a registry app through the shared build/launch state machine.
+/// The WM supplies its hub, environment, log streams and stale-source policy.
 pub fn spawn_client(
     pool: &TaskPool,
     spawner: &ThreadSpawner,
@@ -1083,27 +872,55 @@ pub fn spawn_client(
     // binary, same env, same log — plus `WARM_ENV`, which tells the app to
     // come up and then idle until it is adopted.
     warm: bool,
+    policy: BuildPolicy,
     // Every output line the child writes is forwarded here.
     lines: Sender<ClientLine>,
 ) -> Result<ClientSlot, String> {
-    let root = repo_root();
-    let (program, args) = launch_argv(app, root.as_deref(), extra_args)?;
-    let mut cmd = Command::new(program);
-    cmd.args(&args);
-    cmd.env("STUDIO_HOST", format!("http://127.0.0.1:{}", hub_port))
-        .env("STUDIO_BUILD", id.to_string())
-        .env("STUDIO_CRATE", &app.bin);
+    let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
+    let extra = app.args.iter().chain(extra_args).cloned().collect();
+    let (launch, child) = AppLaunch::start(entry, repo_root(), extra, policy, false, |cmd, kind| {
+        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+    })?;
+    let mut slot = client_slot(pool, id, app, child, warm);
+    slot.status = launch.status().to_string();
+    slot.launch = Some(launch);
+    slot.launch_cwd = cwd.cloned();
+    Ok(slot)
+}
+
+/// Host-specific configuration; both initial launch and build completion use it.
+fn spawn_for_client(
+    pool: &TaskPool,
+    spawner: &ThreadSpawner,
+    id: ClientId,
+    bin: &str,
+    cwd: Option<&PathBuf>,
+    term_colors: Option<&str>,
+    warm: bool,
+    hub_port: u16,
+    mut cmd: Command,
+    kind: LaunchKind,
+    lines: Sender<ClientLine>,
+) -> Result<Child, String> {
+    if kind == LaunchKind::Build {
+        return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
+    }
+    // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
+    // app's environment either way.
+    // The hub environment, and the child as its own process group.
+    makepad_app_host::launch::configure(&mut cmd, hub_port, id, bin);
     // The app owns any controls it embeds in its caption. Keep that content
     // inside the tile; the WM still supplies the outer window decorations.
     cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
+    // The WM draws the app's file and folder pickers (shell/file_picker.rs): a hosted
+    // app on Linux has no display of its own to open a system one on. Elsewhere the
+    // app keeps its system dialogs.
+    #[cfg(target_os = "linux")]
+    cmd.env(makepad_widgets::makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV, "1");
     if let Some(cwd) = cwd {
         // The terminal's Omarchy behavior: open where the focused one is.
         cmd.arg("--cwd").arg(cwd);
         cmd.current_dir(cwd);
-    } else if let Some(root) = &root {
-        // Apps resolve their data (route's local/maps/, resources)
-        // relative to the checkout root, as when run from the repo.
-        cmd.current_dir(root);
     }
     if let Some(colors) = term_colors {
         cmd.env("MAKEPAD_TERMINAL_COLORS", colors);
@@ -1115,51 +932,43 @@ pub fn spawn_client(
             .unwrap_or_else(|_| "0.78 0.70".to_string());
         cmd.env("MAKEPAD_TERMINAL_OPACITY", opacity);
     }
-    // Every Makepad app styles itself from the WM's theme.splash.
-    if let Ok(theme) = std::env::var("MAKEPAD_WM_THEME_SPLASH") {
-        cmd.env("MAKEPAD_WM_THEME_SPLASH", theme);
-    }
+    // MAKEPAD_WIDGET_STYLE is inherited at spawn; makepad_style events
+    // deliver live changes to the WM's system stylesheet.
     if warm {
         cmd.env(WARM_ENV.0, WARM_ENV.1);
     }
-    let child = spawn_process(spawner, id, client_log(id, false), cmd, &app.package, lines)?;
-    Ok(client_slot(pool, id, app, child, warm))
+    spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)
 }
 
-/// The person opened a deck app that is not built: its slot's process is
-/// the build (`build_argv`, in the environment wm got — the Makepad
-/// Builder's compiler when it started wm). The tile shows the crate count;
-/// when cargo is done the app starts in the same slot (`spawn_client`).
-pub fn spawn_build(
-    pool: &TaskPool,
-    spawner: &ThreadSpawner,
-    app: &AppDef,
-    id: ClientId,
-    root: &Path,
-    launch: PendingLaunch,
-    lines: Sender<ClientLine>,
-) -> Result<ClientSlot, String> {
-    let (program, args) = build_argv(app, root);
-    let mut cmd = Command::new(program);
-    cmd.args(&args).current_dir(root);
-    // The progress bar even into a pipe (it needs a width then): its
-    // "73/88" is the tile's count. No colors.
-    cmd.env("CARGO_TERM_COLOR", "never")
-        .env("CARGO_TERM_PROGRESS_WHEN", "always")
-        .env("CARGO_TERM_PROGRESS_WIDTH", "100")
-        // The Builder's build says its crate count the way cargo's bar does.
-        .env("MAKEPAD_BUILD_PROGRESS_LINES", "1");
-    let child = spawn_process(spawner, id, client_log(id, true), cmd, &format!("cargo build -p {}", app.package), lines)?;
-    let mut slot = client_slot(pool, id, app, child, false);
-    slot.via_cargo = true;
-    slot.build = Some(launch);
-    slot.status = "compiling…".into();
-    Ok(slot)
+impl ClientSlot {
+    pub fn is_building(&self) -> bool {
+        self.launch.as_ref().is_some_and(AppLaunch::is_building)
+    }
+
+    pub fn poll_launch(
+        &mut self,
+        spawner: &ThreadSpawner,
+        hub_port: u16,
+        term_colors: Option<&str>,
+        lines: Sender<ClientLine>,
+    ) -> Result<Option<LaunchEvent>, String> {
+        let Some(launch) = &mut self.launch else { return Ok(None) };
+        let id = self.id;
+        let app = &self.app;
+        let cwd = self.launch_cwd.as_ref();
+        let warm = self.warm;
+        let pool = self.task_pool.as_ref().ok_or("no task pool for the client")?;
+        launch.poll(&mut self.child, |cmd, kind| {
+            let entry = makepad_app_registry::find(app).ok_or_else(|| format!("unknown app: {app}"))?;
+            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_app_registry::{cargo_progress, launch_argv};
 
     #[test]
     fn cargo_progress_keeps_the_build_stage_readable() {
@@ -1167,10 +976,6 @@ mod tests {
         assert_eq!(cargo_progress("Blocking waiting for file lock on build directory"), Some(("waiting for another build…".into(), false)));
         assert_eq!(cargo_progress("    Finished `release` profile in 2s"), Some(("launching…".into(), true)));
         assert_eq!(cargo_progress("     Running `/a/checkout/target/release/makepad-app-photos`"), Some(("launching…".into(), true)));
-        // The super-app's provisioning lines reach the desk verbatim.
-        for line in ["extracting tc: already on disk", "inflating tc 120/292 MB · 88 files", "provisioning wmdyn x: resuming", "provision failed: unpack tc.tar.lz4: archive is truncated", "provisioned in 212 s"] {
-            assert_eq!(cargo_progress(line), Some((line.into(), false)), "{line}");
-        }
         assert!(cargo_progress("warning: unused variable").is_none());
         assert!(cargo_progress(" --> /a/checkout/src/main.rs:2").is_none());
         assert!(cargo_progress("app: first frame").is_none());
@@ -1182,7 +987,7 @@ mod tests {
         // USER LAW: a hosted app is a release build, always.
         let app = curated().into_iter().find(|a| a.id == "terminal").unwrap();
         let root = std::path::PathBuf::from("/checkout");
-        let (program, args) = build_argv(&app, &root);
+        let (program, args) = makepad_app_registry::build_argv(&app.target(), &root);
         assert!(program.to_string_lossy().ends_with("cargo"), "{:?}", program);
         assert_eq!(&args[..2], &["build", "--release"], "{:?}", args);
         assert!(args.contains(&"/checkout/Cargo.toml".to_string()), "{:?}", args);
@@ -1196,7 +1001,7 @@ mod tests {
         let shared = makepad_app_registry::checkout_binary(&app.target(), &root, Some(std::ffi::OsStr::new("/builder/target")));
         assert_eq!(shared, std::path::Path::new("/builder/target/release").join(exe));
         let missing = std::env::temp_dir().join(format!("wm-release-test-{}", std::process::id()));
-        assert_eq!(launch_argv(&app, Some(&missing), &[]).unwrap_err(), "not built yet: makepad-app-terminal");
+        assert_eq!(launch_argv(makepad_app_registry::find(&app.id).unwrap(), Some(&missing), &app.args).unwrap_err(), "not built yet: makepad-app-terminal");
     }
 
     #[test]
@@ -1253,7 +1058,7 @@ mod tests {
         // No checkout: run the binary next to the running wm, which for
         // a release wm is target/release/<bin>.
         let app = curated().into_iter().find(|a| a.id == "terminal").unwrap();
-        match launch_argv(&app, None, &[]) {
+        match launch_argv(makepad_app_registry::find(&app.id).unwrap(), None, &app.args) {
             Ok((program, args)) => {
                 let exe = std::env::current_exe().unwrap();
                 assert_eq!(program.parent(), exe.parent());
@@ -1294,11 +1099,15 @@ mod tests {
                 "Files",
                 "Terminal",
                 "Mixer",
+                "Amp",
+                "Code",
                 "Task Manager",
                 "Sheets",
                 "Photos",
+                "Camera",
                 "Clock",
                 "Weather",
+                "Translator",
                 "Finance",
                 "Mail",
                 "Notes",
@@ -1310,10 +1119,9 @@ mod tests {
                 "Video Player",
                 "Route",
                 "Fab",
-                "Studio",
                 "Scope",
                 "Stage",
-                "Amp",
+                "Sandbox",
             ]
             .map(str::to_string)
         );
@@ -1344,7 +1152,6 @@ mod tests {
             ("terminal", LaunchPolicy::AlwaysNew),
             ("video", LaunchPolicy::AlwaysNew),
             ("fab", LaunchPolicy::OrFocus),
-            ("studio", LaunchPolicy::OrFocus),
         ] {
             let app = apps.iter().find(|a| a.id == id).expect(id);
             assert_eq!(app.policy, policy, "{}", id);
@@ -1453,7 +1260,7 @@ mod tests {
             assert_eq!(WarmPool::capacity(app), 1, "{}", app);
         }
         // Everything else launches cold, as it always did.
-        for app in ["vj", "fab", "studio", "image", "nonesuch"] {
+        for app in ["vj", "fab", "image", "nonesuch"] {
             assert_eq!(WarmPool::capacity(app), 0, "{}", app);
             assert!(!WarmPool::is_warm_app(app), "{}", app);
         }
@@ -1622,7 +1429,7 @@ mod tests {
         let binary = makepad_app_registry::checkout_binary(&files.target(), &root, None);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, b"").unwrap();
-        let (program, args) = launch_argv(&files, Some(&root), &[]).unwrap();
+        let (program, args) = launch_argv(makepad_app_registry::find(&files.id).unwrap(), Some(&root), &files.args).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(program, binary);
         assert_eq!(args[0], "--stdin-loop", "{:?}", args);
@@ -1648,90 +1455,25 @@ mod tests {
         let toml = "[package]\nname = \"a\"\n\n[dependencies]\nname = \"b\"\n";
         assert_eq!(manifest_value(toml, "name").as_deref(), Some("a"));
     }
-
-    /// `own_process_group` really does make the child its own group leader
-    /// — the precondition `kill_child_group`'s negative-pid signal relies
-    /// on. `getpgid` is one more syscall this crate has no `libc` for.
-    #[cfg(unix)]
-    #[test]
-    fn spawned_children_lead_their_own_process_group() {
-        extern "C" {
-            fn getpgid(pid: i32) -> i32;
-        }
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 5");
-        own_process_group(&mut cmd);
-        let mut child = cmd.spawn().expect("spawn /bin/sh");
-        let pid = child.id() as i32;
-        let pgid = unsafe { getpgid(pid) };
-        assert_eq!(pgid, pid, "the child should lead its own new group");
-        let pool = Cx::new(Box::new(|_, _| {})).task_pool();
-        kill_child_group(&mut child, std::time::Duration::from_millis(50), &pool);
-        let _ = child.wait();
-    }
-
-    /// The bug this fixes: a child launched through a wrapper (`cargo run`
-    /// stands in for it here as any process that forks a grandchild rather
-    /// than exec-replacing itself) leaks that grandchild when only the
-    /// wrapper is killed. Reproduce it with a shell that backgrounds a
-    /// `sleep` and prints its pid, then confirm `kill_child_group` reaps
-    /// BOTH — the regression `Child::kill()` alone could not clear.
-    #[cfg(unix)]
-    #[test]
-    fn killing_the_group_reaps_a_grandchild_the_wrapper_leaked() {
-        extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("sleep 30 & echo $!; wait");
-        own_process_group(&mut cmd);
-        cmd.stdout(Stdio::piped());
-        let mut child = cmd.spawn().expect("spawn /bin/sh");
-
-        use std::io::BufRead;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read grandchild pid");
-        let grandchild_pid: i32 = line.trim().parse().expect("a pid line");
-
-        // The grandchild is alive and NOT the pid we hold — it really is
-        // one generation further down, like the app under `cargo run`.
-        assert_ne!(grandchild_pid, child.id() as i32);
-        assert_eq!(unsafe { kill(grandchild_pid, 0) }, 0, "grandchild not up yet");
-
-        let pool = Cx::new(Box::new(|_, _| {})).task_pool();
-        kill_child_group(&mut child, std::time::Duration::from_millis(50), &pool);
-        // Past the SIGTERM->SIGKILL escalation: nothing in the group is
-        // still standing, wrapper or grandchild.
-        let _ = child.wait();
-        // The wrapper can exit before the asynchronous escalation and before
-        // launchd reaps the orphan. Wait only in this test, never on the UI.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while unsafe { kill(grandchild_pid, 0) } == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(
-            unsafe { kill(grandchild_pid, 0) },
-            -1,
-            "the grandchild the wrapper orphaned should be gone too"
-        );
-    }
 }
 
 impl Drop for ClientSlot {
     fn drop(&mut self) {
         // Ask the app to go first over its own socket (it may be a wrapper's
-        // child), then reap the process we hold.
+        // child), then reap the process we hold. A later window's slot holds the
+        // app's sender: it never ends the app.
+        if self.parent.is_some() {
+            return;
+        }
         if let Some(sender) = self.sender.take() {
-            crate::hub::send_to_app(
+            makepad_app_host::send_to_app(
                 &sender,
                 vec![makepad_studio_protocol::StudioToApp::Kill],
             );
         }
         if let Some(mut child) = self.child.take() {
             if let Some(pool) = &self.task_pool {
-                reap_child_group(child, GROUP_KILL_GRACE, pool);
+                makepad_app_host::launch::reap_child_group(child, makepad_app_host::launch::GROUP_KILL_GRACE, pool);
             } else {
                 let _ = child.kill();
             }

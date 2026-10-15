@@ -43,7 +43,7 @@
 //! actually go.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     link_label::LinkLabelWidgetRefExt,
     view::View,
     badge::{measure, sized, BadgeIntent, BadgePalette, IntentColors},

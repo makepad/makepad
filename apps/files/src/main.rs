@@ -19,7 +19,7 @@ script_mod! {
             main_window := Window{
                 window.title: "Files"
                 window.inner_size: vec2(1240, 800)
-                pass.clear_color: mod.mpf.bg
+                pass.clear_color: mod.theme.color_bg_app
                 body +: {
                     padding: 0 spacing: 0
                     files := FilesView{}
@@ -51,7 +51,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_files::script_mod(vm);
         self::script_mod(vm)
     }

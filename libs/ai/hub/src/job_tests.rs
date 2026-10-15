@@ -729,7 +729,7 @@ mod transport_tests {
                 stage: Some("sampling".into()), progress: Some(0.375),
                 artifacts: vec![ArtifactRefJson { id: "accepted-image".into(), url: "/artifact/accepted-image".into(), content_type: "image/png".into(), sha256: Some(crate::sha256::sha256_hex(bytes)), byte_len: Some(bytes.len() as u64) }],
                 error: None, model: Some("flux1-schnell".into()), queued_ms: None, started_ms: None, finished_ms: None,
-                log: None, partial_text: None, live: None, serving: None, text: None,
+                log: None, partial_text: None, partial_artifacts: None, live: None, serving: None, text: None,
             })
         }
         fn fetch_artifact(&self, id: &str) -> Result<ArtifactBytes, AssetAiError> {

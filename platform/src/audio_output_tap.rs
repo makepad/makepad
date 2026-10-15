@@ -5,7 +5,7 @@
 //! the device then plays. A tap is invoked with that same buffer right after
 //! the app has filled it, so a recorder gets exactly what the speakers get —
 //! no OS loopback device, no screen-recording permission, no other app's
-//! sound. `platform/src/os/apple/audio_tap.rs` is the *other* thing: a
+//! sound. `platform/hal/src/backend/apple/media/audio_tap.rs` is the *other* thing: a
 //! ScreenCaptureKit loopback of the whole machine.
 //!
 //! Taps hear output 0, the program; a second output is a monitor. They run
@@ -22,6 +22,7 @@
 //! by the next call into the registry after it. A tap that panics is dropped
 //! from its slot on the spot and leaked, never freed on the realtime thread.
 
+use makepad_relax::relax;
 use crate::audio::{AudioBuffer, AudioInfo};
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -186,6 +187,7 @@ pub fn audio_output_tap_active() -> bool {
 
 /// Called from the output callback wrapper in `media_api.rs` once the app has
 /// filled `buffer` for output `output`. Realtime thread.
+#[relax(O3, always)]
 pub(crate) fn feed_audio_output_tap(output: usize, info: AudioInfo, buffer: &AudioBuffer) {
     if output != PROGRAM_OUTPUT || !ACTIVE.load(Ordering::Acquire) {
         return;

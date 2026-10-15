@@ -19,7 +19,6 @@
 //! them at once and remembers them, so a story rebuilt after a reload comes
 //! back the way the user left it. And every action a widget inside the story
 //! raises is written to a ring the actions panel reads.
-use crate::makepad_widgets::makepad_script::trap::NoTrap;
 use crate::makepad_widgets::makepad_script::ScriptMod;
 use crate::makepad_widgets::*;
 use std::collections::VecDeque;
@@ -58,16 +57,8 @@ pub fn apply_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), S
     }
     let line = (hash % 1_000_000) as usize + 2;
     let errors = cx.with_vm(|vm| {
-        vm.bx.captured_errors = Some(Vec::new());
-        let script_mod = ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: "storybook".to_string(),
-            file: "story://control".to_string(),
-            line,
-            column: 1,
-            code,
-            values: Vec::new(),
-        };
+        vm.capture_errors();
+        let script_mod = ScriptMod::new("", "storybook", "story://control", line, 1, &code, &[]);
         let mut target = widget.clone();
         use crate::makepad_widgets::makepad_script::traits::ScriptApply;
         target.script_apply_eval(vm, script_mod);
@@ -341,7 +332,7 @@ impl StoryCanvas {
             // falls through to the missing-template line below.
             crate::stories::evaluate_for(vm, dsl);
             let stories = vm.module(id!(stories));
-            vm.bx.heap.value(stories, id.into(), NoTrap)
+            vm.value(stories, id)
         });
         if value.is_nil() || value.is_err() || value.as_object().is_none() {
             if !self.missing.iter().any(|m| m == dsl) {

@@ -123,8 +123,10 @@ impl DrawListExt for DrawList {
         // set nesting draw list id for incremental repaint scanning
         cx.cx.draw_lists[self.id()].codeflow_parent_id = codeflow_parent_id;
 
-        // check redraw status
-        if cx.cx.draw_lists[self.id()].draw_items.len() != 0 && !will_redraw {
+        // check redraw status: a list that recorded something keeps it unless
+        // it will redraw; an empty one only when its owner opted in.
+        let list = &cx.cx.draw_lists[self.id()];
+        if (list.draw_items.len() != 0 || (list.retain_empty && list.recorded)) && !will_redraw {
             return Redrawing::no();
         }
 
@@ -156,6 +158,7 @@ impl DrawListExt for DrawList {
             panic!("calling end on a view that didnt get begin called this redraw cycle");
         }
         cx.cx.draw_lists[draw_list_id].draw_items.finish_recording();
+        crate::makepad_platform::frame_sources::recorded(cx.cx.draw_lists[draw_list_id].draw_items.len());
     }
 
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {
@@ -205,6 +208,7 @@ impl DrawListExt for DrawList {
         children
     }
 
+    #[track_caller]
     fn redraw(&self, cx: &mut Cx) {
         cx.redraw_list(self.id());
     }
@@ -264,18 +268,52 @@ pub const OVERLAY_Z_BASE: f32 = 32.0;
 /// the near plane; see [`OVERLAY_Z_MAX`].
 pub const OVERLAY_Z_STEP: f32 = 8.0;
 
-/// The ceiling on the ladder, so a pathological nesting depth cannot walk into
-/// the near plane. 64 + the worst content `draw_depth` (20) + the paint-order
-/// counter (0.001 per draw call, so ~2 for a very busy frame) is ~86, leaving
-/// 14 units of headroom below 100.
-pub const OVERLAY_Z_MAX: f32 = 64.0;
+/// Which layer of the window overlay a list paints in: content overlays
+/// first, then popups, then cursors (`overlay_order` breaks ties inside one).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OverlayTier {
+    /// Panes of glass ([`DrawList2d::begin_overlay_under`]): on an overlay only
+    /// so the window's capture holds what lies behind them, never to cover
+    /// anything, so every other overlay paints after them.
+    Under = 0,
+    Content = 1,
+    Popup = 2,
+    Last = 3,
+}
 
-/// The depth floor for an overlay at `nesting`, counted from 1 for the
-/// outermost. See [`OVERLAY_Z_BASE`], [`OVERLAY_Z_STEP`], [`OVERLAY_Z_MAX`].
+/// The ceiling of the content-tier ladder. Content overlays live in
+/// `OVERLAY_Z_BASE..=OVERLAY_Z_MAX`; with the worst content `draw_depth` (20, the
+/// dock's ghost tab) and the paint-order counter (~2 for a very busy frame)
+/// the highest content ink is 48 + 20 + 2 = 70, below [`POPUP_Z_BASE`].
+pub const OVERLAY_Z_MAX: f32 = 48.0;
+
+/// The depth floor for a content-tier overlay at `nesting`, counted from 1
+/// for the outermost. See [`OVERLAY_Z_BASE`], [`OVERLAY_Z_STEP`], [`OVERLAY_Z_MAX`].
 pub fn overlay_z_lift(nesting: usize) -> f32 {
     let level = nesting.max(1) - 1;
     (OVERLAY_Z_BASE + OVERLAY_Z_STEP * level as f32).min(OVERLAY_Z_MAX)
 }
+
+/// The popup tier's own range, above the whole content range: popups
+/// (menus, dialogs, tooltips) are flat, so a small step and a thin band
+/// suffice. A popup at nesting 1 clears every content overlay whatever its
+/// own nesting or `draw_depth` band (content ink tops out at 70).
+pub const POPUP_Z_BASE: f32 = 72.0;
+pub const POPUP_Z_STEP: f32 = 4.0;
+/// Highest popup floor; with the paint counter the worst popup ink is
+/// below 92.
+pub const POPUP_Z_MAX: f32 = 88.0;
+
+/// The depth floor for a popup-tier overlay at `nesting` popup-tier lists
+/// open in the chain (a dropdown in a modal is 2), from 1.
+pub fn popup_z_lift(nesting: usize) -> f32 {
+    let level = nesting.max(1) - 1;
+    (POPUP_Z_BASE + POPUP_Z_STEP * level as f32).min(POPUP_Z_MAX)
+}
+
+/// Cursor lists ([`DrawList2d::begin_overlay_last`]) sit above every popup:
+/// flat ink, floor 92, worst below 100.
+pub const LAST_Z_BASE: f32 = 92.0;
 
 impl DrawList2d {
     pub fn new(cx: &mut Cx) -> Self {
@@ -291,16 +329,60 @@ impl DrawList2d {
         if self.overlay_active {
             self.overlay_active = false;
             cx.overlay_draw_depth = cx.overlay_draw_depth.saturating_sub(1);
+            if cx.cx.draw_lists[self.draw_list.id()].overlay_tier == OverlayTier::Popup as u8 {
+                cx.overlay_popup_depth = cx.overlay_popup_depth.saturating_sub(1);
+            }
         }
         self.draw_list.end(cx);
     }
 
-    pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
-        self.begin_overlay_inner(cx, true)
+    /// Re-enter an overlay this redraw already began, without clearing it. A widget whose walk
+    /// is handed back as a step (a list waiting for its rows) leaves the draw-list stack to
+    /// the caller, so it ends the overlay with that step and resumes it here: what the
+    /// first part drew stays.
+    pub fn resume_overlay(&mut self, cx: &mut Cx2d) {
+        assert!(
+            cx.cx.draw_lists[self.draw_list.id()].redraw_id == cx.cx.redraw_id,
+            "resume_overlay on a draw list that was not begun this redraw"
+        );
+        if !self.overlay_active {
+            self.overlay_active = true;
+            cx.overlay_draw_depth += 1;
+            if cx.cx.draw_lists[self.draw_list.id()].overlay_tier == OverlayTier::Popup as u8 {
+                cx.overlay_popup_depth += 1;
+            }
+        }
+        cx.draw_list_stack.push(self.draw_list.id());
     }
 
+    pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_tier(cx, true, OverlayTier::Last)
+    }
+
+    /// A content-tier overlay: in-view overlays (map marks, badges, canvas
+    /// HUDs). Popups use [`Self::begin_popup_overlay`], which paints above
+    /// every content-tier overlay however late the content one begins.
     pub fn begin_overlay_reuse(&mut self, cx: &mut Cx2d) {
-        self.begin_overlay_inner(cx, false)
+        self.begin_overlay_tier(cx, false, OverlayTier::Content)
+    }
+
+    /// A popup-tier overlay: transient popups (popup menus, menus, popovers,
+    /// modals, tooltips, tips, sliders' value pops, notifications). It sorts
+    /// after every content-tier overlay and lifts above them in depth;
+    /// cursor lists ([`Self::begin_overlay_last`]) stay above it.
+    pub fn begin_popup_overlay(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_tier(cx, false, OverlayTier::Popup)
+    }
+
+    /// Begin an overlay that paints under every plain overlay of the frame,
+    /// and among the others begun this way in draw order. For a pane of
+    /// glass: it is on an overlay so that the window's capture holds what lies
+    /// behind it, not so that it covers anything, and a popup, a menu, a
+    /// tooltip or a modal opened from anywhere, before it or after it in the
+    /// draw, still has to paint over it. The depth floor is a plain
+    /// overlay's.
+    pub fn begin_overlay_under(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_tier(cx, false, OverlayTier::Under)
     }
 
     /// Begin an overlay draw list: it composites after the body of the pass,
@@ -316,13 +398,17 @@ impl DrawList2d {
     /// put a modal over a page; this is what does.
     ///
     /// The list is therefore given a depth FLOOR ([`OVERLAY_Z_BASE`] +
-    /// [`OVERLAY_Z_STEP`] per level of overlay nesting), which the backend
+    /// [`OVERLAY_Z_STEP`] per level of content overlay nesting, or the popup
+    /// range above it), which the backend
     /// walk raises its paint-order counter to on the way in. Only z moves: x
     /// and y are untouched, so hit testing, `map_point_to_local` and
     /// `map_point_from_local` are exactly as they were. Nothing here writes
     /// `view_transform`, so a caller that sets its own after beginning an
     /// overlay keeps the lift.
-    pub fn begin_overlay_inner(&mut self, cx: &mut Cx2d, always_last: bool) {
+    /// The shared body of the three `begin_*overlay*` entry points; the
+    /// tier picks the sort layer and the depth range (content 32..48, popup
+    /// 72..88, cursor 92).
+    fn begin_overlay_tier(&mut self, cx: &mut Cx2d, always_last: bool, tier: OverlayTier) {
         let pass_id = cx
             .overlay_pass_id
             .unwrap_or_else(|| cx.pass_stack.last().unwrap().pass_id);
@@ -346,16 +432,23 @@ impl DrawList2d {
         cx.overlay_seq += 1;
         let seq = cx.overlay_seq;
         cx.draw_lists[self.draw_list.id()].overlay_order = seq;
+        cx.draw_lists[self.draw_list.id()].overlay_tier = tier as u8;
 
         if !self.overlay_active {
             self.overlay_active = true;
             cx.overlay_draw_depth += 1;
+            if tier == OverlayTier::Popup {
+                cx.overlay_popup_depth += 1;
+            }
         }
 
         // Lift this list out of the body's depth band. `overlay_draw_depth` is
         // the nesting count including this list, so the outermost overlay is 1.
-        cx.cx.draw_lists[self.draw_list.id()].overlay_z_lift =
-            overlay_z_lift(cx.overlay_draw_depth);
+        cx.cx.draw_lists[self.draw_list.id()].overlay_z_lift = match tier {
+            OverlayTier::Popup => popup_z_lift(cx.overlay_popup_depth),
+            OverlayTier::Last => LAST_Z_BASE,
+            OverlayTier::Under | OverlayTier::Content => overlay_z_lift(cx.overlay_draw_depth),
+        };
 
         cx.nav_list_item_push(codeflow_parent_id, NavItem::Child(self.draw_list.id()));
 
@@ -804,6 +897,27 @@ mod tests {
     }
 
     /// Nesting climbs, one level at a time, and then stops climbing.
+    #[test]
+    fn tiers_have_separate_ranges_that_clear_each_other_and_stay_in_front_of_the_near_plane() {
+        use super::{popup_z_lift, LAST_Z_BASE, POPUP_Z_BASE, POPUP_Z_MAX};
+        let worst_content_depth = 20.0; // the dock's ghost tab
+        let slack = 2.0; // paint-order counter of a very busy frame
+        // the highest content ink is below the lowest popup floor
+        assert!(OVERLAY_Z_MAX + worst_content_depth + slack < POPUP_Z_BASE);
+        // the highest popup ink is below the cursor floor, which is below the near plane
+        assert!(POPUP_Z_MAX + slack < LAST_Z_BASE);
+        assert!(LAST_Z_BASE + slack < 100.0);
+        // popups at any nesting clear content at any nesting
+        for n in 1..40 {
+            for m in 1..40 {
+                assert!(popup_z_lift(n) > overlay_z_lift(m) + worst_content_depth + slack);
+            }
+        }
+        assert_eq!(popup_z_lift(1), POPUP_Z_BASE);
+        assert!(popup_z_lift(2) > popup_z_lift(1));
+        assert_eq!(popup_z_lift(1000), POPUP_Z_MAX);
+    }
+
     #[test]
     fn overlay_z_lift_climbs_with_nesting_and_is_capped() {
         assert_eq!(overlay_z_lift(1), OVERLAY_Z_BASE);

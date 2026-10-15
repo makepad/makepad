@@ -17,11 +17,24 @@
 //! The `os` service is the WM as an app: list, launch, focus, close, and
 //! open — a file in its associated app, through the same typed
 //! `OpenRequest` a file browser's double-click takes.
+//!
+//! The WM is the one bus owner of its process tree: every hosted client's
+//! service is also in the WM's process registry
+//! ([`ServiceRegistry::process`]), under the client's `w<id>` endpoint, so
+//! the WM's makepad-remote `app` service lists and calls it (a hosted child
+//! serves no `app` of its own). The registry's calls go down to the client
+//! like the pane's; the client's answers to them go back to the registry,
+//! everything else to the pane. The WM also answers a client's `Register`
+//! itself (the endpoint is the WM's to issue), so a port has its address
+//! without a pane.
 
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
+use makepad_ai_services::engine::ServiceRegistry;
+use makepad_ai_services::port::{ServiceLink, ServiceLinkHost};
 use makepad_ai_services::wire::*;
 use makepad_strict_json as json;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::TryRecvError;
 
 /// The WM's own service endpoint.
 pub const OS_ENDPOINT: &str = "os";
@@ -49,9 +62,135 @@ pub struct AiBus {
     /// endpoints): no socket, their frames are made and answered here.
     /// This leg is what the web superbuild runs everything on.
     locals: HashSet<ClientId>,
+    /// The process registry the clients' services are bridged into; `None`
+    /// keeps the bus to the pane alone (tests).
+    registry: Option<ServiceRegistry>,
+    /// Per process client: the host half of its link in the registry.
+    links: HashMap<ClientId, ServiceLinkHost>,
+    /// Calls the registry sent down: their answers go back to it.
+    registry_calls: HashSet<String>,
+    /// Frames for clients made by the bus itself (`Registered` answers).
+    outbox: Vec<(ClientId, String)>,
+    /// Clients that registered since the last look (the WM adds their pid).
+    joined: Vec<ClientId>,
 }
 
 impl AiBus {
+    /// A bus that also serves its clients through `registry`.
+    pub fn with_registry(registry: ServiceRegistry) -> AiBus {
+        AiBus { registry: Some(registry), ..Default::default() }
+    }
+
+    pub fn registry(&self) -> Option<&ServiceRegistry> {
+        self.registry.as_ref()
+    }
+
+    /// Frames the bus made for clients, to put on their sockets.
+    pub fn take_client_frames(&mut self) -> Vec<(ClientId, String)> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Clients that registered since the last call.
+    pub fn take_joined(&mut self) -> Vec<ClientId> {
+        std::mem::take(&mut self.joined)
+    }
+
+    /// What the registry sent down since the last drain: calls and cancels
+    /// for the clients, readdressed to their `w<id>` endpoints.
+    pub fn drain_registry(&mut self) -> Vec<(ClientId, String)> {
+        let mut out = Vec::new();
+        let mut gone = Vec::new();
+        for (client, host) in &self.links {
+            loop {
+                match host.down.try_recv() {
+                    Ok(HostedDown { msg, .. }) => {
+                        match &msg {
+                            ServiceDown::Call(call) => {
+                                self.registry_calls.insert(call.call_id.clone());
+                            }
+                            ServiceDown::Cancel { call_id } => {
+                                self.registry_calls.remove(call_id);
+                            }
+                            // the registry's own bookkeeping; the WM answered Register itself
+                            _ => continue,
+                        }
+                        out.push((*client, HostedDown { to: Some(Self::endpoint_of(*client)), msg }.to_json()));
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        gone.push(*client);
+                        break;
+                    }
+                }
+            }
+        }
+        for client in gone {
+            self.links.remove(&client);
+        }
+        out
+    }
+
+    /// A client's frame into its registry link: a registration opens the
+    /// link; an answer to a registry call goes there and nowhere else.
+    /// True when the frame is the registry's alone.
+    fn to_registry(&mut self, client: ClientId, up: &HostedUp) -> bool {
+        let Some(registry) = &self.registry else { return false };
+        let endpoint = Self::endpoint_of(client);
+        match &up.msg {
+            ServiceUp::Register { manifest, port_tag } => {
+                self.outbox.push((
+                    client,
+                    HostedDown { to: Some(endpoint.clone()), msg: ServiceDown::Registered { port_tag: *port_tag, endpoint: endpoint.clone() } }.to_json(),
+                ));
+                match self.links.get(&client) {
+                    Some(host) => {
+                        let _ = host.up.send(HostedUp { from: None, msg: up.msg.clone() });
+                    }
+                    None => {
+                        let (link, host) = ServiceLink::pair(manifest.clone());
+                        let _ = host.up.send(HostedUp { from: None, msg: up.msg.clone() });
+                        match registry.register_as(link, endpoint, "hosted by the window manager", None) {
+                            Ok(()) => {
+                                self.links.insert(client, host);
+                                self.joined.push(client);
+                            }
+                            Err(e) => makepad_widgets::log!("wm: the registry refused client {client}: {e}"),
+                        }
+                    }
+                }
+                false
+            }
+            ServiceUp::Unregister => {
+                if self.links.remove(&client).is_some() {
+                    registry.unregister(&endpoint);
+                }
+                false
+            }
+            ServiceUp::Result(r) => self.forward_registry_answer(client, &r.call_id.clone(), true, up),
+            ServiceUp::Progress { call_id, .. } => self.forward_registry_answer(client, &call_id.clone(), false, up),
+            ServiceUp::Context(_) => {
+                if let Some(host) = self.links.get(&client) {
+                    let _ = host.up.send(HostedUp { from: None, msg: up.msg.clone() });
+                }
+                false
+            }
+            ServiceUp::Message { .. } => false,
+        }
+    }
+
+    fn forward_registry_answer(&mut self, client: ClientId, call_id: &str, last: bool, up: &HostedUp) -> bool {
+        if !self.registry_calls.contains(call_id) {
+            return false;
+        }
+        if last {
+            self.registry_calls.remove(call_id);
+        }
+        if let Some(host) = self.links.get(&client) {
+            let _ = host.up.send(HostedUp { from: None, msg: up.msg.clone() });
+        }
+        true
+    }
+
     pub fn endpoint_of(client: ClientId) -> EndpointId {
         EndpointId(format!("w{client}"))
     }
@@ -140,19 +279,31 @@ impl AiBus {
         ServiceManifest::new(OS_ENDPOINT, "Desktop", brief)
             .with_tool(ToolDef::new(
                 "list",
-                "The apps this desktop knows, and which are running.",
+                "The apps this desktop knows (its own and the Wayland apps of its launcher), and which are running.",
                 r#"{"type":"object","properties":{}}"#,
                 Risk::Read,
             ))
             .with_tool(ToolDef::new(
                 "launch",
-                "Start an app that is NOT running (see the running list). A running app's tools are already available — call them directly instead of launching.",
+                "Start an app that is NOT running (see the running list), by its id from os.list (`wl.<name>` ids are Wayland apps). A running app's tools are already available — call them directly instead of launching.",
                 r#"{"type":"object","properties":{"app":{"type":"string","description":"the app id from os.list"}},"required":["app"]}"#,
                 Risk::Act,
             ))
             .with_tool(ToolDef::new(
+                "run",
+                "Run a program (a command line) as a Wayland window on this desktop. Only for programs os.list does not have.",
+                r#"{"type":"object","properties":{"command":{"type":"string","description":"the program and its arguments"}},"required":["command"]}"#,
+                Risk::Destructive,
+            ))
+            .with_tool(ToolDef::new(
                 "focus",
                 "Bring a running app to the front.",
+                r#"{"type":"object","properties":{"app":{"type":"string"}},"required":["app"]}"#,
+                Risk::Act,
+            ))
+            .with_tool(ToolDef::new(
+                "maximize",
+                "Make a running app's window fill the desktop (a new window may open small).",
                 r#"{"type":"object","properties":{"app":{"type":"string"}},"required":["app"]}"#,
                 Risk::Act,
             ))
@@ -227,6 +378,9 @@ impl AiBus {
         let Some(mut up) = HostedUp::parse(json) else { return Route::Drop };
         // The sender's claim is never used: the link IS the identity.
         up.from = Some(Self::endpoint_of(client));
+        if self.to_registry(client, &up) {
+            return Route::Drop;
+        }
         match &up.msg {
             ServiceUp::Register { manifest, .. } => {
                 self.manifests.insert(client, manifest.clone());
@@ -244,6 +398,11 @@ impl AiBus {
         if self.is_pane(client) {
             self.pane_client = None;
             return None;
+        }
+        if self.links.remove(&client).is_some() {
+            if let Some(registry) = &self.registry {
+                registry.unregister(&Self::endpoint_of(client));
+            }
         }
         self.manifests.remove(&client)?;
         let from = Some(self.endpoint_for(client));
@@ -291,7 +450,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: &str) -> ServiceCall {
-        ServiceCall { call_id: "c".into(), tool: tool.into(), args: args.into() }
+        ServiceCall { call_id: "c".into(), tool: tool.into(), args: args.into(), caller: None }
     }
 
     #[test]
@@ -330,6 +489,39 @@ mod tests {
         assert!(bus.client_died(4).is_none());
         assert!(bus.client_died(9).is_none());
         assert_eq!(bus.pane_client, None);
+    }
+
+    #[test]
+    fn hosted_services_are_served_through_the_process_registry() {
+        let registry = ServiceRegistry::new();
+        let mut bus = AiBus::with_registry(registry.clone());
+        bus.pane_client = Some(9);
+        // A client registers: the WM answers Registered itself and the
+        // registry lists the service under the client's endpoint.
+        let up = HostedUp { from: None, msg: ServiceUp::Register { manifest: files(), port_tag: 3 } };
+        assert!(matches!(bus.on_custom(4, &up.to_json()), Route::ToPane(_)));
+        let frames = bus.take_client_frames();
+        assert_eq!(frames.len(), 1);
+        let reg = HostedDown::parse(&frames[0].1).unwrap();
+        assert_eq!(reg.msg, ServiceDown::Registered { port_tag: 3, endpoint: EndpointId("w4".into()) });
+        assert_eq!(bus.take_joined(), vec![4]);
+        let w4 = EndpointId("w4".into());
+        assert_eq!(registry.manifest(&w4).map(|m| m.id), Some("files".into()));
+        // A registry call goes down to the client, addressed to w4…
+        let rx = registry.call_remote(&w4, call("stat", "{}")).unwrap();
+        let down = bus.drain_registry();
+        assert!(matches!(down.as_slice(), [(4, json)] if HostedDown::parse(json).unwrap().to == Some(w4.clone())));
+        // …and its answer goes back to the registry, not to the pane.
+        let answer = HostedUp { from: None, msg: ServiceUp::Result(ToolResult::ok("c", "a file", "")) };
+        assert!(matches!(bus.on_custom(4, &answer.to_json()), Route::Drop));
+        registry.pump_remote();
+        assert!(matches!(rx.try_recv(), Ok(RegistryUp::Result(e, r)) if e == w4 && r.call_id == "c"));
+        // The pane's own calls are answered to the pane as before.
+        let pane_answer = HostedUp { from: None, msg: ServiceUp::Result(ToolResult::ok("p1", "x", "")) };
+        assert!(matches!(bus.on_custom(4, &pane_answer.to_json()), Route::ToPane(_)));
+        // The client dies: the registry forgets it.
+        assert!(bus.client_died(4).is_some());
+        assert!(registry.manifest(&w4).is_none());
     }
 
     #[test]
@@ -432,11 +624,13 @@ mod tests {
         assert_eq!(AiBus::str_arg(&call("open", r#"{"path":7}"#), "path"), None);
         assert_eq!(AiBus::str_arg(&call("open", r#"{"path":"  "}"#), "path"), None);
         assert_eq!(AiBus::str_arg(&call("open", "[]"), "path"), None);
-        // The manifest lists the five tools with object schemas.
+        // The manifest lists the seven tools with object schemas; `run`
+        // starts any program, so it is declared destructive.
         let manifest = AiBus::os_manifest(&[]);
         assert!(manifest.validate().is_ok());
         assert!(manifest.tool("open").is_some());
-        assert_eq!(manifest.tools.len(), 5);
+        assert_eq!(manifest.tool("run").map(|t| t.risk), Some(Risk::Destructive));
+        assert_eq!(manifest.tools.len(), 7);
     }
 }
 
@@ -468,7 +662,7 @@ mod local_tests {
         assert!(replay[1].contains("\"m4\""));
         // A call addressed to it is the host's to run; the wrong kind of
         // address for the same id drops.
-        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into() };
+        let call = ServiceCall { call_id: "c1".into(), tool: "summary".into(), args: "{}".into(), caller: None };
         let down = HostedDown { to: Some(EndpointId("m4".into())), msg: ServiceDown::Call(call.clone()) };
         match bus.on_custom(9, &down.to_json()) {
             Route::Local(4, ServiceDown::Call(c)) => assert_eq!(c.call_id, "c1"),

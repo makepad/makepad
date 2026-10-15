@@ -566,6 +566,45 @@ pub fn define_shader_builtins(
         },
     );
 
+    // Compute kernel builtins (shader-only; the script runtime gets zeros).
+    for name in [id_lut!(coopmat_fill), id_lut!(coopmat_convert), id_lut!(coopmat_scale)] {
+        native.add_method(heap, math, name, script_args!(a = NIL, b = NIL), |_vm, _args| ScriptValue::NIL);
+    }
+    native.add_method(heap, math, id_lut!(coopmat_mul_add), script_args!(a = NIL, b = NIL, c = NIL), |_vm, _args| ScriptValue::NIL);
+    for name in [id_lut!(coopmat_load), id_lut!(coopmat_store)] {
+        native.add_method(heap, math, name, script_args!(a = NIL, b = NIL, stride = NIL, layout = NIL), |_vm, _args| ScriptValue::NIL);
+    }
+    for name in [
+        id_lut!(global_id), id_lut!(local_id), id_lut!(group_id), id_lut!(group_count),
+    ] {
+        native.add_method(heap, math, name, script_args!(), |_vm, _args| ScriptValue::NIL);
+    }
+    for name in [
+        id_lut!(local_index), id_lut!(subgroup_size), id_lut!(subgroup_lane), id_lut!(subgroup_id),
+    ] {
+        native.add_method(heap, math, name, script_args!(), |_vm, _args| ScriptValue::from(0u32));
+    }
+    native.add_method(heap, math, id_lut!(barrier), script_args!(), |_vm, _args| ScriptValue::NIL);
+    for name in [
+        id_lut!(subgroup_add), id_lut!(subgroup_min), id_lut!(subgroup_max), id_lut!(subgroup_first),
+    ] {
+        native.add_method(heap, math, name, script_args!(x = 0.0), |vm, args| {
+            vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass())
+        });
+    }
+    for name in [id_lut!(subgroup_shuffle), id_lut!(subgroup_shuffle_xor)] {
+        native.add_method(heap, math, name, script_args!(x = 0.0, lane = 0.0), |vm, args| {
+            vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass())
+        });
+    }
+    native.add_method(heap, math, id_lut!(pack_half2), script_args!(v = NIL), |_vm, _args| ScriptValue::from(0u32));
+    native.add_method(heap, math, id_lut!(unpack_half2), script_args!(u = 0.0), |_vm, _args| ScriptValue::NIL);
+    native.add_method(heap, math, id_lut!(extract_bits), script_args!(x = 0.0, offset = 0.0, count = 0.0), |_vm, _args| ScriptValue::from(0u32));
+    native.add_method(heap, math, id_lut!(dot4_u8), script_args!(a = 0.0, b = 0.0), |_vm, _args| ScriptValue::from(0u32));
+    native.add_method(heap, math, id_lut!(atomic_add), script_args!(x = 0.0, v = 0.0), |vm, args| {
+        vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass())
+    });
+
     // Draw-local retained-instance ordinal; no instance-buffer storage.
     native.add_method(
         heap,
@@ -826,7 +865,7 @@ pub fn define_shader_builtins(
     );
     // Packed-attribute unpackers: two f16s / four unorm8s bitcast into one
     // f32 slot. CPU impls mirror the GPU helpers bit-exactly for the
-    // gpusim runtime.
+    // Rust shader runtime.
     native.add_method(
         heap,
         math,
@@ -1203,7 +1242,79 @@ pub fn type_table_builtin(
     let is_any_float = |t| is_float(t) || is_vec_float(t);
     let is_any_int = |t| is_int(t) || is_vec_int(t);
 
+    let want = |n: usize| -> bool {
+        if args.len() != n {
+            script_err_invalid_args!(trap, "shader builtin {:?} takes {} argument{}, got {}", name, n, if n == 1 { "" } else { "s" }, args.len());
+            return false;
+        }
+        true
+    };
     match name {
+        // ---- compute kernels ----
+        id!(global_id) | id!(local_id) | id!(group_id) | id!(group_count) => {
+            return if want(0) { vec3u_t } else { builtins.pod_void };
+        }
+        id!(local_index) | id!(subgroup_size) | id!(subgroup_lane) | id!(subgroup_id) => {
+            return if want(0) { u32_t } else { builtins.pod_void };
+        }
+        id!(barrier) => {
+            want(0);
+            return builtins.pod_void;
+        }
+        id!(subgroup_add) | id!(subgroup_min) | id!(subgroup_max) | id!(subgroup_first) => {
+            if !want(1) {
+                return builtins.pod_void;
+            }
+            return args[0];
+        }
+        id!(subgroup_shuffle) | id!(subgroup_shuffle_xor) => {
+            if !want(2) {
+                return builtins.pod_void;
+            }
+            return args[0];
+        }
+        id!(pack_half2) => {
+            if !want(1) {
+                return builtins.pod_void;
+            }
+            if args[0] != vec2f_t {
+                script_err_type_mismatch!(trap, "pack_half2 takes a vec2f, got {}", fmt_ty(args[0]));
+            }
+            return u32_t;
+        }
+        id!(unpack_half2) => {
+            if !want(1) {
+                return builtins.pod_void;
+            }
+            if args[0] != u32_t {
+                script_err_type_mismatch!(trap, "unpack_half2 takes a u32, got {}", fmt_ty(args[0]));
+            }
+            return vec2f_t;
+        }
+        id!(extract_bits) => {
+            if !want(3) {
+                return builtins.pod_void;
+            }
+            if !is_int(args[0]) {
+                script_err_type_mismatch!(trap, "extract_bits takes a u32 or i32, got {}", fmt_ty(args[0]));
+            }
+            return args[0];
+        }
+        id!(dot4_u8) => {
+            if !want(2) {
+                return builtins.pod_void;
+            }
+            return u32_t;
+        }
+        id!(atomic_add) => {
+            if !want(2) {
+                return builtins.pod_void;
+            }
+            if !is_int(args[0]) {
+                script_err_type_mismatch!(trap, "atomic_add takes a u32 or i32 element, got {}", fmt_ty(args[0]));
+            }
+            return args[0];
+        }
         id!(asuint) => {
             if args.len() != 1 {
                 script_err_invalid_args!(

@@ -406,7 +406,7 @@ impl ScriptHook for TagField {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -603,10 +603,9 @@ impl Widget for TagField {
     ) -> ScriptAsyncResult {
         if method == live_id!(add) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(tag) = vm.bx.heap.cast_to_owned_string(value, "adding a tag") {
+                    if let Some(tag) = vm.cast_to_owned_string(value, "adding a tag") {
                         vm.with_cx_mut(|cx| {
                             self.add(cx, &tag);
                         });

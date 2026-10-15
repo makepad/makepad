@@ -111,7 +111,7 @@ impl ScriptHook for FlatList {
                             if let Some(template_obj) = kv.value.as_object() {
                                 // Root the template object so it survives GC
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -181,6 +181,10 @@ impl FlatList {
 }
 
 impl Widget for FlatList {
+    fn clips_content(&self) -> bool {
+        true
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !self.visible() {
             return false;

@@ -20,7 +20,7 @@ struct BenchResult {
 fn new_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
@@ -116,8 +116,7 @@ fn main() {
         });
         vm.drain_errors();
         println!("eval result: {}", v);
-        let bodies = vm.bx.code.bodies.borrow();
-        bodies[0].parser.dump_opcodes();
+        vm.dump_body_opcodes(0);
         return;
     }
 
@@ -416,13 +415,13 @@ fn main() {
             let start = Instant::now();
             // long deadlines: we want the per-instruction sampling cost, not
             // actual trips (a loaded machine can deschedule us past 64ms)
-            vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+            vm.set_run_budget(Some(ScriptRunBudget::from_durations(
                 std::time::Duration::from_secs(10),
                 std::time::Duration::from_secs(10),
                 512,
-            ));
+            )));
             let check = vm.with_instruction_limit(1_000_000_000, |vm| vm.call(f, &[]));
-            vm.bx.run_budget = None;
+            vm.set_run_budget(None);
             let el = start.elapsed().as_secs_f64();
             assert!(!check.is_err());
             let ns = el * 1e9 / 100_000.0;

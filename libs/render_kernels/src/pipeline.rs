@@ -20,11 +20,12 @@
 //! reads state `a` and writes the next state `b`) swaps its buffers after
 //! every repetition, so `a` always holds the newest state.
 
-use makepad_script_compute::kernel::{Access, Kernel, KernelError};
-use makepad_script_compute::pipeline::compact_into;
-use makepad_script_compute::sched::{Executor, Job, JobError};
+use makepad_script_compute::kernel::{Access, KernelRef};
+use makepad_script_compute_sched::kernel::{KernelError};
+use makepad_script_compute_sched::pipeline::compact_into;
+use makepad_script_compute_sched::sched::{Executor, Job, JobError};
 use std::collections::HashMap;
-use std::sync::Arc;
+
 
 /// How many elements a pass runs.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,7 +82,7 @@ impl Pipeline {
     }
 
     /// Appends a pass; returns its job to set params, time and seed.
-    pub fn pass(&mut self, kernel: Arc<Kernel>, count: Count) -> &mut Job {
+    pub fn pass(&mut self, kernel: KernelRef, count: Count) -> &mut Job {
         self.passes.push(Pass { job: Some(Job::new(kernel, 0)), count });
         self.passes.last_mut().unwrap().job.as_mut().unwrap()
     }
@@ -131,7 +132,7 @@ impl Pipeline {
 
     /// Runs every pass through `engine` at `priority` (the scheduler's
     /// admission and priority classes apply to each pass).
-    pub fn run_on(&mut self, engine: &crate::KernelEngine, priority: makepad_script_compute::sched::Priority) -> Result<(), PipelineError> {
+    pub fn run_on(&mut self, engine: &crate::KernelEngine, priority: makepad_script_compute_sched::sched::Priority) -> Result<(), PipelineError> {
         self.run_with(engine.executor(), engine.threads(), &mut |job: Job| engine.run(job, priority))
     }
 
@@ -175,36 +176,36 @@ impl Pipeline {
         let mut fail = None;
         for b in kernel.buffers().iter().skip(1) {
             let r = match b.access {
-                Access::Read => match self.buffers.remove(&b.name) {
-                    Some(v) => job.input_vec_u32(&b.name, v),
+                Access::Read => match self.buffers.remove(b.name) {
+                    Some(v) => job.input_vec_u32(b.name, v),
                     None => {
-                        fail = Some(PipelineError::Missing { pass: p, buffer: b.name.clone() });
+                        fail = Some(PipelineError::Missing { pass: p, buffer: b.name.to_string() });
                         break;
                     }
                 },
                 Access::Write => {
                     let words = count * b.stride as usize;
-                    let mut v = self.buffers.remove(&b.name).unwrap_or_default();
+                    let mut v = self.buffers.remove(b.name).unwrap_or_default();
                     if v.len() < words {
                         v.resize(words, 0);
                     }
-                    job.output_u32(&b.name, v)
+                    job.output_u32(b.name, v)
                 }
                 Access::Emit { width, capacity } => {
                     let mut v = self.buffers.remove(&format!("{}#slots", b.name)).unwrap_or_default();
                     v.clear();
                     v.resize((count * width as usize * capacity as usize).max(1), 0);
-                    emits.push((b.name.clone(), width as usize, capacity as usize));
-                    job.output_u32(&b.name, v)
+                    emits.push((b.name.to_string(), width as usize, capacity as usize));
+                    job.output_u32(b.name, v)
                 }
                 Access::EmitCount => {
                     let mut v = std::mem::take(&mut self.counts);
                     v.clear();
                     v.resize(count.max(1), 0);
-                    job.output_u32(&b.name, v)
+                    job.output_u32(b.name, v)
                 }
             };
-            bound.push(b.name.clone());
+            bound.push(b.name.to_string());
             if let Err(e) = r {
                 fail = Some(PipelineError::Kernel { pass: p, error: e });
                 break;
@@ -219,7 +220,7 @@ impl Pipeline {
             Ok(job) => (job, None),
             Err((job, e)) => (job, Some(e)),
         };
-        let overflowed = job.stats().overflowed;
+        let overflowed = job.stats().overflowed();
         // Every buffer goes back to the pipeline, emits compacted.
         for name in bound {
             let Some(v) = job.take_buffer_u32(&name) else { continue };

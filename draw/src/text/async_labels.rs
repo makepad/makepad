@@ -1,6 +1,7 @@
 //! Worker-owned label layout and raster preparation. The UI only admits immutable
-//! runs and places their resident glyphs. All channels are bounded; UI sends and
-//! receives never block. A caller must request frames while `pending()` is true.
+//! runs and places their resident glyphs. Under the HAL, runs are admitted after layout and
+//! resolve host atlas slots when drawn, retaining unresolved glyph rectangles. All channels are
+//! bounded; UI sends and receives never block. A caller must request frames while `pending()` is true.
 use super::{
     font::FontId,
     font_family::{FontDiagnostics, FontFamilyId},
@@ -8,8 +9,10 @@ use super::{
     geom::Point,
     layouter::{BorrowedLayoutParams, LayoutOptions, Layouter, Settings, Style},
     loader::{FontDefinition, FontFamilyDefinition},
-    rasterizer::{PublishedGlyph, RasterizedGlyph},
+    rasterizer::RasterizedGlyph,
 };
+#[cfg(target_arch = "wasm32")]
+use super::rasterizer::PublishedGlyph;
 use crate::makepad_platform::recording_buffer::RecordingBuffer;
 use crate::{makepad_platform::*, Cx2d, DrawText};
 use crate::makepad_platform::makepad_network::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -72,10 +75,18 @@ struct Request {
 struct Glyph {
     origin: Point<f32>,
     size: f32,
+    #[cfg(target_arch = "wasm32")]
     image: Arc<PublishedGlyph>,
+    /// Under the HAL the worker publishes no pixels: the UI asks the host for the glyph.
+    #[cfg(not(target_arch = "wasm32"))]
+    font: FontId,
+    #[cfg(not(target_arch = "wasm32"))]
+    glyph: super::font::GlyphId,
+    #[cfg(not(target_arch = "wasm32"))]
+    dpxs: f32,
 }
 struct Publication {
-    #[cfg(test)]
+    #[cfg(all(target_arch = "wasm32", test))]
     shaped_on: std::thread::ThreadId,
     width: f64,
     missing_glyphs: bool,
@@ -83,6 +94,7 @@ struct Publication {
 }
 struct Resident {
     publication: Arc<Publication>,
+    #[cfg(target_arch = "wasm32")]
     epoch: u64,
     glyphs: Vec<(Point<f32>, f32, RasterizedGlyph)>,
 }
@@ -127,6 +139,7 @@ impl LabelCache {
         let (output, receiver) = mpsc::sync_channel(128);
         match cx.spawn_worker(move || {
             let mut layouter = Layouter::new(Settings::default());
+            #[cfg(target_arch = "wasm32")]
             let mut glyphs = HashMap::default();
             while let Ok(request) = input.recv() {
                 if let Some(family) = request.family {
@@ -154,10 +167,18 @@ impl LabelCache {
                         },
                     );
                 }
+                #[cfg(target_arch = "wasm32")]
                 let result = prepare(&mut layouter, &mut glyphs, &request.key);
+                #[cfg(not(target_arch = "wasm32"))]
+                let result = prepare(&mut layouter, &request.key);
                 // The UI imports into this worker-allocated capacity.
                 let glyphs = Vec::with_capacity(result.glyphs.len());
-                let run = Resident { publication: Arc::new(result), epoch: u64::MAX, glyphs };
+                let run = Resident {
+                    publication: Arc::new(result),
+                    #[cfg(target_arch = "wasm32")]
+                    epoch: u64::MAX,
+                    glyphs,
+                };
                 if output.send((request.key, run)).is_err() {
                     break;
                 }
@@ -170,7 +191,6 @@ impl LabelCache {
             Err(error) => crate::error!("label worker unavailable: {error}"),
         }
     }
-
 
     fn intern_text(&mut self, text: &str) -> LabelText {
         if let Some(last) = &self.last_text {
@@ -228,9 +248,9 @@ impl LabelCache {
         }
     }
 
-
     /// Drain replies and bind glyph images within 0.5ms. A partially admitted
-    /// run remains pending; drawing never pays its first-use raster cost.
+    /// run remains pending; drawing never pays its first-use raster cost. HAL runs need only
+    /// their layout here: drawing resolves atlas slots without waiting for the host's pixels.
     pub fn pump(&mut self, cx: &mut Cx) -> bool {
         self.poll_instance_storage();
         let Some(worker) = self.worker.as_ref() else {
@@ -256,9 +276,12 @@ impl LabelCache {
                 break;
             }
         }
+        #[cfg(target_arch = "wasm32")]
         let fonts = cx
             .has_global::<Rc<RefCell<Fonts>>>()
             .then(|| cx.get_global::<Rc<RefCell<Fonts>>>().clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = cx;
         while spent() < 500e-6 {
             if self.admitting.is_none() {
                 let Ok(run) = worker.receiver.try_recv() else {
@@ -266,8 +289,9 @@ impl LabelCache {
                 };
                 self.admitting = Some(run);
             }
-            let (key, run) = self.admitting.as_mut().unwrap();
+            #[cfg(target_arch = "wasm32")]
             if let Some(fonts) = &fonts {
+                let (_, run) = self.admitting.as_mut().unwrap();
                 let fonts = fonts.borrow();
                 let mut rasterizer = fonts.rasterizer().borrow_mut();
                 if run.epoch != rasterizer.epoch() {
@@ -284,8 +308,8 @@ impl LabelCache {
                     run.glyphs.push((glyph.origin, glyph.size, image));
                 }
             }
-            self.waiting.remove(key);
             let (key, run) = self.admitting.take().unwrap();
+            self.waiting.remove(&key);
             self.ready.insert(key, run);
             changed = true;
         }
@@ -294,15 +318,18 @@ impl LabelCache {
 
     pub fn measure(&mut self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> Option<f64> {
         let key = self.key(draw, cx.current_dpi_factor(), text);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let epoch = fonts.borrow().rasterizer().borrow().epoch();
-        if self.ready.get(&key).is_some_and(|r| r.epoch != epoch) {
-            if self.admitting.is_none() {
-                let run = self.ready.remove(&key).unwrap();
-                self.waiting.insert(key.clone());
-                self.admitting = Some((key.clone(), run));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let epoch = fonts.borrow().rasterizer().borrow().epoch();
+            if self.ready.get(&key).is_some_and(|r| r.epoch != epoch) {
+                if self.admitting.is_none() {
+                    let run = self.ready.remove(&key).unwrap();
+                    self.waiting.insert(key.clone());
+                    self.admitting = Some((key.clone(), run));
+                }
+                return None;
             }
-            return None;
         }
         if let Some(run) = self.ready.get(&key) {
             let width = run.publication.width;
@@ -370,32 +397,64 @@ impl LabelCache {
         storage: Option<&mut RecordingBuffer>,
     ) -> bool {
         let key = self.key(draw, cx.current_dpi_factor(), text);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let epoch = fonts.borrow().rasterizer().borrow().epoch();
-        if self.ready.get(&key).is_some_and(|run| run.epoch != epoch) {
-            if self.admitting.is_none() {
-                let run = self.ready.remove(&key).unwrap();
-                self.waiting.insert(key.clone());
-                self.admitting = Some((key.clone(), run));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let epoch = fonts.borrow().rasterizer().borrow().epoch();
+            if self.ready.get(&key).is_some_and(|run| run.epoch != epoch) {
+                if self.admitting.is_none() {
+                    let run = self.ready.remove(&key).unwrap();
+                    self.waiting.insert(key.clone());
+                    self.admitting = Some((key.clone(), run));
+                }
+                draw.draw_vars.area = Area::Empty;
+                return false;
             }
-            draw.draw_vars.area = Area::Empty;
-            return false;
         }
         let Some(run) = self.ready.get_mut(&key) else {
             self.measure(cx, draw, text);
             draw.draw_vars.area = Area::Empty;
             return false;
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Resolve every drawn glyph, including already-requested ones, so this draw reports
+            // its pending keys and keeps used slots alive. Ready answers, MSDF upgrades and
+            // evictions take effect immediately; none of them discard the worker's layout.
+            let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+            let mut fonts = fonts.borrow_mut();
+            let rasterizer = fonts.rasterizer().clone();
+            let mut rasterizer = rasterizer.borrow_mut();
+            run.glyphs.clear();
+            for glyph in &run.publication.glyphs {
+                let Some(font) = fonts.font(glyph.font) else {
+                    continue;
+                };
+                let Some(image) = rasterizer.rasterize_glyph(&font, glyph.glyph, glyph.dpxs) else {
+                    continue;
+                };
+                run.glyphs.push((
+                    Point::new(
+                        glyph.origin.x + pos.x as f32,
+                        glyph.origin.y + pos.y as f32,
+                    ),
+                    glyph.size,
+                    image,
+                ));
+            }
+        }
         if run.glyphs.is_empty() {
             draw.draw_vars.area = Area::Empty;
             return true;
         }
         // Reuse the run storage for placement and restore its local coordinates.
+        #[cfg(target_arch = "wasm32")]
         for glyph in &mut run.glyphs {
             glyph.0.x += pos.x as f32;
             glyph.0.y += pos.y as f32;
         }
         draw.draw_rasterized_glyphs_abs_with_storage(cx, &run.glyphs, draw.color, storage);
+        #[cfg(target_arch = "wasm32")]
         for (glyph, local) in run.glyphs.iter_mut().zip(&run.publication.glyphs) {
             glyph.0 = local.origin;
         }
@@ -405,7 +464,7 @@ impl LabelCache {
 
 fn prepare(
     layouter: &mut Layouter,
-    images: &mut HashMap<(FontId, u16, u32), Arc<PublishedGlyph>>,
+    #[cfg(target_arch = "wasm32")] images: &mut HashMap<(FontId, u16, u32), Arc<PublishedGlyph>>,
     key: &Key,
 ) -> Publication {
     let scale = f32::from_bits(key.scale);
@@ -423,7 +482,7 @@ fn prepare(
         },
     });
     let mut result = Publication {
-        #[cfg(test)]
+        #[cfg(all(target_arch = "wasm32", test))]
         shaped_on: std::thread::current().id(),
         width: (laidout.size_in_lpxs.width * scale) as f64,
         missing_glyphs: laidout
@@ -436,7 +495,20 @@ fn prepare(
     for row in &laidout.rows {
         for glyph in &row.glyphs {
             let size = glyph.font_size_in_lpxs * scale;
+            #[cfg(not(target_arch = "wasm32"))]
+            result.glyphs.push(Glyph {
+                origin: Point::new(
+                    (row.origin_in_lpxs.x + glyph.origin_in_lpxs.x + glyph.offset_in_lpxs()) * scale,
+                    (row.origin_in_lpxs.y + glyph.origin_in_lpxs.y) * scale,
+                ),
+                size: glyph.font_size_in_lpxs,
+                font: glyph.font.id(),
+                glyph: glyph.id,
+                dpxs: size * dpi,
+            });
+            #[cfg(target_arch = "wasm32")]
             let id = (glyph.font.id(), glyph.id, (size * dpi).to_bits());
+            #[cfg(target_arch = "wasm32")]
             let image = if let Some(image) = images.get(&id) {
                 image.clone()
             } else {
@@ -459,6 +531,7 @@ fn prepare(
                 images.insert(id, image.clone());
                 image
             };
+            #[cfg(target_arch = "wasm32")]
             result.glyphs.push(Glyph {
                 origin: Point::new(
                     (row.origin_in_lpxs.x + glyph.origin_in_lpxs.x + glyph.offset_in_lpxs())
@@ -473,7 +546,7 @@ fn prepare(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(target_arch = "wasm32", test))]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

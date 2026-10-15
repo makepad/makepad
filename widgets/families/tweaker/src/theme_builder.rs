@@ -189,8 +189,8 @@
 //! a test holds that list to the installer. A theme that only moved its
 //! palette skips all of this and derives straight from the base object.
 
-use crate::desktop_style::{self, StyleSheet};
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
+use crate::desktop_style;
+use crate::makepad_platform::{LiveId, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
 use crate::theme_combinations::{COMBINATIONS, PAIRS};
 use crate::theme_tokens::{
     base_theme_keys, contrast, family_from_color, held_pairs, hsl_to_rgb, over, reads_on, rgb_to_hsl, roles_for, roles_from_colors,
@@ -1306,11 +1306,29 @@ fn house_text_contrast(scheme: Scheme) -> f64 {
 /// file's text: `space_factor: 6. // Increase for a less dense layout` is 6.
 /// `None` for a key the file derives rather than states.
 fn file_number(scheme: Scheme, key: &str) -> Option<f64> {
-    let opening = format!("        {key}:");
-    scheme.source().lines().find_map(|line| {
-        let rest = line.strip_prefix(&opening)?;
-        rest.split("//").next()?.trim().parse::<f64>().ok()
-    })
+    file_lines(scheme, key).iter().find_map(|rest| rest.split("//").next()?.trim().parse::<f64>().ok())
+}
+
+/// The theme files' top-level lines indexed once by key: every line that is
+/// `        key:` and then something, in file order, each as what follows the
+/// colon. The build looks a handful of keys up hundreds of times, and
+/// scanning a four-thousand-line file for each of them was most of its time.
+fn file_lines(scheme: Scheme, key: &str) -> &'static [&'static str] {
+    type Index = std::collections::HashMap<&'static str, Vec<&'static str>>;
+    static INDEX: std::sync::OnceLock<[Index; 3]> = std::sync::OnceLock::new();
+    let indexes = INDEX.get_or_init(|| {
+        Scheme::ALL.map(|scheme| {
+            let mut index = Index::new();
+            for line in scheme.source().lines() {
+                let Some(rest) = line.strip_prefix("        ") else { continue };
+                let Some((name, after)) = rest.split_once(':') else { continue };
+                index.entry(name).or_default().push(after);
+            }
+            index
+        })
+    });
+    let at = Scheme::ALL.iter().position(|one| *one == scheme).unwrap_or(0);
+    indexes[at].get(key).map(Vec::as_slice).unwrap_or(&[])
 }
 
 /// A script for a set of pins whose DIMENSIONS moved, or `None` where none
@@ -1471,11 +1489,9 @@ fn file_key(scheme: Scheme, key: &str, known: &BTreeMap<String, u32>, depth: u32
 /// surrounding space taken off: `color_inset: theme.color_d_1` is
 /// `theme.color_d_1`.
 fn file_stated(scheme: Scheme, key: &str) -> Option<String> {
-    let opening = format!("        {key}: ");
-    scheme
-        .source()
-        .lines()
-        .find_map(|line| line.strip_prefix(&opening))
+    file_lines(scheme, key)
+        .iter()
+        .find_map(|after| after.strip_prefix(' '))
         .map(|rest| rest.split("//").next().unwrap_or(rest).trim().to_string())
 }
 
@@ -2080,7 +2096,7 @@ const WRITTEN: &[Written] = {
         // The quieter line a drop zone, a tree select and a waveform write
         // under or beside their main words.
         Written {
-            widgets: &["dropzone.rs", "tree_select.rs", "waveform.rs"],
+            widgets: &["dropzone.rs", "tree_select.rs", "waveform.rs", "curve_editor.rs"],
             grounds: &["color_inset", "color_inset_hover", "color_inset_focus", "color_inset_drag"],
             ink: "color_text_meta",
             need: LEGIBLE,
@@ -2115,6 +2131,14 @@ const WRITTEN: &[Written] = {
             widgets: &["html.rs", "markdown.rs"],
             grounds: &["color_selection_focus"],
             ink: "color_label_inner",
+            need: READABLE,
+        },
+        // A Label's own wash under selected text (draw_selection), in the
+        // label's body ink.
+        Written {
+            widgets: &["label.rs"],
+            grounds: &["color_selection_focus"],
+            ink: "color_label_outer",
             need: READABLE,
         },
         // The selection inside a slider's value, which is only ever up while
@@ -2945,24 +2969,16 @@ impl BuiltTheme {
     /// theme file, a few milliseconds, and leaves two scratch objects in
     /// `mod.themes` until the next module run sweeps them away.
     pub fn sheet_source(&self, vm: &mut ScriptVm) -> String {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: crate::widgets_dir().into(),
-            module_path: "theme_builder".to_string(),
-            file: format!("{EXPORT_NAME}.splash"),
-            line: 0,
-            column: 0,
-            code: self.script_as(EXPORT_SOURCE_NAME, EXPORT_NAME, false),
-            values: vec![],
-        });
+        vm.eval(ScriptMod::new(&(crate::widgets_dir()), "theme_builder", &(format!("{EXPORT_NAME}.splash")), 0, 0, &(self.script_as(EXPORT_SOURCE_NAME, EXPORT_NAME, false)), &[]));
         let themes = vm.module(LiveId::from_str("themes"));
         let object = |vm: &mut ScriptVm, name: &str| {
-            vm.bx.heap.value(themes, LiveId::from_str(name).into(), NoTrap).as_object()
+            vm.value(themes, LiveId::from_str(name)).as_object()
         };
         let (Some(built), Some(base)) = (object(vm, EXPORT_NAME), object(vm, self.scheme.theme_name())) else {
             return crate::theme_tokens::export_sheet_source(self.scheme, &[]);
         };
         let read = |vm: &mut ScriptVm, theme: ScriptObject, key: &str| {
-            let value = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(key));
             match (value.as_color(), value.as_number()) {
                 (Some(rgba), _) => Some(TokenValue::Color(rgba)),
                 (_, Some(number)) => Some(TokenValue::Num(number)),
@@ -5292,7 +5308,7 @@ impl Applied {
 /// both taken off by an install and both go back.
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
-    sheet: Option<StyleSheet>,
+    sheet: desktop_style::Wearing,
     /// Whatever stood at the seam: nothing, a lab's mix, a saved theme's
     /// pins. The builder does not ask whose it is.
     standing: Option<String>,
@@ -5387,8 +5403,8 @@ impl ThemeBuilder {
         if self.entry.is_some() {
             return;
         }
-        let sheet = desktop_style::current(vm);
-        let dark = match sheet.as_ref().and_then(|sheet| desktop_style::find(&sheet.name)) {
+        let sheet = desktop_style::wearing(vm);
+        let dark = match sheet.sheet().and_then(|sheet| desktop_style::find(&sheet.name)) {
             // A sheet's appearance is its base theme's, which two of the dark
             // ones do not say in their name; the equalizer's table knows.
             Some(entry) => BlendTheme::Sheet(entry.id).appearance() == Appearance::Dark,
@@ -5680,10 +5696,7 @@ impl ThemeBuilder {
     /// would clear the very script being handed back.
     fn install_entry(&mut self, vm: &mut ScriptVm, entry: &Entry) {
         self.rebuilds = self.rebuilds.saturating_add(1);
-        match &entry.sheet {
-            Some(sheet) => desktop_style::install(vm, sheet.clone()),
-            None => desktop_style::uninstall(vm),
-        }
+        desktop_style::put_back(vm, entry.sheet.clone());
         crate::set_theme_mix(vm.cx_mut(), entry.standing.clone());
         vm.cx_mut().request_style_reload();
     }
@@ -5692,6 +5705,7 @@ impl ThemeBuilder {
 #[cfg(test)]
 mod theme_builder_tests {
     use super::*;
+    use crate::desktop_style::StyleSheet;
     use crate::makepad_platform::Cx;
     use crate::theme_lab::ThemeLab;
     use crate::theme_tokens::{assigned_keys, theme_keys, BlendCache, BlendValue, ThemeValues};
@@ -5709,25 +5723,15 @@ mod theme_builder_tests {
     }
 
     fn evaluate(vm: &mut ScriptVm, name: &str, code: String) {
-        vm.bx.captured_errors = Some(Vec::new());
-        vm.eval(ScriptMod {
-            cargo_manifest_path: crate::widgets_dir().into(),
-            module_path: format!("theme_builder_test_{name}"),
-            file: format!("{name}.splash"),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        });
+        vm.capture_errors();
+        vm.eval(ScriptMod::new(&crate::widgets_dir(), &format!("theme_builder_test_{name}"), &format!("{name}.splash"), 0, 0, &code, &[]));
         let errors = vm.take_errors();
         assert!(errors.is_empty(), "{name}: {errors:?}");
     }
 
     fn filed(vm: &mut ScriptVm, name: &str) -> ScriptObject {
         let themes = vm.module(LiveId::from_str("themes"));
-        vm.bx
-            .heap
-            .value(themes, LiveId::from_str(name).into(), NoTrap)
+        vm.value(themes, LiveId::from_str(name))
             .as_object()
             .unwrap_or_else(|| panic!("mod.themes.{name} was never built"))
     }
@@ -5737,7 +5741,7 @@ mod theme_builder_tests {
     }
 
     fn token(vm: &mut ScriptVm, theme: ScriptObject, key: &str) -> Option<TokenValue> {
-        let value = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(key));
         match (value.as_color(), value.as_number()) {
             (Some(rgba), _) => Some(TokenValue::Color(rgba)),
             (_, Some(number)) => Some(TokenValue::Num(number)),
@@ -5746,27 +5750,24 @@ mod theme_builder_tests {
     }
 
     fn color(vm: &mut ScriptVm, theme: ScriptObject, key: &str) -> Option<u32> {
-        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        vm.value(theme, LiveId::from_str(key)).as_color()
     }
 
     /// A number inside a token that is an object: the `font_size` of a
     /// `TextStyle`.
     fn inner(vm: &mut ScriptVm, theme: ScriptObject, key: &str, field: &str) -> Option<f64> {
-        let object = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_object()?;
-        vm.bx.heap.value(object, LiveId::from_str(field).into(), NoTrap).as_number()
+        let object = vm.value(theme, LiveId::from_str(key)).as_object()?;
+        vm.value(object, LiveId::from_str(field)).as_number()
     }
 
     /// The theme object the widget module was handed, which is what every
     /// `theme.color_x` in a template was baked from.
     fn widget_theme(vm: &mut ScriptVm) -> ScriptObject {
         let prelude = vm.module(LiveId::from_str("prelude"));
-        let internal = vm
-            .bx
-            .heap
-            .value(prelude, LiveId::from_str("widgets_internal").into(), NoTrap)
+        let internal = vm.value(prelude, LiveId::from_str("widgets_internal"))
             .as_object()
             .expect("the widget prelude");
-        vm.bx.heap.value(internal, LiveId::from_str("theme").into(), NoTrap).as_object().expect("its theme")
+        vm.value(internal, LiveId::from_str("theme")).as_object().expect("its theme")
     }
 
     /// A blue nobody would mistake for the house orange.
@@ -7481,7 +7482,7 @@ mod theme_builder_tests {
                 assert_eq!(token(vm, base, "space_factor"), Some(TokenValue::Num(6.0)));
                 for font in CARRIED_FONTS {
                     let at = |vm: &mut ScriptVm, object: ScriptObject| {
-                        vm.bx.heap.value(object, LiveId::from_str(font).into(), NoTrap)
+                        vm.value(object, LiveId::from_str(font))
                     };
                     assert!(at(vm, base).as_object().is_some(), "{font} is not a style in the base theme");
                     assert!(at(vm, theme) == at(vm, base), "{font} was not carried across");
@@ -7573,7 +7574,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::uninstall(vm);
 
             // Closed, it is inert.
@@ -7651,7 +7652,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::install(vm, StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             crate::set_theme_mix(vm.cx_mut(), Some(standing.clone()));
 
@@ -7751,7 +7752,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::uninstall(vm);
             let mut lab = ThemeLab::with_cache(made_up_cache());
             lab.enter(vm);
@@ -7859,7 +7860,7 @@ mod theme_builder_tests {
             let mut cx = Cx::new(Box::new(|_, _| {}));
             cx.with_vm(|vm| {
                 crate::script_mod(vm);
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 desktop_style::uninstall(vm);
                 let on_screen = worn(vm);
                 let before = color(vm, on_screen, "color_primary");

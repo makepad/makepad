@@ -53,7 +53,7 @@
 //! what makes it the exception.
 
 use crate::desktop_style::SheetEntry;
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
+use crate::makepad_platform::{LiveId, ScriptMod, ScriptVm, ScriptVmCx};
 use crate::script_eval;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,7 +157,7 @@ const fn spec(
     TokenSpec { name, group, kind, doc, min, max, step, themes }
 }
 
-const fn color(name: &'static str, group: TokenGroup, doc: &'static str, themes: &'static [Scheme]) -> TokenSpec {
+const fn color_spec(name: &'static str, group: TokenGroup, doc: &'static str, themes: &'static [Scheme]) -> TokenSpec {
     spec(name, group, TokenKind::Color, doc, 0.0, 0.0, 0.0, themes)
 }
 
@@ -186,15 +186,15 @@ const fn text_style(name: &'static str, doc: &'static str) -> TokenSpec {
 }
 
 const fn accent(name: &'static str, doc: &'static str) -> TokenSpec {
-    color(name, TokenGroup::ColorAccent, doc, ALL)
+    color_spec(name, TokenGroup::ColorAccent, doc, ALL)
 }
 
 const fn surface(name: &'static str, doc: &'static str) -> TokenSpec {
-    color(name, TokenGroup::ColorSurface, doc, ALL)
+    color_spec(name, TokenGroup::ColorSurface, doc, ALL)
 }
 
 const fn status(name: &'static str, doc: &'static str) -> TokenSpec {
-    color(name, TokenGroup::ColorStatus, doc, ALL)
+    color_spec(name, TokenGroup::ColorStatus, doc, ALL)
 }
 
 /// Every token the themes define for the widget programme, plus the globals
@@ -202,7 +202,7 @@ const fn status(name: &'static str, doc: &'static str) -> TokenSpec {
 pub static THEME_TOKENS: &[TokenSpec] = &[
     // The globals.
     spec("color_contrast", TokenGroup::Global, TokenKind::Factor, "Exponent on every tint and shade of the ladder; above one spreads them, below one flattens them.", 0.2, 3.0, 0.05, DARK_LIGHT),
-    color("color_tint", TokenGroup::Global, "Hue mixed into the app background and foreground by color_tint_amount.", DARK_LIGHT),
+    color_spec("color_tint", TokenGroup::Global, "Hue mixed into the app background and foreground by color_tint_amount.", DARK_LIGHT),
     spec("color_tint_amount", TokenGroup::Global, TokenKind::Factor, "How much of color_tint reaches the app background and foreground.", 0.0, 1.0, 0.01, DARK_LIGHT),
     spec("space_factor", TokenGroup::Global, TokenKind::Length, "The unit every space rung and control height is a multiple of.", 2.0, 20.0, 0.5, ALL),
     spec("corner_radius", TokenGroup::Global, TokenKind::Length, "The corner radius of the bevelled controls.", 0.0, 20.0, 0.5, ALL),
@@ -246,12 +246,12 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     length("elevation_4_offset_y", TokenGroup::Elevation, "Shadow drop of a dragged item.", -32.0, 32.0, 1.0),
     length("elevation_5_radius", TokenGroup::Elevation, "Shadow blur of a dialog.", 0.0, 64.0, 1.0),
     length("elevation_5_offset_y", TokenGroup::Elevation, "Shadow drop of a dialog.", -32.0, 32.0, 1.0),
-    color("color_elevation_1", TokenGroup::Elevation, "Shadow colour of a resting card.", ALL),
-    color("color_elevation_2", TokenGroup::Elevation, "Shadow colour of a raised control.", ALL),
-    color("color_elevation_3", TokenGroup::Elevation, "Shadow colour of a menu or popover.", ALL),
-    color("color_elevation_4", TokenGroup::Elevation, "Shadow colour of a dragged item.", ALL),
-    color("color_elevation_5", TokenGroup::Elevation, "Shadow colour of a dialog.", ALL),
-    color("color_elevation_shadow", TokenGroup::Elevation, "The opaque colour the elevation shadows are tints of.", ALL),
+    color_spec("color_elevation_1", TokenGroup::Elevation, "Shadow colour of a resting card.", ALL),
+    color_spec("color_elevation_2", TokenGroup::Elevation, "Shadow colour of a raised control.", ALL),
+    color_spec("color_elevation_3", TokenGroup::Elevation, "Shadow colour of a menu or popover.", ALL),
+    color_spec("color_elevation_4", TokenGroup::Elevation, "Shadow colour of a dragged item.", ALL),
+    color_spec("color_elevation_5", TokenGroup::Elevation, "Shadow colour of a dialog.", ALL),
+    color_spec("color_elevation_shadow", TokenGroup::Elevation, "The opaque colour the elevation shadows are tints of.", ALL),
 
     // Material. Zero in every shipped theme: the stylesheets turn it on.
     spec("material_level", TokenGroup::Material, TokenKind::Factor, "Surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular.", 0.0, 2.0, 1.0, ALL),
@@ -286,15 +286,15 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
     length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
     length("material_margin", TokenGroup::Material, "The margin a material control keeps between its quad and its face, where its cast shadow and glow fall, in points.", 0.0, 32.0, 0.5),
-    color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
-    color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
-    color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
+    color_spec("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
+    color_spec("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
+    color_spec("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
     // Instruments: the readout, the display window, the lamp and the meter.
-    color("color_screen", TokenGroup::ColorSurface, "The face of a display: the glass behind a readout and the dial of a needle meter.", ALL),
-    color("color_screen_ink", TokenGroup::ColorSurface, "What a display lights: segment digits, a meter's scale and its needle.", ALL),
+    color_spec("color_screen", TokenGroup::ColorSurface, "The face of a display: the glass behind a readout and the dial of a needle meter.", ALL),
+    color_spec("color_screen_ink", TokenGroup::ColorSurface, "What a display lights: segment digits, a meter's scale and its needle.", ALL),
     spec("screen_ghost", TokenGroup::State, TokenKind::Opacity, "How much of an unlit segment shows behind the lit ones, as a share of the lit ink.", 0.0, 0.3, 0.01, ALL),
-    color("color_lamp_off", TokenGroup::ColorStatus, "An indicator lamp that is out: the dark lens it shows instead of a hole.", ALL),
-    color("color_lamp_plain", TokenGroup::ColorStatus, "An indicator lamp with no intent of its own, lit.", ALL),
+    color_spec("color_lamp_off", TokenGroup::ColorStatus, "An indicator lamp that is out: the dark lens it shows instead of a hole.", ALL),
+    color_spec("color_lamp_plain", TokenGroup::ColorStatus, "An indicator lamp with no intent of its own, lit.", ALL),
     spec("lamp_halo", TokenGroup::Material, TokenKind::Opacity, "The halo one device pixel outside a lit lamp, as a share of the lamp's own light; a lamp holds it at 0.45 or under.", 0.0, 0.45, 0.01, ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
@@ -425,6 +425,15 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
 /// The registered token of that name, if any.
 pub fn token_spec(name: &str) -> Option<&'static TokenSpec> {
     THEME_TOKENS.iter().find(|t| t.name == name)
+}
+
+/// The colour `mod.theme.<role>` holds in this VM, if it holds one: what an
+/// app's Rust-side drawing (a shader uniform, a pass clear colour) reads the
+/// system theme by. Read it again after every style reload; a theme change
+/// re-runs the app's `script_mod`, and with it every token.
+pub fn color(vm: &mut crate::ScriptVm, role: &str) -> Option<crate::Vec4f> {
+    let theme = vm.module(crate::id!(theme));
+    vm.value(theme, crate::LiveId::from_str(role)).as_color().map(crate::Vec4f::from_u32)
 }
 
 /// How the secondary and tertiary families stand to the primary on the hue
@@ -1568,20 +1577,17 @@ impl TokenValue {
 /// derived from it keep their old values, since derivation happens once when
 /// the base is built.
 ///
-/// The `true` is the script's own and not the caller's to remember. The last
-/// statement of a body the VM parses from TEXT never runs -- it is taken for
-/// the body's trailing expression and dropped -- and the last statement here
-/// is the assignment that wears the theme. With nothing after it to be
-/// dropped in its place, this script pins every token into a theme under
-/// `mod.themes` and then leaves it sitting there unworn, without an error and
-/// without a line in the log, which is what a saved theme did every time one
-/// was picked. Two callers added a `true` of their own and were right to; the
-/// third evaluated the script as it was written. Every caller gets one now,
-/// and a second changes nothing -- the second is the one that gets dropped.
+/// The `true` is the script's own and not the caller's to remember. The VM
+/// once dropped the last statement of a body it parsed from TEXT (taken for
+/// the body's trailing expression), and the last statement here is the
+/// assignment that wears the theme, so a saved theme was filed and never worn.
+/// The parser stores such a final assignment now (61de4a8d52); the terminator
+/// stays so every script writer and its tests keep one shape, and a second
+/// changes nothing.
 /// A `script_eval!` body is no guide to any of this and is exempt: the macro
 /// ends the code it reconstructs with a `;`, so its last statement is a
 /// statement. `a_theme_module_script_wears_the_theme_it_builds` drives the VM
-/// over both shapes and fails if this `true` goes.
+/// over both shapes.
 pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenValue)]) -> String {
     let mut out = format!("mod.themes.{name} = mod.themes.{base}{{");
     for (key, value) in overrides {
@@ -2672,7 +2678,7 @@ impl BlendCache {
     /// back on, and the module is reloaded, so the caller can apply a blend on
     /// top of a VM that is none the wiser.
     pub fn fill(&mut self, vm: &mut ScriptVm, themes: &[BlendTheme]) {
-        let restore = crate::desktop_style::current(vm);
+        let restore = crate::desktop_style::wearing(vm);
         let mut resolved_any = false;
         for theme in themes {
             if self.get(*theme).is_some() {
@@ -2683,10 +2689,7 @@ impl BlendCache {
             resolved_any = true;
         }
         if resolved_any {
-            match restore {
-                Some(sheet) => crate::desktop_style::install(vm, sheet),
-                None => crate::desktop_style::uninstall(vm),
-            }
+            crate::desktop_style::put_back(vm, restore);
             vm.with_reload(crate::script_mod_as_registered);
             // Fifteen resolves are fifteen module rebuilds, each leaving the
             // last behind; collect once here rather than carry them all.
@@ -2965,7 +2968,7 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
     let object = vm.module(LiveId::from_str("theme"));
     let mut values = BTreeMap::new();
     for key in keys {
-        let value = vm.bx.heap.value(object, LiveId::from_str(&key).into(), NoTrap);
+        let value = vm.value(object, LiveId::from_str(&key));
         if let Some(rgba) = value.as_color() {
             values.insert(key, BlendValue::Color(rgba));
         } else if let Some(number) = value.as_number() {
@@ -3337,8 +3340,9 @@ mod.theme.color_surface=#123456
     /// text, nothing added to it -- because that is the caller the terminator
     /// was missing for. The second half runs the same script with the
     /// terminator taken off again: it goes in without an error, files its
-    /// theme, and leaves the first one on the screen. That is what the first
-    /// half is worth, and it is what taking the `true` out would look like.
+    /// theme and wears it too, because the parser now stores a field
+    /// assignment that ends the source (it once dropped it, which is why the
+    /// `true` exists).
     #[test]
     fn a_theme_module_script_wears_the_theme_it_builds() {
         use crate::makepad_platform::Cx;
@@ -3346,27 +3350,19 @@ mod.theme.color_surface=#123456
         const UNWORN: u32 = 0x5C6C7C8C;
 
         fn run(vm: &mut ScriptVm, name: &str, code: &str) {
-            vm.bx.captured_errors = Some(Vec::new());
-            vm.eval(ScriptMod {
-                cargo_manifest_path: crate::widgets_dir().into(),
-                module_path: format!("theme_tokens_test_{name}"),
-                file: format!("{name}.splash"),
-                line: 0,
-                column: 0,
-                code: code.to_string(),
-                values: vec![],
-            });
+            vm.capture_errors();
+            vm.eval(ScriptMod::new(&crate::widgets_dir(), &format!("theme_tokens_test_{name}"), &format!("{name}.splash"), 0, 0, &code, &[]));
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "{name}: {errors:?}");
         }
         fn worn_page(vm: &mut ScriptVm) -> Option<u32> {
             let theme = vm.module(LiveId::from_str("theme"));
-            vm.bx.heap.value(theme, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+            vm.value(theme, LiveId::from_str("color_bg_app")).as_color()
         }
         fn filed_page(vm: &mut ScriptVm, name: &str) -> Option<u32> {
             let themes = vm.module(LiveId::from_str("themes"));
-            let one = vm.bx.heap.value(themes, LiveId::from_str(name).into(), NoTrap).as_object()?;
-            vm.bx.heap.value(one, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+            let one = vm.value(themes, LiveId::from_str(name)).as_object()?;
+            vm.value(one, LiveId::from_str("color_bg_app")).as_color()
         }
         let page = |rgba| vec![("color_bg_app".to_string(), TokenValue::Color(rgba))];
 
@@ -3381,10 +3377,14 @@ mod.theme.color_surface=#123456
             let stripped = stripped.strip_suffix("true\n").expect("the terminator is what this is about");
             run(vm, "unworn", stripped);
             assert_eq!(filed_page(vm, "unworn"), Some(UNWORN), "the derived theme was never built at all");
+            // Since 61de4a8d52 the parser stores a field assignment that ends
+            // the source, so the script wears its theme with or without the
+            // `true`; the terminator is kept because every script writer and
+            // its tests still end on it.
             assert_eq!(
                 worn_page(vm),
-                Some(WORN),
-                "the VM ran the last statement after all: read `theme_module_script` before taking its `true` out"
+                Some(UNWORN),
+                "a script ending on the assignment that wears the theme must wear it"
             );
         });
     }
@@ -3457,7 +3457,7 @@ mod sheet_contrast_tests {
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(id!(theme));
-        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        vm.value(theme, LiveId::from_str(key)).as_color()
     }
 
     /// How the pair really reads. An ink is often the theme's text colour,
@@ -3538,7 +3538,7 @@ mod sheet_contrast_tests {
             check(vm, "skeleton");
             for entry in crate::desktop_style::catalogue() {
                 install(vm, StyleSheet::load(entry));
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
                 assert!(errors.is_empty(), "{}: {errors:?}", entry.id);

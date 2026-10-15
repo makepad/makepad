@@ -12,7 +12,7 @@ pub(crate) fn get(
     for redirect in 0..=MAX_REDIRECTS {
         let limits = Limits {
             max_body_bytes,
-            total_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
             ..Limits::default()
         };
         let mut request = Request::get(&current).limits(limits);

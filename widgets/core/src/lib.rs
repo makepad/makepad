@@ -35,6 +35,7 @@ pub mod splash_host;
 pub mod splash_storage;
 pub mod widget_match_event;
 pub mod widget_tree;
+pub mod ui_checks;
 pub mod scan;
 pub mod widget_hooks;
 pub mod family_api;
@@ -139,6 +140,7 @@ pub mod stack_navigation;
 pub mod callout_tooltip;
 pub mod modal;
 pub mod page_flip;
+pub mod held_events;
 pub mod hosted_view;
 pub mod popup_notification;
 pub mod slides_view;
@@ -361,6 +363,21 @@ struct ThemeMixChoice(Option<String>);
 /// The name a blend is evaluated under: the theme lab's equalized mix.
 pub const THEME_MIX_NAME: &str = "equalized";
 
+/// An app's own theme tokens, laid over the base theme (`set_app_theme_tokens`).
+#[derive(Default)]
+struct AppThemeTokens(Option<String>);
+
+/// The app's own theme in tokens: what an app whose look is its own (Stage's house theme)
+/// says the library's widgets are drawn in -- the menus, popups, drop down lists and
+/// tooltips it opens, the controls' faces -- so they wear the app's look rather than the
+/// plain base theme. Splash assignments to `mod.theme.*`, evaluated by `theme_mod` right
+/// after the base theme on every run (before any widget bakes a token), so like
+/// `set_base_theme` a caller follows it with `cx.request_style_reload()` when it changes.
+/// `None` takes it off (a style sheet worn has tokens of its own).
+pub fn set_app_theme_tokens(cx: &mut Cx, code: Option<String>) {
+    cx.global::<AppThemeTokens>().0 = code;
+}
+
 /// The blend in force, if any: the script `theme_mod` re-emits on every run.
 pub fn theme_mix(cx: &mut Cx) -> Option<String> {
     cx.global::<ThemeMixChoice>().0.clone()
@@ -456,11 +473,7 @@ pub fn widgets_dir() -> &'static str {
 /// and the family crates now, so the name is registered here, before the
 /// theme's fonts ask for it.
 fn register_widgets_resource_crate(vm: &mut ScriptVm) {
-    vm.bx
-        .code
-        .crate_manifests
-        .borrow_mut()
-        .insert("makepad_widgets".to_string(), widgets_dir().to_string());
+    vm.register_crate_manifest("makepad_widgets", widgets_dir());
 }
 
 /// The three base themes, built fresh from their own source: every key of
@@ -489,28 +502,23 @@ fn build_base_themes(vm: &mut ScriptVm) {
             BaseTheme::Light => crate::theme_tokens::Scheme::Light,
             BaseTheme::Skeleton => crate::theme_tokens::Scheme::Skeleton,
         };
-        vm.eval(makepad_platform::ScriptMod {
-            cargo_manifest_path: widgets_dir().into(),
-            module_path: "theme_globals".to_string(),
-            file: format!("theme_{}_rederived.splash", scheme.theme_name()),
-            line: 0,
-            column: 0,
-            code: crate::theme_tokens::theme_rederived_script(scheme, &globals),
-            values: vec![],
-        });
+        vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "theme_globals", &format!("theme_{}_rederived.splash", scheme.theme_name()), 0, 0, &crate::theme_tokens::theme_rederived_script(scheme, &globals), &[]));
     }
     crate::font_policy::install_theme_fonts(vm);
 }
 
 pub fn theme_mod(vm: &mut ScriptVm) {
+    // A Splash isolate's UI modules may still be lazy: register them first, so this run
+    // (a restyle, an appearance) is the second registration it is today, not the first of two.
+    vm.expand_all_lazy();
     register_widgets_resource_crate(vm);
     makepad_draw::script_mod(vm);
     if !vm.is_reload() {
         makepad_platform::ime::script_mod(vm);
     }
 
-    vm.bx.heap.new_module(id!(prelude));
-    vm.bx.heap.new_module(id!(themes));
+    vm.heap_mut().new_module(id!(prelude));
+    vm.heap_mut().new_module(id!(themes));
     crate::animator::script_mod(vm);
     // `mod.tween` (GSAP-style tweens from script), once per VM.
     crate::tween_script::script_mod(vm);
@@ -575,20 +583,16 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             });
         }
     }
+    // The app's own tokens over the base, if it has a look of its own.
+    if let Some(code) = vm.cx_mut().global::<AppThemeTokens>().0.clone() {
+        vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "app_theme_tokens", "app_theme_tokens.splash", 0, 0, &code, &[]));
+    }
     // ...and the blend over it, if one is in force. Here, and not in
     // `widgets_mod`, because this is the seam a mix is seen from: after the
     // themes exist, and before a widget template bakes `theme.color_x` into a
     // literal it will not evaluate again.
     if let Some(code) = theme_mix(vm.cx_mut()) {
-        vm.eval(makepad_platform::ScriptMod {
-            cargo_manifest_path: widgets_dir().into(),
-            module_path: "theme_lab".to_string(),
-            file: format!("{THEME_MIX_NAME}.splash"),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        });
+        vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "theme_lab", &format!("{THEME_MIX_NAME}.splash"), 0, 0, &code, &[]));
     }
 }
 
@@ -608,6 +612,15 @@ pub fn widgets_mod_with(
     *vm.cx_mut().global::<Registration>() = Registration { window, families: families.to_vec() };
     let host_io_only = vm.cx().script_data.std.host_io_only();
     widgets_mod_with_io(vm, window, families, host_io_only, true);
+}
+
+/// The library for a Splash isolate whose host registers it itself
+/// (`alloc_splash_vm_with_ui`): the core and `families`, ONCE, under the sheet
+/// installed on the isolate (no stock copy registered apart, as an isolate
+/// carries none of the host's chrome). Leaves the app's `Registration` alone.
+pub fn isolate_widgets_mod_with(vm: &mut ScriptVm, families: &[fn(&mut ScriptVm)]) {
+    let host_io_only = vm.cx().script_data.std.host_io_only();
+    widgets_mod_with_io(vm, WindowFamilies::default(), families, host_io_only, false);
 }
 
 /// The families the last `widgets_mod_with` registered. A module rebuild the
@@ -657,8 +670,7 @@ fn widgets_mod_with_io(
     // it; then with the sheet, which is the library everything else gets.
     //
     // A Splash isolate registers once: it carries none of the host's chrome,
-    // and it is built inside the isolate's time budget, which a second pass
-    // would spend. Its stock names are the sheet's library.
+    // and a second pass would be wasted work. Its stock names are the sheet's library.
     let sheet = crate::desktop_style::current_name(vm).is_some();
     if sheet && stock_apart {
         register_widgets(vm, window, families, host_io_only, false, true);
@@ -681,6 +693,7 @@ fn register_widgets(
     with_sheet: bool,
     keep: bool,
 ) {
+    vm.expand_all_lazy();
     if with_sheet {
         crate::desktop_style::apply_theme(vm);
     }
@@ -705,15 +718,7 @@ fn register_widgets(
 mod.theme = mod.themes.edited
 true
 ");
-        vm.eval(makepad_platform::ScriptMod {
-            cargo_manifest_path: widgets_dir().into(),
-            module_path: "theme_edits".to_string(),
-            file: "theme_edits.splash".to_string(),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        });
+        vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "theme_edits", &"theme_edits.splash".to_string(), 0, 0, &code, &[]));
     }
     // make the prelude for our own widgets
     script_eval!(vm, {
@@ -723,7 +728,7 @@ true
         }
     });
 
-    vm.bx.heap.new_module(id!(widgets));
+    vm.heap_mut().new_module(id!(widgets));
     // The registration kept as the stock library is kept before anything is
     // registered into it, so the chrome registered below already names its
     // templates from it.
@@ -890,32 +895,27 @@ true
     // display_context which is set before Startup on iOS/Android. On desktop
     // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
     {
-        use makepad_script::trap::NoTrap;
         let insets = vm.cx().display_context.safe_area_insets;
         let widgets = vm.module(id!(widgets));
-        vm.bx.heap.set_value(
+        vm.set_value(
             widgets,
-            id!(SAFE_INSET_PAD_TOP).into(),
-            insets.top.into(),
-            NoTrap,
+            id!(SAFE_INSET_PAD_TOP),
+            insets.top,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             widgets,
-            id!(SAFE_INSET_PAD_BOTTOM).into(),
-            insets.bottom.into(),
-            NoTrap,
+            id!(SAFE_INSET_PAD_BOTTOM),
+            insets.bottom,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             widgets,
-            id!(SAFE_INSET_PAD_LEFT).into(),
-            insets.left.into(),
-            NoTrap,
+            id!(SAFE_INSET_PAD_LEFT),
+            insets.left,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             widgets,
-            id!(SAFE_INSET_PAD_RIGHT).into(),
-            insets.right.into(),
-            NoTrap,
+            id!(SAFE_INSET_PAD_RIGHT),
+            insets.right,
         );
     }
 
@@ -972,9 +972,7 @@ mod base_theme_tests {
     fn theme_mod_emits_the_chosen_base_and_still_defaults_to_dark() {
         fn bg(vm: &mut ScriptVm) -> Option<u32> {
             let theme = vm.module(id!(theme));
-            vm.bx
-                .heap
-                .value(theme, id!(color_bg_app).into(), NoTrap)
+            vm.value(theme, id!(color_bg_app))
                 .as_color()
         }
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1035,7 +1033,7 @@ mod module_rebuild_tests {
             cx.with_vm(|vm| {
                 vm.with_reload(script_mod);
                 vm.gc();
-                (vm.bx.heap.gc_live_len(), vm.bx.heap.root_counts())
+                (vm.heap().gc_live_len(), vm.heap().root_counts())
             })
         };
         // Two runs to settle: the first reload pays for what the first run

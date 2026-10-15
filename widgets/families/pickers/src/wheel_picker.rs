@@ -85,7 +85,7 @@
 //! picker lying down holds exactly ONE column: the cross axis has been spent
 //! on the ruler itself.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::measure,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -1249,9 +1249,8 @@ impl Widget for WheelPicker {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_selected) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let column = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64();
-                let index = vm.bx.heap.vec_value(args_obj, 1, trap).as_f64();
+                let column = vm.vec_value_trap(args_obj, 0).as_f64();
+                let index = vm.vec_value_trap(args_obj, 1).as_f64();
                 if let (Some(column), Some(index)) = (column, index) {
                     vm.with_cx_mut(|cx| {
                         self.set_selected(cx, column.max(0.0) as usize, index.max(0.0) as usize)
@@ -1263,8 +1262,7 @@ impl Widget for WheelPicker {
         if method == live_id!(selected) {
             let mut column = 0.0;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                if let Some(value) = vm.vec_value_trap(args_obj, 0).as_f64() {
                     column = value;
                 }
             }
@@ -1314,6 +1312,10 @@ impl Widget for WheelPicker {
                     abs: along,
                     caught,
                 });
+                // An upright drum drags vertically, leaving sideways swipes to its containers.
+                if !vertical {
+                    cx.claim_finger_drag(fe.digit_id);
+                }
                 self.animator_play(cx, ids!(drag.on));
                 self.draw_bg.redraw(cx);
             }

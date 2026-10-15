@@ -57,11 +57,11 @@ pub(crate) fn scan_widget(widget: &WidgetRef, cx: &mut Cx, scan: &ScanEvent, eve
 /// The widget's `scan:` list, read from its source object; `None` when it
 /// has none.
 pub fn scan_list(vm: &mut ScriptVm, source: ScriptObject) -> Option<Vec<ScanEntry>> {
-    let list = vm.bx.heap.value(source, id!(scan).into(), NoTrap);
+    let list = vm.value(source, id!(scan));
     let array = list.as_array()?;
     let mut out = Vec::new();
-    for i in 0..vm.bx.heap.array_len(array) {
-        let v = vm.bx.heap.array_index(array, i, NoTrap);
+    for i in 0..vm.heap().array_len(array) {
+        let v = vm.heap().array_index(array, i, NoTrap);
         if let Some(id) = v.as_id() {
             out.push(ScanEntry::Name(id));
         } else if let Some(obj) = v.as_object() {

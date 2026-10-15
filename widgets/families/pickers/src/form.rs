@@ -934,16 +934,12 @@ impl Widget for Form {
         }
         if method == live_id!(value) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(path) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "reading a form field path")
+                    if let Some(path) = vm.cast_to_owned_string(value, "reading a form field path")
                     {
                         let held = self.value(&path);
-                        let out = vm.bx.heap.new_string_from_str(&held);
+                        let out = vm.new_string(&held);
                         return ScriptAsyncResult::Return(out.into());
                     }
                 }
@@ -952,18 +948,11 @@ impl Widget for Form {
         }
         if method == live_id!(set_value) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let path = vm.bx.heap.vec_value(args_obj, 0, trap);
-                let value = vm.bx.heap.vec_value(args_obj, 1, trap);
+                let path = vm.vec_value_trap(args_obj, 0);
+                let value = vm.vec_value_trap(args_obj, 1);
                 if !path.is_err() && !value.is_err() {
-                    let path = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(path, "reading a form field path");
-                    let value = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "reading a form field value");
+                    let path = vm.cast_to_owned_string(path, "reading a form field path");
+                    let value = vm.cast_to_owned_string(value, "reading a form field value");
                     if let (Some(path), Some(value)) = (path, value) {
                         vm.with_cx_mut(|cx| self.set_value(cx, &path, &value));
                     }

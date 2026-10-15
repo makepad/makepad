@@ -178,8 +178,7 @@ pub struct XrDrawContext {
 impl XrDrawContext {
     pub fn from_scope(scope: &mut Scope) -> Self {
         Self {
-            scope_data: scope
-                .data
+            scope_data: scope.data_mut()
                 .get::<XrDrawScopeData>()
                 .cloned()
                 .unwrap_or_default(),
@@ -282,13 +281,13 @@ impl XrNode {
         }
 
         let source_obj = self.source.as_object();
-        let source_proto = vm.bx.heap.proto(source_obj);
+        let source_proto = vm.bx.heap_ref().proto(source_obj);
         let proto = if source_proto.as_object().is_some() {
             source_proto
         } else {
             source_obj.into()
         };
-        vm.bx.heap.new_with_proto_no_vec(proto).into()
+        vm.bx.heap_mut().new_with_proto_no_vec(proto).into()
     }
 
     pub fn local_transform(&self) -> Mat4f {
@@ -516,9 +515,7 @@ impl ScriptHook for XrNode {
         value: ScriptValue,
     ) {
         let physics_size_present = value.as_object().is_some_and(|obj| {
-            vm.bx
-                .heap
-                .value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
+            vm.bx.heap_mut().value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
                 .is_some()
         });
         if physics_size_present {

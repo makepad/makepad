@@ -1,5 +1,9 @@
+pub use crate::vector::FeatherSide;
+use crate::vector::{
+    bands::BandScratch,
+    feather::{append_feather_shape, FeatherOptions},
+};
 use crate::{cx_2d::*, draw_list_2d::ManyInstances, makepad_platform::*, turtle::*, vector::*};
-use makepad_svg::tessellate::compute_clip_radii;
 
 script_mod! {
     use mod.pod.*
@@ -9,13 +13,19 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawVector = mod.std.set_type_default() do #(DrawVector::script_shader(vm)){
+        ..mod.glyph_coverage.Feather
+
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.VectorVertexPacked, geom.VectorGeomPacked)
+        // Keep these slots in order for every shader extending DrawVector:
+        // 0 = gradients, 1 = feather curves, 2 = feather bands.
         gradient_texture: texture_2d(float)
+        feather_curve_texture: texture_2d(float)
+        feather_band_texture: texture_2d(float)
 
         v_tcoord: varying(vec2f)
         v_world: varying(vec2f)
@@ -87,18 +97,10 @@ script_mod! {
 
         // --- Shadow utilities ---
 
-        // Attempt at erf approx via Raph Levien (reciprocal sqrt form, GPU-friendly)
-        erf7: fn(x: float) -> float {
-            let s = x * 1.1283791671;
-            let ss = s * s;
-            let t = s + (0.24295 + (0.03395 + 0.0104 * ss) * ss) * (s * ss);
-            return t / sqrt(1.0 + t * t)
-        }
-
         // 1D integral of blurred step: integral of gaussian from -inf to x
-        // Returns smooth 0..1 transition over blur_radius
+        // x and blur are in device pixels, with blur the Gaussian sigma.
         blur_step: fn(x: float, blur: float) -> float {
-            return 0.5 + 0.5 * self.erf7(x * (sqrt(0.5) / blur))
+            return self.feather_cover(x, blur, 0.0)
         }
 
         // 1D blurred box: integral of gaussian-convolved box [-half..+half]
@@ -109,19 +111,23 @@ script_mod! {
         // Blurred rounded rect evaluated at point p relative to rect center.
         // half = half extents, corner = corner radius, blur = blur sigma.
         // Returns 0..1 coverage.
-        // Uses the Raph Levien approach: SDF + erf for the blur.
         shadow_rounded_rect: fn(p: vec2, half_ext: vec2, corner: float, blur: float) -> float {
             // signed distance to rounded rect
             let q = abs(p) - half_ext + vec2(corner, corner);
             let d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - corner;
-            // map distance through blurred step (erf)
-            return self.blur_step(-d, max(blur, 0.001))
+            let px_size = max(max(length(dFdx(p)), length(dFdy(p))), 0.000001);
+            return self.feather_cover(-d / px_size, blur / px_size, 0.0)
         }
 
         // --- Utility functions (use these in get_color / get_stroke_mask) ---
 
         // Returns 1.0 if this pixel is a fill, 0.0 if stroke
         is_fill: fn() -> float {
+            if self.v_stroke_mult < -1.5 {
+                let style = self.fetch_band_texel(floor(self.v_stroke_dist + 0.5) + 2.0);
+                if style.w < 0.0 { return 1.0 }
+                return 0.0
+            }
             if self.v_stroke_mult > 1e5 { return 1.0 }
             return 0.0
         }
@@ -236,14 +242,20 @@ script_mod! {
                 // so both color and depth stay confined to the widget.
                 discard()
             }
-            // geometry shadow mode: stroke_mult == -2.0
-            // v interpolates 1.0 (edge) to 0.0 (3*blur out), stroke_dist = blur
+            // Band feather mode: stroke_dist is the shape's header texel.
+            // The hull's existing UV varying recovers texture/path coordinates
+            // even when an extending vertex shader transforms the carrier.
             if self.v_stroke_mult < -1.5 {
-                let blur = self.v_stroke_dist;
-                // v=1.0 means distance=0 (at edge), v=0.0 means distance=3*blur
-                let dist = (1.0 - self.v_tcoord.y) * 3.0 * blur;
-                let alpha = self.blur_step(-dist, max(blur, 0.001));
-                return self.v_color * alpha
+                let header = floor(self.v_stroke_dist + 0.5);
+                let bounds = self.fetch_band_texel(header + 1.0);
+                let style = self.fetch_band_texel(header + 2.0);
+                let sample = mix(bounds.xy, bounds.zw, self.v_tcoord);
+                let sd = self.band_signed_distance(sample, header).x;
+                let px_size = max(max(length(dFdx(sample)), length(dFdy(sample))), 0.000001);
+                let alpha = self.feather_cover(sd / px_size, style.x / px_size, style.y);
+                let color = self.get_color();
+                if alpha * color.w <= 0.004 { discard() }
+                return color * alpha
             }
             // rect shadow mode: stroke_mult == -1.0
             // params: param0=cx, param1=cy, param2=hx, param3=hy, param4=corner, param5=blur
@@ -303,6 +315,14 @@ script_mod! {
     }
 }
 
+/// The curve/band pair belongs to a mesh, since its vertices carry header
+/// offsets into these textures. Cached meshes retain their own pair.
+#[derive(Clone, Debug, Default)]
+pub struct FeatherTextures {
+    curves: Option<Texture>,
+    bands: Option<Texture>,
+}
+
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawVector {
@@ -353,6 +373,9 @@ pub struct DrawVector {
     // current paint state
     #[rust]
     pub cur_paint: VectorPaint,
+    /// Gaussian sigma in path-local units, like the AA fringe (normally px).
+    #[rust]
+    pub cur_feather: Option<(f32, FeatherSide)>,
     #[rust]
     pub cur_stroke_mult: f32,
     #[rust]
@@ -386,6 +409,16 @@ pub struct DrawVector {
     pub gradient_row_count: usize,
     #[rust]
     pub gradient_texture: Option<Texture>,
+    #[rust]
+    feather_curves: Vec<f32>,
+    #[rust]
+    feather_bands: Vec<f32>,
+    #[rust]
+    feather_band_scratch: BandScratch,
+    #[rust]
+    pub feather_textures: FeatherTextures,
+    #[rust]
+    feather_texture_pool: Vec<FeatherTextures>,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -454,6 +487,18 @@ impl DrawVector {
         self.cur_shape_id = id;
     }
 
+    /// Feather subsequent fills/strokes using Gaussian sigma in path units.
+    /// These equal device pixels in the usual unscaled DrawVector path; like
+    /// the AA fringe, sigma follows the path through GPU transforms. Strokes
+    /// use distance to the flattened centerline (round ends and joins).
+    pub fn set_feather(&mut self, sigma: f32, side: FeatherSide) {
+        self.cur_feather = Some((sigma.max(0.0), side));
+    }
+
+    pub fn clear_feather(&mut self) {
+        self.cur_feather = None;
+    }
+
     /// Start accumulating a vector picture
     pub fn begin(&mut self) {
         self.acc_verts.clear();
@@ -461,6 +506,9 @@ impl DrawVector {
         self.full = None;
         self.gradient_texture_data.clear();
         self.gradient_row_count = 0;
+        self.feather_curves.clear();
+        self.feather_bands.clear();
+        self.clear_feather();
         self.cur_gradient_row_v = -1.0; // sentinel: no gradient texture row
         self.cur_zbias = 0.0;
         self.cur_effect_bbox = None;
@@ -508,6 +556,15 @@ impl DrawVector {
         } else {
             0.25
         };
+        if self.cur_feather.is_some() {
+            let aa = if self.cur_stroke_aa > 0.0 {
+                self.cur_stroke_aa
+            } else {
+                aa
+            };
+            self.append_feather(Some(stroke_width * 0.5), aa, tolerance);
+            return;
+        }
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
         self.cur_stroke_mult = tessellate_path_stroke(
@@ -551,6 +608,10 @@ impl DrawVector {
         } else {
             0.25
         };
+        if self.cur_feather.is_some() {
+            self.append_feather(None, aa, tolerance);
+            return;
+        }
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
         tessellate_path_fill(
@@ -570,21 +631,37 @@ impl DrawVector {
         self.tess_indices = ti;
     }
 
-    /// Draw a geometry-based shadow for any filled path (stars, polygons, etc).
-    /// Uses tessellation with a wide fringe + erf blur in the pixel shader.
-    /// Build your path first, then call shape_shadow(blur).
-    pub fn shape_shadow(&mut self, blur: f32) {
-        self.tess.flatten(&self.path, 0.25);
-        let mut tv = std::mem::take(&mut self.tess_verts);
-        let mut ti = std::mem::take(&mut self.tess_indices);
-        self.tess
-            .fill_shadow(blur, LineJoin::Bevel, 1.0, &mut tv, &mut ti);
-        compute_clip_radii(&mut tv, &ti);
-        self.cur_stroke_mult = -2.0; // sentinel for geometry shadow mode
-        self.append_geometry(&tv, &ti);
-        self.tess_verts = tv;
-        self.tess_indices = ti;
+    fn append_feather(&mut self, half_width: Option<f32>, aa: f32, tolerance: f32) {
+        let Some((sigma, side)) = self.cur_feather else {
+            return;
+        };
+        if self.over(4, 6) {
+            self.path.clear();
+            return;
+        }
+        self.tess.flatten(&self.path, tolerance);
         self.path.clear();
+        let curves_start = self.feather_curves.len();
+        let bands_start = self.feather_bands.len();
+        if let Some(verts) = append_feather_shape(
+            &self.tess,
+            FeatherOptions {
+                sigma,
+                side,
+                half_width,
+                aa,
+            },
+            &mut self.feather_curves,
+            &mut self.feather_bands,
+            &mut self.feather_band_scratch,
+        ) {
+            self.cur_stroke_mult = -2.0;
+            self.append_geometry(&verts, &[0, 1, 2, 0, 2, 3]);
+            if self.full.is_some() {
+                self.feather_curves.truncate(curves_start);
+                self.feather_bands.truncate(bands_start);
+            }
+        }
     }
 
     /// Draw a blurred rounded-rect shadow.
@@ -755,6 +832,9 @@ impl DrawVector {
         self.finish_gradient_texture(cx);
         let Some((mut indices, mut packed)) = self.pack_geometry() else { return };
         let slot = self.acquire_geometry_slot(cx);
+        self.feather_textures = self.feather_texture_pool[slot].clone();
+        self.finish_feather_textures(cx);
+        self.feather_texture_pool[slot] = self.feather_textures.clone();
         let geometry_id = self.geometry_pool[slot].geometry_id();
         self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
         self.geometry = Some(geometry_id);
@@ -769,12 +849,18 @@ impl DrawVector {
     /// that only moves costs an instance per frame. Nothing is uploaded or
     /// drawn when the session produced no geometry; the caller checks
     /// [`Self::has_geometry`] first when that matters.
+    /// Feather textures must be retained alongside a cached mesh and restored
+    /// before submitting it; DrawSvg does this for each kept scale.
     pub fn end_into(&mut self, cx: &mut Cx2d, geometry: &Geometry) {
         if self.acc_verts.is_empty() || self.acc_indices.is_empty() {
             return;
         }
         self.finish_gradient_texture(cx);
         let Some((mut indices, mut packed)) = self.pack_geometry() else { return };
+        // This geometry outlives the frame: never overwrite a pooled or
+        // previously cached mesh's texture pair.
+        self.feather_textures = FeatherTextures::default();
+        self.finish_feather_textures(cx);
         geometry.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
         self.submit_geometry(cx, geometry.geometry_id());
     }
@@ -788,6 +874,8 @@ impl DrawVector {
     /// [`Self::end_into`] or a previous [`Self::end`]).
     pub fn submit_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
         self.draw_vars.geometry_id = Some(geometry_id);
+        self.draw_vars.texture_slots[1] = self.feather_textures.curves.clone();
+        self.draw_vars.texture_slots[2] = self.feather_textures.bands.clone();
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -864,6 +952,22 @@ impl DrawVector {
         }
     }
 
+    fn finish_feather_textures(&mut self, cx: &mut Cx2d) {
+        if self.feather_curves.is_empty() {
+            return;
+        }
+        upload_feather_texture(
+            cx.cx.cx,
+            &mut self.feather_textures.curves,
+            &mut self.feather_curves,
+        );
+        upload_feather_texture(
+            cx.cx.cx,
+            &mut self.feather_textures.bands,
+            &mut self.feather_bands,
+        );
+    }
+
     /// Rewind the per-frame geometry pool when a new frame has started, then
     /// hand out the next free slot. See `geometry_pool`.
     fn acquire_geometry_slot(&mut self, cx: &mut Cx2d) -> usize {
@@ -873,6 +977,10 @@ impl DrawVector {
         if slot >= self.geometry_pool.len() {
             let geometry = Geometry::new(cx.cx.cx);
             self.geometry_pool.push(geometry);
+        }
+        if slot >= self.feather_texture_pool.len() {
+            self.feather_texture_pool
+                .resize_with(slot + 1, FeatherTextures::default);
         }
         slot
     }
@@ -895,6 +1003,7 @@ impl DrawVector {
         // is pointing at.
         self.rewind_geometry_pool(cx);
         self.geometry_cursor = self.geometry_cursor.max(slot + 1);
+        self.feather_textures = self.feather_texture_pool[slot].clone();
         self.submit_geometry(cx, geometry_id);
         true
     }
@@ -911,6 +1020,39 @@ impl DrawVector {
         draw_fn(self, rect.pos.x as f32, rect.pos.y as f32);
         self.end(cx);
     }
+}
+
+/// Swap upload storage back into the session scratch buffer. Each geometry
+/// slot reuses its textures and their CPU storage on subsequent redraws.
+fn upload_feather_texture(cx: &mut Cx, texture: &mut Option<Texture>, values: &mut Vec<f32>) {
+    let texels = values.len() / 4;
+    let width = texels.clamp(1, 2048);
+    let height = texels.div_ceil(width).max(1);
+    let texture = texture.get_or_insert_with(|| {
+        Texture::new_with_format(
+            cx,
+            TextureFormat::VecRGBAf32 {
+                width,
+                height,
+                data: None,
+                updated: TextureUpdated::Empty,
+            },
+        )
+    });
+    let format = texture.get_format(cx);
+    let recycled = match format {
+        TextureFormat::VecRGBAf32 { data, .. } => data.take().unwrap_or_default(),
+        _ => unreachable!("feather textures use RGBA32F"),
+    };
+    let mut upload = std::mem::replace(values, recycled);
+    upload.resize(width * height * 4, 0.0);
+    *format = TextureFormat::VecRGBAf32 {
+        width,
+        height,
+        data: Some(upload),
+        updated: TextureUpdated::Full,
+    };
+    values.clear();
 }
 
 /// Sample multi-stop gradient at parameter t (0..1). Returns (r, g, b, a).

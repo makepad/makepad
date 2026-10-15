@@ -17,6 +17,9 @@ pub struct FirstAccessUnit {
     /// One Annex-B access unit: VPS/SPS/PPS (as the container's codec config
     /// carried them) followed by every NAL of the first sample.
     pub annex_b: Vec<u8>,
+    /// The picture size the sample entry declares.
+    pub width: u32,
+    pub height: u32,
 }
 
 fn err(what: &str) -> VideoFileError {
@@ -89,6 +92,8 @@ struct VideoTrack<'a> {
     codec: StreamVideoCodec,
     /// avcC / hvcC payload.
     config: &'a [u8],
+    width: u32,
+    height: u32,
     first_sample_offset: u64,
     first_sample_size: u32,
 }
@@ -129,8 +134,11 @@ fn video_track<'a>(moov: &'a [u8]) -> Result<VideoTrack<'a>, VideoFileError> {
                 )))
             }
         };
-        // VisualSampleEntry: 6 reserved + 2 data_ref_index + 70 bytes of
-        // fixed fields before the child boxes.
+        // VisualSampleEntry: 6 reserved + 2 data_ref_index + 16 pre_defined/
+        // reserved, then width(2) height(2): 70 bytes of fixed fields before
+        // the child boxes.
+        let dim = |at: usize| entry.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as u32).unwrap_or(0);
+        let (width, height) = (dim(24), dim(26));
         let children = entry.get(78..).ok_or_else(|| err("short sample entry"))?;
         let config_fourcc: &[u8; 4] = match codec {
             StreamVideoCodec::H264 => b"avcC",
@@ -170,7 +178,7 @@ fn video_track<'a>(moov: &'a [u8]) -> Result<VideoTrack<'a>, VideoFileError> {
             return Err(err("no chunk offsets"));
         };
 
-        return Ok(VideoTrack { codec, config, first_sample_offset, first_sample_size });
+        return Ok(VideoTrack { codec, config, width, height, first_sample_offset, first_sample_size });
     }
     Err(err("no video track"))
 }
@@ -274,7 +282,7 @@ pub fn first_access_unit(bytes: &[u8]) -> Result<FirstAccessUnit, VideoFileError
         crate::annex_b::push_annex_b_nal(&mut annex_b, nal);
         at += len;
     }
-    Ok(FirstAccessUnit { codec: track.codec, annex_b })
+    Ok(FirstAccessUnit { codec: track.codec, annex_b, width: track.width, height: track.height })
 }
 
 #[cfg(test)]

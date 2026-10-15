@@ -1,7 +1,7 @@
 # image — a dumb picture viewer, part of the Makepad app family (terminal,
 # wm, files, task, sheets, route, mixer...).
 #
-# Opens one image fit-to-window, centered on a dark makepad_wm_theme background.
+# Opens one image fit-to-window, centered on a system theme background.
 # Left/Right walks the sorted sibling images in the same folder, +/-/wheel
 # zoom around the cursor, 0 fits, 1 shows 100%, drag pans when zoomed,
 # Escape/Q/Space quits. `--preview <path>` sizes the window as a popup.
@@ -30,5 +30,4 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

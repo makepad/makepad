@@ -5,7 +5,9 @@
 //! the arrival time); the karaoke words are refreshed every frame.
 
 use crate::shapes::GlyphSet;
-use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::FieldTy;
+use FieldTy::*;
 use makepad_typography::karaoke::{states, KaraokeStyle, State, SungWord};
 
 /// Words per `Glyph` record.
@@ -18,26 +20,51 @@ const F_NEAR: usize = 27;
 const F_PROGRESS: usize = 28;
 const F_DYING: usize = 39;
 
-/// The `Glyph` layout the animator reads (`let g = glyphs[i]`).
-pub fn glyph_layout() -> Layout {
-    let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-    let mut fields = vec![f("rest", FieldTy::Vec3, 0), f("size", FieldTy::Vec3, 3), f("word_c", FieldTy::Vec3, 6), f("line_c", FieldTy::Vec3, 9)];
-    let scalars = [
-        "index", "count", "t", "word", "words", "line", "lines", "copy", "copies", "char", "shape", "seed", "changed_at", "sung", "age", "near", "progress", "ink", "layer", "glyph",
-    ];
-    for (k, name) in scalars.iter().enumerate() {
-        fields.push(f(name, FieldTy::F32, 12 + k as u32));
-    }
-    fields.push(f("from", FieldTy::Vec3, 32));
-    // base scale (a cloud word's size), word weight 0..1, the word's ink
-    // width and height (at its scale).
-    // `dying`: 1 on a record of the previous text's surplus (see
-    // `Records::set`), 0 on the text's own.
-    for (k, name) in ["k", "weight", "word_w", "word_h", "dying"].iter().enumerate() {
-        fields.push(f(name, FieldTy::F32, 35 + k as u32));
-    }
-    Layout { name: "Glyph".into(), stride: GLYPH_WORDS as u32, fields }
+const fn f(name: &'static str, ty: FieldTy, offset: u32) -> LayoutFieldView<'static> {
+    LayoutFieldView { name, ty, offset }
 }
+
+/// The `Glyph` layout the animator reads (`let g = glyphs[i]`): rest pose,
+/// sizes and centres, the scalars from word 12, `from` (where the glyph
+/// was), then base scale `k`, word `weight`, the word's ink width and
+/// height (at its scale) and `dying` (1 on a record of the previous text's
+/// surplus, see `Records::set`; 0 on the text's own).
+pub const GLYPH: LayoutView<'static> = LayoutView {
+    name: "Glyph",
+    stride: GLYPH_WORDS as u32,
+    fields: &[
+        f("rest", Vec3, 0),
+        f("size", Vec3, 3),
+        f("word_c", Vec3, 6),
+        f("line_c", Vec3, 9),
+        f("index", F32, 12),
+        f("count", F32, 13),
+        f("t", F32, 14),
+        f("word", F32, 15),
+        f("words", F32, 16),
+        f("line", F32, 17),
+        f("lines", F32, 18),
+        f("copy", F32, 19),
+        f("copies", F32, 20),
+        f("char", F32, 21),
+        f("shape", F32, 22),
+        f("seed", F32, 23),
+        f("changed_at", F32, 24),
+        f("sung", F32, 25),
+        f("age", F32, 26),
+        f("near", F32, 27),
+        f("progress", F32, 28),
+        f("ink", F32, 29),
+        f("layer", F32, 30),
+        f("glyph", F32, 31),
+        f("from", Vec3, 32),
+        f("k", F32, 35),
+        f("weight", F32, 36),
+        f("word_w", F32, 37),
+        f("word_h", F32, 38),
+        f("dying", F32, 39),
+    ],
+};
 
 /// What is being sung.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -280,7 +307,7 @@ mod tests {
         assert_eq!((at(&r, 0, F_SUNG), at(&r, 2, F_SUNG), at(&r, 4, F_SUNG)), (1.0, 0.5, 0.0), "the wipe is in the middle glyph");
         r.sing(&Karaoke::Words { words: vec![SungWord { chars: 0..5, start: 0.0, end: 1.0, syllables: vec![] }], time: 0.5, style: KaraokeStyle::default() });
         assert!(at(&r, 0, F_SUNG) == 1.0 && at(&r, 4, F_SUNG) == 0.0);
-        let l = glyph_layout();
+        let l = GLYPH;
         assert_eq!(l.fields.iter().find(|f| f.name == "word_h").unwrap().offset, 38);
         assert!(at(&r, 0, 37) > 0.0 && at(&r, 0, 35) == 1.0, "word width and base scale");
         assert_eq!(at(&r, 4, 32), a.elements[4].pivot[0], "from: where glyph 4 was before");
@@ -308,7 +335,7 @@ mod tests {
         assert_eq!((r.count, r.dying, r.data.len()), (2, 0, 2 * GLYPH_WORDS));
         r.set(&c, 1, 5.0, 1, true);
         assert_eq!(r.dying, 0, "a `1` has no shape in `2`: not kept");
-        let l = glyph_layout();
+        let l = GLYPH;
         assert_eq!(l.fields.iter().find(|f| f.name == "dying").unwrap().offset, 39);
     }
 }

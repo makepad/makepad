@@ -115,7 +115,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_calculator::script_mod(vm);
         self::script_mod(vm)
     }
@@ -162,3 +161,6 @@ fn is_close_requested(raw: &str) -> bool {
     };
     value.get("wm").and_then(|wm| wm.get("CloseRequested")).is_some()
 }
+
+#[cfg(test)]
+makepad_script_test::shader_inventory_test!("calculator", <App as AppMain>::script_mod);

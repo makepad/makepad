@@ -116,6 +116,10 @@ impl WindowFrame {
         self.pass.draw_pass_id()
     }
     pub fn texture(&self) -> &Texture { &self.texture }
+    /// The rect the capture was last made at.
+    pub fn made_at(&self) -> Rect {
+        self.rect
+    }
     /// The capture is going away: its gauss request state is keyed by the
     /// pass slot, which the next capture may reuse.
     pub fn forget(self, cx: &mut Cx) {
@@ -180,42 +184,48 @@ impl WindowFrame {
 pub struct DockWarp {
     pub source: Rect,
     pub dock: Rect,
-    pub progress: f64,
+    /// 0 in place, 1 in the dock: the shared ease (`crate::motion`), so a
+    /// reversal mid-warp keeps its speed.
+    ease: crate::motion::Ease,
     pub minimized: bool,
     pub frame: Option<WindowFrame>,
     pub refresh: bool,
-    duration: f64,
 }
 impl DockWarp {
     pub fn new(source: Rect, dock: Rect, restoring: bool) -> Self {
         Self {
             source,
             dock,
-            progress: if restoring { 1.0 } else { 0.0 },
+            ease: crate::motion::Ease::at(if restoring { 1.0 } else { 0.0 }, Self::seconds()),
             minimized: !restoring,
             frame: None,
             refresh: false,
-            duration: if cfg!(test) {
-                0.62
-            } else {
-                std::env::var("MAKEPAD_WM_WARP_SECONDS")
-                    .ok()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .filter(|s| s.is_finite() && *s >= 0.1 && *s <= 30.0)
-                    .unwrap_or(0.62)
-            },
         }
+    }
+    fn seconds() -> f64 {
+        if cfg!(test) {
+            return 0.62;
+        }
+        std::env::var("MAKEPAD_WM_WARP_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s >= 0.1 && *s <= 30.0)
+            .unwrap_or(0.62)
+    }
+    /// How far the warp is, 0..1.
+    pub fn progress(&self) -> f64 {
+        self.ease.value()
     }
     pub fn active(&self) -> bool {
         if self.minimized {
-            self.progress < 1.0
+            self.progress() < 1.0
         } else {
-            self.progress > 0.0
+            self.progress() > 0.0
         }
     }
     pub fn step(&mut self, dt: f64) {
-        let direction = if self.minimized { 1.0 } else { -1.0 };
-        self.progress = (self.progress + direction * dt / self.duration).clamp(0.0, 1.0);
+        self.ease.retarget(if self.minimized { 1.0 } else { 0.0 });
+        self.ease.step(dt);
     }
     pub fn bounds(&self) -> Rect {
         let x = self.source.pos.x.min(self.dock.pos.x);
@@ -246,7 +256,7 @@ impl DockWarp {
             self.dock.size.x as f32,
             self.dock.size.y as f32,
         );
-        draw.progress = self.progress as f32;
+        draw.progress = self.progress() as f32;
         draw.draw_abs(cx, self.bounds());
     }
 }
@@ -265,21 +275,30 @@ mod tests {
             size: dvec2(48.0, 48.0),
         };
         let mut warp = DockWarp::new(source, dock, false);
-        warp.step(0.2);
-        let progress = warp.progress;
+        let run = |warp: &mut DockWarp, secs: f64| {
+            let mut t = 0.0;
+            while t < secs {
+                warp.step(1.0 / 60.0);
+                t += 1.0 / 60.0;
+            }
+        };
+        run(&mut warp, 0.2);
+        let progress = warp.progress();
+        assert!(progress > 0.0 && progress < 1.0);
         warp.minimized = false;
-        assert_eq!(warp.progress, progress);
-        warp.step(0.1);
-        assert!(warp.progress < progress && warp.active());
-        warp.step(1.0);
-        assert_eq!(warp.progress, 0.0);
+        // Reversing does not move the surface: it bends from where it is.
+        assert_eq!(warp.progress(), progress);
+        warp.step(1.0 / 60.0);
+        assert!((warp.progress() - progress).abs() < 0.1 && warp.active());
+        run(&mut warp, 1.5);
+        assert_eq!(warp.progress(), 0.0);
         assert!(!warp.active());
         assert_eq!(warp.source, source);
         let bounds = warp.bounds();
         assert!(bounds.contains(source.pos) && bounds.contains(dock.pos));
         warp.minimized = true;
-        warp.step(1.0);
-        assert_eq!(warp.progress, 1.0);
+        run(&mut warp, 1.5);
+        assert_eq!(warp.progress(), 1.0);
         assert!(!warp.active());
     }
 }

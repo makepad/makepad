@@ -6,7 +6,7 @@ use crate::makepad_draw::text::{
 use crate::text_input::{mark_band_rect, DrawTextMark, TextMark, TextMarkKind, TextMarkSet};
 use crate::{
     animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
-    makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    makepad_draw::turtle::RowAlign, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -431,7 +431,12 @@ impl SelectionTracker {
 
     /// Find character index from screen point.
     /// `cx` is needed to query widget areas for WidgetText segments.
-    pub fn point_to_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+    /// `shift` is how far the flow moved since it was drawn (a parent's
+    /// alignment, a list scrolled without redrawing it): the text positions
+    /// were recorded at draw time, child widget areas are live.
+    pub fn point_to_index(&self, cx: &Cx, point: DVec2, shift: DVec2) -> Option<usize> {
+        let live = point;
+        let point = point - shift;
         for segment in &self.segments {
             match segment {
                 SelectionSegment::Text {
@@ -469,9 +474,9 @@ impl SelectionTracker {
                 } => {
                     if area.is_valid(cx) {
                         let rect = area.rect(cx);
-                        if rect.size.y > 0.0 && rect.contains(point) {
+                        if rect.size.y > 0.0 && rect.contains(live) {
                             // Linear interpolation based on y position
-                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let local_y = (live.y - rect.pos.y).max(0.0);
                             let fraction = (local_y / rect.size.y).min(1.0);
                             return Some(text_start + (fraction * *text_len as f64) as usize);
                         }
@@ -481,11 +486,11 @@ impl SelectionTracker {
         }
 
         // Find nearest segment if point outside all
-        self.nearest_index(cx, point)
+        self.nearest_index(cx, point, live)
     }
 
     /// Find the nearest character index when point is outside all segments
-    fn nearest_index(&self, cx: &Cx, point: DVec2) -> Option<usize> {
+    fn nearest_index(&self, cx: &Cx, point: DVec2, live: DVec2) -> Option<usize> {
         let mut best: Option<(usize, f64)> = None;
 
         for segment in &self.segments {
@@ -530,10 +535,10 @@ impl SelectionTracker {
                 } => {
                     if area.is_valid(cx) {
                         let rect = area.rect(cx);
-                        let dist = Self::point_to_rect_distance(point, rect);
+                        let dist = Self::point_to_rect_distance(live, rect);
                         if best.map_or(true, |(_, d)| dist < d) {
                             // Linear interpolation based on y position
-                            let local_y = (point.y - rect.pos.y).max(0.0);
+                            let local_y = (live.y - rect.pos.y).max(0.0);
                             let fraction = if rect.size.y > 0.0 {
                                 (local_y / rect.size.y).min(1.0)
                             } else {
@@ -764,6 +769,8 @@ pub struct TextFlow {
     pub strikethrough: StackCounter,
     #[rust]
     pub inline_code: StackCounter,
+    #[rust]
+    pub code_block: StackCounter,
 
     /// (Ascender, descender) in ems per style slot (normal/bold/italic/
     /// bold_italic/fixed), probed lazily via a tiny layout call. Used to
@@ -851,6 +858,16 @@ pub struct TextFlow {
     pub heading_margin: Inset,
     #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
     pub paragraph_margin: Inset,
+    /// Collapses block margins like CSS does: neighboring ones share the larger one, and none
+    /// are added at the start or end of the flow, a list item, a quote, a code block or a table cell.
+    #[live(false)]
+    pub collapse_block_margins: bool,
+    /// The collapsed block margin that's applied right before the next content is drawn.
+    #[rust]
+    pending_block_margin: f64,
+    /// Whether no content has been drawn yet in the current flow, list item (past its marker), quote, code block or table cell.
+    #[rust]
+    is_at_block_start: bool,
 
     #[rust]
     area: Area,
@@ -897,6 +914,10 @@ pub struct TextFlow {
     #[rust]
     selection_word_anchor: Option<(usize, usize)>,
 
+    /// Where the flow's area was when it was drawn (see `shift`).
+    #[rust]
+    drawn_pos: DVec2,
+
     /// Whether currently dragging to select
     #[rust]
     is_selecting: bool,
@@ -904,24 +925,78 @@ pub struct TextFlow {
     // Streaming text animation fields
     #[rust]
     next_frame: NextFrame,
-    /// Whether streaming animation is active
+    /// The wipe that fades streamed text in (see `StreamWipe`).
     #[rust]
-    pub streaming_animation: bool,
-    /// Animated char count for fade effect (lags behind actual)
-    #[rust]
-    animated_chars: f32,
-    /// Actual drawn char count
-    #[rust]
-    actual_chars: f32,
-    /// Last frame time for dt calculation
-    #[rust]
-    last_rate_time: f64,
-    /// Number of chars over which to fade (default 50)
+    wipe: StreamWipe,
+    /// Number of chars over which the wipe's edge fades; match the
+    /// `get_color` of the text style that reads `total_chars`.
     #[live(50.0)]
     pub fade_chars: f32,
-    /// Minimum animation speed in chars per second
-    #[live(100.0)]
-    pub min_fade_speed: f32,
+}
+
+/// The streamed-text wipe: an edge (`front`, in chars) that the text's
+/// `get_color` fades against (`total_chars`). Driven by frame time, it always
+/// runs to its end state -- every drawn char fully shown -- and then asks for
+/// no more frames, whether or not more text is coming. New text finishes the
+/// previous wipe at once and starts its own, so a char is fully shown within
+/// `WIPE_SECS` of being drawn (or sooner, when more text follows).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StreamWipe {
+    /// A streamed text uses the wipe; a plain one is never touched.
+    active: bool,
+    front: f32,
+    drawn: f32,
+    speed: f32,
+    last: f64,
+}
+
+impl StreamWipe {
+    pub const WIPE_SECS: f32 = 0.12;
+
+    pub fn reset(&mut self) {
+        *self = StreamWipe { active: true, ..Default::default() };
+    }
+
+    pub fn start(&mut self) {
+        self.active = true;
+    }
+
+    pub fn front(&self) -> f32 {
+        self.front
+    }
+
+    pub fn done(&self, fade: f32) -> bool {
+        !self.active || self.front >= self.drawn + fade
+    }
+
+    /// The text was drawn with `chars` chars. True while the wipe needs
+    /// frames (and `front` must be applied to the drawn text).
+    pub fn drawn(&mut self, chars: f32, fade: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+        if chars > self.drawn {
+            // What was there already finishes now; the new part wipes in.
+            self.front = self.front.max(self.drawn + fade);
+            self.drawn = chars;
+            self.speed = ((self.drawn + fade - self.front) / Self::WIPE_SECS).max(fade / Self::WIPE_SECS);
+        } else if chars < self.drawn {
+            self.drawn = chars;
+            self.front = self.front.min(chars + fade);
+        }
+        !self.done(fade)
+    }
+
+    /// One frame at `time` seconds. True while more frames are needed.
+    pub fn frame(&mut self, time: f64, fade: f32) -> bool {
+        let dt = if self.last > 0.0 { (time - self.last).clamp(0.0, 0.1) as f32 } else { 1.0 / 60.0 };
+        self.last = time;
+        if self.done(fade) {
+            return false;
+        }
+        self.front = (self.front + self.speed * dt).min(self.drawn + fade);
+        !self.done(fade)
+    }
 }
 
 impl TextFlow {
@@ -934,7 +1009,7 @@ impl TextFlow {
         template_obj: ScriptObject,
     ) {
         // Root the template object
-        let template_ref = vm.bx.heap.new_object_ref(template_obj);
+        let template_ref = vm.new_object_ref(template_obj);
         self.templates.insert(id, template_ref);
         // Apply to existing items with matching template
         let template_value: ScriptValue = template_obj.into();
@@ -969,7 +1044,14 @@ impl TextFlow {
     /// Returns `None` (and does nothing) while the line budget still has room.
     /// Pair every call with [`Self::end_inline_content`].
     pub fn begin_inline_content(&mut self, cx: &mut Cx2d) -> Option<InlineContentHold> {
-        if self.max_lines == 0 || self.lines_drawn < self.max_lines {
+        let is_budget_spent = self.max_lines > 0 && self.lines_drawn >= self.max_lines;
+        // A new line past the budget can't hold anything, e.g., right after a list or quote ends.
+        if is_budget_spent && self.collapse_block_margins && Self::is_at_row_start(cx) {
+            self.content_truncated = true;
+            return None;
+        }
+        self.flush_block_margin(cx);
+        if !is_budget_spent {
             return None;
         }
         let restore_wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
@@ -987,6 +1069,29 @@ impl TextFlow {
             clip_index,
             start_x: cx.turtle().pos().x,
         })
+    }
+
+    /// Whether the turtle is at the left edge of its row, so the next thing drawn opens a new visual line.
+    fn is_at_row_start(cx: &Cx2d) -> bool {
+        cx.turtle().pos().x - cx.turtle().inner_rect().pos.x <= 0.5
+    }
+
+    /// The block-start state that `end_inline_widget` puts back if a widget draws nothing.
+    pub(crate) fn block_start_state(&self) -> (bool, f64) {
+        (self.is_at_block_start, self.pending_block_margin)
+    }
+
+    /// Counts a drawn inline widget as content on its line. If it drew nothing, the block
+    /// start (and pending margin) that `begin_inline_content` used up are put back.
+    pub(crate) fn end_inline_widget(&mut self, drew_something: bool, block_start_state: (bool, f64)) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        if drew_something {
+            self.first_thing_on_a_line = false;
+        } else if block_start_state.0 {
+            (self.is_at_block_start, self.pending_block_margin) = block_start_state;
+        }
     }
 
     /// Completes an inline-content draw begun with
@@ -1226,7 +1331,7 @@ impl WidgetNode for TextFlow {
         self.text_len()
     }
     fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
-        self.selection_tracker.point_to_index(cx, abs)
+        self.selection_tracker.point_to_index(cx, abs, self.shift(cx))
     }
     fn selection_set(&mut self, anchor: usize, cursor: usize) {
         self.set_selection(anchor, cursor)
@@ -1270,51 +1375,10 @@ impl Widget for TextFlow {
 
         // Handle streaming animation NextFrame
         if let Some(ev) = self.next_frame.is_event(event) {
-            let time = ev.time;
-            // Calculate time delta
-            let dt = if self.last_rate_time > 0.0 {
-                (time - self.last_rate_time).max(0.001)
-            } else {
-                1.0 / 60.0
-            };
-            self.last_rate_time = time;
-
-            // Target depends on streaming state:
-            // - While streaming: chase actual_chars (so new text fades in)
-            // - After streaming: go to actual_chars + fade_chars (complete the fade)
-            let target = if self.streaming_animation {
-                self.actual_chars
-            } else {
-                self.actual_chars + self.fade_chars
-            };
-
-            // Calculate how far behind we are
-            let distance = target - self.animated_chars;
-
-            if distance > 0.0 {
-                // Speed scales with distance - further behind = faster catch up
-                // Use a proportional approach: catch up ~20% of distance per frame at 60fps
-                // Plus a minimum speed to ensure we always make progress
-                let catch_up_factor = 0.15; // Fraction of distance to cover per frame (at 60fps baseline)
-                let frame_factor = (dt * 60.0) as f32; // Scale for actual frame rate
-                let proportional_speed = distance * catch_up_factor * frame_factor;
-                let min_speed = self.min_fade_speed * dt as f32;
-                let speed = proportional_speed.max(min_speed);
-
-                self.animated_chars += speed;
-                // Don't overshoot
-                if self.animated_chars > target {
-                    self.animated_chars = target;
-                }
-                // Update shader directly and request redraw for the area
-                self.draw_text.set_total_chars(cx, self.animated_chars);
-                self.draw_text.redraw_areas(cx);
-            }
-
-            // Keep animation alive if streaming or not done fading
-            let done = !self.streaming_animation
-                && self.animated_chars >= self.actual_chars + self.fade_chars;
-            if !done {
+            let more = self.wipe.frame(ev.time, self.fade_chars);
+            self.draw_text.set_total_chars(cx, self.wipe.front());
+            self.draw_text.redraw_areas(cx);
+            if more {
                 self.next_frame = cx.new_next_frame();
             }
         }
@@ -1341,7 +1405,7 @@ impl Widget for TextFlow {
                 if fe.device.is_touch() {
                     cx.hide_clipboard_actions();
                 }
-                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs, self.shift(cx)) {
                     self.selection_word_anchor = if fe.tap_count == 2 {
                         let (start, end) = self.selection_tracker.word_range(idx);
                         self.set_selection(start, end);
@@ -1355,7 +1419,7 @@ impl Widget for TextFlow {
                 }
             }
             Hit::FingerMove(fe) if self.is_selecting => {
-                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
+                if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs, self.shift(cx)) {
                     let (anchor, cursor) = if let Some((start, end)) = self.selection_word_anchor {
                         let (word_start, word_end) = self.selection_tracker.word_range(idx);
                         if idx < start {
@@ -1439,17 +1503,9 @@ impl TextFlow {
         self.draw_text.reset_char_index();
     }
 
-    /// Check if animation is completely idle (not streaming and fade complete)
+    /// The wipe has nothing left to do (or never ran).
     pub fn is_animation_idle(&self) -> bool {
-        // Animation was never started — both counters still at their initial zero
-        // values and streaming flag is off.  Without this early-out a fresh
-        // TextFlow would be treated as "mid-animation" because 0.0 < 0.0 + fade_chars,
-        // causing set_total_chars(0.0) which overrides the shader default (1 000 000)
-        // and makes all text invisible.
-        if !self.streaming_animation && self.animated_chars == 0.0 && self.actual_chars == 0.0 {
-            return true;
-        }
-        !self.streaming_animation && self.animated_chars >= self.actual_chars + self.fade_chars
+        self.wipe.done(self.fade_chars)
     }
 
     pub fn clear_stacks(&mut self) {
@@ -1461,6 +1517,7 @@ impl TextFlow {
         self.underline.clear();
         self.strikethrough.clear();
         self.inline_code.clear();
+        self.code_block.clear();
         self.font_sizes.clear();
         self.y_shift_scales.clear();
         self.font_colors.clear();
@@ -1472,6 +1529,8 @@ impl TextFlow {
         self.table_row_is_header = false;
         self.table_is_first_row = false;
         self.cell_text_align_x = 0.0;
+        self.pending_block_margin = 0.0;
+        self.is_at_block_start = true;
     }
 
     pub fn push_size_rel_scale(&mut self, scale: f64) {
@@ -1513,6 +1572,30 @@ impl TextFlow {
         em
     }
 
+    /// The font size (in points) of the current line. A code or sub/superscript run
+    /// pushes its own scaled size; the entry below it (or the base size) is the line's.
+    pub fn line_font_size(&self) -> f32 {
+        let scaled_run = self.fixed.value() > 0
+            || self.y_shift_scales.last().is_some_and(|scale| *scale != 0.0);
+        if scaled_run {
+            self.font_sizes.iter().rev().nth(1).copied().unwrap_or(self.font_size)
+        } else {
+            self.font_sizes.last().copied().unwrap_or(self.font_size)
+        }
+    }
+
+    /// Lays out a probe in the current line's own style (the normal style at the
+    /// line's size), so an inline widget can read the metrics it has to line up with.
+    pub fn line_probe(&mut self, cx: &mut Cx2d) -> Rc<LaidoutText> {
+        let line_size = self.line_font_size();
+        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
+        let normal_size = std::mem::replace(&mut self.draw_text.text_style.font_size, line_size);
+        let probe = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "Ag");
+        self.draw_text.text_style.font_size = normal_size;
+        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
+        probe
+    }
+
     pub fn push_size_abs_scale(&mut self, scale: f64) {
         self.font_sizes.push(self.font_size * (scale as f32));
     }
@@ -1526,38 +1609,32 @@ impl TextFlow {
         self.draw_mark_rects(cx);
 
         cx.end_turtle_with_area(&mut self.area);
+        self.drawn_pos = self.area.rect(cx).pos;
         self.items.as_mut().unwrap().retain_visible();
 
-        // Update streaming animation state after drawing (also while fading out)
-        let is_idle = self.is_animation_idle();
-        if self.streaming_animation || !is_idle {
-            self.actual_chars = self.draw_text.char_index;
-            self.draw_text.set_total_chars(cx, self.animated_chars);
+        // The wipe: text drawn while it runs gets its edge, and it asks for
+        // frames until it is done. A finished wipe leaves the text alone.
+        if self.wipe.drawn(self.draw_text.char_index, self.fade_chars) {
+            self.draw_text.set_total_chars(cx, self.wipe.front());
             self.next_frame = cx.new_next_frame();
         }
     }
 
-    /// Start streaming text animation with fade-in effect on new characters.
-    /// Call this before drawing when streaming new content.
+    /// Streamed text: new chars wipe in. Call before drawing.
     pub fn start_streaming_animation(&mut self) {
-        self.streaming_animation = true;
+        self.wipe.start();
     }
 
-    /// Reset streaming animation state (for reused widgets).
-    /// Call this when starting to stream new content.
+    /// A reused widget starts a new stream.
     pub fn reset_streaming_animation(&mut self) {
-        self.streaming_animation = true;
-        self.animated_chars = 0.0;
-        self.actual_chars = 0.0;
-        self.last_rate_time = 0.0;
+        self.wipe.reset();
     }
 
-    /// Stop streaming animation. The fade will complete naturally.
-    pub fn stop_streaming_animation(&mut self) {
-        self.streaming_animation = false;
-    }
+    /// The stream ended. The wipe finishes on its own (it never waits for
+    /// this); kept so callers can say so.
+    pub fn stop_streaming_animation(&mut self) {}
 
-    /// Check if streaming animation is still running (including fade-out)
+    /// The wipe has finished (or never ran).
     pub fn is_streaming_animation_done(&self) -> bool {
         self.is_animation_idle()
     }
@@ -1692,14 +1769,27 @@ impl TextFlow {
         self.selectable && self.selection_anchor != self.selection_cursor
     }
 
+    /// How far the flow moved since it was drawn: its text positions are
+    /// recorded at draw time, before a parent aligns it or a list scrolls it
+    /// without drawing it again.
+    fn shift(&self, cx: &Cx) -> DVec2 {
+        if self.area.is_valid(cx) {
+            self.area.rect(cx).pos - self.drawn_pos
+        } else {
+            DVec2::default()
+        }
+    }
+
     /// Selection anchor rect for clipboard/action popups.
     fn selection_clipboard_rect(&self, cx: &Cx) -> Rect {
         let start = self.selection_anchor.min(self.selection_cursor);
         let end = self.selection_anchor.max(self.selection_cursor);
+        let shift = self.shift(cx);
         let rects = self.selection_tracker.selection_rects(start, end);
 
         let mut out: Option<Rect> = None;
-        for rect in rects {
+        for mut rect in rects {
+            rect.pos += shift;
             out = Some(if let Some(acc) = out {
                 let x0 = acc.pos.x.min(rect.pos.x);
                 let y0 = acc.pos.y.min(rect.pos.y);
@@ -1788,9 +1878,12 @@ impl TextFlow {
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Code;
-        self.draw_block.begin(cx, self.code_walk, self.code_layout);
+        let walk = self.begin_block_box(cx, self.code_walk);
+        self.draw_block.begin(cx, walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
+        self.code_block.push();
         self.first_thing_on_a_line = true;
+        self.is_at_block_start = true;
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
@@ -1800,27 +1893,93 @@ impl TextFlow {
         let Some(area) = self.area_stack.pop() else {
             return;
         };
+        self.code_block.pop();
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
+        self.end_block_box(cx, self.code_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
+    }
+
+    /// Applies the pending block margin right before content is drawn,
+    /// or drops it if nothing's been drawn yet in the current container.
+    pub fn flush_block_margin(&mut self, cx: &mut Cx2d) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        let margin = std::mem::take(&mut self.pending_block_margin);
+        if self.is_at_block_start {
+            self.is_at_block_start = false;
+        } else if margin > 0.0 {
+            cx.turtle_new_line_with_spacing(margin);
+        }
+    }
+
+    /// Collapses a block's top margin into the pending one, then applies or drops it.
+    fn begin_block_margin(&mut self, cx: &mut Cx2d, top: f64) {
+        self.pending_block_margin = self.pending_block_margin.max(top);
+        self.flush_block_margin(cx);
+    }
+
+    /// Ends a block: whatever comes next starts below it, after its bottom margin.
+    fn end_block_margin(&mut self, cx: &mut Cx2d, bottom: f64) {
+        cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
+        self.is_at_block_start = false;
+        self.pending_block_margin = self.pending_block_margin.max(bottom);
+    }
+
+    /// Returns the walk to begin a block box with. When collapsing,
+    /// its vertical margins are handled as block margins instead.
+    fn begin_block_box(&mut self, cx: &mut Cx2d, walk: Walk) -> Walk {
+        if !self.collapse_block_margins {
+            return walk;
+        }
+        // A box only lines up with a list item's marker on a baseline-aligned row,
+        // so otherwise it starts on the row below the marker.
+        let is_after_marker = self.is_at_block_start && !self.first_thing_on_a_line;
+        if is_after_marker && !matches!(cx.turtle().flow(), Flow::Right { row_align: RowAlign::Baseline, .. }) {
+            cx.turtle_new_line();
+            self.first_thing_on_a_line = true;
+            if self.tracks_text() {
+                self.selection_tracker.push_newline();
+            }
+        }
+        self.begin_block_margin(cx, walk.margin.top);
+        Walk {
+            margin: Inset { top: 0.0, bottom: 0.0, ..walk.margin },
+            ..walk
+        }
+    }
+
+    /// Ends a block box begun with `begin_block_box`, dropping any trailing margin inside it.
+    fn end_block_box(&mut self, cx: &mut Cx2d, walk: Walk) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        self.pending_block_margin = 0.0;
+        self.end_block_margin(cx, walk.margin.bottom);
     }
 
     pub fn begin_list_item(&mut self, cx: &mut Cx2d, dot: &str, pad: f64) {
         let fs = *self.font_sizes.last().unwrap_or(&self.font_size);
         let font_based_padding = fs as f64 * pad;
 
-        cx.begin_turtle(
-            self.list_item_walk,
-            Layout {
-                padding: Inset {
-                    left: self.list_item_layout.padding.left + font_based_padding,
-                    ..self.list_item_layout.padding
-                },
-                ..self.list_item_layout
-            },
-        );
+        let mut walk = self.list_item_walk;
+        let mut padding = Inset {
+            left: self.list_item_layout.padding.left + font_based_padding,
+            ..self.list_item_layout.padding
+        };
+        if self.collapse_block_margins {
+            // A list item doesn't draw a box, so its vertical padding acts as margin too.
+            self.begin_block_margin(cx, walk.margin.top + padding.top);
+            walk.margin.top = 0.0;
+            walk.margin.bottom = 0.0;
+            padding.top = 0.0;
+            padding.bottom = 0.0;
+        }
+        cx.begin_turtle(walk, Layout { padding, ..self.list_item_layout });
 
         cx.turtle_mut()
             .move_right_down(dvec2(-font_based_padding, 0.0));
@@ -1847,17 +2006,27 @@ impl TextFlow {
         // Note: deliberately NOT pushed onto `area_stack` — `end_list_item` never pops,
         // so a push here would leak an entry per list item and let a stray close tag
         // (unbalanced HTML) pop the wrong block's area in `end_code`/`end_quote`.
+        self.is_at_block_start = true;
     }
 
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.first_thing_on_a_line = true;
+        if self.collapse_block_margins {
+            // No box here either, so the last child's bottom margin collapses with the item's own.
+            self.end_block_margin(cx, self.list_item_walk.margin.bottom + self.list_item_layout.padding.bottom);
+        }
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
 
     pub fn new_line_collapsed(&mut self, cx: &mut Cx2d) {
+        // Nothing's been drawn in this container yet, so there's no line to end.
+        // Right after a list item's marker, that keeps the block on the marker's row.
+        if self.collapse_block_margins && self.is_at_block_start {
+            return;
+        }
         cx.turtle_new_line();
         self.first_thing_on_a_line = true;
         if self.tracks_text() {
@@ -1869,6 +2038,7 @@ impl TextFlow {
     /// gap matches the line spacing of the most recently drawn text.
     /// This is intended for `<br>` tags in HTML rendering.
     pub fn new_line_with_wrap_spacing(&mut self, cx: &mut Cx2d) {
+        self.flush_block_margin(cx);
         let spacing = cx.turtle().wrap_spacing();
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
@@ -1878,6 +2048,11 @@ impl TextFlow {
     }
 
     pub fn new_line_collapsed_with_spacing(&mut self, cx: &mut Cx2d, spacing: f64) {
+        if self.collapse_block_margins {
+            self.new_line_collapsed(cx);
+            self.pending_block_margin = self.pending_block_margin.max(spacing);
+            return;
+        }
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
         if self.tracks_text() {
@@ -1887,14 +2062,19 @@ impl TextFlow {
 
     pub fn sep(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Sep;
-        self.draw_block.draw_walk(cx, self.sep_walk);
+        let walk = self.begin_block_box(cx, self.sep_walk);
+        self.draw_block.draw_walk(cx, walk);
+        self.end_block_box(cx, self.sep_walk);
     }
 
     pub fn begin_quote(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Quote;
+        let walk = self.begin_block_box(cx, self.quote_walk);
         self.draw_block
-            .begin(cx, self.quote_walk, self.quote_layout);
+            .begin(cx, walk, self.quote_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
+        self.first_thing_on_a_line = true;
+        self.is_at_block_start = true;
     }
 
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
@@ -1904,6 +2084,7 @@ impl TextFlow {
         };
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
+        self.end_block_box(cx, self.quote_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -1912,13 +2093,15 @@ impl TextFlow {
     pub fn begin_table(&mut self, cx: &mut Cx2d, num_columns: usize) {
         self.table_num_columns = num_columns;
         self.table_is_first_row = true;
-        cx.begin_turtle(self.table_walk, self.table_layout);
+        let walk = self.begin_block_box(cx, self.table_walk);
+        cx.begin_turtle(walk, self.table_layout);
     }
 
     pub fn end_table(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.table_num_columns = 0;
         self.in_table_header = false;
+        self.end_block_box(cx, self.table_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -2038,12 +2221,16 @@ impl TextFlow {
         cx.begin_turtle(walk, layout);
         self.first_thing_on_a_line = true;
         self.cell_text_align_x = align_x;
+        self.is_at_block_start = true;
     }
 
     pub fn end_table_cell(&mut self, cx: &mut Cx2d) {
         let cell_rect = cx.end_turtle();
         self.table_row_cell_rects.push(cell_rect);
         self.cell_text_align_x = 0.0;
+        // Drop any trailing block margin inside the cell; the cell itself counts as content.
+        self.pending_block_margin = 0.0;
+        self.is_at_block_start = false;
     }
 
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId) -> LiveId {
@@ -2252,11 +2439,25 @@ impl TextFlow {
             if (text == " " || text == "") && self.first_thing_on_a_line {
                 return;
             }
-            let text = if self.first_thing_on_a_line {
-                text.trim_start().trim_end_matches("\n")
-            } else {
+            let is_at_line_start = self.first_thing_on_a_line || (self.collapse_block_margins && self.is_at_block_start);
+            let text = if !is_at_line_start {
                 text.trim_end_matches("\n")
+            } else if self.collapse_block_margins {
+                // Only html whitespace collapses, so `&nbsp;` and full-width spaces stay as content.
+                text.trim_start_matches(crate::makepad_html::is_html_whitespace).trim_end_matches("\n")
+            } else {
+                text.trim_start().trim_end_matches("\n")
             };
+            // Whitespace that starts a line or follows a list item's marker isn't content.
+            if self.collapse_block_margins && is_at_line_start && text.is_empty() {
+                return;
+            }
+            // A run that would start a new line past the budget is dropped before its margin applies.
+            if self.collapse_block_margins && self.max_lines > 0 && self.lines_drawn >= self.max_lines && Self::is_at_row_start(cx) {
+                self.content_truncated = true;
+                return;
+            }
+            self.flush_block_margin(cx);
 
             // Select the appropriate text style based on bold/italic/fixed state
             let (text_style, style_slot) = if self.fixed.value() > 0 {
@@ -2275,17 +2476,7 @@ impl TextFlow {
 
             let run_size = *self.font_sizes.last().unwrap_or(&self.font_size);
             let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
-            // A code or sub/superscript run pushed its own scaled size; the
-            // entry below it (or the base size) is the surrounding line's.
-            let line_size = if style_slot == 4 || y_shift_scale != 0.0 {
-                if self.font_sizes.len() >= 2 {
-                    self.font_sizes[self.font_sizes.len() - 2]
-                } else {
-                    self.font_size
-                }
-            } else {
-                run_size
-            };
+            let line_size = self.line_font_size();
 
             // Baseline-align mixed runs: a fixed/code run scaled to 0.85x of
             // the surrounding text must sit ON the line's baseline — without
@@ -2301,12 +2492,18 @@ impl TextFlow {
                 0.0
             };
 
-            // RowAlign::Center centers each walk by its own height, which
-            // would undo baseline_shift for shorter runs; hand every run the
-            // line's height instead so they all get the same centering shift.
+            // RowAlign::Center centers each walk by its own height, which would undo
+            // baseline_shift for shorter runs; hand every run the line's height (and its
+            // baseline, for RowAlign::Baseline) so they all get the same shift.
             let (line_asc, line_desc) = self.style_metrics_em(cx, 0);
             self.draw_text.align_row_height =
                 Some((line_asc + line_desc) * line_size * LPXS_PER_PT);
+            self.draw_text.align_row_baseline = Some(line_asc * line_size * LPXS_PER_PT);
+            // Our runs' rows wrap at the flow's pitch, not the font's line gap. Read once here
+            // so the selection capture, the wrap probes and the draw share one layout.
+            self.draw_text.flow_wrap_spacing_in_lpxs = Some(
+                (cx.turtle().wrap_spacing() / self.draw_text.font_scale.max(0.0001) as f64) as f32,
+            );
 
             // Apply the text style to the single draw_text instance
             let top_drop = text_style.top_drop;
@@ -2324,13 +2521,7 @@ impl TextFlow {
             // Widget-level max_lines: compute how many layouter rows this run
             // is allowed. A "continuation" run starts mid-line (turtle x > left
             // edge), so its first row shares the current visual line.
-            let mut is_continuation = if self.max_lines > 0 {
-                let turtle_pos = cx.turtle().pos();
-                let turtle_rect = cx.turtle().inner_rect();
-                (turtle_pos.x - turtle_rect.pos.x) > 0.5
-            } else {
-                false
-            };
+            let mut is_continuation = self.max_lines > 0 && !Self::is_at_row_start(cx);
 
             // A continuation run joins a visual line that something else
             // already opened. When the opener was not a text run — an inline
@@ -2562,10 +2753,20 @@ impl TextFlow {
                     + self.inline_code_padding.bottom
                     + self.inline_code_margin.top
                     + self.inline_code_margin.bottom) as f64;
+                // An underlined run (a hovered link) in code keeps its line.
+                let underline = (self.underline.value() > 0).then_some(*font_color);
                 let result = dt.draw_walk_resumable_with_background(cx, text, |cx, mut rect, _| {
+                    let text_rect = rect;
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
+                    if let Some(ink) = underline {
+                        let kind = std::mem::replace(&mut db.block_type, FlowBlockType::Underline);
+                        let line = std::mem::replace(&mut db.line_color, ink);
+                        db.draw_abs(cx, text_rect);
+                        db.block_type = kind;
+                        db.line_color = line;
+                    }
                     areas_tracker.track_rect(cx, rect);
                 });
 
@@ -2768,7 +2969,7 @@ impl WidgetNode for TextFlowLink {
 impl Widget for TextFlowLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            if let Some(tf) = scope.data_mut().get_mut::<TextFlow>() {
                 tf.redraw(cx);
             } else {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
@@ -2827,7 +3028,7 @@ impl Widget for TextFlowLink {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+        let Some(tf) = scope.data_mut().get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
 
@@ -2939,5 +3140,65 @@ mod tests {
         let text = "caf\u{e9}";
         assert_eq!(floor_char_boundary(text, 900), 5);
         assert_eq!(floor_char_boundary("", 4), 0);
+    }
+}
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::StreamWipe;
+
+    /// Tokens arrive with pauses; every char must be fully shown within
+    /// 200 ms of being drawn, and the wipe must stop asking for frames.
+    #[test]
+    fn every_char_finishes_fast_and_the_wipe_idles() {
+        let fade = 24.0;
+        let mut w = StreamWipe::default();
+        w.reset();
+        let frame = 1.0 / 60.0;
+        let mut t = 1.0;
+        let mut chars = 0.0;
+        // (chars added, pause after in seconds): bursts, a token stream,
+        // a long stall, a final burst.
+        let script: Vec<(f32, f64)> = vec![(4.0, 0.05), (6.0, 0.04), (5.0, 0.6), (120.0, 0.03), (3.0, 1.5), (40.0, 0.0)];
+        let mut pending: Vec<(f32, f64)> = Vec::new(); // (char index, drawn at)
+        for (add, pause) in script {
+            chars += add;
+            let mut wants = w.drawn(chars, fade);
+            pending.push((chars, t));
+            // Frames come only while the wipe asks; the clock runs regardless.
+            let end = t + pause.max(0.3);
+            while t < end {
+                t += frame;
+                if wants {
+                    wants = w.frame(t, fade);
+                }
+                pending.retain(|(i, at)| {
+                    let full = w.front() >= i + fade;
+                    assert!(full || t - at <= 0.2, "char {i} drawn at {at} still fading after {:.3}s", t - at);
+                    !full
+                });
+                if t - (end - pause.max(0.3)) >= pause && pause > 0.0 && pause < 0.3 {
+                    break;
+                }
+            }
+            assert!(pause < 0.3 || !wants, "still animating after a {pause}s pause");
+        }
+        assert!(pending.is_empty());
+        // Run on until it says stop; it must, and quickly.
+        let mut n = 0;
+        while w.frame(t, fade) {
+            t += frame;
+            n += 1;
+            assert!(n < 30, "wipe never finished");
+        }
+        assert!(w.done(fade));
+        assert!(!w.drawn(chars, fade), "a redraw of the same text needs no frames");
+    }
+
+    #[test]
+    fn plain_text_is_never_touched() {
+        let mut w = StreamWipe::default();
+        assert!(!w.drawn(500.0, 24.0));
+        assert!(w.done(24.0));
     }
 }

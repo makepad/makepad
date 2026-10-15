@@ -12,7 +12,7 @@ use {
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
         event::{
-            video_playback::CameraPreviewMode, DragItem, Event, NextFrame, QuitReason,
+            video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
             QuitRequestedEvent, Timer, Trigger, VideoSource,
         },
         gpu_info::GpuInfo,
@@ -30,7 +30,6 @@ use {
     },
     std::{
         any::{Any, TypeId},
-        collections::VecDeque,
         ops::Range,
         rc::Rc,
     },
@@ -278,6 +277,30 @@ impl ScreenEdges {
 
 #[derive(PartialEq)]
 pub enum CxOsOp {
+    // ---- child windows and domains of the HAL client (HAL.md 5c / 5d)
+    /// Resizes a child's embedded window (points) and sets its dpi.
+    #[cfg(not(target_arch = "wasm32"))]
+    ChildGeom { child: u32, window: crate::event::LentId, size: Vec2d, dpi: f64 },
+    /// An event for a child, in the child window's coordinates: `makepad_hal::buffers::pack_forward`.
+    #[cfg(not(target_arch = "wasm32"))]
+    ForwardEvent { child: u32, window: crate::event::LentId, packed: Vec<u8> },
+    /// The child holds the keyboard, IME, cursor and clipboard; its siblings lose them.
+    #[cfg(not(target_arch = "wasm32"))]
+    FocusChild(u32),
+    /// Asks the child to close its window.
+    #[cfg(not(target_arch = "wasm32"))]
+    CloseChildWindow { child: u32, window: crate::event::LentId },
+    #[cfg(not(target_arch = "wasm32"))]
+    StartDomain { request: u32, app: String, args: String },
+    #[cfg(not(target_arch = "wasm32"))]
+    StopDomain { domain: u32, kill: bool },
+    #[cfg(not(target_arch = "wasm32"))]
+    RelaunchDomain(u32),
+    #[cfg(not(target_arch = "wasm32"))]
+    ListDomains(u32),
+    #[cfg(not(target_arch = "wasm32"))]
+    SetOwnChrome(bool),
+
     CreateWindow(WindowId),
     CreatePopupWindow {
         window_id: WindowId,
@@ -298,6 +321,10 @@ pub enum CxOsOp {
     HideWindow(WindowId),
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
+    /// Centre the native window buttons (macOS traffic lights) on this
+    /// distance below the window's top edge, in points: a caption row of
+    /// another height than the system's keeps them in line. No-op elsewhere.
+    CenterWindowButtons(WindowId, f64),
     SetTopmost(WindowId, bool),
     /// `true`: drop the native maximized-state border/titlebar strip a
     /// backend would otherwise keep (Windows only; other backends ignore
@@ -306,6 +333,9 @@ pub enum CxOsOp {
     SetChromelessWhenMaximized(WindowId, bool),
     SetWindowTitle(WindowId, String),
     SetWindowVisuals(WindowId, WindowVisuals),
+    /// macOS only: the dpi a window lays its UI out at instead of the native one,
+    /// which keeps the traffic lights centered in a caption bar that zooms with the UI.
+    SetWindowDpiOverride(WindowId, Option<f64>),
     ShowInDock(bool),
     /// Bring the app and its windows to the front, restoring a minimized
     /// one where the backend can (a relaunch of a single-instance app).
@@ -403,6 +433,10 @@ pub enum CxOsOp {
     StartLocationUpdates,
     StopLocationUpdates,
 
+    /// A system haptic (Android under the HAL).
+    #[cfg(target_os = "android")]
+    HapticFeedback(HapticFeedback),
+
     HttpRequest {
         request_id: LiveId,
         request: HttpRequest,
@@ -477,7 +511,6 @@ pub enum CxOsOp {
     SetVideoPlaybackRate(LiveId, f64),
     SelectVideoTrack(LiveId, usize),
     SelectAudioTrack(LiveId, usize),
-    UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
         id: LiveId,
@@ -510,6 +543,24 @@ impl CxOsOp {
     /// The variant's name (what `Debug` prints; the payload is not shown).
     pub fn name(&self) -> &'static str {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::ChildGeom { .. } => "ChildGeom",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::ForwardEvent { .. } => "ForwardEvent",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::FocusChild(..) => "FocusChild",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::CloseChildWindow { .. } => "CloseChildWindow",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::StartDomain { .. } => "StartDomain",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::StopDomain { .. } => "StopDomain",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::RelaunchDomain(..) => "RelaunchDomain",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::ListDomains(..) => "ListDomains",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::SetOwnChrome(..) => "SetOwnChrome",
             Self::CreateWindow(..) => "CreateWindow",
             Self::CreatePopupWindow { .. } => "CreatePopupWindow",
             Self::CloseWindow(..) => "CloseWindow",
@@ -522,10 +573,12 @@ impl CxOsOp {
             Self::HideWindow(..) => "HideWindow",
             Self::HideWindowButtons(..) => "HideWindowButtons",
             Self::ShowWindowButtons(..) => "ShowWindowButtons",
+            Self::CenterWindowButtons(..) => "CenterWindowButtons",
             Self::SetTopmost(..) => "SetTopmost",
             Self::SetChromelessWhenMaximized(..) => "SetChromelessWhenMaximized",
             Self::SetWindowTitle(..) => "SetWindowTitle",
             Self::SetWindowVisuals(..) => "SetWindowVisuals",
+            Self::SetWindowDpiOverride(..) => "SetWindowDpiOverride",
             Self::ShowInDock(..) => "ShowInDock",
             Self::ActivateApp => "ActivateApp",
             Self::LockMousePointer(..) => "LockMousePointer",
@@ -561,6 +614,8 @@ impl CxOsOp {
             Self::RequestPermission { .. } => "RequestPermission",
             Self::StartLocationUpdates => "StartLocationUpdates",
             Self::StopLocationUpdates => "StopLocationUpdates",
+            #[cfg(target_os = "android")]
+            Self::HapticFeedback(..) => "HapticFeedback",
 
             Self::HttpRequest { .. } => "HttpRequest",
             Self::CancelHttpRequest { .. } => "CancelHttpRequest",
@@ -591,7 +646,6 @@ impl CxOsOp {
             Self::SetVideoPlaybackRate(..) => "SetVideoPlaybackRate",
             Self::SelectVideoTrack(..) => "SelectVideoTrack",
             Self::SelectAudioTrack(..) => "SelectAudioTrack",
-            Self::UpdateVideoSurfaceTexture(..) => "UpdateVideoSurfaceTexture",
             Self::CreateWebView { .. } => "CreateWebView",
             Self::UpdateWebView { .. } => "UpdateWebView",
             Self::CloseWebView { .. } => "CloseWebView",
@@ -617,15 +671,6 @@ impl std::fmt::Debug for CxOsOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
-}
-
-/// Requeue an OS op that cannot run yet. FIFO: append so remaining already-queued
-/// ops still run first. Returns `true` if the drain should continue (`len() > 1`);
-/// `false` if this is the only op left — break and retry on the next event.
-#[allow(dead_code)] // only drivers that defer ops call this (macos, windows today)
-pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp) -> bool {
-    platform_ops.push_back(op);
-    platform_ops.len() > 1
 }
 
 impl Cx {
@@ -724,7 +769,7 @@ impl Cx {
         if self.script_vm.is_none() {
             return;
         }
-        self.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+        self.with_vm(|vm| vm.capture_errors());
     }
 
     /// Take the errors the re-run raised: log them, and keep them for
@@ -761,7 +806,7 @@ impl Cx {
     ///
     /// Platform-specific event handlers call this on every `abs` field of
     /// pointer/touch/scroll events so input still hits the right widget when
-    /// zoom is active. Android/OpenHarmony don't need it because they divide
+    /// zoom is active. Android doesn't need it because it divides
     /// raw pixels by the override-aware `dpi_factor` at the source — so this
     /// helper is dead code on those builds, hence the `allow(dead_code)`.
     #[allow(dead_code)]
@@ -781,26 +826,26 @@ impl Cx {
         let Some(vm) = self.script_vm.as_mut() else {
             return;
         };
-        let widgets = vm.heap.module(id!(widgets));
-        vm.heap.set_value(
+        let widgets = vm.heap_mut().module(id!(widgets));
+        vm.heap_mut().set_value(
             widgets,
             id!(SAFE_INSET_PAD_TOP).into(),
             insets.top.into(),
             NoTrap,
         );
-        vm.heap.set_value(
+        vm.heap_mut().set_value(
             widgets,
             id!(SAFE_INSET_PAD_BOTTOM).into(),
             insets.bottom.into(),
             NoTrap,
         );
-        vm.heap.set_value(
+        vm.heap_mut().set_value(
             widgets,
             id!(SAFE_INSET_PAD_LEFT).into(),
             insets.left.into(),
             NoTrap,
         );
-        vm.heap.set_value(
+        vm.heap_mut().set_value(
             widgets,
             id!(SAFE_INSET_PAD_RIGHT).into(),
             insets.right.into(),
@@ -998,23 +1043,8 @@ impl Cx {
         }
 
         #[cfg(target_os = "android")]
-        {
-            if let Some(data) =
-                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
-            {
-                return Ok(Rc::new(data));
-            }
-            if let Some(package_root) = self.package_root.as_deref() {
-                let root_prefix = format!("{}/", package_root);
-                if !path.starts_with(&root_prefix) {
-                    let prefixed_path = format!("{}/{}", package_root, path);
-                    if let Some(data) = unsafe {
-                        crate::os::linux::android::android_jni::to_java_load_asset(&prefixed_path)
-                    } {
-                        return Ok(Rc::new(data));
-                    }
-                }
-            }
+        if let Some(data) = crate::os::hal::read_asset(path) {
+            return Ok(Rc::new(data));
         }
 
         Err(format!("Dependency not loaded {}", path))
@@ -1031,23 +1061,8 @@ impl Cx {
         }
 
         #[cfg(target_os = "android")]
-        {
-            if let Some(data) =
-                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
-            {
-                return Ok(Rc::new(data));
-            }
-            if let Some(package_root) = self.package_root.as_deref() {
-                let root_prefix = format!("{}/", package_root);
-                if !path.starts_with(&root_prefix) {
-                    let prefixed_path = format!("{}/{}", package_root, path);
-                    if let Some(data) = unsafe {
-                        crate::os::linux::android::android_jni::to_java_load_asset(&prefixed_path)
-                    } {
-                        return Ok(Rc::new(data));
-                    }
-                }
-            }
+        if let Some(data) = crate::os::hal::read_asset(path) {
+            return Ok(Rc::new(data));
         }
 
         Err(format!("Dependency not loaded {}", path))
@@ -1097,7 +1112,7 @@ impl Cx {
 
     /// Get resource data intended for font parsing.
     ///
-    /// This reads local file-backed resources directly, then falls back to
+    /// This maps local files and stored Android assets, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
     pub fn get_resource_font_bytes(&mut self, heap_key: usize, handle: ScriptHandle) -> Option<SharedBytes> {
         let path = self.get_resource_abs_path(heap_key, handle)?;
@@ -1110,6 +1125,10 @@ impl Cx {
         if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(path) {
             return Some(bytes);
         }
+        #[cfg(target_os = "android")]
+        if let Some(bytes) = self.get_resource_font_asset_bytes_by_path(path) {
+            return Some(bytes);
+        }
         let resources = self.script_data.resources.resources.borrow();
         let res = resources.iter().find(|res| res.abs_path == path)?;
         if let crate::script::res::CxScriptResourceData::Loaded(data) = &res.data {
@@ -1119,6 +1138,37 @@ impl Cx {
             .as_deref()
             .and_then(|path| self.get_dependency(path).ok())
             .map(SharedBytes::from_owned)
+    }
+
+    /// Maps an APK font by its resource or dependency path, reusing the mapping across
+    /// family loads. Cache actual asset paths so package-root and resource changes can resolve anew.
+    #[cfg(target_os = "android")]
+    pub fn get_resource_font_asset_bytes_by_path(&self, path: &str) -> Option<SharedBytes> {
+        let map_asset = |path: &str| {
+            let mut assets = self.hal.mapped_font_assets.borrow_mut();
+            if let Some(bytes) = assets.get(path) {
+                return bytes.clone();
+            }
+            let bytes = crate::os::hal::map_asset(path);
+            assets.insert(path.to_string(), bytes.clone());
+            bytes
+        };
+        let map_dependency = |path: &str| {
+            map_asset(path).or_else(|| {
+                let package_root = self.package_root.as_deref()?;
+                let root_prefix = format!("{}/", package_root);
+                if path.starts_with(&root_prefix) {
+                    return None;
+                }
+                map_asset(&format!("{}{}", root_prefix, path))
+            })
+        };
+        if let Some(bytes) = map_dependency(path) {
+            return Some(bytes);
+        }
+        let resources = self.script_data.resources.resources.borrow();
+        let res = resources.iter().find(|res| res.abs_path == path)?;
+        map_dependency(res.dependency_path.as_deref()?)
     }
 
     /// The script resource at `path` can never be read in this process: no
@@ -1161,59 +1211,22 @@ impl Cx {
         }
     }
 
-    /// The GPU API this binary renders with (see [`GpuBackend`]). Desktop Linux
-    /// picks between Vulkan and OpenGL ES at startup (a Vulkan-capable build
-    /// falls back to OpenGL when no usable hardware device answers); once the
-    /// event loop has chosen, this reports that choice (recorded on the
-    /// Linux platform state, `CxOs::gpu_backend`). Before that, and on every
-    /// other platform, it is the API compiled into the binary.
+    /// The GPU API selected by the active backend.
     pub fn gpu_backend(&self) -> GpuBackend {
-        #[cfg(all(
-            target_os = "linux",
-            not(any(gpusim, linux_direct, target_env = "ohos"))
-        ))]
-        if let Some(active) = self.os.gpu_backend {
-            return active;
-        }
-        #[cfg(all(target_os = "android", use_vulkan))]
-        if self.os.gl_fallback {
-            return GpuBackend::OpenGl;
-        }
-        #[cfg(gpusim)]
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            GpuBackend::Gpusim
-        }
-        #[cfg(not(gpusim))]
-        {
-            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
-            {
-                GpuBackend::Metal
-            }
-            #[cfg(target_os = "windows")]
-            {
-                GpuBackend::Direct3d11
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                GpuBackend::WebGl
-            }
-            #[cfg(all(
-                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
-                not(target_arch = "wasm32"),
-                use_vulkan
-            ))]
-            {
-                GpuBackend::Vulkan
-            }
-            #[cfg(all(
-                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
-                not(target_arch = "wasm32"),
-                not(use_vulkan)
-            ))]
-            {
-                GpuBackend::OpenGl
+            match self.hal.info.map(|info| info.backend) {
+                Some(makepad_hal::backend_id::METAL) => GpuBackend::Metal,
+                Some(makepad_hal::backend_id::VULKAN) => GpuBackend::Vulkan,
+                Some(makepad_hal::backend_id::GL) => GpuBackend::OpenGl,
+                None if cfg!(target_vendor = "apple") => GpuBackend::Metal,
+                None if cfg!(target_os = "linux") => GpuBackend::Vulkan,
+                Some(makepad_hal::backend_id::D3D11) => GpuBackend::Direct3d11,
+                _ => GpuBackend::Headless,
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        { GpuBackend::WebGl }
     }
 
     /// Returns the app's writable data directory path.
@@ -1271,11 +1284,20 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::XrDiscoverAnchor(id));
     }
 
+    #[cfg_attr(target_os = "linux", track_caller)]
     pub fn quit(&mut self) {
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
+            eprintln!("[hal-linux] Cx::quit queued at {}", std::panic::Location::caller());
+        }
         self.platform_ops.push_back(CxOsOp::Quit);
     }
 
     pub fn request_quit(&mut self, reason: QuitReason) -> bool {
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
+            eprintln!("[hal-linux] Cx::request_quit reason={reason:?}");
+        }
         let event = Event::QuitRequested(QuitRequestedEvent::new(reason));
         self.call_event_handler(&event);
 
@@ -1344,7 +1366,7 @@ impl Cx {
         // instance) never pins: the pin hides and detaches the machine's
         // real cursor, which belongs to whoever sits at it. The injected
         // moves carry their own positions and need no pin.
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+        #[cfg(not(target_arch = "wasm32"))]
         if self.remote_activity.remote_input.get() {
             return;
         }
@@ -1434,16 +1456,6 @@ impl Cx {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push_back(op);
         }
-    }
-
-    /// Requeue an OS op that cannot run yet (typical case: `SetTopmost` before
-    /// any native window exists). FIFO: append so remaining already-queued ops
-    /// still run first in this drain. Returns `true` if the drain should
-    /// continue (`len() > 1`); `false` if this is the only op left — break and
-    /// retry on the next event instead of spinning.
-    #[allow(dead_code)] // only drivers that defer ops call this (macos, windows today)
-    pub(crate) fn defer_platform_op(&mut self, op: CxOsOp) -> bool {
-        defer_platform_op(&mut self.platform_ops, op)
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
@@ -1550,9 +1562,19 @@ impl Cx {
     /// this can be called from inside normal event/action handlers.
     pub fn set_window_dpi_override(&mut self, window_id: WindowId, dpi_override: Option<f64>) {
         let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
+        if matches!(self.os_type(), OsType::Macos) {
+            self.platform_ops
+                .retain(|queued| !matches!(queued, CxOsOp::SetWindowDpiOverride(id, _) if *id == window_id));
+            self.platform_ops.push_back(CxOsOp::SetWindowDpiOverride(window_id, dpi_override));
+        }
+        let current_dpi = self.windows[window_id].effective_dpi_factor();
+        let target_dpi = dpi_override.unwrap_or_else(|| self.windows[window_id].native_dpi_factor());
+        #[cfg(target_os = "linux")]
+        {
+            self.windows[window_id].dpi_override = dpi_override;
+            self.hal_sync_direct_scale();
+        }
         let window = &mut self.windows[window_id];
-        let current_dpi = window.effective_dpi_factor();
-        let target_dpi = dpi_override.unwrap_or_else(|| window.native_dpi_factor());
 
         if (target_dpi - current_dpi).abs() < f64::EPSILON {
             window.dpi_override = dpi_override;
@@ -1563,12 +1585,7 @@ impl Cx {
         let old_geom = window.window_geom.clone();
         let scale = current_dpi / target_dpi;
         window.dpi_override = dpi_override;
-        window.window_geom.inner_size *= scale;
-        window.window_geom.outer_size *= scale;
-        window.window_geom.safe_area_insets = window.window_geom.safe_area_insets.scale(scale);
-        window.window_geom.window_chrome_buttons =
-            CxWindow::scale_rect(window.window_geom.window_chrome_buttons, scale);
-        window.window_geom.dpi_factor = target_dpi;
+        window.window_geom = window.scale_window_geom(old_geom.clone(), scale, target_dpi);
         let new_geom = window.window_geom.clone();
 
         self.pending_window_geom_changes
@@ -1618,15 +1635,25 @@ impl Cx {
     /// Copies the given string to the clipboard.
     ///
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
-    /// A system haptic (Android: the window's `performHapticFeedback`;
-    /// a no-op elsewhere and in hosted children, which have no window).
+    /// A system haptic (Android: the HAL's Haptic command; a no-op elsewhere).
     pub fn haptic_feedback(&mut self, kind: HapticFeedback) {
-        #[cfg(all(target_os = "android", not(linux_direct)))]
-        if !crate::os::linux::android::android_hosted::is_hosted() {
-            let kind = match kind { HapticFeedback::Click => 0, HapticFeedback::VirtualKey => 1, HapticFeedback::Tick => 2 };
-            unsafe { crate::os::linux::android::android_jni::to_java_haptic(kind) };
-        }
+        #[cfg(target_os = "android")]
+        self.platform_ops.push_back(CxOsOp::HapticFeedback(kind));
+        #[cfg(not(target_os = "android"))]
         let _ = kind;
+    }
+
+    /// Brings another running app, by process id, to the front (a launcher showing the app it
+    /// started). macOS and Windows; false where unsupported or refused.
+    #[cfg(not(target_os = "linux"))]
+    pub fn activate_process(&mut self, pid: u32) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return makepad_hal::activate_process(pid);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = pid;
+            false
+        }
     }
 
     pub fn copy_to_clipboard(&mut self, content: &str) {
@@ -1753,6 +1780,11 @@ impl Cx {
         self.fingers.sweep_lock(value);
     }
 
+    /// Takes a scoped sweep lock above existing owners, unless this area already owns one.
+    pub fn acquire_sweep_lock(&mut self, value: Area) -> Option<crate::event::SweepLock> {
+        self.fingers.acquire_sweep_lock(value)
+    }
+
     /// Hand the finger currently captured by `from` over to `to` (with sweep area
     /// `to_sweep`), so a drag begun on one widget can continue on another — e.g. a
     /// long-pressed drawer app handing its touch to the home pager for placement.
@@ -1778,6 +1810,18 @@ impl Cx {
     /// children so the presses it took end at once.
     pub fn claim_finger_gesture(&mut self, digit_id: crate::event::DigitId, area: Area) -> bool {
         self.fingers.claim_gesture(digit_id, area)
+    }
+
+    /// Call on `Hit::FingerDown` when your widget gives this finger's drag its own meaning
+    /// (text selection, a slider), so containers won't turn the drag into their own gesture.
+    pub fn claim_finger_drag(&mut self, digit_id: DigitId) {
+        self.fingers.claim_drag(digit_id);
+    }
+
+    /// Drops every widget's capture of the touch with the given uid, so the rest of that touch hits nothing.
+    /// Call it once those widgets saw the touch get canceled.
+    pub fn release_touch_captures(&mut self, uid: u64) {
+        self.fingers.release_digit(live_id_num!(touch, uid).into());
     }
 
     pub fn sweep_unlock(&mut self, value: Area) {
@@ -1835,8 +1879,10 @@ impl Cx {
         self.fingers.unblock_scrolling_within_area(scrollable_area);
     }
 
+    #[track_caller]
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
+        crate::frame_sources::timer_started(self.timer_id, std::panic::Location::caller());
         if let Some(now) = crate::remote::app_clock::now() {
             self.app_clock.start_timer(self.timer_id, delay, false, now);
             return Timer(self.timer_id);
@@ -1849,8 +1895,10 @@ impl Cx {
         Timer(self.timer_id)
     }
 
+    #[track_caller]
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
+        crate::frame_sources::timer_started(self.timer_id, std::panic::Location::caller());
         if let Some(now) = crate::remote::app_clock::now() {
             self.app_clock.start_timer(self.timer_id, interval, true, now);
             return Timer(self.timer_id);
@@ -1957,43 +2005,67 @@ impl Cx {
         1.0
     }
 
-
+    /// A pass's rect in whole pixels. An area's rect comes from f32 instance data: 1080 px at
+    /// 2.4375 reads back as 443.07693 pt = 1080.00003 px, and a ceil with no allowance made the
+    /// pass (the WM's wallpaper CachedView) 1081 px wide -- drawn back into a 1080-px window it was
+    /// squeezed a pixel and the last column showed the clear colour (the Pixel's white line).
+    /// A hundredth of a pixel is rounding, not content.
     pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
+        let size = |size: Vec2d| Self::pass_logical_size(size, dpi);
         match self.passes[draw_pass_id].pass_rect {
             Some(CxDrawPassRect::Area(area)) => {
                 let rect = area.rect(self);
                 Some(Rect {
-                    pos: (rect.pos * dpi).floor() / dpi,
-                    size: (rect.size * dpi).ceil() / dpi,
+                    pos: ((rect.pos * dpi) + 0.01).floor() / dpi,
+                    size: size(rect.size),
                 })
             }
             Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: origin,
-                    size: (rect.size * dpi).ceil() / dpi,
+                    size: size(rect.size),
                 })
             }
             /*Some(CxDrawPassRect::ScaledArea(area, scale)) => {
                 let rect = area.rect(self);
                 Some(Rect {
-                    pos: (rect.pos * dpi).floor() / dpi,
-                    size: scale * (rect.size * dpi).ceil() / dpi,
+                    pos: ((rect.pos * dpi) + 0.01).floor() / dpi,
+                    size: scale * ((rect.size * dpi) - 0.01).ceil() / dpi,
                 })
             }*/
-            Some(CxDrawPassRect::Size(size)) => Some(Rect {
+            Some(CxDrawPassRect::Size(s)) => Some(Rect {
                 pos: Vec2d::default(),
-                size: (size * dpi).ceil() / dpi,
+                size: size(s),
             }),
             None => None,
         }
     }
 
+    /// A pass's logical size snapped to its whole pixels (`pass_pixel_size` / dpi).
+    pub fn pass_logical_size(size: Vec2d, dpi: f64) -> Vec2d {
+        let (w, h) = Self::pass_pixel_size(size, dpi);
+        dvec2(w as f64 / dpi, h as f64 / dpi)
+    }
+
+    /// The pixel size of a texture pass of logical `size` at `dpi`: the ONE rounding of a pass's
+    /// size to whole pixels (`get_pass_rect`, the frame's pass size and viewport). A render
+    /// target a pass draws into is sized with it too, so the pass is exactly its target: a
+    /// target floored where the pass was ceiled was a pixel smaller at fractional scales (1.25,
+    /// 1.41, 1.75), and the GPU refused the pass every frame (Scope's Glass look and History
+    /// view drew nothing on 149). A hundredth of a pixel is rounding, not content.
+    pub fn pass_pixel_size(size: Vec2d, dpi: f64) -> (usize, usize) {
+        let px = |v: f64| {
+            let p = (v * dpi - 0.01).ceil();
+            if p.is_finite() && p > 0.0 { p as usize } else { 0 }
+        };
+        (px(size.x), px(size.y))
+    }
+
     /// What one texel of a BGRA8 render target costs on this backend: the
-    /// GPU backends allocate 4 bytes, the gpusim raster keeps float colour
-    /// (16 bytes). Caches that budget render targets charge this.
+    /// HAL and WebGL allocate 4 bytes. Caches that budget render targets charge this.
     pub fn render_target_bytes_per_texel(&self) -> usize {
-        if cfg!(gpusim) { 16 } else { 4 }
+        4
     }
 
     /// What one texel of a `DepthD32` attachment costs (4 bytes everywhere).
@@ -2001,13 +2073,9 @@ impl Cx {
         4
     }
 
-    /// Whether a pass's depth attachment lives in its colour target's
-    /// storage: the gpusim raster keeps a depth plane per framebuffer, so
-    /// a retained render target painted with depth holds it for good; the
-    /// GPU backends keep one `TextureSize::Auto` depth texture per handle,
-    /// sized to the largest pass it served.
+    /// Depth attachments have their own storage, independently of color targets.
     pub fn depth_target_rides_with_render_target(&self) -> bool {
-        cfg!(gpusim)
+        false
     }
 
     pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
@@ -2025,7 +2093,7 @@ impl Cx {
     /// Standalone macOS first records any already-pending Draw, then submits
     /// this window before later input, without advancing NextFrame. Other
     /// backends service this work on their ordinary next-render path.
-    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
         if let Some(pass) = self.windows[window_id].main_pass_id {
             self.repaint_pass_and_child_passes(pass);
@@ -2104,10 +2172,14 @@ impl Cx {
         }
     }
 
+    #[track_caller]
     pub fn redraw_all(&mut self) {
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         self.new_draw_event.redraw_all = true;
     }
 
+    #[track_caller]
     pub fn redraw_area(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list(draw_list_id);
@@ -2120,16 +2192,20 @@ impl Cx {
         }
     }
 
+    #[track_caller]
     pub fn redraw_area_and_children(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
         }
     }
 
+    #[track_caller]
     pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
         if self.in_draw_event {
             return;
         }
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         self.redraw_list_in_draw(draw_list_id);
     }
 
@@ -2146,10 +2222,13 @@ impl Cx {
         self.new_draw_event.draw_lists.push(draw_list_id);
     }
 
+    #[track_caller]
     pub fn redraw_list_and_children(&mut self, draw_list_id: DrawListId) {
         if self.in_draw_event {
             return;
         }
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         if self
             .new_draw_event
             .draw_lists_and_children
@@ -2186,6 +2265,16 @@ impl Cx {
         self.keyboard.set_key_focus(focus_area);
     }
 
+    /// The window lost the keyboard: its key focus is kept (and followed through redraws) for
+    /// `unpark_key_focus`, and the live focus is cleared.
+    pub fn park_key_focus(&mut self, window: WindowId) {
+        self.keyboard.park_key_focus(window);
+    }
+
+    pub fn unpark_key_focus(&mut self, window: WindowId) {
+        self.keyboard.unpark_key_focus(window);
+    }
+
     pub fn key_focus(&self) -> Area {
         self.keyboard.key_focus()
     }
@@ -2198,11 +2287,21 @@ impl Cx {
         self.keyboard.has_key_focus(focus_area)
     }
 
+    #[track_caller]
     pub fn new_next_frame(&mut self) -> NextFrame {
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::NextFrame, std::panic::Location::caller());
         let res = NextFrame(self.next_frame_id);
         self.next_frame_id += 1;
         self.new_next_frames.insert(res);
         res
+    }
+
+    /// How many frames were asked for so far: next frames, and redraws
+    /// outside a draw. Two readings around some work tell whether it asked
+    /// for one (a poll that found nothing changed asks for none).
+    pub fn frame_requests(&self) -> u64 {
+        self.frame_requests
     }
 
     /// The frame `next_frame` asked for has not been sent yet. Once it has,
@@ -2642,33 +2741,29 @@ mod stale_window_tests {
         assert_eq!(cx.get_global_ref::<u64>(), Some(&41));
     }
 
-    /// A hosted window (the host reports 930×848 points at dpi 2) whose app
+    /// A window the HAL reports at 930×848 points and dpi 2 whose app
     /// shrank its own dpi to 1.6: it lays out 1.25× larger, and a host
     /// pointer at (100, 100) must land at (125, 125) in its points.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_hosted_window_with_a_dpi_override_lays_out_larger_and_remaps_the_host_pointer() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
         let window = WindowHandle::new(&mut cx);
         let window_id = window.window_id();
         cx.windows[window_id].is_created = true;
-        let native = crate::event::WindowGeom {
-            dpi_factor: 2.0,
-            inner_size: dvec2(930.0, 848.0),
-            ..Default::default()
-        };
-        let first = cx
-            .windows
-            .stdin_apply_native_geom(window_id, native.clone());
-        assert_eq!(first.new_geom.inner_size, dvec2(930.0, 848.0));
+        let restore = makepad_hal::window_state::RESTORE;
+        cx.hal_window_geom(window_id, dvec2(0.0, 0.0), dvec2(930.0, 848.0), 2.0, restore);
+        assert_eq!(cx.windows[window_id].window_geom.inner_size, dvec2(930.0, 848.0));
         cx.windows[window_id].dpi_override = Some(1.6);
-        let again = cx.windows.stdin_apply_native_geom(window_id, native);
+        cx.hal_window_geom(window_id, dvec2(0.0, 0.0), dvec2(930.0, 848.0), 2.0, restore);
+        let again = cx.windows[window_id].window_geom.clone();
         assert!(
-            (again.new_geom.inner_size.x - 1162.5).abs() < 1e-9,
+            (again.inner_size.x - 1162.5).abs() < 1e-9,
             "{:?}",
-            again.new_geom.inner_size
+            again.inner_size
         );
-        assert!((again.new_geom.inner_size.y - 1060.0).abs() < 1e-9);
-        assert_eq!(again.new_geom.dpi_factor, 1.6);
+        assert!((again.inner_size.y - 1060.0).abs() < 1e-9);
+        assert_eq!(again.dpi_factor, 1.6);
         let mut pos = dvec2(100.0, 100.0);
         cx.dpi_override_scale(&mut pos, window_id);
         assert!(
@@ -2705,48 +2800,13 @@ mod stale_window_tests {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_os = "android"), not(gpusim)))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "windows", target_os = "android"))]
 fn can_play_type_impl(mime: &str) -> &'static str {
-    crate::os::linux::linux_video_playback::can_play_type(mime)
+    makepad_hal::can_play_type(mime)
 }
 
-#[cfg(target_os = "android")]
-fn can_play_type_impl(mime: &str) -> &'static str {
-    crate::os::linux::android::android_video_playback::can_play_type(mime)
-}
-
-#[cfg(all(
-    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
-    not(gpusim)
-))]
-fn can_play_type_impl(mime: &str) -> &'static str {
-    crate::os::apple::apple_video_playback::can_play_type(mime)
-}
-
-#[cfg(all(
-    any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "linux"),
-    gpusim
-))]
-fn can_play_type_impl(_mime: &str) -> &'static str {
-    ""
-}
-
-#[cfg(target_os = "windows")]
-fn can_play_type_impl(mime: &str) -> &'static str {
-    crate::os::windows::windows_video_playback::WindowsVideoPlayer::can_play_type(mime)
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "tvos",
-    target_os = "windows",
-)))]
-fn can_play_type_impl(_mime: &str) -> &'static str {
-    ""
-}
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows", target_os = "android")))]
+fn can_play_type_impl(_mime: &str) -> &'static str { "" }
 
 #[macro_export]
 macro_rules! register_component_factory {
@@ -2789,51 +2849,33 @@ macro_rules! register_component_factory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
 
+    /// A texture pass and its render target come out the same pixel size for every scale and
+    /// window size: the target sized with `pass_pixel_size` of the logical size the pass is set
+    /// to, the pass by `get_pass_rect` (snapped to `pass_logical_size`) and then the frame's
+    /// pass size (`pass_pixel_size` again). A target floored where the pass was ceiled was a
+    /// pixel short at 1.25 / 1.41 / 1.75 and the GPU refused the pass (149, Scope's Glass).
     #[test]
-    fn defer_platform_op_breaks_when_requeued_op_is_alone() {
-        let window_id = WindowId(0, 0);
-        let mut platform_ops = VecDeque::new();
-
-        assert!(!defer_platform_op(
-            &mut platform_ops,
-            CxOsOp::SetTopmost(window_id, true),
-        ));
-        assert_eq!(platform_ops, vec![CxOsOp::SetTopmost(window_id, true)]);
+    fn a_pass_is_exactly_its_target_at_every_scale_and_size() {
+        let sizes = [1.0, 7.0, 99.5, 333.0, 640.0, 875.25, 876.0, 1179.0, 1180.0, 1235.7, 1920.0, 2559.0, 4097.3];
+        let mut checked = 0;
+        for step in 100..=250 {
+            let dpi = step as f64 / 100.0;
+            for &w in &sizes {
+                for &h in &sizes {
+                    for logical in [dvec2(w, h), dvec2(w, h) * (1.0 - 1e-12)] {
+                        let target = Cx::pass_pixel_size(logical, dpi);
+                        // the pass: snapped in points, then the frame's pass size from that
+                        let pass = Cx::pass_pixel_size(Cx::pass_logical_size(logical, dpi), dpi);
+                        assert_eq!(pass, target, "logical {logical:?} at dpi {dpi}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 151 * 13 * 13 * 2);
     }
 
-    #[test]
-    fn defer_platform_op_appends_so_pending_ops_still_run_first() {
-        let window_id = WindowId(0, 0);
-        let mut platform_ops = VecDeque::from(vec![CxOsOp::CreateWindow(window_id)]);
-
-        assert!(defer_platform_op(
-            &mut platform_ops,
-            CxOsOp::SetTopmost(window_id, true),
-        ));
-        assert_eq!(
-            platform_ops,
-            vec![
-                CxOsOp::CreateWindow(window_id),
-                CxOsOp::SetTopmost(window_id, true),
-            ]
-        );
-    }
-
-    #[test]
-    fn platform_ops_drain_fifo_create_window_then_set_topmost() {
-        let window_id = WindowId(0, 0);
-        let mut platform_ops = VecDeque::new();
-        platform_ops.push_back(CxOsOp::CreateWindow(window_id));
-        platform_ops.push_back(CxOsOp::SetTopmost(window_id, true));
-
-        let first = platform_ops.pop_front().unwrap();
-        let second = platform_ops.pop_front().unwrap();
-        assert!(matches!(first, CxOsOp::CreateWindow(_)));
-        assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
-        assert!(platform_ops.is_empty());
-    }
     #[test]
     fn nested_overlay_locks_unwind_one_level_at_a_time() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
@@ -2891,6 +2933,13 @@ impl Cx {
     /// "resource"; image decodes, glyph rasters and the like by the
     /// subsystems that registered a probe. Texture uploads are not loads:
     /// a backend uploads a texture in the frame that first samples it.
+    /// Frames presented with a glyph drawn blank: the web build rasterises its glyphs in the
+    /// draw (natively the HAL's font service answers after it, see `os::hal::fonts`).
+    #[cfg(target_arch = "wasm32")]
+    pub fn blank_glyph_frames(&self) -> u64 {
+        0
+    }
+
     pub fn pending_async_loads(&self) -> Vec<(&'static str, usize)> {
         let mut pending = Vec::new();
         let resources = self
@@ -3103,6 +3152,7 @@ impl Cx {
     /// Allocated texture bytes, including free pool slots and pending releases.
     /// Unknown externally owned allocations are omitted. This is an on-demand
     /// O(pool size) measurement; ordinary rendering does not scan the pool.
+    #[cfg(target_arch = "wasm32")]
     pub fn texture_pool_bytes(&self) -> u64 {
         self.textures.0.pool.iter().enumerate().fold(
             self.textures.1.retired.iter().fold(0u64, |sum, retired| {
@@ -3151,7 +3201,6 @@ mod host_io_tests {
         assert_eq!(cx.platform_ops.len(), before);
     }
 }
-
 
 #[cfg(test)]
 mod readback_routing_tests {
@@ -3221,5 +3270,20 @@ mod async_load_tests {
         cx.register_async_load_probe("image", |_| 0);
         cx.register_async_load_probe("glyph", |_| 5);
         assert_eq!(cx.pending_async_loads(), vec![("glyph", 5)]);
+    }
+
+    #[test]
+    fn frame_requests_count_next_frames_and_redraws_outside_a_draw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let start = cx.frame_requests();
+        cx.new_next_frame();
+        cx.redraw_all();
+        assert_eq!(cx.frame_requests(), start + 2);
+        // a redraw asked inside a draw is spent by that draw: no request
+        let list = crate::draw_list::DrawList::new(&mut cx);
+        cx.in_draw_event = true;
+        cx.redraw_list(list.id());
+        cx.in_draw_event = false;
+        assert_eq!(cx.frame_requests(), start + 2);
     }
 }

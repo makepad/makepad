@@ -42,7 +42,6 @@ use makepad_widgets_core::makepad_draw::vector::{LineCap, LineJoin};
 use makepad_widgets_core::makepad_platform::event::TouchState;
 use makepad_widgets_core::widget_tree::CxWidgetExt;
 use makepad_widgets_core::*;
-use std::any::TypeId;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -99,6 +98,10 @@ const FIT_MARGIN: f64 = 32.0;
 const MIN_NODE_WIDTH: f64 = 160.0;
 const MIN_TEXT_LINE_H: f64 = 18.0;
 const RESIZE_GRIP: f64 = 18.0;
+/// One wrapped line of a node's error text.
+const ERROR_LINE_H: f64 = 12.0;
+/// A longer error is cut; the run's header and status line carry it whole.
+const ERROR_MAX_LINES: usize = 5;
 const FLIP_SECONDS: f64 = 0.2;
 const AUTO_FLIP_RATIO: f64 = 0.8;
 const AUTO_FLIP_SETTLE_SECONDS: f64 = 0.25;
@@ -128,18 +131,18 @@ fn card_outline_geometry(body_rect: Rect, zoom: f64) -> CardOutlineGeometry {
     }
 }
 
-fn is_interactive_face_type(type_id: TypeId) -> bool {
-    type_id == TypeId::of::<TextInput>()
-        || type_id == TypeId::of::<FabValueInput>()
-        || type_id == TypeId::of::<DropDown>()
-        || type_id == TypeId::of::<DropDown2>()
-        || type_id == TypeId::of::<Button>()
-        || type_id == TypeId::of::<FoldHeader>()
-        || type_id == TypeId::of::<FoldButton>()
-        || type_id == TypeId::of::<Slider>()
-        || type_id == TypeId::of::<Video>()
-        || type_id == TypeId::of::<CheckBox>()
-        || type_id == TypeId::of::<RadioButton>()
+fn is_interactive_face_type(type_id: ScriptTypeId) -> bool {
+    type_id == <TextInput as ScriptNew>::script_type_id_static()
+        || type_id == <FabValueInput as ScriptNew>::script_type_id_static()
+        || type_id == <DropDown as ScriptNew>::script_type_id_static()
+        || type_id == <DropDown2 as ScriptNew>::script_type_id_static()
+        || type_id == <Button as ScriptNew>::script_type_id_static()
+        || type_id == <FoldHeader as ScriptNew>::script_type_id_static()
+        || type_id == <FoldButton as ScriptNew>::script_type_id_static()
+        || type_id == <Slider as ScriptNew>::script_type_id_static()
+        || type_id == <Video as ScriptNew>::script_type_id_static()
+        || type_id == <CheckBox as ScriptNew>::script_type_id_static()
+        || type_id == <RadioButton as ScriptNew>::script_type_id_static()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3238,6 +3241,33 @@ impl FlowCanvas {
         route
     }
 
+    /// A node's error as the card shows it: word-wrapped to `width`, at most
+    /// [`ERROR_MAX_LINES`] lines, the last one ending in `…` when cut.
+    fn error_lines(&self, cx: &mut Cx2d, error: &str, width: f64) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for paragraph in error.lines() {
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+                if !line.is_empty() && self.text_width(cx, &self.draw_error, &candidate) > width {
+                    lines.push(std::mem::replace(&mut line, word.to_string()));
+                } else {
+                    line = candidate;
+                }
+            }
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        if lines.len() > ERROR_MAX_LINES {
+            lines.truncate(ERROR_MAX_LINES);
+            if let Some(last) = lines.last_mut() {
+                last.push_str(" …");
+            }
+        }
+        lines
+    }
+
     fn text_width(&self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> f64 {
         draw.layout(cx, 0.0, 0.0, None, false, Align::default(), text)
             .size_in_lpxs
@@ -3391,7 +3421,7 @@ impl FlowCanvas {
         // data cannot feed back into routing or card measurements. This pass
         // sits under the thin centreline and selection affordances.
         let mut observed = vec![false; self.edges.len()];
-        if let (Some(host), Some(viewport)) = (scope.data.get_mut::<NodeFacesScope>(), self.drawn_viewport) {
+        if let (Some(host), Some(viewport)) = (scope.data_mut().get_mut::<NodeFacesScope>(), self.drawn_viewport) {
             for (index, edge) in self.edges.iter().enumerate() {
                 if picked_up == Some(*edge) { continue; }
                 let Some(cached) = self.wire_cache[index].as_ref() else { continue };
@@ -3826,13 +3856,14 @@ impl FlowCanvas {
                         .get(&node.id)
                         .and_then(|status| status.error.as_deref())
                 });
-            if let Some(error) = error {
-                let line = error.lines().next().unwrap_or(error);
-                self.draw_error.draw_abs(
-                    cx,
-                    dvec2(r.pos.x + CARD_PAD, r.pos.y + r.size.y - 18.0),
-                    line,
-                );
+            if let Some(error) = error.map(str::to_string) {
+                // Wrapped to the card, bottom-aligned in the rows draw_faces reserved.
+                let lines = self.error_lines(cx, &error, r.size.x - 2.0 * CARD_PAD);
+                let mut y = r.pos.y + r.size.y - 18.0 - ERROR_LINE_H * (lines.len().max(1) - 1) as f64;
+                for line in &lines {
+                    self.draw_error.draw_abs(cx, dvec2(r.pos.x + CARD_PAD, y), line);
+                    y += ERROR_LINE_H;
+                }
             }
         }
     }
@@ -3848,7 +3879,7 @@ impl FlowCanvas {
         indices: &[usize],
     ) -> Vec<(usize, f64)> {
         let mut measured = Vec::new();
-        if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+        if let Some(faces) = scope.data_mut().get_mut::<NodeFacesScope>() {
             faces
                 .faces()
                 .set_popup_anchor_transform(cx, Some(self.camera.popup_anchor_transform()));
@@ -3858,11 +3889,12 @@ impl FlowCanvas {
             let r = self.card_rect(graph, index);
             let full_bleed = Self::full_bleed(node);
             let content = card_content_rect(r, full_bleed, Self::port_rows(node));
-            let has_error = self.face_errors.contains_key(&node.id)
-                || self
-                    .statuses
-                    .get(&node.id)
-                    .is_some_and(|status| status.error.is_some());
+            let error = self
+                .face_errors
+                .get(&node.id)
+                .cloned()
+                .or_else(|| self.statuses.get(&node.id).and_then(|status| status.error.clone()));
+            let error_rows = error.map_or(0, |error| self.error_lines(cx, &error, r.size.x - 2.0 * CARD_PAD).len().max(1));
             let is_resizing = matches!(
                 self.drag.as_ref(),
                 Some(Drag::Resize {
@@ -3908,7 +3940,7 @@ impl FlowCanvas {
                     anchor: self.camera.local_to_screen(self.wire_anchor(graph, index, port, true)),
                 })).collect(),
             };
-            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+            if let Some(faces) = scope.data_mut().get_mut::<NodeFacesScope>() {
                 faces.faces().draw_face_in_viewport(
                     cx,
                     &node.id,
@@ -3922,16 +3954,16 @@ impl FlowCanvas {
                 );
             }
             let rect = cx.end_turtle();
-            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+            if let Some(faces) = scope.data_mut().get_mut::<NodeFacesScope>() {
                 faces.faces().draw_node_overlay(cx, &node.id, &face_viewport);
             }
             cx.pop_clip_rect();
             let mut height = rect.size.y + content.pad_top + content.pad_bottom;
-            if has_error {
-                height += 20.0;
+            if error_rows > 0 {
+                height += 20.0 + ERROR_LINE_H * (error_rows - 1) as f64;
             }
             let height = height.max(min_card_height(full_bleed, Self::port_rows(node)));
-            let pending_face = scope.data.get_mut::<NodeFacesScope>()
+            let pending_face = scope.data_mut().get_mut::<NodeFacesScope>()
                 .is_some_and(|faces| faces.faces().face_measurement_pending(&node.id));
             if !pending_face && node.size.is_none() && (self.heights[index] - height).abs() > 0.5 {
                 measured.push((index, height));
@@ -4296,20 +4328,20 @@ mod tests {
     #[test]
     fn face_press_classification_keeps_controls_interactive_and_displays_draggable() {
         for interactive in [
-            TypeId::of::<TextInput>(),
-            TypeId::of::<FabValueInput>(),
-            TypeId::of::<DropDown>(),
-            TypeId::of::<Button>(),
-            TypeId::of::<FoldHeader>(),
-            TypeId::of::<Slider>(),
+            <TextInput as ScriptNew>::script_type_id_static(),
+            <FabValueInput as ScriptNew>::script_type_id_static(),
+            <DropDown as ScriptNew>::script_type_id_static(),
+            <Button as ScriptNew>::script_type_id_static(),
+            <FoldHeader as ScriptNew>::script_type_id_static(),
+            <Slider as ScriptNew>::script_type_id_static(),
         ] {
             assert!(is_interactive_face_type(interactive));
         }
         for display in [
-            TypeId::of::<View>(),
-            TypeId::of::<Image>(),
-            TypeId::of::<Label>(),
-            TypeId::of::<makepad_widgets_rich_text::markdown::Markdown>(),
+            <View as ScriptNew>::script_type_id_static(),
+            <Image as ScriptNew>::script_type_id_static(),
+            <Label as ScriptNew>::script_type_id_static(),
+            <makepad_widgets_rich_text::markdown::Markdown as ScriptNew>::script_type_id_static(),
         ] {
             assert!(!is_interactive_face_type(display));
         }
@@ -4578,7 +4610,7 @@ impl FlowCanvas {
                 self.draw_boundaries(cx, &graph);
                 self.draw_wires(cx, scope, &graph);
                 let z_order = std::mem::take(&mut self.z_order);
-                if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+                if let Some(faces) = scope.data_mut().get_mut::<NodeFacesScope>() {
                     // A boundary node has no card and so no face to order.
                     if self.boundary_nodes.is_empty() {
                         faces.faces().set_z_order(&z_order);
@@ -4677,7 +4709,7 @@ impl Widget for FlowCanvas {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let policy = scope.data.get_mut::<NodeFacesScope>()
+        let policy = scope.data_mut().get_mut::<NodeFacesScope>()
             .and_then(|faces| faces.policy_for(self.uid))
             .unwrap_or(CanvasEventPolicy::ALL);
         self.handle_event_routed(cx, event, scope, policy);

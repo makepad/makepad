@@ -20,6 +20,7 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-remote = { path = "../../libs/remote" }
 makepad-toml-parser = { path = "../../libs/toml_parser" }
 makepad-source-slice = { path = "../../libs/source_slice" }
 makepad-script = { path = "../../platform/script" }

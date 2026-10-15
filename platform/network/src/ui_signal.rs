@@ -57,6 +57,30 @@ pub fn wake_ui_loop() {
 pub struct SignalToUI(Arc<AtomicBool>);
 
 static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+/// `MAKEPAD_FRAME_TRACE=1`: who raised the app signal, by source line, for the
+/// platform's frame-source report (`take_signal_sources`).
+fn signal_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some_and(|v| v != "0" && !v.is_empty()))
+}
+
+type SignalSources = std::collections::HashMap<&'static std::panic::Location<'static>, u32>;
+static SIGNAL_SOURCES: Mutex<Option<SignalSources>> = Mutex::new(None);
+
+#[track_caller]
+fn note_signal_source() {
+    if !signal_trace_on() { return; }
+    let at = std::panic::Location::caller();
+    if let Ok(mut sources) = SIGNAL_SOURCES.lock() {
+        *sources.get_or_insert_with(Default::default).entry(at).or_default() += 1;
+    }
+}
+
+/// The app-signal raises counted since the last call (`MAKEPAD_FRAME_TRACE=1` only).
+pub fn take_signal_sources() -> Vec<(&'static std::panic::Location<'static>, u32)> {
+    SIGNAL_SOURCES.lock().ok().and_then(|mut sources| sources.take()).map(|m| m.into_iter().collect()).unwrap_or_default()
+}
 static INTERNAL_SIGNAL: AtomicBool = AtomicBool::new(false);
 static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 
@@ -65,7 +89,9 @@ impl SignalToUI {
     /// dispatches `Event::Signal` to the whole widget tree, so raise this only
     /// for data an app polls on that event: a `ToUISender`, a task result, a
     /// texture readback. Makepad's own queues raise `set_internal_signal`.
+    #[track_caller]
     pub fn set_ui_signal() {
+        note_signal_source();
         if !UI_SIGNAL.swap(true, Ordering::AcqRel) {
             wake_ui_loop();
         }
@@ -113,6 +139,7 @@ impl SignalToUI {
         self.0.swap(false, Ordering::AcqRel)
     }
 
+    #[track_caller]
     pub fn set(&self) {
         self.0.store(true, Ordering::Release);
         Self::set_ui_signal();
@@ -221,6 +248,7 @@ impl<T> ToUISender<T> {
         }
     }
 
+    #[track_caller]
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let result = match &self.sender {
             ChannelSender::Unbounded(sender) => sender.send(value),
@@ -232,6 +260,7 @@ impl<T> ToUISender<T> {
         result
     }
 
+    #[track_caller]
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
         let result = match &self.sender {
             ChannelSender::Unbounded(sender) => sender.send(value).map_err(|error| {
@@ -265,6 +294,7 @@ pub fn to_ui_oneshot<T>() -> (ToUIOneshotSender<T>, ToUIOneshotReceiver<T>) {
 }
 
 impl<T> ToUIOneshotSender<T> {
+    #[track_caller]
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
         let result = self.sender.take().unwrap().send(value);
         if result.is_ok() {

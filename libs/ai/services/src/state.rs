@@ -4,6 +4,7 @@
 //! links only this and the wire, and a host that owns the engine hands the
 //! panel a reference to its state each frame.
 
+use crate::card::Card;
 use crate::wire::ToolOutcome;
 
 /// Where the conversation is right now.
@@ -93,9 +94,12 @@ pub struct ServiceInfo {
 /// A tool card's life.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolStatus {
-    /// Destructive: parked until the person clicks Run or Cancel.
+    /// Parked until the person clicks Run or Cancel: a destructive call
+    /// (a plain confirm) or a request (a settings card, `ToolEntry::card`).
     Confirm,
     Running { note: String, permille: u16 },
+    /// Still running, with no recent progress. Only the person's Stop cancels it.
+    NotResponding { note: String, permille: u16 },
     Done { outcome: ToolOutcome, note: String, text: String },
 }
 
@@ -122,6 +126,54 @@ pub struct ToolEntry {
     pub preview: bool,
     /// The person opened the details.
     pub expanded: bool,
+    /// The settings card of a parked request: its fields, filled from the
+    /// call's arguments. `None` for every other call.
+    pub card: Option<Card>,
+}
+
+/// A one-click starting point in the empty conversation: clicking it opens
+/// `tool` of `app` as a settings card filled from `prefill`, with no model
+/// turn — or, for a prompt ([`Suggestion::prompt`], no tool), sends
+/// `prefill` as the person's line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggestion {
+    pub label: String,
+    /// The app id (`stage`).
+    pub app: String,
+    /// The tool's short name.
+    pub tool: String,
+    /// A JSON object of the arguments to start from (`{}` for none); for
+    /// a prompt, the line it sends.
+    pub prefill: String,
+}
+
+impl Suggestion {
+    /// A starting point that is a line the person could have typed: the
+    /// model takes it from there.
+    pub fn prompt(label: &str, line: &str) -> Suggestion {
+        Suggestion { label: label.to_string(), app: String::new(), tool: String::new(), prefill: line.to_string() }
+    }
+
+    pub fn is_prompt(&self) -> bool {
+        self.tool.is_empty()
+    }
+}
+
+/// What the person is looking at: a chip on the composer. While it is set
+/// the turn focuses `app`'s service and `context` goes to the model with
+/// each user line (it is not shown as the person's text).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub label: String,
+    pub app: String,
+    /// One or a few lines the host keeps current: the page, the document,
+    /// the selection.
+    pub context: String,
+    /// The element the person picked on the page, as the panel shows it
+    /// under the context line ("title text · slides/stack.splash:206");
+    /// its details go in `context`. The panel's clear button asks the host
+    /// to deselect it (`AiChatPanelAction::SelectionCleared`).
+    pub selection: Option<String>,
 }
 
 /// One asynchronous service publication shown as its own card. It is sent
@@ -167,6 +219,10 @@ pub struct EngineState {
     pub providers: Vec<ProviderRow>,
     pub local_only: bool,
     pub services: Vec<ServiceInfo>,
+    /// Chips over the composer.
+    pub suggestions: Vec<Suggestion>,
+    /// The composer's target chip.
+    pub target: Option<Target>,
     pub generation: u64,
 }
 
@@ -252,6 +308,7 @@ mod tests {
                 status: ToolStatus::Running { note: String::new(), permille: 0 },
                 preview: true,
                 expanded: false,
+                card: None,
             })
         };
         s.push(card("a"));

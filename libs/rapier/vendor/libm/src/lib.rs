@@ -1,9 +1,9 @@
 //! libm in pure Rust
 #![no_std]
-#![cfg_attr(intrinsics_enabled, allow(internal_features))]
-#![cfg_attr(intrinsics_enabled, feature(core_intrinsics))]
+#![cfg_attr(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")), allow(internal_features))]
+#![cfg_attr(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")), feature(core_intrinsics))]
 #![cfg_attr(
-    all(intrinsics_enabled, target_family = "wasm"),
+    all(all(feature = "unstable-intrinsics", not(feature = "force-soft-floats")), target_family = "wasm"),
     feature(wasm_numeric_instr)
 )]
 #![cfg_attr(f128_enabled, feature(f128))]

@@ -5,17 +5,19 @@
 //! render graph). The host shows the returned texture (a Motion layer, a
 //! game widget) or reads it as a picture (the text texture).
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use crate::draw::{DrawKineticBackdrop, DrawKineticGlyph};
 use crate::kernel::{self, SIGNALS};
 use crate::kit::{self, Kit, KitValues};
 use crate::records::{Karaoke, Records, GLYPH_WORDS};
 use crate::shapes::{self, GlyphSet, VERT_FLOATS};
-use makepad_draw::makepad_platform::draw_shader_layout::{LayoutKind, LayoutPacking, PodType};
+use makepad_draw::makepad_platform::draw_shader_layout::{LayoutKind, LayoutPacking};
 use makepad_draw::*;
 use makepad_audio_reactive::{bind_audio, AudioFrame};
 use makepad_render_graph::{Attachments, FrameUniforms, GraphRunner, Stage, StageInputs};
-use makepad_script_compute::kernel::{FieldTy, Kernel, Layout, LayoutField};
-use std::sync::Arc;
+use makepad_render_kernels::{kernel_layout, LayoutMapError, RecordLayout};
+use makepad_script_compute::kernel::KernelRef;
+
 
 /// The per-frame signals a host gives.
 #[derive(Clone, Default)]
@@ -76,14 +78,14 @@ fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue
         })
         .cloned()
         .collect();
-    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(kit::KIT_MODULE).into(), NoTrap).as_object();
+    let module = vm.value(vm.modules(), LiveId::from_str(kit::KIT_MODULE)).as_object();
     for (k, (name, _)) in kit.values.dials.iter().enumerate().take(4) {
         let id = LiveId::from_str(name);
         if own.iter().any(|(n, _)| *n == id) {
             continue;
         }
         if let Some(m) = module {
-            out.push((id, vm.bx.heap.value(m, LiveId::from_str(["dial_x", "dial_y", "dial_z", "dial_w"][k]).into(), NoTrap)));
+            out.push((id, vm.value(m, LiveId::from_str(["dial_x", "dial_y", "dial_z", "dial_w"][k]))));
         }
     }
     out
@@ -92,16 +94,18 @@ fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue
 /// Register the draw shaders and the kit module (after `makepad_draw::script_mod`
 /// and `makepad_render_graph::script_mod_passes`).
 pub fn script_mod(vm: &mut ScriptVm) {
-    makepad_script_compute::module::register_shared_std(vm);
+    if makepad_script_compute::module::register_shared_std(vm) {
+        makepad_tween_script::install_ease(vm);
+    }
     // The bundled fonts the 3D letters name (`FontSource::Bundled`) are in
     // the widget library's resources, wherever this VM's widgets put them.
-    if let Some(dir) = vm.bx.code.crate_manifests.borrow().get("makepad_widgets") {
-        makepad_text_mesh::letters::set_fonts_dir(std::path::Path::new(dir).join("resources"));
+    if let Some(dir) = vm.crate_manifest("makepad_widgets") {
+        makepad_text_mesh::letters::set_fonts_dir(std::path::Path::new(&dir).join("resources"));
     }
     // Once per VM, however many hosts ask.
-    let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
+    let draw = vm.value(vm.modules(), LiveId::from_str("draw")).as_object();
     let have = draw.is_some_and(|d| {
-        let v = vm.bx.heap.value(d, LiveId::from_str("DrawKineticGlyph").into(), NoTrap);
+        let v = vm.value(d, LiveId::from_str("DrawKineticGlyph"));
         !v.is_nil() && !v.is_err()
     });
     if !have {
@@ -118,33 +122,20 @@ fn kit_draw<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, base: &str, members: 
     if members.is_empty() {
         return draw;
     }
-    let proto = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object().map_or(NIL, |d| vm.bx.heap.value(d, LiveId::from_str(base).into(), NoTrap));
-    let o = vm.bx.heap.new_with_proto(proto);
+    let proto = vm.value(vm.modules(), LiveId::from_str("draw")).as_object().map_or(NIL, |d| vm.value(d, LiveId::from_str(base)));
+    let o = vm.new_with_proto(proto);
     for (k, v) in members {
-        vm.bx.heap.set_value_def(o, (*k).into(), *v);
+        vm.set_value_def(o, *k, *v);
     }
     draw.script_apply(vm, &Apply::Eval, &mut Scope::default(), o.into());
     draw
 }
 
 /// The glyph draw's instance record as the kernel's `KineticGlyph` layout.
-fn instance_layout(cx: &Cx, draw: &DrawKineticGlyph) -> Result<Layout, String> {
+fn instance_layout(cx: &Cx, draw: &DrawKineticGlyph) -> Result<RecordLayout, String> {
     let id = draw.draw_vars.draw_shader_id.ok_or("the glyph shader has no id")?;
     let l = cx.layout_of(id, LayoutKind::Instance, LayoutPacking::VertexFetch).map_err(|e| format!("layout_of: {e:?}"))?;
-    let mut fields = Vec::new();
-    for f in &l.fields {
-        let ty = match f.ty {
-            PodType::F32 => FieldTy::F32,
-            PodType::I32 | PodType::U32 => FieldTy::I32,
-            PodType::Vec2 => FieldTy::Vec2,
-            PodType::Vec3 => FieldTy::Vec3,
-            PodType::Vec4 => FieldTy::Vec4,
-            PodType::Mat4 => FieldTy::Mat4,
-            other => return Err(format!("instance field `{}` is a {other:?}", f.name)),
-        };
-        fields.push(LayoutField { name: f.name.to_string(), ty, offset: f.offset_words });
-    }
-    Ok(Layout { name: "KineticGlyph".into(), stride: l.stride_words, fields })
+    kernel_layout("KineticGlyph", &l).map_err(|LayoutMapError::Unsupported { field, ty }| format!("instance field `{field}` is a {ty}"))
 }
 
 /// A u x v grid over 0..1 (face class 6), shaped in the vertex stage by
@@ -182,6 +173,15 @@ struct Picture {
     list: DrawList,
     color: Texture,
     depth: Texture,
+}
+
+/// Empty the texture slot the shader named `id` (no-op without it).
+fn unbind_named(cx: &Cx, dv: &mut DrawVars, id: LiveId) {
+    if let Some(sid) = dv.draw_shader_id {
+        if let Some(slot) = cx.draw_shaders[sid.index].mapping.textures.iter().position(|t| t.id == id) {
+            dv.texture_slots[slot] = None;
+        }
+    }
 }
 
 /// Bind `tex` to the texture slot the shader named `id` (no-op without it).
@@ -296,12 +296,12 @@ pub struct KineticView {
     overlay: bool,
     draw: DrawKineticGlyph,
     backdrop: Option<DrawKineticBackdrop>,
-    glyph_kernel: Arc<Kernel>,
-    camera_kernel: Option<Arc<Kernel>>,
-    curve_kernel: Option<Arc<Kernel>>,
+    glyph_kernel: KernelRef,
+    camera_kernel: Option<KernelRef>,
+    curve_kernel: Option<KernelRef>,
     /// The curve's points, resampled data and texture.
     curve: (Vec<f32>, Vec<[f32; 3]>, Option<Texture>, f32),
-    layout: Layout,
+    layout: RecordLayout,
     shape_word: usize,
     set: Option<GlyphSet>,
     text: Option<String>,
@@ -343,14 +343,16 @@ impl KineticView {
         }
         let layout = instance_layout(cx, &draw)?;
         let shape_word = layout.fields.iter().find(|f| f.name == "shape").map(|f| f.offset as usize).ok_or("the glyph record has no `shape`")?;
+        let fields = layout.field_views();
+        let out = layout.view(&fields);
         let (glyph_kernel, camera_kernel, curve_kernel) = cx.with_vm(|vm| -> Result<_, String> {
-            let glyph = kernel::compile(vm, &kit, kernel::Which::Glyph, &layout)?;
+            let glyph = kernel::compile(vm, &kit, kernel::Which::Glyph, &out)?;
             let camera = match kit.fn_field(vm, "camera_fn") {
-                Some(_) => Some(kernel::compile(vm, &kit, kernel::Which::Camera, &layout)?),
+                Some(_) => Some(kernel::compile(vm, &kit, kernel::Which::Camera, &out)?),
                 None => None,
             };
             let curve = match (kit.fn_field(vm, "curve_fn"), kit.values.curve_points) {
-                (Some(_), Some(_)) => Some(kernel::compile(vm, &kit, kernel::Which::Curve, &layout)?),
+                (Some(_), Some(_)) => Some(kernel::compile(vm, &kit, kernel::Which::Curve, &out)?),
                 (Some(_), None) => return Err("a kit with `curve_fn` also declares `curve: {points: 256}`".to_string()),
                 _ => None,
             };
@@ -768,6 +770,10 @@ impl KineticView {
             if let Some(a) = &frame.audio {
                 bind_audio(cx.cx, &mut self.draw.draw_vars, a);
             }
+            // the frame pass below binds the picture to the glyph draw; drawing INTO the
+            // picture the draw must not sample it (Vulkan refused the draw: the title of a
+            // `picture` kit was missing on Linux)
+            unbind_named(cx.cx, &mut self.draw.draw_vars, live_id!(pic_tex));
             calls += glyphs.draw(cx, &mut self.draw);
             pp.list.end(cx);
             cx.end_pass(&pp.pass);

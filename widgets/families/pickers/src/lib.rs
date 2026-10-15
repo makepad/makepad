@@ -24,6 +24,7 @@ pub mod picker_parts;
 pub mod radio_group;
 pub mod range_slider;
 pub mod rating;
+pub mod recent_list;
 pub mod tag_field;
 pub mod transfer;
 pub mod tree_select;
@@ -47,6 +48,7 @@ pub fn pickers_mod(vm: &mut ScriptVm) {
     crate::column_picker::script_mod(vm);
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
+    crate::recent_list::script_mod(vm);
 }
 
 // The pooled test contexts and the whole registration the tests build on:
@@ -105,22 +107,18 @@ pub(crate) fn widgets_mod_source() -> &'static str {
 #[cfg(test)]
 mod field_row_tests {
     use makepad_widgets_core::desktop_style::{catalogue, install, StyleSheet};
-    use makepad_widgets_core::makepad_script::trap::NoTrap;
     use makepad_widgets_core::*;
 
     /// A field's box metrics as the sheet leaves them: the minimum height,
     /// and the padding above and below the line.
     fn field_metrics(vm: &mut ScriptVm, name: &str) -> (Option<f64>, Option<f64>, Option<f64>) {
         let widgets = vm.module(id!(widgets));
-        let widget = vm
-            .bx
-            .heap
-            .value(widgets, LiveId::from_str(name).into(), NoTrap)
+        let widget = vm.value(widgets, LiveId::from_str(name))
             .as_object()
             .unwrap_or_else(|| panic!("the family has no widget named {name}"));
-        let min = vm.bx.heap.value(widget, id!(min_height).into(), NoTrap).as_f64();
-        let pad = vm.bx.heap.value(widget, id!(padding).into(), NoTrap).as_object();
-        let side = |vm: &mut ScriptVm, key: LiveId| pad.and_then(|p| vm.bx.heap.value(p, key.into(), NoTrap).as_f64());
+        let min = vm.value(widget, id!(min_height)).as_f64();
+        let pad = vm.value(widget, id!(padding)).as_object();
+        let side = |vm: &mut ScriptVm, key: LiveId| pad.and_then(|p| vm.value(p, key).as_f64());
         (min, side(vm, id!(top)), side(vm, id!(bottom)))
     }
 
@@ -137,7 +135,7 @@ mod field_row_tests {
             cx.with_vm(|vm| {
                 crate::script_mod(vm);
                 install(vm, StyleSheet::load(entry));
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let sheet = entry.id;
                 assert!(vm.take_errors().is_empty(), "{sheet} does not evaluate");

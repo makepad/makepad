@@ -1,7 +1,4 @@
 mod compile;
-mod dyn_pack;
-mod proc_pack;
-pub use dyn_pack::rustc_wrapper as android_rustc_wrapper;
 mod sdk;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -16,7 +13,6 @@ pub enum HostOs {
 #[derive(Clone, Copy, PartialEq)]
 pub enum AndroidVariant {
     Default,
-    Quest,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,6 +38,9 @@ pub struct ManifestArgs<'a> {
     pub version_code: u32,
     pub version_name: &'a str,
     pub debuggable: bool,
+    /// More `<activity>` elements, appended after the launcher activity (the host APK's
+    /// MakepadApp behind its RunActivity; empty for an ordinary app).
+    pub extra_activities: &'a str,
 }
 
 impl AndroidVariant {
@@ -49,12 +48,11 @@ impl AndroidVariant {
         for opt in opt.split(",") {
             match opt {
                 "default" => return Ok(AndroidVariant::Default),
-                "quest" => return Ok(AndroidVariant::Quest),
                 _ => (),
             }
         }
         return Err(format!(
-            "please provide a valid android variant: default, quest"
+            "please provide a valid android variant: default"
         ));
     }
 
@@ -69,6 +67,7 @@ impl AndroidVariant {
             version_code,
             version_name,
             debuggable,
+            extra_activities,
         } = args;
         let icon_attr = if *has_icon {
             "\n                    android:icon=\"@mipmap/ic_launcher\""
@@ -92,13 +91,15 @@ impl AndroidVariant {
                     android:supportsRtl="true"
                     android:debuggable="{debuggable_str}"
                     android:largeHeap="true"
+                    android:enableOnBackInvokedCallback="true"
                     tools:targetApi="{target_sdk_version}">
                     <!-- Lets adb shell attach simpleperf to a release build (API 29+, ignored below). -->
                     <profileable android:shell="true" tools:targetApi="29" />
-                    <meta-data android:name="android.max_aspect" android:value="2.1" />
+                    <!-- Without this the system caps the window at its default 1.86 aspect and letterboxes every taller phone (a black band under the app, where the gesture bar is). -->
+                    <meta-data android:name="android.max_aspect" android:value="3.0" />
                     <activity
                     android:name=".{class_name}"
-                    android:configChanges="orientation|screenSize|keyboardHidden"
+                    android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
                     android:exported="true"
                     android:launchMode="singleTask"
                     android:windowSoftInputMode="adjustNothing|stateUnchanged"
@@ -108,6 +109,7 @@ impl AndroidVariant {
                         <category android:name="android.intent.category.LAUNCHER" />
                     </intent-filter>
                     </activity>
+                    {extra_activities}
                 </application>
                 <uses-sdk android:minSdkVersion="{sdk_version}" android:targetSdkVersion="{target_sdk_version}" />
                 <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
@@ -141,196 +143,10 @@ impl AndroidVariant {
                 </manifest>
                 "#
             ),
-            Self::Quest => format!(
-                r#"<?xml version="1.0" encoding="utf-8"?>
-                <manifest
-                    xmlns:android="http://schemas.android.com/apk/res/android"
-                    xmlns:tools="http://schemas.android.com/tools"
-                    package="{url}"
-                    android:versionCode="{version_code}"
-                    android:versionName="{version_name}"
-                    android:installLocation="auto"
-                >
-
-                <uses-sdk android:minSdkVersion="{sdk_version}" android:targetSdkVersion="{target_sdk_version}" />
-                <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
-                <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
-                <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
-                <uses-feature android:name="com.oculus.feature.CONTEXTUAL_BOUNDARYLESS_APP" android:required="false"/>
-                <uses-permission android:name="com.oculus.permission.USE_SCENE" />
-                <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
-                <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
-                <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
-                <uses-permission android:name="android.permission.INTERNET" />
-                <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-                <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-                <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
-                <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
-                <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-                <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-                <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
-                <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
-                <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API" />
-                <!-- Grants access to Shared Spatial Anchors. -->
-                <uses-permission android:name="com.oculus.permission.IMPORT_EXPORT_IOT_MAP_DATA" />
-                <uses-permission android:name="com.oculus.permission.USE_COLOCATION_DISCOVERY_API" />
-
-                <application
-                    android:label="{label}"{icon_attr}
-                    android:theme="@style/MakepadAppTheme"
-                    android:allowBackup="true"
-                    android:supportsRtl="true"
-                    android:debuggable="{debuggable_str}"
-                    android:largeHeap="true"
-                    tools:targetApi="{target_sdk_version}">
-                    <profileable android:shell="true" tools:targetApi="29" />
-                    <!-- Quest 3-only CPU/GPU trade: prefer one extra CPU level over one GPU level. -->
-                    <meta-data
-                        android:name="com.oculus.trade_cpu_for_gpu_amount"
-                        android:value="-1" />
-                    <activity
-                        android:name=".{class_name}"
-                        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
-                        android:excludeFromRecents="false"
-                        android:exported="true"
-                        android:launchMode="singleTask"
-                        android:screenOrientation="landscape"
-                        android:windowSoftInputMode="adjustNothing|stateUnchanged"
-                        android:theme="@style/MakepadLaunchTheme"
-                        >
-                        <intent-filter>
-                            <action android:name="android.intent.action.MAIN" />
-                            <category android:name="android.intent.category.LAUNCHER" />
-                        </intent-filter>
-                        </activity>
-
-                    <activity
-                        android:name="{class_name}Xr"
-                        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
-                        android:excludeFromRecents="false"
-                        android:exported="true"
-                        android:launchMode="singleTask"
-                        android:screenOrientation="landscape"
-                        android:windowSoftInputMode="adjustNothing|stateUnchanged"
-                        android:theme="@style/MakepadLaunchTheme"
-                        >
-                        <intent-filter>
-                            <action android:name="android.intent.action.MAIN" />
-                            <category android:name="com.oculus.intent.category.VR" />
-                        </intent-filter>
-                    </activity>
-                </application>
-
-                <queries>
-                <!-- to talk to the broker -->
-                    <provider
-                    android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
-
-                <!-- so client-side code of runtime/layers can talk to their service sides -->
-                <intent>
-                <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
-                </intent>
-                <intent>
-                <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
-                </intent>
-                <intent>
-                <action android:name="android.intent.action.MAIN" />
-                </intent>
-                <!-- Android 11+ package visibility: without this the app cannot
-                bind the system speech recognizer service. -->
-                <intent>
-                <action android:name="android.speech.RecognitionService" />
-                </intent>
-                </queries>
-
-                </manifest>
-                "#
-            ),
         }
     }
 }
 
-/*
-Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
-    <manifest
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    package="{url}"
-    android:versionCode="1"
-    android:versionName="1.0"
-    android:installLocation="auto"
-    >
-
-
-    <uses-sdk android:targetSdkVersion="{sdk_version}" />
-    <uses-feature android:glEsVersion="0x00030001" android:required="true"/>
-    <uses-feature android:name="android.hardware.vr.headtracking" android:required="false"/>
-    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
-    <uses-permission android:name="com.oculus.permission.USE_SCENE" />
-    <!-- Request hand and keyboard tracking for keyboard hand presence testing -->
-    <uses-feature android:name="oculus.software.handtracking" android:required="false"/>
-    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
-    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
-
-    <application
-    android:label="{label}"
-    android:allowBackup="false"
-    android:debuggable="true"
-    >
-    //
-    <activity
-    android:name="{class_name}"
-    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
-    android:launchMode="singleTask"
-    android:screenOrientation="landscape"
-    android:excludeFromRecents="false"
-    android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
-    android:exported="true"
-    >
-    <intent-filter>
-    <action android:name="android.intent.action.MAIN" />
-    <action android:name="android.intent.action.LAUNCHER" />
-    <action android:name="android.intent.action.VR" />
-    </intent-filter>
-    </activity>
-
-    <activity
-    android:name="{class_name}.MakepadAppXr"
-    android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode"
-    android:excludeFromRecents="false"
-    android:exported="true"
-    android:launchMode="singleTask"
-    android:screenOrientation="landscape"
-    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
-    >
-    <intent-filter>
-    <action android:name="android.intent.action.MAIN" />
-    <category android:name="com.oculus.intent.category.VR" />
-    </intent-filter>
-    </activity>
-    </application>
-
-    <queries>
-    <!-- to talk to the broker -->
-    <provider
-    android:name="x" android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
-
-    <!-- so client-side code of runtime/layers can talk to their service sides -->
-    <intent>
-    <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
-    </intent>
-    <intent>
-    <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
-    </intent>
-    <intent>
-    <action android:name="android.intent.action.MAIN" />
-    </intent>
-    </queries>
-
-    </manifest>
-    "#)*/
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -458,10 +274,9 @@ fn android_help() -> &'static str {
   cargo makepad android [options] build-aab <cargo args>\n\
   cargo makepad android keystore-create <path> [keytool options]\n\
   cargo makepad android [options] run <cargo args>\n\
+  cargo makepad android [options] build-host|run-host [--privileged] --app <package> [--font-set=Latin|International] [cargo flags]\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
-  cargo makepad android [options] dyn-pack [dyn options] <cargo args>\n\
-  cargo makepad android [options] dyn-rehearse [dyn options] -p <host> <apk> [package ...]\n\
 \n\
 Common options:\n\
   --abi=aarch64|x86_64|armv7|i686|all   (default: aarch64)\n\
@@ -483,7 +298,7 @@ Common options:\n\
   --no-icon\n\
   --sdk-path=<path>\n\
   --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
-  --variant=default|quest\n\
+  --variant=default\n\
   --devices=<serial1,serial2,...>|all    (for run and adb-tcp)\n\
   --keep-sdk-sources\n\
 \n\
@@ -493,25 +308,6 @@ Custom AndroidManifest:\n\
   Play Store). Tokens replaced: {package_id}, {label}, {class_name},\n\
   {min_sdk_version}, {target_sdk_version}, {version_code}, {version_name},\n\
   {debuggable}.\n\
-\n\
-Android super-app (apps/wm-dyn: tiles compiled on the phone against the shipped engine):\n\
-  dyn-pack stages the relocatable checkout, cross-builds host + engine from it,\n\
-  proves every tile build against that target/, packs the APK with the phone\n\
-  toolchain, the checkout and target/ as assets, then rehearses the phone's first\n\
-  tile open from the packed APK. dyn-rehearse runs that last gate on an APK.\n\
-  --dyn-toolchain=<dir>                   REQUIRED for dyn-pack: the musl-host rustc tree for the\n\
-                                          phone (bin/rustc, bin/cargo, bin/busybox, ld.so,\n\
-                                          lib/rustlib/<musl host>, android/lib/clang)\n\
-  --dyn-apps=<pkg,pkg>                    the tiles proven / rehearsed; default: the host's\n\
-                                          [package.metadata.makepad.dyn].apps\n\
-  --dyn-out=<apk>                         default: <target>/makepad-android-dyn/<crate>/<label>-dyn.apk\n\
-  --dyn-stage=<dir>                       default: <target>/makepad-android-dyn/<crate>/stage\n\
-  --dyn-no-rehearsal                      stop after packing\n\
-  The host's Cargo.toml names the engine and the tiles:\n\
-    [package.metadata.makepad.dyn]  engine = \"makepad-wm-engine\"  apps = [\"makepad-app-clock\", ...]\n\
-  Example:\n\
-    cargo makepad android --abi=aarch64 --package-name=nl.makepad.wmdyn --app-label=wmdyn \\\n\
-        dyn-pack --dyn-toolchain=/path/to/tc -p makepad-app-wm-dyn --release --no-default-features\n\
 \n\
 build-aab signing options (defaults: bundled debug.keystore — Play Store will reject):\n\
   --keystore=<path>                       JKS/PKCS12 keystore file (alias auto-discovered\n\
@@ -526,7 +322,6 @@ build-aab signing options (defaults: bundled debug.keystore — Play Store will 
 Examples:\n\
   cargo makepad android --abi=aarch64 build -p my-app --release\n\
   cargo makepad android --abi=aarch64 run -p my-app --release\n\
-  cargo makepad android --devices=all --variant=quest run -p my-app --release\n\
   cargo makepad android --abi=aarch64 \\\n\
       --keystore=play.keystore --keystore-pass=hunter2 \\\n\
       --keystore-key-alias=upload --keystore-key-pass=hunter2 \\\n\
@@ -700,6 +495,44 @@ fn resolve_devices_arg(
     Ok(devices)
 }
 
+/// `--app <package>` (or `--app=<package>`), `--font-set=<set>`; every other word is a cargo flag
+/// the app is packed and compiled with.
+fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
+    let mut apps: Vec<compile::HostApp> = Vec::new();
+    let mut font_set = "Latin".to_string();
+    let mut env = Vec::new();
+    let mut privileged = false;
+    let mut font_assets = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--app" {
+            i += 1;
+            apps.push(compile::HostApp { package: args.get(i).ok_or("--app wants a cargo package")?.clone(), cargo_flags: Vec::new() });
+        } else if let Some(p) = a.strip_prefix("--app=") {
+            apps.push(compile::HostApp { package: p.to_string(), cargo_flags: Vec::new() });
+        } else if let Some(e) = a.strip_prefix("--env=") {
+            env.push(e.to_string());
+        } else if let Some(f) = a.strip_prefix("--font-asset=") {
+            font_assets.push(f.to_string());
+        } else if a == "--privileged" {
+            privileged = true;
+        } else if let Some(f) = a.strip_prefix("--font-set=") {
+            font_set = f.to_string();
+        } else if let Some(app) = apps.last_mut() {
+            // cargo flags follow the app they belong to
+            app.cargo_flags.push(a.to_string());
+        } else {
+            return Err(format!("run-host: {a}: flags follow an --app <package>"));
+        }
+        i += 1;
+    }
+    if apps.is_empty() {
+        return Err("run-host needs --app <package> (repeat it for more apps)".to_string());
+    }
+    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets })
+}
+
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
     #[allow(unused)]
     let mut host_os = HostOs::Unsupported;
@@ -861,44 +694,6 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
-        "proc-pack" => proc_pack::proc_pack(
-            &sdk_dir,
-            host_os,
-            package_name,
-            app_label,
-            version_code,
-            version_name,
-            min_sdk_version,
-            &args[1..],
-            &targets,
-            &variant,
-            &config,
-            &urls,
-        ),
-        "dyn-pack" => dyn_pack::dyn_pack(
-            &sdk_dir,
-            host_os,
-            package_name,
-            app_label,
-            version_code,
-            version_name,
-            min_sdk_version,
-            &args[1..],
-            &targets,
-            &variant,
-            &config,
-            &urls,
-        ),
-        "dyn-rehearse" => dyn_pack::dyn_rehearse(
-            &sdk_dir,
-            host_os,
-            app_label,
-            min_sdk_version,
-            &args[1..],
-            &targets,
-            &variant,
-            &urls,
-        ),
         "build" => {
             compile::build(
                 &sdk_dir,
@@ -975,6 +770,41 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
                 devices,
             )
         }
+        "build-host" | "run-host" => {
+            let host = parse_host_args(&args[1..])?;
+            if args[0] == "build-host" {
+                compile::build_host(
+                    &sdk_dir,
+                    host_os,
+                    package_name,
+                    app_label,
+                    version_code,
+                    version_name,
+                    min_sdk_version,
+                    &host,
+                    &targets,
+                    &variant,
+                    &urls,
+                )
+                .map(|built| println!("{}", built.apk().display()))
+            } else {
+                let devices = resolve_devices_arg(&sdk_dir, &devices)?;
+                compile::run_host(
+                    &sdk_dir,
+                    host_os,
+                    package_name,
+                    app_label,
+                    version_code,
+                    version_name,
+                    min_sdk_version,
+                    &host,
+                    &targets,
+                    &variant,
+                    &urls,
+                    devices,
+                )
+            }
+        }
         _ => Err(format!(
             "{} is not a valid android subcommand\n\n{}",
             args[0],
@@ -998,6 +828,7 @@ mod tests {
             version_code: 1,
             version_name: "1.0",
             debuggable: true,
+            extra_activities: "",
         }
     }
 
@@ -1010,10 +841,11 @@ mod tests {
     }
 
     #[test]
-    fn quest_manifest_uses_splash_and_app_themes() {
-        let xml = AndroidVariant::Quest.manifest_xml(&test_args("App", "dev.makepad.app"));
-        assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
-        assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
+    fn default_manifest_lifts_the_default_aspect_cap() {
+        // The system's default 1.86 cap letterboxes taller phones: a black
+        // band under the app where the gesture bar is.
+        let xml = AndroidVariant::Default.manifest_xml(&test_args("App", "dev.makepad.app"));
+        assert!(xml.contains("android:name=\"android.max_aspect\" android:value=\"3.0\""));
     }
 
     #[test]
@@ -1047,17 +879,5 @@ mod tests {
             xml.contains("tools:targetApi=\"35\""),
             "tools:targetApi should match targetSdkVersion: {xml}"
         );
-    }
-
-    #[test]
-    fn quest_manifest_propagates_version_and_debuggable() {
-        let mut args = test_args("App", "dev.makepad.app");
-        args.version_code = 42;
-        args.version_name = "2.7.3";
-        args.debuggable = false;
-        let xml = AndroidVariant::Quest.manifest_xml(&args);
-        assert!(xml.contains("android:versionCode=\"42\""));
-        assert!(xml.contains("android:versionName=\"2.7.3\""));
-        assert!(xml.contains("android:debuggable=\"false\""));
     }
 }

@@ -18,9 +18,9 @@ fn array(vm: &mut ScriptVm, v: ScriptValue) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let a = v.as_array().ok_or("expected array of strings")?;
-    (0..vm.bx.heap.array_len(a))
+    (0..vm.heap().array_len(a))
         .map(|i| {
-            let v = vm.bx.heap.array_index(a, i, NoTrap);
+            let v = vm.heap().array_index(a, i, NoTrap);
             text(vm, v)
         })
         .collect()
@@ -208,16 +208,14 @@ fn env_pairs(vm: &mut ScriptVm, e: ScriptValue, what: &str) -> Result<Vec<(Strin
     let mut env = Vec::new();
     if !e.is_nil() {
         let obj = e.as_object().ok_or_else(|| format!("{what} must be an object"))?;
-        let entries: Vec<_> = vm
-            .bx
-            .heap
-            .map_ref(obj)
-            .iter()
-            .map(|(k, v)| (*k, v.value))
+        let entries: Vec<_> = vm.heap()
+            .map_entries(obj)
+            .into_iter()
+            .map(|e| (e.key, e.value))
             .collect();
         for (k, v) in entries {
             let mut key = String::new();
-            vm.bx.heap.cast_to_string(k, &mut key);
+            vm.heap().cast_to_string(k, &mut key);
             env.push((key, text(vm, v)?));
         }
     }
@@ -350,8 +348,8 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         package_manifest(vm, &packages[0]).map(PathBuf::from)
     } else { None };
     // Packages that are desktop tools (they drive cargo and child processes,
-    // and most of them is compiled out elsewhere): not checked for web, mobile
-    // or embedded rows, where they would only report their own absence.
+    // and most of them is compiled out elsewhere): not checked for web or mobile
+    // rows, where they would only report their own absence.
     let desktop_only = fields(vm, v, id!(desktop_only))?;
     let all_packages = packages;
     let mut failed = false;
@@ -366,7 +364,7 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         if packages.is_empty() && !workspace { continue; }
         let mut check_opts = opts.clone();
         check_opts.toolchain = check.toolchain.clone();
-        check_opts.env.retain(|(key, _)| key != "MAKEPAD");
+        check_opts.env.retain(|(key, _)| key != "MAKEPAD_BUILD");
         check_opts.env.extend(check.env.clone());
         let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
         if rt(vm).dry() { continue; }
@@ -524,17 +522,17 @@ fn slice_check(vm: &mut ScriptVm) -> Result<Value> {
 pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
     let host = rt(vm).host.json();
     let host = json_value(vm, host);
-    vm.bx.heap.set_value_def(ci, id!(host).into(), host);
+    vm.set_value_def(ci, id!(host), host);
     let mut packages: Vec<_> = rt(vm).run.app_targets.iter().map(|t| t.package.clone()).collect();
     packages.sort();
     packages.dedup();
     let apps = json_value(vm, Value::Arr(packages.iter().map(json::s).collect()));
-    vm.bx.heap.set_value_def(ci, id!(apps).into(), apps);
+    vm.set_value_def(ci, id!(apps), apps);
     // The deep run (every crate's tests) is opt-in: `deep_tests = true` in
     // ci.toml, or `ci --deep`.
     let deep_tests = rt(vm).config.deep_tests;
     let deep = json_value(vm, Value::Bool(deep_tests));
-    vm.bx.heap.set_value_def(ci, id!(deep).into(), deep);
+    vm.set_value_def(ci, id!(deep), deep);
     vm.add_method(ci, id_lut!(exclusive), script_args!(), |vm, _| {
         if allow(vm) {
             let r = rt(vm);
@@ -795,7 +793,7 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             if machine.is_none() {
                 warning(vm, &format!("machine {name}: machine not configured"));
             }
-            let obj = vm.bx.heap.new_object();
+            let obj = vm.new_object();
             let sync_machine = machine.clone();
             let sync_name = name.clone();
             vm.add_method(obj, id_lut!(sync), script_args!(), move |vm, _| {

@@ -2,8 +2,9 @@
 #
 # `apps.json` holds every app the WM hosts, Builder builds and Stage runs:
 # id, label, package, directory, binary, launch policy, menu visibility and
-# Builder features. build.rs turns it into a static table at compile time,
-# so a bad row is a compile error and reading it costs nothing at runtime.
+# Builder features. table.rs embeds it (include_str!) and reads it once, at
+# first use, into the static table; a bad row panics there with the row and
+# the reason, and the crate's tests read the table.
 # (strict_json's errors carry no position: a syntax error names only the
 # reason, which is fine for a table this size.)
 
@@ -18,8 +19,10 @@ publish = false
 name = "makepad_app_registry"
 path = "src/lib.rs"
 
-[build-dependencies]
+[dependencies]
 makepad-strict-json = { path = "../strict_json" }
 
-[dev-dependencies]
-makepad-strict-json = { path = "../strict_json" }
+# cargo with the launchers' exact command and environment, for deploy scripts
+[[bin]]
+name = "makepad-cargo"
+path = "src/bin/makepad_cargo.rs"

@@ -161,11 +161,11 @@ install -d /etc/makepad
 install -m 0755 "$seed/wm-session.sh" /usr/local/bin/makepad-wm-session
 install -m 0644 "$seed/wm.env" /etc/makepad/wm.env
 install -m 0644 "$seed/makepad-wm.service" /etc/systemd/system/makepad-wm.service
-install -m 0755 "$seed/aihub-session.sh" /usr/local/bin/makepad-aihub-session
-install -m 0644 "$seed/aihub.env" /etc/makepad/aihub.env
-install -m 0644 "$seed/makepad-aihub.service" /etc/systemd/system/makepad-aihub.service
+# The AI hub is the WM's own child (apps/wm/src/hub_child.rs): its settings, no unit.
+install -d -o arch -g arch /home/arch/.makepad /home/arch/.makepad/wm
+test -f /home/arch/.makepad/wm/ai-hub.conf || install -o arch -g arch -m 0644 "$seed/ai-hub.conf" /home/arch/.makepad/wm/ai-hub.conf
 systemctl daemon-reload
-systemctl enable makepad-wm.service makepad-aihub.service
+systemctl enable makepad-wm.service
 
 stage 'Recording installed tool versions' 
 source /etc/profile.d/makepad-cuda.sh
@@ -179,14 +179,13 @@ source /etc/profile.d/makepad-cuda.sh
     dkms status
 } > "$state/installed.txt" 2>&1
 if test -f "$seed/clone.json"; then
-    stage 'Installing the verified release WM and AI Hub from the working clone'
+    stage 'Installing the verified release WM from the working clone'
     install -d -o arch -g arch /home/arch/makepad/target/release
     install -o arch -g arch -m 0755 "$seed/makepad-app-wm" /home/arch/makepad/target/release/makepad-app-wm
-    install -o arch -g arch -m 0755 "$seed/makepad-app-ai-hub" /home/arch/makepad/target/release/makepad-app-ai-hub
     install -o arch -g arch -m 0644 "$seed/clone.json" /home/arch/makepad/CLONE-REVISION.json
 else
-    stage 'Building release WM and CUDA AI Hub offline'
-    runuser -u arch -- env HOME=/home/arch MAKEPAD=linux_direct+vulkan CARGO_NET_OFFLINE=true MAKEPAD_CEF_OFFLINE=1 MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm -p makepad-app-ai-hub'
+    stage 'Building the release WM offline (it builds the CUDA AI hub when it starts)'
+    runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm'
 fi
 sshd -t
 systemctl reload sshd

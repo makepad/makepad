@@ -63,7 +63,7 @@ impl Default for TrackLen {
 impl ScriptHook for TrackLen {
     fn on_custom_to_value(&self, vm: &mut ScriptVm) -> Option<ScriptValue> {
         let text = track_len_css(vm, *self)?;
-        Some(vm.bx.heap.new_string_from_str(&text))
+        Some(vm.new_string(&text))
     }
 
     fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
@@ -136,7 +136,7 @@ impl Default for Track {
 impl ScriptHook for Track {
     fn on_custom_to_value(&self, vm: &mut ScriptVm) -> Option<ScriptValue> {
         let text = track_css(vm, self)?;
-        Some(vm.bx.heap.new_string_from_str(&text))
+        Some(vm.new_string(&text))
     }
 
     fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
@@ -233,8 +233,7 @@ fn grid_diagnostic_once(vm: &mut ScriptVm, message: &str) {
 }
 
 fn script_string(vm: &mut ScriptVm, value: ScriptValue) -> Option<String> {
-    vm.bx
-        .heap
+    vm.heap()
         .string_with(value, |_, source| source.to_string())
 }
 
@@ -275,7 +274,7 @@ fn unsupported_intrinsic(source: &str) -> bool {
 }
 
 fn parse_number(source: &str, suffix: &str) -> Option<f64> {
-    let value = source.trim().strip_suffix(suffix)?.trim().parse().ok()?;
+    let value: f64 = source.trim().strip_suffix(suffix)?.trim().parse().ok()?;
     valid_nonnegative(value).then_some(value)
 }
 

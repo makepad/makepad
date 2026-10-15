@@ -24,7 +24,7 @@ use crate::db::{self, ItemRow};
 use crate::library::{ItemId, Library};
 use crate::pack::{pack, Packing};
 use crate::store::{self, StoreEvent, StoreHandle};
-use crate::tape::{fit_dims, page_size, Planes, FullFrame, GRID, LEVELS, PYRAMID_LEVELS, SLOT};
+use crate::tape::{fit_dims, Planes, FullFrame, PageGeometry, LEVELS, PYRAMID_LEVELS, SLOT};
 use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -371,6 +371,9 @@ pub struct TileGrid {
     opened: bool,
     #[rust]
     items: Vec<GridItem>,
+    /// The open library's page layout (its pages' size, slots per side).
+    #[rust]
+    geometry: PageGeometry,
     #[rust]
     plan: Option<GridPlan>,
     /// Packed edge to edge (the default) or one picture per unit cell.
@@ -528,7 +531,7 @@ impl TileGrid {
         self.tween_start = None;
         self.opened = true;
         let uid = self.widget_uid();
-        let (rows, shards) = match db::read_items(&library.db_path()) {
+        let (rows, shards, geometry) = match db::read_items(&library.db_path()) {
             Ok(v) => v,
             Err(e) => {
                 log!("image-tiles: {e}");
@@ -536,6 +539,7 @@ impl TileGrid {
                 return;
             }
         };
+        self.geometry = geometry;
         self.items = rows.iter().filter_map(item_of).collect();
         self.visible = (0..self.items.len()).collect();
         let mut store = store::spawn(library, cx.task_pool());
@@ -1087,7 +1091,7 @@ impl TileGrid {
     fn on_page(&mut self, cx: &mut Cx, shard: i64, level: usize, planes: Planes) {
         let now = self.time();
         self.requested.remove(&(shard, level));
-        if planes.width != page_size(level) {
+        if planes.width != self.geometry.page_size(level) {
             log!("image-tiles: page {shard} L{level}: unexpected size {}", planes.width);
             return;
         }
@@ -1452,7 +1456,8 @@ impl Widget for TileGrid {
                 }
             }
         }
-        let inv = 1.0 / GRID as f32;
+        let grid = self.geometry.grid;
+        let inv = 1.0 / grid as f32;
         for key in shards {
             let indices = by_shard.remove(&key).unwrap();
             let side = indices
@@ -1481,7 +1486,7 @@ impl Widget for TileGrid {
                 .iter()
                 .map(|&i| {
                     let item = &self.items[i];
-                    let (sx, sy) = ((item.slot % GRID) as f32 * inv, (item.slot / GRID) as f32 * inv);
+                    let (sx, sy) = ((item.slot % grid) as f32 * inv, (item.slot / grid) as f32 * inv);
                     (i, vec2f(sx, sy), vec2f(sx + item.uv1.x * inv, sy + item.uv1.y * inv))
                 })
                 .collect();

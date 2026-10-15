@@ -12,8 +12,8 @@
 //! read the chat in a hidden instance.
 
 pub use makepad_widgets;
+use makepad_ai_services::provider::{CLAUDE_DESKTOP, PROVIDER_ENV};
 use makepad_widgets::ai_slot::AiSlotRequests;
-use makepad_widgets::makepad_platform::mcp_relay;
 use makepad_widgets::makepad_platform::ScriptVmCx;
 use makepad_widgets::*;
 
@@ -36,9 +36,9 @@ pub use settings::AiSettings;
 pub fn script_mod(vm: &mut ScriptVm) {
     let requests = vm.cx_mut().global::<AiSlotRequests>();
     requests.feedback_enabled = crate::feedback::enabled_from_env();
-    // Started for Claude Desktop (its `--mcp` relay sets the provider): the
-    // engine and its MCP endpoint come up now, not on the first F10.
-    requests.engine_at_start = std::env::var(mcp_relay::PROVIDER_ENV).is_ok_and(|p| p.trim() == mcp_relay::CLAUDE_DESKTOP);
+    // The Claude Desktop bundle chooses the provider at launch, so its
+    // panel is ready before the person opens F10.
+    requests.engine_at_start = std::env::var(PROVIDER_ENV).is_ok_and(|p| p.trim() == CLAUDE_DESKTOP);
     crate::panel::script_mod(vm);
     crate::feedback::script_mod(vm);
     crate::overlay::script_mod(vm);

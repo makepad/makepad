@@ -40,16 +40,10 @@ use crate::subproc_img::{
 };
 use makepad_micro_serde::*;
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub const MOTION_CMD_ENV: &str = "MAKEPAD_MOTION_CMD";
 const MOTION_CMD_DEFAULT: &str =
     r"C:\ai\venv_hymotion\Scripts\python.exe C:\ai\motion_hymotion.py {in} {out}";
-
-/// Per-job budget: warm generation was 38s for 3 clips on the 4090, but the
-/// cold path loads the Qwen3-8B text encoder (~16GB) plus the bpy retarget
-/// venv — minutes on a slow disk.
-const MOTION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The deterministic clip-name contract between the motion domain and every
 /// game host: these names, exactly, in the output GLB. skin.rs resolves them
@@ -386,7 +380,6 @@ impl ContentBackend for MotionBackend {
                         ext: "glb",
                         input: &params.input_bytes,
                         input_sidecar_json: Some(&sidecar),
-                        timeout: MOTION_TIMEOUT,
                     },
                     cancel,
                     &mut sub_progress,

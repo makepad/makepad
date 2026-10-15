@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
@@ -7,6 +8,35 @@ use crate::*;
 use makepad_live_id::*;
 use std::fmt::Write;
 
+/// pod_view's mode.
+pub const POD_VIEW_DATA: u32 = 0;
+pub const POD_VIEW_TYPE: u32 = 1;
+/// pod_edit's mode.
+pub const POD_EDIT_NEW: u32 = 0;
+pub const POD_EDIT_DATA_MUT: u32 = 1;
+pub const POD_EDIT_NAME_SET: u32 = 2;
+
+/// What pod_view answers: the type and the data words (borrowed from the heap).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct PodView<'a> {
+    /// the pod's type (POD_VIEW_DATA), or the type asked for
+    pub id: ScriptPodType,
+    pub ty: &'a ScriptPodTypeData,
+    pub ptr: *const u32,
+    pub len: usize,
+}
+
+/// What pod_edit answers (by its mode).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct PodEdit {
+    pub pod: ScriptPod,
+    pub ptr: *mut u32,
+    pub len: usize,
+}
+
+#[relax_api(marked)]
 impl ScriptHeap {
     // POD TYPES
 
@@ -25,6 +55,7 @@ impl ScriptHeap {
         default: ScriptValue,
     ) -> ScriptPodType {
         if let Some(ptr) = self.pod_types_free.pop() {
+            self.shader_types[ptr.index as usize].take();
             let pod_type = &mut self.pod_types[ptr.index as usize];
             pod_type.object = object;
             pod_type.name = name;
@@ -35,6 +66,7 @@ impl ScriptHeap {
             let ptr = ScriptPodType {
                 index: self.pod_types.len() as u32,
             };
+            self.shader_types.push(Default::default());
             self.pod_types.push(ScriptPodTypeData {
                 name,
                 object,
@@ -56,26 +88,38 @@ impl ScriptHeap {
         self.new_pod_type(dummy_obj, None, ty, default)
     }
 
+    #[inline]
     pub fn pod_type(&self, ty: ScriptValue) -> Option<ScriptPodType> {
-        if let Some(obj) = ty.as_object() {
-            let object = &self.objects[obj];
-            return object.tag.as_pod_type();
-        }
-        None
+        let obj = ty.as_object()?;
+        self.obj_info(obj).tag.as_pod_type()
     }
 
     #[inline]
     pub fn pod_type_ref(&self, ty: ScriptPodType) -> &ScriptPodTypeData {
-        &self.pod_types[ty.index as usize]
+        self.pod_view(POD_VIEW_TYPE, ScriptPod::default(), ty).ty
     }
 
     /// Get pod data for a ScriptPod value.
     /// Returns the pod type and data slice for extracting values.
     #[inline]
     pub fn pod_data(&self, pod: ScriptPod) -> (&ScriptPodTypeData, &[u32]) {
-        let pod_data = &self.pods[pod];
-        let pod_type = &self.pod_types[pod_data.ty.index as usize];
-        (pod_type, &pod_data.data)
+        let v = self.pod_view(POD_VIEW_DATA, pod, ScriptPodType::default());
+        // SAFETY: the words are the pod's data, borrowed from `self`
+        (v.ty, unsafe { std::slice::from_raw_parts(v.ptr, v.len) })
+    }
+
+    /// Reads a pod by `mode`: POD_VIEW_DATA the pod's type and data words; POD_VIEW_TYPE the type
+    /// `ty` (no words).
+    #[relax_api]
+    pub fn pod_view(&self, mode: u32, pod: ScriptPod, ty: ScriptPodType) -> PodView<'_> {
+        match mode {
+            POD_VIEW_DATA => {
+                let pod_data = &self.pods[pod];
+                let pod_type = &self.pod_types[pod_data.ty.index as usize];
+                PodView { id: pod_data.ty, ty: pod_type, ptr: pod_data.data.as_ptr(), len: pod_data.data.len() }
+            }
+            _ => PodView { id: ty, ty: &self.pod_types[ty.index as usize], ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 },
+        }
     }
 
     /// The data words of a pod value, writable in place: a host that keeps a
@@ -83,7 +127,27 @@ impl ScriptHeap {
     /// it here instead of allocating a new pod per frame.
     #[inline]
     pub fn pod_data_mut(&mut self, pod: ScriptPod) -> &mut [u32] {
-        &mut self.pods[pod].data
+        let e = self.pod_edit(POD_EDIT_DATA_MUT, pod, ScriptPodType::default(), LiveId(0));
+        // SAFETY: the words are the pod's data, borrowed from `self`
+        unsafe { std::slice::from_raw_parts_mut(e.ptr, e.len) }
+    }
+
+    /// Changes pods by `mode`: POD_EDIT_NEW a new pod of type `ty` (`pod`); POD_EDIT_DATA_MUT
+    /// the words of `pod` (`ptr`/`len`); POD_EDIT_NAME_SET names type `ty` `name`.
+    #[relax_api]
+    pub fn pod_edit(&mut self, mode: u32, pod: ScriptPod, ty: ScriptPodType, name: LiveId) -> PodEdit {
+        match mode {
+            POD_EDIT_NEW => PodEdit { pod: self.new_pod_impl(ty), ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 },
+            POD_EDIT_DATA_MUT => {
+                let data = &mut self.pods[pod].data;
+                PodEdit { pod, ptr: data.as_mut_ptr(), len: data.len() }
+            }
+            _ => {
+                self.shader_types[ty.index as usize].take();
+                self.pod_types[ty.index as usize].name = Some(name);
+                PodEdit { pod, ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 }
+            }
+        }
     }
 
     #[inline]
@@ -94,14 +158,15 @@ impl ScriptHeap {
 
     #[inline]
     pub fn pod_type_name_set(&mut self, ty: ScriptPodType, name: LiveId) {
-        let ty = &mut self.pod_types[ty.index as usize];
-        ty.name = Some(name);
+        self.pod_edit(POD_EDIT_NAME_SET, ScriptPod::default(), ty, name);
     }
 
     #[inline]
     pub fn pod_type_name_if_not_set(&mut self, ty: ScriptPodType, name: LiveId) {
-        let ty = &mut self.pod_types[ty.index as usize];
+        let index = ty.index as usize;
+        let ty = &mut self.pod_types[index];
         if ty.name.is_none() {
+            self.shader_types[index].take();
             ty.name = Some(name);
         }
     }
@@ -116,71 +181,70 @@ impl ScriptHeap {
         builtins: &ScriptPodBuiltins,
     ) -> Option<ScriptPodType> {
         use makepad_math::{
-            F16x2, F16x4, I16x2, Mat4f, Quat, SNorm16x2, SNorm8x4, U16x2, UNorm16x2, UNorm8x4,
+            F16x2, F16x4, I16x2, Mat4f, SNorm16x2, SNorm8x4, U16x2, UNorm16x2, UNorm8x4,
             Vec2f, Vec3f, Vec4f,
         };
-        use std::any::TypeId;
 
         // Check primitive types
-        if type_id == TypeId::of::<f32>() {
+        if type_id == <f32 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_f32);
         }
-        if type_id == TypeId::of::<f64>() {
+        if type_id == <f64 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_f32); // f64 maps to f32 in pod
         }
-        if type_id == TypeId::of::<u32>() {
+        if type_id == <u32 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_u32);
         }
-        if type_id == TypeId::of::<i32>() {
+        if type_id == ({ const ID: ScriptTypeId = ScriptTypeId::of_path("makepad_script::prim::i32"); ID }) {
             return Some(builtins.pod_i32);
         }
-        if type_id == TypeId::of::<bool>() {
+        if type_id == <bool as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_bool);
         }
 
         // Check vector types (f32)
-        if type_id == TypeId::of::<Vec2f>() {
+        if type_id == <Vec2f as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_vec2f);
         }
-        if type_id == TypeId::of::<Vec3f>() {
+        if type_id == <Vec3f as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_vec3f);
         }
-        if type_id == TypeId::of::<Vec4f>() {
+        if type_id == <Vec4f as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_vec4f);
         }
 
         // Check matrix types (f32)
-        if type_id == TypeId::of::<Mat4f>() {
+        if type_id == <Mat4f as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_mat4x4f);
         }
 
         // Quat has same layout as Vec4f (x, y, z, w)
-        if type_id == TypeId::of::<Quat>() {
+        if type_id == ({ const ID: ScriptTypeId = ScriptTypeId::of_path("makepad_script::prim::Quat"); ID }) {
             return Some(builtins.pod_vec4f);
         }
 
-        if type_id == TypeId::of::<F16x2>() {
+        if type_id == <F16x2 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_f16x2);
         }
-        if type_id == TypeId::of::<F16x4>() {
+        if type_id == <F16x4 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_f16x4);
         }
-        if type_id == TypeId::of::<U16x2>() {
+        if type_id == <U16x2 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_u16x2);
         }
-        if type_id == TypeId::of::<I16x2>() {
+        if type_id == <I16x2 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_i16x2);
         }
-        if type_id == TypeId::of::<UNorm16x2>() {
+        if type_id == <UNorm16x2 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_unorm16x2);
         }
-        if type_id == TypeId::of::<SNorm16x2>() {
+        if type_id == <SNorm16x2 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_snorm16x2);
         }
-        if type_id == TypeId::of::<UNorm8x4>() {
+        if type_id == <UNorm8x4 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_unorm8x4);
         }
-        if type_id == TypeId::of::<SNorm8x4>() {
+        if type_id == <SNorm8x4 as ScriptNew>::script_type_id_static() {
             return Some(builtins.pod_snorm8x4);
         }
 
@@ -454,13 +518,18 @@ impl ScriptHeap {
 
     // PODS
 
+    #[inline]
     pub fn new_pod(&mut self, ty: ScriptPodType) -> ScriptPod {
+        self.pod_edit(POD_EDIT_NEW, ScriptPod::default(), ty, LiveId(0)).pod
+    }
+
+    fn new_pod_impl(&mut self, ty: ScriptPodType) -> ScriptPod {
         // Pods carry no refusal sentinel, so a refused charge still allocates
         // this one value; the recorded limit error bails the VM before the
         // next opcode, which bounds the overshoot to a single pod.
         let data_bytes = self.pod_types[ty.index as usize]
             .ty
-            .size_of()
+            .size_of_impl()
             .next_multiple_of(4);
         let _ = self.charge_allocation(
             std::mem::size_of::<ScriptPodData>().saturating_add(data_bytes),
@@ -472,23 +541,21 @@ impl ScriptHeap {
             pod.ty = ty;
             pod.tag.set_alloced();
             pod.data
-                .resize(pod_ty.ty.size_of().next_multiple_of(4) >> 2, 0);
+                .resize(pod_ty.ty.size_of_impl().next_multiple_of(4) >> 2, 0);
             // Reused slots keep existing words when size stays equal.
             // Always zero so old pod contents cannot leak into a fresh allocation.
             pod.data.fill(0);
             ptr
         } else {
-            let index = self.pods.len() as u32;
-            self.pods.push(ScriptPodData {
+            let (index, generation) = self.pods.push(ScriptPodData {
                 ty,
                 ..Default::default()
             });
-            // New slot starts at generation 0
-            let ptr = ScriptPod::new(index, crate::value::GENERATION_ZERO);
+            let ptr = ScriptPod::new(index, generation);
             let pod = &mut self.pods[ptr];
             pod.tag.set_alloced();
             pod.data
-                .resize(pod_ty.ty.size_of().next_multiple_of(4) >> 2, 0);
+                .resize(pod_ty.ty.size_of_impl().next_multiple_of(4) >> 2, 0);
             ptr
         }
     }

@@ -9,9 +9,6 @@ pub struct RemindersModule;
 
 pub static REMINDERS_MODULE: RemindersModule = RemindersModule;
 
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(REMINDERS_MODULE);
-
 impl AppModule for RemindersModule {
     fn id(&self) -> &'static str {
         "reminders"
@@ -128,7 +125,7 @@ mod tests {
             root,
             executor,
             shutdown,
-        } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        } = cx.with_script_vm_id(vm_id, |vm| {
             REMINDERS_MODULE.register(vm);
             let parts = REMINDERS_MODULE.create(vm, open, handles);
             assert!(
@@ -143,7 +140,7 @@ mod tests {
         );
         root.handle_event(&mut cx, &Event::Startup, &mut Scope::empty());
         assert!(root.borrow::<RemindersView>().unwrap().timer_is_active());
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
         assert!(!root.borrow::<RemindersView>().unwrap().timer_is_active());
         drop(root);
         drop(executor);

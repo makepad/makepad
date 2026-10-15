@@ -38,8 +38,25 @@ public class MakepadSocketStream {
             mOutputStream = socket.getOutputStream();
             return true;
         } catch (Exception e) {
+            android.util.Log.e("MakepadSocket", "connect " + host + ":" + port + " tls=" + useTls + " failed", e);
             close();
             return false;
+        }
+    }
+
+    /** SHA-256 of the server's leaf certificate (DER) after a TLS handshake, or null. */
+    public synchronized byte[] peerFingerprint() {
+        try {
+            if (!(mSocket instanceof SSLSocket)) {
+                return null;
+            }
+            java.security.cert.Certificate[] chain = ((SSLSocket) mSocket).getSession().getPeerCertificates();
+            if (chain == null || chain.length == 0) {
+                return null;
+            }
+            return java.security.MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -63,6 +80,9 @@ public class MakepadSocketStream {
             byte[] result = new byte[readBytes];
             System.arraycopy(buffer, 0, result, 0, readBytes);
             return result;
+        } catch (java.net.SocketTimeoutException e) {
+            // the read timeout passed with nothing to read: an empty answer (not end of stream)
+            return new byte[0];
         } catch (Exception e) {
             return null;
         }

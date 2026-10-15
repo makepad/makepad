@@ -33,8 +33,8 @@ use crate::layouts::*;
 use crate::time::{SimTime, StepDt};
 use crate::world::{bounding_radius, Kind, PhysWorld};
 use makepad_box3d::id::BodyId;
-use makepad_render_kernels::compute::kernel::Layout;
-use makepad_render_kernels::compute::sched::InlineExecutor;
+use makepad_render_kernels::compute::boundary::LayoutView;
+use makepad_render_kernels::dispatch::sched::InlineExecutor;
 use makepad_render_kernels::pipeline::Count;
 use makepad_render_kernels::Pipeline;
 use std::collections::{BTreeSet, VecDeque};
@@ -1164,8 +1164,8 @@ impl<'a> View<'a> {
     }
 
     /// The bodies of `group` written as `layout` records (a draw shader's
-    /// reflected instance record, or [`rigid_layout`]); returns the count.
-    pub fn write_bodies(&self, group: &str, layout: &Layout, out: &mut Vec<u32>) -> usize {
+    /// reflected instance record, or [`crate::RIGID`]); returns the count.
+    pub fn write_bodies(&self, group: &str, layout: &LayoutView<'_>, out: &mut Vec<u32>) -> usize {
         let mut recs = Vec::new();
         self.bodies(group, &mut recs);
         let stride = layout.stride as usize;

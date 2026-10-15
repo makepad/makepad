@@ -5,7 +5,7 @@
 //! same preservation, validation, deterministic serialization and chunk
 //! handling contract.
 
-use crate::{parse_glb_bytes, GlbChunk, GltfDocument, GltfError};
+use crate::{assemble_glb_with_rest, parse_glb_bytes, parse_gltf_json, split_glb, GltfDocument, GltfError};
 use makepad_micro_serde::{DeJson, JsonValue};
 use std::collections::HashMap;
 
@@ -102,31 +102,30 @@ pub(crate) struct GlbRewrite {
     pub(crate) document: GltfDocument,
     root: HashMap<String, JsonValue>,
     pub(crate) bin: Vec<u8>,
-    extra_chunks: Vec<GlbChunk>,
+    rest: Vec<u8>,
 }
 
 impl GlbRewrite {
     pub(crate) fn begin(input: &[u8]) -> Result<Self, GltfError> {
-        let parsed = parse_glb_bytes(input)?;
-        if parsed.document.buffers_slice().len() != 1
-            || parsed.document.buffers_slice()[0].uri.is_some()
+        let chunks = split_glb(input)?;
+        let json = chunks.json.trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
+        let document = parse_gltf_json(json)?;
+        if document.buffers_slice().len() != 1
+            || document.buffers_slice()[0].uri.is_some()
         {
             return Err(GltfError::Unsupported(
                 "GLB augmentation requires one embedded buffer".to_string(),
             ));
         }
-        let json_len = u32::from_le_bytes(input[12..16].try_into().unwrap()) as usize;
-        let json = std::str::from_utf8(&input[20..20 + json_len])?
-            .trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
         let root = JsonValue::deserialize_json_lenient(json).map_err(GltfError::Json)?;
         let JsonValue::Object(root) = root else {
             return Err(validation("glTF JSON root is not an object"));
         };
         Ok(Self {
-            document: parsed.document,
+            document,
             root,
-            bin: parsed.bin_chunk.unwrap_or_default(),
-            extra_chunks: parsed.extra_chunks,
+            bin: chunks.bin.to_vec(),
+            rest: chunks.rest.to_vec(),
         })
     }
 
@@ -225,31 +224,7 @@ impl GlbRewrite {
 
         let mut json = String::new();
         write_json(&JsonValue::Object(self.root), &mut json)?;
-        let mut json_bytes = json.into_bytes();
-        while json_bytes.len() % 4 != 0 {
-            json_bytes.push(b' ');
-        }
-        let extra_len: usize = self
-            .extra_chunks
-            .iter()
-            .map(|chunk| 8 + chunk.data.len())
-            .sum();
-        let total = 12 + 8 + json_bytes.len() + 8 + self.bin.len() + extra_len;
-        let mut output = Vec::with_capacity(total);
-        output.extend_from_slice(b"glTF");
-        output.extend_from_slice(&2u32.to_le_bytes());
-        output.extend_from_slice(&(total as u32).to_le_bytes());
-        output.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-        output.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
-        output.extend_from_slice(&json_bytes);
-        output.extend_from_slice(&(self.bin.len() as u32).to_le_bytes());
-        output.extend_from_slice(&0x004E_4942u32.to_le_bytes());
-        output.extend_from_slice(&self.bin);
-        for chunk in self.extra_chunks {
-            output.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
-            output.extend_from_slice(&chunk.chunk_type.to_le_bytes());
-            output.extend_from_slice(&chunk.data);
-        }
+        let output = assemble_glb_with_rest(&json, Some(&self.bin), &self.rest);
         // Run the normal structural/index validator over our own output.
         parse_glb_bytes(&output)?;
         Ok(output)

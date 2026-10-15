@@ -1,21 +1,27 @@
-//! The machine's own model through the hub chat session (feature
-//! `localai`, which links the hub's local runtime).
+//! The AI hub through the hub chat session.
 //!
-//! [`LocalModel`] runs the residency election, then the in-process engine.
+//! [`LocalModel`] runs the residency election, then (only in a build with
+//! the `localai` feature, which links the hub's in-process runtime) the
+//! machine's own engine. Without `localai` the same session still reaches a
+//! hub node on this machine or the fleet on the LAN: chatting through a
+//! remote hub needs no model runtime.
 //! Its tool table is prefilled into an append-only context, so a change of
 //! tools does not restart the session: the next turn carries a tool update
 //! block the model reads like any other message. A changed system prompt
 //! travels the same way.
 
-use crate::engine::{Model, ModelEvent, ToolDefinition};
+use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
 use crate::state::{ProviderChoice, ProviderRow};
 use makepad_ai_hub::hub::{AiHub, ChatConfig};
-use makepad_ai_hub::hub_chat::HubChatSession;
+use makepad_ai_hub::hub_chat::{ChatRoute, HubChatSession};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig, ToolSpec};
+use makepad_ai_hub::providers::provider::ToolImage;
 use makepad_platform::thread::SignalToUI;
 use makepad_strict_json as json;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Where the local weights live, relative to a checkout or the exe.
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
@@ -84,6 +90,14 @@ fn repo_root_of(exe: &Path) -> Option<PathBuf> {
 /// model as `<repo>/<file>`, so two levels reach every installed GGUF.
 const WEIGHTS_SEARCH_DEPTH: usize = 2;
 
+/// Folders of the weights directory that hold other domains' models (the
+/// hub registry's `cache_as` roots): a GGUF in them is a text encoder,
+/// projector or music/video part, never a chat model.
+const NON_CHAT_DIRS: &[&str] = &[
+    "video", "music", "stems", "stt", "tts", "depth", "loras", "checkpoints", "artifacts", "fleet",
+    "triposplat", "trellis2", "paint21", "flux2-dev", "flux2-dev-q4-24g", "flux2-klein-4b",
+];
+
 /// The best chat GGUF under `dir`: a Qwen chat model over any other, the
 /// larger file over the smaller. Projector and OCR files are not chat
 /// models and are never picked.
@@ -93,7 +107,8 @@ fn chat_gguf_under(dir: &Path, depth: usize) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if depth < WEIGHTS_SEARCH_DEPTH {
+            let skip = depth == 0 && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| NON_CHAT_DIRS.contains(&n));
+            if depth < WEIGHTS_SEARCH_DEPTH && !skip {
                 if let Some(found) = chat_gguf_under(&path, depth + 1) {
                     let size = std::fs::metadata(&found).map(|m| m.len()).unwrap_or(0);
                     consider(&mut best, found, size);
@@ -131,27 +146,139 @@ fn is_chat_gguf(path: &Path) -> bool {
     lower.ends_with(".gguf") && !lower.contains("mmproj") && !lower.contains("ocr")
 }
 
-/// The provider chip's Local row.
-pub(super) fn local_row() -> ProviderRow {
-    ProviderRow { choice: ProviderChoice::Local, label: local_label(local_model_path().as_deref()), unavailable: None }
+/// What discovery knows about a hub with a chat model on the LAN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HubFind {
+    Idle,
+    Searching,
+    /// `AI hub · 149 (Qwen3.8 27B)`.
+    Found(String),
+    Missing { at: Instant },
+}
+
+static HUB_FIND: Mutex<HubFind> = Mutex::new(HubFind::Idle);
+/// Bumped whenever the discovery answer changes, so a panel redraws its
+/// menu only then.
+static HUB_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// A miss is looked at again after this long, so a hub started later shows up.
+const HUB_RESCAN: Duration = Duration::from_secs(15);
+
+/// Moves when the hub row's answer does.
+pub fn hub_generation() -> u64 {
+    HUB_GENERATION.load(Ordering::Relaxed)
+}
+
+fn set_hub_find(find: HubFind) {
+    let mut slot = HUB_FIND.lock().unwrap_or_else(|e| e.into_inner());
+    if *slot != find {
+        *slot = find;
+        HUB_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The current discovery answer. The first call (and one per [`HUB_RESCAN`]
+/// while nothing is found) starts a probe on its own thread: the same
+/// discovery the chat election runs, which loads no model and sends no
+/// prompt. The caller is never blocked; the UI is signalled when the answer
+/// lands.
+fn hub_find() -> HubFind {
+    let mut slot = HUB_FIND.lock().unwrap_or_else(|e| e.into_inner());
+    let start = match &*slot {
+        HubFind::Idle => {
+            *slot = HubFind::Searching;
+            HUB_GENERATION.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        HubFind::Missing { at } if at.elapsed() >= HUB_RESCAN => {
+            // Keep reporting the miss while it looks again; no flapping.
+            *slot = HubFind::Missing { at: Instant::now() };
+            true
+        }
+        _ => false,
+    };
+    let now = slot.clone();
+    drop(slot);
+    if start {
+        let spawned = std::thread::Builder::new().name("ai-hub-find".into()).spawn(|| {
+            set_hub_find(match makepad_ai_hub::hub_chat::probe_fleet_chat() {
+                Ok(route) => HubFind::Found(route_label(&route)),
+                Err(_) => HubFind::Missing { at: Instant::now() },
+            });
+            SignalToUI::set_ui_signal();
+        });
+        if spawned.is_err() {
+            set_hub_find(HubFind::Missing { at: Instant::now() });
+        }
+    }
+    now
+}
+
+/// `AI hub · 149 (Qwen3.8 27B)` for an elected route.
+fn route_label(route: &ChatRoute) -> String {
+    let this_machine = if cfg!(target_os = "macos") { "this Mac" } else { "this machine" };
+    match route {
+        ChatRoute::Fleet { base, model } => {
+            format!("AI hub · {} ({})", node_short_name(base), model_short_name(Path::new(model)))
+        }
+        ChatRoute::InProcess { model } => format!("AI hub · {this_machine} ({})", model_short_name(Path::new(model))),
+        ChatRoute::MachineNode { .. } => format!("AI hub · {this_machine}"),
+    }
+}
+
+/// The provider menu's hub row, listed in every build. A hub found on the
+/// LAN names its node and model; otherwise it reads "searching…" while
+/// discovery runs and "no hub found" after, unselectable, unless this build
+/// has the in-process runtime (`weights` is then the machine's own model,
+/// which can always answer).
+pub(super) fn local_row(weights: Option<&Path>, has_runtime: bool) -> ProviderRow {
+    let (label, unavailable) = match hub_find() {
+        HubFind::Found(label) => (label, None),
+        _ if has_runtime => (local_label(weights), None),
+        HubFind::Missing { .. } => ("AI hub".to_string(), Some("no hub found".to_string())),
+        HubFind::Idle | HubFind::Searching => ("AI hub".to_string(), Some("searching…".to_string())),
+    };
+    ProviderRow { choice: ProviderChoice::Local, label, unavailable }
 }
 
 /// The provider chip's base label: the local weights when there are any.
 fn local_label(path: Option<&Path>) -> String {
     match path {
-        Some(p) => format!("Local · {}", model_short_name(p)),
-        None => "Local".to_string(),
+        Some(p) => format!("AI hub · {}", model_short_name(p)),
+        None => "AI hub · auto".to_string(),
     }
 }
 
 fn model_short_name(path: &Path) -> String {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("model");
+    // A registry id such as "qwen3.8-27b" has a dot but no file extension.
+    let stem = match name.rsplit_once('.') {
+        Some((stem, extension)) if extension.eq_ignore_ascii_case("gguf") => stem,
+        _ => name,
+    };
     // "Qwen3.5-9B-UD-Q4_K_XL" → "Qwen3.5 9B"
     let mut parts = stem.split('-');
     let family = parts.next().unwrap_or(stem);
-    match parts.next() {
-        Some(size) => format!("{family} {size}"),
+    let family = match family.strip_prefix("qwen") {
+        Some(version) => format!("Qwen{version}"),
         None => family.to_string(),
+    };
+    match parts.next() {
+        Some(size) => format!("{family} {}", size.to_ascii_uppercase()),
+        None => family,
+    }
+}
+
+fn node_short_name(base: &str) -> String {
+    let authority = base.split_once("://").map_or(base, |(_, rest)| rest)
+        .split('/').next().unwrap_or(base);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.octets()[3].to_string(),
+        Err(_) => host.to_string(),
     }
 }
 
@@ -242,12 +369,21 @@ fn with_update(update: Option<String>, text: &str) -> String {
 }
 
 impl Model for LocalModel {
-    /// `Local · Qwen3.5 9B`, and once the election settled where the model
-    /// runs: `Local · qwen3.8-27b on 10.0.0.165`, `Local · Qwen3.5 9B ·
-    /// in-process`.
+    /// Name the elected node and its model, which may differ from the
+    /// weights on this machine: `AI hub · 149 (Qwen3.8 27B)`.
     fn label(&self) -> String {
+        let this_machine = if cfg!(target_os = "macos") { "this Mac" } else { "this machine" };
         match self.session.as_ref().and_then(|s| s.route()) {
-            Some(route) => format!("{} · {}", self.label, route.label()),
+            Some(ChatRoute::Fleet { base, model }) => {
+                format!("AI hub · {} ({})", node_short_name(&base), model_short_name(Path::new(&model)))
+            }
+            Some(ChatRoute::InProcess { model }) => {
+                format!("AI hub · {this_machine} ({})", model_short_name(Path::new(&model)))
+            }
+            Some(ChatRoute::MachineNode { .. }) => {
+                let model = self.model_path.as_deref().map(model_short_name).unwrap_or_else(|| "auto".into());
+                format!("AI hub · {this_machine} ({model})")
+            }
             None => self.label.clone(),
         }
     }
@@ -256,8 +392,8 @@ impl Model for LocalModel {
         let changed = system != self.system || tools != self.tools.as_slice();
         self.system = system.to_string();
         self.tools = tools.to_vec();
-        // No session yet: nothing to do — the weights load on the FIRST
-        // user line (`send_user`), never on a registration. An app joining
+        // No session yet: nothing to do — the weights load on the first
+        // user input (text or pictures), never on a registration. An app joining
         // the bus must not cost the machine a model load the person has
         // not asked for.
         match &self.session {
@@ -270,7 +406,7 @@ impl Model for LocalModel {
 
     fn send_user(&mut self, text: &str, dynamic_context: &str) {
         if self.session.is_none() {
-            // The first line of the conversation is what loads the model.
+            // Without pictures, the first user line starts the session.
             self.start_session();
         }
         let Some(session) = &self.session else {
@@ -297,6 +433,14 @@ impl Model for LocalModel {
         // The tool table travels as an update block in the next message,
         // so a rebind between a call and its result costs nothing.
         true
+    }
+
+    fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
+        if images.is_empty() { return Ok(()); }
+        if self.session.is_none() { self.start_session(); }
+        self.session.as_ref().ok_or("the local model is not loaded")?.attach_images(
+            images.into_iter().map(|image| ToolImage { label: image.label, png: image.png }).collect(),
+        )
     }
 
     fn send_tool_result(&mut self, _call_id: &str, text: &str, is_error: bool) {
@@ -394,8 +538,8 @@ mod tests {
     #[test]
     fn model_names_read_well() {
         assert_eq!(model_short_name(Path::new("/x/Qwen3.5-9B-UD-Q4_K_XL.gguf")), "Qwen3.5 9B");
-        assert_eq!(local_label(Some(Path::new("/x/Qwen3.5-9B-UD-Q4_K_XL.gguf"))), "Local · Qwen3.5 9B");
-        assert_eq!(local_label(None), "Local");
+        assert_eq!(local_label(Some(Path::new("/x/Qwen3.5-9B-UD-Q4_K_XL.gguf"))), "AI hub · Qwen3.5 9B");
+        assert_eq!(local_label(None), "AI hub · auto");
     }
 
     /// A scratch tree: a fake makepad home with weights, a fake checkout
@@ -440,6 +584,8 @@ mod tests {
         // The registry's layout under the home: found from any cwd; the
         // projector beside it is never the answer, a Qwen beats a larger
         // other model, the larger Qwen beats the smaller.
+        // A bigger Qwen-named text encoder under another domain's folder is no chat model.
+        t.file("home/weights/video/MiniMax-H3-tiers/qwen3vl_32b_minimax_h3-Q4_K_M.gguf", 9000);
         t.file("home/weights/some/Other-13B.gguf", 3000);
         t.file("home/weights/unsloth/Qwen3.5-9B-mmproj-F16.gguf", 4000);
         let small = t.file("home/weights/unsloth/Qwen3.5-4B-Q5.gguf", 1000);
@@ -464,5 +610,32 @@ mod tests {
         let pinned = t2.file("pinned/m.gguf", 5);
         assert_eq!(local_model_path_in(Some(pinned.clone()), &weights, None, Some(&repo)), Some(pinned));
         assert_eq!(local_model_path_in(Some(t2.root.join("missing.gguf")), &weights, None, Some(&repo)), None);
+    }
+
+    #[test]
+    fn route_labels_name_node_and_model() {
+        let route = ChatRoute::Fleet { base: "http://10.0.0.149:8785".into(), model: "qwen3.8-27b".into() };
+        assert_eq!(route_label(&route), "AI hub · 149 (Qwen3.8 27B)");
+    }
+
+    #[test]
+    fn hub_row_without_runtime_is_unselectable_until_found() {
+        set_hub_find(HubFind::Searching);
+        let row = local_row(None, false);
+        assert_eq!((row.label.as_str(), row.unavailable.as_deref()), ("AI hub", Some("searching…")));
+        set_hub_find(HubFind::Missing { at: Instant::now() });
+        assert_eq!(local_row(None, false).unavailable.as_deref(), Some("no hub found"));
+        assert_eq!(local_row(None, true).unavailable, None);
+        set_hub_find(HubFind::Found("AI hub · 149 (Qwen3.8 27B)".into()));
+        let row = local_row(None, false);
+        assert_eq!((row.label.as_str(), row.unavailable), ("AI hub · 149 (Qwen3.8 27B)", None));
+    }
+
+    /// Against the real LAN: `cargo test -- --ignored hub_on_the_lan`.
+    #[test]
+    #[ignore]
+    fn hub_on_the_lan() {
+        let route = makepad_ai_hub::hub_chat::probe_fleet_chat().expect("a hub with a chat model on the LAN");
+        println!("LAN hub row: {}", route_label(&route));
     }
 }

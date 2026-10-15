@@ -53,7 +53,7 @@ pub fn route_allowed(role: Role, edge: bool, method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     let device = matches!(
         (method, path),
-        ("GET", "/health") | ("GET", "/models") | ("POST", "/generate") | ("POST", "/realtime")
+        ("GET", "/health") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime")
     ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
         || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
         || (method == "POST" && path == "/bye");
@@ -62,7 +62,16 @@ pub fn route_allowed(role: Role, edge: bool, method: &str, path: &str) -> bool {
     }
     match role {
         Role::Lan => true,
-        Role::Device => device,
+        // Paired devices also fetch the on-device model files: read-only,
+        // hash-addressed (the blob endpoint), on the LAN front only.
+        // And the control panel's routes (CONTROL_API.md): paired devices
+        // may watch and steer the node they are paired with.
+        Role::Device => device
+            || (method == "GET" && path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX))
+            || path == "/control"
+            || path == "/control/watch"
+            || path == "/control/model"
+            || path == "/llm/context",
         // Nodes fetch model blobs from each other (and check health).
         Role::Node => (method == "GET" && path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX)) || (method == "GET" && path == "/health"),
     }
@@ -403,12 +412,14 @@ fn pump(tls: &mut TlsStream, inner: &mut TcpStream) {
 pub struct Caller {
     pub client_id: String,
     pub role: Role,
+    /// The calling app's name (`X-Hub-App` header), for the control panel.
+    pub app: Option<String>,
 }
 
 impl Caller {
     /// A machine-local (loopback-only node) or in-process caller.
     pub fn local() -> Self {
-        Caller { client_id: "local".into(), role: Role::Lan }
+        Caller { client_id: "local".into(), role: Role::Lan, app: None }
     }
 }
 
@@ -423,7 +434,7 @@ pub fn caller_from_headers(lines: &[String], front_secret: &str) -> Option<Calle
     if !makepad_network::tls::constant_time_eq(secret.as_bytes(), front_secret.as_bytes()) {
         return None;
     }
-    Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)? })
+    Some(Caller { client_id: get(HEADER_CLIENT)?, role: Role::parse(&get(HEADER_ROLE)?)?, app: None })
 }
 
 /// The real client address behind a front, for the inner server's per-IP
@@ -460,7 +471,7 @@ mod tests {
         assert!(out.contains("X-Makepad-Client: rik-mac\r\n"));
         assert!(out.ends_with("\r\n\r\n"));
         let lines: Vec<String> = out.split("\r\n").map(String::from).collect();
-        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Lan }));
+        assert_eq!(caller_from_headers(&lines, "s3cret"), Some(Caller { client_id: "rik-mac".into(), role: Role::Lan, app: None }));
         assert_eq!(caller_from_headers(&lines, "other"), None);
     }
 
@@ -468,9 +479,17 @@ mod tests {
     fn route_policy() {
         assert!(route_allowed(Role::Lan, false, "GET", "/jobs"));
         assert!(!route_allowed(Role::Device, false, "GET", "/jobs"));
+        assert!(route_allowed(Role::Device, false, "GET", "/control/watch?since=3"));
+        assert!(route_allowed(Role::Device, false, "POST", "/control/model"));
+        assert!(!route_allowed(Role::Device, true, "GET", "/control"));
+        assert!(!route_allowed(Role::Node, false, "GET", "/control"));
         assert!(route_allowed(Role::Device, false, "POST", "/generate"));
+        assert!(route_allowed(Role::Device, false, "GET", "/voices"));
         assert!(route_allowed(Role::Device, false, "GET", "/job/abc"));
-        assert!(!route_allowed(Role::Device, false, "GET", "/v1/model_blob/00"));
+        assert!(route_allowed(Role::Device, false, "GET", "/v1/model_blob/00"));
+        assert!(!route_allowed(Role::Device, false, "POST", "/v1/model_blob/00"));
+        assert!(!route_allowed(Role::Device, true, "GET", "/v1/model_blob/00"));
+        assert!(!route_allowed(Role::Device, false, "GET", "/v1/model_inventory"));
         assert!(route_allowed(Role::Node, false, "GET", "/v1/model_blob/00"));
         assert!(!route_allowed(Role::Node, false, "POST", "/generate"));
         // The edge narrows even a LAN credential to the device set.

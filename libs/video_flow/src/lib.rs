@@ -19,6 +19,7 @@
 //! Without the default `convert` feature this crate is std-only: the format
 //! and the estimator, no codec seam.
 
+pub mod coverage;
 pub mod estimate;
 pub mod payload;
 

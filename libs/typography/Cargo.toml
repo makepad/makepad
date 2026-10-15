@@ -16,3 +16,6 @@ makepad-script-compute = { path = "../../platform/script/compute" }
 # Outlines of variable glyphs at non-default axis values need gvar's
 # allocating path (the same feature the draw crate enables).
 ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"] }
+
+[dev-dependencies]
+makepad-script-compute-sched = { path = "../../platform/script/compute_sched" }

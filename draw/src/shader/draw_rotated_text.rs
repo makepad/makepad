@@ -489,7 +489,7 @@ impl DrawRotatedText {
     #[allow(clippy::too_many_arguments)]
     pub fn place_text_along_path(
         &self,
-        run: &PreparedTextRun,
+        run: &PreparedTextRun<RasterizedGlyph>,
         path: &[Vec2d],
         cumulative: &[f64],
         start_distance: f64,
@@ -590,7 +590,7 @@ impl DrawRotatedText {
                     baseline_pen_origin.y as f32,
                 ),
                 font_size_in_lpxs: glyph.font_size_in_lpxs,
-                rasterized: glyph.rasterized,
+                rasterized: glyph.glyph,
                 angle,
             });
         }

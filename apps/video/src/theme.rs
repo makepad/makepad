@@ -1,14 +1,8 @@
-//! The palette. wm exports its active `theme.splash` as MAKEPAD_WM_THEME_SPLASH;
-//! `makepad_wm_theme` line-scans it and retints the stock widgets, and this module
-//! publishes the five colors video's own chrome uses as `mod.mpv.*` (for
-//! the DSL) and as `Vec4f` (for the transport bar, which the widget draws
-//! itself). Standalone runs get Tokyo Night, so the player is dark and
-//! square either way. Flat fills only: no gradients, no rounded corners.
+//! Video chrome colours come from the active system theme.
 
 use makepad_widgets::*;
 
-
-/// Every color video paints, as `#rrggbb` strings.
+/// Every color video paints, as `#rrggbbaa` strings.
 #[derive(Clone, Debug)]
 pub struct Palette {
     /// Window background and the letterbox around the picture.
@@ -23,43 +17,24 @@ pub struct Palette {
     pub accent: String,
 }
 
-impl Default for Palette {
-    fn default() -> Self {
-        Self::tokyo_night()
-    }
-}
-
 impl Palette {
-    /// The fallback theme, matching wm's default.
-    pub fn tokyo_night() -> Self {
-        Self {
-            background: "#1a1b26".into(),
-            lighter_background: "#24283b".into(),
-            foreground: "#a9b1d6".into(),
-            dark_foreground: "#565f89".into(),
-            accent: "#7aa2f7".into(),
-        }
-    }
-
-    /// Resolve against the owning Splash VM on each application/style reload.
+    /// Read the owning VM again on each application/style reload.
     pub fn for_vm(vm: &mut ScriptVm) -> Self {
-        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
-    }
-    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
-    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
-    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
-
-        let Some(p) = palette else {
-            return Self::tokyo_night();
+        let mut hex = |role| {
+            let color = theme_tokens::color(vm, role)
+                .unwrap_or_else(|| panic!("missing system theme colour: {role}"));
+            format!("#{:08x}", color.to_u32())
         };
         Self {
-            background: p.hex("background", "#1a1b26"),
-            lighter_background: p.hex("lighter_background", "#24283b"),
-            foreground: p.hex("foreground", "#a9b1d6"),
-            dark_foreground: p.hex("dark_foreground", "#565f89"),
-            accent: p.hex("accent", "#7aa2f7"),
+            background: hex("color_bg_app"),
+            lighter_background: hex("color_fg_app"),
+            foreground: hex("color_text"),
+            dark_foreground: hex("color_text_disabled"),
+            accent: hex("color_focus"),
         }
     }
+
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
 
     pub fn bg_vec4(&self) -> Vec4f {
         vec4_of(&self.background)
@@ -77,35 +52,21 @@ impl Palette {
         vec4_of(&self.accent)
     }
 
-    /// Publish the palette as `mod.mpv` so `script_mod!` can read it. Call
-    /// after `makepad_wm_theme::apply` and before the app's own modules.
+    /// Bind `mod.mpv` to the system theme before the app's modules.
     pub fn publish(&self, vm: &mut ScriptVm) {
-        let code = format!(
-            "mod.mpv = {{\n\
-             bg: {background}\n\
-             bar: {lighter_background}\n\
-             fg: {foreground}\n\
-             dim: {dark_foreground}\n\
-             accent: {accent}\n\
-             }}\n\
-             true\n",
-            background = self.background,
-            lighter_background = self.lighter_background,
-            foreground = self.foreground,
-            dark_foreground = self.dark_foreground,
-            accent = self.accent,
-        );
-        vm.eval(ScriptMod {
-            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-            module_path: "video_palette".to_string(),
-            file: "palette.splash".to_string(),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
+        vm.eval(script! {
+            use mod.prelude.widgets.*
+            mod.mpv = {
+                bg: theme.color_bg_app
+                bar: theme.color_fg_app
+                fg: theme.color_text
+                dim: theme.color_text_disabled
+                accent: theme.color_focus
+            }
+            true
         });
         for e in vm.take_errors() {
-            log!("video palette: {}", e);
+            log!("video theme: {}", e);
         }
     }
 }
@@ -145,19 +106,23 @@ mod tests {
     }
 
     #[test]
-    fn the_five_chrome_colors_are_distinct() {
-        let p = Palette::tokyo_night();
-        let all = [
-            &p.background,
-            &p.lighter_background,
-            &p.foreground,
-            &p.dark_foreground,
-            &p.accent,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for b in all.iter().skip(i + 1) {
-                assert_ne!(a, b, "chrome colors must not collapse");
-            }
-        }
+    fn chrome_colors_follow_the_system_theme() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let p = Palette::for_vm(vm);
+            p.publish(vm);
+            assert_eq!(vec4_of(&p.background), theme_tokens::color(vm, "color_bg_app").unwrap());
+            assert_eq!(vec4_of(&p.lighter_background), theme_tokens::color(vm, "color_fg_app").unwrap());
+            assert_eq!(vec4_of(&p.foreground), theme_tokens::color(vm, "color_text").unwrap());
+            assert_eq!(vec4_of(&p.dark_foreground), theme_tokens::color(vm, "color_text_disabled").unwrap());
+            assert_eq!(vec4_of(&p.accent), theme_tokens::color(vm, "color_focus").unwrap());
+            let chrome = vm.module(id!(mpv));
+            assert_eq!(vm.value(chrome, id!(bg)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_bg_app"));
+            assert_eq!(vm.value(chrome, id!(bar)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_fg_app"));
+            assert_eq!(vm.value(chrome, id!(fg)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_text"));
+            assert_eq!(vm.value(chrome, id!(dim)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_text_disabled"));
+            assert_eq!(vm.value(chrome, id!(accent)).as_color().map(Vec4f::from_u32), theme_tokens::color(vm, "color_focus"));
+        });
     }
 }

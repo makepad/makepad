@@ -1576,7 +1576,6 @@ impl HamburgerMenuRef {
 mod tests {
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
-    use crate::makepad_script::trap::NoTrap;
     use crate::makepad_script::{script, ScriptMod};
     use crate::nav_list::{NavAction, NavList};
     use std::{cell::Cell, collections::HashSet};
@@ -1599,7 +1598,7 @@ mod tests {
     fn theme_ease(cx: &mut Cx, token: &str) -> Ease {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(token));
             Ease::script_from_value(vm, value)
         })
     }
@@ -1607,9 +1606,7 @@ mod tests {
     fn theme_number(cx: &mut Cx, token: &str) -> f64 {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            vm.bx
-                .heap
-                .value(theme, LiveId::from_str(token).into(), NoTrap)
+            vm.value(theme, LiveId::from_str(token))
                 .as_f64()
                 .unwrap_or_else(|| panic!("the theme has no number {token}"))
         })

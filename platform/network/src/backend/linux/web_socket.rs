@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::socket_stream::SocketStream;
+use crate::socket_stream::SocketStream;
 
 pub struct LinuxWebSocket {
     sender: Option<Sender<WebSocketMessage>>,

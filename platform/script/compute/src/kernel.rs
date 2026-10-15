@@ -3,6 +3,7 @@
 //!
 //! ```ignore
 //! let k = kernel::compile(src)?;
+//! use makepad_script_compute_sched::kernel::KernelExt;
 //! let mut call = k.call();
 //! call.set_param("amp", 2.0);
 //! call.input("hf", &heights)?;
@@ -10,11 +11,14 @@
 //! let stats = call.run(count)?;          // or run_parallel(count, threads)
 //! ```
 //!
-//! Elements run in fixed chunks of [`CHUNK`]; a reduce kernel combines its
+//! The host scheduler runs fixed chunks; a reduce kernel combines its
 //! chunk partials in chunk order, so every result is bit-identical whatever
 //! the backend, thread count or scheduling.
+use makepad_relax_api::relax_api;
 
 use crate::ir::{self, Program};
+pub use crate::boundary::KernelRef;
+use crate::boundary::{forever, BufferInfoView, ParamInfoView};
 use crate::lower::kernel as kl;
 pub use crate::lower::kernel::{
     Access, BufferDecl, FieldTy, KernelKind, Layout, LayoutField, MathMode, ReduceOp, CANONICAL_NAN, ELEMENT_CAP, K_ACC, K_BASE, K_COUNT, K_OVERFLOW, K_PARAMS, K_SEED,
@@ -22,85 +26,231 @@ pub use crate::lower::kernel::{
 };
 pub use crate::lower::ParamInfo;
 use crate::{Backend, ShaderError};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Elements per chunk (the unit of scheduling and of reduce partials).
-pub const CHUNK: usize = 4096;
+const RUN_SLICE_MAX: usize = 4096;
 
-/// The most ops (by the static worst case) a slice of elements runs
-/// between two looks at the counted work: how far past its limit a call
-/// can run before it stops.
-pub const SLICE_WORK: u64 = 1 << 22;
-
-/// The smallest range a map kernel's call is split into. A map kernel's
-/// result does not depend on how its elements are split (each element
-/// writes only its own records), so a call of a few thousand elements is
-/// shared by every worker in ranges of at least this many (a multiple of 4,
-/// so four-wide code runs whole groups); reduce kernels keep fixed
-/// [`CHUNK`]s, whose partials combine in order.
-pub const MIN_SPLIT: usize = 512;
-
-/// Whether a call of `count` elements may run split across threads (what
-/// admission checks buffer sizes for; [`split_threads`] decides how many
-/// threads it actually takes).
-pub(crate) fn splits(kernel: &Kernel, threads: usize, count: usize) -> bool {
-    threads > 1 && kernel.parallel_safe && count > if kernel.reduce_init().1 == 0 { MIN_SPLIT } else { CHUNK }
-}
-
-/// Work one more thread must get before splitting pays: waking a parked
-/// worker and joining it costs about 10-20 us (measured with
-/// examples/bench_dispatch: a 4096-element multiply-add took 1.9 us on the
-/// caller and 22 us fanned out over 8 threads).
-pub const SPLIT_NS: f64 = 25_000.0;
-
-/// Threads a call of `count` elements runs on (1: the caller alone): one
-/// per SPLIT_NS of estimated work, at most `threads`. The estimate is the
-/// kernel's measured time per element (see [`Kernel::ns_per_element`]).
-/// The result never depends on it: any split gives the same bits.
-pub(crate) fn split_threads(kernel: &Kernel, threads: usize, count: usize, mode: Mode) -> usize {
-    if !splits(kernel, threads, count) {
-        return 1;
-    }
-    let ns = kernel.ns_per_element(mode) * count as f64;
-    ((ns / SPLIT_NS) as usize).clamp(1, threads)
-}
-
-/// The kernel prelude: hashing, noise, quaternions, matrices, curves and
-/// buffer sampling, available to every kernel (only what is called is
-/// compiled in).
+/// Hashing, noise, quaternions, matrices, curves and buffer sampling.
+/// Available to every kernel; only reached functions are compiled in.
 pub const KERNEL_PRELUDE: &str = include_str!("kernel_prelude.splash");
 
-/// A compiled kernel. Immutable and shareable across threads.
+/// A compiled kernel's plain face: what callers read, laid out so that
+/// Relax-compiled code reads it itself instead of calling into the
+/// compiler's code. It is the first field of its [`KernelBody`] (which holds
+/// the programs, the machine code and the caches) and derefs to it; a
+/// kernel is reached through a [`KernelRef`], which keeps it alive.
+#[relax_api(plain)]
+#[repr(C)]
 pub struct Kernel {
     pub kind: KernelKind,
     pub math: MathMode,
+    /// Element ranges may run on different threads.
+    pub parallel_safe: bool,
+    /// Worst-case AIR ops per element.
+    pub cost: u64,
+    ctx_words: usize,
     /// The entry's name: vertex, instance, element, primitive, reduce_*.
-    pub entry: String,
+    entry: &'static str,
+    params: &'static [ParamInfoView<'static>],
+    buffers: &'static [BufferInfoView<'static>],
+    /// Edit mode: per live literal, the parameter it reads and, in a cell
+    /// the compiler's code and this one read and write as an `AtomicU32`,
+    /// its value now.
+    live_param: &'static [u32],
+    live_value: &'static [u32],
+    /// Measured ns per element (f32 bits, a moving average; 0: none yet):
+    /// how many threads a call is worth. An `AtomicU32` cell.
+    speed: *mut u32,
+    /// Has four-wide code (element-local kernels only). An `AtomicU8` cell.
+    simd: *mut u8,
+    /// The body this face is the first field of.
+    body: *const KernelBody,
+}
+
+// SAFETY: the face is immutable apart from its cells, which are only ever
+// used as atomics, and `body` points to the allocation it lives in, which is
+// shared across threads the same way.
+unsafe impl Send for Kernel {}
+unsafe impl Sync for Kernel {}
+
+/// The kernel's cells that change while it is shared: the plain face points
+/// at them (the std's atomics are no plain data).
+struct KernelCells {
+    speed: AtomicU32,
+    simd: AtomicU8,
+}
+
+impl Kernel {
+    #[inline]
+    pub fn kind(&self) -> KernelKind { self.kind }
+    #[inline]
+    pub fn math(&self) -> MathMode { self.math }
+    #[inline]
+    pub fn entry(&self) -> &str { self.entry }
+    #[inline]
+    pub fn cost(&self) -> u64 { self.cost }
+    #[inline]
+    pub fn parallel_safe(&self) -> bool { self.parallel_safe }
+
+    /// Ctx words: base, count, time, seed, host work, overflow, reduce lanes,
+    /// then the params.
+    #[inline]
+    pub fn ctx_words(&self) -> usize { self.ctx_words }
+
+    #[inline]
+    pub fn params(&self) -> &[ParamInfoView<'_>] { self.params }
+    #[inline]
+    pub fn param_count(&self) -> usize { self.params.len() }
+    #[inline]
+    pub fn param_view(&self, index: usize) -> ParamInfoView<'_> { self.params[index] }
+    #[inline]
+    pub fn param_views(&self) -> impl Iterator<Item = ParamInfoView<'_>> {
+        self.params.iter().copied()
+    }
+    pub fn param_index(&self, name: &str) -> Option<usize> {
+        self.params.iter().position(|p| p.name == name)
+    }
+
+    #[inline]
+    pub fn buffers(&self) -> &[BufferInfoView<'_>] { self.buffers }
+    #[inline]
+    pub fn buffer_count(&self) -> usize { self.buffers.len() }
+    #[inline]
+    pub fn buffer_view(&self, index: usize) -> BufferInfoView<'_> { self.buffers[index] }
+    #[inline]
+    pub fn buffer_views(&self) -> impl Iterator<Item = BufferInfoView<'_>> {
+        self.buffers.iter().copied()
+    }
+    pub fn buffer_index(&self, name: &str) -> Option<usize> {
+        self.buffers.iter().position(|b| b.name == name)
+    }
+
+    /// Has NEON x4 code (used for element-local calls whose outputs hold
+    /// every element).
+    #[inline]
+    pub fn simd(&self) -> bool {
+        // SAFETY: the cell is an AtomicU8 of the body, which outlives this face.
+        unsafe { &*(self.simd as *const AtomicU8) }.load(Ordering::Relaxed) != 0
+    }
+
+    /// The moving average of measured ns per element.
+    #[inline]
+    fn speed(&self) -> &AtomicU32 {
+        // SAFETY: the cell is an AtomicU32 of the body, which outlives this face.
+        unsafe { &*(self.speed as *const AtomicU32) }
+    }
+
+    /// Estimated ns per element on one thread: the moving average of
+    /// native runs, or before any, the worst-case op count at about 0.03
+    /// ns per op for NEON code (0.1 for scalar, 20 for the interpreter).
+    pub fn ns_per_element(&self, mode: Mode) -> f64 {
+        let per_op = match mode {
+            Mode::Interp => return self.cost as f64 * 20.0,
+            Mode::Vector if self.simd() => 0.03,
+            _ => 0.1,
+        };
+        let s = f32::from_bits(self.speed().load(Ordering::Relaxed));
+        if s > 0.0 {
+            s as f64
+        } else {
+            self.cost as f64 * per_op
+        }
+    }
+
+    /// Records a native run of `count` elements on `threads` threads that
+    /// took `nanos` (one-thread-equivalent time per element, averaged).
+    pub fn observe(&self, count: usize, threads: usize, nanos: u64, mode: Mode) {
+        if mode == Mode::Interp || count < 256 {
+            return;
+        }
+        let per = (nanos as f64 * threads as f64 / count as f64) as f32;
+        let old = f32::from_bits(self.speed().load(Ordering::Relaxed));
+        let new = if old > 0.0 { old * 0.75 + per * 0.25 } else { per };
+        self.speed().store(new.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The program's identity across hosts ([`program_key`]).
+    pub fn program_key(&self) -> u64 {
+        let mut key = 0;
+        kernel_ctl(self, KernelCtl::ProgramKey(&mut key));
+        key
+    }
+
+    /// The reduce kind, lanes and identity.
+    pub fn reduce_parts(&self) -> (ReduceOp, usize, f32) {
+        match self.kind {
+            KernelKind::Reduce(op, n) => (
+                op,
+                n as usize,
+                match op {
+                    ReduceOp::Sum => 0.0,
+                    ReduceOp::Min => f32::INFINITY,
+                    ReduceOp::Max => f32::NEG_INFINITY,
+                },
+            ),
+            KernelKind::Map => (ReduceOp::Sum, 0, 0.0),
+        }
+    }
+
+    /// Initialize parameters in zeroed caller-owned context storage, including current live literals.
+    pub fn init_context(&self, ctx: &mut [u32]) {
+        assert!(ctx.len() >= self.ctx_words);
+        for (k, p) in self.params.iter().enumerate() { ctx[K_PARAMS as usize + k] = p.default.to_bits(); }
+        for (param, value) in self.live_param.iter().zip(self.live_value.iter()) {
+            // SAFETY: the cell is an AtomicU32 of the body, which outlives this face.
+            ctx[K_PARAMS as usize + *param as usize] = unsafe { &*(value as *const u32 as *const AtomicU32) }.load(Ordering::Relaxed);
+        }
+    }
+}
+
+impl std::ops::Deref for Kernel {
+    type Target = KernelBody;
+    #[inline]
+    fn deref(&self) -> &KernelBody {
+        // SAFETY: a Kernel only exists as the first field of a KernelBody,
+        // which `body` points to.
+        unsafe { &*self.body }
+    }
+}
+
+impl std::fmt::Debug for Kernel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Kernel({} {:?}, {} params, {} buffers)", self.entry, self.kind, self.params.len(), self.buffers.len())
+    }
+}
+
+/// A compiled kernel's programs, machine code and caches: the compiler's
+/// own state, reached through [`Kernel`]'s deref. Immutable and shareable
+/// across threads.
+#[relax_api(handle)]
+#[repr(C)]
+pub struct KernelBody {
+    /// First: see [`Kernel`].
+    pub(crate) head: Kernel,
+    entry: String,
     params: Vec<ParamInfo>,
-    /// The kernel's buffers, then the hidden work buffer (index `work`).
+    param_views: Box<[ParamInfoView<'static>]>,
     buffers: Vec<BufferDecl>,
-    work: usize,
+    buffer_views: Box<[BufferInfoView<'static>]>,
     shared: Box<[u32]>,
     program: Program,
     /// `program` with its calls inlined and optimized again (the same
     /// bits): what the interpreter and native code run.
     flat: Program,
-    /// Worst-case AIR ops per element.
-    pub cost: u64,
-    /// Element ranges may run on different threads.
-    pub parallel_safe: bool,
-    #[cfg(target_arch = "aarch64")]
-    native: Option<crate::arm64::Code>,
+    /// What each element counts by itself; its loops count at run time
+    /// (ctx `K_WORK`).
+    element_work: u64,
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    native: Option<crate::host_native::Code>,
     /// Four elements per iteration (element-local kernels only).
-    #[cfg(target_arch = "aarch64")]
-    neon: Option<crate::arm64::Code>,
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    neon: Option<crate::host_native::Code>,
     /// Admission's worst-case element estimate, computed on first admit
     /// (the job path stays allocation-free).
-    pub(crate) admission: std::sync::OnceLock<crate::admission::ElementCost>,
-    /// Measured ns per element (f32 bits, a moving average; 0: none yet):
-    /// how many threads a call is worth.
-    speed: AtomicU32,
+    pub(crate) admission: std::sync::OnceLock<crate::cost::ElementCost>,
+    /// One element's worst case in counted ops (slices are sized by it).
+    slice_ops: std::sync::OnceLock<u64>,
     /// Function table slots of this kernel's generated wasm (scalar, four
     /// wide; 0: none; a host links one of the two), once the host linked
     /// its document's module (see [`wasm_module`]).
@@ -108,29 +258,28 @@ pub struct Kernel {
     /// Edit mode: literals read from hidden parameters ([`compile_live`]),
     /// their values now, and the live literals that stayed constants.
     live: Box<[crate::lower::LiveParam]>,
+    live_param: Box<[u32]>,
     live_values: Box<[AtomicU32]>,
     folded: Box<[usize]>,
+    cells: Box<KernelCells>,
 }
 
-impl std::fmt::Debug for Kernel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Kernel({} {:?}, {} params, {} buffers, {:?})", self.entry, self.kind, self.params.len(), self.buffers.len(), self.backend())
-    }
-}
-
-pub fn compile(src: &str) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+#[inline(always)]
+pub fn compile(src: &str) -> Result<KernelRef, Vec<ShaderError>> {
     compile_with(src, &[], Backend::Native)
 }
 
 /// Compiles with host layouts (GPU vertex/instance structs a kernel may
 /// write by field) for a backend.
-pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+#[inline(always)]
+pub fn compile_with(src: &str, layouts: &[crate::boundary::LayoutView<'_>], backend: Backend) -> Result<KernelRef, Vec<ShaderError>> {
     compile_with_modules(src, layouts, backend, &[])
 }
 
 /// Compiles with host layouts and the modules the kernel's `use` items
 /// name (the host resolved each to its text; std modules are built in).
-pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module]) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+#[inline(always)]
+pub fn compile_with_modules(src: &str, layouts: &[crate::boundary::LayoutView<'_>], backend: Backend, modules: &[crate::module::Module]) -> Result<KernelRef, Vec<ShaderError>> {
     compile_live(src, layouts, backend, modules, None)
 }
 
@@ -141,7 +290,30 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
 /// a live literal that must stay a constant (an integer, a size, a value
 /// computed once) is in [`Kernel::folds`]. `None` compiles exactly as
 /// [`compile_with_modules`].
-pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], live: Option<&dyn Fn(usize) -> bool>) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+#[inline(always)]
+pub fn compile_live(src: &str, layouts: &[crate::boundary::LayoutView<'_>], backend: Backend, modules: &[crate::module::Module], live: Option<&dyn Fn(usize) -> bool>) -> Result<KernelRef, Vec<ShaderError>> {
+    use crate::boundary::LiveFilter;
+    unsafe extern "C-unwind" fn include(context: *const (), offset: usize) -> bool {
+        // The reference lives in compile_live's caller-side stack frame.
+        let filter = unsafe { &*(context as *const &dyn Fn(usize) -> bool) };
+        filter(offset)
+    }
+    let filter = match live.as_ref() {
+        Some(filter) => LiveFilter { context: filter as *const _ as *const (), include: Some(include) },
+        None => LiveFilter { context: std::ptr::null(), include: None },
+    };
+    // SAFETY: views and the callback context are borrowed for this synchronous call.
+    let mut compiled = unsafe { crate::boundary::compile_kernel(src, layouts, backend, modules, filter) };
+    if let Some(kernel) = compiled.take_kernel() {
+        return Ok(kernel);
+    }
+    Err((0..compiled.error_count()).map(|index| {
+        let error = compiled.error(index);
+        ShaderError::new(error.start, error.end, error.message.to_string())
+    }).collect())
+}
+
+pub(crate) fn compile_live_impl(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], live: Option<&dyn Fn(usize) -> bool>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
     let toks = crate::parse::lex(src).map_err(|e| vec![e])?;
     let lift = live.map(|live| {
         let mut lift = crate::lower::LiveLift::default();
@@ -157,15 +329,23 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
         lift
     });
     let items = crate::parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
-    let prelude = crate::parse_prelude(KERNEL_PRELUDE, src.len());
+    compile_items_impl(items, src.len(), src, layouts, backend, modules, lift)
+}
+
+/// Compiles a kernel's syntax tree: `items` (the kernel's own items, their
+/// spans below `src_len`) with the prelude and the modules they use.
+/// `source` is the kernel's text when it was written as text (empty for
+/// a kernel built from Splash values), kept by the recorder.
+pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], lift: Option<crate::lower::LiveLift>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+    let prelude = crate::parse_prelude(KERNEL_PRELUDE, src_len);
     // Module spans go past the prelude's, so errors inside them are
     // reported at the kernel's call like the prelude's.
     // The kernel's own items are the roots; library items (modules, the
     // prelude) are compiled in only when reached.
     let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
-    let items = crate::module::resolve(items, src.len() + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
+    let items = crate::module::resolve(items, src_len + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
     let all = crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots);
-    let lowered = kl::lower_kernel(&all, src.len() + 1, layouts, lift).map_err(|e| vec![e])?;
+    let lowered = kl::lower_kernel(&all, src_len + 1, layouts, lift).map_err(|e| vec![e])?;
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = ir::Regions {
@@ -206,41 +386,71 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
-    let flat = ir::flat(&lowered.program).into_owned();
-    #[cfg(target_arch = "aarch64")]
+    let flat = lowered.flat;
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native = if backend == Backend::Native {
         let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
-        crate::arm64::compile_with(&flat, writable)
+        crate::host_native::compile_with(&flat, writable)
     } else {
         None
     };
-    #[cfg(target_arch = "aarch64")]
-    let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&flat) } else { None };
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let neon = if native.is_some() && lowered.parallel_safe { crate::host_simd::compile(&flat) } else { None };
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let _ = backend;
     let live_values: Box<[AtomicU32]> = lowered.live.iter().map(|p| AtomicU32::new(lowered.params[p.param as usize].default.to_bits())).collect();
-    let kernel = Arc::new(Kernel {
-        kind: lowered.kind,
-        math: lowered.math,
-        entry: lowered.entry,
-        params: lowered.params,
-        work: lowered.buffers.len() - 1,
-        buffers: lowered.buffers,
-        shared: shared.into_boxed_slice(),
-        program: lowered.program,
-        flat,
-        cost: lowered.cost,
-        parallel_safe: lowered.parallel_safe,
-        #[cfg(target_arch = "aarch64")]
-        native,
-        #[cfg(target_arch = "aarch64")]
-        neon,
-        admission: std::sync::OnceLock::new(),
-        speed: AtomicU32::new(0),
-        wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
-        live_values,
-        live: lowered.live.into_boxed_slice(),
-        folded: lowered.folded.into_boxed_slice(),
+    let live_param: Box<[u32]> = lowered.live.iter().map(|p| p.param).collect();
+    let (params, buffers, entry) = (lowered.params, lowered.buffers, lowered.entry);
+    // SAFETY (all four views): the names and boxes they borrow belong to the
+    // body built below and are never changed or dropped before it; a
+    // Kernel hands them out only for the length of a borrow of itself.
+    let param_views: Box<[ParamInfoView<'static>]> = params.iter().map(|p| ParamInfoView { name: unsafe { forever(p.name.as_str()) }, default: p.default, min: p.min, max: p.max }).collect();
+    let buffer_views: Box<[BufferInfoView<'static>]> = buffers.iter().map(|b| BufferInfoView { name: unsafe { forever(b.name.as_str()) }, access: b.access, stride: b.stride }).collect();
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let simd = neon.is_some();
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let simd = false;
+    let cells = Box::new(KernelCells { speed: AtomicU32::new(0), simd: AtomicU8::new(simd as u8) });
+    let kernel = Arc::new_cyclic(|body| {
+        let head = Kernel {
+            kind: lowered.kind,
+            math: lowered.math,
+            parallel_safe: lowered.parallel_safe,
+            cost: lowered.cost,
+            ctx_words,
+            entry: unsafe { forever(entry.as_str()) },
+            params: unsafe { forever(&*param_views) },
+            buffers: unsafe { forever(&*buffer_views) },
+            live_param: unsafe { forever(&*live_param) },
+            live_value: unsafe { std::slice::from_raw_parts(live_values.as_ptr() as *const u32, live_values.len()) },
+            speed: cells.speed.as_ptr(),
+            simd: cells.simd.as_ptr(),
+            body: body.as_ptr(),
+        };
+        KernelBody {
+            head,
+            entry,
+            params,
+            param_views,
+            buffers,
+            buffer_views,
+            shared: shared.into_boxed_slice(),
+            program: lowered.program,
+            flat,
+            element_work: lowered.element_work,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            native,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            neon,
+            admission: std::sync::OnceLock::new(),
+            slice_ops: std::sync::OnceLock::new(),
+            wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
+            live_values,
+            live_param,
+            live: lowered.live.into_boxed_slice(),
+            folded: lowered.folded.into_boxed_slice(),
+            cells,
+        }
     });
     #[cfg(target_arch = "wasm32")]
     match precompiled(&kernel.program) {
@@ -250,8 +460,10 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
     #[cfg(not(target_arch = "wasm32"))]
     if RECORDING.load(Ordering::Relaxed) {
         let modules = modules.iter().map(|m| (m.path.to_string(), m.source.to_string())).collect();
-        recorded().0.send(Recorded { kernel: kernel.clone(), source: src.to_string(), layouts: layouts.to_vec(), modules }).ok();
+        recorded().0.send(Recorded { kernel: KernelRef::from_arc(kernel.clone()), source: source.to_string(), layouts: layouts.to_vec(), modules }).ok();
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = source;
     Ok(kernel)
 }
 
@@ -277,23 +489,23 @@ mod wasm_link_thread {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_queue {
-    use super::Kernel;
+    use super::KernelBody;
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-    fn queue() -> &'static (Sender<Weak<Kernel>>, Mutex<Receiver<Weak<Kernel>>>) {
-        static Q: OnceLock<(Sender<Weak<Kernel>>, Mutex<Receiver<Weak<Kernel>>>)> = OnceLock::new();
+    fn queue() -> &'static (Sender<Weak<KernelBody>>, Mutex<Receiver<Weak<KernelBody>>>) {
+        static Q: OnceLock<(Sender<Weak<KernelBody>>, Mutex<Receiver<Weak<KernelBody>>>)> = OnceLock::new();
         Q.get_or_init(|| {
             let (tx, rx) = channel();
             (tx, Mutex::new(rx))
         })
     }
 
-    pub fn push(k: &Arc<Kernel>) {
+    pub fn push(k: &Arc<KernelBody>) {
         let _ = queue().0.send(Arc::downgrade(k));
     }
 
-    pub fn take() -> Vec<Arc<Kernel>> {
+    pub fn take() -> Vec<Arc<KernelBody>> {
         // Only the host's UI thread receives: the lock is never contended.
         let Ok(rx) = queue().1.try_lock() else { return Vec::new() };
         rx.try_iter().filter_map(|w| w.upgrade()).collect()
@@ -302,9 +514,9 @@ mod wasm_queue {
 
 /// Kernels compiled since the last call whose wasm code is not linked yet
 /// (wasm32 hosts; empty elsewhere). Kernels already dropped are skipped.
-pub fn take_unlinked() -> Vec<Arc<Kernel>> {
+pub fn take_unlinked() -> Vec<KernelRef> {
     #[cfg(target_arch = "wasm32")]
-    return wasm_queue::take();
+    return wasm_queue::take().into_iter().map(KernelRef::from_arc).collect();
     #[cfg(not(target_arch = "wasm32"))]
     Vec::new()
 }
@@ -315,7 +527,9 @@ static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// a tool can compile it again elsewhere: its source, host layouts and the
 /// modules its `use` items named).
 pub struct Recorded {
-    pub kernel: Arc<Kernel>,
+    pub kernel: KernelRef,
+    /// Its text; empty for a kernel built from Splash values (the kernel's
+    /// program is what a build tool compiles).
     pub source: String,
     pub layouts: Vec<Layout>,
     /// (path, source) of each module.
@@ -371,7 +585,9 @@ pub fn program_key(p: &Program) -> u64 {
 /// One kernel compiled ahead of time and linked into the host's function
 /// table: its [`program_key`] and the table slot of its entry, as `simd`
 /// when it is four wide, else as `scalar` (the other 0).
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Precompiled {
     pub key: u64,
     pub scalar: u32,
@@ -419,101 +635,39 @@ pub fn precompiled_stats() -> (u32, u32) {
     (PRECOMPILED_HITS.load(Ordering::Relaxed), PRECOMPILED_MISSES.load(Ordering::Relaxed))
 }
 
-/// Why a call could not run.
-#[derive(Clone, Debug, PartialEq)]
-pub enum KernelError {
-    /// A buffer the kernel uses was not bound (its name).
-    Unbound(String),
-    /// A bound buffer is empty.
-    Empty(String),
-    /// A bound buffer has 2^31 words or more.
-    TooLarge(String),
-    /// No buffer of that name in the kernel.
-    NoSuchBuffer(String),
-    /// Bound read-only but the kernel writes it.
-    ReadOnly(String),
-    /// Cancelled by its owner (or pre-empted) before it finished.
-    Cancelled,
-    /// An output buffer is smaller than the call needs (words).
-    TooSmall { name: String, need: u64, have: usize },
-    /// More elements than one call may run.
-    TooMany(usize),
-    /// Stopped: the ops it counted passed the call's limit.
-    OverBudget { work: u64, limit: u64 },
-}
-
-impl std::fmt::Display for KernelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KernelError::Unbound(n) => write!(f, "buffer `{}` is not bound", n),
-            KernelError::Empty(n) => write!(f, "buffer `{}` is empty", n),
-            KernelError::TooLarge(n) => write!(f, "buffer `{}` has 2^31 words or more", n),
-            KernelError::NoSuchBuffer(n) => write!(f, "the kernel has no buffer `{}`", n),
-            KernelError::ReadOnly(n) => write!(f, "buffer `{}` is written by the kernel but was bound read-only", n),
-            KernelError::Cancelled => write!(f, "cancelled"),
-            KernelError::TooSmall { name, need, have } => write!(f, "buffer `{}` has {} words; this call needs {}", name, have, need),
-            KernelError::TooMany(n) => write!(f, "{} elements is more than one call may run", n),
-            KernelError::OverBudget { work, limit } => write!(f, "stopped after {} ops: its limit is {} ops", work, limit),
-        }
-    }
-}
-
-/// What a finished call reports.
-#[derive(Clone, Debug, Default)]
-pub struct RunStats {
-    pub elements: usize,
-    /// An emit found an element's slots full (records were dropped).
-    pub overflowed: bool,
-    /// A host function call failed (a clamped slice, an error, a panic):
-    /// its results were zero.
-    pub host_error: bool,
-    /// A reduce kernel's result (its lanes).
-    pub reduced: Vec<f32>,
-    /// The ops it counted (see [`crate::work`]): the same on every machine.
-    pub work: u64,
-    pub nanos: u64,
-}
-
-impl Kernel {
-    pub fn params(&self) -> &[ParamInfo] {
-        &self.params
+impl KernelBody {
+    /// Elements per slice when `remaining` ops of the call's limit are left
+    /// to `threads` workers: as many as can run (at their worst case)
+    /// within each worker's share, so the slices running at once cannot
+    /// pass the limit; at least four (four-wide code runs whole groups: a
+    /// call stops at most four elements a worker past its limit), at most
+    /// a chunk, and a slice's loop count fits the u32 ctx word. Far from
+    /// the limit, whole chunks run with no more looks at the count than
+    /// one a chunk.
+    pub(crate) fn slice(&self, remaining: u64, threads: usize) -> usize {
+        let fit = remaining / threads.max(1) as u64 / self.slice_ops();
+        let word = (u32::MAX as u64 / self.slice_ops()).max(4);
+        (fit.min(word).min(RUN_SLICE_MAX as u64) as usize).max(4) & !3
     }
 
-    pub fn param_index(&self, name: &str) -> Option<usize> {
-        self.params.iter().position(|p| p.name == name)
+    /// One element's worst case, computed on first ask.
+    fn element_cost(&self) -> crate::cost::ElementCost {
+        *self.admission.get_or_init(|| crate::cost::calculate_cost(self))
     }
 
-    /// The buffers a host binds (index 0, the control word, included; the
-    /// hidden work buffer after them is the runtime's).
-    pub fn buffers(&self) -> &[BufferDecl] {
-        &self.buffers[..self.work]
+    /// One element's worst case with every host call at its largest input.
+    fn element_ops(&self) -> u64 {
+        let c = self.element_cost();
+        c.fixed_ops.saturating_add(c.open_max_ops)
     }
 
-    pub fn buffer_index(&self, name: &str) -> Option<usize> {
-        self.buffers().iter().position(|b| b.name == name)
-    }
-
-    /// Every buffer slot of a call's table, the work buffer last.
-    pub fn table_slots(&self) -> usize {
-        self.buffers.len()
-    }
-
-    /// The hidden work buffer's slot (after [`Kernel::buffers`]): a host
-    /// that builds its own buffer table (a linked-wasm harness) binds
-    /// [`CHUNK`] writable words there, where each element's counted ops land
-    /// at `element % CHUNK`.
-    pub fn work_slot(&self) -> usize {
-        self.work
-    }
-
-    /// Elements per slice: about [`SLICE_WORK`] ops at the worst case, a
-    /// multiple of four (four-wide code runs whole groups), at most a chunk.
-    pub(crate) fn slice(&self) -> usize {
-        ((SLICE_WORK / self.cost.max(1)) as usize).clamp(4, CHUNK) & !3
+    /// One element's worst case in counted ops.
+    fn slice_ops(&self) -> u64 {
+        *self.slice_ops.get_or_init(|| self.element_ops().max(1))
     }
 
     pub fn backend(&self) -> Backend {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if self.native.is_some() {
             return Backend::Native;
         }
@@ -527,17 +681,6 @@ impl Kernel {
         &self.program
     }
 
-    /// Has NEON ×4 code (used for element-local calls whose outputs hold
-    /// every element).
-    pub fn simd(&self) -> bool {
-        #[cfg(target_arch = "aarch64")]
-        return self.neon.is_some();
-        #[cfg(target_arch = "wasm32")]
-        return self.wasm_slots[1].load(Ordering::Relaxed) != 0;
-        #[cfg(not(any(target_arch = "aarch64", target_arch = "wasm32")))]
-        false
-    }
-
     /// The scalar and NEON ×4 machine code as instruction words (for
     /// disassembly; empty where the kernel has none).
     pub fn code_words(&self) -> (&[u32], &[u32]) {
@@ -545,35 +688,6 @@ impl Kernel {
         return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.neon.as_ref().map_or(&[][..], |c| c.words()));
         #[cfg(not(target_arch = "aarch64"))]
         (&[], &[])
-    }
-
-    /// Estimated ns per element on one thread: the moving average of
-    /// native runs, or before any, the worst-case op count at about 0.03
-    /// ns per op for NEON code (0.1 for scalar, 20 for the interpreter).
-    pub fn ns_per_element(&self, mode: Mode) -> f64 {
-        let per_op = match mode {
-            Mode::Interp => return self.cost as f64 * 20.0,
-            Mode::Vector if self.simd() => 0.03,
-            _ => 0.1,
-        };
-        let s = f32::from_bits(self.speed.load(Ordering::Relaxed));
-        if s > 0.0 {
-            s as f64
-        } else {
-            self.cost as f64 * per_op
-        }
-    }
-
-    /// Records a native run of `count` elements on `threads` threads that
-    /// took `nanos` (one-thread-equivalent time per element, averaged).
-    pub(crate) fn observe(&self, count: usize, threads: usize, nanos: u64, mode: Mode) {
-        if mode == Mode::Interp || count < 256 {
-            return;
-        }
-        let per = (nanos as f64 * threads as f64 / count as f64) as f32;
-        let old = f32::from_bits(self.speed.load(Ordering::Relaxed));
-        let new = if old > 0.0 { old * 0.75 + per * 0.25 } else { per };
-        self.speed.store(new.to_bits(), Ordering::Relaxed);
     }
 
     /// Words of the read-only shared tables.
@@ -585,12 +699,6 @@ impl Kernel {
     /// such as generated wasm, reads as its shared region).
     pub fn shared_table(&self) -> &[u32] {
         &self.shared
-    }
-
-    /// Ctx words: base, count, time, seed, host work, overflow, reduce lanes,
-    /// then the params.
-    pub fn ctx_words(&self) -> usize {
-        K_PARAMS as usize + self.params.len()
     }
 
     /// Set the live literal at source offset `offset` ([`compile_live`])
@@ -617,82 +725,13 @@ impl Kernel {
     }
 
     /// The source offsets of the literals this kernel reads live.
+    #[inline(always)]
     pub fn live_offsets(&self) -> impl Iterator<Item = usize> + '_ {
-        self.live.iter().map(|p| p.offset)
+        (0..self.live_offset_count()).map(|index| self.live_offset(index))
     }
 
-    /// A call with every param at its default.
-    pub fn call(&self) -> Call<'_> {
-        let mut ctx = vec![0u32; self.ctx_words()];
-        for (k, p) in self.params.iter().enumerate() {
-            ctx[K_PARAMS as usize + k] = p.default.to_bits();
-        }
-        for (p, v) in self.live.iter().zip(self.live_values.iter()) {
-            ctx[K_PARAMS as usize + p.param as usize] = v.load(Ordering::Relaxed);
-        }
-        let cancel = Arc::new(AtomicU32::new(0));
-        let mut bufs = vec![None; self.buffers.len()];
-        // Buffer 0 is the control word: the cancel token itself, which the
-        // kernel reads every element. The work buffer is each worker's own
-        // (`run_chunks` binds it).
-        bufs[0] = Some((cancel.as_ptr(), 1));
-        bufs[self.work] = Some((std::ptr::null_mut(), CHUNK));
-        Call { kernel: self, ctx, bufs, cancel, work_limit: DEFAULT_WORK_LIMIT, simd: true, _borrow: std::marker::PhantomData }
-    }
-
-    fn reduce_init(&self) -> (ReduceOp, usize, f32) {
-        match self.kind {
-            KernelKind::Reduce(op, n) => (
-                op,
-                n as usize,
-                match op {
-                    ReduceOp::Sum => 0.0,
-                    ReduceOp::Min => f32::INFINITY,
-                    ReduceOp::Max => f32::NEG_INFINITY,
-                },
-            ),
-            KernelKind::Map => (ReduceOp::Sum, 0, 0.0),
-        }
-    }
-
-    /// Runs elements [start, start + n) on this thread with `ctx` (the
-    /// caller's copy) and the buffer table, whose work slot is `work` (this
-    /// worker's [`CHUNK`] words), in slices of [`Kernel::slice`] elements.
-    /// After each slice its counted ops join `count`; once those pass the
-    /// limit the call stops (the other workers at their next element: the
-    /// kernel polls the cancel token, the control buffer, every element).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, mode: Mode, cancel: &AtomicU32, work: *const u32, count: &WorkCount) -> Result<(), KernelError> {
-        // The IEEE environment is part of the result: round to nearest, no
-        // flush-to-zero, no default-NaN, whatever the host thread had.
-        let _fp = FpEnv::pin();
-        let step = self.slice();
-        let mut at = 0;
-        while at < n {
-            if cancel.load(Ordering::Relaxed) != 0 {
-                return Err(KernelError::Cancelled);
-            }
-            let k = (n - at).min(step);
-            ctx[K_BASE as usize] = (start + at) as u32;
-            ctx[kl::K_HOST_WORK as usize] = 0;
-            self.run_raw(ctx, table, lens, k, mode);
-            let mut ops = ctx[kl::K_HOST_WORK as usize] as u64;
-            for e in start + at..start + at + k {
-                // SAFETY: `work` holds CHUNK words this thread owns; the run
-                // above (on this thread) is done writing them.
-                ops += unsafe { work.add(e & (CHUNK - 1)).read() } as u64;
-            }
-            at += k;
-            if count.add(ops) {
-                cancel.store(1, Ordering::Relaxed);
-                return Err(KernelError::Cancelled);
-            }
-        }
-        if cancel.load(Ordering::Relaxed) != 0 {
-            return Err(KernelError::Cancelled);
-        }
-        Ok(())
-    }
+    pub fn live_offset_count(&self) -> usize { self.live.len() }
+    pub fn live_offset(&self, index: usize) -> usize { self.live[index].offset }
 
     /// Records where the host linked this kernel's generated wasm: the
     /// function table slot of its scalar or of its four-wide entry (0: that
@@ -701,6 +740,8 @@ impl Kernel {
     pub fn set_wasm_slots(&self, scalar: u32, simd: u32) {
         self.wasm_slots[1].store(simd, Ordering::Relaxed);
         self.wasm_slots[0].store(scalar, Ordering::Relaxed);
+        #[cfg(target_arch = "wasm32")]
+        self.cells.simd.store((simd != 0) as u8, Ordering::Relaxed);
     }
 
     /// The generated wasm is linked (runs do not use the interpreter).
@@ -759,23 +800,38 @@ impl Kernel {
             } else if scalar != 0 {
                 call(scalar, args(n, frame, ctx));
             } else {
+                // One element a call: each stores its own loops' count.
                 let base = ctx[K_BASE as usize];
+                let w = kl::K_WORK as usize;
+                let mut sum = 0u32;
                 for e in 0..n {
                     ctx[K_BASE as usize] = base.wrapping_add(e as u32);
+                    ctx[w] = 0;
                     call(simd, args(1, frame, ctx));
+                    sum = sum.wrapping_add(ctx[w]);
                 }
                 ctx[K_BASE as usize] = base;
+                ctx[w] = sum;
             }
         });
         true
     }
 
-    fn run_raw(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], n: usize, mode: Mode) {
+    /// Runs `n` elements and returns the ops they counted: each element's
+    /// own, and what their loops counted (ctx `K_WORK`).
+    fn run_raw(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) -> u64 {
+        ctx[kl::K_WORK as usize] = 0;
+        self.run_once(ctx, table, n, mode);
+        self.element_work * n as u64 + ctx[kl::K_WORK as usize] as u64
+    }
+
+    /// One run of the generated code (or the interpreter).
+    fn run_once(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) {
         #[cfg(target_arch = "wasm32")]
         if mode != Mode::Interp && self.run_wasm(ctx, table, n, mode) {
             return;
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if mode == Mode::Vector && n >= 4 {
             if let (Some(code), Some(_)) = (&self.neon, &self.native) {
                 let mut state = [0u32; 1];
@@ -784,16 +840,21 @@ impl Kernel {
                 // element-local and its written buffers hold every record.
                 unsafe { code.run_kernel(ctx.as_mut_ptr(), state.as_mut_ptr(), self.shared.as_ptr() as *mut u32, table.as_ptr(), n4 as u32) };
                 if n4 < n {
+                    // The tail on scalar code, its loops' count added.
+                    let w = kl::K_WORK as usize;
+                    let lanes = ctx[w];
                     let base = ctx[K_BASE as usize];
                     ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
-                    self.run_raw(ctx, table, lens, n - n4, Mode::Scalar);
+                    ctx[w] = 0;
+                    self.run_once(ctx, table, n - n4, Mode::Scalar);
                     ctx[K_BASE as usize] = base;
+                    ctx[w] = ctx[w].wrapping_add(lanes);
                 }
                 return;
             }
         }
         let interp = mode == Mode::Interp;
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if !interp {
             if let Some(code) = &self.native {
                 let mut state = [0u32; 1];
@@ -819,10 +880,10 @@ impl Kernel {
             let mut state = [0u32; 1];
             // No references over host memory: word access through atomics.
             let mut bufs = [ir::RawBuf { ptr: std::ptr::null_mut(), len: 0, writable: false }; kl::MAX_BUFFERS];
-            for (k, len) in lens.iter().enumerate().take(kl::MAX_BUFFERS) {
-                bufs[k] = ir::RawBuf { ptr: table[2 * k] as *mut u32, len: *len, writable: self.buffers[k].access != Access::Read };
+            for k in 0..self.buffers.len() {
+                bufs[k] = ir::RawBuf { ptr: table[2 * k] as *mut u32, len: table[2 * k + 1] as usize, writable: self.buffers[k].access != Access::Read };
             }
-            let mut mem = ir::Mem { ctx, state: &mut state, shared: ir::Shared::Read(&self.shared), bufs: &bufs[..lens.len().min(kl::MAX_BUFFERS)] };
+            let mut mem = ir::Mem { ctx, state: &mut state, shared: ir::Shared::Read(&self.shared), bufs: &bufs[..self.buffers.len()] };
             let zeros = [0f32; 1];
             let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
             let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
@@ -830,9 +891,86 @@ impl Kernel {
         });
     }
 
-    /// The reduce kind, lanes and identity.
-    pub(crate) fn reduce_parts(&self) -> (ReduceOp, usize, f32) {
-        self.reduce_init()
+}
+
+/// The run entry: the one door the scheduler runs kernel code through.
+#[relax_api]
+impl KernelBody {
+    /// Runs elements [start, start + n) on this thread with `ctx` (the
+    /// caller's copy) and the buffer table, in slices of [`KernelBody::slice`]
+    /// elements (`threads`: the workers sharing the call's limit).
+    /// After each slice its counted ops join `count`; once those pass the
+    /// limit the call stops (the other workers at their next element: the
+    /// kernel polls the cancel token, the control buffer, every element).
+    /// # Safety
+    /// `cancel` must point to a live, aligned AtomicU32 for the entire call.
+    /// All bindings must be live for this call and writable where declared.
+    /// Concurrent calls require an element-local kernel, disjoint element
+    /// ranges, and writable buffers large enough for every addressed record.
+    /// Descriptors derive from the parent's borrow once; workers never create
+    /// mutable slices over the complete parent buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn run_range(&self, ctx: &mut [u32], buffers: &[crate::boundary::BorrowedBuffer<'_>], start: usize, n: usize, mode: Mode, cancel: *mut u32, count: &WorkCount, threads: usize) -> bool {
+        let cancel = &*cancel.cast::<AtomicU32>();
+        assert!(ctx.len() >= self.head.ctx_words);
+        assert!(buffers.len() >= self.buffers.len().max(2));
+        assert!(start <= ELEMENT_CAP as usize && n <= ELEMENT_CAP as usize - start);
+        // BorrowedBuffer is repr(C), exactly two u64 words plus a zero-sized
+        // lifetime marker. No payload or table copy and no mutable reborrow of
+        // the parent buffers: all workers read the same immutable table.
+        let table = std::slice::from_raw_parts(buffers.as_ptr().cast::<u64>(), 2 * buffers.len());
+        assert_eq!(table[0], cancel.as_ptr() as u64);
+        // The IEEE environment is part of the result: round to nearest, no
+        // flush-to-zero, no default-NaN, whatever the host thread had.
+        let _fp = FpEnv::pin();
+        let mut at = 0;
+        while at < n {
+            if cancel.load(Ordering::Relaxed) != 0 {
+                return false;
+            }
+            // Its worst case is held while it runs (reserved against what
+            // is left of the limit in one step), so the slices running at
+            // once stay within it.
+            let (k, held) = count.reserve(|left| {
+                let k = (n - at).min(self.slice(left, threads));
+                (k, self.slice_ops().saturating_mul(k as u64))
+            });
+            ctx[K_BASE as usize] = (start + at) as u32;
+            ctx[kl::K_HOST_WORK as usize] = 0;
+            let ops = self.run_raw(ctx, table, k, mode) + ctx[kl::K_HOST_WORK as usize] as u64;
+
+            at += k;
+            let over = count.add(ops);
+            // The reservation becomes what it counted (never more).
+            count.committed.fetch_sub(held - ops.min(held), Ordering::AcqRel);
+            if over {
+                cancel.store(1, Ordering::Relaxed);
+                return false;
+            }
+        }
+        if cancel.load(Ordering::Relaxed) != 0 {
+            return false;
+        }
+        true
+    }
+}
+
+/// A small query only the compiler can answer, from state it holds.
+#[relax_api(plain)]
+#[repr(C, u8)]
+pub enum KernelCtl<'a> {
+    /// One element's worst case, computed on first ask.
+    Cost(&'a mut crate::cost::ElementCost),
+    /// The program's identity ([`program_key`]).
+    ProgramKey(&'a mut u64),
+}
+
+/// Answers a [`KernelCtl`].
+#[relax_api]
+pub fn kernel_ctl(kernel: &Kernel, ctl: KernelCtl<'_>) {
+    match ctl {
+        KernelCtl::Cost(out) => *out = kernel.element_cost(),
+        KernelCtl::ProgramKey(out) => *out = program_key(&kernel.program),
     }
 }
 
@@ -843,19 +981,32 @@ struct FpEnv {
     saved: u64,
 }
 
+/// The thread's FP control register (FPCR) and its write: inline assembly, so they are ops of
+/// this provided crate (Relax compiles no assembly): JIT code reaches them through the bridge.
+#[cfg(target_arch = "aarch64")]
+#[relax_api]
+pub fn fpcr_read() -> u64 {
+    let v: u64;
+    // SAFETY: reads this thread's FP control bits.
+    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+#[cfg(target_arch = "aarch64")]
+#[relax_api]
+pub fn fpcr_write(v: u64) {
+    // SAFETY: writes this thread's FP control bits; callers restore what they read.
+    unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
+}
+
 impl FpEnv {
     #[inline(always)]
     fn pin() -> FpEnv {
         #[cfg(target_arch = "aarch64")]
         {
-            let saved: u64;
-            // SAFETY: reading and writing FPCR only changes this thread's
-            // FP control bits; the guard restores them.
-            unsafe {
-                std::arch::asm!("mrs {0}, fpcr", out(reg) saved, options(nomem, nostack, preserves_flags));
-                if saved != 0 {
-                    std::arch::asm!("msr fpcr, xzr", options(nomem, nostack, preserves_flags));
-                }
+            let saved = fpcr_read();
+            if saved != 0 {
+                fpcr_write(0);
             }
             FpEnv { saved }
         }
@@ -868,82 +1019,51 @@ impl Drop for FpEnv {
     fn drop(&mut self) {
         #[cfg(target_arch = "aarch64")]
         if self.saved != 0 {
-            // SAFETY: restores the value read in `pin`.
-            unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) self.saved, options(nomem, nostack, preserves_flags)) };
+            fpcr_write(self.saved);
         }
     }
-}
-
-/// Elapsed time of a run (wasm32 has no clock in std: 0 there, and the
-/// host times its calls itself).
-struct Clock {
-    #[cfg(not(target_arch = "wasm32"))]
-    t0: std::time::Instant,
-}
-
-impl Clock {
-    fn now() -> Clock {
-        Clock {
-            #[cfg(not(target_arch = "wasm32"))]
-            t0: std::time::Instant::now(),
-        }
-    }
-
-    fn nanos(&self) -> u64 {
-        #[cfg(not(target_arch = "wasm32"))]
-        return self.t0.elapsed().as_nanos() as u64;
-        #[cfg(target_arch = "wasm32")]
-        0
-    }
-}
-
-/// One chunk's result, written by whichever worker ran it.
-#[derive(Default)]
-pub(crate) struct ChunkCell {
-    acc: [AtomicU32; 16],
-}
-
-/// The ctx words a worker copies per chunk (params included).
-const MAX_CTX: usize = K_PARAMS as usize + 256;
-
-/// Checks a call before it runs: the element count, and that every buffer
-/// written per element holds `count` records (always for emit buffers; for
-/// plain outputs when the run is split across threads or four elements run
-/// at once, so no two of them ever share a word). `lens[k]` is buffer k's
-/// bound length. (Work is counted while it runs, not estimated here.)
-pub(crate) fn check(kernel: &Kernel, lens: &[usize], count: usize, split: bool) -> Result<(), KernelError> {
-    if count > kl::ELEMENT_CAP as usize {
-        return Err(KernelError::TooMany(count));
-    }
-    for (k, b) in kernel.buffers().iter().enumerate().skip(1) {
-        let per = match b.access {
-            Access::Read => continue,
-            Access::Write if !split => continue,
-            Access::Write => b.stride as u64,
-            Access::Emit { width, capacity } => width as u64 * capacity as u64,
-            Access::EmitCount => 1,
-        };
-        let need = per.saturating_mul(count as u64);
-        let have = lens.get(k).copied().unwrap_or(0);
-        // Offsets are 32-bit element arithmetic: keep them below 2^31.
-        if need > have as u64 || need > i32::MAX as u64 {
-            return Err(KernelError::TooSmall { name: b.name.clone(), need, have });
-        }
-    }
-    Ok(())
 }
 
 /// A call's counted work: the ops its slices reported, against its limit.
-pub(crate) struct WorkCount {
+/// The caller makes it ([`WorkCount::new`]), the run entry updates it, and
+/// the caller reads it ([`WorkCount::state`]) once the workers joined.
+#[relax_api(handle)]
+pub struct WorkCount {
     used: AtomicU64,
+    /// What finished slices counted plus the worst case of those running
+    /// (reserved before each starts): one word, so a look at what is left
+    /// sees both at once.
+    committed: AtomicU64,
     limit: u64,
     over: AtomicBool,
 }
 
+/// What a [`WorkCount`] holds.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WorkState {
+    pub used: u64,
+    pub over: bool,
+}
+
+#[relax_api]
 impl WorkCount {
-    pub(crate) fn new(limit: u64) -> WorkCount {
-        WorkCount { used: AtomicU64::new(0), limit, over: AtomicBool::new(false) }
+    pub fn new(limit: u64) -> WorkCount {
+        WorkCount { used: AtomicU64::new(0), committed: AtomicU64::new(0), limit, over: AtomicBool::new(false) }
     }
+
+    pub fn state(&self) -> WorkState {
+        WorkState { used: self.used.load(Ordering::Relaxed), over: self.over.load(Ordering::Relaxed) }
+    }
+}
+
+impl WorkCount {
+    #[inline]
+    pub fn over(&self) -> bool { self.state().over }
+
+    #[inline]
+    pub fn used(&self) -> u64 { self.state().used }
 
     /// Adds a slice's ops; true when the call is now over its limit. Whether
     /// a call ends over its limit depends only on its total, not on how its
@@ -957,356 +1077,38 @@ impl WorkCount {
         false
     }
 
-    pub(crate) fn used(&self) -> u64 {
-        self.used.load(Ordering::Relaxed)
-    }
-}
-
-/// What a finished [`run_chunks`] reports: overflowed, host error, the
-/// reduce lanes, the counted ops.
-pub(crate) type ChunksDone = (bool, bool, [f32; 16], u64);
-
-/// Runs `count` elements in fixed chunks of [`CHUNK`]: element-local
-/// kernels on up to `threads` workers of `exec` (the caller included),
-/// others in order on the caller. `ctx` is the call's ctx (count, time,
-/// seed, params); every chunk starts from a copy of it, and the chunk
-/// results are combined in chunk order, so the outcome is the same for any
-/// thread count. `cells` holds at least one cell per chunk. The ops counted
-/// past `limit` stop the call ([`KernelError::OverBudget`]). Allocates
-/// nothing.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_chunks(
-    kernel: &Kernel,
-    ctx: &[u32],
-    table: &[u64],
-    lens: &[usize],
-    count: usize,
-    mode: Mode,
-    cancel: &AtomicU32,
-    cells: &[ChunkCell],
-    exec: &dyn crate::sched::Executor,
-    threads: usize,
-    limit: u64,
-) -> Result<ChunksDone, KernelError> {
-    let (op, lanes, init) = kernel.reduce_init();
-    // Map kernels split into equal ranges, several per thread (any split
-    // gives the same bits); reduce kernels into the fixed chunks.
-    let unit = if lanes == 0 && threads > 1 { count.div_ceil(threads * 4).next_multiple_of(4).clamp(MIN_SPLIT, CHUNK) } else { CHUNK };
-    let chunks = count.div_ceil(unit);
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
-    let any_overflow = AtomicBool::new(false);
-    let any_host_error = AtomicBool::new(false);
-    let counted = WorkCount::new(limit);
-    let words = ctx.len().min(MAX_CTX);
-    let slots = kernel.table_slots().min(kl::MAX_BUFFERS);
-    let ws = kernel.work_slot();
-    let work = |_worker: usize| {
-        let mut buf = [0u32; MAX_CTX];
-        let wctx = &mut buf[..words];
-        // This worker's work counts, bound in its own copy of the table.
-        let mut counts = [0u32; CHUNK];
-        let mut wtable = [0u64; 2 * kl::MAX_BUFFERS];
-        let tl = table.len().min(wtable.len());
-        wtable[..tl].copy_from_slice(&table[..tl]);
-        wtable[2 * ws] = counts.as_mut_ptr() as u64;
-        wtable[2 * ws + 1] = CHUNK as u64;
-        let wtable = &wtable[..tl.max(2 * slots)];
-        let counts = counts.as_ptr();
+    /// Reserves what `size(what is left)` says (a slice and its worst
+    /// case) against the limit, atomically. With nothing left while other
+    /// slices still run, it waits for them (they may end the call); with
+    /// nothing left and nothing running, the smallest slice goes past the
+    /// limit and stops the call.
+    fn reserve(&self, size: impl Fn(u64) -> (usize, u64)) -> (usize, u64) {
+        let mut seen = self.committed.load(Ordering::Acquire);
         loop {
-            if failed.load(Ordering::Relaxed) {
-                return;
+            let left = self.limit.saturating_sub(seen);
+            if left == 0 && seen != self.used.load(Ordering::Acquire) && !self.over.load(Ordering::Acquire) {
+                std::thread::yield_now();
+                seen = self.committed.load(Ordering::Acquire);
+                continue;
             }
-            let c = next.fetch_add(1, Ordering::Relaxed);
-            if c >= chunks {
-                return;
-            }
-            wctx.copy_from_slice(&ctx[..words]);
-            wctx[K_OVERFLOW as usize] = 0;
-            wctx[kl::K_HOST_ERR as usize] = 0;
-            for l in 0..lanes {
-                wctx[K_ACC as usize + l] = init.to_bits();
-            }
-            let start = c * unit;
-            let k = (count - start).min(unit);
-            if kernel.run_range(wctx, wtable, lens, start, k, mode, cancel, counts, &counted).is_err() {
-                failed.store(true, Ordering::Relaxed);
-                return;
-            }
-            if wctx[K_OVERFLOW as usize] != 0 {
-                any_overflow.store(true, Ordering::Relaxed);
-            }
-            if wctx[kl::K_HOST_ERR as usize] != 0 {
-                any_host_error.store(true, Ordering::Relaxed);
-            }
-            if lanes > 0 {
-                let cell = &cells[c];
-                for l in 0..lanes {
-                    cell.acc[l].store(wctx[K_ACC as usize + l], Ordering::Relaxed);
-                }
-            }
-        }
-    };
-    let helpers = if kernel.parallel_safe { threads.max(1).min(chunks.max(1)) } else { 1 };
-    if helpers <= 1 {
-        work(0);
-    } else {
-        exec.fan_out(helpers, &work);
-    }
-    if counted.over.load(Ordering::Relaxed) {
-        // The stop was the count's, not the owner's: the token is free again.
-        cancel.store(0, Ordering::Relaxed);
-        return Err(KernelError::OverBudget { work: counted.used(), limit });
-    }
-    if failed.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) != 0 {
-        return Err(KernelError::Cancelled);
-    }
-    let mut reduced = [init; 16];
-    // fan_out returned: every range's stores happened before (its join).
-    let overflowed = any_overflow.load(Ordering::Relaxed);
-    let host_error = any_host_error.load(Ordering::Relaxed);
-    if lanes > 0 {
-        for cell in &cells[..chunks] {
-            for (l, a) in reduced.iter_mut().enumerate().take(lanes) {
-                *a = combine(op, *a, f32::from_bits(cell.acc[l].load(Ordering::Relaxed)));
+            let (k, held) = size(left);
+            match self.committed.compare_exchange_weak(seen, seen.saturating_add(held), Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return (k, held),
+                Err(now) => seen = now,
             }
         }
     }
-    Ok((overflowed, host_error, reduced, counted.used()))
 }
 
 /// How a range of elements runs.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Mode {
     Interp,
     Scalar,
     /// NEON ×4 where the kernel has it, else scalar.
     Vector,
-}
-
-/// One invocation: params and bound buffers, borrowed for `'a`.
-pub struct Call<'a> {
-    kernel: &'a Kernel,
-    ctx: Vec<u32>,
-    /// (pointer, length in words) per kernel buffer.
-    bufs: Vec<Option<(*mut u32, usize)>>,
-    cancel: Arc<AtomicU32>,
-    work_limit: u64,
-    /// Use NEON ×4 code when the call allows it (on by default).
-    simd: bool,
-    _borrow: std::marker::PhantomData<&'a mut [u32]>,
-}
-
-/// A call's work limit unless its owner sets one: the counted ops it may
-/// run before it is stopped.
-pub const DEFAULT_WORK_LIMIT: u64 = 1 << 40;
-
-// SAFETY: the raw pointers are borrows held for 'a; a call is moved, not
-// shared, and parallel runs only split element-local work.
-unsafe impl Send for Call<'_> {}
-
-/// Cancels a running call from another thread (its owner).
-#[derive(Clone)]
-pub struct CancelToken(Arc<AtomicU32>);
-
-impl CancelToken {
-    pub fn cancel(&self) {
-        self.0.store(1, Ordering::Relaxed);
-    }
-}
-
-impl<'a> Call<'a> {
-    pub fn set_param(&mut self, name: &str, value: f32) -> bool {
-        match self.kernel.param_index(name) {
-            Some(k) => {
-                let p = &self.kernel.params[k];
-                let v = if value.is_finite() { value.clamp(p.min, p.max) } else { p.default };
-                self.ctx[K_PARAMS as usize + k] = v.to_bits();
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn set_time(&mut self, t: f32) {
-        self.ctx[K_TIME as usize] = t.to_bits();
-    }
-
-    pub fn set_seed(&mut self, seed: u32) {
-        self.ctx[K_SEED as usize] = seed;
-    }
-
-    /// The counted ops this call may run (see [`crate::work`]): past them
-    /// it stops with [`KernelError::OverBudget`] (untrusted kernels get the
-    /// limit their admission ticket gives).
-    pub fn set_work_limit(&mut self, ops: u64) {
-        self.work_limit = ops;
-    }
-
-    /// The op-equivalents one host call may cost for its actual input (0:
-    /// no limit): larger inputs are refused before the call runs, with
-    /// `RunStats::host_error` set. Admission sets it for untrusted origins.
-    pub fn set_host_call_limit(&mut self, ops: u64) {
-        self.ctx[kl::K_HOST_LIMIT as usize] = ops.min(u32::MAX as u64) as u32;
-    }
-
-    /// Allows (default) or forbids the NEON ×4 code (differential tests;
-    /// results are bit-identical either way).
-    pub fn set_simd(&mut self, on: bool) {
-        self.simd = on;
-    }
-
-    /// The mode a native run of `count` elements takes: vector code only
-    /// for element-local kernels whose written buffers hold every record
-    /// (four elements run at once).
-    fn native_mode(&self, count: usize) -> Mode {
-        if self.simd && self.kernel.simd() && self.kernel.parallel_safe && self.admit(count, true).is_ok() {
-            Mode::Vector
-        } else {
-            Mode::Scalar
-        }
-    }
-
-    pub fn cancel_token(&self) -> CancelToken {
-        CancelToken(self.cancel.clone())
-    }
-
-    fn bind(&mut self, name: &str, ptr: *mut u32, len: usize, writable: bool) -> Result<(), KernelError> {
-        let k = self.kernel.buffer_index(name).filter(|k| *k > 0).ok_or_else(|| KernelError::NoSuchBuffer(name.into()))?;
-        if len == 0 {
-            return Err(KernelError::Empty(name.into()));
-        }
-        // Word offsets are 32-bit arithmetic (and every backend reads the
-        // length as a 32-bit word).
-        if len > i32::MAX as usize {
-            return Err(KernelError::TooLarge(name.into()));
-        }
-        if !writable && self.kernel.buffers[k].access != Access::Read {
-            return Err(KernelError::ReadOnly(name.into()));
-        }
-        self.bufs[k] = Some((ptr, len));
-        Ok(())
-    }
-
-    /// Binds a read-only buffer.
-    pub fn input(&mut self, name: &str, data: &'a [f32]) -> Result<(), KernelError> {
-        self.bind(name, data.as_ptr() as *mut u32, data.len(), false)
-    }
-
-    pub fn input_u32(&mut self, name: &str, data: &'a [u32]) -> Result<(), KernelError> {
-        self.bind(name, data.as_ptr() as *mut u32, data.len(), false)
-    }
-
-    /// Binds a buffer the kernel writes (and may read).
-    pub fn output(&mut self, name: &str, data: &'a mut [f32]) -> Result<(), KernelError> {
-        self.bind(name, data.as_mut_ptr() as *mut u32, data.len(), true)
-    }
-
-    pub fn output_u32(&mut self, name: &str, data: &'a mut [u32]) -> Result<(), KernelError> {
-        self.bind(name, data.as_mut_ptr(), data.len(), true)
-    }
-
-    fn table(&self) -> Result<(Vec<u64>, Vec<usize>), KernelError> {
-        let mut table = Vec::with_capacity(2 * self.bufs.len().max(2));
-        let mut lens = Vec::new();
-        for (k, b) in self.bufs.iter().enumerate() {
-            let (p, len) = b.ok_or_else(|| KernelError::Unbound(self.kernel.buffers[k].name.clone()))?;
-            table.push(p as u64);
-            table.push(len as u64);
-            lens.push(len);
-        }
-        // The native prologue reads four words.
-        while table.len() < 4 {
-            table.push(0);
-        }
-        Ok((table, lens))
-    }
-
-    /// Runs `count` elements on this thread.
-    pub fn run(&mut self, count: usize) -> Result<RunStats, KernelError> {
-        self.run_with(count, false)
-    }
-
-    /// Runs on the reference interpreter (for tests and hosts without
-    /// executable memory).
-    pub fn run_interp(&mut self, count: usize) -> Result<RunStats, KernelError> {
-        self.run_with(count, true)
-    }
-
-    fn lens(&self) -> Vec<usize> {
-        self.bufs.iter().map(|b| b.map_or(0, |(_, len)| len)).collect()
-    }
-
-    /// Capacity (see [`check`]).
-    fn admit(&self, count: usize, split: bool) -> Result<(), KernelError> {
-        check(self.kernel, &self.lens(), count, split)
-    }
-
-    fn run_with(&mut self, count: usize, interp: bool) -> Result<RunStats, KernelError> {
-        self.run_on(count, interp, &crate::sched::InlineExecutor, 1)
-    }
-
-    fn run_on(&mut self, count: usize, interp: bool, exec: &dyn crate::sched::Executor, threads: usize) -> Result<RunStats, KernelError> {
-        let t0 = Clock::now();
-        let (table, lens) = self.table()?;
-        let split = splits(self.kernel, threads, count);
-        self.admit(count, split)?;
-        let mode = if interp { Mode::Interp } else { self.native_mode(count) };
-        self.ctx[K_COUNT as usize] = count as u32;
-        let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
-        let t = split_threads(self.kernel, threads, count, mode);
-        let t1 = Clock::now();
-        let (overflowed, host_error, reduced, work) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, t, self.work_limit)?;
-        self.kernel.observe(count, t, t1.nanos(), mode);
-        let lanes = self.kernel.reduce_init().1;
-        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), work, nanos: t0.nanos() })
-    }
-
-    /// Runs `count` elements split across up to `threads` workers of the
-    /// process-wide [`crate::sched::ThreadExecutor`] (chunk-aligned; no
-    /// thread is spawned per call). Kernels that are not element-local run
-    /// on one thread. The result is the same for any thread count.
-    pub fn run_parallel(&mut self, count: usize, threads: usize) -> Result<RunStats, KernelError> {
-        self.run_on(count, false, crate::sched::ThreadExecutor::shared(), threads)
-    }
-
-    /// Runs on a host executor (Makepad's TaskPool through
-    /// [`crate::sched::FnExecutor`]) with up to `threads` workers.
-    pub fn run_on_executor(&mut self, count: usize, exec: &dyn crate::sched::Executor, threads: usize) -> Result<RunStats, KernelError> {
-        self.run_on(count, false, exec, threads)
-    }
-}
-
-fn combine(op: ReduceOp, a: f32, b: f32) -> f32 {
-    match op {
-        ReduceOp::Sum => a + b,
-        ReduceOp::Min => {
-            if a < b {
-                a
-            } else {
-                b
-            }
-        }
-        ReduceOp::Max => {
-            if a > b {
-                a
-            } else {
-                b
-            }
-        }
-    }
-}
-
-/// Compacts an emit buffer: element e's `counts[e]` records (of `width`
-/// words, `capacity` slots per element) in element order.
-pub fn compact(data: &[f32], counts: &[u32], width: usize, capacity: usize) -> Vec<f32> {
-    let mut out = Vec::new();
-    for (e, c) in counts.iter().enumerate() {
-        let n = (*c as usize).min(capacity);
-        let at = e * capacity * width;
-        out.extend_from_slice(&data[at..at + n * width]);
-    }
-    out
 }
 
 /// One wasm module holding the code of several kernels (a document's), for

@@ -1292,7 +1292,8 @@ mod tests {
         assert_eq!(schnell.domain, Domain::Image);
         assert_eq!(schnell.backend, "flux");
         assert!(schnell.available && !schnell.gated);
-        assert_eq!(schnell.files.len(), 1);
+        // The combined checkpoint + the downloaded T5 tokenizer table.
+        assert_eq!(schnell.files.len(), 2);
         let schnell_ckpt = &schnell.files[0];
         assert_eq!(schnell_ckpt.repo, "Comfy-Org/flux1-schnell");
         assert_eq!(schnell_ckpt.path, "flux1-schnell-fp8.safetensors");
@@ -1317,7 +1318,7 @@ mod tests {
         assert!(dev.available);
         assert!(dev.gated);
         assert_eq!(dev.backend, "flux");
-        assert_eq!(dev.files.len(), 1);
+        assert_eq!(dev.files.len(), 2);
         let dev_ckpt = &dev.files[0];
         assert_eq!(dev_ckpt.repo, "Comfy-Org/flux1-dev");
         assert_eq!(dev_ckpt.path, "flux1-dev-fp8.safetensors");
@@ -1339,6 +1340,28 @@ mod tests {
                 "{}: split-model BF16 routes are retired",
                 model.id
             );
+        }
+        // Every FLUX.1 model downloads the T5 tokenizer table (not in git),
+        // pinned to the bytes makepad_ai_flux::t5 names.
+        for id in ["flux1-schnell", "flux1-dev", "flux1-depth-dev", "flux1-canny-dev", "flux1-fill-dev"] {
+            let model = registry.find(id).unwrap();
+            let file = model.file_by_role("t5-tokenizer").unwrap_or_else(|| panic!("{id}: no t5-tokenizer"));
+            assert_eq!(file.cache_as, "tokenizers/t5_tokenizer.json", "{id}");
+            assert_eq!(file.path, "https://makepad.nl/models/flux/t5_tokenizer.json", "{id}");
+            assert_eq!(file.size, Some(2_424_064), "{id}");
+            assert_eq!(
+                file.sha256.as_deref(),
+                Some("fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a"),
+                "{id}"
+            );
+            #[cfg(feature = "flux")]
+            {
+                use makepad_ai_flux::t5;
+                assert_eq!(file.path, t5::T5_TOKENIZER_URL);
+                assert_eq!(file.size, Some(t5::T5_TOKENIZER_SIZE));
+                assert_eq!(file.sha256.as_deref(), Some(t5::T5_TOKENIZER_SHA256));
+                assert_eq!(file.cache_as, format!("tokenizers/{}", t5::T5_TOKENIZER_FILE));
+            }
         }
 
         let klein = registry.find("flux2-klein-4b").unwrap();
@@ -1404,8 +1427,13 @@ mod tests {
         assert_eq!(qwen38.domain, Domain::Text);
         assert_eq!(qwen38.backend, "llm");
         assert!(qwen38.available && !qwen38.gated);
-        assert_eq!(qwen38.vram_gb, Some(19.0));
-        assert_eq!(qwen38.files.len(), 1);
+        assert_eq!(qwen38.vram_gb, Some(18.4));
+        // The language GGUF and the model's own vision tower (chat pictures).
+        assert_eq!(qwen38.files.len(), 2);
+        assert_eq!(
+            qwen38.file_by_role("mmproj").unwrap().cache_as,
+            "llm/Qwen3.8-27B-mmproj-F16.gguf"
+        );
         let qwen38_gguf = qwen38.file_by_role("llm-gguf").unwrap();
         assert_eq!(qwen38_gguf.repo, "unsloth/Qwen3.8-27B-GGUF");
         assert_eq!(qwen38_gguf.path, "Qwen3.8-27B-Q4_K_M.gguf");
@@ -1426,20 +1454,30 @@ mod tests {
         assert_eq!(kokoro.domain, Domain::Speech);
         assert_eq!(kokoro.backend, "kokoro");
         assert!(kokoro.available);
-        // 1 model + all 28 English voice packs.
-        assert_eq!(kokoro.files.len(), 29);
+        // 1 model + all 28 English voice packs + the 3 G2P lexicon tables.
+        assert_eq!(kokoro.files.len(), 32);
         assert!(kokoro.files.iter().all(|file| !file.local));
-        assert!(kokoro
-            .files
-            .iter()
-            .all(|file| file.repo == "hexgrad/Kokoro-82M"));
+        let upstream: Vec<_> = kokoro.files.iter().filter(|file| file.converts_to.is_some()).collect();
+        assert_eq!(upstream.len(), 29);
+        assert!(upstream.iter().all(|file| file.repo == "hexgrad/Kokoro-82M"));
         // Every upstream file lands under tts/upstream/ and declares its
         // converted form at the pre-existing cache paths, so boxes carrying
         // converted files never re-download.
-        assert!(kokoro
-            .files
-            .iter()
-            .all(|file| file.cache_as.starts_with("tts/upstream/")));
+        assert!(upstream.iter().all(|file| file.cache_as.starts_with("tts/upstream/")));
+        // The G2P tables download as they are, pinned, next to the model.
+        for role in ["g2p-us-lexicon", "g2p-zh-pinyin", "g2p-zh-words"] {
+            let file = kokoro.file_by_role(role).unwrap();
+            assert!(file.converts_to.is_none() && file.size.is_some() && file.sha256.is_some(), "{role}");
+            assert!(file.path.starts_with("https://makepad.nl/models/speech/kokoro-g2p/"), "{role}");
+            assert!(file.cache_as.starts_with("tts/") && !file.cache_as.starts_with("tts/upstream/"), "{role}");
+        }
+        #[cfg(feature = "tts")]
+        for table in makepad_ai_speech::g2p::data::FILES {
+            let file = kokoro.files.iter().find(|f| f.cache_as == format!("tts/{}", table.name)).unwrap();
+            assert_eq!(file.path, table.url());
+            assert_eq!(file.size, Some(table.size));
+            assert_eq!(file.sha256.as_deref(), Some(table.sha256));
+        }
         let model = kokoro
             .files
             .iter()
@@ -1833,7 +1871,7 @@ mod tests {
         assert_eq!(fill.domain, Domain::Inpaint);
         assert_eq!(fill.backend, "flux-fill");
         assert!(fill.available && fill.gated);
-        assert_eq!(fill.files.len(), 4);
+        assert_eq!(fill.files.len(), 5);
         let dit = fill.file_by_role("diffusion_model").unwrap();
         assert_eq!(dit.repo, "cudabenchmarktest/flux1-fill-dev-fp8");
         assert_eq!(dit.size, Some(11_902_539_328));
@@ -1852,9 +1890,10 @@ mod tests {
         assert_eq!(t5xxl.repo, "comfyanonymous/flux_text_encoders");
         assert!(t5xxl.cache_as.starts_with("text_encoders/"));
         // Every pinned file has both size and sha256 (the RegistryEntryFileJson
-        // doc contract: a revision pin must carry both).
+        // doc contract: a revision pin must carry both). The T5 tokenizer is
+        // not on HuggingFace: a plain URL, pinned by size and sha256 alone.
         for file in &fill.files {
-            assert!(file.revision.is_some());
+            assert!(file.revision.is_some() || file.path.starts_with("https://makepad.nl/"));
             assert!(file.size.is_some());
             assert!(file.sha256.is_some());
         }

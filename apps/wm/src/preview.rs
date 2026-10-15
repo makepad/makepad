@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use makepad_wm_api::{viewer_for, WmRequest};
 
 use crate::clients::{spawn_client, AppDef, ClientLine};
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 
 /// The Quick Look warm-viewer cache, one live client per viewer TYPE
 /// (`makepad_wm_api::viewer_for`'s app id — "image", "pdf", …), kept alive
@@ -201,7 +201,7 @@ pub fn spawn_for_request(
     // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
     // (`PreviewCache`), which keeps a viewer alive between panels rather
     // than standing one by before the first.
-    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, lines)
+    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, makepad_app_registry::BuildPolicy::IfMissing, lines)
 }
 
 #[cfg(test)]

@@ -1,24 +1,26 @@
+use super::geom::{Point, Size};
+#[cfg(target_arch = "wasm32")]
 use {
-    super::{
-        font::{Font, FontId, GlyphId},
-        geom::{Point, Rect, Size},
-        glyph_outline::{Command, GlyphOutline},
-    },
+    super::font::{Font, FontId, GlyphId},
     crate::makepad_platform::*,
     fxhash::{FxHashMap, FxHashSet},
+    makepad_font_core::slug::slug_curves,
 };
 
+#[cfg(target_arch = "wasm32")]
 const CURVE_TEX_WIDTH: usize = 2048;
+#[cfg(target_arch = "wasm32")]
 const BAND_TEX_WIDTH: usize = 2048;
-const CUBIC_TO_QUAD_TOLERANCE: f32 = 0.05;
-const MAX_CUBIC_SPLIT_DEPTH: usize = 12;
+#[cfg(target_arch = "wasm32")]
 const RGBA_F32_TEXEL_FLOATS: usize = 4;
 /// Soft cap on the append-only `curve_data` buffer (~4 MB of f32). Slug glyphs are only
 /// used for very large text, so a realistic on-screen working set is far below this; the
 /// generous headroom means a reset (rebuild of all currently-visible glyphs) only happens
 /// after a lot of *distinct* large glyphs have scrolled through, and never thrashes.
+#[cfg(target_arch = "wasm32")]
 const MAX_CURVE_DATA_FLOATS: usize = 1 << 20;
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SlugGlyphKey {
     font_id: FontId,
@@ -34,8 +36,12 @@ pub struct SlugGlyphInfo {
     pub band_offset: usize,
     pub band_count: usize,
     pub fill_flags: u32,
+    /// The key a kept copy is looked up by again when drawn (the HAL's font service owns the
+    /// curves; they can be taken back). Default: curves this process owns.
+    pub source: makepad_font_core::raster::GlyphSource,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug)]
 struct CachedSlugGlyphInfo {
     generation: u64,
@@ -49,10 +55,10 @@ pub enum SlugGlyphCacheResult {
         generation: u64,
         glyph: SlugGlyphInfo,
     },
-    Deferred,
     Unavailable,
 }
 
+#[cfg(target_arch = "wasm32")]
 pub struct SlugAtlas {
     curve_data: Vec<f32>,
     band_data: Vec<f32>,
@@ -69,6 +75,7 @@ pub struct SlugAtlas {
     needs_reset: bool,
 }
 
+#[cfg(target_arch = "wasm32")]
 impl SlugAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         let atlas = Self {
@@ -150,7 +157,6 @@ impl SlugAtlas {
         &mut self,
         font: &Font,
         glyph_id: GlyphId,
-        can_build: bool,
     ) -> SlugGlyphCacheResult {
         let key = SlugGlyphKey {
             font_id: font.id(),
@@ -168,15 +174,8 @@ impl SlugAtlas {
         if self.missing_glyphs.contains(&key) {
             return SlugGlyphCacheResult::Unavailable;
         }
-        if !can_build {
-            return SlugGlyphCacheResult::Deferred;
-        }
 
-        let Some(outline) = font.glyph_outline(glyph_id) else {
-            self.missing_glyphs.insert(key);
-            return SlugGlyphCacheResult::Unavailable;
-        };
-        let Some(info) = self.build_glyph(font, &outline) else {
+        let Some(info) = self.build_glyph(font, glyph_id) else {
             self.missing_glyphs.insert(key);
             return SlugGlyphCacheResult::Unavailable;
         };
@@ -315,23 +314,10 @@ impl SlugAtlas {
         ))
     }
 
-    fn build_glyph(&mut self, font: &Font, outline: &GlyphOutline) -> Option<SlugGlyphInfo> {
-        let bounds = outline.bounds_in_ems();
-        if bounds.size.width <= 0.000001 || bounds.size.height <= 0.000001 {
-            return None;
-        }
-
-        let curves = outline_to_normalized_quads(outline, bounds, font.units_per_em());
-        if curves.is_empty() {
-            return None;
-        }
-
+    fn build_glyph(&mut self, font: &Font, glyph_id: GlyphId) -> Option<SlugGlyphInfo> {
+        let glyph = slug_curves(font, glyph_id)?;
         let curve_offset = self.curve_data.len() / 8;
-        for curve in &curves {
-            self.curve_data.extend_from_slice(&[
-                curve.p0.x, curve.p0.y, curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, 0.0, 0.0,
-            ]);
-        }
+        self.curve_data.extend_from_slice(&glyph.curves);
 
         // Text rendering uses the full-curve scan path. The band-accelerated
         // path has shown correctness issues on some GPU shader compilers.
@@ -347,218 +333,23 @@ impl SlugAtlas {
         }
 
         Some(SlugGlyphInfo {
-            origin_in_ems: bounds.origin,
-            size_in_ems: bounds.size,
+            origin_in_ems: glyph.origin_in_ems,
+            size_in_ems: glyph.size_in_ems,
             curve_offset,
-            curve_count: curves.len(),
+            curve_count: glyph.curve_count(),
             band_offset,
             band_count,
             fill_flags: 0,
+            source: Default::default(),
         })
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct P2 {
-    x: f32,
-    y: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct QuadCurve {
-    p0: P2,
-    p1: P2,
-    p2: P2,
-}
-
-fn outline_to_normalized_quads(
-    outline: &GlyphOutline,
-    bounds: Rect<f32>,
-    units_per_em: f32,
-) -> Vec<QuadCurve> {
-    let mut curves = Vec::new();
-    let inv_units = 1.0 / units_per_em.max(0.000001);
-    let inv_w = 1.0 / bounds.size.width.max(0.000001);
-    let inv_h = 1.0 / bounds.size.height.max(0.000001);
-    let mut current = None::<P2>;
-    let mut contour_start = None::<P2>;
-
-    for command in outline.commands().iter().copied() {
-        match command {
-            Command::MoveTo(p) => {
-                let point = scale_point(p, inv_units);
-                current = Some(point);
-                contour_start = Some(point);
-            }
-            Command::LineTo(p) => {
-                let Some(p0) = current else {
-                    continue;
-                };
-                let p2 = scale_point(p, inv_units);
-                let p1 = midpoint(p0, p2);
-                curves.push(QuadCurve {
-                    p0: normalize_point(p0, bounds, inv_w, inv_h),
-                    p1: normalize_point(p1, bounds, inv_w, inv_h),
-                    p2: normalize_point(p2, bounds, inv_w, inv_h),
-                });
-                current = Some(p2);
-            }
-            Command::QuadTo(c, p) => {
-                let Some(p0) = current else {
-                    continue;
-                };
-                let p1 = scale_point(c, inv_units);
-                let p2 = scale_point(p, inv_units);
-                curves.push(QuadCurve {
-                    p0: normalize_point(p0, bounds, inv_w, inv_h),
-                    p1: normalize_point(p1, bounds, inv_w, inv_h),
-                    p2: normalize_point(p2, bounds, inv_w, inv_h),
-                });
-                current = Some(p2);
-            }
-            Command::CurveTo(c1, c2, p) => {
-                let Some(p0) = current else {
-                    continue;
-                };
-                let p1 = scale_point(c1, inv_units);
-                let p2 = scale_point(c2, inv_units);
-                let p3 = scale_point(p, inv_units);
-                cubic_to_quads_recursive(p0, p1, p2, p3, 0, bounds, inv_w, inv_h, &mut curves);
-                current = Some(p3);
-            }
-            Command::Close => {
-                if let (Some(p0), Some(ps)) = (current, contour_start) {
-                    if !same_point(p0, ps) {
-                        let p1 = midpoint(p0, ps);
-                        curves.push(QuadCurve {
-                            p0: normalize_point(p0, bounds, inv_w, inv_h),
-                            p1: normalize_point(p1, bounds, inv_w, inv_h),
-                            p2: normalize_point(ps, bounds, inv_w, inv_h),
-                        });
-                    }
-                    current = Some(ps);
-                }
-            }
-        }
-    }
-
-    curves
-}
-
 /// Cx-free font publication used by the retained code renderer. This shares the
 /// editor's outline conversion, including cubic tolerance and contour closure.
-pub fn prepare_code_curves(font: &Font, outline: &GlyphOutline) -> Vec<f32> {
-    outline_to_normalized_quads(outline, outline.bounds_in_ems(), font.units_per_em())
-        .iter()
-        .flat_map(|c| [c.p0.x, c.p0.y, c.p1.x, c.p1.y, c.p2.x, c.p2.y, 0.0, 0.0])
-        .collect()
-}
+pub use makepad_font_core::slug::prepare_code_curves;
 
-fn scale_point(point: Point<f32>, inv_units: f32) -> P2 {
-    P2 {
-        x: point.x * inv_units,
-        y: point.y * inv_units,
-    }
-}
-
-fn normalize_point(point: P2, bounds: Rect<f32>, inv_w: f32, inv_h: f32) -> P2 {
-    P2 {
-        x: (point.x - bounds.origin.x) * inv_w,
-        // Font outlines are Y-up, but DrawGlyph normalized quad space is Y-down.
-        y: (bounds.origin.y + bounds.size.height - point.y) * inv_h,
-    }
-}
-
-fn same_point(a: P2, b: P2) -> bool {
-    (a.x - b.x).abs() <= 0.000001 && (a.y - b.y).abs() <= 0.000001
-}
-
-fn midpoint(a: P2, b: P2) -> P2 {
-    P2 {
-        x: (a.x + b.x) * 0.5,
-        y: (a.y + b.y) * 0.5,
-    }
-}
-
-fn eval_quad(p0: P2, p1: P2, p2: P2, t: f32) -> P2 {
-    let s = 1.0 - t;
-    P2 {
-        x: s * s * p0.x + 2.0 * s * t * p1.x + t * t * p2.x,
-        y: s * s * p0.y + 2.0 * s * t * p1.y + t * t * p2.y,
-    }
-}
-
-fn eval_cubic(p0: P2, p1: P2, p2: P2, p3: P2, t: f32) -> P2 {
-    let s = 1.0 - t;
-    let s2 = s * s;
-    let t2 = t * t;
-    P2 {
-        x: p0.x * s2 * s + 3.0 * p1.x * s2 * t + 3.0 * p2.x * s * t2 + p3.x * t2 * t,
-        y: p0.y * s2 * s + 3.0 * p1.y * s2 * t + 3.0 * p2.y * s * t2 + p3.y * t2 * t,
-    }
-}
-
-fn distance(a: P2, b: P2) -> f32 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    (dx * dx + dy * dy).sqrt()
-}
-
-fn cubic_to_quad_control(p0: P2, p1: P2, p2: P2, p3: P2) -> P2 {
-    P2 {
-        x: (3.0 * (p1.x + p2.x) - p0.x - p3.x) * 0.25,
-        y: (3.0 * (p1.y + p2.y) - p0.y - p3.y) * 0.25,
-    }
-}
-
-fn cubic_to_quads_recursive(
-    p0: P2,
-    p1: P2,
-    p2: P2,
-    p3: P2,
-    depth: usize,
-    bounds: Rect<f32>,
-    inv_w: f32,
-    inv_h: f32,
-    out: &mut Vec<QuadCurve>,
-) {
-    let qc = cubic_to_quad_control(p0, p1, p2, p3);
-    let q = QuadCurve { p0, p1: qc, p2: p3 };
-    let e25 = distance(
-        eval_cubic(p0, p1, p2, p3, 0.25),
-        eval_quad(q.p0, q.p1, q.p2, 0.25),
-    );
-    let e50 = distance(
-        eval_cubic(p0, p1, p2, p3, 0.50),
-        eval_quad(q.p0, q.p1, q.p2, 0.50),
-    );
-    let e75 = distance(
-        eval_cubic(p0, p1, p2, p3, 0.75),
-        eval_quad(q.p0, q.p1, q.p2, 0.75),
-    );
-    let max_err = e25.max(e50).max(e75);
-
-    if max_err <= CUBIC_TO_QUAD_TOLERANCE || depth >= MAX_CUBIC_SPLIT_DEPTH {
-        out.push(QuadCurve {
-            p0: normalize_point(q.p0, bounds, inv_w, inv_h),
-            p1: normalize_point(q.p1, bounds, inv_w, inv_h),
-            p2: normalize_point(q.p2, bounds, inv_w, inv_h),
-        });
-        return;
-    }
-
-    let p01 = midpoint(p0, p1);
-    let p12 = midpoint(p1, p2);
-    let p23 = midpoint(p2, p3);
-    let p012 = midpoint(p01, p12);
-    let p123 = midpoint(p12, p23);
-    let p0123 = midpoint(p012, p123);
-
-    cubic_to_quads_recursive(p0, p01, p012, p0123, depth + 1, bounds, inv_w, inv_h, out);
-    cubic_to_quads_recursive(p0123, p123, p23, p3, depth + 1, bounds, inv_w, inv_h, out);
-}
-
-#[cfg(test)]
+#[cfg(all(target_arch = "wasm32", test))]
 mod tests {
     use super::{SlugAtlas, SlugGlyphCacheResult};
     use crate::{
@@ -750,16 +541,13 @@ mod tests {
                 .glyph_index(ch)
                 .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
                 .0;
-            let result = atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true);
+            let result = atlas.get_or_cache_glyph(font.as_ref(), glyph_id);
             match result {
                 SlugGlyphCacheResult::NeedsUpload { glyph, .. }
                 | SlugGlyphCacheResult::Ready(glyph) => {
                     assert!(glyph.curve_count > 0, "expected curves for {ch:?}");
                     assert!(glyph.size_in_ems.width > 0.0, "expected width for {ch:?}");
                     assert!(glyph.size_in_ems.height > 0.0, "expected height for {ch:?}");
-                }
-                SlugGlyphCacheResult::Deferred => {
-                    panic!("unexpected deferred result for {ch:?}");
                 }
                 SlugGlyphCacheResult::Unavailable => {
                     panic!("unexpected unavailable result for {ch:?}");
@@ -781,7 +569,7 @@ mod tests {
                 .glyph_index(ch)
                 .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
                 .0;
-            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true) {
+            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id) {
                 SlugGlyphCacheResult::NeedsUpload { glyph, .. }
                 | SlugGlyphCacheResult::Ready(glyph) => glyph,
                 other => panic!("unexpected glyph build result for {ch:?}: {other:?}"),
@@ -806,7 +594,7 @@ mod tests {
                 .glyph_index(ch)
                 .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
                 .0;
-            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true) {
+            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id) {
                 SlugGlyphCacheResult::NeedsUpload { glyph, .. }
                 | SlugGlyphCacheResult::Ready(glyph) => glyph,
                 other => panic!("unexpected glyph build result for {ch:?}: {other:?}"),

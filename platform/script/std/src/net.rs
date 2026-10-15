@@ -1,11 +1,9 @@
+use makepad_relax_api::relax_api;
 use crate::makepad_network::{
     http_server::{HttpServer, HttpServerRequest, HttpServerResponse as NetHttpServerResponse},
     FromUIReceiver, FromUISender, NetworkResponse, SocketStream, ToUIReceiver, ToUISender,
-    WsMessage,
 };
-use crate::net_types::{
-    HttpError, HttpMethod, HttpRequest, HttpResponse, HttpServerHeaders, HttpServerResponse,
-};
+use crate::net_types::{HttpMethod, HttpRequest, HttpServerHeaders, HttpServerResponse};
 use crate::{task, vm, ScriptStd, ScriptVmStdExt};
 use makepad_script::id;
 use makepad_script::*;
@@ -16,6 +14,7 @@ use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
+#[relax_api(plain)]
 pub struct ScriptWebSocket {
     #[allow(unused)]
     pub id: LiveId,
@@ -30,6 +29,7 @@ pub struct ScriptServerWebSocket {
     pub events: WebSocketEvents,
 }
 
+#[relax_api(plain)]
 pub struct ScriptHttp {
     pub id: LiveId,
     pub events: HttpEvents,
@@ -91,6 +91,7 @@ pub struct HttpServerOptions {
     pub listen: String,
 }
 
+#[relax_api(plain)]
 #[derive(Script, ScriptHook)]
 pub struct HttpServerEvents {
     #[live]
@@ -101,6 +102,7 @@ pub struct HttpServerEvents {
     pub on_connect_websocket: Option<ScriptFnRef>,
 }
 
+#[relax_api(plain)]
 #[derive(Script, ScriptHook)]
 pub struct HttpEvents {
     #[live]
@@ -115,6 +117,7 @@ pub struct HttpEvents {
     pub on_progress: Option<ScriptFnRef>,
 }
 
+#[relax_api(plain)]
 #[derive(Script, ScriptHook)]
 pub struct WebSocketEvents {
     #[live]
@@ -232,24 +235,28 @@ fn script_value_to_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Result<Vec<u8
         return Err("expected string or byte array".to_string());
     };
 
-    match vm.bx.heap.array_storage(array) {
-        ScriptArrayStorage::U8(v) => Ok(v.clone()),
-        ScriptArrayStorage::U16(v) => Ok(v.iter().map(|b| *b as u8).collect()),
-        ScriptArrayStorage::U32(v) => Ok(v.iter().map(|b| *b as u8).collect()),
-        ScriptArrayStorage::F32(v) => Ok(v.iter().map(|b| *b as u8).collect()),
-        ScriptArrayStorage::ScriptValue(v) => {
-            let mut out = Vec::with_capacity(v.len());
-            for value in v {
-                let Some(num) = value.as_f64() else {
-                    return Err("byte array values must be numbers".to_string());
-                };
-                if !(0.0..=255.0).contains(&num) {
-                    return Err("byte array values must be in 0..255".to_string());
-                }
-                out.push(num as u8);
+    if let Some(v) = vm.heap().array_u8(array) {
+        Ok(v.to_vec())
+    } else if let Some(v) = vm.heap().array_u16(array) {
+        Ok(v.iter().map(|b| *b as u8).collect())
+    } else if let Some(v) = vm.heap().array_u32(array) {
+        Ok(v.iter().map(|b| *b as u8).collect())
+    } else if let Some(v) = vm.heap().array_f32(array) {
+        Ok(v.iter().map(|b| *b as u8).collect())
+    } else if let Some((front, back)) = vm.heap().array_values(array) {
+        let mut out = Vec::with_capacity(front.len() + back.len());
+        for value in front.iter().chain(back) {
+            let Some(num) = value.as_f64() else {
+                return Err("byte array values must be numbers".to_string());
+            };
+            if !(0.0..=255.0).contains(&num) {
+                return Err("byte array values must be in 0..255".to_string());
             }
-            Ok(out)
+            out.push(num as u8);
         }
+        Ok(out)
+    } else {
+        unreachable!("unsupported array storage kind")
     }
 }
 
@@ -308,18 +315,18 @@ pub fn socket_stream_pause_current(vm: &mut ScriptVm, handle: ScriptHandle) -> R
     let Some(index) = socket_stream_index(vm, handle) else {
         return Err("invalid socket_stream handle".to_string());
     };
-    let thread_id = vm.bx.threads.cur().pause();
+    let thread_id = vm.pause();
     let std = vm.std_mut::<ScriptStd>();
     let mut streams = std.data.socket_streams.borrow_mut();
     streams[index].recv_pause.push_front(thread_id);
     Ok(())
 }
 
-fn script_std(host: &mut dyn ScriptHost) -> &mut ScriptStd {
-    host.script_std().downcast_mut().unwrap()
+fn script_std<'a>(host: &'a mut ScriptHostContext<'_>) -> &'a mut ScriptStd {
+    host.std_mut::<ScriptStd>().unwrap()
 }
 
-pub fn handle_script_socket_streams(host: &mut dyn ScriptHost) {
+pub fn handle_script_socket_streams(host: &mut ScriptHostContext) {
     let mut resume_threads = Vec::new();
     {
         let mut streams = script_std(host).data.socket_streams.borrow_mut();
@@ -356,7 +363,7 @@ pub fn handle_script_socket_streams(host: &mut dyn ScriptHost) {
     }
 }
 
-pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
+pub fn handle_script_http_servers(host: &mut ScriptHostContext) {
     let mut i = 0;
     while i < script_std(host).data.http_servers.len() {
         loop {
@@ -379,7 +386,8 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         let maybe_ws = vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
+                            let headers_val =
+                                crate::net_adapter::http_server_headers_value(vm, &headers);
                             let ret = vm.call(handler.into(), &[headers_val]);
                             if script_has_proto!(vm, ret, net.WebSocketEvents) {
                                 let events = WebSocketEvents::script_from_value(vm, ret);
@@ -439,7 +447,7 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     };
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
-                            let array = vm.bx.heap.new_array_from_vec_u8(data);
+                            let array = vm.heap_mut().new_array_from_vec_u8(data);
                             vm.call(handler.into(), &[array.into()]);
                         });
                     }
@@ -461,7 +469,7 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     };
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
-                            let string = vm.bx.heap.new_string_from_str(&string);
+                            let string = vm.new_string(&string);
                             vm.call(handler.into(), &[string.into()]);
                         });
                     }
@@ -474,10 +482,13 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
+                            let headers_val =
+                                crate::net_adapter::http_server_headers_value(vm, &headers);
                             let ret = vm.call(handler.into(), &[headers_val]);
                             if script_has_proto!(vm, ret, net.HttpServerResponse) {
-                                let response = NetHttpServerResponse::from(HttpServerResponse::script_from_value(vm, ret));
+                                let response =
+                                    crate::net_values::http_server_response_buffers(vm, ret)
+                                        .into_response();
                                 let _ = response_sender.send(response);
                             } else {
                                 let _ = response_sender.send(NetHttpServerResponse::new(
@@ -498,12 +509,15 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
                     if let Some(handler) = handler.as_object() {
                         vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
-                            let headers_val = HttpServerHeaders::from(&headers).script_to_value(vm);
-                            let body_array = vm.bx.heap.new_array_from_vec_u8(body);
+                            let headers_val =
+                                crate::net_adapter::http_server_headers_value(vm, &headers);
+                            let body_array = vm.heap_mut().new_array_from_vec_u8(body);
                             let ret = vm.call(handler.into(), &[headers_val, body_array.into()]);
 
                             if script_has_proto!(vm, ret, net.HttpServerResponse) {
-                                let response_obj = NetHttpServerResponse::from(HttpServerResponse::script_from_value(vm, ret));
+                                let response_obj =
+                                    crate::net_values::http_server_response_buffers(vm, ret)
+                                        .into_response();
                                 let _ = response.send(response_obj);
                             } else {
                                 let _ = response.send(NetHttpServerResponse::new(
@@ -527,228 +541,102 @@ pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
     }
 }
 
-pub fn handle_script_web_socket_event(host: &mut dyn ScriptHost, event: NetworkResponse) {
-    match event {
-        NetworkResponse::WsOpened { socket_id } => {
-            let handler = script_std(host)
+/// Selected before constructing a payload. Indices deliberately remain the
+/// pre-callback indices: removal follows the existing callback/async-pump order.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ScriptNetworkEvent {
+    kind: crate::makepad_network::runtime_handle::NetworkResponseKind,
+    handler: ScriptValue,
+    index: usize,
+    remove: bool,
+    websocket: bool,
+}
+#[relax_api]
+impl ScriptNetworkEvent {
+    #[inline]
+    #[relax_api]
+    pub fn begin(
+        host: &mut ScriptHostContext,
+        kind: crate::makepad_network::runtime_handle::NetworkResponseKind,
+        id: LiveId,
+    ) -> Self {
+        use crate::makepad_network::runtime_handle::NetworkResponseKind as K;
+        let websocket = matches!(
+            kind,
+            K::WsOpened | K::WsClosed | K::WsText | K::WsBinary | K::WsError
+        );
+        let mut event = Self {
+            kind,
+            handler: NIL,
+            index: 0,
+            remove: false,
+            websocket,
+        };
+        if matches!(kind, K::HttpProgress) {
+            return event;
+        }
+        let std = script_std(host);
+        if websocket {
+            if let Some(index) = std
                 .data
                 .web_sockets
                 .iter()
-                .find(|item| item.socket_id == socket_id)
-                .and_then(|item| item.events.on_opened.as_object());
-            if let Some(handler) = handler {
-                vm::with_vm_and_async(host, |vm| {
-                    vm.call(handler.into(), &[]);
-                });
+                .position(|item| item.socket_id == id)
+            {
+                let events = &std.data.web_sockets[index].events;
+                let handler = match kind {
+                    K::WsOpened => &events.on_opened,
+                    K::WsClosed => &events.on_closed,
+                    K::WsText => &events.on_string,
+                    K::WsBinary => &events.on_binary,
+                    K::WsError => &events.on_error,
+                    _ => unreachable!(),
+                };
+                event.handler = handler.as_object().map_or(NIL, Into::into);
+                event.index = index;
+                event.remove = matches!(kind, K::WsClosed | K::WsError);
             }
-        }
-        NetworkResponse::WsMessage { socket_id, message } => {
-            match message {
-                WsMessage::Text(string) => {
-                    let handler = script_std(host)
-                        .data
-                        .web_sockets
-                        .iter()
-                        .find(|item| item.socket_id == socket_id)
-                        .and_then(|item| item.events.on_string.as_object());
-                    if let Some(handler) = handler {
-                        vm::with_vm_and_async(host, |vm| {
-                            let string = vm.bx.heap.new_string_from_str(&string);
-                            vm.call(handler.into(), &[string.into()]);
-                        });
-                    }
-                }
-                WsMessage::Binary(data) => {
-                    let handler = script_std(host)
-                        .data
-                        .web_sockets
-                        .iter()
-                        .find(|item| item.socket_id == socket_id)
-                        .and_then(|item| item.events.on_binary.as_object());
-                    if let Some(handler) = handler {
-                        vm::with_vm_and_async(host, |vm| {
-                            let data = vm.bx.heap.new_array_from_vec_u8(data);
-                            vm.call(handler.into(), &[data.into()]);
-                        });
-                    }
-                }
-            }
-        }
-        NetworkResponse::WsClosed { socket_id } => {
-            let found = {
-                let std = script_std(host);
-                std.data
-                    .web_sockets
-                    .iter()
-                    .position(|item| item.socket_id == socket_id)
-                    .map(|index| {
-                        (
-                            index,
-                            std.data.web_sockets[index].events.on_closed.as_object(),
-                        )
-                    })
+        } else if let Some(index) = std.data.http_requests.iter().position(|item| item.id == id) {
+            let events = &std.data.http_requests[index].events;
+            let handler = match kind {
+                K::HttpResponse => &events.on_response,
+                K::HttpStreamChunk => &events.on_stream,
+                K::HttpStreamComplete => &events.on_complete,
+                K::HttpError => &events.on_error,
+                _ => unreachable!(),
             };
-            if let Some((index, handler)) = found {
-                if let Some(handler) = handler {
-                    vm::with_vm_and_async(host, |vm| {
-                        vm.call(handler.into(), &[]);
-                    });
-                }
-                script_std(host).data.web_sockets.remove(index);
-            }
+            event.handler = handler.as_object().map_or(NIL, Into::into);
+            event.index = index;
+            event.remove = !matches!(kind, K::HttpStreamChunk);
         }
-        NetworkResponse::WsError { socket_id, message } => {
-            let found = {
-                let std = script_std(host);
-                std.data
-                    .web_sockets
-                    .iter()
-                    .position(|item| item.socket_id == socket_id)
-                    .map(|index| {
-                        (
-                            index,
-                            std.data.web_sockets[index].events.on_error.as_object(),
-                        )
-                    })
-            };
-            if let Some((index, handler)) = found {
-                if let Some(handler) = handler {
-                    vm::with_vm_and_async(host, |vm| {
-                        let message = vm.bx.heap.new_string_from_str(&message);
-                        vm.call(handler.into(), &[message.into()]);
-                    });
-                }
-                script_std(host).data.web_sockets.remove(index);
-            }
-        }
-        NetworkResponse::HttpResponse { .. }
-        | NetworkResponse::HttpStreamChunk { .. }
-        | NetworkResponse::HttpStreamComplete { .. }
-        | NetworkResponse::HttpError { .. }
-        | NetworkResponse::HttpProgress { .. } => {}
+        event
     }
-}
 
-pub fn handle_script_network_events(
-    host: &mut dyn ScriptHost,
-    responses: &[NetworkResponse],
-) {
-    for response in responses {
-        match response {
-            NetworkResponse::WsOpened { .. }
-            | NetworkResponse::WsMessage { .. }
-            | NetworkResponse::WsClosed { .. }
-            | NetworkResponse::WsError { .. } => {
-                handle_script_web_socket_event(host, response.clone());
-                continue;
-            }
-            _ => {}
+    /// The owner callback builds the payload only when a handler exists.
+    /// Panics restore the VM and propagate before any request/socket removal.
+    #[inline]
+    #[relax_api]
+    pub fn dispatch(&self, host: &mut ScriptHostContext, payload: &mut crate::ScriptVmCall) {
+        if !self.handler.is_nil() {
+            vm::with_vm_and_async_with(host, payload);
         }
+        if self.remove {
+            if self.websocket {
+                script_std(host).data.web_sockets.remove(self.index);
+            } else {
+                script_std(host).data.http_requests.remove(self.index);
+            }
+        }
+    }
 
-        let request_id = match response {
-            NetworkResponse::HttpResponse { request_id, .. }
-            | NetworkResponse::HttpStreamChunk { request_id, .. }
-            | NetworkResponse::HttpStreamComplete { request_id, .. }
-            | NetworkResponse::HttpError { request_id, .. }
-            | NetworkResponse::HttpProgress { request_id, .. } => *request_id,
-            NetworkResponse::WsOpened { .. }
-            | NetworkResponse::WsMessage { .. }
-            | NetworkResponse::WsClosed { .. }
-            | NetworkResponse::WsError { .. } => continue,
-        };
-
-        match response {
-            NetworkResponse::HttpStreamChunk { response: res, .. } => {
-                let handler = script_std(host)
-                    .data
-                    .http_requests
-                    .iter()
-                    .find(|v| v.id == request_id)
-                    .and_then(|request| request.events.on_stream.as_object());
-                if let Some(handler) = handler {
-                    vm::with_vm_and_async(host, |vm| {
-                        let res = HttpResponse::from(res).script_to_value(vm);
-                        vm.call(handler.into(), &[res]);
-                    });
-                }
-            }
-            NetworkResponse::HttpStreamComplete { response: res, .. } => {
-                let found = {
-                    let std = script_std(host);
-                    std.data
-                        .http_requests
-                        .iter()
-                        .position(|v| v.id == request_id)
-                        .map(|index| {
-                            (
-                                index,
-                                std.data.http_requests[index].events.on_complete.as_object(),
-                            )
-                        })
-                };
-                if let Some((index, handler)) = found {
-                    if let Some(handler) = handler {
-                        vm::with_vm_and_async(host, |vm| {
-                            let res = HttpResponse::from(res).script_to_value(vm);
-                            vm.call(handler.into(), &[res]);
-                        })
-                    }
-                    script_std(host).data.http_requests.remove(index);
-                }
-            }
-            NetworkResponse::HttpResponse { response: res, .. } => {
-                let found = {
-                    let std = script_std(host);
-                    std.data
-                        .http_requests
-                        .iter()
-                        .position(|v| v.id == request_id)
-                        .map(|index| {
-                            (
-                                index,
-                                std.data.http_requests[index].events.on_response.as_object(),
-                            )
-                        })
-                };
-                if let Some((index, handler)) = found {
-                    if let Some(handler) = handler {
-                        vm::with_vm_and_async(host, |vm| {
-                            let res = HttpResponse::from(res).script_to_value(vm);
-                            vm.call(handler.into(), &[res]);
-                        })
-                    }
-                    script_std(host).data.http_requests.remove(index);
-                }
-            }
-            NetworkResponse::HttpError { error: err, .. } => {
-                let found = {
-                    let std = script_std(host);
-                    std.data
-                        .http_requests
-                        .iter()
-                        .position(|v| v.id == request_id)
-                        .map(|index| {
-                            (
-                                index,
-                                std.data.http_requests[index].events.on_error.as_object(),
-                            )
-                        })
-                };
-                if let Some((index, handler)) = found {
-                    if let Some(handler) = handler {
-                        vm::with_vm_and_async(host, |vm| {
-                            let res = HttpError::from(err).script_to_value(vm);
-                            vm.call(handler.into(), &[res]);
-                        })
-                    }
-                    script_std(host).data.http_requests.remove(index);
-                }
-            }
-            NetworkResponse::HttpProgress { .. }
-            | NetworkResponse::WsOpened { .. }
-            | NetworkResponse::WsMessage { .. }
-            | NetworkResponse::WsClosed { .. }
-            | NetworkResponse::WsError { .. } => {}
+    #[inline]
+    pub fn call(&self, vm: &mut ScriptVm, value: ScriptValue) {
+        use crate::makepad_network::runtime_handle::NetworkResponseKind as K;
+        if matches!(self.kind, K::WsOpened | K::WsClosed) {
+            vm.call(self.handler, &[]);
+        } else {
+            vm.call(self.handler, &[value]);
         }
     }
 }
@@ -816,10 +704,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
             };
 
             let std = vm.std_mut::<ScriptStd>();
-            let Some(runtime) = std.net.as_ref() else {
+            if std.net.is_none() {
                 return script_err_io!(vm.trap(), "script net runtime is not configured");
-            };
-            runtime.start_http_server(server);
+            }
+            crate::makepad_network::start_http_server(server);
             let id = LiveId::unique();
             std.data.http_servers.push(ScriptHttpServer {
                 id,
@@ -1042,7 +930,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 return script_err_unexpected!(vm.trap(), "invalid socket_stream state");
             };
             match socket_stream_poll(vm, handle) {
-                SocketStreamPoll::Data(data) => vm.bx.heap.new_array_from_vec_u8(data).into(),
+                SocketStreamPoll::Data(data) => vm.heap_mut().new_array_from_vec_u8(data).into(),
                 SocketStreamPoll::Closed(Some(err)) => script_err_io!(vm.trap(), "{err}"),
                 SocketStreamPoll::Closed(None) => NIL,
                 SocketStreamPoll::Pause => {
@@ -1213,9 +1101,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 streams: streams_ref,
                 handle: ScriptHandle::ZERO,
             };
-            let handle = vm
-                .bx
-                .heap
+            let handle = vm.heap_mut()
                 .new_handle(socket_stream_type, Box::new(handle_gc));
             {
                 let std = vm.std_mut::<ScriptStd>();

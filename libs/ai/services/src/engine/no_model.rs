@@ -59,9 +59,9 @@ impl Model for NoModelWithReason {
     }
 }
 
-/// Claude Desktop answers, not this panel: the conversation happens there,
-/// through the app's MCP endpoint, and its calls land here as cards. A line
-/// typed here is told so; the tool console still works.
+/// Claude Desktop holds the conversation and reaches this app's tools
+/// through `makepad-remote mcp`. A line typed here is told so; the tool
+/// console still works.
 pub struct ClaudeDesktopModel {
     queued: Vec<ModelEvent>,
 }
@@ -74,14 +74,14 @@ impl ClaudeDesktopModel {
 
 impl Model for ClaudeDesktopModel {
     fn label(&self) -> String {
-        "Claude Desktop".into()
+        "Claude Desktop (MCP)".into()
     }
     fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
         Ok(())
     }
     fn send_user(&mut self, _text: &str, _dynamic_context: &str) {
         self.queued.push(ModelEvent::Error(
-            "Claude Desktop answers for this app: type in Claude Desktop; its calls show here. \
+            "The desktop assistant answers for this app: type there to use its tools. \
              The tools still work from this console: /name {json}"
                 .into(),
         ));

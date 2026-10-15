@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::array::*;
 use crate::function::*;
 use crate::handle::*;
@@ -5,17 +6,18 @@ use crate::heap::*;
 use crate::makepad_error_log::*;
 
 use crate::object::*;
+use crate::object_heap::*;
 use crate::regex::*;
 use crate::thread::*;
 use crate::trap::*;
 use crate::value::*;
 use crate::vm::*;
 
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 /// Tracks heap statistics from the last garbage collection run.
 /// Used to determine when to trigger the next GC cycle.
+#[relax_api(plain)]
 #[derive(Default, Clone, Copy)]
 pub struct ScriptHeapGcLast {
     pub objects: usize,
@@ -163,6 +165,7 @@ macro_rules! mark_value_fields {
     };
 }
 
+#[relax_api]
 impl ScriptHeap {
     /// Recursively mark a value and all reachable values as static (permanent).
     /// This walks the object graph similar to GC marking but sets the static flag instead.
@@ -226,74 +229,31 @@ impl ScriptHeap {
         }
     }
 
+    #[inline]
     pub fn new_object_ref(&mut self, obj: ScriptObject) -> ScriptObjectRef {
         // Mark as reffed so free_object_if_unreffed won't free it
-        self.objects[obj].tag.set_reffed();
-
-        let mut roots = self.root_objects.borrow_mut();
-        match roots.entry(obj) {
-            Entry::Occupied(mut occ) => {
-                *occ.get_mut() += 1;
-                ScriptObjectRef {
-                    roots: Some(self.root_objects.clone()),
-                    obj: obj,
-                }
-            }
-            Entry::Vacant(vac) => {
-                vac.insert(1);
-                ScriptObjectRef {
-                    roots: Some(self.root_objects.clone()),
-                    obj: obj,
-                }
-            }
-        }
+        self.obj_mode(obj, OBJ_MODE_REFFED, 0);
+        let roots = self.heap_key() as *const crate::roots::ScriptRoots;
+        crate::roots::script_root_retain(roots, crate::roots::ROOT_OBJECT, obj.index);
+        ScriptObjectRef { roots, obj }
     }
 
+    #[inline]
     pub fn new_array_ref(&mut self, array: ScriptArray) -> ScriptArrayRef {
-        let mut roots = self.root_arrays.borrow_mut();
-        match roots.entry(array) {
-            Entry::Occupied(mut occ) => {
-                *occ.get_mut() += 1;
-                ScriptArrayRef {
-                    roots: self.root_arrays.clone(),
-                    array: array,
-                }
-            }
-            Entry::Vacant(vac) => {
-                vac.insert(1);
-                ScriptArrayRef {
-                    roots: self.root_arrays.clone(),
-                    array: array,
-                }
-            }
-        }
+        let roots = self.heap_key() as *const crate::roots::ScriptRoots;
+        crate::roots::script_root_retain(roots, crate::roots::ROOT_ARRAY, array.index);
+        ScriptArrayRef { roots, array }
     }
 
     pub fn new_fn_ref(&mut self, obj: ScriptObject) -> ScriptFnRef {
         ScriptFnRef(self.new_object_ref(obj))
     }
 
+    #[inline]
     pub fn new_handle_ref(&mut self, handle: ScriptHandle) -> ScriptHandleRef {
-        let heap_key = self.heap_key();
-        let mut roots = self.root_handles.borrow_mut();
-        match roots.entry(handle) {
-            Entry::Occupied(mut occ) => {
-                *occ.get_mut() += 1;
-                ScriptHandleRef {
-                    roots: self.root_handles.clone(),
-                    handle: handle,
-                    heap_key,
-                }
-            }
-            Entry::Vacant(vac) => {
-                vac.insert(1);
-                ScriptHandleRef {
-                    roots: self.root_handles.clone(),
-                    handle: handle,
-                    heap_key,
-                }
-            }
-        }
+        let roots = self.heap_key() as *const crate::roots::ScriptRoots;
+        crate::roots::script_root_retain(roots, crate::roots::ROOT_HANDLE, handle.index);
+        ScriptHandleRef { roots, handle }
     }
 
     pub fn mark_inner(&mut self, mark: ScriptGcMark) {
@@ -393,13 +353,28 @@ impl ScriptHeap {
     /// and every element of every array met on the way. `visited` is
     /// shared in and out, so a caller can mark a tree once and then ask
     /// what each further root reaches beyond it. A leak hunt's reading.
+    #[inline(always)]
     pub fn reach_count(&self, seeds: &[ScriptObject], visited: &mut std::collections::HashSet<ScriptObject>) -> usize {
+        unsafe extern "C-unwind" fn insert(ctx: *mut u8, object: ScriptObject) -> bool {
+            (&mut *(ctx as *mut std::collections::HashSet<ScriptObject>)).insert(object)
+        }
+        // SAFETY: the callback touches only visited during this synchronous walk.
+        unsafe { self.reach_count_with(seeds, visited as *mut _ as *mut u8, insert) }
+    }
+
+    /// [`Self::reach_count`] with the visited set behind `insert`, which
+    /// answers whether an object was newly added.
+    ///
+    /// # Safety
+    /// `ctx` must remain valid for `insert` throughout this synchronous walk.
+    #[relax_api]
+    pub unsafe fn reach_count_with(&self, seeds: &[ScriptObject], ctx: *mut u8, insert: unsafe extern "C-unwind" fn(*mut u8, ScriptObject) -> bool) -> usize {
         let mut arrays_seen: std::collections::HashSet<ScriptArray> = Default::default();
         let mut count = 0usize;
         let mut stack: Vec<ScriptValue> = seeds.iter().map(|o| ScriptValue::from(*o)).collect();
         while let Some(val) = stack.pop() {
             if let Some(obj) = val.as_object() {
-                if !self.objects.is_valid(obj) || !visited.insert(obj) {
+                if !self.objects.is_valid(obj) || !insert(ctx, obj) {
                     continue;
                 }
                 count += 1;
@@ -456,30 +431,21 @@ impl ScriptHeap {
             }
         }
 
-        // Mark root_objects
+        // Mark the Rust-held refs' roots (roots.rs): slot indices, at their current generation
         {
-            let roots = self.root_objects.borrow();
+            let roots = self.roots.get();
             let mark_vec = &mut self.mark_vec;
-            for item in roots.keys().copied() {
-                mark_vec.push(ScriptGcMark::Object(item));
+            for index in roots.rooted_slots(crate::roots::ROOT_OBJECT) {
+                let generation = self.objects.generation(index as usize);
+                mark_vec.push(ScriptGcMark::Object(ScriptObject::new(index, generation)));
             }
-        }
-
-        // Mark root_arrays
-        {
-            let roots = self.root_arrays.borrow();
-            let mark_vec = &mut self.mark_vec;
-            for item in roots.keys().copied() {
-                mark_vec.push(ScriptGcMark::Array(item));
+            for index in roots.rooted_slots(crate::roots::ROOT_ARRAY) {
+                let generation = self.arrays.generation(index as usize);
+                mark_vec.push(ScriptGcMark::Array(ScriptArray::new(index, generation)));
             }
-        }
-
-        // Mark root_handles directly
-        {
-            let roots = self.root_handles.borrow();
             let handles = &mut self.handles;
-            for item in roots.keys().copied() {
-                if let Some(handle_data) = handles[item].as_mut() {
+            for index in roots.rooted_slots(crate::roots::ROOT_HANDLE) {
+                if let Some(handle_data) = handles.get_at_mut(index as usize).as_mut() {
                     handle_data.tag.set_mark();
                 }
             }
@@ -673,6 +639,8 @@ impl ScriptHeap {
                     source_len: 0,
                     content_hash: 0,
                     transient: false,
+                    real_file: String::new(),
+                    shown: None,
                 };
                 free.push(b as u16);
             }
@@ -866,6 +834,7 @@ impl ScriptHeap {
         // A collection is the one point where retained capacity can shrink;
         // re-derive the retained-heap cap's headroom from the swept state.
         self.reconcile_heap_bytes_if_limited();
+        crate::inspect_registry::gc_done(self, ((crate::clock::monotonic_now() - start) * 1e9) as u64);
     }
 
     /// Check if garbage collection should be triggered.
@@ -875,7 +844,12 @@ impl ScriptHeap {
     /// - Use minimum thresholds to avoid GC thrashing on small heaps
     /// - Objects are weighted more heavily as they're the primary allocation type
 
+    #[inline]
     pub fn needs_gc(&self) -> bool {
+        self.heap_stat(HEAP_STAT_NEEDS_GC) != 0
+    }
+
+    pub(crate) fn needs_gc_impl(&self) -> bool {
         // Minimum thresholds before GC can trigger (avoid thrashing on small heaps)
         const MIN_OBJECTS: usize = 1024;
         const MIN_STRINGS: usize = 256;
@@ -919,7 +893,12 @@ impl ScriptHeap {
         false
     }
 
+    #[inline]
     pub fn gc_live_len(&self) -> usize {
+        self.heap_stat(HEAP_STAT_LIVE_LEN) as usize
+    }
+
+    pub(crate) fn gc_live_len_impl(&self) -> usize {
         let objects = self.objects.len() - self.objects_free.len();
         let strings = self.strings.len() - self.strings_free.len();
         let arrays = self.arrays.len() - self.arrays_free.len();
@@ -992,5 +971,75 @@ impl ScriptHeap {
                 .push(ScriptObject::new(ptr.index, new_gen));
             self.bump_object_reuse_epoch();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stale handle -- an object collected, its slot taken by a new one --
+    /// reports dead and resolves to nothing; it never aliases the newcomer.
+    /// The generation that tells them apart is unconditional (no feature).
+    #[test]
+    fn a_collected_objects_handle_stays_dead_after_its_slot_is_reused() {
+        let mut heap = ScriptHeap::empty();
+        let proto = heap.new_object();
+        let old = heap.new_with_proto(proto.into());
+        assert!(heap.object_alive(old));
+        // Nothing roots either: a collection with nothing marked takes both.
+        heap.sweep(false);
+        assert!(!heap.object_alive(old) && !heap.object_alive(proto));
+        let mut reused = None;
+        for _ in 0..64 {
+            let o = heap.new_object();
+            if o.index() == old.index() {
+                reused = Some(o);
+                break;
+            }
+        }
+        let reused = reused.expect("the freed slot is handed out again");
+        assert_ne!(reused, old, "the newcomer carries another generation");
+        assert!(heap.object_alive(reused));
+        assert!(!heap.object_alive(old), "the old handle must not alias the newcomer");
+        assert!(!heap.objects.is_valid(old));
+        // A prototype walk through the old handle stops at once.
+        let mut walk = Some(old);
+        let mut steps = 0;
+        while let Some(o) = walk {
+            if !heap.object_alive(o) {
+                break;
+            }
+            steps += 1;
+            walk = heap.proto(o).as_object();
+        }
+        assert_eq!(steps, 0);
+        // Reading through it panics loudly rather than returning the newcomer's data.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| heap.objects[old].proto));
+        assert!(read.is_err());
+    }
+
+    /// A value minted by one heap and resolved in another fails the generation compare every
+    /// access already does, and the panic names both heaps; liveness asks say "not here".
+    #[test]
+    fn a_foreign_handle_is_refused_with_both_heaps_named() {
+        let mut a = ScriptHeap::empty();
+        let mut b = ScriptHeap::empty();
+        assert_ne!(a.heap_tag(), b.heap_tag());
+        for _ in 0..8 {
+            b.new_object();
+        }
+        let from_a = a.new_object();
+        assert!(a.object_alive(from_a));
+        assert!(!b.object_alive(from_a), "another heap's ref is never alive here");
+        assert!(b.objects.get_checked(from_a).is_none(), "the mark walk skips it");
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.objects[from_a].proto));
+        let msg = read.err().and_then(|p| p.downcast::<String>().ok()).map(|s| *s).unwrap_or_default();
+        assert!(msg.contains(&format!("from heap {} used in heap {}", a.heap_tag(), b.heap_tag())), "{msg}");
+        // The null value is every heap's.
+        assert!(b.objects.is_valid(ScriptObject::ZERO) && a.objects.is_valid(ScriptObject::ZERO));
+        // Through a ScriptValue too: the tag rides in the value's payload.
+        let v: ScriptValue = from_a.into();
+        assert_eq!(v.as_object(), Some(from_a));
     }
 }

@@ -1,0 +1,567 @@
+//! Provided crates (local/plans/loader-core.md section 8): a crate rustc built into the binary
+//! that runs Relax (the `makepad` loader builds makepad-script into itself). Relax still loads
+//! its source (types, signatures, generic and inline bodies) but binds the fns the crate marks
+//! `#[relax_api]` (makepad-relax-api) to the compiled code: each gets a bridge body
+//! (lower::bridge_func) with Relax's own ABI that packs its arguments into one uniform C call,
+//! `extern "C" fn(args: *const *mut u8, ret: *mut u8) -> u32`, of the wrapper the attribute
+//! generated into the crate. Callers, fn pointers and vtables need nothing else: the slot is an
+//! ordinary Relax fn.
+//!
+//! The attribute also marks plain data (`plain`: rustc's size/align/field offsets, checked against
+//! Relax's) and opaque handles (`handle`: rustc's size/align/drop and listed trait ops). A marked
+//! op must be C-shaped (`unbound_reason`); every unmarked fn of the crate compiles from source when
+//! JIT code reaches it.
+//!
+//! Each op is registered under its key (`core::any::type_name` of the fn item, which Relax
+//! computes the same way) with rustc's signature (`type_name` of its fn pointer type) and the
+//! layout of each parameter and of the result; a mismatch is a clear "rebuild makepad" error at
+//! bind time, never a wrong call.
+//!
+//! Before binding, every registered crate present in the program must match the loader's
+//! library source closure (srchash.rs). A mismatch is always an error naming changed, added
+//! and removed inputs and feature/version differences; it never selects a second source copy.
+
+use crate::lang_items::LangItem;
+use crate::program::{DefId, DefKind, Program};
+use crate::tcx::Tcx;
+use crate::types::{TyId, TyKind};
+use std::collections::HashMap;
+use relax_session::sync::Mutex;
+
+/// A generated shim: arguments moved out of `args[i]`, the result written to `ret`; 0 = returned,
+/// 1 = panicked (the message is then read with the crate's LastPanicFn).
+pub type ShimFn = unsafe extern "C" fn(*const *mut u8, *mut u8) -> u32;
+/// Writes the text of the last panic a shim caught on this thread: (ptr, len), valid until the
+/// thread's next shim call.
+pub type LastPanicFn = unsafe extern "C" fn(*mut *const u8, *mut usize);
+
+/// A provided type rustc lays out (its fields are the crate's business): size, align, and
+/// its `drop_in_place` when it needs drop.
+pub type DropFn = unsafe extern "C" fn(*mut u8);
+
+/// One op of a provided crate: rustc's signature (`type_name` of its fn pointer type; empty for a
+/// handle's trait ops), per parameter then the result rustc's [size, align, pointee size, pointee
+/// align], and the wrapper.
+#[derive(Clone, Copy)]
+pub struct Shim {
+    pub sig: &'static str,
+    pub slots: &'static [[u64; 4]],
+    pub f: ShimFn,
+}
+
+pub struct ProvidedCrate {
+    /// the crate's name as Relax loads it (`makepad_script`)
+    pub name: String,
+    /// key (`type_name` of the fn item; a handle's trait ops `<path as Clone>::clone` ..) -> op
+    pub shims: HashMap<String, Shim>,
+    /// opaque handles by def path: (size, align, drop)
+    pub types: HashMap<String, (u64, u64, Option<DropFn>)>,
+    /// plain types by def path: rustc's (size, align, field offsets), checked against Relax's at
+    /// unit creation
+    pub layouts: HashMap<String, (u64, u64, &'static [u64])>,
+    pub last_panic: LastPanicFn,
+    /// the source identity rustc built it from (srchash.rs; the loader's build.rs)
+    pub source: u64,
+    /// Per-file and feature/version identity embedded by the loader build.
+    pub manifest: &'static [u8],
+}
+
+impl Clone for ProvidedCrate {
+    fn clone(&self) -> Self {
+        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), last_panic: self.last_panic, source: self.source, manifest: self.manifest }
+    }
+}
+
+static REGISTRY: Mutex<Vec<ProvidedCrate>> = Mutex::new(Vec::new());
+
+pub(crate) fn registered(name: &str) -> bool {
+    let name = name.replace('-', "_");
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p.name == name)
+}
+
+/// Registers a provided crate (before `cli_main`): its `#[relax_api]` entries as the loader read
+/// them from its own binary (makepad_relax_api::entries), and the panic-text accessor.
+pub fn register(
+    name: &str,
+    shims: HashMap<String, Shim>,
+    types: HashMap<String, (u64, u64, Option<DropFn>)>,
+    layouts: HashMap<String, (u64, u64, &'static [u64])>,
+    last_panic: LastPanicFn,
+    source: u64,
+    manifest: &'static [u8],
+) {
+    let name = name.replace('-', "_");
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, last_panic, source, manifest });
+}
+
+/// The registered crates whose source in the program is what the loader was built from
+/// (check_sources); only they bind.
+static MATCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Compares every registered crate present in the program against its embedded library
+/// closure. Any mismatch fails with file and feature/version differences; absent crates skip.
+pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
+    let reg: Vec<_> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| (p.name.clone(), p.source, p.manifest)).collect();
+    let mut verified = Vec::new();
+    for (name, source, manifest) in &reg {
+        for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == *name) {
+            let current = crate::srchash::closure_manifest(pkgs, root);
+            if crate::srchash::manifest_hash(&current) != *source {
+                let built = crate::srchash::decode_manifest(manifest)?;
+                return Err(crate::srchash::diff_message(name, &built, &current));
+            }
+            if !verified.contains(name) { verified.push(name.clone()); }
+        }
+    }
+    let mut matched = MATCHED.lock().unwrap_or_else(|e| e.into_inner());
+    for name in verified {
+        if !matched.contains(&name) {
+            crate::zone_alloc::kept_with(|| matched.push(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Reads what `check_sources` reads, for the identity of every registered crate in the program,
+/// and nothing else. A check for another target binds nothing, but the run on that target
+/// (the phone) compares these identities: `pack-src` records the files this reads so its archive
+/// holds them.
+pub fn read_identity_files(pkgs: &[crate::srchash::SrcPkg]) {
+    let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    for p in reg.iter() {
+        for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == p.name) {
+            let _ = crate::srchash::closure_hash(pkgs, root);
+        }
+    }
+}
+
+/// The registered crates as (crate index in `prog`, entry) whose source matched (check_sources);
+/// crates not in the program are left out. Taken once per unit (Unit::new).
+pub fn take_for(prog: &Program) -> Vec<(u32, ProvidedCrate)> {
+    let matched = MATCHED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    for p in REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if !matched.contains(&p.name) {
+            continue;
+        }
+        if let Some(i) = prog.crates.iter().position(|c| prog.syms.str(c.name) == p.name) {
+            out.push((i as u32, p.clone()));
+        }
+    }
+    out
+}
+
+/// As [`take_for`], for the crates of `prog` named by `only` (indices a run-time load added) that
+/// are not bound yet.
+pub fn take_for_crates(prog: &Program, only: &[u32]) -> Vec<(u32, ProvidedCrate)> {
+    let matched = MATCHED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    for p in REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if !matched.contains(&p.name) {
+            continue;
+        }
+        for &i in only {
+            if prog.syms.str(prog.crates[i as usize].name) == p.name {
+                out.push((i, p.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Is crate `krate` of `prog` a registered provided crate?
+fn is_provided(prog: &Program, krate: u32) -> bool {
+    let name = prog.syms.str(prog.crates[krate as usize].name);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p.name == name)
+}
+
+/// `#[repr(transparent)]` on an ADT (Relax's AdtT records repr(C)/int only; transparent lays
+/// out as its one non-ZST field, which `trusted` checks).
+fn is_transparent(prog: &Program, d: DefId) -> bool {
+    let def = prog.def(d);
+    let f = &prog.files[def.file as usize];
+    f.ast.list(f.ast.item(def.item).attrs).iter().any(|a| {
+        a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "repr" && (a.toks.lo + 1..a.toks.hi).any(|i| f.tok_text(i) == "transparent")
+    })
+}
+
+/// Identity flags follow rustc_middle/src/ty/adt.rs:371; host layout checks remain required.
+/// Is `t` the same bytes on both sides of the boundary (rustc-built crate, Relax-built caller)?
+/// `krate` is the provided crate: pointers to its own types are opaque handles.
+pub fn trusted(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, depth: u32) -> bool {
+    trusted_in(prog, tcx, krate, t, depth, false)
+}
+
+/// `field`: `t` is a field of a provided type, where a pointer to a trait object may pass
+/// through (rustc stores and hands it back, never calls through it: the vtable is Relax's; the
+/// VM's `host: &mut dyn ScriptHost`). As a bound fn's own parameter it may not.
+fn trusted_in(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, depth: u32, field: bool) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let tr = |t: TyId| trusted_in(prog, tcx, krate, t, depth + 1, false);
+    // a pointer to the crate's own values (rustc made them: the pointer is a handle) or to
+    // trusted ones
+    let own_pub = |x: TyId| matches!(tcx.tys.kind(x), TyKind::Adt(d, a, _) if a.is_empty() && prog.def(*d).krate == krate && prog.def(*d).is_pub);
+    let pointee = |x: TyId| match tcx.tys.kind(x) {
+        TyKind::Str => true,
+        // the crate's own public types as elements: rustc's stride (TYPES / LAYOUTS), read only
+        // through the crate's fns
+        TyKind::Slice(e) => tr(*e) || own_pub(*e),
+        // generic ones too: the pointer is an address, their fields stay unread (lower.rs); so
+        // are another provided crate's (rustc-built into the same binary: the census's &mut ScriptVm)
+        TyKind::Adt(d, _, _) => prog.def(*d).krate == krate || is_provided(prog, prog.def(*d).krate) || tr(x),
+        TyKind::Dyn(..) => field,
+        _ => tr(x),
+    };
+    match tcx.tys.kind(t) {
+        TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Never => true,
+        // tuples: rustc's size checked through LAYOUTS (layout_deps)
+        TyKind::Tuple(v) => tcx.tys.list(*v).iter().all(|x| tr(*x)),
+        TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) => pointee(*x),
+        TyKind::FnPtr(_, _, header, _) => header.abi.is_c_like(),
+        TyKind::Array(e, _) => tr(*e),
+        TyKind::Adt(d, a, _) => {
+            // Box<T> (global allocator): both sides allocate with the system malloc, but a box
+            // OWNS its value: JIT-compiled code that drops it runs T's drop glue. That glue is
+            // rustc's when T is marked `#[relax_api(handle)]` (its entry carries rustc's
+            // drop_in_place) or `#[relax_api(plain)]` (layout checked); a private T has no entry, so
+            // Relax would lay it out and drop it by its own rules (String/Vec fields: a bogus
+            // free). Such a box is no handle: the type holding it stays opaque (TYPES), dropped
+            // and cloned by the crate.
+            if tcx.adts.get(d).is_some_and(|a| a.is_box()) {
+                return tcx.tys.list(*a).len() <= 2
+                    && tcx.tys.list(*a).first().is_some_and(|x| match tcx.tys.kind(*x) {
+                        TyKind::Str => true,
+                        TyKind::Slice(e) => tr(*e) || own_pub(*e),
+                        TyKind::Dyn(..) => false,
+                        TyKind::Adt(d2, _, _) if prog.def(*d2).krate == krate => own_pub(*x) || tr(*x),
+                        _ => pointee(*x),
+                    });
+            }
+            let std_crate = is_std(prog, prog.def(*d).krate);
+            // Option<T>: rustc's layout (niche or tag), checked per op slot (the entry's slots)
+            // PhantomData<T>: zero-sized, the same on both sides
+            if tcx.adts.get(d).is_some_and(|a| a.is_phantom_data()) {
+                return true;
+            }
+            if tcx.lang_items.get(LangItem::Option) == Some(*d) && tcx.tys.list(*a).len() == 1 {
+                return tr(tcx.tys.list(*a)[0]);
+            }
+            if !a.is_empty() {
+                return false;
+            }
+            let adt = match tcx.adts.get(d) {
+                Some(x) => x,
+                None => return false,
+            };
+            // std's own types: fieldless enums only (Ordering), checked against LAYOUTS;
+            // other crates' plain data (LiveId, the math vectors): as the crate's own
+            if std_crate && !(adt.is_enum && adt.variants.iter().all(|v| v.fields.is_empty())) {
+                return false;
+            }
+            if adt.is_union {
+                return false;
+            }
+            let fields_ok = |v: &crate::tcx::VariantT| v.fields.iter().all(|f| trusted_in(prog, tcx, krate, f.ty, depth + 1, true));
+            if adt.is_enum {
+                if adt.variants.iter().all(|v| v.fields.is_empty()) {
+                    return true;
+                }
+                // repr(C) / repr(int) data enums: laid out by RFC 2195
+                if adt.repr_c || adt.repr_int.is_some() {
+                    return adt.variants.iter().all(fields_ok);
+                }
+                // Option-like over a reference: the null niche (rustc's guaranteed layout)
+                let opt_like = adt.variants.len() == 2
+                    && adt.variants.iter().filter(|v| v.fields.is_empty()).count() == 1
+                    && adt.variants.iter().any(|v| v.fields.len() == 1 && matches!(tcx.tys.kind(v.fields[0].ty), TyKind::Ref(..)) && fields_ok(v));
+                return opt_like;
+            }
+            // structs, any repr: Relax lays them out as rustc does (layout.rs); each op's entry
+            // carries rustc's size/align per slot and a mismatch refuses the binding
+            let _ = is_transparent;
+            adt.variants.iter().all(fields_ok)
+        }
+        _ => false,
+    }
+}
+
+fn is_std(prog: &Program, krate: u32) -> bool {
+    matches!(prog.syms.str(prog.crates[krate as usize].name), "core" | "alloc" | "std")
+}
+
+/// Every type in `t` whose layout the bound fn relies on and that is not the crate's own
+/// non-generic type (marked plain / handle already): std instances (Option<T>) and other crates'
+/// types, whose size/align the op entries' slots record; Relax compares before binding.
+pub fn layout_deps(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, out: &mut Vec<TyId>) {
+    match tcx.tys.kind(t) {
+        TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) => {
+            // a pointer to the crate's own values is a handle; to others: their layout matters
+            if !matches!(tcx.tys.kind(*x), TyKind::Adt(d, _, _) if prog.def(*d).krate == krate) {
+                layout_deps(prog, tcx, krate, *x, out);
+            }
+        }
+        TyKind::Slice(e) | TyKind::Array(e, _) => layout_deps(prog, tcx, krate, *e, out),
+        TyKind::Tuple(v) if !v.is_empty() => {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+            for x in tcx.tys.list(*v) {
+                layout_deps(prog, tcx, krate, *x, out);
+            }
+        }
+        TyKind::Adt(d, a, _) => {
+            if tcx.adts.get(d).is_some_and(|a| a.is_box()) {
+                return;
+            }
+            if prog.def(*d).krate != krate || !a.is_empty() {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+            for x in tcx.tys.list(*a) {
+                layout_deps(prog, tcx, krate, *x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The key an op is registered under, as `#[relax_api]` records it (makepad-relax-api's
+/// key_code): a trait impl's method `<T as Trait>::m`, an inherent method `<T>::m` (T as
+/// `type_name` prints it), a free fn its path -- [`norm`]ed.
+pub fn key(prog: &Program, tcx: &Tcx, d: DefId) -> String {
+    let def = prog.def(d);
+    let name = prog.syms.str(def.name);
+    if def.parent != crate::program::NO_DEF && prog.def(def.parent).kind == DefKind::Impl {
+        if let Some(&st) = tcx.impl_self.get(&def.parent) {
+            let ty = crate::typeck::type_name(prog, tcx, st);
+            return norm(&match tcx.impl_trait.get(&def.parent) {
+                Some(&tr) => {
+                    let mut t = crate::typeck::item_path(prog, tcx, tr);
+                    if let Some(a) = tcx.impl_trait_args.get(&def.parent).filter(|a| !a.is_empty()) {
+                        t.push_str(&format!("<{}>", a.iter().map(|x| crate::typeck::type_name(prog, tcx, *x)).collect::<Vec<_>>().join(", ")));
+                    }
+                    format!("<{} as {}>::{}", ty, t, name)
+                }
+                None => format!("<{}>::{}", ty, name),
+            });
+        }
+    }
+    norm(&crate::typeck::item_path(prog, tcx, d))
+}
+
+/// A key or signature as both sides compare it: no lifetimes, no spaces, no empty `<>` (rustc
+/// prints `ScriptVm<'_>`, Relax `ScriptVm`), std's items as `core::<name>` (rustc's
+/// `alloc::string::String` is Relax's `core::string::String`, `core::ops::deref::Deref` its
+/// `core::ops::Deref`; same-named std items stay apart by the slots' layouts).
+pub fn norm(s: &str) -> String {
+    let s = sig_norm(&s.replace(" as ", " @ "));
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == ':' && out.ends_with(':') {
+            for k in ["alloc:", "std:"] {
+                let at = out.len() - k.len();
+                if out.ends_with(k) && !out[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                    out.truncate(at);
+                    out.push_str("core:");
+                    break;
+                }
+            }
+        }
+        match c {
+            ',' if out.ends_with('<') || out.ends_with(',') => {}
+            '>' if out.ends_with(',') => {
+                out.pop();
+                if out.ends_with('<') {
+                    out.pop();
+                } else {
+                    out.push('>');
+                }
+            }
+            '>' if out.ends_with('<') => {
+                out.pop();
+            }
+            _ => out.push(c),
+        }
+    }
+    // std's items by crate and name only: Relax's std puts them in other modules
+    // (`core::ops::Deref`, rustc `core::ops::deref::Deref`)
+    let b = out.as_bytes();
+    let mut std_out = String::with_capacity(out.len());
+    let mut i = 0;
+    while i < b.len() {
+        let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b':');
+        if boundary && out[i..].starts_with("core::") {
+            // the segments: keep the last one
+            let mut j = i + 6;
+            let mut last = j;
+            loop {
+                let mut k = j;
+                while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'_') {
+                    k += 1;
+                }
+                if k > j && out[k..].starts_with("::") && k + 2 < b.len() && (b[k + 2].is_ascii_alphabetic() || b[k + 2] == b'_') {
+                    j = k + 2;
+                    last = j;
+                } else {
+                    break;
+                }
+            }
+            std_out.push_str("core::");
+            i = last;
+            continue;
+        }
+        std_out.push(b[i] as char);
+        i += 1;
+    }
+    std_out.replace('@', " as ")
+}
+
+/// The host bridge key for Clone / PartialEq on an opaque type.
+pub fn opaque_method_key(prog: &Program, d: DefId, method: &str) -> String {
+    match method {
+        "eq" => norm(&format!("<{} as PartialEq>::eq", prog.def_path(d))),
+        _ => norm(&format!("<{} as Clone>::clone", prog.def_path(d))),
+    }
+}
+
+/// The signature checked at bind time: `type_name` of the fn's fn pointer type as Relax reads the
+/// source, lifetimes and spacing dropped (rustc's side: the same of `#[relax_api]`'s record).
+pub fn sig(prog: &Program, tcx: &Tcx, d: DefId) -> String {
+    let Some(s) = tcx.fn_sig(prog, d) else { return String::new() };
+    let params: Vec<String> = s.params.iter().map(|p| crate::typeck::type_name(prog, tcx, *p)).collect();
+    let unit = matches!(tcx.tys.kind(s.ret), TyKind::Tuple(v) if v.is_empty());
+    let unsafe_ = if s.header.safety == crate::types::Safety::Unsafe { "unsafe " } else { "" };
+    let text = if unit { format!("{unsafe_}fn({})", params.join(", ")) } else { format!("{unsafe_}fn({}) -> {}", params.join(", "), crate::typeck::type_name(prog, tcx, s.ret)) };
+    norm(&text)
+}
+
+/// A signature without lifetimes or spaces (rustc prints `&'_ T` in fn pointer types).
+pub fn sig_norm(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\'' {
+            i += 1;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            continue;
+        }
+        if !b[i].is_ascii_whitespace() {
+            out.push(b[i] as char);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Why `d` (a fn of provided crate `krate`) is compiled from source instead of bound to a shim;
+/// None: it is bound.
+pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &dyn Fn(DefId) -> bool) -> Option<&'static str> {
+    let def = prog.def(d);
+    if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) {
+        return Some("not a fn");
+    }
+    let s = tcx.fn_sig(prog, d)?;
+    if s.n_generics > 0 {
+        return Some("generic");
+    }
+    if s.header.abi.is_c_like() || s.header.c_variadic || s.track_caller {
+        return Some("abi");
+    }
+    if crate::jit::inline_attrs(prog, d) & crate::opt::ATTR_ALWAYS != 0 {
+        return Some("#[inline(always)]: compiled on the caller's side");
+    }
+    let parent = prog.def(def.parent);
+    if parent.kind == DefKind::Trait {
+        return Some("trait default body");
+    }
+    // Eq's derived assertion is a rustc-internal type-check helper, not a callable API.
+    if parent.kind == DefKind::Impl
+        && prog.syms.str(def.name) == "assert_fields_are_eq"
+        && tcx.impl_trait.get(&def.parent).is_some_and(|t| prog.def_path(*t) == "core::cmp::Eq")
+    {
+        return Some("Eq assertion (compiler internal)");
+    }
+    // `Drop::drop` runs inside the type's drop shim (rustc refuses an explicit call, E0040)
+    if parent.kind == DefKind::Impl && tcx.impl_trait.get(&def.parent).is_some_and(|t| tcx.lang_items.get(LangItem::Drop) == Some(*t)) {
+        return Some("Drop::drop (in the drop shim)");
+    }
+    let crosses = |t: TyId| trusted(prog, tcx, krate, t, 0) || matches!(tcx.tys.kind(t), TyKind::Adt(d, a, _) if a.is_empty() && opaque(*d));
+    if !s.params.iter().chain(std::iter::once(&s.ret)).all(|t| crosses(*t)) {
+        return Some("signature not C-shaped");
+    }
+    None
+}
+
+/// Is ADT `d` of crate `krate` one that may be marked `#[relax_api(handle)]` (rustc's size/align, drop shim):
+/// a public non-generic struct or enum that is not `trusted` by value.
+pub fn opaque_candidate(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) -> bool {
+    let def = prog.def(d);
+    if def.krate != krate || !def.is_pub || !matches!(def.kind, DefKind::Struct | DefKind::Enum) {
+        return false;
+    }
+    match tcx.adts.get(&d) {
+        Some(a) if a.n_generics == 0 && !a.is_union => {}
+        _ => return false,
+    }
+    let t = tcx.tys.intern(TyKind::Adt(d, crate::types::List::EMPTY, crate::types::RegionArgsId::EMPTY));
+    !trusted(prog, tcx, krate, t, 0)
+}
+
+/// The types whose values cross between the provided crates' rustc code and JIT-compiled code:
+/// reachable from the signatures of the bound fns (`bound`) through references, arrays, tuples,
+/// type arguments and the fields of provided-crate types (and Option/Box/PhantomData). The walk
+/// does not enter other std types: what a rustc-built Vec or String holds is reached only
+/// through bound fns, whose signatures are roots themselves. Every other type of a provided
+/// crate is made and laid out by JIT-compiled code alone (an inline shell's result, a type only
+/// generic or unbound code builds): no opaque layout, no field guard.
+pub fn crossing_types(prog: &Program, tcx: &Tcx, krates: &[u32], bound: &dyn Fn(DefId) -> bool) -> std::collections::HashSet<TyId> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack: Vec<TyId> = Vec::new();
+    for (i, def) in prog.defs.iter().enumerate() {
+        if !krates.contains(&def.krate) || !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) {
+            continue;
+        }
+        let d = DefId(i as u32);
+        if !bound(d) {
+            continue;
+        }
+        if let Some(sg) = tcx.fn_sig(prog, d) {
+            stack.extend(sg.params.iter().copied());
+            stack.push(sg.ret);
+        }
+    }
+    while let Some(t) = stack.pop() {
+        if out.len() > 200_000 || !out.insert(t) {
+            continue;
+        }
+        match tcx.tys.kind(t) {
+            TyKind::Adt(d, a, _) => {
+                let k = prog.def(*d).krate;
+                if krates.contains(&k) {
+                    if let Some(adt) = tcx.adts.get(d) {
+                        for (vi, v) in adt.variants.iter().enumerate() {
+                            for fi in 0..v.fields.len() {
+                                stack.push(tcx.field_ty(prog, crate::tcx::TypingEnv::fully_monomorphized(&prog), *d, vi as u32, fi as u32, tcx.tys.list(*a)));
+                            }
+                        }
+                    }
+                    stack.extend(tcx.tys.list(*a).iter().copied());
+                } else if tcx.lang_items.get(LangItem::Option) == Some(*d) || tcx.adts.get(d).is_some_and(|a| a.is_box() || a.is_phantom_data()) {
+                    stack.extend(tcx.tys.list(*a).iter().copied());
+                }
+            }
+            TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) | TyKind::Slice(x) | TyKind::Array(x, _) => stack.push(*x),
+            TyKind::Tuple(v) => stack.extend(tcx.tys.list(*v).iter().copied()),
+            _ => {}
+        }
+    }
+    out
+}
+
+

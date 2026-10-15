@@ -1,8 +1,8 @@
 // Qwen3-VL family vision tower (clip arch, projector "qwen3vl_merger"), on
-// Metal or CUDA. Serves Qwen3.5-9B and Qwen3.8-27B from the same code.
+// Metal, CUDA or Vulkan. Configuration comes from the mmproj GGUF.
 //
 // Loads the separate mmproj GGUF, preprocesses an RGB image (smart-resize +
-// normalize + block-major patch unfold), runs the 27-block SigLIP-style ViT
+// normalize + block-major patch unfold), runs the configured vision transformer
 // with 2D vision rope and full bidirectional flash attention, and returns the
 // projected [n_tokens x proj_dim] embeddings ready for LLM prefill injection.
 //
@@ -12,16 +12,16 @@
 // validated by the vlm-vision-probe bin against dumps from
 // tools/vlm_oracle/clip_dump.
 //
-// The tower runs on Metal or CUDA from one graph builder. The only
+// The tower runs on Metal, CUDA or Vulkan from one graph builder. The only
 // backend-conditional detail is the K/V dtype fed to the one `flash_attn_ext`
-// node: Metal casts K/V to f16, CUDA keeps them f32 because its maskless
-// (non-causal) kernel is the f32 roformer path. Both are gated against the
+// node: Metal casts K/V to f16; CUDA and Vulkan keep them f32. CUDA's maskless
+// (non-causal) kernel is the f32 roformer path. All are gated against the
 // same CPU oracle; f32 K/V scores marginally closer to it.
 //
 // Config, not fork: Qwen3.5-9B and Qwen3.8-27B share this tower exactly (27
 // blocks, n_embd 1152, ffn 4304, 16 heads, patch 16, merge 2, no deepstack);
 // they differ only in `clip.vision.projection_dim` (4096 vs 5120), which is
-// read from the GGUF.
+// read from the GGUF. Qwen3.5-4B uses 24 blocks, n_embd 1024 and proj_dim 2560.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -32,18 +32,23 @@ use crate::{
 };
 use crate::cuda_exec::CudaGraphOptions;
 use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::vulkan_exec::{VulkanExecRuntime, VulkanRawGraphSession};
 
 /// Which device the tower runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisionBackend {
     Metal,
     Cuda,
+    Vulkan,
 }
 
 /// Arithmetic choices for one vision tower. Defaults are the production
 /// winners; parity tools can construct the reference paths explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisionExecutionConfig {
+    /// CUDA's optional f16 activation cast for GEMM. Vulkan accumulates
+    /// f16/f32 weights against f32 activations in f32.
     pub use_f16_gemm: bool,
     pub tiled_roformer: bool,
 }
@@ -60,11 +65,15 @@ impl Default for VisionExecutionConfig {
 enum VisionRuntime {
     Metal(MetalRuntime),
     Cuda(Box<CudaExecRuntime>),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(Box<VulkanExecRuntime>),
 }
 
 enum VisionSession {
     Metal(MetalGraphSession),
     Cuda(Box<CudaRawGraphSession>),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(Box<VulkanRawGraphSession>),
 }
 
 use crate::error::{LlamaError, Result};
@@ -261,6 +270,44 @@ fn resize_pad_u8(src: &[u8], sw: usize, sh: usize, tw: usize, th: usize) -> Vec<
     dst
 }
 
+/// Reads a binary P6 (maxval 255) PPM: interleaved RGB8, width, height
+/// (the test pictures of the vision tools).
+pub fn read_ppm(path: &str) -> std::result::Result<(Vec<u8>, usize, usize), String> {
+    let data = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut fields = Vec::new();
+    let mut pos = 0usize;
+    while fields.len() < 4 {
+        while pos < data.len() && (data[pos] as char).is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= data.len() {
+            return Err(format!("{path}: truncated ppm header"));
+        }
+        if data[pos] == b'#' {
+            while pos < data.len() && data[pos] != b'\n' {
+                pos += 1;
+            }
+            continue;
+        }
+        let start = pos;
+        while pos < data.len() && !(data[pos] as char).is_ascii_whitespace() {
+            pos += 1;
+        }
+        fields.push(String::from_utf8_lossy(&data[start..pos]).into_owned());
+    }
+    pos += 1;
+    if fields[0] != "P6" || fields[3] != "255" {
+        return Err(format!("{path}: not binary P6/255 ppm"));
+    }
+    let w: usize = fields[1].parse().map_err(|_| format!("{path}: bad width"))?;
+    let h: usize = fields[2].parse().map_err(|_| format!("{path}: bad height"))?;
+    let need = w * h * 3;
+    if data.len() < pos + need {
+        return Err(format!("{path}: short pixel payload"));
+    }
+    Ok((data[pos..pos + need].to_vec(), w, h))
+}
+
 /// Preprocess an interleaved RGB8 image for the vision tower.
 pub fn preprocess_rgb8(
     rgb: &[u8],
@@ -396,7 +443,7 @@ pub struct VisionTower {
     execution: VisionExecutionConfig,
     /// One compiled graph per patch grid seen, oldest first in
     /// `graph_order`; bounded by `graph_cache_cap` because a graph session
-    /// holds its own device mirror of the weights on CUDA.
+    /// holds its own device mirror of the weights on CUDA and Vulkan.
     graphs: BTreeMap<(usize, usize), VisionGraph>,
     graph_order: VecDeque<(usize, usize)>,
     graph_cache_cap: usize,
@@ -423,8 +470,8 @@ impl VisionTower {
     /// hundred MB of live activations instead of the tens of GB a bump
     /// arena holding every node would.
     ///
-    /// Backend: CUDA when a usable device is present, else Metal.
-    /// `MAKEPAD_VISION_BACKEND=cuda|metal` pins it (and turns a missing backend
+    /// Backend: Vulkan on Android; otherwise CUDA when usable, else Metal.
+    /// `MAKEPAD_VISION_BACKEND=cuda|metal|vulkan` pins it (and turns a missing backend
     /// into an error rather than a silent fallback).
     pub fn load(path: &str) -> Result<Self> {
         Self::load_with_execution_config(path, VisionExecutionConfig::default())
@@ -437,7 +484,13 @@ impl VisionTower {
         let gguf = GgufFile::open(path)?;
         let config = VisionConfig::from_gguf(&gguf)?;
         let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
-        let mut weights = layout.allocate_and_load(&gguf)?;
+        // Mapped from the file when possible: the GPU backends copy the
+        // weights and then drop the mapped pages, so the tower is not held
+        // twice (the owned arena is the fallback).
+        let mut weights = match layout.map_and_load(&gguf, 0) {
+            Some(weights) => weights,
+            None => layout.allocate_and_load(&gguf)?,
+        };
         weights.ctx.set_no_alloc(true);
         let runtime = Self::select_runtime()?;
         Ok(Self {
@@ -454,13 +507,18 @@ impl VisionTower {
     fn select_runtime() -> Result<VisionRuntime> {
         let pinned = std::env::var("MAKEPAD_VISION_BACKEND").ok();
         match pinned.as_deref() {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Some("vulkan") => Ok(VisionRuntime::Vulkan(Box::new(VulkanExecRuntime::new()?))),
             Some("cuda") => Ok(VisionRuntime::Cuda(Box::new(CudaExecRuntime::new()?))),
             Some("metal") => Ok(VisionRuntime::Metal(
                 MetalRuntime::new().map_err(LlamaError::format)?,
             )),
             Some(other) => Err(LlamaError::unsupported(format!(
-                "MAKEPAD_VISION_BACKEND must be 'cuda' or 'metal', got '{other}'"
+                "MAKEPAD_VISION_BACKEND '{other}' is unavailable (expected cuda, metal, or vulkan on Linux/Android)"
             ))),
+            #[cfg(target_os = "android")]
+            None => Ok(VisionRuntime::Vulkan(Box::new(VulkanExecRuntime::new()?))),
+            #[cfg(not(target_os = "android"))]
             None => match CudaExecRuntime::new() {
                 Ok(cuda) => Ok(VisionRuntime::Cuda(Box::new(cuda))),
                 Err(_) => Ok(VisionRuntime::Metal(
@@ -470,11 +528,24 @@ impl VisionTower {
         }
     }
 
+    /// How many compiled patch grids to keep (each holds a device copy of
+    /// the weights on CUDA/Vulkan); overrides `MAKEPAD_VISION_GRAPH_CACHE`.
+    pub fn set_graph_cache_cap(&mut self, cap: usize) {
+        self.graph_cache_cap = cap.max(1);
+        while self.graph_order.len() > self.graph_cache_cap {
+            if let Some(old) = self.graph_order.pop_front() {
+                self.graphs.remove(&old);
+            }
+        }
+    }
+
     /// Which device this tower is running on.
     pub fn backend(&self) -> VisionBackend {
         match self.runtime {
             VisionRuntime::Metal(_) => VisionBackend::Metal,
             VisionRuntime::Cuda(_) => VisionBackend::Cuda,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            VisionRuntime::Vulkan(_) => VisionBackend::Vulkan,
         }
     }
 
@@ -483,6 +554,8 @@ impl VisionTower {
         match &self.runtime {
             VisionRuntime::Metal(_) => "metal".to_string(),
             VisionRuntime::Cuda(cuda) => cuda.device_description(),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            VisionRuntime::Vulkan(vulkan) => vulkan.device_description(),
         }
     }
 
@@ -500,12 +573,15 @@ impl VisionTower {
     pub fn encode(&mut self, image: &PreparedImage) -> Result<Vec<f32>> {
         let key = (image.grid_w, image.grid_h);
         if !self.graphs.contains_key(&key) {
-            let graph = self.build_graph(image.grid_w, image.grid_h)?;
+            // Evict BEFORE building: a graph session holds its own device
+            // copy of the weights, so building first would hold one more
+            // copy than the cap at the peak.
             while self.graph_order.len() >= self.graph_cache_cap {
                 if let Some(old) = self.graph_order.pop_front() {
                     self.graphs.remove(&old);
                 }
             }
+            let graph = self.build_graph(image.grid_w, image.grid_h)?;
             self.graphs.insert(key, graph);
             self.graph_order.push_back(key);
         }
@@ -555,12 +631,24 @@ impl VisionTower {
                     .ok_or_else(|| LlamaError::format("vision graph returned no output"))?;
                 Ok(bytes_to_f32s(bytes))
             }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            VisionSession::Vulkan(session) => {
+                let writes = [
+                    (graph.input_patches, patches_bytes.as_slice()),
+                    (graph.input_positions, positions_bytes.as_slice()),
+                    (graph.input_block_index, block_index_bytes.as_slice()),
+                ];
+                let outputs = session.execute(&self.weights.ctx, &writes, &[graph.output])?;
+                let bytes = outputs.get(&graph.output)
+                    .ok_or_else(|| LlamaError::format("vision graph returned no output"))?;
+                Ok(bytes_to_f32s(bytes))
+            }
         }
     }
 
     fn build_graph(&mut self, grid_w: usize, grid_h: usize) -> Result<VisionGraph> {
         let cfg = self.config.clone();
-        // Metal's maskless flash kernel takes f16 K/V; CUDA's takes f32.
+        // Metal's maskless flash kernel takes f16 K/V; the others take f32.
         let kv_f16 = matches!(self.runtime, VisionRuntime::Metal(_));
         let n_patches = grid_w * grid_h;
         let n_embd = cfg.n_embd as i64;
@@ -757,7 +845,7 @@ impl VisionTower {
                 ctx.flash_attn_ext_set_prec(attn, Prec::F32).map_err(err)?;
                 ctx.reshape(attn, &[n_embd, n]).map_err(err)?
             } else {
-                // f32 K/V — routes to the CUDA maskless kernel.
+                // f32 K/V — routes to the backend's maskless kernel.
                 // Contiguous copies because that path reads plain strides.
                 let k_c = ctx.cont_3d(k_p, d_head, n, n_heads).map_err(err)?;
                 let v_c = ctx.cont_3d(v_p, d_head, n, n_heads).map_err(err)?;
@@ -808,7 +896,22 @@ impl VisionTower {
         graph
             .build_forward_expand(&self.weights.ctx, cur)
             .map_err(err)?;
+        if std::env::var_os("MAKEPAD_VISION_DUMP_GRAPH").is_some() {
+            for (index, &id) in graph.nodes.iter().enumerate() {
+                let t = &self.weights.ctx.tensors()[id];
+                let sources: Vec<_> = t.src.iter().flatten().map(|&sid| {
+                    let s = &self.weights.ctx.tensors()[sid];
+                    format!("{sid}:{} ne={:?} nb={:?}", s.desc.ty.name(), s.ne, s.nb)
+                }).collect();
+                eprintln!("vision.node {index} id={id} {:?} {} ne={:?} nb={:?} src=[{}] {}",
+                    t.op, t.desc.ty.name(), t.ne, t.nb, sources.join("; "), t.name().unwrap_or(""));
+            }
+        }
         let session = match &self.runtime {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            VisionRuntime::Vulkan(runtime) => VisionSession::Vulkan(Box::new(
+                runtime.create_raw_graph_session(&self.weights.ctx, &graph, &[cur])?,
+            )),
             VisionRuntime::Metal(runtime) => {
                 let prepared =
                     prepare_graph(&self.weights.ctx, &graph, runtime.features()).map_err(err)?;

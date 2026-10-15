@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <math_constants.h>
 #include <stdint.h>
 
 static __device__ __forceinline__ uint16_t makepad_ggml_kq_f32_to_bf16_bits(float value) {
@@ -484,6 +485,92 @@ extern "C" cudaError_t makepad_cuda_quant_bf16_f8_e4m3(
         inv_scale,
         count);
     return cudaGetLastError();
+}
+
+// Dynamic per-tensor E4M3 scale. Positive f32 bit patterns are ordered, so
+// one atomicMax per block reduces absmax without a host readback or a second
+// reduction workspace. Stream ordering separates reset/reduce/scale/quant.
+template<bool Bf16>
+static __device__ __forceinline__ float makepad_cuda_scaled_f8_value(const void *src, uint32_t i) {
+    if constexpr (Bf16) {
+        return __bfloat162float(__ushort_as_bfloat16(static_cast<const uint16_t *>(src)[i]));
+    } else {
+        // Match the existing bf16 linear's input truncation boundary.
+        return __uint_as_float(__float_as_uint(static_cast<const float *>(src)[i]) & 0xffff0000u);
+    }
+}
+
+template<bool Bf16>
+static __global__ void makepad_cuda_scaled_f8_absmax_kernel(
+        const void *src, float *scale, uint32_t count) {
+    __shared__ float maxima[8];
+    float maximum = 0.0f;
+    const size_t base = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4;
+    #pragma unroll
+    for (uint32_t j = 0; j < 4; j++) {
+        if (base + j < count) {
+            const float value = fabsf(makepad_cuda_scaled_f8_value<Bf16>(src, base + j));
+            // Propagate nonfinite input to the quantized output, rather
+            // than silently treating a NaN as zero during fmaxf reduction.
+            maximum = fmaxf(maximum, isfinite(value) ? value : CUDART_INF_F);
+        }
+    }
+    for (int delta = 16; delta; delta >>= 1)
+        maximum = fmaxf(maximum, __shfl_down_sync(0xffffffffu, maximum, delta));
+    if ((threadIdx.x & 31) == 0) maxima[threadIdx.x >> 5] = maximum;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        maximum = threadIdx.x < 8 ? maxima[threadIdx.x] : 0.0f;
+        for (int delta = 16; delta; delta >>= 1)
+            maximum = fmaxf(maximum, __shfl_down_sync(0xffffffffu, maximum, delta));
+        if (threadIdx.x == 0) atomicMax(reinterpret_cast<unsigned int *>(scale), __float_as_uint(maximum));
+    }
+}
+
+static __global__ void makepad_cuda_scaled_f8_scale_kernel(float *scale) {
+    // All-zero tensors need a nonzero divisor. Division in the quantizer
+    // avoids overflow of reciprocal scales for very small nonzero inputs.
+    const float maximum = *scale;
+    *scale = maximum > 0.0f ? fmaxf(maximum / 448.0f, 0x1p-126f) : 1.0f;
+}
+
+template<bool Bf16>
+static __global__ void makepad_cuda_scaled_f8_quant_kernel(
+        const void *src, uint8_t *dst, const float *scale, uint32_t count) {
+    const size_t base = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4;
+    const float s = *scale;
+    #pragma unroll
+    for (uint32_t j = 0; j < 4; j++) {
+        if (base + j < count) {
+            const float x = makepad_cuda_scaled_f8_value<Bf16>(src, base + j);
+            dst[base + j] = isfinite(s) ? static_cast<uint8_t>(
+                __nv_cvt_float_to_fp8(x / s, __NV_SATFINITE, __NV_E4M3)) : 0x7f;
+        }
+    }
+}
+
+template<bool Bf16>
+static cudaError_t makepad_cuda_quant_scaled_f8_launch(
+        const void *src, uint8_t *dst, float *scale, uint32_t count, cudaStream_t stream) {
+    if (count == 0) return cudaErrorInvalidValue;
+    cudaError_t err = cudaMemsetAsync(scale, 0, sizeof(float), stream);
+    if (err != cudaSuccess) return err;
+    const uint32_t grid = static_cast<uint32_t>((static_cast<size_t>(count) + 1023) / 1024);
+    makepad_cuda_scaled_f8_absmax_kernel<Bf16><<<grid, 256, 0, stream>>>(src, scale, count);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+    makepad_cuda_scaled_f8_scale_kernel<<<1, 1, 0, stream>>>(scale);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return err;
+    makepad_cuda_scaled_f8_quant_kernel<Bf16><<<grid, 256, 0, stream>>>(src, dst, scale, count);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_cuda_quant_scaled_f8_e4m3(
+        const void *src, uint8_t *dst, float *scale, uint32_t count,
+        int32_t bf16, cudaStream_t stream) {
+    if (bf16) return makepad_cuda_quant_scaled_f8_launch<true>(src, dst, scale, count, stream);
+    return makepad_cuda_quant_scaled_f8_launch<false>(src, dst, scale, count, stream);
 }
 
 // Gathered embedding rows: out[i][j] = decode(src[row_indices[i]][j]) as f32.

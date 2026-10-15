@@ -129,6 +129,10 @@ fn multi_head_attention(
 /// mel_data: slice of mel spectrogram for this chunk, shape [n_mels, 2*n_ctx]
 /// Returns encoder output: [n_ctx, n_state]
 pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(data) = crate::whisper::accel::try_encode(model, mel_data, n_ctx) {
+        return Tensor { data, shape: vec![n_ctx, model.hparams.n_audio_state as usize] };
+    }
     let n_mels = model.hparams.n_mels as usize;
     let n_state = model.hparams.n_audio_state as usize;
     let n_head = model.hparams.n_audio_head as usize;
@@ -335,6 +339,10 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 /// Returns: Vec of (K, V) pairs, one per decoder layer.
 /// K: [n_ctx, n_state], V: [n_ctx, n_state]
 pub fn compute_cross_kv(model: &WhisperModel, encoder_out: &Tensor) -> Vec<(Tensor, Tensor)> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(cross) = crate::whisper::accel::try_cross_kv(model, encoder_out) {
+        return cross;
+    }
     let mut cross_kv = Vec::new();
     let n_state = encoder_out.shape[1];
     let batch = encoder_out.shape[0];

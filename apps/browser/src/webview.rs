@@ -1,19 +1,15 @@
-//! The page area. One widget hosts every tab's CEF browser; the active
-//! tab's texture is what gets drawn, input goes to the active browser,
-//! background tabs are told they are hidden so they stop painting.
+//! The page area. One widget shows every tab's page; the active tab's page
+//! is what gets drawn and gets the input, background tabs are told they are
+//! hidden so they stop painting.
 //!
-//! Rendering: with `shared_texture_enabled` CEF paints on the GPU into pooled
-//! IOSurfaces and `libs/cef` blits each one into a Makepad-owned IOSurface
-//! texture (`Cx::create_iosurface_render_texture`) that the quad samples —
-//! no CPU readback anywhere. The classic `on_paint` BGRA upload stays as the
-//! fallback (`MAKEPAD_CEF_SOFTWARE=1`, or a CEF build without GPU paint).
+//! The pages live in the browser host (libs/browser_view): Chromium runs in
+//! that process, never in this one. Each tab is one page of it, a hosted
+//! window whose frames arrive as a shared GPU texture the quad samples
+//! directly; input goes to it the hosted-app way. Without a browser host
+//! there are no pages and the area shows its ground.
 
 use crate::tabs::{TabId, TabModel, TabSummary};
-// The surface policy is the stock Browser widget's — one source of truth for
-// how a CEF page survives a resize.
-#[cfg(target_os = "macos")]
-use makepad_widgets::browser::{needs_new_surface, surface_alloc, SETTLE};
-use makepad_widgets::browser::{Browser as BrowserKeys, RESIZE_INTERVAL};
+use makepad_browser_view::{BrowserViews, ViewOp};
 use makepad_widgets::image::DrawImage;
 use makepad_widgets::*;
 
@@ -27,13 +23,13 @@ script_mod! {
         width: Fill
         height: Fill
         draw_empty +: {
-            color: uniform(mod.browser_theme.darker_background)
+            color: uniform(mod.theme.color_bg_container)
             pixel: fn() {
                 return self.color
             }
         }
         draw_status +: {
-            color: mod.browser_theme.dark_foreground
+            color: mod.theme.color_text_disabled
             text_style: theme.font_regular{
                 font_size: 11
             }
@@ -58,10 +54,11 @@ pub struct ActiveInfo {
     pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
-    pub render_mode: String,
-    pub accelerated_frames: u64,
-    pub last_blit_micros: u64,
 }
+
+/// The profile the pages keep cookies and logins in: the one this app's
+/// own Chromium kept before the pages moved to the browser host.
+const PROFILE: &str = "makepad-app-browser";
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct WebView {
@@ -80,78 +77,34 @@ pub struct WebView {
     draw_status: DrawText,
     #[rust]
     tabs: TabModel,
-    /// `cef_initialize` runs on the frame after the chrome first drew, so
-    /// the window is up before Chromium's processes spawn.
     #[rust]
-    cef_ready: bool,
-    #[rust]
-    cef_init_frame: NextFrame,
-    #[rust]
-    cef_init_requested: bool,
-    #[rust]
-    cef_init_error: Option<String>,
+    views: Option<BrowserViews>,
     #[rust]
     first_frame_logged: bool,
-    #[rust]
-    pump_timer: Timer,
-    #[rust]
-    pressed_buttons: MouseButton,
-    #[rust]
-    scroll_remainder: Vec2d,
-    /// A text paste arrived (`TextInput { was_paste }`) ahead of its key
-    /// chord: that chord's key-down is not sent to the page as well.
-    #[rust]
-    pasted_text: bool,
-    #[rust]
-    pump_started: bool,
     #[rust]
     page_appearance: Option<(bool, u32)>,
 }
 
-/// Env-gated resize tracing (`MAKEPAD_BROWSER_TRACE=1`): timestamps + sizes on every
-/// draw, resize and target swap. Debug rig — not for committing.
-pub fn trace_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_BROWSER_TRACE").is_some())
-}
-
-macro_rules! trace {
-    ($($arg:tt)*) => {
-        if crate::webview::trace_on() {
-            eprintln!("[mpb-trace {:>7}us] {}", crate::uptime_us(), format!($($arg)*));
-        }
-    };
-}
-
 impl WebView {
-    const PUMP_INTERVAL: f64 = 1.0 / 120.0;
-
     fn sync_page_appearance(&mut self, cx: &mut Cx) {
         let palette = crate::palette();
         let wanted = (palette.is_dark(), palette.page_background_argb());
-        if self.page_appearance == Some(wanted) { return; }
-        makepad_cef::set_application_dark_mode(wanted.0);
-        makepad_cef::set_background_color(wanted.1);
-        let mut applied = false;
+        if self.page_appearance == Some(wanted) {
+            return;
+        }
+        self.page_appearance = Some(wanted);
+        let Some(views) = &mut self.views else { return };
         for tab in &mut self.tabs.tabs {
-            if let Some(browser) = &mut tab.browser {
-                if let Err(error) = browser.set_dark_mode(wanted.0) {
-                    log!("browser: appearance: {error}");
-                    return;
-                }
-                applied = true;
-                if crate::theme::is_new_tab_url(&tab.url) {
-                    let url = palette.new_tab_url();
-                    let _ = browser.set_url(&url);
-                    tab.url = url;
-                }
+            let Some(view) = tab.view else { continue };
+            views.send(view, ViewOp::Appearance { dark: wanted.0, background: wanted.1 });
+            if crate::theme::is_new_tab_url(&tab.url) {
+                let url = palette.new_tab_url();
+                views.send(view, ViewOp::Navigate { url: url.clone() });
+                tab.url = url;
             }
         }
-        if applied {
-            self.page_appearance = Some(wanted);
-            log!("browser: page color scheme {}", if wanted.0 {"dark"} else {"light"});
-            self.redraw(cx);
-        }
+        log!("browser: page color scheme {}", if wanted.0 { "dark" } else { "light" });
+        self.redraw(cx);
     }
 
     // ------------------------------------------------------------------
@@ -170,8 +123,10 @@ impl WebView {
 
     pub fn close_tab(&mut self, cx: &mut Cx, id: TabId) {
         if let Some((tab, _was_active)) = self.tabs.remove(id) {
-            // Dropping the tab closes its browser.
-            drop(tab);
+            if let (Some(view), Some(views)) = (tab.view, &mut self.views) {
+                views.close(view);
+                views.service(cx);
+            }
         }
         self.apply_active_visibility();
         self.notify(cx);
@@ -217,9 +172,7 @@ impl WebView {
             .tabs
             .iter()
             .enumerate()
-            .map(|(index, tab)| {
-                (tab.display_title(), tab.url.clone(), index == self.tabs.active)
-            })
+            .map(|(index, tab)| (tab.display_title(), tab.url.clone(), index == self.tabs.active))
             .collect()
     }
 
@@ -227,14 +180,6 @@ impl WebView {
         let Some(tab) = self.tabs.active() else {
             return ActiveInfo::default();
         };
-        let (accelerated_frames, last_blit_micros) = tab
-            .browser
-            .as_ref()
-            .map(|b| {
-                let s = b.accelerated_stats();
-                (s.frames, s.last_blit_micros)
-            })
-            .unwrap_or((0, 0));
         ActiveInfo {
             id: Some(tab.id),
             url: tab.url.clone(),
@@ -242,9 +187,6 @@ impl WebView {
             loading: tab.loading,
             can_go_back: tab.can_go_back,
             can_go_forward: tab.can_go_forward,
-            render_mode: format!("{:?}", tab.render_mode),
-            accelerated_frames,
-            last_blit_micros,
         }
     }
 
@@ -254,44 +196,39 @@ impl WebView {
             tab.title.clear();
             tab.favicon = None;
             tab.loading = true;
-            match &mut tab.browser {
-                Some(browser) => {
-                    if let Err(err) = browser.set_url(url) {
-                        log!("navigate failed: {err}");
-                    }
-                }
-                None => tab.initial_url = url.to_string(),
+            match (tab.view, &mut self.views) {
+                (Some(view), Some(views)) => views.send(view, ViewOp::Navigate { url: url.to_string() }),
+                _ => tab.initial_url = url.to_string(),
             }
         }
         self.focus(cx);
         self.notify(cx);
     }
 
-    pub fn go_back(&mut self, cx: &mut Cx) {
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.go_back();
+    fn send_active(&mut self, op: ViewOp) {
+        let Some(view) = self.tabs.active().and_then(|tab| tab.view) else { return };
+        if let Some(views) = &mut self.views {
+            views.send(view, op);
         }
+    }
+
+    pub fn go_back(&mut self, cx: &mut Cx) {
+        self.send_active(ViewOp::Back);
         self.focus(cx);
     }
 
     pub fn go_forward(&mut self, cx: &mut Cx) {
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.go_forward();
-        }
+        self.send_active(ViewOp::Forward);
         self.focus(cx);
     }
 
     pub fn reload(&mut self, cx: &mut Cx) {
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.reload();
-        }
+        self.send_active(ViewOp::Reload);
         self.focus(cx);
     }
 
     pub fn stop(&mut self, cx: &mut Cx) {
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.stop_load();
-        }
+        self.send_active(ViewOp::Stop);
         self.focus(cx);
     }
 
@@ -300,9 +237,7 @@ impl WebView {
         if area.is_valid(cx) {
             cx.set_key_focus(area);
         }
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.set_focus(true);
-        }
+        self.send_active(ViewOp::Focus { on: true });
     }
 
     // ------------------------------------------------------------------
@@ -312,726 +247,137 @@ impl WebView {
         self.redraw(cx);
     }
 
-    fn active_browser(&mut self) -> Option<&mut makepad_cef::Browser> {
-        self.tabs.active_mut().and_then(|t| t.browser.as_mut())
-    }
-
     /// Background tabs stop painting; the active one is shown.
     fn apply_active_visibility(&mut self) {
         let active = self.tabs.active;
-        for (i, tab) in self.tabs.tabs.iter_mut().enumerate() {
-            if let Some(browser) = &mut tab.browser {
-                let _ = browser.set_hidden(i != active);
+        let Some(views) = &mut self.views else { return };
+        for (i, tab) in self.tabs.tabs.iter().enumerate() {
+            if let Some(view) = tab.view {
+                views.send(view, ViewOp::Hidden { on: i != active });
             }
         }
     }
 
-    fn ensure_active_browser(&mut self, cx: &mut Cx, width: usize, height: usize, dpi: f32) {
-        if !self.cef_ready {
-            return;
-        }
+    /// The active tab's page exists and is `size` points big.
+    fn ensure_active_page(&mut self, cx: &mut Cx, size: Vec2d, dpi: f64) {
+        let (dark, background) = (crate::palette().is_dark(), crate::palette().page_background_argb());
         let active = self.tabs.active;
-        let Some(tab) = self.tabs.tabs.get_mut(active) else {
-            return;
-        };
-        if tab.browser.is_none() && tab.init_error.is_none() {
-            match makepad_cef::Browser::new(&tab.initial_url, width, height, dpi) {
-                Ok(mut browser) => {
-                    if let Err(error) = browser.set_dark_mode(crate::palette().is_dark()) {
-                        log!("browser: initial appearance: {error}");
-                    }
-                    tab.browser = Some(browser);
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    log!("CEF browser creation failed: {message}");
-                    tab.init_error = Some(message);
-                }
+        let views = self.views.get_or_insert_with(|| BrowserViews::new(PROFILE));
+        let Some(tab) = self.tabs.tabs.get_mut(active) else { return };
+        if tab.view.is_none() && tab.init_error.is_none() {
+            match views.open(&tab.initial_url, dark, background) {
+                Some(view) => tab.view = Some(view),
+                // No browser host: no page, quietly (browser_view said why once).
+                None => tab.init_error = Some("no browser engine".to_string()),
             }
         }
-        if tab.browser.is_none() {
-            return;
+        if let Some(view) = tab.view {
+            views.set_size(view, size, dpi);
         }
-        if let Some(browser) = &mut tab.browser {
-            let _ = browser.set_hidden(false);
-        }
-
-        let now = std::time::Instant::now();
-        if tab.wanted_size != Some((width, height)) {
-            tab.wanted_size = Some((width, height));
-            tab.wanted_at = Some(now);
-        }
-        Self::sync_browser_size(tab, width, height, dpi, now);
-        Self::sync_accel_surface(cx, tab, width, height, now);
+        views.service(cx);
     }
 
-    /// Tell CEF the page size, at most once per `RESIZE_INTERVAL`; anything
-    /// faster is remembered and applied by the next pump, so the final size of
-    /// a drag always lands.
-    fn sync_browser_size(
-        tab: &mut crate::tabs::Tab,
-        width: usize,
-        height: usize,
-        dpi: f32,
-        now: std::time::Instant,
-    ) {
-        if tab.resized_to == Some((width, height)) {
-            // `Browser::resize` no-ops on an unchanged size; this still lets a
-            // dpi change through.
-            if let Some(browser) = &mut tab.browser {
-                if let Err(err) = browser.resize(width, height, dpi) {
-                    log!("CEF resize failed: {err}");
-                }
-            }
-            tab.deferred_resize = None;
+    /// The pages' news: states, popups, errors, frames.
+    fn sync_tabs(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(views) = &mut self.views else { return };
+        if !views.handle_event(cx, event) {
             return;
         }
-        let due = tab
-            .resized_at
-            .is_none_or(|last| now.duration_since(last) >= RESIZE_INTERVAL);
-        if !due {
-            tab.deferred_resize = Some((width, height, dpi));
-            return;
-        }
-        if let Some(browser) = &mut tab.browser {
-            if let Err(err) = browser.resize(width, height, dpi) {
-                log!("CEF resize failed: {err}");
-            }
-        }
-        trace!("was_resized {}x{}", width, height);
-        tab.resized_to = Some((width, height));
-        tab.resized_at = Some(now);
-        tab.deferred_resize = None;
-    }
-
-    /// GPU path: hand the browser a Makepad-owned IOSurface to copy into.
-    ///
-    /// The surface is over-allocated (grid-rounded) and grows only when the
-    /// page outgrows it; it shrinks only once the size has settled. A new
-    /// surface is BLANK, so it goes to `pending_texture` and the last good one
-    /// keeps being drawn until CEF has put a frame in the new one — that is
-    /// what keeps a drag-resize from flashing the themed ground.
-    fn sync_accel_surface(
-        cx: &mut Cx,
-        tab: &mut crate::tabs::Tab,
-        width: usize,
-        height: usize,
-        now: std::time::Instant,
-    ) {
-        #[cfg(target_os = "macos")]
-        {
-            if !tab.browser.as_ref().is_some_and(|b| b.is_accelerated()) {
-                return;
-            }
-            let want = surface_alloc(width, height);
-            let settled = tab
-                .wanted_at
-                .is_some_and(|since| now.duration_since(since) >= SETTLE);
-            if !needs_new_surface(tab.accel_target_size, tab.pending_alloc, want, settled) {
-                return;
-            }
-            trace!(
-                "surface {:?} -> {}x{} for page {}x{}",
-                tab.accel_target_size,
-                want.0,
-                want.1,
-                width,
-                height
-            );
-            let (texture, iosurface, _id) = cx.create_iosurface_render_texture(want.0, want.1);
-            let Some(browser) = &mut tab.browser else {
-                return;
-            };
-            match browser.set_accelerated_target(iosurface, want.0, want.1) {
-                Ok(()) => {
-                    tab.accel_target_size = Some(want);
-                    if tab.painted && tab.texture.is_some() {
-                        // Keep showing the last good frame until this one has
-                        // one of its own.
-                        tab.pending_texture = Some(texture);
-                        tab.pending_alloc = Some(want);
-                    } else {
-                        tab.texture = Some(texture);
-                        tab.texture_alloc = Some(want);
-                        tab.texture_valid = None;
-                        tab.pending_texture = None;
-                        tab.pending_alloc = None;
-                    }
-                }
-                Err(err) => {
-                    log!("accelerated target failed, software frames only: {err}");
-                    tab.accel_target_size = None;
-                    tab.pending_texture = None;
-                    tab.pending_alloc = None;
-                }
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (cx, tab, width, height, now);
-        }
-    }
-
-    fn apply_software_frame(cx: &mut Cx, tab: &mut crate::tabs::Tab, frame: makepad_cef::Frame) {
-        let size = (frame.width, frame.height);
-        match &tab.texture {
-            Some(texture)
-                if tab.accel_target_size.is_none()
-                    && texture.get_format(cx).vec_width_height() == Some(size) =>
-            {
-                texture.set_data_u32(cx, frame.width, frame.height, frame.pixels);
-            }
-            _ => {
-                tab.accel_target_size = None;
-                tab.pending_texture = None;
-                tab.pending_alloc = None;
-                tab.texture = Some(Texture::new_with_format(
-                    cx,
-                    TextureFormat::VecBGRAu8_32 {
-                        data: Some(frame.pixels),
-                        width: frame.width,
-                        height: frame.height,
-                        updated: TextureUpdated::Full,
-                    },
-                ));
-            }
-        }
-        // An upload texture is exactly the page: the whole thing is valid.
-        tab.texture_alloc = Some(size);
-        tab.texture_valid = Some(size);
-        tab.painted = true;
-    }
-
-    fn favicon_texture(cx: &mut Cx, frame: makepad_cef::Frame) -> Texture {
-        Texture::new_with_format(
-            cx,
-            TextureFormat::VecBGRAu8_32 {
-                data: Some(frame.pixels),
-                width: frame.width,
-                height: frame.height,
-                updated: TextureUpdated::Full,
-            },
-        )
-    }
-
-    /// One pump: run CEF's message loop, collect frames and navigation
-    /// changes from every tab, open queued popups as tabs.
-    fn pump(&mut self, cx: &mut Cx) {
-        makepad_cef::do_message_loop_work();
         let active = self.tabs.active;
         let mut changed = false;
-        let mut redraw = false;
         let mut popups = Vec::new();
         for (i, tab) in self.tabs.tabs.iter_mut().enumerate() {
-            let Some(browser) = &mut tab.browser else {
-                continue;
-            };
-            let mut latest = None;
-            while let Some(frame) = browser.take_frame() {
-                latest = Some(frame);
-            }
-            let counter = browser.accelerated_frame_counter();
-            if counter != tab.accel_frame_counter {
-                let stats = browser.accelerated_stats();
-                let valid = (stats.last_copy_width, stats.last_copy_height);
-                if stats.target_frames > 0 && valid.0 > 0 && valid.1 > 0 {
-                    // The surface CEF is painting into now holds a real frame:
-                    // if it was the pending one, this is the moment to swap —
-                    // never before, so the page area never goes blank.
-                    if let (Some(texture), Some(alloc)) =
-                        (tab.pending_texture.take(), tab.pending_alloc.take())
-                    {
-                        trace!(
-                            "promote pending {}x{} (valid {}x{})",
-                            alloc.0,
-                            alloc.1,
-                            valid.0,
-                            valid.1
-                        );
-                        tab.texture = Some(texture);
-                        tab.texture_alloc = Some(alloc);
-                    }
-                    tab.texture_valid = Some(valid);
-                    tab.painted = true;
-                }
-                if i == active {
-                    trace!(
-                        "paint landed {}x{} (+{} frames, surface {:?})",
-                        stats.last_width,
-                        stats.last_height,
-                        counter - tab.accel_frame_counter,
-                        tab.accel_target_size
-                    );
-                }
-                tab.accel_frame_counter = counter;
-                if i == active {
-                    redraw = true;
-                }
-                if !self.first_frame_logged {
-                    self.first_frame_logged = true;
-                    log!("browser: first page frame at {} ms", crate::uptime_ms());
+            let Some(view) = tab.view else { continue };
+            popups.extend(views.take_popups(view));
+            let Some(state) = views.state(view) else { continue };
+            if let Some(error) = &state.error {
+                if tab.init_error.is_none() {
+                    tab.init_error = Some(error.clone());
+                    changed = true;
                 }
             }
-            let generation = browser.nav_generation();
-            if generation != tab.nav_generation {
-                tab.nav_generation = generation;
-                tab.title = browser.title();
-                let url = browser.url();
-                if !url.is_empty() {
-                    tab.url = url;
-                }
-                tab.loading = browser.is_loading();
-                tab.can_go_back = browser.can_go_back();
-                tab.can_go_forward = browser.can_go_forward();
-                if let Some(favicon) = browser.take_favicon() {
-                    tab.favicon = Some(Self::favicon_texture(cx, favicon));
-                }
-                popups.extend(browser.take_popup_requests());
+            if !state.url.is_empty() && (tab.url != state.url || tab.title != state.title || tab.loading != state.loading
+                || tab.can_go_back != state.can_go_back || tab.can_go_forward != state.can_go_forward)
+            {
+                tab.url = state.url.clone();
+                tab.title = state.title.clone();
+                tab.loading = state.loading;
+                tab.can_go_back = state.can_go_back;
+                tab.can_go_forward = state.can_go_forward;
                 changed = true;
             }
-            let mode = browser.render_mode();
-            if mode != tab.render_mode {
-                tab.render_mode = mode;
-                log!("tab {:?} render mode: {:?}", tab.id, mode);
-                changed = true;
-            }
-            if let Some(frame) = latest {
-                Self::apply_software_frame(cx, tab, frame);
-                if i == active {
-                    redraw = true;
-                }
-            }
-            // A resize that arrived faster than CEF can take them: apply the
-            // last one now, so the end of a drag always reaches the page.
-            if let Some((w, h, dpi)) = tab.deferred_resize {
-                Self::sync_browser_size(tab, w, h, dpi, std::time::Instant::now());
-                if i == active {
-                    redraw = true;
-                }
+            if i == active && !self.first_frame_logged && views.frame(view).is_some() {
+                self.first_frame_logged = true;
+                log!("browser: first page frame at {} ms", crate::uptime_ms());
             }
         }
         for url in popups {
             self.tabs.insert(&url, true);
-            self.apply_active_visibility();
             changed = true;
-            redraw = true;
         }
         if changed {
+            self.apply_active_visibility();
             cx.widget_action(self.uid, WebViewAction::TabsChanged);
         }
-        if redraw {
-            self.redraw(cx);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Input routing (same mapping as the stock Browser widget)
-    // ------------------------------------------------------------------
-
-    fn browser_rect(&self, cx: &mut Cx) -> Option<Rect> {
-        let area = self.draw_bg.area();
-        if area.is_valid(cx) {
-            Some(area.rect(cx))
-        } else {
-            None
-        }
-    }
-
-    /// CEF takes mouse coordinates in view points (it applies the device
-    /// scale factor itself).
-    fn cef_position(&self, cx: &mut Cx, abs: Vec2d) -> Option<(i32, i32)> {
-        let rect = self.browser_rect(cx)?;
-        let local = abs - rect.pos;
-        Some((local.x.round() as i32, local.y.round() as i32))
-    }
-
-    fn send_mouse_move(&mut self, cx: &mut Cx, abs: Vec2d, modifiers: KeyModifiers, leave: bool) {
-        let Some((x, y)) = self.cef_position(cx, abs) else {
-            return;
-        };
-        let m = BrowserKeys::cef_modifiers(modifiers, self.pressed_buttons);
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.send_mouse_move(x, y, m, leave);
-        }
-    }
-
-    fn send_mouse_click(
-        &mut self,
-        cx: &mut Cx,
-        abs: Vec2d,
-        modifiers: KeyModifiers,
-        button: Option<MouseButton>,
-        mouse_up: bool,
-        click_count: i32,
-    ) {
-        let Some((x, y)) = self.cef_position(cx, abs) else {
-            return;
-        };
-        let m = BrowserKeys::cef_modifiers(modifiers, self.pressed_buttons);
-        let b = BrowserKeys::cef_mouse_button(button);
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.send_mouse_click(x, y, m, b, mouse_up, click_count.max(1));
-        }
-    }
-
-    fn send_mouse_wheel(&mut self, cx: &mut Cx, abs: Vec2d, modifiers: KeyModifiers, delta: Vec2d) {
-        let Some((x, y)) = self.cef_position(cx, abs) else {
-            return;
-        };
-        if self.active_browser().is_none() {
-            return;
-        }
-        let (dx, dy) = BrowserKeys::cef_scroll_delta(delta, &mut self.scroll_remainder);
-        if dx == 0 && dy == 0 {
-            return;
-        }
-        let m = BrowserKeys::cef_modifiers(modifiers, self.pressed_buttons)
-            | makepad_cef::EVENTFLAG_PRECISION_SCROLLING_DELTA;
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.send_mouse_wheel(x, y, m, dx, dy);
-        }
-    }
-
-    fn send_key(&mut self, key_event: &KeyEvent, event_type: i32) {
-        let modifiers = BrowserKeys::key_event_modifiers(key_event);
-        let windows_key_code = BrowserKeys::windows_key_code(key_event.key_code);
-        // The platform code beside the VK, never the VK twice: on a Mac the
-        // two ranges overlap and VK_L is the keypad Enter.
-        let native_key_code = BrowserKeys::native_key_code(key_event.key_code);
-        let character = if key_event.modifiers.control
-            || key_event.modifiers.alt
-            || key_event.modifiers.logo
-        {
-            0
-        } else {
-            BrowserKeys::key_char(key_event.key_code, key_event.modifiers.shift)
-                .map(|ch| ch as u16)
-                .unwrap_or(0)
-        };
-        let send_char = event_type == makepad_cef::KEY_EVENT_KEYDOWN
-            && character != 0
-            && !key_event.modifiers.control
-            && !key_event.modifiers.alt
-            && !key_event.modifiers.logo
-            && BrowserKeys::sends_char_on_keydown(key_event.key_code);
-        if let Some(browser) = self.active_browser() {
-            let _ = browser.send_key_event(
-                event_type,
-                modifiers,
-                windows_key_code,
-                native_key_code,
-                character,
-                character,
-                false,
-            );
-            if send_char {
-                let _ = browser.send_key_event(
-                    makepad_cef::KEY_EVENT_CHAR,
-                    modifiers,
-                    windows_key_code,
-                    native_key_code,
-                    character,
-                    character,
-                    false,
-                );
-            }
-        }
-    }
-
-    fn update_ime_spot(&self, cx: &mut Cx, pos: Vec2d) {
-        let area = self.draw_bg.area();
-        if area.is_valid(cx) {
-            cx.show_text_ime(area, pos);
-        }
+        self.redraw(cx);
     }
 }
 
 impl Widget for WebView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.sync_page_appearance(cx);
-        if let Event::Startup = event {
-            if !self.pump_started {
-                self.pump_started = true;
-                self.pump_timer = cx.start_interval(Self::PUMP_INTERVAL);
-            }
-        }
         if let Event::Shutdown = event {
+            if let Some(views) = &mut self.views {
+                views.shutdown(cx);
+            }
             self.tabs.tabs.clear();
             return;
         }
-        if !self.cef_ready && self.cef_init_frame.is_event(event).is_some() {
-            // The chrome has been drawn: bring Chromium up now.
-            match makepad_cef::initialize() {
-                Ok(()) => {
-                    self.cef_ready = true;
-                    log!(
-                        "browser: CEF {} initialized at {} ms",
-                        makepad_cef::CEF_VERSION,
-                        crate::uptime_ms()
-                    );
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    log!("CEF initialize failed: {message}");
-                    self.cef_init_error = Some(message);
-                }
-            }
-            self.redraw(cx);
-        }
-        if self.pump_timer.is_event(event).is_some() && self.cef_ready {
-            self.pump(cx);
-        }
+        self.sync_tabs(cx, event);
 
-        match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
-            Hit::KeyFocus(_) => {
-                if let Some(browser) = self.active_browser() {
-                    let _ = browser.set_focus(true);
-                }
-                if let Some(rect) = self.browser_rect(cx) {
-                    self.update_ime_spot(cx, rect.pos);
-                }
-            }
-            Hit::KeyFocusLost(_) => {
-                if let Some(browser) = self.active_browser() {
-                    let _ = browser.set_focus(false);
-                }
-                cx.hide_text_ime();
-                self.pasted_text = false;
-            }
-            Hit::FingerDown(fe) => {
-                let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
-                self.pressed_buttons.insert(button);
-                cx.set_key_focus(self.draw_bg.area());
-                if let Some(browser) = self.active_browser() {
-                    let _ = browser.set_focus(true);
-                }
-                self.update_ime_spot(cx, fe.abs);
-                self.send_mouse_move(cx, fe.abs, fe.modifiers, false);
-                self.send_mouse_click(
-                    cx,
-                    fe.abs,
-                    fe.modifiers,
-                    Some(button),
-                    false,
-                    fe.tap_count as i32,
-                );
-            }
-            Hit::FingerMove(fe) => {
-                self.send_mouse_move(cx, fe.abs, fe.modifiers, false);
-            }
-            Hit::FingerUp(fe) => {
-                let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
-                self.send_mouse_move(cx, fe.abs, fe.modifiers, false);
-                self.send_mouse_click(
-                    cx,
-                    fe.abs,
-                    fe.modifiers,
-                    Some(button),
-                    true,
-                    fe.tap_count as i32,
-                );
-                self.pressed_buttons.remove(button);
-            }
-            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
-                self.send_mouse_move(cx, fe.abs, fe.modifiers, false);
-            }
-            Hit::FingerHoverOut(fe) => {
-                self.send_mouse_move(cx, fe.abs, fe.modifiers, true);
-            }
-            Hit::FingerScroll(fe) => {
-                self.send_mouse_wheel(cx, fe.abs, fe.modifiers, fe.scroll);
-            }
-            Hit::TextCopy(event) => {
-                if let Some(browser) = self.active_browser() {
-                    BrowserKeys::answer_clipboard(browser, &event, false);
-                }
-            }
-            Hit::TextCut(event) => {
-                if let Some(browser) = self.active_browser() {
-                    BrowserKeys::answer_clipboard(browser, &event, true);
-                }
-            }
-            Hit::KeyDown(key_event) => {
-                // Browser-level shortcuts (Cmd+T/W/L/R/[ ]) are the app's;
-                // they never reach the page.
-                if key_event.modifiers.logo && crate::is_app_shortcut(&key_event) {
-                    return;
-                }
-                if BrowserKeys::page_takes_key_down(&key_event, &mut self.pasted_text) {
-                    self.send_key(&key_event, makepad_cef::KEY_EVENT_KEYDOWN);
-                }
-            }
-            Hit::KeyUp(key_event) => {
-                if key_event.modifiers.logo && crate::is_app_shortcut(&key_event) {
-                    return;
-                }
-                self.send_key(&key_event, makepad_cef::KEY_EVENT_KEYUP);
-            }
-            Hit::TextInput(text_event) => {
-                let ime_pos = self
-                    .browser_rect(cx)
-                    .map(|rect| rect.pos)
-                    .unwrap_or_default();
-                self.update_ime_spot(cx, ime_pos);
-                if text_event.was_paste {
-                    self.pasted_text = true;
-                }
-                let modifiers = BrowserKeys::cef_modifiers(cx.keyboard.modifiers(), MouseButton::empty());
-                let char_data = BrowserKeys::char_event_data(&text_event.input);
-                if let Some(browser) = self.active_browser() {
-                    if text_event.was_paste || text_event.replace_last || char_data.is_none() {
-                        let _ = browser.ime_commit_text(&text_event.input);
-                    } else if let Some((windows_key_code, character)) = char_data {
-                        let native_key_code = text_event
-                            .input
-                            .chars()
-                            .next()
-                            .map(BrowserKeys::native_key_code_for_char)
-                            .unwrap_or(windows_key_code);
-                        let _ = browser.send_key_event(
-                            makepad_cef::KEY_EVENT_CHAR,
-                            modifiers,
-                            windows_key_code,
-                            native_key_code,
-                            character,
-                            character,
-                            false,
-                        );
-                    }
-                }
-            }
+        let Some(view) = self.tabs.active().and_then(|tab| tab.view) else { return };
+        let area = self.draw_bg.area();
+        let hit = event.hits_with_capture_overload(cx, area, true);
+        match &hit {
+            Hit::KeyFocus(_) => self.send_active(ViewOp::Focus { on: true }),
+            Hit::KeyFocusLost(_) => self.send_active(ViewOp::Focus { on: false }),
+            // Browser-level shortcuts (Cmd+T/W/L/R/[ ]) are the app's; they
+            // never reach the page.
+            Hit::KeyDown(key) | Hit::KeyUp(key) if key.modifiers.logo && crate::is_app_shortcut(key) => return,
+            Hit::FingerDown(_) => cx.set_key_focus(area),
             _ => {}
         }
+        let rect = area.is_valid(cx).then(|| area.rect(cx));
+        let Some(views) = &mut self.views else { return };
+        views.forward_hit(cx, view, &hit, |abs| rect.map(|rect| abs - rect.pos));
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.peek_walk_turtle(walk);
-        let dpi = cx.current_dpi_factor() as f32;
-        let width = (rect.size.x.max(1.0) * dpi as f64).round().max(1.0) as usize;
-        let height = (rect.size.y.max(1.0) * dpi as f64).round().max(1.0) as usize;
+        let dpi = cx.current_dpi_factor();
+        self.ensure_active_page(cx, rect.size, dpi);
 
-        self.ensure_active_browser(cx, width, height, dpi);
-
-        let shown = self.tabs.active().filter(|t| t.painted).and_then(|t| {
-            t.texture
-                .clone()
-                .map(|texture| (texture, t.texture_alloc, t.texture_valid))
-        });
         // Themed ground under the page, so a tab that has not painted yet
         // (or a transparent page) never shows black.
         self.draw_empty.draw_abs(cx, rect);
-        if !self.cef_ready {
-            let status = match &self.cef_init_error {
-                Some(err) => format!("browser engine failed to start: {err}"),
-                None => "starting browser engine…".to_string(),
-            };
-            self.draw_status
-                .draw_abs(cx, rect.pos + dvec2(16.0, 14.0), &status);
-            if !self.cef_init_requested && self.cef_init_error.is_none() {
-                self.cef_init_requested = true;
-                self.cef_init_frame = cx.new_next_frame();
-            }
-        }
+        let shown = self.tabs.active().and_then(|tab| tab.view).and_then(|view| self.views.as_ref()?.frame(view));
         match shown {
-            Some((texture, alloc, valid)) => {
-                // Sample only the part of the surface that holds page pixels
-                // and stretch it over the current rect: mid-drag that is the
-                // last good frame at a slightly older size (a fraction of a
-                // percent of scale), never a blank margin.
-                let scale = match (alloc, valid) {
-                    (Some((aw, ah)), Some((vw, vh))) if aw > 0 && ah > 0 && vw > 0 && vh > 0 => {
-                        vec2(
-                            (vw as f32 / aw as f32).min(1.0),
-                            (vh as f32 / ah as f32).min(1.0),
-                        )
-                    }
-                    _ => vec2(1.0, 1.0),
-                };
-                self.draw_bg.image_scale = scale;
-                self.draw_bg.draw_vars.set_texture(0, &texture);
+            Some(frame) if frame.info.width > 0 && frame.info.height > 0 => {
+                // The frame's share of the slot, stretched over the current
+                // rect: mid-drag the last good frame at a slightly older
+                // size, never a blank margin.
+                self.draw_bg.image_scale = vec2(frame.info.width as f32 / frame.alloc[0] as f32, frame.info.height as f32 / frame.alloc[1] as f32);
+                self.draw_bg.draw_vars.set_texture(0, &frame.texture);
                 self.draw_bg.opacity = 1.0;
             }
-            None => {
+            _ => {
                 self.draw_bg.image_scale = vec2(1.0, 1.0);
                 self.draw_bg.draw_vars.empty_texture(0);
                 self.draw_bg.opacity = 0.0;
             }
         }
-        if let Some(tab) = self.tabs.active() {
-            trace!(
-                "draw rect {}x{} px, surface {:?}, valid {:?}, pending {:?}, painted={}",
-                width,
-                height,
-                tab.accel_target_size,
-                tab.texture_valid,
-                tab.pending_alloc,
-                tab.painted
-            );
-        }
         self.draw_bg.draw_walk(cx, walk);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use makepad_widgets::browser::SURFACE_GRID;
-
-    #[test]
-    fn surface_is_grid_rounded() {
-        assert_eq!(surface_alloc(1280, 860), (1280, 1024));
-        assert_eq!(surface_alloc(1281, 1025), (1536, 1280));
-        assert_eq!(surface_alloc(0, 0), (SURFACE_GRID, SURFACE_GRID));
-    }
-
-    /// The whole point of the grid: a drag walks many page sizes inside one
-    /// surface instead of handing CEF a blank one at every step (which is
-    /// what made the page area flash the themed ground for a whole drag).
-    #[test]
-    fn a_drag_walks_many_sizes_per_surface() {
-        let mut current = Some(surface_alloc(1600, 900));
-        let mut steps = 0;
-        let mut swaps = 0;
-        for w in (1600..2600).step_by(8) {
-            let want = surface_alloc(w, 900);
-            steps += 1;
-            if needs_new_surface(current, None, want, false) {
-                swaps += 1;
-                current = Some(want);
-            }
-        }
-        assert_eq!(steps, 125);
-        // 1600 -> 2592 crosses the 1792 / 2048 / 2304 / 2560 lines: four
-        // surfaces for 125 drag steps, instead of 125.
-        assert_eq!(swaps, 4);
-    }
-
-    #[test]
-    fn surface_grows_at_once_and_shrinks_only_when_settled() {
-        let current = Some((1536, 1024));
-        // Outgrowing the surface would clip the blit: no waiting.
-        assert!(needs_new_surface(current, None, (1792, 1024), false));
-        // Smaller page, still moving: keep the surface (and the frame in it).
-        assert!(!needs_new_surface(current, None, (1024, 1024), false));
-        // Settled: hand back the slack.
-        assert!(needs_new_surface(current, None, (1024, 1024), true));
-        // A bigger surface is already on its way; do not queue another.
-        assert!(!needs_new_surface(
-            current,
-            Some((1792, 1024)),
-            (1792, 1024),
-            true
-        ));
-        assert!(needs_new_surface(
-            current,
-            Some((1792, 1024)),
-            (2048, 1024),
-            false
-        ));
-        // Nothing yet: allocate.
-        assert!(needs_new_surface(None, None, (1280, 1024), false));
     }
 }

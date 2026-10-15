@@ -43,10 +43,15 @@ script_mod! {
                 // Tilt-shift: away from the sharp band the frame softens
                 // further toward the same blurred image (a diorama's
                 // shallow focus, free: the bloom chain already made it).
-                let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + 0.3, abs(uv.y - self.tilt.y))
+                let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + self.tilt_feather(), abs(uv.y - self.tilt.y))
                 c = mix(c, self.bloom_texture.sample(uv).xyz * self.post2.w, min(self.post2.x + soft, 1.0))
             }
             return self.agx_graded(c * e)
+        }
+        // The width of the tilt band's soft edge: `tilt.w`, or 0.3 when unset.
+        tilt_feather: fn() -> float {
+            if self.tilt.w > 0.0 { return self.tilt.w }
+            return 0.3
         }
         // Perceptual luma of an HDR texel for FXAA's edge search, without
         // paying the full tone map per tap.
@@ -75,6 +80,13 @@ script_mod! {
 
         pixel: fn() {
             if self.post.x < 0.5 {
+                if self.tilt.x > 0.0 {
+                    // Tilt-shift alone: the scene and `bloom_texture` (its
+                    // blurred copy), both already premultiplied, no
+                    // exposure or tone map.
+                    let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + self.tilt_feather(), abs(self.pos.y - self.tilt.y))
+                    return mix(self.scene_texture.sample(self.pos), self.bloom_texture.sample(self.pos), clamp(soft, 0.0, 1.0))
+                }
                 let color = self.scene_texture.sample(self.pos)
                 return Pal.premul(color)
             }
@@ -144,8 +156,10 @@ pub struct DrawSceneTexture {
     #[live(vec4(1.0, 1.0, 1.6, 1.0))]
     pub grade: Vec4f,
     /// Tilt-shift: x = strength (0 = off), y = the sharp band's centre in
-    /// uv (0 = top), z = its half-height. Needs the bloom texture (the
-    /// blurred image it softens toward).
+    /// uv (0 = top), z = its half-height, w = the width of its soft edge in
+    /// uv (0 = 0.3). Needs the bloom texture (the blurred image it softens
+    /// toward). With the post chain off (`post.x` 0) a non-zero strength
+    /// draws the tilt-shift alone, over premultiplied textures.
     #[live(vec4(0.0, 0.6, 0.2, 0.0))]
     pub tilt: Vec4f,
 }

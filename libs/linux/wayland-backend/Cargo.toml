@@ -15,7 +15,6 @@ rust-version = "1.65"
 name = "wayland-backend"
 version = "0.3.12"
 authors = ["Elinor Berger <elinor@safaradeg.net>"]
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -103,3 +102,6 @@ version = "0.10"
 [dev-dependencies.scoped-tls]
 path = "../scoped-tls"
 version = "1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)", "cfg(unstable_coverage)"] }

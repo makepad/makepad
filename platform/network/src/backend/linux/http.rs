@@ -1,4 +1,4 @@
-use super::socket_stream::SocketStream;
+use crate::socket_stream::SocketStream;
 
 use crate::types::{HttpError, HttpProgress, HttpRequest, HttpResponse, NetworkResponse};
 use makepad_live_id::LiveId;

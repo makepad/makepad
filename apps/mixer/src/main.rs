@@ -79,11 +79,7 @@ script_mod! {
             main_window := Window{
                 window.title: "Mixer"
                 window.inner_size: vec2(1268, 716)
-                // The desk is flat and dark: the pass clears to the theme's
-                // own background, not the stock neutral. `theme.rs` also sets
-                // `color_bg_app`/`color_app_caption_bar` from the same key,
-                // but the clear colour is stated here so a window that never
-                // gets a retint still comes up in the theme.
+                // The mixer surface and pass use the system container ground.
                 pass.clear_color: mod.mpm.bg_dark
                 body +: {
                     width: Fill
@@ -378,7 +374,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).install(vm);
         self::script_mod(vm)
     }

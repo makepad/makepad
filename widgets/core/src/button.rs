@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -1680,18 +1680,14 @@ impl Widget for Button {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying button text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying button text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -1891,7 +1887,12 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_label(cx);
+        // An icon-only button has no label part: walking an empty label still
+        // took a turtle step, and the spacing before it pushed the icon off
+        // centre (the width measurement above already counts no label part).
+        if !self.shown_label().is_empty() || !self.description.is_empty() {
+            self.draw_label(cx);
+        }
         self.draw_icon_end.draw_walk(cx, self.icon_end_walk);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
@@ -2197,17 +2198,23 @@ impl ButtonRef {
             .and_then(|inner| inner.released_modifiers(actions))
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible;
-            inner.redraw(cx);
+            if inner.visible != visible {
+                inner.visible = visible;
+                inner.redraw(cx);
+            }
         }
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.enabled = enabled;
-            inner.redraw(cx);
+            if inner.enabled != enabled {
+                inner.enabled = enabled;
+                inner.redraw(cx);
+            }
         }
     }
 
@@ -2340,9 +2347,7 @@ mod open_tests {
                     mod.shader.test_compile_draw_source(mod.widgets.ButtonFloatingSm.draw_bg, "glsl", false)
                 })),
             ] {
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");
@@ -2379,9 +2384,7 @@ mod open_tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.Button.draw_bg, "glsl", false)
             });
-            let text = vm
-                .bx
-                .heap
+            let text = vm.heap()
                 .string_with(value, |_heap, text| text.to_string())
                 .expect("the compiler answers with source");
             assert!(!text.starts_with("ERRORS:"), "the sheet face did not compile: {text}");

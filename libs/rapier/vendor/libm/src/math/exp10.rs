@@ -7,11 +7,10 @@ const P10: &[f64] = &[
 ];
 
 /// Calculates 10 raised to the power of `x` (f64).
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn exp10(x: f64) -> f64 {
     select_implementation! {
         name: x87_exp10,
-        use_arch_required: x86_no_sse,
+        use_arch_required: all(target_arch = "x86", not(target_feature = "sse")),
         args: x,
     }
 

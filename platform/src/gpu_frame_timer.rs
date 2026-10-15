@@ -24,7 +24,6 @@
 //!
 //! Off until something calls [`set_enabled`]; disabled backends do no work.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -43,13 +42,32 @@ pub struct GpuFrameTiming {
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct State {
+    // Only the prefix is live; completed slots retain their name buffers.
     open: Vec<(u64, String, f64, f64)>,
-    done: VecDeque<GpuFrameTiming>,
+    open_len: usize,
+    spans: Vec<usize>,
+    done: Vec<CompletedFrame>,
+    done_head: usize,
+    done_len: usize,
     /// The last finished frame's end (frames finish in queue order).
     last_end: f64,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { open: Vec::new(), done: VecDeque::new(), last_end: f64::NEG_INFINITY });
+struct CompletedFrame {
+    timing: GpuFrameTiming,
+    // The inactive suffix retains name buffers when pass counts vary.
+    pass_count: usize,
+}
+
+static STATE: Mutex<State> = Mutex::new(State {
+    open: Vec::new(),
+    open_len: 0,
+    spans: Vec::new(),
+    done: Vec::new(),
+    done_head: 0,
+    done_len: 0,
+    last_end: f64::NEG_INFINITY,
+});
 
 /// Frames kept for a consumer that takes them late; older ones drop.
 const KEEP_FRAMES: usize = 240;
@@ -61,8 +79,9 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
     if !on {
         if let Ok(mut s) = STATE.lock() {
-            s.open.clear();
-            s.done.clear();
+            s.open_len = 0;
+            s.done_head = 0;
+            s.done_len = 0;
             s.last_end = f64::NEG_INFINITY;
         }
     }
@@ -80,10 +99,20 @@ pub fn record_pass(frame: u64, name: &str, start: f64, end: f64) {
         return;
     }
     if let Ok(mut s) = STATE.lock() {
-        if s.open.len() >= KEEP_SPANS {
-            s.open.clear();
+        if s.open_len >= KEEP_SPANS {
+            s.open_len = 0;
         }
-        s.open.push((frame, name.to_string(), start, end));
+        let index = s.open_len;
+        if index == s.open.len() {
+            s.open.push((frame, String::new(), start, end));
+        }
+        let span = &mut s.open[index];
+        span.0 = frame;
+        span.1.clear();
+        span.1.push_str(name);
+        span.2 = start;
+        span.3 = end;
+        s.open_len += 1;
     }
 }
 
@@ -93,43 +122,74 @@ pub fn finish_frame(frame: u64) {
         return;
     }
     let Ok(mut s) = STATE.lock() else { return };
-    let mut spans = Vec::new();
-    s.open.retain(|(f, name, a, b)| {
-        if *f == frame {
-            spans.push((name.clone(), *a, *b));
-            false
-        } else {
-            true
-        }
-    });
-    if spans.is_empty() {
-        return;
+    let State {
+        open, open_len, spans, done, done_head, done_len, last_end,
+    } = &mut *s;
+    let end = open[..*open_len].iter()
+        .filter(|sp| sp.0 == frame)
+        .map(|sp| sp.3)
+        .reduce(f64::max);
+    let Some(end) = end else { return };
+    // Older unpresented passes belong to this frame too. Keep indices so
+    // the names stay in their reusable slots while the spans are sorted.
+    spans.clear();
+    spans.extend((0..*open_len).filter(|&i| open[i].0 == frame || open[i].3 <= end));
+    let floor = *last_end;
+    for &i in spans.iter() {
+        open[i].2 = open[i].2.max(floor).min(open[i].3);
     }
-    // Passes of repaints that never presented (a window that skipped its
-    // present after its offscreen passes were encoded) finished before this
-    // frame did: the queue runs in order, so no later frame will claim
-    // them. Their GPU time is real; it is shown as "unpresented <pass>".
-    let end = spans.iter().fold(f64::NEG_INFINITY, |e, sp| e.max(sp.2));
-    s.open.retain(|(_, name, a, b)| {
-        if *b <= end {
-            spans.push((format!("unpresented {name}"), *a, *b));
-            false
-        } else {
-            true
-        }
+    spans.sort_unstable_by(|&a, &b| {
+        open[a].2.total_cmp(&open[b].2)
+            // Match the stable ordering: this frame first, then stale spans.
+            .then_with(|| (open[a].0 != frame).cmp(&(open[b].0 != frame)))
+            .then_with(|| a.cmp(&b))
     });
-    let floor = s.last_end;
-    s.last_end = spans.iter().fold(floor, |e, sp| e.max(sp.2));
-    let timing = breakdown(spans, floor);
-    if s.done.len() >= KEEP_FRAMES {
-        s.done.pop_front();
+    let index = (*done_head + *done_len) % KEEP_FRAMES;
+    if index == done.len() {
+        done.push(CompletedFrame {
+            timing: GpuFrameTiming::default(),
+            pass_count: 0,
+        });
     }
-    s.done.push_back(timing);
+    done[index].pass_count = breakdown_into(spans.iter().map(|&i| {
+        let sp = &open[i];
+        (sp.1.as_str(), sp.2, sp.3, sp.0 != frame)
+    }), &mut done[index].timing);
+    *last_end = spans.iter().fold(floor, |e, &i| e.max(open[i].3));
+    if *done_len == KEEP_FRAMES {
+        *done_head = (*done_head + 1) % KEEP_FRAMES;
+    } else {
+        *done_len += 1;
+    }
+    // Compact the live prefix without dropping the completed name buffers.
+    let mut kept = 0;
+    for i in 0..*open_len {
+        if open[i].0 != frame && open[i].3 > end {
+            open.swap(kept, i);
+            kept += 1;
+        }
+    }
+    *open_len = kept;
 }
 
 /// The frames finished since the last call, oldest first.
+/// Owned output is allocated here; recording and finishing reuse their buffers.
 pub fn take_frames() -> Vec<GpuFrameTiming> {
-    STATE.lock().map(|mut s| s.done.drain(..).collect()).unwrap_or_default()
+    STATE.lock().map(|mut s| {
+        let frames = (0..s.done_len)
+            .map(|i| {
+                let frame = &s.done[(s.done_head + i) % KEEP_FRAMES];
+                GpuFrameTiming {
+                    busy_ms: frame.timing.busy_ms,
+                    span_ms: frame.timing.span_ms,
+                    passes: frame.timing.passes[..frame.pass_count].to_vec(),
+                }
+            })
+            .collect();
+        s.done_head = 0;
+        s.done_len = 0;
+        frames
+    }).unwrap_or_default()
 }
 
 /// The partition described in the module docs. `spans`: (name, start, end)
@@ -139,25 +199,49 @@ pub fn breakdown(mut spans: Vec<(String, f64, f64)>, floor: f64) -> GpuFrameTimi
         s.1 = s.1.max(floor).min(s.2);
     }
     spans.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let first = spans.first().map_or(0.0, |s| s.1);
+    let mut timing = GpuFrameTiming::default();
+    breakdown_into(
+        spans.iter().map(|(name, start, end)| (name.as_str(), *start, *end, false)),
+        &mut timing,
+    );
+    timing
+}
+
+fn breakdown_into<'a>(
+    spans: impl Iterator<Item = (&'a str, f64, f64, bool)>,
+    timing: &mut GpuFrameTiming,
+) -> usize {
+    let mut first = None;
     let mut covered = f64::NEG_INFINITY;
     let mut busy = 0.0;
-    let mut passes: Vec<(String, f32)> = Vec::new();
-    for (name, start, end) in spans {
+    let mut pass_count = 0;
+    for (name, start, end, unpresented) in spans {
+        first.get_or_insert(start);
         let own = (end - start.max(covered)).max(0.0);
         covered = covered.max(end);
         busy += own;
         let ms = (own * 1000.0) as f32;
-        match passes.iter_mut().find(|p| p.0 == name) {
+        let prefix = if unpresented { "unpresented " } else { "" };
+        match timing.passes[..pass_count].iter_mut().find(|p| {
+            p.0.strip_prefix(prefix) == Some(name)
+        }) {
             Some(p) => p.1 += ms,
-            None => passes.push((name, ms)),
+            None => {
+                if pass_count == timing.passes.len() {
+                    timing.passes.push((String::new(), 0.0));
+                }
+                let pass = &mut timing.passes[pass_count];
+                pass.0.clear();
+                pass.0.push_str(prefix);
+                pass.0.push_str(name);
+                pass.1 = ms;
+                pass_count += 1;
+            }
         }
     }
-    GpuFrameTiming {
-        busy_ms: (busy * 1000.0) as f32,
-        span_ms: ((covered - first).max(0.0) * 1000.0) as f32,
-        passes,
-    }
+    timing.busy_ms = (busy * 1000.0) as f32;
+    timing.span_ms = ((covered - first.unwrap_or(0.0)).max(0.0) * 1000.0) as f32;
+    pass_count
 }
 
 #[cfg(test)]

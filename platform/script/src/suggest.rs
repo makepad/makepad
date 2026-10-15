@@ -537,6 +537,25 @@ fn value_or_nil(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptValue) -> S
     NIL
 }
 
+/// The message tail for a missing key on a frozen API object: its own keys, sorted.
+/// Returns `; it has lap, laps, rank`, or an empty string when it has none.
+pub fn api_own_keys(heap: &ScriptHeap, obj_ptr: ScriptObject) -> String {
+    let object = &heap.objects[obj_ptr];
+    let mut names: Vec<String> = Vec::new();
+    for (map_key, _) in object.map.iter() {
+        names.extend(key_to_string_opt(heap, *map_key));
+    }
+    for kv in object.vec.iter() {
+        names.extend(key_to_string_opt(heap, kv.key));
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("; it has {}", names.join(", "))
+}
+
 /// Format suggestions for a missing property on an object
 /// Returns a string like: `. Did you mean 'foo'? Available: bar(obj), baz(fn12:0), foo(#ff0000)`
 pub fn suggest_property(heap: &ScriptHeap, obj_ptr: ScriptObject, key: ScriptValue) -> String {
@@ -703,4 +722,109 @@ mod tests {
             format!("{value}...")
         );
     }
+}
+
+/// The direct named children of `obj`: the ids of its vec entries, in order.
+fn named_children(heap: &ScriptHeap, obj_ptr: ScriptObject) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for kv in heap.objects[obj_ptr].vec.iter() {
+        if kv.key.as_id().is_some() {
+            if let Some(name) = key_to_string_opt(heap, kv.key) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The object-valued entries below `obj` to look through: its own named vec children, then the
+/// map fields along its prototype chain (a typed field such as a splitter's `a`), each name once.
+fn slot_entries(heap: &ScriptHeap, obj_ptr: ScriptObject) -> Vec<(ScriptValue, ScriptValue)> {
+    let mut out: Vec<(ScriptValue, ScriptValue)> = Vec::new();
+    for kv in heap.objects[obj_ptr].vec.iter() {
+        if kv.key.as_id().is_some() {
+            out.push((kv.key, kv.value));
+        }
+    }
+    let mut ptr = obj_ptr;
+    for _ in 0..64 {
+        let object = &heap.objects[ptr];
+        for (key, entry) in object.map.iter() {
+            if key.as_id().is_some() && !out.iter().any(|(k, _)| k == key) {
+                out.push((*key, entry.value));
+            }
+        }
+        match object.proto.as_object() {
+            Some(next) => ptr = next,
+            None => break,
+        }
+    }
+    out
+}
+
+/// Breadth-first search of the subtree below `obj` for the name `name`, as a named child or an
+/// object-valued field (a plain number or string field of that name, an inset's `left`, is not
+/// a place to put a block); returns the path of names to it. Each object is visited once and the
+/// walk is bounded; only the error path of a slot lookup calls this.
+fn locate_name(heap: &ScriptHeap, obj_ptr: ScriptObject, name: LiveId) -> Option<Vec<String>> {
+    const MAX_DEPTH: usize = 8;
+    const MAX_NODES: usize = 4000;
+    let mut visited: Vec<ScriptObject> = vec![obj_ptr];
+    let mut level: Vec<(ScriptObject, Vec<String>)> = vec![(obj_ptr, Vec::new())];
+    let mut nodes = 0;
+    for _ in 0..MAX_DEPTH {
+        let mut next: Vec<(ScriptObject, Vec<String>)> = Vec::new();
+        for (obj, path) in level.iter() {
+            let entries = slot_entries(heap, *obj);
+            for (key, value) in entries.iter() {
+                if key.as_id() == Some(name) && value.as_object().is_some() {
+                    let mut found = path.clone();
+                    found.push(key_to_string(heap, *key));
+                    return Some(found);
+                }
+            }
+            for (key, value) in entries.iter() {
+                let Some(child) = value.as_object() else { continue };
+                if visited.contains(&child) {
+                    continue;
+                }
+                nodes += 1;
+                if nodes > MAX_NODES {
+                    return None;
+                }
+                visited.push(child);
+                let mut child_path = path.clone();
+                child_path.push(key_to_string(heap, *key));
+                next.push((child, child_path));
+            }
+        }
+        if next.is_empty() {
+            return None;
+        }
+        level = next;
+    }
+    None
+}
+
+/// The message for a name that is neither a property nor a direct named child of `obj_ptr`:
+/// lists the named children and, when the name lives deeper, where.
+pub fn slot_not_found_message(heap: &ScriptHeap, obj_ptr: ScriptObject, name: LiveId) -> String {
+    let type_name = heap
+        .object_type_name_in_chain(obj_ptr)
+        .and_then(|id| id.as_string(|s| s.map(|s| s.to_string())))
+        .unwrap_or_else(|| "object".to_string());
+    let name_str = name.as_string(|s| s.map(|s| s.to_string())).unwrap_or_else(|| format!("{:?}", name));
+    let children = named_children(heap, obj_ptr);
+    let mut msg = format!("no property or named child `{}` on {}", name_str, type_name);
+    if !children.is_empty() {
+        msg.push_str(&format!(" (named children: {})", children.join(", ")));
+    }
+    if let Some(path) = locate_name(heap, obj_ptr, name) {
+        if path.len() > 1 {
+            msg.push_str(&format!("; `{}` is at {}", name_str, path.join(".")));
+        }
+    }
+    msg
 }

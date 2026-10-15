@@ -26,9 +26,12 @@ pub fn wall_now() -> f64 {
     Cx::time_now()
 }
 
+/// The two clocks, as `makepad_app_host::HostedApp` takes them.
+pub const CLOCK: makepad_app_host::Clock = makepad_app_host::Clock { now, wall_now };
+
 /// Whether this PLATFORM can host apps as child PROCESSES: a hub to accept
 /// them, a spawner to start them, a shared framebuffer per tile, a pool to
-/// keep them warm. The web, iOS, tvOS, Android and OHOS have none of that:
+/// keep them warm. The web, iOS, tvOS and Android have none of that:
 /// those builds host their linked modules in-process and nothing else.
 /// Whether a build that could host processes WANTS to is the build's say
 /// (`WmBuild::modules_only`, asked through `App::processes`).
@@ -37,7 +40,7 @@ pub const fn processes_available() -> bool {
         target_arch = "wasm32",
         target_os = "ios",
         target_os = "tvos",
-        target_env = "ohos"
+        target_os = "android"
     )))
 }
 
@@ -57,75 +60,6 @@ pub fn no_console_window(command: &mut std::process::Command) {
     }
     #[cfg(not(windows))]
     let _ = command;
-}
-
-/// Android: the APK's extracted native-library directory, where the child
-/// launcher (`libmakepad_launch.so`) and every hostable app's library
-/// (`libapp_<bin>.so`) live — the directory this library was loaded from.
-#[cfg(target_os = "android")]
-pub fn android_native_lib_dir() -> Option<std::path::PathBuf> {
-    use std::ffi::{c_char, c_int, c_void, CStr};
-    #[repr(C)]
-    struct DlInfo {
-        dli_fname: *const c_char,
-        dli_fbase: *mut c_void,
-        dli_sname: *const c_char,
-        dli_saddr: *mut c_void,
-    }
-    extern "C" {
-        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
-    }
-    let mut info = DlInfo {
-        dli_fname: std::ptr::null(),
-        dli_fbase: std::ptr::null_mut(),
-        dli_sname: std::ptr::null(),
-        dli_saddr: std::ptr::null_mut(),
-    };
-    let found = unsafe { dladdr(android_native_lib_dir as *const c_void, &mut info) };
-    if found == 0 || info.dli_fname.is_null() {
-        return None;
-    }
-    let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned();
-    std::path::Path::new(&path).parent().map(|dir| dir.to_path_buf())
-}
-
-/// Android: the launcher and the library of the app whose binary name is
-/// `bin`, when the APK ships it.
-#[cfg(target_os = "android")]
-pub fn android_app_binary(bin: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let dir = android_native_lib_dir()?;
-    let launcher = dir.join("libmakepad_launch.so");
-    let lib = dir.join(format!("libapp_{}.so", bin.replace('-', "_")));
-    (launcher.is_file() && lib.is_file()).then_some((launcher, lib))
-}
-
-/// Android: whether hosted apps are built on the phone before they run
-/// (`MAKEPAD_WM_ONDEVICE_BUILD`, set by the APK's entry from the
-/// `debug.makepad.wm.ondevice` property; clients.rs `launch_argv`).
-#[cfg(target_os = "android")]
-pub fn android_ondevice_builds() -> bool {
-    std::env::var("MAKEPAD_WM_ONDEVICE_BUILD").map(|v| v == "1").unwrap_or(false)
-}
-
-/// Android: what a hosted child needs from the WM's environment — the APK
-/// its assets are in, the app's data and cache directories, the density,
-/// and the socket its shared frames come from (os/linux/android/
-/// android_hosted.rs). Called once, before the first child starts.
-#[cfg(target_os = "android")]
-pub fn android_prepare_children(cx: &Cx) {
-    use makepad_widgets::makepad_platform::os::linux::android::android_hosted as hosted;
-    if let OsType::Android(params) = cx.os_type() {
-        set_child_env(hosted::DATA_PATH_ENV, params.data_path.as_ref());
-        set_child_env(hosted::CACHE_PATH_ENV, params.cache_path.as_ref());
-        set_child_env(hosted::DENSITY_ENV, params.density.to_string().as_ref());
-    }
-    // nativeLibraryDir is <app dir>/lib/<abi>; the APK is <app dir>/base.apk.
-    if let Some(apk) = android_native_lib_dir()
-        .and_then(|dir| dir.parent().and_then(|lib| lib.parent()).map(|app| app.join("base.apk")))
-    {
-        set_child_env(hosted::APK_ENV, apk.as_os_str());
-    }
-    hosted::start_frame_server();
 }
 
 /// Whether this build runs ON a phone: the OS draws the status bar, the
@@ -154,6 +88,14 @@ pub const STORAGE: &str = "wm";
 
 /// The key the chosen theme's name is kept under.
 pub const THEME_KEY: &str = "theme";
+/// The key the desktop behaviour (`warp` or `classic`) is kept under.
+pub const DESKTOP_MODE_KEY: &str = "desktop.mode";
+/// The key the desktop's look (`<sheet id> <dark|light>`) is kept under.
+pub const DESKTOP_LOOK_KEY: &str = "desktop.look";
+/// The key the dock auto-hide choice (`on` or `off`) is kept under.
+pub const DOCK_AUTOHIDE_KEY: &str = "dock.autohide";
+/// The key the shelf auto-hide choice (`left`, `right`, both or empty) is kept under.
+pub const SHELF_AUTOHIDE_KEY: &str = "shelf.autohide";
 /// The key the home page's arranged icon order is kept under (mobile_tiles
 /// `HomeOrder::to_document`).
 pub const HOME_ORDER_KEY: &str = "home.order";
@@ -171,6 +113,180 @@ pub fn persist_theme_choice(cx: &mut Cx, name: &str) {
         let _ = std::fs::write(crate::theme::themes_dir().join("../current-theme"), name);
     }
     let _ = cx.storage(STORAGE).set(cx, THEME_KEY, name.as_bytes().to_vec());
+}
+
+/// Remember the desktop behaviour: a state file beside the theme's natively,
+/// and the desk's storage namespace everywhere.
+pub fn persist_desktop_mode(cx: &mut Cx, mode: crate::spacewarp::Mode) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-desktop-mode"), mode.name());
+    }
+    let _ = cx.storage(STORAGE).set(cx, DESKTOP_MODE_KEY, mode.name().as_bytes().to_vec());
+}
+
+/// The saved desktop behaviour (native; the web reads the storage when it starts).
+pub fn load_desktop_mode() -> Option<crate::spacewarp::Mode> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let text = std::fs::read_to_string(crate::theme::themes_dir().join("../current-desktop-mode")).ok()?;
+        return crate::spacewarp::Mode::from_name(&text);
+    }
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// Remember the desktop's look: the style sheet the person picked and
+/// whether it is dark, beside the theme's state file natively and in the
+/// desk's storage namespace everywhere.
+pub fn persist_desktop_look(cx: &mut Cx, sheet_id: &str, dark: bool) {
+    let text = format!("{} {}", sheet_id, if dark { "dark" } else { "light" });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-desktop-look"), &text);
+    }
+    let _ = cx.storage(STORAGE).set(cx, DESKTOP_LOOK_KEY, text.into_bytes());
+}
+
+/// The saved desktop look (native): the sheet id and the dark flag.
+pub fn load_desktop_look() -> Option<(String, bool)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let text = std::fs::read_to_string(crate::theme::themes_dir().join("../current-desktop-look")).ok()?;
+        let (id, look) = text.trim().split_once(' ')?;
+        return Some((id.to_string(), look == "dark"));
+    }
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// Remember the dock auto-hide choice, beside the theme's state file
+/// natively and in the desk's storage namespace everywhere.
+pub fn persist_dock_autohide(cx: &mut Cx, on: bool) {
+    let text = if on { "on" } else { "off" };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-dock-autohide"), text);
+    }
+    let _ = cx.storage(STORAGE).set(cx, DOCK_AUTOHIDE_KEY, text.as_bytes().to_vec());
+}
+
+/// The saved dock auto-hide choice (native; off when nothing was saved).
+pub fn load_dock_autohide() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return std::fs::read_to_string(crate::theme::themes_dir().join("../current-dock-autohide"))
+            .is_ok_and(|text| text.trim() == "on");
+    }
+    #[cfg(target_arch = "wasm32")]
+    false
+}
+
+/// Remember which shelves (left, right) auto-hide, beside the theme's state
+/// file natively and in the desk's storage namespace everywhere.
+pub fn persist_shelf_autohide(cx: &mut Cx, sides: [bool; 2]) {
+    let text = [("left", sides[0]), ("right", sides[1])].iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect::<Vec<_>>().join(" ");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-shelf-autohide"), &text);
+    }
+    let _ = cx.storage(STORAGE).set(cx, SHELF_AUTOHIDE_KEY, text.into_bytes());
+}
+
+/// Remember the touchpad's natural scrolling choice beside the theme's state
+/// file (the direct backend reads the touchpad itself; elsewhere the OS owns it).
+pub fn persist_natural_scroll(on: bool) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-natural-scroll"), if on { "on" } else { "off" });
+    }
+    let _ = on;
+}
+
+/// The saved natural scrolling choice: on (as on a Mac) unless turned off.
+pub fn load_natural_scroll() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return std::fs::read_to_string(crate::theme::themes_dir().join("../current-natural-scroll"))
+            .map_or(true, |text| text.trim() != "off");
+    }
+    #[cfg(target_arch = "wasm32")]
+    true
+}
+
+/// Applies the natural scrolling choice to the direct backend's touchpad.
+pub fn apply_natural_scroll(on: bool) {
+    #[cfg(target_os = "linux")]
+    makepad_widgets::makepad_platform::linux_input::set_natural_scroll(on);
+    let _ = on;
+}
+
+/// Remember the touchpad's tap to click choice beside natural scrolling's.
+pub fn persist_tap_to_click(on: bool) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-tap-to-click"), if on { "on" } else { "off" });
+    }
+    let _ = on;
+}
+
+/// The saved tap to click choice: off unless turned on.
+pub fn load_tap_to_click() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return std::fs::read_to_string(crate::theme::themes_dir().join("../current-tap-to-click"))
+            .map_or(false, |text| text.trim() == "on");
+    }
+    #[cfg(target_arch = "wasm32")]
+    false
+}
+
+/// Applies tap to click to the direct backend's touchpad.
+pub fn apply_tap_to_click(on: bool) {
+    #[cfg(target_os = "linux")]
+    makepad_widgets::makepad_platform::linux_input::set_tap_to_click(on);
+    let _ = on;
+}
+
+/// The saved shelf auto-hide choice (native; both off when nothing was saved).
+pub fn load_shelf_autohide() -> [bool; 2] {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let text = std::fs::read_to_string(crate::theme::themes_dir().join("../current-shelf-autohide")).unwrap_or_default();
+        return [text.split_whitespace().any(|w| w == "left"), text.split_whitespace().any(|w| w == "right")];
+    }
+    #[cfg(target_arch = "wasm32")]
+    [false, false]
+}
+
+/// Remember each app's half height on the shelf, beside the theme's state file
+/// natively and in the desk's storage namespace everywhere.
+pub fn persist_shelf_half(cx: &mut Cx, heights: &std::collections::HashMap<String, f64>) {
+    let mut rows: Vec<String> = heights.iter().map(|(app, h)| format!("{app} {:.0}", h)).collect();
+    rows.sort();
+    let text = rows.join("\n");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-shelf-half"), &text);
+    }
+    let _ = cx.storage(STORAGE).set(cx, "shelf.half", text.into_bytes());
+}
+
+/// The saved half heights (native).
+pub fn load_shelf_half() -> std::collections::HashMap<String, f64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let text = std::fs::read_to_string(crate::theme::themes_dir().join("../current-shelf-half")).unwrap_or_default();
+        return text
+            .lines()
+            .filter_map(|l| {
+                let (app, h) = l.rsplit_once(' ')?;
+                Some((app.to_string(), h.parse().ok()?))
+            })
+            .collect();
+    }
+    #[cfg(target_arch = "wasm32")]
+    Default::default()
 }
 
 /// The wall clock as the bar shows it when the platform's own sampler
@@ -232,8 +348,7 @@ mod tests {
                 target_arch = "wasm32",
                 target_os = "ios",
                 target_os = "tvos",
-                target_os = "android",
-                target_env = "ohos"
+                target_os = "android"
             )))
         );
         assert!(now() >= 0.0);

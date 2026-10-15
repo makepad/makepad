@@ -10,23 +10,31 @@
 
 use makepad_widgets::app_icon::AppIconDraw;
 pub(crate) mod phone;
+mod spaces;
+pub mod frametrace;
+pub use spaces::{trace_frames as spaces_trace, UNDERLAY_SECS};
 use phone::{DrawPhoneApp, PhoneFrame};
 use crate::mobile_surface::PhoneSurface;
 use crate::dock_warp::{DockWarp, DrawDockWarp, WindowFrame};
+use crate::spacewarp::{input::Router, panel::DrawWarpPanel, Pose, Warp};
+use crate::stereo::{DesktopView, DrawStereoLens, DrawStereoWindow, Optics, StereoParams, StereoView};
 use std::collections::{HashMap, HashSet};
 
 use makepad_widgets::*;
 use makepad_widgets::{backdrop::BackdropCompositor, gauss_view::GaussRoundedView};
 
 use crate::clients::ClientSlot;
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use crate::layout::{LRect, WmLayout};
 use crate::module_view::MpModuleView;
+use crate::wayland_view::MpWaylandView;
 use crate::run_view::{MpRunView, MpRunViewAction};
+use crate::domain_view::MpDomainView;
 use crate::tile::TileHost;
 use crate::theme;
 use crate::desktop::{DrawDesktopChrome, StyleTween};
 use crate::shell::ui::ShellDraw;
+use crate::skins::{DrawSkin, Light, Skin};
 
 #[allow(unused_imports)]
 use crate::layout;
@@ -87,8 +95,6 @@ const TAB_GUTTER: f64 = 1.0;
 // Animation (omarchy default/hypr/looknfeel.lua, speeds are ds = 100ms)
 // ======================================================================
 
-/// windows 3.79 easeOutQuint — move + resize.
-const DUR_WINDOWS: f64 = 0.379;
 /// windowsIn 4.1 easeOutQuint, style popin 87%.
 const DUR_WINDOWS_IN: f64 = 0.41;
 /// windowsOut 1.49 linear, style popin 87%.
@@ -99,6 +105,8 @@ const DUR_FADE_IN: f64 = 0.173;
 const DUR_FADE_OUT: f64 = 0.146;
 /// popin 87%: the scale a window opens from and closes to.
 const POPIN_SCALE: f64 = 0.87;
+/// How long a Float handle takes to grow or shrink.
+const SKIN_GROW_SECS: f64 = 0.15;
 
 /// A cubic bezier from (0,0) to (1,1) with hyprland's two control points,
 /// evaluated as y(x): x is solved for the curve parameter first, exactly
@@ -142,15 +150,6 @@ pub fn almost_linear(t: f64) -> f64 {
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
-}
-
-fn lerp_rect(a: LRect, b: LRect, t: f64) -> LRect {
-    LRect::new(
-        lerp(a.x, b.x, t),
-        lerp(a.y, b.y, t),
-        lerp(a.w, b.w, t),
-        lerp(a.h, b.h, t),
-    )
 }
 
 fn lerp_color(a: Vec4f, b: Vec4f, t: f64) -> Vec4f {
@@ -297,6 +296,51 @@ fn elide_middle(s: &str, max_w: f64, mut width: impl FnMut(&str) -> f64) -> Stri
 /// dispatches its reverse. `previews` stays a whole client list rather
 /// than a predicate so a client that is both closing AND (implausibly) a
 /// preview still ends up counted once, in the preview group.
+/// How long a window stays unseen before its child is told.
+const HIDE_AFTER_SECS: f64 = 0.4;
+
+#[derive(Default)]
+struct Visibility {
+    hidden: bool,
+    unseen_since: Option<f64>,
+}
+
+/// `inner` lies within `outer` (a sliver of tolerance for rounding).
+fn lrect_contains(outer: LRect, inner: LRect) -> bool {
+    const EPS: f64 = 0.5;
+    inner.x >= outer.x - EPS && inner.y >= outer.y - EPS
+        && inner.x + inner.w <= outer.x + outer.w + EPS && inner.y + inner.h <= outer.y + outer.h + EPS
+}
+
+/// Is `me` fully covered by the union of `over` (the windows drawn above it)? A window
+/// partly visible is not: it keeps getting frames.
+fn covered_by_union(me: LRect, over: &[LRect]) -> bool {
+    const EPS: f64 = 0.5;
+    // What is still visible of `me`, as rects; each window above cuts them.
+    let mut visible = vec![me];
+    for o in over {
+        let mut next = Vec::with_capacity(visible.len() + 3);
+        for r in visible {
+            let (x0, y0) = (o.x.max(r.x), o.y.max(r.y));
+            let (x1, y1) = ((o.x + o.w).min(r.x + r.w), (o.y + o.h).min(r.y + r.h));
+            if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
+                next.push(r);
+                continue;
+            }
+            // the parts of r outside o: above, below, left, right
+            if y0 - r.y > EPS { next.push(LRect::new(r.x, r.y, r.w, y0 - r.y)); }
+            if r.y + r.h - y1 > EPS { next.push(LRect::new(r.x, y1, r.w, r.y + r.h - y1)); }
+            if x0 - r.x > EPS { next.push(LRect::new(r.x, y0, x0 - r.x, y1 - y0)); }
+            if r.x + r.w - x1 > EPS { next.push(LRect::new(x1, y0, r.x + r.w - x1, y1 - y0)); }
+        }
+        visible = next;
+        if visible.is_empty() {
+            return true;
+        }
+    }
+    visible.is_empty()
+}
+
 fn compose_zorder(closing: &[ClientId], rest: &[ClientId], previews: &[ClientId]) -> Vec<ClientId> {
     closing
         .iter()
@@ -355,9 +399,18 @@ impl Default for BorderTheme {
 
 pub struct WmState {
     pub snap: crate::snap::SnapState,
+    pub shot: crate::screenshot::Shot,
     pub phone: crate::mobile::PhoneState,
     pub style: StyleTween,
+    /// The dock's auto-hide: whether it is on, and where the slide is.
+    pub dock_autohide: crate::dock_autohide::DockAutohide,
+    /// The left and right shelf's auto-hide (the same state machine).
+    pub shelf_autohide: crate::spacewarp::shelf::ShelfHiding,
     pub dock_backdrop: Option<gauss_view::GaussBlurSnapshot>,
+    /// What the procedural background reacts to (focus rect, covered desk, warp).
+    pub backdrop: crate::backdrop::Env,
+    /// The window skin (`crate::skins`).
+    pub skin: Skin,
     /// One layout per physical screen (a single `""` entry covering the
     /// desk off the multi-screen Linux direct desktop, which is today's WM).
     pub screens: crate::screens::ScreenSet,
@@ -365,6 +418,18 @@ pub struct WmState {
     /// it on WindowGeomChange and the tick); `sync_screens` clips them to
     /// the desk every time the desk rect may have moved.
     pub screen_source: ScreenSource,
+    /// Spacewarp: the user toggle (the desk keeps the per-display zones).
+    pub warp: Warp,
+    /// Shake to periphery: the drag track and the arrangement to restore.
+    pub shake: crate::shake::Shake,
+    /// Drag from behind: the deferred raise of a pressed background window.
+    pub behind: crate::behind::Behind,
+    /// Layout time-scrub: the ring of past arrangements and a scrub in progress.
+    pub history: crate::history::History,
+    /// The spaces' own presentation: slides, the strip, the cheat sheet.
+    pub spaces: crate::spaces::Ui,
+    /// VR mode (`crate::stereo`): on/off, its source screen, depths, look.
+    pub vr: crate::stereo::VrState,
     /// The (rects, main) the screen set was last reconciled to.
     pub screen_key: (Vec<(String, LRect)>, Option<String>),
     /// The physical screens (names, unclipped geoms, main) the set was
@@ -397,17 +462,20 @@ pub struct WmState {
     pub gaps_out: f64,
     /// The clients a drag is currently moving/resizing — one for a
     /// SUPER+drag, both sides of the split for a divider drag in the gap.
-    /// `WmDesk` reads this to skip the tile's normal 379ms layout tween
-    /// for exactly those clients: Hyprland moves a drag 1:1 with the pointer —
-    /// the tween is for LAYOUT changes (a new window, a workspace switch),
-    /// not for a drag, which already delivers a new rect every frame and
-    /// would otherwise restart the tween's `move_t` each time, so the
-    /// drawn quad chases eased-and-lagging positions it never quite
-    /// reaches — a size that "wobbles" by a device pixel as the two ends
+    /// `WmDesk` reads this to skip the tile's layout spring for exactly
+    /// those clients: a drag moves 1:1 with the pointer — the spring is for
+    /// LAYOUT changes (a new window, a space switch, a shortcut), not for a
+    /// drag, which already delivers a new rect every frame and would
+    /// otherwise retarget the spring each time, so the drawn quad chases
+    /// lagging positions it never quite reaches — a size that "wobbles" by a device pixel as the two ends
     /// of that lag round independently, and a child texture sampled at a
     /// quad size that keeps missing the swapchain's true resolution
     /// (blur/shimmer). See `WmDesk::draw_walk`'s sync loop.
     pub dragging: Vec<ClientId>,
+    /// An edge, divider or SUPER+right-button drag is resizing windows: their apps get
+    /// each new size, one per frame, and draw into frames with room to grow (app_host
+    /// `HostedApp::set_live_resize`). Set by the WM before each draw.
+    pub live_resize: bool,
     /// The tile a SHIFT-drag is hovering, so the desk can paint its ring in
     /// the accent: dropping here makes the dragged window a TAB of this
     /// tile instead of swapping the two.
@@ -421,10 +489,6 @@ pub struct WmState {
     pub launchable: crate::apps::Launchable,
     /// Reduce Transparency / Reduce Motion (desktop.rs `Accessibility`).
     pub accessibility: crate::desktop::Accessibility,
-    /// The super-app's first-run provisioning (dylib_host): its newest
-    /// progress line while the toolchain streams out of the APK, shown on
-    /// the desk; None once provisioned (or when nothing is provisioning).
-    pub provision: Option<String>,
 }
 
 /// What the platform says about the screens. `per_screen` false (not the
@@ -440,6 +504,19 @@ pub struct ScreenSource {
 }
 
 impl WmState {
+    /// What a maximised window leaves at the bottom for the floating dock:
+    /// none while the dock auto-hides (it overlays windows when it shows).
+    pub fn shelf_reserve(&self) -> f64 {
+        self.dock_autohide.reserve(self.style.shelf_reserve())
+    }
+    /// The height at the bottom of a display an unfolded shelf window keeps clear of the dock.
+    pub fn dock_clear_height(&self) -> f64 {
+        self.style.shelf_reserve()
+    }
+    /// The dock hides itself in the style that has a floating dock.
+    pub fn dock_autohides(&self) -> bool {
+        self.dock_autohide.enabled && self.style.target == crate::desktop::DesktopStyle::Macos
+    }
     /// Several screens, each tiling on its own (not the single `""` desk).
     pub fn per_screen(&self) -> bool {
         self.screens.is_named()
@@ -549,8 +626,10 @@ impl WmState {
         // (A true Fullscreen from the single desk became a span of its
         // screen inside `reconcile`, see `ScreenSet::normalize_spans`.)
         let floating = self.style.target.floating();
+        let shelf_reserve = self.shelf_reserve();
         for s in &mut self.screens.screens {
             s.layout.desktop.enabled = floating;
+            s.layout.desktop.shelf_reserve = shelf_reserve;
         }
         self.screen_key = key;
         let live_after = self.live_screens();
@@ -751,7 +830,12 @@ script_mod! {
         tab_fg_inactive: mod.wm_theme.foreground
         tab_strip_color: mod.wm_theme.darker_background
         chrome +: {}
+        skin_draw +: {}
         draw_warp +: {}
+        draw_warp_panel +: {}
+        draw_vr +: {}
+        draw_vr_lens +: {}
+        draw_vr_marker +: {}
         phone_ui +: {}
         draw_phone +: {}
         shell_draw +: {
@@ -845,12 +929,15 @@ struct DrawMenuLine {
 /// hyprland's curves; the child is always configured at the target
 /// (resize-sync design), so only the presented quad moves.
 struct TileAnim {
-    /// Where the current tween started and where it lands.
-    from: LRect,
+    /// The moving rect: a critically damped spring (`crate::motion`) toward
+    /// the layout target, so an interrupted move bends into the new one.
+    pos: crate::motion::SpringRect,
+    /// How far the current move started from its target: its progress is
+    /// measured against it.
+    span: f64,
+    /// Where the current move lands.
     target: LRect,
-    /// Progress 0..1 of the move/resize tween.
-    move_t: f64,
-    /// The drawn rect (from/target at ease_out_quint(move_t)).
+    /// The drawn rect.
     cur: LRect,
     /// Opening: 0..1 popin from 87% + fade in.
     open_t: f64,
@@ -864,9 +951,9 @@ struct TileAnim {
 impl TileAnim {
     fn new(rect: LRect, focused: bool) -> Self {
         Self {
-            from: rect,
+            pos: crate::motion::SpringRect::at(rect),
+            span: 0.0,
             target: rect,
-            move_t: 1.0,
             cur: rect,
             open_t: 0.0,
             close_t: None,
@@ -876,10 +963,11 @@ impl TileAnim {
     }
 
     /// A tile that must appear ALREADY THERE. A group tab switch reveals a
-    /// window that has been running behind the strip all along, so it gets
-    /// none of the new-window popin: full size, full opacity, first frame.
-    /// (`new` leaves `move_t` finished already; only the open channel has
-    /// to be wound forward.)
+    /// window that has been running behind the strip all along, and a space
+    /// switch reveals a whole desktop that was there already: they get none
+    /// of the new-window popin, full size and full opacity from the first
+    /// frame. (`new` leaves the move finished already; only the open channel
+    /// has to be wound forward.)
     fn settled(rect: LRect, focused: bool) -> Self {
         Self {
             open_t: 1.0,
@@ -891,33 +979,40 @@ impl TileAnim {
         if self.target == target {
             return;
         }
-        self.from = self.cur;
+        self.pos.retarget(target);
         self.target = target;
-        self.move_t = 0.0;
+        self.span = self.pos.distance();
     }
 
-    /// Move straight to `target`, no tween — a SUPER+drag's own per-frame
-    /// rect update. `retarget` restarted every drag frame would otherwise
-    /// leave `cur` perpetually chasing a moving target through
-    /// `ease_out_quint`, never quite arriving; this is Hyprland's 1:1 drag
-    /// instead of the layout tween.
+    /// Move straight to `target`, no animation — a pointer drag's own
+    /// per-frame rect update. A retarget every drag frame would leave `cur`
+    /// perpetually chasing a moving target, never quite arriving; this is
+    /// the 1:1 drag instead of the layout motion.
     fn snap_to(&mut self, target: LRect) {
-        self.from = target;
+        self.pos.snap(target);
         self.target = target;
         self.cur = target;
-        self.move_t = 1.0;
+        self.span = 0.0;
+    }
+
+    /// The rect is still moving.
+    fn moving(&self) -> bool {
+        !self.pos.settled()
+    }
+
+    /// 0..1: how much of the current move is done (1 when at rest).
+    fn move_t(&self) -> f64 {
+        if self.pos.settled() || self.span <= 0.0 {
+            1.0
+        } else {
+            (1.0 - self.pos.distance() / self.span).clamp(0.0, 1.0)
+        }
     }
 
     /// Advance every channel; true while anything is still moving.
     fn step(&mut self, dt: f64) -> bool {
-        let mut busy = false;
-        if self.move_t < 1.0 {
-            self.move_t = (self.move_t + dt / DUR_WINDOWS).min(1.0);
-            self.cur = lerp_rect(self.from, self.target, ease_out_quint(self.move_t));
-            busy = true;
-        } else {
-            self.cur = self.target;
-        }
+        let mut busy = self.pos.step(dt);
+        self.cur = self.pos.rect();
         if self.open_t < 1.0 && self.close_t.is_none() {
             self.open_t = (self.open_t + dt / DUR_WINDOWS_IN).min(1.0);
             busy = true;
@@ -957,6 +1052,14 @@ impl TileAnim {
     fn done_closing(&self) -> bool {
         self.close_t.map(|t| t >= 1.0).unwrap_or(false)
     }
+}
+
+/// The frozen capture a compact cross-fade fades out.
+struct SwapOut {
+    frame: WindowFrame,
+    desk: Rect,
+    pose: Pose,
+    rounding: f32,
 }
 
 /// The tab strip one grouped tile wears: every member's title in group
@@ -1015,6 +1118,12 @@ pub struct WmDesk {
     #[rust] compositor: Option<BackdropCompositor>,
     #[rust] composing: bool,
     #[rust] terminal_clients: HashSet<ClientId>,
+    /// Cached captures of whole spaces (display, slot): what a slide
+    /// composites and the strip shows. Made when needed, freed after.
+    #[rust] space_shots: HashMap<(usize, usize), WindowFrame>,
+    /// The windows each capture holds, and which captures have let go of
+    /// their windows' own captures (children of the space's pass) yet.
+    #[rust] space_members: HashMap<(usize, usize), (Vec<ClientId>, bool)>,
     /// Clients drawn fullscreen across their screens this frame
     /// (`ScreenSet::span_rects`): no border, title bar or shadow, so the
     /// child's rect is exactly the screens' rect.
@@ -1022,10 +1131,19 @@ pub struct WmDesk {
     #[rust] blur_counts: (usize, usize),
     #[live] terminal_glass: GaussRoundedView,
     #[live] chrome: DrawDesktopChrome,
+    /// The window skin (`crate::skins`) and what it draws with.
+    #[live] skin_draw: DrawSkin,
+    #[rust] skin: Skin,
+    #[rust] skin_light: Option<Light>,
+    /// Each window's Float handle grow tween, 0..1.
+    #[rust] skin_grow: HashMap<ClientId, f64>,
     #[live] draw_shadow: DrawQuad,
     #[live] shell_draw: ShellDraw,
     #[rust] style: StyleTween,
     #[rust] titles: HashMap<ClientId, String>,
+    /// A later window's tile -> its app's client (`client_windows.rs`): one process draws
+    /// them all, so it stops drawing only when none of them shows.
+    #[rust] window_owners: HashMap<ClientId, ClientId>,
     #[rust] window_apps: HashMap<ClientId, String>,
     #[rust] startup_sheet: Option<desktop_style::StyleSheet>,
     #[rust] app_icons: AppIconDraw,
@@ -1035,6 +1153,57 @@ pub struct WmDesk {
     #[rust] minimized: HashSet<ClientId>,
     #[rust] dock_warps: HashMap<ClientId, DockWarp>,
     #[live] draw_warp: DrawDockWarp,
+    /// Spacewarp: the zones as of the last draw, the pointer routing, and
+    /// the scaled-rect drawer.
+    #[rust] pub warp: Warp,
+    #[rust] warp_router: Router,
+    /// The displays and their areas as of the last draw.
+    #[rust] shown_areas: Vec<(usize, LRect)>,
+    /// A space capture was made this frame: the scene repaints whole.
+    #[rust] shots_made: bool,
+    /// The display whose shelf the pointer is swelling.
+    /// What each parked window's capture was made from: the capture is
+    /// redone only when this changes (a new client frame, or its chrome).
+    #[rust] warp_sigs: HashMap<ClientId, (u64, u64, Vec<(Rect, ChromeHit)>)>,
+    /// Where, in screen coordinates, the window drawn last differs from the one before it (None: anywhere).
+    /// Where each parked or compact window was last drawn from its capture
+    /// (the capture's size, the pose, the corner radius): what a freeze or a
+    /// cross-fade keeps drawing.
+    #[rust] last_drawn: HashMap<ClientId, (Rect, Pose, f32)>,
+    /// The outgoing layer of a compact cross-fade.
+    #[rust] swap_out: HashMap<ClientId, SwapOut>,
+    /// Makepad clients whose card has the desk's title bar instead of their own caption:
+    /// a crashed or exited domain app (it draws nothing). Every other makepad window draws
+    /// its own chrome (`own_chrome.rs`); a foreign (Wayland) window and an in-process
+    /// module get the desk's.
+    #[rust] desk_chrome: HashSet<ClientId>,
+    /// FULLSCREEN CAPTION (design). A fullscreen window uses the whole screen.
+    /// Its caption comes in two kinds. PLAIN: only a title and the window
+    /// buttons (the WM draws it for every app that does not draw its own):
+    /// hidden in fullscreen, it slides down over the content, animated, while
+    /// the pointer touches the top edge, and back up when it leaves
+    /// (`fullscreen_reveal`, 0..1 on the shared ease). PERSISTENT: a caption
+    /// that carries the app's own UI (mode tabs, transport, toolbars) is drawn
+    /// by the app inside its client area and stays where it is. The kind is
+    /// decided by the caption, not by an app list: an app that draws its own
+    /// caption (`own_chrome`) is persistent; the WM-drawn caption is plain.
+    /// (An app with a plain own caption can later report it, and be sent the
+    /// reveal progress to slide itself, over the same hosted channel.)
+    #[rust] fullscreen_reveal: Option<crate::motion::Ease>,
+    #[live] draw_warp_panel: DrawWarpPanel,
+    /// VR mode (`crate::stereo`): the windows as panels in 3D.
+    #[live] draw_vr: DrawStereoWindow,
+    #[live] draw_vr_lens: DrawStereoLens,
+    #[live] draw_vr_marker: DrawStereoWindow,
+    #[rust] vr: Option<StereoView>,
+    #[rust] vr_lens: Option<VrLensPlan>,
+    /// `draw_tile` is drawing inside the VR pass: capture, record, and
+    /// leave the flat composite to `draw_vr`.
+    #[rust] vr_capture: bool,
+    /// (client, rect, corner radius) captured into the VR pass this frame.
+    #[rust] vr_frames: Vec<(ClientId, Rect, f32)>,
+    #[rust] vr_desktop: Option<(DesktopView, Rect, Rect)>,
+    #[rust] vr_targets: Vec<(ClientId, Rect)>,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -1079,6 +1248,11 @@ pub struct WmDesk {
     /// the tile is first asked for.
     #[rust]
     module_clients: HashSet<ClientId>,
+    /// Clients that are foreign Wayland windows (wayland_view.rs).
+    #[rust]
+    wayland_clients: HashSet<ClientId>,
+    #[rust]
+    domain_clients: HashSet<ClientId>,
     #[rust]
     anims: HashMap<ClientId, TileAnim>,
     /// The last frame's draw order, back to front (closing tiles, then the
@@ -1090,6 +1264,9 @@ pub struct WmDesk {
     /// Grouped tiles this frame, keyed by the member the tile is showing.
     #[rust]
     group_tabs: HashMap<ClientId, GroupTabs>,
+    /// Per client: what its tile was last told about being shown, and since
+    /// when it has been unseen (see `update_visibility`).
+    #[rust] visibility: HashMap<ClientId, Visibility>,
     /// Every tab `draw_tile` drew, in screen coordinates.
     #[rust]
     tab_hits: Vec<TabHit>,
@@ -1135,7 +1312,7 @@ impl ScriptHook for WmDesk {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -1154,7 +1331,8 @@ impl WmDesk {
     }
     pub fn chrome_pointer(&mut self, cx: &mut Cx, p: Option<Vec2d>) -> Option<(ClientId, ChromeHit)> {
         let hit = p.and_then(|p| self.chrome_hit(p));
-        let hover = hit.filter(|(_, h)| matches!(h, ChromeHit::Close | ChromeHit::Minimize | ChromeHit::Maximize));
+        let skin = self.skin.active();
+        let hover = hit.filter(|(_, h)| matches!(h, ChromeHit::Close | ChromeHit::Minimize | ChromeHit::Maximize) || (skin && *h == ChromeHit::Title));
         if self.chrome_hover != hover {
             self.chrome_hover = hover;
             cx.redraw_area(self.area);
@@ -1181,6 +1359,10 @@ impl WmDesk {
         }
         let template_id = if self.module_clients.contains(&client) {
             live_id!(ModuleTile)
+        } else if self.domain_clients.contains(&client) {
+            live_id!(DomainTile)
+        } else if self.wayland_clients.contains(&client) {
+            live_id!(WaylandTile)
         } else {
             live_id!(Tile)
         };
@@ -1193,6 +1375,12 @@ impl WmDesk {
         if let Some(mut view) = widget_ref.borrow_mut::<MpRunView>() {
             if let Some(sheet) = &self.startup_sheet {view.set_startup_style(cx, sheet);}
             if let Some(app) = self.window_apps.get(&client) {view.set_startup_app(app);}
+        }
+        if let Some(mut view) = widget_ref.borrow_mut::<MpWaylandView>() {
+            view.set_client(client);
+        }
+        if let Some(mut view) = widget_ref.borrow_mut::<MpDomainView>() {
+            view.set_client(client);
         }
         self.items.insert(client, widget_ref.clone());
         Some(widget_ref)
@@ -1216,6 +1404,24 @@ impl WmDesk {
         self.items.remove(&client);
     }
 
+    /// The next tile asked for `client` is a foreign Wayland window's.
+    pub fn mark_wayland(&mut self, client: ClientId) {
+        self.wayland_clients.insert(client);
+        self.items.remove(&client);
+    }
+
+    pub fn mark_domain(&mut self, client: ClientId) {
+        self.domain_clients.insert(client);
+        self.items.remove(&client);
+    }
+
+    pub fn with_domain_view<R>(&mut self, cx: &mut Cx, client: ClientId,
+        f: impl FnOnce(&mut Cx, &mut MpDomainView) -> R) -> Option<R> {
+        let item = self.item(cx, client)?;
+        let mut view = item.borrow_mut::<MpDomainView>()?;
+        Some(f(cx, &mut view))
+    }
+
     /// The tile as its host trait, whichever kind it is (tile.rs).
     pub fn with_tile<R>(
         &mut self,
@@ -1228,6 +1434,12 @@ impl WmDesk {
             return Some(f(cx, &mut *view as &mut dyn TileHost));
         }
         if let Some(mut view) = item.borrow_mut::<MpModuleView>() {
+            return Some(f(cx, &mut *view as &mut dyn TileHost));
+        }
+        if let Some(mut view) = item.borrow_mut::<MpWaylandView>() {
+            return Some(f(cx, &mut *view as &mut dyn TileHost));
+        }
+        if let Some(mut view) = item.borrow_mut::<MpDomainView>() {
             return Some(f(cx, &mut *view as &mut dyn TileHost));
         }
         None
@@ -1246,7 +1458,13 @@ impl WmDesk {
 
     /// Start the close animation: the tile keeps its last frame while it
     /// pops back to 87% and fades, and is dropped when that finishes.
+    /// `tile` shows a later window of the app `owner` (see `window_owners`).
+    pub fn set_window_owner(&mut self, tile: ClientId, owner: ClientId) {
+        self.window_owners.insert(tile, owner);
+    }
+
     pub fn remove_client(&mut self, client: ClientId) {
+        self.window_owners.remove(&client);
         match self.anims.get_mut(&client) {
             Some(anim) if anim.close_t.is_none() => {
                 anim.close_t = Some(0.0);
@@ -1256,6 +1474,7 @@ impl WmDesk {
             None => {
                 self.items.remove(&client);
                 self.module_clients.remove(&client);
+                self.domain_clients.remove(&client);
             }
         }
     }
@@ -1272,7 +1491,12 @@ impl WmDesk {
             self.anims.remove(&client);
             self.items.remove(&client);
             self.module_clients.remove(&client);
+            self.domain_clients.remove(&client);
         }
+    }
+
+    fn lrect_to_lrect_of(r: Rect) -> LRect {
+        LRect::new(r.pos.x, r.pos.y, r.size.x, r.size.y)
     }
 
     fn lrect_to_rect(r: LRect) -> Rect {
@@ -1285,9 +1509,18 @@ impl WmDesk {
     /// Step every tile animation; true while anything is still moving.
     fn step_anims(&mut self, dt: f64) -> bool {
         let mut moving = false;
+        let live = &self.anims;
+        self.skin_grow.retain(|c, _| live.contains_key(c));
+        let hover = self.chrome_hover.map(|(c, _)| c);
+        for (client, grow) in self.skin_grow.iter_mut() {
+            let target = (hover == Some(*client)) as u8 as f64;
+            *grow += (target - *grow).clamp(-dt / SKIN_GROW_SECS, dt / SKIN_GROW_SECS);
+            moving |= *grow != target;
+        }
         for anim in self.anims.values_mut() {
             moving |= anim.step(dt);
         }
+        moving |= self.warp.compact.step(dt);
         moving
     }
 
@@ -1301,10 +1534,136 @@ impl WmDesk {
         }
     }
 
+    /// One window record for the motion recorder (`frametrace`).
+    fn ft_tile(&self, client: ClientId, src: frametrace::Src, drawn: Rect, shown: Rect, cfg: Option<Vec2d>) {
+        use frametrace::r4;
+        let rr = |r: Rect| r4(r.pos.x, r.pos.y, r.size.x, r.size.y);
+        let lr = |r: LRect| r4(r.x, r.y, r.w, r.h);
+        let anim = self.anims.get(&client).map(|a| frametrace::Anim {
+            cur: lr(a.cur), tgt: lr(a.target), moving: a.moving(), open: a.open_t as f32, close: a.close_t.map(|t| t as f32),
+        });
+        let host = self.items.get(&client).and_then(|item| item.borrow_mut::<MpRunView>().map(|v| v.trace_sizes())).map(|(c, t, px, serial, has)| frametrace::Host {
+            cfg: [c.x as f32, c.y as f32], tsz: t.map(|t| [t.x as f32, t.y as f32]), px, serial, has,
+        });
+        let pose = self.warp.pose_drawn(client, self.anims.get(&client).map_or(Self::lrect_to_lrect_of(drawn), |a| a.cur));
+        frametrace::win(frametrace::Win {
+            client,
+            cap: None,
+            app: frametrace::app_id(self.window_apps.get(&client).map_or("", |a| a.as_str())),
+            src,
+            drawn: rr(drawn),
+            shown: rr(shown),
+            req: cfg.map(|c| [c.x as f32, c.y as f32]),
+            anim,
+            host,
+            side: pose.side,
+            scale: pose.scale as f32,
+            compact: pose.compact,
+            pose_shown: lr(pose.shown),
+            half: self.warp.half_rect_of(client).map(lr),
+            swollen: self.warp.swollen_pose(client).map(|p| lr(p.shown)),
+            frozen: self.warp.compact.frozen(client),
+            hidden: self.visibility.get(&client).is_some_and(|v| v.hidden),
+            dragged: self.warp.dragged.contains(&client),
+            minimized: self.minimized.contains(&client),
+            mode: 0,
+            parked: false,
+        });
+    }
+
+    /// The motion recorder's frame record, after every window of the frame.
+    fn ft_frame(&self, scope: &mut Scope, pass_size: Vec2d) {
+        use frametrace::r4;
+        let lr = |r: LRect| r4(r.x, r.y, r.w, r.h);
+        let Some(state) = scope.data.get_mut::<WmState>() else { return };
+        let desk = self.desk_rect;
+        let shown_areas = &self.shown_areas;
+        let warp = &self.warp;
+        let shots = &self.space_shots;
+        let (animating, zorder) = (self.animating, &self.zorder);
+        let hits = &self.title_hits;
+        // The dock's icons, for the test rig only (the stream is on): its
+        // menu items are rebuilt to find them.
+        let mut dock = Vec::new();
+        if frametrace::streaming() && crate::desktop::dock_shown(state) {
+            for item in crate::desktop::dock_items(state) {
+                if let Some(app) = item.id.strip_prefix("apps.") {
+                    let r = crate::desktop::dock_icon_bounds(state, pass_size, app);
+                    dock.push((frametrace::app_id(app), r4(r.pos.x, r.pos.y, r.size.x, r.size.y)));
+                }
+            }
+        }
+        frametrace::end_frame(|f| {
+            f.t = crate::host::now();
+            f.desk = r4(desk.pos.x, desk.pos.y, desk.size.x, desk.size.y);
+            for i in 0..state.screens.live_count() {
+                let l = state.layout_at(i);
+                let h = state.shelf_autohide.hidden(i);
+                f.disp.push(frametrace::Disp {
+                    rect: lr(state.screens.screens[i].rect),
+                    area: shown_areas.iter().find(|(k, _)| *k == i).map(|(_, a)| lr(*a)),
+                    cur: l.spaces.cur() as u16,
+                    active: l.active as u16,
+                    slots: l.spaces.items().iter().map(|sp| sp.slot as u16).collect(),
+                    slide: state.spaces.slides.get(i).map(|s| frametrace::Slide { pos: s.pos.x as f32, v: s.pos.v as f32, from: s.from as u16, to: s.to as u16 }),
+                    hide: [h[0] as f32, h[1] as f32],
+                });
+            }
+            f.active_screen = state.screens.active as u16;
+            f.dragging.extend(state.dragging.iter().copied());
+            f.leave = warp.leave.map(|l| frametrace::Leave {
+                client: l.client, side: l.side, s0: l.s0 as f32, from: l.from as f32,
+                cursor: [l.cursor.0 as f32, l.cursor.1 as f32], size: [l.size.0 as f32, l.size.1 as f32],
+            });
+            f.enter = warp.enter.map(|e| frametrace::Ease { client: e.client, t: e.e as f32, folding: false });
+            f.unfold = warp.unfold.as_ref().map(|u| frametrace::Ease { client: u.client, t: u.t() as f32, folding: u.folding });
+            f.held.extend(shots.keys().map(|k| (k.0 as u16, k.1 as u16)));
+            f.held.sort_unstable();
+            f.underlay = state.spaces.underlay.len() as u16;
+            f.strip = state.spaces.strip.t() as f32;
+            f.dock_out = state.dock_autohide.out_fraction() as f32;
+            f.animating = animating;
+            f.focus = state.layout().focused_client();
+            f.dock.extend(dock);
+            f.hits.extend(hits.iter().map(|(c, r, h)| (*c, r4(r.pos.x, r.pos.y, r.size.x, r.size.y), match h {
+                ChromeHit::Title => "title",
+                ChromeHit::Close => "close",
+                ChromeHit::Minimize => "min",
+                ChromeHit::Maximize => "max",
+                ChromeHit::Resize(-1, -1) => "r--", ChromeHit::Resize(0, -1) => "r0-", ChromeHit::Resize(1, -1) => "r+-",
+                ChromeHit::Resize(-1, 0) => "r-0", ChromeHit::Resize(1, 0) => "r+0",
+                ChromeHit::Resize(-1, 1) => "r-+", ChromeHit::Resize(0, 1) => "r0+", ChromeHit::Resize(1, 1) => "r++",
+                ChromeHit::Resize(_, _) => "r",
+            })));
+            f.zorder.extend(zorder.iter().copied());
+            for w in f.wins.iter_mut() {
+                if state.screens.screen_of(w.client).is_none() { continue; }
+                let l = state.layout_of(w.client);
+                w.mode = match l.window_mode(w.client) {
+                    crate::layout::WindowMode::Normal => 0,
+                    crate::layout::WindowMode::Maximised => 1,
+                    crate::layout::WindowMode::Fullscreen => 2,
+                };
+                w.parked = l.desktop.get(w.client).is_some_and(|d| d.warped);
+            }
+        });
+    }
+
     /// Draw one tile: the border ring (nothing else — the wallpaper stays
     /// visible behind the child, which composites itself at the window
     /// opacity), plus the child at the ring's inset.
     fn draw_tile(
+        &mut self,
+        cx: &mut Cx2d,
+        scope: &mut Scope,
+        client: ClientId,
+        borders: &BorderTheme,
+    ) {
+        self.draw_tile_inner(cx, scope, client, borders);
+        self.draw_swap_out(cx, client);
+    }
+
+    fn draw_tile_inner(
         &mut self,
         cx: &mut Cx2d,
         scope: &mut Scope,
@@ -1318,19 +1677,24 @@ impl WmDesk {
         else {
             return;
         };
-        if let Some(warp) = self.dock_warps.get_mut(&client) {
+        let vr = self.vr_capture;
+        if let Some(warp) = self.dock_warps.get_mut(&client).filter(|_| !vr) {
             if warp.minimized && !warp.active() { return; }
             if let Some(frame) = warp.frame.as_mut().filter(|_| !warp.refresh) {
                 frame.freeze(cx);
                 if !frame.frozen() && self.composing { self.compositor.as_mut().unwrap().content_pass(frame.pass_id()); }
                 warp.draw(cx, &mut self.draw_warp);
                 if self.composing { self.compositor.as_mut().unwrap().content(warp.bounds()); }
+                // The genie is a shader bend of the window's own rect, not a resize:
+                // the trace carries that rect (the warp's bounds also span the dock).
+                let (b, srcr) = (warp.bounds(), warp.source);
+                self.ft_tile(client, frametrace::Src::DockWarp, b, srcr, None);
                 return;
             }
         }
         let fade = if self.dock_warps.contains_key(&client) { 1.0 } else if self.minimized.contains(&client) {
-            let t = self.anims.get(&client).map(|a| a.move_t).unwrap_or(1.0);
-            if t >= 1.0 { return; }
+            let t = self.anims.get(&client).map(|a| a.move_t()).unwrap_or(1.0);
+            if t >= 1.0 { self.ft_tile(client, frametrace::Src::MinGone, Rect::default(), Rect::default(), None); return; }
             fade * (1.0 - ease_out_quint(t))
         } else { fade };
         let mut draw_rect = self.dock_warps.get(&client).map(|w|w.source).unwrap_or(Self::lrect_to_rect(cur));
@@ -1346,10 +1710,84 @@ impl WmDesk {
         // exactly 2px on every side whatever the tween left behind.
         let dpi = cx.current_dpi_factor().max(1.0);
         draw_rect = snap_to_device(draw_rect, dpi);
-
         let spanned = self.spanned_tiles.contains(&client);
-        let inset = if spanned { 0.0 } else { self.style.value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0]) };
+        let inset = if spanned { 0.0 } else { self.skin.inset(self.style.value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0])) };
         let resize_bar = if spanned { 0.0 } else { self.style.weights[4] * 8.0 };
+        let pose = Some(self.warp.pose_drawn(client, Self::lrect_to_lrect_of(draw_rect))).filter(|p| p.warped() && !self.dock_warps.contains_key(&client));
+        // Compact forms (`spacewarp/compact.rs`): the sequence runs here, once
+        // per drawn frame of the client.
+        // An unfolded shelf window is a real window at its half size: the
+        // client is configured there (its full layout, not a compact form)
+        // and drawn from a capture made at that size.
+        let half = self.warp.half_rect_of(client).filter(|_| !vr && !self.dock_warps.contains_key(&client));
+        let pose = pose.filter(|_| half.is_none());
+        let target = half.unwrap_or(target);
+        if let Some(h) = half {
+            draw_rect = snap_to_device(Self::lrect_to_rect(h), dpi);
+        }
+        let grouped = self.group_tabs.contains_key(&client);
+        self.warp.frame = (inset * 2.0, inset * 2.0 + resize_bar);
+        if !vr {
+            self.compact_frame(cx, scope, client, pose, target, dpi, spanned);
+        }
+        // The client area is configured at the compact form's size from the
+        // answer on, but the window only DRAWS compact from the swap.
+        let compact_target = pose.and(self.warp.compact_config_rect(client, target));
+        let cfg_compact = compact_target.is_some();
+        let target = compact_target.unwrap_or(target);
+        let compact = pose.and(self.warp.compact_rect(client, Self::lrect_to_lrect_of(draw_rect))).filter(|_| !vr);
+        let side = pose.map_or(0, |p| p.side);
+        // The shelf's fish-eye shows the item at its swollen pose (a compact
+        // one is then drawn from its capture, scaled).
+        let swollen = self.warp.swollen_pose(client).filter(|_| !vr && !self.dock_warps.contains_key(&client));
+        let pose = if swollen.is_some() { swollen } else { pose.filter(|_| compact.is_none()) };
+        if let Some(r) = compact {
+            draw_rect = snap_to_device(Self::lrect_to_rect(r), dpi);
+        }
+        // A frozen window keeps its last capture on screen, still moving with
+        // its spring, while the client is given its new size: the live view
+        // is swapped in once the client presented a frame at that size.
+        if let (true, Some(fp)) = (!vr && self.warp.compact.frozen(client), compact.map(|r| Pose::compact(r, side)).or(pose)) {
+            if let (Some(mut frame), Some(&(cap, _, rounding))) = (self.desktop_frames.remove(&client), self.last_drawn.get(&client)) {
+                let child = self.settled_child_rect(target, cfg_compact || self.draws_own_chrome(client), spanned, grouped, dpi);
+                if let Some(mut v) = self.items.get(&client).and_then(|item| item.borrow_mut::<MpRunView>()) {
+                    v.configure(cx, child.size, dpi);
+                }
+                if !spanned && !self.skin.own_shadow() {
+                    self.draw_window_shadow(cx, Self::lrect_to_rect(fp.shown), focus, fade);
+                }
+                frame.freeze(cx);
+                if !frame.frozen() && self.composing { self.compositor.as_mut().unwrap().content_pass(frame.pass_id()); }
+                self.draw_warp_panel.draw(cx, &frame, cap, &fp, rounding, 1.0);
+                if self.composing { self.compositor.as_mut().unwrap().content(Self::lrect_to_rect(fp.bounds())); }
+                self.desktop_frames.insert(client, frame);
+                self.last_drawn.insert(client, (cap, fp, rounding));
+                self.ft_tile(client, frametrace::Src::Frozen, cap, Self::lrect_to_rect(fp.shown), Some(child.size));
+                return;
+            }
+        }
+        // The logical rect, for the glasses; a parked window is captured
+        // whole, inside its display.
+        let placed_rect = draw_rect;
+        if pose.is_some() {
+            draw_rect = Self::lrect_to_rect(self.warp.on_screen(client, Self::lrect_to_lrect_of(draw_rect)));
+        }
+        let pose = pose.filter(|_| !vr);
+        // MAKEPAD_WM_MOTION=1: one line per drawn window per frame, what the
+        // person sees (the shown rect and where it came from), for the motion
+        // recorder and its analyser (tools/rig/motion.py).
+        if spaces::motion_trace() {
+            let shown = pose.map_or(Self::lrect_to_lrect_of(draw_rect), |p| p.shown);
+            let src = if self.warp.leave.is_some_and(|l| l.client == client) { "leave" }
+                else if self.warp.enter.is_some_and(|e| e.client == client) { "enter" }
+                else if half.is_some() { "half" }
+                else if swollen.is_some() { "shelf" }
+                else if compact.is_some() { "compact" }
+                else if pose.is_some() { "tile" }
+                else { "plain" };
+            log!("MOTION {:.4} {} {:.1} {:.1} {:.1} {:.1} {}", crate::host::now(), client, shown.x, shown.y, shown.w, shown.h, src);
+        }
+
         let mut inner = snap_child_rect(
             Rect {
                 pos: draw_rect.pos + dvec2(inset, inset),
@@ -1361,31 +1799,73 @@ impl WmDesk {
             dpi,
         );
 
+        if let (Some(p), true) = (pose, std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some()) {
+            log!("warp: client {} logical {:?} shown {:?} scale {:.3}", client, placed_rect, p.shown, p.scale);
+        }
         let (has_frame, arrival) = self
             .items
             .get(&client)
             .and_then(|item| with_tile_host(item, |v| (v.has_frame(), v.arrival_fade())))
             .unwrap_or((false, 1.0));
         let startup_glass = self.style.target == crate::desktop::DesktopStyle::Macos && (!has_frame || arrival < 1.0);
-        let backdrop = if self.composing && (self.terminal_clients.contains(&client) || startup_glass) {
+        // A window whose client presented nothing new and whose chrome did
+        // not change keeps its capture: composite it again, draw nothing into
+        // it. A window drawn straight (no capture: square corners, no warp)
+        // has nothing to keep. So one window presenting leaves every other
+        // window's capture, children and chrome alone.
+        let rounding = if spanned || self.skin.active() { 0.0 } else { self.style.value([0.0, 14.0, 8.0, 0.0, 0.0]) };
+        let captured = !vr && (compact.is_none() || swollen.is_some()) && (pose.is_some() || rounding > 0.01);
+        if !captured { self.warp_sigs.remove(&client); }
+        let sig = captured.then(|| self.warp_signature(client, draw_rect, focus, fade, has_frame, arrival, startup_glass, dpi)).flatten();
+        if let Some(sig) = sig {
+            if self.warp_sigs.get(&client).is_some_and(|(s, _, _)| *s == sig.0) {
+                if let Some(mut frame) = self.desktop_frames.remove(&client) {
+                    // The chrome was not drawn: its hit rects are the capture's.
+                    let hits = self.warp_sigs.get(&client).map(|(_, _, h)| h.clone()).unwrap_or_default();
+                    self.title_hits.extend(hits.into_iter().map(|(r, hit)| (client, r, hit)));
+                    if !spanned && !self.skin.own_shadow() {
+                        self.draw_window_shadow(cx, pose.map_or(draw_rect, |p| Self::lrect_to_rect(p.shown)), focus, fade);
+                    }
+                    if std::env::var_os("MAKEPAD_WM_TRACE_WARP").is_some() { log!("warp: reuse capture client {}", client); }
+                    frame.freeze(cx);
+                    if !frame.frozen() && self.composing { self.compositor.as_mut().unwrap().content_pass(frame.pass_id()); }
+                    if let Some(pose) = pose {
+                        self.draw_warp_panel.draw(cx, &frame, draw_rect, &pose, rounding as f32, 1.0);
+                        self.last_drawn.insert(client, (draw_rect, pose, rounding as f32));
+                        if self.composing { self.compositor.as_mut().unwrap().content(Self::lrect_to_rect(pose.bounds())); }
+                    } else {
+                        self.draw_window_surface(cx, &frame, draw_rect, rounding as f32);
+                        if self.composing { self.compositor.as_mut().unwrap().content(draw_rect); }
+                    }
+                    self.desktop_frames.insert(client, frame);
+                    self.ft_tile(client, frametrace::Src::Reuse, draw_rect, pose.map_or(draw_rect, |p| Self::lrect_to_rect(p.shown)), None);
+                    return;
+                }
+            }
+        }
+        let backdrop = if self.composing && !vr && (self.terminal_clients.contains(&client) || startup_glass) {
             Some(self.compositor.as_mut().unwrap().backdrop(cx, inner, 3.0))
         } else {None};
-        let rounding = if spanned { 0.0 } else { self.style.value([0.0, 14.0, 8.0, 0.0, 0.0]) };
-        if !spanned {
-            self.draw_window_shadow(cx, draw_rect, focus, fade);
+        if !spanned && !vr && !self.skin.own_shadow() {
+            self.draw_window_shadow(cx, pose.map_or(draw_rect, |p| Self::lrect_to_rect(p.shown)), focus, fade);
         }
-        let mut capture = self.dock_warps.get_mut(&client)
+        // In VR mode every window is captured: its texture is the panel.
+        let vr_capture = vr.then(|| self.desktop_frames.remove(&client)
+            .unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_window_surface")));
+        let mut capture = if vr_capture.is_some() { vr_capture } else { self.dock_warps.get_mut(&client)
             .filter(|w| w.frame.is_none() || w.refresh)
             .map(|w| {
                 w.refresh = false;
                 w.frame.take().unwrap_or_else(|| WindowFrame::new(cx))
-            }).or_else(|| (rounding > 0.01).then(|| self.desktop_frames.remove(&client)
-                .unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_window_surface"))));
+            }).or_else(|| (rounding > 0.01 || pose.is_some()).then(|| self.desktop_frames.remove(&client)
+                .unwrap_or_else(|| WindowFrame::new_with_name(cx, "wm_window_surface")))) };
         if let Some(frame) = &mut capture { frame.begin(cx, draw_rect); }
         if let Some(snapshot) = backdrop {
             self.terminal_glass.draw_surface_with_backdrop(cx, inner, Some(snapshot), fade as f32);
         }
-        let title_h = if spanned { 0.0 } else { self.style.title_height().min((inner.size.y * 0.3).max(0.0)) };
+        let own_chrome = self.draws_own_chrome(client);
+        let title_h = if compact.is_some() || spanned || own_chrome { 0.0 } else { self.skin.title_height(self.style.title_height()).min((inner.size.y * 0.3).max(0.0)) };
+        let chrome_h = title_h;
         if title_h > 0.1 {
             self.draw_window_chrome(cx, client, draw_rect, title_h, focus, fade);
             inner.pos.y += title_h;
@@ -1425,7 +1905,7 @@ impl WmDesk {
         self.draw_border.color_end = fade_color(ring_end, fade);
         self.draw_border.angle = borders.angle;
         self.draw_border.border_size = BORDER_SIZE as f32;
-        if self.style.weights[0] > 0.001 && !spanned {
+        if self.style.weights[0] > 0.001 && !spanned && !self.skin.active() {
             self.draw_border.color.w *= self.style.weights[0] as f32;
             self.draw_border.color_end.w *= self.style.weights[0] as f32;
             self.draw_border.draw_abs(cx, draw_rect);
@@ -1435,7 +1915,6 @@ impl WmDesk {
         // the child gets what is left, at both the drawn and the settled
         // size, so its swapchain is never sized as if the strip were not
         // there.
-        let grouped = self.group_tabs.contains_key(&client);
         let (strip, child_rect) = split_groupbar(inner, grouped);
         let child_rect = if strip.is_some() {
             snap_child_rect(child_rect, dpi)
@@ -1450,28 +1929,8 @@ impl WmDesk {
         // the same way so its swapchain matches the rect it will be drawn at.
         // Chrome may still be morphing, but its intermediate border/taskbar
         // dimensions must never become another child resize request.
-        let settled = snap_to_device(Self::lrect_to_rect(target), dpi);
-        let settled_inset = if spanned { 0.0 } else { self.style.target_value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0]) };
-        let settled_resize_bar = if spanned { 0.0 } else { self.style.target_value([0.0, 0.0, 0.0, 0.0, 8.0]) };
-        let mut settled_inner = snap_child_rect(
-            Rect {
-                pos: settled.pos + dvec2(settled_inset, settled_inset),
-                size: dvec2(
-                    (settled.size.x - settled_inset * 2.0).max(1.0),
-                    (settled.size.y - settled_inset * 2.0 - settled_resize_bar).max(1.0),
-                ),
-            },
-            dpi,
-        );
-        let title_h = if spanned { 0.0 } else { self.style.target.title_height().min(settled_inner.size.y * 0.3) };
-        settled_inner.pos.y += title_h;
-        settled_inner.size.y = (settled_inner.size.y-title_h).max(1.0);
-        let (_, settled_child) = split_groupbar(settled_inner, grouped);
-        let settled_child = if grouped {
-            snap_child_rect(settled_child, dpi)
-        } else {
-            settled_child
-        };
+        // A compact window is configured at its compact size, 1:1.
+        let settled_child = self.settled_child_rect(target, cfg_compact || self.draws_own_chrome(client), spanned, grouped, dpi);
         if !self.minimized.contains(&client) {
             if let Some(state) = scope.data.get_mut::<WmState>() {
                 state.tile_origins.insert(
@@ -1483,33 +1942,82 @@ impl WmDesk {
         // Hyprland stretches the frozen snapshot into the shrinking box —
         // no crop (that experiment read odd; git has it).
         let _ = (closing, unscaled_rect);
+        let skin_reach = self.skin.margin().max(24.0);
+        // A layout time-scrub in progress keeps the clients at their size.
+        let scrubbing = scope
+            .data
+            .get_mut::<WmState>()
+            .is_some_and(|s| s.history.holds_resize(crate::host::now()));
+        let live_resize = scope.data.get_mut::<WmState>().is_some_and(|s| s.live_resize);
         if let Some(item) = self.item(cx, client) {
             with_tile_host(&item, |view| {
                 // Minimize only changes the compositor quad. Reconfiguring the
                 // app to the taskbar target would destroy its responsive layout.
-                if !self.minimized.contains(&client) {
+                if !self.minimized.contains(&client) && !scrubbing {
                     view.set_target_size(Some(settled_child.size));
                 }
+                view.set_live_resize(live_resize);
+                view.set_fullscreen(spanned);
                 view.set_close_crop(None);
                 view.set_fade(fade as f32);
             });
             item.draw_walk_all(cx, scope, Walk::abs_rect(child_rect));
         }
+        if own_chrome && !spanned {
+            // The app's own caption; only the border is the desk's (resize).
+            for (edge, x, y) in crate::skins::resize_edges(draw_rect) {
+                self.title_hits.push((client, edge, ChromeHit::Resize(x, y)));
+            }
+        } else if self.skin.active() && !spanned {
+            self.draw_skin(cx, client, draw_rect, inset, chrome_h, focus, fade);
+        }
+        let ft_cfg = Some(settled_child.size);
+        let ft_shown = if let Some(w) = self.dock_warps.get(&client) { w.bounds() } else { pose.map_or(draw_rect, |p| Self::lrect_to_rect(p.shown)) };
+        self.ft_tile(client, if capture.is_some() { frametrace::Src::LiveCap } else { frametrace::Src::Live }, draw_rect, ft_shown, ft_cfg);
         if let Some(mut frame) = capture {
             frame.end(cx);
-            if self.composing {self.compositor.as_mut().unwrap().content_pass(frame.pass_id());}
+            if vr {
+                self.vr_frames.push((client, placed_rect, rounding as f32));
+                self.desktop_frames.insert(client, frame);
+                return;
+            }
+            if self.composing {
+                self.compositor.as_mut().unwrap().content_pass(frame.pass_id());
+            }
             if let Some(warp) = self.dock_warps.get_mut(&client) {
                 warp.frame=Some(frame);
                 warp.draw(cx, &mut self.draw_warp);
                 if self.composing {self.compositor.as_mut().unwrap().content(warp.bounds());}
+            } else if let Some(pose) = pose {
+                match sig {
+                    Some((sig, base)) => {
+                        let hits = self.title_hits.iter().filter(|(c, _, _)| *c == client).map(|(_, r, hit)| (*r, *hit)).collect();
+                        self.warp_sigs.insert(client, (sig, base, hits));
+                    }
+                    None => { self.warp_sigs.remove(&client); }
+                }
+                self.draw_warp_panel.draw(cx, &frame, draw_rect, &pose, rounding as f32, 1.0);
+                self.last_drawn.insert(client, (draw_rect, pose, rounding as f32));
+                if self.composing { self.compositor.as_mut().unwrap().content(Self::lrect_to_rect(pose.bounds())); }
+                self.desktop_frames.insert(client, frame);
             } else {
+                match sig {
+                    Some((sig, base)) => {
+                        let hits = self.title_hits.iter().filter(|(c, _, _)| *c == client).map(|(_, r, hit)| (*r, *hit)).collect();
+                        self.warp_sigs.insert(client, (sig, base, hits));
+                    }
+                    None => { self.warp_sigs.remove(&client); }
+                }
                 self.draw_window_surface(cx, &frame, draw_rect, rounding as f32);
+                if let Some(r) = compact {
+                    self.last_drawn.insert(client, (draw_rect, Pose::compact(r, side), rounding as f32));
+                }
                 self.desktop_frames.insert(client, frame);
                 if self.composing { self.compositor.as_mut().unwrap().content(draw_rect); }
             }
             return;
         }
-        if self.composing { self.compositor.as_mut().unwrap().content(Rect {pos: draw_rect.pos-dvec2(24.0,24.0),size: draw_rect.size+dvec2(48.0,48.0)}); }
+        if self.composing { self.compositor.as_mut().unwrap().content(Rect {pos: draw_rect.pos-dvec2(skin_reach,skin_reach),size: draw_rect.size+dvec2(skin_reach*2.0,skin_reach*2.0)}); }
     }
 
     /// The group's tab strip: one equal-width tab per member, the active
@@ -1665,11 +2173,368 @@ impl WmDesk {
 pub enum ChromeHit { Title, Close, Minimize, Maximize, Resize(i8,i8) }
 impl WmDesk {
     pub fn window_at(&self, p: Vec2d) -> Option<ClientId> {
-        self.zorder.iter().rev().find(|c| !self.minimized.contains(c) && !self.dock_warps.get(c).is_some_and(DockWarp::active) && self.anims.get(c).is_some_and(|a| Self::lrect_to_rect(a.cur).contains(p))).copied()
+        self.zorder.iter().rev().copied().find(|c| !self.minimized.contains(c) && !self.dock_warps.get(c).is_some_and(DockWarp::active) && self.anims.get(c).is_some_and(|a| self.warp.pose_for(*c, a.cur).contains(p.x, p.y)))
+    }
+    /// The rect the window under `p` is shown at (screenshots pick it).
+    pub fn window_shown_at(&self, p: Vec2d) -> Option<Rect> {
+        let client = self.window_at(p)?;
+        let pose = self.warp.pose_for(client, self.anims.get(&client)?.cur);
+        Some(Self::lrect_to_rect(pose.shown))
+    }
+    /// The window under `p`, with its app's own image: the texture of the
+    /// frame it last presented and that frame's size in pixels.
+    pub fn window_image_at(&self, p: Vec2d) -> Option<(Texture, [u32; 2])> {
+        let client = self.window_at(p)?;
+        let item = self.items.get(&client)?;
+        with_tile_host(item, |tile| tile.presented_image()).flatten()
+    }
+    /// Files dropped at `p`: the window under it gets them as a drop at that
+    /// point; its client, when it took them.
+    pub fn drop_files_at(&mut self, cx: &mut Cx, p: Vec2d, paths: Vec<String>) -> Option<ClientId> {
+        let client = self.window_at(p)?;
+        let item = self.items.get(&client)?.clone();
+        let at = self.warp_unmap(client, p);
+        with_tile_host(&item, |tile| tile.drop_files(cx, at, paths)).filter(|taken| *taken).map(|_| client)
     }
     pub fn chrome_hit(&self, p: Vec2d) -> Option<(ClientId, ChromeHit)> {
+        // A Float handle hangs above its window's top edge: outside the rect.
+        if self.skin == Skin::Float {
+            let above = self.title_hits.iter().rev().find(|(c, r, h)| {
+                !matches!(h, ChromeHit::Resize(..)) && r.contains(p)
+                    && self.anims.get(c).is_some_and(|a| !Self::lrect_to_rect(a.cur).contains(p))
+            });
+            if let Some((c, _, h)) = above { return Some((*c, *h)); }
+        }
         let top = self.window_at(p)?;
+        let p = self.warp_unmap(top, p);
         self.title_hits.iter().rev().find(|(c,r,_)| *c==top && r.contains(p)).map(|(c,_,h)| (*c,*h))
+    }
+    /// Everything a parked window's capture is made of besides its pixels'
+    /// source: None when it cannot be told (always re-capture).
+    fn warp_signature(&self, client: ClientId, rect: Rect, focus: f64, fade: f64, has_frame: bool, arrival: f32, startup_glass: bool, dpi: f64) -> Option<(u64, u64)> {
+        use std::hash::{Hash, Hasher};
+        let serial = self.items.get(&client).and_then(|item| with_tile_host(item, |v| v.content_serial()))??;
+        if !has_frame || arrival < 1.0 || startup_glass || self.style.active() || self.composing && self.terminal_clients.contains(&client)
+            || self.group_tabs.contains_key(&client) || self.dock_warps.contains_key(&client) || self.hint == Some(client) {
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (rect.pos.x.to_bits(), rect.pos.y.to_bits(), rect.size.x.to_bits(), rect.size.y.to_bits(), (focus * 1000.0) as i32, (fade * 1000.0) as i32).hash(&mut h);
+        (self.titles.get(&client), self.chrome_hover.filter(|(c, _)| *c == client).map(|(_, hit)| format!("{hit:?}")), self.chrome_pressed.filter(|(c, _)| *c == client).map(|(_, hit)| format!("{hit:?}"))).hash(&mut h);
+        (std::mem::discriminant(&self.style.target), self.style.dark, self.spanned_tiles.contains(&client), std::mem::discriminant(&self.skin), self.draws_own_chrome(client), dpi.to_bits()).hash(&mut h);
+        // Everything the capture is made of but the client's frame: when only
+        // the frame differs, the client's dirty region is all that does.
+        let base = h.clone().finish();
+        serial.hash(&mut h);
+        Some((h.finish(), base))
+    }
+    /// Tell each client whether any of its window shows: minimized and
+    /// settled, on a space that is not shown, or fully covered by a window
+    /// above it (opaque, fully faded in, not moving) means no. A hidden client
+    /// does no frame work; the tile keeps its last frame. A window that has not
+    /// drawn yet is never hidden, and a hidden one must stay unseen for
+    /// `HIDE_AFTER_SECS` first, so a window flicking past does not stop and
+    /// restart its child. Parked windows are visible.
+    fn update_visibility(&mut self, cx: &mut Cx, mobile: bool) {
+        let now = crate::host::now();
+        let drawn: HashSet<ClientId> = self.zorder.iter().copied().collect();
+        let settled = |a: &TileAnim| a.close_t.is_none() && a.popin() == (1.0, 1.0) && a.move_t() >= 1.0;
+        let mut unseen: HashSet<ClientId> = HashSet::new();
+        for (i, client) in self.zorder.iter().enumerate() {
+            let gone = self.minimized.contains(client) && !self.dock_warps.get(client).is_some_and(DockWarp::active);
+            // Fully covered by the windows above it (one or several together) is unseen: the
+            // app gets no frames until it shows again. With glass the desk blurs what lies
+            // behind a window; a covered window's last frame is what it shows there.
+            let covered = self.anims.get(client).is_some_and(|me| {
+                if self.warp.pose_for(*client, me.cur).displaced() { return false; }
+                let over: Vec<LRect> = self.zorder[i + 1..].iter().filter(|over| {
+                    !self.minimized.contains(over) && !self.dock_warps.contains_key(over)
+                }).filter_map(|over| self.anims.get(over).filter(|a| settled(a) && !self.warp.pose_for(*over, a.cur).displaced()).map(|a| a.cur)).collect();
+                covered_by_union(me.cur, &over)
+            });
+            if gone || covered {
+                unseen.insert(*client);
+            }
+        }
+        if !mobile {
+            unseen.extend(self.items.keys().filter(|c| !drawn.contains(c)).copied());
+        }
+        // An app with several windows hides only when every one of them is unseen.
+        let owner = |c: &ClientId| self.window_owners.get(c).copied().unwrap_or(*c);
+        let seen_apps: HashSet<ClientId> = self.items.keys().filter(|c| !unseen.contains(c)).map(owner).collect();
+        unseen.retain(|c| !seen_apps.contains(&owner(c)));
+        let clients: Vec<ClientId> = self.items.keys().copied().collect();
+        for client in clients {
+            let want_hidden = unseen.contains(&client);
+            let state = self.visibility.entry(client).or_default();
+            let hide_now = match (want_hidden, state.unseen_since) {
+                (false, _) => { state.unseen_since = None; false }
+                (true, None) => { state.unseen_since = Some(now); false }
+                (true, Some(since)) => now - since >= HIDE_AFTER_SECS,
+            };
+            if state.hidden == hide_now {
+                continue;
+            }
+            let sent = self.items.get(&client).and_then(|item| with_tile_host(item, |v| {
+                // A window with no frame yet needs its child running.
+                if hide_now && !v.has_frame() { return false; }
+                v.set_visible(cx, !hide_now)
+            })).unwrap_or(false);
+            if sent {
+                self.visibility.entry(client).or_default().hidden = hide_now;
+            }
+        }
+        self.visibility.retain(|c, _| self.items.contains_key(c));
+        // A window waiting out `HIDE_AFTER_SECS` is looked at again next frame.
+        if self.visibility.values().any(|v| v.unseen_since.is_some() && !v.hidden) {
+            cx.redraw_area(self.area);
+        }
+    }
+    /// The rect the child is configured at for a window whose settled desk
+    /// rect is `target`: its client area inside the border, handle and title,
+    /// snapped to the device grid. A compact window, or one with its own chrome, has no title.
+    fn settled_child_rect(&self, target: LRect, compact: bool, spanned: bool, grouped: bool, dpi: f64) -> Rect {
+        let settled = snap_to_device(Self::lrect_to_rect(target), dpi);
+        let settled_inset = if spanned { 0.0 } else { self.skin.inset(self.style.target_value([BORDER_SIZE, 0.0, 0.0, 3.0, 1.0])) };
+        let settled_resize_bar = if spanned { 0.0 } else { self.style.target_value([0.0, 0.0, 0.0, 0.0, 8.0]) };
+        let mut settled_inner = snap_child_rect(
+            Rect {
+                pos: settled.pos + dvec2(settled_inset, settled_inset),
+                size: dvec2(
+                    (settled.size.x - settled_inset * 2.0).max(1.0),
+                    (settled.size.y - settled_inset * 2.0 - settled_resize_bar).max(1.0),
+                ),
+            },
+            dpi,
+        );
+        let title_h = if compact || spanned { 0.0 } else { self.skin.title_height(self.style.target.title_height()).min(settled_inner.size.y * 0.3) };
+        settled_inner.pos.y += title_h;
+        settled_inner.size.y = (settled_inner.size.y - title_h).max(1.0);
+        let (_, settled_child) = split_groupbar(settled_inner, grouped);
+        if grouped { snap_child_rect(settled_child, dpi) } else { settled_child }
+    }
+
+    fn send_parked(&mut self, cx: &mut Cx, client: ClientId, msg: &makepad_widgets::makepad_platform::ime::HostedParked) {
+        if let Some(mut v) = self.items.get(&client).and_then(|item| item.borrow_mut::<MpRunView>()) {
+            v.send_parked(cx, msg);
+        }
+    }
+
+    /// One drawn frame of a client in the compact-forms sequence
+    /// (`spacewarp/compact.rs`): tell it it is parked or unparked, see whether
+    /// it presented a frame at the size it is configured at, move the waits
+    /// along, and when a cross-fade begins keep the frozen capture as its
+    /// outgoing layer.
+    fn compact_frame(&mut self, cx: &mut Cx2d, scope: &mut Scope, client: ClientId, pose: Option<Pose>, target: LRect, dpi: f64, spanned: bool) {
+        let dragged = scope.data.get::<WmState>().is_some_and(|s| s.dragging.contains(&client));
+        let now = crate::host::now();
+        let max = self
+            .anims
+            .get(&client)
+            .and_then(|a| self.warp.zones_of(a.cur))
+            .map_or([0.0, 0.0], |z| crate::spacewarp::compact::slot_max(z.zone_w(), z.screen.h, self.warp.frame));
+        // A window being pulled off its shelf is unparked from the first
+        // moment: the client is asked for its full-size render at once and
+        // the compact view cross-fades to it while the window grows.
+        let leaving = self.warp.leave.is_some_and(|l| l.client == client);
+        let hint_scale = if leaving { None } else { pose.map(|p| p.scale) };
+        if let Some(msg) = self.warp.compact.poll(client, hint_scale, dragged, max, now) {
+            self.send_parked(cx, client, &msg);
+        }
+        let cfg = pose.and(self.warp.compact_config_rect(client, target));
+        let child = self.settled_child_rect(cfg.unwrap_or(target), cfg.is_some() || self.draws_own_chrome(client), spanned, self.group_tabs.contains_key(&client), dpi);
+        let ready = self
+            .items
+            .get(&client)
+            .and_then(|item| item.borrow_mut::<MpRunView>().map(|v| v.frame_matches(child.size, dpi)))
+            .unwrap_or(false);
+        let settled = self.anims.get(&client).is_some_and(|a| a.move_t() >= 1.0);
+        let tick = self.warp.compact.tick(client, now, ready, settled);
+        if let Some(msg) = tick.send {
+            self.send_parked(cx, client, &msg);
+        }
+        if tick.swapped {
+            self.warp_sigs.remove(&client);
+            if let (Some(frame), Some(&(_, pose, rounding))) = (self.desktop_frames.remove(&client), self.last_drawn.get(&client)) {
+                // The outgoing layer is drawn from the capture at the rect it
+                // was MADE at (a compact draw records its own rect, not the
+                // capture's: the fade then showed a corner of the bigger
+                // window, magnified).
+                let desk = frame.made_at();
+                if let Some(old) = self.swap_out.insert(client, SwapOut { frame, desk, pose, rounding }) {
+                    old.frame.forget(cx);
+                }
+            }
+        }
+    }
+
+    /// The outgoing layer of a cross-fade between a window's scaled view
+    /// and its compact surface: the frozen capture, fading out over the
+    /// incoming view that was just drawn.
+    fn draw_swap_out(&mut self, cx: &mut Cx2d, client: ClientId) {
+        let Some(mut out) = self.swap_out.remove(&client) else { return };
+        let Some(alpha) = self.warp.compact.fade(client) else {
+            out.frame.forget(cx);
+            return;
+        };
+        out.frame.freeze(cx);
+        if !out.frame.frozen() && self.composing { self.compositor.as_mut().unwrap().content_pass(out.frame.pass_id()); }
+        self.draw_warp_panel.draw(cx, &out.frame, out.desk, &out.pose, out.rounding, alpha as f32);
+        if self.composing { self.compositor.as_mut().unwrap().content(Self::lrect_to_rect(out.pose.bounds())); }
+        self.swap_out.insert(client, out);
+    }
+    /// The desktop turns Classic: every parked window leaves its slot from
+    /// where it is SHOWN (its tween then runs to the full-size rect the
+    /// layout has given it), so it grows out of its slot.
+    pub(crate) fn begin_unpark(&mut self) {
+        let shown: Vec<(ClientId, LRect)> = self
+            .anims
+            .iter()
+            .filter_map(|(c, a)| {
+                let p = self.warp.pose_for(*c, a.cur);
+                p.displaced().then(|| (*c, p.shown))
+            })
+            .collect();
+        for (c, r) in shown {
+            if let Some(a) = self.anims.get_mut(&c) {
+                a.snap_to(r);
+            }
+        }
+    }
+    /// A window pulled out of its zone is let go while still partly scaled:
+    /// its tween starts from the rect it shows (the next sync retargets it
+    /// to the full-size rect), so it grows into place instead of jumping.
+    pub(crate) fn release_from(&mut self, client: ClientId, shown: LRect) {
+        if let Some(a) = self.anims.get_mut(&client) {
+            a.snap_to(shown);
+        }
+    }
+    /// A client says it draws its own chrome (or stopped).
+    /// A domain app ended (`own` false: its card gets the desk's title bar) or runs again.
+    pub(crate) fn set_own_chrome(&mut self, cx: &mut Cx, client: ClientId, own: bool) {
+        if self.draws_own_chrome(client) == own { return; }
+        if own { self.desk_chrome.remove(&client); } else { self.desk_chrome.insert(client); }
+        if self.domain_clients.contains(&client) {
+            self.with_domain_view(cx, client, |_, v| v.set_own_chrome(own));
+        }
+        self.redraw(cx);
+    }
+    /// The pose of a visible window (None when it is not drawn).
+    pub(crate) fn warp_pose(&self, client: ClientId) -> Option<Pose> {
+        self.anims.get(&client).map(|a| self.warp.pose_for(client, a.cur))
+    }
+    /// A shown point as the window's own desk coordinate.
+    fn warp_unmap(&self, client: ClientId, p: Vec2d) -> Vec2d {
+        let Some(a) = self.anims.get(&client) else { return p };
+        let (x, y) = self.warp.pose_for(client, a.cur).unmap(self.warp.placed(client, a.cur), p.x, p.y);
+        dvec2(x, y)
+    }
+    /// The ring that calls out a shelf item (its app's dock icon was clicked).
+    /// The plain caption of the fullscreen window, slid down over its content
+    /// by `fullscreen_reveal`.
+    fn draw_fullscreen_caption(&mut self, cx: &mut Cx2d) {
+        let Some(p) = self.fullscreen_reveal.as_ref().map(|e| e.value().clamp(0.0, 1.0)).filter(|p| *p > 0.001) else { return };
+        let Some(client) = self.fullscreen_plain_client() else { return };
+        let Some(a) = self.anims.get(&client) else { return };
+        let h = self.skin.title_height(self.style.title_height()).max(1.0);
+        let screen = Self::lrect_to_rect(a.cur);
+        let focus = a.focus;
+        let r = Rect { pos: dvec2(screen.pos.x, screen.pos.y - h * (1.0 - p)), size: dvec2(screen.size.x, h + 1.0) };
+        self.draw_window_chrome(cx, client, r, h, focus, p);
+        if self.composing { self.compositor.as_mut().unwrap().content(r); }
+    }
+    /// The fullscreen window shown now whose caption is the WM's (plain).
+    fn fullscreen_plain_client(&self) -> Option<ClientId> {
+        self.zorder.iter().rev().copied().find(|c| self.spanned_tiles.contains(c) && !self.draws_own_chrome(*c) && !self.minimized.contains(c))
+    }
+    /// An event started something that moves: the clock of the animation
+    /// loop starts now, so its first step is one frame, not the time since
+    /// the last animation.
+    fn kick(&mut self) {
+        if !self.animating {
+            self.last_anim_time = 0.0;
+        }
+        self.animating = true;
+    }
+    /// The pointer moved: the plain caption of a fullscreen window wants to be
+    /// out while the pointer touches the top edge (and stays out while it is
+    /// over the caption). True when that changed.
+    pub fn fullscreen_pointer(&mut self, y: f64) -> bool {
+        if self.fullscreen_plain_client().is_none() {
+            return false;
+        }
+        let h = self.skin.title_height(self.style.title_height()).max(1.0);
+        let open = self.fullscreen_reveal.as_ref().is_some_and(|e| e.target() > 0.5);
+        let want = fullscreen_caption_wanted(open, y, h);
+        if want == open && self.fullscreen_reveal.is_some() {
+            return false;
+        }
+        let e = self.fullscreen_reveal.get_or_insert_with(|| crate::motion::Ease::at(0.0, 0.25));
+        e.retarget(f64::from(want as u8));
+        self.kick();
+        true
+    }
+    fn draw_shelf_pulse(&mut self, cx: &mut Cx2d) {
+        use crate::shell::ui::rect;
+        let Some((client, t)) = self.warp.pulse else { return };
+        let Some(a) = self.anims.get(&client) else {
+            self.warp.pulse = None;
+            return;
+        };
+        let alpha = crate::spacewarp::shelf::pulse_alpha(t / crate::spacewarp::shelf::PULSE_SECS) as f32;
+        let s = self.warp.pose_for(client, a.cur).shown;
+        let ring = 4.0;
+        let color = Vec4f { w: alpha, ..self.menu_text_color };
+        for r in [
+            rect(s.x - ring, s.y - ring, s.w + 2.0 * ring, ring),
+            rect(s.x - ring, s.y + s.h, s.w + 2.0 * ring, ring),
+            rect(s.x - ring, s.y, ring, s.h),
+            rect(s.x + s.w, s.y, ring, s.h),
+        ] {
+            self.shell_draw.solid(cx, r, color);
+        }
+    }
+    /// The shelf items and where they rest: the warped windows and the
+    /// compact ones parked on a side, each with the display it is on.
+    fn shelf_slots(&self) -> Vec<(u64, Pose, LRect)> {
+        let mut slots = Vec::new();
+        for client in self.zorder.iter().copied() {
+            let Some(a) = self.anims.get(&client).filter(|a| a.close_t.is_none()) else { continue };
+            if self.minimized.contains(&client) || self.dock_warps.get(&client).is_some_and(DockWarp::active) {
+                continue;
+            }
+            let Some(screen) = self.warp.zones_of(a.cur).map(|z| z.screen) else { continue };
+            let base = self.warp.pose_drawn(client, a.cur);
+            let pose = match self.warp.compact_rect(client, a.cur) {
+                Some(r) if base.warped() && base.side != 0 => Pose::compact(r, base.side),
+                _ if base.warped() && base.side != 0 => base,
+                _ => continue,
+            };
+            slots.push((client, pose, screen));
+        }
+        slots
+    }
+    /// Recompute the shelf poses (the unfold's push, the auto-hide shift)
+    /// from where the items rest now.
+    fn refresh_swell(&mut self) {
+        let slots = self.shelf_slots();
+        let sizes: std::collections::HashMap<u64, (f64, f64)> = self.anims.iter().map(|(c, a)| (*c, (a.cur.w, a.cur.h))).collect();
+        self.warp.swell_refresh(&slots, &|c| sizes.get(&c).copied());
+    }
+    /// Unfold `client` (a shelf item) to its half size, or fold the open one.
+    pub(crate) fn unfold(&mut self, client: ClientId, side: i8, screen: LRect, half_h: f64, reserve: f64) {
+        self.warp.unfold = Some(crate::spacewarp::shelf::Unfold::new(client, side, screen, half_h, reserve));
+        self.kick();
+    }
+    pub(crate) fn fold(&mut self) {
+        if let Some(u) = &mut self.warp.unfold {
+            u.fold();
+        }
+        self.kick();
+    }
+    /// The app draws its own caption (`own_chrome.rs`).
+    pub fn draws_own_chrome(&self, client: ClientId) -> bool {
+        !self.wayland_clients.contains(&client) && !self.module_clients.contains(&client) && !self.desk_chrome.contains(&client)
     }
     pub fn chrome_button_rect(&self, client: ClientId, hit: ChromeHit) -> Option<Rect> {
         self.title_hits.iter().rev().find(|(c,_,h)|*c==client && *h==hit).map(|(_,r,_)|*r)
@@ -1682,7 +2547,29 @@ impl WmDesk {
             self.draw_shadow.draw_abs(cx,rect(r.pos.x-24.0,r.pos.y-24.0,r.size.x+48.0,r.size.y+48.0));
         }
     }
+    /// The window's skin: one quad over the content, its title text, and its
+    /// hit regions (the resize edges last, so they win).
+    fn draw_skin(&mut self, cx: &mut Cx2d, client: ClientId, r: Rect, inset: f64, h: f64, focus: f64, fade: f64) {
+        let d = crate::skins::Draw {
+            skin: self.skin,
+            rect: r,
+            inset,
+            title_h: h,
+            focus,
+            fade,
+            hover: self.chrome_hover.filter(|(c, _)| *c == client).map(|(_, hit)| hit),
+            grow: ease_out_quint(*self.skin_grow.entry(client).or_insert(0.0)),
+            accent: self.accent,
+            light: self.skin_light,
+            title: self.titles.get(&client).map(String::as_str).unwrap_or(""),
+        };
+        self.skin_draw.draw(cx, &mut self.shell_draw, &d, client, &mut self.title_hits);
+        for (edge, x, y) in crate::skins::resize_edges(r) {
+            self.title_hits.push((client, edge, ChromeHit::Resize(x, y)));
+        }
+    }
     fn draw_window_chrome(&mut self, cx: &mut Cx2d, client: ClientId, r: Rect, h: f64, focus: f64, fade: f64) {
+        if self.skin.active() { return; }
         use crate::desktop::DesktopStyle;
         use crate::shell::{rgb, alpha, ui::{rect,Ico,HAlign}};
         let t=&self.style;
@@ -1803,21 +2690,14 @@ impl WmDesk {
             self.title_hits.push((client,button,hit));
         }
         self.chrome.pressed=0.0;
-        for (edge,x,y) in [
-            (rect(r.pos.x,r.pos.y+12.0,5.0,(r.size.y-24.0).max(0.0)),-1,0),
-            (rect(r.pos.x+r.size.x-5.0,r.pos.y+12.0,5.0,(r.size.y-24.0).max(0.0)),1,0),
-            (rect(r.pos.x+12.0,r.pos.y,(r.size.x-24.0).max(0.0),4.0),0,-1),
-            (rect(r.pos.x+12.0,r.pos.y+r.size.y-5.0,(r.size.x-24.0).max(0.0),5.0),0,1),
-            (rect(r.pos.x,r.pos.y,8.0,8.0),-1,-1),
-            (rect(r.pos.x+r.size.x-8.0,r.pos.y,8.0,8.0),1,-1),
-            (rect(r.pos.x,r.pos.y+r.size.y-12.0,12.0,12.0),-1,1),
-            (rect(r.pos.x+r.size.x-12.0,r.pos.y+r.size.y-12.0,12.0,12.0),1,1),
-        ] {self.title_hits.push((client,edge,ChromeHit::Resize(x,y)));}
+        for (edge,x,y) in crate::skins::resize_edges(r) {self.title_hits.push((client,edge,ChromeHit::Resize(x,y)));}
     }
 }
 
 impl Widget for WmDesk {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.vr_lens = None;
+        frametrace::begin_frame();
         cx.begin_turtle(walk, self.layout);
         let mut rect = cx.turtle().rect();
         self.desk_rect = rect;
@@ -1836,7 +2716,9 @@ impl Widget for WmDesk {
 
         if scope.data.get_mut::<WmState>().is_some_and(|s|s.style.target.mobile()) {
             // No desk tiles here: nothing to tell an app about its screens.
-            if let Some(state) = scope.data.get_mut::<WmState>() { state.tile_origins.clear(); }
+            if let Some(state) = scope.data.get_mut::<WmState>() { state.tile_origins.clear(); state.vr.output = None; }
+            // VR mode shows desk windows only: a phone style draws none.
+            if let Some(mut view) = self.vr.take() { view.close(cx); }
             self.draw_phone_scene(cx,scope,rect);
             cx.end_turtle_with_area(&mut self.area);
             return DrawStep::done();
@@ -1888,6 +2770,32 @@ impl Widget for WmDesk {
         } else {
             vec![(state.screens.active, area)]
         };
+        self.warp.mode = state.warp.mode;
+        state.warp.tiling = !state.style.target.floating();
+        self.warp.tiling = state.warp.tiling;
+        self.warp.parked = state.screens.screens.iter().flat_map(|s| s.layout.desktop.windows.iter().filter(|w| w.warped).map(|w| w.client)).collect();
+        // The pull-out in progress (kept in the shared state by the drag): its
+        // growing pose is what the window is drawn and hit at.
+        self.warp.leave = state.warp.leave;
+        self.warp.enter = state.warp.enter;
+        self.warp.set_areas(shown.iter().map(|(_, a)| *a));
+        self.shown_areas = shown.clone();
+        self.warp.dragged = state.warp.armed_drag.into_iter().filter(|c| state.dragging.contains(c)).collect();
+        if let Some((i, _)) = shown.first() {
+            let h = state.shelf_autohide.hidden(*i);
+            state.backdrop.observe_hide([h[0] as f32, h[1] as f32]);
+        }
+        for (i, area) in &shown {
+            let hidden = state.shelf_autohide.hidden(*i);
+            self.warp.set_hidden(*area, hidden);
+        }
+        self.refresh_swell();
+        state.backdrop.classic = !self.warp.shelves_on();
+        state.backdrop.set_warp(match (self.warp.first_zones(), shown.first()) {
+            (Some(z), _) => crate::backdrop::WarpUniforms::from_zones(&z),
+            (None, Some((_, a))) => crate::backdrop::WarpUniforms::flat(a),
+            (None, None) => crate::backdrop::WarpUniforms::off(),
+        });
         // `rects` already hands floats (and the scratchpad) back after the
         // tiled windows, so drawing in order puts them on top.
         // A screen a span covers shows only the span's client, drawn once
@@ -1895,11 +2803,37 @@ impl Widget for WmDesk {
         let spans: Vec<(ClientId, LRect)> = if state.per_screen() { state.screens.span_rects() } else { Vec::new() };
         let mut targets: Vec<(ClientId, LRect)> = shown
             .iter()
-            .filter(|(i, _)| state.screens.spanned(*i).is_none())
+            .filter(|(i, _)| state.screens.spanned(*i).is_none() && !state.spaces.slides.active(*i))
             .flat_map(|(i, a)| state.layout_at(*i).rects(*a, gap))
             .collect();
         targets.extend(spans.iter().copied());
+        // Windows a fullscreen window is growing over stay under it a moment.
+        if !state.spaces.underlay.is_empty() {
+            if crate::host::now() - state.spaces.underlay_at > UNDERLAY_SECS {
+                state.spaces.underlay.clear();
+            } else {
+                let under: Vec<(ClientId, LRect)> = state
+                    .spaces
+                    .underlay
+                    .iter()
+                    .filter(|(i, c, _)| shown.iter().any(|(s, _)| s == i) && !targets.iter().any(|(t, _)| t == c))
+                    .map(|(_, c, r)| (*c, *r))
+                    .collect();
+                targets.splice(0..0, under);
+            }
+        }
         self.spanned_tiles = spans.iter().map(|(c, _)| *c).collect();
+        // A fullscreen space's window is drawn bare, whichever space is shown.
+        for s in &state.screens.screens {
+            self.spanned_tiles.extend(s.layout.spaces.items().iter().filter_map(|sp| sp.fullscreen_client()));
+        }
+        // The captures a slide or the strip needs, before anything is synced.
+        let (cap_borders, cap_areas) = (state.borders, shown.clone());
+        self.capture_spaces(cx, scope, &cap_borders, &cap_areas);
+        let Some(state) = scope.data.get_mut::<WmState>() else {
+            cx.end_turtle_with_area(&mut self.area);
+            return DrawStep::done();
+        };
         if shown.len() > 1 {
             // Every screen's tiles under every screen's floats, the
             // dragged window on top: a float crossing a seam (it changes
@@ -1926,8 +2860,11 @@ impl Widget for WmDesk {
                 let restored=was_minimized.contains(&client) && !hidden;
                 if (hidden && !was_minimized.contains(&client)) || restored {
                     if !self.dock_warps.contains_key(&client) {
-                        let source=targets.iter().find(|(c,_)|*c==client).map(|(_,r)|Self::lrect_to_rect(*r))
-                            .or_else(||self.anims.get(&client).map(|a|Self::lrect_to_rect(a.cur)));
+                        // Minimising starts from where the window IS (its target is
+                        // already the minimised layout's rect); restoring heads for its target.
+                        let from_anim=self.anims.get(&client).map(|a|Self::lrect_to_rect(a.cur));
+                        let from_target=targets.iter().find(|(c,_)|*c==client).map(|(_,r)|Self::lrect_to_rect(*r));
+                        let source=if hidden {from_anim.or(from_target)} else {from_target.or(from_anim)};
                         if let (Some(source),Some(slot))=(source,state.clients.get(&client)) {
                             self.dock_warps.insert(client,DockWarp::new(source,crate::desktop::dock_icon_bounds(state,size,&slot.app),restored));
                         }
@@ -1955,7 +2892,13 @@ impl Widget for WmDesk {
             }
         }
         let focused = state.layout().focused_client();
+        {
+            let rect_of = |c: ClientId| targets.iter().find(|(t, _)| *t == c).map(|(_, r)| Self::lrect_to_rect(*r));
+            state.backdrop.observe(focused.and_then(rect_of));
+        }
         self.accent = state.accent;
+        self.skin = state.skin;
+        self.skin_light = state.backdrop.kind.map(|k| k.light_dir());
         self.hint = state.drop_hint;
         let borders = state.borders;
         let dragging = state.dragging.clone();
@@ -2020,6 +2963,9 @@ impl Widget for WmDesk {
         // Sync animation targets. Tiles that vanished from the layout
         // without a close animation (workspace switch) go immediately.
         let live: Vec<ClientId> = targets.iter().map(|(c, _)| *c).collect();
+        // A space just arrived (a slide ended): its windows were there all
+        // along and appear at once.
+        let arrived = state.spaces.slides.take_ended();
         for (client, target) in &targets {
             match self.anims.get_mut(client) {
                 Some(anim) => {
@@ -2041,7 +2987,7 @@ impl Widget for WmDesk {
                     // of one of last frame's groups is a reveal; anything
                     // else is genuinely new.
                     let focus = Some(*client) == focused;
-                    let revealed = prev_groups.iter().any(|m| m.contains(client));
+                    let revealed = arrived || prev_groups.iter().any(|m| m.contains(client));
                     let anim = if revealed {
                         TileAnim::settled(*target, focus)
                     } else {
@@ -2056,6 +3002,10 @@ impl Widget for WmDesk {
         // when the workspace returns.
         self.anims
             .retain(|client, anim| live.contains(client) || anim.close_t.is_some());
+        self.warp_sigs.retain(|client, _| self.anims.contains_key(client));
+        self.warp.compact.retain(|client| state.clients.contains_key(&client));
+        self.last_drawn.retain(|client, _| self.anims.contains_key(client));
+        self.swap_out.retain(|client, _| self.anims.contains_key(client));
         // A dropped capture also leaves the gauss request table, which is
         // keyed by its pass slot and would otherwise greet the next capture.
         let dropped: Vec<ClientId> = self
@@ -2070,6 +3020,8 @@ impl Widget for WmDesk {
             }
         }
 
+        // The shelf poses are derived from THIS frame's animations (one pass).
+        self.refresh_swell();
         // Closing tiles paint under the live ones.
         let closing: Vec<ClientId> = self
             .anims
@@ -2089,29 +3041,69 @@ impl Widget for WmDesk {
             &previews,
         );
         self.composing = self.style.weights[1] > 0.001 || self.zorder.iter().any(|c| self.terminal_clients.contains(c));
+        // VR mode: the source screen's windows go to the VR pass instead.
+        let vr_plan = scope.data.get_mut::<WmState>().and_then(|state| {
+            let plan = vr_plan(state, &self.zorder, &self.minimized);
+            if plan.is_none() {
+                state.vr.output = None;
+            }
+            plan
+        });
         if self.composing {
-            self.compositor.get_or_insert_with(|| backdrop::BackdropCompositor::new(cx)).begin(cx);
+            let compositor = self.compositor.get_or_insert_with(|| backdrop::BackdropCompositor::new(cx));
+            compositor.begin(cx);
             let bounds = self.wallpaper.area().rect(cx);
-            if let Some(mut wallpaper) = self.wallpaper.borrow_mut::<View>() { wallpaper.draw_cached_texture(cx, bounds); }
+            if let Some(mut wallpaper) = self.wallpaper.borrow_mut::<View>() {
+                wallpaper.draw_cached_texture(cx, bounds);
+            }
         }
+        if vr_plan.is_none() && self.vr.is_some() {
+            if let Some(mut view) = self.vr.take() { view.close(cx); }
+            self.vr_desktop = None;
+            self.vr_targets.clear();
+            // Out of VR: the captures were children of its pass; the flat
+            // path makes the ones it needs again.
+            for (_, frame) in self.desktop_frames.drain() {
+                frame.forget(cx);
+            }
+            log!("wm: vr view closed");
+        }
+        let in_vr = |c: &ClientId| vr_plan.as_ref().is_some_and(|p| p.clients.contains(c));
         for client in closing {
+            if in_vr(&client) {
+                continue;
+            }
             self.draw_tile(cx, scope, client, &borders);
         }
         for (client, _) in &targets {
-            if previews.contains(client) {
+            if previews.contains(client) || in_vr(client) {
                 continue;
             }
             self.draw_tile(cx, scope, *client, &borders);
         }
+        // A slide shows two captured spaces where the live ones would be.
+        self.draw_slides(cx, scope);
         // Then the scrim and the previews floating over it.
         if !previews.is_empty() {
             self.draw_panel.alpha = 0.5;
             self.draw_panel.draw_abs(cx, rect);
             if self.composing { self.compositor.as_mut().unwrap().content(rect); }
             for client in &previews {
+                if in_vr(client) {
+                    continue;
+                }
                 self.draw_tile(cx, scope, *client, &borders);
             }
         }
+        self.draw_shelf_pulse(cx);
+        self.draw_fullscreen_caption(cx);
+        let mobile = self.style.target.mobile();
+        self.update_visibility(cx, mobile);
+        let vr_lens = vr_plan.and_then(|plan| self.draw_vr(cx, scope, plan, &borders));
+        // The strip and the cheat sheet are above everything.
+        self.draw_strip(cx, scope);
+        let desk_rect = self.desk_rect;
+        self.draw_sheet(cx, scope, desk_rect);
 
         if self.composing {
             // The dock samples the final window stack. When no window reaches
@@ -2130,8 +3122,21 @@ impl Widget for WmDesk {
             if let Some(state) = scope.data.get_mut::<WmState>() { state.dock_backdrop = snapshot; }
         }
 
-        let animating = self.dock_warps.values().any(DockWarp::active) || self.anims.values().any(|a| {
-            a.move_t < 1.0
+        if let Some(lens) = vr_lens {
+            self.vr_lens = Some(lens);
+        }
+
+        let (backdrop_moving, backdrop_dirty) = scope.data.get_mut::<WmState>().map_or((false, false), |s| (s.backdrop.moving(), s.backdrop.take_dirty()));
+        let hover = self.chrome_hover.map(|(c, _)| c);
+        let growing = self.skin_grow.iter().any(|(c, g)| *g != (hover == Some(*c)) as u8 as f64);
+        let spaces_busy = scope.data.get_mut::<WmState>().is_some_and(|s| s.spaces.busy() || !s.spaces.underlay.is_empty());
+        if spaces::trace_frames() {
+            let pos = scope.data.get_mut::<WmState>().and_then(|s| s.spaces.slides.get(s.screens.active).map(|l| l.pos.x));
+            log!("wm: desk frame {:.4} busy={} moving={} slide={:?} shots={}", crate::host::now(), spaces_busy, self.anims.values().any(|a| a.moving()), pos, self.space_shots.len());
+        }
+        let dock_sliding = scope.data.get_mut::<WmState>().is_some_and(|s| s.dock_autohide.sliding() || s.shelf_autohide.sliding());
+        let animating = spaces_busy || dock_sliding || scope.data.get_mut::<WmState>().is_some_and(|s| s.warp.enter.is_some_and(|e| e.busy())) || self.fullscreen_reveal.as_ref().is_some_and(|e| !e.settled()) || self.warp.unfold.is_some_and(|u| u.busy()) || self.warp.pulse.is_some() || growing || backdrop_moving || self.warp.compact.busy() || self.dock_warps.values().any(DockWarp::active) || self.anims.values().any(|a| {
+            a.moving()
                 || a.open_t < 1.0
                 || a.close_t.is_some()
                 || (a.focus - a.focus_target).abs() > 0.001
@@ -2140,13 +3145,20 @@ impl Widget for WmDesk {
             if !self.animating {
                 self.last_anim_time = 0.0;
             }
-            self.animating = true;
+            self.kick();
             self.next_frame = cx.new_next_frame();
         } else {
             self.animating = false;
         }
 
+        let pass_size = cx.owning_window_or_root_pass_size();
+        self.ft_frame(scope, pass_size);
         cx.end_turtle_with_area(&mut self.area);
+        // The background was drawn before this frame told it what changed
+        // (the zones, the focus): draw it once more, with the news.
+        if backdrop_dirty {
+            cx.redraw_area(self.area);
+        }
         DrawStep::done()
     }
 
@@ -2155,16 +3167,76 @@ impl Widget for WmDesk {
             self.handle_phone_event(cx,event,scope);
             return;
         }
+        // While a slide runs the spaces are pictures: nothing under the
+        // pointer can be clicked.
+        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_))
+            && scope.data.get_mut::<WmState>().is_some_and(|s| s.spaces.slides.any())
+        {
+            return;
+        }
+        // VR mode: follow the head tracker (uniform updates, no redraw) and
+        // move the pointer marker.
+        if let Some(state) = scope.data.get_mut::<WmState>() {
+            if let Some(view) = &mut self.vr {
+                if view.handle_event(cx, event, state.vr.look, state.vr.recenter, state.vr.headset()) {
+                    cx.redraw_area(self.area);
+                }
+            }
+            if let Event::MouseMove(e) = event {
+                if state.vr.active() && state.vr.pointer != Some((e.abs.x, e.abs.y)) {
+                    state.vr.pointer = Some((e.abs.x, e.abs.y));
+                    if let Some(view) = &mut self.vr {
+                        view.move_marker(cx, &mut self.draw_vr_marker, state.vr.pointer);
+                    }
+                }
+            }
+        }
         if let Some(ne) = self.next_frame.is_event(event) {
             if self.animating {
                 // A first frame after idle has no meaningful delta.
                 let dt = if self.last_anim_time <= 0.0 {
                     1.0 / 60.0
                 } else {
-                    (ne.time - self.last_anim_time).clamp(0.001, 0.05)
+                    (ne.time - self.last_anim_time).clamp(0.001, 0.025)
                 };
                 self.last_anim_time = ne.time;
+                if let Some(e) = &mut self.fullscreen_reveal {
+                    e.step(dt);
+                }
                 self.step_anims(dt);
+                if let Some(state) = scope.data.get_mut::<WmState>() {
+                    state.spaces.step(dt);
+                    state.dock_autohide.step(dt);
+                    state.shelf_autohide.step(dt);
+                    if let Some(e) = &mut state.warp.enter {
+                        e.step(dt);
+                        if e.gone() {
+                            state.warp.enter = None;
+                        }
+                    }
+                    for (i, area) in &self.shown_areas {
+                        self.warp.set_hidden(*area, state.shelf_autohide.hidden(*i));
+                    }
+                    if let Some((i, _)) = self.shown_areas.first() {
+                        let h = state.shelf_autohide.hidden(*i);
+                        // The grid's zone slides with the shelf: the cached
+                        // background draws again for each step of it.
+                        if state.backdrop.observe_hide([h[0] as f32, h[1] as f32]) {
+                            self.wallpaper.redraw(cx);
+                        }
+                    }
+                }
+                self.warp.pulse_step(dt);
+                if let Some(u) = &mut self.warp.unfold {
+                    u.step(dt);
+                    if u.done() {
+                        self.warp.unfold = None;
+                    }
+                }
+                if self.warp.shelf_moves() {
+                    self.refresh_swell();
+                }
+                if let Some(state) = scope.data.get_mut::<WmState>() { state.backdrop.step(dt as f32); }
                 for warp in self.dock_warps.values_mut() {warp.step(dt);}
                 self.reap_closed();
                 self.next_frame = cx.new_next_frame();
@@ -2204,7 +3276,7 @@ impl Widget for WmDesk {
         // makes the actually-topmost widget claim it instead; anything not
         // in `zorder` (a hidden workspace's tiles) is offered last, same
         // as before.
-        let input=matches!(event,Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+        let input=matches!(event,Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_) | Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
         let mut items: Vec<WidgetRef> = self
             .zorder
             .iter()
@@ -2217,11 +3289,35 @@ impl Widget for WmDesk {
                 items.push(item.clone());
             }
         }
+        // Parked (spacewarp) windows are drawn small: each window gets the
+        // pointer as it must see it, and the claim stays with the window
+        // actually shown under it.
+        if let Event::MouseMove(e) = event {
+            if self.fullscreen_pointer(e.abs.y) {
+                cx.redraw_area(self.area);
+            }
+        }
+        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_)) {
+            let order: Vec<(ClientId, Rect)> = self.zorder.iter().rev()
+                .filter(|c| !self.minimized.contains(c) && !self.dock_warps.get(c).is_some_and(DockWarp::active))
+                .filter_map(|c| self.anims.get(c).map(|a| (*c, Self::lrect_to_rect(a.cur)))).collect();
+            if let Some(routed) = self.warp_router.route(&self.warp, event, &order) {
+                for (client, routed) in routed {
+                    if let Some(item) = self.items.get(&client).cloned() { item.handle_event(cx, &routed, scope); }
+                }
+                return;
+            }
+        }
         // Scroll is NOT a captured hit: every area containing the point
         // receives it, so a wheel over a float would also scroll the tile
-        // underneath. Deliver a scroll only to the TOPMOST window under
-        // the pointer.
-        if let Event::Scroll(e) = event {
+        // underneath. Deliver a scroll (or pinch) only to the TOPMOST
+        // window under the pointer.
+        let wheel_at = match event {
+            Event::Scroll(e) => Some(e.abs),
+            Event::Pinch(e) => Some(e.abs),
+            _ => None,
+        };
+        if let Some(abs) = wheel_at {
             let top = self
                 .zorder
                 .iter()
@@ -2229,7 +3325,7 @@ impl Widget for WmDesk {
                 .find(|c| {
                     !self.minimized.contains(c) && self.anims
                         .get(c)
-                        .map(|a| Self::lrect_to_rect(a.cur).contains(e.abs))
+                        .map(|a| Self::lrect_to_rect(a.cur).contains(abs))
                         .unwrap_or(false)
                 })
                 .copied();
@@ -2246,9 +3342,25 @@ impl Widget for WmDesk {
     }
 }
 
+/// Does the pointer at `y` want the plain fullscreen caption out? It comes
+/// when the pointer touches the top edge and stays while it is over the
+/// caption (`h` high, with a little room), then goes.
+pub fn fullscreen_caption_wanted(open: bool, y: f64, h: f64) -> bool {
+    if open { y < h + 8.0 } else { y <= 1.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plain_fullscreen_caption_comes_at_the_top_edge_and_goes_when_the_pointer_does() {
+        assert!(!fullscreen_caption_wanted(false, 40.0, 28.0));
+        assert!(!fullscreen_caption_wanted(false, 5.0, 28.0), "near the edge is not touching it");
+        assert!(fullscreen_caption_wanted(false, 0.0, 28.0));
+        assert!(fullscreen_caption_wanted(true, 30.0, 28.0), "stays while over the caption");
+        assert!(!fullscreen_caption_wanted(true, 80.0, 28.0));
+    }
 
     /// A monospace stand-in for a real font: every character is one unit
     /// wide, so a width is just a character count.
@@ -2460,11 +3572,12 @@ mod tests {
         let mut anim = TileAnim::new(a, false);
         anim.retarget(b);
         assert_eq!(anim.cur, a);
-        // 379ms of 60fps steps lands exactly on the target.
-        for _ in 0..30 {
+        // The spring settles exactly on the target well inside a second.
+        for _ in 0..60 {
             anim.step(1.0 / 60.0);
         }
         assert_eq!(anim.cur, b);
+        assert!(!anim.moving());
         assert!(!anim.step(1.0 / 60.0) || anim.open_t < 1.0);
 
         // Opening: starts at 87% and fully faded out.
@@ -2502,9 +3615,9 @@ mod tests {
         let b = LRect::new(12.0, 5.0, 900.0, 700.0);
         anim.snap_to(b);
         assert_eq!(anim.cur, b);
-        assert_eq!(anim.from, b);
         assert_eq!(anim.target, b);
-        assert_eq!(anim.move_t, 1.0);
+        assert!(!anim.moving());
+        assert_eq!(anim.move_t(), 1.0);
         // A further `step` never moves `cur`: the position tween has
         // nothing left to animate (open_t may still be settling).
         anim.step(1.0 / 60.0);
@@ -2519,9 +3632,51 @@ mod tests {
             anim.snap_to(pos);
             assert_eq!(anim.cur.w, 900.0);
             assert_eq!(anim.cur.h, 700.0);
-            assert_eq!(anim.move_t, 1.0, "a drag frame must never leave a tween running");
+            assert!(!anim.moving(), "a drag frame must never leave a tween running");
         }
         assert_eq!(anim.cur, pos);
+    }
+
+    #[test]
+    fn a_release_mid_growth_draws_the_shown_pose_first_and_then_eases_to_full_size() {
+        use crate::spacewarp::{Leave, Zones};
+        let z = Zones::new(LRect::new(0.0, 0.0, 3440.0, 1440.0));
+        // Pulled out of the left zone, the pointer 40% of a zone inside the band.
+        let l = Leave {
+            client: 1,
+            side: -1,
+            s0: 0.3,
+            from: 6.0,
+            fx: 0.5,
+            fy: 0.5,
+            size: (800.0, 600.0),
+            cursor: (z.left + z.zone_w() * 0.4, 700.0),
+        };
+        let shown = l.release_from(&z);
+        let full = l.desk(&z);
+        assert!(shown.w < full.w && shown.w > 0.3 * full.w, "released mid-growth");
+        // The desk's release: the spring starts at the shown rect...
+        let mut anim = TileAnim::new(full, true);
+        anim.snap_to(shown);
+        anim.retarget(full);
+        assert_eq!(anim.cur, shown, "first drawn rect is the shown pose");
+        // ... and converges on the full-size rect without a jump.
+        let mut last = anim.cur;
+        for _ in 0..600 {
+            anim.step(1.0 / 60.0);
+            assert!((anim.cur.w - last.w).abs() < 60.0, "no jump between frames");
+            last = anim.cur;
+        }
+        assert!(!anim.moving());
+        assert_eq!(anim.cur, full);
+        // Parking direction: a drop snaps to the drag pose, then eases to the slot.
+        let slot = LRect::new(-1500.0, 300.0, 800.0, 600.0);
+        let mut park = TileAnim::new(full, true);
+        park.snap_to(full);
+        park.retarget(slot);
+        assert_eq!(park.cur, full, "first frame after the drop is where it was dragged");
+        park.step(1.0 / 60.0);
+        assert!(park.cur != full && park.moving());
     }
 
     #[test]
@@ -2579,6 +3734,31 @@ mod tests {
     /// reversing it for dispatch, makes the actually-topmost widget the
     /// one whose `hits()` call sees the point first.
     #[test]
+    fn a_window_inside_another_is_covered_by_it() {
+        let outer = LRect::new(0.0, 0.0, 100.0, 80.0);
+        assert!(lrect_contains(outer, LRect::new(10.0, 10.0, 50.0, 50.0)));
+        assert!(lrect_contains(outer, outer));
+        assert!(!lrect_contains(outer, LRect::new(60.0, 10.0, 50.0, 50.0)));
+        assert!(!lrect_contains(LRect::new(10.0, 10.0, 50.0, 50.0), outer));
+    }
+
+    /// A window under others is unseen only when they cover all of it, together: one
+    /// window over it, two side by side over it, but not with a sliver left showing.
+    #[test]
+    fn a_window_is_covered_only_when_every_part_is_under_others() {
+        let me = LRect::new(100.0, 100.0, 400.0, 300.0);
+        assert!(!covered_by_union(me, &[]));
+        assert!(covered_by_union(me, &[LRect::new(0.0, 0.0, 1000.0, 800.0)]), "a maximised window over it");
+        let left = LRect::new(50.0, 50.0, 260.0, 400.0);
+        let right = LRect::new(300.0, 80.0, 300.0, 400.0);
+        assert!(covered_by_union(me, &[left, right]), "two windows together");
+        assert!(!covered_by_union(me, &[left]), "one half still shows");
+        let short = LRect::new(300.0, 80.0, 300.0, 300.0); // ends at y 380, me ends at 400
+        assert!(!covered_by_union(me, &[left, short]), "a 20 pt strip at the bottom still shows");
+        assert!(!covered_by_union(me, &[LRect::new(600.0, 600.0, 100.0, 100.0)]), "not overlapping");
+    }
+
+    #[test]
     fn zorder_is_back_to_front_previews_last() {
         let closing: Vec<ClientId> = vec![9];
         let rest: Vec<ClientId> = vec![1, 2, 3];
@@ -2609,5 +3789,246 @@ pub fn with_tile_host<R>(item: &WidgetRef, f: impl FnOnce(&mut dyn TileHost) -> 
     if let Some(mut view) = item.borrow_mut::<MpModuleView>() {
         return Some(f(&mut *view as &mut dyn TileHost));
     }
+    if let Some(mut view) = item.borrow_mut::<MpWaylandView>() {
+        return Some(f(&mut *view as &mut dyn TileHost));
+    }
+    if let Some(mut view) = item.borrow_mut::<MpDomainView>() {
+        return Some(f(&mut *view as &mut dyn TileHost));
+    }
     None
+}
+
+// ======================================================================
+// VR mode (crate::stereo): the source screen's windows as panels in 3D
+// ======================================================================
+
+/// What one frame of VR mode draws.
+struct VrPlan {
+    /// The source screen's shown windows, back to front, and their depths.
+    clients: Vec<ClientId>,
+    depths: HashMap<ClientId, f32>,
+    /// The source screen (desk points): the layout the panels are placed by.
+    source: LRect,
+    /// Where the eye pair goes: the headset's slice, or `source` (preview).
+    output: Rect,
+    /// A headset shows the pair: the windows also stay flat on `source`.
+    mirror: bool,
+    /// A configured headset is absent: retain the shared 2D desktop.
+    /// Explicit `screen = preview` still draws the SBS diagnostic view.
+    mono_only: bool,
+    /// The headset screen's EDID identity (when sysfs gave one); only
+    /// meaningful with `mirror`.
+    headset_identity: Option<([u8; 3], u16)>,
+    headset: Option<String>,
+    params: StereoParams,
+    look: (f32, f32),
+    recenter: u32,
+    pointer: Option<(f64, f64)>,
+    physical_pointer: Option<(f64, f64)>,
+}
+
+struct VrLensPlan {
+    optics: Optics,
+    params: StereoParams,
+    output: Rect,
+}
+
+/// This frame's VR plan, `None` while VR mode is off. A source screen that
+/// went away hands over to the active one.
+fn vr_plan(state: &mut WmState, zorder: &[ClientId], minimized: &HashSet<ClientId>) -> Option<VrPlan> {
+    let name = state.vr.source.clone()?;
+    let live = state.screens.live_count();
+    let found = (0..live).find(|&i| state.screens.screens[i].name == name && !state.screens.is_headset(i));
+    let i = match found {
+        Some(i) => i,
+        None => {
+            let screens = &state.screens;
+            let i = if screens.is_headset(screens.active) { screens.main } else { screens.active };
+            let i = i.min(live.saturating_sub(1));
+            state.vr.source = Some(screens.screens[i].name.clone());
+            i
+        }
+    };
+    let source = state.screens.screens[i].rect;
+    let headset = (0..live)
+        .find(|&h| h != i && state.screens.is_headset(h))
+        .map(|h| {
+            let screen = &state.screens.screens[h];
+            // Eye viewports cover the physical output. A desktop bar or
+            // sliding pane must never crop or stretch the headset image,
+            // including the settling frames of a mode-switch hotplug.
+            state.screen_source.names.iter().position(|n| n == &screen.name)
+                .and_then(|i| state.screen_source.geoms.get(i)).copied()
+                .unwrap_or(screen.rect)
+        });
+    let out = headset.unwrap_or(source);
+    let output = Rect { pos: dvec2(out.x, out.y), size: dvec2(out.w.max(2.0), out.h.max(1.0)) };
+    let clients: Vec<ClientId> = zorder
+        .iter()
+        .copied()
+        .filter(|c| state.screens.screen_of(*c) == Some(i) && !minimized.contains(c))
+        .collect();
+    let known = &state.clients;
+    state.vr.retain(|c| known.contains_key(&c));
+    // Slots go to the topmost window first, so overlapping windows keep
+    // their stacking (the front one nearer).
+    let depths = clients.iter().rev().map(|c| (*c, state.vr.depth_of(*c))).collect();
+    let mono_only = headset.is_none() && state.vr.config.screen.is_some();
+    state.vr.output = (!mono_only).then_some(out);
+    Some(VrPlan {
+        clients,
+        depths,
+        source,
+        output,
+        mirror: headset.is_some(),
+        mono_only,
+        headset_identity: state.vr.headset_identity(),
+        headset: headset.and_then(|_| state.vr.headset().map(str::to_owned)),
+        params: state.vr.config.params,
+        look: state.vr.look,
+        recenter: state.vr.recenter,
+        pointer: state.vr.pointer,
+        physical_pointer: state.vr.physical_pointer,
+    })
+}
+
+impl WmDesk {
+    /// Invert the very same camera used by the monitor and stereo view.
+    /// A drag retains its original viewport even if it leaves that screen.
+    pub fn vr_pointer(&self, point: Vec2d, captured: Option<Rect>) -> Option<(Vec2d, Option<ClientId>, Rect)> {
+        let (view, source, output) = self.vr_desktop?;
+        let viewport = if let Some(captured) = captured {
+            captured
+        } else if source != output && source.contains(point) {
+            view.mirror
+        } else if output.contains(point) {
+            let mut eye = output;
+            eye.size.x *= 0.5;
+            if point.x >= eye.pos.x + eye.size.x { eye.pos.x += eye.size.x; }
+            eye
+        } else { return None; };
+        let logical = view.unmap(point, viewport);
+        let client = viewport.contains(point).then(|| self.vr_targets.iter()
+            .find(|(_, rect)| rect.contains(logical)).map(|(client, _)| *client)).flatten();
+        Some((logical, client, viewport))
+    }
+
+    pub fn vr_move_pointer(&mut self, cx: &mut Cx, pointer: Option<(f64, f64)>) {
+        if let Some(view) = &mut self.vr {
+            view.move_marker(cx, &mut self.draw_vr_marker, pointer);
+        }
+    }
+
+    /// Draw outside WmScene's cached pass, including when that cache is
+    /// reused. The eye pass belongs to this final consumer, so a new head
+    /// pose does not make an unchanged 2D desktop paint again.
+    pub fn draw_vr_output(&mut self, cx: &mut Cx2d) {
+        if let (Some(lens), Some(view)) = (&self.vr_lens, &mut self.vr) {
+            view.draw_lens(cx, &mut self.draw_vr_lens, &lens.optics, &lens.params,
+                lens.output);
+        }
+    }
+
+    /// One VR frame: the windows captured under the VR pass, both eyes
+    /// drawn far to near with the pointer marker on top, the windows flat
+    /// on their screen too when a headset shows the pair, then the lens
+    /// pass into the output rect.
+    fn draw_vr(&mut self, cx: &mut Cx2d, scope: &mut Scope, plan: VrPlan, borders: &BorderTheme) -> Option<VrLensPlan> {
+        let mut view = match self.vr.take() {
+            Some(view) => view,
+            None => {
+                let view = StereoView::new(cx, plan.recenter, plan.headset_identity);
+                for line in view.tracker_status() {
+                    log!("wm: vr tracker {}", line);
+                }
+                view
+            }
+        };
+        let size = if plan.mono_only { dvec2(plan.output.size.x * 2.0, plan.output.size.y) } else { plan.output.size };
+        let mut mirror_source = plan.source;
+        if plan.mirror || plan.mono_only {
+            let root_size = cx.owning_window_or_root_pass_size();
+            if let Some(state) = scope.data.get_mut::<WmState>().filter(|s| crate::desktop::dock_shown(s)) {
+                let dock = crate::desktop::dock_bounds(state, root_size);
+                if dock.pos.x < mirror_source.x + mirror_source.w && dock.pos.x + dock.size.x > mirror_source.x
+                    && dock.pos.y > mirror_source.y + mirror_source.h * 0.5 {
+                    mirror_source.h = mirror_source.h.min(dock.pos.y - mirror_source.y);
+                }
+            }
+        }
+        view.begin(cx, size, plan.params.background);
+        self.vr_capture = true;
+        self.vr_frames.clear();
+        for client in &plan.clients {
+            self.draw_tile(cx, scope, *client, borders);
+        }
+        self.vr_capture = false;
+
+        view.prepare(cx, plan.look, plan.recenter, plan.headset.as_deref(), plan.headset_identity, &plan.params);
+        // The headset's own optics on its own screen only; the preview on
+        // an ordinary display stays uncalibrated.
+        let optics = view.optics(&plan.params, plan.mirror.then_some(plan.headset_identity.map(|id| id.0)), size);
+        let desktop = view.desktop_view(plan.source, mirror_source, &optics);
+        let source_rect = Self::lrect_to_rect(plan.source);
+        self.vr_desktop = Some((desktop, source_rect, if plan.mono_only { Rect::default() } else { plan.output }));
+        view.stamp(cx, &mut self.draw_vr, &optics, size);
+        view.stamp(cx, &mut self.draw_vr_marker, &optics, size);
+        let mut quads: Vec<(f32, ClientId, Rect, crate::stereo::Placement, f32)> = self
+            .vr_frames
+            .iter()
+            .map(|(client, r, radius)| {
+                let depth = plan.depths.get(client).copied().unwrap_or(plan.params.depth_min);
+                let placed = crate::spacewarp::vr_placement(&self.warp.pose_rect(*r), depth, |s, d| desktop.place(Self::lrect_to_rect(s), d));
+                (depth, *client, *r, placed, *radius)
+            })
+            .collect();
+        // Painter's order: far to near (a stable sort keeps the stacking
+        // order between windows at one depth).
+        quads.sort_by(|a, b| b.0.total_cmp(&a.0));
+        self.vr_targets = quads.iter().rev().map(|(_, client, rect, _, _)| (*client, *rect)).collect();
+        // Chrome and hosted input must use the same stacking as both
+        // rendered views, including a manually changed depth.
+        let captured: HashSet<_> = quads.iter().map(|q| q.1).collect();
+        let mut order = quads.iter().map(|q| q.1);
+        for client in self.zorder.iter_mut().filter(|c| captured.contains(c)) {
+            if let Some(next) = order.next() { *client = next; }
+        }
+        self.draw_vr.color = vec4(0.0, 0.0, 0.0, 0.0);
+        for (_, client, _, placed, _) in &quads {
+            if let Some(frame) = self.desktop_frames.get(client) {
+                self.draw_vr.draw_vars.set_texture(0, frame.texture());
+                view.draw_quad(cx, &mut self.draw_vr, placed, size);
+            }
+        }
+        // The pointer marker, on the nearest window under the pointer, else
+        // on a backdrop plane as far as the farthest window; pointer moves
+        // rewrite its instances (`move_marker`), no redraw.
+        let targets = quads.iter().rev().map(|(_, _, r, placed, _)| (*r, *placed)).collect();
+        let far = plan.depths.values().copied().fold(plan.params.depth_min, f32::max);
+        let backdrop = desktop.place(Self::lrect_to_rect(desktop.visible), far);
+        let pointer = match plan.physical_pointer {
+            Some((x, y)) => self.vr_pointer(dvec2(x, y), None).map(|(p, _, _)| (p.x, p.y)),
+            None => plan.pointer,
+        };
+        view.draw_marker(cx, &mut self.draw_vr_marker, size, targets, desktop.visible, backdrop, pointer);
+        view.end(cx);
+
+        if plan.mirror || plan.mono_only {
+            cx.begin_turtle(Walk::abs_rect(source_rect), Layout { clip_x: true, clip_y: true, ..Layout::flow_overlay() });
+            self.draw_panel.alpha = 1.0;
+            self.draw_panel.draw_abs(cx, source_rect);
+            for (_, client, r, _, radius) in &quads {
+                if let Some(frame) = self.desktop_frames.remove(client) {
+                    let scaled = desktop.map_rect(*r);
+                    self.draw_window_surface(cx, &frame, scaled, *radius * (scaled.size.x / r.size.x.max(1.0)) as f32);
+                    self.desktop_frames.insert(*client, frame);
+                }
+            }
+            cx.end_turtle();
+        }
+
+        let ready = !plan.mono_only && (!plan.mirror || view.output_ready(plan.headset_identity, size));
+        self.vr = Some(view);
+        ready.then_some(VrLensPlan { optics, params: plan.params, output: plan.output })
+    }
 }

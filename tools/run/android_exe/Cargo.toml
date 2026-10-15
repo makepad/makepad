@@ -1,0 +1,11 @@
+[package]
+name = "makepad-run-android-exe"
+version = "0.1.0"
+edition = "2021"
+description = "libmakepad_exe.so: makepad run's executable in an Android APK (build scripts run as it)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "makepad_exe"
+path = "src/main.rs"

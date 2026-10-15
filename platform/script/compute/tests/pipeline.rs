@@ -2,11 +2,12 @@
 //! same for any thread count and backend, and compaction against the serial
 //! reference.
 
-use makepad_script_compute::kernel::{compact, compile, compile_with, Kernel, K_PARAMS};
-use makepad_script_compute::pipeline::{compact_into, Generations};
-use makepad_script_compute::sched::{Executor, InlineExecutor, ThreadExecutor};
+use makepad_script_compute::kernel::{compile, compile_with, KernelRef, K_PARAMS};
+use makepad_script_compute_sched::kernel::{compact};
+use makepad_script_compute_sched::pipeline::{compact_into, Generations};
+use makepad_script_compute_sched::sched::{Executor, InlineExecutor, ThreadExecutor};
 use makepad_script_compute::Backend;
-use std::sync::Arc;
+
 use std::time::Instant;
 
 /// A segment: start (x, y), angle, length, depth, birth: 6 words. Each
@@ -38,7 +39,7 @@ fn seed() -> Vec<u32> {
     [0.0f32, 0.0, 1.5707964, 1.0, 0.0, 0.0].iter().map(|x| x.to_bits()).collect()
 }
 
-fn grow(k: &Arc<Kernel>, exec: &dyn Executor, threads: usize) -> (makepad_script_compute::pipeline::Grown, f64) {
+fn grow(k: &KernelRef, exec: &dyn Executor, threads: usize) -> (makepad_script_compute_sched::pipeline::Grown, f64) {
     let mut g = Generations::new(k.clone(), "prev", "next").unwrap();
     let t0 = Instant::now();
     let grown = g.grow(&seed(), 6, exec, threads, |job, gen| { job.set_param("gen_time", gen as f32 * 0.5); }).unwrap();

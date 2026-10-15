@@ -11,6 +11,7 @@
 //! or a test counter) — never `Instant`, which the web has no
 //! implementation of.
 
+use crate::card::Card;
 use crate::engine::registry::{RegistryUp, ServiceRegistry};
 use crate::engine::{Model, ModelEvent, ToolDefinition};
 use crate::state::*;
@@ -21,10 +22,8 @@ use std::sync::mpsc::Sender;
 
 /// The base doctrine every conversation starts with.
 pub const DOCTRINE: &str = include_str!("doctrine.md");
-/// Seconds a service has to answer or report progress.
-pub const CALL_DEADLINE_SECS: f64 = 60.0;
-/// Seconds after which even a progressing call is given up.
-pub const CALL_HARD_CAP_SECS: f64 = 600.0;
+/// Silence before showing "not responding". This never ends a call.
+pub const CALL_SILENCE_SECS: f64 = 60.0;
 /// The reserved argument the model may use to pick an instance.
 pub const INSTANCE_KEY: &str = "instance";
 /// Live subscriptions one conversation lease may own.
@@ -39,23 +38,90 @@ pub const WAKE_INTERVAL_SECS: f64 = 2.0;
 pub enum EngineEvent {
     /// The state changed; redraw.
     Changed,
-    /// A destructive call is parked; the panel shows its confirm card.
+    /// A destructive call or a request is parked; the panel shows its
+    /// confirm row or settings card.
     Confirm { call_id: String },
+    /// Preview only: incomplete arguments never enter dispatch or the transcript.
+    ToolCallPartial { call_id: String, name: String, partial_json: String },
 }
 
 struct Pending {
     endpoint: EndpointId,
-    deadline: f64,
-    hard_deadline: f64,
+    activity: CallActivity,
     /// Typed by the person at the console, not asked by the model: the
     /// result is shown, not sent back.
     from_console: bool,
+}
+
+/// Shared by chat and remote calls; the host supplies a monotonic clock.
+pub(crate) struct CallActivity {
+    last_progress: f64,
+    not_responding: bool,
+}
+
+impl CallActivity {
+    pub(crate) fn new(now: f64) -> Self {
+        Self { last_progress: now, not_responding: false }
+    }
+
+    pub(crate) fn progress(&mut self, now: f64) {
+        self.last_progress = now;
+        self.not_responding = false;
+    }
+
+    /// True only on entry to the silent state, so an idle pump never redraws.
+    pub(crate) fn poll(&mut self, now: f64) -> bool {
+        if !self.not_responding && now - self.last_progress >= CALL_SILENCE_SECS {
+            self.not_responding = true;
+            return true;
+        }
+        false
+    }
 }
 
 struct Parked {
     endpoint: EndpointId,
     call: ServiceCall,
     from_console: bool,
+    /// The tool's argument schema, which edited arguments are checked
+    /// against before the call runs.
+    schema: Value,
+    /// The arguments as first proposed (the model's, or the chip's prefill).
+    proposed: String,
+    /// Opened by the person (`propose`), not asked by the model.
+    by_person: bool,
+}
+
+/// What the model is told when the person changed a parked call's
+/// arguments or opened it themselves; `None` when it runs as proposed.
+fn edit_note(proposed: &str, final_args: &str, by_person: bool) -> Option<String> {
+    let before = makepad_strict_json::parse(proposed.as_bytes()).ok();
+    let after = makepad_strict_json::parse(final_args.as_bytes()).ok();
+    let mut changes = Vec::new();
+    if let Some(Value::Obj(after)) = &after {
+        let old = |k: &str| match &before {
+            Some(Value::Obj(f)) => f.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()),
+            _ => None,
+        };
+        for (k, v) in after {
+            if old(k).as_ref() != Some(v) {
+                changes.push(format!("{k} = {}", v.to_json()));
+            }
+        }
+        if let Some(Value::Obj(b)) = &before {
+            for (k, _) in b {
+                if !after.iter().any(|(n, _)| n == k) {
+                    changes.push(format!("{k} removed"));
+                }
+            }
+        }
+    }
+    match (by_person, changes.is_empty()) {
+        (false, true) => None,
+        (false, false) => Some(format!("[the person edited the arguments before running: {}]", changes.join(", "))),
+        (true, true) => Some("[opened by the person]".to_string()),
+        (true, false) => Some(format!("[opened by the person, who set: {}]", changes.join(", "))),
+    }
 }
 
 /// Seconds an `os.launch` answer is held for the app it started to
@@ -95,6 +161,8 @@ pub struct EngineCore {
     /// where each one's result goes when its card lands.
     external: HashMap<String, Sender<ToolResult>>,
     awaiting: Option<AwaitingApp>,
+    /// What to tell the model about a confirmed call, by call id.
+    notes: HashMap<String, String>,
     seen_generation: Option<u64>,
     next_call: u64,
     doctrine: String,
@@ -126,6 +194,7 @@ impl EngineCore {
             parked: HashMap::new(),
             external: HashMap::new(),
             awaiting: None,
+            notes: HashMap::new(),
             seen_generation: None,
             next_call: 0,
             doctrine: doctrine.unwrap_or(DOCTRINE).to_string(),
@@ -168,7 +237,7 @@ impl EngineCore {
     /// Whether the host should keep scheduling pumps even though the model
     /// is idle (normally because a rate-limited publication is waiting).
     pub fn needs_pump(&self) -> bool {
-        self.turn_active || self.awaiting.is_some() || self.queued_message_count() != 0
+        self.turn_active || !self.pending.is_empty() || self.awaiting.is_some() || self.queued_message_count() != 0
     }
 
     /// What the provider chip shows: the choice, the rows it may switch
@@ -206,14 +275,90 @@ impl EngineCore {
             self.cancel(now);
         }
         self.reconfigure_if_needed();
+        self.focus_target();
         self.state.push(Entry::User { text: text.to_string() });
         self.state.status = Status::Thinking;
         self.state.thinking.clear();
         self.state.rate = None;
         self.turn_active = true;
         let dynamic = self.registry.dynamic_context();
-        self.model.send_user(text, &dynamic);
+        let context = self.turn_context(dynamic);
+        self.model.send_user(text, &context);
         self.state.touch();
+    }
+
+    /// What the person is looking at: a chip on the composer. While it is
+    /// set the turn focuses `target.app`'s service (instance choice follows
+    /// the registry's focus) and `target.context` goes to the model with
+    /// each user line, beside the services' own context. The person's
+    /// transcript line is unchanged.
+    pub fn set_target(&mut self, target: Option<Target>) {
+        if self.state.target == target {
+            return;
+        }
+        // The tool table follows the target's app: rebind when it changes.
+        if self.state.target.as_ref().map(|t| &t.app) != target.as_ref().map(|t| &t.app) {
+            self.seen_generation = None;
+        }
+        self.state.target = target;
+        self.focus_target();
+        self.state.touch();
+    }
+
+    /// A line in the transcript from the host: what happened in the app
+    /// (a render finished, an export started). Neither the person's nor the
+    /// model's; the model is not told.
+    pub fn announce(&mut self, text: &str) {
+        let mut text = text.to_string();
+        truncate_to_char_boundary(&mut text, MAX_CONTEXT_BYTES);
+        self.state.push(Entry::System { text });
+    }
+
+    /// The chips over the composer.
+    pub fn set_suggestions(&mut self, suggestions: Vec<Suggestion>) {
+        if self.state.suggestions == suggestions {
+            return;
+        }
+        self.state.suggestions = suggestions;
+        self.state.touch();
+    }
+
+    fn focus_target(&self) {
+        let Some(target) = &self.state.target else { return };
+        if let Some(endpoint) = self.registry.pick_instance(&target.app, None) {
+            self.registry.focus(&endpoint);
+        }
+    }
+
+    /// The per-turn context: the services' volatile state, then the target.
+    fn turn_context(&self, mut dynamic: String) -> String {
+        let Some(target) = &self.state.target else { return dynamic };
+        let mut line = format!("The person is looking at {} ({}).", target.label, target.app);
+        if let Some(selection) = &target.selection {
+            line.push_str(&format!(" Selected: {selection}."));
+        }
+        if !target.context.trim().is_empty() {
+            line.push('\n');
+            line.push_str(target.context.trim());
+        }
+        truncate_to_char_boundary(&mut line, MAX_CONTEXT_BYTES);
+        if !dynamic.is_empty() && !dynamic.ends_with('\n') {
+            dynamic.push('\n');
+        }
+        dynamic.push_str("# Focus\n");
+        dynamic.push_str(&line);
+        dynamic
+    }
+
+    /// Open `tool` of `app` filled from `prefill_json` (an object): a console
+    /// call that never takes a model turn. A Request or Destructive tool
+    /// parks as a card; a Read or Act tool runs at once. Returns the call id; the card is in the transcript, parked for
+    /// `confirm_with` — or already refused when the app or tool is unknown.
+    pub fn propose(&mut self, app: &str, tool: &str, prefill_json: &str, now: f64) -> String {
+        let call_id = self.mint_call_id();
+        let args = if prefill_json.trim().is_empty() { "{}" } else { prefill_json };
+        self.dispatch_with(call_id.clone(), &canonical_name(app, tool), args, true, true, now);
+        call_id
     }
 
     fn console(&mut self, line: &str, now: f64) {
@@ -280,6 +425,14 @@ impl EngineCore {
         self.end_turn();
     }
 
+    /// Stop one tool row, including a silent call. Other calls keep running.
+    pub fn stop_call(&mut self, call_id: &str) {
+        if let Some(p) = self.pending.remove(call_id) {
+            self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.to_string() });
+            self.finish_call(call_id, ToolResult::cancelled(call_id), p.from_console);
+        }
+    }
+
     /// A new conversation: same services, same provider, empty transcript.
     pub fn clear(&mut self, now: f64) {
         self.cancel(now);
@@ -296,12 +449,66 @@ impl EngineCore {
     /// The person's answer to a confirm card.
     pub fn confirm(&mut self, call_id: &str, run: bool, now: f64) {
         let Some(parked) = self.parked.remove(call_id) else { return };
+        if let Some(t) = self.state.tool_mut(call_id) {
+            if let Some(card) = t.card.as_mut() {
+                card.problem = None;
+            }
+        }
         if run {
+            if let Some(note) = edit_note(&parked.proposed, &parked.call.args, parked.by_person) {
+                self.notes.insert(call_id.to_string(), note);
+            }
             self.launch(parked.endpoint, parked.call, parked.from_console, now);
         } else {
             let result = ToolResult::denied(call_id, "the person did not confirm");
             self.finish_call(call_id, result, parked.from_console);
         }
+    }
+
+    /// The person's answer to a settings card: run the parked call with the
+    /// edited `args` (a JSON object), or cancel it (`run` false). The edited
+    /// arguments are checked against the tool's schema first; when they do
+    /// not fit, nothing runs, the card stays parked with the reasons on it
+    /// (`Card::problem`) and the reasons are returned. `None` runs the
+    /// arguments as parked. A call that is not parked is ignored.
+    pub fn confirm_with(&mut self, call_id: &str, run: bool, args: Option<String>, now: f64) -> Result<(), String> {
+        if run {
+            if let (Some(text), Some(parked)) = (args, self.parked.get(call_id)) {
+                let checked = match makepad_strict_json::parse(text.as_bytes()) {
+                    Ok(Value::Obj(fields)) => {
+                        let rest = Value::Obj(fields.into_iter().filter(|(k, _)| k != INSTANCE_KEY).collect());
+                        match crate::card::validate_args(&parked.schema, &rest) {
+                            Ok(()) if rest.to_json().len() > MAX_ARGS_BYTES => Err("arguments over the size cap".to_string()),
+                            Ok(()) => Ok(rest.to_json()),
+                            Err(why) => Err(why.join("; ")),
+                        }
+                    }
+                    Ok(_) => Err("the arguments must be a JSON object".to_string()),
+                    Err(e) => Err(format!("the arguments do not parse: {e}")),
+                };
+                match checked {
+                    Ok(json) => {
+                        if let Some(parked) = self.parked.get_mut(call_id) {
+                            parked.call.args = json.clone();
+                        }
+                        if let Some(t) = self.state.tool_mut(call_id) {
+                            t.args = json;
+                        }
+                    }
+                    Err(why) => {
+                        if let Some(t) = self.state.tool_mut(call_id) {
+                            if let Some(card) = t.card.as_mut() {
+                                card.problem = Some(why.clone());
+                            }
+                        }
+                        self.state.touch();
+                        return Err(why);
+                    }
+                }
+            }
+        }
+        self.confirm(call_id, run, now);
+        Ok(())
     }
 
     pub fn toggle_tool(&mut self, call_id: &str) {
@@ -327,7 +534,7 @@ impl EngineCore {
                 RegistryUp::Progress { endpoint, call_id, note, permille } => {
                     if let Some(p) = self.pending.get_mut(&call_id) {
                         if p.endpoint == endpoint {
-                            p.deadline = (now + CALL_DEADLINE_SECS).min(p.hard_deadline);
+                            p.activity.progress(now);
                             if let Some(t) = self.state.tool_mut(&call_id) {
                                 t.status = ToolStatus::Running { note, permille };
                                 self.state.touch();
@@ -351,18 +558,18 @@ impl EngineCore {
                 events.push(e);
             }
         }
-        let late: Vec<String> = self
+        let silent: Vec<String> = self
             .pending
-            .iter()
-            .filter(|(_, p)| now >= p.deadline)
-            .map(|(id, _)| id.clone())
+            .iter_mut()
+            .filter_map(|(id, p)| p.activity.poll(now).then(|| id.clone()))
             .collect();
-        for call_id in late {
-            let p = self.pending.remove(&call_id).unwrap();
-            self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
-            let label = self.registry.meta(&p.endpoint).map(|m| m.display_name).unwrap_or_default();
-            let result = ToolResult::timed_out(&call_id, format!("{label} did not answer in time"));
-            self.finish_call(&call_id, result, p.from_console);
+        for call_id in silent {
+            if let Some(t) = self.state.tool_mut(&call_id) {
+                if let ToolStatus::Running { note, permille } = &t.status {
+                    t.status = ToolStatus::NotResponding { note: note.clone(), permille: *permille };
+                    self.state.touch();
+                }
+            }
         }
         if !self.turn_active {
             self.deliver_next_message(now);
@@ -386,10 +593,16 @@ impl EngineCore {
         let system = format!(
             "{}\n# Applications\n{}{}",
             self.doctrine.trim(),
-            self.registry.briefs(),
+            self.registry.briefs_for(self.state.target.as_ref().map(|target| target.app.as_str())),
             self.subscription_prompt()
         );
         let mut tools: Vec<ToolDefinition> = self.registry.tool_definitions();
+        // A target scopes the turn to its app's tools (no host-marked
+        // always-on apps exist).
+        if let Some(target) = &self.state.target {
+            let prefix = format!("{}.", target.app);
+            tools.retain(|t| t.name.starts_with(&prefix));
+        }
         tools.push(ToolDefinition {
             name: "bus.unsubscribe".into(),
             description: "Stop one live asynchronous subscription by its sub_id.".into(),
@@ -441,11 +654,12 @@ impl EngineCore {
     fn on_model_event(&mut self, ev: ModelEvent, now: f64) -> Option<EngineEvent> {
         match ev {
             ModelEvent::Loading { phase, fraction } => {
+                // Election may already have picked a node while it is loading.
+                self.state.provider_label = self.model.label();
                 self.state.status = Status::Loading { phase, fraction };
             }
             ModelEvent::Ready => {
-                // The chip follows the model's own account of where it runs
-                // (the local election settles on a route only now).
+                // The chip follows the model's own account of where it runs.
                 self.state.provider_label = self.model.label();
                 if !self.turn_active {
                     self.state.status = Status::Idle;
@@ -472,6 +686,9 @@ impl EngineCore {
                     }
                     self.state.thinking = keep;
                 }
+            }
+            ModelEvent::ToolCallPartial { call_id, name, partial_json } => {
+                return Some(EngineEvent::ToolCallPartial { call_id, name, partial_json });
             }
             ModelEvent::ToolCall { call_id, name, args } => {
                 // A row that never got text sits above the card as a gap.
@@ -530,12 +747,18 @@ impl EngineCore {
             status: ToolStatus::Running { note: String::new(), permille: 0 },
             preview: false,
             expanded: false,
+            card: None,
         }
     }
 
     /// Resolve a call by name to an instance and either launch it, park
     /// it, or answer it at once with why it cannot run.
     fn dispatch(&mut self, call_id: String, name: &str, args: &str, from_console: bool, now: f64) -> Option<EngineEvent> {
+        self.dispatch_with(call_id, name, args, from_console, false, now)
+    }
+
+    /// `propose` parks whatever the risk, as a settings card.
+    fn dispatch_with(&mut self, call_id: String, name: &str, args: &str, from_console: bool, propose: bool, now: f64) -> Option<EngineEvent> {
         let (app, tool) = split_name(name);
         let (app, tool) = (app.to_string(), tool.to_string());
         self.state.push(Entry::Tool(self.card(&call_id, &app, name, args)));
@@ -594,12 +817,37 @@ impl EngineCore {
             return None;
         }
         let risk = def.risk.max(self.registry.risk_floor(&app));
-        let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json };
-        if risk == Risk::Destructive && (!from_console || self.external.contains_key(&call_id)) {
+        let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json, caller: None };
+        let gated = risk >= Risk::Request && (!from_console || self.external.contains_key(&call_id));
+        // A proposal that only looks or changes the app's own state (Read,
+        // Act) runs at once as a console call, with no card; a request or a
+        // destructive one parks.
+        let propose = propose && risk >= Risk::Request;
+        if gated || propose {
+            let mut schema = makepad_strict_json::parse(def.parameters.as_bytes()).unwrap_or(Value::Null);
+            // A request (or a proposal) is a settings card; a destructive
+            // call keeps the plain confirm row.
+            let card = if risk == Risk::Request || propose {
+                let prefill = makepad_strict_json::parse(call.args.as_bytes()).unwrap_or(Value::Null);
+                match Card::for_schema(&tool, &def.description, &def.parameters, def.layout.as_ref(), &prefill) {
+                    Ok(card) => {
+                        // The edits are checked against the schema with the card's map keys typed.
+                        schema = card.schema().clone();
+                        Some(card)
+                    }
+                    Err(why) => {
+                        self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+                        return None;
+                    }
+                }
+            } else {
+                None
+            };
             if let Some(t) = self.state.tool_mut(&call_id) {
                 t.status = ToolStatus::Confirm;
+                t.card = card;
             }
-            self.parked.insert(call_id.clone(), Parked { endpoint, call, from_console });
+            self.parked.insert(call_id.clone(), Parked { endpoint, proposed: call.args.clone(), by_person: propose, call, from_console, schema });
             self.state.touch();
             return Some(EngineEvent::Confirm { call_id });
         }
@@ -661,7 +909,7 @@ impl EngineCore {
         }
         self.pending.insert(
             call_id,
-            Pending { endpoint, deadline: now + CALL_DEADLINE_SECS, hard_deadline: now + CALL_HARD_CAP_SECS, from_console },
+            Pending { endpoint, activity: CallActivity::new(now), from_console },
         );
         self.state.touch();
     }
@@ -983,7 +1231,10 @@ impl EngineCore {
 
     /// A call is over: the card lands, the model hears about it (unless
     /// the person typed it), and the disposition does what it says.
-    fn finish_call(&mut self, call_id: &str, result: ToolResult, from_console: bool) {
+    fn finish_call(&mut self, call_id: &str, mut result: ToolResult, from_console: bool) {
+        if let Some(note) = self.notes.remove(call_id) {
+            result.text = if result.text.trim().is_empty() { note } else { format!("{note}\n{}", result.text) };
+        }
         self.mark_done(call_id, &result);
         if from_console {
             return;
@@ -1099,6 +1350,15 @@ mod tests {
         ServiceManifest::new("files", "Files", "The file browser. Ask it what is in a folder.")
             .with_tool(ToolDef::new("list_dir", "List a folder.", r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#, Risk::Read))
             .with_tool(ToolDef::new("trash", "Move a file to the trash.", r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#, Risk::Destructive))
+            .with_tool(
+                ToolDef::new(
+                    "export",
+                    "Write a folder out as an archive. Takes a while.",
+                    r#"{"type":"object","properties":{"path":{"type":"string"},"format":{"type":"string","enum":["zip","tar"]},"level":{"type":"integer","minimum":1,"maximum":9}},"required":["path","format"]}"#,
+                    Risk::Request,
+                )
+                .with_layout(CardLayout::new("Export a folder", "Export").field("format", "Archive type")),
+            )
             .with_tool(ToolDef::new("open", "Show a folder.", r#"{"type":"object","properties":{"path":{"type":"string"}}}"#, Risk::Act).with_preview())
             .with_topic(TopicDef::new("watch", "Changes to a watched folder."))
     }
@@ -1142,13 +1402,13 @@ mod tests {
             assert!(system.contains("Files"), "brief in the system prompt");
             assert_eq!(
                 tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-                vec!["files.list_dir", "files.trash", "files.open", "bus.unsubscribe"]
+                vec!["files.list_dir", "files.trash", "files.export", "files.open", "bus.unsubscribe"]
             );
         }
         core.pump(0.1);
         assert_eq!(core.state().status, Status::WaitingForTool);
         let ev = port.test_drain();
-        let ServiceCall { call_id, tool, args } = match &ev[0] {
+        let ServiceCall { call_id, tool, args, .. } = match &ev[0] {
             PortEvent::Call(c) => c.clone(),
             other => panic!("{other:?}"),
         };
@@ -1190,8 +1450,240 @@ mod tests {
         assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.tool == "list_dir"));
     }
 
+    fn export_call(args: &str) -> Vec<Vec<ModelEvent>> {
+        vec![vec![call("files.export", args), ModelEvent::TurnDone { tool_calls: 1 }], done("Exported.")]
+    }
+
     #[test]
-    fn a_silent_service_times_out_and_progress_buys_time() {
+    fn a_request_parks_as_a_settings_card_and_runs_with_the_edited_arguments() {
+        let (mut core, model, mut port, _e) = setup(export_call(r#"{"path":"~/pics","format":"tar"}"#));
+        core.send("zip up my pictures", 0.0);
+        let events = core.pump(0.1);
+        assert!(events.contains(&EngineEvent::Confirm { call_id: "m1".into() }));
+        assert!(port.test_drain().is_empty(), "nothing reached the app yet");
+        let t = core.state().tool("m1").unwrap().clone();
+        assert_eq!(t.status, ToolStatus::Confirm);
+        let card = t.card.expect("a request carries its card");
+        assert_eq!((card.title.as_str(), card.confirm.as_str()), ("Export a folder", "Export"));
+        // The layout's field first, then the other required one, then the rest.
+        assert_eq!(card.fields.iter().map(|f| f.arg()).collect::<Vec<_>>(), vec!["format", "path", "level"]);
+        assert!(matches!(&card.fields[0], crate::card::Field::Pick { selected: 1, .. }), "the model's tar is preselected");
+        // The person switches to zip and sets a level.
+        let mut values = card.values();
+        values.picks[0] = 0;
+        values.lines = vec!["~/pics".into(), "5".into()];
+        let args = card.args(&values).to_json();
+        core.confirm_with("m1", true, Some(args), 0.2).unwrap();
+        let got = port.test_drain();
+        let PortEvent::Call(c) = &got[0] else { panic!("{got:?}") };
+        assert_eq!(c.tool, "export");
+        assert_eq!(c.args, r#"{"format":"zip","path":"~/pics","level":5}"#);
+        assert_eq!(core.state().tool("m1").unwrap().args, c.args);
+        port.reply(ToolResult::ok(&c.call_id, "pics.zip", "exported"));
+        core.pump(0.3);
+        assert!(model.lock().unwrap().tool_results[0].1.ends_with("\npics.zip"));
+    }
+
+    #[test]
+    fn invalid_edited_arguments_are_refused_and_the_card_stays() {
+        let (mut core, _model, mut port, _e) = setup(export_call(r#"{"path":"~/pics","format":"zip"}"#));
+        core.send("export", 0.0);
+        core.pump(0.1);
+        let why = core.confirm_with("m1", true, Some(r#"{"path":"~/pics","format":"rar","level":42}"#.into()), 0.2).unwrap_err();
+        assert!(why.contains("`format` must be one of: zip, tar") && why.contains("`level` must be at most 9"), "{why}");
+        assert!(core.confirm_with("m1", true, Some("[1]".into()), 0.2).is_err());
+        assert!(core.confirm_with("m1", true, Some(r#"{"format":"zip"}"#.into()), 0.2).unwrap_err().contains("`path` is required"));
+        assert!(port.test_drain().is_empty(), "nothing ran");
+        let t = core.state().tool("m1").unwrap();
+        assert_eq!(t.status, ToolStatus::Confirm, "still parked");
+        assert!(t.card.as_ref().unwrap().problem.as_deref().is_some_and(|p| p.contains("`path` is required")));
+        // The fixed-up arguments then run, and the problem is gone.
+        core.confirm_with("m1", true, Some(r#"{"path":"~/p","format":"zip"}"#.into()), 0.3).unwrap();
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.args == r#"{"path":"~/p","format":"zip"}"#));
+        assert!(core.state().tool("m1").unwrap().card.as_ref().unwrap().problem.is_none());
+    }
+
+    #[test]
+    fn cancelling_a_request_refuses_it() {
+        let (mut core, model, mut port, _e) = setup(export_call(r#"{"path":"~","format":"zip"}"#));
+        core.send("export", 0.0);
+        core.pump(0.1);
+        core.confirm_with("m1", false, Some("not even json".into()), 0.2).unwrap();
+        assert!(port.test_drain().is_empty());
+        let results = model.lock().unwrap().tool_results.clone();
+        assert!(results[0].1.starts_with("[denied]"), "{results:?}");
+        assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::Done { .. }));
+        // A destructive call has no card and keeps the plain row.
+        let (mut core, _model, mut port, _e) = setup(vec![vec![call("files.trash", r#"{"path":"~/x"}"#), ModelEvent::TurnDone { tool_calls: 1 }]]);
+        core.send("trash", 0.0);
+        core.pump(0.1);
+        let t = core.state().tool("m1").unwrap();
+        assert!(t.status == ToolStatus::Confirm && t.card.is_none());
+        assert!(core.confirm_with("m1", true, Some(r#"{}"#.into()), 0.2).unwrap_err().contains("`path` is required"));
+        core.confirm_with("m1", true, None, 0.3).unwrap();
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.args == r#"{"path":"~/x"}"#));
+    }
+
+    #[test]
+    fn a_request_typed_at_the_console_runs_but_a_proposal_always_parks_without_a_model_turn() {
+        let (mut core, model, mut port, _e) = setup(vec![done("never")]);
+        core.send(r#"/files.export {"path":"~","format":"zip"}"#, 0.0);
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(_)), "the console is the person");
+        let id = core.propose("files", "export", r#"{"path":"~/pics"}"#, 1.0);
+        assert!(port.test_drain().is_empty());
+        {
+            let m = model.lock().unwrap();
+            assert!(m.sends.is_empty(), "no model turn");
+        }
+        assert!(core.needs_pump(), "only the console's running call keeps pumps scheduled, to notice its silence");
+        let t = core.state().tool(&id).unwrap().clone();
+        assert_eq!(t.status, ToolStatus::Confirm);
+        let card = t.card.unwrap();
+        assert!(matches!(&card.fields[1], crate::card::Field::Line { arg, value, .. } if arg == "path" && value == "~/pics"));
+        core.confirm_with(&id, true, Some(r#"{"path":"~/pics","format":"tar"}"#.into()), 1.1).unwrap();
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.tool == "export" && c.args.contains("tar")));
+        assert!(model.lock().unwrap().tool_results.is_empty(), "the result is shown, not sent back");
+        // A Read tool proposed runs at once, with no card; an unknown one is refused at once.
+        let read = core.propose("files", "list_dir", "", 2.0);
+        assert!(core.state().tool(&read).unwrap().card.is_none());
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.tool == "list_dir"));
+        let act = core.propose("files", "open", r#"{"path":"~"}"#, 2.0);
+        assert!(core.state().tool(&act).unwrap().card.is_none());
+        assert!(matches!(&port.test_drain()[0], PortEvent::Call(c) if c.tool == "open"));
+        // A destructive one still parks.
+        let trash = core.propose("files", "trash", r#"{"path":"~/x"}"#, 2.0);
+        assert_eq!(core.state().tool(&trash).unwrap().status, ToolStatus::Confirm);
+        assert!(port.test_drain().is_empty());
+        let bad = core.propose("files", "nope", "{}", 2.0);
+        assert!(matches!(core.state().tool(&bad).unwrap().status, ToolStatus::Done { .. }));
+    }
+
+    #[test]
+    fn the_target_focuses_its_service_and_its_context_reaches_the_model() {
+        let reg = ServiceRegistry::new();
+        let (mut p1, l1) = AiServicePort::in_process(files()).unwrap();
+        let (mut p2, l2) = AiServicePort::in_process(files()).unwrap();
+        let e1 = reg.register(l1, "left", None).unwrap();
+        let e2 = reg.register(l2, "right", None).unwrap();
+        reg.pump();
+        p1.test_drain();
+        p2.test_drain();
+        reg.focus(&e2);
+        let _ = e1;
+        let (model, shared) = scripted(vec![vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }], done("ok")]);
+        let mut core = EngineCore::new(reg, model, None, 1);
+        core.send("hello", 0.0);
+        assert_eq!(shared.lock().unwrap().sends[0].1.contains("# Focus"), false, "no target, no focus block");
+        core.cancel(0.0);
+        core.set_target(Some(Target { label: "Files".into(), app: "files".into(), context: "Folder: ~/pics".into(), selection: None }));
+        assert_eq!(core.state().target.as_ref().unwrap().label, "Files");
+        core.send("what is here", 1.0);
+        {
+            let m = shared.lock().unwrap();
+            let (text, context) = m.sends.last().unwrap();
+            assert_eq!(text, "what is here", "the line is the person's own");
+            assert!(context.contains("# Focus") && context.contains("Folder: ~/pics"), "{context}");
+        }
+        assert!(matches!(&core.state().entries.last(), Some(Entry::User { text }) if text == "what is here"));
+        // Setting the target focused the instance the registry picks by default
+        // (no focus beats a stale one): the call goes to the same one every time.
+        core.pump(1.1);
+        let (a, b) = (p1.test_drain(), p2.test_drain());
+        assert_eq!(a.len() + b.len(), 1, "{a:?} {b:?}");
+        core.set_target(None);
+        core.cancel(2.0);
+        core.send("again", 3.0);
+        assert!(!shared.lock().unwrap().sends.last().unwrap().1.contains("# Focus"));
+    }
+
+    #[test]
+    fn a_target_scopes_the_tools_the_model_sees() {
+        let reg = ServiceRegistry::new();
+        let (mut p1, l1) = AiServicePort::in_process(files()).unwrap();
+        let other = ServiceManifest::new("notes", "Notes", "Notes.")
+            .with_tool(ToolDef::new("add", "Add a note.", r#"{"type":"object","properties":{}}"#, Risk::Act));
+        let (mut p2, l2) = AiServicePort::in_process(other).unwrap();
+        reg.register(l1, "files", None).unwrap();
+        reg.register(l2, "notes", None).unwrap();
+        reg.pump();
+        p1.test_drain();
+        p2.test_drain();
+        let (model, shared) = scripted(vec![done("a"), done("b"), done("c")]);
+        let mut core = EngineCore::new(reg, model, None, 1);
+        let names = |m: &Scripted| m.configured.last().unwrap().1.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        core.send("one", 0.0);
+        core.pump(0.1);
+        let all = names(&shared.lock().unwrap());
+        assert!(all.contains(&"files.list_dir".to_string()) && all.contains(&"notes.add".to_string()), "{all:?}");
+        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "".into(), selection: None }));
+        core.send("two", 1.0);
+        core.pump(1.1);
+        assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe"]);
+        // A new context line for the same app does not rebind.
+        let configs = shared.lock().unwrap().configured.len();
+        core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "page 2".into(), selection: None }));
+        core.send("three", 2.0);
+        core.pump(2.1);
+        assert_eq!(shared.lock().unwrap().configured.len(), configs);
+        core.set_target(None);
+        core.send("four", 3.0);
+        assert!(names(&shared.lock().unwrap()).len() > 2, "all tools again");
+    }
+
+    #[test]
+    fn the_model_is_told_what_the_person_changed() {
+        let (mut core, model, mut port, _e) = setup(export_call(r#"{"path":"~/pics","format":"tar"}"#));
+        core.send("export", 0.0);
+        core.pump(0.1);
+        core.confirm_with("m1", true, Some(r#"{"path":"~/pics","format":"zip","level":5}"#.into()), 0.2).unwrap();
+        let PortEvent::Call(c) = port.test_drain().remove(0) else { panic!() };
+        port.reply(ToolResult::ok(&c.call_id, "pics.zip", "exported"));
+        core.pump(0.3);
+        let text = model.lock().unwrap().tool_results[0].1.clone();
+        assert_eq!(text, "[the person edited the arguments before running: format = \"zip\", level = 5]\npics.zip");
+        // Unedited: the result is untouched.
+        let (mut core, model, mut port, _e) = setup(export_call(r#"{"path":"~/pics","format":"tar"}"#));
+        core.send("export", 0.0);
+        core.pump(0.1);
+        core.confirm_with("m1", true, Some(r#"{"format":"tar","path":"~/pics"}"#.into()), 0.2).unwrap();
+        let PortEvent::Call(c) = port.test_drain().remove(0) else { panic!() };
+        port.reply(ToolResult::ok(&c.call_id, "pics.tar", "exported"));
+        core.pump(0.3);
+        assert_eq!(model.lock().unwrap().tool_results[0].1, "pics.tar");
+        // A proposal says who opened it, in the card's result.
+        let id = core.propose("files", "export", r#"{"path":"~","format":"zip"}"#, 1.0);
+        core.confirm_with(&id, true, None, 1.1).unwrap();
+        let PortEvent::Call(c) = port.test_drain().remove(0) else { panic!() };
+        port.reply(ToolResult::ok(&c.call_id, "done", "exported"));
+        core.pump(1.2);
+        assert!(matches!(&core.state().tool(&id).unwrap().status, ToolStatus::Done { text, .. } if text == "[opened by the person]\ndone"));
+    }
+
+    #[test]
+    fn the_host_announces_a_line_the_model_is_not_told() {
+        let (mut core, model, _port, _e) = setup(vec![]);
+        let before = core.state().generation;
+        core.announce("Exported: ~/Movies/Launch.mp4");
+        assert!(core.state().generation > before);
+        assert!(matches!(core.state().entries.last(), Some(Entry::System { text }) if text == "Exported: ~/Movies/Launch.mp4"));
+        assert!(model.lock().unwrap().sends.is_empty());
+    }
+
+    #[test]
+    fn suggestions_are_state_for_the_chips() {
+        let (mut core, _model, _port, _e) = setup(vec![]);
+        let before = core.state().generation;
+        let chip = Suggestion { label: "Export".into(), app: "files".into(), tool: "export".into(), prefill: "{}".into() };
+        core.set_suggestions(vec![chip.clone()]);
+        assert_eq!(core.state().suggestions, vec![chip.clone()]);
+        let after = core.state().generation;
+        assert!(after > before);
+        core.set_suggestions(vec![chip]);
+        assert_eq!(core.state().generation, after, "an unchanged set does not redraw");
+    }
+
+    #[test]
+    fn silence_is_recoverable_and_only_stop_sends_cancel() {
         let (mut core, model, mut port, _e) = setup(vec![
             vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
             done("Sorry."),
@@ -1201,12 +1693,67 @@ mod tests {
         let _ = port.test_drain();
         port.progress("m1", "walking", 300);
         core.pump(50.0);
-        assert!(core.pump(100.0).is_empty() || model.lock().unwrap().tool_results.is_empty(), "progress at t=50 moved the deadline to 110");
+        core.pump(100.0);
+        assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::Running { .. }));
         core.pump(111.0);
-        let results = model.lock().unwrap().tool_results.clone();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].1.starts_with("[timed_out]"), "{results:?}");
+        assert!(matches!(&core.state().tool("m1").unwrap().status,
+            ToolStatus::NotResponding { note, permille: 300 } if note == "walking"));
+        assert!(core.pending.contains_key("m1"));
+        assert!(model.lock().unwrap().tool_results.is_empty());
+        assert!(port.test_drain().is_empty(), "silence sends no Cancel");
+        let generation = core.state().generation;
+        core.pump(10_000.0);
+        assert_eq!(core.state().generation, generation, "silent polls do not redraw");
+        assert!(port.test_drain().is_empty(), "elapsed time never ends the call");
+        port.progress("m1", "writing", 800);
+        core.pump(10_001.0);
+        assert!(matches!(&core.state().tool("m1").unwrap().status,
+            ToolStatus::Running { note, permille: 800 } if note == "writing"));
+        core.pump(10_062.0);
+        assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::NotResponding { .. }));
+        core.stop_call("m1");
         assert!(matches!(&port.test_drain()[0], PortEvent::Cancel { call_id } if call_id == "m1"));
+        assert!(matches!(core.state().tool("m1").unwrap().status,
+            ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. }));
+        core.stop_call("m1");
+        assert!(port.test_drain().is_empty(), "Stop is idempotent");
+    }
+
+    #[test]
+    fn progressing_calls_have_no_total_cap_and_silent_calls_can_finish() {
+        let (mut core, model, mut port, _e) = setup(vec![
+            vec![call("files.list_dir", "{}"), ModelEvent::TurnDone { tool_calls: 1 }],
+        ]);
+        core.send("list", 0.0);
+        core.pump(0.1);
+        port.test_drain();
+        for step in 1..=100 {
+            port.progress("m1", "walking", step);
+            core.pump(step as f64 * 50.0);
+            assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::Running { .. }));
+            assert!(port.test_drain().is_empty());
+        }
+        core.pump(5_061.0);
+        assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::NotResponding { .. }));
+        port.reply(ToolResult::ok("m1", "finished", "done"));
+        core.pump(5_062.0);
+        assert_eq!(model.lock().unwrap().tool_results[0].1, "finished");
+        assert!(matches!(core.state().tool("m1").unwrap().status, ToolStatus::Done { outcome: ToolOutcome::Ok, .. }));
+    }
+
+    #[test]
+    fn call_activity_clock_resets_only_on_progress() {
+        let mut activity = CallActivity::new(20.0);
+        assert!(!activity.poll(79.0));
+        assert!(activity.poll(80.0));
+        assert!(!activity.poll(8_000.0));
+        activity.progress(8_000.0);
+        assert!(!activity.poll(8_059.0));
+        assert!(activity.poll(8_060.0));
+        for now in (10_000..100_000).step_by(30) {
+            activity.progress(now as f64);
+            assert!(!activity.poll(now as f64 + 29.0));
+        }
     }
 
     #[test]
@@ -1466,7 +2013,7 @@ mod tests {
         let (core, _model, _port, _e) = setup(vec![]);
         core.registry().mark_launchable("photos", "Photos");
         let ctx = core.registry().dynamic_context();
-        assert!(ctx.contains("Running now — call their tools directly: Files (files.list_dir, files.trash, files.open)"), "{ctx}");
+        assert!(ctx.contains("Running now — call their tools directly: Files (files.list_dir, files.trash, files.export, files.open)"), "{ctx}");
         assert!(ctx.contains("Not running — os.launch starts them: Photos (`photos`)"), "{ctx}");
     }
 

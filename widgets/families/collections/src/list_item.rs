@@ -41,7 +41,7 @@
 //! widgets, dropped into the trailing slot.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     family_api::measure,
     makepad_derive_widget::*,
     makepad_draw::*,

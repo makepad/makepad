@@ -1,0 +1,44 @@
+# translator — English <-> Chinese (Mandarin) translation on the local AI hub
+# or on the phone itself.
+#
+# Text, voice and camera. Every model runs on the user's own hub (the local
+# fleet node: Qwen for translation, Whisper for listening, Kokoro for
+# speaking) or, on a phone with the weights, on the phone (`on-device`);
+# there is no cloud provider in this app, and the model named in settings is
+# the model that answers or the app says why not.
+
+[package]
+name = "makepad-app-translator"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-translator"
+
+[[bin]]
+name = "makepad-app-translator"
+path = "src/main.rs"
+
+[features]
+default = ["tweaker", "standalone"]
+# The design overlay (Shift+F10 with the dev overlays on).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+# The standalone window (src/main.rs).
+standalone = []
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
+# The fleet client: discovery + the chat provider.
+makepad-zune-png = { path = "../../libs/zune/zune-png" }
+makepad-zune-jpeg = { path = "../../libs/zune/zune-jpeg" }
+makepad-zune-core = { path = "../../libs/zune/zune-core" }
+# `speech`: the hub speech sessions (Whisper / Kokoro on a hub node, or the OS engine).
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["speech"] }
+
+# On Android the phone's own models run in this process (`on-device` in the
+# settings, see src/ondevice.rs): Qwen through makepad-ai-llm, Whisper and
+# Kokoro through the hub's in-process speech engines, all on Vulkan.
+[target.'cfg(target_os = "android")'.dependencies]
+makepad-ai-llm = { path = "../../libs/ai/llm" }
+makepad-ai-textdet = { path = "../../libs/ai/models/textdet" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["speech", "stt", "tts"] }

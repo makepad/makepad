@@ -144,7 +144,7 @@ impl Pty {
         let pipe_security = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
-            bInheritHandle: true.into(),
+            bInheritHandle: windows::core::BOOL(1),
         };
 
         let mut conpty_input_read = WinHandle::invalid();
@@ -219,14 +219,14 @@ impl Pty {
             .unwrap_or(PCWSTR::null());
         unsafe {
             CreateProcessW(
-                PCWSTR::null(),
+                None,
                 Some(PWSTR(command_line_wide.as_mut_ptr())),
                 None,
                 None,
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                cwd_ptr,
+                Some(cwd_ptr),
                 &startup_info.StartupInfo,
                 &mut process_info,
             )
@@ -299,13 +299,10 @@ impl Pty {
         cmd.env_remove("NO_COLOR");
         cmd.env("TERM_PROGRAM", "terminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // A terminal spawned inside makepad-app-wm inherits the compositor's
-        // studio vars; the shell's children must not think they are hosted
-        // makepad clients.
-        cmd.env_remove("STUDIO_HOST");
-        cmd.env_remove("STUDIO_BUILD");
-        cmd.env_remove("STUDIO_CRATE");
-        cmd.env_remove("MAKEPAD_STDIN_LOOP");
+        // A terminal the WM hosts carries its own hosted identity and the
+        // WM's direct-display request; the shell's children get neither (an
+        // app started here finds the WM itself through MAKEPAD_WM_SOCKET).
+        makepad_app_registry::child_env::scrub(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -677,7 +674,7 @@ impl Drop for Pty {
 }
 
 #[cfg(windows)]
-fn windows_err(err: windows::core::Error) -> io::Error {
+fn windows_err(err: windows::core::HRESULT) -> io::Error {
     io::Error::other(err.to_string())
 }
 
@@ -797,7 +794,7 @@ impl ProcThreadAttributeList {
     fn new(attribute_count: u32) -> io::Result<Self> {
         let mut size = 0usize;
         unsafe {
-            let _ = InitializeProcThreadAttributeList(None, attribute_count, Some(0), &mut size);
+            let _ = InitializeProcThreadAttributeList(None, attribute_count, 0, &mut size);
         }
         if size == 0 {
             return Err(io::Error::other(
@@ -808,7 +805,7 @@ impl ProcThreadAttributeList {
         let mut storage = vec![0u8; size];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
         unsafe {
-            InitializeProcThreadAttributeList(Some(list), attribute_count, Some(0), &mut size)
+            InitializeProcThreadAttributeList(Some(list), attribute_count, 0, &mut size)
                 .map_err(windows_err)?;
         }
         Ok(Self {

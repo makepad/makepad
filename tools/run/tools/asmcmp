@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""asmcmp <kernel> <fn> [options] -- Relax's tier-1 x64 code of one function next to rustc --release's.
+
+Runs on an x86-64 Linux box with the source tree (node 165). One command:
+    tools/run/tools/asmcmp deflate compress_normal
+    tools/run/tools/asmcmp sum_slice relax_bench_rt::sum_slice --makepad ~/cg2/frozen/makepad-t0
+
+Relax side: the bench_rt kernel runs at steady state with MAKEPAD_RUN_DUMP=<fn> + MAKEPAD_RUN_PROFILE, so Relax writes the
+tier-1 code (<base>.t1.bin), its RIR (.t1.rir), code offset -> RIR block/instruction + source position (.t1.map) and
+per-instruction sampler counts (.t1.prof). Disassembled with objdump (Intel syntax).
+rustc side: bench_rt built with `cargo build --release` (CARGO_PROFILE_RELEASE_DEBUG=line-tables-only: line info only,
+same machine code) into <out>/rustc-target; the symbol whose demangled name contains <fn> (the hottest one under
+`perf record` when several match) is disassembled from the binary with `objdump -d -l -C`; per-instruction samples from
+`perf annotate`. Only the toolchain's own tools: cargo, objdump, perf. No downloads.
+
+Output (stdout, also <out>/<kernel>-<fn>.txt):
+  1. totals per instruction category for both functions, static and sample-weighted
+  2. per source line (aligned by file:line), hottest first: instructions per category on each side, sample share
+  3. the hot loops: each backward branch's body (Relax: with RIR block markers b<N>) with per-instruction samples
+Categories: stack_ld / stack_st (rsp/rbp-based memory: spills, reloads, slot traffic), mem_ld / mem_st, mov (register
+copies, extensions, lea), alu, cmp (cmp/test), setcc_cmov, branch (jmp/jcc), bounds (a jcc whose target reaches a
+panic call within a few instructions), call, vector (packed SIMD on xmm/ymm), fp (scalar float), other.
+
+Options: --rustc-fn SUBSTR (rustc symbol to compare when rustc inlined <fn> into a caller), --makepad BIN (default: $MAKEPAD_RUN_BIN or `makepad` on PATH), --tree DIR (default: the checkout containing this file),
+--out DIR (default /tmp/asmcmp-$USER), --warm MS (default 3500), --no-rustc-build (reuse <out>/rustc-target).
+"""
+import argparse, collections, os, re, subprocess, sys
+
+CATS = ["stack_ld", "stack_st", "mem_ld", "mem_st", "mov", "alu", "cmp", "setcc_cmov", "branch", "bounds", "call", "vector", "fp", "other"]
+
+
+def sh(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def classify(mn, ops, is_bounds=False):
+    """category of one instruction (Intel syntax mnemonic + operand text)"""
+    if is_bounds:
+        return "bounds"
+    m = mn
+    if m.startswith("j"):
+        return "branch"
+    if m.startswith("call"):
+        return "call"
+    if m.startswith("set") or m.startswith("cmov"):
+        return "setcc_cmov"
+    if m in ("cmp", "test", "ucomiss", "ucomisd", "comiss", "comisd", "bt"):
+        return "cmp"
+    xmm = "xmm" in ops or "ymm" in ops
+    packed = re.search(r"(ps|pd)$", m) or (m.startswith("p") and xmm) or (m.startswith("vp") and xmm) or m in ("movdqu", "movdqa", "movups", "movaps", "vmovdqu", "vmovups")
+    if xmm and packed:
+        return "vector"
+    if xmm:
+        return "fp"
+    mem = re.search(r"\[(.*?)\]", ops)
+    if mem:
+        stack = re.search(r"\b(rsp|rbp)\b", mem.group(1)) is not None
+        dst_is_mem = ops.strip().find("[") < ops.find(",") if "," in ops else True
+        if m == "lea":
+            return "mov"
+        if m in ("mov", "movzx", "movsx", "movsxd", "movabs") or m.startswith("mov"):
+            if dst_is_mem:
+                return "stack_st" if stack else "mem_st"
+            return "stack_ld" if stack else "mem_ld"
+        # ALU with a memory operand: count the memory side
+        if dst_is_mem:
+            return "stack_st" if stack else "mem_st"
+        return "stack_ld" if stack else "mem_ld"
+    if m in ("mov", "movzx", "movsx", "movsxd", "movabs", "lea", "xchg") or m.startswith("mov"):
+        return "mov"
+    if m in ("add", "sub", "and", "or", "xor", "shl", "shr", "sar", "rol", "ror", "imul", "mul", "div", "idiv", "neg", "not", "inc", "dec", "adc", "sbb", "shlx", "shrx", "sarx", "andn", "popcnt", "lzcnt", "tzcnt", "bswap", "cqo", "cdq", "cdqe", "bsf", "bsr"):
+        return "alu"
+    return "other"
+
+
+def parse_objdump(text):
+    """[(addr, mnemonic, operands, src)] from `objdump -d -l -M intel --no-show-raw-insn` output"""
+    out = []
+    src = ""
+    for l in text.splitlines():
+        if re.match(r"^/.*:\d+", l) or re.match(r"^[^\s].*\.rs:\d+", l):
+            src = re.sub(r" \(discriminator \d+\)", "", l.strip())
+            continue
+        m = re.match(r"^\s*([0-9a-f]+):\s+(\S+)\s*(.*)$", l)
+        if m:
+            ops = re.sub(r"\s+#.*$", "", m.group(3)).strip()
+            out.append((int(m.group(1), 16), m.group(2), ops, src))
+    return out
+
+
+def norm_src(s):
+    m = re.search(r"([^/]+\.rs):(\d+)", s)
+    return f"{m.group(1)}:{m.group(2)}" if m else "?"
+
+
+def mark_bounds(insts, panic_hint):
+    """indices of conditional branches whose target reaches a panic call within 12 instructions"""
+    at = {a: i for i, (a, _, _, _) in enumerate(insts)}
+    res = set()
+    for i, (a, mn, ops, _) in enumerate(insts):
+        if not mn.startswith("j") or mn == "jmp":
+            continue
+        m = re.match(r"^(0x)?([0-9a-f]+)", ops)
+        if not m:
+            continue
+        t = at.get(int(m.group(2), 16))
+        if t is None:
+            continue
+        for k in range(t, min(t + 12, len(insts))):
+            mn2, ops2 = insts[k][1], insts[k][2]
+            if mn2.startswith("call") and panic_hint(insts, k):
+                res.add(i)
+                break
+            if mn2 in ("ret", "jmp"):
+                break
+    return res
+
+
+def rustc_panic(insts, k):
+    return "panic" in insts[k][2] or "slice_index" in insts[k][2] or "slice_end" in insts[k][2]
+
+
+def relax_panic(insts, k):
+    # Relax's panic paths end in a call that never returns: ud2 right after it
+    return k + 1 < len(insts) and insts[k + 1][1] == "ud2"
+
+
+def summarize(insts, samples, panic_hint):
+    bounds = mark_bounds(insts, panic_hint)
+    cats = []
+    for i, (a, mn, ops, src) in enumerate(insts):
+        cats.append(classify(mn, ops, i in bounds))
+    tot = collections.Counter(cats)
+    stot = sum(samples.get(a, 0) for a, _, _, _ in insts) or 1
+    wtot = collections.Counter()
+    for (a, _, _, _), c in zip(insts, cats):
+        wtot[c] += samples.get(a, 0)
+    return cats, tot, wtot, stot
+
+
+def loops(insts, samples, cats, label, rir_marks=None, limit=4):
+    """hottest backward-branch bodies"""
+    at = {a: i for i, (a, _, _, _) in enumerate(insts)}
+    cands = []
+    for i, (a, mn, ops, _) in enumerate(insts):
+        if not mn.startswith("j"):
+            continue
+        m = re.match(r"^(0x)?([0-9a-f]+)", ops)
+        if not m:
+            continue
+        t = at.get(int(m.group(2), 16))
+        if t is None or t > i or i - t > 400:
+            continue
+        w = sum(samples.get(insts[k][0], 0) for k in range(t, i + 1))
+        cands.append((w, t, i))
+    # the innermost hot loops: of the bodies carrying >= 30% of the hottest one's samples, shortest first
+    top = max((w for w, _, _ in cands), default=0)
+    cands = sorted((c for c in cands if top and c[0] >= 0.3 * top), key=lambda c: (c[2] - c[1], -c[0]))
+    out, taken = [], []
+    for w, t, i in cands:
+        if any(not (i < a or t > b) for a, b in taken):
+            continue
+        taken.append((t, i))
+        stot = sum(samples.values()) or 1
+        c = collections.Counter(cats[t:i + 1])
+        out.append(f"--- {label} loop {insts[t][0]:x}..{insts[i][0]:x}: {i - t + 1} instructions, {100.0 * w / stot:.1f}% of samples; " + " ".join(f"{k}={c[k]}" for k in CATS if c[k]))
+        for k in range(t, i + 1):
+            a, mn, ops, src = insts[k]
+            mark = (rir_marks or {}).get(a, "")
+            mk, _, rtxt = mark.partition("  ")
+            line = f"  {100.0 * samples.get(a, 0) / stot:5.1f} {a:6x} {mk:>9} {cats[k]:>10}  {mn} {ops}"
+            out.append(f"{line:<78.78} {norm_src(src):<24} {rtxt[:90]}")
+        if len(taken) >= limit:
+            break
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("kernel")
+    ap.add_argument("fn")
+    here = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    ap.add_argument("--tree", default=here)
+    ap.add_argument("--makepad", default=os.environ.get("MAKEPAD_RUN_BIN", "makepad"))
+    ap.add_argument("--out", default=f"/tmp/asmcmp-{os.environ.get('USER', 'x')}")
+    ap.add_argument("--warm", default="3500")
+    ap.add_argument("--no-rustc-build", action="store_true")
+    ap.add_argument("--rustc-fn", help="substring of the rustc symbol when rustc inlined <fn> elsewhere (default: <fn>)")
+    a = ap.parse_args()
+    bench = os.path.join(a.tree, "libs/relax/compiler/bench_rt")
+    out = a.out
+    os.makedirs(out, exist_ok=True)
+    dd = os.path.join(out, f"relax-{a.kernel}")
+    os.makedirs(dd, exist_ok=True)
+    for f in os.listdir(dd):  # this tool's own dump dir: only its dump files
+        if f.startswith("relax_dump_") or f == "p.tsv":
+            os.remove(os.path.join(dd, f))
+
+    # ---- Relax
+    env = dict(os.environ, MAKEPAD_RUN_DUMP=a.fn, MAKEPAD_RUN_DUMP_DIR=dd, MAKEPAD_RUN_PROFILE=os.path.join(dd, "p.tsv"),
+               MAKEPAD_RUN_PROFILE_FROM_MS=str(max(0, int(a.warm) - 1000)), MAKEPAD_RUN_CACHE="0", BENCH_WARM_MS=a.warm,
+               BENCH_REPS="20", MAKEPAD_RUN_STD="../std", MAKEPAD_RUN_CACHE_DIR=os.path.join(out, "relax-target"))
+    r = sh([a.makepad, "run", "--quiet", "relax-bench-rt", "--", a.kernel], cwd=bench, env=env)
+    res = [l for l in r.stdout.splitlines() if l.startswith("| ")]
+    bins = sorted(f for f in os.listdir(dd) if f.endswith(".t1.bin"))
+    if not bins:
+        sys.exit(f"asmcmp: Relax wrote no tier-1 dump for '{a.fn}' (names dumped: {sorted(os.listdir(dd))}; result {res})")
+    base = os.path.join(dd, bins[0][:-len(".bin")])
+    dis = sh(["objdump", "-D", "-b", "binary", "-mi386:x86-64", "-M", "intel", "--no-show-raw-insn", base + ".bin"]).stdout
+    marks, srcs = {}, {}
+    if os.path.exists(base + ".map"):
+        for l in open(base + ".map"):
+            off, b, i, src = l.rstrip("\n").split("\t")
+            o = int(off, 16)
+            marks.setdefault(o, f"b{b}" + ("" if i == "-" else f".{i}"))
+            srcs.setdefault(o, src)
+    rins = []
+    cur = ""
+    for l in dis.splitlines():
+        m = re.match(r"^\s*([0-9a-f]+):\s+(\S+)\s*(.*)$", l)
+        if m:
+            o = int(m.group(1), 16)
+            cur = srcs.get(o, cur)
+            rins.append((o, m.group(2), re.sub(r"\s+#.*$", "", m.group(3)).strip(), cur))
+    # the emitted RIR (after the back end's splits): marker b<N>.<i> -> instruction text
+    rir_txt = {}
+    if os.path.exists(base + ".emit.rir"):
+        blk, idx = None, 0
+        for l in open(base + ".emit.rir"):
+            m = re.match(r"^b(\d+):", l)
+            if m:
+                blk, idx = int(m.group(1)), 0
+                continue
+            if blk is not None and l.startswith("  "):
+                t = l.strip()
+                if re.match(r"^(Jump|Branch|Ret|Unreachable|Invoke|Resume)\b", t):
+                    rir_txt[f"b{blk}"] = t
+                else:
+                    rir_txt[f"b{blk}.{idx}"] = t
+                    idx += 1
+    for o, mk in list(marks.items()):
+        if mk in rir_txt:
+            marks[o] = mk + "  " + re.sub(r"IntTy \{ bits: (\d+), signed: (true|false) \}", lambda m: ("i" if m.group(2) == "true" else "u") + m.group(1), rir_txt[mk]).replace("VReg(", "v(")
+    rsamp = {}
+    if os.path.exists(base + ".prof"):
+        for l in open(base + ".prof"):
+            o, n = l.split()
+            rsamp[int(o, 16)] = int(n)
+
+    # ---- rustc
+    tgt = os.path.join(out, "rustc-target")
+    if not a.no_rustc_build:
+        b = sh(["cargo", "build", "--release", "--target-dir", tgt], cwd=bench, env=dict(os.environ, CARGO_PROFILE_RELEASE_DEBUG="line-tables-only", CARGO_INCREMENTAL="0"))
+        if b.returncode != 0:
+            sys.exit("asmcmp: rustc build failed:\n" + b.stderr[-2000:])
+    exe = os.path.join(tgt, "release", "relax-bench-rt")
+    syms = sh(["nm", "-C", "--defined-only", exe]).stdout.splitlines()
+    rfn = a.rustc_fn or a.fn
+    cand = [l.split(" ", 2) for l in syms if rfn in l and len(l.split(" ", 2)) == 3 and l.split(" ", 2)[1] in "tT"]
+    if not cand:
+        sys.exit(f"asmcmp: no rustc symbol contains '{rfn}' (rustc may have inlined it: pass --rustc-fn <its caller>)")
+    perf = os.path.join(out, f"rustc-{a.kernel}.data")
+    sh(["perf", "record", "-q", "-o", perf, "-F", "4000", exe, a.kernel], cwd=bench, env=dict(os.environ, BENCH_WARM_MS="500", BENCH_REPS="40"))
+    rep = sh(["perf", "report", "-i", perf, "--no-children", "--sort", "sym", "--stdio"]).stdout
+    def heat(name):
+        for l in rep.splitlines():
+            if name in l:
+                m = re.match(r"\s*([0-9.]+)%", l)
+                if m:
+                    return float(m.group(1))
+        return 0.0
+    cand.sort(key=lambda c: -heat(c[2]))
+    sym = cand[0][2]
+    mangled = [l.split(" ", 2)[2] for l in sh(["nm", "--defined-only", exe]).stdout.splitlines() if len(l.split(" ", 2)) == 3]
+    raw = sh(["objdump", "-d", "-l", "-C", "-M", "intel", "--no-show-raw-insn", f"--disassemble={sym}", exe]).stdout
+    if not parse_objdump(raw):
+        # demangled names with generics do not always round-trip through --disassemble: find by address
+        addr = cand[0][0]
+        start = int(addr, 16)
+        raw = sh(["objdump", "-d", "-l", "-C", "-M", "intel", "--no-show-raw-insn", f"--start-address={start}", f"--stop-address={start + 200000}", exe]).stdout
+        txt, stop = [], False
+        for l in raw.splitlines():
+            if re.match(r"^[0-9a-f]+ <", l) and txt and not l.startswith(f"{start:016x}"):
+                break
+            txt.append(l)
+        raw = "\n".join(txt)
+    cins = parse_objdump(raw)
+    ann = sh(["perf", "annotate", "-i", perf, "--stdio", "-M", "intel", "-s", sym]).stdout
+    csamp = {}
+    for l in ann.splitlines():
+        m = re.match(r"^\s+([0-9.]+)\s+:\s+([0-9a-f]+):", l)
+        if m:
+            csamp[int(m.group(2), 16)] = int(float(m.group(1)) * 100)
+
+    # ---- report
+    rc, rt, rw, rs = summarize(rins, rsamp, relax_panic)
+    cc, ct, cw, cs = summarize(cins, csamp, rustc_panic)
+    lines = [f"asmcmp {a.kernel} {a.fn}", f"  makepad: {os.path.basename(base)} ({len(rins)} instructions) {res[:1]}", f"  rustc: {sym[:120]} ({len(cins)} instructions, {heat(sym):.1f}% of the kernel's samples)", ""]
+    lines.append(f"{'category':>11} {'jit':>7} {'rustc':>7}   {'jit %smp':>10} {'rustc %smp':>10}")
+    for k in CATS:
+        lines.append(f"{k:>11} {rt[k]:7d} {ct[k]:7d}   {100.0 * rw[k] / rs:10.1f} {100.0 * cw[k] / cs:10.1f}")
+    lines.append(f"{'total':>11} {len(rins):7d} {len(cins):7d}")
+    lines.append("")
+    # per source line
+    by = collections.defaultdict(lambda: [collections.Counter(), collections.Counter(), 0.0, 0.0])
+    for (o, mn, ops, src), c in zip(rins, rc):
+        e = by[norm_src(src)]; e[0][c] += 1; e[2] += 100.0 * rsamp.get(o, 0) / rs
+    for (o, mn, ops, src), c in zip(cins, cc):
+        e = by[norm_src(src)]; e[1][c] += 1; e[3] += 100.0 * csamp.get(o, 0) / cs
+    lines.append("per source line (hottest first): jit smp% / rustc smp%, instructions jit / rustc, categories differing")
+    for src, (r1, c1, s1, s2) in sorted(by.items(), key=lambda kv: -(kv[1][2] + kv[1][3]))[:30]:
+        diff = " ".join(f"{k}:{r1[k]}/{c1[k]}" for k in CATS if r1[k] != c1[k])
+        lines.append(f"  {src:28} {s1:5.1f} / {s2:5.1f}   {sum(r1.values()):4d} / {sum(c1.values()):4d}   {diff}")
+    lines.append("")
+    lines += loops(rins, rsamp, rc, "jit", marks)
+    lines.append("")
+    lines += loops(cins, csamp, cc, "rustc")
+    text = "\n".join(lines)
+    print(text)
+    with open(os.path.join(out, f"{a.kernel}-{a.fn.replace(':', '_')}.txt"), "w") as f:
+        f.write(text + "\n")
+
+
+if __name__ == "__main__":
+    main()

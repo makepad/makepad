@@ -2,7 +2,7 @@
 
 mod app_process;
 mod error;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod fixture;
 mod remote;
 mod runtime;

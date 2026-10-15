@@ -78,6 +78,12 @@ impl StyleTween {
     pub fn reserved_height(&self) -> f64 {
         self.target_value([0.0, 0.0, 54.0, 34.0, 0.0])
     }
+    /// What a maximised window leaves at the bottom for a shelf that floats
+    /// over the desk (the macOS dock and its margin); the taskbars are
+    /// already out of the desk's area (`reserved_height`).
+    pub fn shelf_reserve(&self) -> f64 {
+        self.target_value([0.0, MAC_DOCK_RESERVE, 0.0, 0.0, 0.0])
+    }
     pub fn title_height(&self) -> f64 {
         self.value([0.0, 32.0, 34.0, 20.0, 22.0])
     }
@@ -103,6 +109,36 @@ mod tests {
     /// Every desktop style's shelf (the macOS dock, the Windows taskbars)
     /// stands aside while the main screen shows a fullscreen window and
     /// returns when it ends; the mobile styles have none either way.
+    /// A pointer pushed against the screen's bottom edge clicks the dock icon
+    /// above it; the gaps between icons go to the nearest icon; nothing
+    /// beside the dock or above it is a dock hit.
+    #[test]
+    fn the_dock_hits_reach_the_bottom_pixel_row() {
+        let screen = rect(0.0, 0.0, 1280.0, 800.0);
+        let bar = rect(400.0, 800.0 - MAC_DOCK_RESERVE, 480.0, MAC_DOCK_HEIGHT);
+        let cell = |i: f64| rect(410.0 + i * 62.0, bar.pos.y + 6.0, 60.0, MAC_DOCK_HEIGHT - 12.0);
+        let hits = vec![
+            (cell(0.0), ShelfHit::Launcher),
+            (cell(1.0), ShelfHit::App("files".into())),
+            (cell(2.0), ShelfHit::App("code".into())),
+        ];
+        let reach = Some((bar, screen.pos.y + screen.size.y));
+        let bottom = screen.size.y; // the last row, at any scale the WM maps it to
+        assert_eq!(shelf_hit(&hits, reach, dvec2(500.0, bottom)), Some(ShelfHit::App("files".into())));
+        assert_eq!(shelf_hit(&hits, reach, dvec2(500.0, bottom - 0.5)), Some(ShelfHit::App("files".into())));
+        // in the margin under the bar and in the bar's padding
+        assert_eq!(shelf_hit(&hits, reach, dvec2(560.0, bar.pos.y + bar.size.y + 1.0)), Some(ShelfHit::App("code".into())));
+        assert_eq!(shelf_hit(&hits, reach, dvec2(420.0, bar.pos.y + 1.0)), Some(ShelfHit::Launcher));
+        // the 2 pt gap between two cells goes to the nearer one
+        assert_eq!(shelf_hit(&hits, reach, dvec2(470.6, bottom)), Some(ShelfHit::Launcher));
+        assert_eq!(shelf_hit(&hits, reach, dvec2(471.6, bottom)), Some(ShelfHit::App("files".into())));
+        // beside the dock and above it: no hit
+        assert_eq!(shelf_hit(&hits, reach, dvec2(300.0, bottom)), None);
+        assert_eq!(shelf_hit(&hits, reach, dvec2(500.0, bar.pos.y - 1.0)), None);
+        // the dock sits low: a few points over the bottom edge
+        assert!(800.0 - (bar.pos.y + bar.size.y) <= 4.0);
+    }
+
     #[test]
     fn the_dock_hides_under_a_fullscreen_main_screen() {
         for style in [DesktopStyle::Macos, DesktopStyle::Windows, DesktopStyle::Windows2000, DesktopStyle::NextStep] {
@@ -117,7 +153,7 @@ mod tests {
 }
 
 use crate::desk::WmState;
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use crate::shell::{
     alpha, rgb,
     ui::{rect, HAlign, Ico, ShellDraw},
@@ -269,6 +305,9 @@ pub struct DrawDesktopChrome {
 pub enum ShelfHit {
     Launcher,
     App(String),
+    /// The dock's last slot when apps did not fit: how many apps are drawn
+    /// before it, so the rest are `dock_items()[shown..]`.
+    More(usize),
     Window(ClientId),
     ShowDesktop,
 }
@@ -302,6 +341,13 @@ pub struct DesktopShelf {
     hits: Vec<(Rect, ShelfHit)>,
     #[rust]
     bounds: Rect,
+    /// A bottom shelf's reach: its bar and the screen's bottom edge under it
+    /// (the dock's hits go down to the last pixel row).
+    #[rust]
+    bottom_reach: Option<(Rect, f64)>,
+    /// The area the shelf laid out in at the last draw (the whole window).
+    #[rust]
+    screen: Rect,
     #[rust]
     overlay: Option<DrawList2d>,
     #[rust]
@@ -317,13 +363,15 @@ pub struct DesktopShelf {
 }
 impl DesktopShelf {
     pub fn hit(&self, p: Vec2d) -> Option<ShelfHit> {
-        self.hits
-            .iter()
-            .find(|(r, _)| r.contains(p))
-            .map(|(_, h)| h.clone())
+        shelf_hit(&self.hits, self.bottom_reach, p)
+    }
+    /// The area the shelf last laid out in.
+    pub fn screen_rect(&self) -> Rect {
+        self.screen
     }
     pub fn contains(&self, p: Vec2d) -> bool {
-        self.bounds.contains(p) && self.bounds.size.y > 0.0
+        (self.bounds.contains(p) && self.bounds.size.y > 0.0)
+            || self.bottom_reach.is_some_and(|(bar, bottom)| in_bottom_reach(bar, bottom, p))
     }
     pub fn hover_at(&mut self, cx: &mut Cx, p: Vec2d) {
         let h = self.hit(p);
@@ -404,7 +452,7 @@ impl DesktopShelf {
         } else if classic {
             16.0
         } else {
-            26.0
+            26.0 * (r.size.x / CLASSIC_PITCH).min(1.0)
         };
         let icon_box = if mac {
             mac_icon_box(r, amount)
@@ -416,8 +464,20 @@ impl DesktopShelf {
                 size,
             )
         };
-        self.app_icons
-            .draw(cx, app_id, style, icon_box, opacity, ink);
+        if matches!(hit, ShelfHit::More(_)) {
+            // The apps that did not fit: a tile of the weight of an app icon
+            // (opaque, the icons' corner radius, white count), not a wash of
+            // the ink over the shelf glass, which vanished on it.
+            self.chrome.radius = if classic { 0.0 } else { (icon_box.size.x * 0.22) as f32 };
+            self.chrome.bevel = 0.0;
+            self.chrome.color = alpha(rgb(92, 95, 108), opacity);
+            self.chrome.draw_abs(cx, icon_box);
+            let count = label.split(' ').next().unwrap_or("");
+            self.d.label(cx, icon_box, true, (icon_box.size.x * 0.36).max(9.0), alpha(rgb(255, 255, 255), opacity), HAlign::Center, &format!("+{count}"));
+        } else if !crate::wayland_view::draw_foreign_icon(cx, app_id, icon_box, opacity) {
+            self.app_icons
+                .draw(cx, app_id, style, icon_box, opacity, ink);
+        }
         if classic {
             self.d.label_elided(
                 cx,
@@ -446,7 +506,7 @@ impl DesktopShelf {
                 cx,
                 rect(
                     r.pos.x + r.size.x * 0.5 - 1.8,
-                    if mac { mac_icon_box(r, 0.0).pos.y + 59.0 } else { r.pos.y + r.size.y - 4.0 },
+                    if mac { mac_icon_box(r, 0.0).pos.y + 59.0 * slot_scale(r) } else { r.pos.y + r.size.y - 4.0 },
                     3.6,
                     3.6,
                 ),
@@ -480,7 +540,7 @@ impl DesktopShelf {
 pub fn app_icon(id: &str) -> Ico {
     match id {
         "browser" => Ico::Globe,
-        "photos" | "image" => Ico::Photo,
+        "photos" | "image" | "camera" => Ico::Photo,
         "terminal" => Ico::Keyboard,
         "files" => Ico::Menu,
         "sheets" => Ico::Calendar,
@@ -488,23 +548,26 @@ pub fn app_icon(id: &str) -> Ico {
         "video" => Ico::Play,
         "pdf" => Ico::Check,
         "mixer" => Ico::Speaker,
+        "amp" => Ico::Play,
+        "code" => Ico::Prompt,
         "score" => Ico::Bell,
         "route" => Ico::Globe,
         "fabric" => Ico::Shirt,
         "fab" => Ico::Refresh,
-        "studio" => Ico::Moon,
         _ => Ico::Monitor,
     }
 }
 /// The shelf rect for one mix of the per-style geometries.
 fn shelf_rect(screen: Rect, mix: impl Fn([f64; 5]) -> f64, app_count: usize) -> Rect {
-    let dock_width = (((app_count + 1) as f64) * 62.0 + 20.0).min((screen.size.x - 24.0).max(1.0));
-    let next_height = ((app_count + 1) as f64 * 56.0).min((screen.size.y - 48.0).max(1.0));
+    let mac = shelf_plan(DesktopStyle::Macos, screen, app_count);
+    let next = shelf_plan(DesktopStyle::NextStep, screen, app_count);
+    let dock_width = mac.slots() as f64 * mac.pitch + 20.0;
+    let next_height = next.slots() as f64 * next.pitch;
     rect(
         screen.pos.x + mix([8.0, (screen.size.x - dock_width) * 0.5, 0.0, 0.0, screen.size.x - 64.0]),
-        screen.pos.y + mix([0.0, screen.size.y - 88.0, screen.size.y - 54.0, screen.size.y - 34.0, 40.0]),
+        screen.pos.y + mix([0.0, screen.size.y - MAC_DOCK_RESERVE, screen.size.y - 54.0, screen.size.y - 34.0, 40.0]),
         mix([32.0, dock_width, screen.size.x, screen.size.x, 56.0]),
-        mix([0.0, 78.0, 54.0, 34.0, next_height]),
+        mix([0.0, MAC_DOCK_HEIGHT, 54.0, 34.0, next_height]),
     )
 }
 fn shelf_geometry(screen: Rect, style: &StyleTween, app_count: usize) -> Rect {
@@ -522,7 +585,12 @@ struct ShelfLayout {
     next: Option<Rect>,
     mix: f64,
 }
-fn shelf_layout(screen: Rect, style: &StyleTween, app_count: usize) -> ShelfLayout {
+fn shelf_layout(screen: Rect, style: &StyleTween, app_count: usize, drop: f64) -> ShelfLayout {
+    let mut layout = shelf_resting_layout(screen, style, app_count);
+    layout.bar.pos.y += drop;
+    layout
+}
+fn shelf_resting_layout(screen: Rect, style: &StyleTween, app_count: usize) -> ShelfLayout {
     let to_next = style.target == DesktopStyle::NextStep;
     let from_next = style.from_value([0.0, 0.0, 0.0, 0.0, 1.0]) > 0.5;
     if style.active() && to_next != from_next {
@@ -545,25 +613,85 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
     Rect { pos, size: far - pos }
 }
 
+/// The theme's dock slot length and icon size; a slot shorter than this
+/// draws everything smaller by the same share (`dock_layout`).
+const MAC_PITCH: f64 = 62.0;
+/// The macOS dock sits low: 70 pt high (icon, running dot, a few points of
+/// glass under it), 4 pt above the screen's bottom edge.
+const MAC_DOCK_HEIGHT: f64 = 70.0;
+const MAC_DOCK_MARGIN: f64 = 4.0;
+const MAC_DOCK_RESERVE: f64 = MAC_DOCK_HEIGHT + MAC_DOCK_MARGIN;
+
+/// The shelf item at `p`: the item drawn there, or, for a bottom shelf, the
+/// item whose column is nearest anywhere from the bar's top down to the
+/// screen's last row (a pointer pushed against the bottom edge hits the icon
+/// above it; gaps between icons go to the nearest one).
+fn shelf_hit(hits: &[(Rect, ShelfHit)], bottom_reach: Option<(Rect, f64)>, p: Vec2d) -> Option<ShelfHit> {
+    if let Some((_, h)) = hits.iter().find(|(r, _)| r.contains(p)) {
+        return Some(h.clone());
+    }
+    let (bar, bottom) = bottom_reach?;
+    if !in_bottom_reach(bar, bottom, p) {
+        return None;
+    }
+    let distance = |r: &Rect| if p.x < r.pos.x { r.pos.x - p.x } else if p.x > r.pos.x + r.size.x { p.x - r.pos.x - r.size.x } else { 0.0 };
+    hits.iter()
+        .filter(|(r, _)| r.pos.y + r.size.y > bar.pos.y)
+        .min_by(|(a, _), (b, _)| distance(a).total_cmp(&distance(b)))
+        .map(|(_, h)| h.clone())
+}
+/// From the bar's top to the screen's bottom edge, across the bar's width.
+fn in_bottom_reach(bar: Rect, bottom: f64, p: Vec2d) -> bool {
+    bar.size.y > 0.0 && p.x >= bar.pos.x && p.x < bar.pos.x + bar.size.x && p.y >= bar.pos.y && p.y <= bottom
+}
+const NEXT_PITCH: f64 = 56.0;
+const CLASSIC_PITCH: f64 = 48.0;
+fn slot_scale(cell: Rect) -> f64 {
+    (cell.size.x / MAC_PITCH).min(1.0)
+}
+
 /// Center the icon and its running indicator as one group inside each dock cell.
+/// The icon and the magnification grow with the cell's scale and never past it.
 fn mac_icon_box(cell: Rect, hover: f64) -> Rect {
-    let size = 54.0 + 8.0 * hover;
-    let top = cell.pos.y + (cell.size.y - 63.0) * 0.5;
-    rect(cell.pos.x + (cell.size.x-size)*0.5, top - 8.0*hover, size, size)
+    let k = slot_scale(cell);
+    let size = (54.0 + 8.0 * hover) * k;
+    let top = cell.pos.y + (cell.size.y - 63.0 * k) * 0.5;
+    rect(cell.pos.x + (cell.size.x-size)*0.5, top - 8.0*hover*k, size, size)
 }
 
 /// The compositor samples exactly the shelf it will paint this frame, including
 /// an interrupted style tween. Glass outside the dock cannot add a blur stack.
-fn dock_app_ids(state: &WmState) -> Vec<String> {
+pub(crate) fn dock_items(state: &WmState) -> Vec<crate::shell::menu::MenuItem> {
     let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
-        .into_iter().filter(|app| !app.disabled).map(|app| app.id).collect();
+        .into_iter().filter(|app| !app.disabled).collect();
     for client in state.dock_clients() {
         if let Some(client) = state.clients.get(&client) {
-            let id=format!("apps.{}",client.app);
-            if !apps.contains(&id) {apps.push(id);}
+            let id = format!("apps.{}", client.app);
+            if !apps.iter().any(|item| item.id == id) {
+                apps.push(crate::shell::menu::MenuItem {
+                    id,
+                    label: client.display_title().to_string(),
+                    icon: Some(app_icon(&client.app)),
+                    kind: crate::shell::menu::MenuKind::App,
+                    checked: false,
+                    divider: false,
+                    disabled: false,
+                    description: String::new(),
+                    aliases: vec![client.app.clone()],
+                });
+            }
         }
     }
     apps
+}
+/// The slots each shelf style fits along its axis. `screen` is the rect the
+/// shelf lays out in.
+fn shelf_plan(style: DesktopStyle, screen: Rect, app_count: usize) -> crate::dock_layout::DockPlan {
+    match style {
+        DesktopStyle::NextStep => crate::dock_layout::plan((screen.size.y - 48.0).max(1.0), app_count, NEXT_PITCH),
+        DesktopStyle::Macos => crate::dock_layout::plan((screen.size.x - 24.0 - 20.0).max(1.0), app_count, MAC_PITCH),
+        _ => crate::dock_layout::plan((screen.size.x - 36.0).max(1.0), app_count, CLASSIC_PITCH),
+    }
 }
 /// The rect the dock lays out in: the main screen's on a multi-screen
 /// desktop (where the desk reserves its height), else `full`, the whole
@@ -588,15 +716,39 @@ pub fn dock_visible(style: DesktopStyle, main_fullscreen: bool) -> bool {
 /// `dock_visible` for the WM's current style and screens.
 pub fn dock_shown(state: &WmState) -> bool {
     dock_visible(state.style.target, state.screens.main_fullscreen())
+        && (!state.dock_autohides() || state.dock_autohide.drawn())
 }
+/// How far the auto-hiding dock is slid down off its resting place (px).
+fn dock_drop(state: &WmState) -> f64 {
+    if state.dock_autohides() { (1.0 - state.dock_autohide.out_fraction()) * DOCK_SLIDE_TRAVEL } else { 0.0 }
+}
+/// The dock's resting place at its full height plus its margin below the
+/// screen edge: sliding this far hides all of it.
+const DOCK_SLIDE_TRAVEL: f64 = 96.0;
 pub fn dock_bounds(state: &WmState, size: Vec2d) -> Rect {
-    shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, dock_app_ids(state).len()).bar
+    shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, dock_items(state).len(), dock_drop(state)).bar
+}
+/// Where the pointer calls or keeps the auto-hiding dock: the main
+/// display's bottom edge and the dock's resting footprint.
+pub fn dock_zone(state: &WmState, full: Rect) -> crate::dock_autohide::Zone {
+    let screen = dock_screen(state, full);
+    let rest = shelf_layout(screen, &state.style, dock_items(state).len(), 0.0).bar;
+    crate::dock_autohide::Zone {
+        left: screen.pos.x,
+        right: screen.pos.x + screen.size.x,
+        bottom: screen.pos.y + screen.size.y,
+        dock_left: rest.pos.x,
+        dock_right: rest.pos.x + rest.size.x,
+        dock_top: rest.pos.y,
+    }
 }
 pub fn dock_icon_bounds(state: &WmState, size: Vec2d, app: &str) -> Rect {
-    let apps=dock_app_ids(state);
-    let dock=shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, apps.len()).bar;
-    let slot=apps.iter().position(|id| id==&format!("apps.{app}")).map(|i|i+1).unwrap_or(0);
-    let cell=(dock.size.x-20.0)/(apps.len()+1) as f64;
+    let apps=dock_items(state);
+    let screen=dock_screen(state, rect(0.0,0.0,size.x,size.y));
+    let dock=shelf_layout(screen, &state.style, apps.len(), dock_drop(state)).bar;
+    let plan=shelf_plan(DesktopStyle::Macos, screen, apps.len());
+    let slot=apps.iter().position(|item| item.id==format!("apps.{app}")).map(|i|plan.slot_of_app(i)).unwrap_or(0);
+    let cell=(dock.size.x-20.0)/plan.slots() as f64;
     mac_icon_box(rect(dock.pos.x+10.0+slot as f64*cell,dock.pos.y+6.0,cell,dock.size.y-12.0), 0.0)
 }
 
@@ -606,6 +758,8 @@ impl Widget for DesktopShelf {
         let screen = cx.turtle().rect();
         self.hits.clear();
         self.bounds = Rect::default();
+        self.bottom_reach = None;
+        self.screen = screen;
         if let Some(state) = scope.data.get_mut::<WmState>() {
             self.active_window = state.layout().focused_client()
                 .filter(|c| !state.layout().desktop.minimized(*c));
@@ -629,10 +783,7 @@ impl Widget for DesktopShelf {
             }
             let opacity = (1.0 - t.weights[0]) as f32;
             if opacity > 0.001 && dock_shown(state) {
-                let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
-                    .into_iter()
-                    .filter(|a| !a.disabled)
-                    .collect();
+                let apps = dock_items(state);
                 let clients: Vec<_> = state
                     .dock_clients()
                     .into_iter()
@@ -643,24 +794,13 @@ impl Widget for DesktopShelf {
                             .map(|s| (c, s.app.clone(), s.display_title().to_string()))
                     })
                     .collect();
-                for (_, app, title) in &clients {
-                    if !apps.iter().any(|item| item.id == format!("apps.{app}")) {
-                        apps.push(crate::shell::menu::MenuItem {
-                            id: format!("apps.{app}"),
-                            label: title.clone(),
-                            icon: Some(app_icon(app)),
-                            kind: crate::shell::menu::MenuKind::App,
-                            checked: false,
-                            disabled: false,
-                            description: String::new(),
-                            aliases: vec![app.clone()],
-                        });
-                    }
-                }
-                let n = (apps.len() + 1).max(1) as f64;
-                let layout = shelf_layout(dock_screen(state, screen), t, apps.len());
+                let dock_area = dock_screen(state, screen);
+                let layout = shelf_layout(dock_area, t, apps.len(), dock_drop(state));
                 let r = layout.bar;
                 self.bounds = layout.next.map_or(r, |next| union_rect(r, next));
+                if style != DesktopStyle::NextStep && layout.next.is_none() {
+                    self.bottom_reach = Some((r, dock_area.pos.y + dock_area.size.y));
+                }
                 // Window-backed Gaussian blur, sampled from the live desktop.
                 if t.weights[1] > 0.01 {
                     if let Some(mut glass) = self.glass.borrow_mut::<gauss_view::GaussRoundedView>()
@@ -719,11 +859,15 @@ impl Widget for DesktopShelf {
                     let place = if style == DesktopStyle::NextStep { layout.next.unwrap_or(r) } else { r };
                     let (x, y, w, h) = (place.pos.x, place.pos.y, place.size.x, place.size.y);
                     if style == DesktopStyle::NextStep {
-                        let cell = h / n;
+                        let plan = shelf_plan(style, dock_area, apps.len());
+                        let cell = h / plan.slots() as f64;
                         self.button(cx, rect(x,y,w,cell), ShelfHit::Launcher, Ico::Menu, "Workspace", false, style, opacity);
-                        for (i, app) in apps.iter().enumerate() {
+                        for (i, app) in apps.iter().take(plan.shown).enumerate() {
                             let id = app.id.trim_start_matches("apps.");
                             self.button(cx, rect(x,y+(i+1) as f64*cell,w,cell), ShelfHit::App(id.into()), app_icon(id), &app.label, clients.iter().any(|(_,a,_)| a==id), style, opacity);
+                        }
+                        if plan.overflow > 0 {
+                            self.button(cx, rect(x,y+(plan.shown+1) as f64*cell,w,cell), ShelfHit::More(plan.shown), Ico::Menu, &format!("{} more", plan.overflow), false, style, opacity);
                         }
                     } else if style == DesktopStyle::Windows2000 {
                         self.button(
@@ -756,10 +900,12 @@ impl Widget for DesktopShelf {
                             );
                         }
                     } else {
+                        let plan = shelf_plan(style, dock_area, apps.len());
+                        let n = plan.slots() as f64;
                         let cell = if style == DesktopStyle::Macos {
                             (w - 20.0) / n
                         } else {
-                            48.0_f64.min((w - 36.0) / n)
+                            plan.pitch.min((w - 36.0) / n)
                         };
                         let start = if style == DesktopStyle::Macos {
                             x + 10.0
@@ -780,7 +926,7 @@ impl Widget for DesktopShelf {
                             style,
                             opacity,
                         );
-                        for (i, app) in apps.iter().enumerate() {
+                        for (i, app) in apps.iter().take(plan.shown).enumerate() {
                             let id = app.id.trim_start_matches("apps.");
                             self.button(
                                 cx,
@@ -794,6 +940,18 @@ impl Widget for DesktopShelf {
                                 app_icon(id),
                                 &app.label,
                                 clients.iter().any(|(_, a, _)| a == id),
+                                style,
+                                opacity,
+                            );
+                        }
+                        if plan.overflow > 0 {
+                            self.button(
+                                cx,
+                                rect(start + (plan.shown + 1) as f64 * cell, y + 6.0, cell, (h - 12.0).max(1.0)),
+                                ShelfHit::More(plan.shown),
+                                Ico::Menu,
+                                &format!("{} more", plan.overflow),
+                                false,
                                 style,
                                 opacity,
                             );

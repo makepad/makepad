@@ -331,7 +331,10 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                     }
                 };
                 let trusted_peer = http_server.trusted_proxy.is_some_and(|trusted| trusted(peer_ip));
-                let peer_limit = if trusted_peer {
+                // A process on this machine is not a remote client: the window
+                // manager's hosted apps all reach its server over loopback, and
+                // the per-address cap of 16 shed the 17th app with a 503.
+                let peer_limit = if trusted_peer || normalize_client_ip(peer_ip).is_loopback() {
                     MAX_CONNS_PER_TRUSTED_PROXY
                 } else {
                     MAX_CONNS_PER_IP

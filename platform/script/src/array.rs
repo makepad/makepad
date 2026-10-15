@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -5,11 +6,7 @@ use crate::native::*;
 use crate::value::*;
 use crate::*;
 
-use std::cell::RefCell;
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 /// Appends `bytes` with the same replacement behavior as
 /// `String::from_utf8_lossy` without materializing an unbounded intermediate
@@ -44,9 +41,12 @@ pub(crate) fn append_utf8_lossy<S: ScriptStringSink>(mut bytes: &[u8], out: &mut
     }
 }
 
+/// A Rust-held reference to a script array: a GC root while it lives (roots.rs).
+#[relax_api(plain)]
 #[derive(Debug)]
+#[repr(C)]
 pub struct ScriptArrayRef {
-    pub(crate) roots: Rc<RefCell<HashMap<ScriptArray, usize>>>,
+    pub(crate) roots: *const crate::roots::ScriptRoots,
     pub(crate) array: ScriptArray,
 }
 
@@ -58,19 +58,10 @@ impl From<ScriptArrayRef> for ScriptValue {
 
 impl Clone for ScriptArrayRef {
     fn clone(&self) -> Self {
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.array) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                *value += 1;
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
+        crate::roots::script_root_retain(self.roots, crate::roots::ROOT_ARRAY, self.array.index);
         Self {
-            roots: self.roots.clone(),
-            array: self.array.clone(),
+            roots: self.roots,
+            array: self.array,
         }
     }
 }
@@ -83,27 +74,12 @@ impl ScriptArrayRef {
 
 impl Drop for ScriptArrayRef {
     fn drop(&mut self) {
-        let mut roots = self.roots.borrow_mut();
-        match roots.entry(self.array) {
-            Entry::Occupied(mut occ) => {
-                let value = occ.get_mut();
-                if *value >= 1 {
-                    *value -= 1;
-                } else {
-                    eprintln!("ScriptObjectRef is 0!");
-                }
-                if *value == 0 {
-                    occ.remove();
-                }
-            }
-            Entry::Vacant(_vac) => {
-                eprintln!("ScriptObjectRef root is vacant!");
-            }
-        }
+        crate::roots::script_root_release(self.roots, crate::roots::ROOT_ARRAY, self.array.index);
     }
 }
 
-#[derive(Default)]
+#[relax_api(plain)]
+#[derive(Default, Clone, Copy)]
 pub struct ScriptArrayTag(u64);
 
 impl ScriptArrayTag {
@@ -197,6 +173,7 @@ impl ScriptArrayTag {
     }
 }
 
+#[relax_api(handle)]
 #[derive(PartialEq)]
 pub enum ScriptArrayStorage {
     ScriptValue(VecDeque<ScriptValue>),
@@ -207,6 +184,8 @@ pub enum ScriptArrayStorage {
 }
 
 impl ScriptArrayStorage {
+    pub fn script_values() -> Self { Self::ScriptValue(Default::default()) }
+
     /// Backing allocation retained by this storage, excluding the enum
     /// itself. The retained-heap estimate uses capacity instead of logical
     /// length so a cleared or sparsely written collection cannot hide
@@ -487,6 +466,7 @@ impl ScriptArrayStorage {
     }
 }
 
+#[relax_api(handle)]
 pub struct ScriptArrayData {
     pub tag: ScriptArrayTag,
     pub storage: ScriptArrayStorage,

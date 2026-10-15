@@ -105,7 +105,7 @@ impl XrSceneView {
     }
 
     /// The scene's color render target. Valid after the first draw; read it
-    /// back with `Cx::debug_read_render_texture` for pixel checks.
+    /// back with `Texture::read_back` for asynchronous pixel checks.
     pub fn color_texture(&self) -> &Texture {
         &self.color_texture
     }

@@ -132,6 +132,8 @@ pub struct JobRecord {
     pub finished_ms: Option<u64>,
     /// Assistant text for chat/LLM jobs; surfaced as `JobStatusJson.partial_text`.
     pub partial_text: Option<String>,
+    /// Streaming jobs: the chunks published so far.
+    pub partial_artifacts: Vec<ArtifactRefJson>,
     /// The completed text answer, set once when the job's text artifact is
     /// persisted; surfaced as `JobStatusJson.text`.
     pub text: Option<String>,
@@ -338,6 +340,7 @@ impl JobStore {
                 started_ms: None,
                 finished_ms: None,
                 partial_text: None,
+                partial_artifacts: Vec::new(),
                 text: None,
                 serving: None,
                 log: Vec::new(),
@@ -510,9 +513,23 @@ impl JobStore {
         self.release(id);
     }
 
+    pub fn push_partial_artifact(&mut self, id: &str, artifact: ArtifactRefJson) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.partial_artifacts.push(artifact);
+        }
+    }
+
     pub fn set_partial_text(&mut self, id: &str, text: String) {
         if let Some(job) = self.jobs.get_mut(id) {
             job.partial_text = Some(text);
+        }
+    }
+
+    /// The model the job runs on, when the hub ran another than it asked for (its
+    /// quantised variant): status `model` and eviction's busy list follow it.
+    pub fn set_model(&mut self, id: &str, model: &str) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.model = model.to_string();
         }
     }
 
@@ -545,6 +562,9 @@ impl JobStore {
                 },
             );
             update(&mut serving);
+            if let Some(generated) = serving.gen_tokens {
+                crate::control::note_tokens(id, generated);
+            }
             job.serving = Some(serving);
         }
     }
@@ -667,6 +687,17 @@ impl JobStore {
         }
     }
 
+    /// The newest `n` finished jobs, newest first (the control panel's
+    /// `recent`).
+    pub fn recent_finished(&self, n: usize) -> Vec<JobStatusJson> {
+        self.finished.iter().rev().take(n).filter_map(|id| self.status_json(id)).collect()
+    }
+
+    /// (running, queued) job counts.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.running_heavy.is_some() as usize + self.running_chat.len(), self.queue.len())
+    }
+
     /// Running jobs first, then the queue in FIFO order — the live picture
     /// `GET /jobs` serves (finished jobs stay reachable by id only).
     pub fn active_status_json(&self) -> Vec<JobStatusJson> {
@@ -697,6 +728,7 @@ impl JobStore {
                 Some(job.log.clone())
             },
             partial_text: job.partial_text.clone(),
+            partial_artifacts: (!job.partial_artifacts.is_empty()).then(|| job.partial_artifacts.clone()),
             live: None,
             serving: job.serving.clone(),
             text: job.text.clone(),
@@ -755,6 +787,8 @@ impl SharedJobs {
         let mut store = self.inner.0.lock().unwrap();
         let result = f(&mut store);
         self.inner.1.notify_all();
+        drop(store);
+        crate::control::changed();
         result
     }
 
@@ -950,6 +984,7 @@ pub(crate) mod tests {
             inputs: Vec::new(),
             strength: None,
             pull_only: false,
+            control: None,
             input_bytes: Vec::new(),
             input_content_type: String::new(),
             frames: None,
@@ -960,6 +995,7 @@ pub(crate) mod tests {
             flow_map: false,
             target_domain: "image".to_string(),
             chat_session: String::new(),
+            chat_images: Vec::new(),
             identity_anchor: String::new(),
             style: String::new(),
             max_tokens: 512,
@@ -967,11 +1003,16 @@ pub(crate) mod tests {
             variants: 1,
             text: String::new(),
             voice: String::new(),
+            stream: false,
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,
             lyrics: String::new(),
+            score: String::new(),
+            score_mode: String::new(),
+            score_only: false,
             remesh_resolution: None,
             texture: None,
             decimation_target: None,

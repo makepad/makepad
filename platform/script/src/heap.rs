@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::array::*;
 use crate::gc::*;
 use crate::gen_index::{GenSlot, GenVec};
@@ -8,16 +9,15 @@ use crate::pod::*;
 use crate::regex::*;
 use crate::string::*;
 use crate::traits::*;
-use crate::trap::*;
+use crate::object_heap::*;
 use crate::value::*;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::mem::size_of;
-use std::rc::Rc;
 
 /// Result of one execution-scoped script allocation budget.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScriptAllocationReport {
     /// Logical heap bytes charged while the budget was installed.
@@ -26,6 +26,7 @@ pub struct ScriptAllocationReport {
     pub exceeded: bool,
 }
 
+#[relax_api(handle)]
 #[derive(Clone, Debug)]
 pub(crate) struct ScriptAllocationBudget {
     remaining: usize,
@@ -66,6 +67,78 @@ impl ScriptAllocationBudget {
     }
 }
 
+// heap_walk kinds
+pub const HEAP_WALK_TYPE_ROOTS: u32 = 0;
+pub const HEAP_WALK_ALLOCED: u32 = 1;
+pub const HEAP_WALK_ROOTED: u32 = 2;
+
+/// The caller's `push(ctx, object)` behind heap_walk's `push(ctx, default, object)`.
+struct ObjectWalk {
+    ctx: *mut u8,
+    push: unsafe extern "C-unwind" fn(*mut u8, ScriptObject),
+}
+
+unsafe extern "C-unwind" fn object_walk_push(walk: *mut u8, _default: bool, object: ScriptObject) {
+    let walk = &*(walk as *const ObjectWalk);
+    (walk.push)(walk.ctx, object)
+}
+
+// heap_charge modes
+pub const HEAP_CHARGE_BYTES: u32 = 0;
+pub const HEAP_CHARGE_MAP_ENTRY: u32 = 1;
+
+// heap_stat counters
+pub const HEAP_STAT_KEY: u32 = 0;
+pub const HEAP_STAT_TYPE_SLOTS: u32 = 1;
+pub const HEAP_STAT_TYPE_DEFAULTS: u32 = 2;
+pub const HEAP_STAT_POD_TYPES: u32 = 3;
+pub const HEAP_STAT_ROOTED_OBJECTS: u32 = 4;
+pub const HEAP_STAT_ROOTED_ARRAYS: u32 = 5;
+pub const HEAP_STAT_ROOTED_HANDLES: u32 = 6;
+pub const HEAP_STAT_OBJECTS_LEN: u32 = 7;
+pub const HEAP_STAT_REUSE_EPOCH: u32 = 8;
+pub const HEAP_STAT_LIVE_LEN: u32 = 9;
+pub const HEAP_STAT_NEEDS_GC: u32 = 10;
+/// the heap's tag (heap_tag.rs)
+pub const HEAP_STAT_TAG: u32 = 11;
+
+/// value_text's mode.
+pub const TEXT_DEBUG: u32 = 0;
+pub const TEXT_JSON: u32 = 1;
+
+/// type_info's mode.
+pub const TYPE_REGISTERED: u32 = 0;
+pub const TYPE_DEFAULT_FOR_ID: u32 = 1;
+pub const TYPE_OBJECT_ID: u32 = 2;
+pub const TYPE_NAME_IN_CHAIN: u32 = 3;
+
+/// What type_info answers (by its mode).
+#[relax_api(plain)]
+#[repr(C)]
+pub struct TypeInfo {
+    pub check: *const ScriptTypeCheck,
+    pub object: ScriptObject,
+    pub type_id: ScriptTypeId,
+    pub name: LiveId,
+    pub found: bool,
+    /// TYPE_REGISTERED: the check has an object, and then its prototype and the name its
+    /// `script_proto` registered it under (`name_str`; none: `name_ptr` null).
+    pub has_object: bool,
+    pub proto: ScriptValue,
+    pub name_ptr: *const u8,
+    pub name_len: usize,
+}
+
+impl TypeInfo {
+    /// The registering type's name as written in its `script_proto`.
+    #[inline]
+    pub fn name_str(&self) -> Option<&'static str> {
+        // SAFETY: the name is a `&'static str` of the registration
+        (!self.name_ptr.is_null()).then(|| unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.name_ptr, self.name_len)) })
+    }
+}
+
+#[relax_api(handle)]
 #[derive(Default)]
 pub struct ScriptHeap {
     pub modules: ScriptObject,
@@ -73,9 +146,12 @@ pub struct ScriptHeap {
     pub(crate) mark_vec: Vec<ScriptGcMark>,
     pub(crate) object_reuse_epoch: u64,
 
-    pub(crate) root_objects: Rc<RefCell<HashMap<ScriptObject, usize>>>,
-    pub(crate) root_arrays: Rc<RefCell<HashMap<ScriptArray, usize>>>,
-    pub(crate) root_handles: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
+    /// root counts of the Rust-held refs (roots.rs)
+    pub(crate) roots: crate::roots::ScriptRootsOwner,
+    /// this heap's identity in every ref it mints (heap_tag.rs)
+    pub(crate) heap_tag: crate::heap_tag::HeapTag,
+    /// lazily expanded system modules (lazy_modules.rs): `mod` keys not yet made, by group
+    pub(crate) lazy: crate::lazy_modules::LazyModules,
 
     pub(crate) type_defaults: HashMap<ScriptTypeIndex, ScriptObject>,
 
@@ -93,6 +169,7 @@ pub struct ScriptHeap {
     pub(crate) arrays_free: Vec<ScriptArray>,
 
     pub(crate) pod_types: Vec<ScriptPodTypeData>,
+    pub(crate) shader_types: Vec<std::cell::OnceCell<crate::shader_schema::ShaderTypeData>>,
     pub(crate) pod_types_free: Vec<ScriptPodType>,
     pub(crate) pods: GenVec<ScriptPodData>,
     pub(crate) pods_free: Vec<ScriptPod>,
@@ -141,11 +218,91 @@ pub struct ScriptHeap {
     /// instead of being refused. Off for Octoscript, which refuses them.
     pub(crate) charge_native_strings_after: bool,
     /// The module registrations, while a collect run records them
-    /// (`census`).
-    pub census: Option<Box<crate::census::Census>>,
+    /// (makepad-script-census; `census`).
+    pub census: Option<Box<dyn crate::census::ScriptCensus>>,
 }
 
+#[relax_api]
 impl ScriptHeap {
+    /// Whether `obj` names a live object of this heap.
+    pub fn object_alive(&self, obj: ScriptObject) -> bool {
+        let slots = self.object_slots();
+        slots.is_valid(obj) && slots[obj].tag.is_alloced()
+    }
+
+    /// The draw shader objects reachable from `root` (fields holding an object with `vertex`
+    /// and `fragment`/`pixel` methods), appended to `out`: shader prewarming's walk
+    /// (platform shader_prewarm.rs), inside the VM so engine code reads no heap internals.
+    pub fn draw_objects_into(&self, root: ScriptObject, sink: &mut ScriptObjectsOut) {
+    let heap = self;
+    let slots = heap.object_slots();
+    let valid = |o: ScriptObject| slots.is_valid(o) && slots[o].tag.is_alloced();
+    // Module scopes and preludes hold every name: walls.
+    let mut seen: std::collections::HashSet<ScriptObject> = std::collections::HashSet::new();
+    seen.insert(heap.modules);
+    for (key, m) in slots[heap.modules].map.iter() {
+        let Some(module) = m.value.as_object() else { continue };
+        if slots[module].proto != *key {
+            continue;
+        }
+        seen.insert(module);
+        if key.as_id() == Some(id!(prelude)) {
+            seen.extend(slots[module].map.iter().filter_map(|(_, v)| v.value.as_object()));
+        }
+    }
+    // A draw object counts when a field holds it (`draw_bg: {..}` in a
+    // template the UI reaches); one reached only as another's proto (a base
+    // template's, a type default) is not what an instance draws with.
+    let mut out = Vec::new();
+    let mut candidates: std::collections::HashSet<ScriptObject> = std::collections::HashSet::new();
+    let mut stack: Vec<(ScriptObject, bool)> = vec![(root, false)];
+    let mut arrays: std::collections::HashSet<ScriptArray> = std::collections::HashSet::new();
+    let mut values: Vec<ScriptValue> = Vec::new();
+    while let Some((obj, by_field)) = stack.pop() {
+        if !valid(obj) {
+            continue;
+        }
+        if by_field && !candidates.contains(&obj) {
+            let has = |name: LiveId| heap.object_method(obj, name.into(), crate::trap::NoTrap).as_object().is_some();
+            if has(id!(vertex)) && (has(id!(fragment)) || has(id!(pixel))) {
+                candidates.insert(obj);
+                out.push(obj);
+            }
+        }
+        if !seen.insert(obj) {
+            continue;
+        }
+        // A function is code, not a UI definition: what it builds when it
+        // runs (and the scope it closes over, which holds every name its
+        // body imported) is left to the realtime path.
+        if heap.as_fn(obj).is_some() {
+            continue;
+        }
+        let object = &slots[obj];
+        if let Some(p) = object.proto.as_object() {
+            stack.push((p, false));
+        }
+        values.clear();
+        values.extend(object.map.iter().map(|(_, e)| e.value));
+        values.extend(object.vec.iter().map(|kv| kv.value));
+        let mut i = 0;
+        while i < values.len() {
+            let v = values[i];
+            i += 1;
+            if let Some(o) = v.as_object() {
+                stack.push((o, true));
+            } else if let Some(a) = v.as_array() {
+                if heap.array_slots().is_valid(a) && arrays.insert(a) {
+                    for j in 0..heap.array_len(a) {
+                        values.push(heap.array_index_unchecked(a, j));
+                    }
+                }
+            }
+        }
+    }
+    sink.push(&out);
+}
+
     /// Create the refused-allocation sentinels before any budget becomes
     /// active. They are static and frozen, so GC retains them and refused
     /// writes are inert.
@@ -193,6 +350,23 @@ impl ScriptHeap {
     /// sparse index cannot wrap into a small allocation request.
     #[inline]
     pub(crate) fn charge_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
+        self.heap_charge(HEAP_CHARGE_BYTES, ScriptObject::ZERO, NIL, bytes, operation)
+    }
+
+    /// Charges the heap's allocation budget by `mode`: HEAP_CHARGE_BYTES charges `bytes`;
+    /// HEAP_CHARGE_MAP_ENTRY charges one new entry of `ptr`'s map for `key` (nothing when the key
+    /// is there already). False: refused, nothing to allocate.
+    #[inline]
+    #[relax_api]
+    pub(crate) fn heap_charge(&mut self, mode: u32, ptr: ScriptObject, key: ScriptValue, bytes: usize, operation: &'static str) -> bool {
+        match mode {
+            HEAP_CHARGE_BYTES => self.charge_allocation_impl(bytes, operation),
+            _ => self.charge_object_map_entry_impl(ptr, key, operation),
+        }
+    }
+
+    #[inline]
+    fn charge_allocation_impl(&mut self, bytes: usize, operation: &'static str) -> bool {
         // Every container growth lands here; a VM with no budget and no cap
         // (every Makepad host) pays this one check.
         if self.allocation_budget.is_none() && self.heap_cap.is_none() {
@@ -317,6 +491,7 @@ impl ScriptHeap {
     /// Returns the retained-capacity estimate at the last reconcile plus the
     /// logical bytes charged against the cap since. Without a cap this is the
     /// last reconciled estimate only.
+    #[relax_api]
     pub fn accounted_heap_bytes(&self) -> usize {
         let charged = self.heap_cap.as_ref().map_or(0, |cap| cap.allocated);
         self.heap_baseline_bytes.saturating_add(charged)
@@ -327,6 +502,7 @@ impl ScriptHeap {
     /// VM configuration, host-side value injection, or garbage collection.
     /// Normal script allocation paths update the cached amount in constant
     /// time instead of scanning the heap on every instruction.
+    #[relax_api]
     pub fn reconcile_heap_bytes(&mut self) {
         self.heap_baseline_bytes = self.estimated_heap_bytes();
         let Some(maximum) = self.max_heap_bytes else {
@@ -379,9 +555,7 @@ impl ScriptHeap {
         let mut bytes = size_of::<Self>();
 
         bytes = bytes.saturating_add(bytes_for::<ScriptGcMark>(self.mark_vec.capacity()));
-        bytes = bytes.saturating_add(map_bytes(&*self.root_objects.borrow()));
-        bytes = bytes.saturating_add(map_bytes(&*self.root_arrays.borrow()));
-        bytes = bytes.saturating_add(map_bytes(&*self.root_handles.borrow()));
+        bytes = bytes.saturating_add(self.roots.get().bytes());
         bytes = bytes.saturating_add(map_bytes(&self.type_defaults));
 
         bytes = bytes.saturating_add(bytes_for::<GenSlot<ScriptObjectData>>(
@@ -413,6 +587,7 @@ impl ScriptHeap {
             bytes = bytes.saturating_add(array.storage.retained_bytes());
         }
 
+        bytes = bytes.saturating_add(bytes_for::<std::cell::OnceCell<crate::shader_schema::ShaderTypeData>>(self.shader_types.capacity()));
         bytes = bytes.saturating_add(bytes_for::<ScriptPodTypeData>(self.pod_types.capacity()));
         bytes = bytes.saturating_add(bytes_for::<ScriptPodType>(self.pod_types_free.capacity()));
         bytes = bytes.saturating_add(bytes_for::<GenSlot<ScriptPodData>>(self.pods.capacity()));
@@ -462,8 +637,9 @@ impl ScriptHeap {
     /// [`ScriptObjectRef::heap_key`] for every ref minted here. Used to map a
     /// heap to its owning script VM so a widget's objects are always resolved
     /// against the heap that created them.
+    #[inline]
     pub fn heap_key(&self) -> usize {
-        Rc::as_ptr(&self.root_objects) as *const () as usize
+        self.heap_stat(HEAP_STAT_KEY) as usize
     }
 
     /// Cap on the number of cleared `String` buffers kept around for reuse. Each one holds a
@@ -500,6 +676,11 @@ impl ScriptHeap {
         self.reconcile_heap_bytes_if_limited();
     }
 
+    /// This heap's tag, the high byte of every generation it mints (heap_tag.rs).
+    pub fn heap_tag(&self) -> u8 {
+        self.heap_stat(HEAP_STAT_TAG) as u8
+    }
+
     pub fn empty() -> Self {
         let mut objects = GenVec::new();
         let mut arrays = GenVec::new();
@@ -507,6 +688,13 @@ impl ScriptHeap {
         let mut handles = GenVec::new();
         let mut strings = GenVec::new();
         let mut regexes = GenVec::new();
+        let heap_tag = crate::heap_tag::HeapTag::alloc();
+        objects.set_heap_tag(heap_tag.get());
+        arrays.set_heap_tag(heap_tag.get());
+        pods.set_heap_tag(heap_tag.get());
+        handles.set_heap_tag(heap_tag.get());
+        strings.set_heap_tag(heap_tag.get());
+        regexes.set_heap_tag(heap_tag.get());
 
         // Push slot 0 for each (reserved/null slot)
         objects.push(Default::default());
@@ -517,7 +705,6 @@ impl ScriptHeap {
         regexes.push(None); // slot 0 for regexes too
 
         let mut v = Self {
-            root_objects: Default::default(),
             modules: ScriptObject::ZERO,
             objects,
             arrays,
@@ -525,6 +712,7 @@ impl ScriptHeap {
             handles,
             strings,
             regexes,
+            heap_tag,
             ..Default::default()
         };
         // Initialize slot 0 (reserved null slot) - use get_at_mut for internal init
@@ -535,17 +723,72 @@ impl ScriptHeap {
         v.arrays.get_at_mut(0).tag.freeze();
 
         v.modules = v.new_with_proto(id!(mod).into());
-        v.root_objects.borrow_mut().insert(v.modules, 1);
+        v.roots.add_static(crate::roots::ROOT_OBJECT, v.modules.index);
 
         v
     }
 
+    #[inline]
     pub fn registered_type(&self, id: ScriptTypeId) -> Option<&ScriptTypeCheck> {
-        if let Some(index) = self.type_index.get(&id) {
-            Some(&self.type_check[index.0 as usize])
-        } else {
-            None
+        let r = self.type_info(TYPE_REGISTERED, id, ScriptObject::ZERO);
+        // SAFETY: the check is a slot of this heap's type table, borrowed from `self`
+        unsafe { r.check.as_ref() }
+    }
+
+    /// Reads the type table by `mode`: TYPE_REGISTERED the check registered for `id` (`check`);
+    /// TYPE_DEFAULT_FOR_ID the default object of the type `id` (`object`, `found`); TYPE_OBJECT_ID
+    /// the id of the type of `obj` (`type_id`, `found`); TYPE_NAME_IN_CHAIN the registered name of
+    /// `obj` or of its nearest typed prototype (`name`, `found`).
+    #[relax_api]
+    pub fn type_info(&self, mode: u32, id: ScriptTypeId, obj: ScriptObject) -> TypeInfo {
+        let mut r = TypeInfo { check: std::ptr::null(), object: ScriptObject::ZERO, type_id: id, name: LiveId(0), found: false, has_object: false, proto: NIL, name_ptr: std::ptr::null(), name_len: 0 };
+        match mode {
+            TYPE_REGISTERED => {
+                if let Some(index) = self.type_index.get(&id) {
+                    let check = &self.type_check[index.0 as usize];
+                    r.check = check;
+                    r.found = true;
+                    if let Some(object) = &check.object {
+                        r.has_object = true;
+                        r.proto = object.proto;
+                        if let Some(n) = object.name_str {
+                            r.name_ptr = n.as_ptr();
+                            r.name_len = n.len();
+                        }
+                    }
+                }
+            }
+            TYPE_DEFAULT_FOR_ID => {
+                let obj = self.type_index.get(&id).and_then(|ty_index| self.type_defaults.get(ty_index).copied());
+                self.census_default_used(obj);
+                if let Some(obj) = obj {
+                    r.object = obj;
+                    r.found = true;
+                }
+            }
+            TYPE_OBJECT_ID => {
+                if let Some(ti) = self.objects[obj].tag.as_type_index() {
+                    if let Some(object) = &self.type_check[ti.0 as usize].object {
+                        r.type_id = object.type_id;
+                        r.found = true;
+                    }
+                }
+            }
+            _ => {
+                let mut cur = Some(obj);
+                while let Some(obj) = cur {
+                    if let Some(type_id) = self.object_type_id(obj) {
+                        if let Some(name) = self.type_name_by_id(type_id) {
+                            r.name = name;
+                            r.found = true;
+                            break;
+                        }
+                    }
+                    cur = self.proto(obj).as_object();
+                }
+            }
         }
+        r
     }
 
     /// A type registered again -- every module run registers every
@@ -559,6 +802,7 @@ impl ScriptHeap {
     /// the derive registers an enum's named variants that way -- takes the
     /// slot of any earlier registration with the same props: those carry no
     /// object, so nothing about them differs between runs but the slot.
+    #[relax_api]
     pub fn register_type(
         &mut self,
         type_id: Option<ScriptTypeId>,
@@ -566,6 +810,13 @@ impl ScriptHeap {
     ) -> ScriptTypeIndex {
         if let Some(type_id) = type_id {
             if let Some(index) = self.type_index.get(&type_id).copied() {
+                // a re-registration (reload) of the same type takes its slot back; another
+                // type with the same id is a collision
+                if let (Some(have), Some(new)) = (&self.type_check[index.0 as usize].object, &ty_check.object) {
+                    if !crate::traits::same_type_name(have.name_str, new.name_str) {
+                        crate::traits::script_type_id_collision(type_id, have.name_str, new.name_str);
+                    }
+                }
                 self.type_check[index.0 as usize] = ty_check;
                 return index;
             }
@@ -596,33 +847,104 @@ impl ScriptHeap {
 
     /// The objects every type slot roots: each slot's proto, and the
     /// default filed under it. A leak hunt walks what hangs off them.
+    #[inline(always)]
     pub fn type_root_ids(&self) -> (Vec<ScriptObject>, Vec<ScriptObject>) {
-        let protos = self
-            .type_check
-            .iter()
-            .filter_map(|check| check.object.as_ref().and_then(|object| object.proto.as_object()))
-            .collect();
-        let defaults = self.type_defaults.values().copied().collect();
-        (protos, defaults)
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, default: bool, object: ScriptObject) {
+            let (protos, defaults) = &mut *(ctx as *mut (Vec<ScriptObject>, Vec<ScriptObject>));
+            if default { defaults.push(object) } else { protos.push(object) }
+        }
+        let mut out = (Vec::new(), Vec::new());
+        // SAFETY: the callback writes only to out during this synchronous call.
+        unsafe { self.type_root_ids_with(&mut out as *mut _ as *mut u8, push); }
+        out
+    }
+
+    /// [`Self::type_root_ids`] through `push`: `default` false for a type
+    /// proto, true for a type default.
+    ///
+    /// # Safety
+    /// `ctx` must remain valid for `push` throughout this synchronous walk.
+    #[inline]
+    pub unsafe fn type_root_ids_with(&self, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, bool, ScriptObject)) {
+        self.heap_walk(HEAP_WALK_TYPE_ROOTS, ctx, push);
+    }
+
+    /// Walks object ids of the heap by `kind` (HEAP_WALK_*) through `push(ctx, default, object)`:
+    /// the type slots' protos (`default` false) and defaults (true), every allocated object, or
+    /// every object a Rust-held reference roots (`default` false for the last two).
+    ///
+    /// # Safety
+    /// `ctx` must remain valid for `push` throughout this synchronous walk.
+    #[relax_api]
+    pub unsafe fn heap_walk(&self, kind: u32, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, bool, ScriptObject)) {
+        match kind {
+            HEAP_WALK_TYPE_ROOTS => {
+                for check in self.type_check.iter() {
+                    if let Some(proto) = check.object.as_ref().and_then(|object| object.proto.as_object()) {
+                        push(ctx, false, proto);
+                    }
+                }
+                for object in self.type_defaults.values() {
+                    push(ctx, true, *object);
+                }
+            }
+            HEAP_WALK_ALLOCED => {
+                for i in 1..self.objects.len() {
+                    if self.objects.get_at(i).tag.is_alloced() {
+                        push(ctx, false, ScriptObject::new(i as u32, self.objects.generation(i)));
+                    }
+                }
+            }
+            HEAP_WALK_ROOTED => {
+                let roots = self.roots.get();
+                for i in roots.rooted_slots(crate::roots::ROOT_OBJECT) {
+                    push(ctx, false, ScriptObject::new(i, self.objects.generation(i as usize)));
+                }
+            }
+            _ => unreachable!("heap_walk kind"),
+        }
     }
 
     /// Every allocated object slot, as a handle a reader can use. A leak
     /// hunt walks these after a collection to see what survived, by kind.
+    #[inline(always)]
     pub fn alloced_object_ids(&self) -> Vec<ScriptObject> {
-        let mut out = Vec::new();
-        for i in 1..self.objects.len() {
-            let obj = self.objects.get_at(i);
-            if obj.tag.is_alloced() {
-                out.push(ScriptObject::new(i as u32, self.objects.generation(i)));
-            }
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, object: ScriptObject) {
+            (&mut *(ctx as *mut Vec<ScriptObject>)).push(object);
         }
+        let mut out = Vec::new();
+        // SAFETY: the callback writes only to out during this synchronous call.
+        unsafe { self.alloced_object_ids_with(&mut out as *mut _ as *mut u8, push); }
         out
+    }
+
+    /// # Safety
+    /// `ctx` must remain valid for `push` throughout this synchronous walk.
+    #[inline]
+    pub unsafe fn alloced_object_ids_with(&self, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, ScriptObject)) {
+        let mut walk = ObjectWalk { ctx, push };
+        self.heap_walk(HEAP_WALK_ALLOCED, &mut walk as *mut ObjectWalk as *mut u8, object_walk_push);
     }
 
     /// Every object a Rust-held reference is keeping alive. A leak hunt
     /// diffs two readings to see what was newly pinned.
+    #[inline(always)]
     pub fn root_object_ids(&self) -> Vec<ScriptObject> {
-        self.root_objects.borrow().keys().copied().collect()
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, object: ScriptObject) {
+            (&mut *(ctx as *mut Vec<ScriptObject>)).push(object);
+        }
+        let mut out = Vec::new();
+        // SAFETY: the callback writes only to out during this synchronous call.
+        unsafe { self.root_object_ids_with(&mut out as *mut _ as *mut u8, push); }
+        out
+    }
+
+    /// # Safety
+    /// `ctx` must remain valid for `push` throughout this synchronous root walk.
+    #[inline]
+    pub unsafe fn root_object_ids_with(&self, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, ScriptObject)) {
+        let mut walk = ObjectWalk { ctx, push };
+        self.heap_walk(HEAP_WALK_ROOTED, &mut walk as *mut ObjectWalk as *mut u8, object_walk_push);
     }
 
     /// The size of every root the collector marks from, in the order it
@@ -631,34 +953,46 @@ impl ScriptHeap {
     /// time say which root a leak hangs off.
     pub fn root_counts(&self) -> [usize; 6] {
         [
-            self.type_check.len(),
-            self.type_defaults.len(),
-            self.pod_types.len(),
-            self.root_objects.borrow().len(),
-            self.root_arrays.borrow().len(),
-            self.root_handles.borrow().len(),
+            self.heap_stat(HEAP_STAT_TYPE_SLOTS) as usize,
+            self.heap_stat(HEAP_STAT_TYPE_DEFAULTS) as usize,
+            self.heap_stat(HEAP_STAT_POD_TYPES) as usize,
+            self.heap_stat(HEAP_STAT_ROOTED_OBJECTS) as usize,
+            self.heap_stat(HEAP_STAT_ROOTED_ARRAYS) as usize,
+            self.heap_stat(HEAP_STAT_ROOTED_HANDLES) as usize,
         ]
     }
 
-    pub fn type_matches_id(&self, ptr: ScriptObject, type_id: ScriptTypeId) -> bool {
-        let obj = &self.objects[ptr];
-        if let Some(ti) = obj.tag.as_type_index() {
-            if let Some(object) = &self.type_check[ti.0 as usize].object {
-                return object.type_id == type_id;
-            }
+    /// Counts of the heap, by `which` (HEAP_STAT_*).
+    #[inline]
+    #[relax_api]
+    pub fn heap_stat(&self, which: u32) -> u64 {
+        match which {
+            HEAP_STAT_KEY => self.roots.ptr() as usize as u64,
+            HEAP_STAT_TYPE_SLOTS => self.type_check.len() as u64,
+            HEAP_STAT_TYPE_DEFAULTS => self.type_defaults.len() as u64,
+            HEAP_STAT_POD_TYPES => self.pod_types.len() as u64,
+            HEAP_STAT_ROOTED_OBJECTS => self.roots.get().rooted_len(crate::roots::ROOT_OBJECT) as u64,
+            HEAP_STAT_ROOTED_ARRAYS => self.roots.get().rooted_len(crate::roots::ROOT_ARRAY) as u64,
+            HEAP_STAT_ROOTED_HANDLES => self.roots.get().rooted_len(crate::roots::ROOT_HANDLE) as u64,
+            HEAP_STAT_OBJECTS_LEN => self.objects.len() as u64,
+            HEAP_STAT_REUSE_EPOCH => self.object_reuse_epoch,
+            HEAP_STAT_LIVE_LEN => self.gc_live_len_impl() as u64,
+            HEAP_STAT_NEEDS_GC => self.needs_gc_impl() as u64,
+            HEAP_STAT_TAG => self.heap_tag.get() as u64,
+            _ => unreachable!("heap_stat"),
         }
-        false
+    }
+
+    #[inline]
+    pub fn type_matches_id(&self, ptr: ScriptObject, type_id: ScriptTypeId) -> bool {
+        self.object_type_id(ptr) == Some(type_id)
     }
 
     /// Returns the TypeId for an object if it has a registered type.
+    #[inline]
     pub fn object_type_id(&self, ptr: ScriptObject) -> Option<ScriptTypeId> {
-        let obj = &self.objects[ptr];
-        if let Some(ti) = obj.tag.as_type_index() {
-            if let Some(object) = &self.type_check[ti.0 as usize].object {
-                return Some(object.type_id);
-            }
-        }
-        None
+        let r = self.type_info(TYPE_OBJECT_ID, ScriptTypeId::from_u128(0), ptr);
+        r.found.then_some(r.type_id)
     }
 
     /// Returns the registered script name for a given TypeId, if any.
@@ -674,28 +1008,12 @@ impl ScriptHeap {
     /// Best-effort human name for an object: the registered Rust type name
     /// of the object or of its nearest typed prototype. Used for
     /// diagnostics — e.g. naming a draw shader in compile-error reports.
+    #[inline]
     pub fn object_type_name_in_chain(&self, ptr: ScriptObject) -> Option<LiveId> {
-        let mut cur = Some(ptr);
-        while let Some(obj) = cur {
-            if let Some(type_id) = self.object_type_id(obj) {
-                if let Some(name) = self.type_name_by_id(type_id) {
-                    return Some(name);
-                }
-            }
-            cur = self.proto(obj).as_object();
-        }
-        None
+        let r = self.type_info(TYPE_NAME_IN_CHAIN, ScriptTypeId::from_u128(0), ptr);
+        r.found.then_some(r.name)
     }
 
-    pub fn new_module(&mut self, id: LiveId) -> ScriptObject {
-        let md = self.new_with_proto(id.into());
-        self.set_value_def(self.modules, id.into(), md.into());
-        md
-    }
-
-    pub fn module(&mut self, id: LiveId) -> ScriptObject {
-        self.value(self.modules, id.into(), NoTrap).into()
-    }
 
     // Accessors
 
@@ -716,31 +1034,26 @@ impl ScriptHeap {
 
     #[inline]
     pub fn proto(&self, ptr: ScriptObject) -> ScriptValue {
-        self.objects[ptr].proto
+        self.obj_info(ptr).proto
     }
 
     pub fn root_proto(&self, ptr: ScriptObject) -> ScriptValue {
         let mut ptr = ptr;
         loop {
-            let object = &self.objects[ptr];
-            if let Some(next_ptr) = object.proto.as_object() {
+            let proto = self.obj_info(ptr).proto;
+            if let Some(next_ptr) = proto.as_object() {
                 ptr = next_ptr
             } else {
-                return object.proto;
+                return proto;
             }
         }
-    }
-
-    #[inline]
-    pub fn object_data(&self, ptr: ScriptObject) -> &ScriptObjectData {
-        &self.objects[ptr]
     }
 
     /// Monotonic counter bumped when object slots are freed/reused.
     /// Used by higher layers to evict caches keyed by ScriptObject identity.
     #[inline]
     pub fn object_reuse_epoch(&self) -> u64 {
-        self.object_reuse_epoch
+        self.heap_stat(HEAP_STAT_REUSE_EPOCH)
     }
 
     #[inline]
@@ -753,15 +1066,9 @@ impl ScriptHeap {
         &self.type_check[index.0 as usize]
     }
 
+    #[inline]
     pub fn set_type_default(&mut self, obj: ScriptObject) -> bool {
-        let object = &self.objects[obj];
-        if let Some(ty_index) = object.tag.as_type_index() {
-            // Add to type_defaults mapping (GC will scan this table)
-            self.type_defaults.insert(ty_index, obj);
-            true
-        } else {
-            false
-        }
+        self.obj_mode(obj, OBJ_MODE_TYPE_DEFAULT, 0) != 0
     }
 
     pub fn type_default(&self, ty_index: ScriptTypeIndex) -> Option<ScriptObject> {
@@ -770,10 +1077,10 @@ impl ScriptHeap {
         obj
     }
 
+    #[inline]
     pub fn type_default_for_id(&self, type_id: ScriptTypeId) -> Option<ScriptObject> {
-        let obj = self.type_index.get(&type_id).and_then(|ty_index| self.type_defaults.get(ty_index).copied());
-        self.census_default_used(obj);
-        obj
+        let r = self.type_info(TYPE_DEFAULT_FOR_ID, type_id, ScriptObject::ZERO);
+        r.found.then_some(r.object)
     }
 
     /// A Rust type made from its registered default while a census records:
@@ -783,6 +1090,39 @@ impl ScriptHeap {
         if let (Some(census), Some(obj)) = (&self.census, obj) {
             census.default_used(obj);
         }
+    }
+
+    /// Every object slot, for heap walkers outside the VM (the module
+    /// census): `is_valid`, `get_at`, `generation`, indexing.
+    pub fn object_slots(&self) -> &GenVec<ScriptObjectData> {
+        &self.objects
+    }
+
+    /// Every array slot, for heap walkers outside the VM.
+    pub fn array_slots(&self) -> &GenVec<ScriptArrayData> {
+        &self.arrays
+    }
+
+    /// The objects Rust holds (rooted by a `ScriptObjectRef`).
+    pub fn rooted_objects(&self) -> Vec<ScriptObject> {
+        self.root_object_ids()
+    }
+
+    /// The registered type defaults.
+    pub fn type_default_objects(&self) -> Vec<ScriptObject> {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, object: ScriptObject) {
+            (&mut *(ctx as *mut Vec<ScriptObject>)).push(object);
+        }
+        let mut out = Vec::new();
+        // SAFETY: the callback writes only to out during this synchronous call.
+        unsafe { self.type_default_objects_with(&mut out as *mut _ as *mut u8, push); }
+        out
+    }
+
+    /// # Safety
+    /// `ctx` must remain valid for `push` throughout this synchronous walk.
+    pub unsafe fn type_default_objects_with(&self, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, ScriptObject)) {
+        for object in self.type_defaults.values() { push(ctx, *object); }
     }
 
     /// Look up a field's ScriptTypeId from the type-check structure of an object.
@@ -807,6 +1147,7 @@ impl ScriptHeap {
     }
 
     #[inline]
+    #[relax_api]
     pub fn cast_to_f64(&self, v: ScriptValue, ip: ScriptIp) -> f64 {
         if let Some(v) = v.as_f64() {
             return v;
@@ -914,7 +1255,31 @@ impl ScriptHeap {
         println!("{out}");
     }
 
-    pub fn to_debug_string(
+    pub fn to_debug_string(&self, value: ScriptValue, recur: &mut Vec<ScriptValue>, out: &mut String, formatted: bool, depth: usize) {
+        self.debug_string_into(value, recur, &mut crate::vm_api::ScriptTextOut::new(out), formatted, depth);
+    }
+
+    /// Format inside the owning compiler. Recursion guards are unchanged on return.
+    #[inline]
+    pub fn debug_string_into(&self, value: ScriptValue, recur: &[ScriptValue], out: &mut crate::vm_api::ScriptTextOut, formatted: bool, depth: usize) {
+        self.value_text(TEXT_DEBUG, value, recur, formatted, depth, out);
+    }
+
+    /// Writes `value` as text into `out` by `mode`: TEXT_DEBUG its debug format (`recur` the
+    /// recursion guards, unchanged on return; `formatted`, `depth` as to_debug_string), TEXT_JSON
+    /// its JSON.
+    #[relax_api]
+    pub fn value_text(&self, mode: u32, value: ScriptValue, recur: &[ScriptValue], formatted: bool, depth: usize, out: &mut crate::vm_api::ScriptTextOut) {
+        let mut text = String::new();
+        if mode == TEXT_DEBUG {
+            self.to_debug_string_native(value, &mut recur.to_vec(), &mut text, formatted, depth);
+        } else {
+            self.to_json_depth(value, &mut text, 0);
+        }
+        out.push(&text);
+    }
+
+    fn to_debug_string_native(
         &self,
         value: ScriptValue,
         recur: &mut Vec<ScriptValue>,
@@ -1000,10 +1365,10 @@ impl ScriptHeap {
                 object.map_iter_ordered(|key, value| {
                     write_separator(out, formatted, depth + 1, first);
                     if key != NIL {
-                        self.to_debug_string(key, recur, out, formatted, depth + 1);
+                        self.to_debug_string_native(key, recur, out, formatted, depth + 1);
                         write!(out, ": ").ok();
                     }
-                    self.to_debug_string(value, recur, out, formatted, depth + 1);
+                    self.to_debug_string_native(value, recur, out, formatted, depth + 1);
                     first = false;
                 });
                 for kv in object.vec.iter() {
@@ -1011,7 +1376,7 @@ impl ScriptHeap {
                     if kv.key != NIL {
                         write!(out, "{}: ", kv.key).ok();
                     }
-                    self.to_debug_string(kv.value, recur, out, formatted, depth + 1);
+                    self.to_debug_string_native(kv.value, recur, out, formatted, depth + 1);
                     first = false;
                 }
                 if let Some(next_ptr) = object.proto.as_object() {
@@ -1063,7 +1428,7 @@ impl ScriptHeap {
                         out.push_str(", ");
                     }
                 }
-                self.to_debug_string(
+                self.to_debug_string_native(
                     array.storage.index(i).unwrap(),
                     recur,
                     out,
@@ -1100,11 +1465,15 @@ impl ScriptHeap {
             let pod = &self.pods[pod];
             let pod_type = &self.pod_types[pod.ty.index as usize];
             self.pod_debug(out, pod_type, 0, &pod.data);
+        } else if let Some(handle_box) = value.as_handle().and_then(|h| self.handle_box_ref(h)) {
+            // The host's own text for its handle (`ScriptHandleGc::debug_fmt`).
+            write!(out, "{:?}", handle_box).ok();
         } else {
             write!(out, "{}", value).ok();
         }
     }
 
+    #[relax_api]
     pub fn to_json(&mut self, value: ScriptValue) -> ScriptValue {
         if !self.has_allocation_budget() {
             return self.new_string_with(|heap, s| {
@@ -1241,7 +1610,12 @@ impl ScriptHeap {
     }
 
     pub fn to_json_inner(&self, value: ScriptValue, out: &mut String) {
-        self.to_json_depth(value, out, 0);
+        self.json_into(value, &mut crate::vm_api::ScriptTextOut::new(out));
+    }
+
+    #[inline]
+    pub fn json_into(&self, value: ScriptValue, out: &mut crate::vm_api::ScriptTextOut) {
+        self.value_text(TEXT_JSON, value, &[], false, 0, out);
     }
 
     fn to_json_depth(&self, value: ScriptValue, out: &mut String, depth: usize) {
@@ -1364,18 +1738,20 @@ impl ScriptHeap {
     }
 
     // memory  usage
+    #[inline]
     pub fn objects_len(&self) -> usize {
-        self.objects.len()
+        self.heap_stat(HEAP_STAT_OBJECTS_LEN) as usize
     }
 
     /// Checks if a value has an apply transform without calling it.
     /// Used by type_check to be permissive when a transform exists.
+    #[inline]
     pub fn has_apply_transform(&self, value: ScriptValue) -> bool {
         if let Some(obj) = value.as_object() {
-            return self.objects[obj].tag.as_apply_transform().is_some();
+            return self.obj_info(obj).tag.as_apply_transform().is_some();
         }
         if let Some(arr) = value.as_array() {
-            return self.arrays[arr].tag.as_apply_transform().is_some();
+            return self.arr_view(arr).tag.as_apply_transform().is_some();
         }
         false
     }
@@ -1384,6 +1760,7 @@ impl ScriptHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trap::*;
     use crate::vm::{ScriptMod, ScriptVm, ScriptVmBase, ScriptVmHost};
 
     fn eval(vm: &mut ScriptVm, file: &str, code: &str) -> ScriptValue {
@@ -1402,7 +1779,7 @@ mod tests {
     fn numeric_string_conversion_handles_inline_and_heap_strings_and_yields_nan() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         let ip = ScriptIp::default();
@@ -1424,7 +1801,7 @@ mod tests {
     fn array_opcodes_reject_invalid_indexes_before_touching_storage() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.captured_errors = Some(Vec::new());
@@ -1471,7 +1848,7 @@ mod tests {
     fn updating_an_untracked_field_keeps_its_insertion_order() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         let result = eval(
@@ -1505,7 +1882,7 @@ mod tests {
     fn sparse_array_growth_past_the_heap_cap_bails_without_touching_storage() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.captured_errors = Some(Vec::new());
@@ -1573,7 +1950,7 @@ mod tests {
     fn scoped_allocation_budgets_nest_inside_the_retained_cap() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.captured_errors = Some(Vec::new());
@@ -1593,7 +1970,7 @@ mod tests {
     fn string_limit_bails_instead_of_entering_a_try_fallback() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.heap.set_max_string_bytes(Some(8));
@@ -1625,7 +2002,7 @@ mod tests {
     fn byte_array_string_conversion_stops_at_the_string_limit() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.heap.set_max_string_bytes(Some(8));
@@ -1651,7 +2028,7 @@ mod tests {
     fn byte_array_string_conversion_preserves_lossy_utf8_without_a_limit() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
 
@@ -1666,7 +2043,7 @@ mod tests {
     fn bounded_string_helpers_preserve_their_normal_results() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.heap.set_max_string_bytes(Some(64));
@@ -1710,7 +2087,7 @@ mod tests {
     fn byte_array_json_input_stops_at_the_string_limit() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.heap.set_max_string_bytes(Some(8));
@@ -1739,7 +2116,7 @@ mod tests {
     fn byte_array_json_input_parses_within_the_string_limit() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         vm.bx.heap.set_max_string_bytes(Some(64));
@@ -1754,4 +2131,8 @@ mod tests {
         assert_eq!(result.as_number(), Some(12345.0));
         assert!(!vm.bx.heap.take_string_limit_exceeded());
     }
+}
+
+impl ScriptHeap {
+    pub fn object_type_index(&self, obj: ScriptObject) -> Option<crate::traits::ScriptTypeIndex> { self.objects[obj].tag.as_type_index() }
 }

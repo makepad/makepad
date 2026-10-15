@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 # The Builder: a console program with its TUI. On Windows it ships as source
 # (windows/makepad-builder.bat compiles it with Rust's GNU toolchain); on
-# macOS and Linux the same Builder is the shell script makepad.sh.
+# macOS and Linux the same Builder is the shell script makepad-builder.sh.
 [[bin]]
 name = "makepad-builder"
 path = "src/bin/makepad-loader-cli.rs"

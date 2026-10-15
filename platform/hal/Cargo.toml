@@ -1,0 +1,56 @@
+[package]
+name = "makepad-hal"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad HAL: the command/event interface below Cx (windows, GPU resources, input, timers), its session tables, GPU ledger and a headless backend"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
+makepad-key-code = { path = "../key_code", version = "0.1.0" }
+# The font service rasterises glyphs with the same tables and outlines the text layout shapes.
+makepad-font-core = { path = "../../libs/font_core", version = "1.0.0" }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+makepad-vulkan = { path = "../../libs/vulkan", version = "0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-zune-jpeg = { path = "../../libs/zune/zune-jpeg", version = "0.5.15" }
+makepad-math = { path = "../../libs/math", version = "1.0.0" }
+wayland-client = { path = "../../libs/linux/wayland-client" }
+wayland-protocols = { path = "../../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+# WM discovery checks the hosted wire a makepad window manager speaks (wm_socket.rs), and the
+# WM-hosted shell and hosted clients share its swapchain types (hosted_ipc.rs)
+makepad-studio-protocol = { path = "../studio", version = "0.1.0" }
+# the WM-hosted shell speaks the hub protocol's binary frames (backend/linux/wm.rs)
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+
+# The Metal backend and its AppKit / UIKit shells: the shared Apple bindings and the objc runtime
+[target.'cfg(target_vendor = "apple")'.dependencies]
+makepad-apple-sys = { path = "../../libs/apple_sys", version = "1.0.0" }
+makepad-objc-sys = { path = "../../libs/objc-sys", version = "1.0.0" }
+
+[features]
+# the #[relax_api] wrappers and table entries; only the `makepad` loader enables it
+host-shims = []
+
+[dev-dependencies]
+# tests/entries.rs reads the generated #[relax_api] table
+makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0", features = ["host-shims"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dev-dependencies]
+makepad-shader = { path = "../shader", version = "1.0.0" }
+
+# Native inspection reads the HAL ledger directly, including when Cx runs under Relax.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-remote = { path = "../../libs/remote", version = "0.1.0" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+makepad-jni-sys = { path = "../../libs/jni-sys", version = "0.4.0" }
+
+# The D3D11 backend and the Win32 shell (Windows): generated Win32/COM bindings
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = { path = "../../libs/windows/sys", version = "0.1.0" }

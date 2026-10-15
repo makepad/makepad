@@ -5,10 +5,8 @@ use {
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Rect, Size},
         loader::{self, FontDefinition, FontFamilyDefinition, Loader},
-        msdfer,
         num::Zero,
         rasterizer::{self, RasterizedGlyph, Rasterizer},
-        sdfer,
         selection::{Cursor, CursorPosition, Selection},
         shaper::{self, ShapedText},
         substr::Substr,
@@ -17,8 +15,6 @@ use {
     std::{
         borrow::Borrow,
         cell::RefCell,
-        collections::BTreeMap,
-        env,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -40,21 +36,130 @@ const PTS_PER_INCH: f32 = 72.0;
 pub const LAYOUT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// A layout cache entry, tracked with its estimated size, its position in the
-/// least-recently-used order (the tick under which it is registered in
-/// `Layouter::cache_lru_order`), and the frame generation it was last used in.
+/// least-recently-used order (its slot in `Layouter::cache_lru_order`), and the
+/// frame generation it was last used in.
 #[derive(Debug)]
 struct CachedLayout {
     result: Rc<LaidoutText>,
     weight_in_bytes: usize,
-    last_used: u64,
+    slot: u32,
     generation: u64,
+}
+
+/// The recency order of the layout cache: a doubly linked list over a slab, oldest
+/// first. Moving an entry to the back is a relink, so a cache hit never allocates.
+/// Recency is per generation, not per hit: an entry moves to the back on its first
+/// use in a generation only, so within older generations the order is first use.
+#[derive(Debug, Default)]
+struct LruList {
+    nodes: Vec<LruNode>,
+    free: Vec<u32>,
+    oldest: u32,
+    newest: u32,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct LruNode {
+    prev: u32,
+    next: u32,
+    key: Option<OwnedLayoutParams>,
+}
+
+const LRU_NONE: u32 = u32::MAX;
+
+impl LruList {
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.free.clear();
+        self.len = 0;
+    }
+
+    fn front(&self) -> Option<&OwnedLayoutParams> {
+        if self.len == 0 {
+            return None;
+        }
+        self.nodes[self.oldest as usize].key.as_ref()
+    }
+
+    fn push_back(&mut self, key: OwnedLayoutParams) -> u32 {
+        let node = LruNode { prev: LRU_NONE, next: LRU_NONE, key: Some(key) };
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                self.nodes[slot as usize] = node;
+                slot
+            }
+            None => {
+                self.nodes.push(node);
+                (self.nodes.len() - 1) as u32
+            }
+        };
+        self.link_back(slot);
+        self.len += 1;
+        slot
+    }
+
+    fn link_back(&mut self, slot: u32) {
+        let last = if self.len == 0 { LRU_NONE } else { self.newest };
+        self.nodes[slot as usize].prev = last;
+        self.nodes[slot as usize].next = LRU_NONE;
+        if last == LRU_NONE {
+            self.oldest = slot;
+        } else {
+            self.nodes[last as usize].next = slot;
+        }
+        self.newest = slot;
+    }
+
+    fn unlink(&mut self, slot: u32) {
+        let (prev, next) = (self.nodes[slot as usize].prev, self.nodes[slot as usize].next);
+        if prev == LRU_NONE {
+            self.oldest = next;
+        } else {
+            self.nodes[prev as usize].next = next;
+        }
+        if next == LRU_NONE {
+            self.newest = prev;
+        } else {
+            self.nodes[next as usize].prev = prev;
+        }
+    }
+
+    /// Make `slot` the newest.
+    fn touch(&mut self, slot: u32) {
+        if self.len > 1 && self.newest != slot {
+            self.unlink(slot);
+            self.link_back(slot);
+        }
+    }
+
+    fn remove(&mut self, slot: u32) {
+        self.unlink(slot);
+        self.nodes[slot as usize].key = None;
+        self.free.push(slot);
+        self.len -= 1;
+    }
+
+    fn pop_front(&mut self) -> Option<OwnedLayoutParams> {
+        if self.len == 0 {
+            return None;
+        }
+        let slot = self.oldest;
+        let key = self.nodes[slot as usize].key.take();
+        self.remove(slot);
+        key
+    }
 }
 
 #[derive(Debug)]
 pub struct Layouter {
     pub(crate) loader: Loader,
     cache_size: usize,
-    cache_tick: u64,
     cache_bytes: usize,
     /// Frame counter for working-set protection: eviction never removes entries
     /// used in the current generation, so the texts visible in one frame cannot
@@ -63,13 +168,15 @@ pub struct Layouter {
     /// [`Self::advance_cache_generation`].
     cache_generation: u64,
     cached_results: FxHashMap<OwnedLayoutParams, CachedLayout>,
-    cache_lru_order: BTreeMap<u64, OwnedLayoutParams>,
+    cache_lru_order: LruList,
     /// While recording ([`Self::record_glyphs`]): every glyph a layout
     /// returned, by font.
     recorded_glyphs: Option<FxHashMap<FontId, RecordedFont>>,
     /// (font, character) pairs already reported as missing.
     missing_reported: std::collections::HashSet<(FontId, char)>,
     missing_count: usize,
+    /// Moves when a family's faces change (a lazy CJK or emoji face arrives).
+    family_generation: u64,
 }
 
 /// What a font laid out while recording ([`Layouter::record_glyphs`]):
@@ -93,18 +200,26 @@ impl Layouter {
         Self {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
-            cache_tick: 0,
             cache_bytes: 0,
             cache_generation: 0,
             cached_results: FxHashMap::with_capacity_and_hasher(
                 settings.cache_size,
                 Default::default(),
             ),
-            cache_lru_order: BTreeMap::new(),
+            cache_lru_order: LruList::default(),
             recorded_glyphs: None,
             missing_reported: Default::default(),
             missing_count: 0,
+            family_generation: 0,
         }
+    }
+
+    /// Moves whenever a font family's faces change, e.g. when a lazy CJK or
+    /// emoji face arrives on a glyph miss. A widget that keeps glyphs of its
+    /// own past a layout (a terminal's per-character cache) drops them when
+    /// it moves: the boxes it kept for the missing glyphs have real faces now.
+    pub fn family_generation(&self) -> u64 {
+        self.family_generation
     }
 
     /// Starts (or stops) keeping every glyph that layouts return, cached
@@ -210,7 +325,9 @@ impl Layouter {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
-        self.loader.set_font_family_definition(id, definition);
+        if self.loader.set_font_family_definition(id, definition) {
+            self.family_generation += 1;
+        }
         self.cached_results.clear();
         self.cache_lru_order.clear();
         self.cache_bytes = 0;
@@ -240,12 +357,13 @@ impl Layouter {
         }
         if let Some(entry) = self.cached_results.get_mut(&params as &dyn LayoutParams) {
             // Refresh recency so texts that are drawn every frame (e.g. all the
-            // visible items of a scrolling list) survive eviction.
-            if let Some(key) = self.cache_lru_order.remove(&entry.last_used) {
-                self.cache_tick += 1;
-                entry.last_used = self.cache_tick;
+            // visible items of a scrolling list) survive eviction. An entry
+            // already refreshed in this generation stays put: eviction never
+            // touches current-generation entries. The move is a relink, no
+            // allocation.
+            if entry.generation != self.cache_generation {
+                self.cache_lru_order.touch(entry.slot);
                 entry.generation = self.cache_generation;
-                self.cache_lru_order.insert(entry.last_used, key);
             }
             return entry.result.clone();
         }
@@ -259,21 +377,20 @@ impl Layouter {
 
     fn insert_cached_result(&mut self, cache_key: OwnedLayoutParams, result: Rc<LaidoutText>) {
         let weight_in_bytes = Self::entry_weight_in_bytes(&cache_key, &result);
-        self.cache_tick += 1;
         self.cache_bytes = self.cache_bytes.saturating_add(weight_in_bytes);
-        self.cache_lru_order.insert(self.cache_tick, cache_key.clone());
+        let slot = self.cache_lru_order.push_back(cache_key.clone());
         if let Some(old) = self.cached_results.insert(
             cache_key,
             CachedLayout {
                 result,
                 weight_in_bytes,
-                last_used: self.cache_tick,
+                slot,
                 generation: self.cache_generation,
             },
         ) {
             // Replacing an existing entry: drop its LRU registration and weight
             // so the bookkeeping stays consistent.
-            self.cache_lru_order.remove(&old.last_used);
+            self.cache_lru_order.remove(old.slot);
             self.cache_bytes = self.cache_bytes.saturating_sub(old.weight_in_bytes);
         }
         self.evict_lru_to_limits();
@@ -292,17 +409,19 @@ impl Layouter {
             && (self.cached_results.len() > self.cache_size
                 || self.cache_bytes > LAYOUT_CACHE_MAX_BYTES)
         {
-            let Some((tick, key)) = self.cache_lru_order.pop_first() else {
+            let Some(front) = self.cache_lru_order.front() else {
                 break;
             };
             if self
                 .cached_results
-                .get(&key)
+                .get(front)
                 .is_some_and(|entry| entry.generation == self.cache_generation)
             {
-                self.cache_lru_order.insert(tick, key);
                 break;
             }
+            let Some(key) = self.cache_lru_order.pop_front() else {
+                break;
+            };
             if let Some(entry) = self.cached_results.remove(&key) {
                 self.cache_bytes = self.cache_bytes.saturating_sub(entry.weight_in_bytes);
             }
@@ -341,73 +460,14 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        let atlas_size = default_text_atlas_size();
         Self {
             loader: loader::Settings {
                 shaper: shaper::Settings { cache_size: 4096 },
-                rasterizer: rasterizer::Settings {
-                    sdfer: sdfer::Settings {
-                        padding: 4,
-                        radius: 8.0,
-                        cutoff: 0.25,
-                    },
-                    msdfer: msdfer::Settings {
-                        padding: 4,
-                        radius: 8.0,
-                        cutoff: 0.25,
-                        corner_angle_threshold: 3.0,
-                    },
-                    msdf_resolution: rasterizer::MsdfResolutionSettings {
-                        min_request_dpxs_per_em: 20.0,
-                        min_dpxs_per_em: 32.0,
-                        base_dpxs_per_em: 64.0,
-                        max_dpxs_per_em: 128.0,
-                        target_feature_texels: 1.75,
-                        dpx_quantum: 8.0,
-                        min_feature_floor_ems: 1.0 / 1024.0,
-                    },
-                    msdf_complexity: rasterizer::MsdfComplexitySettings {
-                        max_outline_commands: 180,
-                        max_estimated_segments: 1000,
-                    },
-                    outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    atlas_size,
-                },
+                rasterizer: rasterizer::Settings::default(),
             },
             cache_size: 4096,
         }
     }
-}
-
-fn default_text_atlas_size() -> Size<usize> {
-    atlas_size_override_from_env().unwrap_or_else(|| Size::new(2048, 2048))
-}
-
-fn atlas_size_override_from_env() -> Option<Size<usize>> {
-    let raw = env::var("MAKEPAD_TEXT_ATLAS_SIZE").ok()?;
-    parse_text_atlas_size_value(raw.trim())
-}
-
-fn parse_text_atlas_size_value(value: &str) -> Option<Size<usize>> {
-    if value.is_empty() {
-        return None;
-    }
-
-    fn parse_dim(dim: &str) -> Option<usize> {
-        let parsed = dim.trim().parse::<usize>().ok()?;
-        if (256..=8192).contains(&parsed) {
-            Some(parsed)
-        } else {
-            None
-        }
-    }
-
-    if let Some((w, h)) = value.split_once('x').or_else(|| value.split_once('X')) {
-        return Some(Size::new(parse_dim(w)?, parse_dim(h)?));
-    }
-
-    let dim = parse_dim(value)?;
-    Some(Size::new(dim, dim))
 }
 
 #[derive(Debug)]
@@ -642,6 +702,7 @@ impl LayoutContext {
             line_gap_in_lpxs,
             cap_height_in_lpxs,
             line_spacing_scale: self.options.line_spacing_scale,
+            flow_wrap_spacing_in_lpxs: self.options.flow_wrap_spacing_in_lpxs,
             glyphs,
         };
 
@@ -651,11 +712,12 @@ impl LayoutContext {
             if self.rows.len() == 1 {
                 // The first row can share its visual row with earlier inline
                 // content that is taller than the text; the caller passes that
-                // row's real height (plus wrap spacing) so the second row's
-                // top edge clears it. The floor is a top-to-top distance, so
-                // it converts to a baseline advance by adding the change in
-                // ascender between the two rows.
+                // row's real height so the second row's top edge clears it.
+                // Under the flow rule the wrap gap is ours to add. The floor is
+                // a top-to-top distance, so it converts to a baseline advance
+                // by adding the change in ascender between the two rows.
                 let min_advance_in_lpxs = self.options.first_row_min_line_spacing_below_in_lpxs
+                    + prev_row.wrap_spacing_below_in_lpxs().unwrap_or(0.0)
                     + row.ascender_in_lpxs
                     - prev_row.ascender_in_lpxs;
                 natural_in_lpxs.max(min_advance_in_lpxs)
@@ -1179,14 +1241,19 @@ pub struct LayoutOptions {
     /// Minimum distance in logical pixels from the first row's top edge to the
     /// second row's top edge. A continuation run's first row can share its
     /// visual row with earlier inline content that is taller than the text;
-    /// callers pass that row's real height (plus wrap spacing) so the second
-    /// row clears it. Zero keeps pure font-metric spacing. Only the first row
-    /// boundary is affected; later rows always use font-metric spacing.
+    /// callers pass that row's real height (plus wrap spacing, unless
+    /// `flow_wrap_spacing_in_lpxs` is set and the layouter adds it) so the
+    /// second row clears it. Zero keeps pure font-metric spacing. Only the
+    /// first row boundary is affected; later rows keep their natural spacing.
     pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub wrap: bool,
     pub align: f32,
     pub line_spacing_scale: f32,
+    /// The enclosing wrap flow's current wrap spacing, when the text draws as part of one. Rows
+    /// then advance like the flow's own rows: box height plus the larger of this and the row's
+    /// `ascender * (line_spacing_scale - 1)`, line gap ignored. `None` keeps font-metric spacing.
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
     /// Maximum number of rows to display. `None` means unlimited.
     /// When set and the text exceeds this many rows, excess rows are discarded.
     pub max_rows: Option<usize>,
@@ -1205,6 +1272,7 @@ impl Default for LayoutOptions {
             wrap: false,
             align: 0.0,
             line_spacing_scale: 1.0,
+            flow_wrap_spacing_in_lpxs: None,
             max_rows: None,
             ellipsis: false,
         }
@@ -1226,6 +1294,7 @@ impl Hash for LayoutOptions {
         self.wrap.hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
+        self.flow_wrap_spacing_in_lpxs.map(f32::to_bits).hash(hasher);
         self.max_rows.hash(hasher);
         self.ellipsis.hash(hasher);
     }
@@ -1240,6 +1309,8 @@ impl PartialEq for LayoutOptions {
             && self.wrap == other.wrap
             && self.align.to_bits() == other.align.to_bits()
             && self.line_spacing_scale.to_bits() == other.line_spacing_scale.to_bits()
+            && self.flow_wrap_spacing_in_lpxs.map(f32::to_bits)
+                == other.flow_wrap_spacing_in_lpxs.map(f32::to_bits)
             && self.max_rows == other.max_rows
             && self.ellipsis == other.ellipsis
     }
@@ -1426,13 +1497,30 @@ pub struct LaidoutRow {
     /// font has no capital to measure (see [`Font::cap_height_in_ems`]).
     pub cap_height_in_lpxs: f32,
     pub line_spacing_scale: f32,
+    /// See [`LayoutOptions::flow_wrap_spacing_in_lpxs`].
+    pub flow_wrap_spacing_in_lpxs: Option<f32>,
     pub glyphs: Vec<LaidoutGlyph>,
 }
 
 impl LaidoutRow {
+    /// The wrap gap below this row under the flow rule: the flow's spacing or this row's own,
+    /// whichever is larger, as the flow itself would use. `None` under font-metric spacing.
+    pub fn wrap_spacing_below_in_lpxs(&self) -> Option<f32> {
+        self.flow_wrap_spacing_in_lpxs
+            .map(|spacing| spacing.max(self.ascender_in_lpxs * (self.line_spacing_scale - 1.0)))
+    }
+
     pub fn line_spacing_in_lpxs(&self, next_row: &LaidoutRow) -> f32 {
-        (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
-            * next_row.line_spacing_scale
+        match self.wrap_spacing_below_in_lpxs() {
+            // The wrap gap plus this row's box height down to the next row's top, then its ascender.
+            Some(wrap_spacing) => {
+                wrap_spacing - self.descender_in_lpxs + next_row.ascender_in_lpxs
+            }
+            None => {
+                (self.line_gap_in_lpxs - self.descender_in_lpxs + next_row.ascender_in_lpxs)
+                    * next_row.line_spacing_scale
+            }
+        }
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
@@ -1543,30 +1631,11 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, parse_text_atlas_size_value, LaidoutText, LayoutOptions,
+        merge_segments_for_line_breaking, LaidoutText, LayoutOptions,
         Layouter, OwnedLayoutParams, Settings, Size, Style, LAYOUT_CACHE_MAX_BYTES,
     };
     use std::rc::Rc;
     use unicode_segmentation::UnicodeSegmentation;
-
-    #[test]
-    fn parses_text_atlas_size_from_env_value() {
-        assert_eq!(
-            parse_text_atlas_size_value("1024"),
-            Some(Size::new(1024, 1024))
-        );
-        assert_eq!(
-            parse_text_atlas_size_value("1024x2048"),
-            Some(Size::new(1024, 2048))
-        );
-        assert_eq!(
-            parse_text_atlas_size_value("1024X2048"),
-            Some(Size::new(1024, 2048))
-        );
-        assert_eq!(parse_text_atlas_size_value(""), None);
-        assert_eq!(parse_text_atlas_size_value("64"), None);
-        assert_eq!(parse_text_atlas_size_value("bogus"), None);
-    }
 
     /// Helper: split text by word bounds and return segment lengths,
     /// then apply merging, then reconstruct the segment strings.
@@ -2140,5 +2209,24 @@ mod tests {
             assert_eq!(crlf.rows.len(), lf.rows.len(), "max_rows {max_rows}");
             assert_eq!(crlf.is_truncated, lf.is_truncated, "max_rows {max_rows}");
         }
+    }
+
+    /// The recency list pops oldest first, a touch moves an entry to the back,
+    /// and a removed slot is reused.
+    #[test]
+    fn lru_list_orders_by_recency() {
+        let mut lru = super::LruList::default();
+        let a = lru.push_back(cache_test_params("a"));
+        let b = lru.push_back(cache_test_params("b"));
+        let _c = lru.push_back(cache_test_params("c"));
+        lru.touch(a);
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "b");
+        lru.remove(a);
+        assert_eq!(lru.len(), 1);
+        let d = lru.push_back(cache_test_params("d"));
+        assert!(d == a || d == b, "a freed slot is reused");
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "c");
+        assert_eq!(lru.pop_front().unwrap().text.as_str(), "d");
+        assert!(lru.pop_front().is_none() && lru.front().is_none());
     }
 }

@@ -25,7 +25,7 @@
 //! The last test in the file pins the *other* half of "a modal covers the
 //! page" — depth, not layout. The page carries a `deep_band` at
 //! `draw_depth: 12`, and an overlay only outranks it because
-//! `DrawList2d::begin_overlay_inner` gives every overlay draw list a depth
+//! `DrawList2d::begin_overlay_reuse / begin_popup_overlay` gives every overlay draw list a depth
 //! floor. Without it the band paints over the card and over the backdrop.
 
 use makepad_test::{makepad_test, Selector, TestApp, WidgetSnapshot};
@@ -229,7 +229,7 @@ fn band_probes(app: &TestApp) -> (i64, i64, i64, i64) {
 /// dialog away: measured, before the fix, the band painted straight over the
 /// card AND over the dim backdrop, exactly as an engraved score did.
 ///
-/// `DrawList2d::begin_overlay_inner` gives every overlay draw list a depth
+/// `DrawList2d::begin_overlay_reuse / begin_popup_overlay` gives every overlay draw list a depth
 /// floor clear of that band. Nothing in this app asks for it.
 #[makepad_test]
 fn an_open_modal_covers_a_page_that_uses_draw_depth(app: TestApp) {
@@ -256,7 +256,7 @@ fn an_open_modal_covers_a_page_that_uses_draw_depth(app: TestApp) {
         !near(covered, BAND, 40),
         "the page punched through the dialog: ({middle}, {y}) is still the \
          band's colour {covered:?}. The overlay draw list lost the depth test \
-         against draw_depth 12 — see DrawList2d::begin_overlay_inner",
+         against draw_depth 12 — see DrawList2d::begin_overlay_reuse and begin_popup_overlay",
     );
 
     // And the dim backdrop — also overlay content, also at depth 0 — reaches

@@ -176,14 +176,14 @@ script_mod! {
     mod.widgets.MpfTreemap = set_type_default() do mod.widgets.MpfTreemapBase{
         width: Fill
         height: Fill
-        draw_bg +: {color: mod.mpf.bg}
+        draw_bg +: {color: mod.theme.color_bg_app}
         draw_tile +: {}
         draw_text +: {
-            color: mod.mpf.fg
+            color: mod.theme.color_text
             text_style: theme.font_regular{font_size: 8.0}
         }
         draw_bold +: {
-            color: mod.mpf.fg_bright
+            color: mod.theme.color_text_hover
             text_style: theme.font_bold{font_size: 8.5}
         }
     }
@@ -3890,7 +3890,9 @@ mod tests {
 
     #[test]
     fn every_kind_lands_on_a_palette_class() {
-        let palette = Palette::tokyo_night();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let palette = Palette::for_cx(&mut cx);
         for kind in FILE_KINDS {
             let class = kind_class(kind) as usize;
             assert!(class < palette.kinds.len(), "{kind:?} -> {class}");
@@ -4102,7 +4104,9 @@ mod tests {
     #[test]
     fn the_bundle_tag_is_not_a_file_kind() {
         assert!(KIND_BUNDLE as usize >= FILE_KINDS.len());
-        let palette = Palette::tokyo_night();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let palette = Palette::for_cx(&mut cx);
         let class = kind_class(FileKind::Generic) as usize;
         assert!(class < palette.kinds.len());
     }

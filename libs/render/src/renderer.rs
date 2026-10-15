@@ -664,6 +664,7 @@ pub use stock_ibl::STOCK_IBL_MATERIAL;
 pub use draw_items::*;
 pub use prepared::*;
 pub use model_instance::*;
+pub use realm::ModelTail;
 pub use frame_util::*;
 pub use stream_draw::StreamStats;
 

@@ -2,7 +2,7 @@
 # image, video, task, sheets, route, mixer...).
 #
 # `pdf <path>` opens a document as one continuous scroll of pages on a
-# dark makepad_wm_theme background: PageDown/Space page through, Cmd +/- zoom,
+# system theme background: PageDown/Space page through, Cmd +/- zoom,
 # Cmd+0 fits the width, Cmd+1 shows 100%, Cmd+scroll zooms around the
 # cursor, Cmd+Shift+T shows a thumbnail strip, Escape/Q quits.
 # `--preview <path>` sizes the window as a popup — that is files' Quick
@@ -41,5 +41,4 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["pdf"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-pdf-parse = { path = "../../libs/pdf_parse" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

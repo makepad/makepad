@@ -13,7 +13,7 @@ pub struct GpuInfo {
     /// RGBA16Float colour targets that ordinary (BGRA8-declared) draw shaders
     /// can render into WITH blending — an HDR scene pass. Set by backends
     /// that build the matching pipeline variant (Metal; Vulkan where the
-    /// device blends RGBA16Float, see `CxVulkan::float16_blend_targets`).
+    /// device blends RGBA16Float), reported through HAL format capabilities.
     pub float16_blend_targets: bool,
     /// Block-compressed texture formats the backend samples and uploads as
     /// [`crate::texture::TextureFormat::VecMipCompressed`]. Off unless the
@@ -87,7 +87,7 @@ pub fn max_gpu_buffer_bytes() -> u64 {
     MAX_GPU_BUFFER_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Set by the backend once it knows its device.
+/// Set by the backend once it knows its device (under the HAL: from the `HalInfo` the session opened with).
 pub fn set_max_gpu_buffer_bytes(bytes: u64) {
     MAX_GPU_BUFFER_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }

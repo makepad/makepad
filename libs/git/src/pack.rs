@@ -136,14 +136,9 @@ fn parse_pack_index(idx_path: &Path) -> Result<IdxTables, GitError> {
     let total_objects = fanout[255] as usize;
 
     // OID table: total_objects x 20 bytes
-    let mut oids = Vec::with_capacity(total_objects);
-    for _ in 0..total_objects {
-        if pos + 20 > data.len() {
-            return Err(GitError::CorruptPack("truncated OID table".into()));
-        }
-        oids.push(ObjectId::from_slice(&data[pos..pos + 20])?);
-        pos += 20;
-    }
+    let table = data.get(pos..pos + total_objects * 20).ok_or_else(|| GitError::CorruptPack("truncated OID table".into()))?;
+    let oids: Vec<ObjectId> = table.chunks_exact(20).map(|c| ObjectId::from_bytes(c.try_into().unwrap())).collect();
+    pos += total_objects * 20;
 
     // CRC32 table: skip (total_objects x 4 bytes)
     pos += total_objects * 4;
@@ -169,9 +164,38 @@ fn parse_pack_index(idx_path: &Path) -> Result<IdxTables, GitError> {
         }
     }
 
-    let mut sorted_offsets = offsets.clone();
-    sorted_offsets.sort_unstable();
+    let sorted_offsets = match reverse_index(idx_path, &data, &offsets) {
+        Some(sorted) => sorted,
+        None => {
+            let mut sorted = offsets.clone();
+            sorted.sort_unstable();
+            sorted
+        }
+    };
     Ok(IdxTables { fanout, oids, offsets, sorted_offsets })
+}
+
+/// The offsets in pack order from the pack's reverse index (`.rev`, which
+/// git writes beside the pack: each object's index position, in pack
+/// order), instead of sorting them: a 12M-object pack's sort took half a
+/// second of every index parse. `None` without a valid one for this pack.
+fn reverse_index(idx_path: &Path, idx: &[u8], offsets: &[u64]) -> Option<Vec<u64>> {
+    let data = fs::read(idx_path.with_extension("rev")).ok()?;
+    let n = offsets.len();
+    // "RIDX", version 1, hash id 1 (SHA-1), n positions, the pack's
+    // checksum and the file's own.
+    if data.len() != 12 + 4 * n + 40 || data[0..4] != *b"RIDX" || read_u32(&data, 4) != 1 || read_u32(&data, 8) != 1 {
+        return None;
+    }
+    // The pack checksum both files name must agree.
+    if idx.len() < 40 || data[12 + 4 * n..12 + 4 * n + 20] != idx[idx.len() - 40..idx.len() - 20] {
+        return None;
+    }
+    let mut sorted = Vec::with_capacity(n);
+    for i in 0..n {
+        sorted.push(*offsets.get(read_u32(&data, 12 + 4 * i) as usize)?);
+    }
+    sorted.windows(2).all(|w| w[0] < w[1]).then_some(sorted)
 }
 
 impl PackIndex {

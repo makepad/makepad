@@ -13,7 +13,7 @@
 //! (Splash `random`), the other two inputs a reproducible capture pins.
 // No remote bridge on these targets, so nothing steps the clock there.
 #![cfg_attr(
-    any(target_arch = "wasm32", target_os = "android", target_env = "ohos"),
+    any(target_arch = "wasm32", target_os = "android"),
     allow(dead_code)
 )]
 use std::collections::BTreeMap;

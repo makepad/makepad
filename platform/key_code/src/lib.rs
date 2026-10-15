@@ -4,6 +4,25 @@
 //! for the other to compile: script needs only this small crate.
 use makepad_micro_serde::*;
 
+/// FNV-1a over `bytes`, continuing from `hash` (start with
+/// [`FINGERPRINT_SEED`]). A `const fn`, so a crate can fingerprint its own
+/// source at compile time.
+pub const fn fingerprint(mut hash: u64, bytes: &[u8]) -> u64 {
+    let mut at = 0;
+    while at < bytes.len() {
+        hash ^= bytes[at] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        at += 1;
+    }
+    hash
+}
+
+pub const FINGERPRINT_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// This file's fingerprint: `KeyCode` travels the hosted wire by ordinal,
+/// so it is part of makepad-studio-protocol's `WIRE`.
+pub const SOURCE_FINGERPRINT: u64 = fingerprint(FINGERPRINT_SEED, include_bytes!("lib.rs"));
+
 impl Default for KeyCode {
     fn default() -> Self {
         KeyCode::Unknown
@@ -134,6 +153,119 @@ pub enum KeyCode {
 }
 
 impl KeyCode {
+    /// A key by its name (`a`, `KeyA`, `enter`, `ArrowLeft`, `F5`, ...), as a driver types it.
+    pub fn from_name(name: &str) -> Option<KeyCode> {
+        let lower = name.to_ascii_lowercase();
+        // single letter / digit shorthands: "a" -> KeyA, "1" -> Key1
+        let normalized = if lower.len() == 1 {
+            let c = lower.chars().next().unwrap();
+            if c.is_ascii_alphanumeric() {
+                format!("key{c}")
+            } else {
+                lower.clone()
+            }
+        } else {
+            lower.clone()
+        };
+        Some(match normalized.as_str() {
+            "escape" | "esc" => KeyCode::Escape,
+            "back" => KeyCode::Back,
+            "backtick" | "`" => KeyCode::Backtick,
+            "key0" => KeyCode::Key0,
+            "key1" => KeyCode::Key1,
+            "key2" => KeyCode::Key2,
+            "key3" => KeyCode::Key3,
+            "key4" => KeyCode::Key4,
+            "key5" => KeyCode::Key5,
+            "key6" => KeyCode::Key6,
+            "key7" => KeyCode::Key7,
+            "key8" => KeyCode::Key8,
+            "key9" => KeyCode::Key9,
+            "minus" | "-" => KeyCode::Minus,
+            "equals" | "=" => KeyCode::Equals,
+            "backspace" => KeyCode::Backspace,
+            "tab" => KeyCode::Tab,
+            "keyq" => KeyCode::KeyQ,
+            "keyw" => KeyCode::KeyW,
+            "keye" => KeyCode::KeyE,
+            "keyr" => KeyCode::KeyR,
+            "keyt" => KeyCode::KeyT,
+            "keyy" => KeyCode::KeyY,
+            "keyu" => KeyCode::KeyU,
+            "keyi" => KeyCode::KeyI,
+            "keyo" => KeyCode::KeyO,
+            "keyp" => KeyCode::KeyP,
+            "lbracket" | "[" => KeyCode::LBracket,
+            "rbracket" | "]" => KeyCode::RBracket,
+            "return" | "returnkey" | "enter" => KeyCode::ReturnKey,
+            "keya" => KeyCode::KeyA,
+            "keys" => KeyCode::KeyS,
+            "keyd" => KeyCode::KeyD,
+            "keyf" => KeyCode::KeyF,
+            "keyg" => KeyCode::KeyG,
+            "keyh" => KeyCode::KeyH,
+            "keyj" => KeyCode::KeyJ,
+            "keyk" => KeyCode::KeyK,
+            "keyl" => KeyCode::KeyL,
+            "semicolon" | ";" => KeyCode::Semicolon,
+            "quote" | "'" => KeyCode::Quote,
+            "backslash" => KeyCode::Backslash,
+            "keyz" => KeyCode::KeyZ,
+            "keyx" => KeyCode::KeyX,
+            "keyc" => KeyCode::KeyC,
+            "keyv" => KeyCode::KeyV,
+            "keyb" => KeyCode::KeyB,
+            "keyn" => KeyCode::KeyN,
+            "keym" => KeyCode::KeyM,
+            "comma" | "," => KeyCode::Comma,
+            "period" | "." => KeyCode::Period,
+            "slash" | "/" => KeyCode::Slash,
+            "control" | "ctrl" => KeyCode::Control,
+            "alt" | "option" => KeyCode::Alt,
+            "shift" => KeyCode::Shift,
+            "logo" | "cmd" | "command" | "meta" => KeyCode::Logo,
+            "space" => KeyCode::Space,
+            "capslock" => KeyCode::Capslock,
+            "f1" => KeyCode::F1,
+            "f2" => KeyCode::F2,
+            "f3" => KeyCode::F3,
+            "f4" => KeyCode::F4,
+            "f5" => KeyCode::F5,
+            "f6" => KeyCode::F6,
+            "f7" => KeyCode::F7,
+            "f8" => KeyCode::F8,
+            "f9" => KeyCode::F9,
+            "f10" => KeyCode::F10,
+            "f11" => KeyCode::F11,
+            "f12" => KeyCode::F12,
+            "printscreen" => KeyCode::PrintScreen,
+            "scrolllock" => KeyCode::ScrollLock,
+            "pause" => KeyCode::Pause,
+            "insert" => KeyCode::Insert,
+            "delete" | "del" => KeyCode::Delete,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
+            "numpadenter" => KeyCode::NumpadEnter,
+            "arrowup" | "up" => KeyCode::ArrowUp,
+            "arrowdown" | "down" => KeyCode::ArrowDown,
+            "arrowleft" | "left" => KeyCode::ArrowLeft,
+            "arrowright" | "right" => KeyCode::ArrowRight,
+            _ => return None,
+        })
+    }
+
+    /// The key's index in the table every wire format shares (JSON, the HAL's key events).
+    pub fn to_index(self) -> u32 {
+        KEYCODE_VARIANTS.iter().position(|k| *k == self).unwrap_or(KEYCODE_VARIANTS.len() - 1) as u32
+    }
+
+    /// The key at `index` of the shared table; `Unknown` past its end.
+    pub fn from_index(index: u32) -> KeyCode {
+        KEYCODE_VARIANTS.get(index as usize).copied().unwrap_or(KeyCode::Unknown)
+    }
+
     pub fn is_unknown(&self) -> bool {
         match self {
             Self::Unknown => true,
@@ -616,3 +748,5 @@ impl DeJson for KeyCode {
             .unwrap_or(KeyCode::Unknown))
     }
 }
+
+pub mod android;

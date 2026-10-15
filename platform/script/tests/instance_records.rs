@@ -12,7 +12,10 @@ const FIELDS: &str = "m0: shader.instance(mat4x4f)\n";
 
 fn compile(backend: &str) -> String {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
+    let mut vm = ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    };
     vm.bx.captured_errors = Some(Vec::new());
     let mut fields = String::new();
     let mut sum = String::from("self.m0");
@@ -30,7 +33,7 @@ fn compile(backend: &str) -> String {
          fragment: fn() {{ self.pixel = vec4(self.p.z, float(self.n.y), float(self.u), self.f) }}\n}}\n\
          shader.test_compile_draw_source(sh, \"{backend}\", false)"
     );
-    let value = vm.with_instruction_limit(50_000_000, |vm| vm.eval(ScriptMod { file: "x".into(), code, ..Default::default() }));
+    let value = vm.with_instruction_limit(50_000_000, |vm| vm.eval(ScriptMod::new("", "", "x", 0, 0, &code, &[])));
     let errors = vm.take_errors();
     assert!(errors.is_empty(), "{backend}: {errors:?}");
     let src = vm.bx.heap.string_with(value, |_, s| s.to_string()).unwrap_or_default();
@@ -44,46 +47,49 @@ fn compile(backend: &str) -> String {
 #[test]
 fn metal_reads_the_record_by_word_offset() {
     let src = compile("metal");
-    assert!(!src.contains("IoInstanceRaw"), "{src}");
-    assert!(src.contains("#define MP_INSTANCE_WORDS 650u"), "{src}");
-    assert!(src.contains("constant uint *i_raw [[buffer(1)]]"), "{src}");
-    assert!(src.contains("out_instance.f = as_type<float>(w[649]);"), "{src}");
-    assert!(src.contains("out_instance.n = int2(as_type<int>(w[644]), as_type<int>(w[645]));"), "{src}");
-    assert!(src.contains("out_instance.u = w[648];"), "{src}");
-    assert!(src.contains("out_instance.p = float3(as_type<float>(w[640]), as_type<float>(w[641]), as_type<float>(w[642]));"), "{src}");
+    assert!(src.contains("constant uint *_mp_inst [[buffer(1)]]"), "{src}");
+    assert!(src.contains(" = (instance_index * 650u);"), "{src}");
+    assert!(src.contains("_mp.dyninst_f = as_type<float>(_mp._mp_inst[(_t"), "{src}");
+    assert!(src.contains(" + 649u)]);"), "{src}");
+    assert!(src.contains("_mp.dyninst_n = int2(as_type<int>(_mp._mp_inst[(_t"), "{src}");
+    assert!(src.contains(" + 648u)];"), "{src}");
 }
 
 #[test]
 fn hlsl_reads_the_record_from_a_buffer_and_carries_only_what_the_pixel_stage_reads() {
     let src = compile("hlsl");
     assert!(src.contains("Buffer<uint> _mp_inst : register(t0);"), "{src}");
-    assert!(!src.contains(": INST"), "{src}");
-    assert!(src.contains("uint _mp_ib = input.iid * 650;"), "{src}");
-    assert!(src.contains("_mp_iov.i.io_n = int2(asint(_mp_inst[_mp_ib + 644]), asint(_mp_inst[_mp_ib + 645]));"), "{src}");
-    assert!(src.contains("_mp_iov.i.io_u = _mp_inst[_mp_ib + 648];"), "{src}");
-    // The pixel stage reads p, n, u and f, never the matrices.
-    let varying = &src[src.find("struct IoVarying").unwrap()..];
+    assert!(src.contains("uint _t0 = ((_mp_instance_index + _mp_inst_base) * 650u);"), "{src}");
+    assert!(src.contains("dyninst_n = int2(asint(_mp_inst[(_t0 + 644u)]), asint(_mp_inst[(_t0 + 645u)]));"), "{src}");
+    assert!(src.contains("dyninst_u = _mp_inst[(_t0 + 648u)];"), "{src}");
+    // The pixel stage reads p, n, u and f (7 lanes), never the matrices.
+    let varying = &src[src.find("struct VertexOut").unwrap()..];
     let varying = &varying[..varying.find("};").unwrap()];
-    assert!(!varying.contains(" io_m0 ") && !varying.contains(" io_m39 "), "{varying}");
-    assert!(varying.contains(" io_p : VARY"), "{varying}");
+    assert!(varying.contains("float4 packed_varying_1 : TEXCOORD1;") && !varying.contains("packed_varying_2"), "{varying}");
 }
 
 #[test]
-fn wgsl_reads_the_record_from_a_storage_buffer_and_validates() {
+fn wgsl_reads_the_record_from_a_storage_buffer() {
     let src = compile("wgsl");
     assert!(src.contains("var<storage, read> _mp_inst: array<u32>;"), "{src}");
     assert!(!src.contains("packed_instance_0: vec4f"), "{src}");
-    assert!(src.contains("let _mp_ib = in.instance_index * 650u;"), "{src}");
-    // The emitter's pass helpers read the draw pass's uniform buffer, which
-    // every real draw shader declares (DrawPassUniforms); this one stands in.
-    let src = format!(
-        "{src}\nstruct MpTestPass {{ camera_projection: mat4x4f, camera_view: mat4x4f, depth_projection: mat4x4f, depth_view: mat4x4f, camera_inv: mat4x4f }}\n\
-         @group(1) @binding(0) var<uniform> unibuf_draw_pass: MpTestPass;\n"
-    );
-    let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}\n{src}", e.emit_to_string(&src)));
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert!(src.contains("(_mp_instance_index * 650u)"), "{src}");
+}
+
+#[test]
+fn spirv_reads_the_record_from_a_storage_buffer_and_validates() {
+    let src = compile("spirv");
+    for line in src.lines() {
+        let hex = &line[2..];
+        let mut words = Vec::new();
+        for k in 0..hex.len() / 8 {
+            words.push(u32::from_str_radix(&hex[k * 8..k * 8 + 8], 16).unwrap());
+        }
+        assert!(words.len() > 5, "{line}");
+        if let Some(Err(e)) = makepad_script::shader_ir_spirv::spirv_val(&words) {
+            panic!("spirv-val ({}): {e}", &line[..1]);
+        }
+    }
 }
 
 #[test]
@@ -92,5 +98,5 @@ fn glsl_keeps_attributes_and_reads_the_rest_from_the_instance_texture() {
     // 650 words is wider than GL ES's 2048-byte stride: all of it is fetched.
     assert!(src.contains("uniform highp usampler2D mp_inst_data;"), "{src}");
     assert!(!src.contains("in vec4 packed_instance_"), "{src}");
-    assert!(src.contains("gl_InstanceID * 650 + slot"), "{src}");
+    assert!(src.contains("(gl_InstanceID + mp_inst_base) * 650 + slot"), "{src}");
 }

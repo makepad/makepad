@@ -1,31 +1,36 @@
-//! `--remote`: a tiny localhost HTTP control surface baked into every makepad app.
+//! `--remote`: the process's makepad-remote endpoint, with the control commands of every makepad
+//! app.
 //!
-//! Started from `app_main!` when the process is launched with `--remote`
-//! (optionally `--remote=PORT`) or `MAKEPAD_REMOTE=1`. It binds an ephemeral
-//! 127.0.0.1 port, prints one grep-able line, and then lets an external agent
-//! drive the app: read window geometry, grab PNGs of any window, inject mouse /
-//! key / text events through the *real* event path, dump the widget tree, and
-//! tail the log.
+//! Opened from `app_main!` when the process is launched with `--remote` (no value) or
+//! `MAKEPAD_REMOTE=1` / `MAKEPAD_INSPECT=1`. It listens on the process's Unix socket (`makepad_remote::carrier::unix`),
+//! prints one grep-able line, and then lets an external agent drive the app: read window
+//! geometry, view windows as frames (the `frames` service), inject mouse / key / text events
+//! through the *real* event path, dump the widget tree, and tail the log. The commands are the
+//! `cmd` service (`makepad-remote app <pid> help`); `grab`, `gseq`, `gq` are client side.
 //!
 //! Design notes:
-//! - Zero external crates. Hand-rolled HTTP/1.1 (localhost, connection-per-request)
-//!   and hand-rolled JSON in/out.
-//! - The HTTP threads never touch `Cx`. They push commands onto a global queue and
+//! - Zero external crates. The wire is makepad-remote's (`libs/remote`).
+//! - The command threads never touch `Cx`. They push commands onto a global queue and
 //!   block on a reply channel; [`poll`] drains the queue from the event loop
 //!   (via `Cx::poll_control_channel`, which every backend already calls) and
-//!   answers. So responses may block an HTTP thread, never the UI thread.
+//!   answers. So replies may block a command thread, never the UI thread.
 //! - Input is injected through `Cx::dispatch_studio_msg`, the same function the
 //!   studio remote bridge uses, so `Hits`, capture and gestures behave exactly
 //!   as they do for real events. File drops use the native drag/drop event path.
-//! - Grabs use readback tickets for render
+//! - Frames use readback tickets for render
 //!   textures and the presenting command buffer for Metal drawables. Raw
-//!   pixels are scaled and encoded on one bounded, long-lived worker.
+//!   pixels are scaled and encoded on one bounded, long-lived worker, and travel to the client
+//!   as `frames` records; an image never becomes a file on the app's side.
 //! - Standalone macOS serializes a grab with remote commands: apply earlier
 //!   commands, draw pending changes, then submit the capture before applying
 //!   later commands (including input). No NextFrame/animation tick is inserted
-//!   at this boundary. Concurrent HTTP requests are ordered by UI queue order,
-//!   not by the time their clients opened sockets. Each sequence deadline is
+//!   at this boundary. Concurrent requests are ordered by UI queue order,
+//!   not by the time their clients connected. Each sequence deadline is
 //!   a new boundary; it does not freeze the app for the entire sequence.
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "remote_core.rs"]
+mod bridge;
 
 #[path = "app_clock.rs"]
 pub mod app_clock;
@@ -36,35 +41,35 @@ pub mod synthetic_cursor;
 /// nested events. Native input delivered on a later event-loop turn stays native.
 /// The flag is the `Cx`'s (`RemoteActivity::remote_input`); the guard holds a
 /// handle to it so the dispatch it brackets is free to borrow the `Cx`.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RemoteInputScope {
     origin: std::rc::Rc<std::cell::Cell<bool>>,
     previous: bool,
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn remote_input_scope(cx: &crate::cx::Cx) -> RemoteInputScope {
     let origin = cx.remote_activity.remote_input.clone();
     let previous = origin.replace(true);
     RemoteInputScope { origin, previous }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for RemoteInputScope {
     fn drop(&mut self) {
         self.origin.set(self.previous);
     }
 }
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "remote_activity.rs"]
 mod activity;
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "remote_capture.rs"]
 mod capture;
 
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use super::activity;
     use super::app_clock;
@@ -76,7 +81,6 @@ mod imp {
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::{dvec2, Vec2d};
     use crate::texture::{ReadbackRequest, ReadbackTicket, TextureReadback};
-    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
     use crate::window::WindowId;
     use makepad_studio_protocol::{
@@ -86,16 +90,17 @@ mod imp {
     };
     use std::collections::HashMap;
     use std::io::Write;
-    use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    use makepad_remote_core::*;
-    pub use makepad_remote_core::{
+    use super::bridge::*;
+    use makepad_remote::{Out, Req};
+    pub use super::bridge::{
         is_active, note_window_close_requested, requested, tag_window_title,
         take_window_close_requested,
     };
+    pub(crate) use super::bridge::stop_encoder;
 
     /// Commands built by the platform-side routes; they travel through the
     /// core queue as `Cmd::Platform`.
@@ -116,20 +121,192 @@ mod imp {
         },
     }
 
-    /// The routes that need platform state (see `makepad_remote_core::route`).
-    fn platform_route(path: &str, p: &Params) -> Option<Out> {
-        Some(match path {
-            "/log" => route_log(p),
-            "/midi" => route_midi(p),
-            "/cap/start" => route_capture_start(p),
-            "/cap/stop" => route_capture_stop(p),
-            "/cursor" => route_cursor(p),
+    /// Runs one resolved command. `p` holds the request's key=value arguments (words after the
+    /// command name count as flags set to `1`).
+    pub fn command(r: &Resolved, p: &Params) -> Answer {
+        REQUEST_USER_SEQ.set(match p.get(&["if_user_seq"]) {
+            Some(value) => match value.parse::<u64>() {
+                Ok(value) => Some(value),
+                Err(_) => return err("if_user_seq must be an unsigned integer"),
+            },
+            // A script that does not track the sequence is gated by the quiet
+            // period alone; one that does is refused once the person has
+            // intervened since the sequence it named.
+            None => None,
+        });
+        match r.key {
+            "status" => route_status(p),
+            "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
+            "mouse" => route_mouse(p, None),
+            "click" => route_mouse(p, Some("click")),
+            "key" => route_key(p),
+            "text" => route_text(p),
+            "drop" => route_drop(p),
+            "trace" => route_trace(p),
+            "dump" => {
+                let paths = p.flag(&["paths"]);
+                match ask(move |tx| Cmd::Dump { paths, tx }, 4) {
+                    Reply::Text(text) => Answer::Text(text),
+                    other => reply_to_answer(other),
+                }
+            }
+            "snap" => {
+                let window = p.window();
+                let mut needle = p.get(&["q", "query"]).unwrap_or_default().to_string();
+                let mut path = p.get(&["path"]).map(str::to_string);
+                if let Some(query) = needle.strip_prefix("path:") {
+                    path = Some(query.to_string());
+                    needle.clear();
+                }
+                let all = p.flag(&["all"]);
+                reply_to_answer(ask(
+                    move |tx| Cmd::Snap {
+                        window,
+                        needle,
+                        path,
+                        all,
+                        tx,
+                    },
+                    4,
+                ))
+            }
+            "step" => route_step(p),
+            "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
+            "cap pause" => reply_to_answer(ask(|tx| Cmd::CapPause(true, tx), 4)),
+            "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
+            "close" => {
+                let window = p.window();
+                reply_to_answer(ask(move |tx| Cmd::Close { window, tx }, 4))
+            }
+            // A responsive layout is checked by resizing, so the bridge can:
+            // `resize w= h= [window=]` in layout points, answered after the
+            // frame that shows it; a following `status` reports the size taken.
+            "resize" => {
+                // `w` is the width here, so the window goes by `window=`.
+                let window = p.get(&["window"]).and_then(|v| v.parse::<usize>().ok());
+                let (w, h) = (p.f64(&["w"], 0.0), p.f64(&["h"], 0.0));
+                let sane = |v: f64| v.is_finite() && (1.0..=16384.0).contains(&v);
+                if !sane(w) || !sane(h) {
+                    return err("give w= and h= in layout points, 1 to 16384");
+                }
+                reply_to_answer(ask(move |tx| Cmd::Resize { window, size: dvec2(w, h), tx }, 6))
+            }
+            // `window k=maximize`: the window's own maximise, answered after the
+            // next drawn frame with `wait` (the maximise/occlusion proof).
+            "window" => match p.get(&["k", "kind"]) {
+                Some("maximize") | Some("max") => send_input(p.window(), vec![Input::Maximize], p.flag(&["wait"])),
+                Some("dragquery") => match (p.get(&["x"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["y"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(x), Some(y)) => send_input(p.window(), vec![Input::DragQuery(x, y)], p.flag(&["wait"])),
+                    _ => err("dragquery needs x= and y= (window points)"),
+                },
+                Some("resize") => match (p.get(&["width"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["height"]).and_then(|v| v.parse::<f64>().ok())) {
+                    (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => send_input(p.window(), vec![Input::Resize(w, h)], p.flag(&["wait"])),
+                    _ => err("resize needs width= and height= (points)"),
+                },
+                other => err(&format!("unknown window op {other:?}; k=maximize|resize|dragquery")),
+            },
+            // The AI chat overlay (apps/aichat, seated in every Window on F10):
+            // `ai on=1|0` toggles, `ai say=TEXT` types a line, `ai transcript`
+            // reads the conversation. Answered by `Cx::ai_callback`.
+            "ai" => route_ai(
+                if p.get(&["say"]).is_some() {
+                    "say"
+                } else {
+                    "toggle"
+                },
+                p,
+                true,
+            ),
+            "ai transcript" => route_ai("transcript", p, false),
+            // The red hands-off frame, held up or let go by hand. It lights
+            // by itself for a few seconds after any injected input, and
+            // shows from the next frame the app draws.
+            "handsoff" => {
+                let on = p.get(&["on"]).map(|v| v.to_string()).unwrap_or_else(|| "1".to_string()) != "0";
+                HANDS_OFF.store(on, Ordering::Relaxed);
+                Answer::Json(format!("{{\"handsoff\":{}}}", on as u8))
+            }
+            // The tweaker overlay (design feedback). Thin: parse here, decide
+            // in the widgets-side callback. `wait` answers after the next
+            // drawn frame so a following grab sees the change.
+            "tweak" => route_tweak("toggle", p, true),
+            "tweak state" => route_tweak("state", p, false),
+            "tweak apply" => route_tweak("apply", p, true),
+            "tweak diff" => route_tweak("diff", p, false),
+            "tweak clear" => route_tweak("clear", p, false),
+            "tweak final" => route_tweak("final", p, false),
+            // Escape hatch for tweaker ops that don't have (or need) a named
+            // command yet: `tweak op op=NAME ...` -- the callback decides.
+            "tweak op" => match p.get(&["op"]) {
+                Some(op) => route_tweak(&op.to_string(), p, false),
+                None => err("need op="),
+            },
+            // The designer: structural edits to the Splash source under
+            // design, previewed live, never written by the app. The command
+            // only names the op; the tweaker answers it.
+            "design" => route_design(r.sub.as_deref().unwrap_or(""), p),
+            // The shader constant tables: annotated literals compiled into
+            // a hot-patchable uniform buffer (see Cx::shader_const_patch).
+            "shader consts" => {
+                let shader = p
+                    .get(&["shader", "s"])
+                    .and_then(|v| v.parse::<usize>().ok());
+                reply_to_answer(ask(move |tx| Cmd::ShaderConsts { shader, tx }, 4))
+            }
+            "shader const" => {
+                let Some(shader) = p
+                    .get(&["shader", "s"])
+                    .and_then(|v| v.parse::<usize>().ok())
+                else {
+                    return err("need shader=ID");
+                };
+                let Some(index) = p.get(&["i", "index"]).and_then(|v| v.parse::<usize>().ok())
+                else {
+                    return err("need i=INDEX");
+                };
+                let value = match p.get(&["v", "value"]) {
+                    Some(v) => match v.parse::<f32>() {
+                        Ok(v) => Some(v),
+                        Err(_) => return err("v= must be a number"),
+                    },
+                    None => {
+                        if p.flag(&["reset"]) {
+                            None
+                        } else {
+                            return err("need v=VALUE or reset=1");
+                        }
+                    }
+                };
+                reply_to_answer(ask(
+                    move |tx| Cmd::ShaderConstPatch {
+                        shader,
+                        index,
+                        value,
+                        tx,
+                    },
+                    4,
+                ))
+            }
+            "quit" => reply_to_answer(ask(|tx| Cmd::Quit(tx), 4)),
+            // `cap start`, `cap stop`, `cursor`, `midi`, `log`: commands that
+            // need platform state are answered by platform.
+            other => platform_command(other, p).unwrap_or_else(|| err("no such command")),
+        }
+    }
+
+    /// The commands that need platform state.
+    fn platform_command(name: &str, p: &Params) -> Option<Answer> {
+        Some(match name {
+            "log" => route_log(p),
+            "midi" => route_midi(p),
+            "cap start" => route_capture_start(p),
+            "cap stop" => route_capture_stop(p),
+            "cursor" => route_cursor(p),
             _ => return None,
         })
     }
 
     // For `deliver_grab_pixels`, the raw pixel path Metal takes.
-    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_order(order: ReadbackChannelOrder) -> GrabOrder {
         match order {
             ReadbackChannelOrder::Rgba => GrabOrder::Rgba,
@@ -137,16 +314,12 @@ mod imp {
         }
     }
 
-    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_origin(origin: ReadbackOrigin) -> GrabOrigin {
         match origin {
             ReadbackOrigin::TopLeft => GrabOrigin::TopLeft,
             ReadbackOrigin::BottomLeft => GrabOrigin::BottomLeft,
         }
     }
-
-
-
 
     /// Is the bridge driving right now, as far as a person watching the
     /// window should be told?
@@ -176,19 +349,6 @@ mod imp {
         at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     struct GrabBatch {
         window: WindowId,
         ids: std::collections::VecDeque<u64>,
@@ -217,20 +377,9 @@ mod imp {
         static CAPTURE: std::cell::RefCell<Option<UiCapture>> = const { std::cell::RefCell::new(None) };
     }
 
-
-
-
-
-
     // ------------------------------------------------------------------
     // command queue
     // ------------------------------------------------------------------
-
-
-
-
-
-
 
     /// A `/step` in progress (UI thread only).
     struct StepJob {
@@ -250,11 +399,10 @@ mod imp {
     /// The step frame being presented: advanced, dispatched, not yet on the
     /// GPU (a drawable or a shader pipeline may still be on its way).
     struct OpenFrame {
-        repaint_id: u64,
+        submission: u64,
         /// The capture request id and the frame index it carries.
         capture: Option<(u64, u64)>,
         opened: Instant,
-        prepared: bool,
     }
 
     /// The capture session as the UI sees it.
@@ -276,7 +424,6 @@ mod imp {
 
     /// How long a step frame waits for shader pipelines still compiling
     /// before it is presented without them (logged).
-    const STEP_SHADER_WAIT: Duration = Duration::from_secs(10);
     /// How long one step frame may fail to reach the screen, or a step may
     /// wait on the capture encoder, before `/step` gives up with an error.
     const STEP_FRAME_LIMIT: Duration = Duration::from_secs(20);
@@ -330,17 +477,6 @@ mod imp {
         })
     }
 
-    /// Which half of a remote present the event loop is asked for.
-    #[derive(Clone, Copy, PartialEq, Debug)]
-    pub(crate) enum PresentStage {
-        /// Draw what is pending and say whether the GPU can render all of it
-        /// now: `Some(true)` yes, `Some(false)` not yet (pipelines compiling).
-        Prepare,
-        /// Submit the window's frame: `Some(true)` submitted, `Some(false)`
-        /// failed, `None` waiting on a drawable (poll again next beat).
-        Present,
-    }
-
     /// `(target repaint_id, responder, payload)` — resolved once the app has
     /// drawn a frame that includes whatever the request did. `payload` is the
     /// JSON to answer with (a tweak op's result); `None` answers with the
@@ -356,61 +492,373 @@ mod imp {
     // startup
     // ------------------------------------------------------------------
 
-
-
-
-
-    /// Bind the control port and start the accept loop. Prints
-    /// `[makepad-remote] listening on HOST:PORT grabs=DIR` and flushes
-    /// (HOST is `127.0.0.1` unless the bind named another interface).
-    pub fn start_if_requested(cx: &mut Cx) {
-        let Some((host, port)) = requested_bind() else {
-            return;
+    /// Opens the process's makepad-remote endpoint (the one place it is opened, from `Cx::new`,
+    /// so every process with a `Cx` gets it): a same-user Unix socket, nothing on the network,
+    /// in every app unless `MAKEPAD_REMOTE=0`, so a local agent reaches the apps the person
+    /// started. The `cmd` service answers the remote commands and the GPU ledger's, the `frames`
+    /// service streams window images, and upper crates add theirs ([`register_service`]: the
+    /// `app` service of the AI tools). An instance launched for an agent (`--remote`,
+    /// `MAKEPAD_REMOTE=1`, `MAKEPAD_INSPECT=1`) prints `[makepad-remote] pid=<pid> app=<app> socket=<path>`. A port or
+    /// address (the old HTTP forms) is refused with a message and exit status 2. Under
+    /// `makepad run` the host owns the endpoint and the commands and services are registered with it.
+    pub fn start_if_requested() {
+        let driven = match request() {
+            Request::Off => return,
+            Request::Refused(why) => {
+                eprintln!("[makepad-remote] {why}");
+                std::process::exit(2);
+            }
+            Request::Local => false,
+            Request::On => true,
         };
         if ACTIVE.load(Ordering::Relaxed) {
             return;
         }
-        let listener = match TcpListener::bind((host.as_str(), port)) {
-            Ok(l) => l,
-            Err(err) => {
-                println!("[makepad-remote] bind {host}:{port} failed: {err}");
-                let _ = std::io::stdout().flush();
-                return;
-            }
-        };
-        let bound = match listener.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(_) => return,
-        };
         let app = app_name();
         let pid = std::process::id();
-        let dir = std::env::temp_dir()
-            .join("makepad-remote")
-            .join(format!("{app}-{pid}"));
-        let _ = std::fs::create_dir_all(&dir);
-        *grab_dir().lock().unwrap() = dir.clone();
         {
             let mut status = status_cell().lock().unwrap();
             status.app = app.clone();
             status.pid = pid;
-            status.user_seq = cx.remote_activity.seq_handle();
         }
-        ACTIVE.store(true, Ordering::SeqCst);
-        // One line, everything an agent needs to drive and clean up this
-        // instance: port, pid, app, and where grabs land.
-        println!(
-            "[makepad-remote] listening on {host}:{bound} pid={pid} app={app} grabs={}",
-            dir.display()
-        );
-        let _ = std::io::stdout().flush();
-
-        set_platform_hooks(PlatformHooks {
-            wake: wake_commands,
-            route: platform_route,
-        });
-        serve(listener);
+        #[cfg(relax)]
+        {
+            let _ = driven;
+            register_with_host();
+            // held until ACTIVE is set, so a service registered meanwhile is not lost
+            let mut pending = PENDING_SERVICES.lock().unwrap();
+            if serves_own_app() {
+                super::host_registration::register_service_with_host("app", 1, no_app_open, no_app_close);
+            }
+            for (name, version, open, close) in std::mem::take(&mut *pending) {
+                super::host_registration::register_service_with_host(&name, version, open, close);
+            }
+            ACTIVE.store(true, Ordering::SeqCst);
+        }
+        #[cfg(not(relax))]
+        {
+            let endpoint = makepad_remote::Endpoint::new(&app);
+            endpoint.register_cmd(dispatch);
+            endpoint.set_end_fields(end_fields);
+            endpoint.register("frames", 1, frames_service());
+            // held until ACTIVE is set, so a service registered meanwhile is not lost
+            let mut pending = PENDING_SERVICES.lock().unwrap();
+            if serves_own_app() {
+                endpoint.register_program("app", 1, no_app_open, no_app_close);
+            }
+            for (name, version, open, close) in std::mem::take(&mut *pending) {
+                endpoint.register_program(&name, version, open, close);
+            }
+            match endpoint.listen_unix("") {
+                Ok(socket) => {
+                    ACTIVE.store(true, Ordering::SeqCst);
+                    *ENDPOINT.lock().unwrap() = Some(endpoint);
+                    if driven {
+                        println!("[makepad-remote] pid={pid} app={app} socket={}", socket.display());
+                    }
+                }
+                Err(err) => println!("[makepad-remote] cannot listen: {err}"),
+            }
+            let _ = std::io::stdout().flush();
+        }
     }
 
+    #[cfg(not(relax))]
+    static ENDPOINT: Mutex<Option<makepad_remote::Endpoint>> = Mutex::new(None);
+
+    /// Every standalone app answers the `app` service (its AI tools), so a caller can ask any app;
+    /// until an upper crate serves the real one (makepad-ai-services, at the first AI port) the
+    /// answer is: no tools. An app a window manager hosts serves none: the WM serves its tools.
+    fn serves_own_app() -> bool {
+        !crate::app_main::launched_by_host()
+    }
+
+    /// The HAL inspector's command table (the words are the request).
+    pub(crate) fn gpu_commands() -> Vec<crate::remote_schema::Command> {
+        makepad_hal::inspect::COMMANDS
+            .iter()
+            .map(|(words, args, answers)| crate::remote_schema::Command {
+                words,
+                args,
+                answers,
+                service: "inspect",
+                risk: crate::remote_schema::CmdRisk::Read,
+                params: "",
+                required: &[],
+                positional: &[],
+            })
+            .collect()
+    }
+
+    /// The built-in commands as the `app` services `ui`, `edit`, `logs`, `inspect`: their
+    /// `Instance` lines for an `app` list (remote_schema.rs).
+    pub fn builtin_instances() -> Vec<String> {
+        let gpu = gpu_commands();
+        let all: Vec<&crate::remote_schema::Command> = COMMANDS.iter().chain(gpu.iter()).collect();
+        crate::remote_schema::instance_lines(&all)
+    }
+
+    /// A call of a built-in service's tool, run as the `cmd` request it stands for: the `Result`
+    /// line. `None` when `service` is not a built-in one.
+    pub fn builtin_call(call_id: &str, service: &str, tool: &str, args: &str) -> Option<String> {
+        use crate::remote_schema::{request_line, result_line, tool_name};
+        if !crate::remote_schema::SERVICES.iter().any(|s| s.0 == service) {
+            return None;
+        }
+        let gpu = gpu_commands();
+        let Some(c) = COMMANDS.iter().chain(gpu.iter()).find(|c| c.service == service && tool_name(c.words) == tool) else {
+            return Some(result_line(call_id, false, &format!("`{service}` has no tool `{tool}` (help lists them)")));
+        };
+        if CLIENT_SIDE.contains(&c.words) {
+            return Some(result_line(call_id, false, &format!("`{service}.{tool}` reads the frames service: the caller runs it (makepad-remote app <pid> {})", c.words)));
+        }
+        let line = match request_line(c, args) {
+            Ok(l) => l,
+            Err(why) => return Some(result_line(call_id, false, &why)),
+        };
+        let (reply, _) = makepad_remote::cmd::answer(dispatch, &line);
+        let text = String::from_utf8_lossy(&reply).trim_end().to_string();
+        let failed = text.lines().any(|l| l.starts_with("{\"err\":"));
+        Some(result_line(call_id, !failed, &text))
+    }
+
+    /// `app` with no AI services of its own: the built-in services only.
+    extern "C" fn no_app_open(args: *const u8, len: usize, sink: makepad_remote::program::ServiceSink, ctx: *mut std::ffi::c_void) -> usize {
+        let args = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(args, len) }).into_owned();
+        let refuse = |why: &str| {
+            sink(ctx, 2, why.as_ptr(), why.len());
+            0
+        };
+        let first = args.split_whitespace().next().unwrap_or("").to_string();
+        match first.as_str() {
+            "list" | "context" => {}
+            "call" => {
+                let service = args.split_whitespace().nth(1).and_then(|t| t.split_once('.')).map(|(s, _)| s).unwrap_or("");
+                if !crate::remote_schema::SERVICES.iter().any(|s| s.0 == service) {
+                    return refuse("this app has no AI tools of its own (only ui, edit, logs, inspect)");
+                }
+            }
+            _ => return refuse("app: list, context or call <service>.<tool>"),
+        }
+        // answered on its own thread: a call waits for the event loop
+        let ctx = ctx as usize;
+        let spawned = std::thread::Builder::new().name("makepad-remote-app".into()).spawn(move || {
+            let lines = builtin_answer(&args);
+            for l in lines {
+                if !sink(ctx as *mut std::ffi::c_void, 0, l.as_ptr(), l.len()) {
+                    break;
+                }
+            }
+            sink(ctx as *mut std::ffi::c_void, 1, std::ptr::null(), 0);
+        });
+        if spawned.is_err() {
+            let why = "cannot start the app thread";
+            sink(ctx as *mut std::ffi::c_void, 2, why.as_ptr(), why.len());
+            return 0;
+        }
+        1
+    }
+
+    /// The answer lines of an `app` request the built-in services take: `list` (their
+    /// instances), `context` (none), or a call of one of their tools.
+    pub fn builtin_answer(args: &str) -> Vec<String> {
+        let (head, body) = args.split_once('\n').unwrap_or((args, ""));
+        let mut words = head.split_whitespace();
+        match words.next() {
+            Some("list") => builtin_instances(),
+            Some("context") => vec!["{\"Context\":{\"text\":\"\"}}".to_string()],
+            Some("call") => words
+                .next()
+                .and_then(|t| t.split_once('.'))
+                .and_then(|(service, tool)| builtin_call("app0", service, tool, if body.trim().is_empty() { "{}" } else { body }))
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    extern "C" fn no_app_close(_handle: usize) {}
+    static PENDING_SERVICES: Mutex<Vec<(String, u32, makepad_remote::program::ServiceOpen, makepad_remote::program::ServiceClose)>> = Mutex::new(Vec::new());
+
+    /// Serves `name` on this process's endpoint with a producer per channel
+    /// ([`makepad_remote::program`]): the process's own endpoint natively, the Relax host's under
+    /// `makepad run`. Registered before the endpoint is up, it is served once it is; with the
+    /// endpoint off (`MAKEPAD_REMOTE=0`) it is never served.
+    pub fn register_service(
+        name: &str,
+        version: u32,
+        open: makepad_remote::program::ServiceOpen,
+        close: makepad_remote::program::ServiceClose,
+    ) {
+        let mut pending = PENDING_SERVICES.lock().unwrap();
+        if !ACTIVE.load(Ordering::SeqCst) {
+            pending.retain(|s| s.0 != name);
+            pending.push((name.to_string(), version, open, close));
+            return;
+        }
+        drop(pending);
+        #[cfg(relax)]
+        super::host_registration::register_service_with_host(name, version, open, close);
+        #[cfg(not(relax))]
+        if let Some(endpoint) = ENDPOINT.lock().unwrap().as_ref() {
+            endpoint.register_program(name, version, open, close);
+        }
+    }
+
+    /// The `cmd` service of this process: the remote commands (`help` lists them) and the GPU
+    /// ledger's `gpu ...`.
+    pub(crate) fn dispatch(req: &Req, out: &mut Out) {
+        REQUEST_START_USER_SEQ.set(activity::user_seq_now());
+        match req.cmd.as_str() {
+            "ping" => out.line(&format!(
+                "{{\"pid\":{},\"app\":{},\"ms\":{}}}",
+                std::process::id(),
+                json_str(&app_name()),
+                makepad_remote::now_ms()
+            )),
+            "help" => {
+                out.measured("commands", "static", &[]);
+                for c in COMMANDS.iter().chain(gpu_commands().iter()) {
+                    out.line(&format!(
+                        "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"{:?}\"}}",
+                        json_str(c.words),
+                        json_str(c.args),
+                        json_str(c.answers),
+                        json_str(&format!("{}.{}", c.service, crate::remote_schema::tool_name(c.words))),
+                        c.risk
+                    ));
+                }
+            }
+            "" => out.err("empty request"),
+            _ => {
+                // Relax dispatches GPU queries in its host; program code only serves UI commands.
+                #[cfg(not(relax))]
+                if makepad_hal::inspect::dispatch(req, out) {
+                    return;
+                }
+                // a remote answer is not capped: a widget dump or a snapshot of every widget
+                out.limit = usize::MAX;
+                let mut words = vec![req.cmd.clone()];
+                words.extend(req.pos.iter().cloned());
+                let resolved = match resolve(&words) {
+                    Ok(r) => r,
+                    Err(why) => return out.err(&why),
+                };
+                // words after the command are flags (`snap all` = `snap all=1`)
+                let mut args = req.kv.clone();
+                args.extend(words[resolved.used..].iter().map(|w| (w.clone(), "1".to_string())));
+                match command(&resolved, &Params(args)) {
+                    Answer::Json(text) | Answer::Text(text) => out.line(&text),
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // under `makepad run`: the host owns the endpoint
+    // ------------------------------------------------------------------
+
+    /// A command for the Relax host: the request line in, the reply lines out through `sink`
+    /// as they are produced (chunks, not lines); true when the reply was cut at the size limit.
+    #[cfg(relax)]
+    pub(crate) extern "C" fn host_query(line: *const u8, len: usize, sink: extern "C" fn(*const u8, usize, *mut std::ffi::c_void), ctx: *mut std::ffi::c_void) -> bool {
+        struct SinkWriter(extern "C" fn(*const u8, usize, *mut std::ffi::c_void), *mut std::ffi::c_void);
+        impl Write for SinkWriter {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                (self.0)(b.as_ptr(), b.len(), self.1);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let line = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(line, len)) };
+        let mut w = std::io::BufWriter::with_capacity(64 << 10, SinkWriter(sink, ctx));
+        let truncated = makepad_remote::cmd::answer_to(dispatch, line, &mut w);
+        let _ = w.flush();
+        truncated
+    }
+
+    /// The host's sink of a service channel: `kind` 0 sends `ptr..len` as one message (false: the
+    /// client is gone), 1 ends the stream, 2 ends it with `ptr..len` as the reason.
+    #[cfg(relax)]
+    type HostSink = extern "C" fn(ctx: *mut std::ffi::c_void, kind: u32, ptr: *const u8, len: usize) -> bool;
+
+    #[cfg(relax)]
+    static HOST_FRAMES: Mutex<Vec<(usize, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
+
+    /// `open` of the `frames` service for the host: starts a producer feeding `sink`.
+    #[cfg(relax)]
+    extern "C" fn host_frames_open(args: *const u8, len: usize, sink: HostSink, ctx: *mut std::ffi::c_void) -> usize {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+        let args = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(args, len)) };
+        let parsed = match parse_frames_args(args) {
+            Ok(a) => a,
+            Err(why) => {
+                sink(ctx, 2, why.as_ptr(), why.len());
+                return 0;
+            }
+        };
+        let handle = NEXT.fetch_add(1, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        HOST_FRAMES.lock().unwrap().push((handle, cancelled.clone()));
+        let ctx = ctx as usize;
+        let spawned = std::thread::Builder::new().name("makepad-remote-frames".into()).spawn(move || {
+            let ctx = ctx as *mut std::ffi::c_void;
+            let ended = Arc::new(AtomicBool::new(false));
+            let (ended_by_close, ended_after) = (ended.clone(), ended.clone());
+            let ctx_close = ctx as usize;
+            let ctx_send = ctx as usize;
+            run_frames(
+                parsed,
+                FramesOut {
+                    send: Box::new(move |record, _wait| sink(ctx_send as *mut std::ffi::c_void, 0, record.as_ptr(), record.len())),
+                    close: Box::new(move |code, why| {
+                        if !ended_by_close.swap(true, Ordering::SeqCst) {
+                            let kind = if code == 0 { 1 } else { 2 };
+                            sink(ctx_close as *mut std::ffi::c_void, kind, why.as_ptr(), why.len());
+                        }
+                    }),
+                    closed: Box::new({
+                        let cancelled = cancelled.clone();
+                        move || cancelled.load(Ordering::Relaxed)
+                    }),
+                },
+            );
+            // a producer that stopped without ending the stream (the client left): the host
+            // still gets its final call, which frees the channel's state
+            if !ended_after.swap(true, Ordering::SeqCst) {
+                sink(ctx, 1, std::ptr::null(), 0);
+            }
+            HOST_FRAMES.lock().unwrap().retain(|(h, _)| *h != handle);
+        });
+        if spawned.is_err() {
+            HOST_FRAMES.lock().unwrap().retain(|(h, _)| *h != handle);
+            let why = "cannot start the frames thread";
+            sink(ctx as *mut std::ffi::c_void, 2, why.as_ptr(), why.len());
+            return 0;
+        }
+        handle
+    }
+
+    /// The client closed the stream `handle`: its producer stops.
+    #[cfg(relax)]
+    extern "C" fn host_frames_close(handle: usize) {
+        if let Some((_, flag)) = HOST_FRAMES.lock().unwrap().iter().find(|(h, _)| *h == handle) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Registers every remote command word and the `frames` service with the Relax host (its own
+    /// commands win a clash): the one mechanism for what a program offers its host.
+    #[cfg(relax)]
+    fn register_with_host() {
+        for c in COMMANDS {
+            let first = c.words.split(' ').next().unwrap_or(c.words);
+            super::host_registration::register_with_host(first);
+        }
+        super::host_registration::register_service_with_host("frames", 1, host_frames_open, host_frames_close);
+    }
 
     /// True while a remote request (input, a grab or a grab sequence, a
     /// step) is in flight: an app that paces its own frames when idle runs
@@ -424,7 +872,6 @@ mod imp {
     /// Only macOS downshifts, so this is unused on the other backends — they
     /// poll the control channel at a fixed rate anyway.
     #[allow(dead_code)]
-    #[allow(dead_code)]// only the macos paint clock asks
     pub(crate) fn needs_ticks() -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
@@ -440,9 +887,6 @@ mod imp {
     // user-initiated window closes
     // ------------------------------------------------------------------
 
-
-
-
     /// The human clicked a window's close button (or hit Cmd-W). Say so on
     /// stdout — with or without `--remote` — so anyone tailing the log can tell
     /// "the user dismissed this" apart from "the app crashed", and remember it
@@ -452,7 +896,7 @@ mod imp {
         // agent driving the app, and a shipped app should not print
         // `[makepad-remote] ...` to stdout every time a window closes.
         let line = format!("[makepad-remote] user closed window {window_id} ({title:?})");
-        if is_active() {
+        if requested() {
             println!("{line}");
             let _ = std::io::stdout().flush();
         }
@@ -468,13 +912,12 @@ mod imp {
     /// away. Not a crash.
     pub fn note_user_closed_last_window() {
         let line = "[makepad-remote] app exit: user closed the last window".to_string();
-        if is_active() {
+        if requested() {
             println!("{line}");
             let _ = std::io::stdout().flush();
         }
         push_log_line(line);
     }
-
 
     // ------------------------------------------------------------------
     // log ring (filled from log.rs)
@@ -489,7 +932,6 @@ mod imp {
     // ------------------------------------------------------------------
     // grab plumbing, called from the screenshot pipeline
     // ------------------------------------------------------------------
-
 
     /// True when a pending screenshot request may be answered by the pass that
     /// belongs to `window_id`. Non-remote (studio / file-sink) ids always match,
@@ -513,11 +955,30 @@ mod imp {
         })
     }
 
+    /// Whether a pending screenshot request waits on `window_id`'s pass, without
+    /// taking it: a backend that paces presents (Wayland frame callbacks, which a
+    /// compositor withholds from an occluded window) still draws that window.
+    pub(crate) fn grab_waits_on_window(request_id: u64, window_id: usize) -> bool {
+        if !is_grab_id(request_id) {
+            return true;
+        }
+        if capture::is_capture_id(request_id) {
+            return CAPTURE.with_borrow(|capture| capture.as_ref().map(|c| c.window)) == Some(window_id);
+        }
+        CAPTURES.with_borrow(|captures| captures.windows.get(&request_id).is_none_or(|want| *want == window_id))
+    }
+
     /// Hand a finished PNG to whichever grab requests asked for it. Returns the
     /// ids that were *not* remote grabs, so the caller can route them onwards.
     /// Compatibility path for backends that still supply PNGs. The worker
     /// handles decoding/scaling; capture_kind makes their timing limitation
     /// explicit. Metal's raw path bypasses this full-size encoding entirely.
+    pub(crate) fn fail_grabs(ids: &[u64], why: &str) {
+        CAPTURES.with_borrow_mut(|captures| {
+            for id in ids { captures.failures.push((*id, why.to_string())); }
+        });
+    }
+
     pub(crate) fn deliver_grabs(
         request_ids: Vec<u64>,
         width: u32,
@@ -564,10 +1025,6 @@ mod imp {
 
     /// Metal calls this as soon as the presenting buffer's pixels are ready,
     /// before any PNG work. Return non-remote ids for probes/Studio/recording.
-    #[cfg(all(
-        not(gpusim),
-        any(target_os = "macos", target_os = "ios", target_os = "tvos")
-    ))]
     pub(crate) fn deliver_grab_pixels(
         request_ids: Vec<u64>,
         width: u32,
@@ -723,10 +1180,6 @@ mod imp {
                     .main_pass_id
                     .and_then(|pass| cx.passes[pass].color_textures.first())
                     .map(|color| color.texture.clone());
-                #[cfg(all(
-                    not(gpusim),
-                    any(target_os = "macos", target_os = "ios", target_os = "tvos")
-                ))]
                 let texture = if cx.in_makepad_studio { texture } else { None };
                 let ticket = texture.and_then(|texture| {
                     texture
@@ -779,48 +1232,12 @@ mod imp {
 
     /// Drain the command queue and publish window state. Called from
     /// `Cx::poll_control_channel`, i.e. from the event loop of every backend.
+    /// Drain app-side control work. The backend's next frame completes grabs and frame waits.
     pub(crate) fn poll(cx: &mut Cx) {
-        // The native Mac event callback supplies its renderer so it can seal
-        // a grab BEFORE the next command. Hosted/gpusim backends retain
-        // their ordinary next-render readback path.
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        if !cx.in_makepad_studio {
-            return;
-        }
-        poll_with_present(cx, false, |_, _, _| None);
+        poll_frames(cx);
     }
 
-    /// Returns whether a present is still waiting on its window's drawable
-    /// (the caller schedules the next beat to poll it again).
-    #[cfg(all(target_os = "macos", not(gpusim)))]
-    pub(crate) fn poll_macos(
-        cx: &mut Cx,
-        present: impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
-    ) -> bool {
-        poll_with_present(cx, true, present)
-    }
-
-    #[cfg(all(target_os = "macos", not(gpusim)))]
-    pub(crate) fn next_grab_deadline() -> Option<Instant> {
-        CAPTURES.with_borrow(|captures| {
-            captures
-                .batches
-                .iter()
-                .filter(|batch| !batch.cancelled.load(Ordering::Relaxed))
-                .map(|batch| batch.due)
-                .min()
-        })
-    }
-
-    /// `presents`: the caller's closure submits frames itself (standalone
-    /// macOS). Otherwise the backend's own render loop presents what the
-    /// bridge marked, and a step frame counts as presented once `repaint_id`
-    /// moves past it.
-    fn poll_with_present(
-        cx: &mut Cx,
-        presents: bool,
-        mut present: impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
-    ) -> bool {
+    fn poll_frames(cx: &mut Cx) -> bool {
         if !ACTIVE.load(Ordering::Relaxed) {
             return false;
         }
@@ -844,10 +1261,10 @@ mod imp {
         };
         // A due sequence frame precedes commands dispatched on this wake.
         poll_captures(cx);
-        pending |= present_captures(cx, presents, &mut present);
+        pending |= drive_step(cx);
         for cmd in cmds {
             poll_captures(cx);
-            pending |= present_captures(cx, presents, &mut present);
+            pending |= drive_step(cx);
             let wait_window = match &cmd.cmd {
                 Cmd::Input {
                     window, wait: true, ..
@@ -858,7 +1275,7 @@ mod imp {
             apply(cx, cmd);
             // Do not batch later input ahead of a grab in this same drain.
             poll_captures(cx);
-            pending |= present_captures(cx, presents, &mut present);
+            pending |= drive_step(cx);
             if let Some(window) = wait_window.and_then(|window| resolve_window(cx, window).ok()) {
                 cx.request_remote_window_present(window);
                 // The input has been applied above, whatever the present
@@ -867,64 +1284,14 @@ mod imp {
                 // a later beat, and the waiters resolve on that repaint. An
                 // answer of "retry" here made drivers send the input again,
                 // and a busy app took every key twice ("bbrowser").
-                match present(cx, window, PresentStage::Present) {
-                    Some(true) => {}
-                    Some(false) | None => {
-                        cx.request_remote_window_present(window);
-                        pending = true;
-                    }
-                }
-            }
+                pending = true;
+}
             resolve_frame_waiters(cx);
         }
 
         poll_captures(cx);
-        pending |= present_captures(cx, presents, &mut present);
+        pending |= drive_step(cx);
         resolve_frame_waiters(cx);
-        pending
-    }
-
-    /// Returns whether a capture's present is waiting on its drawable. A
-    /// `/step` in progress runs here too, so its frames are sealed at the
-    /// same boundaries as grabs: before any later command is applied.
-    fn present_captures(
-        cx: &mut Cx,
-        presents: bool,
-        present: &mut impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
-    ) -> bool {
-        let mut pending = drive_step(cx, presents, present);
-        let windows = CAPTURES.with_borrow(|captures| {
-            let mut windows: Vec<usize> = captures.windows.values().copied().collect();
-            windows.sort_unstable();
-            windows.dedup();
-            windows
-        });
-        for window in windows {
-            let result = match resolve_window(cx, Some(window)) {
-                Ok(window) => present(cx, window, PresentStage::Present),
-                Err(_) => Some(false),
-            };
-            if result.is_none() {
-                pending = true;
-                continue;
-            }
-            // A failed drawable must not silently move this capture across
-            // later input. Fail closed; never wait on the UI for the GPU.
-            CAPTURES.with_borrow_mut(|captures| {
-                captures.windows.retain(|id, target| {
-                    if *target != window {
-                        return true;
-                    }
-                    cx.screenshot_requests
-                        .retain(|request| request.request_id != *id);
-                    captures.failures.push((
-                        *id,
-                        "grab frame could not be submitted at arming; retry".into(),
-                    ));
-                    false
-                });
-            });
-        }
         pending
     }
 
@@ -932,11 +1299,7 @@ mod imp {
     /// advances the virtual clock, fires due timers, delivers NextFrame, and
     /// is drawn and presented (with a capture request while a capture runs)
     /// before the next one starts. Returns whether it is still running.
-    fn drive_step(
-        cx: &mut Cx,
-        presents: bool,
-        present: &mut impl FnMut(&mut Cx, WindowId, PresentStage) -> Option<bool>,
-    ) -> bool {
+    fn drive_step(cx: &mut Cx) -> bool {
         let Some(mut job) = STEP.with_borrow_mut(Option::take) else {
             return false;
         };
@@ -1022,25 +1385,8 @@ mod imp {
                 job.open = Some(open_step_frame(cx, &job));
             }
             let open = job.open.as_mut().unwrap();
-            let presented = if presents {
-                if !open.prepared {
-                    if present(cx, job.window, PresentStage::Prepare) == Some(false) {
-                        if open.opened.elapsed() < STEP_SHADER_WAIT {
-                            break true;
-                        }
-                        crate::log!(
-                            "[makepad-remote] step frame {}: shader pipelines still compiling after {:?}, presenting without them",
-                            app_clock::frame(),
-                            STEP_SHADER_WAIT
-                        );
-                    }
-                    open.prepared = true;
-                }
-                let presented = present(cx, job.window, PresentStage::Present);
-                presented == Some(true)
-            } else {
-                cx.repaint_id > open.repaint_id
-            };
+            let presented = cx.hal.frames.window_completion(crate::event::hal_intake::hal_window_id(job.window)) > open.submission
+                && cx.pipelines_pending() == 0;
             let captured = open.capture.is_none_or(|(id, _)| {
                 !cx.screenshot_requests.iter().any(|request| request.request_id == id)
             });
@@ -1124,10 +1470,9 @@ mod imp {
         }
         cx.request_remote_window_present(job.window);
         OpenFrame {
-            repaint_id: cx.repaint_id,
+            submission: cx.hal.frames.window_submission(crate::event::hal_intake::hal_window_id(job.window)),
             capture,
             opened: Instant::now(),
-            prepared: false,
         }
     }
 
@@ -1207,11 +1552,7 @@ mod imp {
         if !loads.is_empty() {
             reasons.push("loads");
         }
-        #[cfg(all(
-            not(gpusim),
-            any(target_os = "macos", target_os = "ios", target_os = "tvos")
-        ))]
-        if cx.metal_pipelines_pending() > 0 {
+        if cx.pipelines_pending() > 0 {
             reasons.push("shaders");
         }
         let list: Vec<String> = reasons.iter().map(|reason| format!("\"{reason}\"")).collect();
@@ -1339,29 +1680,41 @@ mod imp {
         });
     }
 
+    /// The window table the command threads read. Every app's endpoint is open, so this runs on
+    /// every poll of every app: it compares in place and allocates only when a window changed.
     fn publish_windows(cx: &Cx) {
-        let mut windows = Vec::new();
-        for window_id in cx.windows.id_iter() {
-            let window = &cx.windows[window_id];
-            if !window.is_created {
-                continue;
-            }
-            let geom = &window.window_geom;
-            windows.push(WinInfo {
-                id: window_id.id(),
-                title: window.create_title.clone(),
-                w: geom.inner_size.x,
-                h: geom.inner_size.y,
-                dpi: geom.dpi_factor,
-                x: geom.position.x,
-                y: geom.position.y,
+        let Ok(mut status) = status_cell().try_lock() else { return };
+        let created = || cx.windows.id_iter().filter(|id| cx.windows[*id].is_created);
+        let same = created().count() == status.windows.len()
+            && created().zip(status.windows.iter()).all(|(window_id, info)| {
+                let window = &cx.windows[window_id];
+                let geom = &window.window_geom;
+                info.id == window_id.id()
+                    && info.title == window.create_title
+                    && info.w == geom.inner_size.x
+                    && info.h == geom.inner_size.y
+                    && info.dpi == geom.dpi_factor
+                    && info.x == geom.position.x
+                    && info.y == geom.position.y
             });
+        if same {
+            return;
         }
-        if let Ok(mut status) = status_cell().try_lock() {
-            if status.windows != windows {
-                status.windows = windows;
-            }
-        }
+        status.windows = created()
+            .map(|window_id| {
+                let window = &cx.windows[window_id];
+                let geom = &window.window_geom;
+                WinInfo {
+                    id: window_id.id(),
+                    title: window.create_title.clone(),
+                    w: geom.inner_size.x,
+                    h: geom.inner_size.y,
+                    dpi: geom.dpi_factor,
+                    x: geom.position.x,
+                    y: geom.position.y,
+                }
+            })
+            .collect();
     }
 
     fn resolve_window(cx: &Cx, want: Option<usize>) -> Result<WindowId, String> {
@@ -1500,6 +1853,7 @@ mod imp {
                                         sy: dy,
                                         is_mouse: true,
                                         modifiers: mods,
+                                        phase: Default::default(),
                                     }),
                                     window_id,
                                     dvec2(0.0, 0.0),
@@ -1559,8 +1913,31 @@ mod imp {
                                     sy: dy,
                                     is_mouse: true,
                                     modifiers: mods,
+                                    phase: Default::default(),
                                 }),
                             }
+                        }
+                        Input::PadScroll {
+                            x,
+                            y,
+                            dx,
+                            dy,
+                            phase,
+                            mods,
+                            time: at,
+                        } => {
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            StudioToApp::Scroll(RemoteScroll {
+                                time: at.unwrap_or(time),
+                                x: native.x,
+                                y: native.y,
+                                sx: dx,
+                                sy: dy,
+                                is_mouse: false,
+                                modifiers: mods,
+                                phase,
+                            })
                         }
                         Input::Pinch {
                             x,
@@ -1644,6 +2021,17 @@ mod imp {
                             continue;
                         }
                     };
+                    // A HAL app's copy / cut chord, as a physical key press gives it (hal_intake):
+                    // the focused widget's text goes on the clipboard before the key itself.
+                    if let StudioToApp::KeyDown(e) = &msg {
+                        if (e.modifiers.control || e.modifiers.logo) && cx.hal.hosted.is_none() {
+                            match e.key_code {
+                                crate::event::KeyCode::KeyC => cx.hal_clipboard_chord(true),
+                                crate::event::KeyCode::KeyX => cx.hal_clipboard_chord(false),
+                                _ => {}
+                            }
+                        }
+                    }
                     cx.dispatch_studio_msg(msg, window_id, dvec2(0.0, 0.0));
                 }
                 if wait {
@@ -2120,7 +2508,6 @@ mod imp {
     // HTTP
     // ------------------------------------------------------------------
 
-
     /// Called only while applying UI commands. These event markers never
     /// cross the HTTP command channel; only the path and coordinates do.
     fn inject_file_drop(
@@ -2159,11 +2546,6 @@ mod imp {
         result
     }
 
-
-
-
-
-
     /// `{"shaders":[{"id":N,"consts":[{"i":0,"name":..,"doc":..,"value":..,"initial":..,
     /// "min":..,"max":..,"step":..,"file":..,"line":..,"col":..}]}]}` — only shaders
     /// that carry table constants, or the one asked for.
@@ -2191,9 +2573,9 @@ mod imp {
                 if i > 0 {
                     out.push(',');
                 }
-                let loc = cx.with_vm(|vm| vm.bx.code.ip_to_loc(tc.ip));
+                let loc = cx.with_vm(|vm| vm.ip_to_loc(tc.ip));
                 let (file, line, col) = match loc {
-                    Some(loc) => (loc.file, loc.line, loc.col),
+                    Some(loc) => (loc.file().to_owned(), loc.line(), loc.col()),
                     None => (String::new(), 0, 0),
                 };
                 out.push_str(&format!(
@@ -2217,10 +2599,8 @@ mod imp {
         out
     }
 
-
-
     /// `/cap/start?path=ABS.mp4[&fps=60][&audio=1][&w=]`.
-    fn route_capture_start(p: &Params) -> Out {
+    fn route_capture_start(p: &Params) -> Answer {
         let Some(path) = p.get(&["path"]) else {
             return err("cap/start needs path= (an absolute .mp4 path)");
         };
@@ -2264,21 +2644,21 @@ mod imp {
                 if !virtual_clock {
                     capture::install_screen_sink(window, fps);
                 }
-                Out::Json(200, text)
+                Answer::Json(text)
             }
             other => {
                 capture::close_session();
-                reply_to_out(other)
+                reply_to_answer(other)
             }
         }
     }
 
     /// `/cap/stop[?hashes=1]`: answered once the file is finalized.
-    fn route_capture_stop(p: &Params) -> Out {
+    fn route_capture_stop(p: &Params) -> Answer {
         capture::remove_screen_sink();
         match ask(Cmd::CapStop, 10) {
             Reply::Text(_) => {}
-            other => return reply_to_out(other),
+            other => return reply_to_answer(other),
         }
         match capture::wait_for_result(Duration::from_secs(600)) {
             Ok(result) => {
@@ -2303,14 +2683,14 @@ mod imp {
                     out.push_str(&format!(",\"frame_hashes\":[{}]", hashes.join(",")));
                 }
                 out.push('}');
-                Out::Json(200, out)
+                Answer::Json(out)
             }
             Err(msg) => err(&msg),
         }
     }
 
     /// `/cursor?show=1|0[&style=arrow|hand|text|crosshair|app][&x=&y=][&w=]`.
-    fn route_cursor(p: &Params) -> Out {
+    fn route_cursor(p: &Params) -> Answer {
         let style = match p.get(&["style"]) {
             Some(name) => match synthetic_cursor::SyntheticCursorStyle::parse(name) {
                 Some(style) => Some(style),
@@ -2331,7 +2711,7 @@ mod imp {
             _ => return err("cursor position needs both x= and y="),
         };
         let window = p.window();
-        reply_to_out(ask(
+        reply_to_answer(ask(
             move |tx| {
                 Cmd::Platform(Box::new(PlatformCmd::Cursor {
                     style,
@@ -2343,13 +2723,6 @@ mod imp {
             4,
         ))
     }
-
-
-
-
-
-
-
 
     /// The port names a `/midi?k=ports` list asks for, each with the ends it
     /// carries.
@@ -2388,13 +2761,13 @@ mod imp {
     /// This proves everything the app does WITH a message. It proves nothing
     /// about enumeration, the OS handles or real hot-plug, which all sit
     /// below the seam it enters at.
-    fn route_midi(p: &Params) -> Out {
+    fn route_midi(p: &Params) -> Answer {
         use crate::midi::{MidiData, MidiPortId};
         use crate::makepad_live_id::LiveId;
         match p.get(&["k", "kind"]).unwrap_or("in") {
             "reset" => {
                 crate::midi_inject::reset();
-                Out::Json(200, "{\"ok\":1}".to_string())
+                Answer::Json("{\"ok\":1}".to_string())
             }
             "ports" => {
                 // Names, comma separated, each optionally suffixed with the
@@ -2416,7 +2789,7 @@ mod imp {
                         )
                     })
                     .collect();
-                Out::Json(200, format!("{{\"n\":{},\"ports\":[{}]}}", rows.len(), rows.join(",")))
+                Answer::Json(format!("{{\"n\":{},\"ports\":[{}]}}", rows.len(), rows.join(",")))
             }
             "out" => {
                 let sent = crate::midi_inject::drain_outgoing();
@@ -2429,7 +2802,7 @@ mod imp {
                         )
                     })
                     .collect();
-                Out::Json(200, format!("{{\"n\":{},\"m\":[{}]}}", rows.len(), rows.join(",")))
+                Answer::Json(format!("{{\"n\":{},\"m\":[{}]}}", rows.len(), rows.join(",")))
             }
             "in" => {
                 let byte = |keys: &[&str]| p.f64(keys, -1.0);
@@ -2452,9 +2825,7 @@ mod imp {
                 };
                 let data = MidiData { data: [a as u8, b as u8, c as u8] };
                 let queued = crate::midi_inject::push_incoming(port, data);
-                Out::Json(
-                    200,
-                    format!(
+                Answer::Json(format!(
                         "{{\"ok\":{},\"dropped\":{}}}",
                         queued as u8,
                         crate::midi_inject::dropped()
@@ -2465,31 +2836,13 @@ mod imp {
         }
     }
 
-
-
-
-
-
-    fn route_log(p: &Params) -> Out {
+    fn route_log(p: &Params) -> Answer {
         // Asked before the ring is locked: the answer comes from the UI thread.
         let pool = match ask(Cmd::PoolSummary, 2) {
             Reply::Text(text) => text,
             _ => String::new(),
         };
-        Out::Json(200, log_json(p, &pool))
-    }
-
-    // The recorder exercises the same /log serialization without binding a
-    // socket or starting an app. The ring itself is always on; the flag is
-    // what the rest of the bridge reads.
-    #[cfg(gpusim)]
-    pub fn gpusim_start_log_capture() {
-        ACTIVE.store(true, Ordering::Relaxed);
-    }
-
-    #[cfg(gpusim)]
-    pub fn gpusim_log_snapshot() -> String {
-        log_json(&Params(vec![("since".into(), "0".into())]), "")
+        Answer::Json(log_json(p, &pool))
     }
 
     fn log_json(p: &Params, pool: &str) -> String {
@@ -2516,47 +2869,13 @@ mod imp {
         out
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    fn wake_commands() {
-        // SignalToUI coalesces wakes until timer 0 clears its flag. A remote
-        // capture must also wake between those ticks (including 200 ms idle).
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        crate::os::apple::macos::macos_app::wake_event_loop();
-        #[cfg(not(all(target_os = "macos", not(gpusim))))]
-        crate::thread::SignalToUI::set_internal_signal();
-    }
-
-
-
-
     // ------------------------------------------------------------------
     // parameters
     // ------------------------------------------------------------------
 
-
-
-
-
-
     // ------------------------------------------------------------------
     // formatting helpers
     // ------------------------------------------------------------------
-
-
-
 
     #[cfg(test)]
     mod tests {
@@ -2626,6 +2945,64 @@ mod imp {
             );
         }
 
+        fn params(pairs: &[(&str, &str)]) -> Params {
+            Params(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        }
+
+        /// What a command answers from its arguments alone, without asking the UI thread.
+        fn answered(line: &str, pairs: &[(&str, &str)]) -> String {
+            let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+            match command(&resolve(&words).unwrap(), &params(pairs)) {
+                Answer::Json(j) => j,
+                Answer::Text(t) => t,
+            }
+        }
+
+        #[test]
+        fn arguments_are_checked_before_the_ui_thread_is_asked() {
+            assert!(answered("drop", &[]).contains("drop requires path="));
+            assert!(answered("resize", &[("w", "0"), ("h", "10")]).contains("layout points"));
+            assert!(answered("key", &[]).contains("need t="));
+            assert!(answered("text", &[]).contains("need t="));
+            assert!(answered("mouse", &[("k", "bogus")]).contains("bad kind"));
+            assert!(answered("mouse", &[("k", "pinch"), ("phase", "sideways")]).contains("bad pinch phase"));
+            assert!(answered("shader const", &[]).contains("need shader="));
+            assert!(answered("shader const", &[("shader", "1"), ("i", "0")]).contains("need v="));
+            assert!(answered("tweak op", &[]).contains("need op="));
+            assert!(answered("window", &[("k", "nope")]).contains("unknown window op"));
+            assert!(answered("cap start", &[]).contains("needs path="));
+            assert!(answered("cursor", &[("style", "x")]).contains("cursor style"));
+            assert!(answered("midi", &[("k", "bogus")]).contains("bad kind"));
+            assert!(answered("status", &[("if_user_seq", "x")]).contains("if_user_seq"));
+            assert!(answered("handsoff", &[("on", "0")]).contains("\"handsoff\":0"));
+            assert!(answered("trace", &[("off", "1")]).contains("topics"));
+        }
+
+        /// `dispatch` is the `cmd` service: it answers help with every command, resolves words
+        /// the way a typed line and a JSON request both give them, and refuses what it does not
+        /// know.
+        #[test]
+        fn dispatch_answers_help_and_refuses_unknown_commands() {
+            let run = |line: &str| {
+                let (reply, _) = makepad_remote::cmd::answer(dispatch, line);
+                String::from_utf8(reply).unwrap()
+            };
+            let help = run("help");
+            for c in COMMANDS {
+                assert!(help.contains(&format!("{{\"cmd\":\"{}\"", c.words)), "help lists {}", c.words);
+            }
+            assert!(help.contains("\"tool\":\"ui.cap_start\""), "help names each command's tool");
+            assert!(help.contains("\"cmd\":\"gpu top\""), "help lists the GPU ledger's commands");
+            assert!(run("frobnicate").contains("unknown command `frobnicate`"));
+            assert!(run("grab").contains("client-side"));
+            assert!(run("ping").contains("\"pid\""));
+            // the words of a command arrive as positional words or inside a JSON `cmd`
+            assert!(run("handsoff on=0").contains("\"handsoff\":0"));
+            assert!(run("{\"cmd\":\"handsoff\",\"on\":\"1\"}").contains("\"handsoff\":1"));
+            assert!(run("design").contains("design <op>"));
+            assert!(run("{\"cmd\":\"shader const\",\"shader\":\"2\"}").contains("need i="));
+        }
+
         #[test]
         fn path_queries_match_whole_trailing_segments() {
             assert!(path_matches("main.new_note", "main.new_note"));
@@ -2671,11 +3048,10 @@ mod imp {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))]
+#[cfg(target_arch = "wasm32")]
 mod imp {
     use crate::cx::Cx;
 
-    pub fn start_if_requested(_cx: &mut Cx) {}
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.
     pub fn requested() -> bool {
@@ -2707,6 +3083,7 @@ mod imp {
     pub(crate) fn grab_targets_window(_request_id: u64, _window_id: Option<usize>) -> bool {
         true
     }
+    /// There is no remote bridge, so every grab id is non-remote and is returned to the caller.
     pub(crate) fn deliver_grabs(
         request_ids: Vec<u64>,
         _width: u32,
@@ -2718,3 +3095,61 @@ mod imp {
 }
 
 pub use imp::*;
+
+#[cfg(all(relax, any(unix, windows)))]
+pub(crate) mod host_registration {
+    fn host_symbol(name: *const std::ffi::c_char) -> *mut std::ffi::c_void {
+        crate::cx::relax_host_symbol(unsafe { std::ffi::CStr::from_ptr(name) })
+    }
+
+    /// Registers the command `name` with the Relax host, answered by the process's dispatch
+    /// (`remote::dispatch`).
+    #[cfg(relax)]
+    pub(crate) fn register_with_host(name: &str) {
+        type Query = extern "C" fn(
+            *const u8,
+            usize,
+            extern "C" fn(*const u8, usize, *mut std::ffi::c_void),
+            *mut std::ffi::c_void,
+        ) -> bool;
+        let register = host_symbol(c"relax_register_inspect".as_ptr());
+        if register.is_null() {
+            return;
+        }
+        let register: extern "C" fn(*const u8, usize, Query) =
+            unsafe { std::mem::transmute(register) };
+        register(name.as_ptr(), name.len(), crate::remote::host_query);
+    }
+
+    /// Registers the service `name` with the Relax host: `open(args, len, sink, ctx)` starts a
+    /// producer for one channel and returns its handle (0: refused, after a sink call with the
+    /// reason), `close(handle)` stops it when the client closes the channel. The producer calls
+    /// `sink(ctx, kind, ptr, len)`: kind 0 sends a message (false: the client is gone), 1 ends the
+    /// stream, 2 ends it with a reason; the end call is always the last and frees `ctx`.
+    #[cfg(relax)]
+    pub(crate) fn register_service_with_host(
+        name: &str,
+        version: u32,
+        open: extern "C" fn(
+            *const u8,
+            usize,
+            extern "C" fn(*mut std::ffi::c_void, u32, *const u8, usize) -> bool,
+            *mut std::ffi::c_void,
+        ) -> usize,
+        close: extern "C" fn(usize),
+    ) {
+        type Open = extern "C" fn(
+            *const u8,
+            usize,
+            extern "C" fn(*mut std::ffi::c_void, u32, *const u8, usize) -> bool,
+            *mut std::ffi::c_void,
+        ) -> usize;
+        let register = host_symbol(c"relax_register_remote_service".as_ptr());
+        if register.is_null() {
+            return;
+        }
+        let register: extern "C" fn(*const u8, usize, u32, Open, extern "C" fn(usize)) =
+            unsafe { std::mem::transmute(register) };
+        register(name.as_ptr(), name.len(), version, open, close);
+    }
+}

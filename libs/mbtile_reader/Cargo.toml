@@ -6,6 +6,6 @@ description = "Minimal pure-Rust SQLite reader and streaming writer for MBTiles 
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-brotli = "8.0"
+brotli = { path = "../brotli/brotli" }
 makepad-fast-inflate = { path = "../fast_inflate" }
 makepad-sqlite = { path = "../sqlite_query" }

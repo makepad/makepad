@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-cell-width = { path = "../../libs/cell_width" }
 
 [[bin]]
 name = "agents"

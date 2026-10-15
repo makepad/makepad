@@ -144,15 +144,12 @@ impl ConcedingRow {
                 // as_f64 all answer None for it. as_number is the only accessor
                 // that sees every numeric representation, and reading a rank with
                 // any of the others finds no ranks at all, silently.
-                let Some(rank) = vm
-                    .bx
-                    .heap
-                    .value(src, id!(give_up).into(), NoTrap)
+                let Some(rank) = vm.value(src, id!(give_up))
                     .as_number()
                 else {
                     continue;
                 };
-                let block = vm.bx.heap.value(src, id!(tight).into(), NoTrap);
+                let block = vm.value(src, id!(tight));
                 let Some(obj) = block.as_object() else {
                     continue;
                 };
@@ -166,24 +163,24 @@ impl ConcedingRow {
                 // mentions it reads as nothing -- and a face that restores
                 // nothing is a concession the row can never take back.
                 let keys = WidthOverride::keys(vm, obj);
-                let was = vm.bx.heap.new_object();
+                let was = vm.new_object();
                 for key in keys {
                     let v = if key == id!(visible) {
                         ScriptValue::from_bool(child.visible())
                     } else if key == id!(text) {
                         let s = child.text();
-                        vm.bx.heap.new_string_from_str(&s)
+                        vm.new_string(&s)
                     } else {
-                        vm.bx.heap.value(src, key.into(), NoTrap)
+                        vm.value(src, key)
                     };
                     if !v.is_nil() {
-                        vm.bx.heap.set_value_def(was, key.into(), v);
+                        vm.set_value_def(was, key, v);
                     }
                 }
                 base_over.push((id, WidthOverride::parse(vm, was)));
-                base.push((id, vm.bx.heap.new_object_ref(was)));
+                base.push((id, vm.new_object_ref(was)));
 
-                let handle = vm.bx.heap.new_object_ref(obj);
+                let handle = vm.new_object_ref(obj);
                 by_rank
                     .entry(rank as u64)
                     .or_default()

@@ -296,6 +296,8 @@ pub enum JobPoll {
     Progress { permille: u16, stage: String },
     /// Text the job streamed since the last delta.
     Delta(String),
+    /// The next artifact a streaming job published (`partial_artifacts`), verified.
+    Chunk(ArtifactBytes),
     Done(GenOutput),
     Failed(String),
 }
@@ -370,6 +372,8 @@ pub fn transient_transport_error(error: &AssetAiError) -> bool {
 fn lease_origin(origin: (String, u64)) -> (String, u64) {
     use crate::sha256::{to_hex, Sha256};
     static NEXT_LEASE: AtomicU64 = AtomicU64::new(0);
+    // Keep fetch_update for older stable toolchains without try_update.
+    #[allow(deprecated)]
     let nonce = NEXT_LEASE
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
         .expect("generation lease identity exhausted");
@@ -417,6 +421,8 @@ pub struct GenJob {
     attempts: usize,
     pending_stage: Option<String>,
     partial_text: String,
+    /// How many `partial_artifacts` of the status have been handed out.
+    chunks_seen: usize,
     artifacts: Vec<ArtifactBytes>,
     last_keepalive: Option<Instant>,
     status_recovery: TransportRecovery,
@@ -454,6 +460,7 @@ impl GenJob {
             attempts: 0,
             pending_stage: None,
             partial_text: String::new(),
+            chunks_seen: 0,
             artifacts: Vec::new(),
             last_keepalive: None,
             status_recovery: TransportRecovery::default(),
@@ -663,6 +670,22 @@ impl GenJob {
                 if !delta.is_empty() {
                     self.partial_text = partial.to_string();
                     return JobPoll::Delta(delta.to_string());
+                }
+            }
+        }
+        if let Some(parts) = status.partial_artifacts.as_ref() {
+            if let Some(artifact_ref) = parts.get(self.chunks_seen) {
+                match provider.provider.fetch_artifact(&artifact_ref.id) {
+                    Ok(artifact) => {
+                        if let Err(error) = verify_artifact_bytes(&artifact.bytes, artifact_ref) {
+                            return JobPoll::Failed(error.to_string());
+                        }
+                        self.chunks_seen += 1;
+                        return JobPoll::Chunk(artifact);
+                    }
+                    // A blip: the same chunk is asked for again on the next poll.
+                    Err(error) if transient_transport_error(&error) => {}
+                    Err(error) => return JobPoll::Failed(error.to_string()),
                 }
             }
         }
@@ -888,7 +911,7 @@ pub fn generate(
                 progress(&stage, permille);
                 std::thread::sleep(poll_interval);
             }
-            JobPoll::Delta(_) => {}
+            JobPoll::Delta(_) | JobPoll::Chunk(_) => {}
             // A cancel that arrived while the answer was fetched still wins.
             JobPoll::Done(_) if cancelled() => {
                 job.cancel();

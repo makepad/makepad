@@ -26,13 +26,13 @@ use makepad_ai_cuda::{
     CUDA_R_16F, CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
 use makepad_ai_cuda::llm_ops::{
-    binary, cast_f32_bf16, cast_f32_f16_split, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
+    binary, cast_contiguous, cast_f32_bf16, cast_f32_f16_split, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
-    get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
+    get_rows_16, get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
     layer_norm, quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched,
-    rms_norm_mul, rope_multi, rope_vision, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+    dequant_q8_0_f16, rms_norm_mul, rope_multi, rope_vision, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
     upscale_bilinear,
 
     QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
@@ -46,7 +46,7 @@ use makepad_ai_cuda::roformer_ops::{
 };
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
-    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
+    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NEOX, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
 };
 
 use super::{CudaDeviceFeatures, ScratchEpoch};
@@ -119,7 +119,19 @@ const GEMM_F16_MIN_COLUMNS: usize = 32;
 const GRAPH_ACT_SCRATCH: usize = 64 << 20;
 const GRAPH_WEIGHT_SCRATCH: usize = GEMM_SLAB_BYTES;
 /// VRAM the arena refuses to consume (driver/display/allocator slack).
-const VRAM_RESERVE_BYTES: u64 = 1 << 30;
+const VRAM_RESERVE_DEFAULT: u64 = 1 << 30;
+
+/// Free VRAM that must remain after the model's arena is placed (headroom for
+/// the desktop and other processes); `MAKEPAD_LLM_VRAM_RESERVE_MB` overrides the 1 GiB default,
+/// and the UI's reserve (`crate::set_ui_reserve_bytes`) raises it.
+fn vram_reserve_bytes() -> u64 {
+    std::env::var("MAKEPAD_LLM_VRAM_RESERVE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|mb| mb << 20)
+        .unwrap_or(VRAM_RESERVE_DEFAULT)
+        .max(crate::ui_reserve_bytes())
+}
 
 fn host_split_enabled() -> bool {
     HOST_SPLIT_ENABLED.with(Cell::get)
@@ -645,12 +657,13 @@ impl Runtime {
         let main_size = ctx.mem_size().max(min_total) - ro_split;
         let required = (ro_split + main_size) as u64;
         let features = self.features();
-        if required + VRAM_RESERVE_BYTES > features.free_vram_bytes {
+        let reserve = vram_reserve_bytes();
+        if required + reserve > features.free_vram_bytes {
             return Err(LlamaError::unsupported(format!(
                 "model needs {:.2} GiB device memory (+{:.1} GiB reserve) but only {:.2} GiB \
                  of {:.2} GiB VRAM is free on {}",
                 required as f64 / (1u64 << 30) as f64,
-                VRAM_RESERVE_BYTES as f64 / (1u64 << 30) as f64,
+                reserve as f64 / (1u64 << 30) as f64,
                 features.free_vram_bytes as f64 / (1u64 << 30) as f64,
                 features.total_vram_bytes as f64 / (1u64 << 30) as f64,
                 features.device_name,
@@ -862,10 +875,38 @@ impl Runtime {
         };
         Ok(RawSession {
             state: self.state.clone(),
-            _arena: arena,
+            _arena: Rc::new(arena),
             arena: arena_ref,
             plan,
         })
+    }
+
+    /// Compile sequential graph shapes over one persistent context image.
+    /// Only planned temporaries overlap; allocated context leaves keep their
+    /// offsets and contents when execution switches between shapes.
+    pub(super) fn create_raw_sessions(
+        &self,
+        ctx: &Context,
+        graphs: &[(&crate::Graph, &[TensorId])],
+    ) -> Result<Vec<RawSession>> {
+        let plans = graphs.iter().map(|(graph, pins)| {
+            plan_raw_graph(ctx, graph, pins, super::CudaGraphOptions::default())
+        }).collect::<Result<Vec<_>>>()?;
+        if plans.is_empty() { return Ok(Vec::new()); }
+        let size = plans.iter().map(|p| p.required_size).max().unwrap();
+        let arena = Rc::new(self.create_context_arena_sized(ctx, size, &mut |_, _| {})?);
+        Ok(plans.into_iter().map(|plan| RawSession {
+            state: self.state.clone(),
+            _arena: arena.clone(),
+            arena: ArenaRef {
+                ro_dev: arena.ro_dev,
+                ro_split: arena.ro_split,
+                main_dev: arena.main_dev,
+                main_size: arena.main_size,
+                _keep: arena.state.clone(),
+            },
+            plan,
+        }).collect())
     }
 
     pub(super) fn read_arena_bytes(
@@ -889,6 +930,42 @@ impl Runtime {
             check(cudaStreamSynchronize(self.state.stream), "arena readback sync")?;
         }
         Ok(out)
+    }
+
+    pub(super) fn write_arena_bytes(
+        &self,
+        arena: &Arena,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if offset < arena.ro_split {
+            return Err(LlamaError::format(format!(
+                "refusing to write read-only CUDA arena range [{}..+{}) below split {}",
+                offset,
+                bytes.len(),
+                arena.ro_split,
+            )));
+        }
+        unsafe {
+            // Same drain as `clear_arena_ranges`: a late write from the
+            // previous run must not land on top of the restored bytes.
+            check(cudaDeviceSynchronize(), "state write drain")?;
+            check(
+                cudaMemcpyAsync(
+                    arena.ptr_at(offset, bytes.len())?,
+                    bytes.as_ptr() as *const c_void,
+                    bytes.len(),
+                    CUDA_MEMCPY_HOST_TO_DEVICE,
+                    self.state.stream,
+                ),
+                "state write",
+            )?;
+            check(cudaStreamSynchronize(self.state.stream), "state write sync")?;
+        }
+        Ok(())
     }
 
     pub(super) fn clear_arena_ranges(
@@ -948,8 +1025,13 @@ fn default_reserve_key_count(spec: &HybridDecodeSpec) -> usize {
 enum KernelSel {
     Skip,
     GetRowsF32,
+    GetRows16 { bf16: bool },
     GetRowsQuant(i32),
     SetRows { f16: bool },
+    /// Quantize f32 rows into a q8_0 KV cache.
+    SetRowsQ8,
+    /// q8_0 (strided view) -> contiguous f16, ahead of the f16 flash kernels.
+    DequantQ8,
     SoftMaxMasked,
     FlashDecode,
     FlashMma,
@@ -984,6 +1066,8 @@ enum KernelSel {
     MmvF32,
     GemmF32,
     GemmF16,
+    GemmBf16,
+    CastContiguous { src_type: i32, dst_type: i32 },
     MulMatBatched { a_f16: bool },
     CopyStrided,
     // llama.cpp qwen35.cpp:276 / ggml-cuda.cu:2520: CPY view -> cache, not CONT+SET_ROWS
@@ -1071,11 +1155,26 @@ fn select_kernel(
         Op::None | Op::View | Op::Reshape | Op::Permute | Op::Transpose => KernelSel::Skip,
         Op::Cont | Op::Cpy | Op::Dup => {
             let s = src(0)?;
+            if s.desc.ty == TensorType::Q8_0 && t.desc.ty == TensorType::F16 {
+                if s.ne[0] % 32 != 0 || t.ne != s.ne || !t.is_contiguous() {
+                    return Err(unsupported_node(t, "q8_0 -> f16 copy shape"));
+                }
+                return Ok(KernelSel::DequantQ8);
+            }
             if s.desc.ty != t.desc.ty {
-                return Err(unsupported_node(t, "type-converting copy"));
+                let kind = |ty| match ty {
+                    TensorType::F32 => Some(0), TensorType::F16 => Some(1),
+                    TensorType::BF16 => Some(2), _ => None,
+                };
+                if let (Some(src_type), Some(dst_type)) = (kind(s.desc.ty), kind(t.desc.ty)) {
+                    if s.is_contiguous() && t.is_contiguous() && s.nelements() == t.nelements() {
+                        return Ok(KernelSel::CastContiguous { src_type, dst_type });
+                    }
+                }
+                return Err(unsupported_node(t, "strided or unsupported type-converting copy"));
             }
             match t.desc.ty {
-                TensorType::F32 | TensorType::F16 => KernelSel::CopyStrided,
+                TensorType::F32 | TensorType::F16 | TensorType::BF16 => KernelSel::CopyStrided,
                 other => return Err(unsupported_node(t, &format!("copy of {}", other.name()))),
             }
         }
@@ -1093,6 +1192,14 @@ fn select_kernel(
             }
             match s.desc.ty {
                 TensorType::F32 => KernelSel::GetRowsF32,
+                TensorType::F16 | TensorType::BF16 => {
+                    if s.nb[0] != 2 || s.ne[2] != 1 || s.ne[3] != 1
+                        || !rows.is_contiguous() || !t.is_contiguous() || t.desc.ty != TensorType::F32
+                    {
+                        return Err(unsupported_node(t, "16-bit get_rows requires a 2D source with contiguous rows"));
+                    }
+                    KernelSel::GetRows16 { bf16: s.desc.ty == TensorType::BF16 }
+                }
                 ty => match quant_kind(ty) {
                     Some(kind) => KernelSel::GetRowsQuant(kind),
                     None => {
@@ -1119,6 +1226,7 @@ fn select_kernel(
             match t.desc.ty {
                 TensorType::F16 => KernelSel::SetRows { f16: true },
                 TensorType::F32 => KernelSel::SetRows { f16: false },
+                TensorType::Q8_0 if s.ne[0] % 32 == 0 => KernelSel::SetRowsQ8,
                 other => {
                     return Err(unsupported_node(
                         t,
@@ -1215,7 +1323,7 @@ fn select_kernel(
                 && k.nb[2] % 16 == 0
                 && v.nb[1] % 16 == 0
                 && v.nb[2] % 16 == 0;
-            if q.ne[0] == 256 && v.ne[0] == 256 && aligned {
+            if matches!(q.ne[0], 128 | 256) && v.ne[0] == q.ne[0] && aligned {
                 if q.ne[1] == 1
                     && q.ne[3] == 1
                     && !(gqa > 4 && k.ne[1] >= 8192)
@@ -1311,7 +1419,18 @@ fn select_kernel(
             if mode == GGML_ROPE_TYPE_VISION {
                 return Ok(KernelSel::RopeVision);
             }
-            if mode != GGML_ROPE_TYPE_IMROPE && (mode & GGML_ROPE_TYPE_MROPE) == 0 {
+            if mode == GGML_ROPE_TYPE_NEOX {
+                let n_dims = t.op_param_i32(1);
+                let positions = src(1)?;
+                if n_dims <= 0 || n_dims % 2 != 0 || t.ne[0] % 2 != 0 || i64::from(n_dims) > t.ne[0]
+                    || src(0)?.nb[0] != 4 || t.nb[0] != 4
+                    || positions.desc.ty != TensorType::I32 || !positions.is_contiguous()
+                    || positions.nelements() < t.ne[2]
+                {
+                    return Err(unsupported_node(t, "NEOX rope dimensions/positions"));
+                }
+            }
+            if mode != GGML_ROPE_TYPE_NEOX && mode != GGML_ROPE_TYPE_IMROPE && (mode & GGML_ROPE_TYPE_MROPE) == 0 {
                 return Err(unsupported_node(t, &format!("rope mode {mode}")));
             }
             KernelSel::RopeMulti
@@ -1363,6 +1482,15 @@ fn select_kernel(
             }
             let m_total = (b.ne[1] * b.ne[2] * b.ne[3]) as usize;
             match a.desc.ty {
+                TensorType::BF16 => {
+                    if a.ne[2] != 1 || a.ne[3] != 1 || !a.is_contiguous()
+                        || !b.is_contiguous() || !t.is_contiguous()
+                        || a.ne[0] != b.ne[0] || t.desc.ty != TensorType::F32
+                    {
+                        return Err(unsupported_node(t, "BF16 matmul requires a contiguous 2D weight"));
+                    }
+                    KernelSel::GemmBf16
+                }
                 TensorType::F16 => {
                     // An f16 weight against a wide activation is a plain GEMM
                     // and belongs on cuBLAS' tensor cores. The fallback below
@@ -1970,7 +2098,10 @@ fn plan_raw_graph(
     for &leaf_id in &graph.leafs {
         let (root, _) = resolve_root(tensors, leaf_id)?;
         let root_t = &tensors[root];
-        if root_t.data_offset.is_none() && !planned.contains_key(&root) {
+        // A leaf a node fills (the destination of a cast copy) lives from that
+        // node to its last reader, like any node output: allocated up front it
+        // would hold one buffer per layer for the whole graph.
+        if root_t.data_offset.is_none() && !planned.contains_key(&root) && !def.contains_key(&root) {
             allocate(
                 root,
                 root_t.nbytes(),
@@ -2096,7 +2227,7 @@ pub(super) struct RawSession {
     // Owns the device allocations; `arena` below is the borrowed view the
     // dispatcher resolves offsets against. Field order matters for drop: the
     // view's `_keep` clone must not be the last reference.
-    _arena: Arena,
+    _arena: Rc<Arena>,
     arena: ArenaRef,
     plan: GraphPlan,
 }
@@ -2354,6 +2485,8 @@ impl Compiled {
                                 KernelSel::CopyStrided
                                 | KernelSel::CopyViewTo
                                 | KernelSel::SetRows { .. }
+                                | KernelSel::SetRowsQ8
+                                | KernelSel::DequantQ8
                                 | KernelSel::Unary(_)
                                 | KernelSel::Glu(_)
                                 | KernelSel::Norm { .. }
@@ -2654,6 +2787,10 @@ impl ExecView<'_> {
 
         match kernel {
             KernelSel::Skip => Ok(()),
+            KernelSel::CastContiguous { src_type, dst_type } => check(unsafe {
+                cast_contiguous(src_type, dst_type, self.ptr_of(self.src_id(&t, 0)?)?,
+                    self.ptr_of(node_id)?, t.nelements() as usize, stream)
+            }, "cast_contiguous"),
             KernelSel::CopyStrided | KernelSel::CopyViewTo => {
                 let (s, src_ptr) = if matches!(kernel, KernelSel::CopyViewTo) {
                     let mid_id = self.src_id(&t, 0)?;
@@ -2700,7 +2837,7 @@ impl ExecView<'_> {
                         label,
                     );
                 }
-                let elem = if t.desc.ty == TensorType::F16 { 2 } else { 4 };
+                let elem = if matches!(t.desc.ty, TensorType::F16 | TensorType::BF16) { 2 } else { 4 };
                 check(
                     unsafe {
                         copy_strided(
@@ -2782,7 +2919,7 @@ impl ExecView<'_> {
                 }
                 Ok(())
             }
-            KernelSel::GetRowsF32 | KernelSel::GetRowsQuant(_) => {
+            KernelSel::GetRowsF32 | KernelSel::GetRows16 { .. } | KernelSel::GetRowsQuant(_) => {
                 let s_id = self.src_id(&t, 0)?;
                 let rows_id = self.src_id(&t, 1)?;
                 let s = &tensors[s_id];
@@ -2790,6 +2927,10 @@ impl ExecView<'_> {
                 let nrows = (rows.ne[0] * rows.ne[1] * rows.ne[2]) as i32;
                 let err = unsafe {
                     match kernel {
+                        KernelSel::GetRows16 { bf16 } => get_rows_16(
+                            i32::from(bf16), self.ptr_of(s_id)?, self.ptr_of(rows_id)? as *const i32,
+                            self.ptr_of(node_id)?, t.ne[0] as i32, nrows, s.nb[1], t.nb[1], stream,
+                        ),
                         KernelSel::GetRowsF32 => get_rows_f32(
                             self.ptr_of(s_id)?,
                             self.ptr_of(rows_id)? as *const i32,
@@ -2815,6 +2956,46 @@ impl ExecView<'_> {
                     }
                 };
                 check(err, "get_rows")
+            }
+            KernelSel::SetRowsQ8 => {
+                let s_id = self.src_id(&t, 0)?;
+                let rows_id = self.src_id(&t, 1)?;
+                let s = &tensors[s_id];
+                check(
+                    unsafe {
+                        set_rows(
+                            2,
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(rows_id)? as *const i32,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            s.nb[1],
+                            t.nb[1],
+                            stream,
+                        )
+                    },
+                    "set_rows q8_0",
+                )
+            }
+            KernelSel::DequantQ8 => {
+                let s_id = self.src_id(&t, 0)?;
+                let s = &tensors[s_id];
+                check(
+                    unsafe {
+                        dequant_q8_0_f16(
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            (s.ne[2] * s.ne[3]) as i32,
+                            s.nb[1],
+                            s.nb[2],
+                            stream,
+                        )
+                    },
+                    "dequant q8_0",
+                )
             }
             KernelSel::SetRows { f16 } => {
                 let s_id = self.src_id(&t, 0)?;
@@ -3276,12 +3457,16 @@ impl ExecView<'_> {
                 let attn_factor = t.op_param_f32(8);
                 let beta_fast = t.op_param_f32(9);
                 let beta_slow = t.op_param_f32(10);
-                let sections = [
+                let mut sections = [
                     t.op_param_i32(11),
                     t.op_param_i32(12),
                     t.op_param_i32(13),
                     t.op_param_i32(14),
                 ];
+                // NEOX uses the same split-half rotation with just position
+                // row 0. A nonzero single section avoids modulo-by-zero and
+                // never reads the three MROPE-only position rows.
+                if mode == GGML_ROPE_TYPE_NEOX { sections = [n_dims / 2, 0, 0, 0]; }
                 let corr_factor = |n_rot: f32| -> f32 {
                     n_dims as f32
                         * ((n_ctx_orig as f32 / (n_rot * 2.0 * std::f32::consts::PI)).ln())
@@ -3593,6 +3778,36 @@ impl ExecView<'_> {
                 };
                 if status != CUBLAS_STATUS_SUCCESS {
                     return Err(LlamaError::format(format!("cublas sgemm failed: {status}")));
+                }
+                Ok(())
+            }
+            KernelSel::GemmBf16 => {
+                let a_id = self.src_id(&t, 0)?;
+                let b_id = self.src_id(&t, 1)?;
+                let a = &tensors[a_id];
+                let b = &tensors[b_id];
+                let n = i32::try_from(b.ne[1] * b.ne[2] * b.ne[3])
+                    .map_err(|_| LlamaError::format("bf16 GEMM column count exceeds i32"))?;
+                let m = i32::try_from(a.ne[1])
+                    .map_err(|_| LlamaError::format("bf16 GEMM row count exceeds i32"))?;
+                let k = i32::try_from(a.ne[0])
+                    .map_err(|_| LlamaError::format("bf16 GEMM inner dimension exceeds i32"))?;
+                let scratch = self.state.scratch_acts.borrow_mut()
+                    .ensure(k as usize * n as usize * 2, "bf16 GEMM activation scratch")?;
+                check(unsafe {
+                    cast_f32_bf16(self.ptr_of(b_id)?, scratch, k, n, b.nb[0], b.nb[1], stream)
+                }, "bf16 GEMM activation cast")?;
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                let status = unsafe {
+                    cublasGemmEx(self.state.blas, CUBLAS_OP_T, CUBLAS_OP_N, m, n, k,
+                        &alpha as *const f32 as *const c_void, self.ptr_of(a_id)?, CUDA_R_16BF, k,
+                        scratch, CUDA_R_16BF, k, &beta as *const f32 as *const c_void,
+                        self.ptr_of(node_id)?, CUDA_R_32F, m, CUBLAS_COMPUTE_32F,
+                        CUBLAS_GEMM_DEFAULT_TENSOR_OP)
+                };
+                if status != CUBLAS_STATUS_SUCCESS {
+                    return Err(LlamaError::format(format!("cublas bf16 GEMM failed: {status}")));
                 }
                 Ok(())
             }

@@ -28,6 +28,8 @@
 //! (degrees, counter-clockwise; it joins the pen with a line, or starts a
 //! stroke when the pen is up), and `;` lifts the pen.
 
+#[cfg(test)]
+use makepad_script_compute_sched::kernel::KernelExt;
 use super::karaoke::SungWord;
 use std::collections::HashMap;
 
@@ -662,15 +664,22 @@ mod tests {
     /// the order and at the pace `write_on` writes them.
     #[test]
     fn a_kernel_writes_strokes_on_with_births() {
-        use makepad_script_compute::kernel::{compile_with, FieldTy, Layout, LayoutField};
+        use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+        use makepad_script_compute::kernel::{compile_with, FieldTy};
         use makepad_script_compute::Backend;
         let font = StrokeFont::bundled("technical").unwrap();
         let lay = stroke_layout(&font, "Write it on, word by word", &StrokeStyle { size: 40.0, ..Default::default() });
         let segs = stroke_segments(&lay, true);
         let n = segs.len() / STROKE_SEGMENT_WORDS;
         assert!(n > 100);
-        let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-        let seg = Layout { name: "LineSegment".into(), stride: 12, fields: vec![f("a", FieldTy::Vec3, 0), f("b", FieldTy::Vec3, 3), f("width", FieldTy::F32, 6), f("color", FieldTy::Vec4, 7), f("birth", FieldTy::F32, 11)] };
+        const SEG_FIELDS: &[LayoutFieldView<'static>] = &[
+            LayoutFieldView { name: "a", ty: FieldTy::Vec3, offset: 0 },
+            LayoutFieldView { name: "b", ty: FieldTy::Vec3, offset: 3 },
+            LayoutFieldView { name: "width", ty: FieldTy::F32, offset: 6 },
+            LayoutFieldView { name: "color", ty: FieldTy::Vec4, offset: 7 },
+            LayoutFieldView { name: "birth", ty: FieldTy::F32, offset: 11 },
+        ];
+        let seg = LayoutView { name: "LineSegment", stride: 12, fields: SEG_FIELDS };
         let src = "let s = input(f32)\nlet out = output(LineSegment)\nlet speed = param(200)\nfn element(i) { let r = i * 7\n out[i].a = vec3(s[r], s[r + 1], 0.0)\n out[i].b = vec3(s[r + 2], s[r + 3], 0.0)\n out[i].width = if s[r + 6] > 0.5 { 0.5 } else { 2.0 }\n out[i].color = if s[r + 6] > 0.5 { vec4(1.0, 1.0, 1.0, 0.2) } else { vec4(1.0, 0.9, 0.8, 1.0) }\n out[i].birth = s[r + 4] / speed }";
         let k = compile_with(src, &[seg], Backend::Native).unwrap_or_else(|e| panic!("{:?}", e));
         let mut out = vec![0.0f32; n * 12];

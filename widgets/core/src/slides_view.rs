@@ -183,7 +183,7 @@ impl ScriptHook for SlidesView {
                             continue;
                         }
                         if let Some(template_obj) = kv.value.as_object() {
-                            self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            self.templates.insert(id, vm.new_object_ref(template_obj));
                             // The written order is the deck's order. An id
                             // already in it is this slide being applied
                             // again, not another slide behind it.

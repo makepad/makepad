@@ -1,0 +1,8 @@
+[package]
+name = "anc-wid"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anc-draw = { path = "../draw" }

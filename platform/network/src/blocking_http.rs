@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-#[cfg(any(not(target_arch = "wasm32"), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
 use std::time::Instant;
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -61,7 +61,11 @@ pub struct Limits {
     pub max_trailer_bytes: usize,
     pub max_body_bytes: usize,
     pub max_chunk_line_bytes: usize,
-    pub total_timeout: Duration,
+    /// DNS, TCP and TLS connection establishment only.
+    pub connect_timeout: Duration,
+    /// Maximum silence between bytes, including response headers and uploads.
+    /// An active stream has no elapsed-time limit.
+    pub idle_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -74,7 +78,8 @@ impl Default for Limits {
             max_trailer_bytes: 4 * 1024,
             max_body_bytes: 1024 * 1024,
             max_chunk_line_bytes: 1024,
-            total_timeout: Duration::from_secs(60),
+            connect_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -324,16 +329,13 @@ pub fn request_to_writer_no_redirect(
         if !url.https && !cleartext_host_permitted(&url.host) {
             return Err(Error::CleartextForbidden);
         }
-        let deadline = Instant::now()
-            .checked_add(req.limits.total_timeout)
-            .ok_or(Error::Timeout)?;
         #[cfg(target_os = "windows")]
         {
-            winhttp_fetch(&req, &url, deadline, writer)
+            winhttp_fetch(&req, &url, writer)
         }
         #[cfg(not(target_os = "windows"))]
         {
-            socket_fetch(&req, &url, deadline, writer)
+            socket_fetch(&req, &url, writer)
         }
     }
 }
@@ -705,6 +707,14 @@ impl Write for Transport {
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 impl Transport {
+    fn activity(&self) -> u64 {
+        match self {
+            Transport::Plain(_) => 0,
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", target_os = "tvos"))]
+            Transport::Tls(s) => s.activity(),
+        }
+    }
+
     fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         match self {
             Transport::Plain(s) => s.set_read_timeout(timeout),
@@ -732,10 +742,11 @@ impl Transport {
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
-fn socket_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut dyn Write) -> Result<Response, Error> {
+fn socket_fetch(req: &Request, url: &ParsedUrl, writer: &mut dyn Write) -> Result<Response, Error> {
+    let deadline = Instant::now().checked_add(req.limits.connect_timeout).ok_or(Error::Timeout)?;
     let mut transport = connect(url, &req.cancel, deadline)?;
-    write_request(&mut transport, req, url, deadline)?;
-    read_response(&mut transport, req, deadline, writer)
+    write_request(&mut transport, req, url, req.limits.idle_timeout)?;
+    read_response(&mut transport, req, req.limits.idle_timeout, writer)
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -976,6 +987,10 @@ mod linux_tls {
         fn SSL_free(ssl: *mut SSL);
         fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
         fn SSL_connect(ssl: *mut SSL) -> c_int;
+        fn SSL_get_rbio(ssl: *const SSL) -> *mut c_void;
+        fn SSL_get_wbio(ssl: *const SSL) -> *mut c_void;
+        fn BIO_number_read(bio: *mut c_void) -> u64;
+        fn BIO_number_written(bio: *mut c_void) -> u64;
         fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
         fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
         fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
@@ -1019,6 +1034,13 @@ mod linux_tls {
     unsafe impl Send for LinuxTls {}
 
     impl LinuxTls {
+        pub fn activity(&self) -> u64 {
+            unsafe {
+                BIO_number_read(SSL_get_rbio(self.ssl))
+                    .wrapping_add(BIO_number_written(SSL_get_wbio(self.ssl)))
+            }
+        }
+
         pub fn handshake(
             tcp: TcpStream,
             host: &str,
@@ -1214,11 +1236,12 @@ mod apple_tls {
     struct AppleIo {
         tcp: TcpStream,
         cancel: super::CancelToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
+        activity: u64,
     }
 
     fn io_watch_failed(io: &AppleIo) -> bool {
-        io.cancel.is_cancelled() || Instant::now() >= io.deadline
+        io.cancel.is_cancelled() || io.deadline.is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     unsafe extern "C" fn ssl_read_callback(
@@ -1246,7 +1269,10 @@ mod apple_tls {
                     *data_len = done;
                     return errSSLClosedGraceful;
                 }
-                Ok(n) => done += n,
+                Ok(n) => {
+                    done += n;
+                    io.activity = io.activity.wrapping_add(n as u64);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e)
                     if matches!(
@@ -1292,7 +1318,10 @@ mod apple_tls {
                     *data_len = done;
                     return errSSLClosedAbort;
                 }
-                Ok(n) => done += n,
+                Ok(n) => {
+                    done += n;
+                    io.activity = io.activity.wrapping_add(n as u64);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e)
                     if matches!(
@@ -1339,7 +1368,7 @@ mod apple_tls {
             cancel: &super::CancelToken,
             deadline: Instant,
         ) -> Result<AppleTls, Error> {
-            let mut io = Box::new(AppleIo { tcp, cancel: cancel.clone(), deadline });
+            let mut io = Box::new(AppleIo { tcp, cancel: cancel.clone(), deadline: Some(deadline), activity: 0 });
             let raw = unsafe { SSLCreateContext(ptr::null(), kSSLClientSide, kSSLStreamType) };
             if raw.is_null() {
                 return Err(Error::Connect);
@@ -1377,10 +1406,13 @@ mod apple_tls {
                 }
                 return Err(Error::Connect);
             }
+            io.deadline = None;
             let ctx = guard.0;
             guard.0 = ptr::null_mut();
             Ok(AppleTls { io, ctx })
         }
+
+        pub fn activity(&self) -> u64 { self.io.activity }
 
         pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
             self.io.tcp.set_read_timeout(timeout)
@@ -1478,7 +1510,7 @@ fn write_request(
     transport: &mut Transport,
     req: &Request,
     url: &ParsedUrl,
-    deadline: Instant,
+    idle_timeout: Duration,
 ) -> Result<(), Error> {
     let mut head = String::new();
     head.push_str(req.method.as_str());
@@ -1501,24 +1533,24 @@ fn write_request(
     head.push_str("Content-Length: ");
     head.push_str(&req.body.len().to_string());
     head.push_str("\r\n\r\n");
-    write_all_watch(transport, head.as_bytes(), &req.cancel, deadline)?;
+    write_all_watch(transport, head.as_bytes(), &req.cancel, idle_timeout)?;
     if !req.body.is_empty() {
-        write_all_watch(transport, &req.body, &req.cancel, deadline)?;
+        write_all_watch(transport, &req.body, &req.cancel, idle_timeout)?;
     }
-    write_flush_watch(transport, &req.cancel, deadline)
+    write_flush_watch(transport, &req.cancel, idle_timeout)
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 fn read_response(
     transport: &mut Transport,
     req: &Request,
-    deadline: Instant,
+    idle_timeout: Duration,
     writer: &mut dyn Write,
 ) -> Result<Response, Error> {
     let mut carry = Vec::new();
     let mut informational = 0u8;
     loop {
-        let (status, header_block, prefix) = read_head(transport, req, deadline, carry)?;
+        let (status, header_block, prefix) = read_head(transport, req, idle_timeout, carry)?;
         if (100..200).contains(&status) {
             informational = informational.saturating_add(1);
             if informational > 5 {
@@ -1540,11 +1572,11 @@ fn read_response(
                 return Err(Error::InvalidResponse);
             }
         } else if validated.chunked {
-            read_chunked(transport, prefix, req, deadline, writer)?;
+            read_chunked(transport, prefix, req, idle_timeout, writer)?;
         } else if let Some(len) = validated.content_length {
-            read_sized(transport, prefix, len, req, deadline, writer)?;
+            read_sized(transport, prefix, len, req, idle_timeout, writer)?;
         } else {
-            read_until_close(transport, prefix, req, deadline, writer)?;
+            read_until_close(transport, prefix, req, idle_timeout, writer)?;
         }
         return Ok(Response { status, headers: validated.headers, body: Vec::new() });
     }
@@ -1554,7 +1586,7 @@ fn read_response(
 fn read_head(
     transport: &mut Transport,
     req: &Request,
-    deadline: Instant,
+    idle_timeout: Duration,
     carry: Vec<u8>,
 ) -> Result<(u16, String, Vec<u8>), Error> {
     let mut buf = carry;
@@ -1569,7 +1601,7 @@ fn read_head(
         if buf.len() > req.limits.max_head_bytes {
             return Err(Error::ResponseTooLarge);
         }
-        let n = read_watch(transport, &mut tmp, &req.cancel, deadline)?;
+        let n = read_watch(transport, &mut tmp, &req.cancel, idle_timeout)?;
         if n == 0 {
             return Err(Error::InvalidResponse);
         }
@@ -1620,7 +1652,7 @@ fn read_sized(
     prefix: Vec<u8>,
     len: u64,
     req: &Request,
-    deadline: Instant,
+    idle_timeout: Duration,
     writer: &mut dyn Write,
 ) -> Result<u64, Error> {
     let want = usize::try_from(len).map_err(|_| Error::ResponseTooLarge)?;
@@ -1636,7 +1668,7 @@ fn read_sized(
     let mut tmp = [0u8; 8192];
     while received < want {
         let take = (want - received).min(tmp.len());
-        let n = read_watch(transport, &mut tmp[..take], &req.cancel, deadline)?;
+        let n = read_watch(transport, &mut tmp[..take], &req.cancel, idle_timeout)?;
         if n == 0 {
             return Err(Error::InvalidResponse);
         }
@@ -1656,7 +1688,7 @@ fn read_until_close(
     transport: &mut Transport,
     prefix: Vec<u8>,
     req: &Request,
-    deadline: Instant,
+    idle_timeout: Duration,
     writer: &mut dyn Write,
 ) -> Result<u64, Error> {
     let mut received = prefix.len();
@@ -1667,7 +1699,7 @@ fn read_until_close(
     let mut tmp = [0u8; 8192];
     loop {
         let read_len = capped_read_len(req.limits.max_body_bytes, received, tmp.len());
-        let n = match read_watch(transport, &mut tmp[..read_len], &req.cancel, deadline) {
+        let n = match read_watch(transport, &mut tmp[..read_len], &req.cancel, idle_timeout) {
             Ok(0) => break,
             Ok(n) => n,
             Err(Error::Reset) => return Err(Error::Reset),
@@ -1689,7 +1721,7 @@ fn read_chunked(
     transport: &mut Transport,
     prefix: Vec<u8>,
     req: &Request,
-    deadline: Instant,
+    idle_timeout: Duration,
     writer: &mut dyn Write,
 ) -> Result<u64, Error> {
     let mut src = ChunkSrc { transport, prefix, pos: 0 };
@@ -1698,7 +1730,7 @@ fn read_chunked(
     let mut trailer_bytes = 0usize;
     let mut trailer_count = 0usize;
     loop {
-        let line = src.read_line(req.limits.max_chunk_line_bytes, &req.cancel, deadline)?;
+        let line = src.read_line(req.limits.max_chunk_line_bytes, &req.cancel, idle_timeout)?;
         let size_part = line.split(';').next().unwrap_or("").trim();
         if size_part.is_empty() {
             return Err(Error::InvalidResponse);
@@ -1706,7 +1738,7 @@ fn read_chunked(
         let size = u64::from_str_radix(size_part, 16).map_err(|_| Error::InvalidResponse)?;
         if size == 0 {
             loop {
-                let trailer = src.read_line(req.limits.max_header_line_bytes, &req.cancel, deadline)?;
+                let trailer = src.read_line(req.limits.max_header_line_bytes, &req.cancel, idle_timeout)?;
                 if trailer.is_empty() {
                     break;
                 }
@@ -1723,7 +1755,7 @@ fn read_chunked(
             if src.pos < src.prefix.len() {
                 return Err(Error::InvalidResponse);
             }
-            expect_eof(src.transport, &req.cancel, deadline)?;
+            expect_eof(src.transport, &req.cancel, idle_timeout)?;
             return Ok(received as u64);
         }
         if size > req.limits.max_body_bytes as u64 {
@@ -1737,14 +1769,14 @@ fn read_chunked(
         let mut remaining = take;
         while remaining > 0 {
             let n = remaining.min(chunk.len());
-            src.read_exact(&mut chunk[..n], &req.cancel, deadline)?;
+            src.read_exact(&mut chunk[..n], &req.cancel, idle_timeout)?;
             writer.write_all(&chunk[..n]).map_err(|_| Error::Io)?;
             received += n;
             remaining -= n;
             req.report_body(received as u64, None);
         }
         let mut crlf = [0u8; 2];
-        src.read_exact(&mut crlf, &req.cancel, deadline)?;
+        src.read_exact(&mut crlf, &req.cancel, idle_timeout)?;
         if crlf != *b"\r\n" {
             return Err(Error::InvalidResponse);
         }
@@ -1760,21 +1792,21 @@ struct ChunkSrc<'a> {
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 impl ChunkSrc<'_> {
-    fn read_byte(&mut self, cancel: &CancelToken, deadline: Instant) -> Result<u8, Error> {
+    fn read_byte(&mut self, cancel: &CancelToken, idle_timeout: Duration) -> Result<u8, Error> {
         if self.pos < self.prefix.len() {
             let b = self.prefix[self.pos];
             self.pos += 1;
             return Ok(b);
         }
         let mut one = [0u8; 1];
-        let n = read_watch(self.transport, &mut one, cancel, deadline)?;
+        let n = read_watch(self.transport, &mut one, cancel, idle_timeout)?;
         if n == 0 {
             return Err(Error::InvalidResponse);
         }
         Ok(one[0])
     }
 
-    fn read_exact(&mut self, buf: &mut [u8], cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
+    fn read_exact(&mut self, buf: &mut [u8], cancel: &CancelToken, idle_timeout: Duration) -> Result<(), Error> {
         let mut filled = 0usize;
         if self.pos < self.prefix.len() {
             let take = (self.prefix.len() - self.pos).min(buf.len());
@@ -1783,7 +1815,7 @@ impl ChunkSrc<'_> {
             filled = take;
         }
         while filled < buf.len() {
-            let n = read_watch(self.transport, &mut buf[filled..], cancel, deadline)?;
+            let n = read_watch(self.transport, &mut buf[filled..], cancel, idle_timeout)?;
             if n == 0 {
                 return Err(Error::InvalidResponse);
             }
@@ -1796,11 +1828,11 @@ impl ChunkSrc<'_> {
         &mut self,
         max: usize,
         cancel: &CancelToken,
-        deadline: Instant,
+        idle_timeout: Duration,
     ) -> Result<String, Error> {
         let mut line = Vec::new();
         loop {
-            let b = self.read_byte(cancel, deadline)?;
+            let b = self.read_byte(cancel, idle_timeout)?;
             if b == b'\n' {
                 if line.last() == Some(&b'\r') {
                     line.pop();
@@ -1818,7 +1850,7 @@ impl ChunkSrc<'_> {
 
 // ----------------------------------------------------------- watch / i/o
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
 fn check_watch(cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1838,7 +1870,7 @@ fn capped_read_len(max_body: usize, received: usize, buffer_len: usize) -> usize
         .max(1)
 }
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
 fn remaining(deadline: Instant) -> Result<Duration, Error> {
     deadline.checked_duration_since(Instant::now()).ok_or(Error::Timeout)
 }
@@ -1847,10 +1879,10 @@ fn remaining(deadline: Instant) -> Result<Duration, Error> {
 fn expect_eof(
     transport: &mut Transport,
     cancel: &CancelToken,
-    deadline: Instant,
+    idle_timeout: Duration,
 ) -> Result<(), Error> {
     let mut tmp = [0u8; 32];
-    match read_watch(transport, &mut tmp, cancel, deadline) {
+    match read_watch(transport, &mut tmp, cancel, idle_timeout) {
         Ok(0) => Ok(()),
         Ok(_) => Err(Error::InvalidResponse),
         Err(Error::Reset) => Err(Error::Reset),
@@ -1863,13 +1895,19 @@ fn read_watch(
     transport: &mut Transport,
     buf: &mut [u8],
     cancel: &CancelToken,
-    deadline: Instant,
+    idle_timeout: Duration,
 ) -> Result<usize, Error> {
+    let mut deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
     loop {
         check_watch(cancel, deadline)?;
         let slice = remaining(deadline)?.min(IO_SLICE);
         transport.set_read_timeout(Some(slice)).map_err(|_| Error::Io)?;
-        match transport.read(buf) {
+        let activity = transport.activity();
+        let result = transport.read(buf);
+        if transport.activity() != activity {
+            deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
+        }
+        match result {
             Ok(n) => return Ok(n),
             Err(e)
                 if e.kind() == std::io::ErrorKind::TimedOut
@@ -1897,15 +1935,24 @@ fn write_all_watch(
     transport: &mut Transport,
     mut buf: &[u8],
     cancel: &CancelToken,
-    deadline: Instant,
+    idle_timeout: Duration,
 ) -> Result<(), Error> {
+    let mut deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
     while !buf.is_empty() {
         check_watch(cancel, deadline)?;
         let slice = remaining(deadline)?.min(IO_SLICE);
         transport.set_write_timeout(Some(slice)).map_err(|_| Error::Io)?;
-        match transport.write(buf) {
+        let activity = transport.activity();
+        let result = transport.write(buf);
+        if transport.activity() != activity {
+            deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
+        }
+        match result {
             Ok(0) => return Err(Error::Io),
-            Ok(n) => buf = &buf[n..],
+            Ok(n) => {
+                buf = &buf[n..];
+                deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
+            }
             Err(e)
                 if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock
@@ -1923,8 +1970,9 @@ fn write_all_watch(
 fn write_flush_watch(
     transport: &mut Transport,
     cancel: &CancelToken,
-    deadline: Instant,
+    idle_timeout: Duration,
 ) -> Result<(), Error> {
+    let deadline = Instant::now().checked_add(idle_timeout).ok_or(Error::Timeout)?;
     loop {
         check_watch(cancel, deadline)?;
         let slice = remaining(deadline)?.min(IO_SLICE);
@@ -2083,7 +2131,7 @@ const WATCH_NONE: u8 = 0;
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 const WATCH_CANCEL: u8 = 1;
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
-const WATCH_TIMEOUT: u8 = 2;
+const ERROR_WINHTTP_TIMEOUT: u32 = 12002;
 
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
 struct SharedRequest {
@@ -2116,26 +2164,25 @@ impl SharedRequest {
             Ordering::Acquire,
         );
     }
-    fn classify(&self, cancel: &CancelToken, deadline: Instant) -> Error {
+    fn classify(&self, cancel: &CancelToken) -> Error {
         classify_watchdog_failure(
             self.kind.load(Ordering::Acquire),
             cancel.is_cancelled(),
-            Instant::now() >= deadline,
+            unsafe { GetLastError() } == ERROR_WINHTTP_TIMEOUT,
         )
     }
     fn invoke<T>(
         &self,
         cancel: &CancelToken,
-        deadline: Instant,
         f: impl FnOnce(*mut std::ffi::c_void) -> T,
     ) -> Result<T, Error> {
         let p = self.load();
         if p.is_null() {
-            return Err(self.classify(cancel, deadline));
+            return Err(self.classify(cancel));
         }
         let out = f(p);
         if self.load().is_null() {
-            return Err(self.classify(cancel, deadline));
+            return Err(self.classify(cancel));
         }
         Ok(out)
     }
@@ -2149,8 +2196,8 @@ impl Drop for SharedRequest {
 }
 
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
-fn timeout_ms(deadline: Instant) -> Result<i32, Error> {
-    let ms = remaining(deadline)?.as_millis().min(i32::MAX as u128) as i32;
+fn timeout_ms(timeout: Duration) -> Result<i32, Error> {
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
     if ms <= 0 {
         Err(Error::Timeout)
     } else {
@@ -2159,8 +2206,8 @@ fn timeout_ms(deadline: Instant) -> Result<i32, Error> {
 }
 
 #[cfg(all(target_os = "windows", not(target_arch = "wasm32")))]
-fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut dyn std::io::Write) -> Result<Response, Error> {
-    check_watch(&req.cancel, deadline)?;
+fn winhttp_fetch(req: &Request, url: &ParsedUrl, writer: &mut dyn std::io::Write) -> Result<Response, Error> {
+    if req.cancel.is_cancelled() { return Err(Error::Cancelled); }
     // Windows cleartext: only literal loopback IPs. No sync DNS before the
     // watchdog covers the hop — `localhost` must be spelled as 127.0.0.1/::1.
     if !url.https && !is_literal_loopback_host(&url.host) {
@@ -2180,8 +2227,9 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
         return Err(Error::Connect);
     }
     let session = OnceHandle::new(session);
-    let ms = timeout_ms(deadline)?;
-    if unsafe { WinHttpSetTimeouts(session.load(), ms, ms, ms, ms) } == 0 {
+    let connect_ms = timeout_ms(req.limits.connect_timeout)?;
+    let idle_ms = timeout_ms(req.limits.idle_timeout)?;
+    if unsafe { WinHttpSetTimeouts(session.load(), connect_ms, connect_ms, idle_ms, idle_ms) } == 0 {
         return Err(Error::Connect);
     }
     let host = wide_null(&url.host);
@@ -2190,7 +2238,7 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
         return Err(Error::Connect);
     }
     let connect = OnceHandle::new(connect);
-    check_watch(&req.cancel, deadline)?;
+    if req.cancel.is_cancelled() { return Err(Error::Cancelled); }
     let verb = wide_null(req.method.as_str());
     let target = wide_null(&url.target);
     let request = unsafe {
@@ -2237,16 +2285,16 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
     } else {
         req.body.as_ptr() as *mut std::ffi::c_void
     };
-    check_watch(&req.cancel, deadline)?;
-    let watchdog = WinHttpWatchdog::start(request.clone(), req.cancel.clone(), deadline)?;
-    let fail = || request.classify(&req.cancel, deadline);
-    let ok = request.invoke(&req.cancel, deadline, |p| unsafe {
+    if req.cancel.is_cancelled() { return Err(Error::Cancelled); }
+    let watchdog = WinHttpWatchdog::start(request.clone(), req.cancel.clone())?;
+    let fail = || request.classify(&req.cancel);
+    let ok = request.invoke(&req.cancel, |p| unsafe {
         WinHttpSendRequest(p, headers.as_ptr(), u32::MAX, body_ptr, body_len, body_len, 0)
     })?;
     if ok == 0 {
         return Err(fail());
     }
-    let ok = request.invoke(&req.cancel, deadline, |p| unsafe {
+    let ok = request.invoke(&req.cancel, |p| unsafe {
         WinHttpReceiveResponse(p, std::ptr::null_mut())
     })?;
     if ok == 0 {
@@ -2254,7 +2302,7 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
     }
     let mut status = 0u32;
     let mut status_len = std::mem::size_of::<u32>() as u32;
-    let ok = request.invoke(&req.cancel, deadline, |p| unsafe {
+    let ok = request.invoke(&req.cancel, |p| unsafe {
         WinHttpQueryHeaders(
             p,
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -2271,7 +2319,7 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
     if (100..200).contains(&status) {
         return Err(Error::InvalidResponse);
     }
-    let raw = winhttp_raw_headers(&request, &req.cancel, deadline, req.limits.max_head_bytes)?;
+    let raw = winhttp_raw_headers(&request, &req.cancel, req.limits.max_head_bytes)?;
     let parsed = parse_header_block(&raw, &req.limits)?;
     let ValidatedHeaders { headers, content_length, chunked } =
         validate_response_headers(parsed, &req.limits)?;
@@ -2283,7 +2331,6 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
         let received = winhttp_read_body(
             &request,
             req,
-            deadline,
             content_length,
             writer,
         )?;
@@ -2296,7 +2343,7 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
             }
         }
         if chunked {
-            winhttp_validate_trailers(&request, &req.cancel, deadline, &req.limits)?;
+            winhttp_validate_trailers(&request, &req.cancel, &req.limits)?;
         }
     }
     drop(watchdog);
@@ -2310,11 +2357,10 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant, writer: &mut
 fn winhttp_validate_trailers(
     request: &SharedRequest,
     cancel: &CancelToken,
-    deadline: Instant,
     limits: &Limits,
 ) -> Result<(), Error> {
     let mut byte_len = 0u32;
-    let first = request.invoke(cancel, deadline, |p| unsafe {
+    let first = request.invoke(cancel, |p| unsafe {
         WinHttpQueryHeaders(
             p,
             WINHTTP_QUERY_RAW_HEADERS_CRLF | WINHTTP_QUERY_FLAG_TRAILERS,
@@ -2326,7 +2372,7 @@ fn winhttp_validate_trailers(
     })?;
     if first == 0 {
         if request.load().is_null() {
-            return Err(request.classify(cancel, deadline));
+            return Err(request.classify(cancel));
         }
         let code = unsafe { GetLastError() };
         if code == ERROR_WINHTTP_HEADER_NOT_FOUND || byte_len == 0 {
@@ -2346,7 +2392,7 @@ fn winhttp_validate_trailers(
         .checked_add(1)
         .ok_or(Error::ResponseTooLarge)?;
     let mut wide = vec![0u16; units];
-    let ok = request.invoke(cancel, deadline, |p| unsafe {
+    let ok = request.invoke(cancel, |p| unsafe {
         WinHttpQueryHeaders(
             p,
             WINHTTP_QUERY_RAW_HEADERS_CRLF | WINHTTP_QUERY_FLAG_TRAILERS,
@@ -2357,7 +2403,7 @@ fn winhttp_validate_trailers(
         )
     })?;
     if ok == 0 {
-        return Err(request.classify(cancel, deadline));
+        return Err(request.classify(cancel));
     }
     let mut used = byte_len as usize / 2;
     while used > 0 && wide[used - 1] == 0 {
@@ -2391,7 +2437,6 @@ impl WinHttpWatchdog {
     fn start(
         request: Arc<SharedRequest>,
         cancel: CancelToken,
-        deadline: Instant,
     ) -> Result<WinHttpWatchdog, Error> {
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
@@ -2401,10 +2446,6 @@ impl WinHttpWatchdog {
                 while !stop2.load(Ordering::Acquire) {
                     if cancel.is_cancelled() {
                         request.close(WATCH_CANCEL);
-                        return;
-                    }
-                    if Instant::now() >= deadline {
-                        request.close(WATCH_TIMEOUT);
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(25));
@@ -2429,11 +2470,10 @@ impl Drop for WinHttpWatchdog {
 fn winhttp_raw_headers(
     request: &SharedRequest,
     cancel: &CancelToken,
-    deadline: Instant,
     max_head_bytes: usize,
 ) -> Result<String, Error> {
     let mut byte_len = 0u32;
-    let first = request.invoke(cancel, deadline, |p| unsafe {
+    let first = request.invoke(cancel, |p| unsafe {
         WinHttpQueryHeaders(
             p,
             WINHTTP_QUERY_RAW_HEADERS_CRLF,
@@ -2445,7 +2485,7 @@ fn winhttp_raw_headers(
     })?;
     if first == 0 {
         if request.load().is_null() {
-            return Err(request.classify(cancel, deadline));
+            return Err(request.classify(cancel));
         }
         let code = unsafe { GetLastError() };
         if code != ERROR_INSUFFICIENT_BUFFER {
@@ -2465,7 +2505,7 @@ fn winhttp_raw_headers(
         return Err(Error::ResponseTooLarge);
     }
     let mut wide = vec![0u16; units];
-    let ok = request.invoke(cancel, deadline, |p| unsafe {
+    let ok = request.invoke(cancel, |p| unsafe {
         WinHttpQueryHeaders(
             p,
             WINHTTP_QUERY_RAW_HEADERS_CRLF,
@@ -2476,7 +2516,7 @@ fn winhttp_raw_headers(
         )
     })?;
     if ok == 0 {
-        return Err(request.classify(cancel, deadline));
+        return Err(request.classify(cancel));
     }
     let mut used = byte_len as usize / 2;
     while used > 0 && wide[used - 1] == 0 {
@@ -2489,7 +2529,6 @@ fn winhttp_raw_headers(
 fn winhttp_read_body(
     request: &SharedRequest,
     req: &Request,
-    deadline: Instant,
     total: Option<u64>,
     writer: &mut dyn std::io::Write,
 ) -> Result<u64, Error> {
@@ -2498,10 +2537,10 @@ fn winhttp_read_body(
     let mut received = 0usize;
     let mut buf = [0u8; 8192];
     loop {
-        check_watch(cancel, deadline)?;
+        if cancel.is_cancelled() { return Err(Error::Cancelled); }
         let mut read = 0u32;
         let read_len = capped_read_len(max_body, received, buf.len());
-        let ok = request.invoke(cancel, deadline, |p| unsafe {
+        let ok = request.invoke(cancel, |p| unsafe {
             WinHttpReadData(
                 p,
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -2510,7 +2549,7 @@ fn winhttp_read_body(
             )
         })?;
         if ok == 0 {
-            return Err(request.classify(cancel, deadline));
+            return Err(request.classify(cancel));
         }
         if read == 0 {
             req.report_body(received as u64, total);

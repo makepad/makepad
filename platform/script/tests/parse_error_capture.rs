@@ -12,7 +12,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
@@ -20,15 +20,7 @@ fn test_vm() -> ScriptVm<'static> {
 fn eval_captured(vm: &mut ScriptVm, name: &str, code: &str) -> Vec<String> {
     vm.bx.captured_errors = Some(Vec::new());
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: format!("parse_error_capture_{name}"),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", &format!("parse_error_capture_{name}"), 0, 0, &code, &[]))
     });
     vm.take_errors()
 }
@@ -79,15 +71,7 @@ fn streaming_eval_surfaces_parse_errors() {
     let code = DANGLING_ELSE;
     vm.with_instruction_limit(500_000, |vm| {
         vm.eval_with_append_source(
-            ScriptMod {
-                cargo_manifest_path: String::new(),
-                module_path: "stream#1".to_string(),
-                file: "parse_error_capture_stream".to_string(),
-                line: 0,
-                column: 0,
-                code: String::new(),
-                values: vec![],
-            },
+            ScriptMod::new("", "stream#1", "parse_error_capture_stream", 0, 0, "", &[]),
             code,
             NIL.into(),
         )

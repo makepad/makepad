@@ -25,61 +25,27 @@ impl Cx {
         self.script_vm.is_none()
     }
 
-    // The `with_vm` family is generic over its closure and result, so each
-    // shell below only moves them through `Option` slots; the entry (holder
-    // guard, taking and parking the VM) runs in the shared `*_dyn` bodies.
-
     #[track_caller]
     pub fn with_vm_and_async<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let caller = std::panic::Location::caller();
-        let mut f = Some(f);
-        let mut out = None;
-        self.with_vm_and_async_dyn(caller, &mut |vm| out = Some((f.take().unwrap())(vm)));
-        out.unwrap()
-    }
-
-    #[inline(never)]
-    fn with_vm_and_async_dyn(
-        &mut self,
-        caller: &'static std::panic::Location<'static>,
-        f: &mut dyn FnMut(&mut ScriptVm),
-    ) {
-        let _vm_guard =
-            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
-        makepad_script_std::vm::with_vm_and_async_dyn(self, f)
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
+        makepad_script_std::with_vm_and_async(&mut self.host_context(), f)
     }
 
     #[track_caller]
     pub fn with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
-        let caller = std::panic::Location::caller();
-        let mut f = Some(f);
-        let mut out = None;
-        self.with_vm_dyn(caller, &mut |vm| out = Some((f.take().unwrap())(vm)));
-        out.unwrap()
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
+        makepad_script_std::with_vm(&mut self.host_context(), f)
     }
 
-    #[inline(never)]
-    fn with_vm_dyn(
-        &mut self,
-        caller: &'static std::panic::Location<'static>,
-        f: &mut dyn FnMut(&mut ScriptVm),
-    ) {
-        let _vm_guard =
-            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
-        makepad_script_std::vm::with_vm_dyn(self, false, f);
-    }
-
-    /// Like [`Cx::with_vm`], but returns `None` instead of panicking when the
-    /// VM is already held (swapped off) by an enclosing `with_vm`/`eval`.
+    /// Like [`Cx::with_vm`], but returns `None` if the VM is already held.
     pub fn try_with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> Option<R> {
-        let mut f = Some(f);
-        let mut out = None;
-        if !makepad_script_std::vm::with_vm_dyn(self, true, &mut |vm| {
-            out = Some((f.take().unwrap())(vm))
-        }) {
-            return None;
-        }
-        out
+        makepad_script_std::try_with_vm(&mut self.host_context(), f)
     }
 
     #[track_caller]
@@ -88,25 +54,11 @@ impl Cx {
         thread_id: ScriptThreadId,
         f: F,
     ) -> R {
-        let caller = std::panic::Location::caller();
-        let mut f = Some(f);
-        let mut out = None;
-        self.with_vm_thread_dyn(caller, thread_id, &mut |vm| {
-            out = Some((f.take().unwrap())(vm))
-        });
-        out.unwrap()
-    }
-
-    #[inline(never)]
-    fn with_vm_thread_dyn(
-        &mut self,
-        caller: &'static std::panic::Location<'static>,
-        thread_id: ScriptThreadId,
-        f: &mut dyn FnMut(&mut ScriptVm),
-    ) {
-        let _vm_guard =
-            makepad_script_std::VmHolderGuard::enter(self.script_vm.is_some(), caller);
-        makepad_script_std::vm::with_vm_thread_dyn(self, thread_id, f)
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
+        makepad_script_std::with_vm_thread(&mut self.host_context(), thread_id, f)
     }
 
     #[track_caller]
@@ -115,7 +67,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        makepad_script_std::eval(self, script_mod)
+        makepad_script_std::eval(&mut self.host_context(), &script_mod.view())
     }
 
     pub fn add_script_task_on_thread_completed_hook(
@@ -138,15 +90,15 @@ impl Cx {
     }
 
     pub(crate) fn handle_script_tasks(&mut self) {
-        makepad_script_std::handle_script_tasks(self);
+        makepad_script_std::handle_script_tasks(&mut self.host_context());
     }
 
     pub(crate) fn handle_script_signals(&mut self) {
-        makepad_script_std::pump(self);
+        makepad_script_std::pump(&mut self.host_context());
     }
 
-    pub(crate) fn handle_script_web_socket_event(&mut self, event: NetworkResponse) {
-        makepad_script_std::handle_script_web_socket_event(self, event);
+    pub(crate) fn handle_script_web_socket_event(&mut self, event: &NetworkResponse) {
+        makepad_script_std::net_adapter::dispatch_network_response(&mut self.host_context(), event);
     }
 
     #[allow(unused)]
@@ -233,7 +185,12 @@ impl Cx {
             }
         }
 
-        makepad_script_std::handle_script_network_events(self, responses);
+        for response in responses {
+            makepad_script_std::net_adapter::dispatch_network_response(
+                &mut self.host_context(),
+                response,
+            );
+        }
     }
 
     /// Run the script network handlers against whichever VM is currently *installed*
@@ -248,7 +205,12 @@ impl Cx {
     /// loads — those live on `Cx::script_data.resources` and are handled once, for the
     /// app VM, before the event is dispatched to the widget tree.
     pub fn handle_script_network_events_for_current_vm(&mut self, responses: &[NetworkResponse]) {
-        makepad_script_std::handle_script_network_events(self, responses);
+        for response in responses {
+            makepad_script_std::net_adapter::dispatch_network_response(
+                &mut self.host_context(),
+                response,
+            );
+        }
     }
 }
 
@@ -258,7 +220,7 @@ mod unwind_tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn heap_key(cx: &mut Cx) -> usize {
-        cx.with_vm(|vm| vm.bx.heap.heap_key())
+        cx.with_vm(|vm| vm.heap_key())
     }
 
     /// A closure handed to `with_vm` panics inside a `catch_unwind` (the

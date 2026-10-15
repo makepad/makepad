@@ -7,7 +7,7 @@
 //! cargo run --release -p makepad-render-kernels --example bench_task_pool
 
 use makepad_platform::Cx;
-use makepad_render_kernels::compute::sched::{Job, Priority};
+use makepad_render_kernels::dispatch::sched::{Job, Priority};
 use makepad_render_kernels::{engine, install};
 use std::time::Instant;
 

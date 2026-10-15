@@ -8,7 +8,7 @@
 //! published slot, and a slot a submitted frame still reads is never
 //! written. The record is whatever the draw shader reflects (fields by
 //! name: pos, rot, scale, color, seed, id, prev_pos, prev_rot, age,
-//! radius, speed, group), or [`crate::rigid_layout`].
+//! radius, speed, group), or [`crate::RIGID`].
 //!
 //! **Into physics.** A kernel's `Body` records are spawns; each record is
 //! validated before anything is created ([`crate::BodyRecord::validate`]).
@@ -22,7 +22,7 @@
 //! `physics.nearest(bodies, n, p)` without a `use`.
 
 use crate::stepper::View;
-use makepad_render_kernels::compute::kernel::Layout;
+use makepad_render_kernels::compute::boundary::LayoutView;
 use makepad_render_kernels::{FrameFences, OutputRing, PublishError, Topology};
 
 /// The kernel module a host registers as `physics` (queries over `Rigid`
@@ -86,7 +86,7 @@ fn raycast(bodies, n, o, d, max_t) {
 "#;
 
 /// A ring for a group's instances in `layout` (two slots: the CPU path).
-pub fn body_ring(layout_id: u64, layout: &Layout) -> OutputRing {
+pub fn body_ring(layout_id: u64, layout: &LayoutView<'_>) -> OutputRing {
     OutputRing::new(2, Topology::Instances, layout_id, layout.stride)
 }
 
@@ -94,7 +94,7 @@ pub fn body_ring(layout_id: u64, layout: &Layout) -> OutputRing {
 /// into a free slot of `ring` and publishes it; returns the published
 /// generation and record count. With no free slot (every slot still read
 /// by frames in flight) the previous slot keeps drawing: `Ok(None)`.
-pub fn publish_bodies(view: &View, group: &str, layout: &Layout, ring: &mut OutputRing, fences: &dyn FrameFences) -> Result<Option<(u64, u32)>, PublishError> {
+pub fn publish_bodies(view: &View, group: &str, layout: &LayoutView<'_>, ring: &mut OutputRing, fences: &dyn FrameFences) -> Result<Option<(u64, u32)>, PublishError> {
     let Ok(mut lease) = ring.begin_write(fences) else { return Ok(None) };
     let mut data = lease.take_data();
     let n = view.write_bodies(group, layout, &mut data);

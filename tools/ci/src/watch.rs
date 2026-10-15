@@ -17,7 +17,7 @@ use std::{
 /// without `makepad-`), its directory's name or its path. The commercial
 /// checkout's products are matched the same way where their scripts sit
 /// (apps/commercial/stage/app is `stage`, apps/commercial/sandbox is
-/// `sandbox`); Scope, Amp and the `slice:<app>` tiles run.
+/// `sandbox`); Scope and the `slice:<app>` tiles run.
 pub const DEFAULT_SKIPS: &[&str] = &[
     "stage",
     "sandbox",
@@ -25,7 +25,6 @@ pub const DEFAULT_SKIPS: &[&str] = &[
     "mixer",
     "mail",
     "wm-all",
-    "wm-dyn",
     "asset-server",
     "flow-server",
     "ai-hub",

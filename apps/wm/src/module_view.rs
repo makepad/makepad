@@ -32,7 +32,7 @@
 
 use crate::desk::phone::DrawPhoneApp;
 use crate::dock_warp::WindowFrame;
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use crate::run_view::MpRunViewAction;
 use crate::tile::TileHost;
 use makepad_widgets::gauss_view::CaptureGauss;
@@ -313,9 +313,9 @@ impl Widget for MpModuleView {
         // `color_bg_app`, what its own window would clear to — never the
         // desk's colour: a light-theme app that leaves its ground showing
         // put its dark ink on the desk's dark ground (the clock's title).
-        if let Some(ground) = cx.cx.with_script_vm_id_trusted(self.vm_id, |vm| {
+        if let Some(ground) = cx.cx.with_script_vm_id(self.vm_id, |vm| {
             let theme = vm.module(id!(theme));
-            vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap).as_color()
+            vm.value(theme, id!(color_bg_app)).as_color()
         }) {
             self.draw_bg.color = vec4(((ground >> 24) & 0xff) as f32 / 255.0, ((ground >> 16) & 0xff) as f32 / 255.0, ((ground >> 8) & 0xff) as f32 / 255.0, 1.0);
         }

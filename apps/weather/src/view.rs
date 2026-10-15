@@ -3,26 +3,24 @@
 //! `HostedViewMode` over `Event::Custom` (the same message a standalone
 //! window and a module's isolate both receive; the `HostedView` child
 //! below reads it and swaps faces on its own — nothing here parses it) —
-//! and the fetch, the tick timer and the last good forecast.
+//! the clock tick and the sample forecast.
 //!
 //! The full face is the sky with the city and temperature leading, then
 //! the hourly strip, the ten-day list, the detail cards and the footer,
 //! all in one scroller; a glass button opens the locations sheet. The city
 //! is chosen from a short, named list (never inferred from the machine's
 //! location) and persisted to whatever storage a host gives this instance.
-//! [`WeatherView::ensure_started`] seeds the first fetch on the first
-//! event or draw, whichever the host gives it first: a window has a
-//! `Startup` event, a module instance does not.
+//! The forecast is sample data generated on the device (`sample.rs`):
+//! nothing is fetched, so the first frame already shows a full forecast.
 
 use crate::daily::ForecastDays;
 use crate::hourly::{GlyphIcon, HourlyStrip};
 use crate::model::{
-    compass, describe, geocode_url, hhmm_from_epoch, hhmm_of, local_hhmm, parse_cities, serialize_cities, temp, uv_text, City, Day, Forecast,
-    GeocodeResponse, GeocodeResult, SkyInputs, TempUnit, WeatherState, ATTRIBUTION, MAX_BODY_BYTES, MAX_CITIES,
+    compass, describe, hhmm_of, local_hhmm, parse_cities, search_cities, serialize_cities, temp, uv_text, City, Day, Forecast, SkyInputs, TempUnit,
+    WeatherState, MAX_CITIES, SAMPLE_NOTE,
 };
 use crate::parts::{PageDots, SolarArc};
 use crate::sky::SkyView;
-use makepad_widgets::makepad_platform::script::timer::script_local_utc_offset_secs;
 use makepad_widgets::makepad_platform::storage::{StorageHandle, StorageRequestId, StorageResponse, StorageResult};
 use makepad_widgets::*;
 
@@ -94,8 +92,8 @@ script_mod! {
         }
         check := SkyText{text: "✓" visible: false draw_text.color: theme.color_focus draw_text.text_style: theme.font_bold{font_size: 15}}
         // Hidden while `search` has text (those rows are results, not the
-        // person's own list) and on the `refresh` row (set_sheet); a plain
-        // View, not SkyDim, since it needs its own tap target.
+        // person's own list); a plain View, not SkyDim, since it needs its
+        // own tap target.
         remove := View{width: 32 height: 32 margin: Inset{left: 4} align: Align{x: 0.5 y: 0.5}
             cursor: MouseCursor.Hand grab_key_focus: false
             SkyDim{text: "×" draw_text.text_style: theme.font_bold{font_size: 17}}
@@ -310,8 +308,6 @@ script_mod! {
                                     city_10 := SheetRow{}
                                     city_11 := SheetRow{}
                                 }
-                                Hairline{margin: Inset{left: 20 right: 20}}
-                                refresh := SheetRow{height: 44}
                                 View{width: Fill height: 20}
                             }
                         }
@@ -349,8 +345,7 @@ pub struct WeatherView {
     started: bool,
     #[rust]
     state: WeatherState,
-    /// A slow tick that re-checks the 15 minute refresh budget and ages
-    /// the "updated N min ago" line.
+    /// A slow tick that keeps the city's clock and the "Now" hour current.
     #[rust]
     tick: Option<Timer>,
     #[rust]
@@ -373,10 +368,6 @@ pub struct WeatherView {
     cities_load: Option<StorageRequestId>,
     #[rust]
     cities_write: Option<StorageRequestId>,
-    #[rust]
-    refreshed_load: Option<StorageRequestId>,
-    #[rust]
-    refreshed_write: Option<StorageRequestId>,
     /// True once the person picks a city: a load response landing later
     /// (a slow jail on a cold start) must never clobber a fresh pick.
     #[rust]
@@ -412,20 +403,7 @@ pub struct WeatherView {
     /// can measure how far the finger travelled.
     #[rust]
     swipe_start: Option<f64>,
-    /// The Locations sheet's search: a debounce timer restarted on every
-    /// keystroke (`geocode_debounce`), the text it will search for once
-    /// that timer fires (`pending_query`, since a `Timer` event carries no
-    /// payload of its own), the in-flight request's id, an incrementing
-    /// tag for it (superseded searches must not overwrite a newer one's
-    /// results), and the results themselves.
-    #[rust]
-    geocode_debounce: Option<Timer>,
-    #[rust]
-    pending_query: String,
-    #[rust]
-    geocode_pending: Option<LiveId>,
-    #[rust]
-    geocode_seq: u64,
+    /// The Locations sheet's search results over the city catalogue.
     #[rust]
     search_results: Vec<City>,
 }
@@ -523,114 +501,46 @@ impl WeatherView {
         self.view.widget(cx, ids!(app_view)).borrow::<HostedView>().map(|h| h.mode()).unwrap_or_default()
     }
 
-    /// One line for the assistant: the selected city, its status, and the
-    /// current conditions and ten-day outlook when there is good data.
+    /// One line for the assistant: the selected city, the current
+    /// conditions and the ten-day outlook, marked as sample data.
     pub fn ai_summary(&self) -> String {
         let city = self.state.city();
-        let mut out = format!("{}, {} — {}", city.name, city.country, self.state.status_text());
-        if let Some((forecast, _)) = self.state.current() {
-            let cur = &forecast.current;
-            out.push_str(&format!("; now {} {}", temp(cur.temperature_2m, self.state.unit), describe(forecast.code())));
-            let (hi, lo) = forecast.today_high_low();
-            out.push_str(&format!(" (H {} L {})", temp(hi, self.state.unit), temp(lo, self.state.unit)));
-            let days: Vec<String> = forecast
-                .days()
-                .iter()
-                .map(|d| {
-                    let name = if d.weekday.is_empty() { d.date.clone() } else { d.weekday.to_string() };
-                    format!("{} {}/{}", name, temp(d.high, self.state.unit), temp(d.low, self.state.unit))
-                })
-                .collect();
-            if !days.is_empty() {
-                out.push_str(&format!("; forecast: {}", days.join(", ")));
-            }
+        let mut out = format!("{}, {} — sample forecast (generated, not real weather)", city.name, city.country);
+        let forecast = self.state.forecast();
+        let cur = &forecast.current;
+        out.push_str(&format!("; now {} {}", temp(cur.temperature_2m, self.state.unit), describe(forecast.code())));
+        let (hi, lo) = forecast.today_high_low();
+        out.push_str(&format!(" (H {} L {})", temp(hi, self.state.unit), temp(lo, self.state.unit)));
+        let days: Vec<String> = forecast
+            .days()
+            .iter()
+            .map(|d| {
+                let name = if d.weekday.is_empty() { d.date.clone() } else { d.weekday.to_string() };
+                format!("{} {}/{}", name, temp(d.high, self.state.unit), temp(d.low, self.state.unit))
+            })
+            .collect();
+        if !days.is_empty() {
+            out.push_str(&format!("; forecast: {}", days.join(", ")));
         }
         out
     }
 
-    /// The timer stops and every fetch in flight — the one on screen and
-    /// any background one a "Refresh" left running — is cancelled; nothing
-    /// this widget owns outlives its isolate.
+    /// The timer stops; nothing this widget owns outlives its isolate.
     pub fn shutdown(&mut self, cx: &mut Cx) {
         if let Some(t) = self.tick.take() {
             cx.stop_timer(t);
         }
-        for (_, id) in self.state.pending.drain() {
-            cx.cancel_http_request(id);
-        }
     }
 
-    /// Fetch the city on screen.
-    fn fetch(&mut self, cx: &mut Cx) {
-        self.fetch_city(cx, self.state.city);
-    }
-
-    /// Fetch any city, on or off screen — "Refresh" (`refresh_all`) calls
-    /// this once per city; everything else fetches only the one showing.
-    fn fetch_city(&mut self, cx: &mut Cx, index: usize) {
-        let (id, url) = self.state.begin_fetch(index);
-        let mut request = HttpRequest::new(url, HttpMethod::GET);
-        request.set_header("Accept".into(), "application/json".into());
-        cx.http_request(id, request);
-        if index == self.state.city {
-            self.render(cx);
-        }
-    }
-
-    /// Ask every city for a fresh forecast at once and note when — shown
-    /// in the Locations sheet, in the device's own local time.
-    fn refresh_all(&mut self, cx: &mut Cx) {
-        for i in 0..self.state.cities.len() {
-            self.fetch_city(cx, i);
-        }
-        self.state.last_refreshed = Some(Cx::time_now() as i64);
-        if let Some(storage) = self.storage.as_ref() {
-            self.refreshed_write = Some(storage.set(cx, "refreshed", self.state.last_refreshed.unwrap().to_string().into_bytes()));
-        }
-        if self.sheet_open {
-            self.update_refresh_row(cx);
-        }
-    }
-
-    fn handle_response(&mut self, cx: &mut Cx, id: LiveId, result: Result<HttpResponse, String>) {
-        let Some(city) = self.state.owner_of(id) else {
-            // A reply for a request we already superseded (a second fetch
-            // for the same city replaced it in `pending`): drop it without
-            // touching the model.
-            return;
-        };
-        let parsed = result.and_then(|response| {
-            if response.status_code != 200 {
-                return Err(format!("HTTP {}", response.status_code));
-            }
-            let body = response.body.as_ref().ok_or_else(|| "empty response".to_string())?;
-            if body.len() > MAX_BODY_BYTES {
-                return Err(format!("response too large ({} bytes)", body.len()));
-            }
-            let text = std::str::from_utf8(body).map_err(|_| "response is not UTF-8".to_string())?;
-            Forecast::parse(text)
-        });
-        self.state.complete(id, parsed);
-        if city == self.state.city {
-            self.render(cx);
-            self.wake_sky(cx);
-        }
-    }
-
-    /// Select a city, persist the choice, and fetch it only if its cached
-    /// data (an earlier visit, or a "Refresh") is not already fresh — the
-    /// same question the periodic tick asks of the city already on screen.
+    /// Select a city, persist the choice and show its forecast.
     fn select_city(&mut self, cx: &mut Cx, index: usize) {
         if !self.state.select_city(index) {
             return;
         }
         self.city_changed = true;
         self.persist_city(cx);
-        if self.state.due_for_refresh() {
-            self.fetch(cx);
-        } else {
-            self.render(cx);
-        }
+        self.render(cx);
+        self.wake_sky(cx);
     }
 
     fn persist_city(&mut self, cx: &mut Cx) {
@@ -676,7 +586,7 @@ impl WeatherView {
 
     /// Remove a city from the list (never the last one). Removing the
     /// selected city lands on whatever now sits at its old position — the
-    /// next city, or the new last one if it was the last — and refetches;
+    /// next city, or the new last one if it was the last — and shows it;
     /// removing any other just shifts the selected index down if the
     /// removed one sat before it, since the actual city does not move.
     fn remove_city(&mut self, cx: &mut Cx, index: usize) {
@@ -690,7 +600,7 @@ impl WeatherView {
         if was_current {
             self.state.city = index.min(self.state.cities.len() - 1);
             self.persist_city(cx);
-            self.fetch(cx);
+            self.render(cx);
         } else if index < self.state.city {
             self.state.city -= 1;
             self.persist_city(cx);
@@ -724,8 +634,8 @@ impl WeatherView {
                 continue;
             };
             row.set_visible(cx, true);
-            row.label(cx, ids!(city)).set_text(cx, &city.name);
-            row.label(cx, ids!(country)).set_text(cx, &city.country);
+            row.label(cx, ids!(city)).set_text(cx, city.name);
+            row.label(cx, ids!(country)).set_text(cx, city.country);
             row.widget(cx, ids!(check)).set_visible(cx, !searching && i == self.state.city);
             row.widget(cx, ids!(remove)).set_visible(cx, !searching && self.state.cities.len() > 1);
         }
@@ -739,84 +649,17 @@ impl WeatherView {
         }
     }
 
-    /// "Refresh"'s own row: its subtitle carries when it last ran, in the
-    /// device's own local time (`script_local_utc_offset_secs` — 0, UTC,
-    /// until some host sets it; `refresh_all`'s doc comment).
-    fn update_refresh_row(&mut self, cx: &mut Cx) {
-        let refresh = self.view.widget(cx, ids!(refresh));
-        refresh.label(cx, ids!(city)).set_text(cx, "Refresh");
-        let text = match self.state.last_refreshed {
-            Some(epoch) => format!("Last refreshed {}", hhmm_from_epoch(epoch, script_local_utc_offset_secs())),
-            None => "Not yet refreshed".to_string(),
-        };
-        refresh.label(cx, ids!(country)).set_text(cx, &text);
-        refresh.widget(cx, ids!(country)).set_visible(cx, true);
-        refresh.widget(cx, ids!(remove)).set_visible(cx, false);
-    }
-
-    /// Every keystroke restarts a short debounce (`run_geocode_search`
-    /// fires it) rather than searching on each one: a city search is one
-    /// request per pause in typing, not one per letter.
+    /// The search runs over the built-in city catalogue on every keystroke:
+    /// no request, no wait.
     fn on_search_changed(&mut self, cx: &mut Cx, text: String) {
-        if let Some(t) = self.geocode_debounce.take() {
-            cx.stop_timer(t);
-        }
-        self.geocode_pending = None;
-        self.search_results.clear();
-        self.populate_rows(cx);
-        let query = text.trim().to_string();
-        if query.is_empty() {
-            self.update_search_status(cx, "");
-            return;
-        }
-        self.pending_query = query;
-        self.geocode_debounce = Some(cx.start_timeout(0.35));
-        self.update_search_status(cx, "Searching…");
-    }
-
-    fn run_geocode_search(&mut self, cx: &mut Cx) {
-        if self.pending_query.is_empty() {
-            return;
-        }
-        self.geocode_seq += 1;
-        let id = LiveId::from_str(&format!("weather_geocode_{}", self.geocode_seq));
-        self.geocode_pending = Some(id);
-        let mut request = HttpRequest::new(geocode_url(&self.pending_query), HttpMethod::GET);
-        request.set_header("Accept".into(), "application/json".into());
-        cx.http_request(id, request);
-    }
-
-    fn handle_geocode_response(&mut self, cx: &mut Cx, id: LiveId, result: Result<HttpResponse, String>) {
-        if self.geocode_pending != Some(id) {
-            // A reply for a search a newer keystroke already superseded.
-            return;
-        }
-        self.geocode_pending = None;
-        let parsed = result.and_then(|response| {
-            if response.status_code != 200 {
-                return Err(format!("HTTP {}", response.status_code));
-            }
-            let body = response.body.as_ref().ok_or_else(|| "empty response".to_string())?;
-            let text = std::str::from_utf8(body).map_err(|_| "response is not UTF-8".to_string())?;
-            GeocodeResponse::parse(text)
-        });
-        match parsed {
-            Ok(response) => {
-                self.search_results = response.results.unwrap_or_default().into_iter().map(GeocodeResult::into_city).collect();
-                let status = if self.search_results.is_empty() { "No results" } else { "" };
-                self.update_search_status(cx, status);
-            }
-            Err(e) => {
-                log!("weather: city search failed: {}", e);
-                self.search_results.clear();
-                self.update_search_status(cx, "Search failed");
-            }
-        }
+        self.search_results = search_cities(&text);
+        let status = if !text.trim().is_empty() && self.search_results.is_empty() { "No matching city" } else { "" };
+        self.update_search_status(cx, status);
         self.populate_rows(cx);
     }
 
-    /// Flip the display unit, persist it, and re-render: the fetched data
-    /// stays Celsius, so nothing needs to be refetched.
+    /// Flip the display unit, persist it, and re-render: the forecast
+    /// stays Celsius; only the text converts.
     fn toggle_unit(&mut self, cx: &mut Cx) {
         self.state.unit = self.state.unit.toggle();
         if let Some(storage) = self.storage.as_ref() {
@@ -851,9 +694,7 @@ impl WeatherView {
             if !self.city_changed {
                 if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
                     if let Some(index) = std::str::from_utf8(bytes).ok().and_then(|s| s.trim().parse::<usize>().ok()) {
-                        if self.state.select_city(index) {
-                            self.fetch(cx);
-                        }
+                        self.state.select_city(index);
                     }
                 }
             }
@@ -879,22 +720,10 @@ impl WeatherView {
                 log!("weather: could not save the selected unit: {}", e);
             }
         }
-        if let Some(response) = responses.iter().find(|r| self.refreshed_load == Some(r.request_id)) {
-            self.refreshed_load = None;
-            if let Ok(StorageResult::Value(Some(bytes))) = &response.result {
-                if let Some(epoch) = std::str::from_utf8(bytes).ok().and_then(|s| s.trim().parse::<i64>().ok()) {
-                    self.state.last_refreshed = Some(epoch);
-                }
-            }
-        }
-        if let Some(response) = responses.iter().find(|r| self.refreshed_write == Some(r.request_id)) {
-            self.refreshed_write = None;
-            if let Err(e) = &response.result {
-                log!("weather: could not save the last-refreshed time: {}", e);
-            }
-        }
         // Either load above can change the list or the selected index:
-        // the dots and, if it's open, the sheet's rows must catch up.
+        // the forecast, the dots and, if it's open, the sheet's rows must
+        // catch up.
+        self.render(cx);
         if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
             dots.set(cx, self.state.cities.len(), self.state.city);
         }
@@ -911,11 +740,7 @@ impl WeatherView {
             self.search_results.clear();
             self.update_search_status(cx, "");
             self.populate_rows(cx);
-            self.update_refresh_row(cx);
         } else {
-            if let Some(t) = self.geocode_debounce.take() {
-                cx.stop_timer(t);
-            }
             // The search field may have taken key focus while the sheet was
             // up; hand it back so the arrow keys keep switching cities.
             if self.face(cx) == HostedViewMode::Full {
@@ -960,48 +785,12 @@ impl WeatherView {
 
     /// Push the model into every label of both faces.
     fn render(&mut self, cx: &mut Cx) {
-        let city = self.state.city();
-        let status = self.state.status_text();
-        self.view.label(cx, ids!(hero_city)).set_text(cx, &city.name);
-        self.view.label(cx, ids!(tile_city)).set_text(cx, &city.name);
-        self.view.label(cx, ids!(header_city)).set_text(cx, &city.name);
+        let city = *self.state.city();
+        self.view.label(cx, ids!(hero_city)).set_text(cx, city.name);
+        self.view.label(cx, ids!(tile_city)).set_text(cx, city.name);
+        self.view.label(cx, ids!(header_city)).set_text(cx, city.name);
         self.view.label(cx, ids!(unit_label)).set_text(cx, self.state.unit.label());
-        let freshness = self.state.tile_freshness();
-
-        let Some((forecast, _)) = self.state.current().map(|(f, t)| (f.clone(), t)) else {
-            self.view.label(cx, ids!(local_time_label)).set_text(cx, "--:--");
-            for id in [ids!(hero_temp), ids!(tile_temp)] {
-                self.view.label(cx, id).set_text(cx, "—°");
-            }
-            let placeholder = if self.state.loading() { "Loading" } else { "Unavailable" };
-            for id in [ids!(hero_cond), ids!(tile_cond), ids!(header_line)] {
-                self.view.label(cx, id).set_text(cx, placeholder);
-            }
-            for id in [ids!(hero_hilo), ids!(tile_hilo), ids!(summary)] {
-                self.view.label(cx, id).set_text(cx, "");
-            }
-            self.view.widget(cx, ids!(condition_icon)).set_visible(cx, false);
-            for card in [ids!(uv_card), ids!(sun_card), ids!(wind_card), ids!(humidity_card), ids!(precip_card), ids!(feels_card)] {
-                self.set_card(cx, card, "—", "Unavailable");
-            }
-            self.view.label(cx, ids!(footer)).set_text(cx, &format!("{status} · {ATTRIBUTION}"));
-            if let Some(mut hours) = self.view.widget(cx, ids!(hours)).borrow_mut::<HourlyStrip>() {
-                hours.set_cells(cx, Vec::new(), self.state.unit);
-            }
-            if let Some(mut days) = self.view.widget(cx, ids!(days)).borrow_mut::<ForecastDays>() {
-                days.set_days(cx, Vec::new(), None, self.state.unit);
-            }
-            for id in [ids!(sky_full), ids!(sky_tile)] {
-                if let Some(mut sky) = self.view.widget(cx, id).borrow_mut::<SkyView>() {
-                    match self.sky_override {
-                        Some(inputs) => sky.set_conditions(cx, inputs),
-                        None => sky.set_unknown(cx),
-                    }
-                }
-            }
-            self.view.redraw(cx);
-            return;
-        };
+        let forecast = self.state.forecast();
 
         let cur = &forecast.current;
         let code = forecast.code();
@@ -1015,7 +804,7 @@ impl WeatherView {
         self.view.label(cx, ids!(hero_cond)).set_text(cx, cond);
         self.view.label(cx, ids!(tile_cond)).set_text(cx, cond);
         self.view.label(cx, ids!(hero_hilo)).set_text(cx, &hilo);
-        self.view.label(cx, ids!(tile_hilo)).set_text(cx, freshness.as_deref().unwrap_or(&hilo));
+        self.view.label(cx, ids!(tile_hilo)).set_text(cx, &hilo);
         self.view.label(cx, ids!(header_line)).set_text(cx, &format!("{} · {}", temp_text, cond));
         self.view.label(cx, ids!(summary)).set_text(cx, &Self::summary_text(&forecast));
         self.view.widget(cx, ids!(condition_icon)).set_visible(cx, true);
@@ -1097,8 +886,7 @@ impl WeatherView {
             }
             None => self.set_card(cx, ids!(feels_card), "—", "Unavailable"),
         }
-        let updated = cur.time.as_deref().map(hhmm_of).unwrap_or_else(|| "—".into());
-        self.view.label(cx, ids!(footer)).set_text(cx, &format!("Updated {updated} · {ATTRIBUTION}"));
+        self.view.label(cx, ids!(footer)).set_text(cx, SAMPLE_NOTE);
 
         let inputs = self.sky_override.unwrap_or_else(|| forecast.sky_inputs());
         for id in [ids!(sky_full), ids!(sky_tile)] {
@@ -1220,13 +1008,12 @@ impl WeatherView {
             self.cities_load = Some(storage.get(cx, "cities"));
             self.city_load = Some(storage.get(cx, "city"));
             self.unit_load = Some(storage.get(cx, "unit"));
-            self.refreshed_load = Some(storage.get(cx, "refreshed"));
         }
         self.tick = Some(cx.start_interval(30.0));
         if let Some(mut dots) = self.view.widget(cx, ids!(dots)).borrow_mut::<PageDots>() {
             dots.set(cx, self.state.cities.len(), self.state.city);
         }
-        self.fetch(cx);
+        self.render(cx);
     }
 }
 
@@ -1250,37 +1037,8 @@ impl Widget for WeatherView {
         if let Event::Storage(responses) = event {
             self.on_storage(cx, responses);
         }
-        if let Event::NetworkResponses(responses) = event {
-            for response in responses {
-                match response {
-                    NetworkResponse::HttpResponse { request_id, response } => {
-                        if self.geocode_pending == Some(*request_id) {
-                            self.handle_geocode_response(cx, *request_id, Ok(response.clone()));
-                        } else {
-                            self.handle_response(cx, *request_id, Ok(response.clone()));
-                        }
-                    }
-                    NetworkResponse::HttpError { request_id, error } => {
-                        if self.geocode_pending == Some(*request_id) {
-                            self.handle_geocode_response(cx, *request_id, Err(error.message.clone()));
-                        } else {
-                            self.handle_response(cx, *request_id, Err(error.message.clone()));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if self.geocode_debounce.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
-            self.geocode_debounce = None;
-            self.run_geocode_search(cx);
-        }
         if self.tick.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
-            if self.state.due_for_refresh() {
-                self.fetch(cx);
-            } else {
-                self.render(cx);
-            }
+            self.render(cx);
         }
         if let Some(frame) = self.sky_frame.is_event(event) {
             if self.sky_last > 0.0 {
@@ -1369,11 +1127,6 @@ impl Widget for WeatherView {
                         self.set_sheet(cx, false);
                     }
                 }
-            }
-            if self.view.view(cx, ids!(refresh)).finger_up(actions).is_some_and(|fe| !fe.cancelled) {
-                // Stays open — unlike picking a city — so the "Last
-                // refreshed" line update_refresh_row just wrote is visible.
-                self.refresh_all(cx);
             }
         }
         self.view.handle_event(cx, event, scope);

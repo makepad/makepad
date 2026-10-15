@@ -760,7 +760,7 @@ mod tests {
             crate::shell::script_mod(vm);
             super::script_mod(vm);
             let storybook = vm.module(id!(storybook));
-            let value = vm.bx.heap.value(
+            let value = vm.heap().value(
                 storybook,
                 id!(ControlsPanel).into(),
                 crate::makepad_widgets::makepad_script::trap::NoTrap,
@@ -778,7 +778,7 @@ mod tests {
         let panel = panel(&mut cx);
         let control = profile("Profile", "prof");
         let anchors = vec![[0.0, 1.0, 2.0], [0.3, 0.8, 1.0], [0.6, 0.4, 3.0], [1.0, 0.0, 0.0]];
-        cx.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+        cx.with_vm(|vm| vm.capture_errors());
         let row = panel.portal_list(&mut cx, ids!(list)).item(&mut cx, 0, live_id!(RowCurve));
         assert!(!row.is_empty(), "no RowCurve template");
         let inner = panel.borrow::<ControlsPanel>().expect("a ControlsPanel");
@@ -854,7 +854,7 @@ mod tests {
         use crate::makepad_widgets::makepad_script::trap::NoTrap;
         let read = |vm: &mut ScriptVm| {
             let storybook = vm.module(id!(storybook));
-            let value = vm.bx.heap.value(storybook, id!(ControlsPanel).into(), NoTrap);
+            let value = vm.value(storybook, id!(ControlsPanel));
             resolution(vm, value, "ControlsPanel")
         };
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -866,7 +866,7 @@ mod tests {
             assert!(plain.len() > 1_000, "only {} lines were read off the panel", plain.len());
             let sheet = everything_sheet(vm, &|_| false);
             install(vm, sheet);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(|vm| {
                 crate::theme::widgets_script_mod(vm);
                 crate::shell::script_mod(vm);

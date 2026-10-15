@@ -22,6 +22,7 @@ use makepad_widgets::*;
 
 pub mod ai_pane;
 pub mod bar;
+pub mod file_picker;
 pub mod gallery;
 pub mod launcher;
 pub mod menu;
@@ -29,24 +30,34 @@ pub mod notifications;
 pub mod osd;
 pub mod panels;
 pub mod ui;
-/// The Wi-Fi dropdown's iwd backend: Linux desktop only (not OpenHarmony);
+/// The Wi-Fi dropdown's iwd backend: Linux desktop only;
 /// no other platform compiles or references it.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 pub mod wifi_linux;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+/// The Wi-Fi panel's hotspot mode (logic) and the QR encoder its join code
+/// uses; same gating as the Wi-Fi backend.
+#[cfg(target_os = "linux")]
+pub mod hotspot_linux;
+#[cfg(target_os = "linux")]
+pub mod qr;
+#[cfg(target_os = "linux")]
 pub mod system_linux;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 mod system_slider;
 /// The saved display arrangement (order, main screen, modes, render-on
 /// GPU): pure parser/serializer/resolver model, no file I/O. Linux only,
 /// same gate as `system_linux` (it uses `LinuxDisplaySnapshot`).
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 pub mod display_layout;
+/// The Display menu's model: resolutions and rates per screen, and the
+/// try / keep / revert state machine of a mode or arrangement change.
+#[cfg(target_os = "linux")]
+pub mod display_menu;
 
 /// Register every shell widget. Called from `AppMain::script_mod` AFTER
 /// the theme has been evaluated (the DSL below reads `mod.wm_theme`).
 pub fn script_mod(vm: &mut ScriptVm) {
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     system_slider::script_mod(vm);
     ui::script_mod(vm);
     ai_pane::script_mod(vm);
@@ -56,6 +67,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     notifications::script_mod(vm);
     panels::script_mod(vm);
     gallery::script_mod(vm);
+    file_picker::script_mod(vm);
 }
 
 // ======================================================================

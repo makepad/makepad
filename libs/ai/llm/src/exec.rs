@@ -24,6 +24,10 @@ use crate::Context;
 use crate::cuda_exec::{
     CompiledHybridDecodeCuda, CudaContextArena, CudaDeviceFeatures, CudaExecRuntime,
 };
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::vulkan_exec::{
+    CompiledHybridDecodeVulkan, VulkanContextArena, VulkanDeviceFeatures, VulkanExecRuntime,
+};
 use crate::error::{LlamaError, Result};
 use crate::runtime::{
     compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
@@ -41,36 +45,55 @@ pub enum ExecBackendKind {
     Native,
     Metal,
     Cuda,
+    Vulkan,
 }
 
 /// Device capability snapshot used for graph preparation and buffer sizing.
 pub enum ExecFeatures {
     Metal(MetalDeviceFeatures),
     Cuda(CudaDeviceFeatures),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(VulkanDeviceFeatures),
 }
 
 /// The per-backend GPU view of a ggml `Context` arena.
 pub enum ExecContextBuffers {
     Metal(MetalContextBuffers),
     Cuda(CudaContextArena),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(VulkanContextArena),
 }
 
 /// One compiled hybrid-decode graph shape, ready to execute repeatedly.
 pub enum CompiledHybridDecode {
     Metal(CompiledHybridDecodeMetal),
     Cuda(CompiledHybridDecodeCuda),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(CompiledHybridDecodeVulkan),
 }
 
 /// The execution backend handle shared by every compiled graph of a session.
 pub enum ExecRuntime {
     Metal(MetalRuntime),
     Cuda(CudaExecRuntime),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Vulkan(VulkanExecRuntime),
 }
 
 impl ExecRuntime {
     /// Bind the platform-native backend, failing closed when it cannot run.
+    /// `MAKEPAD_LLM_BACKEND` (`metal` / `cuda` / `vulkan`) pins a backend
+    /// for tests and probes; production uses the platform's own.
     pub fn new() -> Result<Self> {
-        Self::with_backend(ExecBackendKind::Native)
+        match std::env::var("MAKEPAD_LLM_BACKEND").ok().as_deref() {
+            None | Some("") | Some("native") => Self::with_backend(ExecBackendKind::Native),
+            Some("metal") => Self::with_backend(ExecBackendKind::Metal),
+            Some("cuda") => Self::with_backend(ExecBackendKind::Cuda),
+            Some("vulkan") => Self::with_backend(ExecBackendKind::Vulkan),
+            Some(other) => Err(LlamaError::unsupported(format!(
+                "MAKEPAD_LLM_BACKEND must be metal, cuda or vulkan, got '{other}'"
+            ))),
+        }
     }
 
     pub fn with_backend(kind: ExecBackendKind) -> Result<Self> {
@@ -80,6 +103,8 @@ impl ExecRuntime {
                     Self::with_backend(ExecBackendKind::Metal)
                 } else if cfg!(any(target_os = "windows", target_os = "linux")) {
                     Self::with_backend(ExecBackendKind::Cuda)
+                } else if cfg!(target_os = "android") {
+                    Self::with_backend(ExecBackendKind::Vulkan)
                 } else {
                     Err(LlamaError::unsupported(
                         "no native LLM execution backend for this platform (Metal on \
@@ -91,6 +116,10 @@ impl ExecRuntime {
                 MetalRuntime::new().map_err(LlamaError::unsupported)?,
             )),
             ExecBackendKind::Cuda => Ok(Self::Cuda(CudaExecRuntime::new()?)),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            ExecBackendKind::Vulkan => Ok(Self::Vulkan(VulkanExecRuntime::new()?)),
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            ExecBackendKind::Vulkan => Err(LlamaError::unsupported("the Vulkan backend runs on Linux and Android")),
         }
     }
 
@@ -98,6 +127,8 @@ impl ExecRuntime {
         match self {
             Self::Metal(_) => ExecBackendKind::Metal,
             Self::Cuda(_) => ExecBackendKind::Cuda,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(_) => ExecBackendKind::Vulkan,
         }
     }
 
@@ -106,6 +137,8 @@ impl ExecRuntime {
         match self {
             Self::Metal(_) => "metal".to_string(),
             Self::Cuda(runtime) => runtime.device_description(),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(runtime) => runtime.device_description(),
         }
     }
 
@@ -113,6 +146,8 @@ impl ExecRuntime {
         match self {
             Self::Metal(runtime) => ExecFeatures::Metal(runtime.features()),
             Self::Cuda(runtime) => ExecFeatures::Cuda(runtime.features()),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(runtime) => ExecFeatures::Vulkan(runtime.features()),
         }
     }
 
@@ -142,6 +177,14 @@ impl ExecRuntime {
                 n_tokens,
                 n_outputs,
             ),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(runtime) => runtime.reserve_hybrid_decode_main_buffer_size(
+                weights,
+                spec,
+                shared_cache,
+                n_tokens,
+                n_outputs,
+            ),
         }
     }
 
@@ -162,6 +205,10 @@ impl ExecRuntime {
                 create_metal_context_buffer_with_runtime(runtime, ctx)?,
             )),
             Self::Cuda(runtime) => Ok(ExecContextBuffers::Cuda(
+                runtime.create_context_arena_with_progress(ctx, progress)?,
+            )),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(runtime) => Ok(ExecContextBuffers::Vulkan(
                 runtime.create_context_arena_with_progress(ctx, progress)?,
             )),
         }
@@ -215,6 +262,20 @@ impl ExecRuntime {
                     n_seqs,
                 )?))
             }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (Self::Vulkan(runtime), ExecContextBuffers::Vulkan(arena)) => {
+                Ok(CompiledHybridDecode::Vulkan(runtime.compile_hybrid_decode(
+                    weights,
+                    spec,
+                    shared_cache,
+                    arena,
+                    n_tokens,
+                    n_outputs,
+                    attention_key_base,
+                    attention_key_count,
+                    n_seqs,
+                )?))
+            }
             _ => Err(LlamaError::format(
                 "execution runtime and context buffers belong to different backends",
             )),
@@ -237,6 +298,10 @@ impl ExecRuntime {
                 .map_err(LlamaError::format)?
                 .to_vec()),
             (Self::Cuda(runtime), ExecContextBuffers::Cuda(arena)) => {
+                runtime.read_arena_bytes(arena, offset, len)
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (Self::Vulkan(runtime), ExecContextBuffers::Vulkan(arena)) => {
                 runtime.read_arena_bytes(arena, offset, len)
             }
             _ => Err(LlamaError::format(
@@ -292,6 +357,52 @@ impl ExecRuntime {
             (Self::Cuda(runtime), ExecContextBuffers::Cuda(arena)) => {
                 runtime.clear_arena_ranges(arena, ranges)
             }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (Self::Vulkan(runtime), ExecContextBuffers::Vulkan(arena)) => {
+                runtime.clear_arena_ranges(arena, ranges)
+            }
+            _ => Err(LlamaError::format(
+                "execution runtime and context buffers belong to different backends",
+            )),
+        }
+    }
+
+    /// Write `bytes` at a logical context-image offset, in both the host
+    /// context image and the backend buffer compiled graphs reference: the
+    /// counterpart of `read_state_range`, used to restore saved session
+    /// state. Only the mutable (state) region can be written.
+    pub fn write_state_range(
+        &self,
+        ctx: &mut Context,
+        buffers: &ExecContextBuffers,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        ctx.data_at_mut(offset, bytes.len())
+            .map_err(LlamaError::format)?
+            .copy_from_slice(bytes);
+        match (self, buffers) {
+            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+                let main_offset = offset.checked_sub(buffers.ro_split).ok_or_else(|| {
+                    LlamaError::format(format!(
+                        "refusing to write read-only Metal state range [{}..+{}) below split {}",
+                        offset,
+                        bytes.len(),
+                        buffers.ro_split,
+                    ))
+                })?;
+                runtime
+                    .write_buffer(&buffers.main_buffer, main_offset, bytes)
+                    .map_err(LlamaError::format)?;
+                runtime.wait_idle().map_err(LlamaError::format)
+            }
+            (Self::Cuda(runtime), ExecContextBuffers::Cuda(arena)) => {
+                runtime.write_arena_bytes(arena, offset, bytes)
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (Self::Vulkan(runtime), ExecContextBuffers::Vulkan(arena)) => {
+                runtime.write_arena_bytes(arena, offset, bytes)
+            }
             _ => Err(LlamaError::format(
                 "execution runtime and context buffers belong to different backends",
             )),
@@ -322,6 +433,10 @@ impl ExecRuntime {
             (Self::Cuda(runtime), ExecContextBuffers::Cuda(arena)) => {
                 runtime.read_arena_bytes(arena, offset, len)
             }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (Self::Vulkan(runtime), ExecContextBuffers::Vulkan(arena)) => {
+                runtime.read_arena_bytes(arena, offset, len)
+            }
             _ => Err(LlamaError::format(
                 "execution runtime and context buffers belong to different backends",
             )),
@@ -334,6 +449,8 @@ impl CompiledHybridDecode {
         match self {
             Self::Metal(compiled) => compiled.decode(),
             Self::Cuda(compiled) => compiled.decode(),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(compiled) => compiled.decode(),
         }
     }
 
@@ -345,6 +462,8 @@ impl CompiledHybridDecode {
         match self {
             Self::Metal(compiled) => compiled.execute_logits_only_with_layout(input, layout),
             Self::Cuda(compiled) => compiled.execute_logits_only_with_layout(input, layout),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(compiled) => compiled.execute_logits_only_with_layout(input, layout),
         }
     }
 
@@ -361,6 +480,12 @@ impl CompiledHybridDecode {
                 layout,
                 skip_logits_readback,
             ),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(compiled) => compiled.execute_logits_only_with_layout_options(
+                input,
+                layout,
+                skip_logits_readback,
+            ),
         }
     }
 
@@ -372,6 +497,8 @@ impl CompiledHybridDecode {
         match self {
             Self::Metal(compiled) => compiled.execute_with_layout(input, layout),
             Self::Cuda(compiled) => compiled.execute_with_layout(input, layout),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(compiled) => compiled.execute_with_layout(input, layout),
         }
     }
 }

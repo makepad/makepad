@@ -13,7 +13,8 @@
 //! widgets, so the status spinner and the overlay get all of them for free
 //! and a host can swap faces with a prop. The shader runs on the pass clock
 //! (`draw_pass.time`), the same idiom as the loading spinner, so nothing
-//! pumps frames from Rust while a spinner turns.
+//! pumps frames from Rust while a spinner turns. A quiet or finished status
+//! mark never reads that clock, so it never repaints by itself.
 //!
 //! DELAY: a spinner that appears for a 40 ms fetch is a flash, not
 //! feedback. `delay_secs` keeps the mark at zero alpha until the delay has
@@ -49,6 +50,7 @@
 
 use crate::{
     button::*,
+    family_api::apply_draw_twin,
     gauss_view::{arm_gauss_capture, GaussRoundedView},
     label::*,
     makepad_derive_widget::*,
@@ -187,6 +189,11 @@ script_mod! {
             return 0.35 + 0.65 * (0.5 + 0.5 * sin(w - i * 0.9))
         }
 
+        clock: fn() -> float { return self.draw_pass.time }
+        // At `morph` 1 nothing that moves is left, so StatusSpinner's `draw_still` swaps
+        // `clock` for this one and its finished tick or cross never repaints.
+        still_clock: fn() -> float { return 0.0 }
+
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let size = min(self.rect_size.x, self.rect_size.y)
@@ -204,7 +211,7 @@ script_mod! {
             let radius = size * 0.5 - inset - stroke * 0.5
             // How much of the turning face is left; the mark takes the rest.
             let spin = 1.0 - self.morph
-            let t = self.draw_pass.time * self.speed
+            let t = self.clock() * self.speed
             if self.face < 0.5 {
                 // The loading spinner's motion: a turn with a breathing gap.
                 let rotation = t * TAU
@@ -824,7 +831,7 @@ impl Morph {
 
 /// A spinner with an ending: the arc becomes a tick or a cross and then
 /// goes quiet by itself.
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct StatusSpinner {
     #[uid]
     uid: WidgetUid,
@@ -837,6 +844,9 @@ pub struct StatusSpinner {
     #[redraw]
     #[live]
     draw_bg: DrawSpinner,
+    /// `draw_bg` with its `still_clock`, drawn in its place once the mark has fully morphed.
+    #[new]
+    draw_still: DrawSpinner,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -877,6 +887,12 @@ pub struct StatusSpinner {
     reset_timer: Timer,
     #[rust]
     next_frame: NextFrame,
+}
+
+impl ScriptHook for StatusSpinner {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        apply_draw_twin(vm, apply, scope, value, id!(draw_bg), id!(still_clock), &mut self.draw_still);
+    }
 }
 
 impl StatusSpinner {
@@ -972,12 +988,23 @@ impl Widget for StatusSpinner {
             SpinnerStatus::Error => (FACE_STATUS_ERROR, 1.0),
         };
         let alpha = alpha * self.opacity as f32;
-        self.draw_bg.face = SpinnerFace::Arc.index();
-        self.draw_bg.alpha = if self.disabled { alpha * 0.5 } else { alpha };
-        self.draw_bg.status = face_status;
-        self.draw_bg.morph = self.shown_morph as f32;
-        self.draw_bg.contained = 0.0;
-        self.draw_bg.draw_walk(cx, Walk::fixed(s, s));
+        let still = self.shown_morph >= 1.0;
+        let draw = if still { &mut self.draw_still } else { &mut self.draw_bg };
+        draw.face = SpinnerFace::Arc.index();
+        draw.alpha = if self.disabled { alpha * 0.5 } else { alpha };
+        draw.status = face_status;
+        draw.morph = self.shown_morph as f32;
+        draw.contained = 0.0;
+        if alpha > 0.0 && !still {
+            self.draw_bg.draw_walk(cx, Walk::fixed(s, s));
+        } else {
+            // A quiet or finished mark doesn't move, so we skip the clock-reading `draw_bg`;
+            // it keeps the rect as its area, so its redraws still reach us.
+            let rect = cx.walk_turtle_with_area(&mut self.draw_bg.draw_vars.area, Walk::fixed(s, s));
+            if alpha > 0.0 {
+                self.draw_still.draw_abs(cx, rect);
+            }
+        }
         let label = self.label_text();
         if !label.is_empty() && alpha > 0.0 {
             self.draw_text

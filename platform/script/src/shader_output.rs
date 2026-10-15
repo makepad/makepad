@@ -1,121 +1,10 @@
-use crate::heap::*;
-use crate::pod::*;
-use crate::shader_backend::*;
-use crate::value::*;
-use crate::vm::*;
+//! Splash compilation state: VM provenance around the shared backend output.
+use makepad_relax_api::relax_api;
+use crate::object::ScriptMapEntry;
+use crate::{heap::*, value::*, vm::*, shader_backend::*};
 use makepad_live_id::*;
-use std::collections::BTreeSet;
-use std::fmt::Write;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SamplerFilter {
-    Nearest,
-    Linear,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SamplerAddress {
-    Repeat,
-    ClampToEdge,
-    ClampToZero,
-    MirroredRepeat,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SamplerCoord {
-    Normalized,
-    Pixel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ShaderSampler {
-    pub filter: SamplerFilter,
-    pub address: SamplerAddress,
-    pub coord: SamplerCoord,
-    pub is_video: bool,
-    /// Compare reference <= stored depth, then linearly filter visibility.
-    pub compare: bool,
-}
-
-impl Default for ShaderSampler {
-    fn default() -> Self {
-        Self {
-            filter: SamplerFilter::Linear,
-            address: SamplerAddress::ClampToEdge,
-            coord: SamplerCoord::Normalized,
-            is_video: false,
-            compare: false,
-        }
-    }
-}
-
-impl ShaderSampler {
-    pub fn video() -> Self {
-        Self {
-            is_video: true,
-            ..Self::default()
-        }
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct ShaderSamplerOptions {}
-
-#[derive(Debug, Default, Clone)]
-pub struct ShaderStorageFlags(u32);
-impl ShaderStorageFlags {
-    pub fn set_read(&mut self) {
-        self.0 |= 1
-    }
-    pub fn set_write(&mut self) {
-        self.0 |= 1
-    }
-    pub fn is_read(&self) -> bool {
-        self.0 & 1 != 0
-    }
-    pub fn is_write(&self) -> bool {
-        self.0 & 2 != 0
-    }
-    pub fn is_readwrite(&self) -> bool {
-        self.0 & 3 == 3
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextureType {
-    Texture1d,
-    Texture1dArray,
-    Texture2d,
-    Texture2dArray,
-    Texture3d,
-    Texture3dArray,
-    TextureCube,
-    TextureCubeArray,
-    TextureDepth,
-    TextureDepthArray,
-    TextureVideo,
-}
-
-#[derive(Debug, Clone)]
-pub enum ShaderIoKind {
-    StorageBuffer(ShaderStorageFlags),
-    UniformBuffer,
-    Sampler(ShaderSamplerOptions),
-    Texture(TextureType),
-    Varying,
-    VertexBuffer,
-    VertexPosition,
-    FragmentOutput(u8),
-    RustInstance,
-    Uniform,
-    DynInstance,
-    ScopeUniform,
-}
-
-/// Tracks the source of a scope uniform for buffer refresh after compilation.
-/// Each scope uniform comes from either:
-/// - A direct scope value: `test_p1` -> source_obj is the scope, key is `test_p1`
-/// - An object property: `test_obj.p2` -> source_obj is `test_obj`, key is `p2`
+pub use makepad_shader::shader_output::{SamplerFilter, SamplerAddress, SamplerCoord, ShaderSampler, ShaderSamplerOptions, ShaderStorageFlags, TextureType, ShaderIoKind, ShaderIo, ShaderMode, ShaderIoKindTag, UniformBufferBindings};
+#[relax_api(plain)]
 #[derive(Debug, Clone)]
 pub struct ScopeUniformSource {
     /// The source object to read the value from
@@ -138,6 +27,7 @@ pub struct ScopeUniformSource {
 /// into the code, so its value can be hot-patched with zero recompiles. The
 /// source is never rewritten by a patch — the span is context for whoever
 /// eventually edits it (the ledger hands it to the AI).
+#[relax_api(handle)]
 #[derive(Debug, Clone)]
 pub struct ShaderTableConst {
     /// The scope-uniform io name this constant occupies (`ct0`, `ct1`, …).
@@ -162,6 +52,7 @@ pub struct ShaderTableConst {
 
 /// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
 /// This is distinct from uniform buffers on io_self - these come from the surrounding scope.
+#[relax_api(plain)]
 #[derive(Debug, Clone)]
 pub struct ScopeUniformBufferSource {
     /// The uniform buffer ScriptObject itself (needed for runtime buffer binding)
@@ -174,6 +65,7 @@ pub struct ScopeUniformBufferSource {
 
 /// Tracks a texture defined in the script scope (e.g., `let tex = shader.texture_2d(float)`)
 /// This is distinct from textures on io_self - these come from the surrounding scope.
+#[relax_api(plain)]
 #[derive(Debug, Clone)]
 pub struct ScopeTextureSource {
     /// The texture ScriptObject itself (needed for runtime texture binding)
@@ -184,231 +76,59 @@ pub struct ScopeTextureSource {
     pub shader_name: LiveId,
 }
 
-#[allow(unused)]
-#[derive(Debug)]
-pub struct ShaderIo {
-    pub kind: ShaderIoKind,
-    pub name: LiveId,
-    pub ty: ScriptPodType,
-    /// Buffer index assigned during Metal/backend code generation (for uniform buffers, etc.)
-    pub buffer_index: Option<usize>,
-}
-
-impl ShaderIo {
-    pub fn kind(&self) -> &ShaderIoKind {
-        &self.kind
-    }
-
-    pub fn name(&self) -> LiveId {
-        self.name
-    }
-
-    pub fn ty(&self) -> ScriptPodType {
-        self.ty
-    }
-
-    pub fn buffer_index(&self) -> Option<usize> {
-        self.buffer_index
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
-pub enum ShaderMode {
-    Vertex,
-    #[default]
-    Fragment,
-    Compute,
-}
-
+#[relax_api(handle)]
 #[derive(Default, Debug)]
 pub struct ShaderOutput {
+    function_ids: std::collections::HashMap<ScriptObject, makepad_shader::shader_ids::ShaderFnId>,
+    function_objects: Vec<ScriptObject>,
+    pub compiled: makepad_shader::shader_output::ShaderOutput,
+    /// Functions lowered directly from source AST (inventory/diagnostics).
+    pub ast_functions: usize,
     pub mode: ShaderMode,
-    pub backend: ShaderBackend,
-    pub use_vulkan: bool,
-    /// GLSL for WebGL 2 (the web backend): an instance record wider than
-    /// WebGL's 255-byte attribute stride is read whole from the instance
-    /// data texture ([`crate::shader_glsl::WEBGL_MAX_ATTRIB_STRIDE`]).
-    pub glsl_webgl2: bool,
-    pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
-    pub structs: BTreeSet<ScriptPodType>,
-    pub functions: Vec<ShaderFn>,
-    pub samplers: Vec<ShaderSampler>,
     pub scope_uniforms: Vec<ScopeUniformSource>,
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
     pub scope_textures: Vec<ScopeTextureSource>,
-    /// Compile flag: lift `/** name */`-annotated float literals in fn
-    /// bodies into hot-patchable table constants ([`ShaderTableConst`])
-    /// instead of folding them into the emitted code. Off (the default)
-    /// emits byte-identical code to a compiler without the feature.
     pub const_table: bool,
-    /// The lifted literals, in emission order; each also appears as a
-    /// `ShaderIoKind::ScopeUniform` io and a [`ScopeUniformSource`] with
-    /// `table_const: Some(index)`.
     pub table_consts: Vec<ShaderTableConst>,
-    /// Edit mode: lift every float and colour literal written on the rows
-    /// these name into hot-patchable table constants with their sites
-    /// ([`crate::literal::LiveLiterals`]). `None` (the default) emits byte-identical
-    /// code to a compiler without the feature.
     pub live_literals: Option<std::sync::Arc<crate::literal::LiveLiterals>>,
-    /// Pick variants (an editor's click-to-code): every sample of a 2D
-    /// texture is emitted through `_MP_PS`, which the plain source defines
-    /// as the sample itself and the pick source ([`Self::metal_draw_source_pick`])
-    /// as the sample plus a read of the texture's pick twin at the same
-    /// place (the ids of what drew there). Off (the default) emits
-    /// byte-identical code to a compiler without the feature.
-    pub pick: bool,
-    /// While the pick source is assembled.
-    pub pick_emit: bool,
-    /// The expressions lifted literals were emitted as (`scope.ct3`), so an
-    /// operator meeting one with a half or integer operand casts it the way
-    /// the folded literal would have adapted.
-    pub lifted_exprs: std::collections::HashSet<String>,
-    /// Live literals that stayed folded (ints): a patch of one needs the
-    /// program compiled again.
     pub folded_sites: Vec<crate::literal::LiteralSite>,
-    /// Per-texture sampler bindings inferred during shader lowering.
-    /// Entries are `(texture_expr, sampler_index)`.
-    pub texture_sampler_bindings: Vec<(String, usize)>,
-    /// HLSL helper: needs _mpTexSize helper function for texture.size()
-    pub hlsl_needs_tex_size: bool,
-    /// Set to true if any errors occurred during shader compilation
-    pub has_errors: bool,
-    /// Human-readable messages for every error behind [`Self::has_errors`].
-    /// Backends log these with the shader's identity when they refuse to
-    /// build the pipeline — a shader must never fail into a silent
-    /// fallback. Populated via [`Self::push_error`]; also collects messages
-    /// that would otherwise vanish (entry-point compiles run under `NoTrap`,
-    /// which discards `script_err_*!` messages, and errors queued on a
-    /// nested function compiler's trap are never drained by anyone).
-    pub errors: Vec<String>,
-    /// True if this shader uses screen-space derivatives (dFdx/dFdy).
-    pub uses_derivatives: bool,
-    /// Monotonic temporary id source for Rust backend expression hoisting.
-    pub rust_tmp_counter: usize,
-    /// Monotonic id source for loop-guard locals, so nested guards never
-    /// collide (see [`crate::shader_control::LOOP_GUARD_MAX_ITERS`]).
-    pub loop_guard_counter: usize,
-    /// The static cost of the function the last `compile_shader_def` call
-    /// resolved to, charged to the caller's loop body.
-    pub last_call_cost: u64,
-    /// Total emitted source bytes across every function body compiled into
-    /// this shader. Bounded by [`MAX_EMITTED_BYTES`]: a call graph that
-    /// branches (each call site *inlines* via `compile_fn`) expands
-    /// exponentially with depth, and `recur_block` only stops true
-    /// recursion — not `f1` calling `f2` twice calling `f3` twice.
-    pub emitted_bytes: usize,
-    /// Set once the emitted-size budget is blown, so the error is raised
-    /// exactly once rather than at every subsequent write.
-    pub size_exceeded: bool,
-    /// The scope objects whose methods this shader calls, in the order it
-    /// first calls them: a method's name prefix is its object's place here
-    /// (`scope0_`, `scope1_`, …). The object's heap index would do for
-    /// uniqueness but changes whenever the module is evaluated again (a
-    /// style reload), which made the same shader's source text differ and
-    /// the GPU compile it again; the order of first use does not change.
     pub scope_prefixes: Vec<usize>,
 }
-
-/// Ceiling on total emitted shader source. Real shaders here run to tens of
-/// kilobytes (the largest built-in measured ~29 KB), so this is roughly 30x
-/// headroom while still catching exponential inlining long before it can
-/// exhaust memory or hang the compiler.
+impl std::ops::Deref for ShaderOutput {
+    type Target = makepad_shader::shader_output::ShaderOutput;
+    fn deref(&self) -> &Self::Target { &self.compiled }
+}
+impl std::ops::DerefMut for ShaderOutput {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.compiled }
+}
 pub const MAX_EMITTED_BYTES: usize = 1 << 20;
-
 impl ShaderOutput {
-    /// Unique local name for a loop guard, so nested `loop{}` bodies each get
-    /// their own counter instead of shadowing one another.
-    pub(crate) fn next_loop_guard(&mut self) -> String {
-        let n = self.loop_guard_counter;
-        self.loop_guard_counter += 1;
-        format!("_mp_loop_guard_{n}")
+    pub(crate) fn register_function(&mut self, object: ScriptObject) -> makepad_shader::shader_ids::ShaderFnId {
+        *self.function_ids.entry(object).or_insert_with(|| {
+            self.function_objects.push(object);
+            makepad_shader::shader_ids::ShaderFnId(self.function_objects.len() as u32)
+        })
+    }
+    /// Frontend provenance for a function reached by shader-pack recording.
+    /// Backend-synthesized entry functions have no VM object.
+    pub fn function_object(&self, id: makepad_shader::shader_ids::ShaderFnId) -> Option<ScriptObject> {
+        id.0.checked_sub(1).and_then(|index| self.function_objects.get(index as usize)).copied()
     }
 
-    /// Record a compile error so the backend can report it with the shader's
-    /// identity. Never silent: every `has_errors = true` must leave at least
-    /// one message here.
-    pub fn push_error(&mut self, msg: String) {
-        self.has_errors = true;
-        self.errors.push(msg);
+    pub fn new_for(backend: ShaderBackend, use_vulkan: bool, const_table: bool, pick: bool) -> Self {
+        Self { compiled: makepad_shader::shader_output::ShaderOutput { backend, use_vulkan, pick, ..Default::default() }, const_table, live_literals: crate::literal::live(), ..Default::default() }
     }
-
-    /// All collected error messages, one per line — what a backend logs when
-    /// it refuses to build the pipeline.
-    pub fn error_report(&self) -> String {
-        if self.errors.is_empty() {
-            // has_errors was set without a message — still say something.
-            "shader compile failed (no diagnostic captured; this is a compiler bug, please report)"
-                .to_string()
-        } else {
-            self.errors.join("\n")
-        }
+    pub fn type_name_into(&self, heap: &ScriptHeap, ty: ScriptPodType, out: &mut crate::vm_api::ScriptTextOut) {
+        let mut text = String::new();
+        self.compiled.backend.pod_type_name_from_ty(heap, ty.into(), &mut text);
+        out.push(&text);
     }
-}
-
-/// Mapping of uniform buffer type names to their assigned buffer indices
-#[derive(Default, Debug, Clone)]
-pub struct UniformBufferBindings {
-    /// Maps Pod type name (e.g. DrawCallUniforms) to buffer index
-    pub bindings: Vec<(LiveId, usize)>,
-    /// Buffer index for the IoScopeUniform struct (if any scope uniforms exist)
-    pub scope_uniform_buffer_index: Option<usize>,
-}
-
-impl UniformBufferBindings {
-    /// Look up buffer index by Pod type name
-    pub fn get_by_type_name(&self, type_name: LiveId) -> Option<usize> {
-        self.bindings
-            .iter()
-            .find(|(name, _)| *name == type_name)
-            .map(|(_, idx)| *idx)
-    }
-}
-
-#[derive(Debug)]
-pub struct ShaderFn {
-    /// Static worst-case loop iterations of one call, callees included.
-    pub cost: u64,
-    pub call_sig: String,
-    pub overload: usize,
-    pub name: LiveId,
-    pub args: Vec<ScriptPodType>,
-    pub fnobj: ScriptObject,
-    pub out: String,
-    pub ret: ScriptPodType,
-}
-
-impl ShaderOutput {
-    pub fn validate_vertex_fetch_io(
-        &mut self,
-        heap: &ScriptHeap,
-        kind: &ShaderIoKind,
-        name: LiveId,
-        ty: ScriptPodType,
-    ) {
-        let pod_ty = &heap.pod_type_ref(ty).ty;
-        let message = match kind {
-            ShaderIoKind::DynInstance | ShaderIoKind::RustInstance
-                if pod_ty.has_compact_format() =>
-            {
-                Some(format!(
-                    "compact vertex format in instance field `{name}` is unsupported; instance buffers are f32-backed"
-                ))
-            }
-            ShaderIoKind::VertexBuffer if !pod_ty.vertex_layout_supported() => {
-                Some(format!(
-                    "vertex format in `{name}` cannot contain nested structs, arrays, matrices, or non-float vectors"
-                ))
-            }
-            _ => None,
-        };
-        if let Some(message) = message {
-            if !self.errors.iter().any(|error| error == &message) {
-                self.push_error(message);
-            }
-        }
-    }
-
+    pub fn assign_uniform_buffers(&mut self, heap: &ScriptHeap, start_index: usize) -> usize { self.assign_uniform_buffer_indices(heap, start_index).1 }
+    pub fn set_mode(&mut self, mode: ShaderMode) { self.mode = mode; }
+    pub fn scope_uniforms(&self) -> &[ScopeUniformSource] { &self.scope_uniforms }
+    pub fn table_consts(&self) -> &[ShaderTableConst] { &self.table_consts }
+    pub fn folded_sites(&self) -> &[crate::literal::LiteralSite] { &self.folded_sites }
     fn validate_collected_vertex_fetch_io(&mut self, heap: &ScriptHeap) {
         let io: Vec<_> = self
             .io
@@ -419,24 +139,9 @@ impl ShaderOutput {
             self.validate_vertex_fetch_io(heap, &kind, name, ty);
         }
     }
-
-    pub fn next_rust_tmp_id(&mut self) -> usize {
-        let id = self.rust_tmp_counter;
-        self.rust_tmp_counter = self.rust_tmp_counter.wrapping_add(1);
-        id
-    }
-
-    /// Pre-collect ALL Rust instance fields in the correct order for struct layout.
-    /// Uses recursion to process from deepest prototype to io_self, collecting all rust type properties.
-    /// Dyn instance fields are NOT pre-collected - they are added during compilation
-    /// as encountered, and their order doesn't matter.
-    ///
-    /// IoInstance struct layout: Dyn fields first (any order), Rust fields last (must match Repr(C))
-    /// RustInstance fields are pushed in the correct order: deref parent fields first, then child fields.
     pub fn pre_collect_rust_instance_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
         self.pre_collect_rust_instance_io_recursive(vm, io_self);
     }
-
     fn pre_collect_rust_instance_io_recursive(&mut self, vm: &mut ScriptVm, obj: ScriptObject) {
         // First, recurse to prototype (to process deepest ancestor first)
         // This ensures parent's RustInstance fields come before child's fields
@@ -445,8 +150,7 @@ impl ShaderOutput {
         }
 
         // Then process this object's type properties
-        let obj_data = vm.bx.heap.object_data(obj);
-        let ty_index = obj_data.tag.as_type_index();
+        let ty_index = vm.bx.heap.obj_info(obj).tag.as_type_index();
 
         if let Some(ty_index) = ty_index {
             // Collect the ordered props - iter_rust_instance_ordered returns all instance fields
@@ -464,39 +168,31 @@ impl ShaderOutput {
                     .type_id_to_pod_type(type_id, &vm.bx.code.builtins.pod)
                 {
                     // Skip if already added (handles duplicate prototypes in chain)
-                    if !self.io.iter().any(|io| io.name == field_id) {
+                    if !self.compiled.io.iter().any(|io| io.name == field_id) {
                         vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
-                        self.io.push(ShaderIo {
+                        self.compiled.io.push(ShaderIo {
                             kind: ShaderIoKind::RustInstance,
                             name: field_id,
-                            ty: pod_ty,
-                            buffer_index: None,
+                            ty: pod_ty.into(),
+                            buffer_index: None, instance_lane: None,
                         });
                     }
                 }
             }
         }
     }
-
-    /// Pre-collect ALL shader IO (uniforms, textures, fragment outputs) in definition order.
-    /// Walks from deepest prototype to io_self, collecting all shader IO properties in a single pass.
-    /// This ensures IO appears in definition order, not access order during compilation.
-    ///
-    /// Note: RustInstance and DynInstance are handled separately - RustInstance via
-    /// pre_collect_rust_instance_io (from Rust type properties), DynInstance during compilation.
     pub fn pre_collect_shader_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
         // Use recursion to process from deepest prototype first (no temporary Vec needed)
         self.pre_collect_shader_io_recursive(vm, io_self);
 
         // Set pod type names for uniforms (requires mutable heap, done after iteration)
-        for io in &self.io {
+        for io in &self.compiled.io {
             if matches!(io.kind, ShaderIoKind::Uniform) {
-                vm.bx.heap.pod_type_name_if_not_set(io.ty, io.name);
+                vm.bx.heap.pod_type_name_if_not_set(io.ty.into(), io.name);
             }
         }
         self.validate_collected_vertex_fetch_io(&vm.bx.heap);
     }
-
     fn pre_collect_shader_io_recursive(&mut self, vm: &ScriptVm, obj: ScriptObject) {
         use crate::mod_shader::*;
 
@@ -506,14 +202,13 @@ impl ShaderOutput {
         }
 
         // Then process this object's map entries in insertion order
-        let obj_data = vm.bx.heap.object_data(obj);
-        obj_data.map_iter_ordered(|key, value| {
+        for ScriptMapEntry { key, value } in vm.bx.heap.map_entries_ordered(obj) {
             if let Some(value_obj) = value.as_object() {
                 if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
                     if let Some(field_id) = key.as_id() {
                         // Skip if already exists (derived class overrides)
-                        if self.io.iter().any(|io| io.name == field_id) {
-                            return;
+                        if self.compiled.io.iter().any(|io| io.name == field_id) {
+                            continue;
                         }
                         
                         // Get the pod type from the prototype
@@ -525,22 +220,22 @@ impl ShaderOutput {
                             // Uniforms
                             SHADER_IO_DYN_UNIFORM => {
                                 if let Some(pod_ty) = pod_ty {
-                                    self.io.push(ShaderIo {
+                                    self.compiled.io.push(ShaderIo {
                                         kind: ShaderIoKind::Uniform,
                                         name: field_id,
-                                        ty: pod_ty,
-                                        buffer_index: None,
+                                        ty: pod_ty.into(),
+                                        buffer_index: None, instance_lane: None,
                                     });
                                 }
                             }
 
                             SHADER_IO_UNIFORM_BUFFER => {
                                 if let Some(pod_ty) = pod_ty {
-                                    self.io.push(ShaderIo {
+                                    self.compiled.io.push(ShaderIo {
                                         kind: ShaderIoKind::UniformBuffer,
                                         name: field_id,
-                                        ty: pod_ty,
-                                        buffer_index: None,
+                                        ty: pod_ty.into(),
+                                        buffer_index: None, instance_lane: None,
                                     });
                                 }
                             }
@@ -550,33 +245,33 @@ impl ShaderOutput {
                                     && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 => {
                                 let index = (io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0) as u8;
                                 // Check by index, not name
-                                let already_exists = self.io.iter().any(|io| {
+                                let already_exists = self.compiled.io.iter().any(|io| {
                                     matches!(io.kind, ShaderIoKind::FragmentOutput(idx) if idx == index)
                                 });
                                 if !already_exists {
                                     if let Some(pod_ty) = pod_ty {
-                                        self.io.push(ShaderIo {
+                                        self.compiled.io.push(ShaderIo {
                                             kind: ShaderIoKind::FragmentOutput(index),
                                             name: field_id,
-                                            ty: pod_ty,
-                                            buffer_index: None,
+                                            ty: pod_ty.into(),
+                                            buffer_index: None, instance_lane: None,
                                         });
                                     }
                                 }
                             }
                             
                             // Textures
-                            SHADER_IO_TEXTURE_1D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_1D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_2D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_2D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_3D => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3d), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_3D_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3dArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_CUBE => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCube), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_CUBE_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCubeArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_DEPTH => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepth), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_DEPTH_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepthArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            SHADER_IO_TEXTURE_VIDEO => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureVideo), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+                            SHADER_IO_TEXTURE_1D => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1d), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_1D_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1dArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_2D => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2d), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_2D_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture2dArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_3D => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3d), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_3D_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture3dArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_CUBE => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCube), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_CUBE_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCubeArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_DEPTH => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepth), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_DEPTH_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepthArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
+                            SHADER_IO_TEXTURE_VIDEO => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureVideo), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
 
                             // Other IO types are handled during compilation or elsewhere
                             _ => {}
@@ -584,9 +279,8 @@ impl ShaderOutput {
                     }
                 }
             }
-        });
+        }
     }
-
     pub(crate) fn get_pod_type_from_value(
         vm: &ScriptVm,
         value: ScriptValue,
@@ -614,127 +308,6 @@ impl ShaderOutput {
         }
         None
     }
-
-    /// The instance record as the draw list writes it (`DrawShaderInputs`
-    /// with attribute packing): dyn instance fields, then Rust instance
-    /// fields, 32-bit words back to back, an integer vector on a 4-word
-    /// boundary with the words after it padded to the next one. Each entry is
-    /// (index into `self.io`, word offset); the second value is the stride in
-    /// words. Every emitter that reads instance records from a buffer
-    /// addresses them by these offsets.
-    pub fn instance_record(&self, vm: &ScriptVm) -> (Vec<(usize, usize)>, usize) {
-        let mut fields = Vec::new();
-        let mut at = 0usize;
-        for rust in [false, true] {
-            for (index, io) in self.io.iter().enumerate() {
-                let wanted = match io.kind {
-                    ShaderIoKind::DynInstance => !rust,
-                    ShaderIoKind::RustInstance => rust,
-                    _ => false,
-                };
-                if !wanted {
-                    continue;
-                }
-                let ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
-                let slots = ty.slots();
-                let int_lanes = slots > 1 && Self::is_integer_word(ty);
-                if int_lanes {
-                    at = at.next_multiple_of(4);
-                }
-                fields.push((index, at));
-                at += slots;
-                if int_lanes {
-                    at = at.next_multiple_of(4);
-                }
-            }
-        }
-        (fields, at)
-    }
-
-    /// Integer scalars and vectors: their words are read as integers.
-    pub fn is_integer_word(ty: &ScriptPodTy) -> bool {
-        match ty {
-            ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool | ScriptPodTy::AtomicU32 | ScriptPodTy::AtomicI32 => true,
-            ScriptPodTy::Vec(v) => !matches!(
-                v,
-                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f | ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h
-            ),
-            _ => false,
-        }
-    }
-
-    pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
-        let mut plain_structs = self.structs.clone();
-        let mut raw_logical_structs = BTreeSet::new();
-        let mut packed_only_structs = BTreeSet::new();
-
-        for io in &self.io {
-            let ty = io.ty;
-            if !matches!(vm.bx.heap.pod_type_ref(ty).ty, ScriptPodTy::Struct { .. }) {
-                continue;
-            }
-
-            if matches!(self.backend, ShaderBackend::Metal) {
-                // Instance records are decoded word by word into the
-                // logical struct (`_mp_decode_instance`).
-                match io.kind {
-                    ShaderIoKind::UniformBuffer => {
-                        packed_only_structs.insert(ty);
-                    }
-                    ShaderIoKind::VertexBuffer => {
-                        raw_logical_structs.insert(ty);
-                    }
-                    _ => {
-                        plain_structs.insert(ty);
-                    }
-                }
-            } else {
-                plain_structs.insert(ty);
-            }
-        }
-
-        // Metal fetches packed bytes into `*Raw` structs, then decodes into
-        // distinct logical structs used by shader expressions.
-        plain_structs.extend(raw_logical_structs.iter().copied());
-        packed_only_structs.retain(|ty| !raw_logical_structs.contains(ty));
-        for ty in &packed_only_structs {
-            plain_structs.remove(ty);
-        }
-
-        self.structs.extend(plain_structs.iter().copied());
-        self.structs.extend(raw_logical_structs.iter().copied());
-        self.structs.extend(packed_only_structs.iter().copied());
-
-        if matches!(self.backend, ShaderBackend::Metal) {
-            self.backend
-                .pod_struct_defs_packed(&vm.bx.heap, &packed_only_structs, out);
-            self.backend
-                .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &raw_logical_structs, out);
-        } else {
-            self.backend
-                .pod_struct_defs(&vm.bx.heap, &self.structs, out);
-        }
-    }
-
-    pub fn create_functions(&self, out: &mut String) {
-        for fns in &self.functions {
-            writeln!(out, "{}{{", fns.call_sig).ok();
-            if matches!(self.backend, ShaderBackend::Hlsl) {
-                if fns.call_sig.contains("inout IoV _iov") {
-                    // DXC requires explicit definite assignment for inout params.
-                    writeln!(out, "    _iov = _iov;").ok();
-                }
-                if fns.call_sig.contains("inout IoF _iof") {
-                    // DXC requires explicit definite assignment for inout params.
-                    writeln!(out, "    _iof = _iof;").ok();
-                }
-            }
-            writeln!(out, "{}", fns.out).ok();
-            writeln!(out, "}}\n").ok();
-        }
-    }
-
-    /// Find the vertex buffer object from io_self by looking for SHADER_IO_VERTEX_BUFFER type
     pub fn find_vertex_buffer_object(
         &self,
         vm: &ScriptVm,
@@ -745,10 +318,8 @@ impl ShaderOutput {
         // Walk the prototype chain looking for vertex buffer properties
         let mut current = Some(io_self);
         while let Some(obj) = current {
-            let obj_data = vm.bx.heap.object_data(obj);
-
             // Check map properties
-            if let Some(ret) = obj_data.map_iter_ret(|_key, value| {
+            for ScriptMapEntry { value, .. } in vm.bx.heap.map_entries(obj) {
                 if let Some(value_obj) = value.as_object() {
                     if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
                         if io_type == SHADER_IO_VERTEX_BUFFER {
@@ -756,9 +327,6 @@ impl ShaderOutput {
                         }
                     }
                 }
-                None
-            }) {
-                return Some(ret);
             }
 
             // Move to next prototype
@@ -766,119 +334,64 @@ impl ShaderOutput {
         }
         None
     }
-
-    /// Assign buffer indices to uniform buffers starting from `start_index`.
-    /// Returns the UniformBufferBindings and the next available buffer index.
-    /// Also sets the buffer_index field on each ShaderIo.
-    pub fn assign_uniform_buffer_indices(
-        &mut self,
-        heap: &ScriptHeap,
-        start_index: usize,
-    ) -> (UniformBufferBindings, usize) {
-        let mut bindings = UniformBufferBindings::default();
-        let mut buf_idx = start_index;
-
-        for io in &mut self.io {
-            if let ShaderIoKind::UniformBuffer = io.kind {
-                // Get the Pod type name for this uniform buffer
-                let pod_type = heap.pod_type_ref(io.ty);
-                if let Some(type_name) = pod_type.name {
-                    bindings.bindings.push((type_name, buf_idx));
-                }
-                io.buffer_index = Some(buf_idx);
-                buf_idx += 1;
-            }
+}
+impl ScopeUniformSource {
+    pub fn source_obj(&self) -> ScriptObject { self.source_obj }
+    pub fn key(&self) -> LiveId { self.key }
+    pub fn shader_name(&self) -> LiveId { self.shader_name }
+    pub fn ty(&self) -> ScriptPodType { self.ty }
+    pub fn table_const(&self) -> Option<usize> { self.table_const }
+}
+/// What a table constant reads as (ShaderTableConst::view); the colour is meaningful when `has_color`.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ShaderTableConstView<'a> {
+    pub shader_name: LiveId,
+    pub value: f64,
+    pub ip: ScriptIp,
+    pub color: [f32; 4],
+    pub has_color: bool,
+    pub negated: bool,
+    pub doc: &'a str,
+    pub site: *const crate::literal::LiteralSite,
+    pub _view: std::marker::PhantomData<&'a ()>,
+}
+#[relax_api(marked)]
+impl ShaderTableConst {
+    #[relax_api]
+    pub fn view(&self) -> ShaderTableConstView<'_> {
+        ShaderTableConstView {
+            shader_name: self.shader_name,
+            value: self.value,
+            ip: self.ip,
+            color: self.color.unwrap_or([0.0; 4]),
+            has_color: self.color.is_some(),
+            negated: self.negated,
+            doc: &self.doc,
+            site: self.site.as_ref().map_or(std::ptr::null(), |s| s as *const _),
+            _view: std::marker::PhantomData,
         }
-
-        // Assign scope uniform buffer index if we have any scope uniforms
-        let has_scope_uniforms = self
-            .io
-            .iter()
-            .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
-        if has_scope_uniforms {
-            bindings.scope_uniform_buffer_index = Some(buf_idx);
-            buf_idx += 1;
-        }
-
-        (bindings, buf_idx)
     }
-
-    /// Get the UniformBufferBindings from the current IO state.
-    /// This should be called after `assign_uniform_buffer_indices` has been called.
-    pub fn get_uniform_buffer_bindings(&self, heap: &ScriptHeap) -> UniformBufferBindings {
-        let mut bindings = UniformBufferBindings::default();
-
-        for io in &self.io {
-            if let ShaderIoKind::UniformBuffer = io.kind {
-                if let Some(buf_idx) = io.buffer_index {
-                    let pod_type = heap.pod_type_ref(io.ty);
-                    if let Some(type_name) = pod_type.name {
-                        bindings.bindings.push((type_name, buf_idx));
-                    }
-                }
-            }
-        }
-
-        // Compute scope uniform buffer index (one past the max uniform buffer index, or start at 3)
-        let has_scope_uniforms = self
-            .io
-            .iter()
-            .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
-        if has_scope_uniforms {
-            let max_idx = self
-                .io
-                .iter()
-                .filter_map(|io| io.buffer_index)
-                .max()
-                .map(|m| m + 1)
-                .unwrap_or(3);
-            bindings.scope_uniform_buffer_index = Some(max_idx);
-        }
-
-        bindings
+    #[inline]
+    pub fn shader_name(&self) -> LiveId { self.view().shader_name }
+    #[inline]
+    pub fn value(&self) -> f64 { self.view().value }
+    #[inline]
+    pub fn ip(&self) -> ScriptIp { self.view().ip }
+    #[inline]
+    pub fn color(&self) -> Option<[f32; 4]> { let v = self.view(); v.has_color.then_some(v.color) }
+    #[inline]
+    pub fn negated(&self) -> bool { self.view().negated }
+    #[inline]
+    pub fn doc(&self) -> &str { self.view().doc }
+    #[inline]
+    pub fn site(&self) -> Option<&crate::literal::LiteralSite> {
+        // SAFETY: the pointer is the table constant's own site, borrowed from `self`
+        unsafe { self.view().site.as_ref() }
     }
-
-    /// A 2D texture's sample as emitted: itself, or with pick variants
-    /// ([`Self::pick`]) through `_MP_PS(bit, twin, sample, coord)` (`bit`
-    /// the texture's index among the shader's textures, `twin` its pick
-    /// twin in `Io`). Only a texture of the shader's own (`_io.t_name`) has
-    /// a twin.
-    pub fn pick_sample(&self, texture_expr: &str, tex_type: TextureType, sample: String, coord: &str) -> String {
-        if !self.pick || !matches!(self.backend, ShaderBackend::Metal) || !matches!(tex_type, TextureType::Texture2d) {
-            return sample;
-        }
-        let Some(name) = texture_expr.strip_prefix("_io.t_") else { return sample };
-        let textures = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)));
-        let Some(bit) = textures.map(|io| io.name.to_string()).position(|n| n == name) else { return sample };
-        if bit >= 32 {
-            return sample;
-        }
-        format!("_MP_PS({bit}u, {name}__pick, {sample}, {coord})")
-    }
-
-    /// Get or create a sampler with the given properties, returns the sampler index
-    pub fn get_or_create_sampler(&mut self, sampler: ShaderSampler) -> usize {
-        // Check if we already have this sampler
-        if let Some(idx) = self.samplers.iter().position(|s| *s == sampler) {
-            return idx;
-        }
-        // Create new sampler
-        let idx = self.samplers.len();
-        self.samplers.push(sampler);
-        idx
-    }
-
-    /// Record sampler usage for a texture expression.
-    /// If the same texture is sampled multiple times, the first sampler wins.
-    pub fn bind_texture_sampler(&mut self, texture_expr: &str, sampler_idx: usize) {
-        if self
-            .texture_sampler_bindings
-            .iter()
-            .any(|(expr, _)| expr == texture_expr)
-        {
-            return;
-        }
-        self.texture_sampler_bindings
-            .push((texture_expr.to_string(), sampler_idx));
+}
+impl ShaderTableConst {
+    pub fn new(shader_name: LiveId, doc: &str, value: f64) -> Self {
+        Self { shader_name, doc: doc.to_owned(), value, ip: ScriptIp::default(), site: None, color: None, negated: false }
     }
 }

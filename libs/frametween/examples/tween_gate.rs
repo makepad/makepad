@@ -86,6 +86,8 @@ pub struct App {
     failures: usize,
     #[rust]
     reported: usize,
+    #[rust]
+    readback: Option<ReadbackTicket>,
 }
 
 impl App {
@@ -223,18 +225,41 @@ impl App {
         true
     }
 
-    fn read(&mut self, cx: &mut Cx, mode: Mode) {
-        let tex = self.view(cx, |_cx, view| view.output_texture()).flatten();
-        let Some(tex) = tex else {
-            log!("FAIL {:<10} the warp never rendered", mode.label());
-            self.failures += 1;
-            return;
+    fn read(&mut self, cx: &mut Cx, mode: Mode) -> bool {
+        let ticket = match self.readback {
+            Some(ticket) => ticket,
+            None => {
+                let tex = self.view(cx, |_cx, view| view.output_texture()).flatten();
+                let Some(tex) = tex else {
+                    log!("FAIL {:<10} the warp never rendered", mode.label());
+                    self.failures += 1;
+                    self.reported += 1;
+                    return true;
+                };
+                match tex.read_back(cx, ReadbackRequest::default()) {
+                    Ok(ticket) => { self.readback = Some(ticket); ticket }
+                    Err(error) => {
+                        log!("FAIL {:<10} render target readback: {error}", mode.label());
+                        self.failures += 1;
+                        self.reported += 1;
+                        return true;
+                    }
+                }
+            }
         };
-        let Some((w, h, bgra)) = cx.debug_read_render_texture(&tex) else {
-            log!("FAIL {:<10} render target readback failed", mode.label());
-            self.failures += 1;
-            return;
+        let Some(result) = cx.try_take_texture_readbacks_for(&[ticket]).pop() else { return false };
+        self.readback = None;
+        let (w, h) = (result.width, result.height);
+        let mut bgra = match result.data {
+            Ok(bytes) => bytes.to_vec(),
+            Err(error) => {
+                log!("FAIL {:<10} render target readback: {error}", mode.label());
+                self.failures += 1;
+                self.reported += 1;
+                return true;
+            }
         };
+        for px in bgra.chunks_exact_mut(4) { px.swap(0, 2); }
         if let Some(dir) = std::env::var_os("FRAMETWEEN_GATE_PNG") {
             let mut rgba = vec![255u8; bgra.len()];
             for (o, px) in rgba.chunks_exact_mut(4).zip(bgra.chunks_exact(4)) {
@@ -256,6 +281,7 @@ impl App {
             }
         }
         self.reported += 1;
+        true
     }
 
     fn step(&mut self, cx: &mut Cx) {
@@ -311,10 +337,11 @@ impl App {
                 };
             }
             Stage::Read => {
-                self.read(cx, mode);
-                self.which += 1;
-                self.offered = false;
-                self.stage = Stage::Feed;
+                if self.read(cx, mode) {
+                    self.which += 1;
+                    self.offered = false;
+                    self.stage = Stage::Feed;
+                }
             }
         }
         self.pump = cx.new_next_frame();

@@ -1,0 +1,4 @@
+out original old 12
+out default false
+out cloned old 12 true
+out independent old true old-clone false

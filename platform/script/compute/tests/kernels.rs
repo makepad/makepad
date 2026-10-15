@@ -1,7 +1,10 @@
 //! Kernel smoke tests: compile, run natively and interpreted (bit-equal),
 //! parallel = serial, reduce, emit, layouts, errors.
 
-use makepad_script_compute::kernel::{compile, compile_with, compact, FieldTy, Layout, LayoutField};
+use makepad_script_compute_sched::kernel::KernelExt;
+use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::{compile, compile_with, FieldTy};
+use makepad_script_compute_sched::kernel::{compact};
 use makepad_script_compute::Backend;
 
 fn bits(v: &[f32]) -> Vec<u32> {
@@ -80,17 +83,14 @@ fn reduce_emit_and_layouts() {
     assert_eq!(&flat[..6], &[1.0, 0.0, 2.0, 0.0, 2.0, 1.0]);
 
     // A host layout (a GPU instance struct): fields by name at offsets.
-    let layout = Layout {
-        name: "Inst".into(),
-        stride: 8,
-        fields: vec![
-            LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 },
-            LayoutField { name: "phase".into(), ty: FieldTy::F32, offset: 4 },
-            LayoutField { name: "id".into(), ty: FieldTy::I32, offset: 5 },
-        ],
-    };
+    const INST_FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "phase", ty: FieldTy::F32, offset: 4 },
+        LayoutFieldView { name: "id", ty: FieldTy::I32, offset: 5 },
+    ];
+    let layout = LayoutView { name: "Inst", stride: 8, fields: INST_FIELDS };
     let src = "let inst = output(Inst)\nfn instance(i) { inst[i].pos = vec3(float(i), 1.0, 2.0)\n inst[i].phase = 0.5\n inst[i].id = i * 2 }";
-    let k = compile_with(src, &[layout.clone()], Backend::Native).unwrap();
+    let k = compile_with(src, &[layout], Backend::Native).unwrap();
     let mut out = vec![0.0f32; 8 * 3];
     let mut c = k.call();
     c.output("inst", &mut out).unwrap();
@@ -138,4 +138,22 @@ fn a_run_time_loop_past_its_cap_is_reported_not_cut_silently() {
             }
         }
     }
+}
+
+/// An app's record table is registered once; a kernel compiled with a
+/// different table under the same name fails with a mismatch error.
+#[test]
+fn a_layout_that_drifted_from_its_registered_table_is_an_error() {
+    use makepad_script_compute::boundary::register_layout;
+    const GOOD: &[LayoutFieldView<'static>] = &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "size", ty: FieldTy::F32, offset: 3 }];
+    const DRIFTED: &[LayoutFieldView<'static>] = &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "size", ty: FieldTy::F32, offset: 4 }];
+    let good = LayoutView { name: "DriftProbe", stride: 8, fields: GOOD };
+    let drifted = LayoutView { name: "DriftProbe", stride: 8, fields: DRIFTED };
+    assert!(register_layout(&good));
+    assert!(register_layout(&good), "registering the same table again is fine");
+    assert!(!register_layout(&drifted), "a second, different table under the name is refused");
+    let src = "let out = output(DriftProbe)\nfn element(i) { out[i].size = 1.0 }";
+    assert!(compile_with(src, &[good], Backend::Native).is_ok());
+    let errors = compile_with(src, &[drifted], Backend::Native).err().expect("the drifted table must not compile");
+    assert!(errors.iter().any(|e| e.message.contains("`DriftProbe` is not the registered one")), "{:?}", errors);
 }

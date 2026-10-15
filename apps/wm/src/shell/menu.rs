@@ -66,6 +66,8 @@ pub struct MenuItem {
     pub kind: MenuKind,
     /// Appends " ✓" to the label.
     pub checked: bool,
+    /// A divider line is drawn above this row when browsing.
+    pub divider: bool,
     /// Drawn at α .4, skipped by the cursor, ignores clicks.
     pub disabled: bool,
     pub description: String,
@@ -80,6 +82,7 @@ impl MenuItem {
             icon: None,
             kind,
             checked: false,
+            divider: false,
             disabled: false,
             description: String::new(),
             aliases: Vec::new(),
@@ -87,6 +90,10 @@ impl MenuItem {
     }
     fn icon(mut self, ico: Ico) -> Self {
         self.icon = Some(ico);
+        self
+    }
+    fn divided(mut self) -> Self {
+        self.divider = true;
         self
     }
     fn aliases(mut self, a: &[&str]) -> Self {
@@ -190,6 +197,8 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
         ("hyprland", "Hyprland"),
         ("screensaver", "Screensaver"),
         ("about", "About"),
+        ("vr", "VR Mode"),
+        ("vr-recenter", "VR Recenter"),
     ] {
         child("style", leaf, label, MenuKind::Action);
     }
@@ -298,6 +307,20 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
             &["bar", "top bar"],
             "Show or hide the top bar",
         ),
+        (
+            "style.vr",
+            MenuKind::Action,
+            Some(Ico::Monitor),
+            &["vr", "3d", "headset", "stereo"],
+            "Windows as panels in 3D (SUPER+ALT+V)",
+        ),
+        (
+            "style.vr-recenter",
+            MenuKind::Action,
+            Some(Ico::Monitor),
+            &["recenter"],
+            "VR: look straight ahead again (SUPER+ALT+Home)",
+        ),
         ("apps", MenuKind::Menu, Some(Ico::Menu), &[], ""),
     ];
     for (id, kind, ico, aliases, desc) in live {
@@ -322,6 +345,8 @@ pub fn omarchy_tree() -> Vec<MenuItem> {
         "style.theme",
         "style.background",
         "style.bar",
+        "style.vr",
+        "style.vr-recenter",
         "system",
     ];
     for item in v.iter_mut() {
@@ -429,6 +454,22 @@ pub struct MenuModel {
     /// What the `apps` provider may list (apps.rs); the host sets it from
     /// its registry at startup.
     pub launchable: crate::apps::Launchable,
+    /// The apps the dock had no room for, listed under the `dock` path as
+    /// `dock.<app>` rows.
+    dock_rest: Vec<MenuItem>,
+    /// Whether the dock hides itself (the Theme menu's check row).
+    pub dock_autohide: bool,
+    /// Warp shelves on (the Warp desktop) or off (Classic).
+    pub warp_shelves: bool,
+    /// Which shelves (left, right) auto-hide.
+    pub shelf_autohide: [bool; 2],
+    /// Touchpad scrolling moves the content with the fingers (the Theme
+    /// menu's check row).
+    pub natural_scroll: bool,
+    pub tap_to_click: bool,
+    /// `Some(dark)` when the current style has a dark variant: the Theme
+    /// menu then offers the appearance row.
+    pub dark_choice: Option<bool>,
 }
 
 impl Default for MenuModel {
@@ -445,6 +486,13 @@ impl Default for MenuModel {
             items: Vec::new(),
             frozen_top: None,
             launchable: Default::default(),
+            dock_rest: Vec::new(),
+            dock_autohide: false,
+            natural_scroll: true,
+            tap_to_click: false,
+            warp_shelves: true,
+            shelf_autohide: [false; 2],
+            dark_choice: None,
         }
     }
 }
@@ -483,7 +531,7 @@ impl MenuModel {
             ] {items.push(MenuItem::new(id,label,kind).icon(icon));}
         }
         items.extend(launcher::apps(launchable));
-        items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
+        items.push(MenuItem::new("desktop","Theme",MenuKind::Menu));
         // One row per sheet of the catalogue. Dark or light is the appearance toggle's to
         // say, not a second row here, and the black-orange theme is not
         // offered from this menu.
@@ -500,6 +548,64 @@ impl MenuModel {
         items
     }
 
+    /// The menu tree plus, under `dock`, the apps the dock had no room for.
+    fn items_for(&self, path: &str) -> Vec<MenuItem> {
+        let mut items = Self::all_items(path, &self.launchable);
+        if path.starts_with("desktop") {
+            if let Some(dark) = self.dark_choice {
+                let mut row = MenuItem::new("desktop.appearance", "Dark mode", MenuKind::Action);
+                row.checked = dark;
+                items.push(row);
+            }
+            let mut row = MenuItem::new("desktop.autohide-dock", "Auto-hide dock", MenuKind::Action).divided();
+            row.checked = self.dock_autohide;
+            items.push(row);
+            for (id, label) in [
+                ("desktop.window-maximise", "Maximise window"),
+                ("desktop.window-fullscreen", "Fullscreen window"),
+                ("desktop.window-restore", "Restore window"),
+            ] {
+                let row = MenuItem::new(id, label, MenuKind::Action);
+                items.push(if id == "desktop.window-maximise" { row.divided() } else { row });
+            }
+            for (id, label, on) in [
+                ("desktop.warp-shelves", "Warp shelves", self.warp_shelves),
+                ("desktop.autohide-left-shelf", "Hide left shelf", self.shelf_autohide[0]),
+                ("desktop.autohide-right-shelf", "Hide right shelf", self.shelf_autohide[1]),
+            ] {
+                let mut row = MenuItem::new(id, label, MenuKind::Action);
+                row.checked = on;
+                items.push(row);
+            }
+            // The direct backend reads the touchpad itself; elsewhere the OS owns the choice.
+            if cfg!(target_os = "linux") {
+                let mut row = MenuItem::new("desktop.natural-scroll", "Natural scrolling", MenuKind::Action).divided();
+                row.checked = self.natural_scroll;
+                items.push(row);
+                let mut row = MenuItem::new("desktop.tap-to-click", "Tap to click", MenuKind::Action);
+                row.checked = self.tap_to_click;
+                items.push(row);
+            }
+        }
+        if path.starts_with("dock") {
+            items.push(MenuItem::new("dock", "More apps", MenuKind::Menu));
+            items.extend(self.dock_rest.iter().cloned());
+        }
+        items
+    }
+
+    /// Opens the list of the apps the dock had no room for (`apps.<id>` items).
+    pub fn open_dock_rest(&mut self, rest: Vec<MenuItem>) {
+        self.dock_rest = rest
+            .into_iter()
+            .map(|mut item| {
+                item.id = format!("dock.{}", item.id.trim_start_matches("apps."));
+                item
+            })
+            .collect();
+        self.open_at("dock", MenuSkin::Launcher);
+    }
+
     pub fn open_at(&mut self, path: &str, skin: MenuSkin) {
         self.open = true;
         self.skin = skin;
@@ -509,7 +615,7 @@ impl MenuModel {
         self.sel = 0;
         self.scroll = 0;
         self.frozen_top = None;
-        self.items = Self::all_items(path, &self.launchable);
+        self.items = self.items_for(path);
         self.rebuild();
     }
 
@@ -527,7 +633,7 @@ impl MenuModel {
         self.filter.clear();
         self.sel = 0;
         self.scroll = 0;
-        self.items = Self::all_items(&self.path, &self.launchable);
+        self.items = self.items_for(&self.path);
         self.rebuild();
     }
 
@@ -536,7 +642,7 @@ impl MenuModel {
         if let Some((path, sel)) = self.stack.pop() {
             self.path = path;
             self.filter.clear();
-            self.items = Self::all_items(&self.path, &self.launchable);
+            self.items = self.items_for(&self.path);
             self.rebuild();
             self.sel = sel.min(self.rows.len().saturating_sub(1));
             return true;
@@ -551,7 +657,7 @@ impl MenuModel {
         self.path = parent;
         self.filter.clear();
         self.sel = 0;
-        self.items = Self::all_items(&self.path, &self.launchable);
+        self.items = self.items_for(&self.path);
         self.rebuild();
         true
     }
@@ -601,7 +707,7 @@ impl MenuModel {
         if needle.is_empty() {
             // Browse: direct children, in declared order.
             for item in items.iter().filter(|i| i.parent() == path) {
-                rows.push(self.row_for(item, String::new(), false));
+                rows.push(self.row_for(item, String::new(), item.divider));
             }
         } else {
             // Live search over the open submenu's SUBTREE, scored.
@@ -1024,6 +1130,15 @@ impl ShellMenu {
         skin
     }
 
+    pub fn open_dock_rest(&mut self, cx: &mut Cx, rest: Vec<MenuItem>) {
+        self.anchor = None;
+        self.touch_press = None;
+        self.model.open_dock_rest(rest);
+        self.next = nextstep::NextMenus::default();
+        self.gate.reset();
+        self.redraw(cx);
+    }
+
     pub fn open_at(&mut self, cx: &mut Cx, path: &str, skin: MenuSkin) {
         self.anchor = None;
         self.touch_press = None;
@@ -1245,9 +1360,10 @@ impl ShellMenu {
             // the user wants one label column, so an icon-less row keeps an
             // EMPTY icon slot and every label starts at the same x.
             let label_x = ICON_MARGIN + ICON_COLUMN + ICON_GAP;
-            if let Some(name) = row.target.strip_prefix("apps.") {
+            if let Some(name) = row.target.strip_prefix("apps.").or_else(|| row.target.strip_prefix("dock.")) {
                 let size = if self.desktop_style == DesktopStyle::Windows2000 {16.0}else{24.0};
-                self.app_icons.draw(cx,name,self.desktop_style,rect(row_rect.pos.x+ICON_MARGIN+(ICON_COLUMN-size)*0.5,y+(rh-size)*0.5,size,size),dim as f32,text_color);
+                let icon_rect=rect(row_rect.pos.x+ICON_MARGIN+(ICON_COLUMN-size)*0.5,y+(rh-size)*0.5,size,size);
+                if !crate::wayland_view::draw_foreign_icon(cx,name,icon_rect,dim as f32) {self.app_icons.draw(cx,name,self.desktop_style,icon_rect,dim as f32,text_color);}
             } else if let Some(ico) = row.icon {
                 self.d.icon_centered(cx,ico,rect(row_rect.pos.x+ICON_MARGIN,y,ICON_COLUMN,rh),tok.font.icon_large,text_color);
             }
@@ -1621,6 +1737,20 @@ mod tests {
         assert_eq!(m.rows[9].label, "System");
         // Submenu rows carry the chevron.
         assert!(m.rows[0].has_children);
+    }
+
+    #[test]
+    fn the_dock_rest_lists_only_the_apps_the_dock_had_no_room_for() {
+        let mut m = MenuModel::default();
+        let rest = vec![
+            MenuItem::new("apps.clock", "Clock", MenuKind::App),
+            MenuItem::new("apps.files", "Files", MenuKind::App),
+        ];
+        m.open_dock_rest(rest);
+        assert!(m.open);
+        let rows: Vec<_> = m.rows.iter().map(|r| (r.label.as_str(), r.target.as_str())).collect();
+        assert_eq!(rows, vec![("Clock", "dock.clock"), ("Files", "dock.files")]);
+        assert_eq!(m.header().0, "More apps\u{2026}");
     }
 
     #[test]

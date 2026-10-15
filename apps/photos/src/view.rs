@@ -18,6 +18,7 @@
 
 pub mod tile;
 
+use crate::camera_roll::{self, RollWatch};
 use crate::library;
 use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
@@ -147,12 +148,12 @@ script_mod! {
             empty_icon := AppIcon{name: "photos" width: 40 height: 40}
             empty_title := Label{
                 padding: 0
-                text: "No photo library"
+                text: "No photos yet"
                 draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 12.0}}
             }
             empty_body := Label{
                 padding: 0
-                text: "Add photos to your library to see them here."
+                text: "Shots you take with Camera show up here."
                 draw_text +: {color: theme.color_text_meta text_style: theme.font_regular{font_size: 9.0}}
             }
         }
@@ -219,6 +220,26 @@ pub struct PhotosView {
     transition: Option<HostedTransition>,
     #[rust]
     last_rect: Rect,
+    /// The camera roll: what the wall has seen of it, the once-a-second
+    /// look, the shots waiting for the bake in flight, and that bake.
+    #[rust]
+    roll: RollWatch,
+    #[rust]
+    roll_timer: Timer,
+    #[rust]
+    roll_waiting: Vec<std::path::PathBuf>,
+    #[rust]
+    roll_import: Option<RollImport>,
+}
+
+/// Camera shots being baked into the wall: the library they go into and
+/// the newest of them (the wall glides onto it when the bake reports).
+pub struct RollImport {
+    root: std::path::PathBuf,
+    newest: Option<String>,
+    shots: Vec<std::path::PathBuf>,
+    /// The bake's summary and the last picture error it logged.
+    done: TaskHandle<Result<(makepad_image_tiles::bake::BakeSummary, Option<String>), String>>,
 }
 
 /// One `photos.add` in flight: the blocking tape bake is a heavy pool job.
@@ -370,9 +391,127 @@ impl PhotosView {
         }
         match library::find(self.collection.as_deref()) {
             Some(lib) => self.open_library(cx, lib),
-            None => self.set_status(cx, library::how_to_bake()),
+            None => self.set_status(cx, library::nothing_yet()),
         }
         self.applied = None;
+        // The camera roll: what is there now, then a look once a second.
+        self.roll_timer = cx.start_interval(1.0);
+        self.look_at_roll(cx);
+    }
+
+    /// New shots in the camera roll go into the bake queue; a bake starts
+    /// when none runs.
+    fn look_at_roll(&mut self, cx: &mut Cx) {
+        let shots = self.roll.new_shots(&camera_roll::roll_dir());
+        if !shots.is_empty() {
+            log!("photos: {} new shot(s) in the camera roll", shots.len());
+            self.roll_waiting.extend(shots);
+        }
+        self.start_roll_import(cx);
+    }
+
+    /// Bake the waiting shots into the open library, or — with none open —
+    /// into the home's own default collection, which then opens.
+    fn start_roll_import(&mut self, cx: &mut Cx) {
+        if self.roll_import.is_some() || self.roll_waiting.is_empty() {
+            return;
+        }
+        let root = if self.library_root.is_empty() {
+            library::home_root().join(library::DEFAULT_COLLECTION)
+        } else {
+            std::path::PathBuf::from(&self.library_root)
+        };
+        let shots = std::mem::take(&mut self.roll_waiting);
+        let newest = shots.last().map(|p| p.to_string_lossy().to_string());
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (cx, root, newest, shots);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use makepad_image_tiles::bake::{bake, BakeOptions};
+            let sources = camera_roll::sources(&shots);
+            let pool = cx.task_pool();
+            let bake_pool = pool.clone();
+            let bake_root = root.clone();
+            // The home's own collection holds the person's shots only: a shot
+            // that failed before (a phone without a frame codec yet) is tried
+            // again. A library someone baked from the web keeps its failures.
+            let retry_failed = root == library::home_root().join(library::DEFAULT_COLLECTION);
+            let job = pool.submit(Lane::Heavy, move || {
+                let options = BakeOptions { fetch_threads: 2, encode_threads: 2, retry_failed };
+                let mut last_error = None;
+                let summary = bake(
+                    &bake_root,
+                    &sources,
+                    &options,
+                    &mut |line| {
+                        log!("photos camera roll: {line}");
+                        // A picture's error is an indented line under the count.
+                        if let Some(e) = line.lines().filter_map(|l| l.strip_prefix("  ")).last() {
+                            last_error = Some(e.to_string());
+                        }
+                    },
+                    &bake_pool,
+                )?;
+                Ok((summary, last_error))
+            });
+            match job {
+                Ok(done) => {
+                    if self.library_root.is_empty() {
+                        self.set_status(cx, "Putting your camera shots on the wall…".to_string());
+                    }
+                    self.roll_import = Some(RollImport { root, newest, shots, done });
+                }
+                Err(e) => {
+                    log!("photos: could not queue the camera roll bake: {e}");
+                    self.roll.unsee(&shots);
+                }
+            }
+        }
+    }
+
+    /// A finished camera-roll bake: the wall re-opens with the shots and
+    /// glides onto the newest; the next waiting shots start baking.
+    fn poll_roll_import(&mut self, cx: &mut Cx) {
+        let Some(import) = self.roll_import.as_mut() else { return };
+        let Some(result) = import.done.try_take() else { return };
+        let import = self.roll_import.take().unwrap();
+        match result.map_err(|e| e.to_string()).and_then(|r| r) {
+            Ok((summary, _)) if summary.baked > 0 || summary.skipped > 0 => {
+                // A wall that was asked for another picture keeps that ask.
+                if self.show_when_opened.is_none() {
+                    self.show_when_opened = import.newest;
+                }
+                self.open_library(cx, Library::new(&import.root));
+            }
+            Ok((_, error)) => {
+                let why = error.unwrap_or_else(|| "no picture could be read".into());
+                log!("photos: the camera roll bake took nothing ({} shot(s)): {why}", import.shots.len());
+                self.set_status(cx, format!("Could not put {} camera shot(s) on the wall: {why}", import.shots.len()));
+            }
+            Err(e) => {
+                log!("photos: the camera roll bake failed: {e}");
+                self.set_status(cx, format!("Could not put the camera shots on the wall: {e}"));
+            }
+        }
+        self.start_roll_import(cx);
+    }
+
+    /// Show the picture at `path` (a WM `Open`, or the path the app was
+    /// started with): at once when it is on the wall, else once the camera
+    /// roll's bake has put it there.
+    pub fn show_path(&mut self, cx: &mut Cx, path: &str) {
+        self.ensure_open(cx);
+        match self.search_link(cx, path) {
+            Some(item) => {
+                self.show(cx, item);
+            }
+            None => {
+                self.show_when_opened = Some(path.to_string());
+                self.look_at_roll(cx);
+            }
+        }
     }
 
     fn open_library(&mut self, cx: &mut Cx, lib: Library) {
@@ -629,6 +768,10 @@ impl Widget for PhotosView {
         }
         self.ensure_open(cx);
         self.poll_adds(cx);
+        if self.roll_timer.is_event(event).is_some() {
+            self.look_at_roll(cx);
+        }
+        self.poll_roll_import(cx);
         // ⌘F (or Ctrl+F, or a bare `/` while the wall has the keys) puts the
         // caret in the search box; Esc in the box clears the filter.
         if let Event::KeyDown(ke) = event {

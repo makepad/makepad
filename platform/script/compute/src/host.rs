@@ -36,12 +36,15 @@
 //! The registry is append-only: built-in functions first, then any the host
 //! registers at start-up (a text crate registering `text.outline`), before
 //! kernels that call them compile.
+use makepad_relax_api::relax_api;
 
 use crate::ir::{RawBuf, Ty};
 use std::sync::RwLock;
 
 /// Determinism tier of a host function.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Tier {
     /// The same bits on every machine and build.
     X,
@@ -50,7 +53,9 @@ pub enum Tier {
 }
 
 /// A slice parameter.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct SliceSig {
     /// Most words the function sees (a longer slice is clamped and the
     /// call's error word set).
@@ -58,12 +63,10 @@ pub struct SliceSig {
     pub writable: bool,
 }
 
-/// Why a host function failed (its results are zero, the error word set).
-#[derive(Clone, Debug, PartialEq)]
-pub struct HostError(pub String);
-
 /// A kernel buffer range as a host function sees it.
+#[relax_api(plain)]
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct HostSlice {
     buf: RawBuf,
     start: usize,
@@ -105,31 +108,131 @@ impl HostSlice {
     }
 }
 
-/// The function a registry entry calls: scalar arguments (one word each;
-/// f64 has none), slices, and one word per result.
-pub type HostCall = fn(args: &[u32], slices: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError>;
+/// Borrowed arguments for one callback. Only the runtime constructs this
+/// frame; its views expire when the callback returns.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct HostCallFrame {
+    args: *const u32,
+    nargs: usize,
+    slices: *const HostSlice,
+    nslices: usize,
+    rets: *mut u32,
+    nrets: usize,
+}
+impl HostCallFrame {
+    #[inline]
+    pub fn parts(&mut self) -> (&[u32], &[HostSlice], &mut [u32]) {
+        // SAFETY: invoke_counted lends these disjoint live slices for the
+        // callback; the returned views cannot outlive this frame borrow.
+        unsafe { (std::slice::from_raw_parts(self.args, self.nargs), std::slice::from_raw_parts(self.slices, self.nslices), std::slice::from_raw_parts_mut(self.rets, self.nrets)) }
+    }
+}
 
-/// A registered host function.
+/// A borrowed diagnostic receiver. Message bytes are borrowed only until
+/// the receiver returns. The kernel runtime records failure without allocating.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ErrorSink<'a> {
+    context: *mut (),
+    write: unsafe extern "C-unwind" fn(*mut (), *const u8, usize),
+    borrow: std::marker::PhantomData<&'a mut ()>,
+}
+impl<'a> ErrorSink<'a> {
+    /// # Safety
+    /// The context and receiver must remain valid for 'a. The receiver
+    /// must accept borrowed UTF-8 bytes, and concurrent calls if shared.
+    pub unsafe fn new(context: *mut (), write: unsafe extern "C-unwind" fn(*mut (), *const u8, usize)) -> Self {
+        Self { context, write, borrow: std::marker::PhantomData }
+    }
+    #[inline]
+    pub fn report(&self, message: &str) {
+        unsafe { (self.write)(self.context, message.as_ptr(), message.len()) }
+    }
+    /// Report a failure and return the callback's failure status.
+    pub fn fail(&self, message: &str) -> bool {
+        self.report(message);
+        false
+    }
+}
+
+/// Monotone worst-case op-equivalents for borrowed, clamped slice lengths.
+pub type HostCost = unsafe extern "C-unwind" fn(context: *mut (), words: *const u32, len: usize) -> u64;
+/// Returns success; reporting to the sink also marks the call failed.
+pub type HostCall = unsafe extern "C-unwind" fn(context: *mut (), frame: &mut HostCallFrame, errors: ErrorSink<'_>) -> bool;
+
+/// Process-lived callback code and context. No Rust function pointers or
+/// owned Rust results cross this contract.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostCallbacks {
+    context: *mut (),
+    cost: HostCost,
+    call: HostCall,
+}
+// SAFETY: constructing a table requires thread-safe process-lived callbacks.
+unsafe impl Send for HostCallbacks {}
+unsafe impl Sync for HostCallbacks {}
+impl HostCallbacks {
+    /// # Safety
+    /// Code and context must remain live for the process (the registry is
+    /// append-only). Both callbacks must support concurrent calls, accept
+    /// the supplied views without retaining them, and access only their
+    /// context and declared buffers. Cost must be monotone and bound work.
+    pub const unsafe fn new(context: *mut (), cost: HostCost, call: HostCall) -> Self {
+        Self { context, cost, call }
+    }
+    #[inline]
+    fn cost_of(&self, lens: &[u32]) -> u64 {
+        unsafe { (self.cost)(self.context, lens.as_ptr(), lens.len()) }
+    }
+}
+
+/// A complete registration descriptor. Metadata has process lifetime;
+/// the registry copies the descriptor and owns its single shared index.
+#[relax_api(plain)]
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HostFn {
-    /// The name a kernel calls (`poly.triangulate`).
+    /// Name used in kernel source.
     pub name: &'static str,
-    /// Scalar parameters, in order, after the slices.
+    /// Word scalar parameters, after the buffer slices.
     pub params: &'static [Ty],
-    /// Slice parameters, first in the call: each is written in the kernel
-    /// as three arguments `buffer, word_offset, word_len`.
+    /// Each slice is supplied as buffer, word offset and word length.
     pub slices: &'static [SliceSig],
-    /// Results (at most one today: the call's value).
+    /// At most one word result.
     pub rets: &'static [Ty],
-    /// Worst-case op-equivalents of one call for these slice lengths
-    /// (words, clamped), monotone in each.
-    pub cost: fn(slice_words: &[u32]) -> u64,
-    /// Host-memory touches per call (admission charges them as misses).
+    pub callbacks: HostCallbacks,
+    /// Host-memory touches per call (charged as misses by admission).
     pub misses: u32,
     pub tier: Tier,
-    pub call: HostCall,
     /// One line for the kernel guide.
     pub doc: &'static str,
+}
+
+/// Registration status owned by value; no Rust error allocation crosses
+/// the compiled boundary.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct Registration {
+    index: u32,
+    error: u32,
+}
+impl Registration {
+    pub fn index(&self) -> Option<u16> { if self.error == 0 { Some(self.index as u16) } else { None } }
+    pub fn error(&self) -> &'static str {
+        match self.error {
+            0 => "",
+            1 => "host registry exhausted its u16 function indices",
+            _ => "host function: at most 8 slices, 16 word parameters and one word result; f64 is unsupported",
+        }
+    }
+    #[inline(always)]
+    pub fn into_result(self) -> Result<u16, &'static str> {
+        self.index().ok_or_else(|| self.error())
+    }
 }
 
 impl std::fmt::Debug for HostFn {
@@ -145,7 +248,7 @@ impl HostFn {
         for (k, s) in self.slices.iter().enumerate().take(8) {
             lens[k] = s.max_words;
         }
-        (self.cost)(&lens[..self.slices.len().min(8)])
+        self.callbacks.cost_of(&lens[..self.slices.len().min(8)])
     }
 
     /// The cost of a call with these slice lengths (clamped to the maxima).
@@ -154,7 +257,7 @@ impl HostFn {
         for (k, s) in self.slices.iter().enumerate().take(8) {
             l[k] = lens.get(k).copied().unwrap_or(s.max_words).min(s.max_words);
         }
-        (self.cost)(&l[..self.slices.len().min(8)])
+        self.callbacks.cost_of(&l[..self.slices.len().min(8)])
     }
 }
 
@@ -177,21 +280,26 @@ fn registry() -> std::sync::RwLockReadGuard<'static, Vec<HostFn>> {
 
 /// Registers a host function (at start-up); returns its index. A name
 /// registered twice keeps its first entry (and index).
-pub fn register(f: HostFn) -> Result<u16, HostError> {
+#[relax_api]
+pub fn register(f: HostFn) -> Registration {
     // The built-in entries first (their indices never move).
     drop(registry());
     let mut w = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     if let Some(k) = w.iter().position(|h| h.name == f.name) {
-        return Ok(k as u16);
+        return Registration { index: k as u32, error: 0 };
     }
-    if w.len() >= u16::MAX as usize || f.rets.len() > 1 || f.slices.len() > 8 || f.params.len() > 16 || f.params.contains(&Ty::F64) || f.rets.contains(&Ty::F64) {
-        return Err(HostError(format!("host function `{}`: at most 8 slices, 16 word parameters and one word result", f.name)));
+    if w.len() >= u16::MAX as usize {
+        return Registration { index: 0, error: 1 };
+    }
+    if f.rets.len() > 1 || f.slices.len() > 8 || f.params.len() > 16 || f.params.contains(&Ty::F64) || f.rets.contains(&Ty::F64) {
+        return Registration { index: 0, error: 2 };
     }
     w.push(f);
-    Ok(w.len() as u16 - 1)
+    Registration { index: w.len() as u32 - 1, error: 0 }
 }
 
 /// The entry at `index`.
+#[relax_api]
 pub fn get(index: u16) -> Option<HostFn> {
     registry().get(index as usize).copied()
 }
@@ -201,13 +309,17 @@ pub fn find(name: &str) -> Option<u16> {
     registry().iter().position(|h| h.name == name).map(|k| k as u16)
 }
 
-/// Every registered function (the kernel guide lists them).
-pub fn all() -> Vec<HostFn> {
-    registry().clone()
+/// The registry's entries in index order (the registry is append-only),
+/// through [`get`] alone: it never reads the registry statics.
+#[inline(always)]
+pub fn entries() -> impl Iterator<Item = HostFn> {
+    (0..=u16::MAX).map_while(|index| get(index))
 }
 
 /// A slice argument at run time: buffer index, word offset, word length.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct SliceRaw {
     pub buf: u32,
     pub off: u32,
@@ -260,13 +372,21 @@ pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
     for (k, v) in views.iter().enumerate() {
         lens[k] = v.len as u32;
     }
-    let cost = (h.cost)(&lens[..views.len()]);
+    let cost = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.callbacks.cost_of(&lens[..views.len()]))) {
+        Ok(cost) => cost,
+        Err(_) => return (false, 0),
+    };
     if limit != 0 && cost > limit {
         return (false, 0);
     }
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (h.call)(args, views, rets)));
+    let mut frame = HostCallFrame { args: args.as_ptr(), nargs: args.len(), slices: views.as_ptr(), nslices: views.len(), rets: rets.as_mut_ptr(), nrets: rets.len() };
+    let mut failed = false;
+    unsafe extern "C-unwind" fn report(context: *mut (), _message: *const u8, _len: usize) { *context.cast::<bool>() = true; }
+    // SAFETY: this stack receiver is used synchronously on this invocation.
+    let errors = unsafe { ErrorSink::new((&mut failed as *mut bool).cast(), report) };
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (h.callbacks.call)(h.callbacks.context, &mut frame, errors) }));
     match r {
-        Ok(Ok(())) => (ok, cost),
+        Ok(true) if !failed => (ok, cost),
         _ => {
             rets.fill(0);
             (false, cost)
@@ -281,12 +401,27 @@ pub const REC_HEADER: usize = 4;
 /// Native code's entry into the registry: `rec` is the call record (see
 /// [`REC_HEADER`]), `table` the kernel's buffer table ((ptr, len) pairs,
 /// `nbufs` of them, writability in `writable`), `ctx` the kernel ctx
-/// (`K_HOST_ERR` is set when the call fails). Never unwinds.
+/// (`K_HOST_ERR` is set when the call fails). Never unwinds. On x86-64 it takes the System V
+/// ABI the code generator emits for host calls on every OS (Windows' C ABI passes in rcx/rdx).
 ///
 /// # Safety
 /// `rec` points at a record of the size its header states, `table` at
 /// `nbufs` live (ptr, len) pairs, `ctx` at a kernel ctx.
+#[cfg(target_arch = "x86_64")]
+pub unsafe extern "sysv64" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
+    trampoline_body(rec, table, ctx, writable)
+}
+
+/// [`trampoline`] with the platform C ABI (arm64: AAPCS64, what compute's arm64 back end calls).
+///
+/// # Safety
+/// As [`trampoline`].
+#[cfg(not(target_arch = "x86_64"))]
 pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
+    trampoline_body(rec, table, ctx, writable)
+}
+
+unsafe fn trampoline_body(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let head = std::slice::from_raw_parts(rec, REC_HEADER);
         let (f, na, ns, nr) = (head[0], head[1] as usize, head[2] as usize, head[3] as usize);
@@ -325,13 +460,15 @@ pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut 
 /// grows as n²: budgets decide what an untrusted kernel may pass).
 pub const TRIANGULATE_MAX_POINTS: u32 = 1 << 16;
 
-/// Ear clipping's worst case for `words` words of points: n ears, each
-/// found by a scan of at most n vertices and re-tested at its two
-/// neighbours against at most n points (point tests of ~12 ops), plus the
-/// initial test of every vertex.
-fn triangulate_cost(lens: &[u32]) -> u64 {
+/// Ear clipping's worst case for `words` words of points, in the ops
+/// [`triangulate_ops`] counts: the area pass, every vertex's first ear test
+/// (a scan of at most n points, 12 ops a point test), the two neighbours'
+/// re-tests at each of the n clips (the same scans), and the ear searches
+/// (at most n steps of 4 ops each).
+unsafe extern "C-unwind" fn triangulate_cost(_context: *mut (), words: *const u32, len: usize) -> u64 {
+    let lens = std::slice::from_raw_parts(words, len);
     let n = (lens.first().copied().unwrap_or(0) / 2) as u64;
-    16 * n * n + 64 * n + 256
+    12 * 3 * n * n + 4 * n * n + 64 * n + 256
 }
 
 static BUILTIN: &[HostFn] = &[HostFn {
@@ -339,10 +476,10 @@ static BUILTIN: &[HostFn] = &[HostFn {
     params: &[],
     slices: &[SliceSig { max_words: 2 * TRIANGULATE_MAX_POINTS, writable: false }, SliceSig { max_words: 3 * TRIANGULATE_MAX_POINTS, writable: true }],
     rets: &[Ty::I32],
-    cost: triangulate_cost,
+    // SAFETY: stateless process-lived callbacks; all memory comes from the frame.
+    callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), triangulate_cost, triangulate) },
     misses: 4,
     tier: Tier::X,
-    call: triangulate,
     doc: "poly.triangulate(pts, off, words, tris, off, words) -> triangles: a simple polygon (vec2 points, either winding) into triangle indices (3 i32 words each); -1 when it is not simple",
 }];
 
@@ -350,22 +487,45 @@ static BUILTIN: &[HostFn] = &[HostFn {
 /// computed once and re-tested only when a neighbour is clipped; the next
 /// ear is found by walking forward from the last clipped one. IEEE
 /// arithmetic only (tier X).
-fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
+unsafe extern "C-unwind" fn triangulate(_context: *mut (), frame: &mut HostCallFrame, errors: ErrorSink<'_>) -> bool {
+    let (_args, s, rets) = frame.parts();
     let (pts, out) = (&s[0], &s[1]);
     let n = pts.len() / 2;
-    if n < 3 {
-        rets[0] = 0;
-        return Ok(());
-    }
     let p: Vec<(f64, f64)> = (0..n).map(|i| (pts.get_f32(2 * i) as f64, pts.get_f32(2 * i + 1) as f64)).collect();
+    let need = 3 * n.saturating_sub(2);
+    if n >= 3 && out.len() < need {
+        return errors.fail(&format!("the triangle buffer holds {} words; {} points need {}", out.len(), n, need));
+    }
+    let (r, _) = ear_clip(&p, &mut |at, w| out.set(at, w));
+    rets[0] = r as u32;
+    true
+}
+
+/// The ops the triangulation runs on `pts` (vec2 points), counted as
+/// [`triangulate_cost`] declares them: what its declaration is held to.
+pub fn triangulate_ops(pts: &[f32]) -> u64 {
+    let p: Vec<(f64, f64)> = pts.chunks_exact(2).map(|c| (c[0] as f64, c[1] as f64)).collect();
+    ear_clip(&p, &mut |_, _| {}).1
+}
+
+/// Triangles of `p` into `out(word, value)`: the triangle count (-1: not
+/// simple), and the ops counted (12 a point test, 4 an ear-search step,
+/// 64 a vertex's setup).
+fn ear_clip(p: &[(f64, f64)], out: &mut dyn FnMut(usize, u32)) -> (i32, u64) {
+    let n = p.len();
+    if n < 3 {
+        return (0, 0);
+    }
+    let tests = std::cell::Cell::new(0u64);
+    let mut scans = 0u64;
+    let ops = |tests: u64, scans: u64| 12 * tests + 4 * scans + 64 * n as u64;
     let mut area = 0.0f64;
     for i in 0..n {
         let (a, b) = (p[i], p[(i + 1) % n]);
         area += a.0 * b.1 - b.0 * a.1;
     }
     if !(area.abs() > 0.0) {
-        rets[0] = (-1i32) as u32;
-        return Ok(());
+        return (-1, ops(0, 0));
     }
     let sign = if area > 0.0 { 1.0 } else { -1.0 };
     let cross = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) * sign;
@@ -374,6 +534,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
     let is_ear = |i: usize, next: &[usize], prev: &[usize]| {
         let (ia, ic) = (prev[i], next[i]);
         let (a, b, c) = (p[ia], p[i], p[ic]);
+        tests.set(tests.get() + 1);
         if cross(a, b, c) <= 0.0 {
             return false;
         }
@@ -381,6 +542,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         // equal to a corner are allowed: duplicated points).
         let mut j = next[ic];
         while j != ia {
+            tests.set(tests.get() + 1);
             let q = p[j];
             if q != a && q != b && q != c && cross(a, b, q) >= 0.0 && cross(b, c, q) >= 0.0 && cross(c, a, q) >= 0.0 {
                 return false;
@@ -390,10 +552,6 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         true
     };
     let mut ear: Vec<bool> = (0..n).map(|i| is_ear(i, &next, &prev)).collect();
-    let need = 3 * (n - 2);
-    if out.len() < need {
-        return Err(HostError(format!("the triangle buffer holds {} words; {} points need {}", out.len(), n, need)));
-    }
     let mut m = n;
     let mut at = 0usize;
     let mut cur = 0usize;
@@ -402,6 +560,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         let mut i = cur;
         let mut found = false;
         for _ in 0..m {
+            scans += 1;
             if ear[i] {
                 found = true;
                 break;
@@ -409,13 +568,12 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
             i = next[i];
         }
         if !found {
-            rets[0] = (-1i32) as u32;
-            return Ok(());
+            return (-1, ops(tests.get(), scans));
         }
         let (a, c) = (prev[i], next[i]);
-        out.set(at, a as u32);
-        out.set(at + 1, i as u32);
-        out.set(at + 2, c as u32);
+        out(at, a as u32);
+        out(at + 1, i as u32);
+        out(at + 2, c as u32);
         at += 3;
         written += 1;
         next[a] = c;
@@ -425,9 +583,9 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         ear[c] = is_ear(c, &next, &prev);
         cur = c;
     }
-    out.set(at, prev[cur] as u32);
-    out.set(at + 1, cur as u32);
-    out.set(at + 2, next[cur] as u32);
-    rets[0] = (written + 1) as u32;
-    Ok(())
+    out(at, prev[cur] as u32);
+    out(at + 1, cur as u32);
+    out(at + 2, next[cur] as u32);
+    ((written + 1) as i32, ops(tests.get(), scans))
 }
+

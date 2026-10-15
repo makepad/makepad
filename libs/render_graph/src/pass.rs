@@ -92,10 +92,11 @@ pub struct PassDecl {
     pub size: Option<(u32, u32)>,
     pub format: Option<Format>,
     pub uniforms: Vec<UniformDecl>,
-    /// The body of `pixel`: `fn() -> vec4 { ... }`.
-    pub pixel: String,
-    /// Extra shader functions the pixel calls (`name: fn(..) {..}` lines).
-    pub helpers: String,
+    /// `pixel`: the document's `fn() -> vec4 { ... }` (or a fused pass's
+    /// chain of its members' pixels).
+    pub pixel: PassCode,
+    /// Further shader functions the pixel calls (`self.<name>(..)`), in order.
+    pub helpers: Vec<PassHelper>,
     /// The pass keeps its output across frames and may read `@history`.
     pub history: bool,
     /// Further named outputs written in the same draw (MRT: a raymarch's
@@ -107,13 +108,116 @@ pub struct PassDecl {
     /// (`self.color.sample(self.uv())`): passes like it that follow one
     /// another run as one ([`fuse`]).
     pub map: bool,
-    /// Where the pass's code is written: each function's text (`pixel`,
-    /// a helper) and its place in the document, so a compile error names
-    /// the document's line.
-    pub origins: Vec<(String, CodeAt)>,
-    /// An editor's document: in edit mode its literals compile live (as
-    /// slots named by `origins`; see `Cx::set_live_literals`).
+    /// An editor's document: in edit mode its literals compile live (named
+    /// by where the pass's fns are written; see `Cx::set_live_literals`).
     pub live_literals: bool,
+}
+
+/// A shader function of a pass: the document's fn, moved to the GPU's VM by
+/// its tokens (no text is written or read again).
+#[derive(Clone, Debug)]
+pub struct PassFn {
+    pub image: std::sync::Arc<makepad_script::ScriptFnImage>,
+    /// Where it is written in the document, as the host names it (its
+    /// VM's place unless the host maps it to an editor's file; compile
+    /// errors and edit mode's live literals are named by it).
+    pub at: CodeAt,
+}
+
+impl PassFn {
+    pub fn new(image: makepad_script::ScriptFnImage) -> Self {
+        let at = CodeAt { file: image.file().to_string(), line: image.line(), col: image.col() };
+        Self { image: std::sync::Arc::new(image), at }
+    }
+
+    /// Where it is written in the document.
+    pub fn at(&self) -> CodeAt {
+        self.at.clone()
+    }
+
+    /// The fn as written (diagnostics).
+    pub fn text(&self) -> &str {
+        self.image.text()
+    }
+}
+
+impl PartialEq for PassFn {
+    fn eq(&self, other: &Self) -> bool {
+        self.image.hash() == other.image.hash() && self.at == other.at
+    }
+}
+
+impl PassDecl {
+    /// The document fns the pass compiles (its own and its helpers'), for a
+    /// host that names their places ([`PassFn::at`]).
+    pub fn fns_mut(&mut self) -> impl Iterator<Item = &mut PassFn> {
+        self.helpers.iter_mut().map(|h| &mut h.code).chain(std::iter::once(&mut self.pixel)).filter_map(|c| match c {
+            PassCode::Fn(f) => Some(f),
+            PassCode::Chain(_) => None,
+        })
+    }
+}
+
+/// A pass's code: the document's fn, or a fused pass's pixel, which runs
+/// its first `n` members' pixels (`self.f<k>_pixel`) in order on the colour
+/// at the pixel ([`fuse`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PassCode {
+    Fn(PassFn),
+    Chain(usize),
+}
+
+impl PassCode {
+    /// The fn as written (diagnostics; empty for a fused chain).
+    pub fn text(&self) -> &str {
+        match self {
+            PassCode::Fn(f) => f.text(),
+            PassCode::Chain(_) => "",
+        }
+    }
+
+    /// The document fn, when it is one.
+    pub fn as_fn(&self) -> Option<&PassFn> {
+        match self {
+            PassCode::Fn(f) => Some(f),
+            PassCode::Chain(_) => None,
+        }
+    }
+}
+
+/// One further shader function of a pass, under its field name, and (in a
+/// fused pass) the names its member's code reads `self` by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PassHelper {
+    pub name: String,
+    pub code: PassCode,
+    pub namespace: Option<PassNamespace>,
+}
+
+/// How a fused member's function reads `self`: `self.<from>` is
+/// `self.<to>` (its uniforms, slots and helpers under the member's prefix),
+/// and with `input` it takes the colour so far as a first parameter in
+/// place of its read of the colour at its own pixel
+/// (`self.color.sample(self.uv())`). The shader compiler's fn namespace.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PassNamespace {
+    pub renames: Vec<(String, String)>,
+    pub input: bool,
+}
+
+impl PassNamespace {
+    /// This namespace, then `outer` on what it gives (a fused pass fused
+    /// again).
+    fn then(&self, outer: &PassNamespace) -> PassNamespace {
+        let apply = |ns: &PassNamespace, n: &str| ns.renames.iter().find(|(a, _)| a == n).map_or(n.to_string(), |(_, b)| b.clone());
+        let mut renames: Vec<(String, String)> = self.renames.iter().map(|(a, b)| (a.clone(), apply(outer, b))).collect();
+        for (a, b) in &outer.renames {
+            if !self.renames.iter().any(|(x, _)| x == a) {
+                renames.push((a.clone(), b.clone()));
+            }
+        }
+        PassNamespace { renames, input: self.input || outer.input }
+    }
 }
 
 /// A place in a document's source.
@@ -212,70 +316,36 @@ impl PassDecl {
         if self.history && self.reads.is_empty() {
             return Err("a history pass reads something (@history, its own last output; its first read stands in on a cold start)".into());
         }
-        if !self.pixel.trim_start().starts_with("fn") {
-            return Err("`pixel` must be a shader function: \"fn() -> vec4 { ... }\"".into());
-        }
         Ok(())
     }
 
-    /// The Splash shader source of this pass.
-    /// Where line `line` (1-based) of [`Self::source`] is written in the
-    /// document, when it is inside one of the pass's functions.
-    pub fn locate(&self, line: u32) -> Option<CodeAt> {
-        let src = self.source();
-        for (text, at) in &self.origins {
-            let Some(start) = src.find(text.as_str()) else { continue };
-            let first = src[..start].matches('\n').count() as u32 + 1;
-            let last = first + text.matches('\n').count() as u32;
-            if line >= first && line <= last {
-                return Some(CodeAt { file: at.file.clone(), line: at.line + (line - first), col: if line == first { at.col } else { 0 } });
-            }
-        }
-        None
-    }
-
-    pub fn source(&self) -> String {
-        let mut s = String::new();
-        // The shared stdlib (`hash12`, `snoise2`, `srgb_to_linear`, `sd_*`, eases, …) is
-        // in scope, as in Shader layers, kernels and documents.
-        s.push_str("use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.shared.*\nuse mod.draw\nmod.draw.DrawGraphPass{\n");
-        s.push_str(&format!("    color_format: {}\n", self.format().shader_color_format()));
-        for (i, o) in self.outputs.iter().enumerate() {
-            s.push_str(&format!("    {}: fragment_output({}, vec4f)\n", o.slot, i + 1));
-        }
-        for i in 0..self.reads.len() {
-            s.push_str(&format!("    {}: texture_2d(float)\n", self.slot(i)));
-        }
-        for u in &self.uniforms {
-            let init = match u.width {
-                1 => "0.0".to_string(),
-                2 => "vec2(0.0, 0.0)".to_string(),
-                3 => "vec3(0.0, 0.0, 0.0)".to_string(),
-                16 => "mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)".to_string(),
-                _ => "vec4(0.0, 0.0, 0.0, 0.0)".to_string(),
-            };
-            s.push_str(&format!("    {}: uniform({init})\n", u.name));
-        }
-        if !self.helpers.trim().is_empty() {
-            s.push_str(&self.helpers);
-            s.push('\n');
-        }
-        s.push_str("    pixel: ");
-        s.push_str(self.pixel.trim());
-        s.push_str("\n}\n");
-        s
-    }
-
-    /// The program's identity: its source, and where its functions are
-    /// written (an editor's live literals are named by their places, so the
-    /// same text moved is another program; its GPU program is shared by
-    /// source).
+    /// The program's identity: everything its shader is made of (the
+    /// declarations and its fns, by their tokens and where they are
+    /// written: an editor's live literals are named by their places, so the
+    /// same fn moved is another program).
     pub fn program_id(&self) -> ProgramId {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.source().hash(&mut h);
-        for (_, at) in &self.origins {
-            at.hash(&mut h);
+        self.format().shader_color_format().hash(&mut h);
+        for o in &self.outputs {
+            o.slot.hash(&mut h);
         }
+        for i in 0..self.reads.len() {
+            self.slot(i).hash(&mut h);
+        }
+        self.uniforms.hash(&mut h);
+        let code = |c: &PassCode, h: &mut std::collections::hash_map::DefaultHasher| match c {
+            PassCode::Fn(f) => (0u8, f.image.hash(), &f.at).hash(h),
+            PassCode::Chain(n) => (1u8, *n as u64).hash(h),
+        };
+        for helper in &self.helpers {
+            helper.name.hash(&mut h);
+            code(&helper.code, &mut h);
+            if let Some(ns) = &helper.namespace {
+                ns.renames.hash(&mut h);
+                ns.input.hash(&mut h);
+            }
+        }
+        code(&self.pixel, &mut h);
         ProgramId(h.finish())
     }
 }
@@ -312,45 +382,9 @@ fn fusable(d: &PassDecl) -> bool {
         && d.reads.first().is_some_and(|r| r == "color") && d.slot(0) == "color"
 }
 
-/// Rename `self.<name>` for the names in `names` to `self.<prefix><name>`.
-fn prefixed(src: &str, names: &[String], prefix: &str) -> String {
-    let mut out = String::with_capacity(src.len() + 64);
-    let b = src.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if src[i..].starts_with("self.") && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) {
-            let start = i + 5;
-            let mut end = start;
-            while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
-                end += 1;
-            }
-            let ident = &src[start..end];
-            out.push_str("self.");
-            if names.iter().any(|n| n == ident) {
-                out.push_str(prefix);
-            }
-            out.push_str(ident);
-            i = end;
-        } else {
-            let ch = src[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
-        }
-    }
-    out
-}
-
-/// The helper names a pass defines (`name: fn(` at the start of a line).
-fn helper_names(helpers: &str) -> Vec<String> {
-    helpers
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim_start();
-            let (name, rest) = l.split_once(':')?;
-            (rest.trim_start().starts_with("fn") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.is_empty()).then(|| name.to_string())
-        })
-        .collect()
-}
+/// The most passes one fused pass runs (its pixel is one of the chains
+/// `fuse_2` .. `fuse_16` of `fuse.splash`).
+pub const MAX_FUSED: usize = 16;
 
 /// Consecutive `map` passes of one stage run as one pass: each one's pixel
 /// becomes a function of the colour so far, called in order on the colour
@@ -373,7 +407,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
         let mut j = i + 1;
         if fusable(&decls[i]) {
             let (mut f, mut r) = (floats(&decls[i]), decls[i].reads.len());
-            while j < decls.len() && fusable(&decls[j]) && decls[j].stage == decls[i].stage {
+            while j < decls.len() && j - i < MAX_FUSED && fusable(&decls[j]) && decls[j].stage == decls[i].stage {
                 let (nf, nr) = (f + floats(&decls[j]), r + decls[j].reads.len() - 1);
                 if nf > MAX_FLOATS || nr > MAX_READS {
                     break;
@@ -392,13 +426,15 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
         let mut reads = vec!["color".to_string()];
         let mut slots = vec!["color".to_string()];
         let mut uniforms = Vec::new();
-        let mut helpers = String::new();
-        let mut pixel = String::from("fn() -> vec4 {\n    var c = self.color.sample(self.uv())\n");
+        let mut helpers = Vec::new();
         for (k, d) in members.iter().enumerate() {
+            // Its uniforms, further slots and helpers under its prefix: its
+            // code reads them by their own names (the fn namespace).
             let prefix = format!("f{k}_");
             let mut names: Vec<String> = d.uniforms.iter().map(|u| u.name.clone()).collect();
             names.extend((1..d.reads.len()).map(|n| d.slot(n).to_string()));
-            names.extend(helper_names(&d.helpers));
+            names.extend(d.helpers.iter().map(|h| h.name.clone()));
+            let renames = PassNamespace { renames: names.iter().map(|n| (n.clone(), format!("{prefix}{n}"))).collect(), input: false };
             for u in &d.uniforms {
                 uniforms.push(UniformDecl { name: format!("{prefix}{}", u.name), width: u.width });
             }
@@ -406,31 +442,17 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
                 reads.push(d.reads[n].clone());
                 slots.push(format!("{prefix}{}", d.slot(n)));
             }
-            if !d.helpers.trim().is_empty() {
-                // Its helpers' own names too, where they are defined.
-                let own = helper_names(&d.helpers);
-                let renamed: Vec<String> = prefixed(&d.helpers, &names, &prefix)
-                    .lines()
-                    .map(|l| {
-                        let t = l.trim_start();
-                        match own.iter().find(|n| t.starts_with(n.as_str()) && t[n.len()..].trim_start().starts_with(':')) {
-                            Some(_) => format!("{}{prefix}{t}", &l[..l.len() - t.len()]),
-                            None => l.to_string(),
-                        }
-                    })
-                    .collect();
-                helpers.push_str(&renamed.join("\n"));
-                helpers.push('\n');
+            let within = |ns: &Option<PassNamespace>, outer: &PassNamespace| Some(match ns {
+                Some(inner) => inner.then(outer),
+                None => outer.clone(),
+            });
+            for h in &d.helpers {
+                helpers.push(PassHelper { name: format!("{prefix}{}", h.name), code: h.code.clone(), namespace: within(&h.namespace, &renames) });
             }
             // Its pixel, as a function of the colour so far.
-            let body = d.pixel.trim();
-            let open = body.find('{').map_or(0, |o| o + 1);
-            let close = body.rfind('}').unwrap_or(body.len());
-            let inner = prefixed(&body[open..close], &names, &prefix).replace("self.color.sample(self.uv())", "c_in");
-            helpers.push_str(&format!("    {prefix}pixel: fn(c_in: vec4) -> vec4 {{{inner}}}\n"));
-            pixel.push_str(&format!("    c = self.{prefix}pixel(c)\n"));
+            helpers.push(PassHelper { name: format!("{prefix}pixel"), code: d.pixel.clone(), namespace: Some(PassNamespace { input: true, ..renames }) });
         }
-        pixel.push_str("    return c\n}");
+        let pixel = PassCode::Chain(members.len());
         out.push(PassDecl {
             name: None,
             stage: members[0].stage,
@@ -448,7 +470,6 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
             outputs: Vec::new(),
             label: members.iter().map(|d| d.label.as_str()).collect::<Vec<_>>().join(" + "),
             map: true,
-            origins: members.iter().flat_map(|d| d.origins.iter().cloned()).collect(),
             live_literals: members.iter().any(|d| d.live_literals),
         });
         map.push((i..j).collect());
@@ -460,6 +481,15 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_script::*;
+
+    /// A Splash fn as a pass's code (made in a VM of its own).
+    fn code(src: &str) -> PassCode {
+        let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        let v = vm.eval(ScriptMod::new("", "", "test.splash", 0, 0, src, &[]));
+        PassCode::Fn(PassFn::new(vm.fn_image(v.as_object().unwrap()).unwrap()))
+    }
 
     #[test]
     fn map_passes_that_follow_one_another_fuse() {
@@ -474,15 +504,16 @@ mod tests {
             size: None,
             format: None,
             uniforms: uniforms.iter().map(|u| UniformDecl { name: u.to_string(), width: 1 }).collect(),
-            pixel: pixel.into(),
-            helpers: String::new(),
+            pixel: code(pixel),
+            helpers: Vec::new(),
             history: false,
             outputs: Vec::new(),
             label: label.into(),
             map: true,
-            origins: Vec::new(),
             live_literals: false,
         };
+        let a_pixel = "fn() -> vec4 { let c = self.color.sample(self.uv()) return c + self.bloom.sample(self.uv()) * self.amount }";
+        let out_member_pixel = |p: &str| code(p);
         let a = m("a", &["color", "bloom"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c + self.bloom.sample(self.uv()) * self.amount }", &["amount"]);
         let b = m("b", &["color"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c * self.amount }", &["amount"]);
         let mut c = m("c", &["color"], "fn() -> vec4 { return self.color.sample(self.uv() + vec2(0.01, 0.0)) }", &[]);
@@ -494,9 +525,16 @@ mod tests {
         assert_eq!(f.reads, vec!["color", "bloom"]);
         assert_eq!(f.slots, vec!["color", "f0_bloom"]);
         assert_eq!(f.uniforms.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), vec!["f0_amount", "f1_amount"]);
-        assert!(f.helpers.contains("f0_pixel: fn(c_in: vec4) -> vec4 { let c = c_in return c + self.f0_bloom.sample(self.uv()) * self.f0_amount }"), "{}", f.helpers);
-        assert!(f.helpers.contains("f1_pixel: fn(c_in: vec4) -> vec4 { let c = c_in return c * self.f1_amount }"), "{}", f.helpers);
-        assert!(f.pixel.contains("c = self.f0_pixel(c)") && f.pixel.contains("c = self.f1_pixel(c)"));
+        // Each member's pixel is a helper of the fused pass, reading its own
+        // names under its prefix and the colour so far as its input.
+        let names: Vec<&str> = f.helpers.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["f0_pixel", "f1_pixel"]);
+        let ns0 = f.helpers[0].namespace.as_ref().unwrap();
+        assert!(ns0.input);
+        assert_eq!(ns0.renames, vec![("amount".to_string(), "f0_amount".to_string()), ("bloom".to_string(), "f0_bloom".to_string())]);
+        assert_eq!(f.helpers[0].code, out_member_pixel(&a_pixel));
+        assert_eq!(f.helpers[1].namespace.as_ref().unwrap().renames, vec![("amount".to_string(), "f1_amount".to_string())]);
+        assert_eq!(f.pixel, PassCode::Chain(2));
         assert_eq!(out[1], c);
         // A lone map pass is itself.
         let (out, map) = fuse(&out[1..2]);
@@ -515,42 +553,25 @@ mod tests {
             size: None,
             format: None,
             uniforms: vec![UniformDecl { name: "amount".into(), width: 1 }, UniformDecl { name: "tint".into(), width: 4 }],
-            pixel: "fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }".into(),
-            helpers: String::new(),
+            pixel: code("fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }"),
+            helpers: Vec::new(),
             history: false,
             outputs: Vec::new(),
             label: "Pass".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
         }
     }
 
     #[test]
-    fn source_declares_slots_and_uniforms_in_order() {
-        let s = decl().source();
-        let color = s.find("color: texture_2d(float)").unwrap();
-        let glow = s.find("glow: texture_2d(float)").unwrap();
-        assert!(color < glow);
-        assert!(s.contains("amount: uniform(0.0)"));
-        assert!(s.contains("tint: uniform(vec4(0.0, 0.0, 0.0, 0.0))"));
-        assert!(s.contains("color_format: @Rgba16F"));
+    fn the_program_is_what_the_shader_is_made_of() {
         let mut d = decl();
         d.stage = Stage::Final;
-        assert!(d.source().contains("color_format: @Bgra8NoBlend"));
-        assert_ne!(d.program_id(), decl().program_id());
-    }
-
-    #[test]
-    fn a_line_of_the_pass_source_is_found_in_the_document() {
+        assert_ne!(d.program_id(), decl().program_id(), "the output format differs");
         let mut d = decl();
-        d.pixel = "fn() -> vec4 {\n    let c = self.color.sample(self.uv())\n    return c * self.amount\n}".into();
-        d.origins = vec![(d.pixel.clone(), CodeAt { file: "motion".into(), line: 40, col: 16 })];
-        let src = d.source();
-        let first = src[..src.find("fn() -> vec4").unwrap()].matches('\n').count() as u32 + 1;
-        assert_eq!(d.locate(first), Some(CodeAt { file: "motion".into(), line: 40, col: 16 }));
-        assert_eq!(d.locate(first + 2).map(|a| a.line), Some(42));
-        assert_eq!(d.locate(1), None, "the header is not the document's");
+        d.pixel = code("fn() -> vec4 { return self.color.sample(self.uv()) * self.amount * 2.0 }");
+        assert_ne!(d.program_id(), decl().program_id(), "the code differs");
+        assert_eq!(decl().program_id(), decl().program_id());
     }
 
     #[test]
@@ -561,7 +582,6 @@ mod tests {
         assert_eq!(a[1].reads, vec!["color".to_string(), "k0_soft".to_string()]);
         // The shader still says self.soft.
         assert_eq!(a[1].slot(1), "soft");
-        assert!(a[1].source().contains("soft: texture_2d(float)"));
     }
 
     #[test]
@@ -574,9 +594,6 @@ mod tests {
         assert!(d.validate().is_err());
         let mut d = decl();
         d.reads = vec!["a b".into()];
-        assert!(d.validate().is_err());
-        let mut d = decl();
-        d.pixel = "return 1".into();
         assert!(d.validate().is_err());
         let mut d = decl();
         d.reads.push("history".into());

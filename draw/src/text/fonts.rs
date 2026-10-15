@@ -1,18 +1,25 @@
+#[cfg(target_arch = "wasm32")]
+use super::{
+    image::{Bgra, Image},
+    msdfer::Msdfer,
+    rasterizer::{CompletedMsdfJob, QueuedMsdfJob},
+    slug_atlas::SlugAtlas,
+};
 use {
     super::{
         font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
-        image::{Bgra, Image},
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
-        msdfer::Msdfer,
-        rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
-        slug_atlas::{SlugAtlas, SlugGlyphCacheResult},
+        rasterizer::{OutlineRasterizationMode, Rasterizer},
+        slug_atlas::SlugGlyphCacheResult,
     },
     crate::makepad_platform::*,
     fxhash::FxHashSet,
-    std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
+    std::{cell::RefCell, rc::Rc},
 };
+#[cfg(target_arch = "wasm32")]
+use std::mem::ManuallyDrop;
 
 #[derive(Default)]
 struct LazyFontRequests {
@@ -37,22 +44,6 @@ impl LazyFontRequests {
     }
 }
 
-fn default_slug_new_glyphs_per_redraw(cx: &Cx) -> usize {
-    match cx.os_type() {
-        OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Windows => 1,
-        _ => usize::MAX,
-    }
-}
-
-fn default_slug_min_dpxs_per_em(cx: &Cx, rasterizer: &Rasterizer) -> f32 {
-    match cx.os_type() {
-        OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Windows => {
-            rasterizer.msdf_resolution().max_dpxs_per_em
-        }
-        _ => 0.0,
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FontsMemoryBytes {
     pub atlas_bytes: usize,
@@ -63,16 +54,31 @@ pub struct Fonts {
     layouter: Layouter,
     lazy_font_requests: LazyFontRequests,
     missing_font_paths: FxHashSet<String>,
+    #[cfg(target_arch = "wasm32")]
     needs_prepare_atlases: bool,
+    /// The glyph atlas. Under the HAL it is the host's texture, lent to this session.
     atlas_texture: Texture,
+    #[cfg(not(target_arch = "wasm32"))]
+    slug_curve_texture: Texture,
+    #[cfg(not(target_arch = "wasm32"))]
+    slug_band_texture: Texture,
+    #[cfg(target_arch = "wasm32")]
     slug_atlas: SlugAtlas,
+    /// Outline glyphs at or above this size draw as slug curves, smaller ones from the
+    /// SDF/MSDF atlas. 0 (the default, every platform): all text is slug.
     slug_min_dpxs_per_em: f32,
-    slug_new_glyphs_per_redraw: usize,
-    slug_budget_redraw_id: u64,
-    slug_built_glyphs_this_redraw: usize,
+    #[cfg(target_arch = "wasm32")]
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
+    #[cfg(target_arch = "wasm32")]
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
+    /// Upgrades the MSDF worker has sent (it raises the UI signal after each) and those
+    /// applied at a draw: the signal hook redraws while sent > applied.
+    #[cfg(target_arch = "wasm32")]
+    msdf_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(target_arch = "wasm32")]
+    msdf_applied: usize,
     /// Glyph rasters sent to the MSDF worker and not applied yet.
+    #[cfg(target_arch = "wasm32")]
     msdf_jobs_in_flight: usize,
     /// Fonts whose resource this process could not read (see
     /// [`Self::note_font_unavailable`]); their families render without them
@@ -83,15 +89,44 @@ pub struct Fonts {
 }
 
 impl Fonts {
+    /// Under the HAL the atlases are the host's: textures lent to this session when it answers
+    /// (`prepare_textures`), glyphs asked for as they are drawn.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
-        let (atlas_size, msdfer_settings, slug_min_dpxs_per_em) = {
+        Self {
+            layouter,
+            lazy_font_requests: Default::default(),
+            missing_font_paths: FxHashSet::default(),
+            // Before AtlasInfo arrives, the unresolved slot is this transparent texel. The
+            // lent host atlas reserves the same texel for the lifetime of its texture.
+            atlas_texture: Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: 1,
+                    height: 1,
+                    data: Some(vec![0]),
+                    updated: TextureUpdated::Full,
+                },
+            ),
+            slug_curve_texture: Texture::new_with_format(cx, TextureFormat::Unknown),
+            // the curve scan needs no band data: a texel stands in
+            slug_band_texture: Texture::new_with_format(
+                cx,
+                TextureFormat::VecRGBAf32 { width: 1, height: 1, data: None, updated: TextureUpdated::Empty },
+            ),
+            slug_min_dpxs_per_em: 0.0,
+            unavailable_fonts: FxHashSet::default(),
+            unavailable_generation: 0,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
+        let layouter = Layouter::new(settings);
+        let (atlas_size, msdfer_settings) = {
             let rasterizer = layouter.rasterizer().borrow();
-            (
-                rasterizer.color_atlas().size(),
-                rasterizer.msdfer().settings(),
-                default_slug_min_dpxs_per_em(cx, &rasterizer),
-            )
+            (rasterizer.color_atlas().size(), rasterizer.msdfer().settings())
         };
 
         let mut msdf_job_sender: FromUISender<QueuedMsdfJob> = Default::default();
@@ -100,6 +135,8 @@ impl Fonts {
             .receiver()
             .expect("MSDF worker receiver is taken exactly once");
         let worker_tx = msdf_result_receiver.sender();
+        let msdf_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_sent = msdf_sent.clone();
         if let Ok(task) = cx.spawn_worker(move || {
             let mut msdfer = Msdfer::new(msdfer_settings);
             while let Ok(job) = worker_rx.recv() {
@@ -109,6 +146,8 @@ impl Fonts {
                     job.dpxs_per_em,
                     &mut msdf.subimage_mut(super::geom::Rect::from(job.key.size)),
                 );
+                // counted before the send: its UI signal must find the count raised
+                worker_sent.fetch_add(1, std::sync::atomic::Ordering::Release);
                 if worker_tx
                     .send(CompletedMsdfJob {
                         key: job.key,
@@ -139,12 +178,11 @@ impl Fonts {
                 },
             ),
             slug_atlas: SlugAtlas::new(cx),
-            slug_min_dpxs_per_em,
-            slug_new_glyphs_per_redraw: default_slug_new_glyphs_per_redraw(cx),
-            slug_budget_redraw_id: 0,
-            slug_built_glyphs_this_redraw: 0,
+            slug_min_dpxs_per_em: 0.0,
             msdf_job_sender,
             msdf_result_receiver,
+            msdf_sent,
+            msdf_applied: 0,
             msdf_jobs_in_flight: 0,
             unavailable_fonts: FxHashSet::default(),
             unavailable_generation: 0,
@@ -182,10 +220,16 @@ impl Fonts {
     }
 
     pub fn slug_curve_texture(&self) -> &Texture {
+        #[cfg(not(target_arch = "wasm32"))]
+        return &self.slug_curve_texture;
+        #[cfg(target_arch = "wasm32")]
         self.slug_atlas.curve_texture()
     }
 
     pub fn slug_band_texture(&self) -> &Texture {
+        #[cfg(not(target_arch = "wasm32"))]
+        return &self.slug_band_texture;
+        #[cfg(target_arch = "wasm32")]
         self.slug_atlas.band_texture()
     }
 
@@ -193,41 +237,46 @@ impl Fonts {
         dpxs_per_em >= self.slug_min_dpxs_per_em
     }
 
-    pub fn max_rasterized_glyph_dpxs_per_em(&self) -> f32 {
-        self.layouter
-            .rasterizer()
-            .borrow()
-            .msdf_resolution()
-            .max_dpxs_per_em
+    /// Selects the SDF/MSDF atlas for outline glyphs below `dpxs_per_em` (`f32::INFINITY`: the
+    /// atlas at every size; `outline_rasterization_mode` picks SDF or MSDF). Slug is the default
+    /// at every size (0).
+    pub fn set_slug_min_dpxs_per_em(&mut self, dpxs_per_em: f32) {
+        self.slug_min_dpxs_per_em = dpxs_per_em.max(0.0);
     }
 
+    pub fn slug_min_dpxs_per_em(&self) -> f32 {
+        self.slug_min_dpxs_per_em
+    }
+
+    /// The slug curves of a glyph, from the host's curve texture. Asked for on the first look; until
+    /// they arrive its usual rectangle draws the zero-curve slot (the text redraws on arrival).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_or_cache_slug_glyph(
         &mut self,
-        redraw_id: u64,
         font: &Font,
         glyph_id: GlyphId,
     ) -> SlugGlyphCacheResult {
-        match self.slug_atlas.get_or_cache_glyph(font, glyph_id, false) {
-            SlugGlyphCacheResult::Deferred => {}
-            result => return result,
+        use super::rasterizer::SlugLookup;
+        let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+        match rasterizer.client_mut().slug(font, glyph_id) {
+            SlugLookup::Ready(info) => SlugGlyphCacheResult::Ready(info),
+            SlugLookup::Empty => SlugGlyphCacheResult::Unavailable,
         }
+    }
 
-        if self.slug_new_glyphs_per_redraw != usize::MAX {
-            if self.slug_budget_redraw_id != redraw_id {
-                self.slug_budget_redraw_id = redraw_id;
-                self.slug_built_glyphs_this_redraw = 0;
-            }
-            if self.slug_built_glyphs_this_redraw >= self.slug_new_glyphs_per_redraw {
-                return SlugGlyphCacheResult::Deferred;
-            }
-            self.slug_built_glyphs_this_redraw += 1;
-        }
-
-        self.slug_atlas.get_or_cache_glyph(font, glyph_id, true)
+    #[cfg(target_arch = "wasm32")]
+    pub fn get_or_cache_slug_glyph(&mut self, font: &Font, glyph_id: GlyphId) -> SlugGlyphCacheResult {
+        self.slug_atlas.get_or_cache_glyph(font, glyph_id)
     }
 
     /// Glyph rasters queued for or running on the MSDF worker: text that
     /// draws with a fallback until they land (`Cx::pending_async_loads`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pending_glyph_rasters(&self) -> usize {
+        self.layouter.rasterizer().try_borrow().map_or(0, |rasterizer| rasterizer.client().pending())
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn pending_glyph_rasters(&self) -> usize {
         let queued = self
             .layouter
@@ -237,11 +286,18 @@ impl Fonts {
         self.msdf_jobs_in_flight + queued
     }
 
+    /// Under the HAL the host uploads the curves: nothing here waits for an upload.
     pub fn slug_cache_generation(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        return 0;
+        #[cfg(target_arch = "wasm32")]
         self.slug_atlas.cache_generation()
     }
 
     pub fn slug_uploaded_generation(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        return 0;
+        #[cfg(target_arch = "wasm32")]
         self.slug_atlas.uploaded_generation()
     }
 
@@ -251,20 +307,30 @@ impl Fonts {
     /// atlas (not its texture) owns them, and the laid-out text cache. Font
     /// file bytes are script resources and are counted by `Cx::memory_report`.
     pub fn memory_bytes(&self) -> FontsMemoryBytes {
-        let rasterizer = self.layouter.rasterizer().borrow();
-        FontsMemoryBytes {
-            atlas_bytes: rasterizer
-                .color_atlas()
-                .image()
-                .as_pixels()
-                .len()
-                .saturating_mul(4),
-            layout_cache_bytes: self.layouter.cache_bytes(),
-        }
+        // under the HAL the atlas is the host's (its ledger counts it), not this session's
+        #[cfg(not(target_arch = "wasm32"))]
+        let atlas_bytes = 0;
+        #[cfg(target_arch = "wasm32")]
+        let atlas_bytes = self
+            .layouter
+            .rasterizer()
+            .borrow()
+            .color_atlas()
+            .image()
+            .as_pixels()
+            .len()
+            .saturating_mul(4);
+        FontsMemoryBytes { atlas_bytes, layout_cache_bytes: self.layouter.cache_bytes() }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub fn flush_slug_textures(&mut self, cx: &mut Cx) -> bool {
         self.slug_atlas.prepare_textures(cx)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn flush_slug_textures(&mut self, _cx: &mut Cx) -> bool {
+        false
     }
 
     pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
@@ -331,6 +397,12 @@ impl Fonts {
         self.layouter.is_font_known(id)
     }
 
+    /// The loaded font with this id (loading it from its definition when needed).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn font(&mut self, id: FontId) -> Option<Rc<Font>> {
+        self.layouter.is_font_known(id).then(|| self.layouter.loader.get_or_load_font(id).clone())
+    }
+
     /// True the first time a resource path fails to load, so the error logs once.
     pub fn note_missing_font(&mut self, resource_path: &str) -> bool {
         self.missing_font_paths.insert(resource_path.to_string())
@@ -338,6 +410,11 @@ impl Fonts {
 
     pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
         self.layouter.define_font_family(id, definition);
+    }
+
+    /// See [`layouter::Layouter::family_generation`].
+    pub fn family_generation(&self) -> u64 {
+        self.layouter.family_generation()
     }
 
     pub fn set_font_family_definition(
@@ -375,6 +452,44 @@ impl Fonts {
         self.layouter.missing_glyphs()
     }
 
+    /// The end of a draw: the glyphs it asked for go to the host.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
+        // Frame boundary for the layout cache's working-set protection.
+        self.layouter.advance_cache_generation();
+        let outbox = {
+            let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+            let client = rasterizer.client_mut();
+            if client.sweep_due() {
+                // what the live draw lists show is in use, redrawn or not
+                for list in cx.draw_lists.iter_live() {
+                    for glyph in &list.glyph_uses {
+                        client.retained(*glyph);
+                    }
+                }
+            }
+            client.end_frame();
+            client.take_outbox()
+        };
+        // fonts first: a request for a font names it by the id it was opened under
+        for open in &outbox.opens {
+            cx.hal_font_open(open.local, open.index, &open.vars, open.source());
+        }
+        for (local, kind, glyphs) in &outbox.requests {
+            cx.hal_glyph_request(*local, *kind, glyphs);
+        }
+        cx.hal_glyphs_pending(&outbox.pending);
+        if !outbox.releases.is_empty() {
+            cx.hal_glyph_release(&outbox.releases);
+        }
+        if !outbox.touches.is_empty() {
+            cx.hal_glyph_touch(&outbox.touches);
+        }
+        self.layouter.rasterizer().borrow_mut().client_mut().recycle(outbox);
+        true
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         assert!(!self.needs_prepare_atlases);
         // Frame boundary for the layout cache's working-set protection.
@@ -406,6 +521,7 @@ impl Fonts {
         true
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn prepare_atlas_texture(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let dirty_rect = rasterizer.color_atlas_mut().take_dirty_image().bounds();
@@ -420,6 +536,36 @@ impl Fonts {
         )
     }
 
+    /// The start of a draw. Under the HAL: takes what the font service answered since the last one
+    /// (the atlas textures lent to this session, the glyphs that arrived or were taken back).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx) {
+        use crate::makepad_platform::{hal_font_wire as wire, HalFontEvent};
+        for event in cx.hal_take_font_events() {
+            let mut rasterizer = self.layouter.rasterizer().borrow_mut();
+            let client = rasterizer.client_mut();
+            match event {
+                HalFontEvent::Opened { font, status, len: _, hash: _, path } => {
+                    if status != wire::font_status::OPENED {
+                        crate::error!("the font service could not open a font ({}): {path}", if status == wire::font_status::MISSING { "missing" } else { "not a font" });
+                    }
+                    client.on_opened(font, status);
+                }
+                HalFontEvent::Atlas { kind, texture, width, height, generation } => {
+                    client.on_atlas(kind, width, height, generation);
+                    if kind == wire::atlas::RASTER {
+                        self.atlas_texture.set_hal_lent(cx, texture);
+                    } else {
+                        self.slug_curve_texture.set_hal_lent(cx, texture);
+                    }
+                }
+                HalFontEvent::Ready { font, entries } => client.on_ready(font, &entries),
+                HalFontEvent::Evicted { generation: _, slots, .. } => client.on_evicted(&slots),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn prepare_atlases_if_needed(&mut self, cx: &mut Cx) {
         if !self.needs_prepare_atlases {
             return;
@@ -428,6 +574,7 @@ impl Fonts {
         self.needs_prepare_atlases = false;
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn prepare_atlas(&mut self, cx: &mut Cx) {
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         let pixels = self.atlas_texture.take_vec_u32(cx);
@@ -435,6 +582,7 @@ impl Fonts {
         rasterizer.color_atlas_mut().replace_pixels(pixels);
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn dispatch_msdf_jobs(&mut self) {
         let jobs = self
             .layouter
@@ -448,6 +596,7 @@ impl Fonts {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn apply_completed_msdf_jobs(&mut self) -> usize {
         let mut completed = 0usize;
         while let Ok(job) = self.msdf_result_receiver.try_recv() {
@@ -458,10 +607,21 @@ impl Fonts {
             completed += 1;
             self.msdf_jobs_in_flight = self.msdf_jobs_in_flight.saturating_sub(1);
         }
+        self.msdf_applied += completed;
         completed
+    }
+
+    /// Glyph upgrades finished on the MSDF worker and not applied yet (they are applied at
+    /// the next draw, which the signal hook requests).
+    pub fn msdf_results_waiting(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return false;
+        #[cfg(target_arch = "wasm32")]
+        (self.msdf_sent.load(std::sync::atomic::Ordering::Acquire) > self.msdf_applied)
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn bgra_vec_into_u32(vec: Vec<Bgra>) -> Vec<u32> {
     debug_assert_eq!(std::mem::size_of::<Bgra>(), std::mem::size_of::<u32>());
     debug_assert_eq!(std::mem::align_of::<Bgra>(), std::mem::align_of::<u32>());
@@ -472,6 +632,7 @@ fn bgra_vec_into_u32(vec: Vec<Bgra>) -> Vec<u32> {
     unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast::<u32>(), vec.len(), vec.capacity()) }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn u32_vec_into_bgra(vec: Vec<u32>) -> Vec<Bgra> {
     debug_assert_eq!(std::mem::size_of::<Bgra>(), std::mem::size_of::<u32>());
     debug_assert_eq!(std::mem::align_of::<Bgra>(), std::mem::align_of::<u32>());

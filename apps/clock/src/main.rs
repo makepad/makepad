@@ -16,7 +16,8 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_app_clock::{ai, view::ClockView};
+use makepad_widgets::makepad_platform::ime::pick_compact_form;
+use makepad_app_clock::{ai, view::{compact_forms, ClockView}};
 use makepad_widgets::desktop_style::{self, StyleSheet};
 use makepad_widgets::*;
 
@@ -113,6 +114,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        cx.declare_compact_forms(&compact_forms());
         // Dev flags for looking at the faces in a plain window: `--phone`
         // sizes the window like the phone viewport, `--tile` like the home
         // tile and asks the view for its compact face, the way a host does.
@@ -149,7 +151,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
         makepad_app_aichat::script_mod(vm);
@@ -169,6 +170,24 @@ impl AppMain for App {
         if let Event::Custom(json) = event {
             if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
                 cx.quit();
+                return;
+            }
+        }
+        // Parked beside the work (the compact-forms contract, platform/src/ime.rs):
+        // the host says how much room the slot has; the row is picked when it
+        // fits and the answer says so, then the host gives the window that
+        // size. Unparked: the full face again (the host resizes the window).
+        if let Event::Custom(json) = event {
+            if let Some(parked) = makepad_widgets::makepad_platform::ime::HostedParked::parse(json) {
+                let form = parked.scale.and_then(|_| pick_compact_form(&compact_forms(), parked.max));
+                let on = form.is_some();
+                let mode = if on { HostedViewMode::Tile } else { HostedViewMode::Full };
+                let clock = self.ui.widget(cx, ids!(clock));
+                clock.handle_event(cx, &Event::Custom(mode.to_json()), &mut Scope::empty());
+                if let Some(mut view) = clock.borrow_mut::<ClockView>() {
+                    view.set_compact(cx, on);
+                }
+                cx.answer_compact(form);
                 return;
             }
         }

@@ -774,6 +774,25 @@ pub unsafe fn cublas_gemm_ex(
     }
 }
 
+/// cublasGemmEx with caller-typed scalars (COMPUTE_16F requires half alpha/beta).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cublas_gemm_ex_raw(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t, transb: cublasOperation_t,
+    m: i32, n: i32, k: i32,
+    alpha: *const c_void,
+    a: *const c_void, atype: cudaDataType, lda: i32,
+    b: *const c_void, btype: cudaDataType, ldb: i32,
+    beta: *const c_void,
+    c: *mut c_void, ctype: cudaDataType, ldc: i32,
+    compute_type: cublasComputeType_t, algo: cublasGemmAlgo_t,
+) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasGemmEx(
+        handle, transa, transb, m, n, k, alpha, a, atype, lda, b, btype, ldb,
+        beta, c, ctype, ldc, compute_type, algo,
+    )) }
+}
+
 /// cublasGemmStridedBatchedEx with caller-typed alpha/beta scalars: compute
 /// types whose scaling factors are not f32 (e.g. CUBLAS_COMPUTE_16F wants
 /// __half alpha/beta) need raw pointers instead of the &f32 of the wrapper

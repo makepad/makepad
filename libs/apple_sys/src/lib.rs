@@ -2084,6 +2084,36 @@ extern "C" {
     pub fn CFRunLoopRun();
     #[cfg(target_os = "macos")]
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopGetMain() -> CFRunLoopRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
+    /// Returns why it returned (`kCFRunLoopRun*`: 1 finished, 2 stopped, 3 timed out, 4 handled a source).
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: Boolean) -> i32;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopSourceCreate(allocator: CFAllocatorRef, order: CFIndex, context: *mut CFRunLoopSourceContext) -> CFRunLoopSourceRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopSourceSignal(source: CFRunLoopSourceRef);
+}
+
+pub type CFRunLoopSourceRef = *mut c_void;
+
+/// A version 0 run loop source's callbacks (`CFRunLoopSourceContext`); unused ones are `None`.
+#[repr(C)]
+pub struct CFRunLoopSourceContext {
+    pub version: CFIndex,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> CFStringRef>,
+    pub equal: Option<extern "C" fn(*const c_void, *const c_void) -> Boolean>,
+    pub hash: Option<extern "C" fn(*const c_void) -> usize>,
+    pub schedule: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub cancel: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFStringRef)>,
+    pub perform: Option<extern "C" fn(*mut c_void)>,
 }
 
 #[cfg(target_os = "macos")]

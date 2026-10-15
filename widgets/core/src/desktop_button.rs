@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     button::ButtonAction,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -113,6 +113,37 @@ script_mod! {
                         sdf.fill(#ff3b30)
                         return sdf.result
                     }
+                    // macOS-style window controls an app draws in its own caption under a
+                    // window manager in that style: the colour, the glyph on hover.
+                    DesktopButtonType.MacClose => {
+                        sdf.circle(c.x, c.y, 6.0)
+                        sdf.fill(#ff5f57.mix(#e0443e, self.down))
+                        let g = 2.6
+                        sdf.move_to(c.x - g, c.y - g)
+                        sdf.line_to(c.x + g, c.y + g)
+                        sdf.move_to(c.x - g, c.y + g)
+                        sdf.line_to(c.x + g, c.y - g)
+                        sdf.stroke(#4d0000.mix(#4d000000, 1.0 - self.hover), 1.1)
+                        return sdf.result
+                    }
+                    DesktopButtonType.MacMin => {
+                        sdf.circle(c.x, c.y, 6.0)
+                        sdf.fill(#febc2e.mix(#d9a020, self.down))
+                        sdf.move_to(c.x - 3.2, c.y)
+                        sdf.line_to(c.x + 3.2, c.y)
+                        sdf.stroke(#985700.mix(#98570000, 1.0 - self.hover), 1.1)
+                        return sdf.result
+                    }
+                    DesktopButtonType.MacMax => {
+                        sdf.circle(c.x, c.y, 6.0)
+                        sdf.fill(#28c840.mix(#1fa733, self.down))
+                        sdf.move_to(c.x - 3.0, c.y)
+                        sdf.line_to(c.x + 3.0, c.y)
+                        sdf.move_to(c.x, c.y - 3.0)
+                        sdf.line_to(c.x, c.y + 3.0)
+                        sdf.stroke(#006500.mix(#00650000, 1.0 - self.hover), 1.1)
+                        return sdf.result
+                    }
                 }
                 return #f00
             }
@@ -167,6 +198,9 @@ pub enum DesktopButtonType {
     Fullscreen = 6,
     RecordOff = 7,
     RecordOn = 8,
+    MacClose = 9,
+    MacMin = 10,
+    MacMax = 11,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -199,7 +233,9 @@ impl Widget for DesktopButton {
         }
 
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) => {
+            // only a primary click/touch counts, so e.g. a right-click or the mouse's
+            // back button over the close button doesn't close the window
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.widget_action(uid, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, ids!(hover.down));
             }
@@ -213,7 +249,7 @@ impl Widget for DesktopButton {
             Hit::FingerLongPress(_) => {
                 cx.widget_action(uid, ButtonAction::LongPressed);
             }
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over {
                     cx.widget_action(uid, ButtonAction::Clicked(fe.modifiers));
                     if fe.device.has_hovers() {

@@ -178,6 +178,9 @@ impl ContentBackend for ControlBackend {
         let mode = ControlMode::from_model_id(&self.model_id)?;
         self.mode = Some(mode);
         ctx.ensure_files()?;
+        // The T5 tokenizer table, downloaded with the model (not in git).
+        makepad_ai_flux::t5::load_tokenizer_from(ctx.cache_dir)
+            .map_err(|e| AssetAiError::Backend(format!("model {}: {e}", ctx.spec.id)))?;
         self.ready = Some(ReadyFiles {
             unet_path: ctx.path_by_role("unet")?,
             vae_path: ctx.path_by_role("vae")?,
@@ -671,6 +674,8 @@ mod tests {
             guidance: None,
             delay_ms: 0,
             pull_only: false,
+            stream: false,
+            control: None,
             input_bytes: vec![1, 2, 3],
             input_content_type: "image/png".to_string(),
             inputs: Vec::new(),
@@ -683,6 +688,7 @@ mod tests {
             codec: String::new(),
             audio: None,
             chat_session: String::new(),
+            chat_images: Vec::new(),
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),
@@ -692,10 +698,14 @@ mod tests {
             text: String::new(),
             voice: String::new(),
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,
             lyrics: String::new(),
+            score: String::new(),
+            score_mode: String::new(),
+            score_only: false,
             remesh_resolution: None,
             texture: None,
             decimation_target: None,

@@ -5,7 +5,6 @@
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_cef::BootstrapResult;
 use makepad_widgets::*;
 
 mod ai;
@@ -17,9 +16,10 @@ mod webview;
 use chrome::{TabStrip, TabStripAction};
 use tabs::TabId;
 use std::cell::RefCell;
-use std::rc::Rc;
 use theme::Palette;
 use webview::{WebView, WebViewAction};
+
+app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -54,7 +54,7 @@ script_mod! {
                             flow: Down
                             padding: Inset{top: 4 bottom: 4 left: 0 right: 0}
                             draw_bg +: {
-                                color: mod.browser_theme.background
+                                color: mod.theme.color_bg_app
                             }
                             menu_new_tab := MpMenuItem{text: "New tab"}
                             menu_close_tab := MpMenuItem{text: "Close tab"}
@@ -88,8 +88,8 @@ pub fn uptime_us() -> u128 {
 
 fn palette() -> Palette {
     PALETTE.with(|p| {
-        p.borrow_mut()
-            .get_or_insert_with(Palette::current)
+        p.borrow().as_ref()
+            .expect("browser system theme registered before use")
             .clone()
     })
 }
@@ -149,8 +149,6 @@ pub struct App {
     shown_tab: Option<TabId>,
     #[rust]
     menu_open: bool,
-    #[rust]
-    reported_mode: String,
     #[rust]
     focus_omnibox_pending: bool,
     #[rust]
@@ -310,15 +308,6 @@ impl App {
         // The bar shows the page title too when the window manager hosts us.
         makepad_wm_api::set_title(cx, &title);
 
-        if info.render_mode != self.reported_mode && info.render_mode != "None" {
-            self.reported_mode = info.render_mode.clone();
-            log!(
-                "browser: page rendering is {} (accelerated frames so far: {}, last blit {}us)",
-                info.render_mode,
-                info.accelerated_frames,
-                info.last_blit_micros
-            );
-        }
         self.ui.redraw(cx);
     }
 
@@ -468,15 +457,7 @@ impl MatchEvent for App {
         if !makepad_wm_api::warm_start() {
             self.ai_port = AiServicePort::open(cx, ai::manifest());
         }
-        match makepad_cef::startup_phases() {
-            Some((bundle_ms, exec_gap_ms)) => log!(
-                "browser: window up at {} ms after main (app bundle prepared in {} ms, exec-to-main gap {} ms)",
-                uptime_ms(),
-                bundle_ms,
-                exec_gap_ms
-            ),
-            None => log!("browser: window up at {} ms after main", uptime_ms()),
-        }
+        log!("browser: window up at {} ms after main", uptime_ms());
         let urls = initial_urls();
         if urls.is_empty() {
             // Never boot empty: the first tab opens the web (Cmd+T tabs
@@ -566,22 +547,12 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(menu_about)).clicked(actions) {
             self.set_menu_open(cx, false);
-            let info = self
-                .with_webview(cx, |_cx, wv| wv.active_info())
-                .unwrap_or_default();
             let html = format!(
                 "<!doctype html><title>About browser</title><body style=\"background:{bg};color:{fg};font:14px -apple-system,Helvetica,sans-serif;padding:32px\">\
                  <h2 style=\"font-weight:500\">browser</h2>\
-                 <p>Makepad chrome, Chromium Embedded Framework {cef} page rendering.</p>\
-                 <p>Page rendering path: <b>{mode}</b> (accelerated frames: {frames}, last GPU blit: {blit}µs)</p>\
-                 <p>ANGLE backend: {angle}</p></body>",
+                 <p>Makepad chrome; pages rendered by Chromium in the browser host, shown as shared GPU textures.</p></body>",
                 bg = palette().darker_background,
                 fg = palette().foreground,
-                cef = makepad_cef::CEF_VERSION,
-                mode = info.render_mode,
-                frames = info.accelerated_frames,
-                blit = info.last_blit_micros,
-                angle = std::env::var("MAKEPAD_CEF_USE_ANGLE").unwrap_or_else(|_| "default".into()),
             );
             let url = format!("data:text/html;charset=utf-8,{}", theme::percent_encode(&html));
             self.new_tab(cx, Some(url));
@@ -635,9 +606,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        // The family theme bridge retints the stock widgets from the WM
-        // theme; the chrome roles go into mod.browser_theme.
-        makepad_wm_theme::apply(vm);
         let palette=Palette::for_vm(vm);
         PALETTE.with(|p|*p.borrow_mut()=Some(palette.clone()));
         palette.apply(vm);
@@ -651,13 +619,17 @@ impl AppMain for App {
             let can_back=self.with_webview(cx,|_,view|view.active_info().can_go_back).unwrap_or(false);
             if can_back && event.back_pressed() {self.with_webview(cx,|cx,view|view.go_back(cx));return;}
         }
+        if let Event::Startup = event {
+            let _ = uptime_ms();
+            adopt_renamed_profile();
+        }
         if let Event::WindowGeomChange(e)=event {
             let narrow=e.new_geom.inner_size.x<620.0;
             for path in [ids!(forward_btn),ids!(reload_btn),ids!(bookmark_btn)] {self.ui.widget(cx,path).set_visible(cx,!narrow);}
         }
         // The window manager asked politely (SUPER+W): go now, ahead of the
-        // kill that follows its grace. A warm-pool browser needs no waking —
-        // CEF paints nothing until a tile presents it.
+        // kill that follows its grace. A warm-pool browser needs no waking:
+        // its pages paint nothing until a tile presents it.
         if let Event::Custom(json) = event {
             match makepad_wm_api::WmEvent::parse(json) {
                 Some(makepad_wm_api::WmEvent::Adopted) if self.ai_port.is_none() => {
@@ -707,79 +679,24 @@ impl AppMain for App {
     }
 }
 
-fn main() {
-    app_main();
-}
-
-/// The CEF-aware entry point: helper-process bootstrap (`cef_execute_process`),
-/// the app-bundle re-exec macOS needs for Chromium's subprocesses, then the
-/// ordinary Makepad event loop with the `--remote` control surface.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
-pub fn app_main() {
-    let _ = uptime_ms();
-    if let Err(err) = makepad_cef::reexec_into_app_bundle_if_needed() {
-        panic!("CEF bundle re-exec failed: {err}");
-    }
-    match makepad_cef::bootstrap() {
-        Ok(BootstrapResult::Continue) => {}
-        Ok(BootstrapResult::Exit(code)) => std::process::exit(code),
-        Err(err) => panic!("CEF bootstrap failed: {err}"),
-    }
-
-    Cx::init_log();
-    if Cx::pre_start() {
-        return;
-    }
-    // Chromium composites the page on this colour. Left at CEF's default the
-    // first frames of every page are BLACK — a dark dip then a bright jump on
-    // open, and a black margin wherever a resize outruns the reflow.
-    makepad_cef::set_background_color(palette().page_background_argb());
-    adopt_renamed_profile();
-    // Only the cheap NSApp/pump preparation here: the window goes up first,
-    // the WebView runs `cef_initialize` on the frame after it is drawn.
-    if let Err(err) = makepad_cef::prepare() {
-        panic!("CEF prepare failed: {err}");
-    }
-
-    let cx = Rc::new(RefCell::new(Cx::new(
-        makepad_widgets::_app_main_event_closure!(App),
-    )));
-    let studio_http = makepad_widgets::resolve_studio_http();
-    cx.borrow_mut().init_websockets(&studio_http);
-    if makepad_widgets::should_run_stdin_loop_from_env() {
-        cx.borrow_mut().in_makepad_studio = true;
-    }
-    cx.borrow_mut().init_cx_os();
-    makepad_widgets::makepad_platform::remote::start_if_requested(&mut cx.borrow_mut());
-    Cx::event_loop(cx.clone());
-    drop(cx);
-    makepad_cef::shutdown();
-}
-
-/// CEF keeps the browser profile (cookies, logins) at
-/// `~/.makepad-cef/<executable name>`. The binary was `browser` before it
-/// became `makepad-app-browser`: an existing old profile moves over once, so
-/// the rename does not sign the user out of everything. Not when a profile
-/// directory is chosen explicitly, and never over an existing new profile.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+/// The pages keep their profile (cookies, logins) at
+/// `~/.makepad-cef/makepad-app-browser` (browser_view's profile for this
+/// app). The binary was `browser` before it became `makepad-app-browser`: an
+/// existing old profile moves over once, so the rename does not sign the
+/// user out of everything. Never over an existing new profile.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn adopt_renamed_profile() {
-    if std::env::var_os("MAKEPAD_CEF_PROFILE_DIR").is_some() || std::env::var_os("MAKEPAD_CEF_EPHEMERAL").is_some() {
+    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
         return;
     }
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return };
-    let Some(stem) = std::env::current_exe().ok().and_then(|exe| exe.file_stem().map(|s| s.to_os_string())) else { return };
     let profiles = std::path::Path::new(&home).join(".makepad-cef");
-    let (old, new) = (profiles.join("browser"), profiles.join(&stem));
-    if stem != "makepad-app-browser" || !old.is_dir() || new.exists() {
+    let (old, new) = (profiles.join("browser"), profiles.join("makepad-app-browser"));
+    if !old.is_dir() || new.exists() {
         return;
     }
     match std::fs::rename(&old, &new) {
         Ok(()) => log!("browser: moved the profile {} to {}", old.display(), new.display()),
         Err(err) => log!("browser: could not move the profile {} to {}: {err}", old.display(), new.display()),
     }
-}
-
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))]
-pub fn app_main() {
-    panic!("browser is desktop-only");
 }

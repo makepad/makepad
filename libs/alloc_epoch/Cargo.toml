@@ -1,0 +1,11 @@
+[package]
+name = "makepad-alloc-epoch"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad: tell the process (and a loader that runs it) that the process allocator is about to be replaced"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

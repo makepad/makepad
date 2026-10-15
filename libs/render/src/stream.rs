@@ -418,10 +418,11 @@ impl OcclusionRaster {
         }
         if n < 3 { return; }
         let (w, h) = (self.width as f32, self.height as f32);
-        let sp: Vec<(f32, f32, f32)> = buf[..n].iter().map(|v| {
+        let mut sp = [(0.0f32, 0.0f32, 0.0f32); 8];
+        for (s, v) in sp.iter_mut().zip(&buf[..n]) {
             let iw = 1.0 / v.w;
-            ((v.x * iw * 0.5 + 0.5) * w, (0.5 - v.y * iw * 0.5) * h, iw)
-        }).collect();
+            *s = ((v.x * iw * 0.5 + 0.5) * w, (0.5 - v.y * iw * 0.5) * h, iw);
+        }
         for i in 1..n - 1 {
             self.triangle(sp[0], sp[i], sp[i + 1]);
         }

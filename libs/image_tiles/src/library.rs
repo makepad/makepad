@@ -3,10 +3,11 @@
 //! One directory is one library:
 //! - `library.sqlite` — the index: items and shard bookkeeping ([`crate::db`]).
 //! - `tapes/<shard>/L<level>.mov` — one HEVC intra frame per file: the atlas
-//!   page of a shard at one level. Level 0 is a 4096 px frame, level 4 a
-//!   256 px one; one hardware decode fills a whole atlas level.
+//!   page of a shard at one level. Level 0 is `grid * 128` px (the library's
+//!   [`crate::tape::PageGeometry`]: 4096 on a desktop, 2048 on a phone), each
+//!   level halves it; one hardware decode fills a whole atlas level.
 //! - `full/<item>.mov` — the picture at the highest resolution it was
-//!   fetched at (capped to [`crate::tape::FULL_MAX_PX`]), one intra frame.
+//!   fetched at (capped to the layout's `frame_max`), one intra frame.
 //! - `pyr/<item>-<px>.mov` — the picture's pre-cut zoom levels, named by
 //!   long side, so a zoom is one small hardware decode of the level that
 //!   fits, never the archival frame plus a rescale.

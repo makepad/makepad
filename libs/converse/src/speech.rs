@@ -279,6 +279,8 @@ impl SpeechOutput {
                             // each other.
                             playback.samples.extend_from_slice(&audio.samples);
                         }
+                        // converse does not ask for streaming (TtsConfig::stream is off)
+                        TtsEvent::AudioChunk { .. } => {}
                         TtsEvent::Error { message, .. } => log!("tts: {message}"),
                     }
                 }

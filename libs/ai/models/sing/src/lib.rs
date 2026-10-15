@@ -10,6 +10,8 @@
 //! Design: local/agent_state/edits/design/NEURAL-VOICE.md.
 
 pub mod data;
+#[cfg(feature = "dit")]
+pub mod dit;
 pub mod disc;
 pub mod dsp;
 pub mod fft;

@@ -1,4 +1,5 @@
-//! weather as a library: the Open-Meteo model, the sky artwork widget,
+//! weather as a library: the model and its offline sample forecast, the
+//! sky artwork widget,
 //! and — for a host that links it — the module ([`module`]): what the
 //! window manager (and the web superbuild) seats in a tile IN-PROCESS,
 //! one instance per isolate, without a `Window` or a process. The
@@ -13,6 +14,7 @@ pub mod hourly;
 pub mod model;
 pub mod module;
 pub mod parts;
+pub mod sample;
 pub mod sky;
 pub mod view;
 

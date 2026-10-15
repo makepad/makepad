@@ -8,7 +8,7 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            app_open::*, drag_drop::*, finger::*, game_input::*, keyboard::*, location::*, network::*,
+            app_open::*, domain::*, drag_drop::*, finger::*, game_input::*, keyboard::*, location::*, network::*,
             video_playback::*, window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
@@ -164,12 +164,16 @@ pub enum Event {
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
-    /// The GPU context was lost and has been restored (a WebGL context the
-    /// browser took away and gave back). Every GPU object was recreated from
-    /// what the CPU side keeps: vec textures, geometries, instance data and
-    /// shaders are uploaded again and every pass is repainted. Contents only
-    /// the GPU held are gone (a render target drawn once and not redrawn,
-    /// results of GPU work read back later): handle this to redo that work.
+    /// The GPU device was lost and has been replaced (a WebGL context the
+    /// browser took away and gave back; the HAL's DeviceReset after the
+    /// driver's VK_ERROR_DEVICE_LOST or a device removal). Every GPU object
+    /// was recreated from what the CPU side keeps: vec textures, geometries,
+    /// instance data and shaders are uploaded again and every pass is
+    /// repainted. Contents only the GPU held are gone (a render target drawn
+    /// once and not redrawn, data whose CPU copy was dropped after upload,
+    /// results of GPU work read back later, shared images a host lent its
+    /// child): handle this to redo that work. Delivered once per reset, after
+    /// the uploads were queued and before the repaint.
     GpuReset,
     /// Clear all hover/pressed visual state, e.g. after an overlay that
     /// swallowed the hover-outs (a context menu) has closed.
@@ -241,6 +245,11 @@ pub enum Event {
     KeyUp(KeyEvent),
     PhysicalKeyboard(PhysicalKeyboardEvent),
     TextInput(TextInputEvent),
+    /// A reply to `Cx::read_clipboard`, routed by its request id.
+    Clipboard(crate::clipboard_read::ClipboardEvent),
+    /// Acceptance/error from a queued direct-display control request.
+    #[cfg(target_os = "linux")]
+    LinuxDisplayResult(crate::linux_display::LinuxDisplayResultEvent),
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
@@ -289,6 +298,9 @@ pub enum Event {
     BackPressed {
         handled: Cell<bool>,
     },
+    /// The system back gesture while the user is still making it (Android's predictive back, API 34+).
+    /// If they complete it, an `Event::BackPressed` follows; otherwise it ends with a `Cancel`.
+    BackGesture(BackGestureEvent),
 
     /// Permission check or request result
     PermissionResult(PermissionResult),
@@ -305,8 +317,35 @@ pub enum Event {
     /// create children from data spawn their variants and forward into them.
     Scan(crate::collect::ScanEvent),
 
+    /// A child domain's window is there or changed (see [`ChildWindowEvent`]). HAL client only.
+    ChildWindow(ChildWindowEvent),
+    ChildWindowClosed(ChildWindowClosedEvent),
+    /// A domain this app started changed state. HAL client only.
+    DomainState(DomainStateEvent),
+    DomainList(DomainListEvent),
+    ChildFrame(ChildFrameEvent),
+    ChildWindowAction(ChildWindowActionEvent),
+    ChildMessage { child: u32, message: String },
+    /// The GPU is short of memory (see [`GpuPressureEvent`]); the session that owns the
+    /// desktop frees what other GPU users hold for the UI. HAL client only.
+    GpuPressure(GpuPressureEvent),
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
+}
+
+/// The device's free memory fell under the UI's reserve, or a GPU allocation failed for
+/// lack of room (`failed`). `wanted_mb` is how much would bring the free memory back to
+/// the reserve (plus the failed allocation); 0 means the shortage is over. `free_mb` and
+/// `budget_mb` are the device's numbers when it was raised; `reserve_mb` is what the UI
+/// keeps free. All in MiB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuPressureEvent {
+    pub wanted_mb: u32,
+    pub free_mb: u32,
+    pub budget_mb: u32,
+    pub reserve_mb: u32,
+    pub failed: bool,
 }
 
 impl Event {
@@ -364,6 +403,8 @@ impl Event {
             33 => "KeyUp",
             68 => "PhysicalKeyboard",
             34 => "TextInput",
+            85 => "Clipboard",
+            86 => "LinuxDisplayResult",
             35 => "TextRangeReplace",
             36 => "TextCopy",
             37 => "TextCut",
@@ -392,6 +433,7 @@ impl Event {
             51 => "MouseLeave",
             52 => "Actions",
             53 => "BackPressed",
+            87 => "BackGesture",
             54 => "PermissionResult",
 
             #[cfg(target_arch = "wasm32")]
@@ -406,6 +448,14 @@ impl Event {
             69 => "LocationUpdate",
             70 => "LocationError",
             77 => "Scan",
+            80 => "ChildWindow",
+            81 => "ChildWindowClosed",
+            82 => "DomainState",
+            83 => "DomainList",
+            84 => "ChildFrame",
+            88 => "ChildWindowAction",
+            89 => "ChildMessage",
+            90 => "GpuPressure",
             _ => panic!(),
         }
     }
@@ -461,6 +511,9 @@ impl Event {
             Self::KeyUp(_) => 33,
             Self::PhysicalKeyboard(_) => 68,
             Self::TextInput(_) => 34,
+            Self::Clipboard(_) => 85,
+            #[cfg(target_os = "linux")]
+            Self::LinuxDisplayResult(_) => 86,
             Self::TextRangeReplace(_) => 35,
             Self::TextCopy(_) => 36,
             Self::TextCut(_) => 37,
@@ -491,10 +544,19 @@ impl Event {
             Self::MouseLeave(_) => 51,
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,
+            Self::BackGesture(_) => 87,
             Self::PermissionResult(_) => 54,
             Self::LocationUpdate(_) => 69,
             Self::LocationError(_) => 70,
             Self::Scan(_) => 77,
+            Self::ChildWindow(_) => 80,
+            Self::ChildWindowClosed(_) => 81,
+            Self::DomainState(_) => 82,
+            Self::DomainList(_) => 83,
+            Self::ChildFrame(_) => 84,
+            Self::ChildWindowAction(_) => 88,
+            Self::ChildMessage { .. } => 89,
+            Self::GpuPressure(_) => 90,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,
@@ -581,6 +643,33 @@ impl QuitRequestedEvent {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BackGestureEvent {
+    pub state: BackGestureState,
+    /// Where the finger is, or `None` if this gesture doesn't come from a touch (e.g. a held back button).
+    pub abs: Option<crate::makepad_math::Vec2d>,
+    /// How far along the system thinks the gesture is, from 0 to 1.
+    pub progress: f64,
+    /// Which screen edge the gesture started from.
+    pub edge: BackGestureEdge,
+    /// Seconds, on the same clock as this platform's touch times.
+    pub time: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackGestureState {
+    Start,
+    Move,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackGestureEdge {
+    Left,
+    Right,
+    None,
+}
+
 #[derive(Debug)]
 pub enum Hit {
     KeyFocus(KeyFocusEvent),
@@ -625,7 +714,8 @@ impl Event {
             | Self::TouchUpdate(_)
             | Self::Scroll(_)
             | Self::Pinch(_)
-            | Self::BackPressed { .. } => true,
+            | Self::BackPressed { .. }
+            | Self::BackGesture(_) => true,
             Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,
         }

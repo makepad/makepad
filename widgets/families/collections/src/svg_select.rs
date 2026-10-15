@@ -54,7 +54,7 @@
 //! And a rounded rectangle is picked as a square one, which is a corner or
 //! two of slack on a shape that is rarely a region at all.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
@@ -1027,10 +1027,9 @@ impl Widget for SvgSelect {
     ) -> ScriptAsyncResult {
         if method == live_id!(select) || method == live_id!(deselect) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(id) = vm.bx.heap.cast_to_owned_string(value, "picking a region") {
+                    if let Some(id) = vm.cast_to_owned_string(value, "picking a region") {
                         vm.with_cx_mut(|cx| {
                             if method == live_id!(select) {
                                 self.select(cx, &id);
@@ -1049,7 +1048,7 @@ impl Widget for SvgSelect {
         }
         if method == live_id!(selection) {
             let text = self.selected.join(" ");
-            let str_val = vm.bx.heap.new_string_from_str(&text);
+            let str_val = vm.new_string(&text);
             return ScriptAsyncResult::Return(str_val.into());
         }
         ScriptAsyncResult::MethodNotFound

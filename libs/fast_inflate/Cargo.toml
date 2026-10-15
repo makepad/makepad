@@ -7,12 +7,6 @@ description = "Fast DEFLATE/zlib decompression ported from libdeflate"
 
 [dependencies]
 
-[dev-dependencies]
-flate2 = "1"
-miniz_oxide = "0.8"
-libdeflater = "1.25"
-rand = "0.8"
-
 [[bench]]
 name = "decompress_bench"
 harness = false

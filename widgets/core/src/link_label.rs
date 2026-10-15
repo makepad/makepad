@@ -235,18 +235,14 @@ impl Widget for LinkLabel {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.button.text.as_ref());
+            let str_val = vm.new_string(self.button.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying link label text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying link label text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);

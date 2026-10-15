@@ -71,7 +71,11 @@ impl SkinnedModel {
     pub fn node_frames(&self, pose: &PoseBuffer, out: &mut Vec<NodeFrame>) {
         out.clear();
         out.resize(self.nodes.len(), NodeFrame::default());
-        let mut done = vec![false; self.nodes.len()];
+        // Visited flags on the stack for ordinary rigs: IK asks for every
+        // node's frame several times per character per frame.
+        let mut stack = [false; 256];
+        let mut heap;
+        let done: &mut [bool] = if self.nodes.len() <= stack.len() { &mut stack[..self.nodes.len()] } else { heap = vec![false; self.nodes.len()]; &mut heap };
         fn visit(nodes: &[Node], pose: &PoseBuffer, out: &mut [NodeFrame], done: &mut [bool], i: usize) {
             if done[i] { return; }
             let local = pose.get(i).copied().unwrap_or(nodes[i].rest);
@@ -86,7 +90,7 @@ impl SkinnedModel {
             out[i] = frame;
             done[i] = true;
         }
-        for i in 0..self.nodes.len() { visit(&self.nodes, pose, out, &mut done, i); }
+        for i in 0..self.nodes.len() { visit(&self.nodes, pose, out, done, i); }
     }
 
     /// Set a node's model-space rotation, given its parent's model frame.

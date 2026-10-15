@@ -1,13 +1,14 @@
-//! weather — current conditions and a five-day forecast from Open-Meteo
-//! for a chosen city, as a plain full-window Makepad app, part of the
-//! Makepad family (wm hosts it as a tile, or in-process as a module;
-//! terminal, files and sheets are its siblings).
+//! weather — current conditions and a ten-day forecast for a chosen
+//! city, as a plain full-window Makepad app, part of the Makepad family
+//! (wm hosts it as a tile, or in-process as a module; terminal, files and
+//! sheets are its siblings).
 //!
-//! Everything that makes it a weather app — the fetch (over the
-//! platform's own HTTP request API), the tick timer and the last good
-//! forecast — lives in `WeatherView` (`src/view.rs`), and none of it
-//! depends on this binary, so `cargo test -p makepad-app-weather` covers it
-//! without a window.
+//! The app is offline: the forecast is sample data generated on the
+//! device (src/sample.rs), so it shows a full forecast on its first frame.
+//! Everything that makes it a weather app — the sample forecast, the
+//! clock tick and the city list — lives in `WeatherView` (`src/view.rs`),
+//! and none of it depends on this binary, so `cargo test -p
+//! makepad-app-weather` covers it without a window.
 //!
 //! weather runs standalone, and unmodified inside makepad-app-wm / Studio
 //! tiles via the shared --stdin-loop client runtime every Makepad app
@@ -139,7 +140,7 @@ impl MatchEvent for App {
         }
         // `--sky=<class>` (clear, partly, overcast, rain, snow, fog,
         // thunder) with `--night` forces the sky art, so every condition
-        // can be checked against the text without waiting for weather.
+        // can be checked against the text whatever the sample shows.
         if let Some(kind) = args.iter().find_map(|a| a.strip_prefix("--sky=")) {
             let night = args.iter().any(|a| a == "--night");
             let (kind, cover, precip) = match kind {
@@ -171,7 +172,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
         makepad_app_aichat::script_mod(vm);

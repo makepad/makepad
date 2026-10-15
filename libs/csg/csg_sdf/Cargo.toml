@@ -9,7 +9,8 @@ default = ["threads"]
 threads = ["makepad-csg-math/threads"]
 
 [dependencies]
+makepad-script-compute-sched = { path = "../../../platform/script/compute_sched" }
 makepad-csg-math = { path = "../csg_math" }
 makepad-csg-mesh = { path = "../csg_mesh" }
 makepad-script = { path = "../../../platform/script", version = "1.0.0" }
-makepad-script-math-aot = { path = "../../../platform/script/math_aot", version = "1.0.0" }
+makepad-script-compute = { path = "../../../platform/script/compute", version = "1.0.0", features = ["vm"] }

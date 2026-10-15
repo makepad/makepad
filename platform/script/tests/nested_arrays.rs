@@ -11,22 +11,17 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn number(name: &str, code: &str) -> f64 {
     let mut vm = test_vm();
     vm.bx.captured_errors = Some(Vec::new());
     let value = vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: format!("nested_arrays_{name}"),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", &format!("nested_arrays_{name}"), 0, 0, &code, &[]))
     });
     let mut errs: Vec<String> = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| format!("{e:?}")).collect();
     errs.extend(vm.take_errors().into_iter().map(|e| format!("{e:?}")));
@@ -87,5 +82,3 @@ fn indexing_still_indexes() {
     let paren = "let a = [5 6]\nlet b = [(a [1])]\nb[0]";
     assert_eq!(number("paren", paren), 6.0);
 }
-
-

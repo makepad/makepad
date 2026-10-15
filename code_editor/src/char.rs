@@ -31,30 +31,13 @@ impl CharExt for char {
     }
 
     fn column_count(self) -> usize {
-        // Unicode East Asian Width: characters in East Asian Wide or Fullwidth
-        // categories occupy two display columns in a monospace grid. Without
-        // this, CJK text in the code editor overlaps because each glyph draws
-        // at 2× advance but the layouter only reserves 1 column.
-        match self as u32 {
-            // CJK Symbols and Punctuation, Hiragana, Katakana
-            0x3000..=0x30FF
-            // CJK Unified Ideographs Extension A
-            | 0x3400..=0x4DBF
-            // CJK Unified Ideographs (main block)
-            | 0x4E00..=0x9FFF
-            // Hangul Syllables
-            | 0xAC00..=0xD7AF
-            // CJK Compatibility Ideographs
-            | 0xF900..=0xFAFF
-            // Fullwidth forms + Halfwidth/Fullwidth punctuation
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-            // CJK Unified Ideographs Extensions B..F
-            | 0x20000..=0x2FFFF
-            // Emoticons, misc symbols & pictographs, transport, supplemental symbols
-            | 0x1F300..=0x1F9FF => 2,
-            _ => 1,
-        }
+        // The terminal's cell width: East Asian Wide/Fullwidth and emoji
+        // presentation take two columns, so a CJK glyph (drawn at twice the
+        // Latin advance) gets two grid columns for the cursor, selection and
+        // hit testing. The editor steps through text a char at a time, so a
+        // zero-width char (a combining mark, a joiner) keeps one column of
+        // its own: visible, and a place the cursor can stand.
+        (makepad_cell_width::char_width(self as u32) as usize).max(1)
     }
 
     fn opposite_delimiter(&self) -> Option<char> {
@@ -67,5 +50,38 @@ impl CharExt for char {
             '}' => '{',
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CharExt;
+    use crate::str::StrExt;
+
+    /// Wide characters take two grid columns, the terminal's widths: the
+    /// cursor after `"大型"` stands at column 4, and selection and hit
+    /// testing walk the same columns.
+    #[test]
+    fn wide_characters_take_two_columns() {
+        for (ch, columns) in [
+            ('a', 1),
+            ('大', 2),
+            ('，', 2),
+            ('ア', 2),
+            ('한', 2),
+            ('ㄅ', 2),
+            ('🚀', 2),
+            ('✨', 2),
+            ('✅', 2),
+            ('→', 1),
+            ('\u{301}', 1),
+            ('\u{200d}', 1),
+        ] {
+            assert_eq!(ch.column_count(), columns, "{ch:?}");
+        }
+        let line = "zh: \"大型代码库\"";
+        assert_eq!(line.column_count(), 6 + 5 * 2);
+        assert_eq!("\t大".column_count_at(0, 4), 4 + 2);
+        assert_eq!("大\t".column_count_at(0, 4), 2 + 2);
     }
 }

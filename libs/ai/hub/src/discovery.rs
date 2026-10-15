@@ -93,10 +93,75 @@ pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: 
         }
         .serialize_json();
         loop {
-            let _ = socket.send_to(beacon.as_bytes(), ("255.255.255.255", DISCOVERY_PORT));
+            // 255.255.255.255 leaves by the default route only; each up
+            // interface's directed broadcast reaches its own subnet too (a
+            // Wi-Fi hotspot this machine hosts). Interfaces are read every
+            // round: a hotspot may come up after the node.
+            for target in beacon_targets() {
+                let _ = socket.send_to(beacon.as_bytes(), (target, DISCOVERY_PORT));
+            }
             std::thread::sleep(BEACON_INTERVAL);
         }
     });
+}
+
+/// The TLS port a fleet node serves on unless configured otherwise.
+pub const DEFAULT_TLS_PORT: u16 = 8123;
+
+/// Fleet nodes where no beacon reaches: a hub listening at `port` on a
+/// gateway of this machine (the routing table's, else each interface's first
+/// host) that takes a TCP connection within `timeout`. A phone on a laptop's
+/// hotspot hears no beacon when the laptop broadcasts out of another
+/// interface, but the laptop is its gateway. The URLs are marked as fleet
+/// endpoints and reached through the same TLS / known-node / credential
+/// path as a beacon's: nothing is trusted for being a gateway.
+pub fn gateway_nodes(port: u16, timeout: Duration) -> Vec<String> {
+    let candidates = makepad_core_util::netif::gateway_candidates();
+    let probes: Vec<_> = candidates
+        .into_iter()
+        .map(|ip| {
+            std::thread::spawn(move || {
+                let addr = std::net::SocketAddr::from((ip, port));
+                std::net::TcpStream::connect_timeout(&addr, timeout).ok().map(|_| ip)
+            })
+        })
+        .collect();
+    let mut out = Vec::new();
+    for probe in probes {
+        if let Ok(Some(ip)) = probe.join() {
+            let host_port = format!("{ip}:{port}");
+            crate::fleet_auth::mark_fleet_endpoint(&host_port);
+            out.push(format!("https://{host_port}"));
+        }
+    }
+    out
+}
+
+/// This machine's IPv4 addresses: a change means another network (a
+/// client forgets which nodes were unreachable).
+pub fn network_addresses() -> Vec<std::net::Ipv4Addr> {
+    makepad_core_util::netif::interfaces().into_iter().map(|i| i.addr).collect()
+}
+
+/// Whether `host:port` takes a TCP connection within `timeout` (a
+/// remembered hub address is only a hint: elsewhere it may not exist).
+pub fn answers(host_port: &str, timeout: Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(addrs) = host_port.to_socket_addrs() else { return false };
+    addrs.into_iter().any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+}
+
+/// Where a beacon goes: the limited broadcast, then every up interface's
+/// directed broadcast.
+fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
+    let mut out = vec![std::net::Ipv4Addr::BROADCAST];
+    for interface in makepad_core_util::netif::interfaces() {
+        let target = interface.broadcast();
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    out
 }
 
 /// A beacon for the wanted fleet from `from`: the node's TLS endpoint,
@@ -172,55 +237,122 @@ impl Discovery {
 /// and a fresh bind per call leaked a socket plus a thread each time (the
 /// Asset UI sat on 22 sockets bound to :41830 after ten minutes, growing).
 /// The filter reads `MAKEPAD_AI_FLEET` per beacon, so sharing across
-/// callers changes nothing they observe.
+/// callers changes nothing they observe. After [`stop_listener`] the next
+/// call starts it again (the set is kept).
 pub fn start_listener() -> Discovery {
-    static SHARED: OnceLock<Discovered> = OnceLock::new();
-    Discovery::Available(SHARED.get_or_init(spawn_listener).clone())
+    let mut slot = LISTENER.lock().unwrap_or_else(|e| e.into_inner());
+    let set = DISCOVERED.get_or_init(Discovered::default).clone();
+    // a failed bind is said once and not retried until a stop (another app holds the port)
+    let failed = BIND_FAILED.load(std::sync::atomic::Ordering::Relaxed);
+    if !failed && slot.as_ref().map_or(true, |l| l.thread.is_finished()) {
+        *slot = Listener::spawn(set.clone(), DISCOVERY_PORT);
+        if slot.is_none() {
+            BIND_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Discovery::Available(set)
 }
 
-fn spawn_listener() -> Discovered {
-    let discovered = Discovered::default();
-    let nodes = discovered.nodes.clone();
-    std::thread::spawn(move || {
-        let socket = match makepad_core_util::udp::bind_reuse_udp(DISCOVERY_PORT) {
+/// Ends the listener thread and waits for it (an app that quits: under `makepad run` the app's
+/// domain waits for every thread it started, and this one blocked in its receive for good, so
+/// every quit of an app that had looked for the fleet waited out the stop's 5 s). The wait is
+/// woken by one datagram over loopback to a socket of the listener's own -- no timeout, no
+/// polling, nothing on the network.
+pub fn stop_listener() {
+    BIND_FAILED.store(false, std::sync::atomic::Ordering::Relaxed);
+    let listener = LISTENER.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(listener) = listener {
+        listener.stop();
+    }
+}
+
+static DISCOVERED: OnceLock<Discovered> = OnceLock::new();
+static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
+static BIND_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct Listener {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// where one datagram wakes the listener's wait: its private loopback socket (unix), or the
+    /// discovery port itself on loopback (Windows binds that port exclusively: it is this
+    /// listener's own)
+    wake: std::net::SocketAddr,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Listener {
+    /// Wakes the listener's wait, which sees the stop flag, and joins it.
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(waker) = UdpSocket::bind(("127.0.0.1", 0)) {
+            let _ = waker.send_to(&[0], self.wake);
+        }
+        let _ = self.thread.join();
+    }
+
+    fn spawn(discovered: Discovered, port: u16) -> Option<Listener> {
+        let nodes = discovered.nodes.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let socket = match makepad_core_util::udp::bind_reuse_udp(port) {
             Ok(socket) => socket,
             Err(e) => {
-                eprintln!(
-                    "discovery: listener bind :{DISCOVERY_PORT} failed: {e} — no LAN fleet"
-                );
-                return;
+                eprintln!("discovery: listener bind :{port} failed: {e} — no LAN fleet");
+                return None;
             }
         };
-        let mut buffer = [0u8; 2048];
-        let mut warned_no_credential = false;
-        loop {
-            let Ok((len, from)) = socket.recv_from(&mut buffer) else {
-                continue;
-            };
-            let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
-                continue;
-            };
-            let Ok(beacon) = FleetBeaconJson::deserialize_json(text) else {
-                continue;
-            };
-            // A node is only of use to a process with a fleet credential.
-            if crate::fleet_auth::own_credential().is_none() {
-                if !warned_no_credential {
-                    warned_no_credential = true;
-                    eprintln!("discovery: fleet nodes found, but this process has no fleet credential (~/.makepad/ai-hub/client.credential or MAKEPAD_AI_HUB_CREDENTIAL; see tools/aihub-fleet.md)");
+        #[cfg(unix)]
+        let (waker, wake) = {
+            let waker = UdpSocket::bind(("127.0.0.1", 0)).ok()?;
+            let wake = waker.local_addr().ok()?;
+            (waker, wake)
+        };
+        #[cfg(not(unix))]
+        let wake = std::net::SocketAddr::from(([127, 0, 0, 1], socket.local_addr().ok()?.port()));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("ai-hub-discovery".into())
+            .spawn(move || {
+                let mut buffer = [0u8; 2048];
+                let mut warned_no_credential = false;
+                loop {
+                    #[cfg(unix)]
+                    match makepad_core_util::udp::wait_readable(&socket, &waker) {
+                        Ok((_, true)) | Err(_) => return,
+                        Ok((false, false)) => continue,
+                        Ok((true, false)) => {}
+                    }
+                    let received = socket.recv_from(&mut buffer);
+                    if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    let Ok((len, from)) = received else {
+                        continue;
+                    };
+                    let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
+                        continue;
+                    };
+                    let Ok(beacon) = FleetBeaconJson::deserialize_json(text) else {
+                        continue;
+                    };
+                    // A node is only of use to a process with a fleet credential.
+                    if crate::fleet_auth::own_credential().is_none() {
+                        if !warned_no_credential {
+                            warned_no_credential = true;
+                            eprintln!("discovery: fleet nodes found, but this process has no fleet credential (~/.makepad/ai-hub/client.credential or MAKEPAD_AI_HUB_CREDENTIAL; see tools/aihub-fleet.md)");
+                        }
+                        continue;
+                    }
+                    let Some(base_url) = accept_fleet_beacon(&beacon, from.ip(), &wanted_fleet()) else {
+                        continue;
+                    };
+                    nodes
+                        .lock()
+                        .unwrap()
+                        .insert(beacon.node_id, (base_url, Instant::now()));
                 }
-                continue;
-            }
-            let Some(base_url) = accept_fleet_beacon(&beacon, from.ip(), &wanted_fleet()) else {
-                continue;
-            };
-            nodes
-                .lock()
-                .unwrap()
-                .insert(beacon.node_id, (base_url, Instant::now()));
-        }
-    });
-    discovered
+            })
+            .ok()?;
+        Some(Listener { stop, wake, thread })
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +400,24 @@ mod tests {
             panic!("native discovery unexpectedly unavailable");
         };
         assert!(Arc::ptr_eq(&a.nodes, &b.nodes));
+    }
+
+    /// A listener waiting in its receive with nothing on the network ends promptly when stopped
+    /// (an app's quit waits for it), and its set stays.
+    #[test]
+    fn a_listener_stops_without_any_beacon() {
+        let set = Discovered::default();
+        // an ephemeral port: no beacon reaches it, and no other listener on this machine shares it
+        let listener = Listener::spawn(set.clone(), 0).expect("listener");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!listener.thread.is_finished(), "the listener waits for beacons");
+        let (done, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            listener.stop();
+            let _ = done.send(());
+        });
+        assert!(stopped.recv_timeout(Duration::from_secs(5)).is_ok(), "stopping the listener did not return");
+        assert!(set.nodes().is_empty());
     }
 
     #[test]

@@ -150,19 +150,18 @@ impl ScriptHook for MacosWindowConfig {
         let mut has_full_screen_auxiliary = false;
 
         if let Some(obj) = value.as_object() {
-            vm.map_mut_with(obj, |_vm, map| {
-                for (key, _) in map.iter() {
-                    match key.as_id() {
-                        Some(id!(level)) => has_level = true,
-                        Some(id!(non_activating)) => has_non_activating = true,
-                        Some(id!(miniaturizable)) => has_miniaturizable = true,
-                        Some(id!(resizable)) => has_resizable = true,
-                        Some(id!(join_all_spaces)) => has_join_all_spaces = true,
-                        Some(id!(full_screen_auxiliary)) => has_full_screen_auxiliary = true,
-                        _ => {}
-                    }
+            for entry in vm.heap().map_entries(obj) {
+                let key = entry.key;
+                match key.as_id() {
+                    Some(id!(level)) => has_level = true,
+                    Some(id!(non_activating)) => has_non_activating = true,
+                    Some(id!(miniaturizable)) => has_miniaturizable = true,
+                    Some(id!(resizable)) => has_resizable = true,
+                    Some(id!(join_all_spaces)) => has_join_all_spaces = true,
+                    Some(id!(full_screen_auxiliary)) => has_full_screen_auxiliary = true,
+                    _ => {}
                 }
-            });
+            }
         }
 
         if !has_level {
@@ -225,34 +224,6 @@ impl WindowHandle {
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
-    /// A hosted (stdin-loop) window's geometry as the HOST reports it: the
-    /// host's logical size at the host's dpi. Recorded as the window's native
-    /// geometry and converted into layout points through any `dpi_override`
-    /// the app has set — exactly what a native window's geometry goes
-    /// through — so an app that lays out at its own scale (a console that
-    /// shrinks to fit a tile) still gets the host's pointer coordinates
-    /// remapped into its points (`remap_dpi_override`).
-    #[cfg(any(
-        test,
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos"), any(not(linux_direct), use_vulkan)),
-        gpusim,
-    ))]
-    pub(crate) fn stdin_apply_native_geom(
-        &mut self,
-        window_id: WindowId,
-        native_geom: WindowGeom,
-    ) -> crate::event::WindowGeomChangeEvent {
-        let window = &mut self[window_id];
-        let old_geom = window.window_geom.clone();
-        window.os_dpi_factor = Some(native_geom.dpi_factor);
-        let new_geom = window.native_window_geom_to_layout(native_geom);
-        window.window_geom = new_geom.clone();
-        crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }
-    }
-
     fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
@@ -268,7 +239,9 @@ impl CxWindowPool {
     pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
         for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            let position = window.layout_vec2d_to_native_points(window.window_geom.position);
+            // Position is already in native points; only the in-window size is scaled by
+            // native_window_geom_to_layout (including for host-supplied geometry).
+            let position = window.window_geom.position;
             let size = window.layout_vec2d_to_native_points(window.window_geom.inner_size);
             if pos.x >= position.x
                 && pos.y >= position.y
@@ -281,10 +254,9 @@ impl CxWindowPool {
         let first = &self.0.pool[0];
         return (
             WindowId(0, first.generation),
-            first.item.layout_vec2d_to_native_points(first.item.window_geom.position),
+            first.item.window_geom.position,
         );
     }
-
 
     /// Every allocated window slot, as a generation-correct `WindowId`.
     /// Callers usually want to skip the ones whose `is_created` is false.
@@ -460,6 +432,7 @@ impl WindowHandle {
         cxwindow.wayland_decorations = WaylandDecorationPreference::default();
         cxwindow.uses_client_side_decorations = false;
         cxwindow.wayland_is_fullscreen = false;
+        cxwindow.draws_chrome_buttons = false;
         cx.platform_ops
             .push_back(CxOsOp::CreateWindow(window.window_id()));
         window
@@ -505,6 +478,7 @@ impl WindowHandle {
             cxwindow.wayland_decorations = WaylandDecorationPreference::default();
             cxwindow.uses_client_side_decorations = false;
             cxwindow.wayland_is_fullscreen = false;
+            cxwindow.draws_chrome_buttons = false;
             cxwindow.popup_grab_keyboard
         };
         cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
@@ -717,6 +691,12 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
 
+    /// A double click on the window's caption makes it fullscreen (`true`) or maximises it
+    /// (`false`, the default); see `CxWindow::double_click_fullscreen`.
+    pub fn set_double_click_fullscreen(&self, cx: &mut Cx, on: bool) {
+        cx.windows[self.window_id()].double_click_fullscreen = on;
+    }
+
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
@@ -864,6 +844,15 @@ pub struct CxWindow {
     pub(crate) uses_client_side_decorations: bool,
     /// True compositor fullscreen, kept separate so CSD remains visible when maximized.
     pub(crate) wayland_is_fullscreen: bool,
+    /// Whether makepad draws this window's minimize/maximize/close buttons itself (Windows, Wayland CSD),
+    /// so they keep their size in layout points, unlike the OS's own buttons.
+    pub(crate) draws_chrome_buttons: bool,
+    /// A double click on the window's caption (or anywhere, for a drag-anywhere window)
+    /// makes it fullscreen on its screen instead of maximised; again restores it. A host
+    /// window manager reads it from the drag query's answer (`makepad_studio_protocol::HostedDragAnswer`).
+    pub double_click_fullscreen: bool,
+    /// The host window manager shows this window fullscreen (`ime::HostedFullscreen`).
+    pub(crate) hosted_fullscreen: bool,
 }
 
 impl Default for CxWindow {
@@ -893,6 +882,9 @@ impl Default for CxWindow {
             wayland_decorations: WaylandDecorationPreference::default(),
             uses_client_side_decorations: false,
             wayland_is_fullscreen: false,
+            draws_chrome_buttons: false,
+            double_click_fullscreen: false,
+            hosted_fullscreen: false,
         }
     }
 }
@@ -926,6 +918,29 @@ impl CxWindow {
         rect.pos *= scale;
         rect.size *= scale;
         rect
+    }
+
+    /// The size of the three 46 x 29 chrome buttons that makepad draws itself, in layout points.
+    const DRAWN_CHROME_BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
+
+    /// Returns `geom` with all of its in-window lengths multiplied by `scale`, at `dpi_factor`.
+    ///
+    /// The OS's own chrome buttons scale too, but the ones we draw zoom along with the rest of our drawing,
+    /// so they keep their size in layout points at the top right.
+    pub(crate) fn scale_window_geom(&self, mut geom: WindowGeom, scale: f64, dpi_factor: f64) -> WindowGeom {
+        geom.inner_size *= scale;
+        geom.outer_size *= scale;
+        geom.safe_area_insets = geom.safe_area_insets.scale(scale);
+        geom.window_chrome_buttons = if self.draws_chrome_buttons {
+            Rect {
+                pos: dvec2(geom.inner_size.x - Self::DRAWN_CHROME_BUTTONS_SIZE.x, 0.0),
+                size: Self::DRAWN_CHROME_BUTTONS_SIZE,
+            }
+        } else {
+            Self::scale_rect(geom.window_chrome_buttons, scale)
+        };
+        geom.dpi_factor = dpi_factor;
+        geom
     }
 
     pub fn window_visuals(&self) -> WindowVisuals {
@@ -1053,18 +1068,12 @@ impl CxWindow {
 
     /// Converts a `WindowGeom` reported in native OS points into Makepad layout
     /// points, applying any active `dpi_override` to every in-window metric.
-    pub fn native_window_geom_to_layout(&self, mut geom: WindowGeom) -> WindowGeom {
+    pub fn native_window_geom_to_layout(&self, geom: WindowGeom) -> WindowGeom {
         let native_dpi =
             Self::valid_dpi_factor(geom.dpi_factor).unwrap_or(self.native_dpi_factor());
         let effective_dpi =
             Self::valid_dpi_factor(self.dpi_override.unwrap_or(native_dpi)).unwrap_or(native_dpi);
-        let scale = native_dpi / effective_dpi;
-        geom.inner_size *= scale;
-        geom.outer_size *= scale;
-        geom.safe_area_insets = geom.safe_area_insets.scale(scale);
-        geom.window_chrome_buttons = Self::scale_rect(geom.window_chrome_buttons, scale);
-        geom.dpi_factor = effective_dpi;
-        geom
+        self.scale_window_geom(geom, native_dpi / effective_dpi, effective_dpi)
     }
 
     pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
@@ -1380,15 +1389,7 @@ mod tests {
         let mut host = test_cx();
         let config = host.with_vm(|vm| {
             let obj = vm.heap_mut().new_object();
-            vm.map_mut_with(obj, |_vm, map| {
-                map.insert(
-                    ScriptValue::from_id(id!(kind)),
-                    ScriptMapValue {
-                        tag: Default::default(),
-                        value: NIL,
-                    },
-                );
-            });
+            vm.heap_mut().map_insert_own(obj, ScriptValue::from_id(id!(kind)), NIL);
 
             let mut config = MacosWindowConfig::default();
             config.kind = MacosWindowKind::FloatingPanel;

@@ -8,6 +8,7 @@
 #[path = "support/ai_corpus.rs"]
 mod ai_corpus;
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use ai_corpus::AI_CORPUS;
 use makepad_script_compute::kernel::{compile_with, Kernel};
 use makepad_script_compute::Backend;
@@ -90,6 +91,7 @@ fn bits(v: &[f32]) -> Vec<u32> {
 #[test]
 fn ai_style_kernels_compile_and_compute_what_they_say() {
     let mut failed = Vec::new();
+    let mut four_wide = 0;
     for (name, src) in AI_CORPUS {
         let native = match compile_with(src, &[], Backend::Native) {
             Ok(k) => k,
@@ -99,6 +101,11 @@ fn ai_style_kernels_compile_and_compute_what_they_say() {
             }
         };
         let interp = compile_with(src, &[], Backend::Interp).unwrap();
+        // hosts with a native backend (AArch64; x86-64 through the shared back end) compile
+        // every corpus kernel to machine code
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        assert_eq!(native.backend(), Backend::Native, "{}: no native code", name);
+        four_wide += native.simd() as usize;
         let words = expected(name, 0).len();
         let n = 9;
         let got = run(&interp, n, words, false);
@@ -119,6 +126,9 @@ fn ai_style_kernels_compile_and_compute_what_they_say() {
         }
     }
     assert!(failed.is_empty(), "{} of {} AI-style kernels fail:\n{}", failed.len(), AI_CORPUS.len(), failed.join("\n"));
+    eprintln!("{} of {} corpus kernels have four-wide code", four_wide, AI_CORPUS.len());
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    assert!(four_wide > 0, "no corpus kernel got four-wide code");
 }
 
 fn compile_err(src: &str) -> String {

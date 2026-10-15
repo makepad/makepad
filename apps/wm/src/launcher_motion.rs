@@ -1,6 +1,5 @@
 //! The Android phone shell's motion, to the Pixel Launcher's numbers
-//! (Launcher3 + Quickstep; the parity spec is
-//! local/agent_state/wm-android-proc/launcher-parity-spec.md). Units are
+//! (Launcher3 + Quickstep). Units are
 //! the shell's points, which are Android's dp (Makepad scales by density);
 //! a spec speed in px/ms or px/s is converted with the device density where
 //! it is given in pixels.

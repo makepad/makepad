@@ -225,8 +225,8 @@ impl FastGi {
         self.scene_key=None;self.scene_center=None;self.pending_scene=None;
         self.meshes.epoch=self.meshes.epoch.wrapping_add(1);
     }
-    /// Drop everything (mode or layout change).
-    fn release(&mut self){
+    /// Drop everything (mode or layout change, a replaced GPU device).
+    pub(crate) fn release(&mut self){
         if let Some(job)=self.voxel_job.take(){job.cancel();}
         self.generation=self.generation.wrapping_add(1);
         self.gpu=None;self.voxels=None;self.scene_key=None;self.scene_center=None;self.pending_scene=None;self.has_scene=false;
@@ -523,11 +523,11 @@ impl FastGi {
     /// uniforms still hold the matrices that depth was drawn with.
     pub fn run_screen_ao(&mut self,cx:&mut Cx2d,scene_pass:DrawPassId,depth:&Texture,size:DVec2,params:crate::ssao::SsaoParams)->Option<Texture> {
         let p=cx.passes[scene_pass].pass_uniforms.camera_projection;
-        // Perspective only (w = -z); nothing is drawn before the first frame.
-        if p.v[11]!=-1.0||p.v[0]==0.0||p.v[5]==0.0||size.x<2.0||size.y<2.0 {return None;}
-        self.ao.pass.hardware_depth=Some((p.v[10],p.v[14]));
-        let proj=crate::ssao::SsaoProjection{ortho:false,half_x:1.0/p.v[0],half_y:1.0/p.v[5]};
-        self.ao.pass.run(cx,size*0.5,depth,proj,params,scene_pass);
+        // Nothing is drawn before the first frame (no projection yet).
+        if p.v[0]==0.0||p.v[5]==0.0||size.x<2.0||size.y<2.0 {return None;}
+        // The view's own matrices: the world frame is view space.
+        let general=crate::ssao::SsaoGeneral::from_clip(p);
+        self.ao.pass.run_general(cx,size*0.5,depth,general,params,scene_pass);
         self.stats.ao_gpu_ms=self.ao.pass.gpu_min_ms();
         self.ao.pass.output().cloned()
     }

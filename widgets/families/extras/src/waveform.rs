@@ -82,7 +82,7 @@
 use crate::{
     // Animate is set_disabled's; the other four are what the Animator derive
     // and animator_handle_event need. The same set as range_slider.rs:30.
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     // The intent palette a region or a mark is coloured through, and the
     // one-line text measurer the skip-not-clip rule needs.
     badge::{BadgeIntent, BadgePalette},
@@ -2086,8 +2086,7 @@ impl Widget for Waveform {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_playhead) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let at = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64();
+                let at = vm.vec_value_trap(args_obj, 0).as_f64();
                 if let Some(at) = at {
                     vm.with_cx_mut(|cx| self.set_playhead(cx, at));
                 }
@@ -2152,6 +2151,7 @@ impl Widget for Waveform {
                 // rest of the window, and "nothing" has to mean nothing.
                 cx.set_key_focus(self.area);
                 self.grab = Some(part);
+                cx.claim_finger_drag(fe.digit_id);
                 self.press_x = fe.abs.x;
                 self.animator_play(cx, ids!(drag.on));
                 cx.widget_action(uid, WaveformAction::Grabbed(part));

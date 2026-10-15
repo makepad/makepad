@@ -9,9 +9,16 @@ description = "Backend-neutral model-weight disk layer: safetensors/GGUF/torch/n
 makepad-micro-serde = { path = "../../micro_serde" }
 
 [[bin]]
+name = "qwen35-convert"
+path = "src/bin/qwen35_convert.rs"
+
+[[bin]]
 name = "storage-bench"
 path = "src/bin/storage_bench.rs"
 
 [[bin]]
 name = "mac-storage-bench"
 path = "src/bin/mac_storage_bench.rs"
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

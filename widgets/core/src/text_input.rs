@@ -1,6 +1,6 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+        animator::{Animate, Animator, AnimatorImpl},
         makepad_derive_widget::*,
         makepad_draw::{
             event::finger::TouchState,
@@ -895,6 +895,10 @@ pub struct TextInput {
     /// `Returned` on Enter).
     #[live(false)]
     submit_on_enter: bool,
+    /// Keeps key focus and the IME up after submitting (emitting `Returned`),
+    /// e.g., so a chat input can take the next message right away.
+    #[live(false)]
+    keep_focus_on_submit: bool,
     #[live]
     scroll_bar: ScrollBar,
     /// Space between the vertical scroll bar and the input's top, right and bottom edges,
@@ -924,6 +928,10 @@ pub struct TextInput {
     /// without this the cached multi-row layout survives it.
     #[rust]
     laidout_max_lines: usize,
+    /// `draw_text.text_style.font_size` as of the cached layout, part of the
+    /// cache key for the same reason (`set_font_size`).
+    #[rust]
+    laidout_font_size: f32,
     #[rust]
     text_area: Area,
     #[rust]
@@ -986,7 +994,8 @@ pub struct TextInput {
 impl ScriptHook for TextInput {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         vm.with_cx_mut(|cx| {
-            self.check_text_is_empty(cx);
+            // A new input has no earlier look to fade from.
+            self.check_text_is_empty(cx, Animate::No);
         });
     }
 }
@@ -1002,7 +1011,7 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.bx.heap.new_string_from_str(&text);
+                let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
                     |vm| {
@@ -1023,7 +1032,7 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.bx.heap.new_string_from_str(&text);
+                let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
                     |vm| {
@@ -1032,6 +1041,14 @@ impl TextInput {
                 );
             });
         }
+    }
+
+    fn submit(&mut self, cx: &mut Cx, uid: WidgetUid, mods: KeyModifiers) {
+        if !self.keep_focus_on_submit {
+            cx.hide_text_ime();
+            cx.set_key_focus(Area::Empty);
+        }
+        self.emit_return(cx, uid, mods);
     }
 
     pub fn is_multiline(&self) -> bool {
@@ -1092,6 +1109,23 @@ impl TextInput {
 
     pub fn max_lines(&self) -> usize {
         self.draw_text.max_lines
+    }
+
+    /// Sets the text's size in points at run time (a field that follows a
+    /// zoom or a picture's scale). Like [`TextInput::set_max_lines`]: no
+    /// script apply (it would reset `text`), and the size is part of the
+    /// layout cache key, so the next draw re-lays out and the current layout
+    /// stays valid for cursor operations until then.
+    pub fn set_font_size(&mut self, cx: &mut Cx, font_size: f32) {
+        if self.draw_text.text_style.font_size == font_size {
+            return;
+        }
+        self.draw_text.text_style.font_size = font_size;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.draw_text.text_style.font_size
     }
 
     /// Takes key focus AND turns the caret on.
@@ -1352,6 +1386,7 @@ impl TextInput {
         if self.laidout_text.is_some()
             && self.laidout_width == max_width_in_lpxs
             && self.laidout_max_lines == self.draw_text.max_lines
+            && self.laidout_font_size == self.draw_text.text_style.font_size
         {
             return;
         }
@@ -1369,6 +1404,7 @@ impl TextInput {
         let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
         self.laidout_max_lines = self.draw_text.max_lines;
+        self.laidout_font_size = self.draw_text.text_style.font_size;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
@@ -2199,7 +2235,7 @@ impl TextInput {
         // Marks are spans over the text that was; a replacement is an edit like
         // any other, so they go with it. See [`TextMarkSet::clear_on_edit`].
         self.marks.clear_on_edit();
-        self.check_text_is_empty(cx);
+        self.check_text_is_empty(cx, Animate::Yes);
         self.draw_bg.redraw(cx);
         self.emit_change(cx, uid);
         cx.hide_clipboard_actions();
@@ -2519,7 +2555,7 @@ impl TextInput {
         self.history.apply_edit(edit, &mut self.text);
         self.laidout_text = None;
         self.marks.clear_on_edit();
-        self.check_text_is_empty(cx);
+        self.check_text_is_empty(cx, Animate::Yes);
     }
 
     fn char_range_to_byte_range(&self, start: usize, end: usize) -> (usize, usize) {
@@ -2631,7 +2667,7 @@ impl TextInput {
         self.needs_scroll_to_cursor = true;
         self.laidout_text = None;
         self.marks.clear_on_edit();
-        self.check_text_is_empty(cx);
+        self.check_text_is_empty(cx, Animate::Yes);
     }
 
     fn undo(&mut self, cx: &mut Cx) -> bool {
@@ -2642,7 +2678,7 @@ impl TextInput {
             self.marks.clear_on_edit();
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
-            self.check_text_is_empty(cx);
+            self.check_text_is_empty(cx, Animate::Yes);
             true
         } else {
             false
@@ -2656,19 +2692,15 @@ impl TextInput {
             self.marks.clear_on_edit();
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
-            self.check_text_is_empty(cx);
+            self.check_text_is_empty(cx, Animate::Yes);
             true
         } else {
             false
         }
     }
 
-    fn check_text_is_empty(&mut self, cx: &mut Cx) {
-        if self.text.is_empty() {
-            self.animator_play(cx, ids!(empty.on));
-        } else {
-            self.animator_play(cx, ids!(empty.off));
-        }
+    fn check_text_is_empty(&mut self, cx: &mut Cx, animate: Animate) {
+        self.animator_toggle(cx, self.text.is_empty(), animate, ids!(empty.on), ids!(empty.off));
     }
 
     fn handle_navigation_key(&mut self, cx: &mut Cx, uid: WidgetUid, event: KeyEvent) -> bool {
@@ -2757,6 +2789,10 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    fn clips_content(&self) -> bool {
+        true
+    }
+
     /// What a person types cannot be bounded: its faces ship whole, with
     /// the web runtime's text input and clipboard.
     fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
@@ -2773,18 +2809,14 @@ impl Widget for TextInput {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(&self.text);
+            let str_val = vm.new_string(&self.text);
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying text input contents")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying text input contents")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -2824,7 +2856,7 @@ impl Widget for TextInput {
         self.history.clear();
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
-        self.check_text_is_empty(cx);
+        self.check_text_is_empty(cx, Animate::Yes);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -2909,6 +2941,17 @@ impl Widget for TextInput {
         }
 
         let uid = self.widget_uid();
+
+        if let Event::FingerCancel(cancel) = event {
+            if cx.fingers.press_taken_away(cancel.digit_id)
+                && self.pending_outside_focus_loss_touch.is_some_and(|uid| {
+                    let digit_id: crate::event::DigitId = live_id_num!(touch, uid).into();
+                    digit_id == cancel.digit_id
+                })
+            {
+                self.pending_outside_focus_loss_touch = None;
+            }
+        }
 
         // Self-detect focus loss from taps outside our area
         // But NOT if we've captured the finger (e.g., during a selection drag that ends outside)
@@ -3074,8 +3117,10 @@ impl Widget for TextInput {
                 abs,
                 tap_count,
                 device,
+                digit_id,
                 ..
             }) if device.is_primary_hit() && !scrollbar_captured => {
+                cx.claim_finger_drag(digit_id);
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
@@ -3232,9 +3277,7 @@ impl Widget for TextInput {
                     || mods.is_primary()
                     || (has_physical_keyboard && self.submit_on_enter && !mods.any());
                 if should_submit {
-                    cx.hide_text_ime();
-                    cx.set_key_focus(Area::Empty);
-                    self.emit_return(cx, uid, mods);
+                    self.submit(cx, uid, mods);
                 } else if !self.is_read_only {
                     self.reset_blink_timer(cx);
                     self.create_or_extend_edit_group(EditKind::Other);
@@ -3273,9 +3316,7 @@ impl Widget for TextInput {
                 if !self.is_multiline {
                     // Single-line fields submit on Enter regardless of Shift; never embed
                     // a raw newline.
-                    cx.hide_text_ime();
-                    cx.set_key_focus(Area::Empty);
-                    self.emit_return(cx, uid, mods);
+                    self.submit(cx, uid, mods);
                 } else {
                     self.reset_blink_timer(cx);
                     self.create_or_extend_edit_group(EditKind::Other);
@@ -3493,7 +3534,7 @@ impl Widget for TextInput {
                     }
 
                     // This path bypasses apply_edit(), so keep placeholder/color state in sync.
-                    self.check_text_is_empty(cx);
+                    self.check_text_is_empty(cx, Animate::Yes);
                     self.draw_bg.redraw(cx);
                     if text_changed {
                         self.emit_change(cx, uid);
@@ -3709,9 +3750,7 @@ impl Widget for TextInput {
                 let mods = KeyModifiers::default();
                 match event.action {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
-                        cx.hide_text_ime();
-                        cx.set_key_focus(Area::Empty);
-                        self.emit_return(cx, uid, mods);
+                        self.submit(cx, uid, mods);
                     }
                     ImeAction::Next | ImeAction::Previous => {
                         self.emit_return(cx, uid, mods);
@@ -3765,6 +3804,13 @@ impl TextInputRef {
 
     pub fn max_lines(&self) -> usize {
         self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::set_font_size`].
+    pub fn set_font_size(&self, cx: &mut Cx, font_size: f32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_font_size(cx, font_size);
+        }
     }
 
     /// See [`TextInput::take_key_focus`].
@@ -4066,7 +4112,6 @@ pub enum ReplaceRangeError {
 
 /// The saved (checkpointed) state of a text input widget.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextInputState {
     text: String,
     password_text: String,
@@ -4142,7 +4187,6 @@ impl TextNavigation {
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct History {
     current_edit_kind: Option<EditKind>,
     undo_stack: EditStack,
@@ -4208,7 +4252,6 @@ impl History {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 enum EditKind {
     Insert,
     Backspace,
@@ -4229,7 +4272,6 @@ impl EditKind {
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditStack {
     edit_groups: Vec<EditGroup>,
     edits: Vec<Edit>,
@@ -4264,14 +4306,12 @@ impl EditStack {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct EditGroup {
     selection: Selection,
     edit_start: usize,
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Edit {
     start: usize,
     end: usize,

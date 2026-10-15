@@ -1,6 +1,7 @@
 //! The audio shader front end, part 1: lexing and parsing Splash syntax
 //! into an AST with byte spans (spans are relative to the shader's code
 //! string, so an editor can underline an error in place).
+use makepad_relax_api::relax_api;
 
 use crate::ShaderError;
 
@@ -27,7 +28,7 @@ pub struct Token {
     pub nl: bool,
 }
 
-const PUNCTS: &[&str] = &[
+pub(crate) const PUNCTS: &[&str] = &[
     ">>>", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "->", "+",
     "-", "*", "/", "%", "=", "<", ">", "!", "&", "|", "^", "(", ")", "{", "}", "[", "]", ",", ";", ":",
     ".",
@@ -191,13 +192,17 @@ fn int_is_method(b: &[u8], i: usize) -> bool {
 // AST
 // =========================================================================
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Debug, PartialEq)]
+#[repr(u8)]
 pub enum TypeAnn {
     F32,
     F64,
@@ -238,7 +243,9 @@ pub struct FnDecl {
     pub span: Span,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum AssignOp {
     Set,
     Add,
@@ -261,7 +268,9 @@ pub enum Stmt {
     Return(Option<Expr>, Span),
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum BinOp {
     Add,
     Sub,
@@ -324,6 +333,16 @@ pub struct Expr {
 // Parser
 // =========================================================================
 
+/// The math methods a value takes (`p.length()`, `a.dot(b)`): the method
+/// form of the builtin, with the receiver as its first argument.
+pub const VALUE_METHODS: &[(&str, &str)] =
+    &[("length", "length"), ("dot", "dot"), ("cross", "cross"), ("normalize", "normalize"), ("normalized", "normalize"), ("mix", "mix")];
+
+/// The builtin a value method calls.
+pub fn value_method(name: &str) -> Option<&'static str> {
+    VALUE_METHODS.iter().find(|(m, _)| *m == name).map(|(_, f)| *f)
+}
+
 /// `a` or `a.b.c` (plain names only): the module path of a qualified call.
 fn dotted(e: &Expr) -> Option<String> {
     match &e.kind {
@@ -333,6 +352,29 @@ fn dotted(e: &Expr) -> Option<String> {
     }
 }
 
+/// A colour (`0xRRGGBBAA`) as the kernel language reads it: `vec4(r, g, b,
+/// a)`, each channel / 255 (what the VM and shaders give a colour literal).
+pub(crate) fn color_value(c: u32, span: Span) -> ExprKind {
+    let ch = |k: u32| Expr { kind: ExprKind::Num(((c >> (24 - 8 * k)) & 0xff) as f64 / 255.0, false), span };
+    ExprKind::Call("vec4".into(), vec![ch(0), ch(1), ch(2), ch(3)])
+}
+
+/// A type annotation's name (`f32`, `vec3`, …) as the annotation it is.
+pub(crate) fn type_ann_named(name: &str) -> Option<TypeAnn> {
+    Some(match name {
+        "f32" | "float" => TypeAnn::F32,
+        "f64" => TypeAnn::F64,
+        "i32" | "int" | "u32" => TypeAnn::I32,
+        "bool" => TypeAnn::Bool,
+        "vec2" | "vec2f" => TypeAnn::Vec2,
+        "vec3" | "vec3f" => TypeAnn::Vec3,
+        "vec4" | "vec4f" => TypeAnn::Vec4,
+        "mat4" | "mat4f" => TypeAnn::Mat4,
+        _ => return None,
+    })
+}
+
+#[relax_api(plain)]
 pub struct Parser<'a> {
     toks: &'a [Token],
     pos: usize,
@@ -514,17 +556,10 @@ impl<'a> Parser<'a> {
         }
         let t = self.tok().clone();
         let name = self.ident()?;
-        Ok(Some(match name.as_str() {
-            "f32" | "float" => TypeAnn::F32,
-            "f64" => TypeAnn::F64,
-            "i32" | "int" | "u32" => TypeAnn::I32,
-            "bool" => TypeAnn::Bool,
-            "vec2" | "vec2f" => TypeAnn::Vec2,
-            "vec3" | "vec3f" => TypeAnn::Vec3,
-            "vec4" | "vec4f" => TypeAnn::Vec4,
-            "mat4" | "mat4f" => TypeAnn::Mat4,
-            _ => return Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, f64, i32, bool, vec2, vec3, vec4, mat4)", name))),
-        }))
+        match type_ann_named(&name) {
+            Some(ann) => Ok(Some(ann)),
+            None => Err(ShaderError::new(t.start, t.end, format!("unknown type `{}` (f32, f64, i32, bool, vec2, vec3, vec4, mat4)", name))),
+        }
     }
 
     /// `name: expr` pairs up to the closing `}` (already past `{`).
@@ -583,6 +618,68 @@ impl<'a> Parser<'a> {
                 }
             };
             fields.push((name, value));
+        }
+    }
+
+    /// A fn value's parameters and body, `(a, b) { .. }`, named `name`:
+    /// the whole token stream (a script fn as the VM read it).
+    pub fn fn_value(&mut self, name: String) -> PResult<FnDecl> {
+        let start = self.tok().start;
+        let f = self.fn_rest(name, start)?;
+        self.end()?;
+        Ok(f)
+    }
+
+    /// A closure, `|a, b| expr` or `|a| { .. }` (`||` without parameters,
+    /// an optional `-> type`), named `name`: the whole token stream. An
+    /// expression body returns its value.
+    pub fn closure_value(&mut self, name: String) -> PResult<FnDecl> {
+        let start = self.tok().start;
+        let mut params = Vec::new();
+        if !self.eat("||") {
+            self.expect("|")?;
+            loop {
+                self.skip_seps();
+                if self.eat("|") {
+                    break;
+                }
+                let p = self.ident()?;
+                let ann = self.type_ann()?;
+                params.push((p, ann));
+                if !self.is("|") {
+                    self.expect(",")?;
+                }
+            }
+        }
+        if self.eat("->") {
+            // Return types are inferred; an annotation is checked loosely.
+            self.ident()?;
+        }
+        let body = if self.is("{") {
+            self.block()?
+        } else {
+            let at = self.tok().start;
+            let value = self.expr()?;
+            let mut body = vec![Stmt::Return(Some(value), Span { start: at, end: self.prev_end() })];
+            loop {
+                self.skip_seps();
+                if matches!(self.peek(), Tk::Eof) {
+                    break;
+                }
+                body.push(self.stmt()?);
+            }
+            body
+        };
+        self.end()?;
+        Ok(FnDecl { name, params, body, span: Span { start, end: self.prev_end() } })
+    }
+
+    fn end(&mut self) -> PResult<()> {
+        if matches!(self.peek(), Tk::Eof) {
+            Ok(())
+        } else {
+            let found = describe(self.peek());
+            self.err(format!("expected the end of the fn, found {}", found))
         }
     }
 
@@ -803,6 +900,25 @@ impl<'a> Parser<'a> {
                         e = Expr { kind: ExprKind::Call(format!("{}.{}", q, name), args), span };
                         continue;
                     }
+                    // `expr.length()`: a value method on a computed value
+                    // (a plain path is a qualified call, resolved in lowering).
+                    if let Some(f) = value_method(&name) {
+                        self.bump();
+                        let mut args = vec![e];
+                        loop {
+                            self.skip_seps();
+                            if self.eat(")") {
+                                break;
+                            }
+                            args.push(self.expr()?);
+                            if !self.is(")") && !self.is(",") {
+                                self.expect(")")?;
+                            }
+                        }
+                        let span = Span { start, end: self.prev_end() };
+                        e = Expr { kind: ExprKind::Call(f.into(), args), span };
+                        continue;
+                    }
                 }
                 let span = Span { start, end: self.prev_end() };
                 e = Expr { kind: ExprKind::Field(Box::new(e), name), span };
@@ -832,8 +948,7 @@ impl<'a> Parser<'a> {
                 // shaders give a colour literal).
                 self.bump();
                 let span = Span { start, end: self.prev_end() };
-                let ch = |k: u32| Expr { kind: ExprKind::Num(((c >> (24 - 8 * k)) & 0xff) as f64 / 255.0, false), span };
-                done(self, ExprKind::Call("vec4".into(), vec![ch(0), ch(1), ch(2), ch(3)]))
+                done(self, color_value(c, span))
             }
             Tk::Punct("(") => {
                 self.bump();

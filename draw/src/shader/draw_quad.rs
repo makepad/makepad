@@ -155,7 +155,39 @@ impl DrawAffineQuad {
     }
 }
 
+/// The shader of a plain `mod.draw.DrawQuad` (its stock `pixel` is `#0000`),
+/// resolved on first use per Cx (`None` until then).
+#[derive(Default)]
+struct StockQuadShader(Option<Option<DrawShaderId>>);
+
 impl DrawQuad {
+    /// Whether drawing this quad changes no pixel: it draws through the plain
+    /// DrawQuad shader, whose `pixel` is transparent black, and blends
+    /// premultiplied-over, under which transparent black is the identity. A
+    /// custom shader (anything overriding `pixel` or `fragment`) is a different
+    /// shader and never counts. Its one other trace is the depth it writes in a
+    /// 2D pass: ink painted after it lies in front of it by paint order (each
+    /// draw raises zbias) unless that ink spends a lower `draw_depth`, and such
+    /// ink inside an invisible quad was being cut away by nothing visible.
+    /// Such a quad is only an area: a caller that needs the area takes the
+    /// turtle's rect instead of a GPU instance.
+    pub fn draws_nothing(&self, cx: &mut Cx2d) -> bool {
+        let Some(shader) = self.draw_vars.draw_shader_id else { return false };
+        if !self.draw_vars.options.alpha_blend {
+            return false;
+        }
+        let known = cx.cx.global::<StockQuadShader>().0;
+        let stock = match known {
+            Some(stock) => stock,
+            None => {
+                let Some(stock) = cx.cx.try_with_vm(|vm| DrawQuad::script_new_with_default(vm).draw_vars.draw_shader_id) else { return false };
+                cx.cx.global::<StockQuadShader>().0 = Some(stock);
+                stock
+            }
+        };
+        stock == Some(shader)
+    }
+
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
         cx.push_draw_call_parent();
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;

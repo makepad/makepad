@@ -17,7 +17,6 @@ pub struct World {
     pub sky: Option<SkyConfig>,
     pub sun: SunConfig,
     pub camera: CameraState,
-    pub crosshair: bool,
     pub render_rev: u64,
     pub paint_rev: u64,
     pub content_generation: u64,

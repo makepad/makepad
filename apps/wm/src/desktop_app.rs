@@ -15,6 +15,9 @@ pub(super) fn browser_appearance(style: DesktopStyle, dark: bool, omarchy_source
     style.supports_dark() && dark
 }
 
+/// How long a shelf called out from the dock stays out when the pointer is not on it (s).
+const SHELF_CALL_HOLD: f64 = 2.0;
+
 impl App {
     /// The family's own sheet.
     pub(super) fn set_desktop_style(&mut self, cx: &mut Cx, style: DesktopStyle) {
@@ -43,20 +46,29 @@ impl App {
         let screen_count = self.state_mut().screens.screens.len();
         let areas: Vec<LRect> = (0..screen_count).map(|i| self.screen_area(cx, i)).collect();
         let dark = self.state_mut().style.dark;
-        let sheet = desktop_style::StyleSheet::load(entry.light().with_appearance(dark));
+        let sheet = crate::clients::with_app_artwork(desktop_style::StyleSheet::load(entry.light().with_appearance(dark)));
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {desk.set_startup_style(cx, &sheet);}
         let sheet_name = sheet.name.clone();
         let sheet_ground = sheet.theme_color("color_bg_app");
         app_icon::install(cx, style, &sheet.icons);
+        // Tiling and the shelves exclude each other: parked windows come back full size
+        // while the shelves still say where they are shown, then the shelves go off. The
+        // user's shelf setting (`warp.mode`) is kept for the next floating style.
+        if !style.floating() && previous.floating() {
+            self.unpark_all(cx);
+        }
         let state = self.state_mut();
         state.dragging.clear();
         state.style.select(style);
+        state.warp.tiling = !style.floating();
         if changes_size { state.style.step(1.0); }
+        let shelf_reserve = state.shelf_reserve();
         for (i, s) in state.screens.screens.iter_mut().enumerate() {
             s.layout.desktop.enabled = style.floating();
+            s.layout.desktop.shelf_reserve = shelf_reserve;
             let a = areas.get(i).copied().unwrap_or(area);
             for c in s.layout.all_clients() {
-                s.layout.desktop.ensure(c, a);
+                s.layout.ensure_desktop(c, a);
             }
         }
         // Send the complete stylesheet, so already-running and warm applications
@@ -66,6 +78,11 @@ impl App {
             if let Some(sender) = &slot.sender {
                 send_to_app(sender, vec![StudioToApp::Custom(json.clone())]);
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let clients: Vec<_> = state.clients.iter().filter(|(_, slot)| slot.ready).map(|(id, _)| *id).collect();
+            for client in clients { self.domains.send_message(client, json.clone()); }
         }
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
@@ -131,6 +148,13 @@ impl App {
         let Some(json) = self.stylesheet.as_ref().map(|s| s.to_json()) else {
             return;
         };
+        // with the dark/light it stands for (`HostedAppearance`), for a process client
+        let appearance = self.warm_pool.browser_appearance().map(|dark| makepad_studio_protocol::HostedAppearance { dark }.to_json());
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.domains.owns(client) {
+            self.domains.send_message(client, json);
+            return;
+        }
         if let Some(sender) = self
             .state_mut()
             .clients
@@ -138,13 +162,29 @@ impl App {
             .filter(|s| s.ready)
             .and_then(|s| s.sender.as_ref())
         {
-            send_to_app(sender, vec![StudioToApp::Custom(json)]);
+            let mut msgs = vec![StudioToApp::Custom(json)];
+            msgs.extend(appearance.map(StudioToApp::Custom));
+            send_to_app(sender, msgs);
         }
     }
     pub(super) fn refresh_warm_browser_appearance(&mut self, cx: &mut Cx, dark: bool) {
+        // browsers and other portal clients follow (Chromium: SettingChanged color-scheme)
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = &self.portal {
+            portal.set_color_scheme(if dark { crate::portal::PREFER_DARK } else { crate::portal::PREFER_LIGHT });
+        }
         for client in self.warm_pool.set_browser_appearance(dark) {
             log!("wm: retiring warm browser {} for {} appearance", client, if dark {"dark"} else {"light"});
             self.request_close(cx, client);
+        }
+        // Running apps hear it too (`HostedAppearance`): what draws without a stylesheet, such
+        // as `makepad run`'s load screen, follows it.
+        let json = makepad_studio_protocol::HostedAppearance { dark }.to_json();
+        let state = self.state_mut();
+        for slot in state.clients.values().filter(|slot| slot.ready) {
+            if let Some(sender) = &slot.sender {
+                send_to_app(sender, vec![StudioToApp::Custom(json.clone())]);
+            }
         }
         // Normal top-up runs after reaping; no new process overlaps the old
         // profile lock, and pages the user has opened stay in their process.
@@ -153,6 +193,13 @@ impl App {
         self.state_mut().style.dark = !self.state_mut().style.dark;
         let entry = self.current_desktop_sheet();
         self.set_desktop_sheet(cx, entry);
+        self.persist_desktop_look(cx);
+    }
+    /// Remember the sheet and appearance the desktop wears now.
+    pub(super) fn persist_desktop_look(&mut self, cx: &mut Cx) {
+        let id = self.current_desktop_sheet().id;
+        let dark = self.state_mut().style.dark;
+        host::persist_desktop_look(cx, id, dark);
     }
     /// The sheet the desktop wears, as a picker offers it (its light one).
     pub(super) fn current_desktop_sheet(&mut self) -> &'static desktop_style::SheetEntry {
@@ -163,7 +210,185 @@ impl App {
             .map(|entry| entry.light())
             .unwrap_or_else(|| family.sheet(false))
     }
+    /// Switch the dock's auto-hide, and remember it.
+    pub(super) fn set_dock_autohide(&mut self, cx: &mut Cx, on: bool) {
+        let now = host::now();
+        self.state_mut().dock_autohide.set_enabled(on, now);
+        host::persist_dock_autohide(cx, on);
+        self.apply_shelf_reserve(cx);
+        self.dock_autohide_refresh(cx);
+        self.redraw_all(cx);
+    }
+    /// The dock's icon of an app whose window is a shelf item: its shelf
+    /// slides out if it auto-hides, and the item blinks a ring around itself.
+    fn call_out_shelf_item(&mut self, cx: &mut Cx, client: ClientId) {
+        let side = self.desk(cx).borrow::<crate::desk::WmDesk>().and_then(|d| d.warp_pose(client)).map(|p| p.side).filter(|s| *s != 0);
+        let Some(side) = side else { return };
+        let now = host::now();
+        let screen = self.state_mut().screens.screen_of(client).unwrap_or(0);
+        self.state_mut().shelf_autohide.display(screen, now)[(side > 0) as usize].reveal(now, SHELF_CALL_HOLD);
+        if let Some(mut d) = self.desk(cx).borrow_mut::<crate::desk::WmDesk>() {
+            d.warp.pulse_start(client);
+        }
+        self.shelf_autohide_refresh(cx);
+        self.redraw_all(cx);
+    }
+    /// Every screen's maximised windows follow the dock's reserve.
+    fn apply_shelf_reserve(&mut self, cx: &mut Cx) {
+        let area = self.desk_area(cx);
+        let state = self.state_mut();
+        let reserve = state.shelf_reserve();
+        for s in state.screens.screens.iter_mut() {
+            s.layout.desktop.shelf_reserve = reserve;
+            for c in s.layout.all_clients() {
+                s.layout.ensure_desktop(c, area);
+            }
+        }
+    }
+    /// The pointer and the dock's timer, before anything else sees the event.
+    pub(super) fn dock_autohide_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.state.is_none() {
+            return;
+        }
+        // A delay armed before any pointer event (the dock of a restart).
+        if self.dock_autohide_timer.is_empty() {
+            if let Some(at) = self.state_mut().dock_autohide.deadline() {
+                self.dock_autohide_timer = cx.start_timeout((at - host::now()).max(0.0));
+            }
+        }
+        match event {
+            Event::MouseMove(e) => {
+                self.dock_pointer = e.abs;
+                self.dock_autohide_refresh(cx);
+            }
+            Event::MouseUp(_) => self.dock_autohide_refresh(cx),
+            Event::Timer(t) if self.dock_autohide_timer.is_timer(t).is_some() => {
+                self.dock_autohide_timer = Timer::empty();
+                self.state_mut().dock_autohide.fire(host::now());
+                self.dock_autohide_refresh(cx);
+                self.redraw_all(cx);
+            }
+            _ => {}
+        }
+    }
+    /// Tell the dock's auto-hide where the pointer is and whether a menu or
+    /// a drag holds it, then wake for its next deadline.
+    pub(super) fn dock_autohide_refresh(&mut self, cx: &mut Cx) {
+        if self.state.is_none() || !self.state_mut().dock_autohides() {
+            return;
+        }
+        let Some(full) = self.ui.widget(cx, ids!(desktop_shelf)).borrow::<DesktopShelf>().map(|s| s.screen_rect()) else { return };
+        // Not drawn yet: there is no display edge to be at.
+        if full.size.x <= 0.0 || full.size.y <= 0.0 {
+            return;
+        }
+        let menu_open = self.ui.widget(cx, ids!(shell_menu)).borrow::<ShellMenu>().is_some_and(|m| m.is_open());
+        let busy = menu_open || self.drag.is_some() || self.div_drag.is_some();
+        let p = self.dock_pointer;
+        let now = host::now();
+        let state = self.state_mut();
+        let zone = crate::desktop::dock_zone(state, full);
+        let was = state.dock_autohide.deadline();
+        let over = zone.over(state.dock_autohide.is_out(), p.x, p.y);
+        state.dock_autohide.update(now, over, busy);
+        let due = state.dock_autohide.deadline();
+        if due != was || due.is_none() != self.dock_autohide_timer.is_empty() {
+            cx.stop_timer(self.dock_autohide_timer);
+            self.dock_autohide_timer = match due {
+                Some(at) => cx.start_timeout((at - now).max(0.0)),
+                None => Timer::empty(),
+            };
+        }
+    }
+    /// Switch one shelf's auto-hide (`side` 0 left, 1 right), and remember it.
+    pub(super) fn set_shelf_autohide(&mut self, cx: &mut Cx, side: usize, on: bool) {
+        let now = host::now();
+        let state = self.state_mut();
+        state.shelf_autohide.set_enabled(side, on, now);
+        let sides = [state.shelf_autohide.enabled(0), state.shelf_autohide.enabled(1)];
+        host::persist_shelf_autohide(cx, sides);
+        self.shelf_autohide_refresh(cx);
+        self.redraw_all(cx);
+    }
+    /// The pointer and the shelves' timer, before anything else sees the event.
+    pub(super) fn shelf_autohide_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.state.is_none() {
+            return;
+        }
+        if self.shelf_autohide_timer.is_empty() {
+            if let Some(at) = self.shelf_deadline() {
+                self.shelf_autohide_timer = cx.start_timeout((at - host::now()).max(0.0));
+            }
+        }
+        match event {
+            Event::MouseMove(e) => {
+                self.shelf_pointer = e.abs;
+                self.shelf_autohide_refresh(cx);
+            }
+            Event::MouseUp(_) => self.shelf_autohide_refresh(cx),
+            Event::Timer(t) if self.shelf_autohide_timer.is_timer(t).is_some() => {
+                self.shelf_autohide_timer = Timer::empty();
+                let now = host::now();
+                self.state_mut().shelf_autohide.fire(now);
+                self.shelf_autohide_refresh(cx);
+                self.redraw_all(cx);
+            }
+            _ => {}
+        }
+    }
+    fn shelf_deadline(&mut self) -> Option<f64> {
+        self.state_mut().shelf_autohide.deadline()
+    }
+    /// Tell each auto-hiding shelf where the pointer is and whether a menu
+    /// or a drag holds it, then wake for the next deadline.
+    pub(super) fn shelf_autohide_refresh(&mut self, cx: &mut Cx) {
+        if self.state.is_none() || !self.state_mut().shelf_autohide.any_enabled() {
+            return;
+        }
+        let p = self.shelf_pointer;
+        let pointer_screen = self.state_mut().screen_under(p.x, p.y);
+        let menu_open = self.ui.widget(cx, ids!(shell_menu)).borrow::<ShellMenu>().is_some_and(|m| m.is_open());
+        // A window being moved calls the shelf of the zone it is over and
+        // keeps it out while it hovers there; other drags and menus hold it.
+        let moving_window = self.drag.as_ref().is_some_and(|d| d.floating && !d.resize && d.armed);
+        let busy = menu_open || self.div_drag.is_some() || (self.drag.is_some() && !moving_window);
+        let now = host::now();
+        let was = self.shelf_deadline();
+        for screen in 0..self.state_mut().screens.live_count() {
+            let area = self.screen_area(cx, screen);
+            let reach = self.desk(cx).borrow::<crate::desk::WmDesk>().map_or([0.0; 2], |d| d.warp.reach_at((area.x + area.w * 0.5, area.y + area.h * 0.5)));
+            let held = self.desk(cx).borrow::<crate::desk::WmDesk>().and_then(|d| d.warp.unfold.filter(|u| u.open() && u.screen == area).map(|u| u.side));
+            let state = self.state_mut();
+            for (i, side) in [-1i8, 1].into_iter().enumerate() {
+                let m = &mut state.shelf_autohide.display(screen, now)[i];
+                let over = screen == pointer_screen && crate::spacewarp::shelf::autohide_over(side, m.is_out(), reach[i], area, (p.x, p.y));
+                // A shelf with an unfolded window stays out until it is folded.
+                m.update(now, over || held == Some(side), busy);
+            }
+        }
+        let due = self.shelf_deadline();
+        if due != was || due.is_none() != self.shelf_autohide_timer.is_empty() {
+            cx.stop_timer(self.shelf_autohide_timer);
+            self.shelf_autohide_timer = match due {
+                Some(at) => cx.start_timeout((at - now).max(0.0)),
+                None => Timer::empty(),
+            };
+        }
+    }
     pub(super) fn open_style_menu(&mut self, cx: &mut Cx) {
+        {
+            let state = self.state_mut();
+            let (autohide, dark) = (state.dock_autohide.enabled, state.style.target.supports_dark().then_some(state.style.dark));
+            let (warp, shelves) = (state.warp.mode == spacewarp::Mode::Warp, [state.shelf_autohide.enabled(0), state.shelf_autohide.enabled(1)]);
+            if let Some(mut menu) = self.ui.widget(cx, ids!(shell_menu)).borrow_mut::<ShellMenu>() {
+                menu.model.warp_shelves = warp;
+                menu.model.shelf_autohide = shelves;
+                menu.model.dock_autohide = autohide;
+                menu.model.dark_choice = dark;
+                menu.model.natural_scroll = host::load_natural_scroll();
+                menu.model.tap_to_click = host::load_tap_to_click();
+            }
+        }
         let anchor = if self.state_mut().style.target.mobile() {
             self.ui.widget(cx, ids!(phone_controls)).borrow::<crate::mobile_surface::PhoneSurface>()
                 .and_then(|bar| bar.hit_rect(&crate::mobile::PhoneHit::Style))
@@ -200,7 +425,7 @@ impl App {
             self.open_shell_menu(cx, path, MenuSkin::Launcher);
         }
     }
-    fn minimize_desktop(&mut self, cx: &mut Cx, client: ClientId) {
+    pub(super) fn minimize_desktop(&mut self, cx: &mut Cx, client: ClientId) {
         let layout = self.state_mut().layout_of_mut(client);
         if let Some(w) = layout.desktop.get_mut(client) {
             w.minimized = true;
@@ -217,14 +442,6 @@ impl App {
             self.focus_client(cx, next);
         }
         self.update_bar(cx);
-        self.redraw_all(cx);
-    }
-    fn maximize_desktop(&mut self, cx: &mut Cx, client: ClientId) {
-        if let Some(w) = self.state_mut().layout_of_mut(client).desktop.get_mut(client) {
-            w.maximized = !w.maximized;
-            w.minimized = false;
-        }
-        self.focus_client(cx, client);
         self.redraw_all(cx);
     }
     pub(super) fn apply_snap(&mut self, cx: &mut Cx, client: ClientId, zone: crate::snap::Zone) {
@@ -249,7 +466,7 @@ impl App {
         }
         if self.snap_hover_timer.is_event(event).is_some() {
             if let Some((client,anchor))=self.state_mut().snap.hovered {
-                let area=self.desk_area(cx);
+                let area=crate::spacewarp::band_of(self.desk_area(cx));
                 self.state_mut().snap.picker=Some(crate::snap::Picker::new(client,area,Some(anchor)));
                 self.state_mut().snap.area=Some(area);
                 self.redraw_all(cx);
@@ -287,7 +504,7 @@ impl App {
         }
         false
     }
-    fn activate_shelf(&mut self, cx: &mut Cx, hit: ShelfHit) {
+    pub(super) fn activate_shelf(&mut self, cx: &mut Cx, hit: ShelfHit) {
         match hit {
             ShelfHit::Launcher => self.toggle_launcher(cx),
             ShelfHit::App(app) => {
@@ -308,11 +525,13 @@ impl App {
                         })
                 };
                 if let Some(c) = existing {
+                    self.call_out_shelf_item(cx, c);
                     self.restore_desktop(cx, c);
                 } else {
                     self.launch_app(cx, &app);
                 }
             }
+            ShelfHit::More(shown) => self.open_dock_overflow(cx, shown),
             ShelfHit::Window(c) => {
                 if self.state_mut().layout().focused_client() == Some(c)
                     && !self.state_mut().layout_of(c).desktop.minimized(c)
@@ -375,13 +594,13 @@ impl App {
         if style == DesktopStyle::Windows {
             match e.key_code {
                 KeyCode::KeyZ => {
-                    let area=self.desk_area(cx);
+                    let area=crate::spacewarp::band_of(self.desk_area(cx));
                     let anchor=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.chrome_button_rect(client,ChromeHit::Maximize));
                     self.state_mut().snap.picker=Some(crate::snap::Picker::new(client,area,anchor));
                     self.state_mut().snap.area=Some(area);
                     self.redraw_all(cx);
                 }
-                KeyCode::ArrowUp => self.maximize_desktop(cx, client),
+                KeyCode::ArrowUp => self.maximise_toggle(cx, client),
                 KeyCode::ArrowDown => {
                     if self
                         .state_mut()
@@ -390,7 +609,7 @@ impl App {
                         .get(client)
                         .is_some_and(|w| w.maximized)
                     {
-                        self.maximize_desktop(cx, client);
+                        self.maximise_toggle(cx, client);
                     } else {
                         self.minimize_desktop(cx, client);
                     }
@@ -406,7 +625,7 @@ impl App {
     }
     /// Called before child input dispatch; coordinates are from the last drawn
     /// frame, including the interpolated title bar and shelf rectangles.
-    pub(super) fn desktop_pointer(&mut self, cx: &mut Cx, event: &Event) -> bool {
+    pub(super) fn desktop_pointer(&mut self, cx: &mut Cx, event: &Event, physical: Option<Vec2d>) -> bool {
         if self.drag.is_some() || self.div_drag.is_some() {
             return false;
         }
@@ -418,9 +637,12 @@ impl App {
             _ => return false,
         };
         let shelf = self.ui.widget(cx, ids!(desktop_shelf));
+        // Window input may have passed through the VR desktop camera;
+        // the shell's shelf keeps its ordinary screen coordinates.
+        let shelf_point = physical.unwrap_or(p);
         let (hit, inside) = if let Some(mut s) = shelf.borrow_mut::<DesktopShelf>() {
-            s.hover_at(cx, p);
-            (s.hit(p), s.contains(p))
+            s.hover_at(cx, shelf_point);
+            (s.hit(shelf_point), s.contains(shelf_point))
         } else {
             (None, false)
         };
@@ -435,7 +657,7 @@ impl App {
                         match control {
                             ChromeHit::Close => self.request_close(cx, client),
                             ChromeHit::Minimize => self.minimize_desktop(cx, client),
-                            ChromeHit::Maximize => self.maximize_desktop(cx, client),
+                            ChromeHit::Maximize => self.fullscreen_toggle(cx, client),
                             _ => {}
                         }
                     }
@@ -453,7 +675,14 @@ impl App {
             }
             return true;
         }
-        if !self.state_mut().style.target.floating() {
+        if self.warp_shelf_press(cx, event) {
+            return true;
+        }
+        // A skin's controls work on every style; its title and edges are the
+        // floating styles' business.
+        let skin_control = self.state_mut().skin.active()
+            && chrome_hit.is_some_and(|(_, h)| matches!(h, ChromeHit::Close | ChromeHit::Minimize | ChromeHit::Maximize));
+        if !self.state_mut().style.target.floating() && !skin_control {
             return false;
         }
         if self.state_mut().style.target == DesktopStyle::NextStep {
@@ -497,12 +726,15 @@ impl App {
                             }
                         }
                         ChromeHit::Title => {
-                            let double = self.title_press.is_some_and(|(c, time, pos)| {
+                            // A parked window's title: drag moves it, a click
+                            // brings it to the centre (never a double click).
+                            let parked = self.warp_is_parked(cx, client);
+                            let double = !parked && self.title_press.is_some_and(|(c, time, pos)| {
                                 c == client && e.time - time < 0.35 && (pos - p).length() < 5.0
                             });
-                            self.title_press = Some((client, e.time, p));
+                            self.title_press = if parked { None } else { Some((client, e.time, p)) };
                             if double {
-                                self.maximize_desktop(cx, client);
+                                self.maximise_toggle(cx, client);
                             } else {
                                 self.begin_drag_on(cx, client, p, false, false);
                             }

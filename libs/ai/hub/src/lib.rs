@@ -63,9 +63,9 @@ pub mod front;
 pub mod front;
 pub mod job;
 pub mod gpu;
+pub mod gpu_yield;
 pub mod home;
 pub mod hub;
-#[cfg(feature = "llm")]
 pub mod hub_chat;
 pub mod machine;
 pub mod fast_backend;
@@ -82,8 +82,10 @@ pub mod kokoro_backend;
 pub mod whisper_backend;
 #[cfg(feature = "speech")]
 pub mod speech;
+pub mod hub_order;
 pub mod llm_backend;
-#[cfg(feature = "llm")]
+pub mod control;
+pub mod llm_context;
 pub mod local_llm;
 #[cfg(feature = "local")]
 pub mod local;
@@ -105,9 +107,11 @@ pub mod pipe;
 pub mod peer_fetch;
 pub mod peer_serve;
 pub mod protocol;
+mod progress_watch;
 pub mod providers;
 pub mod realtime;
 pub mod realtime_wire;
+pub mod model_store;
 pub mod ram;
 pub mod registry;
 pub mod resample;
@@ -116,6 +120,7 @@ pub mod rig_backend;
 #[cfg(feature = "rig-native")]
 pub mod rig_native_backend;
 pub mod ace_backend;
+pub mod yue2_backend;
 pub mod moss_backend;
 pub mod sa3_backend;
 #[cfg(not(target_arch = "wasm32"))]

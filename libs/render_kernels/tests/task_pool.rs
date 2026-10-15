@@ -3,7 +3,7 @@
 //! on the caller alone. (Its own test binary: the engine is per process.)
 
 use makepad_platform::Cx;
-use makepad_render_kernels::compute::sched::{InlineExecutor, Job, Priority};
+use makepad_render_kernels::dispatch::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::pipeline::Count;
 use makepad_render_kernels::{engine, install, Pipeline};
 

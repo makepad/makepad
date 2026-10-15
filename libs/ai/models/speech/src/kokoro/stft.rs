@@ -39,6 +39,7 @@ fn reflect(signal: &[f32], pad: usize) -> Vec<f32> {
 
 /// `[magnitude (11 rows) | phase (11 rows)]`, the generator's `har` tensor.
 pub fn stft_mag_phase(signal: &[f32]) -> Mat {
+        let _t = super::ops::op_timer("stft_mag_phase");
     let window = window();
     let padded = reflect(signal, N_FFT / 2);
     let frames = (padded.len() - N_FFT) / HOP + 1;
@@ -124,6 +125,7 @@ fn inverse_basis() -> Vec<f32> {
 ///
 /// Verified elementwise against the reference waveform: max |Δ| 5.3e-7.
 pub fn istft(re_im: &Mat) -> Vec<f32> {
+        let _t = super::ops::op_timer("istft");
     let frames = re_im.cols;
     let basis = inverse_basis();
 

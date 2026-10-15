@@ -2,28 +2,19 @@
 //! DesktopRunView (studio/desktop/src/desktop_run_view.rs): shared-GPU
 //! swapchain presentation plus input forwarding over the studio protocol.
 //! Trimmed of studio-only concerns (remote PNG frames, AI input viz) and
-//! given rounded corners — the child texture is clipped by a rounded-rect
+//! given rounded corners -- the child texture is clipped by a rounded-rect
 //! mask in the shader, Omarchy-style.
+//!
+//! The protocol state with the child (swapchain, bootstrap, tick pacing,
+//! input forwarding, presented frame) is `makepad_app_host::HostedApp`; this
+//! widget is what the tile adds: the quad that draws the frame with its
+//! corner mask and fades, the "starting..." panel, key focus, the phone's
+//! soft keyboard and the cursor.
 
-use crate::hub::ClientId;
-use makepad_studio_protocol::{
-    MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    RemoteMouseUp, RemoteScroll, StudioToApp, StudioToAppVec,
-};
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_studio_protocol::HostToAppGpu;
-use makepad_widgets::makepad_micro_serde::SerBin;
-use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-use makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_from_host_swapchain;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_widgets::makepad_platform::shared_framebuf::{
-    export_host_swapchain, ExportedHostSwapchain, LinuxSwapchainSender,
-};
+use crate::own_chrome::ChromePresses;
+use makepad_app_host::{ClientId, HostedApp};
+use makepad_studio_protocol::MouseButton;
 use makepad_widgets::*;
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use makepad_widgets::makepad_platform::shared_framebuf::aux_chan::ExternalEndpointListener;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -50,6 +41,11 @@ script_mod! {
             tex_size: instance(vec2(1.0, 1.0))
             host_dpi_factor: instance(1.0)
             packed_header: instance(1.0)
+            // The size the app was last told, in pixels (0: unknown). A frame drawn at
+            // another size (an older one, while a resize waits for the app) is shown at
+            // its own size from the top-left, not stretched; past its edge the edge
+            // pixels continue.
+            expect_px: instance(vec2(0.0, 0.0))
             // The close-crop: while a tile closes, its quad shrinks but the
             // frozen app image must STAY PUT — the quad becomes a moving
             // window over the unmoving texture. crop_origin/crop_span map
@@ -65,7 +61,12 @@ script_mod! {
                 let cpos = self.crop_origin + self.pos * self.crop_span
                 let uv = cpos
                 if self.packed_header < 0.5 {
-                    return self.tex.sample(uv * self.tex_scale) * self.fade
+                    if self.expect_px.x <= 0.0 || self.expect_px.y <= 0.0 {
+                        return self.tex.sample(uv * self.tex_scale) * self.fade
+                    }
+                    let drawn = self.tex_scale * self.tex_size
+                    let px = min(uv * self.expect_px, max(drawn - vec2(0.5), vec2(0.5)))
+                    return self.tex.sample(px / self.tex_size) * self.fade
                 }
                 let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
                 let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
@@ -102,45 +103,6 @@ script_mod! {
 /// rather than a zap.
 const ARRIVAL_FADE_SECS: f32 = 0.28;
 
-/// Drag-stall hunt: timestamped trace lines appended to the file named by
-/// MAKEPAD_WM_TRACE. Free when unset (one static branch). Timestamps are UNIX ms
-/// (mod 1e7) so host and child (MAKEPAD_STUDIO_TRACE) lines correlate.
-pub fn trace_host(line: &str) {
-    use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
-    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    let file = FILE.get_or_init(|| {
-        std::env::var("MAKEPAD_WM_TRACE").ok().and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-                .map(Mutex::new)
-        })
-    });
-    let Some(file) = file else { return };
-    let ms = crate::host::wall_now() * 1000.0;
-    if let Ok(mut f) = file.lock() {
-        let _ = writeln!(f, "{:.2} H {}", ms % 1.0e7, line);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RunTarget {
-    client: ClientId,
-    window_id: usize,
-}
-
-/// One GPU renderer-replacement transaction for this tile. Native Linux only.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-struct GpuTransition {
-    id: u64,
-    epoch: u64,
-    candidate: Option<HostSwapchain>,
-    queued: bool,
-}
-
 #[derive(Clone, Debug, Default)]
 pub enum MpRunViewAction {
     ForwardToApp {
@@ -164,6 +126,14 @@ pub enum MpRunViewAction {
 
 #[derive(Script, Widget)]
 pub struct MpRunView {
+    /// Since a live resize began, until a frame of the size the app was told arrives
+    /// after it: frames of another size are shown unscaled from the top-left
+    /// (`expect_px`). Otherwise a frame fills the quad as before (open and close
+    /// animations scale it on purpose).
+    #[rust]
+    anchor_frames: bool,
+    #[rust]
+    live_resize: bool,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -184,20 +154,18 @@ pub struct MpRunView {
     no_fb_view: WidgetRef,
     #[rust]
     area: Area,
+    /// The protocol state with the child.
+    #[rust(HostedApp::new(crate::host::CLOCK))]
+    pub hosted: HostedApp,
+    /// `hosted.present_serial()` as the quad last took it.
+    #[rust]
+    quad_serial: u64,
     /// FOCUS RULE: false on a Quick-Look panel. Clicks still hit-test and
     /// still reach the child (hover, scroll, buttons all work), but the
-    /// press does not pull the compositor's key focus off the requester —
+    /// press does not pull the compositor's key focus off the requester --
     /// files keeps the keyboard so its arrows go on dialing.
     #[rust(true)]
     takes_key_focus: bool,
-    /// The child announced it decodes `StudioToApp::MouseCancel`
-    /// (`HostedPointerCaps`); until it does, a cancelled press is relayed the
-    /// way an older child can take it (see the FingerUp relay).
-    #[rust]
-    child_mouse_cancel: bool,
-    /// The one log line for a child that cannot take a cancellation.
-    #[rust]
-    logged_no_mouse_cancel: bool,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -215,102 +183,11 @@ pub struct MpRunView {
     /// The popin fade (1.0 = solid); the desk drives it during open/close.
     #[rust(1.0f32)]
     fade: f32,
-    /// When the FIRST frame landed: the content fades in quickly from the
-    /// "starting…" panel instead of popping on abruptly.
-    #[rust]
-    first_present_at: Option<f64>,
-    #[rust]
-    tick_timer: Timer,
-    /// The tile tick's period: the unit of the Tick pacing below.
-    #[rust]
-    tick_period: f64,
-    /// When the `Tick` the child has not acknowledged (`TickDone`) yet
-    /// went out. The timer sends the next Tick only once this clears, so
-    /// a slow child never has more than one frame's ticks and pointer
-    /// moves queued behind it; a child that never acknowledges (an older
-    /// binary, a GPU handoff pause) is pumped again after `tick_fallback`.
-    #[rust]
-    tick_outstanding: Option<f64>,
-    /// A timer beat arrived while the child was busy. Retain one request so
-    /// its acknowledgement can start the next frame without another beat.
-    #[rust]
-    tick_deferred: bool,
-    /// A frame of the child arrived and the desk has not painted it yet.
-    /// On Android the child draws straight into the shared images the desk
-    /// samples, with no GPU fence between the two processes: its next Tick
-    /// waits for this paint (or `tick_fallback`), so the child can never
-    /// run ahead and overwrite the image the desk is still reading — a
-    /// resize used to answer with two back-to-back frames and tear the
-    /// tile-to-app zoom.
-    #[rust]
-    flip_unpainted: Option<f64>,
-    /// The desk's frame after a child frame arrived: whether or not this
-    /// view drew in it (a tile waiting for its face is not drawn), the desk
-    /// is past sampling anything older, so the hold lifts there too.
-    #[rust]
-    paint_frame: NextFrame,
-    /// Paced ticking (Android with GPU-fenced frames, see `paced`): the
-    /// display frame the next Tick goes out on, while one is wanted.
-    #[rust]
-    tick_frame: NextFrame,
-    #[rust]
-    tick_frame_pending: bool,
-    /// The child asked for another frame (`RequestAnimationFrame`, sent at
-    /// the end of every Tick it still animates, and from any thread when a
-    /// signal needs its UI loop).
-    #[rust]
-    child_wants_frame: bool,
-    /// Input went to the child since its last Tick: it draws on the next.
-    #[rust]
-    input_since_tick: bool,
-    /// The child's next timer is due (`HostedWake`).
-    #[rust]
-    wake_timer: Timer,
-    /// A slow safety beat while paced; a child that never asks is still
-    /// pumped now and then.
-    /// The child fences its frames (`HostedFenced`): paced ticking and no
-    /// paint hold apply to it only then.
-    #[rust]
-    child_fenced: bool,
-    /// Ticks sent to the child and `TickDone`s back. The child reads its
-    /// messages in order and draws only inside a Tick, so once every Tick
-    /// sent before some message is acknowledged, each later frame was drawn
-    /// after that message (the phone's tile faces fence on this).
-    #[rust]
-    ticks_sent: u64,
-    #[rust]
-    ticks_done: u64,
-    /// The pointer's latest position since the last Tick went out: the
-    /// child sees at most one MouseMove per frame, flushed ahead of the
-    /// Tick or of any Down/Up/Scroll so their order holds.
-    #[rust]
-    pending_move: Option<RemoteMouseMove>,
-    /// Paced (Android): the finger's earlier samples since the last Tick,
-    /// oldest first — the child's velocity tracker needs every sample.
-    #[rust]
-    move_history: Vec<RemoteMouseMove>,
-    #[rust]
-    last_rect: Rect,
-    #[rust]
-    last_dpi_factor: f64,
     #[rust]
     redraw_countdown: usize,
+    /// Counts every applied presented frame (never reset): the content's version.
     #[rust]
-    bootstrap_pending: bool,
-    #[rust]
-    bootstrap_tick_count: u32,
-    #[rust]
-    current_target: Option<RunTarget>,
-    #[rust]
-    swapchain: Option<HostSwapchain>,
-    #[rust]
-    last_swapchain_with_completed_draws: Option<HostSwapchain>,
-    #[rust]
-    pending_draw: Option<PresentableDraw>,
-    #[rust]
-    present_ok_count: usize,
-    #[rust]
-    app_ready_for_swapchain: bool,
+    present_serial: u64,
     #[rust]
     remote_cursor: MouseCursor,
     #[rust]
@@ -321,58 +198,22 @@ pub struct MpRunView {
     /// one (`HostedImeState`); the soft keyboard shows only then.
     #[rust]
     child_ime: Option<Vec2d>,
-    /// While the tile rect is being ANIMATED, the layout's settled target
-    /// size. The quad draws at the animated rect; the swapchain and the
-    /// child's WindowGeomChange always use this, so a tween never causes
-    /// swapchain churn or per-frame child relayouts (see
-    /// local/agent_state/wm/resize-sync-design.md).
+    /// The app draws its own chrome (`own_chrome.rs`): a press asks it where
+    /// it landed.
     #[rust]
-    target_size: Option<Vec2d>,
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    chrome_press: ChromePresses,
+    /// Whether the window is fullscreen, and what the app was last told (`HostedFullscreen`).
     #[rust]
-    outbox: Option<LinuxSwapchainSender>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fullscreen: bool,
     #[rust]
-    aux_chan_listener: Option<ExternalEndpointListener>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    aux_chan_deadline: f64,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    next_export_tag: u64,
-    /// In-flight descriptor batch: tag and optional GPU (transition, epoch).
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    inflight: Option<(u64, Option<(u64, u64)>)>,
-    /// `try_send` Full: the same batch, retried by ownership.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    pending: Option<(u64, ExportedHostSwapchain)>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    gpu_transition: Option<GpuTransition>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    frozen: Option<u64>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    retired_swapchain: Option<HostSwapchain>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    transport_error: Option<String>,
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    #[rust]
-    outbox_full_logged: bool,
+    told_fullscreen: Option<bool>,
 }
 
 impl ScriptHook for MpRunView {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         vm.with_cx_mut(|cx| {
             self.draw_app.set_texture(0, &cx.null_texture());
-            // 240 Hz direct sessions must not be throttled by the old 125 Hz poll.
-            self.tick_period = if matches!(cx.os_type(), OsType::LinuxDirect) { 1.0 / 240.0 } else { 0.008 };
-            self.tick_timer = cx.start_interval(self.tick_period);
+            self.hosted.start(cx);
             self.draw_app
                 .draw_vars
                 .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
@@ -381,38 +222,15 @@ impl ScriptHook for MpRunView {
 }
 
 impl MpRunView {
-    fn emit_to_app(&mut self, cx: &mut Cx, client: ClientId, msgs: Vec<StudioToApp>) {
-        if msgs.is_empty() {
-            return;
+    /// Hand the batches the child is owed to the desk, which writes them to
+    /// its socket. Called after every call into `hosted`.
+    fn flush(&mut self, cx: &mut Cx) {
+        self.hosted.ensure_beat(cx);
+        for (client, msg_bin) in self.hosted.take_outgoing() {
+            cx.widget_action(self.uid, MpRunViewAction::ForwardToApp { client, msg_bin });
         }
-        let with_tick = msgs.iter().any(|msg| matches!(msg, StudioToApp::Tick));
-        if !with_tick && msgs.iter().any(|msg| {
-            matches!(
-                msg,
-                StudioToApp::MouseDown(_)
-                    | StudioToApp::MouseUp(_)
-                    | StudioToApp::MouseMove(_)
-                    | StudioToApp::MouseCancel(_)
-                    | StudioToApp::Scroll(_)
-                    | StudioToApp::Pinch(_)
-                    | StudioToApp::KeyDown(_)
-                    | StudioToApp::KeyUp(_)
-                    | StudioToApp::TextInput(_)
-                    | StudioToApp::TextCopy
-                    | StudioToApp::TextCut
-            )
-        }) {
-            self.input_since_tick = true;
-            self.want_tick(cx);
-        }
-        let msg_bin = StudioToAppVec(msgs).serialize_bin();
-        cx.widget_action(self.uid, MpRunViewAction::ForwardToApp { client, msg_bin });
     }
 
-    /// A press, release or scroll: the pointer position it happened at
-    /// goes out first, in the same batch, so the child sees the move
-    /// before the edge exactly as the host did.
-    /// What the child said its pointer input understands.
     /// The child's text field took (`show`) or gave up the keyboard.
     pub fn set_child_ime(&mut self, cx: &mut Cx, ime: makepad_widgets::makepad_platform::ime::HostedImeState) {
         self.child_ime = ime.visible.then(|| dvec2(ime.x, ime.y + ime.height));
@@ -422,190 +240,82 @@ impl MpRunView {
         self.redraw(cx);
     }
 
-    pub fn set_pointer_caps(&mut self, caps: makepad_widgets::makepad_platform::ime::HostedPointerCaps) {
-        self.child_mouse_cancel = caps.mouse_cancel;
-    }
 
-    /// The pointer samples owed to the child, oldest first.
-    fn take_moves(&mut self, msgs: &mut Vec<StudioToApp>) {
-        for mv in self.move_history.drain(..) {
-            msgs.push(StudioToApp::MouseMove(mv));
+    /// The app's answer to the press' drag query: where the window drag
+    /// starts when the press was on its caption. The press is then the
+    /// window manager's, so the app is told it was cancelled.
+    pub fn take_caption_press(&mut self, cx: &mut Cx, answer: &makepad_studio_protocol::HostedDragAnswer, time: f64) -> Option<crate::own_chrome::CaptionPress> {
+        let press = self.chrome_press.answer(answer)?;
+        if let crate::own_chrome::CaptionPress::Drag(_) = press {
+            self.hosted.mouse_up(None, MouseButton::PRIMARY, time, &KeyModifiers::default(), true);
+            self.flush(cx);
         }
-        if let Some(mv) = self.pending_move.take() {
-            msgs.push(StudioToApp::MouseMove(mv));
-        }
+        Some(press)
     }
 
-    fn emit_after_pending_move(&mut self, cx: &mut Cx, client: ClientId, msg: StudioToApp) {
-        let mut msgs = Vec::with_capacity(2);
-        self.take_moves(&mut msgs);
-        msgs.push(msg);
-        self.emit_to_app(cx, client, msgs);
+    /// Send the child a compact-forms message (`HostedParked`, see
+    /// `spacewarp/compact.rs`) on the existing custom channel.
+    pub fn send_parked(&mut self, cx: &mut Cx, msg: &makepad_widgets::makepad_platform::ime::HostedParked) -> bool {
+        if self.hosted.client().is_none() { return false; }
+        self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(msg.to_json())]);
+        self.flush(cx);
+        true
     }
 
-    /// How long a Tick may stay unacknowledged before the child is pumped
-    /// anyway: four tick periods, never under 50 ms, so a child that does
-    /// not speak `TickDone` still runs at 20 Hz.
-    fn tick_fallback(&self) -> f64 {
-        (self.tick_period * 4.0).max(0.050)
+    /// Did the child present a frame of `size` (points, at `dpi`)? Within two
+    /// pixels: the child's area is snapped to the device grid.
+    pub fn frame_matches(&self, size: Vec2d, dpi: f64) -> bool {
+        self.hosted.presented_px().is_some_and(|[w, h]| {
+            (w as f64 - size.x * dpi).abs() <= 2.0 && (h as f64 - size.y * dpi).abs() <= 2.0
+        })
     }
 
-    /// Android with GPU-fenced frames: the child is ticked on the display's
-    /// frames, and only while it has something to do (it asked for a frame,
-    /// input went to it, a timer of its is due, it is still starting up) —
-    /// an idle child is never woken. Elsewhere a fixed interval beat.
-    fn paced(&self, cx: &Cx) -> bool {
-        #[cfg(target_os = "android")]
-        {
-            self.child_fenced && cx.hosted_frames_fenced()
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = cx;
-            false
-        }
+    /// For `frametrace`: (the size the child was last told, the settled
+    /// size requested, the presented frame's pixels, the present serial,
+    /// whether it has a frame).
+    pub fn trace_sizes(&self) -> (Vec2d, Option<Vec2d>, Option<[u32; 2]>, u64, bool) {
+        let (cfg, tsz) = self.hosted.trace_config();
+        (cfg, tsz, self.hosted.presented_px(), self.hosted.present_serial(), self.hosted.has_frame())
     }
 
-    /// Paced: tick on the next display frame.
-    fn want_tick(&mut self, cx: &mut Cx) {
-        if self.tick_frame_pending || self.current_target.is_none() || !self.paced(cx) {
-            return;
-        }
-        self.tick_frame_pending = true;
-        self.tick_frame = cx.new_next_frame();
+    /// Give the child frames of `size` now (a frozen window keeps its child
+    /// configured without drawing it).
+    pub fn configure(&mut self, cx: &mut Cx, size: Vec2d, dpi: f64) {
+        self.hosted.prepare_size(cx, size, dpi);
+        self.flush(cx);
     }
 
-    pub fn set_child_fenced(&mut self, cx: &mut Cx, on: bool) {
-        self.child_fenced = on;
-        self.child_wants_frame = true;
-        self.want_tick(cx);
+    /// The child asked for a frame.
+    pub fn request_tick(&mut self, cx: &mut Cx) {
+        self.hosted.request_tick(cx);
     }
 
-    /// The child's `RequestAnimationFrame`.
-    pub fn child_frame_request(&mut self, cx: &mut Cx) {
-        self.child_wants_frame = true;
-        self.want_tick(cx);
+    /// The child is idle for `secs` (its earliest timer).
+    pub fn wake_in(&mut self, cx: &mut Cx, secs: f64) {
+        self.hosted.wake_in(cx, secs);
     }
 
-    /// The child's next timer is due in `seconds` (paced only).
-    pub fn child_wake_in(&mut self, cx: &mut Cx, seconds: f64) {
-        if !self.paced(cx) {
-            return;
-        }
-        cx.stop_timer(self.wake_timer);
-        self.wake_timer = cx.start_timeout(seconds.clamp(0.0, 60.0));
-    }
-
-    /// The next Tick waits for the desk to paint the child's last frame
-    /// (see `flip_unpainted`).
-    fn paint_holds_tick(&self, cx: &Cx) -> bool {
-        // With GPU fences between the two processes the child's next write
-        // waits for the desk's reads on the GPU, not here.
-        #[cfg(target_os = "android")]
-        if self.child_fenced && cx.hosted_frames_fenced() {
-            return false;
-        }
-        let _ = cx;
-        cfg!(target_os = "android")
-            && self.flip_unpainted.is_some_and(|at| crate::host::now() - at < self.tick_fallback())
-    }
-
-    fn append_tick(&mut self, target: RunTarget, msgs: &mut Vec<StudioToApp>) {
-        trace_host(&format!("tick c{}", target.client));
-        self.take_moves(msgs);
-        msgs.push(StudioToApp::Tick);
-        if makepad_error_log::trace_enabled("pace") {
-            log!("pace wm tick_tx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, target.client);
-        }
-        self.ticks_sent += 1;
-        self.tick_outstanding = Some(crate::host::now());
-        self.tick_deferred = false;
-        self.child_wants_frame = false;
-        self.input_since_tick = false;
-    }
-
-    /// Return one tick credit. If a timer beat was missed while the child
-    /// rendered, service that retained request now instead of quantizing a
-    /// slightly late child to half the compositor's frame rate.
-    /// (Ticks sent, TickDones received) — see `ticks_sent`.
-    pub fn tick_counts(&self) -> (u64, u64) {
-        (self.ticks_sent, self.ticks_done)
+    /// Tell the child whether any of its window shows (`HostedVisible`).
+    pub fn send_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
+        if self.hosted.client().is_none() { return false; }
+        let json = makepad_studio_protocol::HostedVisible { visible }.to_json();
+        self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(json)]);
+        self.flush(cx);
+        true
     }
 
     pub fn tick_done(&mut self, cx: &mut Cx) {
-        // The child coalesces queued Ticks into one TickDone: it answers the
-        // newest Tick sent.
-        self.ticks_done = self.ticks_sent;
-        if let Some(target) = self.current_target {
-            trace_host(&format!("ack c{}", target.client));
-        }
-        if self.tick_outstanding.take().is_none() {
-            return;
-        }
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if self.frozen.is_some() {
-            self.tick_deferred = false;
-            return;
-        }
-        if self.tick_deferred && !self.paint_holds_tick(cx) {
-            if let Some(target) = self.current_target {
-                let mut msgs = Vec::new();
-                self.append_tick(target, &mut msgs);
-                self.emit_to_app(cx, target.client, msgs);
-            }
-        }
+        self.hosted.tick_done();
+        self.flush(cx);
     }
 
-    fn set_target(&mut self, cx: &mut Cx, target: Option<RunTarget>) {
-        if self.current_target == target {
-            return;
-        }
-        self.ticks_sent = 0;
-        self.ticks_done = 0;
-        let had_target = self.current_target.is_some();
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        {
-            // Drop the outbox first: Drop shuts the aux endpoint before the
-            // client socket is replaced.
-            self.outbox = None;
-            self.aux_chan_listener = None;
-            self.inflight = None;
-            self.pending = None;
-            self.gpu_transition = None;
-            self.frozen = None;
-            self.retired_swapchain = None;
-            self.transport_error = None;
-            self.outbox_full_logged = false;
-        }
-        self.current_target = target;
-        self.tick_outstanding = None;
-        self.tick_deferred = false;
-        // A new child is not paced until it says it fences: the interval
-        // beat runs again for it.
-        self.child_fenced = false;
-        if self.tick_timer.0 == 0 {
-            self.tick_timer = cx.start_interval(self.tick_period);
-        }
-        // Paced: a new child starts ticking at once (its bootstrap).
-        self.child_wants_frame = true;
-        self.tick_frame_pending = false;
-        self.want_tick(cx);
-        self.pending_move = None;
-        self.move_history.clear();
+    /// What a changed target resets in the tile (the protocol state reset
+    /// itself in `HostedApp::set_target`).
+    fn target_changed(&mut self, cx: &mut Cx, had_target: bool) {
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
-        self.swapchain = None;
-        self.last_swapchain_with_completed_draws = None;
-        self.pending_draw = None;
-        self.present_ok_count = 0;
-        self.first_present_at = None;
-        self.app_ready_for_swapchain = false;
         self.ime_pos = None;
-        self.last_rect = Rect::default();
-        self.last_dpi_factor = 0.0;
-        self.bootstrap_pending = target.is_some();
-        self.bootstrap_tick_count = 0;
-        if target.is_some() {
+        if self.hosted.client().is_some() {
             // Keep redrawing during startup so bootstrap messages resend
             // until the child socket is ready.
             self.redraw_countdown = self.redraw_countdown.max(240);
@@ -615,16 +325,6 @@ impl MpRunView {
             }
             self.redraw_countdown = 0;
         }
-        self.draw_app.set_texture(0, &cx.null_texture());
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(tex_scale), &[0.0f32, 0.0f32]);
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         self.redraw(cx);
     }
 
@@ -641,604 +341,91 @@ impl MpRunView {
         }
     }
 
-    fn apply_presentable_draw_to_quad(
-        cx: &mut Cx,
-        draw_app: &mut DrawQuad,
-        redraw_countdown: &mut usize,
-        presentable_draw: PresentableDraw,
-        swapchain: &HostSwapchain,
-    ) -> bool {
-        // Zero-sized frames from early startup races stall bootstrap if
-        // treated as presented.
-        if presentable_draw.width == 0 || presentable_draw.height == 0 {
-            return false;
-        }
-        let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
-            return false;
-        };
-        // A frame bigger than the image it names was clipped by the child
-        // (drawn before it had the bigger frames): never stretch it.
-        if presentable_draw.width > swapchain.alloc_width || presentable_draw.height > swapchain.alloc_height {
-            return false;
-        }
-
-        let Some(texture) = drawn.texture_for_draw(cx, &presentable_draw, swapchain.alloc_width, swapchain.alloc_height) else {
-            return false;
-        };
-        draw_app.set_texture(0, &texture);
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(tex_scale),
-            &[
-                (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
-                (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
-            ],
-        );
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(tex_size),
-            &[
-                (swapchain.alloc_width as f32),
-                (swapchain.alloc_height as f32),
-            ],
-        );
-        // The in-band size header exists only on the Linux software path;
-        // reading it elsewhere blanks tiles whose top-left pixel is black
-        // (see the studio RunView note).
-        #[cfg(target_os = "windows")]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[0.0f32]);
-        #[cfg(not(target_os = "windows"))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
-
-        *redraw_countdown = (*redraw_countdown).max(20);
-        true
-    }
-
-    fn try_present_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) -> bool {
-        if let Some(swapchain) = self.swapchain.as_ref() {
-            if Self::apply_presentable_draw_to_quad(
-                cx,
-                &mut self.draw_app,
-                &mut self.redraw_countdown,
-                presentable_draw,
-                swapchain,
-            ) {
-                self.last_swapchain_with_completed_draws = None;
-                self.redraw(cx);
-                return true;
-            }
-        }
-        if let Some(swapchain) = self.last_swapchain_with_completed_draws.as_ref() {
-            if Self::apply_presentable_draw_to_quad(
-                cx,
-                &mut self.draw_app,
-                &mut self.redraw_countdown,
-                presentable_draw,
-                swapchain,
-            ) {
-                self.redraw(cx);
-                return true;
-            }
-        }
-        false
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn setup_aux_chan(&mut self, _cx: &mut Cx, hub_port: u16, client: ClientId) {
-        if self.outbox.is_some() || self.aux_chan_listener.is_some() {
+    /// Put the hosted frame (or the empty one) on the quad when it changed.
+    fn sync_quad(&mut self, cx: &mut Cx) {
+        if self.quad_serial == self.hosted.present_serial() {
             return;
         }
-        let studio_addr = format!("http://127.0.0.1:{}", hub_port);
-        let listener = match ExternalEndpointListener::new_for_studio(
-            &studio_addr,
-            &client.to_string(),
-        ) {
-            Ok(listener) => listener,
-            Err(err) => {
-                log!("wm aux_chan listener failed: {}", err);
-                return;
+        self.quad_serial = self.hosted.present_serial();
+        match self.hosted.presented() {
+            Some(presented) => {
+                self.draw_app.set_texture(0, &presented.texture);
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_scale), &presented.tex_scale);
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_size), &presented.tex_size);
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(packed_header), &[presented.packed_header]);
             }
-        };
-        // The listener is nonblocking. Poll it on the existing view timer;
-        // a dormant child must not monopolize the shared heavy worker.
-        self.aux_chan_listener = Some(listener);
-        self.aux_chan_deadline = crate::host::now() + 120.0;
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn poll_aux_chan(&mut self, cx: &mut Cx) {
-        let Some(listener) = &self.aux_chan_listener else {
-            return;
-        };
-        match listener.try_accept_host_endpoint() {
-            Ok(Some(endpoint)) => {
-                self.aux_chan_listener = None;
-                match LinuxSwapchainSender::start(&cx.thread_spawner(), endpoint) {
-                    Ok(sender) => self.outbox = Some(sender),
-                    Err(error) => {
-                        log!("wm aux_chan outbox failed: {error}");
-                        self.transport_error = Some(error);
-                    }
-                }
-            }
-            Err(error) => {
-                log!("wm aux_chan accept failed: {error}");
-                self.transport_error = Some(error.to_string());
-                self.aux_chan_listener = None;
-            }
-            Ok(None) if crate::host::now() >= self.aux_chan_deadline => {
-                let error = "timeout while waiting for child aux-channel connection";
-                log!("wm aux_chan accept failed: {error}");
-                self.transport_error = Some(error.into());
-                self.aux_chan_listener = None;
-            }
-            Ok(None) => {}
-        }
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn export_busy(&self) -> bool {
-        self.pending.is_some() || self.inflight.is_some()
-    }
-
-    /// Queue one exported batch. One transaction at a time: the caller must
-    /// not export while `export_busy`. Full retains the batch for retry.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn queue_exported(
-        &mut self,
-        batch: ExportedHostSwapchain,
-        kind: Option<(u64, u64)>,
-    ) -> Result<(), String> {
-        let tag = self.next_export_tag;
-        self.next_export_tag = self.next_export_tag.wrapping_add(1);
-        self.inflight = Some((tag, kind));
-        let Some(outbox) = self.outbox.as_mut() else {
-            self.inflight = None;
-            return Err("GPU descriptor outbox is not ready".into());
-        };
-        match outbox.try_send(tag, batch) {
-            Ok(()) => Ok(()),
-            Err(batch) => {
-                if let Some(error) = outbox.error().map(str::to_string) {
-                    self.inflight = None;
-                    self.transport_error = Some(error.clone());
-                    Err(error)
-                } else {
-                    self.pending = Some((tag, batch));
-                    if !self.outbox_full_logged {
-                        self.outbox_full_logged = true;
-                        log!("wm swapchain outbox full; retrying the same batch");
-                    }
-                    Ok(())
-                }
+            None => {
+                self.draw_app.set_texture(0, &cx.null_texture());
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_scale), &[0.0f32, 0.0f32]);
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
+                self.draw_app.draw_vars.set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
             }
         }
     }
 
-    /// Retry a Full batch and collect completed descriptor metadata. Always
-    /// emit completed tags: the FDs are already in the child's ordered stream.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn take_outbox_msgs(&mut self) -> Vec<StudioToApp> {
-        let mut msgs = Vec::new();
-        let Some(outbox) = self.outbox.as_mut() else {
-            return msgs;
-        };
-        if let Some((tag, batch)) = self.pending.take() {
-            match outbox.try_send(tag, batch) {
-                Ok(()) => {}
-                Err(batch) => {
-                    if let Some(error) = outbox.error().map(str::to_string) {
-                        self.inflight = None;
-                        self.transport_error = Some(error);
-                    } else {
-                        self.pending = Some((tag, batch));
-                    }
-                }
-            }
-        }
-        let completed = outbox.poll();
-        let sender_error = outbox.error().map(str::to_string);
-        for sent in completed {
-            let kind = match self.inflight {
-                Some((tag, kind)) if tag == sent.tag => {
-                    self.inflight = None;
-                    kind
-                }
-                _ => {
-                    self.transport_error = Some("GPU descriptor completion tag mismatch".into());
-                    // Unknown metadata cannot safely describe the ordered
-                    // FD stream. Close this transport, rather than rebinding
-                    // descriptors to an ordinary swapchain by accident.
-                    self.outbox = None;
-                    self.pending = None;
-                    self.inflight = None;
-                    return msgs;
-                }
-            };
-            msgs.push(match kind {
-                Some((transition, transport_epoch)) => StudioToApp::Gpu(HostToAppGpu::Swapchain {
-                    transition,
-                    transport_epoch,
-                    swapchain: sent.swapchain,
-                }),
-                None => StudioToApp::Swapchain(sent.swapchain),
-            });
-        }
-        if let Some(error) = sender_error {
-            if self.transport_error.is_none() {
-                self.transport_error = Some(error);
-            }
-        }
-        msgs
-    }
-
-    fn ensure_swapchain_for_rect(
-        &mut self,
-        cx: &mut Cx,
-        rect: Rect,
-        dpi_factor: f64,
-        target: RunTarget,
-    ) {
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if self.frozen.is_some() {
-            return;
-        }
-        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-            return;
-        }
-        let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
-        let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
-        let needs_new_swapchain = self
-            .swapchain
-            .as_ref()
-            .map(|swapchain| {
-                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                {
-                    min_width != swapchain.alloc_width
-                        || min_height != swapchain.alloc_height
-                        || swapchain.window_id != target.window_id
-                }
-                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                {
-                    min_width > swapchain.alloc_width
-                        || min_height > swapchain.alloc_height
-                        || swapchain.window_id != target.window_id
-                }
-            })
-            .unwrap_or(true);
-
-        // Child coordinates stay local. A desktop translation does not resize
-        // the app or replace its shared framebuffer.
-        let rect_changed = self.last_rect.size != rect.size || self.last_dpi_factor != dpi_factor;
-        if needs_new_swapchain {
-            if self.last_swapchain_with_completed_draws.is_none() {
-                self.last_swapchain_with_completed_draws = self.swapchain.take();
-            } else {
-                self.swapchain = None;
-            }
-
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-            let (alloc_width, alloc_height) = (min_width.max(1), min_height.max(1));
-            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-            let (alloc_width, alloc_height) = (
-                min_width.max(64).next_power_of_two(),
-                min_height.max(64).next_power_of_two(),
-            );
-
-            self.swapchain = Some(HostSwapchain::new(
-                target.window_id,
-                alloc_width,
-                alloc_height,
-                cx,
-            ));
-        }
-
-        if rect_changed || needs_new_swapchain {
-            self.bootstrap_pending = true;
-            self.bootstrap_tick_count = 0;
-            self.want_tick(cx);
-        }
-
-        self.last_rect = rect;
-        self.last_dpi_factor = dpi_factor;
-    }
-
-    fn build_bootstrap_msgs(&mut self, cx: &mut Cx, target: RunTarget) -> Vec<StudioToApp> {
-        if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
-            return Vec::new();
-        }
-        let mut outbound = vec![StudioToApp::WindowGeomChange {
-            window_id: target.window_id,
-            dpi_factor: self.last_dpi_factor,
-            left: 0.0,
-            top: 0.0,
-            width: self.last_rect.size.x,
-            height: self.last_rect.size.y,
-        }];
-
-        if !self.app_ready_for_swapchain {
-            return outbound;
-        }
-
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        {
-            self.poll_aux_chan(cx);
-            outbound.extend(self.take_outbox_msgs());
-            if self.outbox.is_some() && !self.export_busy() {
-                let exported = self.swapchain.as_mut().map(|swapchain| export_host_swapchain(swapchain, cx));
-                match exported {
-                    Some(Ok(batch)) => {
-                        if let Err(error) = self.queue_exported(batch, None) {
-                            log!("wm swapchain export queue failed: {error}");
-                        }
-                    }
-                    Some(Err(err)) => {
-                        let error = format!("{err:?}");
-                        log!("wm swapchain export failed: {error}");
-                        self.transport_error = Some(error);
-                    }
-                    None => {}
-                }
-            }
-            outbound.extend(self.take_outbox_msgs());
-        }
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        {
-            if let Some(swapchain) = self.swapchain.as_ref() {
-                let shared = shared_swapchain_from_host_swapchain(swapchain, cx);
-                outbound.push(StudioToApp::Swapchain(shared));
-            }
-        }
-        outbound
-    }
-
-    pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
-        if makepad_error_log::trace_enabled("pace") {
-            log!("pace wm flip_rx={:.2} c{}", crate::host::wall_now() * 1000.0 % 1.0e6, self.current_target.map(|t| t.client).unwrap_or(0));
-        }
-        if self.try_present_draw(cx, presentable_draw) {
-            trace_host(&format!(
-                "pd c{}",
-                self.current_target.map(|t| t.client).unwrap_or(0)
-            ));
-            self.pending_draw = None;
-            if cfg!(target_os = "android") {
-                self.flip_unpainted = Some(crate::host::now());
-                self.paint_frame = cx.new_next_frame();
-            }
-            self.present_ok_count += 1;
-            if self.present_ok_count == 1 {
-                // Whatever frames come in first, they fade in quickly
-                // rather than popping over the "starting…" panel.
-                self.first_present_at = Some(crate::host::now());
-            }
-            // A present settles the bootstrap only once its messages went
-            // out for the current rect (the first bootstrap beat sends
-            // them). A frame already in flight when the tile changed size
-            // must not cancel a geometry the child was never sent: it kept
-            // drawing at the old size, and the tile showed that frame
-            // stretched to the new rect.
-            if self.bootstrap_tick_count > 0 {
-                self.bootstrap_pending = false;
-                self.bootstrap_tick_count = 0;
-            }
-        } else {
-            self.pending_draw = Some(presentable_draw);
+    /// A presented frame was applied (or not): the quad redraws for it.
+    fn presented_frame(&mut self, cx: &mut Cx, applied: bool) {
+        if applied {
+            self.present_serial += 1;
+            self.redraw_countdown = self.redraw_countdown.max(20);
+            self.redraw(cx);
         }
     }
 
-    pub fn set_run_target(
-        &mut self,
-        cx: &mut Cx,
-        client: ClientId,
-        window_id: usize,
-        _hub_port: u16,
-    ) {
-        self.set_target(cx, Some(RunTarget { client, window_id }));
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        self.setup_aux_chan(cx, _hub_port, client);
+    pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: makepad_studio_protocol::PresentableDraw) {
+        let applied = self.hosted.set_presentable_draw(cx, presentable_draw);
+        self.presented_frame(cx, applied);
+    }
+
+    pub fn set_run_target(&mut self, cx: &mut Cx, client: ClientId, window_id: usize, hub_port: u16) {
+        let had_target = self.hosted.client().is_some();
+        if self.hosted.set_run_target(cx, client, window_id, hub_port) {
+            self.target_changed(cx, had_target);
+        }
+    }
+
+    /// Show one of the app `owner`'s later windows (`window_id`) as the desk client
+    /// `client` (`client_windows.rs`): its GPU channel is the app's.
+    pub fn set_later_window_target(&mut self, cx: &mut Cx, client: ClientId, window_id: usize, owner: ClientId) {
+        let had_target = self.hosted.client().is_some();
+        if self.hosted.set_window_target(cx, client, window_id, owner) {
+            self.target_changed(cx, had_target);
+        }
+    }
+
+    /// Where this window starts in the app's coordinates (a later window's is far from
+    /// the first's, so the app tells their pointer events apart).
+    pub fn set_window_origin(&mut self, origin: Vec2d) {
+        self.hosted.set_window_origin(origin);
     }
 
     /// CreateWindow arrived: the child's stdin loop is live, share the
     /// swapchain from now on.
     pub fn app_ready(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
-        let target = RunTarget { client, window_id };
-        if self.current_target != Some(target) {
-            self.set_target(cx, Some(target));
+        let had_target = self.hosted.client().is_some();
+        if self.hosted.app_ready(cx, client, window_id) {
+            self.target_changed(cx, had_target);
         }
-        self.app_ready_for_swapchain = true;
-        self.tick_outstanding = None;
-        self.tick_deferred = false;
-        self.present_ok_count = 0;
-        self.first_present_at = None;
-        self.bootstrap_pending = true;
-        self.bootstrap_tick_count = 0;
-        self.want_tick(cx);
         self.redraw_countdown = self.redraw_countdown.max(240);
         self.redraw(cx);
     }
 
     pub fn clear_run_target(&mut self, cx: &mut Cx) {
-        self.set_target(cx, None);
+        let had_target = self.hosted.client().is_some();
+        if self.hosted.clear_run_target(cx) {
+            self.target_changed(cx, had_target);
+        }
     }
 
     pub fn client(&self) -> Option<ClientId> {
-        self.current_target.map(|t| t.client)
-    }
-
-    /// A hosted window may freeze only after bootstrap has produced a frame.
-    /// Freezing earlier would suppress the geometry/bootstrap it still needs.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_window_id(&self) -> Option<usize> {
-        (self.app_ready_for_swapchain
-            && self.present_ok_count > 0
-            && self.outbox.is_some()
-            && self.gpu_error().is_none())
-            .then(|| self.current_target.map(|t| t.window_id))
-            .flatten()
-    }
-
-    /// Freeze ordinary Tick/bootstrap and swapchain resize. Last rect, DPI,
-    /// and displayed texture stay. In-flight descriptor metadata still
-    /// drains through the outbox.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_freeze(&mut self, id: u64) {
-        match self.frozen {
-            Some(frozen) if frozen == id => {}
-            Some(_) => {
-                self.transport_error = Some("GPU freeze id mismatch".into());
-            }
-            None => {
-                self.frozen = Some(id);
-            }
-        }
-    }
-
-    /// Export a candidate swapchain from the prepared renderer. `Ok(false)`
-    /// means accept or a previous export is not ready yet; retry. Errors do
-    /// not drop the active swapchain.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_prepare(&mut self, cx: &mut Cx, id: u64, epoch: u64) -> Result<bool, String> {
-        if self.frozen != Some(id) {
-            return Err("GPU prepare without matching freeze".into());
-        }
-        if let Some(transition) = &self.gpu_transition {
-            if transition.id != id || transition.epoch != epoch {
-                return Err("GPU prepare transport epoch mismatch".into());
-            }
-            if transition.queued { return Ok(true); }
-        }
-        self.poll_aux_chan(cx);
-        if self.outbox.is_none() || self.export_busy() {
-            return Ok(false);
-        }
-        if !self.app_ready_for_swapchain {
-            return Ok(false);
-        }
-        if self.last_rect.size.x <= 0.0
-            || self.last_rect.size.y <= 0.0
-            || !(self.last_dpi_factor.is_finite() && self.last_dpi_factor > 0.0)
-        {
-            return Ok(false);
-        }
-        let Some(target) = self.current_target else {
-            return Err("GPU prepare has no client window".into());
-        };
-        let alloc_width = ((self.last_rect.size.x * self.last_dpi_factor).ceil() as u32).max(1);
-        let alloc_height = ((self.last_rect.size.y * self.last_dpi_factor).ceil() as u32).max(1);
-        let mut candidate = HostSwapchain::new(target.window_id, alloc_width, alloc_height, cx);
-        match export_host_swapchain(&mut candidate, cx) {
-            Ok(batch) => {
-                self.queue_exported(batch, Some((id, epoch)))?;
-                self.gpu_transition = Some(GpuTransition {
-                    id,
-                    epoch,
-                    candidate: Some(candidate),
-                    queued: true,
-                });
-                Ok(true)
-            }
-            Err(err) => {
-                let error = format!("{err:?}");
-                self.transport_error = Some(error.clone());
-                Err(error)
-            }
-        }
-    }
-
-    /// Install the queued candidate as the active swapchain. Stay frozen
-    /// until `gpu_retire`. The last displayed texture is left on `draw_app`.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_commit(&mut self, cx: &mut Cx, id: u64) -> Result<(), String> {
-        let Some(transition) = self.gpu_transition.as_mut() else {
-            return Err("GPU commit without prepared candidate".into());
-        };
-        if transition.id != id || !transition.queued {
-            return Err("GPU commit requires a queued candidate".into());
-        }
-        if self.frozen != Some(id) {
-            return Err("GPU commit without matching freeze".into());
-        }
-        let candidate = transition
-            .candidate
-            .take()
-            .ok_or_else(|| "GPU commit missing candidate swapchain".to_string())?;
-        self.retired_swapchain = self.swapchain.take();
-        self.swapchain = Some(candidate);
-        self.last_swapchain_with_completed_draws = None;
-        self.pending_draw = None;
-        // Preserve the displayed old frame until the first new-generation
-        // present, without showing startup chrome or replaying its fade.
-        self.bootstrap_pending = false;
-        self.bootstrap_tick_count = 0;
-        self.redraw(cx);
-        Ok(())
-    }
-
-    /// Drop the retired generation and unfreeze. Ordinary Tick resumes.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_retire(&mut self, cx: &mut Cx, id: u64) {
-        let matches = self.frozen == Some(id)
-            || self.gpu_transition.as_ref().is_some_and(|t| t.id == id);
-        if !matches {
-            self.transport_error = Some("GPU retire id mismatch".into());
-            return;
-        }
-        self.retired_swapchain = None;
-        self.gpu_transition = None;
-        self.frozen = None;
-        self.redraw(cx);
-    }
-
-    /// Drop the candidate, unfreeze the old active swapchain, and keep
-    /// draining any in-flight descriptor metadata. Terminal transport
-    /// errors are not retried as a reconnect.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_cancel(&mut self, cx: &mut Cx, id: u64) {
-        let matches = self.frozen == Some(id)
-            || self.gpu_transition.as_ref().is_some_and(|t| t.id == id);
-        if !matches {
-            self.transport_error = Some("GPU cancel id mismatch".into());
-            return;
-        }
-        self.gpu_transition = None;
-        self.frozen = None;
-        self.redraw(cx);
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    pub fn gpu_error(&self) -> Option<&str> {
-        self.transport_error
-            .as_deref()
-            .or_else(|| self.outbox.as_ref().and_then(|sender| sender.error()))
-    }
-
-    /// The child is about to be told it is `size` (a phone tile opening
-    /// full screen): give it frames that big now. Its frames are otherwise
-    /// sized where the view is drawn — for a tile opening, only once a
-    /// full-size frame confirmed the face, which needs frames that big: the
-    /// child used to break that loop by drawing its first full frame into
-    /// the tile's small frames, clipped (the zoom's smeared frame).
-    pub fn prepare_size(&mut self, cx: &mut Cx, size: Vec2d, dpi_factor: f64) {
-        let Some(target) = self.current_target else { return };
-        self.target_size = Some(size);
-        let rect = Rect { pos: self.last_rect.pos, size };
-        self.ensure_swapchain_for_rect(cx, rect, dpi_factor, target);
-    }
-
-    pub fn set_target_size(&mut self, size: Option<Vec2d>) {
-        self.target_size = size;
+        self.hosted.client()
     }
 
     /// Focus the compositor keyboard on this tile.
     /// Claim the compositor's key focus for this tile. False while the
-    /// tile has no live Area — never drawn, or not drawn since its draw
+    /// tile has no live Area -- never drawn, or not drawn since its draw
     /// list was rebuilt (the AI pane hides its run view entirely between
-    /// showings) — because focusing a dead area is a no-op; the caller
+    /// showings) -- because focusing a dead area is a no-op; the caller
     /// keeps such a focus PENDING and retries after the next draw.
     pub fn focus_keyboard(&mut self, cx: &mut Cx) -> bool {
         // A Quick-Look panel declines the keyboard outright. True, not
@@ -1254,7 +441,7 @@ impl MpRunView {
         true
     }
 
-    /// Give the keyboard back if this tile holds it — the AI pane hiding
+    /// Give the keyboard back if this tile holds it -- the AI pane hiding
     /// must not leave its child as the invisible key target.
     pub fn release_keyboard(&mut self, cx: &mut Cx) {
         if self.area != Area::Empty && cx.has_key_focus(self.area) {
@@ -1262,14 +449,12 @@ impl MpRunView {
         }
     }
 
-    /// FOCUS RULE: mark this tile a Quick-Look panel — mouse yes, keyboard
+    /// FOCUS RULE: mark this tile a Quick-Look panel -- mouse yes, keyboard
     /// never. Set once when the WM floats a preview viewer.
     pub fn set_takes_key_focus(&mut self, on: bool) {
         self.takes_key_focus = on;
     }
 
-    /// The newest line the child (or the cargo wrapper building it) wrote.
-    /// Shown under "starting…" until the first frame arrives.
     /// The desk sets this every frame while the tile closes: `origin` and
     /// `span` place the shrinking quad inside the tile's original rect
     /// (both normalized), pinning the frozen frame in screen space.
@@ -1285,10 +470,10 @@ impl MpRunView {
     /// How far the arrival fade-in has come (0 = first frame just landed,
     /// 1 = fully shown; also 1 before any frame). The desk uses the
     /// complement on its dark starting wash so the crossfade keeps the
-    /// tile's darkness continuous — no bright flash between the wash
+    /// tile's darkness continuous -- no bright flash between the wash
     /// vanishing and the content appearing.
     pub fn arrival_fade(&self) -> f32 {
-        match self.first_present_at {
+        match self.hosted.first_present_at() {
             Some(t0) => {
                 let t = ((crate::host::now() - t0) as f32 / ARRIVAL_FADE_SECS).min(1.0);
                 t * t * (3.0 - 2.0 * t)
@@ -1297,6 +482,8 @@ impl MpRunView {
         }
     }
 
+    /// The newest line the child (or the cargo wrapper building it) wrote.
+    /// Shown under "starting..." until the first frame arrives.
     pub fn set_status_line(&mut self, cx: &mut Cx, line: &str) {
         if self.status_line == line {
             return;
@@ -1320,7 +507,7 @@ impl MpRunView {
         }
     }
 
-    /// Keep the tail — that is where the crate name is.
+    /// Keep the tail -- that is where the crate name is.
     fn trimmed_status(&self, width: f64) -> String {
         // The code font at 9pt is about 7 logical px per character.
         let max = ((width - 24.0) / 7.0).floor().max(8.0) as usize;
@@ -1333,7 +520,7 @@ impl MpRunView {
     }
 
     pub fn has_frame(&self) -> bool {
-        self.present_ok_count > 0
+        self.hosted.has_frame()
     }
 
     fn local_from_area(&self, cx: &Cx, abs: Vec2d) -> Option<Vec2d> {
@@ -1360,28 +547,31 @@ impl Widget for MpRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
         let rect = cx.walk_turtle(walk).dpi_snap(1.0 / dpi_factor);
-        // Only the "starting…" state gets a backdrop; a presented frame is
+        // Only the "starting..." state gets a backdrop; a presented frame is
         // composited straight over the wallpaper so translucent children
         // (Omarchy's 0.985/0.96 window opacity) show it through.
-        if self.present_ok_count == 0 {
+        if !self.hosted.has_frame() {
             self.draw_bg.draw_abs(cx, rect);
         }
 
-        let target = self.current_target;
-        if let Some(target) = target {
-            let config_rect = Rect {
-                pos: rect.pos,
-                size: self.target_size.unwrap_or(rect.size),
-            };
-            self.ensure_swapchain_for_rect(cx, config_rect, dpi_factor, target);
-            if let Some(presentable_draw) = self.pending_draw {
-                self.set_presentable_draw(cx, presentable_draw);
-            }
+        let target = self.hosted.target();
+        // The app draws no caption while its window is fullscreen (`HostedFullscreen`).
+        if target.is_some() && self.told_fullscreen != Some(self.fullscreen) {
+            self.told_fullscreen = Some(self.fullscreen);
+            self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(
+                makepad_widgets::makepad_platform::ime::HostedFullscreen { window_id: target.map_or(0, |t| t.window_id), on: self.fullscreen }.to_json())]);
+            self.flush(cx);
         }
+        if target.is_some() {
+            self.hosted.set_geometry(cx, rect, dpi_factor);
+            let applied = self.hosted.retry_pending_draw(cx);
+            self.presented_frame(cx, applied);
+        }
+        self.sync_quad(cx);
 
         // A cargo build has no protocol target yet. Its launch panel must
         // still be visible before the application connects.
-        let waiting_for_framebuffer = self.present_ok_count == 0;
+        let waiting_for_framebuffer = !self.hosted.has_frame();
         if waiting_for_framebuffer {
             self.redraw(cx);
         } else if self.redraw_countdown > 0 {
@@ -1389,16 +579,17 @@ impl Widget for MpRunView {
             self.redraw(cx);
         }
 
-        if self.present_ok_count > 0 {
-            self.flip_unpainted = None;
-            trace_host(&format!(
-                "paint c{}",
-                target.map(|t| t.client).unwrap_or(0)
-            ));
-        }
+        self.hosted.painted();
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
+        let told = self.hosted.trace_config().0 * dpi_factor;
+        let told = [told.x.ceil() as u32, told.y.ceil() as u32];
+        if self.anchor_frames && !self.live_resize && self.hosted.presented_px() == Some(told) {
+            self.anchor_frames = false;
+        }
+        let expect = if self.anchor_frames { [told[0] as f32, told[1] as f32] } else { [0.0, 0.0] };
+        self.draw_app.draw_vars.set_dyn_instance(cx, id!(expect_px), &expect);
         let (crop_origin, crop_span) = self
             .close_crop
             .unwrap_or((dvec2(0.0, 0.0), dvec2(1.0, 1.0)));
@@ -1415,7 +606,7 @@ impl Widget for MpRunView {
         // The arrival fade: ~130ms from the first presented frame, over
         // whatever frames come in, multiplied with the desk's popin fade.
         const FIRST_FADE: f32 = ARRIVAL_FADE_SECS;
-        let first_fade = match self.first_present_at {
+        let first_fade = match self.hosted.first_present_at() {
             Some(t0) => {
                 let t = ((crate::host::now() - t0) as f32 / FIRST_FADE).min(1.0);
                 if t < 1.0 {
@@ -1436,13 +627,7 @@ impl Widget for MpRunView {
             }
             let t = self.status_line.trim_start();
             let lower = t.to_ascii_lowercase();
-            let headline = if lower.starts_with("compiling")
-                || lower.starts_with("provisioning")
-                || lower.starts_with("extracting")
-                || lower.starts_with("bootstrapping")
-                || lower.starts_with("aligning")
-                || lower.starts_with("provisioned")
-            {
+            let headline = if lower.starts_with("compiling") {
                 "Compiling…"
             } else if lower.starts_with("waiting for another build") {
                 "Waiting to compile…"
@@ -1488,103 +673,25 @@ impl Widget for MpRunView {
                 self.area, Rect{pos:ime,size:Vec2d::default()}, TextInputConfig::default(),
             ));
         }
+        // What the draw told the host (geometry, a new swapchain) is owed to
+        // the child now, and wakes the beat if it was asleep.
+        self.flush(cx);
         DrawStep::done()
     }
 
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        let target = self.current_target;
-        if self.paint_frame.is_event(event).is_some() {
-            self.flip_unpainted = None;
-        }
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.hosted.handle_event(cx, event);
+        self.flush(cx);
+        // Input handed to the host wakes the beat if it was asleep (the
+        // input path ends in `flush`).
+        self.handle_input(cx, event, scope);
+    }
+}
 
-        let mut beat = false;
-        if let Event::Timer(timer_event) = event {
-            if self.tick_timer.is_timer(timer_event).is_some() {
-                if self.paced(cx) {
-                    // Paced from here on: the interval beat stops (a fenced
-                    // child stays fenced for its life).
-                    cx.stop_timer(self.tick_timer);
-                    self.tick_timer = Timer::empty();
-                    self.child_wants_frame = true;
-                    self.want_tick(cx);
-                } else if target.is_none() {
-                    // No child: nothing to beat for (a view without a
-                    // client woke the loop at 125 Hz for nothing);
-                    // `set_target` starts it again.
-                    cx.stop_timer(self.tick_timer);
-                    self.tick_timer = Timer::empty();
-                } else {
-                    beat = true;
-                }
-            } else if self.wake_timer.is_timer(timer_event).is_some() {
-                self.child_wants_frame = true;
-                self.want_tick(cx);
-            }
-        }
-        if self.tick_frame.is_event(event).is_some() {
-            self.tick_frame_pending = false;
-            beat = true;
-        }
-        if beat {
-            {
-                if let Some(target) = target {
-                    let mut msgs = Vec::new();
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                    {
-                        self.poll_aux_chan(cx);
-                        msgs.extend(self.take_outbox_msgs());
-                    }
-                    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                    let frozen = self.frozen.is_some();
-                    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                    let frozen = false;
-                    let should_bootstrap = !frozen && (self.present_ok_count == 0 || self.bootstrap_pending);
-                    if should_bootstrap {
-                        self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
-                        if self.bootstrap_tick_count == 1 || self.bootstrap_tick_count % 15 == 0 {
-                            msgs.extend(self.build_bootstrap_msgs(cx, target));
-                        }
-                    }
-                    let paced = self.paced(cx);
-                    // Paced: a Tick only when the child has something to do.
-                    let wanted = !paced
-                        || should_bootstrap
-                        || self.child_wants_frame
-                        || self.input_since_tick
-                        || self.pending_move.is_some();
-                    if !frozen && wanted {
-                        self.tick_deferred = true;
-                        let now = crate::host::now();
-                        let due = match self.tick_outstanding {
-                            None => true,
-                            Some(sent_at) if now - sent_at >= self.tick_fallback() => {
-                                trace_host(&format!(
-                                    "tick-fallback c{} {:.1}ms",
-                                    target.client,
-                                    (now - sent_at) * 1000.0
-                                ));
-                                true
-                            }
-                            Some(_) => false,
-                        };
-                        if due && !self.paint_holds_tick(cx) {
-                            self.append_tick(target, &mut msgs);
-                        } else if paced {
-                            // Busy child: look again next frame (its TickDone
-                            // sends the deferred Tick sooner; the fallback
-                            // needs frames to be noticed).
-                            self.want_tick(cx);
-                        }
-                    }
-                    if paced && should_bootstrap {
-                        self.want_tick(cx);
-                    }
-                    self.emit_to_app(cx, target.client, msgs);
-                }
-            }
-        }
+impl MpRunView {
+    fn handle_input(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
 
-        let Some(target) = target else {
+        let Some(target) = self.hosted.target() else {
             return;
         };
 
@@ -1612,62 +719,23 @@ impl Widget for MpRunView {
                         },
                     );
                     self.redraw(cx);
-                    self.emit_after_pending_move(
-                        cx,
-                        target.client,
-                        StudioToApp::MouseDown(RemoteMouseDown {
-                            button_raw_bits: Self::default_mouse_button(&e.device).bits(),
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        }),
-                    );
+                    self.hosted.mouse_down(local, Self::default_mouse_button(&e.device), e.time, &e.modifiers);
+                    if Self::default_mouse_button(&e.device) == MouseButton::PRIMARY {
+                        let query = self.chrome_press.begin(e.abs, self.hosted.child_point(local));
+                        self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(query.to_json())]);
+                    }
                 }
             }
             Hit::FingerMove(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    trace_host("mm");
-                    // Held until the next Tick (or the next edge): one
-                    // position per frame is all a frame can show. Paced
-                    // (Android), every sample goes (the child's velocity
-                    // tracker wants them all), and a move with no Tick
-                    // out goes at once with its own Tick rather than
-                    // waiting for the next display frame.
-                    let paced = self.paced(cx);
-                    if paced {
-                        if let Some(prev) = self.pending_move.take() {
-                            if self.move_history.len() >= 32 {
-                                self.move_history.remove(0);
-                            }
-                            self.move_history.push(prev);
-                        }
-                    }
-                    self.pending_move = Some(RemoteMouseMove {
-                        x: local.x,
-                        y: local.y,
-                        time: e.time,
-                        modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                    });
-                    if paced && self.tick_outstanding.is_none() && !self.paint_holds_tick(cx) {
-                        let mut msgs = Vec::new();
-                        self.append_tick(target, &mut msgs);
-                        self.emit_to_app(cx, target.client, msgs);
-                    } else if paced {
-                        self.want_tick(cx);
-                    }
+                    self.hosted.mouse_move(local, e.time, &e.modifiers);
                 }
             }
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {
                 self.is_hovered = true;
                 cx.set_cursor(self.remote_cursor);
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.pending_move = Some(RemoteMouseMove {
-                        x: local.x,
-                        y: local.y,
-                        time: e.time,
-                        modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                    });
+                    self.hosted.hover_move(local, e.time, &e.modifiers);
                 }
             }
             Hit::FingerHoverOut(_) => {
@@ -1675,75 +743,31 @@ impl Widget for MpRunView {
                 cx.set_cursor(MouseCursor::Default);
             }
             Hit::FingerUp(e) => {
-                // A press the WM took away is relayed as a cancellation: the
-                // app lets go of it without clicking or flinging. A child
-                // that never announced `MouseCancel` is sent nothing — the
-                // WM never cancelled its presses before, and any release
-                // could commit what the press started.
-                if e.cancelled && !self.child_mouse_cancel {
-                    if !std::mem::replace(&mut self.logged_no_mouse_cancel, true) {
-                        log!("wm: client {} does not take MouseCancel; its cancelled presses are not relayed", target.client);
-                    }
-                    return;
-                }
-                // A cancel is owed even when the view's area is gone; where
-                // it lands does not matter, it clicks nothing.
-                let local = self.local_from_area(cx, e.abs).or_else(|| e.cancelled.then(Default::default));
-                let release = if e.cancelled && self.child_mouse_cancel { StudioToApp::MouseCancel } else { StudioToApp::MouseUp };
-                if let Some(local) = local {
-                    // A cancel travels in a batch of its own.
-                    if e.cancelled {
-                        if let Some(mv) = self.pending_move.take() {
-                            self.emit_to_app(cx, target.client, vec![StudioToApp::MouseMove(mv)]);
-                        }
-                    }
-                    self.emit_after_pending_move(
-                        cx,
-                        target.client,
-                        release(RemoteMouseUp {
-                            button_raw_bits: Self::default_mouse_button(&e.device).bits(),
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        }),
-                    );
-                }
+                let local = self.local_from_area(cx, e.abs);
+                self.chrome_press.end();
+                self.hosted.mouse_up(local, Self::default_mouse_button(&e.device), e.time, &e.modifiers, e.cancelled);
             }
             Hit::FingerScroll(e) => {
                 if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_after_pending_move(
-                        cx,
-                        target.client,
-                        StudioToApp::Scroll(RemoteScroll {
-                            is_mouse: e.device.is_mouse(),
-                            time: e.time,
-                            x: local.x,
-                            y: local.y,
-                            sx: e.scroll.x,
-                            sy: e.scroll.y,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        }),
-                    );
+                    // `FingerScroll` reports every scroll as a mouse device; a
+                    // trackpad gesture is the one that carries a phase.
+                    let is_mouse = e.device.is_mouse() && e.phase == makepad_widgets::makepad_platform::event::ScrollPhase::None;
+                    self.hosted.scroll(local, e.scroll, is_mouse, e.phase, e.time, &e.modifiers);
                 }
             }
-            Hit::TextInput(e) => {
-                self.emit_to_app(cx, target.client, vec![StudioToApp::TextInput(e)]);
+            Hit::FingerPinch(e) => {
+                if let Some(local) = self.local_from_area(cx, e.abs) {
+                    self.hosted.pinch(local, e.scale, e.phase, e.time, &e.modifiers);
+                }
             }
-            Hit::KeyDown(e) => {
-                self.emit_to_app(cx, target.client, vec![StudioToApp::KeyDown(e)]);
-            }
-            Hit::KeyUp(e) => {
-                self.emit_to_app(cx, target.client, vec![StudioToApp::KeyUp(e)]);
-            }
-            Hit::TextCopy(_) => {
-                self.emit_to_app(cx, target.client, vec![StudioToApp::TextCopy]);
-            }
-            Hit::TextCut(_) => {
-                self.emit_to_app(cx, target.client, vec![StudioToApp::TextCut]);
-            }
+            Hit::TextInput(e) => self.hosted.text_input(e),
+            Hit::KeyDown(e) => self.hosted.key_down(e),
+            Hit::KeyUp(e) => self.hosted.key_up(e),
+            Hit::TextCopy(_) => self.hosted.text_copy(),
+            Hit::TextCut(_) => self.hosted.text_cut(),
             _ => {}
         }
+        self.flush(cx);
     }
 }
 
@@ -1780,8 +804,38 @@ impl crate::tile::TileHost for MpRunView {
         MpRunView::arrival_fade(self)
     }
 
+    /// The applied-frame count, with the first draws after a present
+    /// (the post-present redraw run, `presented_frame` sets 20) kept
+    /// distinct: those still repaint so the image's upload settles; later
+    /// ones reuse the capture. None before the first frame.
+    fn content_serial(&self) -> Option<u64> {
+        let fresh = self.redraw_countdown.saturating_sub(16).min(4) as u64;
+        self.has_frame().then_some(self.present_serial * 8 + fresh)
+    }
+
+    fn presented_image(&self) -> Option<(Texture, [u32; 2])> {
+        let px = self.hosted.presented_px()?;
+        Some((self.hosted.presented()?.texture.clone(), px))
+    }
+
+    fn drop_files(&mut self, cx: &mut Cx, abs: Vec2d, paths: Vec<String>) -> bool {
+        let Some(local) = self.local_from_area(cx, abs) else { return false };
+        self.hosted.drop_files(local, paths, &KeyModifiers::default());
+        true
+    }
+
     fn set_target_size(&mut self, size: Option<Vec2d>) {
-        MpRunView::set_target_size(self, size)
+        self.hosted.set_target_size(size)
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+    }
+
+    fn set_live_resize(&mut self, on: bool) {
+        self.live_resize = on;
+        self.anchor_frames |= on;
+        self.hosted.set_live_resize(on)
     }
 
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>) {
@@ -1790,5 +844,9 @@ impl crate::tile::TileHost for MpRunView {
 
     fn set_fade(&mut self, fade: f32) {
         MpRunView::set_fade(self, fade)
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
+        MpRunView::send_visible(self, cx, visible)
     }
 }

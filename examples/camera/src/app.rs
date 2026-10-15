@@ -69,7 +69,6 @@ script_mod! {
                                 width: Fill
                                 height: Fill
                                 autoplay: false
-                                show_controls: false
                             }
                         }
 
@@ -81,7 +80,6 @@ script_mod! {
                                 width: Fill
                                 height: Fill
                                 autoplay: false
-                                show_controls: false
                             }
                         }
                     }

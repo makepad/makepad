@@ -17,13 +17,13 @@ use std::collections::HashMap;
 
 pub(crate) fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
     let theme = vm.module(id!(theme));
-    let muted = vm.bx.heap.value(theme, id!(color_text_muted).into(), NoTrap);
+    let muted = vm.value(theme, id!(color_text_muted));
     if !muted.is_nil() && !muted.is_err() {
         muted
     } else {
         // Stock themes without a WM palette predate color_text_muted. Resolve
         // their secondary role once; never override a host's explicit muted role.
-        vm.bx.heap.value(theme, id!(color_text_meta).into(), NoTrap)
+        vm.value(theme, id!(color_text_meta))
     }
 }
 
@@ -864,6 +864,10 @@ impl MailView {
 
     fn apply_layout(&mut self, cx: &mut Cx, metrics: LayoutMetrics) {
         self.compact = metrics.kind == LayoutKind::Compact;
+        if !self.compact {
+            // The wide layout hides the phone stack, which then never sees a gesture's pop end.
+            self.view.stack_navigation(cx, ids!(phone)).end_interactive_pop_without_animation(cx);
+        }
         self.view.widget(cx, ids!(sidebar)).set_visible(cx, metrics.show_sidebar);
         self.view.widget(cx, ids!(wide_mailbox_btn)).set_visible(cx, !self.compact && !metrics.show_sidebar);
         let mut list_col = self.view.widget(cx, ids!(list_column));
@@ -1533,6 +1537,26 @@ impl MailView {
         if self.glass(cx, ids!(list_back), actions) || self.glass(cx, ids!(read_back), actions) {
             self.pop_compact(cx);
         }
+        let nav = self.view.stack_navigation(cx, ids!(phone));
+        for action in actions.filter_widget_actions_cast::<StackNavigationTransitionAction>(nav.widget_uid()) {
+            match action {
+                // Back closes the sheet or composer before it navigates.
+                StackNavigationTransitionAction::InteractivePopStarted
+                    if self.sheet != SheetKind::None || self.ui.composer.is_some() =>
+                {
+                    nav.cancel_interactive_pop(cx);
+                }
+                // Going back from the reader shows the message list, not the mailboxes at the root.
+                StackNavigationTransitionAction::InteractivePopStarted
+                    if matches!(self.ui.history.last(), Some(Route::Read(_))) =>
+                {
+                    nav.set_interactive_pop_view(cx, Some(live_id!(messages)));
+                }
+                // The stack finishes this pop itself (sync_stack waits for it), so we only go back in our history.
+                StackNavigationTransitionAction::InteractivePopCommitted => self.pop_compact(cx),
+                _ => {}
+            }
+        }
         if self.view.button(cx, ids!(phone_unread)).clicked(actions) {
             self.ui.list.unread_only = !self.ui.list.unread_only;
             self.rebuild_rows();
@@ -1859,7 +1883,9 @@ impl Widget for MailView {
             }
         }
         if let Event::BackPressed { .. } = event {
-            if event.back_pressed() {
+            // A swipe or back gesture's pop gets this Back instead, since the system's back gesture ends with one.
+            let has_pending_pop = self.view.stack_navigation(cx, ids!(phone)).has_pending_interactive_pop();
+            if !has_pending_pop && event.back_pressed() {
                 if self.sheet != SheetKind::None {
                     self.close_sheet(cx);
                     return;
@@ -1905,7 +1931,6 @@ mod tests {
         cx.init_cx_os();
         let root = cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
-            makepad_wm_theme::apply(vm);
             crate::script_mod(vm);
             let value = script_eval!(vm, {use mod.widgets.* MailView{}});
             let root = WidgetRef::script_from_value(vm, value);
@@ -2256,6 +2281,63 @@ mod tests {
         assert!(!nav.is_transitioning());
     }
 
+    fn finish_pop(view: &mut MailView, cx: &mut Cx, id: LiveId) {
+        let nav = view.view.stack_navigation(cx, ids!(phone));
+        let child = nav.view_by_id(cx, id);
+        let actions = cx.capture_actions(|cx| cx.widget_action(child.widget_uid(), StackNavigationTransitionAction::HideEnd(nav.widget_uid())));
+        nav.borrow_mut().unwrap().handle_actions(cx, &actions, &mut Scope::empty());
+        assert!(!nav.is_transitioning());
+    }
+
+    // A swipe or back gesture can't start here, since the platform's dispatch decides who owns it,
+    // so we send what the stack would send during one.
+    fn send_stack_action(view: &mut MailView, cx: &mut Cx, action: StackNavigationTransitionAction) {
+        let nav = view.view.stack_navigation(cx, ids!(phone));
+        let actions = cx.capture_actions(|cx| cx.widget_action(nav.widget_uid(), action));
+        view.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+    }
+
+    #[test]
+    fn committed_interactive_pops_go_back_once_and_cancelled_ones_change_nothing() {
+        let (mut cx, root) = root();
+        let mut view = root.borrow_mut::<MailView>().unwrap();
+        view.update_layout(&mut cx, dvec2(402.0, 780.0));
+        view.open_row(&mut cx, MessageId(1));
+        finish_push(&mut view, &mut cx, live_id!(messages));
+        view.sync_stack(&mut cx);
+        finish_push(&mut view, &mut cx, live_id!(message));
+        let nav = view.view.stack_navigation(&cx, ids!(phone));
+        let reading = view.ui.history.clone();
+
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopStarted);
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopCancelled);
+        assert_eq!(view.ui.history, reading);
+        assert_eq!(view.ui.selected, Some(MessageId(1)));
+        assert!(!nav.is_transitioning());
+        assert_eq!(nav.current_view(), Some(live_id!(message)));
+
+        // A gesture's pop is the stack's own, which a plain pop stands in for here.
+        nav.pop_to_view(&mut cx, live_id!(messages));
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopStarted);
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopCommitted);
+        assert_eq!(view.ui.history, vec![Route::Mailboxes, Route::Messages]);
+        assert!(view.ui.selected.is_none());
+        finish_pop(&mut view, &mut cx, live_id!(message));
+        view.sync_stack(&mut cx);
+        assert!(!nav.is_transitioning(), "the reader was pushed back");
+        assert_eq!(nav.current_view(), Some(live_id!(messages)));
+
+        nav.pop_to_root(&mut cx);
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopStarted);
+        send_stack_action(&mut view, &mut cx, StackNavigationTransitionAction::InteractivePopCommitted);
+        assert_eq!(view.ui.history, vec![Route::Mailboxes]);
+        finish_pop(&mut view, &mut cx, live_id!(messages));
+        view.sync_stack(&mut cx);
+        assert!(!nav.is_transitioning(), "the message list was pushed back");
+        assert_eq!(nav.current_view(), None);
+        no_script_errors(&mut cx);
+    }
+
     #[test]
     fn reader_resize_and_inflight_navigation_reconcile_to_root_history() {
         let (mut cx, root) = root();
@@ -2279,9 +2361,7 @@ mod tests {
         // A second intent during the first transition is retained, not discarded.
         view.pop_compact(&mut cx);
         assert_eq!(view.ui.history, vec![Route::Mailboxes]);
-        let child = nav.view_by_id(&mut cx, live_id!(message));
-        let actions = cx.capture_actions(|cx| cx.widget_action(child.widget_uid(), StackNavigationTransitionAction::HideEnd(nav.widget_uid())));
-        nav.borrow_mut().unwrap().handle_actions(&mut cx, &actions, &mut Scope::empty());
+        finish_pop(&mut view, &mut cx, live_id!(message));
         view.sync_stack(&mut cx);
         assert_eq!(nav.destination_view(), None);
         no_script_errors(&mut cx);
@@ -2370,7 +2450,6 @@ mod tests {
             cx.init_cx_os();
             let root = cx.with_vm(|vm| {
                 makepad_widgets::script_mod(vm);
-                makepad_wm_theme::apply(vm);
                 script_eval!(vm, {
                     mod.theme.color_text_muted = #(muted)
                     mod.theme.color_text_meta = #ff00ff

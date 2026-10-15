@@ -1,0 +1,10 @@
+[package]
+name = "makepad-cef-fetch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Former makepad-cef build dependencies, used only by this explicit tool.
+makepad-network = { path = "../../platform/network", version = "1.0.0" }

@@ -7,7 +7,10 @@ pub mod metal_compiled;
 pub mod metal_selector;
 pub mod op;
 pub mod tensor;
+pub mod turns;
 pub mod cuda_exec;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod vulkan_exec;
 pub mod exec;
 pub mod gguf;
 pub mod draft_vocab;
@@ -136,13 +139,28 @@ pub use runtime::{
     LogitsProbeSpec, MoeFfnGraph, MoeFfnRun, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind,
     RmsNormSpec,
 };
+/// Device memory another owner (the desktop's UI) keeps for itself: a model's
+/// arena is refused when placing it would leave less than this free. 0 = only
+/// the executor's own slack (`MAKEPAD_LLM_VRAM_RESERVE_MB`).
+static UI_RESERVE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets the UI's reserve (see `UI_RESERVE_BYTES`); the hub sets it from the
+/// window manager's yield requests.
+pub fn set_ui_reserve_bytes(bytes: u64) {
+    UI_RESERVE_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ui_reserve_bytes() -> u64 {
+    UI_RESERVE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub use draft_vocab::DraftVocab;
 pub use session::{
     LlamaGeneration, LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig,
-    LlamaStopReason, SpecLane, SpecRoundOutcome, SpeculativeStats,
+    LlamaSessionState, LlamaStopReason, SessionMemory, SpecLane, SpecRoundOutcome, SpeculativeStats,
 };
 pub use vision::{
-    calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
+    calc_size_preserved_ratio, preprocess_rgb8, read_ppm, vision_rope_positions, PreparedImage,
     VisionConfig, VisionExecutionConfig, VisionTower,
 };
 pub use vocab::{LlamaTextDecoder, LlamaTokenizerKind, LlamaVocab};

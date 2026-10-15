@@ -53,7 +53,7 @@ impl Cx {
     pub(crate) fn repaint_windows(&mut self) {
         for draw_pass_id in self.passes.id_iter() {
             match self.passes[draw_pass_id].parent {
-                CxDrawPassParent::Window(_) => {
+                CxDrawPassParent::Window(_) if self.passes[draw_pass_id].main_draw_list_id.is_some() => {
                     self.passes[draw_pass_id].paint_dirty = true;
                 }
                 _ => (),
@@ -91,8 +91,8 @@ impl Cx {
         None
     }
 
-    /// Whether the time repaint (`demo_time_repaint`: some shader read
-    /// `draw_pass.time`, so repaint every frame) may re-dirty this pass.
+    /// Whether this pass's `repaint_next` (a shader read `draw_pass.time`, or
+    /// a draw call had to be skipped) may re-dirty it.
     ///
     /// It used to re-dirty EVERY pass with a main draw list — including
     /// passes their owner did not begin again on the latest redraw, which
@@ -110,7 +110,7 @@ impl Cx {
     /// not the global cycle — so a window that did not redraw this cycle
     /// keeps its time-animated child passes alive (multi-window), while a
     /// child left behind by a window that DID redraw is stale. Window passes
-    /// are always live; parentless passes compare against the current cycle.
+    /// are live while their window is open; parentless passes compare against the current cycle.
     /// Explicit `repaint_pass` users are untouched: this gates only the time
     /// repaint, and dirty propagation to parents is unchanged.
     fn pass_live_for_time_repaint(&self, pass_id: DrawPassId) -> bool {
@@ -118,15 +118,21 @@ impl Cx {
         let Some(list_id) = pass.main_draw_list_id else {
             return false;
         };
-        if matches!(pass.parent, CxDrawPassParent::Window(_)) {
-            return true;
+        // A closed window can't paint, so its pass, or a child pass dirtying it, would stay dirty forever.
+        if let CxDrawPassParent::Window(window_id) = pass.parent {
+            return self.windows.is_valid(window_id) && self.windows[window_id].is_created;
         }
         let reference = match self.pass_root_window(pass_id) {
-            Some(window_id) if self.windows.is_valid(window_id) => self.windows[window_id]
-                .main_pass_id
-                .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
-                .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
-                .unwrap_or(self.redraw_id),
+            Some(window_id) if self.windows.is_valid(window_id) => {
+                if !self.windows[window_id].is_created {
+                    return false;
+                }
+                self.windows[window_id]
+                    .main_pass_id
+                    .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
+                    .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
+                    .unwrap_or(self.redraw_id)
+            }
             _ => self.redraw_id,
         };
         self.draw_lists[list_id].redraw_id >= reference
@@ -134,9 +140,6 @@ impl Cx {
 
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
-
-        #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
-        self.retire_replaced_texture_allocations();
 
         // A pass whose last handle was dropped lets go of its attachments
         // and its place in the tree now, on every backend: its slot is only
@@ -191,11 +194,29 @@ impl Cx {
         // its flag cleared so an idle app does not keep requesting frames on
         // its behalf. The one exception is an explicit `repaint_pass`, which
         // paints it this once.
+        let mut time_owed = false;
         for draw_pass_id in self.passes.id_iter() {
             let requested = self.passes[draw_pass_id].repaint_requested;
             if !requested && live[draw_pass_id.0] != Some(true) {
                 self.passes[draw_pass_id].paint_dirty = false;
             }
+            let repaint_next = std::mem::take(&mut self.passes[draw_pass_id].repaint_next);
+            let pass = &self.passes[draw_pass_id];
+            if !(repaint_next || pass.time_owed) {
+                continue;
+            }
+            let live_for_time = live[draw_pass_id.0] == Some(true)
+                && self.pass_live_for_time_repaint(draw_pass_id);
+            // A pass that per-window pacing skipped is still dirty, so it keeps owing its frame,
+            // but one that can't paint anymore (closed window, stale child) owes nothing.
+            if !pass.paint_dirty || !live_for_time {
+                self.passes[draw_pass_id].time_owed = false;
+            }
+            if repaint_next && live_for_time {
+                self.passes[draw_pass_id].paint_dirty = true;
+                self.passes[draw_pass_id].time_owed = true;
+            }
+            time_owed |= self.passes[draw_pass_id].time_owed;
         }
 
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -205,11 +226,6 @@ impl Cx {
             for draw_pass_id in self.passes.id_iter() {
                 if live[draw_pass_id.0] != Some(true) {
                     continue;
-                }
-                if self.demo_time_repaint
-                    && self.pass_live_for_time_repaint(draw_pass_id)
-                {
-                    self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
                     let other = match self.passes[draw_pass_id].parent {
@@ -288,7 +304,51 @@ impl Cx {
             }
         };
         passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
+        self.pass_time_rebase = !time_owed;
         self.demo_time_repaint = false;
+    }
+
+    /// The `draw_pass.time` for a repaint stamped `now`. Its origin only moves while
+    /// nothing time-driven is on screen, so the f32 stays precise however long the app runs.
+    pub(crate) fn pass_time(&mut self, now: f64) -> f32 {
+        if std::mem::take(&mut self.pass_time_rebase) {
+            self.pass_time_origin = now;
+        }
+        (now - self.pass_time_origin).max(0.0) as f32
+    }
+
+    /// Where popups draw as overlays on their parent's surface (Android, iOS), a dirty
+    /// popup has to repaint its parent window too. Window passes sort last, so we append.
+    #[allow(dead_code)]
+    pub(crate) fn queue_popup_parents(&self, passes_todo: &mut Vec<DrawPassId>) {
+        for i in 0..passes_todo.len() {
+            let CxDrawPassParent::Window(window_id) = self.passes[passes_todo[i]].parent else {
+                continue;
+            };
+            if !self.windows.is_valid(window_id) {
+                continue;
+            }
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            let Some(parent_pass_id) = window
+                .popup_parent
+                .filter(|parent_id| {
+                    self.windows.is_valid(*parent_id)
+                        && self.windows[*parent_id].is_created
+                        && !self.windows[*parent_id].is_popup
+                })
+                .and_then(|parent_id| self.windows[parent_id].main_pass_id)
+            else {
+                continue;
+            };
+            if self.passes[parent_pass_id].main_draw_list_id.is_some()
+                && !passes_todo.contains(&parent_pass_id)
+            {
+                passes_todo.push(parent_pass_id);
+            }
+        }
     }
 
     pub(crate) fn need_redrawing(&self) -> bool {
@@ -320,9 +380,7 @@ impl Cx {
                 NetworkResponse::WsOpened { .. }
                 | NetworkResponse::WsMessage { .. }
                 | NetworkResponse::WsClosed { .. }
-                | NetworkResponse::WsError { .. } => {
-                    self.handle_script_web_socket_event(response.clone())
-                }
+                | NetworkResponse::WsError { .. } => self.handle_script_web_socket_event(&response),
                 NetworkResponse::HttpResponse { .. }
                 | NetworkResponse::HttpStreamChunk { .. }
                 | NetworkResponse::HttpStreamComplete { .. }
@@ -342,8 +400,6 @@ impl Cx {
     /// repaint, so the caller should poll for the file to appear. Piggybacks on
     /// the studio screenshot pipeline: ids above `SCREENSHOT_FILE_ID_BASE` are
     /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
-    /// (Gpusim builds write frames to files on their own; this is for the
-    /// live GPU-rendered app.)
     /// Returns the capture's request id, so the caller can later
     /// [`cancel_frame_capture`](Self::cancel_frame_capture) it.
     pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) -> u64 {
@@ -379,7 +435,6 @@ impl Cx {
             sinks.insert(request_id, std::path::PathBuf::new());
         }
     }
-
 
     /// Drain the pending screenshot requests this pass can answer.
     ///
@@ -731,18 +786,11 @@ impl Cx {
         modifiers: crate::event::KeyModifiers,
         time: f64,
     ) {
-        // `os::apple` does not exist in a gpusim build (see os/mod.rs), so
-        // the pointer-lock transform has to be gated on the module's own cfg,
-        // not on the target alone.
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        let (abs, lock_delta) = crate::os::apple::macos::macos_app::with_macos_app(|app| {
-            app.locked_mouse_transform(raw, delta, seed)
-        });
-        #[cfg(not(all(target_os = "macos", not(gpusim))))]
-        let (abs, lock_delta) = {
-            let _ = (delta, seed);
-            (raw, crate::makepad_math::DVec2::default())
-        };
+        // Remote coordinates already integrate the injected deltas. Pinned captures retain
+        // that virtual position; the HAL applies the actual OS pointer lock separately.
+        let _ = seed;
+        let abs = raw;
+        let lock_delta = if self.fingers.has_pinned_capture() { delta } else { crate::makepad_math::DVec2::default() };
         self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
             abs,
             lock_delta,
@@ -759,12 +807,9 @@ impl Cx {
     /// scrub pin at the platform layer first — exactly what
     /// macos_window::send_mouse_up does for a physical up.
     pub fn dispatch_hw_pin_release(&mut self) {
-        #[cfg(all(target_os = "macos", not(gpusim)))]
-        crate::os::apple::macos::macos_app::with_macos_app(|app| {
-            if app.pointer_pin_mode {
-                app.set_pointer_pin(false);
-            }
-        });
+        if self.fingers.has_pinned_capture() {
+            self.push_unique_platform_op(crate::cx_api::CxOsOp::PinMousePointer(false));
+        }
     }
 
     /// Dispatch a StudioToApp message as an event. Handles input, clipboard,
@@ -809,72 +854,6 @@ impl Cx {
         }));
         self.fingers.mouse_up(button);
         self.fingers.cycle_hover_area(live_id!(mouse).into());
-    }
-
-    /// A hosted child on a touch device (an Android child process): the
-    /// host's pointer is a finger, so its press, moves and release arrive as
-    /// one touch, dispatched the way the Activity build dispatches
-    /// `FromJavaMessage::Touch` — lists and scroll views drag-scroll, and a
-    /// press a scroller takes away is cancelled. As mouse events, a press on
-    /// a row captured the mouse and the list refused to scroll under it.
-    /// `state: None` is the host's cancellation (`MouseCancel`).
-    #[cfg(target_os = "android")]
-    pub(crate) fn dispatch_hosted_touch(
-        &mut self,
-        state: Option<crate::event::finger::TouchState>,
-        at: crate::makepad_math::DVec2,
-        time: f64,
-        window_id: crate::window::WindowId,
-        pos: crate::makepad_math::DVec2,
-    ) {
-        use crate::event::finger::{TouchPoint, TouchState};
-        let abs = self.stdin_pointer_abs(at, pos, window_id);
-        let touch = |state| TouchPoint {
-            state,
-            abs,
-            time,
-            uid: 0,
-            rotation_angle: 0.0,
-            force: 0.0,
-            radius: crate::makepad_math::dvec2(1.0, 1.0),
-            handled: Cell::new(Area::Empty),
-            sweep_lock: Cell::new(Area::Empty),
-        };
-        let Some(state) = state else {
-            let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, 0).into();
-            self.fingers.cancel_digit(digit_id);
-            self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
-                window_id,
-                digit_id,
-                device: crate::event::DigitDevice::Touch { uid: 0 },
-                abs,
-                time,
-                modifiers: Default::default(),
-            }));
-            self.fingers.process_touch_update_end(&[touch(TouchState::Stop)]);
-            self.update_pointer_capture_pacing();
-            self.send_studio_key_focus_rect_response();
-            return;
-        };
-        if state == TouchState::Start {
-            self.activate_window_on_pointer_down(window_id);
-        }
-        let touches = vec![touch(state)];
-        self.fingers.process_touch_update_start(time, &touches);
-        let e = Event::TouchUpdate(crate::event::TouchUpdateEvent {
-            time,
-            window_id,
-            touches,
-            modifiers: Default::default(),
-        });
-        self.call_event_handler(&e);
-        if let Event::TouchUpdate(e) = e {
-            self.fingers.process_touch_update_end(&e.touches);
-        }
-        self.update_pointer_capture_pacing();
-        if state == TouchState::Stop {
-            self.send_studio_key_focus_rect_response();
-        }
     }
 
     pub fn dispatch_studio_msg(
@@ -944,7 +923,7 @@ impl Cx {
                     handled_y: Cell::new(false),
                     is_mouse: e.is_mouse,
                     time: e.time,
-                    phase: crate::event::ScrollPhase::None,
+                    phase: e.phase,
                 }));
             }
             StudioToApp::Pinch(e) => {
@@ -971,9 +950,31 @@ impl Cx {
                 self.call_event_handler(&Event::KeyUp(e));
             }
             StudioToApp::TextInput(e) => {
-                #[cfg(all(target_vendor = "apple", not(gpusim)))]
-                crate::os::apple::metal::note_input_event();
                 self.call_event_handler(&Event::TextInput(e));
+            }
+            StudioToApp::DropFiles(e) => {
+                let abs = self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id);
+                let modifiers = e.modifiers.into_key_modifiers();
+                let items = std::sync::Arc::new(
+                    e.paths
+                        .into_iter()
+                        .map(|path| crate::event::DragItem::FilePath { path, internal_id: None })
+                        .collect::<Vec<_>>(),
+                );
+                self.call_event_handler(&Event::Drag(crate::event::DragEvent {
+                    modifiers,
+                    handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                    abs,
+                    items: items.clone(),
+                    response: std::sync::Arc::new(std::sync::Mutex::new(crate::event::DragResponse::None)),
+                }));
+                self.call_event_handler(&Event::Drop(crate::event::DropEvent {
+                    modifiers,
+                    handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
+                    abs,
+                    items,
+                }));
+                self.call_event_handler(&Event::DragEnd);
             }
             StudioToApp::TextCopy => {
                 let response = Rc::new(RefCell::new(None));
@@ -981,7 +982,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -991,7 +993,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -1015,25 +1018,81 @@ impl Cx {
                 self.call_event_handler(&Event::Shutdown);
                 return true;
             }
-            StudioToApp::Gpu(command) => {
-                // Supporting hosted backends intercept this before generic
-                // input dispatch. Other backends must reject the transition
-                // explicitly so a host never waits for a silent no-op.
-                Self::send_studio_message(AppToStudio::Gpu(
-                    makepad_studio_protocol::AppToHostGpu::Failed {
-                        transition: command.transition(),
-                        message: "this backend does not support hosted GPU migration".into(),
-                    },
-                ));
-            }
             StudioToApp::Custom(data) => {
                 if crate::ime::HostedBack::parse(&data).is_some_and(|back| back.handled.is_none()) {
                     let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
                     self.call_event_handler(&event);
                     let Event::BackPressed { handled } = event else { unreachable!() };
-                    Self::send_studio_message(AppToStudio::Custom(crate::ime::HostedBack {
-                        handled: Some(handled.get()),
-                    }.to_json()));
+                    let reply = crate::ime::HostedBack { handled: Some(handled.get()) }.to_json();
+                    // a domain answers its parent (the WM) over the HAL; a hosted process over its socket
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sent = self.hal_send_parent_message(&reply);
+                    #[cfg(target_arch = "wasm32")]
+                    let sent = false;
+                    if !sent {
+                        Self::send_studio_message(AppToStudio::Custom(reply));
+                    }
+                } else if let Some(shown) = makepad_studio_protocol::HostedVisible::parse(&data) {
+                    let hidden = !shown.visible;
+                    if self.hosted_hidden != hidden {
+                        self.hosted_hidden = hidden;
+                        if !hidden {
+                            // What the host could not show meanwhile is stale.
+                            self.redraw_all();
+                        }
+                    }
+                } else if let Some(window) = crate::ime::HostedWindow::parse(&data) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if window.op == crate::ime::hosted_window_op::CLOSE_REQUEST {
+                        self.hal_hosted_close_request(window.window_id);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = window;
+                } else if let Some(fullscreen) = crate::ime::HostedFullscreen::parse(&data) {
+                    // A fullscreen window draws no caption (widgets `Window`), and its geometry
+                    // says it is fullscreen (`WindowHandle::is_fullscreen`), as a native one's does.
+                    let window_id = self.windows.id_iter().find(|w| w.id() == fullscreen.window_id);
+                    if let Some(window_id) = window_id {
+                        if self.windows[window_id].hosted_fullscreen != fullscreen.on {
+                            self.windows[window_id].hosted_fullscreen = fullscreen.on;
+                            let old_geom = self.windows[window_id].window_geom.clone();
+                            self.windows[window_id].window_geom.is_fullscreen = fullscreen.on;
+                            let new_geom = self.windows[window_id].window_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }));
+                            self.redraw_all();
+                        }
+                    }
+                } else if let Some(query) = makepad_studio_protocol::HostedDragQuery::parse(&data) {
+                    // The host asks the app's window drag query (the one a
+                    // native backend asks for a borderless window).
+                    use crate::event::WindowDragQueryResponse as R;
+                    let response = std::rc::Rc::new(std::cell::Cell::new(R::NoAnswer));
+                    // The window the point is in (a multi-window app's later windows sit at
+                    // their own origins in the child's window space), in its own points.
+                    let host = crate::makepad_math::dvec2(query.x, query.y);
+                    let (window_id, pos) = if self.windows.len() == 0 {
+                        (crate::window::CxWindowPool::id_zero(), crate::makepad_math::dvec2(0.0, 0.0))
+                    } else {
+                        self.windows.window_id_contains(host)
+                    };
+                    let abs = if self.windows.len() == 0 { host } else { self.stdin_pointer_abs(host, pos, window_id) };
+                    self.call_event_handler(&Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
+                        window_id,
+                        abs,
+                        response: response.clone(),
+                    }));
+                    let answer = match response.get() {
+                        R::NoAnswer => makepad_studio_protocol::drag_answer::NO_ANSWER,
+                        R::Client => makepad_studio_protocol::drag_answer::CLIENT,
+                        R::Caption => makepad_studio_protocol::drag_answer::CAPTION,
+                        R::SysMenu => makepad_studio_protocol::drag_answer::SYS_MENU,
+                    };
+                    // What a double click there does: the window's own declaration.
+                    let fullscreen = self.windows.len() != 0 && self.windows.is_valid(window_id) && self.windows[window_id].double_click_fullscreen;
+                    let double_click = if fullscreen { makepad_studio_protocol::drag_double::FULLSCREEN } else { makepad_studio_protocol::drag_double::MAXIMISE };
+                    Self::send_studio_message(AppToStudio::Custom(
+                        makepad_studio_protocol::HostedDragAnswer { id: query.id, response: answer, double_click }.to_json(),
+                    ));
                 } else {
                     self.call_event_handler(&Event::Custom(data));
                 }
@@ -1056,11 +1115,27 @@ impl Cx {
         false
     }
 
+    /// Wake and redraw after an installed compiler patch, including while idle.
+    #[cfg(relax)]
+    fn poll_live_patch(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        static CHANGED: AtomicBool = AtomicBool::new(false);
+        extern "C" fn wake() {
+            CHANGED.store(true, Ordering::Release);
+            crate::thread::SignalToUI::set_internal_signal();
+        }
+        if !INSTALLED.swap(true, Ordering::Relaxed) { std::relax::on_patch(wake); }
+        if CHANGED.swap(false, Ordering::AcqRel) { self.redraw_all(); }
+    }
+
     /// Drain the global control channel and dispatch each message as an event.
     /// Must be called from the event loop (not from inside an event handler).
     /// Also services the `--remote` HTTP control surface, which every backend
     /// therefore gets by calling this one function.
     pub fn poll_control_channel(&mut self) {
+        #[cfg(relax)]
+        self.poll_live_patch();
         use crate::makepad_math::dvec2;
         use crate::web_socket::CONTROL_CHANNEL;
         use crate::window::CxWindowPool;
@@ -1164,8 +1239,6 @@ impl Cx {
         }
     }
 
-    // Same logic as gpusim::raster::encode_png_rgba which is behind
-    // cfg(gpusim) and unavailable to the windowed backend.
     #[allow(dead_code)]
     pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         use makepad_zune_png::{
@@ -1277,7 +1350,7 @@ impl Cx {
             }
         }
 
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+        #[cfg(not(target_arch = "wasm32"))]
         if self.collect.is_some() {
             self.collect_after_draw();
         }
@@ -1306,6 +1379,8 @@ impl Cx {
     /// next, before or after the advance depending on the machine's load,
     /// and a timer it started (a caret blink) landed a frame apart from run
     /// to run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(target_os = "android", allow(dead_code))] // only the remote bridge settles events, and Android has none
     pub(crate) fn settle_deferred_events(&mut self) {
         self.handle_action_receiver();
         self.handle_triggers();
@@ -1393,11 +1468,45 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        // Under `makepad run` with an agent watching (makepad inspect), the dispatch is a retry
+        // boundary: a panic in it parks for the agent, and when the agent resumes it with
+        // `retry` (after a hot patch) the event is dispatched again with the patched code.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(r) = relax_retry::hooks() {
+            let name = event.name();
+            loop {
+                (r.enter)(name.as_ptr(), name.len());
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call_event_handler_once(event)));
+                (r.leave)();
+                match res {
+                    Ok(()) => return,
+                    Err(p) => {
+                        if !(r.take)() {
+                            std::panic::resume_unwind(p);
+                        }
+                    }
+                }
+            }
+        }
+        self.call_event_handler_once(event)
+    }
+
+    fn call_event_handler_once(&mut self, event: &Event) {
         let _phase = crate::thread::ui_event_phase(event);
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
         crate::remote::note_user_event(self, event);
+        match event {
+            Event::Signal => crate::frame_sources::signal(),
+            Event::Timer(t) => crate::frame_sources::timer_fired(t.timer_id),
+            _ => {}
+        }
+        if let Event::Signal = event {
+            for hook in self.signal_hooks.clone() {
+                hook(self);
+            }
+        }
         if let Event::Shutdown = event {
             // An open `/cap/start` file is finished before the app goes.
             crate::remote::finish_capture_on_shutdown(self);
@@ -1552,6 +1661,7 @@ impl Cx {
         if let Err(payload) = drawn {
             std::panic::resume_unwind(payload);
         }
+        self.validate_scoped_sweep_locks_after_draw();
         if let Some(mut hook) = self.post_draw_hook.take() {
             hook(self);
             if self.post_draw_hook.is_none() {
@@ -1575,6 +1685,8 @@ impl Cx {
     }
 
     pub(crate) fn call_next_frame_event(&mut self, time: f64) {
+        #[cfg(target_arch = "wasm32")]
+        self.dispatch_clipboard_reads();
         // Under the virtual clock a NextFrame is a frame of `/step`, never
         // of the backend's paint beat; the pending set waits for one.
         if crate::remote::app_clock::enabled() && !self.app_clock.dispatching_frame {
@@ -1730,6 +1842,69 @@ mod tests {
         assert!(!todo.contains(&child_id));
     }
 
+    fn pass_with_current_list(cx: &mut Cx) -> (DrawPass, DrawList) {
+        let pass = DrawPass::new(cx);
+        let list = DrawList::new(cx);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        let redraw_id = cx.redraw_id;
+        cx.draw_lists[list.id()].clear_draw_items(redraw_id, recording_gen, uniforms_gen);
+        cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
+        (pass, list)
+    }
+
+    #[test]
+    fn time_repaint_only_repaints_the_passes_that_asked() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (animated, _animated_list) = pass_with_current_list(&mut cx);
+        let (idle, _idle_list) = pass_with_current_list(&mut cx);
+        let (animated, idle) = (animated.draw_pass_id(), idle.draw_pass_id());
+        let mut todo = Vec::new();
+
+        cx.passes[animated].repaint_next = true;
+        cx.demo_time_repaint = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(todo, vec![animated]);
+        assert!(!cx.passes[idle].paint_dirty);
+
+        // The flag is used up: without another request nothing repaints.
+        cx.passes[animated].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.is_empty());
+    }
+
+    #[test]
+    fn pass_clock_rebases_only_while_nothing_owes_a_time_frame() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (pass, _list) = pass_with_current_list(&mut cx);
+        let pass = pass.draw_pass_id();
+        let mut todo = Vec::new();
+
+        assert_eq!(cx.pass_time(100.0), 0.0);
+        assert_eq!(cx.pass_time(100.5), 0.5);
+
+        // An animating pass holds the origin, even on a beat that skips painting it.
+        cx.passes[pass].repaint_next = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(101.0), 1.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(101.5), 1.5);
+
+        // Once it painted without asking again, the next repaint starts the clock over.
+        cx.passes[pass].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(200.0), 0.0);
+        assert_eq!(cx.pass_time(200.25), 0.25);
+
+        // A pass that still owes a frame but was left behind by a redraw can't paint, so it owes nothing.
+        cx.passes[pass].repaint_next = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(201.0), 1.0);
+        cx.redraw_id += 1;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(300.0), 0.0);
+    }
+
     #[test]
     fn platform_monotonic_time_moves_forward() {
         let wall = Cx::time_now();
@@ -1825,6 +2000,83 @@ mod tests {
     }
 }
 
+/// Hosted-child frame demand, shared by every `--stdin-loop` backend. The
+/// host ticks a child only while the child says it has something to do:
+/// after a Tick it announces a frame (`RequestAnimationFrame`) or the
+/// delay of its next timer (`WakeIn`), and a worker thread that raises a
+/// UI signal wakes its loop to service the new work. An idle child needs no periodic Tick.
+#[cfg(not(target_arch = "wasm32"))]
+mod hosted_demand {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A wake request is on its way to the host and no Tick has answered it.
+    static WAKE_SENT: AtomicBool = AtomicBool::new(false);
+
+    pub fn request_frame() {
+        if !WAKE_SENT.swap(true, Ordering::AcqRel) {
+            super::Cx::send_studio_message(super::AppToStudio::RequestAnimationFrame);
+        }
+    }
+
+    pub fn wake_from_thread() {
+        // A HAL client services signals in its own pump, then announces visible work.
+        // Its host socket also wakes that pump: asking the host for a frame here would
+        // turn each incoming Tick into another frame request, even while idle or hidden.
+        crate::thread::wake_ui_event_loop();
+    }
+
+    pub fn tick_began() {
+        WAKE_SENT.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Cx {
+    /// Wake a hosted child on worker signals. Socket-read loops ask the host for a
+    /// Tick; the HAL wakes its event pump and announces demand after servicing signals.
+    pub(crate) fn stdin_install_wake(&mut self) {
+        // Each host message used to raise the UI signal too: a full-app
+        // `Event::Signal` per Tick (a hosted Stage pumped 100+ times a second idle).
+        self.studio_socket_wakes_loop_only();
+        hosted_demand::tick_began();
+        crate::makepad_network::install_ui_waker(Some(crate::makepad_network::UiWaker::new(
+            hosted_demand::wake_from_thread,
+        )));
+    }
+
+    /// A Tick is being consumed: wakes raised from now on are new ones.
+    pub(crate) fn stdin_tick_began(&mut self) {
+        hosted_demand::tick_began();
+    }
+
+    /// A hidden hosted child keeps its frame work (next-frame callbacks, draws) until the
+    /// shared HostedVisible dispatch shows it again -- except while a remote request needs a
+    /// frame (a grab, a step, input that waits for its frame): the remote is never starved.
+    pub(crate) fn hosted_frames_held(&self) -> bool {
+        self.hosted_hidden && !crate::remote::needs_ticks()
+    }
+
+    /// At most one frame request until the host answers with a Tick, none while frames are held.
+    pub(crate) fn stdin_request_frame(&self) {
+        if !self.hosted_frames_held() {
+            hosted_demand::request_frame();
+        }
+    }
+
+    /// End of a Tick: tell the host what this child still needs. A pending
+    /// frame (next-frame callbacks, a redraw) asks for the next Tick; else
+    /// the earliest timer says in how long. Nothing pending says nothing.
+    pub(crate) fn stdin_announce_demand(&self, timers: &crate::os::shared_framebuf::PollTimers) {
+        // As in call_next_frame_event, a virtual clock advances callbacks only on /step.
+        let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
+        if !self.hosted_frames_held() && (next_frames_due || self.need_redrawing()) {
+            self.stdin_request_frame();
+        } else if let Some(delay) = timers.next_due_in() {
+            Self::send_studio_message(AppToStudio::WakeIn(delay));
+        }
+    }
+}
+
 /// Hosted-child input pacing, shared by every `--stdin-loop` backend.
 impl Cx {
     /// Collapse one drained host batch before dispatch: every `Tick` but
@@ -1833,14 +2085,7 @@ impl Cx {
     /// is replaced by it (a frame can only show the pointer's latest
     /// position). Everything else keeps its order, so a Down/Up/Scroll
     /// still sees the move that preceded it.
-    #[cfg(any(
-        gpusim,
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos")),
-    ))]
-    #[cfg(any(not(linux_direct), use_vulkan))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Only the Ticks of a batch fold into its last; every pointer sample
     /// stays (a touch child's velocity tracker needs each one).
     #[allow(dead_code)]
@@ -1901,16 +2146,7 @@ impl Cx {
     /// child that fell behind sees its whole backlog at once and can
     /// coalesce it. Returns true when the socket closed or failed; the
     /// caller dispatches what it has and then leaves its loop.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        all(target_os = "linux", not(target_env = "ohos")),
-    ))]
-    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
-    // The direct Vulkan loop drains inline (it also polls its GPU inbox
-    // between batches); every blocking hosted loop uses this.
-    #[cfg(not(all(target_os = "linux", linux_direct, use_vulkan)))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn stdin_drain_host_batches(&mut self, into: &mut Vec<StudioToApp>) -> bool {
         use crate::makepad_micro_serde::*;
         use crate::web_socket::WebSocketMessage;
@@ -1918,8 +2154,13 @@ impl Cx {
         loop {
             match self.try_recv_studio_websocket_message() {
                 Some(WebSocketMessage::Binary(data)) => {
-                    match StudioToAppVec::deserialize_bin(&data) {
-                        Ok(msgs) => into.extend(msgs.0),
+                    match StudioToAppVec::decode_bin(&data) {
+                        Ok((msgs, errors)) => {
+                            for error in errors {
+                                crate::error!("{error}");
+                            }
+                            into.extend(msgs.0)
+                        }
                         Err(err) => crate::error!(
                             "Cant parse studio websocket binary payload in --stdin-loop: {:?}",
                             err
@@ -1946,5 +2187,49 @@ impl Cx {
                 None => return false,
             }
         }
+    }
+}
+
+/// makepad inspect's retry boundary hooks (dlsym'd once; absent in a rustc build): set while an
+/// agent watches the app.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod relax_retry {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+
+    pub struct Hooks {
+        on: &'static AtomicBool,
+        pub enter: extern "C" fn(*const u8, usize),
+        pub leave: extern "C" fn(),
+        pub take: extern "C" fn() -> bool,
+    }
+
+    pub fn hooks() -> Option<&'static Hooks> {
+        static H: OnceLock<Option<Hooks>> = OnceLock::new();
+        H.get_or_init(|| {
+            extern "C" {
+                fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+            }
+
+            #[cfg(target_os = "macos")]
+            let default = -2isize as *mut std::ffi::c_void;
+            #[cfg(not(target_os = "macos"))]
+            let default = std::ptr::null_mut();
+            let get = |n: &std::ffi::CStr| unsafe { dlsym(default, n.as_ptr()) };
+            let (on, enter, leave, take) = (get(c"relax_retry_on"), get(c"relax_retry_enter"), get(c"relax_retry_leave"), get(c"relax_retry_take"));
+            if on.is_null() || enter.is_null() || leave.is_null() || take.is_null() {
+                return None;
+            }
+            Some(unsafe {
+                Hooks {
+                    on: &*(on as *const AtomicBool),
+                    enter: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*const u8, usize)>(enter),
+                    leave: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(leave),
+                    take: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> bool>(take),
+                }
+            })
+        })
+        .as_ref()
+        .filter(|h| h.on.load(Ordering::Relaxed))
     }
 }

@@ -838,10 +838,12 @@ impl LazyFluxTransformer {
             )));
         }
 
-        // Device-resident fast path: run the whole step on the GPU (activations
+        // Device-resident path: run the whole step on the GPU (activations
         // never leave the device between ops; only tiny modulation vectors and
-        // the final prediction cross the bus). Any failure falls back to the
-        // host math below, which stays byte-for-byte what it was.
+        // the final prediction cross the bus). A failure there fails the job:
+        // the host math below is for machines without a device (and debug
+        // captures), never a silent fallback -- on a 12B model it expands
+        // every weight to f32 on the host, which took the hub process down.
         if !capture_debug && gpu_device_available() {
             match self.execute_device(
                 weights,
@@ -859,9 +861,9 @@ impl LazyFluxTransformer {
                 }
                 Err(DiffusionError::Cancelled) => return Err(DiffusionError::Cancelled),
                 Err(err) => {
-                    eprintln!(
-                        "flux transformer device path failed ({err}); falling back to host math"
-                    );
+                    return Err(DiffusionError::model(format!(
+                        "flux transformer on the GPU failed: {err} (no CPU fallback)"
+                    )));
                 }
             }
         }
@@ -1621,14 +1623,16 @@ impl LazyFluxTransformer {
                 "flux modulation bias/weight length mismatch",
             ));
         }
+        let mod_weights = mod_part_lists.iter().flatten().map(device_weight).collect::<Result<Vec<_>>>()?;
         let mod_gpu_parts = mod_part_lists
             .iter()
             .flatten()
-            .map(|part| GpuLinearPart {
-                bt_ggml_type: part.ggml_type,
+            .zip(&mod_weights)
+            .map(|(part, (ggml_type, bytes))| GpuLinearPart {
+                bt_ggml_type: *ggml_type,
                 n: part.rows,
                 cache_key: &part.cache_key,
-                bytes: part.bytes,
+                bytes: bytes.as_slice(part.bytes),
             })
             .collect::<Vec<_>>();
         // The modulation row STAYS on device: layer norms and gated residuals
@@ -2043,6 +2047,51 @@ fn flux_graph_enabled(total_tokens: usize) -> bool {
     }
 }
 
+/// A weight as the device GEMM takes it: BF16/F16/block-quant bytes as they
+/// are; F32 (city96's GGUF keeps its small tensors in F32) converted to BF16
+/// once per tensor and kept, so warm steps convert nothing.
+enum DeviceBytes {
+    Resident,
+    Converted(Arc<Vec<u8>>),
+}
+
+impl DeviceBytes {
+    fn as_slice<'a>(&'a self, resident: &'a [u8]) -> &'a [u8] {
+        match self {
+            DeviceBytes::Resident => resident,
+            DeviceBytes::Converted(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
+thread_local! {
+    static F32_AS_BF16: RefCell<BTreeMap<String, Arc<Vec<u8>>>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn device_weight(part: &ResidentMatrix<'_>) -> Result<(u32, DeviceBytes)> {
+    if part.ggml_type != TensorType::F32.ggml_type() {
+        return Ok((part.ggml_type, DeviceBytes::Resident));
+    }
+    let bf16 = TensorType::BF16.ggml_type();
+    F32_AS_BF16.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(bytes) = cache.get(&part.cache_key) {
+            return Ok((bf16, DeviceBytes::Converted(bytes.clone())));
+        }
+        let values = f32_bytes_to_vec(part.bytes)?;
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            // round to nearest even, as the safetensors BF16 casts do
+            let bits = value.to_bits();
+            let rounded = bits.wrapping_add(0x7fff + ((bits >> 16) & 1));
+            bytes.extend_from_slice(&((rounded >> 16) as u16).to_le_bytes());
+        }
+        let bytes = Arc::new(bytes);
+        cache.insert(part.cache_key.clone(), bytes.clone());
+        Ok((bf16, DeviceBytes::Converted(bytes)))
+    })
+}
+
 /// Device linear mirroring `linear_rows`: multi-part weights land in their
 /// column ranges directly; the cache key layout ("{ns}::{ns}::{name}") matches
 /// the host lazy path exactly so both paths share one weight cache.
@@ -2065,13 +2114,15 @@ fn linear_device(
             )));
         }
     }
+    let device_weights = parts.iter().map(device_weight).collect::<Result<Vec<_>>>()?;
     let gpu_parts = parts
         .iter()
-        .map(|part| GpuLinearPart {
-            bt_ggml_type: part.ggml_type,
+        .zip(&device_weights)
+        .map(|(part, (ggml_type, bytes))| GpuLinearPart {
+            bt_ggml_type: *ggml_type,
             n: part.rows,
             cache_key: &part.cache_key,
-            bytes: part.bytes,
+            bytes: bytes.as_slice(part.bytes),
         })
         .collect::<Vec<_>>();
     gpu_linear_nt_cached(input, namespace, &gpu_parts, &bias).map_err(DiffusionError::model)
@@ -2102,13 +2153,15 @@ fn linear_device_f16(
             )));
         }
     }
+    let device_weights = parts.iter().map(device_weight).collect::<Result<Vec<_>>>()?;
     let gpu_parts = parts
         .iter()
-        .map(|part| GpuLinearPart {
-            bt_ggml_type: part.ggml_type,
+        .zip(&device_weights)
+        .map(|(part, (ggml_type, bytes))| GpuLinearPart {
+            bt_ggml_type: *ggml_type,
             n: part.rows,
             cache_key: &part.cache_key,
-            bytes: part.bytes,
+            bytes: bytes.as_slice(part.bytes),
         })
         .collect::<Vec<_>>();
     gpu_linear_nt_cached_f16(input, namespace, &gpu_parts, &bias).map_err(DiffusionError::model)
@@ -2940,10 +2993,11 @@ fn flux_namespace_for(path: &Path, lora_fingerprint: &str) -> String {
 }
 
 /// The f16 activation spine requires f16-accumulate gemms, which the F8
-/// dequant path (bf16 scratch + f32 accumulate, the ComfyUI-default numerics
-/// class) deliberately refuses — so F8 weights force the f32 spine.
+/// and GGUF block-quant dequant paths (bf16 scratch + f32 accumulate, the
+/// ComfyUI-default numerics class) deliberately refuse — so F8 and
+/// block-quant weights force the f32 spine.
 fn flux_f16_activations_enabled(weights: &LoadedFluxTransformerWeights) -> bool {
-    !weights.f8_weights && gpu_act_f16_enabled()
+    !weights.f8_weights && !weights.quantized && gpu_act_f16_enabled()
 }
 
 fn tensor_type_of(ctx: &Context, id: TensorId) -> Result<TensorType> {
@@ -2983,6 +3037,7 @@ pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) 
             .borrow_mut()
             .retain(|key, _| !key.starts_with(&namespace));
     });
+    F32_AS_BF16.with(|cache| cache.borrow_mut().retain(|key, _| !key.starts_with(&namespace)));
     crate::backend::gpu_weight_cache_evict_prefix(&namespace).unwrap_or(0)
 }
 
@@ -3039,10 +3094,40 @@ fn decode_ggml_matrix_to_f32(matrix: &ResidentMatrix<'_>) -> Result<Vec<f32>> {
             out.extend(matrix.bytes.iter().map(|&b| f8_e4m3_to_f32(b)));
             Ok(out)
         }
-        other => Err(DiffusionError::model(format!(
-            "flux transformer unsupported ggml matrix type {}",
-            other
-        ))),
+        // GGUF block quants (the city96 FLUX.1 tiers): the small host-side
+        // linears (time/vector/guidance embeds, modulation) read them here.
+        other => {
+            use makepad_ai_common::quant;
+            let dequant: fn(&[u8], &mut [f32]) = match other {
+                quant::GGML_TYPE_Q4_0 => quant::dequantize_q4_0,
+                quant::GGML_TYPE_Q4_1 => quant::dequantize_q4_1,
+                quant::GGML_TYPE_Q5_0 => quant::dequantize_q5_0,
+                quant::GGML_TYPE_Q5_1 => quant::dequantize_q5_1,
+                quant::GGML_TYPE_Q8_0 => quant::dequantize_q8_0,
+                quant::GGML_TYPE_Q4_K => quant::dequantize_q4_k,
+                quant::GGML_TYPE_Q5_K => quant::dequantize_q5_k,
+                quant::GGML_TYPE_Q6_K => quant::dequantize_q6_k,
+                _ => {
+                    return Err(DiffusionError::model(format!(
+                        "flux transformer unsupported ggml matrix type {}",
+                        other
+                    )))
+                }
+            };
+            let (block_bytes, block_len) = (quant::block_size(other), quant::block_elements(other));
+            let total = matrix.rows * matrix.cols;
+            if block_len == 0 || total % block_len != 0 || matrix.bytes.len() != total / block_len * block_bytes {
+                return Err(DiffusionError::model(format!(
+                    "flux transformer: {} matrix of {}x{} has {} bytes",
+                    quant::ggml_type_name(other), matrix.rows, matrix.cols, matrix.bytes.len()
+                )));
+            }
+            out.resize(total, 0.0);
+            for (block, values) in matrix.bytes.chunks_exact(block_bytes).zip(out.chunks_exact_mut(block_len)) {
+                dequant(block, values);
+            }
+            Ok(out)
+        }
     }
 }
 

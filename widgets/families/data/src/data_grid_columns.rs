@@ -196,7 +196,7 @@ impl<K: GridColumn> GridColumns<K> {
         if sections.len() > 1 {
             for section in sections {
                 let title = section.unwrap_or("Other");
-                let submenu = listed.iter().copied().filter(|c| c.section() == section).map(row).collect();
+                let submenu: Vec<MenuRow> = listed.iter().copied().filter(|c| c.section() == section).map(row).collect();
                 rows.push(MenuRow::new(LiveId::from_str(title), title).submenu(submenu));
             }
         } else {

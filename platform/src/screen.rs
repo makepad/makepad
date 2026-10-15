@@ -27,70 +27,45 @@ pub struct ScreenGeom {
 }
 
 /// Every display attached right now, in the platform's window-position space:
-/// what an app that puts a picture on a second screen chooses from.
-#[cfg(all(not(gpusim), target_os = "windows"))]
+/// what an app that puts a picture on a second screen chooses from. Under the HAL the window
+/// system's last look. A HAL direct desktop reads its session's event-fed cache
+/// on the Cx thread; other backends use their host screen inventory.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn screens() -> Vec<ScreenGeom> {
-    crate::os::windows::win32_screen::win32_screens()
-}
-
-/// Every display attached right now, in the platform's window-position space:
-/// what an app that puts a picture on a second screen chooses from.
-#[cfg(all(not(gpusim), target_os = "macos"))]
-pub fn screens() -> Vec<ScreenGeom> {
-    crate::os::apple::macos::macos_window::macos_screens()
-}
-
-/// The screens the Linux direct backend arranged into its wide desktop, in
-/// window coordinates (native pixels divided by the window's DPI factor).
-/// Empty for other Linux backends.
-///
-/// `screens()` below is a free function without a `Cx`, so the direct
-/// backend publishes into this static; a future X11 implementation must
-/// publish here too or split the cfg. Connector names are kept alongside
-/// the geometry, under the same lock, so the two lists are always published
-/// together: index i of `screens()` and of `linux_screen_names()` is always
-/// the same screen.
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
-static LINUX_SCREENS: std::sync::Mutex<(Vec<ScreenGeom>, Vec<String>)> =
-    std::sync::Mutex::new((Vec::new(), Vec::new()));
-
-/// Every display attached right now, in the platform's window-position space:
-/// on Linux, the direct backend's wide desktop, ordered left to right by
-/// position (empty for other backends).
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
-pub fn screens() -> Vec<ScreenGeom> {
-    LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.clone()
-}
-
-/// The connector name of each of `screens()`, in the same left-to-right
-/// order: index i of both lists is the same screen. Empty on other Linux
-/// backends, and (via the fallback below) on non-Linux platforms.
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
-#[allow(dead_code)] // not read inside the platform crate; a host process reads it
-pub fn linux_screen_names() -> Vec<String> {
-    LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).1.clone()
-}
-
-/// Published by the direct backend whenever its desktop layout may change.
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos"), linux_direct))]
-pub(crate) fn set_linux_screens(screens: Vec<ScreenGeom>, names: Vec<String>) {
-    *LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = (screens, names);
+    #[cfg(target_os = "linux")]
+    if let Some(screens) = HAL_DIRECT_SCREENS.with(|s| s.borrow().as_ref().map(|s| {
+        // The shell reports native points (pixels / the shell's DPI); a DPI override on
+        // the desktop window (e.g. a saved display scale) changes the window's points.
+        let scale = HAL_DIRECT_SCALE.with(|f| f.get());
+        let at = |r: Rect| Rect { pos: r.pos * scale, size: r.size * scale };
+        s.iter().map(|(_, g)| ScreenGeom { bounds: at(g.bounds), work_area: at(g.work_area), is_primary: g.is_primary }).collect()
+    })) {
+        return screens;
+    }
+    let rect = |r: [f64; 4]| Rect { pos: dvec2(r[0], r[1]), size: dvec2(r[2], r[3]) };
+    let mut all = vec![makepad_hal::ScreenInfo::default(); 8];
+    loop {
+        let n = makepad_hal::hal_screens(&mut all) as usize;
+        if n <= all.len() {
+            all.truncate(n);
+            break;
+        }
+        all.resize(n, makepad_hal::ScreenInfo::default());
+    }
+    all.into_iter()
+        .map(|s| ScreenGeom { bounds: rect(s.bounds), work_area: rect(s.work_area), is_primary: s.is_primary })
+        .collect()
 }
 
 /// A backend with no display list to offer answers with none; a caller
 /// then keeps its window where the system put it.
-#[cfg(not(any(
-    all(not(gpusim), target_os = "windows"),
-    all(not(gpusim), target_os = "macos"),
-    all(not(gpusim), target_os = "linux", not(target_env = "ohos"))
-)))]
+#[cfg(target_arch = "wasm32")]
 pub fn screens() -> Vec<ScreenGeom> {
     Vec::new()
 }
 
-/// Non-Linux platforms (and the gpusim/OHOS Linux fallback above) have no
-/// connector names to offer; `screens()` is empty there too.
-#[cfg(not(all(not(gpusim), target_os = "linux", not(target_env = "ohos"))))]
+/// Other platforms do not expose Linux connector names.
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)] // not read inside the platform crate; a host process reads it
 pub fn linux_screen_names() -> Vec<String> {
     Vec::new()
@@ -635,4 +610,30 @@ mod tests {
         );
         assert_eq!(clamp_point_to_screens(&screens, dvec2(40.0, 50.0)), dvec2(40.0, 50.0));
     }
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    // Free screen APIs are called on the session's Cx thread. Each domain has
+    // its own cache, filled by DirectDisplays rather than the host's statics.
+    static HAL_DIRECT_SCREENS: std::cell::RefCell<Option<Vec<(String, ScreenGeom)>>> = const { std::cell::RefCell::new(None) };
+    /// Native DPI / effective DPI of the direct desktop's window.
+    static HAL_DIRECT_SCALE: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Set from the direct desktop window's native and effective DPI factors whenever
+/// the inventory arrives or that window's DPI override changes.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_hal_direct_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 { HAL_DIRECT_SCALE.with(|f| f.set(scale)); }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_hal_direct_screens(screens: Option<Vec<(String, ScreenGeom)>>) {
+    HAL_DIRECT_SCREENS.with(|s| *s.borrow_mut() = screens);
+}
+
+#[cfg(target_os = "linux")]
+pub fn linux_screen_names() -> Vec<String> {
+    HAL_DIRECT_SCREENS.with(|s| s.borrow().as_ref().map_or_else(Vec::new, |s| s.iter().map(|(n, _)| n.clone()).collect()))
 }

@@ -44,6 +44,8 @@ pub mod maps_root;
 #[cfg(not(feature = "demo"))]
 pub mod module;
 pub mod nav;
+#[cfg(not(feature = "demo"))]
+pub mod network;
 #[cfg(any(feature = "demo", test))]
 pub mod nav_api;
 pub mod overlays;

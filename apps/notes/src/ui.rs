@@ -97,7 +97,7 @@ script_mod! {
         // The title on the card's 16 pt edge, the section caption on the
         // rows' text inset. The insets live on wrapping Views: a Label
         // applies its own padding twice.
-        scroll := ScrollYView{
+        folder_scroll := ScrollYView{
             width: Fill height: Fill flow: Down
             Plain{height: 36 padding: Inset{left: 16} align: Align{y: 0.5}
                 title := Ink{width: Fill text: "Folders" draw_text.text_style: theme.font_bold{font_size: 21}}
@@ -136,8 +136,8 @@ script_mod! {
         header +: {visible: false height: 0 padding: 0}
         body +: {margin: 0 padding: 0}
         animator +: {slide: {
-            hide: {ease: Ease.Bezier{cp0: 0.22 cp1: 1.0 cp2: 0.36 cp3: 1.0} from: {all: Play.Forward{duration: 0.26}} apply: {offset: 403.0}}
-            show: {ease: Ease.Bezier{cp0: 0.22 cp1: 1.0 cp2: 0.36 cp3: 1.0} from: {all: Play.Forward{duration: 0.26}} apply: {offset: 0.0}}
+            hide: {ease: Ease.Bezier{cp0: 0.22 cp1: 1.0 cp2: 0.36 cp3: 1.0} from: {all: Play.Forward{duration: 0.26}} apply: {slide: 1.0}}
+            show: {ease: Ease.Bezier{cp0: 0.22 cp1: 1.0 cp2: 0.36 cp3: 1.0} from: {all: Play.Forward{duration: 0.26}} apply: {slide: 0.0}}
         }}
     }
     mod.widgets.NotesViewBase = #(NotesView::register_widget(vm))

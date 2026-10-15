@@ -1,6 +1,6 @@
 # weather — a small Makepad app with two resident faces: the full forecast
-# view and a compact home-widget tile, both fed by one Open-Meteo fetch over
-# the platform's HTTP API. The WM picks the face on the same window/swapchain
+# view and a compact home-widget tile, both fed by one sample forecast
+# generated on the device (offline; no network). The WM picks the face on the same window/swapchain
 # via `HostedView`; one process, one model — or, hosted in-process, one
 # module instance in its own isolate (src/module.rs).
 
@@ -21,7 +21,6 @@ name = "makepad_app_weather"
 path = "src/lib.rs"
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -37,7 +36,6 @@ localai = ["makepad-app-aichat?/localai"]
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the forecast's one tool.
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
 # The window manager's vocabulary for the standalone window: the bar's

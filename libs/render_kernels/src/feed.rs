@@ -6,8 +6,8 @@
 //! realtime stream's latest, or locked time's synchronous run) and writes
 //! them into the pass values or draw uniforms by name.
 
-use makepad_script_compute::kernel::Layout;
-use makepad_script_compute::sched::Job;
+use makepad_script_compute::boundary::LayoutView;
+use makepad_script_compute_sched::sched::Job;
 
 /// Where one uniform component comes from.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,9 +33,9 @@ impl Feed {
     }
 
     /// Field `field` of record `element` of `buffer`, written in `layout`.
-    pub fn field(uniform: &str, buffer: &str, element: usize, layout: &Layout, field: &str) -> Result<Feed, String> {
+    pub fn field(uniform: &str, buffer: &str, element: usize, layout: &LayoutView<'_>, field: &str) -> Result<Feed, String> {
         let f = layout.fields.iter().find(|f| f.name == field).ok_or_else(|| {
-            let names: Vec<&str> = layout.fields.iter().map(|f| f.name.as_str()).collect();
+            let names: Vec<&str> = layout.fields.iter().map(|f| f.name).collect();
             format!("`{}` has no field `{}` (it has {})", layout.name, field, names.join(", "))
         })?;
         let width = (f.ty.words() as usize).clamp(1, 4);
@@ -51,7 +51,7 @@ impl Feed {
         let mut v = [0.0f32; 4];
         for (k, s) in self.sources.iter().take(4).enumerate() {
             v[k] = match s {
-                FeedSource::Reduced { lane } => job.stats().reduced.get(*lane).copied().unwrap_or(0.0),
+                FeedSource::Reduced { lane } => job.stats().reduced().get(*lane).copied().unwrap_or(0.0),
                 FeedSource::Word { buffer, element, stride, word } => job.out_u32(buffer).and_then(|w| w.get(element * stride + word)).map_or(0.0, |w| f32::from_bits(*w)),
             };
         }
@@ -76,8 +76,9 @@ pub fn apply<'a>(feeds: &'a [Feed], job: &Job, names: &[&str], values: &mut [[f3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compute::kernel::{FieldTy, LayoutField};
-    use crate::compute::sched::InlineExecutor;
+    use crate::compute::boundary::LayoutFieldView;
+    use crate::compute::kernel::FieldTy;
+    use crate::dispatch::sched::InlineExecutor;
 
     #[test]
     fn reduce_results_and_records_feed_uniforms() {
@@ -88,8 +89,8 @@ mod tests {
         let mut job = Job::new(k, 100);
         job.input_vec_u32("p", pts.clone()).unwrap();
         job.run(&InlineExecutor, 1).unwrap();
-        let head = Layout { name: "Head".into(), stride: 4, fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "age".into(), ty: FieldTy::F32, offset: 3 }] };
-        let k2 = crate::compile("let h = output(Head)\nfn element(i) { h[i].pos = vec3(float(i), 2.0, 3.0)\n h[i].age = 0.5 }", &[head.clone()], &[]).unwrap();
+        let head = LayoutView { name: "Head", stride: 4, fields: &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "age", ty: FieldTy::F32, offset: 3 }] };
+        let k2 = crate::compile("let h = output(Head)\nfn element(i) { h[i].pos = vec3(float(i), 2.0, 3.0)\n h[i].age = 0.5 }", &[head], &[]).unwrap();
         let mut job2 = Job::new(k2, 3);
         job2.output_u32("h", vec![0; 12]).unwrap();
         job2.run(&InlineExecutor, 1).unwrap();

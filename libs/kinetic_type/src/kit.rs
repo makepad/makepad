@@ -56,7 +56,7 @@ pub struct Kit {
 impl Kit {
     /// The kit's fn field `name` (a script fn), if it has one.
     pub fn fn_field(&self, vm: &ScriptVm, name: &str) -> Option<ScriptObject> {
-        field(vm, self.object.as_object(), name).as_object().filter(|f| vm.bx.heap.as_fn(*f).is_some())
+        field(vm, self.object.as_object(), name).as_object().filter(|f| vm.heap().as_fn(*f).is_some())
     }
 
     /// The draw members the kit writes (`name: fn` fields other than the
@@ -66,7 +66,7 @@ impl Kit {
             .into_iter()
             .filter(|(k, v)| {
                 let name = k.to_string();
-                !KERNEL_FIELDS.contains(&name.as_str()) && v.as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some())
+                !KERNEL_FIELDS.contains(&name.as_str()) && v.as_object().is_some_and(|f| vm.heap().as_fn(f).is_some())
             })
             .collect()
     }
@@ -76,17 +76,17 @@ impl Kit {
 /// its values.
 pub fn load(vm: &mut ScriptVm, source: &str, file: &str) -> Result<Kit, String> {
     script_mod(vm);
-    vm.bx.captured_errors = Some(Vec::new());
+    vm.capture_errors();
     // A body of its own the VM reclaims once nothing holds the kit.
-    let v = vm.eval_transient(ScriptMod { file: file.to_string(), code: format!("{KIT_USES}{source}"), ..Default::default() });
+    let v = vm.eval_transient(ScriptMod::new("", "", &file, 0, 0, &format!("{KIT_USES}{source}"), &[]));
     let errors = vm.take_errors();
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
-    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object();
-    let kinetic = module.map(|m| vm.bx.heap.value(m, LiveId::from_str("Kinetic").into(), NoTrap));
-    let o = v.as_object().filter(|o| Some(vm.bx.heap.proto(*o)) == kinetic).ok_or_else(|| format!("{file}: a kit is one `Kinetic{{ ... }}` object"))?;
-    let object = vm.bx.heap.new_object_ref(o);
+    let module = vm.value(vm.modules(), LiveId::from_str(KIT_MODULE)).as_object();
+    let kinetic = module.map(|m| vm.value(m, LiveId::from_str("Kinetic")));
+    let o = v.as_object().filter(|o| Some(vm.heap().proto(*o)) == kinetic).ok_or_else(|| format!("{file}: a kit is one `Kinetic{{ ... }}` object"))?;
+    let object = vm.new_object_ref(o);
     let values = read_values(vm, o)?;
     Ok(Kit { object, values })
 }
@@ -94,11 +94,12 @@ pub fn load(vm: &mut ScriptVm, source: &str, file: &str) -> Result<Kit, String> 
 /// An object's own fields, in the order written.
 fn fields(vm: &ScriptVm, o: ScriptObject) -> Vec<(LiveId, ScriptValue)> {
     let mut out = Vec::new();
-    vm.bx.heap.object_data(o).map_iter_ordered(|k, v| {
+    for e in vm.heap().map_entries_ordered(o) {
+        let (k, v) = (e.key, e.value);
         if let Some(k) = k.as_id() {
             out.push((k, v));
         }
-    });
+    }
     out
 }
 
@@ -157,7 +158,7 @@ pub struct KitValues {
 }
 
 fn field(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
-    let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
+    let v = vm.value(o, LiveId::from_str(name));
     if v.is_err() {
         NIL
     } else {
@@ -173,7 +174,7 @@ fn text_of(vm: &mut ScriptVm, v: ScriptValue) -> Option<String> {
         return Some(id.to_string());
     }
     if v.is_string_like() {
-        return vm.bx.heap.cast_to_owned_string(v, "kinetic kit");
+        return vm.cast_to_owned_string(v, "kinetic kit");
     }
     None
 }
@@ -191,20 +192,20 @@ pub const KIT_MODULE: &str = "kin";
 
 /// Registers the kit module (once per VM).
 pub fn script_mod(vm: &mut ScriptVm) {
-    let have = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object().is_some();
+    let have = vm.value(vm.modules(), LiveId::from_str(KIT_MODULE)).as_object().is_some();
     if have {
         return;
     }
     let m = vm.new_module(LiveId::from_str(KIT_MODULE));
-    let proto = vm.bx.heap.new_object();
-    vm.bx.heap.set_value_def(m, LiveId::from_str("Kinetic").into(), proto.into());
+    let proto = vm.new_object();
+    vm.set_value_def(m, LiveId::from_str("Kinetic"), proto);
     let types: Vec<(&str, &str)> = makepad_render_graph::kits::KITS.iter().map(|k| (k.name, k.kind)).chain([("Pass", "pass")]).collect();
     makepad_render_graph::script::register_post_types(vm, m, &types);
     for e in makepad_render_graph::script::install_kits(vm, &format!("mod.{KIT_MODULE}"), None) {
         log!("kinetic: graph kits: {e}");
     }
-    vm.bx.captured_errors = Some(Vec::new());
-    vm.eval(ScriptMod { file: "kinetic_type/kit.splash".into(), code: KIT_GLUE.into(), ..Default::default() });
+    vm.capture_errors();
+    vm.eval(ScriptMod::new("", "", "kinetic_type/kit.splash", 0, 0, &KIT_GLUE, &[]));
     for e in vm.take_errors() {
         log!("kinetic: kit.splash: {e}");
     }
@@ -371,7 +372,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     let curve_frames = cv.as_object().map_or(crate::curve::Frames::default(), |c| crate::curve::Frames {
         closed: num(field(vm, c, "closed")).unwrap_or(0.0) > 0.5,
         up: field(vm, c, "up").as_array().and_then(|a| {
-            let at = |i| num(vm.bx.heap.array_index(a, i, NoTrap));
+            let at = |i| num(vm.heap().array_index(a, i, NoTrap));
             Some([at(0)?, at(1)?, at(2)?])
         }),
     });
@@ -386,7 +387,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     let mut pass_values = Vec::new();
     let post = field(vm, o, "post");
     let items = makepad_render_graph::script::post_items(vm, post);
-    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object().ok_or("the kit module is not registered")?;
+    let module = vm.value(vm.modules(), LiveId::from_str(KIT_MODULE)).as_object().ok_or("the kit module is not registered")?;
     for (k, item) in items.into_iter().enumerate() {
         let label = format!("post[{k}]");
         let kind = makepad_render_graph::script::post_kind(vm, item).ok_or_else(|| format!("{label} is a kit (Glow{{..}}) or a Pass{{..}}"))?;

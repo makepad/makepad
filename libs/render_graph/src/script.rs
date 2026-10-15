@@ -6,7 +6,7 @@
 //! post parameter is read once per frame, at the frame point) and sets
 //! each uniform's width from what it evaluates to.
 
-use crate::pass::PassDecl;
+use crate::pass::{PassCode, PassDecl, PassFn, PassHelper};
 use crate::plan::{Format, Stage};
 use makepad_script::*;
 
@@ -23,7 +23,7 @@ pub struct PassRead {
 pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "scale_height", "preview_scale", "size", "format", "uniforms", "pixel", "helpers", "history", "map"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
-    let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
+    let v = vm.value(o, LiveId::from_str(name));
     if v.is_err() { NIL } else { v }
 }
 
@@ -35,7 +35,7 @@ fn text(vm: &mut ScriptVm, v: ScriptValue) -> Option<String> {
         return Some(id.to_string());
     }
     if v.is_string_like() {
-        return vm.bx.heap.cast_to_owned_string(v, "graph pass");
+        return vm.cast_to_owned_string(v, "graph pass");
     }
     None
 }
@@ -44,9 +44,47 @@ fn text(vm: &mut ScriptVm, v: ScriptValue) -> Option<String> {
 /// or `None` when `v` is no script function.
 pub fn fn_text(vm: &ScriptVm, v: ScriptValue) -> Option<(crate::pass::CodeAt, String)> {
     let o = v.as_object()?;
-    let ScriptFnPtr::Script(ip) = vm.bx.heap.as_fn(o)? else { return None };
-    let (loc, text) = vm.bx.code.fn_text(ip)?;
-    Some((crate::pass::CodeAt { file: loc.file, line: loc.line, col: loc.col }, text))
+    let ip = vm.heap().fn_script_ip(o)?;
+    let (loc, text) = vm.fn_text(ip)?;
+    Some((crate::pass::CodeAt { file: loc.file().to_owned(), line: loc.line(), col: loc.col() }, text))
+}
+
+/// A Splash function as a pass's code (moved to the GPU's VM by its tokens,
+/// [`PassFn`]), or `None` when `v` is no script function.
+pub fn fn_code(vm: &ScriptVm, v: ScriptValue) -> Option<PassFn> {
+    let o = v.as_object()?;
+    vm.fn_image(o).map(PassFn::new)
+}
+
+/// A pass's `helpers` (see [`helper_fns`]) as its code.
+pub fn helper_codes(vm: &ScriptVm, v: ScriptValue) -> Result<Vec<PassHelper>, String> {
+    if v.is_nil() {
+        return Ok(Vec::new());
+    }
+    let Some(o) = v.as_object().filter(|o| !vm.is_fn(*o)) else {
+        return Err("`helpers` is an object of shader functions: `helpers: {name: fn(x: float) -> float { ... }}`".into());
+    };
+    let mut chain = vec![o];
+    while let Some(p) = vm.heap().proto(*chain.last().unwrap()).as_object() {
+        if chain.len() > 16 || vm.is_fn(p) {
+            break;
+        }
+        chain.push(p);
+    }
+    let mut out: Vec<PassHelper> = Vec::new();
+    for level in chain.iter().rev() {
+        // (A pass's `pixel` is never a helper: an object of hooks may hold
+        // the step it runs as its `pixel` too.)
+        for n in own_fields(vm, *level).into_iter().filter(|n| n != "pixel") {
+            let f = get(vm, *level, &n);
+            let Some(code) = fn_code(vm, f) else {
+                return Err(format!("helper `{n}` is a shader function: `helpers: {{{n}: fn(x: float) -> float {{ ... }}}}`"));
+            };
+            out.retain(|h| h.name != n);
+            out.push(PassHelper { name: n, code: PassCode::Fn(code), namespace: None });
+        }
+    }
+    Ok(out)
 }
 
 /// A pass's `helpers`: an object of shader functions, its own and those it
@@ -56,12 +94,12 @@ pub fn helper_fns(vm: &ScriptVm, v: ScriptValue) -> Result<Vec<(String, crate::p
     if v.is_nil() {
         return Ok(Vec::new());
     }
-    let Some(o) = v.as_object().filter(|o| !vm.bx.heap.is_fn(*o)) else {
+    let Some(o) = v.as_object().filter(|o| !vm.is_fn(*o)) else {
         return Err("`helpers` is an object of shader functions: `helpers: {name: fn(x: float) -> float { ... }}`".into());
     };
     let mut chain = vec![o];
-    while let Some(p) = vm.bx.heap.proto(*chain.last().unwrap()).as_object() {
-        if chain.len() > 16 || vm.bx.heap.is_fn(p) {
+    while let Some(p) = vm.heap().proto(*chain.last().unwrap()).as_object() {
+        if chain.len() > 16 || vm.is_fn(p) {
             break;
         }
         chain.push(p);
@@ -83,7 +121,7 @@ pub fn helper_fns(vm: &ScriptVm, v: ScriptValue) -> Result<Vec<(String, crate::p
 }
 
 fn list(vm: &ScriptVm, v: ScriptValue) -> Vec<ScriptValue> {
-    let h = &vm.bx.heap;
+    let h = vm.heap();
     if let Some(a) = v.as_array() {
         return (0..h.array_len(a)).map(|i| h.array_index(a, i, NoTrap)).collect();
     }
@@ -95,9 +133,10 @@ fn list(vm: &ScriptVm, v: ScriptValue) -> Vec<ScriptValue> {
 
 /// The own field names of an object, in order.
 pub fn own_fields(vm: &ScriptVm, obj: ScriptObject) -> Vec<String> {
-    let h = &vm.bx.heap;
+    let h = vm.heap();
     let mut out = Vec::new();
-    h.map_ref(obj).iter().for_each(|(k, _)| {
+    h.map_entries(obj).into_iter().for_each(|e| {
+        let k = e.key;
         if let Some(id) = k.as_id() {
             out.push(id.to_string());
         }
@@ -149,8 +188,8 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
     let size = if size_v.is_nil() {
         None
     } else {
-        match makepad_script::numeric::NumericValue::from_script_value_heap(&vm.bx.heap, size_v, Default::default()) {
-            makepad_script::numeric::NumericValue::Vec2(v) if v.x >= 1.0 && v.y >= 1.0 => Some((v.x as u32, v.y as u32)),
+        match makepad_script::numeric::NumericValue::from_script_value_heap(vm.heap(), size_v, Default::default()).as_vec2() {
+            Some(v) if v.x >= 1.0 && v.y >= 1.0 => Some((v.x as u32, v.y as u32)),
             _ => return Err(format!("{label}: `size` is the output in pixels: vec2(512, 256)")),
         }
     };
@@ -160,20 +199,15 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         Some(f) => Some(Format::by_name(&f).ok_or_else(|| format!("{label}: `format: @{f}` is not a format; one of @rgba16f @rgba32f @rgba8"))?),
     };
     // `pixel: fn() -> vec4 { ... }` and `helpers: {name: fn(..) -> .. {..}}`:
-    // Splash functions in the document, compiled as the pass's shader (their
-    // text kept with where it is, so its errors point at the document).
-    let mut origins = Vec::new();
+    // Splash functions in the document, compiled as the pass's shader (moved
+    // by their tokens, so their errors point at the document).
     let pixel_v = get(vm, o, "pixel");
     let helpers_v = get(vm, o, "helpers");
-    let mut helpers = String::new();
-    let Some((at, pixel)) = fn_text(vm, pixel_v) else {
+    let Some(pixel) = fn_code(vm, pixel_v) else {
         return Err(format!("{label}: a pass needs `pixel: fn() -> vec4 {{ ... }}`, a shader function"));
     };
-    origins.push((pixel.clone(), at));
-    for (n, at, text) in helper_fns(vm, helpers_v).map_err(|e| format!("{label}: {e}"))? {
-        helpers.push_str(&format!("    {n}: {text}\n"));
-        origins.push((text, at));
-    }
+    let pixel = PassCode::Fn(pixel);
+    let helpers = helper_codes(vm, helpers_v).map_err(|e| format!("{label}: {e}"))?;
     let mut uniforms = Vec::new();
     let uv = get(vm, o, "uniforms");
     if let Some(uo) = uv.as_object() {
@@ -204,7 +238,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         };
         outputs.push(crate::pass::OutputDecl { slot: name.clone(), name, format });
     }
-    let decl = PassDecl { name, stage, reads, slots, scale, scale_height, preview_scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map, origins, live_literals: false };
+    let decl = PassDecl { name, stage, reads, slots, scale, scale_height, preview_scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map, live_literals: false };
     Ok(PassRead { decl, uniforms })
 }
 
@@ -217,11 +251,32 @@ pub const POST_TAG: &str = "__post";
 /// kits among them their defaults and templates.
 pub fn register_post_types(vm: &mut ScriptVm, module: ScriptObject, types: &[(&str, &str)]) {
     for (name, kind) in types {
-        let proto = vm.bx.heap.new_object();
+        let proto = vm.new_object();
         let tag = LiveId::from_str_with_lut(kind).unwrap_or(LiveId::from_str(kind));
-        vm.bx.heap.set_value_def(proto, LiveId::from_str(POST_TAG).into(), tag.into());
-        vm.bx.heap.set_value_def(module, LiveId::from_str(name).into(), proto.into());
+        vm.set_value_def(proto, LiveId::from_str(POST_TAG), tag);
+        vm.set_value_def(module, LiveId::from_str(name), proto);
     }
+}
+
+/// `mod.post`: the render graph's post types (`Pass`, `MotionBlur` and every
+/// kit of [`crate::kits::KITS`]: `Glow`, `Halation`, `Bloom`, ...), tagged
+/// with their kind, with the kits' defaults and templates. A VM has one,
+/// whoever installs it first (a Motion document, a standalone scene); a
+/// document uses it by name (`use mod.post`, then `post.Glow{..}`). The
+/// evaluation errors.
+pub fn install_post(vm: &mut ScriptVm) -> Vec<String> {
+    if vm.value(vm.modules(), id!(post)).as_object().is_some() {
+        return Vec::new();
+    }
+    let post = vm.new_module(id!(post));
+    let mut types = vec![("Pass", "pass"), ("MotionBlur", "motion_blur")];
+    types.extend(crate::kits::KITS.iter().map(|kit| (kit.name, kit.kind)));
+    register_post_types(vm, post, &types);
+    let mut errors = install_kits(vm, "mod.post", None);
+    vm.capture_errors();
+    vm.eval(ScriptMod::new("", "", "mod.post", 0, 0, "mod.post.MotionBlur = mod.post.MotionBlur{shutter: 180 samples: @auto tol: 3}\ntrue\n", &[]));
+    errors.extend(vm.take_errors());
+    errors
 }
 
 /// The post kind of a document's entry (its type's [`POST_TAG`]).
@@ -256,7 +311,7 @@ pub fn read_post_entry(vm: &mut ScriptVm, module: ScriptObject, kind: &str, item
     if template.is_nil() {
         return Ok(PostEntry::Host(o));
     }
-    vm.bx.captured_errors = Some(Vec::new());
+    vm.capture_errors();
     let built = vm.call(template, &[item]);
     let errors = vm.take_errors();
     if !errors.is_empty() || built.is_err() {
@@ -282,11 +337,11 @@ pub fn read_post_entry(vm: &mut ScriptVm, module: ScriptObject, kind: &str, item
 /// registered, see [`crate::kits::KITS`]): all, or the kinds in `only`.
 /// Returns the evaluation errors.
 pub fn install_kits(vm: &mut ScriptVm, module: &str, only: Option<&[&str]>) -> Vec<String> {
-    vm.bx.captured_errors = Some(Vec::new());
+    vm.capture_errors();
     // A file of its own per module and selection: the kits' functions keep
     // pointing into their own code when another module installs them too.
     let file = format!("graph://kits/{module}/{}", only.map_or("all".to_string(), |o| o.join(",")));
-    let v = vm.eval(ScriptMod { file, code: crate::kits::kit_source(module, only), ..Default::default() });
+    let v = vm.eval(ScriptMod::new("", "", &file, 0, 0, &(crate::kits::kit_source(module, only)), &[]));
     let mut errors = vm.take_errors();
     if v.is_err() && errors.is_empty() {
         errors.push("the graph kits did not evaluate".into());

@@ -1,9 +1,9 @@
 //! Steady state allocates nothing: a realtime stream of kernel jobs on the
 //! headless pool, and synchronous runs, counted with a global allocator.
 
-use makepad_script_compute::admission::{DeviceLimits, JobBudget, Ledger, Origin};
+use makepad_script_compute_sched::admission::{DeviceLimits, JobBudget, Ledger, Origin};
 use makepad_script_compute::kernel::compile;
-use makepad_script_compute::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, Stream, ThreadExecutor};
+use makepad_script_compute_sched::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, Stream, ThreadExecutor};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

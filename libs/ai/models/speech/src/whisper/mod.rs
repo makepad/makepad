@@ -17,16 +17,22 @@ mod metal_backend;
 mod model;
 #[path = "cpu/quant.rs"]
 mod quant;
+mod quantize;
 mod settings;
 #[path = "cpu/tensor.rs"]
 mod tensor;
 mod text_align;
 mod tokenizer;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[path = "vulkan/backend.rs"]
+mod vulkan_backend;
 
 pub use accel::backend_name as accel_backend_name;
+pub use accel::release_device_state;
 pub use align::{token_rows, AlignmentHeads, WordSpan, AUDIO_FRAME_MS, LEAD_ROWS};
 pub use decode_loop::{AlignedSegment, Segment, WhisperParams, WhisperState};
 pub use model::{Vocab, WhisperModel};
+pub use quantize::{quantize_ggml, QuantizationStats, WeightQuantization};
 pub use text_align::{align_text, AlignTextError, TimedWord, ALIGN_SAMPLE_RATE, MAX_ALIGN_SECS};
 pub use tokenizer::WhisperTokenizer;
 

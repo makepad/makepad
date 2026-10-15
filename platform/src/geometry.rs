@@ -1,6 +1,7 @@
+#[cfg(target_arch = "wasm32")]
+use crate::os::web::CxOsGeometry;
 use crate::{
     cx::Cx, draw_shader::DrawShaderInputs, id_pool::*, makepad_error_log::*, makepad_script::*,
-    os::CxOsGeometry,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -357,7 +358,7 @@ impl IndexData {
 impl Geometry {
     pub fn into_script_handle(self, vm: &mut ScriptVm) -> ScriptValue {
         let ty = vm.handle_type(id!(geometry));
-        let handle = vm.bx.heap.new_handle(ty, Box::new(self));
+        let handle = vm.heap_mut().new_handle(ty, Box::new(self));
         handle.into()
     }
 
@@ -688,6 +689,7 @@ pub struct CxGeometry {
     pub logged_stride_mismatch: bool,
     pub logged_unsupported_typed: bool,
     #[allow(unused)]
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsGeometry,
 }
 
@@ -706,6 +708,7 @@ impl Default for CxGeometry {
             dirty_indices: false,
             logged_stride_mismatch: false,
             logged_unsupported_typed: false,
+            #[cfg(target_arch = "wasm32")]
             os: CxOsGeometry::default(),
         }
     }

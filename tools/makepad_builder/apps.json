@@ -44,6 +44,40 @@
     ]
   },
   {
+    "id": "amp",
+    "title": "Amp",
+    "package": "makepad-app-amp",
+    "binary": "makepad-app-amp",
+    "workspace": "makepad/apps/amp",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "code",
+    "title": "Code",
+    "package": "makepad-app-code",
+    "binary": "makepad-app-code",
+    "workspace": "makepad/apps/code",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "box3d",
+    "title": "Box3D",
+    "package": "makepad-example-box3d",
+    "binary": "makepad-example-box3d",
+    "workspace": "makepad/examples/box3d",
+    "features": []
+  },
+  {
+    "id": "counter",
+    "title": "Counter",
+    "package": "makepad-example-counter",
+    "binary": "makepad-example-counter",
+    "workspace": "makepad/examples/counter",
+    "features": []
+  },
+  {
     "id": "browser",
     "title": "Browser",
     "package": "makepad-app-browser",
@@ -71,6 +105,15 @@
     "features": [
       "standalone"
     ],
+    "menu": "other"
+  },
+  {
+    "id": "camera",
+    "title": "Camera",
+    "package": "makepad-app-camera",
+    "binary": "makepad-app-camera",
+    "workspace": "makepad/apps/camera",
+    "features": [],
     "menu": "other"
   },
   {
@@ -261,6 +304,15 @@
     "binary": "makepad-app-video",
     "workspace": "makepad/apps/video",
     "features": []
+  },
+  {
+    "id": "translator",
+    "title": "Translator",
+    "package": "makepad-app-translator",
+    "binary": "makepad-app-translator",
+    "workspace": "makepad/apps/translator",
+    "features": [],
+    "menu": "other"
   },
   {
     "id": "weather",

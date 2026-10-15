@@ -1,0 +1,63 @@
+wait_frame
+sleep_frames 10
+resize 400 640
+wait_frame
+resize 440 660
+wait_frame
+resize 400 680
+wait_frame
+resize 440 640
+wait_frame
+resize 400 660
+wait_frame
+resize 440 680
+wait_frame
+resize 400 640
+wait_frame
+resize 440 660
+wait_frame
+resize 400 680
+wait_frame
+resize 440 640
+wait_frame
+resize 400 660
+wait_frame
+resize 440 680
+wait_frame
+resize 400 640
+wait_frame
+resize 440 660
+wait_frame
+resize 400 680
+wait_frame
+resize 440 640
+wait_frame
+resize 400 660
+wait_frame
+resize 440 680
+wait_frame
+resize 400 640
+wait_frame
+resize 440 660
+wait_frame
+resize 400 680
+wait_frame
+resize 440 640
+wait_frame
+resize 400 660
+wait_frame
+resize 440 680
+wait_frame
+resize 400 640
+wait_frame
+resize 440 660
+wait_frame
+resize 400 680
+wait_frame
+resize 440 640
+wait_frame
+resize 400 660
+wait_frame
+resize 440 680
+wait_frame
+budget max_frame_ms 100000

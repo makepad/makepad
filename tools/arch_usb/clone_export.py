@@ -15,15 +15,16 @@ def main():
     root = Path(sys.argv[1]).resolve()
     if not (root/'Cargo.toml').is_file():
         raise RuntimeError(f'Not a Makepad checkout: {root}')
-    binaries = {name: root/'target/release'/name for name in ('makepad-app-wm', 'makepad-app-ai-hub')}
+    binaries = {name: root/'target/release'/name for name in ('makepad-app-wm',)}
     for name, path in binaries.items():
         with path.open('rb') as stream:
             if stream.read(4) != b'\x7fELF':
                 raise RuntimeError(f'Missing Linux release binary: {name}')
-    # These are the two standalone services. Hosted apps retain the normal
-    # Cargo launch path; do not collect a set of prebuilt hosted app binaries.
+    # The WM is the one standalone service. Hosted apps and the AI hub (the WM's own
+    # child, apps/wm/src/hub_child.rs) keep the normal Cargo launch path; do not
+    # collect prebuilt binaries for them.
     services = {}
-    for name in ('makepad-wm.service', 'makepad-aihub.service'):
+    for name in ('makepad-wm.service',):
         properties = subprocess.check_output(
             ['systemctl', 'show', name, '-p', 'ActiveState', '-p', 'WorkingDirectory', '-p', 'ExecStart'], text=True)
         if 'ActiveState=active\n' not in properties or f'WorkingDirectory={root}\n' not in properties:
@@ -78,19 +79,20 @@ def main():
                 add(archive, path, 'cargo/'+path.relative_to(cargo).as_posix())
         for name, path in {
             'wm-session.sh': '/usr/local/bin/makepad-wm-session',
-            'aihub-session.sh': '/usr/local/bin/makepad-aihub-session',
             'wm.env': '/etc/makepad/wm.env',
-            'aihub.env': '/etc/makepad/aihub.env',
             'makepad-wm.service': '/etc/systemd/system/makepad-wm.service',
-            'makepad-aihub.service': '/etc/systemd/system/makepad-aihub.service',
         }.items():
             add(archive, Path(path), 'config/'+name)
+        # The WM's AI hub settings, when this machine has its own.
+        hub_conf = Path.home()/'.makepad/wm/ai-hub.conf'
+        if hub_conf.is_file():
+            add(archive, hub_conf, 'config/ai-hub.conf')
         manifest['source_files'] = source_count
         data = (json.dumps(manifest, indent=2)+'\n').encode()
         info = tarfile.TarInfo('manifest.json')
         info.size = len(data)
         archive.addfile(info, io.BytesIO(data))
-    print(f'Exported {source_count} source files, WM/AI Hub services and Cargo cache.', file=sys.stderr)
+    print(f'Exported {source_count} source files, the WM service, the AI hub settings and Cargo cache.', file=sys.stderr)
 
 
 if __name__ == '__main__':

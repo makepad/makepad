@@ -618,7 +618,7 @@ fn ai_worker_loop(command_rx: Receiver<AiWorkerCommand>, event_tx: Sender<AiWork
                 ProviderEvent::FunctionCall { .. } => Some(AiWorkerEvent::Error(
                     "AI provider requested an unsupported function".to_string(),
                 )),
-                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => None,
+                ProviderEvent::Status { .. } | ProviderEvent::Serving(_) | ProviderEvent::FunctionCallPartial { .. } => None,
             };
             if let Some(event) = event {
                 if !emit_ai_worker_event(&event_tx, event) {

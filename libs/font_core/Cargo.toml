@@ -1,0 +1,20 @@
+[package]
+name = "makepad-font-core"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Font tables, glyph outlines and glyph rasterisation shared by the text layout (draw) and the HAL's font service"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-shared-bytes = { path = "../shared_bytes", version = "1.0.0" }
+rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
+# Multi-axis UI fonts such as Roboto Flex exceed the 32-tuple stack buffer.
+# Enable the parser's heap fallback so valid glyph outlines are not discarded.
+ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"] }
+ab_glyph_rasterizer = { version = "0.1.8", path = "../ab_glyph_rasterizer" }
+sdfer = { path = "../sdfer", version = "0.2.1" }
+fxhash = { version = "0.2.1", path = "../fxhash" }
+makepad-zune-png = { version = "0.5.2", path = "../zune/zune-png" }

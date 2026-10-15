@@ -3,6 +3,7 @@ mod augment;
 pub use augment::{embed_ktx2_images, rewrite_glb_images};
 mod authoring;
 mod animation;
+mod container;
 mod document;
 mod error;
 mod image;
@@ -28,6 +29,7 @@ pub use crate::buffer::{
 pub use crate::animation::{
     replace_glb_node_animations, GlbNodeAnimChannel, GlbNodeAnimClip,
 };
+pub use crate::container::{assemble_glb, assemble_glb_with_rest, rewrite_json_chunk, split_glb, GlbChunks};
 pub use crate::document::*;
 pub use crate::authoring::*;
 pub use crate::error::GltfError;

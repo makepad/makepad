@@ -253,6 +253,9 @@ impl ContentBackend for InpaintBackend {
             )));
         }
         ctx.ensure_files()?;
+        // The T5 tokenizer table, downloaded with the model (not in git).
+        makepad_ai_flux::t5::load_tokenizer_from(ctx.cache_dir)
+            .map_err(|e| AssetAiError::Backend(format!("model {}: {e}", ctx.spec.id)))?;
         self.ready = Some(ReadyFiles {
             diffusion_model_path: role_path(ctx.spec, ctx.cache_dir, ROLE_DIFFUSION_MODEL)?,
             vae_path: role_path(ctx.spec, ctx.cache_dir, ROLE_VAE)?,
@@ -446,10 +449,6 @@ mod fill_worker {
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<FluxFillWorker>)> =
         std::sync::Mutex::new((0, None));
 
-    /// Upper bound on a release acknowledgement (it queues behind whatever the
-    /// thread is doing; the free itself is well under a second).
-    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
     /// Frees every device allocation this pipeline thread owns — the resident
     /// pipeline's checkpoint weight-cache namespaces, any residual dense-linear
     /// weight buffer, and the idle CUDA block pool — ON this thread, the only
@@ -500,17 +499,9 @@ mod fill_worker {
             self.tx
                 .send(WorkerCmd::Release(ack_tx))
                 .map_err(|_| FluxFillWorkerError::WorkerGone("flux-fill worker thread is gone".to_string()))?;
-            ack_rx
-                .recv_timeout(RELEASE_TIMEOUT)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        FluxFillWorkerError::WorkerGone("flux-fill dropped the release reply".to_string())
-                    }
-                    mpsc::RecvTimeoutError::Timeout => FluxFillWorkerError::Other(format!(
-                        "flux-fill worker did not acknowledge the device release within {}s",
-                        RELEASE_TIMEOUT.as_secs()
-                    )),
-                })
+            crate::progress_watch::release_reply(&ack_rx, "flux-fill").map_err(|_| {
+                FluxFillWorkerError::WorkerGone("flux-fill dropped the release reply".to_string())
+            })
         }
 
         fn spawn() -> Result<Self, AssetAiError> {
@@ -753,6 +744,8 @@ mod tests {
             guidance: None,
             delay_ms: 0,
             pull_only: false,
+            stream: false,
+            control: None,
             input_bytes: Vec::new(),
             input_content_type: "image/png".to_string(),
             inputs: Vec::new(),
@@ -767,6 +760,7 @@ mod tests {
             codec: String::new(),
             audio: None,
             chat_session: String::new(),
+            chat_images: Vec::new(),
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),
@@ -776,10 +770,14 @@ mod tests {
             text: String::new(),
             voice: String::new(),
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,
             lyrics: String::new(),
+            score: String::new(),
+            score_mode: String::new(),
+            score_only: false,
             remesh_resolution: None,
             texture: None,
             decimation_target: None,

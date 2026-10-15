@@ -9,9 +9,44 @@ pub fn parse_path_data(d: &str, path: &mut VectorPath) {
     parser.parse(path);
 }
 
+/// Builds a path from SVG commands and numeric operands, using the same
+/// relative coordinates, control points and arcs as `parse_path_data`.
+/// Commands may contain repeated operand groups; arc flags must be 0 or 1.
+pub struct PathDataBuilder {
+    parser: PathDataParser<'static>,
+}
+
+impl Default for PathDataBuilder {
+    fn default() -> Self {
+        Self {
+            parser: PathDataParser::new(""),
+        }
+    }
+}
+
+impl PathDataBuilder {
+    pub fn command(&mut self, command: u8, numbers: &[f32], path: &mut VectorPath) {
+        // Only the input borrows `numbers`; the cursor/control-point state
+        // survives between commands. No text or temporary vector is needed.
+        let mut parser = PathDataParser {
+            numbers: Some(numbers),
+            ..self.parser
+        };
+        parser.dispatch_command(command, path);
+        self.parser.cx = parser.cx;
+        self.parser.cy = parser.cy;
+        self.parser.sx = parser.sx;
+        self.parser.sy = parser.sy;
+        self.parser.last_ctrl_x = parser.last_ctrl_x;
+        self.parser.last_ctrl_y = parser.last_ctrl_y;
+        self.parser.last_cmd = parser.last_cmd;
+    }
+}
+
 struct PathDataParser<'a> {
     data: &'a [u8],
     pos: usize,
+    numbers: Option<&'a [f32]>,
     // Current point
     cx: f32,
     cy: f32,
@@ -29,6 +64,7 @@ impl<'a> PathDataParser<'a> {
         Self {
             data: s.as_bytes(),
             pos: 0,
+            numbers: None,
             cx: 0.0,
             cy: 0.0,
             sx: 0.0,
@@ -51,6 +87,11 @@ impl<'a> PathDataParser<'a> {
     }
 
     fn parse_number(&mut self) -> Option<f32> {
+        if let Some(numbers) = self.numbers {
+            let value = *numbers.get(self.pos)?;
+            self.pos += 1;
+            return Some(value);
+        }
         self.skip_whitespace_and_commas();
         if self.pos >= self.data.len() {
             return None;
@@ -112,6 +153,13 @@ impl<'a> PathDataParser<'a> {
     }
 
     fn parse_flag(&mut self) -> Option<bool> {
+        if self.numbers.is_some() {
+            return match self.parse_number()? {
+                0.0 => Some(false),
+                1.0 => Some(true),
+                _ => None,
+            };
+        }
         self.skip_whitespace_and_commas();
         if self.pos >= self.data.len() {
             return None;
@@ -130,6 +178,9 @@ impl<'a> PathDataParser<'a> {
     }
 
     fn at_number_start(&self) -> bool {
+        if let Some(numbers) = self.numbers {
+            return self.pos < numbers.len();
+        }
         if self.pos >= self.data.len() {
             return false;
         }

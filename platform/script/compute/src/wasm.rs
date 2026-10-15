@@ -71,6 +71,7 @@
 //! but host calls) and four-wide ([`simd`]: SIMD128, the
 //! NEON ×4 backend's masked SPMD over element-local kernels; see
 //! [`crate::spmd`]).
+use makepad_relax_api::relax_api;
 
 use crate::ir::{self, Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Ty, Un, Val};
 
@@ -78,6 +79,7 @@ mod simd;
 
 /// What the host's engine offers: how the module imports its memory, and
 /// whether its relaxed multiply-add is the fused one.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Target {
     /// A shared memory (a threaded host): the import must then name the
@@ -94,6 +96,7 @@ pub struct Target {
 
 /// One program of a module, and the form it is compiled in (a host builds
 /// one entry per kernel; a test may build both forms of a program).
+#[relax_api(plain)]
 pub struct Entry<'a> {
     pub program: &'a Program,
     /// Four elements per iteration (only element-local kernels whose

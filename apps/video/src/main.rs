@@ -1,5 +1,5 @@
 //! video: a dumb video player. `video <path>` opens one clip
-//! fit-to-window on a dark makepad_wm_theme background and plays it.
+//! fit-to-window on a system theme background and plays it.
 //! `video --preview <path>` sizes the window as a small popup instead —
 //! that is files' Quick Look.
 
@@ -21,7 +21,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1100, 700)
                 window.title: "video"
-                pass +: { clear_color: mod.mpv.bg }
+                pass +: { clear_color: mod.theme.color_bg_app }
                 body +: {
                     root := View{
                         width: Fill
@@ -43,7 +43,7 @@ script_mod! {
                             // The window background, not the transport
                             // bar's fill: the two strips sit next to each
                             // other and must not read as one.
-                            draw_bg +: { color: mod.mpv.bg }
+                            draw_bg +: { color: mod.theme.color_bg_app }
 
                             status := Label{
                                 width: Fill
@@ -51,7 +51,7 @@ script_mod! {
                                 text_overflow: TextOverflow.Ellipsis
                                 text: ""
                                 draw_text +: {
-                                    color: mod.mpv.fg
+                                    color: mod.theme.color_text
                                     text_style: theme.font_regular{font_size: 9}
                                 }
                             }
@@ -92,18 +92,8 @@ impl MatchEvent for App {
             }
         }
 
-        // Speakers: the clip's soundtrack, mixed from the decode queue.
-        cx.audio_output(0, move |info, output| {
-            output.zero();
-            makepad_app_video::player::mix_into(output, info.sample_rate);
-        });
-
-        // makepad_wm_theme::apply already retinted theme.color_bg_app and
-        // mod.widgets.Window.pass.clear_color from a theme.splash when one
-        // is exported; patch the pass clear color explicitly too so the
-        // letterbox around the picture is right either way.
-        {
-            let color = Palette::for_cx(cx).bg_vec4();
+        // Keep the pass clear colour in sync with the installed system theme.
+        if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
             let mut window = self.ui.window(cx, ids!(main_window));
             script_apply_eval!(cx, window, {
                 pass +: { clear_color: #(color) }
@@ -113,7 +103,7 @@ impl MatchEvent for App {
         self.preview = PreviewState::new(preview, path.as_deref());
 
         if let Some(mut player) = self.ui.widget(cx, ids!(player)).borrow_mut::<MpVideoView>() {
-            player.set_muted(muted);
+            player.set_muted(cx, muted);
             player.set_preview(preview);
             if let Some(path) = &path {
                 player.open(cx, path);
@@ -130,10 +120,6 @@ impl MatchEvent for App {
         }
     }
 
-    fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
-        cx.use_audio_outputs(&devices.default_output());
-    }
-
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
             // A raw downcast never matches a widget action: unwrap the
@@ -145,7 +131,6 @@ impl MatchEvent for App {
                 name,
                 width,
                 height,
-                fps,
                 position_secs,
                 duration_secs,
                 playing,
@@ -177,13 +162,13 @@ impl MatchEvent for App {
                         format!("vol {volume_pct}%")
                     };
                     format!(
-                        "{name}    {width}\u{00d7}{height}    {fps:.0} fps    {state}    {} / {}    {sound}",
+                        "{name}    {width}\u{00d7}{height}    {state}    {} / {}    {sound}",
                         format_time(position_secs),
                         format_time(duration_secs),
                     )
                 };
                 self.ui.label(cx, ids!(status)).set_text(cx, &text);
-                // Double-clicked into bare mode: the picture is the whole
+                // F switched to bare mode: the picture is the whole
                 // window, status line included.
                 self.ui.widget(cx, ids!(status_row)).set_visible(cx, !bare);
             }
@@ -231,7 +216,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);
         makepad_app_video::widget::script_mod(vm);
         self::script_mod(vm)

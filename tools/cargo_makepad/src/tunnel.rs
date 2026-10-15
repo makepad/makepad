@@ -1,6 +1,6 @@
 //! `cargo makepad tunnel`: the client of the makepad-remote tunnel server
-//! (tools/remote). TLS with a pinned server certificate and a per-box key;
-//! see makepad_network::tunnel and tools/remote/TUNNEL.md. The server is
+//! (libs/remote). TLS with a pinned server certificate and a per-box key;
+//! see makepad_network::tunnel and libs/remote/TUNNEL.md. The server is
 //! `makepad-remote --server`.
 
 use std::fs;
@@ -263,7 +263,7 @@ pub fn handle_tunnel(args: &[String]) -> Result<(), String> {
         return if args.is_empty() { Err("tunnel mode requires arguments".into()) } else { Ok(()) };
     }
     if args[0] == "--server" {
-        return Err("the tunnel server is `makepad-remote --server` (tools/remote)".into());
+        return Err("the tunnel server is `makepad-remote --server` (libs/remote)".into());
     }
     let addr = &args[0];
     let mut sync_files = true;

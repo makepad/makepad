@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use makepad_widgets::text::geom::Point;
-use makepad_widgets::text::rasterizer::RasterizedGlyph;
+use makepad_widgets::makepad_draw::shader::draw_text::PreparedGlyph;
 use makepad_widgets::*;
 
 use crate::session::Session;
@@ -318,7 +318,7 @@ pub enum MpTermAction {
 
 #[derive(Clone, Copy)]
 struct CachedGlyph {
-    rasterized: RasterizedGlyph,
+    glyph: PreparedGlyph,
     font_size_in_lpxs: f32,
     x_offset_in_lpxs: f32,
     y_offset_in_lpxs: f32,
@@ -402,6 +402,11 @@ pub struct MpTerm {
     pad_x: f64,
     #[live(4.0)]
     pad_y: f64,
+    /// Take the keyboard on the first draw (a terminal window wants it; a
+    /// host with other fields, like a docked panel, gives it on click or
+    /// through `take_key_focus`).
+    #[live(true)]
+    focus_on_first_draw: bool,
 
     #[rust]
     session: Option<Session>,
@@ -435,7 +440,7 @@ pub struct MpTerm {
     #[rust]
     glyph_cache: HashMap<(char, bool, u8), Option<CachedGlyph>>,
     #[rust]
-    glyph_cache_key: (u64, u64, u64),
+    glyph_cache_key: (u64, u64, u64, u64, u64),
     /// Lines scrolled back from the bottom (0 = live).
     #[rust]
     view_offset: usize,
@@ -470,6 +475,9 @@ pub struct MpTerm {
     presentation_frame: Option<TerminalPresentationFrame>,
     #[rust]
     style_colors: Option<(Rgb, Rgb)>,
+    /// The host theme's `color_terminal_cursor`, when it sets one.
+    #[rust]
+    style_cursor: Option<Rgb>,
     #[rust]
     original_colors: Option<([Rgb; 16], Rgb, Rgb)>,
     /// A viewer, not a shell: no key focus on first draw, no typing, paste,
@@ -502,16 +510,19 @@ impl ScriptHook for MpTerm {
             id!(inset),
             &[if retro { 2.0 } else { 0.0 }],
         );
-        self.style_colors = if desktop_style::current_name(vm).is_some_and(|s| s != "omarchy") {
-            makepad_wm_theme::current_for_vm(vm).and_then(|p| {
-                Some((
-                    parse_hex_rgb(p.get("term.foreground").or_else(|| p.get("foreground"))?)?,
-                    parse_hex_rgb(p.get("term.background").or_else(|| p.get("background"))?)?,
-                ))
-            })
-        } else {
-            None
+        let foreground = theme_tokens::color(vm, "color_terminal_text")
+            .or_else(|| theme_tokens::color(vm, "color_text"));
+        let background = theme_tokens::color(vm, "color_terminal_bg")
+            .or_else(|| theme_tokens::color(vm, "color_bg_app"));
+        let rgb = |color: Vec4f| {
+            let rgba = color.to_u32();
+            Rgb::new((rgba >> 24) as u8, (rgba >> 16) as u8, (rgba >> 8) as u8)
         };
+        self.style_colors = foreground.zip(background).map(|(fg, bg)| (rgb(fg), rgb(bg)));
+        self.style_cursor = theme_tokens::color(vm, "color_terminal_cursor").map(rgb);
+        if let (Some(session), Some(cursor)) = (&mut self.session, self.style_cursor) {
+            session.terminal.cursor_color = Some(cursor);
+        }
         if let (Some(session), Some((mut palette, fg, bg))) =
             (&mut self.session, self.original_colors)
         {
@@ -602,9 +613,19 @@ impl MpTerm {
         self.session.as_ref().map(Session::child_pid)
     }
 
+    /// Give this terminal the keyboard (after its first draw).
+    pub fn take_key_focus(&mut self, cx: &mut Cx) {
+        cx.set_key_focus(self.area);
+    }
+
     /// Whether keyboard input currently goes to this terminal's PTY area.
     pub fn has_input_focus(&self, cx: &Cx) -> bool {
         cx.has_key_focus(self.area)
+    }
+
+    /// The area that holds the keyboard when this terminal has it.
+    pub fn focus_area(&self) -> Area {
+        self.area
     }
 
     /// Rows currently painted in the widget, or the last `lines` rows of
@@ -742,6 +763,9 @@ impl MpTerm {
                     }
                 }
                 self.original_colors = Some((base16, fg, bg));
+                if session.terminal.cursor_color.is_none() {
+                    session.terminal.cursor_color = self.style_cursor;
+                }
                 if let Some((style_fg, style_bg)) = self.style_colors {
                     fg = style_fg;
                     bg = style_bg;
@@ -761,10 +785,18 @@ impl MpTerm {
     fn refresh_metrics(&mut self, cx: &mut Cx2d) {
         let font_size = self.font_size * self.presentation_font_scale;
         self.draw_text.text_style.font_size = font_size as f32;
+        // The atlas epoch moves when glyph slots are evicted or the atlas
+        // starts over: cached slots are void then.
+        // So does a font family taking a face it lacked (a lazy CJK or emoji
+        // face arriving): the missing-glyph boxes cached before are stale.
+        let epoch = cx.fonts.borrow().rasterizer().borrow().epoch();
+        let families = cx.fonts.borrow().family_generation();
         let key = (
             font_size.to_bits(),
             cx.current_dpi_factor().to_bits(),
             self.raster_scale().to_bits(),
+            epoch,
+            families,
         );
         if key != self.glyph_cache_key {
             self.glyph_cache.clear();
@@ -839,19 +871,22 @@ impl MpTerm {
                     1.0
                 };
                 let font_size = g.font_size_in_lpxs / scale;
-                let center_y = (-g.rasterized.origin_in_dpxs.y
-                    - g.rasterized.atlas_image_bounds.size.height as f32 * 0.5)
-                    * font_size
-                    / g.rasterized.dpxs_per_em;
+                let center_y = g.glyph.center_y_in_ems() * font_size;
                 CachedGlyph {
-                    rasterized: g.rasterized,
+                    glyph: g.glyph,
                     font_size_in_lpxs: font_size * fit,
                     x_offset_in_lpxs: (g.pen_x_in_lpxs + g.offset_x_in_lpxs) / scale * fit,
                     y_offset_in_lpxs: center_y * (1.0 - fit),
                 }
             })
         });
-        self.glyph_cache.insert((ch, bold, columns), cached);
+        // A miss or a glyph still on its way from an asynchronous rasterizer
+        // (an unresolved stand-in) is not kept: the rasterizer redraws
+        // everything when the glyph lands, and the next draw caches it.
+        let resolved = cached.is_some_and(|g| !g.glyph.is_pending());
+        if resolved {
+            self.glyph_cache.insert((ch, bold, columns), cached);
+        }
         cached
     }
 
@@ -1702,11 +1737,11 @@ impl MpTerm {
                     (g.x + glyph.x_offset_in_lpxs as f64) as f32,
                     (g.y + baseline) as f32 + glyph.y_offset_in_lpxs,
                 );
-                self.draw_text.draw_rasterized_glyph_abs(
+                self.draw_text.draw_prepared_glyph_abs(
                     cx,
                     point,
                     glyph.font_size_in_lpxs,
-                    glyph.rasterized,
+                    glyph.glyph,
                     color,
                 );
             }
@@ -1856,7 +1891,7 @@ impl Widget for MpTerm {
             self.took_focus = true;
             // Canvas hosts decide focus from actual input. Redrawing their
             // areas must still let the framework migrate an existing focus.
-            if self.canvas_ime_anchor.is_none() && !self.read_only {
+            if self.focus_on_first_draw && self.canvas_ime_anchor.is_none() && !self.read_only {
                 cx.set_key_focus(self.area);
             }
         }

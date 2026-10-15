@@ -64,11 +64,16 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-splash"}
     RunStudioRelease{name: "makepad-example-slides"}
     RunStudioRelease{name: "makepad-example-isolate"}
+    RunStudioRelease{name: "makepad-example-gl-interop"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-app-clock"}
     RunStudioRelease{name: "makepad-app-weather"}
+    RunStudioRelease{name: "makepad-app-translator"}
+    RunStudioRelease{name: "makepad-app-camera"}
+    RunStudioRelease{name: "makepad-app-amp"}
+    RunStudioRelease{name: "makepad-app-code"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-skeuomorph"}

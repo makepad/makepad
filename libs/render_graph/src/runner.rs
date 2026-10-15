@@ -101,6 +101,7 @@ struct HistorySlot {
 pub struct GraphRunner {
     /// The camera passes see (`self.ray_dir()`, `self.eye()`).
     view: Option<PassView>,
+    depth_from_view: bool,
     /// Frame pixels per output pixel (the host's supersampling; 0 = 1).
     px_scale: f32,
     /// A realtime preview draws the frame (`self.realtime()` is 1).
@@ -183,6 +184,14 @@ impl GraphRunner {
         self.view = view;
     }
 
+    /// Read depth through the view ([`GraphRunner::set_view`]) instead of a
+    /// perspective camera's terms (`FrameUniforms::camera`): the depth
+    /// buffer was drawn through any matrix. `view_depth_at(uv, z)` then
+    /// gives the distance along the view's forward axis. Off by default.
+    pub fn set_depth_from_view(&mut self, on: bool) {
+        self.depth_from_view = on;
+    }
+
     /// How many frame pixels one output pixel is (the host's supersampling
     /// factor; 1 by default). Passes read it, times their own scale, as
     /// `self.px_scale()`, so a line N output pixels wide stays N wide at
@@ -258,6 +267,8 @@ impl GraphRunner {
                 Some((f, _)) if *f == t.format => {}
                 _ => {
                     let tex = Texture::new_with_format(cx, t.format.texture_format());
+                    // every frame renders a graph target before it is read
+                    tex.set_transient(cx, true);
                     if i < self.targets.len() {
                         self.targets[i] = (t.format, tex);
                     } else {
@@ -335,6 +346,19 @@ impl GraphRunner {
             items.finish_recording();
         }
         self.last = Default::default();
+    }
+
+    /// Give every target's GPU storage back (history cold, recorded passes
+    /// dropped), for a host whose picture nothing reads for now. The
+    /// handles stay: the next run allocates them again.
+    pub fn release_targets(&mut self, cx: &mut Cx) {
+        self.reset_history(cx);
+        for (_, texture) in &self.targets {
+            texture.release(cx);
+        }
+        for h in &self.history {
+            h.twin.release(cx);
+        }
     }
 
     /// Whether any pass keeps history.
@@ -484,6 +508,7 @@ impl GraphRunner {
             let mode = history_ready + if self.realtime { 2.0 } else { 0.0 };
             dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, mode, pass_px]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
+            dv.set_uniform(cx.cx, live_id!(g_depth), &[if self.depth_from_view { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
             if let Some(v) = &self.view {
                 dv.set_uniform(cx.cx, live_id!(g_ivp), &v.inv_view_proj);
                 dv.set_uniform(cx.cx, live_id!(g_eye), &[v.eye[0], v.eye[1], v.eye[2], 1.0]);
@@ -559,13 +584,12 @@ mod tests {
             size: None,
             format: None,
             uniforms: Vec::new(),
-            pixel: "fn() -> vec4 { return self.color.sample(self.uv()) }".into(),
-            helpers: String::new(),
+            pixel: crate::pass::PassCode::Chain(2),
+            helpers: Vec::new(),
             history: false,
             outputs: Vec::new(),
             label: "Pass".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
         }
     }

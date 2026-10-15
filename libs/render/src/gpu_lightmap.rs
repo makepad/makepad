@@ -114,12 +114,7 @@ impl GpuLightmapMode {
     /// (Quest, phones, the web, GL fallbacks). `vendor` and `renderer` are
     /// the lower-cased GpuInfo strings.
     pub fn for_gpu(float16_blend_targets: bool, vendor: &str, renderer: &str) -> Self {
-        let mobile_target = cfg!(any(
-            target_os = "android",
-            target_os = "ios",
-            target_env = "ohos",
-            target_arch = "wasm32"
-        ));
+        let mobile_target = cfg!(any(target_os = "android", target_os = "ios", target_arch = "wasm32"));
         let mobile_gpu = vendor == "arm"
             || ["qualcomm", "adreno", "mali", "powervr", "imagination"]
                 .iter()
@@ -347,7 +342,7 @@ fn casters_reaching<'a>(slices: &'a [CasterSlice<'a>], casc: &'a crate::shadow_c
     slices.iter().flat_map(move |s| {
         let whole = std::iter::once((0, s.casters.len())).filter(move |_| s.blocks.is_empty());
         let blocks = s.blocks.iter()
-            .filter(move |b| cascade_overlaps(casc, b.min, b.max))
+            .filter(move |b| cascade_overlaps(casc, b.min, b.max) && crate::shadow_csm::cascade_sees(casc, b.min, b.max))
             .map(|b| (b.start as usize, b.end as usize));
         whole.chain(blocks).flat_map(move |(a, e)| s.casters[a..e].iter())
     })
@@ -1381,9 +1376,9 @@ impl GpuLightmapBaker {
         self.rt_us = 0;
     }
 
-    /// DEBUG (idempotence probe): re-bake every region of the CURRENT
-    /// layout into the CURRENT targets — no re-plan, no fresh textures.
-    /// This is the exact path the accumulator invariant is about.
+    /// Re-bake every region of the CURRENT layout into the CURRENT targets --
+    /// no re-plan, no fresh textures: the idempotence probe, and a replaced
+    /// GPU device (`Renderer::gpu_reset`), whose targets came back empty.
     pub fn debug_redirty(&mut self) {
         self.dirty = true;
     }
@@ -2854,7 +2849,7 @@ impl GpuLightmapBaker {
                 // upload-time registry below owns that lane in Realtime and
                 // carries every material layer rather than only layer zero.
                 for m in state.meshes.iter().take(state.region_mesh_count) {
-                    if !cascade_overlaps(casc, m.min, m.max) {
+                    if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) {
                         continue;
                     }
                     draws_n += 1;
@@ -2901,7 +2896,7 @@ impl GpuLightmapBaker {
             di.sun_rz = casc.rz;
             straddle.clear();
             for m in casters_reaching(static_casters, casc).filter(|m| m.cutout.is_none() && draws_in(m.band)) {
-                if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
+                if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
@@ -2937,7 +2932,7 @@ impl GpuLightmapBaker {
             dc.depth.sun_ry = casc.ry;
             dc.depth.sun_rz = casc.rz;
             for m in casters_reaching(cutouts, casc).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
-                if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
+                if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
@@ -2955,7 +2950,7 @@ impl GpuLightmapBaker {
                 // Rigid movers cull by their posed AABB. Morphed casters are
                 // never culled by a rest AABB (a posed limb can leave it);
                 // the GPU clips them.
-                if mv.morph.is_none() && (!cascade_overlaps(casc, *lo, *hi) || held(CasterBand::All, *lo, *hi)) {
+                if mv.morph.is_none() && (!cascade_overlaps(casc, *lo, *hi) || !crate::shadow_csm::cascade_sees(casc, *lo, *hi) || held(CasterBand::All, *lo, *hi)) {
                     continue;
                 }
                 draws_n += 1;
@@ -3010,7 +3005,7 @@ impl GpuLightmapBaker {
                 let half = (*hi - *lo) * 0.5;
                 let grow = half.x.max(half.y).max(half.z) + 0.25;
                 let grow = vec3f(grow, grow, grow);
-                if !cascade_overlaps(casc, *lo - grow, *hi + grow) {
+                if !cascade_overlaps(casc, *lo - grow, *hi + grow) || !crate::shadow_csm::cascade_sees(casc, *lo - grow, *hi + grow) {
                     continue;
                 }
                 if held(CasterBand::All, *lo - grow, *hi + grow) {

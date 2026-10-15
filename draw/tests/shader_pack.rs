@@ -3,7 +3,8 @@
 //! depend on what a process loaded before them; recording through `Cx`
 //! gives entries that install and are found by the same keys.
 
-use makepad_draw::makepad_platform::shader_pack::*;
+use makepad_draw::makepad_platform::shader_pack::verify_shader_pack_entry;
+use makepad_draw::makepad_script::shader_pack::{shader_pack_key, read_shader_pack, PackScopeSource};
 use makepad_draw::*;
 
 const LIBRARY: [&str; 4] = ["DrawQuad", "DrawColor", "DrawText", "DrawSvg"];
@@ -28,8 +29,8 @@ fn document(helper_body: &str) -> String {
 }
 
 fn eval(vm: &mut ScriptVm, file: &str, code: String) -> ScriptObject {
-    vm.bx.captured_errors = Some(Vec::new());
-    let value = vm.eval(ScriptMod { file: file.into(), code, ..Default::default() });
+    vm.capture_errors();
+    let value = vm.eval(ScriptMod::new("", "", &file, 0, 0, &code, &[]));
     let errors = vm.take_errors();
     assert!(errors.is_empty() && !value.is_err(), "{file} did not evaluate: {errors:?}");
     value.as_object().unwrap()
@@ -139,7 +140,7 @@ fn a_recorded_pack_installs_by_key() {
     );
     assert_eq!(cx.install_shader_pack(pack.clone()).unwrap(), entries.len());
     for entry in &entries {
-        assert_eq!(cx.draw_shaders.packs.entry(entry.key).as_ref(), Some(entry));
+        assert_eq!(cx.draw_shaders.packs.lookup(entry.key).entry(), Some(entry));
     }
     // Packs of another version, or not packs, are refused.
     assert!(cx.install_shader_pack(b"MPSP\x63\0\0\0".to_vec()).is_err());

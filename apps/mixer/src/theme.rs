@@ -1,89 +1,56 @@
-//! The desk's palette. wm exports its active `theme.splash` as
-//! MAKEPAD_WM_THEME_SPLASH; `makepad_wm_theme` line-scans it and retints the *stock*
-//! widgets, and this module carries the same colours to the three places the
-//! mixer paints itself:
-//!
-//!   * `mod.mpm.*` — read by `main.rs`'s own `script_mod!` (the window and
-//!     the search page);
-//!   * a one-line `let mp = {...}` preamble prepended to every surface layout
-//!     — a `Splash` body runs in its OWN isolate VM, which registers a FRESH
-//!     stock `mod.theme` and never sees `mod.mpm`, so a layout has to be
-//!     handed its colours (see [`Palette::splash_preamble`]);
-//!   * [`Palette::rgb3`], for the one colour `surface.rs` sets from Rust.
-//!
-//! It also applies the stock retint with these same values, because
-//! `makepad_wm_theme::apply` is a no-op when the WM is not running and that would
-//! otherwise leave the caption bar in the neutral stock theme above a black
-//! desk. Standalone runs get Tokyo Night, so the surface is dark and square
-//! either way.
+//! Mixer colours come from the active system theme. `mod.mpm` serves the
+//! app's Splash modules; the one-line `let mp = {...}` preamble carries the
+//! same token values into surface layout isolates.
 //!
 //! SAFETY: colours only. Nothing here can name an OSC address — see
 //! `makepad_app_mixer::safety`.
 
 use makepad_widgets::*;
 
-
-/// A palette entry: the name the DSL reads it by, the key in the WM's
-/// theme.splash, and the Tokyo Night fallback.
-///
-/// The meter and lamp hues live in the theme's terminal block — omarchy's
-/// base16 mapping is colour1 = red, 2 = green, 3 = yellow, 6 = cyan — because
-/// a desktop theme has no "signal is clipping" role of its own.
-const KEYS: &[(&str, &str, &str)] = &[
-    ("bg", "background", "#1a1b26"),
-    ("bg_dark", "darker_background", "#0e0e14"),
-    ("bg_light", "lighter_background", "#24283b"),
-    ("fg", "foreground", "#a9b1d6"),
-    ("fg_bright", "bright_foreground", "#c0caf5"),
-    ("fg_dim", "dark_foreground", "#565f89"),
-    ("muted", "muted", "#414868"),
-    ("accent", "accent", "#7aa2f7"),
-    ("red", "term.color1", "#f7768e"),
-    ("green", "term.color2", "#9ece6a"),
-    ("yellow", "term.color3", "#e0af68"),
-    ("cyan", "term.color6", "#449dab"),
+/// The layout's colour names and their system theme roles.
+const KEYS: &[(&str, &str)] = &[
+    ("bg", "color_bg_app"),
+    ("bg_dark", "color_bg_container"),
+    ("bg_light", "color_fg_app"),
+    ("fg", "color_text"),
+    ("fg_bright", "color_text_hover"),
+    ("fg_dim", "color_text_disabled"),
+    ("muted", "color_bevel_outset_2"),
+    ("accent", "color_focus"),
+    ("red", "color_error"),
+    ("green", "color_success"),
+    ("yellow", "color_warning"),
+    ("cyan", "color_info"),
 ];
 
-/// Every colour the mixer paints with, as `#rrggbb` strings.
+/// Every colour the mixer paints with, as `#rrggbbaa` strings.
 #[derive(Clone, Debug)]
 pub struct Palette {
-    /// `name` -> `#rrggbb`, in [`KEYS`] order.
+    /// `name` -> `#rrggbbaa`, in [`KEYS`] order.
     entries: Vec<(&'static str, String)>,
 }
 
 impl Palette {
-    /// Resolve against the owning Splash VM on each application/style reload.
+    /// Read the owning VM again on each application/style reload.
     pub fn for_vm(vm: &mut ScriptVm) -> Self {
-        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
-    }
-    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
-    #[cfg(test)]
-    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
-    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
-
-        let wm = palette;
-        Palette {
-            entries: KEYS
-                .iter()
-                .map(|(name, key, fallback)| {
-                    let hex = match &wm {
-                        Some(p) => p.hex(key, fallback),
-                        None => fallback.to_string(),
-                    };
-                    (*name, hex)
-                })
-                .collect(),
+        Self {
+            entries: KEYS.iter().map(|(name, role)| {
+                let color = theme_tokens::color(vm, role)
+                    .unwrap_or_else(|| panic!("missing system theme colour: {role}"));
+                (*name, format!("#{:08x}", color.to_u32()))
+            }).collect(),
         }
     }
 
-    /// One colour by its DSL name. Unknown names read magenta rather than
-    /// silently theme-shaped black.
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
+
+    /// One colour by its layout name.
     pub fn get(&self, name: &str) -> &str {
         self.entries
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, v)| v.as_str())
-            .unwrap_or("#ff00ff")
+            .expect("a known mixer colour role")
     }
 
     /// One colour as linear-ish rgb components, for the handful of places
@@ -114,10 +81,8 @@ impl Palette {
         format!("let mp = {{{}}}\n", body.join(", "))
     }
 
-    /// Publish `mod.mpm.*` for the app's own `script_mod!`, and retint the
-    /// stock widgets (the caption bar, the spinner) with the same palette.
-    /// Call once, after `makepad_widgets::script_mod` and `makepad_wm_theme::apply`,
-    /// and before this crate's own `script_mod`.
+    /// Publish `mod.mpm.*` after widget registration and before this crate's
+    /// modules, using the same token values as the isolate preamble.
     pub fn install(&self, vm: &mut ScriptVm) {
         let mut code = String::from("mod.mpm = {\n");
         for (name, hex) in &self.entries {
@@ -125,52 +90,8 @@ impl Palette {
         }
         code.push_str("}\n");
 
-        // `makepad_wm_theme::apply` only retints when the WM exported a palette;
-        // standalone that leaves the window chrome in the stock theme, which
-        // reads as a grey band above a Tokyo Night desk. Same keys, our
-        // fallbacks.
-        let c = |name: &str| self.get(name).to_string();
-        if !desktop_style::current_name(vm).is_some_and(|s|s!="omarchy") { code.push_str(&format!(
-            "mod.theme.color_b = {bg_dark}\n\
-             mod.theme.color_b_h = {bg_dark}00\n\
-             mod.theme.color_w = {fg_bright}\n\
-             mod.theme.color_w_h = {fg_bright}00\n\
-             mod.theme.color_bg_app = {bg}\n\
-             mod.theme.color_fg_app = {bg_light}\n\
-             mod.theme.color_bg_container = {bg_dark}\n\
-             mod.theme.color_text = {fg}\n\
-             mod.theme.color_text_hover = {fg_bright}\n\
-             mod.theme.color_text_muted = {fg_dim}\n\
-             mod.theme.color_focus = {accent}\n\
-             mod.theme.color_outset_active = {accent}\n\
-             mod.theme.color_ctrl_default = {bg_light}\n\
-             mod.theme.color_ctrl_hover = {muted}\n\
-             mod.theme.color_ctrl_active = {accent}\n\
-             mod.theme.color_ctrl_selected = {accent}\n\
-             mod.theme.color_app_caption_bar = {bg_dark}\n\
-             mod.theme.corner_radius = 0.0\n\
-             true\n",
-            bg = c("bg"),
-            bg_dark = c("bg_dark"),
-            bg_light = c("bg_light"),
-            fg = c("fg"),
-            fg_bright = c("fg_bright"),
-            fg_dim = c("fg_dim"),
-            muted = c("muted"),
-            accent = c("accent"),
-        ));
-
-        }
         code.push_str("true\n");
-        vm.eval(ScriptMod {
-            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-            module_path: "mixer_theme".to_string(),
-            file: "mixer_theme.splash".to_string(),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        });
+        vm.eval(ScriptMod::new(env!("CARGO_MANIFEST_DIR"), "mixer_theme", "mixer_theme.splash", 0, 0, &code, &[]));
         for e in vm.take_errors() {
             log!("mixer theme: {}", e);
         }
@@ -182,42 +103,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn standalone_falls_back_to_tokyo_night() {
-        let p = Palette::load();
-        // The WM is not running under `cargo test`, so every key is a
-        // fallback — and the fallbacks ARE wm's bundled tokyo-night.
-        assert_eq!(p.get("bg"), "#1a1b26");
-        assert_eq!(p.get("bg_dark"), "#0e0e14");
-        assert_eq!(p.get("accent"), "#7aa2f7");
-        assert_eq!(p.get("red"), "#f7768e");
-        assert_eq!(p.get("green"), "#9ece6a");
-        assert_eq!(p.get("yellow"), "#e0af68");
-        assert_eq!(p.get("cyan"), "#449dab");
-        // Nothing reads as neutral grey: every channel pair differs.
-        for (name, hex) in &p.entries {
-            let [r, g, b] = p.rgb3(name);
-            assert!(
-                (r - g).abs() > 0.001 || (g - b).abs() > 0.001,
-                "{name} = {hex} is a neutral grey"
-            );
-        }
-    }
-
-    #[test]
-    fn a_wm_palette_wins_over_every_fallback() {
-        // Both the top-level roles and the terminal hues come from the WM's
-        // own theme.splash when it is running.
-        let src = "mod.wm_theme = {\n    accent: #ff8800\n    background: #101010\n    term: {\n        color1: #123456\n    }\n}\n";
-        let wm = makepad_wm_theme::scan(src);
-        assert_eq!(wm.hex("accent", "#7aa2f7"), "#ff8800");
-        assert_eq!(wm.hex("term.color1", "#f7768e"), "#123456");
-        // ...and a key the theme omits still resolves.
-        assert_eq!(wm.hex("term.color6", "#449dab"), "#449dab");
-    }
-
-    #[test]
     fn the_layout_preamble_is_exactly_one_line() {
-        let p = Palette::load();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let p = Palette::for_cx(&mut cx);
         let pre = p.splash_preamble();
         assert_eq!(pre.lines().count(), 1, "preamble must stay one line: {pre}");
         assert!(pre.ends_with('\n'));
@@ -229,12 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_hex() {
-        let p = Palette::load();
-        let [r, g, b] = p.rgb3("bg_dark"); // #0e0e14
-        assert!((r - 14.0 / 255.0).abs() < 1e-6);
-        assert!((g - 14.0 / 255.0).abs() < 1e-6);
-        assert!((b - 20.0 / 255.0).abs() < 1e-6);
-        assert_eq!(p.get("nope"), "#ff00ff");
+    fn rgb_components_follow_the_system_tokens() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let p = Palette::for_vm(vm);
+            for (name, role) in KEYS {
+                let c = theme_tokens::color(vm, role).unwrap();
+                assert_eq!(p.rgb3(name), [c.x, c.y, c.z]);
+            }
+        });
     }
 }

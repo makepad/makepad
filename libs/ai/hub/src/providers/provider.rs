@@ -91,6 +91,10 @@ pub enum ProviderEvent {
     /// advertises lanes). Providers that know none of it never emit it, and
     /// no consumer may depend on it arriving.
     Serving(ServingFacts),
+    /// A tool's arguments while they are being written. This is the whole
+    /// JSON prefix, possibly incomplete; consumers may preview it but must
+    /// wait for `FunctionCall` before executing the tool.
+    FunctionCallPartial { call_id: String, name: String, partial_json: String },
     /// A native function call. `arguments` is the raw JSON string; the
     /// session parses it to an object and remains the security boundary.
     FunctionCall { call_id: String, name: String, arguments: String },

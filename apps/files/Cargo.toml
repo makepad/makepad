@@ -18,7 +18,6 @@ name = "makepad_app_files"
 path = "src/lib.rs"
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -36,7 +35,6 @@ chat = ["dep:makepad-ai-hub"]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-diskmap = { path = "../../libs/diskmap" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
 # The AI services wire: bounded read and confirmed mutation tools on the bus
 # (hosted port, id-correlated runner — see ai_service.rs).

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
+# The WM starts the AI hub as its own child and stops it when it ends
+# (apps/wm/src/hub_child.rs, settings ~/.makepad/wm/ai-hub.conf): restarting the
+# WM restarts the hub, and its chat model loads again (about a minute for a 27B).
 set -Eeuo pipefail
 if test -f /etc/makepad/wm.env; then
     set -a
     source /etc/makepad/wm.env
     set +a
 fi
-export MAKEPAD=linux_direct+vulkan
+export MAKEPAD=linux_direct
 export MAKEPAD_WM_ROOT=${MAKEPAD_WM_ROOT:-/home/arch/makepad}
 export CARGO_NET_OFFLINE=true
-export MAKEPAD_CEF_OFFLINE=1
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 cd "$MAKEPAD_WM_ROOT"
 if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then

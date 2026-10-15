@@ -13,7 +13,8 @@
 #![allow(dead_code)]
 
 use makepad_script_compute::ir::{self, Program};
-use makepad_script_compute::kernel::{compile_with, Access, Layout, K_BASE, K_COUNT, K_PARAMS, K_TIME};
+use makepad_script_compute::boundary::LayoutView;
+use makepad_script_compute::kernel::{compile_with, Access, K_BASE, K_COUNT, K_PARAMS, K_TIME};
 use makepad_script_compute::{wasm, Backend};
 
 pub const GUARD_WORDS: usize = 3;
@@ -121,12 +122,12 @@ pub fn layout(name: String, p: Program, parallel_safe: bool, ctx: &[u32], shared
 
 /// A kernel from Splash source over `n` elements: params at their
 /// defaults except `params`, inputs filled with a pattern, outputs zero.
-pub fn source_case(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f32)], time: f32, n: u32) -> Case {
+pub fn source_case(name: &str, src: &str, layouts: &[LayoutView<'_>], params: &[(&str, f32)], time: f32, n: u32) -> Case {
     source_case_with(name, src, layouts, params, time, n, &|_, _| {})
 }
 
 /// [`source_case`] with input buffer `k`'s words then given by `fill`.
-pub fn source_case_with(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f32)], time: f32, n: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
+pub fn source_case_with(name: &str, src: &str, layouts: &[LayoutView<'_>], params: &[(&str, f32)], time: f32, n: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
     source_case_spare(name, src, layouts, params, time, n, 0, fill)
 }
 
@@ -134,7 +135,7 @@ pub fn source_case_with(name: &str, src: &str, layouts: &[Layout], params: &[(&s
 /// than run (as a call over part of a larger run sees them: the words past
 /// the n elements must keep their contents).
 #[allow(clippy::too_many_arguments)]
-pub fn source_case_spare(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f32)], time: f32, n: u32, spare: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
+pub fn source_case_spare(name: &str, src: &str, layouts: &[LayoutView<'_>], params: &[(&str, f32)], time: f32, n: u32, spare: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
     let k = compile_with(src, layouts, Backend::Interp).unwrap_or_else(|e| panic!("{}: {:?}", name, e));
     let mut ctx = vec![0u32; k.ctx_words()];
     for (i, p) in k.params().iter().enumerate() {
@@ -173,7 +174,6 @@ pub fn source_case_spare(name: &str, src: &str, layouts: &[Layout], params: &[(&
             }
             (v, i > 0 && b.access != Access::Read)
         })
-        .chain(std::iter::once((vec![0u32; makepad_script_compute::kernel::CHUNK], true)))
         .collect();
     let name = if spare > 0 { format!("{} n={} spare {}", name, n, spare) } else { format!("{} n={}", name, n) };
     layout(name, k.program().clone(), k.parallel_safe, &ctx, k.shared_table(), &bufs, n)

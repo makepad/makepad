@@ -53,26 +53,16 @@ pub use makepad_network::{
 };
 
 pub(crate) fn wake_ui_event_loop() {
-    #[cfg(all(not(gpusim), target_os = "macos"))]
-    crate::os::apple::macos::macos_app::wake_event_loop();
-
-    #[cfg(all(not(gpusim), target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     unsafe {
         js_wake_ui();
     }
 
-    #[cfg(any(
-        gpusim,
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "android"
-    ))]
+    #[cfg(not(target_arch = "wasm32"))]
     crate::os::wake_ui_event_loop();
 }
 
-#[cfg(all(not(gpusim), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn js_wake_ui();
@@ -1280,7 +1270,16 @@ impl PoolInner {
         queue.wait_max_us.fetch_max(wait_us, Ordering::Relaxed);
         let lane = job.lane;
         let label = job.label;
+        // makepad inspect's timeline: the job is a span of work on this worker
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        let traced = ui_hang::relax_timeline::hooks().inspect(|h| (h.begin)(label.as_ptr(), label.len())).is_some();
         job.run(status);
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        if traced {
+            if let Some(h) = ui_hang::relax_timeline::hooks() {
+                (h.end)(label.as_ptr(), label.len());
+            }
+        }
         let run_us = ((Cx::monotonic_now() - started).max(0.0) * 1_000_000.0) as u64;
         queue.run_total_us.fetch_add(run_us, Ordering::Relaxed);
         queue.run_max_us.fetch_max(run_us, Ordering::Relaxed);

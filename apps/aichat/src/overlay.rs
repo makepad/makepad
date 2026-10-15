@@ -3,15 +3,14 @@
 //! `mod.widgets.AiChatOverlay{}` is what the Window's AI slot
 //! (`widgets/families/ai/src/ai_slot.rs`) instantiates by name on F10, and what the
 //! superbuild seats in its pane. It is a `View` with the panel in it and
-//! three duties around it: adopt the in-process service links the apps
-//! parked on `Cx` ([`PendingServiceLinks`]) into the panel's registry,
-//! send the lines the bridge asked to say ([`AiSlotRequests::say`]),
-//! and publish the transcript as JSON ([`AiTranscript`]) after each draw
-//! so `/ai/transcript` answers without touching a widget. The panel's
-//! Escape (an idle, empty composer) asks the slot to close.
+//! one duty around it (the panel shows the process's registry, which
+//! every port of the process joined when it opened): send the lines the
+//! bridge asked to say ([`AiSlotRequests::say`]). The panel itself
+//! publishes the transcript as JSON ([`AiTranscript`]) so `/ai/transcript`
+//! answers in every host without touching a widget. The panel's Escape (an
+//! idle, empty composer) asks the slot to close.
 
 use crate::panel::{AiChatPanel, AiChatPanelAction};
-use makepad_ai_services::port::PendingServiceLinks;
 use makepad_ai_services::state::{Entry, EngineState, Status, ToolStatus};
 use makepad_widgets::ai_slot::AiSlotRequests;
 use makepad_widgets::makepad_micro_serde::*;
@@ -48,6 +47,8 @@ struct TranscriptRow {
     title: String,
     status: String,
     note: String,
+    /// A tool call's argument JSON; empty for other rows.
+    args: String,
 }
 
 #[derive(SerJson)]
@@ -80,6 +81,7 @@ pub fn transcript_json(state: &EngineState) -> String {
                 title: String::new(),
                 status: String::new(),
                 note: String::new(),
+                args: String::new(),
             },
             Entry::Event(event) => TranscriptRow {
                 kind: "event".into(),
@@ -91,6 +93,7 @@ pub fn transcript_json(state: &EngineState) -> String {
                 } else {
                     format!("sub_id: {} · dropped: {}", event.sub_id, event.dropped)
                 },
+                args: String::new(),
             },
             Entry::Assistant { text, streaming } => TranscriptRow {
                 kind: "assistant".into(),
@@ -98,14 +101,16 @@ pub fn transcript_json(state: &EngineState) -> String {
                 title: String::new(),
                 status: if *streaming { "streaming".into() } else { "done".into() },
                 note: String::new(),
+                args: String::new(),
             },
             Entry::Tool(t) => {
                 let (status, note, text) = match &t.status {
                     ToolStatus::Confirm => ("confirm".to_string(), String::new(), String::new()),
                     ToolStatus::Running { note, permille } => ("running".to_string(), format!("{note} {permille}‰"), String::new()),
+                    ToolStatus::NotResponding { note, permille } => ("not responding".to_string(), format!("{note} {permille}‰"), String::new()),
                     ToolStatus::Done { outcome, note, text } => (outcome.slug().to_string(), note.clone(), text.clone()),
                 };
-                TranscriptRow { kind: "tool".into(), text, title: t.title.clone(), status, note }
+                TranscriptRow { kind: "tool".into(), text, title: t.title.clone(), status, note, args: t.args.clone() }
             }
             Entry::System { text } => TranscriptRow {
                 kind: "system".into(),
@@ -113,6 +118,7 @@ pub fn transcript_json(state: &EngineState) -> String {
                 title: String::new(),
                 status: String::new(),
                 note: String::new(),
+                args: String::new(),
             },
         })
         .collect();
@@ -132,52 +138,19 @@ pub struct AiChatOverlay {
     source: ScriptObjectRef,
     #[deref]
     view: View,
-    /// The state generation last published as JSON.
-    #[rust]
-    published: Option<u64>,
 }
 
 impl AiChatOverlay {
-    /// The transcript JSON, rewritten when the engine's state moved — on
-    /// every event as well as every draw, so a closed slot (no draws) still
-    /// answers `/ai/transcript` with the turn that finished behind it.
-    fn publish_transcript(&mut self, cx: &mut Cx) {
-        let json = self
-            .view
-            .widget(cx, ids!(panel))
-            .borrow::<AiChatPanel>()
-            .and_then(|panel| {
-                let state = panel.state()?;
-                if self.published == Some(state.generation) {
-                    return None;
-                }
-                Some((state.generation, transcript_json(state)))
-            });
-        if let Some((generation, json)) = json {
-            self.published = Some(generation);
-            cx.global::<AiTranscript>().json = json;
-        }
-    }
-
-    /// The links the apps parked and the lines the bridge asked for, into
-    /// the panel.
+    /// The lines the bridge asked to say, into the panel.
     fn adopt_requests(&mut self, cx: &mut Cx) {
-        let links = cx.global::<PendingServiceLinks>().take();
         let says = std::mem::take(&mut cx.global::<AiSlotRequests>().say);
-        if links.is_empty() && says.is_empty() {
+        if says.is_empty() {
             return;
         }
         let panel = self.view.widget(cx, ids!(panel));
         let Some(mut panel) = panel.borrow_mut::<AiChatPanel>() else {
             return;
         };
-        for link in links {
-            let label = link.manifest.label.clone();
-            match panel.registry().register(link, "in this window", None) {
-                Ok(endpoint) => log!("aichat: {label} joined in-process as {}", endpoint.as_str()),
-                Err(e) => log!("aichat: {label} refused: {e}"),
-            }
-        }
         for text in says {
             panel.say(cx, text);
         }
@@ -188,7 +161,6 @@ impl Widget for AiChatOverlay {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.adopt_requests(cx);
         self.view.handle_event(cx, event, scope);
-        self.publish_transcript(cx);
         if let Event::Actions(actions) = event {
             for action in actions {
                 if let Some(widget_action) = action.as_widget_action() {
@@ -202,11 +174,7 @@ impl Widget for AiChatOverlay {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let step = self.view.draw_walk(cx, scope, walk);
-        if step.is_done() {
-            self.publish_transcript(cx);
-        }
-        step
+        self.view.draw_walk(cx, scope, walk)
     }
 }
 
@@ -250,6 +218,7 @@ mod tests {
             status: ToolStatus::Done { outcome: ToolOutcome::Ok, note: "3 × 4".into(), text: "Sheet1, 3 rows".into() },
             preview: false,
             expanded: false,
+            card: None,
         }));
         state.generation = 7;
         let json = transcript_json(&state);

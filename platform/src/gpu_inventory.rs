@@ -35,14 +35,12 @@ pub struct GpuTextureEntry {
     pub width: usize,
     pub height: usize,
     pub mip_levels: usize,
-    /// Allocated GPU bytes as the backend reports them (Metal `allocatedSize`,
-    /// GL/D3D texel storage); `None` where the backend does not report.
+    /// Allocated GPU bytes as the backend reports them (the HAL ledger: Metal
+    /// `allocatedSize`, Vulkan / D3D / GL allocation sizes); `None` where the backend
+    /// does not report (WebGL).
     pub gpu_bytes: Option<u64>,
     /// Texel bytes computed from format, size and mip levels.
     pub texel_bytes: u64,
-    /// A slot reused for a new texture keeps the previous texture's GPU
-    /// storage here until the slot is released.
-    pub previous_bytes: u64,
     /// CPU pixels the texture still holds (a `Vec*` format's data).
     pub cpu_bytes: u64,
     /// Passes this texture is attached to (`<pass name>:color<i>`,
@@ -53,10 +51,9 @@ pub struct GpuTextureEntry {
 }
 
 impl GpuTextureEntry {
-    /// The best known GPU size: reported, else computed, plus the previous
-    /// allocation the slot still holds.
+    /// The best known GPU size: reported, else computed.
     pub fn bytes(&self) -> u64 {
-        self.gpu_bytes.unwrap_or(self.texel_bytes).saturating_add(self.previous_bytes)
+        self.gpu_bytes.unwrap_or(self.texel_bytes)
     }
     /// A display name: the first attachment, else the first sampling pass.
     pub fn name(&self) -> String {
@@ -80,8 +77,8 @@ pub struct GpuDrawListBuffers {
     /// Instance data the list holds on the CPU (recording and retained
     /// publication floats).
     pub instance_cpu_bytes: u64,
-    /// GPU instance buffer capacity (Metal: every buffer, pending copy and
-    /// spare of each item); `None` where the backend does not report.
+    /// GPU instance buffer bytes of the list's items (the HAL ledger); `None` where
+    /// the backend does not report (WebGL).
     pub instance_gpu_bytes: Option<u64>,
 }
 
@@ -98,7 +95,8 @@ pub struct GpuInventory {
     /// Physical instance buffer bytes the retained upload budget charges
     /// (every backing allocation incl. spares and pending retirement).
     pub retained_allocation_bytes: u64,
-    /// The device's own total (Metal `currentAllocatedSize`): every buffer,
+    /// The device's own total, where the HAL backend has one (Metal
+    /// `currentAllocatedSize`): every buffer,
     /// texture and heap the process holds on the GPU, including what no
     /// registry above sees (drawables, staging, pipeline state).
     pub device_allocated_bytes: Option<u64>,
@@ -165,21 +163,80 @@ fn texel_size(format: &TextureFormat) -> u64 {
     }
 }
 
-#[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
-fn draw_call_gpu_bytes(os: &crate::os::CxOsDrawCall) -> Option<u64> {
-    Some(os.inventory_bytes())
+/// What the backend measured: allocated bytes per texture, per draw list's instance buffers,
+/// of the geometry buffers, and the device's own total. On native targets this is the HAL's
+/// ledger of the session; a web build's WebGL measures nothing.
+#[derive(Default)]
+struct Measured {
+    #[cfg(not(target_arch = "wasm32"))]
+    textures: std::collections::HashMap<(u32, u32), u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    instances: std::collections::HashMap<usize, u64>,
+    geometry: Option<u64>,
+    device: Option<u64>,
 }
-#[cfg(not(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos"))))]
-fn draw_call_gpu_bytes(_os: &crate::os::CxOsDrawCall) -> Option<u64> {
-    None
-}
-#[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
-fn geometry_gpu_bytes(os: &crate::os::CxOsGeometry) -> Option<u64> {
-    Some(os.inventory_bytes())
-}
-#[cfg(not(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos"))))]
-fn geometry_gpu_bytes(_os: &crate::os::CxOsGeometry) -> Option<u64> {
-    None
+
+impl Measured {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn of(cx: &Cx) -> Self {
+        let session = cx.hal.frames.w.session();
+        let mut items = vec![makepad_hal::Allocation::default(); 256];
+        let mut found = makepad_hal::hal_allocations(session, &mut items);
+        if found.count as usize > items.len() {
+            items.resize(found.count as usize, makepad_hal::Allocation::default());
+            found = makepad_hal::hal_allocations(session, &mut items);
+        }
+        if !found.open {
+            return Self::default();
+        }
+        items.truncate((found.count as usize).min(items.len()));
+        let mut buffers = std::collections::HashMap::new();
+        let mut m = Self { device: found.has_device.then_some(found.device_allocated), ..Self::default() };
+        for item in &items {
+            if item.texture {
+                m.textures.insert((item.index, item.gen), item.bytes);
+            } else {
+                buffers.insert((item.index, item.gen), item.bytes);
+                if item.geometry {
+                    *m.geometry.get_or_insert(0) += item.bytes;
+                }
+            }
+        }
+        for (list, id) in cx.hal.frames.instance_buffers() {
+            if let Some(bytes) = buffers.get(&(id.index, id.gen)) {
+                *m.instances.entry(list).or_default() += bytes;
+            }
+        }
+        m
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn of(_cx: &Cx) -> Self {
+        Self::default()
+    }
+
+    /// The allocated GPU bytes of a pool texture, where the backend measured them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn texture(&self, cx: &Cx, id: TextureId) -> Option<u64> {
+        let hal = cx.hal.frames.texture_hal_id(id.0, id.generation())?;
+        self.textures.get(&(hal.index, hal.gen)).copied()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn texture(&self, _cx: &Cx, _id: TextureId) -> Option<u64> {
+        None
+    }
+
+    /// The GPU bytes of a draw list's instance buffers, where the backend measured them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn instances(&self, list: usize) -> Option<u64> {
+        Some(self.instances.get(&list).copied().unwrap_or(0))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn instances(&self, _list: usize) -> Option<u64> {
+        None
+    }
 }
 
 fn full_chain(width: usize, height: usize) -> usize {
@@ -191,6 +248,7 @@ impl Cx {
     /// Call `frame_completion_serial` first to collect finished retirements.
     pub fn gpu_inventory(&self) -> GpuInventory {
         let mut inv = GpuInventory::default();
+        let measured = Measured::of(self);
 
         // Pass attachments and the passes whose draw lists sample a texture.
         let slots = self.textures.0.pool.len();
@@ -227,18 +285,12 @@ impl Cx {
                 .and_then(|p| pass_names.get(p.0).cloned())
                 .unwrap_or_default();
             let mut buffers = GpuDrawListBuffers { draw_list: index, pass: pass.clone(), ..Default::default() };
-            let mut gpu = 0u64;
-            let mut gpu_known = false;
             for item in &list.draw_items.buffer {
                 if let Some(instances) = &item.instances {
                     buffers.instance_cpu_bytes += (instances.capacity() * 4) as u64;
                 }
                 if let Some(retained) = &item.retained_instances {
                     buffers.instance_cpu_bytes += (retained.float_len() * 4) as u64;
-                }
-                if let Some(bytes) = draw_call_gpu_bytes(&item.os) {
-                    gpu += bytes;
-                    gpu_known = true;
                 }
                 if let CxDrawKind::DrawCall(call) = &item.kind {
                     buffers.draw_calls += 1;
@@ -251,8 +303,8 @@ impl Cx {
                     }
                 }
             }
-            buffers.instance_gpu_bytes = gpu_known.then_some(gpu);
-            if buffers.instance_cpu_bytes > 0 || gpu > 0 {
+            buffers.instance_gpu_bytes = measured.instances(index);
+            if buffers.instance_cpu_bytes > 0 || buffers.instance_gpu_bytes.unwrap_or(0) > 0 {
                 inv.draw_lists.push(buffers);
             }
         }
@@ -261,18 +313,13 @@ impl Cx {
             let texture = &slot.item;
             let free = self.textures.0.is_free(index);
             let id = TextureId::from_pool_slot(index, slot.generation);
-            let gpu_bytes = self.texture_allocation_bytes(id);
-            let previous_bytes = texture
-                .previous_platform_resource
-                .as_ref()
-                .and_then(|os| os.allocated_bytes(self))
-                .unwrap_or(0);
+            let gpu_bytes = measured.texture(self, id);
             let (width, height) = texture.alloc.as_ref().map_or((0, 0), |a| (a.width, a.height));
             let cpu_bytes = texture.format.cpu_data_bytes() as u64;
-            if free && gpu_bytes.unwrap_or(0) == 0 && previous_bytes == 0 && texture.alloc.is_none() {
+            if free && gpu_bytes.unwrap_or(0) == 0 && texture.alloc.is_none() {
                 continue;
             }
-            if !free && texture.alloc.is_none() && gpu_bytes.unwrap_or(0) == 0 && previous_bytes == 0 && cpu_bytes == 0 {
+            if !free && texture.alloc.is_none() && gpu_bytes.unwrap_or(0) == 0 && cpu_bytes == 0 {
                 continue;
             }
             let mip_levels = match &texture.format {
@@ -308,22 +355,16 @@ impl Cx {
                 mip_levels,
                 gpu_bytes,
                 texel_bytes: texel_bytes * faces,
-                previous_bytes,
                 cpu_bytes,
                 attached_to: if free { Vec::new() } else { std::mem::take(&mut attached[index]) },
                 sampled_in: if free { Vec::new() } else { std::mem::take(&mut sampled[index]) },
             });
         }
-        inv.retired_texture_bytes = self
-            .textures
-            .1
-            .retired
-            .iter()
-            .map(|r| r.os.allocated_bytes(self).unwrap_or(r.bytes))
-            .sum();
+        #[cfg(target_arch = "wasm32")]
+        {
+            inv.retired_texture_bytes = self.textures.1.retired.iter().map(|r| r.bytes).sum();
+        }
 
-        let mut geometry_gpu = 0u64;
-        let mut geometry_gpu_known = false;
         for (index, slot) in self.geometries.0.pool.iter().enumerate() {
             if self.geometries.0.is_free(index) {
                 continue;
@@ -331,15 +372,24 @@ impl Cx {
             let g = &slot.item;
             inv.geometries += 1;
             inv.geometry_cpu_bytes += g.vertices.byte_len() as u64 + g.indices.capacity_bytes() as u64;
-            if let Some(bytes) = geometry_gpu_bytes(&g.os) {
-                geometry_gpu += bytes;
-                geometry_gpu_known = true;
-            }
         }
-        inv.geometry_gpu_bytes = geometry_gpu_known.then_some(geometry_gpu);
         inv.retained_allocation_bytes = self.draw_lists.1.allocations.bytes() as u64;
-        inv.device_allocated_bytes = self.device_allocated_bytes();
+        inv.geometry_gpu_bytes = measured.geometry;
+        inv.device_allocated_bytes = measured.device;
         inv
+    }
+
+    /// The GPU pipelines the backend built for this `Cx`'s draw shaders: on native targets the
+    /// HAL pipelines this client created (pick variants included), on the web the WebGL programs.
+    pub fn gpu_pipeline_count(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.hal.frames.pipeline_count()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.draw_shaders.os_shaders.len()
+        }
     }
 
     /// The live texture slots as (index, generation), cheaply: compare the
@@ -356,15 +406,4 @@ impl Cx {
             .collect()
     }
 
-    #[cfg(all(not(gpusim), target_os = "macos"))]
-    fn device_allocated_bytes(&self) -> Option<u64> {
-        use crate::makepad_objc_sys::{msg_send, sel, sel_impl};
-        let device = self.os.metal_device?;
-        Some(unsafe { msg_send![device, currentAllocatedSize] })
-    }
-
-    #[cfg(not(all(not(gpusim), target_os = "macos")))]
-    fn device_allocated_bytes(&self) -> Option<u64> {
-        None
-    }
 }

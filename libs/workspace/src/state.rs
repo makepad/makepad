@@ -143,9 +143,9 @@ impl RendererChoice {
 /// Every optional field may be absent from an older `settings.ron`.
 #[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
 pub struct Settings {
-    /// Style family id (`"macos"`, `"windows-2000"`, ...); `None` follows the
+    /// UI theme id (`"macos"`, `"windows-2000"`, ...); `None` follows the
     /// host OS family and native appearance where available.
-    pub style: Option<String>,
+    pub theme: Option<String>,
     /// Manual dark preference for an explicit family, or for a platform that
     /// cannot report its native appearance.
     pub dark: bool,
@@ -163,9 +163,12 @@ pub struct Settings {
     /// fitting a step's changed files into view (`None` = off, the fitting
     /// default).
     pub history_keep_zoom: Option<bool>,
-    /// The map colour theme identifier (`None` = `"default"`). The widget
-    /// style and dark preference above are the OS chrome; this is the map.
-    pub map_theme: Option<String>,
+    /// The 3D map look the user chose, by id (`None` or unknown = the look
+    /// linked to the widget theme above). The widget theme and dark
+    /// preference above are the OS chrome; this is the map.
+    pub look: Option<String>,
+    /// The Look tab's Adjust overrides (`key=value;...`, empty = none).
+    pub look_adjust: Option<String>,
     /// Experimental infinite zoom: a prepared map inside the glyph
     /// (`None` = off). Older settings files without the field stay off.
     pub infinite_zoom: Option<bool>,
@@ -188,6 +191,9 @@ pub struct RecentFolder {
     pub path: String,
     /// `makepad_platform::folder_access` bookmark bytes as lowercase hex.
     pub bookmark: Option<String>,
+    /// When it was last opened, in seconds since the Unix epoch (`None`:
+    /// an entry written before the time was kept).
+    pub opened: Option<u64>,
 }
 
 impl RecentFolder {
@@ -240,9 +246,9 @@ impl Settings {
     pub fn history_keep_zoom(&self) -> bool {
         self.history_keep_zoom.unwrap_or(false)
     }
-    /// The saved map theme identifier, `"default"` when unset.
-    pub fn map_theme(&self) -> &str {
-        self.map_theme.as_deref().unwrap_or("default")
+    /// The saved map look id, empty when unset (the look follows the theme).
+    pub fn look(&self) -> &str {
+        self.look.as_deref().unwrap_or("")
     }
     pub fn infinite_zoom(&self) -> bool {
         self.infinite_zoom.unwrap_or(true)
@@ -293,9 +299,19 @@ impl Settings {
             Some(bytes) => Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
             None => previous.and_then(|entry| entry.bookmark),
         };
-        entries.insert(0, RecentFolder { path, bookmark });
+        let opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs());
+        entries.insert(0, RecentFolder { path, bookmark, opened });
         entries.truncate(RECENT_FOLDERS);
         self.recent_folders = Some(entries);
+    }
+    /// Take `path` off the recent list (a folder that is gone).
+    pub fn forget_folder(&mut self, path: &str) {
+        let mut entries = self.recent_folders.take().unwrap_or_default();
+        entries.retain(|entry| entry.path != path);
+        self.recent_folders = (!entries.is_empty()).then_some(entries);
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -482,12 +498,12 @@ mod tests {
     fn settings_without_renderer_still_load() {
         // a settings.ron written before the Renderer row existed
         let old = Settings::deserialize_ron(
-            "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: false)",
+            "(theme: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: false)",
         )
         .unwrap();
         assert_eq!(old.renderer, None);
         assert_eq!(old.renderer(), None);
-        assert_eq!(old.style.as_deref(), Some("macos"));
+        assert_eq!(old.theme.as_deref(), Some("macos"));
         assert_eq!(old.code_indent_cells(), 3);
         assert!(!old.map_tiles());
         assert!(old.infinite_zoom());
@@ -539,7 +555,7 @@ mod tests {
     #[test]
     fn settings_without_export_width_load_with_the_default() {
         // a settings file written before the print export existed
-        let old = "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
+        let old = "(theme: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
         let s = Settings::deserialize_ron(old).unwrap();
         assert_eq!(s.export_width, None);
         assert_eq!(s.export_width(), 4096);
@@ -556,14 +572,15 @@ mod tests {
         assert_eq!(Settings::load(&dir), Settings::default());
         assert_eq!(Settings::deserialize_ron("(dark: false)").unwrap().code_indent_cells(), 2);
         let s = Settings {
-            style: Some("windows-2000".into()),
+            theme: Some("windows-2000".into()),
             dark: true,
             architecture_indent_cells: Some(2),
             map_tiles: Some(false),
             renderer: None,
             export_width: Some(8192),
             history_keep_zoom: None,
-            map_theme: None,
+            look: None,
+            look_adjust: None,
             infinite_zoom: None,
             tab_width: None,
             map_hidden: None,

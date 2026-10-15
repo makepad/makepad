@@ -1,4 +1,4 @@
-// Shader runtime types for gpusim/JIT rendering
+// Shader runtime types for Rust shader validation
 // These types mirror GPU shader primitives for CPU-side evaluation
 
 use crate::math_f32::*;

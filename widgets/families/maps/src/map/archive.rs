@@ -136,6 +136,19 @@ pub struct ReadCompletion {
     pub result: Result<Arc<[u8]>, String>,
 }
 
+/// The read error of a cache-only source asked for bytes its disk cache does
+/// not hold. The archive turns it into [`TileBytesResult::Missing`]: the map
+/// shows no data there, and nothing retries or waits on a network.
+pub const NOT_CACHED: &str = "not in the offline map cache";
+
+fn read_error_result(error: &str) -> TileBytesResult {
+    if error == NOT_CACHED {
+        TileBytesResult::Missing
+    } else {
+        TileBytesResult::Error(error.to_string())
+    }
+}
+
 pub trait ByteSource {
     fn request_root(&mut self, cx: &mut Cx, token: ReadToken);
     fn request_range(
@@ -155,6 +168,9 @@ pub trait ByteSource {
     }
     /// Ceiling for the source's in-memory caches; a ceiling, not a target.
     fn set_cache_budget(&mut self, _bytes: usize) {}
+    /// Cache-only: answer from what is already on disk and never touch
+    /// the network (a source with no network ignores it).
+    fn set_cache_only(&mut self, _on: bool) {}
     fn flush(&mut self, _cx: &mut Cx) {}
     fn cancel(&mut self, cx: &mut Cx, token: ReadToken);
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion>;
@@ -478,6 +494,8 @@ struct CachedHttpRange {
 pub struct HttpRangeByteSource {
     root_url: String,
     disk_cache: Option<ArchiveCacheStore>,
+    /// Misses answer [`NOT_CACHED`] at once instead of fetching.
+    cache_only: bool,
     requests: HashMap<LiveId, HttpNetworkRead>,
     queued: Vec<PendingHttpRead>,
     ready: VecDeque<ReadCompletion>,
@@ -506,6 +524,7 @@ impl HttpRangeByteSource {
         Self {
             root_url: root_url.into().trim_end_matches('/').to_string(),
             disk_cache,
+            cache_only: false,
             requests: HashMap::new(),
             queued: Vec::new(),
             ready: VecDeque::new(),
@@ -820,6 +839,10 @@ impl ByteSource for HttpRangeByteSource {
         self.evict_ranges_to_budget();
     }
 
+    fn set_cache_only(&mut self, on: bool) {
+        self.cache_only = on;
+    }
+
     fn request_root(&mut self, cx: &mut Cx, token: ReadToken) {
         if let Some(bytes) = self.root_cache.as_ref() {
             self.ready.push_back(ReadCompletion {
@@ -840,6 +863,14 @@ impl ByteSource for HttpRangeByteSource {
             self.ready.push_back(ReadCompletion {
                 token,
                 result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if self.cache_only {
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Err(NOT_CACHED.to_string()),
             });
             cx.redraw_all();
             return;
@@ -904,6 +935,14 @@ impl ByteSource for HttpRangeByteSource {
             self.ready.push_back(ReadCompletion {
                 token,
                 result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if self.cache_only {
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Err(NOT_CACHED.to_string()),
             });
             cx.redraw_all();
             return;
@@ -1285,6 +1324,15 @@ pub struct TileArchive<S: ByteSource> {
 }
 
 impl<S: ByteSource> TileArchive<S> {
+    /// See [`ByteSource::set_cache_only`]. Turning it off forgets a root
+    /// that was missing from the cache, so the next tile asks again.
+    pub fn set_cache_only(&mut self, on: bool) {
+        self.source.set_cache_only(on);
+        if !on {
+            self.root_error = None;
+        }
+    }
+
     pub fn new(source: S, workers: ArchiveWorkerPool) -> Self {
         Self {
             source,
@@ -1876,7 +1924,7 @@ budget; kept {} entries for tile ids {}..={}",
             {
                 let result = match &result {
                     Ok(bytes) => TileBytesResult::Bytes(bytes.clone()),
-                    Err(error) => TileBytesResult::Error(error.clone()),
+                    Err(error) => read_error_result(error),
                 };
                 self.finish(key, generation, result);
             }
@@ -1940,7 +1988,7 @@ budget; kept {} entries for tile ids {}..={}",
             .map(|(key, _)| *key)
             .collect();
         for key in keys {
-            self.finish(key, generation, TileBytesResult::Error(error.clone()));
+            self.finish(key, generation, read_error_result(&error));
         }
     }
 
@@ -2098,6 +2146,14 @@ impl MapTileArchive {
         match self {
             Self::File(archive) => archive.zoom_range(),
             Self::Http(archive) => archive.zoom_range(),
+        }
+    }
+
+    /// A hosted archive reads only its disk cache while on; a local file
+    /// archive is unaffected.
+    pub fn set_cache_only(&mut self, on: bool) {
+        if let Self::Http(archive) = self {
+            archive.set_cache_only(on);
         }
     }
 
@@ -2558,6 +2614,54 @@ mod tests {
             source.disk_cache.as_mut().unwrap().read_range(2, 10, 4).as_deref(),
             Some(b"good".as_slice())
         );
+    }
+
+    #[test]
+    fn cache_only_source_serves_the_disk_cache_and_never_fetches() {
+        let directory = TestCacheDir::new("cache-only");
+        let url = "https://tiles.invalid/offline.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_range(1, 0, b"held").unwrap();
+        let mut source = HttpRangeByteSource::new_with_disk_cache(url, Some(cache));
+        source.set_cache_only(true);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let held = next_archive_task_token();
+        let absent = next_archive_task_token();
+        let root = next_archive_task_token();
+        source.request_range(&mut cx, 1, 0, 4, held, 0, None);
+        source.request_range(&mut cx, 1, 100, 4, absent, 0, None);
+        source.request_root(&mut cx, root);
+        source.flush(&mut cx);
+        assert!(source.requests.is_empty() && source.queued.is_empty(), "cache-only fetched");
+        let done = source.poll(&mut cx, &Event::Signal);
+        let result = |token| done.iter().find(|done| done.token == token).unwrap().result.clone();
+        assert_eq!(result(held).unwrap().as_ref(), b"held");
+        assert_eq!(result(absent).unwrap_err(), NOT_CACHED);
+        assert_eq!(result(root).unwrap_err(), NOT_CACHED);
+    }
+
+    #[test]
+    fn a_cache_only_archive_without_its_root_answers_missing_tiles() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let workers = new_archive_worker_pool(&mut cx);
+        let mut archive = MapTileArchive::http("https://tiles.invalid/never-cached.mkmap", workers);
+        archive.set_cache_only(true);
+        let key = TileKey { z: 3, x: 1, y: 2 };
+        archive.request_tile(&mut cx, key, 1, 0);
+        archive.flush(&mut cx);
+        assert_eq!(archive.source_request_count(), 0);
+        let mut tiles = Vec::new();
+        for _ in 0..20 {
+            tiles.extend(archive.drain(&mut cx, &Event::Signal));
+            if !tiles.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].key, key);
+        assert!(matches!(tiles[0].result, TileBytesResult::Missing));
+        assert_eq!(archive.source_request_count(), 0);
     }
 
     #[test]

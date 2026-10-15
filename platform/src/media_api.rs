@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use crate::{
     audio::{AudioBuffer, AudioDeviceId, AudioInfo, AudioInputFn, AudioInputOptions, AudioOutputFn},
     midi::*,
@@ -34,6 +35,9 @@ pub trait CxMediaApi {
     where
         F: FnMut(AudioInfo, &AudioBuffer) + Send + 'static,
     {
+        // runs on the device's real-time thread: under Relax compiled now, not on its first call
+        #[cfg(relax)]
+        std::relax::realtime(&f);
         self.audio_input_box(index, Box::new(f))
     }
 
@@ -46,15 +50,24 @@ pub trait CxMediaApi {
     /// in the app's closure costs that closure and its buffer, not the
     /// device thread it was called from. The taps are fed either way, so a
     /// recording keeps its place through a fault rather than ending at it.
+    #[relax(O3, always)]
     fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
+        // The app's closure and this seam run on the device's real-time thread: under Relax
+        // everything they reach is compiled now, never on a first call there (a stall the
+        // device plays as a glitch).
+        #[cfg(relax)]
+        std::relax::realtime(&*f);
         let mut fenced = crate::audio_output_fence::FencedOutput::new(index, f);
-        self.audio_output_box_os(
-            index,
-            Box::new(move |info, buffer| {
-                fenced.call(info, buffer);
-                crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
-            }),
-        )
+        let mut meter = crate::audio_deadline::DeadlineMeter::new("output");
+        let seam = move |info: AudioInfo, buffer: &mut AudioBuffer| {
+            let t0 = std::time::Instant::now();
+            fenced.call(info, buffer);
+            crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
+            meter.block(buffer.frame_count(), info.sample_rate, t0.elapsed());
+        };
+        #[cfg(relax)]
+        std::relax::realtime(&seam);
+        self.audio_output_box_os(index, Box::new(seam))
     }
 
     /// Backend-implemented half of [`Self::audio_output_box`]. Apps call the
@@ -159,6 +172,31 @@ pub trait CxMediaApi {
     }
 
     fn use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]);
+
+    /// The cameras the platform has listed so far (None: not listed yet). The list also arrives as
+    /// `Event::VideoInputs`, once when capture is first used and again when it changes; a reader that
+    /// starts later (a deck opened a second time) asks here instead of waiting for an event that
+    /// does not come again.
+    fn video_inputs(&self) -> Option<Vec<VideoInputDesc>> {
+        None
+    }
+
+    /// Open the camera `input` in `index` at `format` without streaming it:
+    /// the device is held (and its format fixed) but captures nothing and
+    /// its light stays off. Returns the format the device agreed to. Unlike
+    /// `use_video_input`, other slots are left alone.
+    fn video_input_open(&mut self, _index: usize, _input: VideoInputId, _format: VideoFormatId) -> Result<VideoFormat, String> {
+        Err("camera slots are not supported on this platform".into())
+    }
+
+    /// Start or stop streaming the camera open in `index`. When this
+    /// returns with `on == false`, no more frames are delivered.
+    fn video_input_stream(&mut self, _index: usize, _on: bool) -> Result<(), String> {
+        Err("camera slots are not supported on this platform".into())
+    }
+
+    /// Close the camera open in `index`.
+    fn video_input_close(&mut self, _index: usize) {}
 }
 
 /// The seam where an app's output closure is wrapped: the fence, then the

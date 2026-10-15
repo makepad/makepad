@@ -248,40 +248,20 @@ mod platform {
 mod platform {
     use super::{facts_from_bytes, RamFacts};
 
-    type Bool = i32;
-
-    /// `MEMORYSTATUSEX` (sysinfoapi.h).
-    #[repr(C)]
-    #[derive(Default)]
-    struct MemoryStatusEx {
-        dw_length: u32,
-        dw_memory_load: u32,
-        ull_total_phys: u64,
-        ull_avail_phys: u64,
-        ull_total_page_file: u64,
-        ull_avail_page_file: u64,
-        ull_total_virtual: u64,
-        ull_avail_virtual: u64,
-        ull_avail_extended_virtual: u64,
-    }
-
-    const _: () = assert!(std::mem::size_of::<MemoryStatusEx>() == 64);
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> Bool;
-    }
+    use makepad_windows_sys::Win32::System::SystemInformation::{
+        GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
 
     pub(super) fn query_ram() -> Option<RamFacts> {
-        let mut status = MemoryStatusEx {
-            dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
-            ..MemoryStatusEx::default()
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..MEMORYSTATUSEX::default()
         };
         // SAFETY: one MEMORYSTATUSEX we own with dwLength set as required.
-        if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        if unsafe { GlobalMemoryStatusEx(&mut status) }.is_err() {
             return None;
         }
-        facts_from_bytes(status.ull_total_phys, status.ull_avail_phys)
+        facts_from_bytes(status.ullTotalPhys, status.ullAvailPhys)
     }
 }
 

@@ -95,12 +95,20 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     let src_paths = [
         manifest_dir.join("kernels/affine.cu"),
         manifest_dir.join("kernels/diffusion_ops.cu"),
+        manifest_dir.join("kernels/gather.cu"),
+        manifest_dir.join("kernels/sequence_ops.cu"),
+        manifest_dir.join("kernels/launch_profile.cu"),
+        manifest_dir.join("kernels/q8.cu"),
+        manifest_dir.join("kernels/sampling.cu"),
         manifest_dir.join("kernels/gated_delta_net.cu"),
         manifest_dir.join("kernels/kquants.cu"),
         manifest_dir.join("kernels/llm/kernels.cu"),
         manifest_dir.join("kernels/nvfp4.cu"),
         manifest_dir.join("kernels/nvfp4_mmq.cu"),
         manifest_dir.join("kernels/ops.cu"),
+        manifest_dir.join("kernels/q8_dense.cu"),
+        manifest_dir.join("kernels/whisper_enc.cu"),
+        manifest_dir.join("kernels/kokoro_ops.cu"),
         manifest_dir.join("kernels/paint_extras.cu"),
         manifest_dir.join("kernels/rife.cu"),
         manifest_dir.join("kernels/roformer.cu"),
@@ -113,6 +121,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         println!("cargo:rerun-if-changed={}", src_path.display());
     }
     rerun_if_changed_tree(&manifest_dir.join("kernels/llm"));
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("kernels/launch_profile.cuh").display());
 
     let Some(cuda_root) = cuda_root(target_os) else {
         cuda_unavailable(require_cuda, "CUDA toolkit root not found");

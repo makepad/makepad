@@ -86,7 +86,7 @@ pub fn param(kit: &str, param: &str) -> Option<KitParam> {
 }
 
 /// The kits' Splash source for the host module `module` (for example
-/// `mod.m3`), setting defaults on `module.<Name>` and defining
+/// `mod.scene`), setting defaults on `module.<Name>` and defining
 /// `module.kit_<kind>`: all of them, or only the kinds in `only` (a host
 /// that has its own node of the same name leaves that kit out).
 pub fn kit_source(module: &str, only: Option<&[&str]>) -> String {
@@ -144,9 +144,9 @@ $M.BloomTent = {
 #[cfg(feature = "gpu")]
 pub fn install_filters(vm: &mut makepad_draw::ScriptVm) -> Vec<String> {
     use makepad_draw::*;
-    vm.bx.captured_errors = Some(Vec::new());
+    vm.capture_errors();
     let code = format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{}true\n", FILTERS.replace("$M", "mod.draw"));
-    let v = vm.eval(ScriptMod { file: "graph://filters".into(), code, ..Default::default() });
+    let v = vm.eval(ScriptMod::new("", "", "graph://filters", 0, 0, &code, &[]));
     let mut errors = vm.take_errors();
     if v.is_err() && errors.is_empty() {
         errors.push("the graph's filters did not evaluate".into());
@@ -497,14 +497,16 @@ $M.kit_lut = fn(p) {
 // ---------------------------------------------------------------- DepthOfField
 // A thin lens: circle of confusion from the view distance against `focus`
 // (metres), `aperture` its size (pixels at 1080p for something at
-// infinity), capped at `max_blur` (pixels at 1080p). A full-resolution
+// infinity), capped at `max_blur` (pixels at 1080p); `range` the in-focus
+// band, the defocus |1 - focus / distance| below which nothing blurs (the
+// blur grows from its edge). A full-resolution
 // gather of 24 taps on a disc, each tap counted where its own blur reaches
 // this pixel and never beyond this pixel's own (a blurred background does
 // not bleed over a sharp foreground, and what is in focus stays sharp).
-$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16}
+$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16 range: 0}
 $M.kit_dof = fn(p) {
     return [
-        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
+        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur range: p.range}
             pixel: fn() -> vec4 {
                 let px = self.size().y / 1080.0
                 let f = max(self.focus, 0.001)
@@ -512,9 +514,9 @@ $M.kit_dof = fn(p) {
                 var z0 = 100000.0
                 let d0 = self.depth.sample_nearest(self.uv()).x
                 if d0 < 0.99999 {
-                    z0 = self.view_depth(d0)
+                    z0 = self.view_depth_at(self.uv(), d0)
                 }
-                let c0 = min(abs(1.0 - f / max(z0, 0.001)) * self.aperture * px, maxb)
+                let c0 = min(max(abs(1.0 - f / max(z0, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                 var sum = self.color.sample_nearest(self.uv())
                 var wsum = 1.0
                 for k in 0..24 {
@@ -524,9 +526,9 @@ $M.kit_dof = fn(p) {
                     var z = 100000.0
                     let d = self.depth.sample_nearest(suv).x
                     if d < 0.99999 {
-                        z = self.view_depth(d)
+                        z = self.view_depth_at(suv, d)
                     }
-                    let sc = min(abs(1.0 - f / max(z, 0.001)) * self.aperture * px, maxb)
+                    let sc = min(max(abs(1.0 - f / max(z, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                     let reach = min(sc, c0 + 0.25)
                     let w = clamp(reach - r + 0.5, 0.0, 1.0)
                     sum = sum + self.color.sample_nearest(suv) * w

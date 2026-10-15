@@ -7,7 +7,10 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 const DOC: &str = "
@@ -26,7 +29,7 @@ let o = {k: 1}
 ";
 
 fn eval(vm: &mut ScriptVm) -> ScriptObject {
-    let v = vm.eval(ScriptMod { file: "object_ops".into(), code: DOC.into(), ..Default::default() });
+    let v = vm.eval(ScriptMod::new("", "", "object_ops", 0, 0, &DOC, &[]));
     v.as_object().expect("the document is an object")
 }
 
@@ -65,7 +68,7 @@ fn without_a_hook_object_arithmetic_stays_nan() {
 #[test]
 fn a_hook_gives_object_arithmetic_a_meaning_and_nothing_else() {
     let vm = &mut test_vm();
-    vm.bx.object_op_hook = Some(hook);
+    vm.set_object_op_hook(Some(hook));
     let o = eval(vm);
     let n = |name: &str| field(vm, o, name).as_number();
     assert_eq!(n("add"), Some(1003.0));

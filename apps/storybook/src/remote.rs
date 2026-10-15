@@ -59,7 +59,7 @@ fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), Stri
     // The rebuild runs the story file again under reload, as the live edit
     // would, so widgets that guard their state on `is_reload` behave alike.
     cx.live_edit_capture_begin();
-    cx.with_vm(|vm| vm.bx.is_reload = true);
+    cx.with_vm(|vm| vm.set_reload(true));
     let rebuilt = match canvas.borrow_mut::<crate::canvas::StoryCanvas>() {
         Some(mut canvas) => {
             canvas.rebuild(cx);
@@ -67,7 +67,7 @@ fn design_preview(cx: &mut Cx, file: &str, text: &str) -> Option<Result<(), Stri
         }
         None => false,
     };
-    cx.with_vm(|vm| vm.bx.is_reload = false);
+    cx.with_vm(|vm| vm.set_reload(false));
     cx.live_edit_capture_end();
     log!(
         "storybook: design preview of {} (override {}, canvas {})",

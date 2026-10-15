@@ -31,7 +31,8 @@ mod wasm_case;
 
 use kernel_gen::*;
 use makepad_script_compute::ir::{self, Block, Program, Region, Regions, Stmt};
-use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::FieldTy;
 use makepad_script_compute::wasm;
 use std::collections::BTreeMap;
 use wasm_case::*;
@@ -193,17 +194,14 @@ fn minimize(mut p: Program, s: &Setup, regions: &Regions, dir: &std::path::Path,
     }
 }
 
-fn segment() -> Layout {
-    Layout {
-        name: "Segment".into(),
-        stride: 11,
-        fields: vec![
-            LayoutField { name: "a".into(), ty: FieldTy::Vec3, offset: 0 },
-            LayoutField { name: "b".into(), ty: FieldTy::Vec3, offset: 3 },
-            LayoutField { name: "color".into(), ty: FieldTy::Vec4, offset: 6 },
-            LayoutField { name: "width".into(), ty: FieldTy::F32, offset: 10 },
-        ],
-    }
+fn segment() -> LayoutView<'static> {
+    const FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "a", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "b", ty: FieldTy::Vec3, offset: 3 },
+        LayoutFieldView { name: "color", ty: FieldTy::Vec4, offset: 6 },
+        LayoutFieldView { name: "width", ty: FieldTy::F32, offset: 10 },
+    ];
+    LayoutView { name: "Segment", stride: 11, fields: FIELDS }
 }
 
 /// The plate kernels' params (as the kernel bench sets them).

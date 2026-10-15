@@ -122,7 +122,7 @@ impl ScriptHook for CachedWidget {
 
         // Try to retrieve the widget from the global cache.
         // Each heap has its own singletons, so isolates never share widgets with the app or each other.
-        let key = (vm.bx.heap.heap_key(), self.template_id);
+        let key = (vm.heap_key(), self.template_id);
         let cx = vm.cx_mut();
         if let Some(widget) = cx
             .get_global::<WidgetWrapperCache>()

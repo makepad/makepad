@@ -11,12 +11,16 @@ default = []
 g2p = ["dep:makepad-ai-speech"]
 # sing_eval: held-out word error rate through our speech recogniser.
 eval = ["g2p", "makepad-ai-speech/whisper"]
+# The DiT voice (score-native flow-matching DiT + Vocos vocoder) on the
+# device tensor surface: `dit::CantorDit`, the `cantor_dit` tool.
+dit = ["dep:makepad-ai-common", "g2p"]
 
 [dependencies]
 # The matmul gateway: Metal on macOS, cuBLAS on Linux with the CUDA store,
 # None elsewhere (the CPU loops in nn.rs are the reference).
 makepad-ai-metal = { path = "../../metal", features = ["metal-precompile"] }
 makepad-ai-speech = { path = "../speech", default-features = false, features = ["kokoro"], optional = true }
+makepad-ai-common = { path = "../common", optional = true }
 
 # The device-resident training backend (nn_gpu.rs): the CUDA store's
 # training kernels. Linux/Windows only, like the store itself.
@@ -40,3 +44,12 @@ required-features = ["g2p"]
 name = "sing_eval"
 path = "src/bin/sing_eval.rs"
 required-features = ["eval"]
+
+[[bin]]
+name = "cantor_dit"
+path = "src/bin/cantor_dit.rs"
+required-features = ["dit"]
+
+[[test]]
+name = "dit_parity"
+required-features = ["dit"]

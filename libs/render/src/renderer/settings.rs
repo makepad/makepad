@@ -86,6 +86,11 @@ impl Renderer {
     /// and exposure textures. `texels` is the scene target in pixels.
     pub fn bind_composite(&self, draw: &mut makepad_render_graph::DrawSceneTexture, texels: Vec2f) {
         draw.post = self.composite_post();
+        // The HDR composite writes alpha 1 everywhere (tone-mapped colour,
+        // dithered): premultiplied-over then IS a plain write. Drawn without
+        // blending it is an opaque draw, so a tile GPU's hidden-surface
+        // removal skips whatever the window drew under it (its ground).
+        draw.draw_vars.options.alpha_blend = !self.hdr_output;
         draw.texel = vec2(1.0 / texels.x.max(1.0), 1.0 / texels.y.max(1.0));
         let bloom = self.post.bloom().filter(|_| self.hdr_output && self.bloom > 0.0);
         let g = &self.grade;

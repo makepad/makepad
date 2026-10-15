@@ -1192,7 +1192,7 @@ mod tests {
             let src = probe.script_source();
 
             // The block is readable back by name off the instance.
-            let block = vm.bx.heap.value(src, id!(tight).into(), NoTrap);
+            let block = vm.value(src, id!(tight));
             assert!(block.is_object(), "tight must read back as an object");
 
             // The rank is an integer. `as_f64` answers None for an integer
@@ -1203,7 +1203,7 @@ mod tests {
             // reading ranks with any single-type accessor finds none of them and
             // builds no ladder, with no error anywhere. `as_number` is the only
             // accessor that covers every numeric representation.
-            let rank = vm.bx.heap.value(src, id!(give_up).into(), NoTrap);
+            let rank = vm.value(src, id!(give_up));
             assert_eq!(rank.as_number(), Some(1.0), "give_up reads through as_number");
             assert_eq!(rank.as_i32(), None, "and is NOT an i32");
             assert_eq!(rank.as_f64(), None, "and is NOT an f64");
@@ -1264,7 +1264,7 @@ mod tests {
             assert!(vm.take_errors().is_empty());
             let root = WidgetRef::script_from_value(vm, value);
             let probe = root.widget(vm.cx_mut(), ids!(probe));
-            let block = vm.bx.heap.value(probe.script_source(), id!(tight).into(), NoTrap);
+            let block = vm.value(probe.script_source(), id!(tight));
             (root, probe, block)
         });
 

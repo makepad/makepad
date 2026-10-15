@@ -60,8 +60,7 @@ put() { eval "st_$1=\$2"; }
 
 # Licensed apps come from the VPS catalog: id|title|license|megabytes|source
 fetch_licenses() {
-    if [ "$demo_free" = yes ]; then licenses=; else licenses='scope|Makepad Scope|commercial|214|sources/scope
-amp|Makepad Amp|beta|188|sources/stage/apps/amp'; fi
+    if [ "$demo_free" = yes ]; then licenses=; else licenses='scope|Makepad Scope|commercial|214|sources/scope'; fi
 }
 # The free apps in the public Makepad repository (apps.json in the live one).
 free_apps='wm|Makepad WM
@@ -82,7 +81,8 @@ finance|Finance
 video|Video
 browser|Browser
 fab|Fab
-route|Route'
+route|Route
+amp|Makepad Amp'
 
 scan() {
     rust=local

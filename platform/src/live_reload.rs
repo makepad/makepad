@@ -1,15 +1,15 @@
 use crate::cx::Cx;
 use crate::makepad_script::{
-    parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptMod, ScriptModKey, ScriptSource,
+    parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptMod, ScriptModKey,
     ScriptValue,
 };
 use makepad_live_reload_core::{
     normalize_path, normalize_path_string, normalize_relative_path_string,
 };
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use {
@@ -30,7 +30,7 @@ pub(crate) struct PendingLiveChange {
 
 pub struct CxLiveReloadState {
     pub(crate) pending_files: Vec<PendingLiveChange>,
-    pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
+    pub script_mod_overrides: crate::makepad_script::ScriptModOverrides,
     /// Set when overrides were dropped outside the file path (a revert), so
     /// the next live edit re-runs the modules as a DSL change.
     pub(crate) overrides_changed: bool,
@@ -180,9 +180,9 @@ impl Cx {
             .collect();
         let mut removed = 0;
         {
-            let mut overrides = self.script_data.live_reload.script_mod_overrides.borrow_mut();
+            let overrides = &self.script_data.live_reload.script_mod_overrides;
             for key in keys {
-                if overrides.remove(&key).is_some() {
+                if overrides.remove(&key) {
                     removed += 1;
                 }
             }
@@ -196,7 +196,7 @@ impl Cx {
     /// How many `script_mod!` blocks currently run on hot-reloaded text
     /// instead of their compiled-in code.
     pub fn live_edit_override_count(&self) -> usize {
-        self.script_data.live_reload.script_mod_overrides.borrow().len()
+        self.script_data.live_reload.script_mod_overrides.len()
     }
 
     pub fn start_hot_reload_file_observer_if_requested(&mut self) {
@@ -311,20 +311,16 @@ impl Cx {
             }
             let mut tokenizer = ScriptTokenizer::default();
             let mut parser = ScriptParser::default();
-            tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
-            tokenizer.finish(&mut script_vm.heap);
+            tokenizer.tokenize(&extracted.code, script_vm.heap_mut());
+            tokenizer.finish(script_vm.heap_mut());
             parser.parse(
                 &tokenizer,
                 &site.file_name,
                 (extracted.first_token_line, extracted.first_token_column),
                 &site.values,
             );
-            if parser.had_error {
-                let detail = parser
-                    .parse_errors
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "parse error".to_string());
+            if parser.had_error() {
+                let detail = parser.first_error().unwrap_or("parse error").to_owned();
                 return Err(format!("{}: {}", format_script_mod_site(site), detail));
             }
         }
@@ -353,7 +349,7 @@ impl Cx {
                 extracted.len()
             ));
         }
-        let current = self.script_data.live_reload.script_mod_overrides.borrow().clone();
+        let current = self.script_data.live_reload.script_mod_overrides.snapshot();
         let mut next = current.clone();
         for (site, extracted) in compiled_sites.iter().zip(extracted.iter()) {
             if extracted.rust_value_count != site.values.len() {
@@ -382,7 +378,7 @@ impl Cx {
         if next == current {
             return Ok(false);
         }
-        *self.script_data.live_reload.script_mod_overrides.borrow_mut() = next;
+        self.script_data.live_reload.script_mod_overrides.replace(next);
         Ok(true)
     }
 
@@ -419,8 +415,7 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
         .script_data
         .live_reload
         .script_mod_overrides
-        .borrow()
-        .clone();
+        .snapshot();
     let mut next_overrides = current_overrides.clone();
 
     let mut processed_files = 0usize;
@@ -501,7 +496,7 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
         return false;
     }
 
-    *cx.script_data.live_reload.script_mod_overrides.borrow_mut() = next_overrides;
+    cx.script_data.live_reload.script_mod_overrides.replace(next_overrides);
     // Name the files: a PERSISTENT override at every cold launch means some
     // file permanently differs from its compiled-in copy — that's a build
     // staleness bug to chase, not a feature.
@@ -509,7 +504,7 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
         .script_data
         .live_reload
         .script_mod_overrides
-        .borrow()
+        .snapshot()
         .keys()
         .map(|key| format!("{:?}", key))
         .collect();
@@ -526,20 +521,18 @@ fn collect_compiled_sites_for_file(
     script_vm: &crate::makepad_script::ScriptVmBase,
     file_name: &str,
 ) -> Vec<CompiledScriptModSite> {
-    let bodies = script_vm.code.bodies.borrow();
     let mut sites = Vec::new();
     let mut seen = HashSet::<ScriptModKey>::new();
 
-    for body in bodies.iter() {
-        let ScriptSource::Mod(script_mod) = &body.source else {
-            continue;
-        };
+    for index in 0..script_vm.body_count() {
+        let body = script_vm.body_module_read(index);
+        let Some(script_mod) = body.module() else { continue; };
         // `script_apply_eval!` bodies are tagged with `__script_source__` as the
         // first token of their code. They are Rust-driven runtime evals, not static
         // DSL blocks, so the file extractor cannot match them. Skip them here so
         // the compiled-site count only reflects `script_mod!` blocks, which the
         // extractor does understand.
-        if script_mod.code.trim_start().starts_with("__script_source__") {
+        if script_mod.view().code.trim_start().starts_with("__script_source__") {
             continue;
         }
         let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name)
@@ -553,12 +546,12 @@ fn collect_compiled_sites_for_file(
         sites.push(CompiledScriptModSite {
             key,
             file_name: compiled_file_name,
-            original_code: script_mod.code.clone(),
-            values: script_mod.values.clone(),
+            original_code: script_mod.view().code.to_owned(),
+            values: script_mod.view().values.to_vec(),
         });
     }
 
-    sites.sort_by_key(|site| (site.key.line, site.key.column));
+    sites.sort_by_key(|site| (site.key.line(), site.key.column()));
     sites
 }
 
@@ -567,21 +560,11 @@ fn validate_extracted_script_mod(
     site: &CompiledScriptModSite,
     extracted: &ExtractedScriptMod,
 ) -> bool {
-    let mut tokenizer = ScriptTokenizer::default();
-    let mut parser = ScriptParser::default();
-    tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
-    tokenizer.finish(&mut script_vm.heap);
-    parser.parse(
-        &tokenizer,
-        &site.file_name,
-        (extracted.first_token_line, extracted.first_token_column),
-        &site.values,
-    );
-    !parser.had_error
+    script_vm.validate_script(&extracted.code, &site.file_name, extracted.first_token_line, extracted.first_token_column, &site.values)
 }
 
 fn format_script_mod_site(site: &CompiledScriptModSite) -> String {
-    format!("{}:{}:{}", site.file_name, site.key.line, site.key.column)
+    format!("{}:{}:{}", site.file_name, site.key.line(), site.key.column())
 }
 
 fn log_live_reload_file_error(file_name: &str, message: String) {
@@ -593,11 +576,11 @@ fn resolve_matching_script_mod_file(
     changed_file_name: &str,
 ) -> Option<String> {
     let changed_file_name = normalize_path_string(Path::new(changed_file_name));
-    if script_mod.file.is_empty() {
+    if script_mod.view().file.is_empty() {
         return None;
     }
 
-    let raw_file = normalize_relative_path_string(Path::new(&script_mod.file));
+    let raw_file = normalize_relative_path_string(Path::new(script_mod.view().file));
     if raw_file == changed_file_name {
         return Some(changed_file_name);
     }
@@ -617,8 +600,8 @@ fn resolve_matching_script_mod_file(
 
     // For crate-relative paths like `src/main.rs`, anchor the suffix with the
     // crate directory name so we do not match every `src/main.rs` in the repo.
-    if !script_mod.cargo_manifest_path.is_empty() {
-        let manifest_path = Path::new(&script_mod.cargo_manifest_path);
+    if !script_mod.view().cargo_manifest_path.is_empty() {
+        let manifest_path = Path::new(script_mod.view().cargo_manifest_path);
         if let Some(crate_dir) = manifest_path.file_name() {
             let anchored = PathBuf::from(crate_dir).join(Path::new(&raw_file));
             if path_has_component_suffix(Path::new(&changed_file_name), &anchored, 3) {
@@ -631,10 +614,10 @@ fn resolve_matching_script_mod_file(
 }
 
 fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
-    if script_mod.file.is_empty() {
+    if script_mod.view().file.is_empty() {
         return Vec::new();
     }
-    let file_path = Path::new(&script_mod.file);
+    let file_path = Path::new(script_mod.view().file);
     let mut candidates = Vec::new();
 
     if file_path.is_absolute() {
@@ -646,8 +629,8 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
         push_unique_candidate(&mut candidates, cwd.join(file_path));
     }
 
-    if !script_mod.cargo_manifest_path.is_empty() {
-        let manifest_path = Path::new(&script_mod.cargo_manifest_path);
+    if !script_mod.view().cargo_manifest_path.is_empty() {
+        let manifest_path = Path::new(script_mod.view().cargo_manifest_path);
         for ancestor in manifest_path.ancestors() {
             push_unique_candidate(&mut candidates, ancestor.join(file_path));
         }
@@ -668,15 +651,13 @@ fn collect_hot_reload_watch_plan(
     script_vm: &crate::makepad_script::ScriptVmBase,
 ) -> Option<HotReloadWatchPlan> {
     let excluded_manifest_paths = excluded_hot_reload_manifest_paths();
-    let bodies = script_vm.code.bodies.borrow();
     let mut roots = BTreeMap::<String, WatchRoot>::new();
     let mut files_by_root = HashMap::<String, Vec<String>>::new();
     let mut initial_contents = HashMap::<String, String>::new();
 
-    for body in bodies.iter() {
-        let ScriptSource::Mod(script_mod) = &body.source else {
-            continue;
-        };
+    for index in 0..script_vm.body_count() {
+        let body = script_vm.body_module_read(index);
+        let Some(script_mod) = body.module() else { continue; };
         let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths)
         else {
             continue;
@@ -736,8 +717,8 @@ fn hot_reload_root_for_script_mod(
     script_mod: &ScriptMod,
     excluded_manifest_paths: &HashSet<String>,
 ) -> Option<String> {
-    let manifest_path = (!script_mod.cargo_manifest_path.is_empty())
-        .then(|| normalize_path_string(Path::new(&script_mod.cargo_manifest_path)));
+    let manifest_path = (!script_mod.view().cargo_manifest_path.is_empty())
+        .then(|| normalize_path_string(Path::new(script_mod.view().cargo_manifest_path)));
     match manifest_path {
         Some(path) if excluded_manifest_paths.contains(&path) => None,
         Some(path) => Some(path),
@@ -1359,11 +1340,7 @@ mod tests {
 
     #[test]
     fn matches_workspace_relative_runtime_file_against_absolute_change_path() {
-        let script_mod = ScriptMod {
-            cargo_manifest_path: "/Users/admin/makepad/makepad/examples/shader".to_string(),
-            file: "examples/shader/src/main.rs".to_string(),
-            ..Default::default()
-        };
+        let script_mod = ScriptMod::new("/Users/admin/makepad/makepad/examples/shader", "", "examples/shader/src/main.rs", 0, 0, "", &[]);
 
         let matched = resolve_matching_script_mod_file(
             &script_mod,
@@ -1377,11 +1354,7 @@ mod tests {
 
     #[test]
     fn matches_crate_relative_runtime_file_against_absolute_change_path() {
-        let script_mod = ScriptMod {
-            cargo_manifest_path: "/Users/admin/makepad/makepad/examples/shader".to_string(),
-            file: "src/main.rs".to_string(),
-            ..Default::default()
-        };
+        let script_mod = ScriptMod::new("/Users/admin/makepad/makepad/examples/shader", "", "src/main.rs", 0, 0, "", &[]);
 
         let matched = resolve_matching_script_mod_file(
             &script_mod,
@@ -1395,10 +1368,7 @@ mod tests {
 
     #[test]
     fn does_not_match_short_unanchored_suffixes() {
-        let script_mod = ScriptMod {
-            file: "main.rs".to_string(),
-            ..Default::default()
-        };
+        let script_mod = ScriptMod::new("", "", "main.rs", 0, 0, "", &[]);
 
         assert_eq!(
             resolve_matching_script_mod_file(
@@ -1409,6 +1379,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     #[test]
     fn excludes_platform_script_and_draw_manifests_from_hot_reload() {
         let excluded = excluded_hot_reload_manifest_paths();

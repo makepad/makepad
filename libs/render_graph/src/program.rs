@@ -2,7 +2,7 @@
 //! every pass subclasses, and [`Programs`], which compiles each distinct
 //! pass source once (see [`crate::pass`]).
 
-use crate::pass::PassDecl;
+use crate::pass::{PassCode, PassDecl, PassFn, PassNamespace};
 use crate::plan::ProgramId;
 use makepad_draw::*;
 use std::collections::HashMap;
@@ -32,6 +32,10 @@ script_mod! {
         g_misc: uniform(vec4(1.0, 1.0, 0.0, 1.0))
         // The camera for depth reads: proj[10], proj[14], orthographic.
         g_cam: uniform(vec4(-1.0, -0.2, 0.0, 1.0))
+        // x = 1 when depth reads go through the view below (`view_depth_at`):
+        // for a host whose depth was drawn through any matrix (a
+        // homography, an orthographic pass), not a perspective camera.
+        g_depth: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // The view (when the host gives one): the inverse view-projection,
         // the eye (w = 1 when set) and the view's forward axis.
         g_ivp: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
@@ -73,6 +77,16 @@ script_mod! {
                 return 0.0 - (z - self.g_cam.y) / self.g_cam.x
             }
             return self.g_cam.y / (z + self.g_cam.x)
+        }
+        // The view distance of the depth-buffer value `z` at `uv`: as
+        // `view_depth` for a perspective or orthographic camera, or, when
+        // the host reads depth through its view (`g_depth.x`), the distance
+        // along the view's forward axis of the world point the sample shows.
+        view_depth_at: fn(uv: vec2, z: float) -> float {
+            if self.g_depth.x > 0.5 {
+                return self.view_distance(self.world_at(uv, z))
+            }
+            return self.view_depth(z)
         }
         // The camera, for raymarch passes: the eye, the world direction
         // through `uv`, and a point's view distance (what `view_depth`
@@ -152,36 +166,27 @@ impl Programs {
         if let Some(done) = self.compiled.get(&id) {
             return done.as_ref().map(|_| Some(id)).map_err(|e| e.clone());
         }
-        let code = decl.source();
         let label = decl.label.clone();
-        let file = format!("graph://pass/{:016x}", id.0);
-        // Errors name the document's lines where the pass's code is written.
-        let at = |line: u32| decl.locate(line);
         let made = cx.try_with_vm(|vm| {
             let evaluated = EVALUATED.with(|e| e.borrow().get(&id).cloned());
             let v: ScriptValue = match evaluated {
                 Some(Ok(obj)) => obj.as_object().into(),
                 Some(Err(e)) => return Err(e),
                 None => {
-                    crate::pass_stdlib(vm);
-                    vm.bx.captured_errors = Some(Vec::new());
-                    let v = vm.eval(ScriptMod { file: file.clone(), code, ..Default::default() });
-                    let errors = vm.take_errors();
-                    let made = match v.as_object() {
-                        Some(obj) if errors.is_empty() && !v.is_err() => Ok(vm.bx.heap.new_object_ref(obj)),
-                        _ => Err(format!("{label} did not compile: {}", errors.iter().map(|e| located(e, &file, &at)).collect::<Vec<_>>().join("; "))),
-                    };
+                    let made = pass_object(vm, decl).map(|obj| vm.new_object_ref(obj)).map_err(|e| format!("{label} did not compile: {e}"));
                     EVALUATED.with(|e| e.borrow_mut().insert(id, made.clone()));
-                    v
+                    made?.as_object().into()
                 }
             };
             if v.is_err() || v.as_object().is_none() {
                 return Err(format!("{label} did not compile"));
             }
-            // Edit mode: the pass's functions are the document's text, and
-            // their literals compile as slots named by where they are written.
+            // Edit mode: the pass's functions are the document's, and their
+            // literals compile as slots named by where they are written.
             if decl.live_literals && vm.host.cx().live_literals_on() {
-                vm.host.cx_mut().set_literal_source(&file, literal_origins(decl));
+                for f in pass_fns(decl) {
+                    vm.host.cx_mut().set_literal_source(&adopted_file(f), literal_origins(f));
+                }
             }
             let mut scope = Scope::default();
             let mut d = Box::new(DrawGraphPass::script_new_with_default(vm));
@@ -205,37 +210,157 @@ impl Programs {
 }
 
 
-/// The rows of a pass's [`PassDecl::source`] that are the document's own
-/// text (its functions, from `origins`), as shader literal origins: what
-/// edit mode's live literals are named by.
-fn literal_origins(decl: &PassDecl) -> Vec<LiteralOrigin> {
-    let src = decl.source();
-    let mut out = Vec::new();
-    for (text, at) in &decl.origins {
-        let Some(start) = src.find(text.as_str()) else { continue };
-        let row = src[..start].matches('\n').count() as u32;
-        let row_start = src[..start].rfind('\n').map_or(0, |n| n + 1);
-        out.push(LiteralOrigin {
-            rows: row..row + text.matches('\n').count() as u32 + 1,
-            code_col: src[row_start..start].chars().count() as u32,
-            file: at.file.clone(),
-            line: at.line.saturating_sub(1),
-            col: at.col.saturating_sub(1),
-        });
-    }
-    out
+/// The passes' scope and parts (`pass_scope.splash`) and the fused passes'
+/// pixels (`fuse.splash`), evaluated once in this VM.
+const PASS_SCOPE: &str = include_str!("pass_scope.splash");
+const FUSE: &str = include_str!("fuse.splash");
+const PASS_SCOPE_FILE: &str = "graph://pass_scope.splash";
+const FUSE_FILE: &str = "graph://fuse.splash";
+
+thread_local! {
+    /// (the parts object, the fuse chains object) of this thread's VM.
+    static PARTS: std::cell::RefCell<Option<(ScriptObjectRef, ScriptObjectRef)>> = Default::default();
 }
 
-/// `error` with its `file:line:col` in the generated pass source replaced by
-/// where that line is written in the document (`at`), when it is.
-fn located(error: &str, file: &str, at: &dyn Fn(u32) -> Option<crate::pass::CodeAt>) -> String {
-    let Some(i) = error.find(file) else { return error.to_string() };
-    let rest = &error[i + file.len()..];
-    let mut parts = rest.splitn(3, ':');
-    let (Some(""), Some(line)) = (parts.next(), parts.next()) else { return error.to_string() };
-    let Ok(line) = line.parse::<u32>() else { return error.to_string() };
-    let tail = parts.next().unwrap_or("");
-    let col_len = tail.chars().take_while(|c| c.is_ascii_digit()).count();
-    let Some(doc) = at(line) else { return error.to_string() };
-    format!("{}{}:{}:{}{}", &error[..i], doc.file, doc.line, doc.col.max(1), &tail[col_len..])
+fn parts(vm: &mut ScriptVm) -> Result<(ScriptObject, ScriptObject), String> {
+    if let Some((p, f)) = PARTS.with(|p| p.borrow().as_ref().map(|(p, f)| (p.as_object(), f.as_object()))) {
+        return Ok((p, f));
+    }
+    crate::pass_stdlib(vm);
+    vm.capture_errors();
+    let p = vm.eval(ScriptMod::new("", "", PASS_SCOPE_FILE, 0, 0, PASS_SCOPE, &[]));
+    let f = vm.eval(ScriptMod::new("", "", FUSE_FILE, 0, 0, FUSE, &[]));
+    let errors = vm.take_errors();
+    let (Some(p), Some(f)) = (p.as_object(), f.as_object()) else { return Err(format!("the pass parts did not evaluate: {}", errors.join("; "))) };
+    if !errors.is_empty() {
+        return Err(format!("the pass parts did not evaluate: {}", errors.join("; ")));
+    }
+    let refs = (vm.new_object_ref(p), vm.new_object_ref(f));
+    PARTS.with(|parts| *parts.borrow_mut() = Some(refs));
+    Ok((p, f))
+}
+
+/// The pass's shader as an object of this VM: a `DrawGraphPass` with one
+/// `texture_2d` per read, a fragment output per further output, a uniform
+/// per value and the document's fns (moved here by their tokens), in the
+/// order the pass declares them. No shader text is written.
+pub fn pass_object(vm: &mut ScriptVm, decl: &PassDecl) -> Result<ScriptObject, String> {
+    let (parts, fuse) = parts(vm)?;
+    let scope = vm.end_scope_of(PASS_SCOPE_FILE).ok_or("the pass scope is gone")?;
+    let draw = vm.value(vm.modules(), lut_id("draw")).as_object().ok_or("mod.draw is not registered")?;
+    let proto = vm.value(draw, lut_id("DrawGraphPass"));
+    if proto.as_object().is_none() {
+        return Err("mod.draw.DrawGraphPass is not registered".into());
+    }
+    vm.capture_errors();
+    let obj = vm.new_with_proto(proto);
+    let part = |vm: &mut ScriptVm, name: &str, args: &[ScriptValue]| {
+        let f = vm.value(parts, lut_id(name));
+        vm.call(f, args)
+    };
+    let format = lut_id(decl.format().shader_color_format().trim_start_matches('@'));
+    vm.set_value_trap(obj, lut_id("color_format"), format);
+    for (i, o) in decl.outputs.iter().enumerate() {
+        let v = part(vm, "output", &[((i + 1) as f64).into()]);
+        vm.set_value_trap(obj, lut_id(&o.slot), v);
+    }
+    for i in 0..decl.reads.len() {
+        let v = part(vm, "texture", &[]);
+        vm.set_value_trap(obj, lut_id(decl.slot(i)), v);
+    }
+    for u in &decl.uniforms {
+        let width = match u.width {
+            1 | 2 | 3 | 16 => u.width,
+            _ => 4,
+        };
+        let v = part(vm, &format!("uniform_{width}"), &[]);
+        vm.set_value_trap(obj, lut_id(&u.name), v);
+    }
+    let mut failed = Vec::new();
+    for h in &decl.helpers {
+        match code_fn(vm, &h.code, h.namespace.as_ref(), fuse, scope) {
+            Some(f) => {
+                vm.set_value_trap(obj, lut_id(&h.name), f);
+            }
+            None => failed.push(h.name.clone()),
+        }
+    }
+    match code_fn(vm, &decl.pixel, None, fuse, scope) {
+        Some(f) => {
+            vm.set_value_trap(obj, id!(pixel), f);
+        }
+        None => failed.push("pixel".into()),
+    }
+    let errors = vm.take_errors();
+    if !errors.is_empty() || !failed.is_empty() {
+        let mut out: Vec<String> = errors.iter().map(|e| located(e, decl)).collect();
+        if errors.is_empty() {
+            out.push(format!("{} is not a shader function", failed.join(", ")));
+        }
+        return Err(out.join("; "));
+    }
+    Ok(obj)
+}
+
+/// A pass fn as a fn of this VM: the document's, adopted by its tokens, or
+/// a fused pass's chain; in `namespace` when a fused pass's member.
+fn code_fn(vm: &mut ScriptVm, code: &PassCode, namespace: Option<&PassNamespace>, fuse: ScriptObject, scope: ScriptObject) -> Option<ScriptObject> {
+    let f = match code {
+        PassCode::Fn(f) => vm.adopt_fn(&f.image, scope)?,
+        PassCode::Chain(n) => {
+            let chain = vm.value(fuse, lut_id(&format!("fuse_{n}"))).as_object()?;
+            match namespace {
+                // Its own fn object: the namespace is the fn's.
+                Some(_) => {
+                    let image = vm.fn_image(chain)?;
+                    let chain_scope = vm.end_scope_of(FUSE_FILE)?;
+                    vm.adopt_fn(&image, chain_scope)?
+                }
+                None => chain,
+            }
+        }
+    };
+    if let Some(ns) = namespace {
+        let renames: Vec<ShaderFnRename> = ns.renames.iter().map(|(a, b)| ShaderFnRename { from: lut_id(a), to: lut_id(b) }).collect();
+        let input = ns.input.then_some(ShaderFnInput { field: id!(color), method: id!(sample), at: id!(uv), param: lut_id("c_in") });
+        vm.set_shader_fn_namespace(f, &renames, input);
+    }
+    Some(f)
+}
+
+/// An id whose name the shader compiler can write (a field, a uniform, a
+/// texture or a parameter name of the shader it makes).
+fn lut_id(name: &str) -> LiveId {
+    LiveId::from_str_with_lut(name).unwrap_or_else(|_| LiveId::from_str(name))
+}
+
+/// The document fns a pass compiles.
+fn pass_fns(decl: &PassDecl) -> Vec<&PassFn> {
+    decl.helpers.iter().map(|h| &h.code).chain(std::iter::once(&decl.pixel)).filter_map(|c| match c {
+        PassCode::Fn(f) => Some(f),
+        PassCode::Chain(_) => None,
+    }).collect()
+}
+
+/// The module an adopted fn's body is named by (see `ScriptVm::adopt_fn`).
+fn adopted_file(f: &PassFn) -> String {
+    format!("adopted://{:016x}", f.image.hash())
+}
+
+/// An adopted fn's rows as shader literal origins: where its literals are
+/// written in the document (what edit mode's live literals are named by).
+fn literal_origins(f: &PassFn) -> Vec<LiteralOrigin> {
+    let at = f.at();
+    let rows = f.text().matches('\n').count() as u32 + 1;
+    vec![LiteralOrigin::new(0, rows, 0, &at.file, at.line.saturating_sub(1), at.col.saturating_sub(1))]
+}
+
+/// `error` with an adopted fn's `adopted://<hash>` replaced by the file the
+/// fn is written in.
+fn located(error: &str, decl: &PassDecl) -> String {
+    let mut out = error.to_string();
+    for f in pass_fns(decl) {
+        out = out.replace(&adopted_file(f), &f.at().file);
+    }
+    out
 }

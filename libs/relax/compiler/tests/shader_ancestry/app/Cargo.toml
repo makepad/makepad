@@ -1,0 +1,9 @@
+[package]
+name = "anc-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anc-mac = { path = "../mac" }
+anc-wid = { path = "../wid" }

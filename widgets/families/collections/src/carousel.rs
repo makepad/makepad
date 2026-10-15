@@ -47,7 +47,7 @@
 //! that needs real children in a strip should say so and get a widget that
 //! answers them.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::{measure, sized},
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -1081,8 +1081,7 @@ impl Widget for Carousel {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_page) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(page) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                if let Some(page) = vm.vec_value_trap(args_obj, 0).as_f64() {
                     vm.with_cx_mut(|cx| self.set_page(cx, page.max(0.0) as usize));
                 }
             }
@@ -1090,8 +1089,7 @@ impl Widget for Carousel {
         }
         if method == live_id!(go_to) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(page) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                if let Some(page) = vm.vec_value_trap(args_obj, 0).as_f64() {
                     vm.with_cx_mut(|cx| self.go_to(cx, page.max(0.0) as usize));
                 }
             }
@@ -1175,6 +1173,7 @@ impl Widget for Carousel {
                         self.samples.clear();
                         push_sample(&mut self.samples, fe.abs.x, fe.time);
                         self.grab = Some(Grab { offset: self.offset, abs: fe.abs.x, caught });
+                        cx.claim_finger_drag(fe.digit_id);
                         self.animator_play(cx, ids!(drag.on));
                         self.draw_bg.redraw(cx);
                     }

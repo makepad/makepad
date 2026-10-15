@@ -1,14 +1,13 @@
 //! Linux system controls behind the shell's audio, monitor and power panels:
 //! the default audio output and input (device lists, selection, volume,
-//! mute), backlight brightness where the hardware has one, and the system
-//! battery. Backend only — the panels draw what a [`SystemSnapshot`] says.
+//! mute) and the system battery. Backend only — the panels draw what a [`SystemSnapshot`] says.
 //!
 //! # Shape
 //!
 //! One long-lived worker (`cx.thread_spawner()`, thread `wm-system`) owns
 //! every OS call. The UI talks to it through [`SystemController`]:
 //!
-//! * Slider values (output volume, input volume, brightness) go into one
+//! * Slider values (output volume, input volume) go into one
 //!   atomic slot each. A drag overwrites the slot; the worker takes the
 //!   latest value per pass, so a drag can never queue more than one
 //!   process per slider.
@@ -23,8 +22,8 @@
 //! * The worker sleeps in `poll(2)` on an eventfd the controller writes and
 //!   on the stdout of a `pactl subscribe` child, so hotplug, default-device
 //!   changes and volume changes made elsewhere arrive as events, not polls.
-//!   Backlight and battery are re-read from sysfs every few seconds (two
-//!   tiny file reads) and on [`SystemCommand::Refresh`].
+//!   Battery and GPUs are re-read from sysfs every few seconds (tiny file
+//!   reads) and on [`SystemCommand::Refresh`].
 //!
 //! # OS primitives
 //!
@@ -39,11 +38,6 @@
 //!   for every default-following stream, native or Pulse; the outcome then
 //!   reports which streams were observed on the new default (`pw-dump`,
 //!   the whole graph) and which stayed, instead of claiming a move.
-//! * Brightness: `/sys/class/backlight/*`. Writes try the sysfs node first
-//!   (works where a udev rule grants the seat user write access) and fall
-//!   back to logind's `Session.SetBrightness` over `busctl` (the caller's own
-//!   active session, no polkit, no privilege). A denied write is reported as
-//!   such; nothing is dimmed by other means.
 //! * Battery: `/sys/class/power_supply/*` with `type=Battery`, excluding
 //!   `scope=Device` (mouse/keyboard batteries) and absent packs. Mains/USB
 //!   supplies give the AC state.
@@ -95,7 +89,7 @@
 //! Compiled for Linux only (the inner `cfg` below makes the module empty
 //! elsewhere), so no other platform's behaviour changes.
 
-#![cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#![cfg(target_os = "linux")]
 
 use {
     super::display_layout::DisplayLayout,
@@ -139,12 +133,9 @@ use {
 
 /// `PA_VOLUME_NORM`: the raw volume that is 100%.
 const PA_VOLUME_NORM: u64 = 0x10000;
-const BACKLIGHT_ROOT: &str = "/sys/class/backlight";
 const POWER_ROOT: &str = "/sys/class/power_supply";
 /// Deadline for one `pactl` invocation.
 const COMMAND_TIMEOUT: f64 = 2.5;
-/// Deadline for the logind call (busctl gets its own 2s bus timeout inside).
-const LOGIND_TIMEOUT: f64 = 3.5;
 /// Read cap for device lists (verbose property maps per device).
 const LIST_OUTPUT_CAP: usize = 4 << 20;
 /// Read cap for everything else, and for stderr.
@@ -161,7 +152,7 @@ const AUDIO_DEBOUNCE: f64 = 0.15;
 const AUDIO_MIN_INTERVAL: f64 = 0.25;
 /// Audio poll cadence while the event stream is down.
 const AUDIO_POLL_INTERVAL: f64 = 5.0;
-/// Backlight and battery re-read cadence.
+/// Battery and GPU re-read cadence.
 const SYSFS_INTERVAL: f64 = 5.0;
 const SUBSCRIBE_BACKOFF_MIN: f64 = 2.0;
 const SUBSCRIBE_BACKOFF_MAX: f64 = 30.0;
@@ -172,10 +163,6 @@ const COMMAND_QUEUE: usize = 32;
 /// pass so slider values and sysfs reads are never starved by a backlog.
 const COMMANDS_PER_PASS: usize = 8;
 const SNAPSHOT_QUEUE: usize = 4;
-/// Re-reads of a backlight after a write, 40ms apart, for hardware that
-/// applies asynchronously.
-const BRIGHTNESS_SETTLE_READS: usize = 3;
-const BRIGHTNESS_SETTLE: Duration = Duration::from_millis(40);
 /// Grace before re-counting streams after a default-device change, so the
 /// session manager's re-links are observed rather than raced.
 const STREAM_SETTLE: Duration = Duration::from_millis(150);
@@ -332,50 +319,6 @@ impl AudioState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrightnessCapability {
-    /// No `/sys/class/backlight` device: the panel says "Fixed brightness".
-    NoBacklight,
-    Backlight,
-}
-
-/// How the last brightness write got through, learned by trying.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BrightnessAccess {
-    Untested,
-    Sysfs,
-    Logind,
-    Denied(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Backlight {
-    pub name: String,
-    /// The kernel's `type`: `raw`, `firmware` or `platform`.
-    pub kind: String,
-    pub max: u32,
-    pub raw: u32,
-    pub percent: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrightnessState {
-    pub capability: BrightnessCapability,
-    /// Preferred device first (`raw` before `firmware` before `platform`).
-    pub devices: Vec<Backlight>,
-    pub access: BrightnessAccess,
-}
-
-impl BrightnessState {
-    pub fn primary(&self) -> Option<&Backlight> {
-        self.devices.first()
-    }
-
-    pub fn percent(&self) -> Option<u32> {
-        self.primary().map(|b| b.percent)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerCapability {
     /// No system battery (a desktop): show nothing.
     NoBattery,
@@ -523,7 +466,6 @@ pub enum SystemCommand {
 pub enum CommandKind {
     OutputVolume,
     InputVolume,
-    Brightness,
     OutputMute,
     InputMute,
     SelectOutput,
@@ -584,7 +526,6 @@ pub struct SystemSnapshot {
     /// `Cx::monotonic_now()` at publish.
     pub sampled_at: f64,
     pub audio: AudioState,
-    pub brightness: BrightnessState,
     pub power: PowerState,
     /// The last few outcomes, oldest first; match on `seq`.
     pub outcomes: Vec<CommandOutcome>,
@@ -653,11 +594,6 @@ impl Default for SystemSnapshot {
             pointer_speeds: [None, None],
             input_settings_loaded: false,
             audio: AudioState::unavailable("not sampled yet".into(), false),
-            brightness: BrightnessState {
-                capability: BrightnessCapability::NoBacklight,
-                devices: Vec::new(),
-                access: BrightnessAccess::Untested,
-            },
             power: PowerState {
                 capability: PowerCapability::NoBattery,
                 batteries: Vec::new(),
@@ -709,7 +645,6 @@ const SLOT_EMPTY: u64 = u64::MAX;
 struct Slots {
     output_volume: AtomicU64,
     input_volume: AtomicU64,
-    brightness: AtomicU64,
 }
 
 impl Slots {
@@ -717,7 +652,6 @@ impl Slots {
         Self {
             output_volume: AtomicU64::new(SLOT_EMPTY),
             input_volume: AtomicU64::new(SLOT_EMPTY),
-            brightness: AtomicU64::new(SLOT_EMPTY),
         }
     }
 }
@@ -806,12 +740,6 @@ impl SystemController {
     /// Default input volume, 0..=100. Coalesced like the output.
     pub fn set_input_volume(&mut self, percent: u32) -> Seq {
         self.store_slot(|s| &s.input_volume, percent)
-    }
-
-    /// Primary backlight, 0..=100 of its `max_brightness`. Coalesced. Note
-    /// that 0 switches many panels fully off; a UI floor is the panel's call.
-    pub fn set_brightness(&mut self, percent: u32) -> Seq {
-        self.store_slot(|s| &s.brightness, percent)
     }
 
     /// Queue a discrete command. `Err(command)` means the bounded queue is
@@ -939,6 +867,7 @@ impl fmt::Display for ExecError {
 /// with the worker thread that spawned it.
 fn spawn_process(program: &str, args: &[&str], stdout: Stdio, stderr: Stdio) -> Result<Child, ExecError> {
     let mut command = Command::new(program);
+    makepad_app_registry::child_env::scrub(&mut command);
     command
         .args(args)
         .env("LC_ALL", "C")
@@ -1217,7 +1146,7 @@ fn read_audio(live_events: bool) -> Result<(AudioState, Vec<u32>), ExecError> {
 }
 
 // ======================================================================
-// sysfs: backlight and power supplies
+// sysfs: power supplies
 // ======================================================================
 
 fn read_trim(path: &Path) -> Option<String> {
@@ -1228,62 +1157,6 @@ fn read_trim(path: &Path) -> Option<String> {
 
 fn read_u64(path: &Path) -> Option<u64> {
     read_trim(path)?.parse().ok()
-}
-
-fn kind_rank(kind: &str) -> u8 {
-    match kind {
-        "raw" => 0,
-        "firmware" => 1,
-        "platform" => 2,
-        _ => 3,
-    }
-}
-
-fn read_backlights() -> Vec<Backlight> {
-    let mut devices = Vec::new();
-    let Ok(dir) = std::fs::read_dir(BACKLIGHT_ROOT) else {
-        return devices;
-    };
-    for entry in dir.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = entry.path();
-        let Some(max) = read_u64(&path.join("max_brightness")) else {
-            continue;
-        };
-        if max == 0 || max > u32::MAX as u64 {
-            continue;
-        }
-        let raw = read_u64(&path.join("actual_brightness"))
-            .or_else(|| read_u64(&path.join("brightness")))
-            .unwrap_or(0)
-            .min(max);
-        devices.push(Backlight {
-            name,
-            kind: read_trim(&path.join("type")).unwrap_or_default(),
-            max: max as u32,
-            raw: raw as u32,
-            percent: ((raw * 100 + max / 2) / max) as u32,
-        });
-    }
-    devices.sort_by(|a, b| {
-        kind_rank(&a.kind)
-            .cmp(&kind_rank(&b.kind))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    devices
-}
-
-fn read_brightness(access: &BrightnessAccess) -> BrightnessState {
-    let devices = read_backlights();
-    BrightnessState {
-        capability: if devices.is_empty() {
-            BrightnessCapability::NoBacklight
-        } else {
-            BrightnessCapability::Backlight
-        },
-        devices,
-        access: access.clone(),
-    }
 }
 
 fn battery_status(text: Option<&str>) -> BatteryStatus {
@@ -1426,7 +1299,7 @@ fn read_power() -> PowerState {
 // ======================================================================
 
 /// The DRM cards and their connected connectors: a handful of tiny sysfs
-/// reads per card, so it rides the same cadence as the backlight. `pci` is
+/// reads per card, so it rides the same cadence as the battery. `pci` is
 /// the device symlink's target directory (`0000:01:00.0`); a card with no
 /// PCI device (a virtual one) keeps an empty `pci`.
 fn read_gpus() -> Vec<GpuInfo> {
@@ -1752,7 +1625,6 @@ struct Worker {
     /// Indices of the sources the input filter hid (monitors, loopbacks), so
     /// a screen recorder on a monitor is not counted as a mic stream.
     hidden_source_indices: Vec<u32>,
-    brightness_access: BrightnessAccess,
     /// Discrete commands were left in the queue by the per-pass cap: the
     /// next pass runs without sleeping.
     backlog: bool,
@@ -1784,7 +1656,6 @@ impl Worker {
             next_audio_poll: 0.0,
             next_sysfs_sample: 0.0,
             hidden_source_indices: Vec::new(),
-            brightness_access: BrightnessAccess::Untested,
             backlog: false,
             serial: 0,
         }
@@ -2064,14 +1935,6 @@ impl Worker {
             audio_touched = true;
             changed = true;
         }
-        if self.stopping() {
-            return (changed, audio_touched);
-        }
-        if let Some((seq, percent)) = take_slot(&self.slots.brightness) {
-            let result = self.set_brightness(percent, now);
-            self.record(seq, CommandKind::Brightness, result);
-            changed = true;
-        }
         (changed, audio_touched)
     }
 
@@ -2345,71 +2208,6 @@ impl Worker {
         Ok(follow)
     }
 
-    /// Write the primary backlight: sysfs first, logind when sysfs denies.
-    /// Success is the device reading back what was written.
-    fn set_brightness(&mut self, percent: u32, now: f64) -> CommandResult {
-        let Some(device) = self.snapshot.brightness.devices.first().cloned() else {
-            return CommandResult::Failed("no backlight device".into());
-        };
-        let raw = ((percent.min(100) as u64 * device.max as u64 + 50) / 100) as u32;
-        let node = Path::new(BACKLIGHT_ROOT).join(&device.name).join("brightness");
-        let access = match std::fs::write(&node, raw.to_string()) {
-            Ok(()) => BrightnessAccess::Sysfs,
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
-                let value = raw.to_string();
-                match run_bounded(
-                    "busctl",
-                    &[
-                        "--timeout=2",
-                        "call",
-                        "org.freedesktop.login1",
-                        "/org/freedesktop/login1/session/auto",
-                        "org.freedesktop.login1.Session",
-                        "SetBrightness",
-                        "ssu",
-                        "backlight",
-                        &device.name,
-                        &value,
-                    ],
-                    LOGIND_TIMEOUT,
-                    SMALL_OUTPUT_CAP,
-                ) {
-                    Ok(_) => BrightnessAccess::Logind,
-                    Err(logind) => BrightnessAccess::Denied(format!(
-                        "sysfs: {error}; logind: {logind}"
-                    )),
-                }
-            }
-            Err(error) => BrightnessAccess::Denied(format!("sysfs write failed: {error}")),
-        };
-        self.brightness_access = access.clone();
-        if let BrightnessAccess::Denied(message) = access {
-            self.sample_sysfs(now);
-            return CommandResult::Failed(message);
-        }
-        // Success is the driver holding the requested value (`brightness`).
-        // The physical reading (`actual_brightness`) can lag or quantise;
-        // give it a short bounded settle so the snapshot that follows shows
-        // the level the user will see, but do not fail on it.
-        let actual_node = Path::new(BACKLIGHT_ROOT).join(&device.name).join("actual_brightness");
-        for _ in 0..BRIGHTNESS_SETTLE_READS {
-            if read_u64(&actual_node) == Some(raw as u64) {
-                break;
-            }
-            sleep(BRIGHTNESS_SETTLE);
-        }
-        let requested = read_u64(&node);
-        self.sample_sysfs(now);
-        match requested {
-            Some(held) if held == raw as u64 => CommandResult::Applied,
-            Some(held) => CommandResult::Failed(format!(
-                "asked {} for {raw}, driver holds {held}",
-                device.name
-            )),
-            None => CommandResult::Failed(format!("{} vanished after the write", device.name)),
-        }
-    }
-
     // ---- sampling -------------------------------------------------------
 
     fn sample_audio(&mut self, now: f64) -> bool {
@@ -2434,13 +2232,8 @@ impl Worker {
 
     fn sample_sysfs(&mut self, now: f64) -> bool {
         self.next_sysfs_sample = now + SYSFS_INTERVAL;
-        let brightness = read_brightness(&self.brightness_access);
         let power = read_power();
         let mut changed = false;
-        if brightness != self.snapshot.brightness {
-            self.snapshot.brightness = brightness;
-            changed = true;
-        }
         if power != self.snapshot.power {
             self.snapshot.power = power;
             changed = true;

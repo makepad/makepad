@@ -12,10 +12,11 @@
 //! non-finite outputs, emit or loop overflow and host-component errors.
 
 use crate::engine::engine;
-use makepad_script_compute::admission::{self, DeviceLimits, JobBudget, Origin};
-use makepad_script_compute::kernel::{Access, FieldTy, Kernel, KernelKind, Layout, LayoutField, MathMode};
+use makepad_script_compute_sched::admission::{DeviceLimits, JobBudget, Origin};
+use makepad_script_compute::kernel::{Access, FieldTy, Kernel, KernelRef, KernelKind, MathMode};
+use crate::layout::{views, RecordField, RecordLayout};
 use makepad_script_compute::module::{Module, STD};
-use makepad_script_compute::sched::Job;
+use makepad_script_compute_sched::sched::Job;
 use makepad_script_compute::{Backend, ShaderError};
 use makepad_strict_json::{self as json, Value};
 
@@ -37,7 +38,7 @@ pub fn guide() -> String {
         s += &fn_list(src);
     }
     s += "\n## Host components\nHeavy Rust functions a kernel calls by name. A slice argument is three: a buffer, a word offset and a word length (clamped to the buffer).\n";
-    for h in makepad_script_compute::host::all() {
+    for h in makepad_script_compute::host::entries() {
         s += &format!("- `{}`: {}\n", h.name, h.doc);
     }
     s
@@ -118,7 +119,7 @@ fn num(v: &Value) -> Option<f64> {
     }
 }
 
-fn layouts_of(args: &Value) -> Result<Vec<Layout>, String> {
+fn layouts_of(args: &Value) -> Result<Vec<RecordLayout>, String> {
     let mut out = Vec::new();
     for l in args.get("layouts").and_then(Value::as_arr).unwrap_or(&[]) {
         let name = l.get("name").and_then(Value::as_str).ok_or("a layout needs a `name`")?;
@@ -129,9 +130,9 @@ fn layouts_of(args: &Value) -> Result<Vec<Layout>, String> {
             let ty = f.get("type").and_then(Value::as_str).unwrap_or("f32");
             let ty = field_ty(ty).ok_or_else(|| format!("layout `{name}`: field `{fname}` has type `{ty}`; use f32, i32, vec2, vec3, vec4 or mat4"))?;
             let offset = f.get("offset").and_then(num).ok_or_else(|| format!("layout `{name}`: field `{fname}` needs an `offset` (words)"))? as u32;
-            fields.push(LayoutField { name: fname.to_string(), ty, offset });
+            fields.push(RecordField { name: fname.to_string(), ty, offset });
         }
-        out.push(Layout { name: name.to_string(), stride, fields });
+        out.push(RecordLayout { name: name.to_string(), stride, fields });
     }
     Ok(out)
 }
@@ -147,7 +148,7 @@ fn access_name(a: Access) -> String {
 
 /// What a compiled kernel is, for the model.
 fn describe(k: &Kernel) -> Value {
-    let kind = match k.kind {
+    let kind = match k.kind() {
         KernelKind::Map => "map".to_string(),
         KernelKind::Reduce(op, lanes) => format!("reduce {op:?} ({lanes} lanes)").to_lowercase(),
     };
@@ -155,20 +156,20 @@ fn describe(k: &Kernel) -> Value {
         k.buffers()
             .iter()
             .skip(1)
-            .map(|b| json::obj(vec![("name", json::s(b.name.clone())), ("access", json::s(access_name(b.access))), ("stride", Value::Int(b.stride as i64))]))
+            .map(|b| json::obj(vec![("name", json::s(b.name.to_string())), ("access", json::s(access_name(b.access))), ("stride", Value::Int(b.stride as i64))]))
             .collect(),
     );
-    let params = Value::Arr(k.params().iter().map(|p| json::obj(vec![("name", json::s(p.name.clone())), ("default", Value::F64(p.default as f64)), ("min", Value::F64(p.min as f64)), ("max", Value::F64(p.max as f64))])).collect());
-    let element_ops = admission::element_ops(k);
+    let params = Value::Arr(k.params().iter().map(|p| json::obj(vec![("name", json::s(p.name.to_string())), ("default", Value::F64(p.default as f64)), ("min", Value::F64(p.min as f64)), ("max", Value::F64(p.max as f64))])).collect());
+    let element_ops = makepad_script_compute::cost::element_ops(k);
     let element_bound = DeviceLimits::default().element_work;
     json::obj(vec![
-        ("entry", json::s(k.entry.clone())),
+        ("entry", json::s(k.entry().to_string())),
         ("kind", json::s(kind)),
-        ("math", json::s(if k.math == MathMode::Portable { "portable" } else { "fast" })),
+        ("math", json::s(if k.math() == MathMode::Portable { "portable" } else { "fast" })),
         ("buffers", buffers),
         ("params", params),
-        ("worst_ops_per_element", Value::Int(k.cost.min(i64::MAX as u64) as i64)),
-        ("parallel", Value::Bool(k.parallel_safe)),
+        ("worst_ops_per_element", Value::Int(k.cost().min(i64::MAX as u64) as i64)),
+        ("parallel", Value::Bool(k.parallel_safe())),
         ("four_wide", Value::Bool(k.simd())),
         ("worst_counted_ops_per_element", Value::Int(element_ops.min(i64::MAX as u64) as i64)),
         ("untrusted_admissible", Value::Bool(element_ops <= element_bound)),
@@ -187,7 +188,8 @@ pub fn check(args: &Value) -> Result<Value, String> {
         .filter_map(|m| Some((m.get("path")?.as_str()?.to_string(), m.get("source")?.as_str()?.to_string())))
         .collect();
     let modules: Vec<Module> = mods.iter().map(|(p, s)| Module { path: p, source: s }).collect();
-    let kernel = match makepad_script_compute::kernel::compile_with_modules(src, &layouts, Backend::Native, &modules) {
+    let fields: Vec<_> = layouts.iter().map(RecordLayout::field_views).collect();
+    let kernel = match makepad_script_compute::kernel::compile_with_modules(src, &views(&layouts, &fields), Backend::Native, &modules) {
         Ok(k) => k,
         Err(errs) => return Ok(json::obj(vec![("ok", Value::Bool(false)), ("problems", compile_problems(&errs, src))])),
     };
@@ -201,7 +203,7 @@ fn ramp(words: usize) -> Vec<u32> {
     (0..words).map(|k| ((k % 97) as f32 * 0.25 - 4.0).to_bits()).collect()
 }
 
-fn dry_run(k: &std::sync::Arc<Kernel>, args: &Value) -> (Vec<Value>, Value) {
+fn dry_run(k: &KernelRef, args: &Value) -> (Vec<Value>, Value) {
     let n = args.get("count").and_then(num).unwrap_or(64.0).clamp(1.0, 4096.0) as usize;
     let mut problems = Vec::new();
     let mut job = Job::new(k.clone(), n);
@@ -220,21 +222,21 @@ fn dry_run(k: &std::sync::Arc<Kernel>, args: &Value) -> (Vec<Value>, Value) {
     for b in k.buffers().iter().skip(1) {
         let r = match b.access {
             Access::Read => {
-                let words = match given.and_then(|g| g.get(&b.name)).and_then(Value::as_arr) {
+                let words = match given.and_then(|g| g.get(b.name)).and_then(Value::as_arr) {
                     Some(vals) if !vals.is_empty() => vals.iter().map(|v| (num(v).unwrap_or(0.0) as f32).to_bits()).collect(),
                     _ => ramp((n * b.stride as usize).max(64)),
                 };
-                job.input_vec_u32(&b.name, words)
+                job.input_vec_u32(b.name, words)
             }
             Access::Write => {
-                written.push((b.name.clone(), b.stride as usize));
-                job.output_u32(&b.name, vec![0; n * b.stride as usize])
+                written.push((b.name.to_string(), b.stride as usize));
+                job.output_u32(b.name, vec![0; n * b.stride as usize])
             }
             Access::Emit { width, capacity } => {
-                emits.push((b.name.clone(), width));
-                job.output_u32(&b.name, vec![0; n * (width * capacity) as usize])
+                emits.push((b.name.to_string(), width));
+                job.output_u32(b.name, vec![0; n * (width * capacity) as usize])
             }
-            Access::EmitCount => job.output_u32(&b.name, vec![0; n]),
+            Access::EmitCount => job.output_u32(b.name, vec![0; n]),
         };
         if let Err(e) = r {
             problems.push(problem(0, 0, format!("dry run: {e}"), ""));
@@ -251,15 +253,15 @@ fn dry_run(k: &std::sync::Arc<Kernel>, args: &Value) -> (Vec<Value>, Value) {
         }
         Ok(()) => {
             let stats = job.stats();
-            run.push(("ns_per_element", Value::F64((stats.nanos as f64 / n as f64 * 10.0).round() / 10.0)));
-            if stats.overflowed {
+            run.push(("ns_per_element", Value::F64((stats.nanos() as f64 / n as f64 * 10.0).round() / 10.0)));
+            if stats.overflowed() {
                 problems.push(problem(0, 0, "dry run: an element emitted more records than its emit_buffer slots, or a loop with a run-time bound reached 1024 iterations".into(), ""));
             }
-            if stats.host_error {
+            if stats.host_error() {
                 problems.push(problem(0, 0, "dry run: a host component call failed (its results were zero)".into(), ""));
             }
-            if !stats.reduced.is_empty() {
-                run.push(("reduced", Value::Arr(stats.reduced.iter().map(|x| Value::F64(*x as f64)).collect())));
+            if !stats.reduced().is_empty() {
+                run.push(("reduced", Value::Arr(stats.reduced().iter().map(|x| Value::F64(*x as f64)).collect())));
             }
             let mut outs = Vec::new();
             for (name, stride) in &written {

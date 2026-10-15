@@ -31,7 +31,7 @@ script_mod! {
     let Sep = SolidView{
         width: 1 height: 16
         margin: Inset{left: 3 right: 3}
-        draw_bg +: {color: mod.sheets.muted}
+        draw_bg +: {color: mod.theme.color_bevel_outset_2}
     }
 
     // Compact toolbar controls inherit the active Splash style.
@@ -41,8 +41,8 @@ script_mod! {
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
         align: Align{x: 0.5 y: 0.5}
         draw_text +: {
-            color: mod.sheets.fg
-            color_hover: mod.sheets.fg_bright
+            color: mod.theme.color_text
+            color_hover: mod.theme.color_text_hover
             text_style: theme.font_regular{font_size: 8.5}
         }
     }
@@ -67,11 +67,11 @@ script_mod! {
                 font_size: 9.0
                 line_spacing: 1.2
             }
-            color: mod.sheets.fg_bright
-            color_hover: mod.sheets.fg_bright
-            color_focus: mod.sheets.fg_bright
-            color_down: mod.sheets.fg_bright
-            color_empty: mod.sheets.fg_dark
+            color: mod.theme.color_text_hover
+            color_hover: mod.theme.color_text_hover
+            color_focus: mod.theme.color_text_hover
+            color_down: mod.theme.color_text_hover
+            color_empty: mod.theme.color_text_disabled
         }
     }
 
@@ -87,7 +87,7 @@ script_mod! {
             flow: Right spacing: 3
             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
             align: Align{y: 0.5}
-            draw_bg +: {color: mod.sheets.bg_dark}
+            draw_bg +: {color: mod.theme.color_bg_container}
 
             new_btn := TBtn{text: "New"}
             disk_controls := View{
@@ -139,7 +139,7 @@ script_mod! {
                     labels: ["fx"]
                             draw_text +: {
                         text_style: theme.font_regular{font_size: 8.5}
-                        color: mod.sheets.fg
+                        color: mod.theme.color_text
                     }
                 }
             }
@@ -153,14 +153,14 @@ script_mod! {
             flow: Right spacing: 6
             padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
             align: Align{y: 0.5}
-            draw_bg +: {color: mod.sheets.bg}
+            draw_bg +: {color: mod.theme.color_bg_app}
 
             name_box := FieldInput{width: 76 empty_text: ""}
             fx_label := Label{
                 text: "fx"
                 align: Align{x: 0.5 y: 0.5}
                 draw_text +: {
-                    color: mod.sheets.fg_dark
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_italic{font_size: 9.5}
                 }
             }
@@ -189,20 +189,20 @@ script_mod! {
                     cell_pad_x: 6.0
                     zebra_stripes: false
 
-                    color_bg: mod.sheets.bg
-                    color_cell: mod.sheets.bg
-                    color_cell_alt: mod.sheets.bg
-                    color_text: mod.sheets.fg
-                    color_header: mod.sheets.bg_light
-                    color_header_active: mod.sheets.muted
-                    color_header_text: mod.sheets.fg_bright
+                    color_bg: mod.theme.color_bg_app
+                    color_cell: mod.theme.color_bg_app
+                    color_cell_alt: mod.theme.color_bg_app
+                    color_text: mod.theme.color_text
+                    color_header: mod.theme.color_fg_app
+                    color_header_active: mod.theme.color_bevel_outset_2
+                    color_header_text: mod.theme.color_text_hover
                     color_selection: mod.sheets.sel_fill
-                    color_selection_border: mod.sheets.accent
-                    color_drag_marker: mod.sheets.accent
+                    color_selection_border: mod.theme.color_focus
+                    color_drag_marker: mod.theme.color_focus
                     color_resize_guide: mod.sheets.accent_ghost
 
                     draw_cell +: {
-                        border_color: uniform(mod.sheets.muted)
+                        border_color: uniform(mod.theme.color_bevel_outset_2)
                         border_size: uniform(1.0)
                     }
                     draw_text +: {
@@ -216,7 +216,7 @@ script_mod! {
                             font_size: 9.0
                             line_spacing: 1.2
                         }
-                        color: mod.sheets.fg
+                        color: mod.theme.color_text
                     }
                     draw_text_bold +: {
                         text_style: TextStyle{
@@ -229,7 +229,7 @@ script_mod! {
                             font_size: 9.0
                             line_spacing: 1.2
                         }
-                        color: mod.sheets.fg_bright
+                        color: mod.theme.color_text_hover
                     }
 
                     Editor := TextInput{
@@ -247,10 +247,10 @@ script_mod! {
                                 font_size: 9.0
                                 line_spacing: 1.2
                             }
-                            color: mod.sheets.fg_bright
-                            color_hover: mod.sheets.fg_bright
-                            color_focus: mod.sheets.fg_bright
-                            color_down: mod.sheets.fg_bright
+                            color: mod.theme.color_text_hover
+                            color_hover: mod.theme.color_text_hover
+                            color_focus: mod.theme.color_text_hover
+                            color_down: mod.theme.color_text_hover
                         }
                     }
 
@@ -261,7 +261,7 @@ script_mod! {
                         padding: Inset{left: 6 right: 6 top: 4 bottom: 2}
                         draw_text +: {
                             text_style: theme.font_italic{font_size: 9.0}
-                            color: mod.sheets.fg
+                            color: mod.theme.color_text
                         }
                     }
                     BoldItalicCell := Label{
@@ -269,7 +269,7 @@ script_mod! {
                         padding: Inset{left: 6 right: 6 top: 4 bottom: 2}
                         draw_text +: {
                             text_style: theme.font_bold_italic{font_size: 9.0}
-                            color: mod.sheets.fg_bright
+                            color: mod.theme.color_text_hover
                         }
                     }
                 }
@@ -277,22 +277,22 @@ script_mod! {
             more_panel := SolidView{
                 visible: false
                 width: Fill height: Fill
-                draw_bg +: {color: mod.sheets.bg}
+                draw_bg +: {color: mod.theme.color_bg_app}
                 more_list := PortalList{
                     width: Fill height: Fill
                     Row := ButtonFlat{
                         width: Fill height: 48 margin: 0
                         padding: Inset{left: 16 right: 16}
                         align: Align{x: 0.0 y: 0.5}
-                        draw_bg +: {color: #0000 color_hover: mod.sheets.bg_light color_down: mod.sheets.bg_light border_size: 0.0 border_radius: 0.0}
+                        draw_bg +: {color: #0000 color_hover: mod.theme.color_fg_app color_down: mod.theme.color_fg_app border_size: 0.0 border_radius: 0.0}
                         draw_text +: {
-                            color: mod.sheets.fg color_hover: mod.sheets.fg_bright color_down: mod.sheets.fg_bright
+                            color: mod.theme.color_text color_hover: mod.theme.color_text_hover color_down: mod.theme.color_text_hover
                             text_style: theme.font_regular{font_size: 10.5}
                         }
                     }
                     Header := Label{
                         width: Fill height: 40 padding: Inset{left: 8 top: 8}
-                        draw_text +: {color: mod.sheets.fg_dark text_style: theme.font_bold{font_size: 9}}
+                        draw_text +: {color: mod.theme.color_text_disabled text_style: theme.font_bold{font_size: 9}}
                     }
                 }
             }
@@ -303,7 +303,7 @@ script_mod! {
             flow: Right spacing: 3
             padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
             align: Align{y: 0.5}
-            draw_bg +: {color: mod.sheets.bg_dark}
+            draw_bg +: {color: mod.theme.color_bg_container}
 
             // The tabs scroll sideways; "+" and Rename's field sit outside
             // the strip, so any number of long names keeps them on screen.
@@ -334,19 +334,19 @@ script_mod! {
             flow: Right spacing: 12
             padding: Inset{left: 8 right: 8}
             align: Align{y: 0.5}
-            draw_bg +: {color: mod.sheets.bg_light}
+            draw_bg +: {color: mod.theme.color_fg_app}
 
             status_msg := Label{
                 width: Fill
                 draw_text +: {
-                    color: mod.sheets.fg_dark
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_regular{font_size: 8.5}
                 }
             }
             status_stats := Label{
                 width: Fit
                 draw_text +: {
-                    color: mod.sheets.fg
+                    color: mod.theme.color_text
                     text_style: TextStyle{
                         font_family: FontFamily{
                             latin := FontMember{

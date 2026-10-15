@@ -157,7 +157,7 @@ use crate::{
     animator::Ease,
     makepad_draw::*,
     makepad_script::{
-        pod::{ScriptPodTy, ScriptPodVec},
+        pod::ScriptPodVec,
         script_err_invalid_args, script_err_type_mismatch, ScriptFnRef,
     },
     tween::{
@@ -473,12 +473,12 @@ impl VmTweens {
             let applied = cx.with_script_vm_id(vm_id, |vm| {
                 let key = w.script_source_heap_key();
                 let src = w.script_source();
-                if key != vm.bx.heap.heap_key() || src == ScriptObject::ZERO {
+                if key != vm.heap_key() || src == ScriptObject::ZERO {
                     return false;
                 }
-                let obj = vm.bx.heap.new_object();
+                let obj = vm.new_object();
                 for p in &r.paths {
-                    if let Some(v) = source_raw(&vm.bx.heap, src, p.path()) {
+                    if let Some(v) = source_raw(vm.heap(), src, p.path()) {
                         set_path(vm, obj, p.path(), v);
                     }
                 }
@@ -775,7 +775,7 @@ fn call_closure(cx: &mut Cx, vm_id: SplashVmId, f: &ScriptFnRef) {
     contain_isolate_panic("tween callback", || {
         cx.with_script_vm_id(vm_id, |vm| {
             // Never call a closure against a heap that did not mint it.
-            if key != 0 && vm.bx.heap.heap_key() != key {
+            if key != 0 && vm.heap_key() != key {
                 return;
             }
             vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
@@ -903,23 +903,22 @@ fn path_text(path: &[LiveId]) -> String {
 
 /// The own keyed entries of `obj` (a vars literal's `key: value` pairs).
 fn own_entries(vm: &ScriptVm, obj: ScriptObject) -> Vec<(LiveId, ScriptValue)> {
-    vm.bx
-        .heap
-        .map_ref(obj)
-        .iter()
-        .filter_map(|(k, v)| Some((k.as_id()?, v.value)))
+    vm.heap()
+        .map_entries(obj)
+        .into_iter()
+        .filter_map(|e| Some((e.key.as_id()?, e.value)))
         .collect()
 }
 
 fn fn_object(vm: &ScriptVm, v: ScriptValue) -> Option<ScriptObject> {
-    v.as_object().filter(|o| vm.bx.heap.is_fn(*o))
+    v.as_object().filter(|o| vm.is_fn(*o))
 }
 
 fn string_of(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
     if !v.is_string_like() {
         return None;
     }
-    vm.bx.heap.string_with(v, |_, s| s.to_string())
+    vm.heap().string_with(v, |_, s| s.to_string())
 }
 
 fn number(v: ScriptValue, what: LiveId) -> Parse<f64> {
@@ -963,10 +962,10 @@ fn tween_value(heap: &ScriptHeap, v: ScriptValue) -> Option<TweenValue> {
     let p = v.as_pod()?;
     let (ty, data) = heap.pod_data(p);
     let f = |i: usize| f32::from_bits(data[i]) as f64;
-    let (value, lanes) = match ty.ty {
-        ScriptPodTy::Vec(ScriptPodVec::Vec2f) => (TweenValue::Vec2([f(0), f(1)]), 2),
-        ScriptPodTy::Vec(ScriptPodVec::Vec3f) => (TweenValue::Vec3([f(0), f(1), f(2)]), 3),
-        ScriptPodTy::Vec(ScriptPodVec::Vec4f) => (TweenValue::Vec4([f(0), f(1), f(2), f(3)]), 4),
+    let (value, lanes) = match ty.ty().as_vec() {
+        Some(ScriptPodVec::Vec2f) => (TweenValue::Vec2([f(0), f(1)]), 2),
+        Some(ScriptPodVec::Vec3f) => (TweenValue::Vec3([f(0), f(1), f(2)]), 3),
+        Some(ScriptPodVec::Vec4f) => (TweenValue::Vec4([f(0), f(1), f(2), f(3)]), 4),
         _ => return None,
     };
     // Like numbers: a NaN or infinite lane is not a value to animate.
@@ -974,7 +973,7 @@ fn tween_value(heap: &ScriptHeap, v: ScriptValue) -> Option<TweenValue> {
 }
 
 fn prop_value(vm: &ScriptVm, v: ScriptValue, path: &[LiveId]) -> Parse<PVal> {
-    if let Some(t) = tween_value(&vm.bx.heap, v) {
+    if let Some(t) = tween_value(vm.heap(), v) {
         return Ok(PVal::Abs(t));
     }
     if let Some(s) = string_of(vm, v) {
@@ -1026,7 +1025,7 @@ fn collect_props(
 
 fn add_prop(vm: &ScriptVm, v: ScriptValue, path: &[LiveId], out: &mut Vec<PProp>) -> Parse<()> {
     if let Some(obj) = v.as_object() {
-        if vm.bx.heap.is_fn(obj) {
+        if vm.is_fn(obj) {
             return Err(format!(
                 "{}: a function is not a property value (callbacks are on_start, on_update, on_repeat, on_complete, on_reverse_complete, on_interrupt)",
                 path_text(path)
@@ -1052,7 +1051,7 @@ fn add_prop(vm: &ScriptVm, v: ScriptValue, path: &[LiveId], out: &mut Vec<PProp>
 
 /// An ease: an `Ease` value, a GSAP string or a CSS preset name.
 fn parse_ease(vm: &mut ScriptVm, v: ScriptValue) -> Parse<Easing> {
-    if v.as_object().is_some() && Ease::script_type_check(&vm.bx.heap, v) {
+    if v.as_object().is_some() && Ease::script_type_check(vm.heap(), v) {
         let e = Ease::script_from_value(vm, v);
         return Ok(Easing::from(&e));
     }
@@ -1130,7 +1129,7 @@ fn pair(vm: &ScriptVm, v: ScriptValue, what: &str) -> Parse<(f64, f64)> {
     let Some(arr) = v.as_array() else {
         return Err(what.into());
     };
-    let heap = &vm.bx.heap;
+    let heap = vm.heap();
     if heap.array_len(arr) != 2 {
         return Err(what.into());
     }
@@ -1182,7 +1181,7 @@ fn parse_callback(
         return Err(format!("{kind:?} callback must be a function"));
     };
     *events = events.with(kind.mask());
-    cbs.push((kind, vm.bx.heap.new_fn_ref(obj)));
+    cbs.push((kind, vm.heap_mut().new_fn_ref(obj)));
     Ok(())
 }
 
@@ -1349,7 +1348,7 @@ fn motion_key(vm: &ScriptVm, v: ScriptValue, what: &str) -> Parse<IdPath> {
 
 /// The points of a `motion_path` array: `[[x, y], ..]` or `[[x, y, z], ..]`.
 fn motion_points(vm: &ScriptVm, arr: ScriptArray) -> Parse<Vec<[f64; 3]>> {
-    let heap = &vm.bx.heap;
+    let heap = vm.heap();
     let n = heap.array_len(arr);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -1451,7 +1450,7 @@ fn parse_motion_path(vm: &mut ScriptVm, v: ScriptValue) -> Parse<PathSpec> {
                     let Some(arr) = v.as_array() else {
                         return Err(bad.into());
                     };
-                    let heap = &vm.bx.heap;
+                    let heap = vm.heap();
                     let len = heap.array_len(arr);
                     if len != 2 && len != 3 {
                         return Err(bad.into());
@@ -1558,9 +1557,9 @@ fn parse_targets(vm: &ScriptVm, v: ScriptValue) -> Parse<Vec<WidgetUid>> {
         return Ok(out);
     }
     if let Some(arr) = v.as_array() {
-        let len = vm.bx.heap.array_len(arr);
+        let len = vm.heap().array_len(arr);
         for i in 0..len {
-            let item = vm.bx.heap.array_index(arr, i, NoTrap);
+            let item = vm.heap().array_index(arr, i, NoTrap);
             let Some(uid) = ui_handle_uid(vm, item) else {
                 return Err(format!("target {i} is not a ui handle (ui, ui.name)"));
             };
@@ -1629,8 +1628,8 @@ fn parse_keys(vm: &ScriptVm, v: ScriptValue) -> Parse<Option<Vec<PropKey>>> {
     if let Some(s) = string_of(vm, v) {
         split(&s, &mut out);
     } else if let Some(arr) = v.as_array() {
-        for i in 0..vm.bx.heap.array_len(arr) {
-            let item = vm.bx.heap.array_index(arr, i, NoTrap);
+        for i in 0..vm.heap().array_len(arr) {
+            let item = vm.heap().array_index(arr, i, NoTrap);
             if let Some(s) = string_of(vm, item) {
                 split(&s, &mut out);
             } else if let Some(id) = item.as_id() {
@@ -1676,15 +1675,15 @@ fn source_raw(heap: &ScriptHeap, src: ScriptObject, path: &[LiveId]) -> Option<S
 /// heap than `vm`'s.
 fn source_value(vm: &ScriptVm, w: &WidgetRef, path: &[LiveId]) -> Option<TweenValue> {
     w.try_widget_uid()?;
-    if w.script_source_heap_key() != vm.bx.heap.heap_key() {
+    if w.script_source_heap_key() != vm.heap_key() {
         return None;
     }
     let src = w.script_source();
     if src == ScriptObject::ZERO {
         return None;
     }
-    let v = source_raw(&vm.bx.heap, src, path)?;
-    tween_value(&vm.bx.heap, v)
+    let v = source_raw(vm.heap(), src, path)?;
+    tween_value(vm.heap(), v)
 }
 
 /// Writes `v` at `path` of `obj`, creating the intermediate objects.
@@ -1694,16 +1693,16 @@ fn set_path(vm: &mut ScriptVm, obj: ScriptObject, path: &[LiveId], v: ScriptValu
     };
     let mut parent = obj;
     for id in prefix {
-        parent = match vm.bx.heap.value(parent, (*id).into(), NoTrap).as_object() {
+        parent = match vm.value(parent, *id).as_object() {
             Some(child) => child,
             None => {
-                let child = vm.bx.heap.new_object();
-                vm.bx.heap.set_value_def(parent, (*id).into(), child.into());
+                let child = vm.new_object();
+                vm.set_value_def(parent, *id, child);
                 child
             }
         };
     }
-    vm.bx.heap.set_value_def(parent, (*last).into(), v);
+    vm.set_value_def(parent, *last, v);
 }
 
 /// How many lanes a value of `kind` carries.
@@ -1829,7 +1828,7 @@ fn build_tween(
     // The widgets, each built by this VM: a source in another heap (a
     // Splash isolate's widget seen from its host, the host-built Splash seen
     // from its isolate) is not this script's to animate, nor to read.
-    let own_heap = vm.bx.heap.heap_key();
+    let own_heap = vm.heap_key();
     let mut widgets = Vec::with_capacity(uids.len());
     for uid in &uids {
         let w = vm.cx().widget_tree().widget(*uid);
@@ -2069,8 +2068,7 @@ fn handle_type(vm: &mut ScriptVm, vm_id: SplashVmId) -> ScriptHandleType {
 fn mint(vm: &mut ScriptVm, id: TweenId, timeline: bool) -> ScriptValue {
     let vm_id = current_splash_vm_id(vm.cx_mut());
     let ty = handle_type(vm, vm_id);
-    vm.bx
-        .heap
+    vm.heap_mut()
         .new_handle(
             ty,
             Box::new(TweenHandleGc {
@@ -2301,16 +2299,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 );
             }
             let t = tween_ticker(vm.cx_mut());
-            let obj = vm.bx.heap.new_object();
-            vm.bx
-                .heap
-                .set_value_def(obj, id!(time_scale).into(), t.time_scale.into());
-            vm.bx
-                .heap
-                .set_value_def(obj, id!(paused).into(), t.paused.into());
-            vm.bx
-                .heap
-                .set_value_def(obj, id!(reduced_motion).into(), t.reduced_motion.into());
+            let obj = vm.new_object();
+            vm.set_value_def(obj, id!(time_scale), t.time_scale);
+            vm.set_value_def(obj, id!(paused), t.paused);
+            vm.set_value_def(obj, id!(reduced_motion), t.reduced_motion);
             obj.into()
         },
     );
@@ -2478,7 +2470,7 @@ fn opt_fn(vm: &mut ScriptVm, v: ScriptValue, what: &str) -> Result<Option<Script
         return Ok(None);
     }
     match fn_object(vm, v) {
-        Some(obj) => Ok(Some(vm.bx.heap.new_fn_ref(obj))),
+        Some(obj) => Ok(Some(vm.heap_mut().new_fn_ref(obj))),
         None => Err(format!("{what} takes a function")),
     }
 }

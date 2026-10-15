@@ -23,21 +23,21 @@
 //! bit-identical to the interpreter: AIR's ops are total and exactly
 //! specified (a fused multiply-add is one rounding everywhere) and math
 //! functions are polynomials of those ops (no libm).
+use makepad_relax_api::relax_api;
 
-pub mod admission;
+pub mod cost;
+pub mod boundary;
 pub mod host;
-#[cfg(feature = "vm")]
-pub mod imports;
 pub mod ir;
 pub mod js;
 pub mod kernel;
 pub mod lower;
 pub mod module;
+#[cfg(feature = "vm")]
+pub mod object;
 pub mod opt;
 pub mod parse;
-pub mod pipeline;
 pub mod rand;
-pub mod sched;
 pub mod work;
 mod spmd;
 #[cfg(feature = "vm")]
@@ -48,9 +48,28 @@ pub mod wasm;
 pub mod arm64;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
+/// Native code through the shared back end (makepad-codegen): AIR -> RIR -> x64 / arm64.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub mod native;
+/// Four elements per iteration through the shared back end (SSE4.1/AVX2, NEON).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub mod native_vec;
+/// The host's scalar native backend: compute's own emitter on AArch64 (until the shared
+/// path replaces it, loader-core.md step 6), the shared back end on x86-64.
+/// (Feature `shared-backend`: the shared back end on AArch64 too.)
+#[cfg(all(target_arch = "aarch64", not(feature = "shared-backend")))]
+pub use arm64 as host_native;
+#[cfg(any(target_arch = "x86_64", all(target_arch = "aarch64", feature = "shared-backend")))]
+pub use native as host_native;
+/// The host's four-wide backend: NEON x4 on AArch64 (until step 3), the shared back end's
+/// SSE4.1/AVX2 vectors on x86-64.
+#[cfg(all(target_arch = "aarch64", not(feature = "shared-backend")))]
+pub use neon as host_simd;
+#[cfg(any(target_arch = "x86_64", all(target_arch = "aarch64", feature = "shared-backend")))]
+pub use native_vec as host_simd;
 
 /// A compile error with a byte span into the source it came from.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct ShaderError {
     pub start: usize,
     pub end: usize,
@@ -58,11 +77,13 @@ pub struct ShaderError {
 }
 
 impl ShaderError {
+    #[inline(always)]
     pub fn new(start: usize, end: usize, message: String) -> Self {
         ShaderError { start, end, message }
     }
 
     /// 1-based line and column of the error start in `src`.
+    #[inline(always)]
     pub fn line_col(&self, src: &str) -> (usize, usize) {
         let at = self.start.min(src.len());
         let before = &src[..at];
@@ -72,13 +93,31 @@ impl ShaderError {
     }
 }
 
+// These diagnostics are also materialized by caller-side compile wrappers.
+// Their String never crosses a bound signature; ErrorView borrows the text.
+impl Clone for ShaderError {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self { start: self.start, end: self.end, message: self.message.clone() }
+    }
+}
+
+impl PartialEq for ShaderError {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start && self.end == other.end && self.message == other.message
+    }
+}
+
 impl std::fmt::Display for ShaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (at {}..{})", self.message, self.start, self.end)
     }
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Backend {
     /// The AIR interpreter (the reference; the path where executable
     /// memory is unavailable).
@@ -128,3 +167,4 @@ pub fn with_prelude(items: &[parse::Item], prelude: Vec<parse::Item>, own: &std:
     }
     all
 }
+

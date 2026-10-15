@@ -3,7 +3,8 @@ use crate::{
     //makepad_live_id::{
     //LiveId,
     //},
-    draw_list::DrawListId,
+    draw_list::{CxDrawCall, CxDrawItem, CxDrawList, DrawListId},
+    draw_shader::CxDrawShaderMapping,
     makepad_error_log::*,
     makepad_math::*,
 };
@@ -110,11 +111,40 @@ fn rect_area_clipped(ra: &RectArea, cx: &Cx, ignore_redraw: bool) -> Rect {
     }
 }
 
+/// The draw call that an `Area::Instance` points at, or `None` if its draw list was recorded
+/// again within the same redraw (so `redraw_id` still matches), and `draw_item_id` now holds
+/// something else, e.g., a sub-list.
+fn instance_draw_item<'a>(
+    inst: &InstanceArea,
+    draw_list: &'a CxDrawList,
+) -> Option<(&'a CxDrawItem, &'a CxDrawCall)> {
+    if inst.draw_item_id >= draw_list.draw_items.len() {
+        return None;
+    }
+    let draw_item = &draw_list.draw_items[inst.draw_item_id];
+    Some((draw_item, draw_item.draw_call()?))
+}
+
+/// The shader mapping and instance data of an `Area::Instance`'s draw call,
+/// or `None` if the area is stale (see `instance_draw_item()`), or its first instance
+/// lies past the end of that draw call's data, e.g., when a shorter draw call took its slot.
+fn live_instance_data<'a>(
+    inst: &InstanceArea,
+    cx: &'a Cx,
+    draw_list: &'a CxDrawList,
+) -> Option<(&'a CxDrawShaderMapping, &'a [f32])> {
+    let (draw_item, draw_call) = instance_draw_item(inst, draw_list)?;
+    let mapping = &cx.draw_shaders[draw_call.draw_shader_id.index].mapping;
+    let buf = draw_item.instances.as_deref()?;
+    (inst.instance_offset + mapping.instances.total_slots <= buf.len()).then_some((mapping, buf))
+}
+
 impl Area {
     pub fn area(&self) -> Self {
         self.clone()
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(*self);
     }
@@ -202,7 +232,7 @@ impl Area {
                     if draw_list.redraw_id != inst.redraw_id {
                         return false;
                     }
-                    return true;
+                    return instance_draw_item(inst, draw_list).is_some();
                 }
                 return false;
             }
@@ -224,27 +254,23 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                let draw_item = &draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.draw_call().unwrap();
-
-                if draw_item.instances.as_ref().unwrap().len() == 0 {
-                    error!("No instances but everything else valid?");
+                // ok now we have to patch x/y/w/h into it. An area into a capture that was frozen
+                // or recycled, or whose draw list was recorded again within this redraw, can point
+                // at an item with no draw call or data: it has no rect.
+                let Some((mapping, buf)) = live_instance_data(inst, cx, draw_list) else {
                     return Rect::default();
-                }
-                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
-                // ok now we have to patch x/y/w/h into it
-                let buf = draw_item.instances.as_ref().unwrap();
-                if let Some(rect_pos) = sh.mapping.rect_pos {
+                };
+                if let Some(rect_pos) = mapping.rect_pos {
                     let pos = dvec2(
                         buf[inst.instance_offset + rect_pos + 0] as f64,
                         buf[inst.instance_offset + rect_pos + 1] as f64,
                     );
-                    if let Some(rect_size) = sh.mapping.rect_size {
+                    if let Some(rect_size) = mapping.rect_size {
                         let size = dvec2(
                             buf[inst.instance_offset + rect_size + 0] as f64,
                             buf[inst.instance_offset + rect_size + 1] as f64,
                         );
-                        if let Some(draw_clip) = sh.mapping.draw_clip {
+                        if let Some(draw_clip) = mapping.draw_clip {
                             let p1 = dvec2(
                                 buf[inst.instance_offset + draw_clip + 0] as f64,
                                 buf[inst.instance_offset + draw_clip + 1] as f64,
@@ -309,14 +335,28 @@ impl Area {
         self.clipped_rect_union_inner(cx, true)
     }
 
+    /// The bounds of EVERY instance in an instance area before any clip is
+    /// applied (the draw list's own shift still is): where a text run or a
+    /// batch of quads was laid out. Compare with [`Self::clipped_rect_union`]
+    /// to find what a clip cuts off.
+    pub fn rect_union(&self, cx: &Cx) -> Rect {
+        self.rect_union_inner(cx, false, false)
+    }
+
     fn clipped_rect_union_inner(&self, cx: &Cx, ignore_redraw: bool) -> Rect {
+        self.rect_union_inner(cx, ignore_redraw, true)
+    }
+
+    fn rect_union_inner(&self, cx: &Cx, ignore_redraw: bool, clip: bool) -> Rect {
         let inst = match self {
             Area::Instance(inst) => inst,
             // A container without a background owns a rect area; attached
             // means on screen for it exactly as for an instance, so a
             // retained list that did not redraw this frame still answers.
-            Area::Rect(ra) => return rect_area_clipped(ra, cx, ignore_redraw),
-            _ => return self.clipped_rect(cx),
+            Area::Rect(ra) => {
+                return if clip { rect_area_clipped(ra, cx, ignore_redraw) } else { self.rect(cx) };
+            }
+            _ => return if clip { self.clipped_rect(cx) } else { self.rect(cx) },
         };
         if inst.instance_count == 0 {
             // A probe, not a draw: an instance-less area is simply "nothing
@@ -327,8 +367,7 @@ impl Area {
         if !ignore_redraw && draw_list.redraw_id != inst.redraw_id {
             return Rect::default();
         }
-        let draw_item = &draw_list.draw_items[inst.draw_item_id];
-        let Some(draw_call) = draw_item.draw_call() else {
+        let Some((draw_item, draw_call)) = instance_draw_item(inst, draw_list) else {
             return Rect::default();
         };
         let Some(buf) = draw_item.instances.as_ref() else {
@@ -336,11 +375,11 @@ impl Area {
         };
         let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
         let (Some(rect_pos), Some(rect_size)) = (sh.mapping.rect_pos, sh.mapping.rect_size) else {
-            return self.clipped_rect(cx);
+            return if clip { self.clipped_rect(cx) } else { self.rect(cx) };
         };
         let stride = sh.mapping.instances.total_slots;
         if stride == 0 {
-            return self.clipped_rect(cx);
+            return if clip { self.clipped_rect(cx) } else { self.rect(cx) };
         }
         let mut union: Option<Rect> = None;
         for i in 0..inst.instance_count {
@@ -352,7 +391,7 @@ impl Area {
                 pos: dvec2(buf[o + rect_pos] as f64, buf[o + rect_pos + 1] as f64),
                 size: dvec2(buf[o + rect_size] as f64, buf[o + rect_size + 1] as f64),
             };
-            if let Some(draw_clip) = sh.mapping.draw_clip {
+            if let (true, Some(draw_clip)) = (clip, sh.mapping.draw_clip) {
                 rect = rect.clip((
                     dvec2(buf[o + draw_clip] as f64, buf[o + draw_clip + 1] as f64),
                     dvec2(buf[o + draw_clip + 2] as f64, buf[o + draw_clip + 3] as f64),
@@ -360,12 +399,13 @@ impl Area {
             }
             if draw_list.draw_list_has_clip {
                 let u = &draw_list.draw_list_uniforms;
-                rect = rect
-                    .translate(dvec2(u.view_shift.x as f64, u.view_shift.y as f64))
-                    .clip((
+                rect = rect.translate(dvec2(u.view_shift.x as f64, u.view_shift.y as f64));
+                if clip {
+                    rect = rect.clip((
                         dvec2(u.view_clip.x as f64, u.view_clip.y as f64),
                         dvec2(u.view_clip.z as f64, u.view_clip.w as f64),
                     ));
+                }
             }
             if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
                 continue;
@@ -405,22 +445,18 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                let draw_item = &draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.draw_call().unwrap();
-
-                if draw_item.instances.as_ref().unwrap().len() == 0 {
-                    error!("No instances but everything else valid?");
+                // ok now we have to patch x/y/w/h into it. An area into a capture that was frozen
+                // or recycled, or whose draw list was recorded again within this redraw, can point
+                // at an item with no draw call or data: it has no rect.
+                let Some((mapping, buf)) = live_instance_data(inst, cx, draw_list) else {
                     return Rect::default();
-                }
-                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
-                // ok now we have to patch x/y/w/h into it
-                let buf = draw_item.instances.as_ref().unwrap();
-                if let Some(rect_pos) = sh.mapping.rect_pos {
+                };
+                if let Some(rect_pos) = mapping.rect_pos {
                     let pos = dvec2(
                         buf[inst.instance_offset + rect_pos + 0] as f64,
                         buf[inst.instance_offset + rect_pos + 1] as f64,
                     );
-                    if let Some(rect_size) = sh.mapping.rect_size {
+                    if let Some(rect_size) = mapping.rect_size {
                         let size = dvec2(
                             buf[inst.instance_offset + rect_size + 0] as f64,
                             buf[inst.instance_offset + rect_size + 1] as f64,
@@ -450,11 +486,19 @@ impl Area {
                     //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
                 }
+                // A stale area whose draw list was recorded again within this redraw, see `instance_draw_item()`.
+                if inst.draw_item_id >= cxview.draw_items.len() {
+                    return;
+                }
                 let draw_item = &mut cxview.draw_items[inst.draw_item_id];
                 //log!("{:?}", draw_item.kind.sub_list().is_some());
-                let draw_call = draw_item.kind.draw_call().unwrap();
+                let Some(draw_call) = draw_item.kind.draw_call() else {
+                    return;
+                };
                 let sh = &cx.draw_shaders[draw_call.draw_shader_id.index]; // ok now we have to patch x/y/w/h into it
-                let buf = draw_item.instances.as_mut().unwrap();
+                let Some(buf) = draw_item.instances.as_mut() else {
+                    return;
+                };
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let x_index = inst.instance_offset + rect_pos;
                     let y_index = inst.instance_offset + rect_pos + 1;
@@ -601,4 +645,38 @@ impl Area {
         }
         None
     }*/
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw_list::DrawList;
+
+    /// An undrawn widget keeps its last area. If its draw list was recorded again within the same redraw,
+    /// that area's `redraw_id` still matches while its slot now holds a sub-list (or nothing at all).
+    #[test]
+    fn a_stale_instance_area_never_panics() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        let sub_list = DrawList::new(&mut cx);
+        let draw_list = &mut cx.draw_lists[list.id()];
+        draw_list.clear_draw_items(1, 1, 1);
+        draw_list.append_sub_list(1, sub_list.id());
+
+        for draw_item_id in [0, 3] {
+            let area = Area::Instance(InstanceArea {
+                draw_list_id: list.id(),
+                draw_item_id,
+                instance_offset: 0,
+                instance_count: 1,
+                redraw_id: 1,
+            });
+            assert!(!area.is_valid(&cx));
+            assert!(area.valid_instance(&cx).is_none());
+            assert_eq!(area.clipped_rect(&cx), Rect::default());
+            assert_eq!(area.clipped_rect_union(&cx), Rect::default());
+            assert_eq!(area.rect(&cx), Rect::default());
+            area.set_rect(&mut cx, &Rect { pos: dvec2(1.0, 1.0), size: dvec2(1.0, 1.0) });
+        }
+    }
 }

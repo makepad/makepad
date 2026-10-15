@@ -17,4 +17,4 @@ unicode-segmentation = { version = "1.12.0", path = "../unicode/unicode-segmenta
 
 [dev-dependencies]
 # Size report only: the web export serves fonts inside a brotli-compressed wasm.
-brotli = "8.0"
+brotli = { path = "../brotli/brotli" }

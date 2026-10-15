@@ -10,6 +10,6 @@ repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
 makepad-network = { path = "../../platform/network" }
-brotli = "8.0"
+brotli = { path = "../brotli/brotli" }
 # The collect manifest: what a collect run says the app needs.
 makepad-web-manifest = { path = "../web_manifest" }

@@ -72,19 +72,34 @@ mod async_sink {
     pub(super) enum Message {
         Record(Box<dyn FnOnce() + Send>),
         Deferred(DeferredLog),
+        /// the consumer returns
+        Stop,
+    }
+    /// A hosted app ended (its domain is being torn down): the consumer returns after it has written
+    /// what was queued before the stop, so the domain has no thread left.
+    pub(super) fn stop() {
+        if let Some(Some(tx)) = SINK.get() {
+            let _ = tx.send(Message::Stop);
+        }
     }
     static SINK: OnceLock<Option<SyncSender<Message>>> = OnceLock::new();
     static DROPPED: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn init() {
         SINK.get_or_init(|| {
-            let (tx, rx) = sync_channel::<Message>(1024);
+            // MAKEPAD_LOG_SINK=<records> deepens the queue for diagnostic runs that log in bursts
+            let depth = std::env::var("MAKEPAD_LOG_SINK").ok().and_then(|v| v.parse().ok()).unwrap_or(1024usize);
+            let (tx, rx) = sync_channel::<Message>(depth);
             std::thread::Builder::new().name("makepad-log".into()).spawn(move || {
                 let mut reported = 0;
                 while let Ok(message) = rx.recv() {
+                    if matches!(message, Message::Stop) {
+                        return;
+                    }
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match message {
                         Message::Record(write) => write(),
                         Message::Deferred(record) => record.write(),
+                        Message::Stop => {}
                     })).is_err() {
                         DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
@@ -118,6 +133,12 @@ mod async_sink {
     }
 
     pub(super) fn dropped() -> u64 { DROPPED.load(Ordering::Relaxed) }
+}
+
+/// A hosted app ends: the log consumer thread returns (records logged after it are counted as dropped).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stop_sink() {
+    async_sink::stop();
 }
 
 /// Number of log records refused by the bounded native sink.
@@ -172,6 +193,7 @@ impl DeferredLog {
             Ok(()) => Ok(()),
             Err(async_sink::Message::Deferred(record)) => Err(record),
             Err(async_sink::Message::Record(_)) => unreachable!(),
+            Err(async_sink::Message::Stop) => unreachable!(),
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -284,10 +306,7 @@ fn write_log_record(
         }
         #[cfg(target_os = "ios")]
         {
-            extern "C" {
-                fn NSLog(fmt: crate::os::apple::apple_sys::ObjcId, ...);
-            }
-            use crate::os::apple::apple_util::str_to_nsstring;
+            use makepad_apple_sys::{str_to_nsstring, NSLog};
             let msg = format!(
                 "{} {}:{}:{} - {}",
                 log_level_prefix(level),
@@ -296,34 +315,8 @@ fn write_log_record(
                 column_start + 1,
                 message
             );
-            unsafe { NSLog(str_to_nsstring(&msg)) };
-        }
-        #[cfg(target_env = "ohos")]
-        {
-            let msg = format!(
-                "{} {}:{}:{} - {}\0",
-                log_level_prefix(level),
-                file_name,
-                line_start,
-                column_start,
-                message
-            );
-            let hilevel: hilog_sys::LogLevel = match level {
-                LogLevel::Warning => hilog_sys::LogLevel::LOG_WARN,
-                LogLevel::Error => hilog_sys::LogLevel::LOG_ERROR,
-                LogLevel::Log => hilog_sys::LogLevel::LOG_INFO,
-                _ => hilog_sys::LogLevel::LOG_INFO,
-            };
-            unsafe {
-                hilog_sys::OH_LOG_Print(
-                    hilog_sys::LogType::LOG_APP,
-                    hilevel,
-                    0x03D00,
-                    "makepad-ohos\0".as_ptr().cast(),
-                    "%{public}s\0".as_ptr().cast(),
-                    msg.as_ptr(),
-                )
-            };
+            // the message as an argument: a `%` in it is no format directive
+            unsafe { NSLog(str_to_nsstring("%@"), str_to_nsstring(&msg)) };
         }
     }
 

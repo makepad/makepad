@@ -1,0 +1,11 @@
+# The layouts built into the binary (src/embedded_styles.rs), one file stem per line.
+# One per size class (tiny, small, medium) and the large ones to choose from.
+widget
+mini
+compact
+classic
+deck
+theatre
+library
+strip
+tile

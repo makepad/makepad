@@ -14,8 +14,10 @@
 //! off it; do not block, and do not call `add_screen_capture` /
 //! `remove_screen_capture` from inside a sink (the registry lock is held).
 //!
-//! Backend coverage: macOS/Metal, Windows/D3D11, Linux/OpenGL + Vulkan —
-//! the same places that can already answer a `/g` grab.
+//! Backend coverage: every backend that answers a `/g` grab. Under the HAL
+//! the frame builder asks for the same window copy a grab uses while a sink
+//! is owed a frame (`os/hal/readback.rs`), so Metal, Vulkan (X11, Wayland,
+//! KMS, Android) and D3D11 all serve it from one place.
 //!
 //! A recorder uses the second kind of sink, [`add_screen_capture_surface`],
 //! where the backend supports it ([`surfaces_supported`]: Metal, D3D11, the
@@ -24,8 +26,7 @@
 //! next free buffer of a small ring, in the work that presents it, and the
 //! render thread never waits for or touches the pixels. A frame is skipped
 //! rather than waited for when every buffer is still in use. The backend
-//! halves are `os/apple/capture_surface.rs`, `os/windows/capture_surface.rs`
-//! and `os/linux/capture_surface.rs`.
+//! halves live in the HAL's Apple, Windows and Linux backends.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -93,7 +94,7 @@ pub struct ScreenCaptureSurface {
 }
 
 #[cfg(target_vendor = "apple")]
-pub(crate) struct SurfaceInner(pub(crate) crate::os::apple::apple_sys::CVPixelBufferRef);
+pub(crate) struct SurfaceInner(pub(crate) makepad_apple_sys::CVPixelBufferRef);
 
 // A CVPixelBuffer is a thread-safe CF object; the handle only retains it.
 #[cfg(target_vendor = "apple")]
@@ -104,7 +105,7 @@ unsafe impl Sync for SurfaceInner {}
 #[cfg(target_vendor = "apple")]
 impl Clone for SurfaceInner {
     fn clone(&self) -> Self {
-        unsafe { crate::os::apple::apple_sys::CVPixelBufferRetain(self.0) };
+        unsafe { makepad_apple_sys::CVPixelBufferRetain(self.0) };
         Self(self.0)
     }
 }
@@ -112,7 +113,7 @@ impl Clone for SurfaceInner {
 #[cfg(target_vendor = "apple")]
 impl Drop for SurfaceInner {
     fn drop(&mut self) {
-        unsafe { crate::os::apple::apple_sys::CVPixelBufferRelease(self.0) };
+        unsafe { makepad_apple_sys::CVPixelBufferRelease(self.0) };
     }
 }
 
@@ -141,7 +142,7 @@ pub(crate) trait MappedCapture: Send + Sync {
 impl ScreenCaptureSurface {
     /// The `CVPixelBufferRef`, valid while `self` lives.
     #[cfg(target_vendor = "apple")]
-    pub fn pixel_buffer(&self) -> crate::os::apple::apple_sys::CVPixelBufferRef {
+    pub fn pixel_buffer(&self) -> makepad_apple_sys::CVPixelBufferRef {
         self.inner.0
     }
 
@@ -168,7 +169,7 @@ impl ScreenCaptureSurface {
         out.resize(width * height * 4, 0);
         #[cfg(target_vendor = "apple")]
         unsafe {
-            use crate::os::apple::apple_sys::*;
+            use makepad_apple_sys::*;
             // kCVPixelBufferLock_ReadOnly
             if CVPixelBufferLockBaseAddress(self.inner.0, 1) != 0 {
                 return false;
@@ -187,7 +188,7 @@ impl ScreenCaptureSurface {
         }
         #[cfg(target_os = "windows")]
         {
-            crate::os::windows::capture_surface::read_texture_rgba(self, out)
+            read_d3d11_rgba(self, out)
         }
         #[cfg(target_os = "linux")]
         {
@@ -200,6 +201,57 @@ impl ScreenCaptureSurface {
             }
             true
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// [`ScreenCaptureSurface::read_rgba`] on D3D11: a staging copy on the
+/// surface's device, mapped (waits for the copy) on the caller's thread.
+fn read_d3d11_rgba(surface: &ScreenCaptureSurface, out: &mut Vec<u8>) -> bool {
+    use crate::windows::Win32::Graphics::{
+        Direct3D11::{ID3D11Resource, ID3D11Texture2D, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE},
+        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+    };
+    let SurfaceInner { texture, device } = &surface.inner;
+    let (width, height) = (surface.width, surface.height);
+    unsafe {
+        let Ok(context) = device.GetImmediateContext() else {
+            return false;
+        };
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE(3), // D3D11_USAGE_STAGING
+            BindFlags: 0,
+            CPUAccessFlags: 0x20000, // D3D11_CPU_ACCESS_READ
+            MiscFlags: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        if device.CreateTexture2D(&desc, None, Some(&mut staging)).is_err() {
+            return false;
+        }
+        let (Some(Ok(staging)), Ok(source)) = (staging.map(|s| ID3D11Resource::query(s.as_raw())), ID3D11Resource::query(texture.as_raw())) else {
+            return false;
+        };
+        context.CopyResource(&staging, &source);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        if context.Map(&staging, 0, D3D11_MAP(1), 0, Some(&mut mapped)).is_err() {
+            return false;
+        }
+        let row_bytes = width as usize * 4;
+        for (y, row) in out.chunks_exact_mut(row_bytes).enumerate().take(height as usize) {
+            let src = std::slice::from_raw_parts(
+                (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                row_bytes,
+            );
+            swizzle_opaque(row, src, true);
+        }
+        context.Unmap(&staging, 0);
+        true
     }
 }
 

@@ -506,7 +506,6 @@ mod lazy_evaluation {
     //! altogether, because the reload emptied `mod.stories` and nothing put
     //! the page back.
     use crate::canvas::id_path;
-    use crate::makepad_widgets::makepad_script::trap::NoTrap;
     use crate::makepad_widgets::*;
     use crate::theme::Choice;
 
@@ -534,9 +533,7 @@ mod lazy_evaluation {
     fn page_is_written(cx: &mut Cx) -> bool {
         cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            vm.bx
-                .heap
-                .value(stories, LiveId::from_str(PAGE).into(), NoTrap)
+            vm.value(stories, LiveId::from_str(PAGE))
                 .as_object()
                 .is_some()
         })
@@ -547,10 +544,7 @@ mod lazy_evaluation {
     fn label_color(cx: &mut Cx) -> Vec4f {
         let page = cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm
-                .bx
-                .heap
-                .value(stories, LiveId::from_str(PAGE).into(), NoTrap);
+            let value = vm.value(stories, LiveId::from_str(PAGE));
             assert!(value.as_object().is_some(), "no template {PAGE}");
             WidgetRef::script_from_value(vm, value)
         });

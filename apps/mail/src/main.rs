@@ -170,37 +170,15 @@ impl MatchEvent for App {
 
 #[cfg(target_os = "macos")]
 fn native_mail_dark_appearance() -> bool {
-    use makepad_widgets::makepad_platform::os::apple::apple_sys::*;
-    // Use the same AppKit matching as the standalone workspace appearance
-    // picker. Contrast variants resolve to the corresponding light/dark theme.
-    unsafe {
-        extern "C" {
-            static NSAppearanceNameAqua: ObjcId;
-            static NSAppearanceNameDarkAqua: ObjcId;
-        }
-        let main_thread: bool = msg_send![class!(NSThread), isMainThread];
-        if !main_thread { return false; }
-        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-        let appearance: ObjcId = msg_send![app, effectiveAppearance];
-        let names = [NSAppearanceNameAqua, NSAppearanceNameDarkAqua];
-        let supported: ObjcId = msg_send![class!(NSArray), arrayWithObjects: names.as_ptr() count: names.len()];
-        let best: ObjcId = msg_send![appearance, bestMatchFromAppearancesWithNames: supported];
-        let dark = if best.is_null() { false } else {
-            let result: BOOL = msg_send![best, isEqualToString: NSAppearanceNameDarkAqua];
-            result == YES
-        };
-        let () = msg_send![pool, drain];
-        dark
-    }
+    // the same host answer as the standalone workspace appearance picker; contrast variants
+    // resolve to the corresponding light/dark theme
+    makepad_widgets::makepad_platform::host_dark().unwrap_or(false)
 }
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         #[cfg(target_os = "macos")]
-        if desktop_style::current_name(vm).is_none()
-            && std::env::var_os("MAKEPAD_WM_THEME_SPLASH").is_none()
-        {
+        if desktop_style::current_name(vm).is_none() {
             let dark = native_mail_dark_appearance();
             desktop_style::install(vm, desktop_style::StyleSheet::load(
                 desktop_style::DesktopStyle::Macos.sheet(dark),
@@ -210,7 +188,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_mail::script_mod(vm);
         self::script_mod(vm)
     }

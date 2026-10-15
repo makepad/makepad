@@ -47,7 +47,7 @@
 //! answer the wheel — a bar inside a scrolling page that seeked on scroll
 //! would throw the playhead across the room every time the page moved.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::measure,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -139,6 +139,8 @@ script_mod! {
             knob_size_hover: uniform(15.0)
             /** clear ring around the knob in pixels 0..6 step 0.5 */
             knob_ring: uniform(2.0)
+            /** the whole bar's opacity, for a host that fades it in and out 0..1 step 0.01 */
+            fade: instance(1.0)
             /** corner rounding; the full radius makes a pill 0..24 step 0.5 */
             border_radius: uniform(theme.radius_full)
             /** bevel thickness in pixels 0..4 step 0.5 */
@@ -225,7 +227,7 @@ script_mod! {
                     sdf.circle(kx, mid, kr)
                     sdf.fill(self.color_knob)
                 }
-                return sdf.result
+                return sdf.result * self.fade
             }
         }
 
@@ -636,6 +638,12 @@ impl ScriptHook for PlaybackBar {
 }
 
 impl PlaybackBar {
+    /// The whole bar's opacity (0..1) for its next draws: a host fading
+    /// its transport in and out sets it before each draw.
+    pub fn set_fade(&mut self, cx: &mut Cx, fade: f32) {
+        self.draw_bg.draw_vars.set_dyn_instance(cx, id!(fade), &[fade.clamp(0.0, 1.0)]);
+    }
+
     /// A length nobody has said is not a track anybody can seek into.
     fn seekable(&self) -> bool {
         self.duration.is_finite() && self.duration > 0.0
@@ -780,8 +788,7 @@ impl Widget for PlaybackBar {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_position) || method == live_id!(set_duration) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(seconds) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                if let Some(seconds) = vm.vec_value_trap(args_obj, 0).as_f64() {
                     if method == live_id!(set_position) {
                         vm.with_cx_mut(|cx| self.set_position(cx, seconds));
                     } else {
@@ -845,6 +852,7 @@ impl Widget for PlaybackBar {
                 // one's first target back.
                 self.gate.rest();
                 self.animator_play(cx, ids!(drag.on));
+                cx.claim_finger_drag(fe.digit_id);
                 cx.widget_action(uid, PlaybackBarAction::Grabbed);
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
                 self.drive(cx, fraction, fe.time, Stroke::Down);

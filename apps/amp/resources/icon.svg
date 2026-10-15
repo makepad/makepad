@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="amp-bg" x1="0" y1="0" x2="0.8" y2="1"><stop offset="0" stop-color="#1d3d40"/><stop offset="1" stop-color="#0a1a1e"/></linearGradient>
+    <linearGradient id="amp-bar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6ff0d0"/><stop offset="1" stop-color="#2fae96"/></linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="230" fill="url(#amp-bg)"/>
+  <g transform="translate(512 512) scale(14.2) translate(-31 -31)"><path d="M17 47 L31 15 L45 47" fill="none" stroke="url(#amp-bar)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><rect x="26.3" y="39" width="1.8" height="4" rx="0.9" fill="#efffff" stroke="none" stroke-width="1"/><rect x="28.7" y="37" width="1.8" height="8" rx="0.9" fill="#efffff" stroke="none" stroke-width="1"/><rect x="31.1" y="35" width="1.8" height="12" rx="0.9" fill="#efffff" stroke="none" stroke-width="1"/><rect x="33.5" y="37" width="1.8" height="8" rx="0.9" fill="#efffff" stroke="none" stroke-width="1"/><rect x="35.9" y="39" width="1.8" height="4" rx="0.9" fill="#efffff" stroke="none" stroke-width="1"/></g>
+</svg>

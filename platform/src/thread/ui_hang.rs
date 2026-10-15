@@ -71,7 +71,53 @@ pub struct UiPhaseGuard {
     previous: u64,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     root: bool,
+    /// the phase reported to makepad inspect's timeline at entry (0: none)
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    traced: u64,
     _thread: PhantomData<Rc<()>>,
+}
+
+/// makepad inspect's timeline under `makepad run` (dlsym'd once; absent in a rustc build): the
+/// loader's recording flag and its span entries. Off, a phase costs one load.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+pub(crate) mod relax_timeline {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+
+    pub struct Hooks {
+        pub flag: &'static AtomicBool,
+        pub begin: extern "C" fn(*const u8, usize),
+        pub end: extern "C" fn(*const u8, usize),
+    }
+
+    pub fn hooks() -> Option<&'static Hooks> {
+        static H: OnceLock<Option<Hooks>> = OnceLock::new();
+        H.get_or_init(|| {
+            extern "C" {
+                fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+            }
+            // RTLD_DEFAULT: -2 on Apple targets, null on Linux
+            #[cfg(target_vendor = "apple")]
+            let default = -2isize as *mut std::ffi::c_void;
+            #[cfg(not(target_vendor = "apple"))]
+            let default = std::ptr::null_mut();
+            let flag = unsafe { dlsym(default, c"relax_recording".as_ptr()) };
+            let begin = unsafe { dlsym(default, c"relax_span_begin".as_ptr()) };
+            let end = unsafe { dlsym(default, c"relax_span_end".as_ptr()) };
+            if flag.is_null() || begin.is_null() || end.is_null() {
+                return None;
+            }
+            Some(unsafe {
+                Hooks {
+                    flag: &*(flag as *const AtomicBool),
+                    begin: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*const u8, usize)>(begin),
+                    end: std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*const u8, usize)>(end),
+                }
+            })
+        })
+        .as_ref()
+        .filter(|h| h.flag.load(Ordering::Relaxed))
+    }
 }
 
 #[inline]
@@ -97,8 +143,16 @@ fn enter(phase: u64) -> UiPhaseGuard {
         state,
         previous: 0,
         root: false,
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        traced: 0,
         _thread: PhantomData,
     };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(h) = relax_timeline::hooks() {
+        let name = phase_name(phase as u32);
+        (h.begin)(name.as_ptr(), name.len());
+        guard.traced = phase;
+    }
     if !state.is_null() {
         // Registration and guards are confined to this thread. The sampler
         // owns another Arc, so State also outlives TLS teardown.
@@ -122,6 +176,13 @@ fn enter(_: u64) -> UiPhaseGuard {
 impl Drop for UiPhaseGuard {
     #[inline]
     fn drop(&mut self) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if self.traced != 0 {
+            if let Some(h) = relax_timeline::hooks() {
+                let name = phase_name(self.traced as u32);
+                (h.end)(name.as_ptr(), name.len());
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         if !self.state.is_null() {
             let state = unsafe { &*self.state };

@@ -472,12 +472,7 @@ impl<'a> ScriptVm<'a> {
                 }
                 ScriptMe::Object(obj) => {
                     let obj = *obj;
-                    self.bx.heap.set_value_vec(
-                        obj,
-                        field,
-                        value,
-                        self.bx.threads.cur().trap.pass(),
-                    );
+                    self.set_named_child(obj, field, value);
                 }
                 ScriptMe::Pod { pod, .. } => {
                     let pod = *pod;
@@ -496,6 +491,56 @@ impl<'a> ScriptVm<'a> {
                     );
                 }
             }
+        }
+        self.bx.threads.cur().trap.goto_next();
+    }
+
+    /// `object.name := value`: replace the named child in place, else append it. An object
+    /// (a widget, a template instance) under the name of a declared property of a typed object
+    /// is refused instead of being appended where the type never reads it; a plain value
+    /// (string, number, @id) stays a named entry beside the children, which hosts read as
+    /// metadata (Stage faces: `bind := "node.port"` on a Slider that has its own `bind`).
+    fn set_named_child(&mut self, obj: ScriptObject, field: ScriptValue, value: ScriptValue) {
+        if let Some(id) = field.unescape_id().as_id() {
+            if value.as_object().is_some() && self.bx.heap.field_type_from_type_check(obj, id).is_some() {
+                let type_name = self
+                    .bx
+                    .heap
+                    .object_type_name_in_chain(obj)
+                    .and_then(|t| t.as_string(|s| s.map(|s| s.to_string())))
+                    .unwrap_or_else(|| "its type".to_string());
+                script_err_not_allowed!(
+                    self.bx.threads.cur_ref().trap,
+                    "`{}` is a property of {}, not a child: write `{}: ...` or `{} +: {{...}}`",
+                    id,
+                    type_name,
+                    id,
+                    id
+                );
+                return;
+            }
+        }
+        self.bx
+            .heap
+            .set_value_vec(obj, field, value, self.bx.threads.cur().trap.pass());
+    }
+
+    /// `parent.name := value` through a path: the stack holds [parent, name, value].
+    pub(crate) fn handle_assign_field_vec(&mut self) {
+        let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let field = self.bx.threads.cur().pop_stack_value();
+        let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        if let Some(obj) = object.as_object() {
+            self.set_named_child(obj, field, value);
+            self.bx.threads.cur().push_stack_unchecked(NIL);
+        } else {
+            let value = script_err_wrong_value!(
+                self.bx.threads.cur_ref().trap,
+                "cannot assign child {:?} on {:?} (not an object)",
+                field,
+                object.value_type()
+            );
+            self.bx.threads.cur().push_stack_unchecked(value);
         }
         self.bx.threads.cur().trap.goto_next();
     }

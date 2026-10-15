@@ -17,9 +17,18 @@ makepad-ai-metal = { path = "../metal", features = ["metal-precompile"] }
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../cuda" }
 
+# The Vulkan executor (vulkan_exec.rs): Android's native backend, and on
+# Linux pinned with MAKEPAD_LLM_BACKEND=vulkan.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+makepad-ai-vulkan = { path = "../vulkan" }
+
 [[bin]]
 name = "llama-load"
 path = "src/bin/llama_load.rs"
+
+[[bin]]
+name = "kv-quality"
+path = "src/bin/kv_quality.rs"
 
 [[bin]]
 name = "llama-load-time"
@@ -40,6 +49,12 @@ path = "src/bin/llama_compare.rs"
 [[bin]]
 name = "llama-generate"
 path = "src/bin/llama_generate.rs"
+
+# Single-turn engine check: every prompt file of a directory (system + user)
+# through TurnEngine, with the system prompt's state reused.
+[[bin]]
+name = "llama-turns"
+path = "src/bin/llama_turns.rs"
 
 [[bin]]
 name = "llama-tokenize"

@@ -12,8 +12,8 @@
 use crate::db::{ShardRow, TileDb};
 use crate::library::{mark_no_pyramid, Library};
 use crate::tape::{
-    box_downscale, build_pyramid, decode_image, fit_dims, image_to_rgba, page_size, write_frame, Planes, TilePyramid,
-    FULL_BPP, FULL_MAX_PX, LEVELS, PAGE_BPP, PYRAMID_LEVELS, SHARD_CAP,
+    box_downscale, build_pyramid, decode_image, fit_dims, image_to_rgba, write_frame, PageGeometry, Planes, TilePyramid,
+    FULL_BPP, LEVELS, PAGE_BPP, PYRAMID_LEVELS,
 };
 use makepad_network::blocking_http::{self, Limits, Request};
 use makepad_widgets_core::makepad_platform::thread::{Lane, TaskPool};
@@ -98,7 +98,7 @@ pub fn fetch_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     }
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        let limits = Limits { max_body_bytes: max_bytes, total_timeout: Duration::from_secs(120), ..Limits::default() };
+        let limits = Limits { max_body_bytes: max_bytes, idle_timeout: Duration::from_secs(120), ..Limits::default() };
         let request = Request::get(current.clone()).limits(limits);
         let response = blocking_http::request_no_redirect(request).map_err(|e| format!("GET {current}: {e:?}"))?;
         match response.status {
@@ -148,12 +148,12 @@ struct Baked {
 /// The CPU half of one picture: decode, the slot pyramid, the capped full
 /// frame and its pre-cut zoom levels — everything except the shard, which
 /// belongs to the packer.
-fn process_picture(library: &Library, id: i64, bytes: &[u8]) -> Result<Baked, String> {
+fn process_picture(library: &Library, geometry: PageGeometry, id: i64, bytes: &[u8]) -> Result<Baked, String> {
     let img = decode_image(bytes)?;
     let (w, h) = (img.width as u32, img.height as u32);
     let rgba = image_to_rgba(&img);
     let pyramid = build_pyramid(&rgba, w, h);
-    let (fw, fh) = fit_dims(w, h, FULL_MAX_PX);
+    let (fw, fh) = fit_dims(w, h, geometry.frame_max);
     // The fitted buffer is kept: it is also the zoom pyramid's source. The
     // levels are each made from the one above, so the whole pyramid costs
     // about a third more than its top level instead of a multiple of it.
@@ -188,8 +188,8 @@ struct OpenShard {
     pages: Vec<Planes>,
 }
 
-fn open_shard(id: i64) -> OpenShard {
-    OpenShard { id, count: 0, pages: (0..LEVELS).map(|l| Planes::black(page_size(l), page_size(l))).collect() }
+fn open_shard(id: i64, geometry: PageGeometry) -> OpenShard {
+    OpenShard { id, count: 0, pages: (0..LEVELS).map(|l| Planes::black(geometry.page_size(l), geometry.page_size(l))).collect() }
 }
 
 /// Write a filled (or final partial) shard's five tape frames and mark it
@@ -220,6 +220,18 @@ pub fn bake(
     let library = Library::new(root);
     library.ensure_dirs()?;
     let mut db = TileDb::open(&library.db_path())?;
+    // A new library's layout fits this machine's encoder; a library keeps the layout it was
+    // made with (one from before the layout was kept is a desktop's).
+    let geometry = match db.geometry()? {
+        Some(geometry) => geometry,
+        None if db.next_shard()? == 0 => {
+            let geometry = PageGeometry::for_encoder(makepad_video::hevc_encoder_max_size());
+            db.set_geometry(geometry)?;
+            log(format!("new library: {} px pages, frames up to {} px", geometry.page_size(0), geometry.frame_max));
+            geometry
+        }
+        None => PageGeometry::DESKTOP,
+    };
     let reset = db.reset_unsealed_shards()?;
     if reset > 0 {
         log(format!("{reset} unsealed shard(s) from an interrupted run reset"));
@@ -259,7 +271,7 @@ pub fn bake(
         pool.fan_out(Lane::Heavy, batch.len(), |index| {
             let (id, url) = &batch[index];
             let msg = match fetch_bytes(url, PICTURE_MAX_BYTES) {
-                Ok(bytes) => match process_picture(&library, *id, &bytes) {
+                Ok(bytes) => match process_picture(&library, geometry, *id, &bytes) {
                     Ok(baked) => PackMsg::Baked { id: *id, baked },
                     Err(error) => PackMsg::Failed { id: *id, error },
                 },
@@ -283,20 +295,20 @@ pub fn bake(
             match msg {
                 PackMsg::Baked { id, baked } => {
                     let shard = open.get_or_insert_with(|| {
-                        let s = open_shard(next_shard);
+                        let s = open_shard(next_shard, geometry);
                         next_shard += 1;
                         s
                     });
                     let slot = shard.count;
                     for (level, planes) in baked.pyramid.levels.iter().enumerate() {
-                        let (x, y) = crate::tape::slot_origin(slot, level);
+                        let (x, y) = geometry.slot_origin(slot, level);
                         shard.pages[level].blit(planes, x, y);
                     }
                     shard.count += 1;
                     db.upsert_shard(ShardRow { id: shard.id, count: shard.count as i64, sealed: false })?;
                     db.set_ready(id, baked.width, baked.height, shard.id, slot)?;
                     summary.baked += 1;
-                    if shard.count >= SHARD_CAP {
+                    if shard.count >= geometry.shard_cap() {
                         let full = open.take().unwrap();
                         seal(&library, &mut db, full)?;
                         summary.shards_sealed += 1;

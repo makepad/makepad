@@ -15,12 +15,16 @@ pub struct Cx2d<'a, 'b> {
     pub(crate) overlay_id: Option<DrawListId>,
     pub(crate) overlay_pass_id: Option<DrawPassId>,
     pub(crate) overlay_draw_depth: usize,
+    /// How many popup-tier overlay lists are open in the chain (a dropdown in a modal is 2).
+    pub(crate) overlay_popup_depth: usize,
     /// Increments once per overlay sub-list begun this frame; stamped onto the
     /// sub-list so the Overlay can composite in draw order.
     pub(crate) overlay_seq: u64,
 
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub(crate) turtles: Vec<Turtle>,
+    /// Emptied deferred-fill lists of finished turtles, for the next ones.
+    pub(crate) fill_pool: Vec<Vec<crate::turtle::DeferredFill>>,
     pub(crate) finished_rows: Vec<usize>,
     pub(crate) finished_walks: Vec<FinishedWalk>,
     pub(crate) turtle_clips: Vec<(Vec2d, Vec2d)>,
@@ -40,6 +44,44 @@ pub struct Cx2d<'a, 'b> {
     /// pass (even though they draw while the body is open) and must look
     /// exactly as they do with the mode off.
     pub sploded_scene: Option<DrawPassId>,
+    /// Every text run drawn while a check is collecting them; `None` (and
+    /// free) otherwise. See [`TextRunSink`].
+    pub text_runs: Option<TextRunSink>,
+}
+
+/// What a UI check reads back after a draw: where each text run was laid out
+/// and how big it is. Switched on with `cx.text_runs = Some(Default::default())`
+/// before the draw; a widget's draw wrapper sets `owner` to its uid around its
+/// own draw, so a run is attributed to the innermost widget that was drawing.
+#[derive(Default)]
+pub struct TextRunSink {
+    pub owner: u64,
+    pub runs: Vec<TextRun>,
+}
+
+/// One drawn run of text, in the coordinates the draw used.
+#[derive(Clone, Copy, Debug)]
+pub struct TextRun {
+    /// `WidgetUid` of the widget that was drawing, 0 for none.
+    pub owner: u64,
+    /// The laid-out text box as drawn (before any later alignment).
+    pub rect: Rect,
+    /// Em size of the first glyph in logical pixels, `font_scale` applied.
+    pub font_size: f32,
+    /// Capital height in logical pixels, 0 when the face has no capital.
+    pub cap_height: f32,
+    /// The layout cut the text short (ellipsis or line limit).
+    pub truncated: bool,
+    /// Ink colour as set on the draw.
+    pub color: [f32; 4],
+    /// The text draw's own area after the draw (`Area::Empty` for draws that
+    /// do not report it). Its instances are the run's glyphs: a parent's
+    /// alignment moves them after the draw, and each carries the clip it was
+    /// drawn under, so the area is where the text ended up and what shows.
+    pub area: crate::makepad_platform::Area,
+    /// The box the walk allotted the text has no width or no height: the text
+    /// is laid out and then given no room (a label hidden by a 0x0 walk).
+    pub declared_empty: bool,
 }
 
 // Owned by the drawing context, so separate contexts and nested Cx2d draws
@@ -47,6 +89,7 @@ pub struct Cx2d<'a, 'b> {
 #[derive(Default)]
 struct Cx2dScratch {
     turtles: Vec<Turtle>,
+    fill_pool: Vec<Vec<crate::turtle::DeferredFill>>,
     finished_rows: Vec<usize>,
     finished_walks: Vec<FinishedWalk>,
     turtle_clips: Vec<(Vec2d, Vec2d)>,
@@ -69,6 +112,7 @@ impl Drop for Cx2d<'_, '_> {
         self.sploded_hairline_seen.clear();
         self.cx.global::<Cx2dScratchPool>().0.push(Cx2dScratch {
             turtles: std::mem::take(&mut self.turtles),
+            fill_pool: std::mem::take(&mut self.fill_pool),
             finished_rows: std::mem::take(&mut self.finished_rows),
             finished_walks: std::mem::take(&mut self.finished_walks),
             turtle_clips: std::mem::take(&mut self.turtle_clips),
@@ -100,6 +144,7 @@ pub struct DrawUnwindMark {
     overlay_id: Option<DrawListId>,
     overlay_pass_id: Option<DrawPassId>,
     overlay_draw_depth: usize,
+    overlay_popup_depth: usize,
     overlay_seq: u64,
     nesting_depth: usize,
 }
@@ -119,6 +164,7 @@ impl DrawUnwindMark {
             && self.overlay_id == other.overlay_id
             && self.overlay_pass_id == other.overlay_pass_id
             && self.overlay_draw_depth == other.overlay_draw_depth
+            && self.overlay_popup_depth == other.overlay_popup_depth
             && self.nesting_depth == other.nesting_depth
     }
 }
@@ -137,6 +183,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             overlay_id: self.overlay_id,
             overlay_pass_id: self.overlay_pass_id,
             overlay_draw_depth: self.overlay_draw_depth,
+            overlay_popup_depth: self.overlay_popup_depth,
             overlay_seq: self.overlay_seq,
             nesting_depth: self.cx.cx.nesting_depth,
         }
@@ -157,6 +204,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.overlay_id = mark.overlay_id;
         self.overlay_pass_id = mark.overlay_pass_id;
         self.overlay_draw_depth = mark.overlay_draw_depth;
+        self.overlay_popup_depth = mark.overlay_popup_depth;
         self.overlay_seq = mark.overlay_seq;
         self.cx.cx.nesting_depth = mark.nesting_depth;
     }
@@ -190,18 +238,39 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             overlay_id: None,
             overlay_pass_id: None,
             overlay_draw_depth: 0,
+            overlay_popup_depth: 0,
             overlay_seq: 0,
             cx,
             turtle_clips: scratch.turtle_clips,
             finished_rows: scratch.finished_rows,
             finished_walks: scratch.finished_walks,
             turtles: scratch.turtles,
+            fill_pool: scratch.fill_pool,
             align_list: scratch.align_list,
             draw_call_parent_stack,
             draw_call_parent_next: 2,
             sploded_hairline: None,
             sploded_hairline_seen: scratch.sploded_hairline_seen,
             sploded_scene: None,
+            text_runs: None,
+        }
+    }
+
+    /// Make `owner` the widget text runs are attributed to; returns the
+    /// previous owner for [`Self::exit_text_owner`]. Free when no check is
+    /// collecting.
+    #[inline]
+    pub fn enter_text_owner(&mut self, owner: u64) -> u64 {
+        match self.text_runs.as_mut() {
+            Some(sink) => std::mem::replace(&mut sink.owner, owner),
+            None => 0,
+        }
+    }
+
+    #[inline]
+    pub fn exit_text_owner(&mut self, previous: u64) {
+        if let Some(sink) = self.text_runs.as_mut() {
+            sink.owner = previous;
         }
     }
 

@@ -341,6 +341,275 @@ impl<'a> CameraFrameRef<'a> {
 
 pub type CameraFrameInputFn = Box<dyn for<'a> FnMut(CameraFrameRef<'a>) + Send + 'static>;
 
+/// One camera frame as BGRA pixels (the `TextureFormat::VecBGRAu8_32` layout:
+/// a `u32` is `a<<24 | r<<16 | g<<8 | b`), whatever layout the device sent.
+#[derive(Default)]
+pub struct CameraBgraFrame {
+    /// The capture time on [`camera_clock_ns`]'s clock (0: unknown).
+    pub timestamp_ns: u64,
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u32>,
+}
+
+impl CameraBgraFrame {
+    /// Fill this frame from `src` (I420, NV12, YUY2 or MJPEG). The pixel
+    /// buffer is reused, so a steady stream allocates nothing.
+    pub fn convert(&mut self, src: CameraFrameRef<'_>) -> Result<(), String> {
+        let (w, h) = (src.width, src.height);
+        if w == 0 || h == 0 {
+            return Err("empty camera frame".into());
+        }
+        self.timestamp_ns = src.timestamp_ns;
+        match src.layout {
+            CameraFrameLayout::Mjpeg => return self.decode_mjpeg(src),
+            CameraFrameLayout::I420 | CameraFrameLayout::NV12 | CameraFrameLayout::YUY2 => {}
+            CameraFrameLayout::Unknown => return Err("camera frame layout unknown".into()),
+        }
+        self.width = w;
+        self.height = h;
+        self.pixels.resize(w * h, 0);
+        let coefficients = YuvCoefficients::new(src.matrix);
+        let plane = |i: usize| src.planes[i];
+        // The byte of `plane` at (row, col), as the plane's strides lay it out.
+        let at = |plane: CameraFramePlaneRef<'_>, row: usize, col: usize| -> i32 {
+            plane.bytes.get(row * plane.row_stride + col * plane.pixel_stride.max(1)).copied().unwrap_or(128) as i32
+        };
+        match src.layout {
+            CameraFrameLayout::I420 => {
+                if src.plane_count < 3 {
+                    return Err("I420 frame without three planes".into());
+                }
+                for row in 0..h {
+                    let out = &mut self.pixels[row * w..(row + 1) * w];
+                    for (col, pixel) in out.iter_mut().enumerate() {
+                        *pixel = coefficients.bgra(at(plane(0), row, col), at(plane(1), row / 2, col / 2), at(plane(2), row / 2, col / 2));
+                    }
+                }
+            }
+            CameraFrameLayout::NV12 => {
+                if src.plane_count < 2 {
+                    return Err("NV12 frame without two planes".into());
+                }
+                let uv = plane(1);
+                let pair = uv.pixel_stride.max(2);
+                for row in 0..h {
+                    let out = &mut self.pixels[row * w..(row + 1) * w];
+                    for (col, pixel) in out.iter_mut().enumerate() {
+                        let base = (row / 2) * uv.row_stride + (col / 2) * pair;
+                        let u = uv.bytes.get(base).copied().unwrap_or(128) as i32;
+                        let v = uv.bytes.get(base + 1).copied().unwrap_or(128) as i32;
+                        *pixel = coefficients.bgra(at(plane(0), row, col), u, v);
+                    }
+                }
+            }
+            CameraFrameLayout::YUY2 => {
+                let packed = plane(0);
+                for row in 0..h {
+                    let line = row * packed.row_stride;
+                    let out = &mut self.pixels[row * w..(row + 1) * w];
+                    for (col, pixel) in out.iter_mut().enumerate() {
+                        let base = line + (col / 2) * 4;
+                        let y = packed.bytes.get(base + (col & 1) * 2).copied().unwrap_or(16) as i32;
+                        let u = packed.bytes.get(base + 1).copied().unwrap_or(128) as i32;
+                        let v = packed.bytes.get(base + 3).copied().unwrap_or(128) as i32;
+                        *pixel = coefficients.bgra(y, u, v);
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn decode_mjpeg(&mut self, src: CameraFrameRef<'_>) -> Result<(), String> {
+        use makepad_zune_jpeg::makepad_zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+        let bytes = src.planes[0].bytes;
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
+        let mut decoder = makepad_zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+        decoder.decode_headers().map_err(|error| format!("MJPEG headers: {error:?}"))?;
+        let (width, height) = decoder.dimensions().ok_or("MJPEG frame without dimensions")?;
+        // A camera frame is the size the device was asked for; anything else
+        // is a corrupt frame, not a new size.
+        if (src.width, src.height) != (0, 0) && (width, height) != (src.width, src.height) {
+            return Err(format!("MJPEG frame is {width}x{height}, the stream is {}x{}", src.width, src.height));
+        }
+        self.width = width;
+        self.height = height;
+        self.pixels.resize(width * height, 0);
+        // SAFETY: a `u32` slice is a valid `u8` slice of four times the length.
+        let out = unsafe { std::slice::from_raw_parts_mut(self.pixels.as_mut_ptr() as *mut u8, self.pixels.len() * 4) };
+        decoder.decode_into(out).map_err(|error| format!("MJPEG decode: {error:?}"))
+    }
+}
+
+impl CameraBgraFrame {
+    /// A copy of every `step`-th pixel in each direction, turned clockwise by
+    /// `quarter_turns` quarter turns (a camera's `VideoInputDesc::sensor_orientation`
+    /// / 90 makes it upright).
+    pub fn rotated(&self, step: usize, quarter_turns: usize) -> CameraBgraFrame {
+        let step = step.max(1);
+        let (sw, sh) = (self.width / step, self.height / step);
+        let turns = quarter_turns % 4;
+        let (ow, oh) = if turns % 2 == 1 { (sh, sw) } else { (sw, sh) };
+        let mut pixels = vec![0u32; ow * oh];
+        for sy in 0..sh {
+            for sx in 0..sw {
+                let p = self.pixels[sy * step * self.width + sx * step];
+                let (dx, dy) = match turns {
+                    0 => (sx, sy),
+                    1 => (sh - 1 - sy, sx),
+                    2 => (sw - 1 - sx, sh - 1 - sy),
+                    _ => (sy, sw - 1 - sx),
+                };
+                pixels[dy * ow + dx] = p;
+            }
+        }
+        CameraBgraFrame { timestamp_ns: self.timestamp_ns, width: ow, height: oh, pixels }
+    }
+}
+
+/// Limited-range YCbCr to RGB in 16.16 fixed point for one colour matrix.
+struct YuvCoefficients {
+    r_v: i32,
+    g_u: i32,
+    g_v: i32,
+    b_u: i32,
+}
+
+impl YuvCoefficients {
+    fn new(matrix: CameraColorMatrix) -> Self {
+        // (Kr, Kb) of the matrix.
+        let (kr, kb): (f64, f64) = match matrix {
+            CameraColorMatrix::BT709 => (0.2126, 0.0722),
+            CameraColorMatrix::BT2020 => (0.2627, 0.0593),
+            CameraColorMatrix::BT601 | CameraColorMatrix::Unknown => (0.299, 0.114),
+        };
+        let kg = 1.0 - kr - kb;
+        let scale = 255.0 / 224.0 * 65536.0;
+        Self {
+            r_v: (2.0 * (1.0 - kr) * scale).round() as i32,
+            g_u: (2.0 * kb * (1.0 - kb) / kg * scale).round() as i32,
+            g_v: (2.0 * kr * (1.0 - kr) / kg * scale).round() as i32,
+            b_u: (2.0 * (1.0 - kb) * scale).round() as i32,
+        }
+    }
+
+    #[inline]
+    fn bgra(&self, y: i32, u: i32, v: i32) -> u32 {
+        let y = ((y - 16) * 298).max(0) + 128;
+        let (u, v) = (u - 128, v - 128);
+        let r = (y + ((self.r_v * v) >> 8)) >> 8;
+        let g = (y - ((self.g_u * u) >> 8) - ((self.g_v * v) >> 8)) >> 8;
+        let b = (y + ((self.b_u * u) >> 8)) >> 8;
+        0xff00_0000 | (r.clamp(0, 255) as u32) << 16 | (g.clamp(0, 255) as u32) << 8 | b.clamp(0, 255) as u32
+    }
+}
+
+/// The newest converted frame of one camera: the capture thread publishes
+/// (a frame not taken yet is replaced, so a slow consumer never builds a
+/// queue), the render thread takes.
+pub struct CameraLatest {
+    inner: Mutex<CameraLatestInner>,
+}
+
+#[derive(Default)]
+struct CameraLatestInner {
+    latest: Option<CameraBgraFrame>,
+    spare: Vec<CameraBgraFrame>,
+    received: u64,
+    replaced: u64,
+    failed: u64,
+    last_error: Option<String>,
+}
+
+impl CameraLatest {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { inner: Mutex::new(CameraLatestInner::default()) })
+    }
+
+    /// The callback to install for a camera slot (`camera_frame_input`): it
+    /// converts on the capture thread and keeps only the newest frame.
+    pub fn input_fn(self: &Arc<Self>) -> CameraFrameInputFn {
+        let this = self.clone();
+        Box::new(move |src: CameraFrameRef<'_>| {
+            let mut frame = this.inner.lock().unwrap().spare.pop().unwrap_or_default();
+            let result = frame.convert(src);
+            let mut inner = this.inner.lock().unwrap();
+            inner.received += 1;
+            match result {
+                Ok(()) => {
+                    if let Some(old) = inner.latest.replace(frame) {
+                        inner.replaced += 1;
+                        inner.spare.push(old);
+                    }
+                }
+                Err(error) => {
+                    inner.failed += 1;
+                    inner.last_error = Some(error);
+                    inner.spare.push(frame);
+                }
+            }
+            inner.spare.truncate(3);
+        })
+    }
+
+    /// The newest frame since the last take.
+    pub fn take(&self) -> Option<CameraBgraFrame> {
+        self.inner.lock().unwrap().latest.take()
+    }
+
+    /// Hand a taken frame back, so its pixel buffer is reused.
+    pub fn recycle(&self, frame: CameraBgraFrame) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.spare.len() < 3 {
+            inner.spare.push(frame);
+        }
+    }
+
+    /// (frames received, frames replaced before anyone took them, frames
+    /// that failed to convert, the last conversion error).
+    pub fn stats(&self) -> (u64, u64, u64, Option<String>) {
+        let inner = self.inner.lock().unwrap();
+        (inner.received, inner.replaced, inner.failed, inner.last_error.clone())
+    }
+}
+
+/// The clock camera frames' `timestamp_ns` is on, now, in nanoseconds
+/// (`None` where the platform does not stamp frames on a clock the app can
+/// read). A frame's age is this minus its stamp.
+/// The display's rotation in quarter turns (Android's Surface.ROTATION_*),
+/// kept by the platform as the device turns; 0 where the platform does not
+/// rotate the display under the app.
+static DISPLAY_ROTATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_display_rotation(quarter_turns: u32) {
+    DISPLAY_ROTATION.store(quarter_turns % 4, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn display_rotation() -> u32 {
+    DISPLAY_ROTATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clockwise quarter turns that make a camera's frames upright on the screen
+/// as it is held now: the sensor's orientation against the display's current
+/// rotation (a front camera turns the other way; its mirror is the caller's).
+/// Recompute per frame: the phone may turn while the camera runs.
+pub fn camera_upright_quarter_turns(sensor_orientation: u16, front_facing: bool) -> usize {
+    let sensor = (sensor_orientation as u32 / 90) % 4;
+    let display = display_rotation();
+    (if front_facing { sensor + display } else { sensor + 4 - display } % 4) as usize
+}
+
+pub fn camera_clock_ns() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    { Some(makepad_hal::clock_ns()) }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VideoCodec {
     H264,
@@ -1014,6 +1283,10 @@ pub struct VideoInputDesc {
     pub input_id: VideoInputId,
     pub name: String,
     pub formats: Vec<VideoFormat>,
+    /// Clockwise rotation in degrees (0, 90, 180, 270) that turns this camera's
+    /// frames upright for a device held in its natural orientation. 0 for
+    /// cameras that deliver upright frames (webcams).
+    pub sensor_orientation: u16,
 }
 
 #[derive(Clone)]
@@ -1041,5 +1314,118 @@ impl std::fmt::Debug for VideoInputsEvent {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod camera_frame_tests {
+    use super::*;
+
+    fn plane(bytes: &[u8], row_stride: usize, pixel_stride: usize) -> CameraFramePlaneRef<'_> {
+        CameraFramePlaneRef { bytes, row_stride, pixel_stride }
+    }
+
+    fn frame<'a>(layout: CameraFrameLayout, planes: [CameraFramePlaneRef<'a>; 3], count: usize) -> CameraFrameRef<'a> {
+        CameraFrameRef { timestamp_ns: 7, width: 2, height: 2, layout, matrix: CameraColorMatrix::BT601, plane_count: count, planes }
+    }
+
+    fn channels(pixel: u32) -> (u32, u32, u32) {
+        ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255)
+    }
+
+    #[test]
+    fn limited_range_black_and_white_reach_the_ends() {
+        let coefficients = YuvCoefficients::new(CameraColorMatrix::BT601);
+        assert_eq!(channels(coefficients.bgra(16, 128, 128)), (0, 0, 0));
+        assert_eq!(channels(coefficients.bgra(235, 128, 128)), (255, 255, 255));
+        assert_eq!(coefficients.bgra(81, 90, 240) >> 24, 255, "alpha is opaque");
+        let (r, g, b) = channels(coefficients.bgra(81, 90, 240));
+        assert!(r > 240 && g < 20 && b < 20, "BT.601 red is red: {r} {g} {b}");
+    }
+
+    #[test]
+    fn i420_nv12_and_yuy2_of_the_same_picture_agree() {
+        // Left column red-ish, right column blue-ish; chroma is per 2x2.
+        let y = [81u8, 41, 81, 41];
+        let i420 = frame(CameraFrameLayout::I420, [plane(&y, 2, 1), plane(&[128], 1, 1), plane(&[128], 1, 1)], 3);
+        let nv12 = frame(CameraFrameLayout::NV12, [plane(&y, 2, 1), plane(&[128, 128], 2, 2), CameraFramePlaneRef::empty()], 2);
+        let yuy2_bytes = [81u8, 128, 41, 128, 81, 128, 41, 128];
+        let yuy2 = frame(CameraFrameLayout::YUY2, [plane(&yuy2_bytes, 4, 2), CameraFramePlaneRef::empty(), CameraFramePlaneRef::empty()], 1);
+        let mut a = CameraBgraFrame::default();
+        let mut b = CameraBgraFrame::default();
+        let mut c = CameraBgraFrame::default();
+        a.convert(i420).unwrap();
+        b.convert(nv12).unwrap();
+        c.convert(yuy2).unwrap();
+        assert_eq!((a.width, a.height, a.timestamp_ns), (2, 2, 7));
+        assert_eq!(a.pixels, b.pixels);
+        assert_eq!(a.pixels, c.pixels);
+    }
+
+    #[test]
+    fn a_frame_nobody_took_is_replaced_by_the_newer_one() {
+        let latest = CameraLatest::new();
+        let mut input = latest.input_fn();
+        let y = [16u8; 4];
+        for stamp in [1u64, 2, 3] {
+            let mut f = frame(CameraFrameLayout::I420, [plane(&y, 2, 1), plane(&[128], 1, 1), plane(&[128], 1, 1)], 3);
+            f.timestamp_ns = stamp;
+            input(f);
+        }
+        let taken = latest.take().expect("a frame");
+        assert_eq!(taken.timestamp_ns, 3);
+        assert!(latest.take().is_none());
+        let (received, replaced, failed, _) = latest.stats();
+        assert_eq!((received, replaced, failed), (3, 2, 0));
+        latest.recycle(taken);
+    }
+
+    #[test]
+    fn a_garbage_mjpeg_frame_is_counted_not_shown() {
+        let latest = CameraLatest::new();
+        let mut input = latest.input_fn();
+        let junk = [1u8, 2, 3, 4];
+        input(CameraFrameRef { timestamp_ns: 1, width: 2, height: 2, layout: CameraFrameLayout::Mjpeg, matrix: CameraColorMatrix::Unknown, plane_count: 1, planes: [plane(&junk, 4, 1), CameraFramePlaneRef::empty(), CameraFramePlaneRef::empty()] });
+        assert!(latest.take().is_none());
+        assert_eq!(latest.stats().2, 1);
+    }
+}
+
+#[cfg(test)]
+mod camera_rotation_tests {
+    use super::*;
+
+    #[test]
+    fn a_quarter_turn_moves_the_top_left_to_the_top_right() {
+        let mut f = CameraBgraFrame { timestamp_ns: 0, width: 4, height: 2, pixels: vec![0; 8] };
+        f.pixels[0] = 0xffff_ffff;
+        let turned = f.rotated(1, 1);
+        assert_eq!((turned.width, turned.height), (2, 4));
+        assert_eq!(turned.pixels[1], 0xffff_ffff);
+        let half = f.rotated(2, 0);
+        assert_eq!((half.width, half.height), (2, 1));
+    }
+
+    /// Android's back camera, sensor 90 (its top along the device's right edge):
+    /// a mark in the sensor image's top-left corner is at the device's top-right,
+    /// and must land top-right on screen with the phone upright; held in
+    /// landscape (display turned 90) the picture needs no turn at all.
+    #[test]
+    fn back_camera_marks_land_where_android_says() {
+        let w = 4;
+        let h = 2;
+        let mut f = CameraBgraFrame { timestamp_ns: 0, width: w, height: h, pixels: vec![0; w * h] };
+        f.pixels[0] = 0xffff_0000; // the mark, top-left of the sensor image
+        set_display_rotation(0);
+        let up = f.rotated(1, camera_upright_quarter_turns(90, false));
+        assert_eq!((up.width, up.height), (h, w));
+        assert_eq!(up.pixels[up.width - 1], 0xffff_0000, "portrait: top-right");
+        set_display_rotation(1);
+        let land = f.rotated(1, camera_upright_quarter_turns(90, false));
+        assert_eq!(land.pixels[0], 0xffff_0000, "landscape (ROTATION_90): unturned");
+        set_display_rotation(3);
+        let rev = f.rotated(1, camera_upright_quarter_turns(90, false));
+        assert_eq!(rev.pixels[w * h - 1], 0xffff_0000, "reverse landscape: a half turn");
+        set_display_rotation(0);
     }
 }

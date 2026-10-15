@@ -203,6 +203,18 @@ pub fn permission_status_from_name(name: &str) -> PermissionStatus {
     }
 }
 
+/// Set by a host that shows the file and folder pickers for its children
+/// (the Linux WM draws them): a hosted child then relays its file dialogs
+/// instead of opening its own. Not passed on to a child's own children
+/// (`makepad_app_host::launch::configure` removes it).
+pub const HOST_FILE_DIALOGS_ENV: &str = "MAKEPAD_HOST_FILE_DIALOGS";
+
+/// Whether this process's host shows its file dialogs (`HOST_FILE_DIALOGS_ENV`).
+pub fn host_serves_file_dialogs() -> bool {
+    static SERVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SERVES.get_or_init(|| std::env::var(HOST_FILE_DIALOGS_ENV).is_ok_and(|v| v == "1"))
+}
+
 pub fn relay_file_dialog(kind: &str, dialog: &FileDialog) -> RelayFileDialog {
     RelayFileDialog {
         id: dialog.id.0,
@@ -266,6 +278,8 @@ pub struct HostRelayServer {
     permissions: HashMap<i32, (u64, i32)>,
     dialogs: HashMap<LiveId, PendingDialog>,
     folder_dialogs: Vec<PendingDialog>,
+    /// Host clipboard read id -> (client, the child's id).
+    clipboard_reads: HashMap<u64, (u64, u64)>,
 }
 
 impl HostRelayServer {
@@ -341,6 +355,11 @@ impl HostRelayServer {
                     self.dialogs.insert(host_id, pending);
                 }
             }
+            ChildRelay::ReadClipboard { request_id } => {
+                let host_id = cx.read_clipboard();
+                self.clipboard_reads.insert(host_id, (client, request_id));
+            }
+            ChildRelay::SetPrimarySelection { text } => cx.set_primary_selection(&text),
         }
         Vec::new()
     }
@@ -373,6 +392,15 @@ impl HostRelayServer {
                     }
                 }
             }
+            Event::Clipboard(e) => {
+                if let Some((client, request_id)) = self.clipboard_reads.remove(&e.request) {
+                    let png = match &e.content.image {
+                        Some(crate::clipboard_read::ClipboardImage::Png(png)) => png.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    out.push((client, HostRelay::Clipboard { request_id, text: e.content.text.clone().unwrap_or_default(), png }));
+                }
+            }
             Event::PermissionResult(PermissionResult { permission, request_id, status }) => {
                 if let Some((client, child_id)) = self.permissions.remove(request_id) {
                     out.push((
@@ -391,14 +419,9 @@ impl HostRelayServer {
     }
 
     /// Picker answers (they arrive as actions).
-    pub fn on_actions(&mut self, cx: &Cx, actions: &Actions) -> Vec<(u64, HostRelay)> {
+    pub fn on_actions(&mut self, actions: &Actions) -> Vec<(u64, HostRelay)> {
         let mut out = Vec::new();
         for action in actions {
-            // A picked set the worker finished copying (see `materialize`).
-            if let Some(done) = action.downcast_ref::<MaterializedPick>() {
-                out.push((done.client, HostRelay::FileDialog(done.result.clone())));
-                continue;
-            }
             if self.dialogs.is_empty() && self.folder_dialogs.is_empty() {
                 continue;
             }
@@ -443,12 +466,6 @@ impl HostRelayServer {
                 out.push((pending.client, HostRelay::FileDialog(result)));
                 continue;
             }
-            if !pending.save && !pending.folder && paths.iter().any(|p| p.to_string_lossy().starts_with("content://")) {
-                // Copying documents out of a provider can take seconds:
-                // a worker does it and answers through an action.
-                materialize(cx, pending.client, result, paths);
-                continue;
-            }
             result.paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
             out.push((pending.client, HostRelay::FileDialog(result)));
         }
@@ -466,92 +483,7 @@ impl HostRelayServer {
         self.permissions.retain(|_, (c, _)| *c != client);
         self.dialogs.retain(|_, p| p.client != client);
         self.folder_dialogs.retain(|p| p.client != client);
-    }
-}
-
-/// A picked set a worker finished copying, posted back to the UI thread.
-#[derive(Clone, Debug)]
-struct MaterializedPick {
-    client: u64,
-    result: RelayFileDialogResult,
-}
-
-/// Picked documents a child can open: on Android the picker answers with
-/// `content://` URIs only a JVM can read, so a worker copies each one into
-/// the app's cache (the child runs as the same app and reads it there) and
-/// the answer is posted when all are copied. Each pick gets its own
-/// directory; picks older than a day are removed first.
-#[allow(unused_variables)]
-fn materialize(cx: &Cx, client: u64, mut result: RelayFileDialogResult, paths: Vec<PathBuf>) {
-    #[cfg(target_os = "android")]
-    {
-        use crate::os::linux::android::android_jni;
-        let root = match cx.os_type() {
-            crate::cx::OsType::Android(params) if !params.cache_path.is_empty() => {
-                PathBuf::from(&params.cache_path).join("picked")
-            }
-            _ => {
-                Cx::post_action(MaterializedPick { client, result });
-                return;
-            }
-        };
-        std::thread::spawn(move || {
-            remove_old_picks(&root, std::time::Duration::from_secs(24 * 3600));
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let dir = root.join(format!("{stamp}-{}", LiveId::unique().0));
-            let _ = std::fs::create_dir_all(&dir);
-            for p in paths {
-                let uri = p.to_string_lossy().into_owned();
-                if !uri.starts_with("content://") {
-                    result.paths.push(uri);
-                    continue;
-                }
-                let name = pick_file_name(&uri, result.paths.len());
-                let dest = dir.join(name);
-                if unsafe { android_jni::to_java_copy_content_uri(&uri, &dest.to_string_lossy()) } {
-                    result.paths.push(dest.to_string_lossy().into_owned());
-                }
-            }
-            Cx::post_action(MaterializedPick { client, result });
-        });
-        return;
-    }
-    #[allow(unreachable_code)]
-    {
-        result.paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-        Cx::post_action(MaterializedPick { client, result });
-    }
-}
-
-/// A file name for a copied document: the URI's last segment (decoded
-/// spaces), made safe, prefixed with its index so two picks never collide.
-#[cfg(any(target_os = "android", test))]
-fn pick_file_name(uri: &str, index: usize) -> String {
-    let last = uri.rsplit(['/', ':']).next().filter(|n| !n.is_empty()).unwrap_or("document");
-    let clean: String = last
-        .replace("%20", " ")
-        .chars()
-        .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
-        .collect();
-    format!("{index}-{clean}")
-}
-
-#[cfg(target_os = "android")]
-fn remove_old_picks(root: &std::path::Path, max_age: std::time::Duration) {
-    let Ok(entries) = std::fs::read_dir(root) else { return };
-    for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > max_age);
-        if old {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
+        self.clipboard_reads.retain(|_, (c, _)| *c != client);
     }
 }
 
@@ -564,9 +496,6 @@ impl Cx {
     pub(crate) fn handle_host_relay(&mut self, relay: HostRelay) {
         match relay {
             HostRelay::Http(event) => {
-                #[cfg(target_os = "android")]
-                crate::os::linux::android::android_network::hosted_http_event(&event);
-                #[cfg(not(target_os = "android"))]
                 let _ = event;
             }
             HostRelay::PermissionResult { request_id, permission, status } => {
@@ -579,6 +508,16 @@ impl Cx {
             }
             HostRelay::FileDialog(result) => {
                 Cx::post_action(file_dialog_action_from_relay(&result));
+            }
+            HostRelay::Clipboard { request_id, text, png } => {
+                use crate::clipboard_read::{ClipboardContent, ClipboardEvent, ClipboardImage};
+                let content = ClipboardContent {
+                    supported: true,
+                    text: (!text.is_empty()).then_some(text),
+                    image: (!png.is_empty()).then(|| ClipboardImage::Png(std::sync::Arc::new(png))),
+                    files: Vec::new(),
+                };
+                self.call_event_handler(&Event::Clipboard(ClipboardEvent { request: request_id, content: std::sync::Arc::new(content) }));
             }
         }
     }
@@ -644,13 +583,6 @@ mod tests {
         for bad in ["file:///data/x", "content://x", "intent://x#Intent;end", "javascript:1", "noscheme"] {
             assert!(!url_scheme_allowed(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn copied_picks_get_safe_distinct_names() {
-        assert_eq!(pick_file_name("content://com.android.providers/document/primary%3AA%20b.csv", 0), "0-primary%3AA b.csv");
-        assert_eq!(pick_file_name("content://x/document/", 3), "3-document");
-        assert_ne!(pick_file_name("content://x/a", 0), pick_file_name("content://x/a", 1));
     }
 
     #[test]

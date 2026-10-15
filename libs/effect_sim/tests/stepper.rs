@@ -4,7 +4,9 @@
 //! physics, bodies published through a kernel ring, and the step budget.
 
 use makepad_effect_sim::*;
-use makepad_render_kernels::compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_render_kernels::compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_render_kernels::compute::kernel::FieldTy;
+use makepad_render_kernels::RecordLayout;
 use makepad_render_kernels::{compile, ManualFences};
 use std::sync::Arc;
 
@@ -28,13 +30,11 @@ fn instance(i) {
 }
 "#;
 
-fn spark_layout() -> Layout {
-    Layout {
-        name: "Spark".into(),
-        stride: 4,
-        fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "life".into(), ty: FieldTy::F32, offset: 3 }],
-    }
-}
+const SPARK: LayoutView<'static> = LayoutView {
+    name: "Spark",
+    stride: 4,
+    fields: &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "life", ty: FieldTy::F32, offset: 3 }],
+};
 
 fn program(src: &str) -> u64 {
     let mut h = Fnv::default();
@@ -42,8 +42,8 @@ fn program(src: &str) -> u64 {
     h.finish()
 }
 
-fn call(src: &str, buffer: &str, layouts: &[Layout], inputs: Vec<(String, SimInput)>) -> KernelCall {
-    let mut all = makepad_effect_sim::layouts();
+fn call(src: &str, buffer: &str, layouts: &[LayoutView<'_>], inputs: Vec<(String, SimInput)>) -> KernelCall {
+    let mut all = makepad_effect_sim::layouts().to_vec();
     all.extend_from_slice(layouts);
     let kernel = compile(src, &all, &makepad_effect_sim::modules()).unwrap_or_else(|e| panic!("{src}\n{e:?}"));
     KernelCall { kernel, buffer: buffer.into(), params: Vec::new(), inputs, program: program(src) }
@@ -64,11 +64,11 @@ fn sparks() -> SimDesc {
     let inputs = vec![("hits".to_string(), SimInput::Contacts("confetti".into()))];
     SimDesc {
         name: "sparks".into(),
-        state: spark_layout(),
+        state: RecordLayout::of(&SPARK),
         count: 64,
         every: 2,
-        init: call(&srcs.init, "next", &[spark_layout()], inputs.clone()),
-        update: call(&srcs.update, "next", &[spark_layout()], inputs),
+        init: call(&srcs.init, "next", &[SPARK], inputs.clone()),
+        update: call(&srcs.update, "next", &[SPARK], inputs),
         prev: "prev".into(),
         spawn: None,
     }
@@ -338,7 +338,7 @@ fn contacts_stay_readable_for_the_retention_window() {
 #[test]
 fn bodies_publish_through_a_kernel_ring() {
     let mut st = Stepper::new(confetti(1, 64 << 20), &mut Paddle);
-    let layout = rigid_layout();
+    let layout = RIGID;
     let mut ring = body_ring(0xb0d1, &layout);
     let fences = ManualFences::with_delay(2);
     for f in 120..160 {
@@ -376,15 +376,15 @@ fn sims_can_spawn_bodies_and_read_bodies() {
     );
     let (init, update) = (srcs.init, srcs.update);
     let inputs = vec![("bodies".to_string(), SimInput::Bodies("confetti".into()))];
-    let tick = Layout { name: "Tick".into(), stride: 1, fields: vec![LayoutField { name: "n".into(), ty: FieldTy::F32, offset: 0 }] };
+    let tick = LayoutView { name: "Tick", stride: 1, fields: &[LayoutFieldView { name: "n", ty: FieldTy::F32, offset: 0 }] };
     let mut d = confetti(3, 64 << 20);
     d.sims.push(SimDesc {
         name: "fountain".into(),
-        state: tick.clone(),
+        state: RecordLayout::of(&tick),
         count: 4,
         every: 12,
-        init: call(&init, "next", &[tick.clone()], inputs.clone()),
-        update: call(&update, "next", &[tick.clone()], inputs),
+        init: call(&init, "next", &[tick], inputs.clone()),
+        update: call(&update, "next", &[tick], inputs),
         prev: "prev".into(),
         spawn: Some(("drops".into(), "drops".into(), Shape::Sphere)),
     });

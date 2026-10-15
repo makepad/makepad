@@ -261,6 +261,7 @@ mod tests {
             value: Some("hello world".to_string()),
             checked: None,
             selected: None,
+            path: None,
         }
     }
 
