@@ -605,11 +605,11 @@ mod tests {
     fn the_skin_draw_carries_the_atlas_and_the_flag_only_under_an_environment() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut skin = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             crate::script_mod(vm);
             let skin = DrawSceneSkinnedGpu::script_new_with_default(vm);
             let errors = vm.take_errors();

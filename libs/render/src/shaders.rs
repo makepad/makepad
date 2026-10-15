@@ -1353,7 +1353,7 @@ mod shader_registration_tests {
             ("env background GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "glsl", false)})),
             ("env background HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "hlsl", false)})),
         ] {
-            let source = test_source(&vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap());
+            let source = test_source(&vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap());
             assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
             assert!(source.contains("env_tex") && source.contains("detail_map"), "{name}: both textures are sampled");
             // The dome's texel addressing works in its logical size
@@ -1376,17 +1376,17 @@ mod shader_registration_tests {
     fn the_environment_background_shader_compiles_and_samples_both_textures() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_material::builtin::register(vm);
             crate::renderer::ibl::script_mod(vm);
             let errors = script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawEnvBackground)});
-            let errors = vm.bx.heap.string_with(errors, |_heap, value| value.to_string()).expect("compile result should be a string");
+            let errors = vm.heap().string_with(errors, |_heap, value| value.to_string()).expect("compile result should be a string");
             let setup_errors = vm.take_errors();
             assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
             assert!(errors.is_empty(), "env background: {errors}");
@@ -1638,11 +1638,11 @@ mod skin_ibl_tests {
     fn with_vm(f: impl FnOnce(&mut ScriptVm)) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             crate::script_mod(vm);
             f(vm);
             let errors = vm.take_errors();
@@ -1696,7 +1696,7 @@ mod skin_ibl_tests {
                 ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
                 ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
             ] {
-                let source = test_source(&vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap());
+                let source = test_source(&vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap());
                 assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
                 assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
                 assert!(source.contains("detail_map"), "{name}: the atlas is sampled");

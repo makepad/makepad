@@ -517,14 +517,14 @@ mod tests {
 
     /// The lowered source of a program object, for GLSL or HLSL.
     fn lowered(vm: &mut ScriptVm, program: ScriptObject, glsl: bool) -> String {
-        let draw = vm.bx.heap.value(vm.bx.heap.modules, id!(draw).into(), NoTrap).as_object().unwrap();
-        vm.bx.heap.set_value(draw, id!(program_under_test).into(), program.into(), NoTrap);
+        let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
+        vm.set_value(draw, id!(program_under_test), program);
         let source = if glsl {
             script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "glsl", false) })
         } else {
             script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "hlsl", false) })
         };
-        crate::shaders::test_source(&vm.bx.heap.string_with(source, |_, s| s.to_string()).unwrap_or_default())
+        crate::shaders::test_source(&vm.heap().string_with(source, |_, s| s.to_string()).unwrap_or_default())
     }
 
     /// An IBL program (the stock IBL program and the built-in item IBL
@@ -562,7 +562,7 @@ mod tests {
             // No environment, no change: the stock PBR lane's program has
             // neither the control nor a lookup.
             let stock = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "glsl", false) });
-            let stock = vm.bx.heap.string_with(stock, |_, s| s.to_string()).unwrap_or_default();
+            let stock = vm.heap().string_with(stock, |_, s| s.to_string()).unwrap_or_default();
             assert!(!stock.is_empty() && !stock.starts_with("ERRORS:"));
             assert!(!stock.contains("ibl_ctl") && !stock.contains("mat_ibl_"), "the stock PBR lane's program is as it was");
             assert!(vm.take_errors().is_empty());
