@@ -742,14 +742,16 @@ impl Env {
 
     /// What stands in front of a disc in the map leaves of it, per channel
     /// (D1): the lights drawn over the sky (flags and gels, a scrim's cloth, a
-    /// window's glass at its own exposure) and, under sky replacement, the
-    /// base image below its line. `key` is the disc's key in the map's own
-    /// frame, and `disc(d)` the disc as the map draws it along `d`, which
-    /// weighs each direction: the soft limb, and a hard edge across the disc,
-    /// count as they show. Each is affine in the base it is drawn over, so
-    /// what the map makes of a white base less what it makes of a black one is
-    /// the share that reaches the eye, the lights' own light cancelling. 1,
-    /// exactly, when nothing stands in front of any disc.
+    /// window's glass at its own exposure and, in Sky mode, its frame and
+    /// bars, which hide what is behind them: `LightFx::against_sky`, D12)
+    /// and, under sky replacement, the base image below its line. `key` is
+    /// the disc's key in the map's own frame, and `disc(d)` the disc as the
+    /// map draws it along `d`, which weighs each direction: the soft limb,
+    /// and a hard edge across the disc, count as they show. Each is affine in
+    /// the base it is drawn over, so what the map makes of a white base less
+    /// what it makes of a black one is the share that reaches the eye, the
+    /// lights' own light cancelling. 1, exactly, when nothing stands in front
+    /// of any disc.
     ///
     /// A midpoint grid of DISC_GRID x DISC_GRID points over the tangent plane
     /// round the disc's covering cone, as `studio::key_emission` takes a key.

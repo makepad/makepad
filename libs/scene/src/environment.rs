@@ -156,9 +156,9 @@ pub struct SunConfig {
 ///   above the horizon and the cover along it (the clouds, a cloud volume,
 ///   the weather's rain, rain shafts and fog), times what stands in front of
 ///   the disc in the map (the lights drawn over the sky: flags, gels, a
-///   scrim's cloth, a window filled with sky at its own exposure; a base
-///   image below its horizon line), per channel, weighed by the disc as it
-///   draws itself;
+///   scrim's cloth, a window filled with sky, its glass at its own exposure
+///   and its frame and bars dark against the sky; a base image below its
+///   horizon line), per channel, weighed by the disc as it draws itself;
 /// - the moon: the mean over its disc, times the share of it the key carries
 ///   as it arrives after dusk, the cover along it and what stands in front of
 ///   it, as for the sun;
@@ -166,20 +166,22 @@ pub struct SunConfig {
 ///   photograph (`hdri::detect_sun`) at the image's exposure, times what the
 ///   lights in front of it leave of it, weighed by the photograph;
 /// - a studio key: its whole emission as the map draws it, integrated once
-///   per map: its shape, corner, ring, soft edge, hotspot, roll, picture and
-///   colour ramp, what hangs in front of it (a gobo, barn doors and a grid,
-///   the wear of its face), and the lights listed after it that dim it
-///   (flags and gels, a scrim's cloth, a window filled with sky, whose glass
-///   shows the sky in its place). A light in its own box (a rect, disc,
-///   ring, polygon or scrim) is integrated over its own tangent plane, a
-///   picture light weighed by its picture, and a stroke, which its points
-///   place, over the cones round its centre line. So a thin strip or a ring
-///   carries only what it draws, and part of a wide rect's or a soft light's
-///   emission lies outside the cone (up to about 8 % for the built-in studio
-///   presets) and is counted in it, and `cos_cover` is what holds it. A
-///   window filled with sky as the key carries the sky it lets in, measured
-///   against that sky, not its own colour. A stroke that spreads wider round
-///   its middle than an 85 degree key is never the key (the generator's D2);
+///   per map, when the engine first asks for it: its shape, corner, ring,
+///   soft edge, hotspot, roll, picture and colour ramp, what hangs in front
+///   of it (a gobo, barn doors and a grid, the wear of its face), and the
+///   lights listed after it that dim it (flags and gels, a scrim's cloth, a
+///   window filled with sky, whose glass shows the sky in its place and
+///   whose frame and bars, against the sky, hide it too). A light in its
+///   own box (a rect, disc, ring, polygon or scrim) is integrated over its
+///   own tangent plane, a picture light weighed by its picture, and a
+///   stroke, which its points place, over the cones round its centre line.
+///   So a thin strip or a ring carries only what it draws, and part of a
+///   wide rect's or a soft light's emission lies outside the cone (up to
+///   about 8 % for the built-in studio presets) and is counted in it, and
+///   `cos_cover` is what holds it. A window filled with sky as the key
+///   carries the sky it lets in, measured against that sky, not its own
+///   colour. A stroke that spreads wider round its middle than an 85 degree
+///   key is never the key (the generator's D2);
 /// - a detected sun (`hdri::detect_sun`): the energy it gathered over the
 ///   cone's solid angle.
 ///
