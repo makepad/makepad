@@ -365,7 +365,7 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
     // The socket is bound before the line is printed, but a dial can still
     // race the first accept: retry until the deadline.
     let client = loop {
-        match RemoteClient::connect(&listening.socket) {
+        match dial(&listening) {
             Ok(client) => break client,
             Err(err) => {
                 if let Ok(Some(status)) = child.try_wait() {
@@ -457,6 +457,26 @@ pub fn parse_listening_line(line: &str) -> TestResult<ListeningLine> {
     })
 }
 
+impl ListeningLine {
+    /// What the client dials. A Unix socket path is dialled as printed. On
+    /// Windows the endpoint prints its loopback carrier, `tcp:127.0.0.1:PORT`,
+    /// whose token is only in the discovery file `makepad-remote-<pid>.json`;
+    /// `makepad_remote::Client::connect` takes no `tcp:` address but reads that
+    /// file for a pid, so such an endpoint is dialled by its pid.
+    pub fn dial_spec(&self) -> String {
+        let socket = self.socket.display().to_string();
+        if socket.starts_with("tcp:") {
+            self.pid.to_string()
+        } else {
+            socket
+        }
+    }
+}
+
+fn dial(listening: &ListeningLine) -> TestResult<RemoteClient> {
+    RemoteClient::dial(&listening.dial_spec(), &listening.socket)
+}
+
 pub fn file_tail(path: &Path) -> String {
     let text = fs::read_to_string(path).unwrap_or_default();
     if text.len() <= TAIL_BYTES {
@@ -488,6 +508,47 @@ mod tests {
         assert!(parse_listening_line("[makepad-remote] cannot listen: denied").is_err());
         assert!(parse_listening_line("[makepad-remote] pid=1 app=x").is_err());
         assert!(parse_listening_line("[makepad-remote] pid=nope app=x socket=/s").is_err());
+    }
+
+    #[test]
+    fn a_loopback_socket_is_dialled_by_pid_and_a_socket_path_as_printed() {
+        let tcp = parse_listening_line(
+            "[makepad-remote] pid=29036 app=makepad-hdri socket=tcp:127.0.0.1:51848",
+        )
+        .unwrap();
+        assert_eq!(tcp.socket, PathBuf::from("tcp:127.0.0.1:51848"));
+        assert_eq!(tcp.dial_spec(), "29036");
+        let unix = parse_listening_line(
+            "[makepad-remote] pid=9931 app=x socket=/tmp/my dir/makepad-remote-9931.sock",
+        )
+        .unwrap();
+        assert_eq!(unix.dial_spec(), "/tmp/my dir/makepad-remote-9931.sock");
+    }
+
+    /// An endpoint opened the way an app opens it (`listen_unix`: a Unix
+    /// socket, or on Windows loopback TCP behind a token that only the
+    /// discovery file holds) is reached from the startup line printed for it.
+    #[test]
+    fn the_startup_line_of_a_real_endpoint_is_dialled() {
+        fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) {
+            match req.cmd.as_str() {
+                "help" => out.line("makepad-remote app=mt-dial"),
+                other => out.err(&format!("unknown command `{other}`")),
+            }
+        }
+        let endpoint = makepad_remote::Endpoint::new("mt-dial");
+        endpoint.register_cmd(dispatch);
+        let socket = endpoint.listen_unix("").unwrap();
+        let line = format!(
+            "[makepad-remote] pid={} app=mt-dial socket={}",
+            std::process::id(),
+            socket.display()
+        );
+        let listening = parse_listening_line(&line).unwrap();
+        let client = dial(&listening).unwrap();
+        assert!(client.help().unwrap().contains("app=mt-dial"));
+        // Diagnostics name the endpoint by the socket it printed.
+        assert_eq!(client.socket(), socket.display().to_string());
     }
 
     #[test]

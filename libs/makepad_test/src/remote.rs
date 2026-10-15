@@ -1,6 +1,7 @@
 //! Client side of the app's `--remote` endpoint (`platform/src/remote_core.rs`).
 //!
-//! Every call is one `cmd` request over the app's makepad-remote Unix socket;
+//! Every call is one `cmd` request over the app's makepad-remote endpoint (a
+//! Unix socket, or loopback TCP on Windows);
 //! the answer lines are JSON decoded with `makepad-micro-serde`. Every
 //! `{"err":...}` line becomes a [`TestError`] so callers never see a fake
 //! success. Images are written by this client (`makepad_remote::app`), never by
@@ -114,10 +115,19 @@ impl std::fmt::Debug for RemoteClient {
 }
 
 impl RemoteClient {
-    /// Dials the app's makepad-remote Unix socket (the path of its startup line).
+    /// Dials a Unix socket path: the fixture endpoints of this crate's tests.
+    #[cfg(all(test, unix))]
     pub fn connect(socket: impl AsRef<Path>) -> TestResult<Self> {
+        let socket = socket.as_ref();
+        Self::dial(&socket.display().to_string(), socket)
+    }
+
+    /// Dials `spec`, anything `makepad_remote::Client::connect` takes (a
+    /// socket path, a pid or an app name), and names the endpoint by the
+    /// `socket` of its startup line in diagnostics.
+    pub fn dial(spec: &str, socket: impl AsRef<Path>) -> TestResult<Self> {
         let socket = socket.as_ref().to_path_buf();
-        let client = Client::connect(&socket.display().to_string()).map_err(|err| {
+        let client = Client::connect(spec).map_err(|err| {
             TestError::new(format!(
                 "connect to app remote {} failed: {err}",
                 socket.display()
@@ -126,7 +136,7 @@ impl RemoteClient {
         Ok(Self { socket, client })
     }
 
-    /// The socket path this client dials, for diagnostics.
+    /// The socket of the app's startup line, for diagnostics.
     pub fn socket(&self) -> String {
         self.socket.display().to_string()
     }

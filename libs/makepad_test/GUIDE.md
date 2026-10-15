@@ -232,7 +232,7 @@ cargo test --release -p makepad-example-text-input --test ui -- --test-threads=1
 ## Standalone Transport and Ownership
 
 The runtime uses the app's documented [remote commands](../../docs/agents/app-remote.md)
-over its makepad-remote Unix socket: `status`, `snap`, `dump`, `grab`, `log`, and the
+over its makepad-remote endpoint (a Unix socket; on Windows, loopback TCP dialled by PID): `status`, `snap`, `dump`, `grab`, `log`, and the
 input commands (`click`, `mouse`, `key`, `text`). Images are written by the test client,
 never by the app. Input requests wait for a
 resulting frame. Rectangles are window-local layout points; do not apply DPI

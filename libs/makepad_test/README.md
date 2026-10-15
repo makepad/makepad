@@ -1,6 +1,6 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` makepad-remote endpoint (a Unix socket). Test windows are hidden by default; no Studio instance or hub is required.
+`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` makepad-remote endpoint (a Unix socket; on Windows, loopback TCP). Test windows are hidden by default; no Studio instance or hub is required.
 
 ## Quick Start
 

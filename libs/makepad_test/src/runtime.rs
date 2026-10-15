@@ -203,7 +203,8 @@ impl TestApp {
         self.inner.borrow().app.pid
     }
 
-    /// The Unix socket path of the owned app's remote endpoint, for diagnostics.
+    /// The socket the owned app's remote endpoint printed (a Unix socket path,
+    /// or `tcp:127.0.0.1:PORT` on Windows), for diagnostics.
     pub fn remote_endpoint(&self) -> String {
         self.inner.borrow().app.client.socket()
     }
