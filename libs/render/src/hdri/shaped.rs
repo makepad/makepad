@@ -66,6 +66,10 @@ pub struct ShapedLight {
     blend: Blend,
     /// A scrim hides what is behind it; the other shapes add, as A3's lights do.
     occludes: bool,
+    /// P1: how far a picture's Penumbra widens the soft edge inward, as a
+    /// share of the shape's own depth (`with_inset`, `depth`); 0 draws the
+    /// bare shape. `compose` and `hide` draw with it, `sample` without.
+    inset: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -106,7 +110,28 @@ impl ShapedLight {
             _ => return None,
         };
         let occludes = matches!(kind, ShapedKind::Scrim(_));
-        Some(ShapedLight { kind, cull, blend: light.blend(), occludes })
+        Some(ShapedLight { kind, cull, blend: light.blend(), occludes, inset: 0.0 })
+    }
+
+    /// The light with its soft edge widened inward by `inset` of its depth
+    /// (P1: a picture in stretch or fill, whose border is the light's edge,
+    /// `LightImage::edge_inset`): every edge ramp of the shape then runs
+    /// from half its band plus `inset` x the depth inside to half its band
+    /// outside, one smoothstep, so the light's reach and its cull stay.
+    pub fn with_inset(self, inset: f32) -> ShapedLight {
+        ShapedLight { inset, ..self }
+    }
+
+    /// The depth the shape's Softness takes, tangent units (a stroke's in
+    /// radians): how deep a polygon's centre sits inside it, a stroke's half
+    /// width (before its profile), a scrim's shorter half extent. Penumbra 1
+    /// widens the edge that far in (`with_inset`).
+    pub fn depth(&self) -> f32 {
+        match &self.kind {
+            ShapedKind::Fill(fill) => fill.depth,
+            ShapedKind::Stroke(stroke) => stroke.half_width,
+            ShapedKind::Scrim(scrim) => scrim.short,
+        }
     }
 
     /// Every direction the light can touch lies in this cone.
@@ -114,12 +139,18 @@ impl ShapedLight {
         self.cull
     }
 
-    /// Mask and emission at `dir` (unit, in the map's own frame), without the cull.
+    /// Mask and emission at `dir` (unit, in the map's own frame), without
+    /// the cull: the bare shape, whatever picture widens its edge.
     pub fn sample(&self, dir: Vec3f) -> ShapeSample {
+        self.sample_inset(dir, 0.0)
+    }
+
+    /// `sample` with the edge widened inward by `inset` of the depth.
+    fn sample_inset(&self, dir: Vec3f, inset: f32) -> ShapeSample {
         match &self.kind {
-            ShapedKind::Fill(fill) => fill.sample(dir),
-            ShapedKind::Stroke(stroke) => stroke.sample_at(dir).0,
-            ShapedKind::Scrim(scrim) => scrim.sample(dir),
+            ShapedKind::Fill(fill) => fill.sample(dir, inset),
+            ShapedKind::Stroke(stroke) => stroke.sample_at(dir, inset).0,
+            ShapedKind::Scrim(scrim) => scrim.sample(dir, inset),
         }
     }
 
@@ -135,15 +166,15 @@ impl ShapedLight {
         // stroke and a scrim flag by their bare shape.
         let (s, color, flag) = match &self.kind {
             ShapedKind::Fill(fill) => {
-                let s = fill.sample(dir);
+                let s = fill.sample(dir, self.inset);
                 (s, color, s.emit)
             }
             ShapedKind::Stroke(stroke) => {
-                let (s, t) = stroke.sample_at(dir);
+                let (s, t) = stroke.sample_at(dir, self.inset);
                 (s, stroke.color_at(t, color), s.mask)
             }
             ShapedKind::Scrim(scrim) => {
-                let s = scrim.sample(dir);
+                let s = scrim.sample(dir, self.inset);
                 (s, color, s.mask)
             }
         };
@@ -170,7 +201,7 @@ impl ShapedLight {
         if !self.hides_behind() || !self.cull.contains(dir) {
             return acc;
         }
-        acc * (1.0 - self.sample(dir).mask)
+        acc * (1.0 - self.sample_inset(dir, self.inset).mask)
     }
 
     /// Whether this is an Add light that hides what is behind it (a scrim):
@@ -228,6 +259,9 @@ struct FillLight {
     half: Vec2f,
     /// Half the soft band, tangent units.
     edge: f32,
+    /// How deep the centre sits inside the outline, tangent units: the
+    /// depth the Softness (and a picture's Penumbra) takes.
+    depth: f32,
     hotspot: f32,
 }
 
@@ -257,6 +291,7 @@ impl FillLight {
             shape: FillShape::new(&outline, edge),
             half: vec2f(hx, hy),
             edge,
+            depth,
             hotspot: HOTSPOT_FALLOFF * light.hotspot,
         })
     }
@@ -266,12 +301,13 @@ impl FillLight {
         CullCone::new(self.frame.center, (self.shape.outline().bounding_radius() + self.edge).atan())
     }
 
-    fn sample(&self, dir: Vec3f) -> ShapeSample {
+    /// Mask and emission at `dir`, the edge widened inward by `inset` of the depth.
+    fn sample(&self, dir: Vec3f, inset: f32) -> ShapeSample {
         let Some(t) = project(&self.frame, dir) else {
             return ShapeSample::default();
         };
         let d = self.shape.sdf(t);
-        let mask = 1.0 - smoothstep(-self.edge, self.edge, d);
+        let mask = 1.0 - smoothstep(-self.edge - inset * self.depth, self.edge, d);
         if !(mask > 0.0) {
             return ShapeSample::default();
         }
@@ -435,8 +471,9 @@ impl StrokeLight {
     }
 
     /// Mask and emission at `dir`, and how far along the stroke the nearest
-    /// point lies (t, 0..1 by arc length).
-    fn sample_at(&self, dir: Vec3f) -> (ShapeSample, f32) {
+    /// point lies (t, 0..1 by arc length). `inset` widens the edge inward by
+    /// that share of the half width there.
+    fn sample_at(&self, dir: Vec3f, inset: f32) -> (ShapeSample, f32) {
         let hit = self.path.nearest(dir);
         // Written negated so a NaN distance is dark too.
         if !(hit.dist < self.path.reach()) {
@@ -446,7 +483,7 @@ impl StrokeLight {
         let hw = self.half_width * w;
         // As a ring's edge: the band is softness x the half width, centred on the edge.
         let edge = 0.5 * (self.softness * hw).max(EDGE_MIN);
-        let mask = 1.0 - smoothstep(hw - edge, hw + edge, hit.dist);
+        let mask = 1.0 - smoothstep(hw - edge - inset * hw, hw + edge, hit.dist);
         if !(mask > 0.0) {
             return (ShapeSample::default(), hit.t);
         }
@@ -627,6 +664,9 @@ struct ScrimLight {
     frame: LightFrame,
     /// Half extents tan(w/2), tan(h/2).
     half: Vec2f,
+    /// The shorter of them: the depth the Softness (and a picture's
+    /// Penumbra) takes, as a rect's.
+    short: f32,
     /// Corner radius, tangent units (studio.rs's rect rounding).
     round: f32,
     /// Half the soft band, tangent units.
@@ -663,6 +703,7 @@ impl ScrimLight {
         ScrimLight {
             frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
             half: vec2f(hx, hy),
+            short,
             round: light.corner * short,
             edge,
             frame_w,
@@ -676,7 +717,11 @@ impl ScrimLight {
         CullCone::new(self.frame.center, (self.half.x.hypot(self.half.y) + self.edge).atan())
     }
 
-    fn sample(&self, dir: Vec3f) -> ShapeSample {
+    /// Mask and emission at `dir`. `inset` widens both of its edges inward
+    /// by that share of the depth: the outline's, where the cloth ends, and
+    /// the frame's inner one, where it starts to glow (a picture's Penumbra
+    /// fades the whole light, as its alpha does).
+    fn sample(&self, dir: Vec3f, inset: f32) -> ShapeSample {
         let Some(t) = project(&self.frame, dir) else {
             return ShapeSample::default();
         };
@@ -685,12 +730,13 @@ impl ScrimLight {
         let qy = t.y.abs() - self.half.y + self.round;
         let (ox, oy) = (qx.max(0.0), qy.max(0.0));
         let d = (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - self.round;
-        let mask = 1.0 - smoothstep(-self.edge, self.edge, d);
+        let inset = inset * self.short;
+        let mask = 1.0 - smoothstep(-self.edge - inset, self.edge, d);
         if !(mask > 0.0) {
             return ShapeSample::default();
         }
         // The cloth inside the frame glows; the frame itself is dark.
-        let cloth = 1.0 - smoothstep(-self.inner_edge, self.inner_edge, d + self.frame_w);
+        let cloth = 1.0 - smoothstep(-self.inner_edge - inset, self.inner_edge, d + self.frame_w);
         let ux = t.x / self.half.x;
         let uy = t.y / self.half.y;
         let glow = (-(ux * ux + uy * uy) * self.inv_two_sigma2).exp();

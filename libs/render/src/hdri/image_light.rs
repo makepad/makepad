@@ -17,6 +17,13 @@
 //! With `alpha_as_mask` the picture's alpha cuts the light out (a PNG of a
 //! lamp or a window frame). Alpha comes from 8-bit files; `.hdr` has none
 //! and reads as opaque.
+//!
+//! P1: a picture's Penumbra fades its border out over a band inside it (in
+//! fit the letterboxed picture's own border, in stretch and fill the light's
+//! edge, which widens inward; `LightImageParams::penumbra`), and Soften mask
+//! edges box-filters a masked picture's premultiplied texels over the same
+//! band, exactly, through a summed-area table one per picture
+//! (`SummedArea`, which image gobos share too).
 
 use makepad_draw::*;
 use makepad_render_material::ibl::EnvMap;
@@ -109,6 +116,106 @@ impl<T> PictureMemo<T> {
     }
 }
 
+/// Prefix sums of the `N` numbers each texel of a picture gives: entry
+/// (x, y) of the (width + 1) x (height + 1) table sums the texels left of
+/// column x and above row y. It gives the exact mean of those numbers over a
+/// box of any size from sixteen reads each. In f64: a 2048 x 2048 picture
+/// sums four million texels, where f32 would already lose a texel's own
+/// fractions. So a table is (width + 1) x (height + 1) x N x 8 bytes, and one
+/// is built per picture and kind, for the first light, gobo or map that needs
+/// it, and shared by every other (`PictureMemo`, D15): an image gobo's
+/// (`gobo::PassTable`, one number a texel, what it passes: 33.6 MB at 2048)
+/// and a light picture's softened mask (`SoftTable`, four: its premultiplied
+/// colour and its alpha, 134.3 MB at 2048).
+#[derive(Debug)]
+pub(crate) struct SummedArea<const N: usize> {
+    width: usize,
+    height: usize,
+    sums: Vec<[f64; N]>,
+}
+
+impl<const N: usize> SummedArea<N> {
+    /// The table of `texel`'s numbers over `img`, which has texels: its width
+    /// and height are above 0 and it holds that many (the callers check).
+    pub(crate) fn build(img: &EnvMap, texel: impl Fn(&[f32; 4]) -> [f64; N]) -> SummedArea<N> {
+        let (w, h) = (img.width, img.height);
+        let stride = w + 1;
+        let mut sums = vec![[0.0f64; N]; stride * (h + 1)];
+        for (y, texels) in img.data.chunks_exact(w).enumerate() {
+            // Row y + 1 of the table is row y plus the running sum along texel row y.
+            let (above, below) = sums.split_at_mut((y + 1) * stride);
+            let mut row = [0.0f64; N];
+            for ((t, up), out) in texels.iter().zip(&above[y * stride + 1..]).zip(&mut below[1..stride]) {
+                let numbers = texel(t);
+                for k in 0..N {
+                    row[k] += numbers[k];
+                    out[k] = up[k] + row[k];
+                }
+            }
+        }
+        SummedArea { width: w, height: h, sums }
+    }
+
+    /// The numbers integrated over 0..x by 0..y, in texels (texel (i, j)
+    /// covers i..i+1 by j..j+1), with the edge texels held past the
+    /// picture's border, so that it runs on linearly outside it (negative
+    /// left of and above the picture). Inside a texel the integral is
+    /// exactly the bilinear blend of the table at the texel's corners, and an
+    /// edge texel's blend carried on past the border is exactly the held edge.
+    fn integral(&self, x: f64, y: f64) -> [f64; N] {
+        let stride = self.width + 1;
+        // `as usize` saturates: left of or above the picture is texel 0.
+        let i = (x.floor() as usize).min(self.width - 1);
+        let j = (y.floor() as usize).min(self.height - 1);
+        let (tx, ty) = (x - i as f64, y - j as f64);
+        let at = |i: usize, j: usize| &self.sums[j * stride + i];
+        let mut out = [0.0f64; N];
+        for k in 0..N {
+            let top = at(i, j)[k] + (at(i + 1, j)[k] - at(i, j)[k]) * tx;
+            let bottom = at(i, j + 1)[k] + (at(i + 1, j + 1)[k] - at(i, j + 1)[k]) * tx;
+            out[k] = top + (bottom - top) * ty;
+        }
+        out
+    }
+
+    /// The mean of the numbers over the box centred at (x, y) with
+    /// half-widths `rx` and `ry`, in texels as `integral` places them, the
+    /// edge texels held past the border. The box is never narrower than a
+    /// texel: one texel across, its mean is the bilinear lookup itself, so a
+    /// box-filtered picture is never blockier than the picture.
+    pub(crate) fn box_mean(&self, x: f64, y: f64, rx: f64, ry: f64) -> [f64; N] {
+        let (w, h) = (self.width as f64, self.height as f64);
+        let rx = rx.max(0.5);
+        let ry = ry.max(0.5);
+        // A box wholly past the border sees the held edge alone, as it does
+        // at the border plus its half-width: holding the centre there keeps
+        // the sums small. max/min hold a NaN at the near side.
+        let x = x.max(-rx).min(w + rx);
+        let y = y.max(-ry).min(h + ry);
+        let (a, b, c, d) = (self.integral(x + rx, y + ry), self.integral(x - rx, y + ry), self.integral(x + rx, y - ry), self.integral(x - rx, y - ry));
+        let mut out = [0.0f64; N];
+        for k in 0..N {
+            out[k] = (a[k] - b[k] - c[k] + d[k]) / (4.0 * rx * ry);
+        }
+        out
+    }
+
+    /// The picture's width and height, in texels.
+    pub(crate) fn width(&self) -> usize {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        self.height
+    }
+
+    /// What the table takes in memory, in bytes.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        self.sums.len() * std::mem::size_of::<[f64; N]>()
+    }
+}
+
 /// Every image key the params name, sorted and without repeats; "" (no
 /// picture) is left out. Lights that are switched off count too: they can be
 /// switched back on. So does the name on a gobo of another kind: the person
@@ -192,10 +299,29 @@ struct PictureMeans {
 /// The means of every live light picture (`PictureMemo`).
 static MEANS: PictureMemo<PictureMeans> = PictureMemo::new();
 
-/// Drops the means of every picture whose last `Arc` is gone
-/// (`composite::drop_dead_facts` calls this).
-pub(super) fn drop_dead_means() {
+/// A light picture's softened mask (P1, `LightImageParams::soften_mask`):
+/// the summed-area table of its premultiplied texels (`premultiplied`), from
+/// which a box filter of any size is exact.
+type SoftTable = SummedArea<4>;
+
+/// The softened-mask tables of every live light picture (`PictureMemo`).
+static SOFT_TABLES: PictureMemo<SoftTable> = PictureMemo::new();
+
+/// What one texel gives a softened mask's table (`SoftTable`): its colour
+/// times its alpha, and its alpha, read as `LightImage::bilinear` reads a
+/// masked picture (NaN and negative colours as 0, alpha held to 0..=1, a
+/// NaN alpha as clear).
+fn premultiplied(t: &[f32; 4]) -> [f64; 4] {
+    let clean = |x: f32| if x.is_finite() && x > 0.0 { x as f64 } else { 0.0 };
+    let alpha = if t[3].is_finite() { t[3].clamp(0.0, 1.0) as f64 } else { 0.0 };
+    [clean(t[0]) * alpha, clean(t[1]) * alpha, clean(t[2]) * alpha, alpha]
+}
+
+/// Drops the means and the softened-mask tables of every picture whose last
+/// `Arc` is gone (`composite::drop_dead_facts` calls this).
+pub(super) fn drop_dead_light_facts() {
     MEANS.drop_dead();
+    SOFT_TABLES.drop_dead();
 }
 
 impl PictureMeans {
@@ -232,11 +358,40 @@ pub struct LightImage {
     /// points left (it does: studio.rs follows ibl::softbox). Measured once
     /// rather than assumed, so a picture never comes out mirrored.
     x_sign: f32,
+    /// `LightImageParams::penumbra` as clamp() holds it.
+    penumbra: f32,
+    /// The depth of the light the picture lies in, the scale its Softness
+    /// takes (`with_depth`); None reads half the box's shorter side.
+    depth: Option<f32>,
+    /// The softened mask's table (`SoftTable`), shared by every light that
+    /// softens this picture.
+    soft: Option<Arc<SoftTable>>,
 }
 
 impl LightImage {
+    /// The picture laid in a light whose Softness takes `depth` (tangent
+    /// units; `ShapedLight::depth` for a shaped light): in stretch and fill
+    /// its Penumbra's band is that share of it.
+    pub(super) fn with_depth(self, depth: f32) -> LightImage {
+        LightImage { depth: Some(depth), ..self }
+    }
+
+    /// How far the light's own soft edge widens inward, as a share of its
+    /// depth (P1): Penumbra in stretch and fill, where the picture covers
+    /// the light and its border is the light's edge; 0 in fit, where the
+    /// picture's border is its own and `shade` fades it.
+    pub(super) fn edge_inset(&self) -> f32 {
+        match self.fit {
+            ImageFit::Fit => 0.0,
+            ImageFit::Stretch | ImageFit::Fill => self.penumbra,
+        }
+    }
+
     /// The picture `params` names, or None when the key is empty, not in
     /// `images`, or the picture is empty: the light is then drawn plain.
+    /// The block is read as clamp() holds it (D17). A picture whose alpha
+    /// masks it and whose cut-out edges soften over a band (P1) shares its
+    /// softened mask's table with every light that softens it.
     pub fn new(params: &LightImageParams, images: &ImageSet) -> Option<LightImage> {
         if params.key.is_empty() {
             return None;
@@ -245,9 +400,19 @@ impl LightImage {
         if map.width == 0 || map.height == 0 || map.data.len() != map.width * map.height {
             return None;
         }
+        let params = &params.clamped();
         let mask = params.alpha_as_mask;
         let means = MEANS.get(&map, PictureMeans::walk);
         let mean = if mask { means.visible } else { means.whole };
+        let penumbra = params.penumbra();
+        // Only a mask cuts edges out, and a band of 0 softens nothing.
+        let soft = (mask && params.soften_mask() && penumbra > 0.0).then(|| {
+            SOFT_TABLES.get(&map, |map| {
+                #[cfg(test)]
+                super::probe::count(super::probe::Work::SoftMask);
+                SummedArea::build(map, premultiplied)
+            })
+        });
         Some(LightImage {
             fit: params.fit(),
             mask,
@@ -256,6 +421,9 @@ impl LightImage {
             aspect: map.width as f32 / map.height as f32,
             // A light due north on the horizon: the viewer's right is east, +X.
             x_sign: if light_frame(0.0, 0.0, 0.0).right.x >= 0.0 { 1.0 } else { -1.0 },
+            penumbra,
+            depth: None,
+            soft,
             map,
         })
     }
@@ -269,12 +437,19 @@ impl LightImage {
     /// masked picture is transparent; without the mask it is 1 on the picture.
     /// Past the light's box the picture's edge texels repeat, so a soft edge
     /// carries the edge colour.
+    ///
+    /// P1: in fit the alpha fades out over the band inside the letterboxed
+    /// picture's border (`LightImageParams::penumbra`), along each of its
+    /// axes; in stretch and fill the light's own edge widens instead
+    /// (`edge_inset`). A softened mask is read through its box filter over
+    /// the band. At Penumbra 0 this is the lookup as it was, bit for bit.
     pub fn shade(&self, p: Vec2f, half: Vec2f) -> (Vec3f, f32) {
         // The box as the viewer sees it: u to the right, v down (row 0 on top).
         let mut u = 0.5 + 0.5 * self.x_sign * p.x / half.x.max(1.0e-6);
         let mut v = 0.5 - 0.5 * p.y / half.y.max(1.0e-6);
         // How much wider than the box the picture is.
         let wide = self.aspect / (half.x / half.y.max(1.0e-6)).max(1.0e-6);
+        let mut fade = 1.0;
         match self.fit {
             ImageFit::Stretch => {}
             ImageFit::Fit => {
@@ -286,6 +461,14 @@ impl LightImage {
                 }
                 if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
                     return (Vec3f::default(), 0.0);
+                }
+                if self.penumbra > 0.0 {
+                    // The picture's border is its own: it fades out inside
+                    // it, to 0 at it, smoothly along each axis (the product
+                    // rounds the corners, as a blurred rectangle's).
+                    let laid = self.laid(half, wide);
+                    let band = self.band(half, laid);
+                    fade = smoothstep(0.0, band, laid.x - p.x.abs()) * smoothstep(0.0, band, laid.y - p.y.abs());
                 }
             }
             ImageFit::Fill => {
@@ -303,8 +486,63 @@ impl LightImage {
         let (w, h) = (self.map.width as f32, self.map.height as f32);
         let u = u.max(0.5 / w).min(1.0 - 0.5 / w);
         let v = v.max(0.5 / h).min(1.0 - 0.5 / h);
-        let (rgb, alpha) = self.bilinear(u, v);
-        (rgb * self.gain, alpha)
+        let (rgb, alpha) = match &self.soft {
+            Some(table) => {
+                let laid = self.laid(half, wide);
+                self.softened(table, u, v, self.band(half, laid), laid)
+            }
+            None => self.bilinear(u, v),
+        };
+        (rgb * self.gain, alpha * fade)
+    }
+
+    /// The whole picture's half extents in the tangent plane of a box of
+    /// half extents `half`, as its fit lays it (`wide`: how much wider than
+    /// the box the picture is): the box itself in stretch; in fit the box's
+    /// width or height and the other side by the picture's aspect, inside
+    /// the box; in fill the other way round, past it.
+    fn laid(&self, half: Vec2f, wide: f32) -> Vec2f {
+        let half = vec2f(half.x.max(1.0e-6), half.y.max(1.0e-6));
+        match (self.fit, wide > 1.0) {
+            (ImageFit::Stretch, _) => half,
+            (ImageFit::Fit, true) | (ImageFit::Fill, false) => vec2f(half.x, half.y / wide),
+            (ImageFit::Fit, false) | (ImageFit::Fill, true) => vec2f(half.x * wide, half.y),
+        }
+    }
+
+    /// The band, tangent units, the picture's border fades over and its
+    /// softened mask is box-filtered over: Penumbra x the picture's depth.
+    /// In fit that is its inradius, half the letterboxed picture's shorter
+    /// side (`laid`); in stretch and fill, where the picture covers the light,
+    /// the light's own depth (`with_depth`; half the box's shorter side when
+    /// none was given).
+    fn band(&self, half: Vec2f, laid: Vec2f) -> f32 {
+        match self.fit {
+            ImageFit::Fit => self.penumbra * laid.x.min(laid.y),
+            ImageFit::Stretch | ImageFit::Fill => self.penumbra * self.depth.unwrap_or(half.x.min(half.y)),
+        }
+    }
+
+    /// The softened mask at (u, v), inside the texel centres: the mean of
+    /// the premultiplied picture (`premultiplied`) over the box the band
+    /// spans round it, `band` across each way in the tangent plane of a
+    /// picture laid `laid` (`laid`), its colour divided back out of its
+    /// alpha. A hard cut-out edge so becomes a ramp the band wide, centred on
+    /// it, and the colour fades with the alpha: a transparent texel's colour
+    /// never shows, so no dark fringe. The edge texels are held past the
+    /// picture's border, as the bilinear lookup holds them.
+    fn softened(&self, table: &SoftTable, u: f32, v: f32, band: f32, laid: Vec2f) -> (Vec3f, f32) {
+        let (w, h) = (self.map.width as f64, self.map.height as f64);
+        // Half the band each way, in texels: a texel is 2 laid / w across.
+        let rx = 0.25 * band as f64 / laid.x as f64 * w;
+        let ry = 0.25 * band as f64 / laid.y as f64 * h;
+        let m = table.box_mean(u as f64 * w, v as f64 * h, rx, ry);
+        // Below a billionth the box holds no picture, whatever the sums' rounding says.
+        if !(m[3] > 1.0e-9) {
+            return (Vec3f::default(), 0.0);
+        }
+        let colour = |c: f64| (c / m[3]).max(0.0) as f32;
+        (vec3f(colour(m[0]), colour(m[1]), colour(m[2])), (m[3] as f32).min(1.0))
     }
 
     /// The bilinear lookup at (u, v), inside the texel centres: the colour
@@ -345,7 +583,7 @@ impl LightImage {
 mod tests {
     use super::*;
     use crate::hdri::studio::{light_color, project};
-    use crate::hdri::{dir_from_az_el, Env, LightParams};
+    use crate::hdri::{dir_from_az_el, Env, LightParams, IMAGE_FIT_NAMES};
     use crate::sky::luminance;
 
     fn picture(width: usize, height: usize, texel: impl Fn(usize, usize) -> [f32; 4]) -> EnvMap {
@@ -491,7 +729,7 @@ mod tests {
         // A 4:1 strip on a square box: texel x is x + 1 in the red channel.
         let strip = set_of("strip", picture(4, 1, |x, _| [x as f32 + 1.0, 0.0, 0.0, 1.0]));
         let image = |fit: &str| {
-            LightImage::new(&LightImageParams { key: "strip".to_string(), fit: fit.to_string(), alpha_as_mask: false }, &strip).unwrap()
+            LightImage::new(&LightImageParams { key: "strip".to_string(), fit: fit.to_string(), alpha_as_mask: false, ..LightImageParams::default() }, &strip).unwrap()
         };
         let half = vec2f(0.5, 0.5);
         // Points of the box by what the viewer sees: x to the right, y up, -1..1.
@@ -553,7 +791,7 @@ mod tests {
         // Opaque white beside a transparent texel whose (straight) colour is
         // magenta, as a PNG keeps it: the magenta must not fringe the edge.
         let map = picture(2, 1, |x, _| if x == 0 { [1.0, 1.0, 1.0, 1.0] } else { [1.0, 0.0, 1.0, 0.0] });
-        let params = LightImageParams { key: "edge".to_string(), fit: "stretch".to_string(), alpha_as_mask: true };
+        let params = LightImageParams { key: "edge".to_string(), fit: "stretch".to_string(), alpha_as_mask: true, ..LightImageParams::default() };
         let image = LightImage::new(&params, &set_of("edge", map)).unwrap();
         // Halfway between the two texel centres: half covered, and white.
         let (colour, alpha) = image.shade(vec2f(0.0, 0.0), vec2f(0.5, 0.5));
@@ -642,5 +880,397 @@ mod tests {
         let light = image_light("a.png");
         let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
         assert!(project(&f, box_dir(&light, 0.5, 0.5)).unwrap().length() < 1.0e-6);
+    }
+
+    /// The image block of picture `key` shown `fit`, with a penumbra.
+    fn soft_image(key: &str, fit: &str, penumbra: f32) -> LightImageParams {
+        LightImageParams { key: key.to_string(), fit: fit.to_string(), penumbra: Some(penumbra), ..LightImageParams::default() }
+    }
+
+    /// P1: a picture without a penumbra, or at 0, draws exactly as before
+    /// P1, in every fit, masked or not, and Soften mask edges does nothing
+    /// there (its band is 0): the map, the key and the keyless copy, bit for
+    /// bit. Against the code before P1 by a throwaway probe (the report);
+    /// here against the block without the fields.
+    #[test]
+    fn no_penumbra_draws_the_picture_as_before() {
+        let images = set_of("logo", picture(12, 6, |x, y| [0.2 + 0.1 * x as f32, 0.5, 0.1 * y as f32, if (x + 2 * y) % 5 == 0 { 0.0 } else { 1.0 }]));
+        let fingerprint = |image: LightImageParams| {
+            let light = LightParams { key: true, softness: 0.3, image: Some(image), ..image_light("logo") };
+            let env = Env::new_with(&dark_studio(vec![light]), &images);
+            let key = env.sun().expect("a key");
+            (env.bake(48).data, env.bake_without_key(48).expect("a keyless copy").data, [key.radiance.x, key.radiance.y, key.radiance.z, key.facing, key.cos_cover])
+        };
+        for &fit in IMAGE_FIT_NAMES {
+            for alpha_as_mask in [false, true] {
+                let bare = LightImageParams { key: "logo".to_string(), fit: fit.to_string(), alpha_as_mask, ..LightImageParams::default() };
+                let want = fingerprint(bare.clone());
+                for (penumbra, soften_mask) in [(Some(0.0), None), (None, Some(true)), (Some(0.0), Some(true)), (Some(0.0), Some(false)), (Some(-1.0), Some(true))] {
+                    let got = fingerprint(LightImageParams { penumbra, soften_mask, ..bare.clone() });
+                    assert!(got == want, "{fit}, mask {alpha_as_mask}, penumbra {penumbra:?}, soften {soften_mask:?}: the drawing moved");
+                }
+            }
+        }
+    }
+
+    /// P1 (the owner's "5G" logo): in fit, Penumbra fades the picture out
+    /// over a band inside its own border, smoothly and to 0 at the border,
+    /// Penumbra x its inradius (half its shorter side) wide along both of
+    /// its axes. Penumbra 1 fades right to its centre, and only the border
+    /// fades: the colour is the sharp picture's.
+    #[test]
+    fn penumbra_fades_a_fitted_picture_inside_its_border() {
+        // A 4:1 strip in a square box: the box's width and a quarter of its
+        // height, so its border runs at y = 0.125 and x = 0.5.
+        let strip = set_of("strip", picture(8, 2, |x, _| [1.0 + 0.25 * x as f32, 0.5, 0.25, 1.0]));
+        let image = |penumbra: f32| LightImage::new(&soft_image("strip", "fit", penumbra), &strip).unwrap();
+        let half = vec2f(0.5, 0.5);
+        let (across, along) = (0.125f32, 0.5f32);
+        let sharp = image(0.0);
+        for penumbra in [0.3f32, 1.0] {
+            let soft = image(penumbra);
+            let band = penumbra * across;
+            let mut last: Option<f32> = None;
+            // Up the strip's middle from its centre, out past its border.
+            for i in 0..=500 {
+                let y = 0.2 * i as f32 / 500.0;
+                let p = vec2f(0.0, y);
+                let (colour, alpha) = soft.shade(p, half);
+                let want = smoothstep(0.0, band, across - y);
+                assert!((alpha - want).abs() < 1.0e-5, "penumbra {penumbra} at y {y}: alpha {alpha}, the band says {want}");
+                if let Some(last) = last {
+                    assert!(alpha <= last + 1.0e-6, "penumbra {penumbra}: the fade rises outward at y {y}: {last} then {alpha}");
+                    assert!(last - alpha < 0.02, "penumbra {penumbra}: a step at y {y}: {last} then {alpha}");
+                }
+                last = Some(alpha);
+                if y >= across {
+                    assert_eq!(alpha, 0.0, "penumbra {penumbra}: at and past the border nothing, y {y}");
+                } else {
+                    assert!((colour - sharp.shade(p, half).0).length() < 1.0e-6, "penumbra {penumbra}: only the border fades, y {y}");
+                }
+            }
+            // Along its length the band is as wide: Penumbra x the shorter side.
+            for i in 0..=200 {
+                let x = along * i as f32 / 200.0;
+                let alpha = soft.shade(vec2f(x, 0.0), half).1;
+                let want = smoothstep(0.0, band, along - x);
+                assert!((alpha - want).abs() < 1.0e-5, "penumbra {penumbra} at x {x}: alpha {alpha}, the band says {want}");
+            }
+        }
+        // Penumbra 1 fades right to the centre: full there, below full anywhere else across.
+        let full = image(1.0);
+        assert_eq!(full.shade(vec2f(0.0, 0.0), half).1, 1.0);
+        assert!(full.shade(vec2f(0.0, 0.002), half).1 < 1.0);
+        // The other letterbox: a 1:4 picture, its sides inside the box.
+        let post = set_of("post", picture(2, 8, |_, y| [1.0, 0.1 * y as f32, 0.5, 1.0]));
+        let soft = LightImage::new(&soft_image("post", "fit", 0.5), &post).unwrap();
+        for i in 0..=200 {
+            let x = 0.2 * i as f32 / 200.0;
+            let alpha = soft.shade(vec2f(x, 0.0), half).1;
+            let want = smoothstep(0.0, 0.5 * 0.125, 0.125 - x);
+            assert!((alpha - want).abs() < 1.0e-5, "a post at x {x}: alpha {alpha}, the band says {want}");
+        }
+    }
+
+    /// P1: the map draws the fitted picture's fade: its light is the sharp
+    /// picture's times the fade (the light's own Softness included, at the
+    /// sides where the picture meets the box), and nothing past the picture
+    /// is lit.
+    #[test]
+    fn a_fitted_pictures_penumbra_is_what_the_map_draws() {
+        let strip = set_of("strip", picture(8, 2, |x, _| [0.2 + 0.1 * x as f32, 1.0, 0.5, 1.0]));
+        let light = |penumbra: f32| LightParams { softness: 0.3, image: Some(soft_image("strip", "fit", penumbra)), ..image_light("strip") };
+        let sharp = Env::new_with(&dark_studio(vec![light(0.0)]), &strip);
+        let soft = Env::new_with(&dark_studio(vec![light(0.4)]), &strip);
+        let l = light(0.4);
+        let f = light_frame(l.azimuth_deg, l.elevation_deg, l.roll_deg);
+        // The 40 degree square box; the strip a quarter of its height.
+        let half = (0.5 * l.width_deg).to_radians().tan();
+        let (across, along) = (half / 4.0, half);
+        let band = 0.4 * across;
+        let fade = |p: Vec2f| smoothstep(0.0, band, across - p.y.abs()) * smoothstep(0.0, band, along - p.x.abs());
+        let mut lit = 0;
+        for j in 0..=120 {
+            for i in 0..=120 {
+                let d = box_dir(&l, -0.1 + 1.2 * i as f32 / 120.0, 0.3 + 0.4 * j as f32 / 120.0);
+                let p = project(&f, d).unwrap();
+                let (a, b) = (sharp.radiance(d), soft.radiance(d));
+                // Past the border (by more than f32 places a direction on it).
+                if p.x.abs() > along * (1.0 + 1.0e-5) || p.y.abs() > across * (1.0 + 1.0e-5) {
+                    assert_eq!(b, Vec3f::default(), "past the picture nothing is lit, at {p:?}");
+                    continue;
+                }
+                assert!((b - a * fade(p)).length() <= 1.0e-5 * a.length().max(1.0), "at {p:?}: {b:?}, the sharp light {a:?} x {}", fade(p));
+                lit += (b.max_elem() > 0.0) as usize;
+            }
+        }
+        assert!(lit > 2000, "{lit} lit samples");
+    }
+
+    /// P1: in stretch and fill the picture covers the light, so its border
+    /// is the light's own edge, where Softness already ramps. Penumbra widens
+    /// that one ramp inward by Penumbra x the light's depth (half a rect's
+    /// shorter side), its outer end staying where Softness puts it: the
+    /// bands add into one smoothstep from (Softness / 2 + Penumbra) x depth
+    /// inside to Softness / 2 x depth outside, not two falloffs multiplied.
+    /// At Penumbra 0 the edge is Softness's alone; at Softness 0 it fades
+    /// inside the border only.
+    #[test]
+    fn in_stretch_and_fill_penumbra_widens_the_lights_own_edge() {
+        let flat = set_of("flat", picture(6, 4, |_, _| [1.0, 1.0, 1.0, 1.0]));
+        let (hx, hy) = (25f32.to_radians().tan(), 15f32.to_radians().tan());
+        for fit in ["stretch", "fill"] {
+            for (softness, penumbra) in [(0.0f32, 0.4f32), (0.3, 0.0), (0.3, 0.4), (0.6, 1.0)] {
+                let light = LightParams {
+                    width_deg: 50.0,
+                    height_deg: 30.0,
+                    softness,
+                    rgb: Some([1.0; 3]),
+                    intensity_ev: 0.0,
+                    image: Some(soft_image("flat", fit, penumbra)),
+                    ..image_light("flat")
+                };
+                let env = Env::new_with(&dark_studio(vec![light.clone()]), &flat);
+                let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
+                let a = 0.5 * (softness * hy).max(1.0e-4);
+                let b = penumbra * hy;
+                // Across the light's middle, from its centre out past its reach.
+                for i in 0..=400 {
+                    let x = 1.3 * (hx + a) * i as f32 / 400.0;
+                    let d = (f.center + f.right * x).normalize();
+                    // The rect's signed distance along its middle: the side's, or the deepest point's.
+                    let distance = (x - hx).max(-hy);
+                    let want = 1.0 - smoothstep(-(a + b), a, distance);
+                    let got = luminance(env.radiance(d));
+                    assert!((got - want).abs() < 2.0e-4, "{fit}, softness {softness}, penumbra {penumbra}, at x {x}: {got}, one ramp says {want}");
+                }
+            }
+        }
+    }
+
+    /// P1: every shape's own edge widens the same way in stretch: a stroke's
+    /// across its half width (analytically), and a disc's, a ring's, a
+    /// polygon's and a scrim's by the same rule: at Penumbra 0 the light is
+    /// the plain one, and above it never brighter, dimmer inside its edge
+    /// and dark where the plain light is (its reach stays).
+    #[test]
+    fn penumbra_widens_every_shapes_own_edge_in_stretch() {
+        let flat = set_of("flat", picture(4, 4, |_, _| [1.0, 1.0, 1.0, 1.0]));
+        let pictured = |light: &LightParams, penumbra: f32| LightParams { image: Some(soft_image("flat", "stretch", penumbra)), ..light.clone() };
+        // A stroke along the horizon, 6 degrees wide: across it at azimuth
+        // 90 the distance from its centre line is the elevation.
+        let stroke = LightParams {
+            shape: "stroke".to_string(),
+            softness: 0.4,
+            rgb: Some([1.0; 3]),
+            intensity_ev: 0.0,
+            stroke: Some(crate::hdri::StrokeParams { points: vec![[60.0, 0.0], [120.0, 0.0]], width_deg: 6.0, ..Default::default() }),
+            ..image_light("flat")
+        };
+        let hw = 3f32.to_radians();
+        let edge = 0.5 * 0.4 * hw;
+        for penumbra in [0.0f32, 0.5, 1.0] {
+            let env = Env::new_with(&dark_studio(vec![pictured(&stroke, penumbra)]), &flat);
+            for i in 0..=200 {
+                let elevation = 4.0 * i as f32 / 200.0;
+                let got = luminance(env.radiance(dir_from_az_el(90.0, elevation)));
+                let want = 1.0 - smoothstep(hw - edge - penumbra * hw, hw + edge, elevation.to_radians());
+                assert!((got - want).abs() < 2.0e-3, "a stroke at penumbra {penumbra}, {elevation} degrees off its line: {got}, one ramp says {want}");
+            }
+        }
+        let shapes = [
+            LightParams { shape: "disc".to_string(), ..image_light("flat") },
+            LightParams { shape: "ring".to_string(), inner: 0.4, ..image_light("flat") },
+            LightParams { shape: "polygon".to_string(), ..image_light("flat") },
+            LightParams { shape: "scrim".to_string(), ..image_light("flat") },
+        ];
+        for shape in shapes {
+            let shape = LightParams { softness: 0.3, rgb: Some([1.0; 3]), intensity_ev: 0.0, ..shape };
+            let name = shape.shape.clone();
+            let draw = |penumbra: f32| {
+                let env = Env::new_with(&dark_studio(vec![pictured(&shape, penumbra)]), &flat);
+                (0..=60).flat_map(|j| (0..=60).map(move |i| (i, j))).map(|(i, j)| luminance(env.radiance(box_dir(&shape, -0.2 + 1.4 * i as f32 / 60.0, -0.2 + 1.4 * j as f32 / 60.0)))).collect::<Vec<f32>>()
+            };
+            let plain = {
+                let env = Env::new(&dark_studio(vec![shape.clone()]));
+                (0..=60).flat_map(|j| (0..=60).map(move |i| (i, j))).map(|(i, j)| luminance(env.radiance(box_dir(&shape, -0.2 + 1.4 * i as f32 / 60.0, -0.2 + 1.4 * j as f32 / 60.0)))).collect::<Vec<f32>>()
+            };
+            let zero = draw(0.0);
+            for (k, (z, p)) in zero.iter().zip(&plain).enumerate() {
+                assert!((z - p).abs() < 1.0e-5, "{name} at penumbra 0, sample {k}: {z} vs the plain light's {p}");
+            }
+            let soft = draw(0.6);
+            let mut dimmer = 0;
+            for (k, (s, p)) in soft.iter().zip(&plain).enumerate() {
+                assert!(*s <= p + 1.0e-5, "{name}, sample {k}: {s} is brighter than the plain light's {p}");
+                if *p == 0.0 {
+                    assert_eq!(*s, 0.0, "{name}, sample {k}: lit past the plain light's reach");
+                }
+                dimmer += (*s < p - 1.0e-3) as usize;
+            }
+            assert!(dimmer > 50, "{name}: the edge widened at only {dimmer} samples");
+        }
+    }
+
+    /// The mean of the premultiplied picture (colour x alpha, and alpha)
+    /// over the box centred on (x, y) with half-widths (rx, ry), in texels
+    /// (texel (i, j) covers i..i+1 by j..j+1), each at least half a texel,
+    /// the edge texels held past the border: by brute force, as the gobo's
+    /// test computes its mask's.
+    fn premultiplied_box_mean(img: &EnvMap, x: f64, y: f64, rx: f64, ry: f64) -> [f64; 4] {
+        let (w, h) = (img.width, img.height);
+        let (rx, ry) = (rx.max(0.5), ry.max(0.5));
+        let cover = |lo: f64, hi: f64, i: usize, n: usize| {
+            let start = if i == 0 { f64::NEG_INFINITY } else { i as f64 };
+            let end = if i + 1 == n { f64::INFINITY } else { (i + 1) as f64 };
+            (hi.min(end) - lo.max(start)).max(0.0)
+        };
+        let mut sum = [0.0f64; 4];
+        for j in 0..h {
+            let down = cover(y - ry, y + ry, j, h);
+            for i in 0..w {
+                let k = cover(x - rx, x + rx, i, w) * down;
+                let t = img.data[j * w + i];
+                let a = t[3].clamp(0.0, 1.0) as f64;
+                for c in 0..3 {
+                    sum[c] += t[c] as f64 * a * k;
+                }
+                sum[3] += a * k;
+            }
+        }
+        sum.map(|s| s / (4.0 * rx * ry))
+    }
+
+    /// P1: Soften mask edges is an exact box filter of the premultiplied
+    /// picture over the band (Penumbra x the light's depth, here half the
+    /// box's shorter side, wide): its alpha is the box's mean alpha, its
+    /// colour the box's mean premultiplied colour over that, in every fit.
+    #[test]
+    fn softened_mask_edges_are_a_box_filter_of_the_premultiplied_picture() {
+        let hash = |x: usize, y: usize| ((x * 7919 + y * 104729) % 1009) as f32 / 1008.0;
+        let img = picture(48, 32, |x, y| [1.5 * hash(x, y), hash(y, x), 0.3 + 0.5 * hash(x + 3, y), if hash(y + 5, x) < 0.3 { 0.0 } else { 1.0 }]);
+        let images = set_of("noise", img.clone());
+        let half = vec2f(0.6, 0.3);
+        for &fit in IMAGE_FIT_NAMES {
+            let params = LightImageParams { alpha_as_mask: true, soften_mask: Some(true), ..soft_image("noise", fit, 0.3) };
+            let image = LightImage::new(&params, &images).unwrap();
+            // The picture's tangent-plane half extents, and the band.
+            let wide = 1.5 / (half.x / half.y);
+            let pic = match fit {
+                "fit" => if wide > 1.0 { vec2f(half.x, half.y / wide) } else { vec2f(half.x * wide, half.y) },
+                "fill" => if wide > 1.0 { vec2f(half.x * wide, half.y) } else { vec2f(half.x, half.y / wide) },
+                _ => half,
+            };
+            let band = 0.3 * if fit == "fit" { pic.x.min(pic.y) } else { half.x.min(half.y) };
+            let (rx, ry) = (band as f64 * 48.0 / (4.0 * pic.x as f64), band as f64 * 32.0 / (4.0 * pic.y as f64));
+            for j in 0..=24 {
+                for i in 0..=30 {
+                    let p = vec2f(-0.66 + 1.32 * i as f32 / 30.0, -0.44 + 0.88 * j as f32 / 24.0);
+                    let (colour, alpha) = image.shade(p, half);
+                    // Where shade reads the picture: u to the viewer's right, held to the texel centres.
+                    let u = (0.5 + 0.5 * image.x_sign * p.x / pic.x).max(0.5 / 48.0).min(1.0 - 0.5 / 48.0);
+                    let v = (0.5 - 0.5 * p.y / pic.y).max(0.5 / 32.0).min(1.0 - 0.5 / 32.0);
+                    if fit == "fit" && (p.x.abs() > pic.x || p.y.abs() > pic.y) {
+                        assert_eq!(alpha, 0.0, "{fit} at {p:?}: past the picture");
+                        continue;
+                    }
+                    let m = premultiplied_box_mean(&img, u as f64 * 48.0, v as f64 * 32.0, rx, ry);
+                    let fade = if fit == "fit" { smoothstep(0.0, band, pic.x - p.x.abs()) * smoothstep(0.0, band, pic.y - p.y.abs()) } else { 1.0 };
+                    let want_alpha = m[3].min(1.0) as f32 * fade;
+                    assert!((alpha - want_alpha).abs() < 1.0e-5, "{fit} at {p:?}: alpha {alpha}, the box mean {want_alpha}");
+                    if m[3] > 1.0e-6 {
+                        let want = vec3f((m[0] / m[3]) as f32, (m[1] / m[3]) as f32, (m[2] / m[3]) as f32) * image.gain;
+                        assert!((colour - want).length() < 1.0e-4 * want.length().max(1.0), "{fit} at {p:?}: colour {colour:?}, the box mean {want:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// P1: a hard cut-out edge softened is a smooth cut-out of the band's
+    /// width (a box filter's ramp, centred on the edge), and the colour fades
+    /// with its alpha: no dark fringe where the alpha was 0 and a PNG keeps
+    /// black, the colour just inside the edge is the picture's.
+    #[test]
+    fn a_softened_hard_edge_ramps_over_the_band_without_a_dark_fringe() {
+        // Left half an opaque orange, right half clear over black.
+        let edge = set_of("edge", picture(64, 8, |x, _| if x < 32 { [1.0, 0.5, 0.25, 1.0] } else { [0.0, 0.0, 0.0, 0.0] }));
+        let params = |soften: bool| LightImageParams { alpha_as_mask: true, soften_mask: Some(soften), ..soft_image("edge", "stretch", 0.4) };
+        let (soft, sharp) = (LightImage::new(&params(true), &edge).unwrap(), LightImage::new(&params(false), &edge).unwrap());
+        let half = vec2f(0.5, 0.25);
+        // The band: Penumbra x half the shorter side, 0.1 (6.4 texels) across.
+        let band = 0.4 * 0.25;
+        let orange = vec3f(1.0, 0.5, 0.25) * soft.gain;
+        let mut softer = 0;
+        for i in 0..=400 {
+            // To the viewer's right of the edge, through it.
+            let x = -0.15 + 0.3 * i as f32 / 400.0;
+            let p = vec2f(soft.x_sign * x, 0.1);
+            let (colour, alpha) = soft.shade(p, half);
+            let want = (0.5 - x / band).max(0.0).min(1.0);
+            assert!((alpha - want).abs() < 1.0e-4, "{x} from the edge: alpha {alpha}, a ramp of the band's width says {want}");
+            if alpha > 1.0e-6 {
+                assert!((colour - orange).length() < 1.0e-4, "{x} from the edge: {colour:?}, a dark fringe (the picture is {orange:?})");
+            }
+            softer += (alpha - sharp.shade(p, half).1).abs().gt(&0.05) as usize;
+        }
+        assert!(softer > 60, "the softened edge is the sharp one at all but {softer} samples");
+    }
+
+    /// P1, D15: a picture's softened mask is one summed-area table, built for
+    /// the first light that softens it and shared by every other light and
+    /// later `Env` that shows it (`SummedArea`, as image gobos share theirs),
+    /// 32 bytes a table entry (134.3 MB at 2048 x 2048), and freed with the
+    /// picture. With Soften mask edges off, without Alpha cuts out, or at
+    /// Penumbra 0 no table is built.
+    #[test]
+    fn a_softened_pictures_table_is_built_once_shared_and_freed() {
+        use crate::hdri::probe::{counted, Work};
+        let texels = |x: usize, y: usize| [0.5, 0.25 * (x % 4) as f32, 0.1 * (y % 3) as f32, if (x / 3 + y / 2) % 2 == 0 { 1.0 } else { 0.0 }];
+        let images = set_of("logo", picture(32, 16, texels));
+        let block = |penumbra: f32| LightImageParams { alpha_as_mask: true, soften_mask: Some(true), ..soft_image("logo", "fit", penumbra) };
+        let lit = |azimuth_deg: f32, penumbra: f32| LightParams { azimuth_deg, image: Some(block(penumbra)), ..image_light("logo") };
+        let before = counted(Work::SoftMask);
+        let env = Env::new_with(&dark_studio(vec![lit(90.0, 0.3), lit(200.0, 0.8)]), &images);
+        assert_eq!(counted(Work::SoftMask), before + 1, "two lights share one table");
+        let dragged = Env::new_with(&dark_studio(vec![lit(91.0, 0.3), lit(200.0, 0.8)]), &images);
+        assert_eq!(counted(Work::SoftMask), before + 1, "a held drag's next Env reads the same table");
+        let table = |params: &LightImageParams| LightImage::new(params, &images).expect("the picture").soft;
+        let (a, b) = (table(&block(0.3)).expect("a table"), table(&block(1.0)).expect("a table"));
+        assert!(Arc::ptr_eq(&a, &b), "one table, whatever the band");
+        assert_eq!(a.bytes(), 33 * 17 * 32, "four f64 sums an entry");
+        // Off, without the mask, or with no band: none built, none kept.
+        for off in [
+            LightImageParams { soften_mask: Some(false), ..block(0.5) },
+            LightImageParams { soften_mask: None, ..block(0.5) },
+            LightImageParams { alpha_as_mask: false, ..block(0.5) },
+            block(0.0),
+            LightImageParams { penumbra: None, ..block(0.5) },
+        ] {
+            assert!(table(&off).is_none(), "{off:?} keeps a table");
+        }
+        let fresh = set_of("logo", picture(32, 16, texels));
+        let off = LightParams { image: Some(LightImageParams { soften_mask: Some(false), ..block(0.5) }), ..image_light("logo") };
+        let _ = Env::new_with(&dark_studio(vec![off]), &fresh);
+        assert_eq!(counted(Work::SoftMask), before + 1, "a light that does not soften built a table");
+        // Another picture with the same texels has its own; a table goes with its picture.
+        let twin = LightImage::new(&block(0.5), &fresh).unwrap().soft.expect("a table");
+        assert!(!Arc::ptr_eq(&a, &twin));
+        assert_eq!(counted(Work::SoftMask), before + 2);
+        let kept = Arc::downgrade(&a);
+        drop((a, b, env, dragged, images));
+        crate::hdri::composite::drop_dead_facts();
+        assert!(kept.upgrade().is_none(), "a freed picture's table is freed with it");
+    }
+
+    /// D17: a picture reads its block as clamp() holds it: a Penumbra past 1
+    /// draws as 1, a NaN one as 0.
+    #[test]
+    fn a_pictures_penumbra_reads_as_clamp_holds_it() {
+        let strip = set_of("strip", picture(8, 2, |_, _| [1.0, 1.0, 1.0, 1.0]));
+        let shade = |penumbra: f32| LightImage::new(&soft_image("strip", "fit", penumbra), &strip).unwrap().shade(vec2f(0.0, 0.05), vec2f(0.5, 0.5));
+        assert_eq!(shade(7.0), shade(1.0));
+        assert_eq!(shade(f32::NAN), shade(0.0));
+        assert!(shade(1.0).1 < shade(0.0).1, "Penumbra 1 fades the strip");
     }
 }

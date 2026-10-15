@@ -677,7 +677,7 @@ fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegr
             } else {
                 let m = match &key.shaped {
                     Some(shaped) => shaped.sample(dir()).emit,
-                    None => key.mask(vec2f(x, y)),
+                    None => key.mask(vec2f(x, y), key.inset),
                 };
                 (m, Vec3f::all(1.0))
             };
@@ -876,6 +876,11 @@ struct PreparedLight {
     ring_half: f32,
     /// Width of the soft edge, in tangent units.
     band: f32,
+    /// How far a picture's Penumbra widens the soft edge inward, tangent
+    /// units (P1, stretch and fill; `LightImage::edge_inset` x the depth):
+    /// the edge ramps from half the band plus this inside to half the band
+    /// outside. 0 without a picture; a shaped light keeps its own.
+    inset: f32,
     /// Outside this box (the half extents plus the edge) the light is exactly zero.
     reach: Vec2f,
     /// Exponent scale of the Gaussian centre falloff (HOTSPOT_FALLOFF x hotspot).
@@ -922,6 +927,15 @@ impl PreparedLight {
             LightShape::Rect | LightShape::Disc | LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => short,
         };
         let band = (l.softness * inradius).max(MIN_EDGE);
+        let shaped = ShapedLight::new(l);
+        // P1: a picture that covers the light (stretch, fill) has the light's
+        // edge for its border, and its Penumbra widens the light's soft edge
+        // inward by that share of the depth the Softness takes (a shaped
+        // light's own, `ShapedLight::depth`); its softened mask spans as
+        // much. A picture in fit fades inside its own border (`LightImage`).
+        let depth = shaped.as_ref().map_or(inradius, ShapedLight::depth);
+        let image = l.image.as_ref().and_then(|image| LightImage::new(image, images)).map(|image| image.with_depth(depth));
+        let inset = image.as_ref().map_or(0.0, LightImage::edge_inset);
         PreparedLight {
             frame,
             shape,
@@ -931,12 +945,13 @@ impl PreparedLight {
             ring_mid: 0.5 * (1.0 + inner),
             ring_half,
             band,
+            inset: inset * inradius,
             reach: vec2f(half.x + band, half.y + band),
             hotspot: HOTSPOT_FALLOFF * l.hotspot,
             key_cos: (0.5 * l.width_deg.max(l.height_deg)).to_radians().cos(),
             color: held_light_color(l),
-            shaped: ShapedLight::new(l),
-            image: l.image.as_ref().and_then(|image| LightImage::new(image, images)),
+            shaped: shaped.map(|shaped| shaped.with_inset(inset)),
+            image,
         }
     }
 
@@ -971,12 +986,13 @@ impl PreparedLight {
     /// glass of a window filled with sky. A plain light drawn in white over
     /// black is its own coverage (shape, soft edge and hotspot). A shaped
     /// light is asked directly: a stroke with a ramp carries its own colour,
-    /// so drawing it in white would not give its coverage.
+    /// so drawing it in white would not give its coverage. Its bare shape:
+    /// a picture's Penumbra is the picture's, as its alpha is.
     fn cover(&self, dir: Vec3f) -> f32 {
         match &self.shaped {
             Some(shaped) if shaped.cull().contains(dir) => shaped.sample(dir).emit,
             Some(_) => 0.0,
-            None => self.over(dir, Vec3f::default(), Vec3f::all(1.0)).x,
+            None => self.over_with(dir, Vec3f::default(), Vec3f::all(1.0), 0.0).x,
         }
     }
 
@@ -998,13 +1014,20 @@ impl PreparedLight {
         }
     }
 
-    /// This light drawn over `acc` in the colour `color`.
+    /// This light drawn over `acc` in the colour `color`, its edge widened
+    /// by its picture's Penumbra (`inset`; a shaped light's is its own).
     fn over(&self, dir: Vec3f, acc: Vec3f, color: Vec3f) -> Vec3f {
+        self.over_with(dir, acc, color, self.inset)
+    }
+
+    /// `over` with the soft edge widened inward by `inset` (an A3 light's;
+    /// a shaped light draws with its own).
+    fn over_with(&self, dir: Vec3f, acc: Vec3f, color: Vec3f, inset: f32) -> Vec3f {
         if let Some(shaped) = &self.shaped {
             return shaped.compose(dir, acc, color);
         }
         let Some(p) = project(&self.frame, dir) else { return acc };
-        let m = self.mask(p);
+        let m = self.mask(p, inset);
         if !(m > 0.0) {
             return acc;
         }
@@ -1034,8 +1057,11 @@ impl PreparedLight {
         }
     }
 
-    /// Coverage 0..=1 at tangent-plane point `p`: the soft edge times the hotspot falloff.
-    fn mask(&self, p: Vec2f) -> f32 {
+    /// Coverage 0..=1 at tangent-plane point `p`: the soft edge times the
+    /// hotspot falloff. `inset` widens the edge inward (P1, a picture's
+    /// Penumbra): one smoothstep from half the band plus `inset` inside the
+    /// outline to half the band outside it, so the light's reach stays.
+    fn mask(&self, p: Vec2f, inset: f32) -> f32 {
         // Cheap box cull first. Most of the sphere is far from any light.
         if p.x.abs() > self.reach.x || p.y.abs() > self.reach.y {
             return 0.0;
@@ -1063,7 +1089,7 @@ impl PreparedLight {
             // be built (a stroke with fewer than two points): it covers nothing.
             LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => return 0.0,
         };
-        let edge = 1.0 - smoothstep(-0.5 * self.band, 0.5 * self.band, distance);
+        let edge = 1.0 - smoothstep(-0.5 * self.band - inset, 0.5 * self.band, distance);
         if edge <= 0.0 {
             return 0.0;
         }

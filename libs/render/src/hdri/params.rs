@@ -77,15 +77,16 @@ fn hold(value: f32, (lo, hi): (f32, f32), fallback: f32) -> f32 {
 /// `clamped()` on every settings block that has a range: the sky's sun,
 /// atmosphere, sun disc, deck, night, volume and weather, the studio's
 /// backdrop, a base image, and each light with its polygon, stroke, scrim,
-/// gobo, aim and wear. A block's ranges, its defaults and its rule for NaN
-/// are written once, in its `clamp_fields` (D17): no layer holds a field on
-/// its own. Each layer's reader takes its block through `clamped()`: the
-/// atmosphere, the sun's direction, the deck, the night, the volume, the
-/// weather, the base image, the studio's backdrop, and a light once where
-/// its drawing is built (`Studio`'s prepared light, `LightFx::new`,
-/// `ShapedLight::new`), its colour and its CRI readout (`light_color`,
-/// `light_white`, `cri::light_spectrum`), its gobo, aim and wear
-/// (`Gobo::new`, `Aim::new`, `Imperfections::new`). What they hand a held
+/// picture, gobo, aim and wear. A block's ranges, its defaults and its rule
+/// for NaN are written once, in its `clamp_fields` (D17): no layer holds a
+/// field on its own. Each layer's reader takes its block through
+/// `clamped()`: the atmosphere, the sun's direction, the deck, the night,
+/// the volume, the weather, the base image, the studio's backdrop, and a
+/// light once where its drawing is built (`Studio`'s prepared light,
+/// `LightFx::new`, `ShapedLight::new`), its colour and its CRI readout
+/// (`light_color`, `light_white`, `cri::light_spectrum`), its picture, gobo,
+/// aim and wear (`LightImage::new`, `Gobo::new`, `Aim::new`,
+/// `Imperfections::new`). What they hand a held
 /// light or number to reads it as it is (`studio::held_light_color`, the
 /// shape helpers `half_extents`, `unit_to_dir`, `dir_to_unit`, `stroke_box`,
 /// `light_fx::face_axes`, which the panel calls with its held lights).
@@ -123,6 +124,7 @@ clamped_copy!(
     PolygonParams,
     StrokeParams,
     ScrimParams,
+    LightImageParams,
     GoboParams,
     AimParams,
     ImperfectionParams,
@@ -535,11 +537,47 @@ pub struct LightImageParams {
     pub fit: String,
     /// The picture's alpha cuts the light out; false ignores alpha.
     pub alpha_as_mask: bool,
+    /// `IMAGE_PENUMBRA_RANGE`, 0..=1 (P1; None = 0, NaN is held to 0): the
+    /// picture fades out over a band inside its own border, smoothly, to 0
+    /// at the border. The band is `penumbra` x the picture's depth in the
+    /// light's tangent plane, the scale the light's Softness takes, so 1
+    /// fades right to the picture's centre. Only the border fades; the
+    /// picture's content stays sharp. At 0 the light draws exactly as
+    /// without it.
+    /// - "fit": the border is the letterboxed picture's own, where the light
+    ///   is dark past it; the band is penumbra x its inradius (half its
+    ///   shorter side), the same along both of its axes (their product
+    ///   rounds the corners). The fade multiplies the light, as the
+    ///   picture's alpha does, so nothing past the picture is lit. Along the
+    ///   two sides where the picture fills the box, the light's own Softness
+    ///   ramps there too and the two multiply; Softness's outer half, past
+    ///   the picture, was already cut there at Penumbra 0.
+    /// - "stretch" and "fill": the picture covers the whole light, so its
+    ///   border is the light's own edge, where Softness already ramps.
+    ///   There Penumbra widens that one ramp inward by penumbra x the
+    ///   light's depth (half a rect's or a disc's shorter side, a ring's
+    ///   half thickness, a polygon's inside depth, a stroke's half width),
+    ///   its outer end staying where Softness puts it: the two bands add
+    ///   into one smoothstep, from (Softness / 2 + Penumbra) x the depth
+    ///   inside the outline to Softness / 2 x it outside, not two falloffs
+    ///   multiplied, so the light's reach is unchanged and at Penumbra 0
+    ///   the edge is Softness's alone.
+    pub penumbra: Option<f32>,
+    /// With `alpha_as_mask` (P1; None = false): the picture's own cut-out
+    /// edges soften over the same band too, through an exact box filter of
+    /// the premultiplied picture (its colour times its alpha, and its
+    /// alpha), so the colour fades with its alpha and no dark fringe shows
+    /// where the alpha was 0. The box filter softens detail finer than the
+    /// band with the edges. Nothing without `alpha_as_mask` or at Penumbra 0.
+    pub soften_mask: Option<bool>,
 }
+
+/// What clamp() keeps of `LightImageParams::penumbra`; NaN is 0.
+pub const IMAGE_PENUMBRA_RANGE: (f32, f32) = (0.0, 1.0);
 
 impl Default for LightImageParams {
     fn default() -> Self {
-        LightImageParams { key: String::new(), fit: "stretch".to_string(), alpha_as_mask: false }
+        LightImageParams { key: String::new(), fit: "stretch".to_string(), alpha_as_mask: false, penumbra: None, soften_mask: None }
     }
 }
 
@@ -572,12 +610,25 @@ impl LightImageParams {
         }
     }
 
+    /// `penumbra`, None read as 0. As it is: a block clamp() holds is in range.
+    pub fn penumbra(&self) -> f32 {
+        self.penumbra.unwrap_or(0.0)
+    }
+
+    /// `soften_mask`, None read as false.
+    pub fn soften_mask(&self) -> bool {
+        self.soften_mask.unwrap_or(false)
+    }
+
     fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
         if self.key.chars().count() > IMAGE_KEY_LIMIT {
             self.key = self.key.chars().take(IMAGE_KEY_LIMIT).collect();
             f.push(prefix, "key");
         }
         f.choice(prefix, "fit", &mut self.fit, IMAGE_FIT_NAMES);
+        if let Some(penumbra) = self.penumbra.as_mut() {
+            f.range(prefix, "penumbra", penumbra, IMAGE_PENUMBRA_RANGE.0, IMAGE_PENUMBRA_RANGE.1, 0.0);
+        }
     }
 }
 
@@ -2648,7 +2699,7 @@ mod source_param_tests {
     fn image_blocks_clamp_and_round_trip() {
         let mut p = HdriParams::default();
         p.lights.push(LightParams {
-            image: Some(LightImageParams { key: "C:\\pics\\window.png".to_string(), fit: " FILL".to_string(), alpha_as_mask: true }),
+            image: Some(LightImageParams { key: "C:\\pics\\window.png".to_string(), fit: " FILL".to_string(), alpha_as_mask: true, ..LightImageParams::default() }),
             ..LightParams::default()
         });
         assert_eq!(p.lights[0].image.as_ref().unwrap().fit(), ImageFit::Fill, "the accessor reads a loose spelling");
@@ -2665,6 +2716,46 @@ mod source_param_tests {
         assert_eq!(ImageFit::Fit.as_str(), IMAGE_FIT_NAMES[1]);
         let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
         assert!(!plain.to_json().contains("image"));
+    }
+
+    /// P1: Penumbra and Soften mask edges are Options, so a preset saved
+    /// before them loads (with neither), and clamp() holds Penumbra to
+    /// `IMAGE_PENUMBRA_RANGE` (NaN to 0, the default) and reports it, as it
+    /// does every other field.
+    #[test]
+    fn a_pictures_penumbra_is_held_and_old_presets_load() {
+        let mut p = HdriParams::default();
+        for penumbra in [-0.5, 1.5, f32::NAN, f32::INFINITY, 0.3, 0.0, 1.0] {
+            let image = LightImageParams { key: "a.png".to_string(), penumbra: Some(penumbra), soften_mask: Some(true), ..LightImageParams::default() };
+            p.lights.push(LightParams { image: Some(image), ..LightParams::default() });
+        }
+        let held = ["lights[0].image.penumbra", "lights[1].image.penumbra", "lights[2].image.penumbra", "lights[3].image.penumbra"];
+        assert_eq!(p.clamp(), held);
+        let penumbras: Vec<Option<f32>> = p.lights.iter().map(|l| l.image.as_ref().unwrap().penumbra).collect();
+        assert_eq!(penumbras, [Some(0.0), Some(1.0), Some(0.0), Some(1.0), Some(0.3), Some(0.0), Some(1.0)]);
+        assert!(p.clamp().is_empty(), "held values stay");
+        assert_eq!(IMAGE_PENUMBRA_RANGE, (0.0, 1.0));
+        // Saved and loaded with the settings, as the other picture fields are.
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        // A file from before P1: its image blocks have neither field.
+        let mut tree = JsonValue::deserialize_json(&p.to_json()).unwrap();
+        for light in tree.get_mut("lights").and_then(JsonValue::as_array_mut).unwrap() {
+            let Some(JsonValue::Object(image)) = light.get_mut("image") else { panic!("an image block") };
+            assert!(image.remove("penumbra").is_some() && image.remove("soften_mask").is_some());
+        }
+        let old = tree.serialize_json();
+        assert!(!old.contains("penumbra") && !old.contains("soften_mask"));
+        let mut loaded = HdriParams::from_json(&old).expect("a preset saved before P1 loads");
+        assert!(loaded.clamp().is_empty());
+        for light in &loaded.lights {
+            let image = light.image.as_ref().unwrap();
+            assert_eq!((image.penumbra, image.soften_mask, image.penumbra(), image.soften_mask()), (None, None, 0.0, false));
+        }
+        // A patch names them as it names the other picture fields.
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"image": {"key": "a.png", "penumbra": 7, "soften_mask": true}}]}"#).unwrap();
+        let image = merged.lights[0].image.as_ref().unwrap();
+        assert_eq!((image.penumbra, image.soften_mask), (Some(1.0), Some(true)));
+        assert_eq!(report, ["lights[0].image.penumbra"]);
     }
 
     #[test]

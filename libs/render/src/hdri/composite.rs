@@ -101,16 +101,17 @@ pub fn image_facts(map: &Arc<EnvMap>) -> Arc<ImageFacts> {
 }
 
 /// Drops what is kept of every picture whose last `Arc` is gone: a base
-/// image's facts, a gobo picture's summed-area table and a light picture's
-/// mean (`image_light::PictureMemo`). Each memo does so whenever it adds an
-/// entry; a host that frees a picture calls this (the app after every
-/// batch, its base images going by the plan owner's D4; the sandbox when it
-/// lets go of a map's pictures), so what is kept of it goes with it, not at
-/// the next picture's first bake. A gobo's table of a 2048 picture is 33.6 MB.
+/// image's facts, a gobo picture's summed-area table, a light picture's mean
+/// and its softened mask's table (`image_light::PictureMemo`). Each memo does
+/// so whenever it adds an entry; a host that frees a picture calls this (the
+/// app after every batch, its base images going by the plan owner's D4; the
+/// sandbox when it lets go of a map's pictures), so what is kept of it goes
+/// with it, not at the next picture's first bake. Of a 2048 picture, a
+/// gobo's table is 33.6 MB and a softened mask's 134.3 MB.
 pub fn drop_dead_facts() {
     FACTS.drop_dead();
     super::gobo::drop_dead_tables();
-    super::image_light::drop_dead_means();
+    super::image_light::drop_dead_light_facts();
 }
 
 /// The luminance a level surface receives from the rows of `map` more than

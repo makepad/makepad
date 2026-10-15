@@ -326,6 +326,81 @@ fn a_held_drag_on_a_heavy_studio_stays_fast() {
     });
 }
 
+/// P1: a 2048 x 2048 light picture's softened mask (Soften mask edges) is
+/// one summed-area table of four f64 sums an entry, (2049 x 2049) x 32 bytes
+/// = 134.3 MB, built for the first light that softens the picture. Timed as
+/// the first `Env::new_with` that softens a fresh picture against one that
+/// does not (both walk the picture for its mean), the median of three; a
+/// later `Env` (a held drag's) shares the table, and the 512 x 256 preview
+/// of the softened light is timed against the unsoftened one's.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_softened_2048_picture_builds_its_table_once() {
+    use makepad_render::hdri::{LightImageParams, LightParams};
+    let params = |soften: bool| HdriParams {
+        mode: "studio".to_string(),
+        lights: vec![LightParams {
+            key: true,
+            azimuth_deg: 30.0,
+            elevation_deg: 30.0,
+            width_deg: 60.0,
+            height_deg: 40.0,
+            image: Some(LightImageParams {
+                key: "logo.png".to_string(),
+                fit: "fit".to_string(),
+                alpha_as_mask: true,
+                penumbra: Some(0.3),
+                soften_mask: Some(soften),
+            }),
+            ..LightParams::default()
+        }],
+        ..HdriParams::default()
+    };
+    // A fresh picture each time, so each first Env builds what it needs.
+    let first_env = |soften: bool| {
+        let mut images = ImageSet::default();
+        images.insert("logo.png", gobo_picture());
+        let start = Instant::now();
+        let env = Env::new_with(&params(soften), &images);
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        drop((env, images));
+        makepad_render::hdri::composite::drop_dead_facts();
+        ms
+    };
+    let plain = median((0..3).map(|_| first_env(false)).collect());
+    let soft = median((0..3).map(|_| first_env(true)).collect());
+    let side = makepad_render::hdri::image_light::MAX_LIGHT_IMAGE_SIDE;
+    let bytes = (side + 1) * (side + 1) * 4 * std::mem::size_of::<f64>();
+    println!(
+        "hdri_perf: a softened {side} x {side} picture: first Env::new_with {soft:7.1} ms against {plain:7.1} ms unsoftened: the table {:7.1} ms, {bytes} bytes ({:.1} MB)",
+        soft - plain,
+        bytes as f64 / 1.0e6
+    );
+    let mut images = ImageSet::default();
+    images.insert("logo.png", gobo_picture());
+    let _built = Env::new_with(&params(true), &images);
+    let start = Instant::now();
+    let shared = Env::new_with(&params(true), &images);
+    let later = start.elapsed().as_secs_f64() * 1000.0;
+    let unsoftened = Env::new_with(&params(false), &images);
+    with_pool(|pool| {
+        let bake = |env: &Env| {
+            let times: Vec<f64> = (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    let map = env.bake_par(512, |n, f| pool.fan_out(Lane::Heavy, n, f));
+                    check_map(&map, 512, "softened picture");
+                    start.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            median(times)
+        };
+        let (soft_bake, plain_bake) = (bake(&shared), bake(&unsoftened));
+        println!("hdri_perf: a later Env::new_with that softens it {later:7.1} ms; 512x256 bake {soft_bake:7.1} ms softened, {plain_bake:7.1} ms not");
+        assert!(later < 0.5 * soft.max(1.0), "a later Env built its own table: {later:.1} ms against {soft:.1} ms");
+    });
+}
+
 /// D15 (L:229): the first build of a seed's cloud noise, about 2 s of
 /// `Env::new_with` in release, stops soon after a newer request cancels the
 /// job: the app's released bake of a new seed is stopped by the next drag

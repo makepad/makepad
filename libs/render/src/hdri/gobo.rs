@@ -25,7 +25,7 @@
 
 use super::*;
 use super::foliage::Foliage;
-use super::image_light::PictureMemo;
+use super::image_light::{PictureMemo, SummedArea};
 use super::light_fx::face_axes;
 use std::sync::Arc;
 
@@ -108,7 +108,7 @@ enum ImageMask {
     /// ImageSet and read bilinearly (`image_mask`).
     Sharp(Arc<EnvMap>),
     /// Further off: the summed-area table that box-filters it, one per
-    /// picture (`PassTable::shared`).
+    /// picture (`shared_pass_table`).
     Soft(Arc<PassTable>),
 }
 
@@ -133,7 +133,7 @@ impl Gobo {
         let image = match picture {
             Some(img) if soft <= SHARP_SOFT => Some(ImageMask::Sharp(img)),
             // A picture without texels masks nothing (as `image_mask` reads it).
-            Some(img) => PassTable::shared(&img).map(ImageMask::Soft),
+            Some(img) => shared_pass_table(&img).map(ImageMask::Soft),
             None => None,
         };
         let foliage = match kind {
@@ -192,7 +192,7 @@ impl Gobo {
         let b = vec2f(p.x / self.rect.x, p.y / self.rect.y);
         match mask {
             ImageMask::Sharp(img) => image_mask(img, b),
-            ImageMask::Soft(table) => table.box_mean(b, vec2f(self.soft / self.rect.x, self.soft / self.rect.y)),
+            ImageMask::Soft(table) => pass_mean(table, b, vec2f(self.soft / self.rect.x, self.soft / self.rect.y)),
         }
     }
 
@@ -295,20 +295,13 @@ fn image_mask(img: &EnvMap, b: Vec2f) -> f32 {
     top + (bottom - top) * ty
 }
 
-/// Prefix sums of what an image mask's texels pass (`texel_passes`): entry
-/// (x, y) of the (width + 1) x (height + 1) table sums the texels left of
-/// column x and above row y. It gives the exact mean of the mask over a box
-/// of any size from sixteen reads. In f64: a 2048 x 2048 mask sums to four
-/// million, where f32 would already lose a texel's own fractions. That is
-/// 33.6 MB and about 64 ms in release (L:174), so a picture has one table,
-/// built for the first gobo that hangs off its light and shared by every
-/// other light, cast and `Env` that shows it (`shared`, D15).
-#[derive(Debug)]
-struct PassTable {
-    width: usize,
-    height: usize,
-    sums: Vec<f64>,
-}
+/// Prefix sums of what an image mask's texels pass (`texel_passes`), one
+/// number a texel (`image_light::SummedArea`): the exact mean of the mask
+/// over a box of any size from sixteen reads. At 2048 x 2048 that is 33.6 MB
+/// and about 64 ms in release (L:174), so a picture has one table, built for
+/// the first gobo that hangs off its light and shared by every other light,
+/// cast and `Env` that shows it (`shared_pass_table`, D15).
+type PassTable = SummedArea<1>;
 
 /// The table of every live gobo picture (`image_light::PictureMemo`).
 static TABLES: PictureMemo<PassTable> = PictureMemo::new();
@@ -319,71 +312,29 @@ pub(super) fn drop_dead_tables() {
     TABLES.drop_dead();
 }
 
-impl PassTable {
-    /// The table of `img`, built on the first call for the picture and
-    /// shared from then on. None for a picture without texels.
-    fn shared(img: &Arc<EnvMap>) -> Option<Arc<PassTable>> {
-        let (w, h) = (img.width, img.height);
-        if w == 0 || h == 0 || img.data.len() != w * h {
-            return None;
-        }
-        Some(TABLES.get(img, PassTable::build))
+/// The table of `img`, built on the first call for the picture and shared
+/// from then on. None for a picture without texels.
+fn shared_pass_table(img: &Arc<EnvMap>) -> Option<Arc<PassTable>> {
+    let (w, h) = (img.width, img.height);
+    if w == 0 || h == 0 || img.data.len() != w * h {
+        return None;
     }
-
-    /// The table of a picture with texels (`shared` checks that it has).
-    fn build(img: &EnvMap) -> PassTable {
+    Some(TABLES.get(img, |img| {
         #[cfg(test)]
         crate::hdri::probe::count(crate::hdri::probe::Work::PassTable);
-        let (w, h) = (img.width, img.height);
-        let stride = w + 1;
-        let mut sums = vec![0.0f64; stride * (h + 1)];
-        for (y, texels) in img.data.chunks_exact(w).enumerate() {
-            // Row y + 1 of the table is row y plus the running sum along texel row y.
-            let (above, below) = sums.split_at_mut((y + 1) * stride);
-            let mut row = 0.0f64;
-            for ((t, up), out) in texels.iter().zip(&above[y * stride + 1..]).zip(&mut below[1..stride]) {
-                row += texel_passes(t) as f64;
-                *out = up + row;
-            }
-        }
-        PassTable { width: w, height: h, sums }
-    }
+        SummedArea::build(img, |t| [texel_passes(t) as f64])
+    }))
+}
 
-    /// The mask integrated over 0..x by 0..y, in texels (texel (i, j) covers
-    /// i..i+1 by j..j+1), with the edge texels held past the picture's
-    /// border, so that it runs on linearly outside it (negative left of and
-    /// above the picture). Inside a texel the integral is exactly the
-    /// bilinear blend of the table at the texel's corners, and an edge
-    /// texel's blend carried on past the border is exactly the held edge.
-    fn integral(&self, x: f64, y: f64) -> f64 {
-        let stride = self.width + 1;
-        // `as usize` saturates: left of or above the picture is texel 0.
-        let i = (x.floor() as usize).min(self.width - 1);
-        let j = (y.floor() as usize).min(self.height - 1);
-        let (tx, ty) = (x - i as f64, y - j as f64);
-        let at = |i: usize, j: usize| self.sums[j * stride + i];
-        let top = at(i, j) + (at(i + 1, j) - at(i, j)) * tx;
-        let bottom = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx;
-        top + (bottom - top) * ty
-    }
-
-    /// The mean of the mask over the box round unit-box point `b` (placed
-    /// as `image_mask` places it) with half-widths `r`, in unit-box units.
-    /// The box is never narrower than a texel: one texel across, its mean
-    /// is the bilinear lookup itself, so a soft gobo is never blockier than
-    /// a sharp one.
-    fn box_mean(&self, b: Vec2f, r: Vec2f) -> f32 {
-        let (w, h) = (self.width as f64, self.height as f64);
-        let rx = (0.5 * r.x as f64 * w).max(0.5);
-        let ry = (0.5 * r.y as f64 * h).max(0.5);
-        // A box wholly past the border sees the held edge alone, as it does
-        // at the border plus its half-width: holding the centre there keeps
-        // the sums small. max/min hold a NaN at the near side.
-        let x = ((0.5 + 0.5 * b.x as f64) * w).max(-rx).min(w + rx);
-        let y = ((0.5 - 0.5 * b.y as f64) * h).max(-ry).min(h + ry);
-        let sum = self.integral(x + rx, y + ry) - self.integral(x - rx, y + ry) - self.integral(x + rx, y - ry) + self.integral(x - rx, y - ry);
-        (sum / (4.0 * rx * ry)) as f32
-    }
+/// The mean of the mask over the box round unit-box point `b` (placed as
+/// `image_mask` places it) with half-widths `r`, in unit-box units. The box
+/// is never narrower than a texel (`SummedArea::box_mean`), so a soft gobo
+/// is never blockier than a sharp one.
+fn pass_mean(table: &PassTable, b: Vec2f, r: Vec2f) -> f32 {
+    let (w, h) = (table.width() as f64, table.height() as f64);
+    let x = (0.5 + 0.5 * b.x as f64) * w;
+    let y = (0.5 - 0.5 * b.y as f64) * h;
+    table.box_mean(x, y, 0.5 * r.x as f64 * w, 0.5 * r.y as f64 * h)[0] as f32
 }
 
 /// The studio a projected gobo lands on, in units of the camera's height

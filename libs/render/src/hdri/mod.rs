@@ -1235,16 +1235,18 @@ pub(crate) mod probe {
         /// A key measured from the map's drawing: `Studio::measured_key`,
         /// `Studio::measured_window_key`, `Env::disc_share`.
         Key,
-        /// A gobo picture's summed-area table built (`gobo::PassTable::build`).
+        /// A gobo picture's summed-area table built (`gobo::shared_pass_table`).
         PassTable,
         /// A light picture's texels walked for its mean (`image_light::PictureMeans`).
         PictureMean,
         /// A worn face's normaliser sampled (`Imperfections::mean_raw`).
         WearNorm,
+        /// A light picture's softened-mask table built (`image_light::SoftTable`, P1).
+        SoftMask,
     }
 
     thread_local! {
-        static COUNTS: [Cell<usize>; 4] = const { [const { Cell::new(0) }; 4] };
+        static COUNTS: [Cell<usize>; 5] = const { [const { Cell::new(0) }; 5] };
     }
 
     /// One more of `work` on this thread.
