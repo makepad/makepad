@@ -208,12 +208,13 @@ fn world_items_and_a_rect_area_light_draw_in_the_dark() {
 /// platform it draws in the legacy lane, where the lookups carry the map's
 /// exposure as the rig's fill does (`ibl_ctl.y`, renderer/stock_ibl.rs; the
 /// sunset meters at the ceiling, 3.2). With the scale the item pair and the
-/// stock chrome pair read means of 131.9 to 142.9 (D3D11); at the map's raw
-/// scale, which is what a frame draws when the control is not resolved at
-/// the rig site (frame.rs, `resolve_ibl_lane`) or not written on the draw
-/// (draw_models.rs, `bind_ibl_lane`), 47.4 to 53.6. No headless test runs
-/// those two calls, so this is the check that fails when one of them is
-/// lost: a mean near 50 is that.
+/// stock chrome pair read means of 134.8 to 145.5 (the HAL's D3D11; 131.9 to
+/// 142.9 on the D3D11 backend before it); at the map's raw scale, which is
+/// what a frame draws when the control is not resolved at the rig site
+/// (frame.rs, `resolve_ibl_lane`) or not written on the draw (draw_models.rs,
+/// `bind_ibl_lane`), 47.4 to 53.6 (measured on that older backend). No
+/// headless test runs those two calls, so this is the check that fails when
+/// one of them is lost: a mean near 50 is that.
 const LIT_AT_THE_LANES_SCALE: f32 = 90.0;
 
 #[test]
