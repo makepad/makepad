@@ -214,20 +214,34 @@ impl Env {
     /// bloom (redesign §5) is rastered at that width's texel, coarsened to a 32nd
     /// of its bloom length and to at most width / 12 cells a side (and
     /// `caster::CASTER_RASTER_MAX_SIDE`), so the held 512 preview pays for a
-    /// 512 raster and an export gets a fine one. `new`, `new_with` and
-    /// `new_cancellable` are this at [`CASTER_REFERENCE_WIDTH`]. Every lookup of
-    /// the Env (both bakes at any width, the keyless copy, the key, `disc_share`)
-    /// reads that one raster, so the key carries the light the map draws and the
-    /// copy lacks exactly it (D1, N3). The pre-pass polls `cancelled` too.
-    /// Without a caster whose bloom is on, `width` changes nothing: the Env is
-    /// `new_cancellable`'s, bit for bit.
+    /// 512 raster and an export gets a fine one; a bright disc behind it (the
+    /// sun, the moon) is sampled alike at every width (D6). A soft caster's
+    /// raster has cells no finer than that width's texel (M5). `new`,
+    /// `new_with` and `new_cancellable` are this at [`CASTER_REFERENCE_WIDTH`].
+    /// Every lookup of the Env (both bakes at any width, the keyless copy, the
+    /// key, `disc_share`) reads those rasters, so the key carries the light the
+    /// map draws and the copy lacks exactly it (D1, N3). The pre-pass polls
+    /// `cancelled` too. Without a caster that is soft or whose bloom is on,
+    /// `width` changes nothing: the Env is `new_cancellable`'s, bit for bit.
+    /// The casters' rasters are built on this thread; [`Self::new_for_width_par`]
+    /// spreads their rows.
     pub fn new_for_width(params: &HdriParams, images: &ImageSet, width: usize, cancelled: &dyn Fn() -> bool) -> Option<Env> {
+        Env::new_for_width_par(params, images, width, cancelled, &caster::serial_rows)
+    }
+
+    /// [`Self::new_for_width`] with the shadow casters' rasters (softness and
+    /// bloom) spread by `run` as [`Self::bake_par`]'s rows are: `run(n, row)`
+    /// calls `row(0..n)`, each once (`pool.fan_out` inside a Heavy job, never
+    /// on the UI thread). The Env is `new_for_width`'s, bit for bit. A runner
+    /// that skips rows (its job overtaken) leaves the map None, or a caster's
+    /// softness raster empty: the caller drops a map its token has cancelled.
+    pub fn new_for_width_par(params: &HdriParams, images: &ImageSet, width: usize, cancelled: &dyn Fn() -> bool, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Option<Env> {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         // In Sky mode the lights hang against the sky itself (D12: a window
         // filled with sky draws its frame and bars there).
-        let studio = studio::Studio::new_with(&params.studio, &params.lights, images, params.mode() == Mode::Sky);
+        let studio = studio::Studio::new_with(&params.studio, &params.lights, images, params.mode() == Mode::Sky, width, run);
         // An image that is the whole base hides the generated sky: its weather
         // and its cloud volume are not drawn, so they are not built (D6).
         let whole_base = composite::whole_base(&params, images);
@@ -334,7 +348,7 @@ impl Env {
         }
         // A caster's bloom reads the finished layers behind it, so it comes
         // last; a newer request stops it as it stops the cloud noise (R5).
-        if !env.build_caster_bloom(width, cancelled) {
+        if !env.build_caster_bloom(width, cancelled, run) {
             return None;
         }
         // The key is not measured here: the engine's first `sun` does that,
@@ -421,10 +435,11 @@ impl Env {
     /// bloom on, in list order, so a caster sees the bloom of the casters
     /// before it. What the map draws behind the caster (`content_before`) and
     /// its own coverage are rastered in its frame for a map `width` wide, the
-    /// sun's and the moon's discs area-averaged. A caster that nothing bright
-    /// stands behind keeps no raster: it stays exactly the flag it draws as.
-    /// False when `cancelled` stopped it.
-    fn build_caster_bloom(&mut self, width: usize, cancelled: &dyn Fn() -> bool) -> bool {
+    /// sun's and the moon's discs sampled on grids of their own (D6), the rows
+    /// spread by `run` (M5). A caster that nothing bright stands behind keeps
+    /// no raster: it stays exactly the flag it draws as. False when `cancelled`
+    /// stopped it (or the runner skipped a row).
+    fn build_caster_bloom(&mut self, width: usize, cancelled: &dyn Fn() -> bool, run: caster::RowRunner) -> bool {
         let entries = self.studio.bloom_casters();
         if entries.is_empty() {
             return true;
@@ -442,7 +457,7 @@ impl Env {
                 let Some(caster) = env.studio.caster(entry) else { continue };
                 let behind = |d: Vec3f| env.content_before(d, entry, at);
                 let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
-                caster::CasterBloom::build(caster, width, &hot, &behind, &sharp, cancelled)
+                caster::CasterBloom::build(caster, width, &hot, &behind, &sharp, cancelled, run)
             };
             let Some(bloom) = built else { return false };
             if bloom.thins_anything() {
@@ -2118,6 +2133,25 @@ mod tests {
             assert!(env.studio.caster(0).is_some_and(|c| c.bloom().is_some()), "width {width}: the sun blooms");
             assert!(env.bake_par(48, four_threads) == env.bake(48), "width {width}: the parallel bake is the serial one");
         }
+    }
+
+    /// M5: an Env whose casters' rasters (softness and bloom) are spread over four threads is
+    /// the one built on this thread, bit for bit, at the held and released widths; a runner
+    /// that skips rows, as an overtaken job's does, builds no map.
+    #[test]
+    fn an_env_whose_caster_rasters_are_spread_is_the_serial_one() {
+        let images = ImageSet::default();
+        let mut p = sun_under_leaves(1.0, 10.0, 10.0);
+        p.lights[0].caster = Some(CasterParams { softness: 0.4, ..p.lights[0].caster_params() });
+        p.lights.push(LightParams { azimuth_deg: 180.0, elevation_deg: 25.0, ..p.lights[0].clone() });
+        for width in [512, CASTER_REFERENCE_WIDTH] {
+            let serial = Env::new_for_width(&p, &images, width, &|| false).expect("nothing cancels it");
+            let spread = Env::new_for_width_par(&p, &images, width, &|| false, &four_threads).expect("nothing cancels it");
+            assert!((0..2).all(|i| spread.studio.caster(i).is_some_and(|c| c.bloom().is_some())), "width {width}: both casters bloom");
+            assert!(spread.bake(48) == serial.bake(48), "width {width}: the rasters spread over four threads are the serial ones");
+        }
+        let skipping = |n: usize, row: &(dyn Fn(usize) + Sync)| (0..n).filter(|i| i % 2 == 0).for_each(row);
+        assert!(Env::new_for_width_par(&p, &images, 512, &|| false, &skipping).is_none(), "a runner that skipped rows built a map");
     }
 
     /// R5 (N3): the keyless copy reads the raster the map was built with, its key included.

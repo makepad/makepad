@@ -475,10 +475,10 @@ fn a_soft_casters_raster_stays_well_under_a_held_bake() {
 /// for. This is the plan's hardest case for it: an 80 degree leaves caster in
 /// front of the sun with 45 degrees of bloom, on a clear sky and on a volumetric
 /// one, at the held (512) and released (1024) preview widths. The pre-pass is
-/// what `Env::new_for_width` takes with the bloom on, less what it takes with
-/// it off (medians of five); the bake is that Env's row-parallel bake. The
-/// pre-pass is one thread's work while the bake fans out, so it is held to a
-/// quarter of the bake on 8 cores: of the bake itself, or of its one-thread
+/// what `Env::new_for_width_par` takes with the bloom on, less what it takes
+/// with it off (medians of five), its rows spread over the pool as the app's
+/// preview job spreads them (M5); the bake is that Env's row-parallel bake. The
+/// pre-pass is held to a quarter of the bake on 8 cores: of the bake itself, or of its one-thread
 /// time over 8 where that is less (a machine whose bake runs more than 8 times
 /// faster than on one thread). The speed-up is measured, not taken from
 /// `available_parallelism`, which counts logical processors: on an 8-core
@@ -519,7 +519,7 @@ fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
             for width in [512usize, 1024] {
                 let build = |p: &HdriParams| {
                     let start = Instant::now();
-                    let env = Env::new_for_width(p, &images, width, &|| false).expect("nothing cancels it");
+                    let env = Env::new_for_width_par(p, &images, width, &|| false, &|n, f| pool.fan_out(Lane::Heavy, n, f)).expect("nothing cancels it");
                     (start.elapsed().as_secs_f64() * 1000.0, env)
                 };
                 let (mut pre_pass, mut bakes) = (Vec::new(), Vec::new());
@@ -551,5 +551,92 @@ fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
             }
         }
         assert!(slow.is_empty(), "bloom pre-passes over their allowance: {}", slow.join(", "));
+    });
+}
+
+/// M5 (plan 4's final review): four soft shadow casters with bloom stay well under the held
+/// bake. Four 60 x 45 degree leaves casters at softness 0.3 with 10 degrees of bloom: one in
+/// front of the sun, one on either side of it and one above it, on a clear sky, on the spec's
+/// cloudy one and on a volumetric one, at the held preview's width (512). Their pre-pass, the
+/// softness rasters and the bloom rasters, is what `Env::new_for_width_par` takes with them
+/// less what it takes with the same casters sharp and without bloom (medians of five), its
+/// rows spread over the pool as the app's preview job spreads them. The held bake is what the
+/// preview job pays without that pre-pass, as `a_soft_casters_raster_stays_well_under_a_held_bake`
+/// counts it: that Env's build and its row-parallel bake. The pre-pass is held to a quarter of
+/// the held bake on 8 cores (`a_bloom_casters_pre_pass_stays_well_under_its_bake`'s measured
+/// allowance), so the four casters together cost no more than one caster's bloom may.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
+    let with_casters = |sky: &HdriParams, softness: f32, bloom_strength: f32| {
+        let mut p = sky.clone();
+        p.lights = [(200.0f32, 30.0f32), (160.0, 35.0), (240.0, 25.0), (200.0, 70.0)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(azimuth_deg, elevation_deg))| LightParams {
+                azimuth_deg,
+                elevation_deg,
+                width_deg: 60.0,
+                height_deg: 45.0,
+                gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, seed: 3 + i as u32, distance: 0.0, ..GoboParams::default() }),
+                caster: Some(CasterParams { softness, bloom_strength, bloom_length_deg: 10.0, ..CasterParams::default() }),
+                ..LightParams::new_caster()
+            })
+            .collect();
+        p
+    };
+    let mut clear = cloudy_sky();
+    clear.sky.clouds.coverage = 0.0;
+    clear.sky.clouds.cirrus = 0.0;
+    let mut volumetric = cloudy_sky();
+    // A seed no other test in this binary bakes; its noise is built once, untimed, below.
+    volumetric.seed = 0x0b10_0c46;
+    volumetric.sky.volumetric = Some(VolumetricParams::default());
+    let images = ImageSet::default();
+    let width = 512;
+    with_pool(|pool| {
+        let mut slow = Vec::new();
+        for (name, sky) in [("clear sky", &clear), ("cloudy sky", &cloudy_sky()), ("volumetric sky", &volumetric)] {
+            let (on, soft_only, off) = (with_casters(sky, 0.3, 1.0), with_casters(sky, 0.3, 0.0), with_casters(sky, 0.0, 0.0));
+            // Untimed: the pool's first fan-out and the volume's noise.
+            let warm = Env::new_for_width(&off, &images, width, &|| false).expect("nothing cancels it");
+            let _ = warm.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, f));
+            let build = |p: &HdriParams| {
+                let start = Instant::now();
+                let env = Env::new_for_width_par(p, &images, width, &|| false, &|n, f| pool.fan_out(Lane::Heavy, n, f)).expect("nothing cancels it");
+                (start.elapsed().as_secs_f64() * 1000.0, env)
+            };
+            let (mut pre_pass, mut softness, mut envs, mut bakes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..5 {
+                let (with_ms, env) = build(&on);
+                let (soft_ms, _) = build(&soft_only);
+                let (without_ms, _) = build(&off);
+                pre_pass.push((with_ms - without_ms).max(0.0));
+                softness.push((soft_ms - without_ms).max(0.0));
+                envs.push(without_ms);
+                let start = Instant::now();
+                let map = env.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, f));
+                bakes.push(start.elapsed().as_secs_f64() * 1000.0);
+                check_map(&map, width, name);
+            }
+            let (pre, soft, env_ms, bake) = (median(pre_pass), median(softness), median(envs), median(bakes));
+            let held = env_ms + bake;
+            // The same bake on this thread alone, once: its speed-up over one thread.
+            let env = build(&on).1;
+            let start = Instant::now();
+            let _ = env.bake_par(width, |n, f| (0..n).for_each(f));
+            let speed_up = start.elapsed().as_secs_f64() * 1000.0 / bake;
+            let allowed = 0.25 * (speed_up / 8.0).max(1.0);
+            println!(
+                "hdri_perf: four soft blooming casters {width}x{} {name:<15} pre-pass {pre:6.2} ms (softness {soft:5.2} ms) against the held bake {held:6.2} ms (Env {env_ms:6.2} + bake {bake:6.2}): {:4.1} %, allowed {:.0} % at {speed_up:4.1}x one thread",
+                width / 2,
+                100.0 * pre / held,
+                100.0 * allowed
+            );
+            if pre > allowed * held {
+                slow.push(format!("{name}: {pre:.1} ms against {held:.1} ms, over {:.0} %", 100.0 * allowed));
+            }
+        }
+        assert!(slow.is_empty(), "four soft blooming casters' pre-passes over their allowance: {}", slow.join(", "));
     });
 }

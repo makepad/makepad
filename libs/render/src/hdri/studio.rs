@@ -19,7 +19,7 @@
 //! Kelvin/tint colour (luminance 1) or an explicit rgb, times 2^intensity_ev.
 
 use makepad_draw::*;
-use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams, KELVIN_RANGE};
+use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams, CASTER_REFERENCE_WIDTH, KELVIN_RANGE};
 use crate::sky::{luminance, xyz_to_linear_rgb};
 use super::shaped::{half_extents, stroke_box, ShapedLight};
 use super::shape::ArcPath;
@@ -28,7 +28,7 @@ use super::gels::gel_stack;
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
 use super::light_fx::LightFx;
-use super::caster::{caster_drawn, caster_flag, CasterBloom, CasterLayer};
+use super::caster::{caster_drawn, caster_flag, serial_rows, CasterBloom, CasterLayer, RowRunner};
 use std::borrow::Cow;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
@@ -358,7 +358,7 @@ impl Studio {
     ///
     /// No pictures: an image light is drawn plain (see `new_with`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
-        Studio::new_with(studio, lights, &ImageSet::default(), false)
+        Studio::new_with(studio, lights, &ImageSet::default(), false, CASTER_REFERENCE_WIDTH, &serial_rows)
     }
 
     /// `new` with the pictures image lights show (`Env::new_with` passes
@@ -372,7 +372,10 @@ impl Studio {
     /// (`caster::caster_flag`), so nothing here reads the light fields it
     /// keeps but ignores, and it is never the key. One whose image mask is
     /// not in `images` draws as no caster at all and is left out (spec §6).
-    pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet, against_sky: bool) -> Studio {
+    /// A soft caster's raster is laid out for a map `width` wide, its rows
+    /// spread by `run` (`caster::RowRunner`); `new` builds them for
+    /// CASTER_REFERENCE_WIDTH on this thread.
+    pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet, against_sky: bool, width: usize, run: RowRunner) -> Studio {
         // The backdrop as clamp() holds it (D17); each light holds its own
         // (`PreparedLight::new`, `LightFx::new`).
         let studio = &studio.clamped();
@@ -392,7 +395,7 @@ impl Studio {
         // gobo cuts what the flag takes out of the key (B8). A caster's is
         // its pattern.
         let fx: Vec<LightFx> = drawn.iter().map(|l| LightFx::new(l, images).against_sky(against_sky)).collect();
-        let casters: Vec<Option<CasterLayer>> = enabled.iter().map(|l| if l.is_caster() { CasterLayer::new(l, images) } else { None }).collect();
+        let casters: Vec<Option<CasterLayer>> = enabled.iter().map(|l| if l.is_caster() { CasterLayer::new(l, images, width, run) } else { None }).collect();
         let any_fx = fx.iter().any(|fx| !fx.is_plain()) || casters.iter().flatten().any(|c| !c.is_plain());
         Studio {
             top: rgb(studio.top),

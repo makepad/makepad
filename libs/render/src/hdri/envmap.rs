@@ -82,7 +82,8 @@ pub fn bake_generated_env_map_with(params: &HdriParams, images: &ImageSet, width
 
 /// [`bake_generated_env_map_with`] for a job a newer request can overtake
 /// (the sandbox's map job): its `Env` is built through
-/// [`Env::new_for_width`] at `width` (a caster's bloom is rastered for it),
+/// [`Env::new_for_width_par`] at `width` (a caster's rasters are laid out for
+/// it, their rows spread by `run`),
 /// so the first build of a seed's cloud volume noise (about 2.2 s in
 /// release) and the bloom's pre-pass stop when `cancelled` says so, and the
 /// bake is then None (D15, L:229). The rows are `run`'s to skip; a bake that
@@ -94,7 +95,7 @@ pub fn bake_generated_env_map_cancellable(
     run: impl Fn(usize, &(dyn Fn(usize) + Sync)),
     cancelled: &dyn Fn() -> bool,
 ) -> Option<GeneratedEnvMap> {
-    let env = Env::new_for_width(params, images, width, cancelled)?;
+    let env = Env::new_for_width_par(params, images, width, cancelled, &run)?;
     let map = env.bake_par(width, &run);
     let keyless = env.bake_keyless_par(&map, &run);
     Some(GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() })
@@ -494,7 +495,9 @@ mod tests {
 
     /// R5: the bakes that know their width build their Env for it
     /// (`Env::new_for_width`), so a shadow caster's bloom is rastered at the
-    /// bake's texel: the map is that Env's, not the reference width's.
+    /// bake's texel: the map is that Env's, not the reference width's. The
+    /// threshold lets the sky through, so the raster carries light (the sun's
+    /// disc alone is sampled alike at every width, D6).
     #[test]
     fn a_generated_bake_rasters_a_casters_bloom_at_its_width() {
         let mut p = HdriParams::default();
@@ -507,7 +510,7 @@ mod tests {
             width_deg: 40.0,
             height_deg: 30.0,
             gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, seed: 3, ..GoboParams::default() }),
-            caster: Some(CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() }),
+            caster: Some(CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, bloom_threshold_ev: -2.0, ..CasterParams::default() }),
             ..LightParams::new_caster()
         });
         let at_64 = Env::new_for_width(&p, &ImageSet::default(), 64, &|| false).expect("nothing cancels it").bake(64);
