@@ -210,13 +210,14 @@ fn a_two_output_shader_declares_both_outputs_for_every_backend() {
     });
 }
 
-type Read = Arc<Mutex<Vec<Option<Result<(usize, usize, Vec<[f32; 4]>), String>>>>>;
+/// One target read back: its size and texels, or the readback error.
+type Texels = Result<(usize, usize, Vec<[f32; 4]>), String>;
 
 fn decode(bytes: &[u8], half: bool) -> Vec<[f32; 4]> {
     if half {
-        bytes.chunks_exact(8).map(|t| std::array::from_fn(|c| f16_to_f32(u16::from_le_bytes([t[c * 2], t[c * 2 + 1]])))).collect()
+        bytes.as_chunks::<8>().0.iter().map(|t| std::array::from_fn(|c| f16_to_f32(u16::from_le_bytes([t[c * 2], t[c * 2 + 1]])))).collect()
     } else {
-        bytes.chunks_exact(16).map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[c * 4..c * 4 + 4].try_into().unwrap()))).collect()
+        bytes.as_chunks::<16>().0.iter().map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[c * 4..c * 4 + 4].try_into().unwrap()))).collect()
     }
 }
 
@@ -257,50 +258,59 @@ fn float_targets_blend_write_two_outputs_and_read_back() {
     cx.borrow_mut().hal_attach_session(info);
     println!("backend {} float16 blend targets {}", info.backend, cx.borrow().gpu_info().float16_blend_targets);
 
-    // Settle (every pipeline built), paint once more with them all, then read the four targets.
-    let read: Read = Arc::new(Mutex::new(vec![None, None, None, None]));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut repainted_after = None;
-    let mut requested = false;
-    loop {
-        assert!(std::time::Instant::now() < deadline, "timed out (repainted {repainted_after:?}, requested {requested})");
-        let mut cx = cx.borrow_mut();
+    // Paint until no pipeline is compiling, read the four targets, and again until two reads
+    // agree: a backend that builds a pipeline for a new target layout on first use (Metal:
+    // RGBA16F, two outputs) leaves that draw out until it is ready, then Cx paints again.
+    // a turn waits up to 1 ms for the HAL: a minute or more in all
+    let mut turns = 0;
+    let mut turn = |cx: &mut Cx| {
+        turns += 1;
+        assert!(turns < 60_000, "timed out");
         assert!(cx.hal_session_turn(1_000_000, true));
-        if requested {
-            if read.lock().unwrap().iter().all(Option::is_some) {
+    };
+    let mut last: Option<Vec<Texels>> = None;
+    let mut rounds = 0;
+    let read = loop {
+        rounds += 1;
+        assert!(rounds <= 8, "the targets did not settle");
+        let mut cx = cx.borrow_mut();
+        let after = cx.frame_submission_serial();
+        cx.redraw_all();
+        loop {
+            turn(&mut cx);
+            let submitted = cx.frame_submission_serial();
+            if submitted > after && cx.frame_completion_serial() == submitted && cx.pipelines_pending() == 0 {
                 break;
             }
-            continue;
         }
-        let submitted = cx.frame_submission_serial();
-        let settled = submitted != 0 && cx.frame_completion_serial() == submitted && cx.pipelines_pending() == 0;
-        match repainted_after {
-            None if settled => {
-                repainted_after = Some(submitted);
-                cx.redraw_all();
+        let slots: Arc<Mutex<Vec<Option<Texels>>>> = Arc::new(Mutex::new(vec![None; 4]));
+        {
+            let scene = scene.borrow();
+            let scene = scene.as_ref().unwrap();
+            let targets = [(&scene.blend.textures[0], true), (&scene.mrt.textures[0], true), (&scene.mrt.textures[1], true), (&scene.data32.textures[0], false)];
+            for (slot, (texture, half)) in targets.into_iter().enumerate() {
+                let slots = slots.clone();
+                cx.read_render_texture(texture, move |result| {
+                    let result = result.map(|(w, h, bytes)| (w, h, decode(&bytes, half))).map_err(|e| format!("{e:?}"));
+                    slots.lock().unwrap()[slot] = Some(result);
+                })
+                .expect("readback request");
             }
-            Some(serial) if settled && submitted > serial => {
-                let scene = scene.borrow();
-                let scene = scene.as_ref().unwrap();
-                let targets = [(&scene.blend.textures[0], true), (&scene.mrt.textures[0], true), (&scene.mrt.textures[1], true), (&scene.data32.textures[0], false)];
-                for (slot, (texture, half)) in targets.into_iter().enumerate() {
-                    let read = read.clone();
-                    cx.read_render_texture(texture, move |result| {
-                        let result = result.map(|(w, h, bytes)| (w, h, decode(&bytes, half))).map_err(|e| format!("{e:?}"));
-                        read.lock().unwrap()[slot] = Some(result);
-                    })
-                    .expect("readback request");
-                }
-                requested = true;
-            }
-            _ => {}
         }
-    }
+        while slots.lock().unwrap().iter().any(Option::is_none) {
+            turn(&mut cx);
+        }
+        let now: Vec<Texels> = slots.lock().unwrap().iter().map(|t| t.clone().unwrap()).collect();
+        if last.as_ref() == Some(&now) {
+            break now;
+        }
+        last = Some(now);
+    };
     hal.close(info.session);
+    println!("two equal reads after {rounds} paints");
 
-    let read = read.lock().unwrap();
     let texels = |slot: usize| -> &Vec<[f32; 4]> {
-        let (w, h, texels) = read[slot].as_ref().unwrap().as_ref().expect("readback");
+        let (w, h, texels) = read[slot].as_ref().expect("readback");
         assert_eq!((*w, *h), (SIZE, SIZE));
         texels
     };
