@@ -211,11 +211,12 @@ impl Env {
     }
 
     /// [`Self::new_cancellable`] for a map baked `width` wide. A shadow caster's
-    /// bloom (redesign §5) is rastered at that width's texel, coarsened to a 32nd
-    /// of its bloom length and to at most width / 12 cells a side (and
-    /// `caster::CASTER_RASTER_MAX_SIDE`), so the held 512 preview pays for a
-    /// 512 raster and an export gets a fine one; a bright disc behind it (the
-    /// sun, the moon) is sampled alike at every width (D6). A soft caster's
+    /// bloom (redesign §5) is rastered at that width's texel, coarsened to a
+    /// sixth of its bloom length (a finer share at a wider map) and to at most
+    /// width / 12 cells a side (and `caster::CASTER_RASTER_MAX_SIDE`), the width
+    /// held to at least [`CASTER_REFERENCE_WIDTH`] (D6): the held 512 preview
+    /// reads the released 1024 one's raster, and an export gets a finer one; a
+    /// bright disc behind it (the sun, the moon) is sampled alike at every width. A soft caster's
     /// raster has cells no finer than that width's texel (M5). `new`,
     /// `new_with` and `new_cancellable` are this at [`CASTER_REFERENCE_WIDTH`].
     /// Every lookup of the Env (both bakes at any width, the keyless copy, the

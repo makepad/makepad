@@ -75,15 +75,22 @@ pub(crate) fn serial_rows(n: usize, row: &(dyn Fn(usize) + Sync)) {
     (0..n).for_each(row);
 }
 
-/// `row(0..rows)` through `run`, RASTER_ROWS_PER_RUN at a call, `cancelled` polled before
-/// each call. None when it says so, or when the runner skipped a row.
+/// `row(0..rows)` through `run`, at most RASTER_ROWS_PER_RUN at a call and as many at each
+/// (68 rows go as 34 and 34, not 64 and 4, so no call is a thread's row alone), `cancelled`
+/// polled before each call. None when it says so, or when the runner skipped a row.
 fn rows_by<T: Send + Sync>(rows: usize, run: RowRunner, cancelled: &dyn Fn() -> bool, row: &(dyn Fn(usize) -> T + Sync)) -> Option<Vec<T>> {
+    rows_in_calls(rows, RASTER_ROWS_PER_RUN, run, cancelled, row)
+}
+
+/// `rows_by` with at most `per_call` rows at a call.
+fn rows_in_calls<T: Send + Sync>(rows: usize, per_call: usize, run: RowRunner, cancelled: &dyn Fn() -> bool, row: &(dyn Fn(usize) -> T + Sync)) -> Option<Vec<T>> {
     let out: Vec<std::sync::OnceLock<T>> = (0..rows).map(|_| std::sync::OnceLock::new()).collect();
-    for start in (0..rows).step_by(RASTER_ROWS_PER_RUN) {
+    let per_run = rows.div_ceil(rows.div_ceil(per_call.max(1)).max(1)).max(1);
+    for start in (0..rows).step_by(per_run) {
         if cancelled() {
             return None;
         }
-        let n = RASTER_ROWS_PER_RUN.min(rows - start);
+        let n = per_run.min(rows - start);
         run(n, &|k| {
             let _ = out[start + k].set(row(start + k));
         });
@@ -337,10 +344,11 @@ impl SoftCoverage {
         let cell = vec2f(span.x / nx as f32, span.y / ny as f32);
         let ext = vec2f(half.x + radius + cell.x, half.y + radius + cell.y);
         let (w, h) = (nx + 2, ny + 2);
-        // The rows inside the ring of empty cells, each built where `run` puts it. Nothing
-        // here cancels them (a raster this size is a few milliseconds' work); a runner that
-        // skipped rows was overtaken, its whole map is dropped, and the raster stays empty.
-        let inside = rows_by(h - 2, run, &|| false, &|r| (1..w - 1).map(|i| cell_value(pattern, ext, cell, i, r + 1)).collect::<Vec<f32>>());
+        // The rows inside the ring of empty cells, each built where `run` puts it, all in one
+        // call. Nothing here cancels them (a raster this size is a few milliseconds' work); a
+        // runner that skipped rows was overtaken, its whole map is dropped, and the raster
+        // stays empty.
+        let inside = rows_in_calls(h - 2, usize::MAX, run, &|| false, &|r| (1..w - 1).map(|i| cell_value(pattern, ext, cell, i, r + 1)).collect::<Vec<f32>>());
         let mut data = vec![[0.0f32; 4]; w * h];
         for (r, row) in inside.into_iter().flatten().enumerate() {
             for (k, value) in row.into_iter().enumerate() {
@@ -379,13 +387,18 @@ impl SoftCoverage {
 /// the default 2^10, 0.53 degrees across: 8 EV over 6.7e-5, 5.4e-4) thins the leaves next to
 /// it by about 97 % at bloom 1.
 const BLOOM_REF_ENERGY: f64 = 1.5e-4;
-/// A bloom raster's cell is never finer than a 32nd of its bloom length: the blur that
-/// follows spans that many cells either way.
-const BLOOM_CELLS_PER_LENGTH: f32 = 32.0;
-/// A map `width` wide has a bloom raster of at most width / 12 cells a side (42 at the held
-/// 512 preview, 85 at the released 1024 one, 341 at 4K). Its pre-pass is one thread's work
-/// beside a row-parallel bake, so this keeps it a small share of the bake (hdri_perf's
-/// `a_bloom_casters_pre_pass_stays_well_under_its_bake`).
+/// A bloom raster's cell is never finer than a sixth of its bloom length at
+/// CASTER_REFERENCE_WIDTH, a finer share in proportion to a wider map's (up to
+/// BLOOM_CELLS_PER_LENGTH_MAX): the kernel then reaches at most that many cells either way, and
+/// the cell-averaged kernel blurs it (`kernel_pass`). A long bloom needs no finer cells to be
+/// smooth, so the held preview, which shares the released one's raster (D6), stays cheap with
+/// several long blooms (M5); an export keeps a fine one.
+const BLOOM_CELLS_PER_LENGTH: f32 = 6.0;
+const BLOOM_CELLS_PER_LENGTH_MAX: f32 = 32.0;
+/// A map `width` wide has a bloom raster of at most width / 12 cells a side, the width held to
+/// at least CASTER_REFERENCE_WIDTH (D6): 85 at the held 512 preview and the released 1024 one,
+/// which so read the same raster, 341 at 4K. This keeps the pre-pass a small share of the bake
+/// (hdri_perf's `a_bloom_casters_pre_pass_stays_well_under_its_bake`).
 const BLOOM_WIDTH_PER_SIDE: usize = 12;
 /// The fewest cells a side, for the smallest maps.
 const BLOOM_MIN_SIDE: usize = 16;
@@ -403,15 +416,28 @@ const BLOOM_DISC_SAMPLES_PER_RADIUS: f32 = 6.0;
 /// sun's cells took the held 512 pre-pass to 64 % of its bake (hdri_perf).
 const BLOOM_DISC_SAMPLES_MAX: usize = 12;
 /// A disc in the caster's plane (`Touch::Plane`) is sampled on a grid of its own square,
-/// apart from the raster: at most a third of its reach apart, and at most half the kernel's
-/// box width w (D6), so a bloom shorter than the disc still sees it as a disc. The grid does
-/// not depend on the raster's cell, so the held and the released previews sample a disc
-/// alike.
+/// apart from the raster, at a spacing of at most a third of its reach and at most half the
+/// kernel's box width w (D6), so a bloom shorter than the disc still sees it as a disc. The
+/// grid does not depend on the raster's cell, so the held and the released previews sample a
+/// disc alike.
 const BLOOM_DISC_GRID_PER_REACH: f32 = 3.0;
 const BLOOM_DISC_GRID_PER_WIDTH: f32 = 2.0;
-/// The most samples a side of a disc's grid: 256 for a bloom shorter than about 0.4 of the
-/// disc's reach, 36 for one longer than its reach (about 0.3 degrees beside the default sun).
+/// The most samples a side of a disc's grid, each a lookup behind the caster: 256 for a bloom
+/// shorter than about 0.4 of the disc's reach, 36 for one longer than its reach (about 0.3
+/// degrees beside the default sun). A disc that asks for more (a large sun or moon behind a
+/// short bloom) has grid steps wider than that spacing; each sample then looks at the caster's
+/// own coverage over its step at the spacing asked (BLOOM_DISC_SUBSAMPLES_MAX at most a side,
+/// no lookup behind), and spreads its light over the part of its step that shows
+/// (`BloomPoint`), so the bloom thins a band along the caster's edge, not beads at the samples.
 const BLOOM_DISC_GRID_MAX: usize = 16;
+/// The most looks at the caster's coverage a side of one sample of a disc's capped grid.
+const BLOOM_DISC_SUBSAMPLES_MAX: usize = 16;
+/// A disc's grid of this many looks or fewer (the default sun's 6 x 6 beside a long bloom) is
+/// built on the caller's thread: a call of the pool's runner costs more.
+const BLOOM_DISC_SERIAL_LOOKS: usize = 64;
+/// A point whose light spreads over less than this share of the kernel's box width w is blurred
+/// by the kernel itself (`spline`), the limit its spread kernel tends to.
+const BLOOM_POINT_MIN_SPREAD: f32 = 1.0e-3;
 /// Samples a side of a raster cell a disc's square covers part of: what lies outside the
 /// square is the cell's, what lies inside it the disc's.
 const BLOOM_CELL_SAMPLES: usize = 4;
@@ -430,14 +456,73 @@ enum Touch {
     Angle(Vec3f, f32, usize),
 }
 
-/// A share of a disc's light behind a caster, kept apart from the raster (D6): its place in
-/// the caster's tangent plane and S / BLOOM_REF_ENERGY it brings at the kernel's peak. It is
-/// blurred by the kernel itself (`spline`) wherever it is looked up, so a bloom shorter than a
-/// raster cell still blooms it over its own length.
+/// A share of a disc's light behind a caster, kept apart from the raster (D6): its centre in
+/// the caster's tangent plane, S / BLOOM_REF_ENERGY it brings at the kernel's peak, and the half
+/// sides of the box it spreads evenly over (its light's own spread, matched by its second
+/// moments: the part of a grid step, or of a group of steps, that shows past the caster). It is
+/// blurred by the kernel over that box wherever it is looked up (`spread`), so a bloom shorter
+/// than a raster cell, or than a disc's grid step, still blooms it over its own length.
 #[derive(Clone, Copy, Debug)]
 struct BloomPoint {
     at: Vec2f,
     weight: f32,
+    half: Vec2f,
+}
+
+/// A disc's light over part of its grid (`CasterBloom::build`): b x area summed, and its first
+/// and second moments about the disc's centre (each look's own square of side q adding
+/// q² / 12), tangent units.
+#[derive(Clone, Copy, Debug, Default)]
+struct Moments {
+    mass: f64,
+    x: f64,
+    y: f64,
+    xx: f64,
+    yy: f64,
+}
+
+impl Moments {
+    /// `mass` spread evenly over the square of side `q` centred at `x`, `y`.
+    fn add(&mut self, mass: f64, x: f32, y: f32, q: f32) {
+        let (x, y, own) = (x as f64, y as f64, (q as f64) * (q as f64) / 12.0);
+        self.mass += mass;
+        self.x += mass * x;
+        self.y += mass * y;
+        self.xx += mass * (x * x + own);
+        self.yy += mass * (y * y + own);
+    }
+
+    fn merge(&mut self, other: &Moments) {
+        self.mass += other.mass;
+        self.x += other.x;
+        self.y += other.y;
+        self.xx += other.xx;
+        self.yy += other.yy;
+    }
+
+    /// This light times `factor`, where it lies unchanged.
+    fn scaled(&self, factor: f64) -> Moments {
+        Moments { mass: self.mass * factor, x: self.x * factor, y: self.y * factor, xx: self.xx * factor, yy: self.yy * factor }
+    }
+
+    /// The point that holds this light, about `centre`: at its centroid, spread over the box
+    /// of its second moments (half side sqrt(3 var), the box with the same spread).
+    fn point(&self, centre: Vec2f) -> BloomPoint {
+        let (cx, cy) = (self.x / self.mass, self.y / self.mass);
+        let half = |second: f64, mean: f64| (3.0 * (second / self.mass - mean * mean).max(0.0)).sqrt() as f32;
+        BloomPoint { at: vec2f(centre.x + cx as f32, centre.y + cy as f32), weight: (self.mass / BLOOM_REF_ENERGY) as f32, half: vec2f(half(self.xx, cx), half(self.yy, cy)) }
+    }
+}
+
+/// A point's kernel along one axis, `d` from its centre: the peak-1 kernel (`spline`, box width
+/// `w`) blurred over the point's box of half side `half`, its integral that of `spline` (4/3 w).
+/// The kernel itself for a point of no spread.
+fn spread(d: f32, half: f32, w: f32) -> f32 {
+    if half <= BLOOM_POINT_MIN_SPREAD * w {
+        return spline(d / w);
+    }
+    let (d, half, w) = (d as f64, half as f64, w as f64);
+    (4.0 / 3.0 * w / (2.0 * half) * (spline_cdf((d + half) / w) - spline_cdf((d - half) / w))) as f32
 }
 
 /// The profile of three boxes of width 1 along one axis, its peak scaled to 1, at `u` box
@@ -483,7 +568,7 @@ pub(crate) struct CasterBloom {
     /// tangent units.
     points: Vec<BloomPoint>,
     width: f32,
-    /// The box the points reach, tangent units: their own box widened by 1.5 w.
+    /// The box the points reach, tangent units: their own boxes widened by 1.5 w.
     points_min: Vec2f,
     points_max: Vec2f,
     /// The bright light the raster and the points hold, the sum of b x area (the tests).
@@ -499,17 +584,21 @@ impl CasterBloom {
     ///   and all of it round its edges), whatever its strength and tint. `behind(d)` is what
     ///   the map draws at `d` (map frame) before the caster, times 2^intensity_ev. `sharp(d)`
     ///   is the caster's analytic coverage, which its softness raster softens.
+    /// - The raster is laid out for a map `width` wide, held to at least
+    ///   CASTER_REFERENCE_WIDTH (D6), so the held and the released previews read one raster.
     /// - A disc of `hot` (map frame; radius in radians) that projects onto the caster's plane
     ///   is sampled on a grid of its own square there, fine enough for the disc and for the
-    ///   kernel (BLOOM_DISC_GRID_*), and kept as points; a raster cell holds b at its centre,
+    ///   kernel (BLOOM_DISC_GRID_*; where the grid is capped, each sample looks at the caster's
+    ///   coverage over its step at that spacing), and kept as points spread over the part of
+    ///   the square that shows; a raster cell holds b at its centre,
     ///   or the mean of a grid of samples outside the squares where a square covers part of
     ///   it (and over all of it where a disc too near the plane's edge to project touches it).
     /// - S: the bright light within the bloom length, nearer counting more: b blurred by the
     ///   kernel of three boxes of width w = 2/3 of the bloom length, scaled so its peak is 1.
     ///   On the raster that is the kernel as it falls over each cell while it spans few cells
     ///   (`kernel_pass`, D6), else three box passes (summed-area tables). The points are
-    ///   blurred by the kernel itself (`spline`). A longer length only widens the kernel, so S
-    ///   only grows with it.
+    ///   blurred by the kernel over their boxes (`spread`). A longer length only widens the
+    ///   kernel, so S only grows with it.
     /// - g = 1 - exp(-S / BLOOM_REF_ENERGY); 0 below BLOOM_FLUSH.
     /// `run` spreads the raster's rows and each disc's grid rows (M5). Counted as
     /// probe::Work::CasterBloom. None when `cancelled` (polled between the runner's calls and
@@ -526,6 +615,9 @@ impl CasterBloom {
         #[cfg(test)]
         super::probe::count(super::probe::Work::CasterBloom);
         let p = &caster.params;
+        // D6: no map below the reference width rasters its bloom more coarsely, so the held
+        // preview's raster is the released one's; a wider map (an export) gets a finer one.
+        let width = width.max(CASTER_REFERENCE_WIDTH);
         let len = p.bloom_length_deg.to_radians().tan();
         // What the coverage reaches: the box, widened by the softness blur (decision 10).
         let soft = p.softness * CASTER_SOFT_SCALE * caster.half.x.min(caster.half.y);
@@ -537,7 +629,8 @@ impl CasterBloom {
         // BLOOM_BOX_SHARE of that, so a bloom that fits in the rest leaves the cell as it is.
         let room = (side - 6) as f32;
         let box_reach = caster.half.x.max(caster.half.y) + soft;
-        let cell = texel.max(len / BLOOM_CELLS_PER_LENGTH).max(2.0 * box_reach / (BLOOM_BOX_SHARE * room)).max(2.0 * reach.x.max(reach.y) / room);
+        let per_length = (BLOOM_CELLS_PER_LENGTH * width as f32 / CASTER_REFERENCE_WIDTH as f32).min(BLOOM_CELLS_PER_LENGTH_MAX);
+        let cell = texel.max(len / per_length).max(2.0 * box_reach / (BLOOM_BOX_SHARE * room)).max(2.0 * reach.x.max(reach.y) / room);
         // The cells lie on a grid round the caster's centre, an even count a side, so a longer
         // bloom of the same cell only adds cells at the border (D6: cells that moved with the
         // length sampled the pattern elsewhere, and a little more bloom could thin less).
@@ -551,18 +644,20 @@ impl CasterBloom {
         let threshold = 2.0f32.powf(p.bloom_threshold_ev);
         let frame = caster.frame;
         let at = |x: f32, y: f32| (frame.center + frame.right * x + frame.up * y).normalize();
-        // b at one direction. The coverage first: behind a fully covering part nothing shows,
-        // and the lookup behind is the slow part.
-        let ev_over = |d: Vec3f| -> f32 {
+        // b at one direction: how far the light behind is over the threshold, in EV, times
+        // the share that shows past the caster. The coverage first: behind a fully covering
+        // part nothing shows, and the lookup behind is the slow part.
+        let shows = |d: Vec3f| -> f32 {
             let m = caster.unbloomed(d, sharp);
-            if !(m < 1.0) {
-                return 0.0;
-            }
+            if !(m < 1.0) { 0.0 } else { 1.0 - m.max(0.0) }
+        };
+        let ev_behind = |d: Vec3f| -> f32 {
             let lum = luminance(behind(d));
-            if !(lum > threshold) {
-                return 0.0;
-            }
-            (lum.min(MAX_RADIANCE) / threshold).log2() * (1.0 - m.max(0.0))
+            if !(lum > threshold) { 0.0 } else { (lum.min(MAX_RADIANCE) / threshold).log2() }
+        };
+        let ev_over = |d: Vec3f| -> f32 {
+            let open = shows(d);
+            if !(open > 0.0) { 0.0 } else { ev_behind(d) * open }
         };
         // Each disc. In the caster's tangent plane a disc is its centre's projection and its
         // reach there, the outward side of its radius, which the plane stretches most
@@ -632,45 +727,68 @@ impl CasterBloom {
                 .collect()
         };
         let b: Vec<f32> = rows_by(rows, run, cancelled, &raster_row)?.concat();
-        // The squares, each on its own grid (a sample in an earlier square is that one's),
-        // into points merged to about half the kernel's width apart.
+        // The squares, each on its own grid (a look in an earlier square is that one's), into
+        // points merged to about half the kernel's width apart.
         let mut points = Vec::new();
         #[cfg(test)]
         let mut point_energy = 0.0f64;
         for (k, &(c, h)) in squares.iter().enumerate() {
             let spacing = (h / BLOOM_DISC_GRID_PER_REACH).min(w as f32 / BLOOM_DISC_GRID_PER_WIDTH);
-            let n = ((2.0 * h / spacing).ceil() as usize).clamp(2, BLOOM_DISC_GRID_MAX);
+            let wanted = ((2.0 * h / spacing).ceil() as usize).max(1);
+            let n = wanted.clamp(2, BLOOM_DISC_GRID_MAX);
+            // Where the grid is capped, a sample's step is wider than the spacing asked: it looks
+            // at the caster's coverage `sub` x `sub` times over its step (and behind it once, at
+            // its centre), so an edge across the step is placed to a `sub`th of it.
+            let sub = wanted.div_ceil(n).clamp(1, BLOOM_DISC_SUBSAMPLES_MAX);
             let groups = ((2.0 * h * BLOOM_DISC_GRID_PER_WIDTH / w as f32).ceil() as usize).clamp(1, n);
             let step = 2.0 * h / n as f32;
-            // b on the grid, a row at a time where `run` puts it (0 in an earlier square).
+            let q = step / sub as f32;
+            let area = (q as f64) * (q as f64);
+            // The light of each sample of the grid, a row at a time where `run` puts it.
             let place = |s: usize, centre: f32| centre - h + (s as f32 + 0.5) * step;
-            let grid_row = |sj: usize| -> Vec<f32> {
+            let grid_row = |sj: usize| -> Vec<Moments> {
                 let sy = place(sj, c.y);
-                (0..n).map(|si| if in_square(&squares[..k], place(si, c.x), sy) { 0.0 } else { ev_over(at(place(si, c.x), sy)) }).collect()
+                (0..n)
+                    .map(|si| {
+                        let sx = place(si, c.x);
+                        let mut light = Moments::default();
+                        if sub == 1 {
+                            if !in_square(&squares[..k], sx, sy) {
+                                light.add(ev_over(at(sx, sy)) as f64 * area, sx - c.x, sy - c.y, q);
+                            }
+                            return light;
+                        }
+                        for v in 0..sub {
+                            let y = sy + ((v as f32 + 0.5) / sub as f32 - 0.5) * step;
+                            for u in 0..sub {
+                                let x = sx + ((u as f32 + 0.5) / sub as f32 - 0.5) * step;
+                                if !in_square(&squares[..k], x, y) {
+                                    light.add(shows(at(x, y)) as f64 * area, x - c.x, y - c.y, q);
+                                }
+                            }
+                        }
+                        if light.mass > 0.0 { light.scaled(ev_behind(at(sx, sy)) as f64) } else { light }
+                    })
+                    .collect()
             };
-            let values = rows_by(n, run, cancelled, &grid_row)?;
-            // Per group: the sum of b and of b x place.
-            let mut sums = vec![(0.0f64, 0.0f64, 0.0f64); groups * groups];
+            // A grid of few looks is not worth a call of the runner.
+            let grid_run: RowRunner = if n * n * sub * sub <= BLOOM_DISC_SERIAL_LOOKS { &serial_rows } else { run };
+            let values = rows_by(n, grid_run, cancelled, &grid_row)?;
+            let mut sums = vec![Moments::default(); groups * groups];
             for (sj, row) in values.iter().enumerate() {
-                for (si, &v) in row.iter().enumerate() {
-                    if v > 0.0 {
-                        let v = v as f64;
-                        let group = &mut sums[(sj * groups / n) * groups + si * groups / n];
-                        group.0 += v;
-                        group.1 += v * place(si, c.x) as f64;
-                        group.2 += v * place(sj, c.y) as f64;
+                for (si, light) in row.iter().enumerate() {
+                    if light.mass > 0.0 {
+                        sums[(sj * groups / n) * groups + si * groups / n].merge(light);
                     }
                 }
             }
-            let area = (step as f64) * (step as f64);
-            for &(v, vx, vy) in &sums {
-                let weight = v * area / BLOOM_REF_ENERGY;
-                if weight > BLOOM_FLUSH {
+            for light in &sums {
+                if light.mass / BLOOM_REF_ENERGY > BLOOM_FLUSH {
                     #[cfg(test)]
                     {
-                        point_energy += v * area;
+                        point_energy += light.mass;
                     }
-                    points.push(BloomPoint { at: vec2f((vx / v) as f32, (vy / v) as f32), weight: weight as f32 });
+                    points.push(light.point(c));
                 }
             }
         }
@@ -712,8 +830,9 @@ impl CasterBloom {
         let w = w as f32;
         let (mut points_min, mut points_max) = (Vec2f::all(f32::INFINITY), Vec2f::all(f32::NEG_INFINITY));
         for point in &points {
-            points_min = vec2f(points_min.x.min(point.at.x - 1.5 * w), points_min.y.min(point.at.y - 1.5 * w));
-            points_max = vec2f(points_max.x.max(point.at.x + 1.5 * w), points_max.y.max(point.at.y + 1.5 * w));
+            let reach = Vec2f::all(1.5 * w) + point.half;
+            points_min = vec2f(points_min.x.min(point.at.x - reach.x), points_min.y.min(point.at.y - reach.y));
+            points_max = vec2f(points_max.x.max(point.at.x + reach.x), points_max.y.max(point.at.y + reach.y));
         }
         Some(CasterBloom {
             frame,
@@ -756,17 +875,17 @@ impl CasterBloom {
     }
 
     /// The points' S / BLOOM_REF_ENERGY at tangent point `p`: each one's weight times the
-    /// kernel (`spline` along both axes, w wide). 0 past their reach.
+    /// kernel over its box (`spread` along both axes, w wide). 0 past their reach.
     fn points_at(&self, p: Vec2f) -> f32 {
         if !(p.x > self.points_min.x && p.y > self.points_min.y && p.x < self.points_max.x && p.y < self.points_max.y) {
             return 0.0;
         }
-        let reach = 1.5 * self.width;
+        let (w, reach) = (self.width, 1.5 * self.width);
         let mut s = 0.0;
         for point in &self.points {
             let (dx, dy) = (p.x - point.at.x, p.y - point.at.y);
-            if dx.abs() < reach && dy.abs() < reach {
-                s += point.weight * spline(dx / self.width) * spline(dy / self.width);
+            if dx.abs() < reach + point.half.x && dy.abs() < reach + point.half.y {
+                s += point.weight * spread(dx, point.half.x, w) * spread(dy, point.half.y, w);
             }
         }
         s
@@ -1166,9 +1285,10 @@ mod tests {
     /// R5, the bloom's property 2: the share is exactly 0 farther than the bloom length (and
     /// the raster's cells round it) from anything bright behind the caster, and a cancelled
     /// pre-pass stops. A solid caster 40 x 30 degrees due north, 20 degrees up, 6 degrees of
-    /// bloom; behind it one spot a degree across at 2^14 (4 EV over the default threshold),
+    /// bloom; behind it one spot 1.5 degrees across at 2^14 (4 EV over the default threshold),
     /// 3 degrees right of its centre, and a dim sky. The pattern is open (`sharp` 0), so the
-    /// spot shows and the share is the bloom's alone.
+    /// spot shows and the share is the bloom's alone. (The raster's cells are a sixth of the
+    /// length, about a degree, so a spot that wide always holds a cell's centre.)
     #[test]
     fn the_bloom_share_is_exactly_zero_beyond_its_length() {
         use crate::hdri::{dir_from_az_el, CasterParams, ImageSet, LightParams};
@@ -1183,13 +1303,13 @@ mod tests {
         };
         let caster = CasterLayer::new(&light, &ImageSet::default(), CASTER_REFERENCE_WIDTH, &serial_rows).expect("a solid caster draws");
         let spot = dir_from_az_el(3.0, 20.0);
-        let cos_spot = 0.5f32.to_radians().cos();
+        let cos_spot = 0.75f32.to_radians().cos();
         let behind = |d: Vec3f| if d.dot(spot) >= cos_spot { Vec3f::all(16384.0) } else { Vec3f::all(0.5) };
         let open = |_: Vec3f| 0.0;
         let bloom = CasterBloom::build(&caster, 1024, &[], &behind, &open, &|| false, &serial_rows).expect("nothing cancels it");
         assert!(bloom.thins_anything(), "the spot is bright");
         assert!(bloom.share(spot) > 0.5, "on the spot: {}", bloom.share(spot));
-        // 10 degrees from the spot: past 6 degrees of bloom, the spot's half degree and three cells.
+        // 10 degrees from the spot: past 6 degrees of bloom, the spot's 0.75 degrees and three cells.
         for (az, el) in [(13.0, 20.0), (-7.0, 20.0), (3.0, 30.0), (3.0, 10.0), (-15.0, 32.0)] {
             assert_eq!(bloom.share(dir_from_az_el(az, el)), 0.0, "at azimuth {az}, elevation {el}");
         }
@@ -1275,11 +1395,12 @@ mod tests {
         [("the sun", thinned_round_the_sun(&sun, length_deg), cell(&sun, 0)), ("a softbox", thinned_round_the_softbox(&softbox, length_deg), cell(&softbox, 1))]
     }
 
-    /// D6 (plan 4's final review): a bloom shorter than a raster cell of the held preview still
-    /// acts, and every length past it thins more, round the sun and round a softbox. The cell of
-    /// the held 512 rasters here is over a degree; a kernel of a third of the length each way
-    /// was held to half a cell, so every length under about 1.5 cells thinned as much as every
-    /// other (or, as the raster's cells moved with the length, less).
+    /// D6 (plan 4's final review): a bloom shorter than a raster cell still acts, and every
+    /// length past it thins more, round the sun and round a softbox, in the held 512 preview.
+    /// Its rasters' cells here are about two thirds of a degree (the released preview's, which
+    /// the held one shares); a kernel of a third of the length each way was held to half a cell,
+    /// so every length under about 1.5 cells thinned as much as every other (or, as the
+    /// raster's cells moved with the length, less).
     #[test]
     fn a_bloom_shorter_than_a_raster_cell_still_thins_and_grows_with_its_length() {
         let lengths = [0.1f32, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0];
@@ -1289,7 +1410,7 @@ mod tests {
             let thinned: Vec<f64> = by_length.iter().map(|s| s[scene].1).collect();
             println!("{name}: thinned at 512 by length {lengths:?}: {thinned:?}");
             for (&length_deg, s) in lengths.iter().zip(&by_length) {
-                if length_deg <= 1.0 {
+                if length_deg <= 0.5 {
                     assert!(s[scene].2 > length_deg.to_radians().tan(), "{name}: the premise, {length_deg} degrees is under a cell ({})", s[scene].2);
                 }
             }
@@ -1301,39 +1422,78 @@ mod tests {
     }
 
     /// D6: the held (512) and the released (1024) previews thin a caster alike, from a tenth of
-    /// a degree of bloom to 20 degrees. Round the sun, whose disc both sample on the same grid
-    /// of its own, within HELD_RELEASED_DISC. Round a softbox, which the raster carries at
-    /// cells twice as wide in the held preview, within HELD_RELEASED_RASTER of the released
-    /// thinning, or of the caster's own solid angle where a bloom shorter than a few held cells
-    /// thins only a few per cent of it.
+    /// a degree of bloom to 20 degrees, within HELD_RELEASED of the released thinning: round the
+    /// sun, whose disc both sample on the same grid of its own, and round a softbox, which the
+    /// raster carries (both previews raster it at the released preview's cells).
     #[test]
     fn held_and_released_previews_bloom_alike() {
-        // A 40 x 30 degree box in the tangent plane: 4 asin(sin 20 deg x sin 15 deg).
-        let caster_sr = 4.0 * (20f64.to_radians().sin() * 15f64.to_radians().sin()).asin();
         let mut off = Vec::new();
         for length_deg in [0.1f32, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0] {
             for (held, released) in d6_scenes(length_deg, 512).into_iter().zip(d6_scenes(length_deg, 1024)) {
                 let (name, held, released) = (held.0, held.1, released.1);
-                println!("{name:9} {length_deg:5.2} degrees: held {held:.4e} sr, released {released:.4e} sr, {:+.1} %", 100.0 * (held / released - 1.0));
+                println!("{name:9} {length_deg:5.2} degrees: held {held:.4e} sr, released {released:.4e} sr, {:+.2} %", 100.0 * (held / released - 1.0));
                 assert!(released > 0.0, "{name}, {length_deg} degrees: the released preview thins nothing");
-                let allowed = match name {
-                    "the sun" => HELD_RELEASED_DISC * released,
-                    _ => (HELD_RELEASED_RASTER * released).max(HELD_RELEASED_RASTER_FLOOR * caster_sr),
-                };
-                if !((held - released).abs() <= allowed) {
-                    off.push(format!("{name} at {length_deg} degrees: held {held:.3e} sr, released {released:.3e} sr, {allowed:.3e} sr allowed"));
+                if !((held - released).abs() <= HELD_RELEASED * released) {
+                    off.push(format!("{name} at {length_deg} degrees: held {held:.3e} sr, released {released:.3e} sr, {:+.1} %", 100.0 * (held / released - 1.0)));
                 }
             }
         }
-        assert!(off.is_empty(), "the held and released previews differ: {}", off.join(", "));
+        assert!(off.is_empty(), "the held and released previews differ by more than {} %: {}", 100.0 * HELD_RELEASED, off.join(", "));
     }
 
     /// How far the held and released previews' bloom may differ (`held_and_released_previews_bloom_alike`):
-    /// round a disc, 2 % of the released thinning; round light the raster carries, 15 % of it,
-    /// or 1.5 % of the caster's solid angle where that is more.
-    const HELD_RELEASED_DISC: f64 = 0.02;
-    const HELD_RELEASED_RASTER: f64 = 0.15;
-    const HELD_RELEASED_RASTER_FLOOR: f64 = 0.015;
+    /// 2 % of the released thinning, round a disc and round light the raster carries alike.
+    const HELD_RELEASED: f64 = 0.02;
+
+    /// D6 (plan 4's fix wave, review of S3): a disc far wider than its bloom is long (a 20
+    /// degree sun at softness 0.2, 11 degrees out to its soft edge, behind a 0.5 degree bloom)
+    /// asks for more grid steps across it than BLOOM_DISC_GRID_MAX allows, so its grid is 1.6
+    /// degrees apart and the kernel reaches 0.5. It still thins the solid 40 x 30 degree caster
+    /// whose bottom edge crosses it in a band along that edge, not in beads at its samples,
+    /// wherever the edge falls between them: at nine places of the disc a fifth of a degree
+    /// apart (a grid step in all), along a line 0.15 degrees inside the edge, over 5 degrees
+    /// either side of the disc's centre, the share never falls under half its most, and the
+    /// line's mean share never under a quarter of its most at any place. (The edge is placed to
+    /// the spacing a grid asks for, half the kernel's box width, as round a disc whose grid is
+    /// not capped, so this far into the kernel's tail the band's share still moves with it by
+    /// up to about 2.5 times: 0.15 to 0.36 here, 0.15 to 0.42 round a 0.6 degree disc.)
+    #[test]
+    fn a_large_disc_at_a_casters_edge_thins_it_in_a_band_not_in_beads() {
+        use crate::hdri::{dir_from_az_el, ImageSet};
+        let light = caster_at(0.0, 20.0, 40.0, 30.0, None, CasterParams { bloom_strength: 1.0, bloom_length_deg: 0.5, ..CasterParams::default() });
+        let caster = CasterLayer::new(&light, &ImageSet::default(), CASTER_REFERENCE_WIDTH, &serial_rows).expect("a solid caster draws");
+        let (frame, half) = (caster.frame, caster.half);
+        let solid = |d: Vec3f| match project(&frame, d) {
+            Some(t) if t.x.abs() <= half.x && t.y.abs() <= half.y => 1.0,
+            _ => 0.0,
+        };
+        let outer = 11f32.to_radians();
+        let line_y = -half.y + 0.15f32.to_radians();
+        let (mut means, mut beads) = (Vec::new(), Vec::new());
+        for k in 0..9 {
+            // The disc's centre on the caster's bottom edge (5 degrees up), then lower.
+            let sun = dir_from_az_el(0.0, 5.0 - 0.2 * k as f32);
+            let behind = |d: Vec3f| if d.dot(sun) >= outer.cos() { Vec3f::all(16384.0) } else { Vec3f::all(0.5) };
+            let bloom = CasterBloom::build(&caster, CASTER_REFERENCE_WIDTH, &[(sun, outer)], &behind, &solid, &|| false, &serial_rows).expect("nothing cancels it");
+            let reach = 5f32.to_radians().tan();
+            let shares: Vec<f32> = (0..=200)
+                .map(|i| {
+                    let x = -reach + 2.0 * reach * i as f32 / 200.0;
+                    bloom.share((frame.center + frame.right * x + frame.up * line_y).normalize())
+                })
+                .collect();
+            let (min, max) = shares.iter().fold((f32::INFINITY, 0.0f32), |(lo, hi), &s| (lo.min(s), hi.max(s)));
+            let mean = shares.iter().map(|&s| s as f64).sum::<f64>() / shares.len() as f64;
+            println!("disc {:.1} degrees under the edge: share along the edge {min:.4} to {max:.4}, mean {mean:.4}", 0.2 * k as f32);
+            if !(max > 0.0 && min >= 0.5 * max) {
+                beads.push(format!("{:.1} degrees under the edge: {min:.4} to {max:.4}", 0.2 * k as f32));
+            }
+            means.push(mean);
+        }
+        assert!(beads.is_empty(), "the share 0.15 degrees inside the edge is not a band (none, or falling under half its most between samples): {}", beads.join(", "));
+        let (lo, hi) = means.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), &m| (lo.min(m), hi.max(m)));
+        assert!(lo >= 0.25 * hi, "the band's mean share falls from {hi:.4} to {lo:.4} as the disc moves: {means:?}");
+    }
 
     /// `p` with every caster's bloom strength set to `strength`.
     fn bloom_at(mut p: HdriParams, strength: f32) -> HdriParams {

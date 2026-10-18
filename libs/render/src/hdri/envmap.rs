@@ -493,13 +493,14 @@ mod tests {
         assert!(sun.unwrap().dir.y > 0.0);
     }
 
-    /// R5: the bakes that know their width build their Env for it
-    /// (`Env::new_for_width`), so a shadow caster's bloom is rastered at the
-    /// bake's texel: the map is that Env's, not the reference width's. The
-    /// threshold lets the sky through, so the raster carries light (the sun's
-    /// disc alone is sampled alike at every width, D6).
+    /// R5, M5: the bakes that know their width build their Env for it
+    /// (`Env::new_for_width`), so a shadow caster's rasters are laid out for
+    /// the bake: the map is that Env's, not the reference width's. The caster
+    /// is soft, and a softness raster's cells are no finer than the bake's
+    /// texel; its bloom's raster is the reference width's at 64 (no map below
+    /// it rasters a bloom more coarsely, D6).
     #[test]
-    fn a_generated_bake_rasters_a_casters_bloom_at_its_width() {
+    fn a_generated_bake_rasters_a_caster_at_its_width() {
         let mut p = HdriParams::default();
         p.sky.sun.mode = "manual".to_string();
         p.sky.sun.azimuth_deg = 200.0;
@@ -510,7 +511,7 @@ mod tests {
             width_deg: 40.0,
             height_deg: 30.0,
             gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, seed: 3, ..GoboParams::default() }),
-            caster: Some(CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, bloom_threshold_ev: -2.0, ..CasterParams::default() }),
+            caster: Some(CasterParams { softness: 0.3, bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() }),
             ..LightParams::new_caster()
         });
         let at_64 = Env::new_for_width(&p, &ImageSet::default(), 64, &|| false).expect("nothing cancels it").bake(64);
