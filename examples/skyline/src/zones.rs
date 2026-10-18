@@ -141,7 +141,6 @@ impl Zones {
     pub fn tr_n(&self, u: f64) -> f64 { self.rng.region(fract(u), self.p[P::TrC], self.p[P::TrW], 450.0) }
     /// Open land outside the city core, industry, town, fair and bridge: unwobbled, or the shader's `prOpen`.
     pub fn open_n(&self, u: f64) -> f64 { self.free(self.land_n(u), u) }
-    #[allow(dead_code)] // the prop generators
     pub fn open(&self, u: f64) -> f64 { self.free(self.land(u), u) }
     fn free(&self, x: f64, u: f64) -> f64 { [&self.core, &self.ind, &self.town, &self.fair, &self.bridge].iter().fold(x, |x, z| x * (1.0 - Self::in_z(u, z))) }
     /// Ridge elevations of the five ranges at u (the zones' footprint).

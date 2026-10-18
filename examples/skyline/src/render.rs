@@ -66,18 +66,20 @@ impl ViewSpec {
     pub fn row_of(&self, ang: f64) -> f64 { self.horizon * self.h as f64 - ang / self.px0() }
 }
 
-/// One scene target: a pass with two RGBA16F targets (colour + coverage, light + coverage).
+/// A pass with RGBA16F targets cleared to transparent: two (colour + coverage, light + coverage), or one (`color` and
+/// `light` are the same texture).
 pub struct SceneTarget { pub pass: DrawPass, pub list: DrawList2d, pub color: Texture, pub light: Texture }
 
 impl SceneTarget {
-    pub fn new(cx: &mut Cx, name: &str) -> Self {
+    pub fn new(cx: &mut Cx, name: &str, two: bool) -> Self {
         let pass = DrawPass::new_with_name(cx, name);
         let target = |cx: &mut Cx| {
             let t = Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
             pass.add_color_texture(cx, &t, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
             t
         };
-        let (color, light) = (target(cx), target(cx));
+        let color = target(cx);
+        let light = if two { target(cx) } else { color.clone() };
         Self { list: DrawList2d::new(cx), pass, color, light }
     }
 
@@ -99,13 +101,15 @@ impl SceneTarget {
 pub struct SceneCtx<'a> {
     pub view: &'a ViewSpec, pub p: &'a Params,
     /// The placement zones (the city and the props read them).
-    #[allow(dead_code)] pub z: &'a Zones,
+    pub z: &'a Zones,
     /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
     pub cols: &'a Texture, pub col_geom: [f32; 4], pub col_data: &'a [[f32; 4]],
     /// The single trees' coverage (or a blank texture).
     pub tree_cov: Texture,
     /// The city march's targets once stage A provides them: colour + alpha, emission + depth (m).
     pub city: Option<(Texture, Texture)>,
+    /// The producers' passes (trees, city): a pass that samples them puts them under itself, so they paint first.
+    pub inputs: [Option<DrawPassId>; 2],
     /// The reflection run: everything seen mirrored about the horizon (or its own waterline).
     pub mirror: bool,
 }
@@ -128,6 +132,8 @@ impl SceneCtx<'_> {
 
     /// The column data of output column x (0..w) and row r.
     pub fn col(&self, x: usize, r: usize) -> [f32; 4] { self.col_data[(x + self.col_geom[2] as usize) * ROWS + r] }
+    /// The top of the near ground rise in this view (raw elevation, rad).
+    pub fn rise(&self) -> f64 { (0..self.view.w).map(|x| self.col(x, 6)).map(|g| g[1] as f64 / (g[2] as f64).max(1e-3)).fold(0.0, f64::max) }
 
     /// The pass rect from raw elevation `top` down to `bottom` (rad), across the view, flipped in
     /// the reflection run; None when it is empty.
@@ -157,7 +163,7 @@ pub struct Stats {
     pub w: usize, pub h: usize, pub zones_ms: f64, pub cols_ms: f64, pub record_ms: f64, pub renders: u64,
 }
 
-struct ColumnCache { key: u64, m: usize, data: Vec<[f32; 4]>, tex: Texture, geom: [f32; 4] }
+pub struct ColumnCache { key: u64, m: usize, data: Vec<[f32; 4]>, tex: Texture, geom: [f32; 4] }
 
 /// The parameters the zones depend on (with the seed).
 const ZONE_KEYS: &[P] = &[
@@ -176,11 +182,11 @@ pub struct Skyline {
     #[live] pub post: Post,
     #[rust] scene: Option<SceneTarget>,
     #[rust] mirror: Option<SceneTarget>,
-    #[rust] zones: Option<(u64, Zones)>,
-    #[rust] cols: Option<ColumnCache>,
+    #[rust] pub zones: Option<(u64, Zones)>,
+    #[rust] pub cols: Option<ColumnCache>,
     #[rust] blank: Option<Texture>,
     /// The key of the picture the targets hold.
-    #[rust] drawn: Option<u64>,
+    #[rust] pub drawn: Option<u64>,
     #[rust] pub stats: Stats,
     /// A running export or band (`export.rs`), on a Skyline of its own.
     #[rust] pub job: Option<crate::export::Job>,
@@ -189,7 +195,9 @@ pub struct Skyline {
 impl Skyline {
     /// Draws `view` into `rect` of the current pass: records the passes when the picture changed,
     /// then the final composite (`tone`: the display tone shoulder; an export keeps the raw HDR).
-    pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, view: &ViewSpec, p: &Params, tone: bool) {
+    /// The scene has the blur's margin, so lights at the edges blur with their real neighbours; the final crops it.
+    pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool) {
+        let view = &self.post.scene_view(p, shown);
         self.update_inputs(cx, view, p);
         // the picture: every parameter but the view's own (pan, zoom and the field of view only
         // place the view, which its first azimuth, span and size say), and the view
@@ -197,15 +205,26 @@ impl Skyline {
         let mut picture: Vec<f64> = p.v.iter().enumerate().filter(|(i, _)| !view_only.contains(i)).map(|(_, x)| *x).collect();
         picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon]);
         let key = p.hash(&[], &picture);
-        if self.scene.is_none() { self.scene = Some(SceneTarget::new(cx, "skyline_scene")); }
+        if self.scene.is_none() { self.scene = Some(SceneTarget::new(cx, "skyline_scene", true)); }
         if self.drawn != Some(key) {
             let t1 = Cx::monotonic_now();
             self.record(cx, view, p);
             (self.drawn, self.stats.renders, self.stats.record_ms) = (Some(key), self.stats.renders + 1, ms_since(t1));
         }
         let (scene, mirror) = (self.scene.as_ref().unwrap(), self.mirror.as_ref());
-        self.post.draw_final(cx, rect, p, &crate::post::SceneOut { view, scene, mirror }, tone);
-        (self.stats.w, self.stats.h) = (view.w, view.h);
+        self.post.draw_final(cx, rect, &crate::post::SceneOut { view, scene, mirror }, tone);
+        (self.stats.w, self.stats.h) = (shown.w, shown.h);
+    }
+
+    /// Lets go of every target (an export core between jobs), and of the shaders' hold on the textures.
+    pub fn release(&mut self) {
+        (self.scene, self.mirror, self.drawn, self.props.pl) = (None, None, None, None);
+        (self.post.water, self.post.blur) = (None, None);
+        self.city.release(); self.trees.release();
+        let (pr, ci, po) = (&mut self.props, &mut self.city, &mut self.post);
+        for v in [&mut self.draw_glow.draw_vars, &mut self.draw_range.draw_vars, &mut self.draw_ground.draw_vars, &mut self.trees.draw_trees.draw_vars,
+            &mut ci.draw_city.draw_vars, &mut ci.draw_blit.draw_vars, &mut pr.draw_part.draw_vars, &mut pr.draw_blit.draw_vars,
+            &mut po.draw_final.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars] { v.texture_slots = Default::default(); }
     }
 
     /// The zones and the columns for this view, rebuilt when what they depend on changed.
@@ -250,19 +269,20 @@ impl Skyline {
         let blank = self.blank.as_ref().unwrap();
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
-        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, mirror: false };
+        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
         sc.tree_cov = self.trees.coverage().unwrap_or(blank).clone();
-        sc.city = self.city.textures();
+        (sc.city, sc.inputs) = (self.city.textures(), [self.trees.pass_id(), self.city.pass_id()]);
         self.props.update(z, p);
-        // the scene, and its mirror image when the water reflects it
+        // the scene, and its mirror image when the water reflects it and the view shows sea
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-        self.mirror = self.post.wants_mirror(p, z).then(|| {
-            let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror"));
+        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35);
+        self.mirror = (self.post.wants_mirror(p) && sea).then(|| {
+            let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
             sc.mirror = true;
             mirror.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
             sc.mirror = false;
@@ -308,8 +328,7 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     if sc.mirror { return; }
     if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { sp.range.k = 5.0; sp.range.draw_abs(cx, r); }
     // the ground band: from the top of the near rise (raw elevation) down; the sea is all below the horizon
-    let rise = (0..v.w).map(|x| sc.col(x, 6)).map(|g| g[1] as f64 / (g[2] as f64).max(1e-3)).fold(0.0, f64::max);
-    if let Some(r) = sc.band(rise + 2.0 * px0, -10.0) {
+    if let Some(r) = sc.band(sc.rise() + 2.0 * px0, -10.0) {
         sc.set_uniforms(cx, &mut sp.ground.draw_vars);
         sp.ground.draw_abs(cx, r);
     }

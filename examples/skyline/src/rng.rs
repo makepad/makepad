@@ -8,14 +8,11 @@ pub const TAU: f64 = 6.2831853;
 
 /// The page's `hu`: one round of a 32-bit integer mix.
 #[inline]
-pub fn hu(mut x: u32) -> u32 {
-    x ^= x >> 16; x = x.wrapping_mul(0x7feb_352d); x ^= x >> 15; x = x.wrapping_mul(0x846c_a68b); x ^ (x >> 16)
-}
+pub fn hu(mut x: u32) -> u32 { x ^= x >> 16; x = x.wrapping_mul(0x7feb_352d); x ^= x >> 15; x = x.wrapping_mul(0x846c_a68b); x ^ (x >> 16) }
 /// JavaScript's `Math.trunc(x) | 0` (wraps like `ToInt32`).
 #[inline]
 pub fn i32_of(x: f64) -> i32 { x.trunc() as i64 as i32 }
 /// A hash's four bytes as 0..1 (the shader's `hb4`, the page's `pkR`).
-#[allow(dead_code)] // the city and the props
 pub fn hb4(h: u32) -> [f64; 4] { [0, 8, 16, 24].map(|s| ((h >> s) & 255) as f64 / 255.0) }
 #[inline]
 pub fn fract(x: f64) -> f64 { x - x.floor() }
@@ -51,10 +48,8 @@ impl Rng {
     }
     /// The city's lot hash `hcell` (the trees' `sgTg`, the town's `townHcell`) of integer cell (x, y), layer k.
     #[inline]
-    #[allow(dead_code)] // the city, the trees and the props
     pub fn hcell(&self, x: i32, y: i32, k: i32) -> u32 { self.hash3(x.wrapping_add(8192) as u32, y.wrapping_add(8192) as u32, k as u32) }
     /// The props' instance hash `pkHash(a, b)` (a sum, not a xor, of its terms).
-    #[allow(dead_code)] // the props
     pub fn pk_hash(&self, a: f64, b: f64) -> u32 {
         hu((i32_of(a).wrapping_add(32768) as u32).wrapping_mul(0x9E37_79B1).wrapping_add((i32_of(b) as u32).wrapping_mul(0x85eb_ca6b)).wrapping_add(self.s))
     }
@@ -90,7 +85,6 @@ impl Rng {
         smooth(h + 0.035, h - 0.035, d + (self.fbm(u, 6.0, ly) - 0.5) * 0.14) * on
     }
     /// 2D gradient noise of the tree crowns' rough edge (`sgTgn`), layer k.
-    #[allow(dead_code)] // the trees
     pub fn tgn(&self, x: f64, y: f64, k: i32) -> f64 {
         let (ix, iy) = (x.floor(), y.floor());
         let (fx, fy) = (x - ix, y - iy);

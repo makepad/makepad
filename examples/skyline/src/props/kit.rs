@@ -167,13 +167,6 @@ script_mod! {
             let y = floor(i / self.parts_geom.x)
             return self.parts.sample_nearest(vec2((i - y * self.parts_geom.x + 0.5) / self.parts_geom.x, (y + 0.5) / self.parts_geom.y))
         }
-        // a black-body-like light at k Kelvin, brightest channel 1
-        kelvin: fn(k: float) -> vec3 {
-            let t = clamp(k, 1000.0, 12000.0) / 100.0; var c = vec3(1.0, clamp(0.39008158 * log(t) - 0.63184144, 0.0, 1.0), 1.0)
-            if t > 66.0 { c = vec3(clamp(1.292936 * pow(t - 60.0, -0.1332047592), 0.0, 1.0), clamp(1.129891 * pow(t - 60.0, -0.0755148492), 0.0, 1.0), 1.0) }
-            if t < 66.0 { c.z = if t <= 19.0 { 0.0 } else { clamp(0.54320679 * log(t - 10.0) - 1.19625409, 0.0, 1.0) } }
-            return c
-        }
         // body tone of an unlit prop d m away (prTone): as black as the front treeline near, the range tops' tone from 5 km
         tone: fn(d: float) -> vec3 {
             let t = clamp(log(d / 5000.0) / log(6.0), 0.0, 1.0); let nk = clamp(log(d / 400.0) / log(12.5), 0.0, 1.0); let hz2 = self.haze * self.haze * 0.35
@@ -396,10 +389,5 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyPartBlit { #[deref] pub draw_super: DrawQuad }
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyPart { #[deref] pub draw_super: DrawQuad, #[live] pub h0: Vec4f, #[live] pub h1: Vec4f, #[live] pub h2: Vec4f, #[live] pub h3: Vec4f }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyPartBlit { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyPart { #[deref] pub draw_super: DrawQuad, #[live] pub h0: Vec4f, #[live] pub h1: Vec4f, #[live] pub h2: Vec4f, #[live] pub h3: Vec4f }

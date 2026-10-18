@@ -2,11 +2,10 @@
 //! [`Skyline::draw_view`] into an RGBA16F target and read back as it is, then written as PNG (toned, un-premultiplied
 //! 8-bit) or EXR (linear float32, premultiplied), or handed over as a [`Band`] (the HDRI generator's skyline layer).
 //! A job runs on a `Skyline` of its own, so the views are never disturbed. Tile k is drawn in frame k and read in frame
-//! k + 1 (two targets in turn); its scene has the blur's margin ([`Post::scene_view`]), so tiles meet without a seam. Metal leaves out
+//! k + 1 (two targets in turn); its scene has the blur's margin (`draw_view`), so tiles meet without a seam. Metal leaves out
 //! the first draw into a new target layout while it builds the pipeline, so there the first tile is read until two
 //! reads agree.
 use crate::params::{Params, P};
-use crate::post::target;
 use crate::render::{SceneTarget, Skyline, ViewSpec};
 use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, makepad_script::pod_heap::f16_to_f32, *};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -86,7 +85,7 @@ impl Skyline {
             let read = cx.read_render_texture(&job.targets[i % 2].color, move |r| {
                 let lut: Vec<f32> = (0..=u16::MAX).map(f16_to_f32).collect();
                 let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
-                let decode = |(_, _, b): (usize, usize, std::sync::Arc<[u8]>)| b.as_chunks::<8>().0.iter().map(|t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])]).collect();
+                let decode = |(_, _, b): (usize, usize, std::sync::Arc<[u8]>)| par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])]);
                 send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).map(decode)));
             });
             if let Err(e) = read { send(&job.tx, News::Tile(i, Err(format!("{e:?}")))); }
@@ -94,13 +93,12 @@ impl Skyline {
         }
         if job.next < job.tiles() && (!job.check || job.reads == 0) {
             let (i, view) = (job.next, job.view(job.next));
-            let scene = self.post.scene_view(&job.p, &view);
-            if job.targets.len() <= i % 2 { job.targets.push(target(cx, "skyline_export")); }
+            if job.targets.len() <= i % 2 { job.targets.push(SceneTarget::new(cx, "skyline_export", false)); }
             let rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(view.w as f64, view.h as f64) };
             let tone = matches!(job.sink, Some(Sink::File(ExportKind::Png, _)));
             let t = &mut job.targets[i % 2];
             cx.make_child_pass(&t.pass);
-            t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &scene, &job.p, tone));
+            t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &view, &job.p, tone));
             (job.drawn, job.next) = (Some(i), i + 1);
         }
         let more = job.sink.is_some();
@@ -133,15 +131,22 @@ impl Skyline {
                     })));
                     continue;
                 }
-                News::Done(Ok(msg)) => { let ms = (Cx::monotonic_now() - job.t0) * 1000.0; self.job = None; return Some(format!("{msg} ({ms:.0} ms)")); }
+                News::Done(Ok(msg)) => { let ms = (Cx::monotonic_now() - job.t0) * 1000.0; self.job = None; self.release(); return Some(format!("{msg} ({ms:.0} ms)")); }
                 News::Tile(_, Err(e)) | News::Done(Err(e)) => e,
             };
             if let Some(Sink::Band(done)) = job.sink.take() { let e = e.clone(); std::thread::spawn(move || done(Err(e))); }
-            self.job = None;
+            self.job = None; self.release();
             return Some(format!("Export failed: {e}"));
         }
         None
     }
+}
+
+/// `f` of every item of `t`, in order, the work split over every core (decoding and toning millions of texels).
+fn par<T: Sync, U: Send + Copy + Default>(t: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    let (n, mut out, f) = (t.len().div_ceil(std::thread::available_parallelism().map_or(4, |n| n.get())).max(1), vec![U::default(); t.len()], &f);
+    std::thread::scope(|s| for (o, c) in out.chunks_mut(n).zip(t.chunks(n)) { s.spawn(move || for (o, x) in o.iter_mut().zip(c) { *o = f(x) }); });
+    out
 }
 
 /// The user's Downloads folder when there is one, else the working directory.
@@ -154,12 +159,12 @@ fn downloads() -> std::path::PathBuf {
 fn png(w: usize, h: usize, t: &[[f32; 4]]) -> Result<Vec<u8>, String> {
     use makepad_widgets::makepad_draw::makepad_zune_png::{PngEncoder, makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions}};
     let u = |x: f32, k: f32| (x * k).round().min(255.0) as u8;
-    let px: Vec<u8> = t.iter().flat_map(|c| {
+    let px = par(t, |c| {
         let (a, k) = (c[3].clamp(0.0, 1.0), if c[3] > 0.0 { 255.0 / c[3].min(1.0) } else { 0.0 });
         [u(c[0], k), u(c[1], k), u(c[2], k), u(a, 255.0)]
-    }).collect();
+    });
     let (mut out, options) = (Vec::new(), EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGBA));
-    PngEncoder::new(&px, options).encode(&mut out).map_err(|e| format!("png: {e:?}"))?;
+    PngEncoder::new(px.as_flattened(), options).encode(&mut out).map_err(|e| format!("png: {e:?}"))?;
     Ok(out)
 }
 

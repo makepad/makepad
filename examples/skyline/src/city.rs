@@ -87,13 +87,6 @@ script_mod! {
         ..mod.draw.SkyScene,
         alpha_blend: false
         ct_h: uniform(1.0), ct_d: uniform(0.7), ct_w: uniform(0.3), win_d: uniform(0.45), lights: uniform(3.0), temp: uniform(3200.0)
-        // the page's `kelvin`: a black-body-like light colour at k K, brightest channel 1
-        kelvin: fn(k: float) -> vec3 {
-            let t = clamp(k, 1000.0, 12000.0) / 100.0
-            if t > 66.0 { return vec3(clamp(1.292936 * pow(t - 60.0, -0.1332047592), 0.0, 1.0), clamp(1.129891 * pow(t - 60.0, -0.0755148492), 0.0, 1.0), 1.0) }
-            var b = 1.0; if t < 66.0 { b = clamp(0.54320679 * log(max(t - 10.0, 1.0)) - 1.19625409, 0.0, 1.0) * step(19.0001, t) }
-            return vec3(1.0, clamp(0.39008158 * log(t) - 0.63184144, 0.0, 1.0), b)
-        }
         // the page's `box1`: a box-filtered pulse on [a, b] over footprint w; wide footprints fall back to its mean
         box1: fn(f: float, a: float, b: float, w0: float) -> float {
             let w = max(w0, 0.004)
@@ -319,7 +312,7 @@ const CITY_KEYS: &[P] = &[P::CtH, P::CtD, P::CtW, P::CtC, P::CtR, P::Off, P::Off
 
 /// The march's shaders, its two targets and the key of what they hold.
 #[derive(Script, ScriptHook)]
-pub struct City { #[live] pub draw_city: DrawSkyCity, #[live] pub draw_blit: DrawSkyCityBlit, #[rust] target: Option<SceneTarget>, #[rust] key: Option<u64> }
+pub struct City { #[live] pub draw_city: DrawSkyCity, #[live] pub draw_blit: DrawSkyCityBlit, #[rust] target: Option<SceneTarget>, #[rust] pub key: Option<u64> }
 
 /// The raw elevations (rad) the city can reach, top and bottom: from its tallest roof, mast and beacon over the nearest
 /// lot down to the street there. Lots stand beyond the band's inner edge (half downtown's distance) and 3 blocks clear of
@@ -342,7 +335,7 @@ impl City {
     pub fn draw_pass(&mut self, cx: &mut Cx2d, sc: &SceneCtx, consumer: DrawPassId) {
         let v = sc.view;
         let key = sc.p.hash(CITY_KEYS, &[v.u0, v.span, v.w as f64, v.h as f64, v.horizon]);
-        let target = self.target.get_or_insert_with(|| SceneTarget::new(cx, "skyline_city"));
+        let target = self.target.get_or_insert_with(|| SceneTarget::new(cx, "skyline_city", true));
         if self.key != Some(key) {
             let city = &mut self.draw_city;
             target.record(cx, v.w, v.h, |cx| if let Some(r) = band(sc) { sc.set_uniforms(cx, &mut city.draw_vars); city.draw_abs(cx, r); });
@@ -358,8 +351,11 @@ impl City {
         self.draw_blit.draw_abs(cx, r);
     }
 
-    /// The march's targets: colour + alpha, light + depth (m), once there are any.
+    /// The march's targets: colour + alpha, light + depth (m), once there are any; its pass.
     pub fn textures(&self) -> Option<(Texture, Texture)> { self.target.as_ref().map(|t| (t.color.clone(), t.light.clone())) }
+    pub fn pass_id(&self) -> Option<DrawPassId> { self.target.as_ref().map(|t| t.pass.draw_pass_id()) }
+    /// Lets go of the targets (an export core between jobs).
+    pub fn release(&mut self) { (self.target, self.key) = (None, None); }
 }
 
 /// Binds the march's targets to a shader with `..mod.draw.SkyCityDepth` (the blit, and props hidden by the city).

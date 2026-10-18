@@ -3,7 +3,6 @@
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
 use crate::params::{Params, P};
 use crate::render::{bind_texture, SceneCtx, SceneTarget, ViewSpec};
-use crate::zones::Zones;
 use makepad_widgets::makepad_draw::*;
 
 script_mod! {
@@ -13,18 +12,16 @@ script_mod! {
     use mod.draw
 
     // A gaussian of `sigma` texels of `scene_light` along d about the texel under uv (the page's blur: at most 129 taps,
-    // wider steps past that), across the seam when `wrap` (the full turn), else clamped to the edge texels.
+    // wider steps past that), clamped to the edge texels (the scene has the blur's margin, so they are never reached).
     mod.draw.SkyBlur = {
         scene_light: texture_2d(float)
         sigma: uniform(0.0)
-        wrap: uniform(0.0)
         gauss: fn(uv: vec2, d: vec2) -> vec4 {
             let r = ceil(3.0 * self.sigma); let s = max(1.0, r / 64.0); let n = min(r, 64.0); let ts = self.scene_light.size(); let lo = vec2(0.5, 0.5) / ts
             var acc = vec4(0.0, 0.0, 0.0, 0.0); var ws = 0.0
             for i in 0..u32(2.0 * n + 1.0) {
                 let o = (float(i) - n) * s; let w = exp(0.0 - o * o / (2.0 * self.sigma * self.sigma)); let q = (floor(uv * ts) + 0.5 + d * o) / ts
-                let t = vec2(mix(clamp(q.x, lo.x, 1.0 - lo.x), q.x, self.wrap), clamp(q.y, lo.y, 1.0 - lo.y))
-                acc = acc + self.scene_light.sample_repeat(t) * w; ws = ws + w
+                acc = acc + self.scene_light.sample(clamp(q, lo, vec2(1.0, 1.0) - lo)) * w; ws = ws + w
             }
             return acc / ws
         }
@@ -103,13 +100,6 @@ script_mod! {
 /// The scene's targets as post sees them; `mirror`: the mirrored scene, when [`Post::wants_mirror`] asked for it.
 pub struct SceneOut<'a> { pub view: &'a ViewSpec, pub scene: &'a SceneTarget, pub mirror: Option<&'a SceneTarget> }
 
-/// A pass with one RGBA16F target, cleared to transparent (its `color` and `light` are the same texture).
-pub fn target(cx: &mut Cx, name: &str) -> SceneTarget {
-    let (pass, t) = (DrawPass::new_with_name(cx, name), Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true }));
-    pass.add_color_texture(cx, &t, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
-    SceneTarget { list: DrawList2d::new(cx), pass, color: t.clone(), light: t }
-}
-
 /// `v` with `m` more pixels on every side (the same pixel centres; the horizon moved down by m).
 fn widen(v: &ViewSpec, m: usize) -> ViewSpec {
     let (w, h, mf) = (v.w as f64, v.h as f64, m as f64);
@@ -130,26 +120,26 @@ pub fn blur_sigma(p: &Params, v: &ViewSpec) -> f64 {
 pub struct Post {
     #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_blur: DrawSkyBlur, #[live] pub draw_water: DrawSkyWater,
     /// The water and blur targets; what the last picture ran: the water, the blur's sigma (px, 0 none); the scene's margin (px).
-    #[rust] water: Option<SceneTarget>, #[rust] blur: Option<SceneTarget>, #[rust] ran: (bool, f64), #[rust] margin: usize,
+    #[rust] pub water: Option<SceneTarget>, #[rust] pub blur: Option<SceneTarget>, #[rust] ran: (bool, f64), #[rust] margin: usize,
 }
 
 impl Post {
-    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea.
-    pub fn wants_mirror(&self, p: &Params, _z: &Zones) -> bool { p[P::PrRefl] > 0.0 && p[P::Land] < 0.999 }
+    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea (render.rs
+    /// also asks for sea in the view).
+    pub fn wants_mirror(&self, p: &Params) -> bool { p[P::PrRefl] > 0.0 && p[P::Land] < 0.999 }
 
     /// The view to draw the scene at for `v`: widened by the blur's margin, so lights at its edges blur with their real
     /// neighbours as on the page; the final crops the margin off.
     pub fn scene_view(&mut self, p: &Params, v: &ViewSpec) -> ViewSpec { self.margin = blur_margin(p, v); widen(v, self.margin) }
 
-    /// The passes between the scene and the final, recorded when the picture changes: the water when the mirror ran and
-    /// this view shows sea, the horizontal blur when its sigma shows. Each is the parent of the passes it samples.
+    /// The passes between the scene and the final, recorded when the picture changes: the water when the mirror ran, the
+    /// horizontal blur when its sigma shows. Each is the parent of the passes it samples.
     pub fn draw_passes(&mut self, cx: &mut Cx2d, sc: &SceneCtx, out: &SceneOut) {
         let v = out.view;
         let full = Rect { pos: dvec2(0.0, 0.0), size: dvec2(v.w as f64, v.h as f64) };
         let (mut head, mut light) = (out.scene.pass.draw_pass_id(), out.scene.light.clone());
-        let sea = out.mirror.filter(|_| (0..v.w).any(|x| sc.col(x, 6)[0] < 0.35));
-        if let Some(mirror) = sea {
-            let (t, d) = (self.water.get_or_insert_with(|| target(cx, "skyline_water")), &mut self.draw_water);
+        if let Some(mirror) = out.mirror {
+            let (t, d) = (self.water.get_or_insert_with(|| SceneTarget::new(cx, "skyline_water", false)), &mut self.draw_water);
             sc.set_uniforms(cx, &mut d.draw_vars);
             for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light)] { bind_texture(cx, &mut d.draw_vars, name, tex); }
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
@@ -158,19 +148,18 @@ impl Post {
         }
         let sigma = blur_sigma(sc.p, v);
         if sigma > 0.0 {
-            let (t, d) = (self.blur.get_or_insert_with(|| target(cx, "skyline_blur")), &mut self.draw_blur);
+            let (t, d) = (self.blur.get_or_insert_with(|| SceneTarget::new(cx, "skyline_blur", false)), &mut self.draw_blur);
             bind_texture(cx, &mut d.draw_vars, live_id!(scene_light), &light);
             d.draw_vars.set_uniform(cx, live_id!(sigma), &[sigma as f32]);
-            d.draw_vars.set_uniform(cx, live_id!(wrap), &[if v.span == 1.0 { 1.0 } else { 0.0 }]);
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             cx.attach_child_pass(head, t.pass.draw_pass_id(), None);
         }
-        self.ran = (sea.is_some(), sigma);
+        self.ran = (out.mirror.is_some(), sigma);
     }
 
     /// The final composite into `rect` of the current pass, every draw; it attaches the pass chain it samples to the
     /// current pass (so it paints first and stays alive).
-    pub fn draw_final(&mut self, cx: &mut Cx2d, rect: Rect, _p: &Params, out: &SceneOut, tone: bool) {
+    pub fn draw_final(&mut self, cx: &mut Cx2d, rect: Rect, out: &SceneOut, tone: bool) {
         let (water, sigma) = self.ran;
         let t = if sigma > 0.0 { self.blur.as_ref() } else if water { self.water.as_ref() } else { None };
         let (pass, light) = t.map_or((&out.scene.pass, &out.scene.light), |t| (&t.pass, &t.light));

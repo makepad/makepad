@@ -111,9 +111,7 @@ pub struct SkylineView {
 }
 
 impl SkylineView {
-    fn set_params(&mut self, cx: &mut Cx, p: &Params) {
-        if self.params != *p { self.params = p.clone(); self.redraw(cx); }
-    }
+    fn set_params(&mut self, cx: &mut Cx, p: &Params) { if self.params != *p { self.params = p.clone(); self.redraw(cx); } }
     fn view(&self, w: usize) -> ViewSpec { if self.detail { ViewSpec::detail(&self.params, w) } else { ViewSpec::strip(&self.params, w) } }
 }
 
@@ -150,6 +148,8 @@ impl Widget for SkylineView {
         let view = self.view(w);
         let (lw, lh) = if self.fixed_px.is_some() { (w as f64 / dpi, view.h as f64 / dpi) } else { (avail, avail * view.h as f64 / view.w as f64) };
         let rect = cx.walk_turtle(Walk { width: Size::Fixed(lw), height: Size::Fixed(lh), ..walk });
+        // on whole device pixels, so the picture and the backdrop's horizon step sit on the pixel grid
+        let rect = Rect { pos: dvec2((rect.pos.x * dpi).round() / dpi, (rect.pos.y * dpi).round() / dpi), size: rect.size };
         self.rect = rect;
         self.draw_sky.draw_vars.set_uniform(cx, live_id!(horizon), &[view.horizon as f32]);
         self.draw_sky.draw_abs(cx, rect);
@@ -183,9 +183,7 @@ impl ParamPanel {
         let list = self.view.flat_list(cx, ids!(param_list));
         let mut out = Vec::new();
         for (id, item) in list.items_with_actions(actions) {
-            if let Some(i) = (0..COUNT).find(|i| row_id(*i) == id) {
-                if let Some(v) = item.as_slider().slided(actions) { out.push((i, v)); }
-            }
+            if let Some(i) = (0..COUNT).find(|i| row_id(*i) == id) { if let Some(v) = item.as_slider().slided(actions) { out.push((i, v)); } }
         }
         out
     }
@@ -247,8 +245,8 @@ impl App {
     fn status(&mut self, cx: &mut Cx) {
         let mut parts = Vec::new();
         for (detail, name) in [(false, "Strip"), (true, "Detail")] {
-            if let Some(s) = self.view_mut(cx, detail, |v, _| v.sky.stats.clone()) {
-                parts.push(format!("{name} {}x{}: zones {:.1}, columns {:.1}, record {:.2} ms; {} renders", s.w, s.h, s.zones_ms, s.cols_ms, s.record_ms, s.renders));
+            if let Some((s, t)) = self.view_mut(cx, detail, |v, _| (v.sky.stats.clone(), v.sky.trees.stats.3)) {
+                parts.push(format!("{name} {}x{}: zones {:.1}, columns {:.1}, trees {t:.1}, record {:.2} ms; {} renders", s.w, s.h, s.zones_ms, s.cols_ms, s.record_ms, s.renders));
             }
         }
         self.ui.label(cx, ids!(status)).set_text(cx, &parts.join("\n"));

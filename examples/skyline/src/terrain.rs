@@ -5,7 +5,7 @@
 //! a coverage target with one channel per tree layer (ranges 2, 3, 4 and the front treeline) that
 //! the range instances sample.
 use crate::params::{P, Params};
-use crate::render::SceneCtx;
+use crate::render::{SceneCtx, SceneTarget};
 use crate::rng::{fract, mix, smooth, Rng, TAU};
 use crate::zones::Zones;
 use makepad_widgets::makepad_draw::*;
@@ -311,8 +311,8 @@ pub struct DrawSkyTrees { #[deref] pub draw_super: DrawQuad, #[live] pub copy: f
 /// or the view leaves the arc it holds) with its key, arc (start, length) and index count; the last build's trees,
 /// vertices, triangles and CPU ms.
 #[derive(Script, ScriptHook)]
-pub struct Trees { #[live] pub draw_trees: DrawSkyTrees, #[rust] target: Option<(DrawPass, DrawList2d, Texture)>,
-    #[rust] mesh: Option<(u64, [f64; 2], Geometry, usize)>, #[rust] pub stats: (usize, usize, usize, f64) }
+pub struct Trees { #[live] pub draw_trees: DrawSkyTrees, #[rust] target: Option<SceneTarget>,
+    #[rust] pub mesh: Option<(u64, [f64; 2], Geometry, usize)>, #[rust] pub stats: (usize, usize, usize, f64) }
 
 impl Trees {
     /// Draws the trees into their coverage target, a pass the scene pass `consumer` samples. Called only when the
@@ -328,21 +328,18 @@ impl Trees {
             self.stats = (m.trees, m.v.len() / 9, n / 3, 0.0); geom.update(cx, m.i, m.v);
             (self.stats.3, self.mesh) = ((Cx::monotonic_now() - t0) * 1000.0, Some((key, ga, geom, n)));
         }
-        let (Self { draw_trees: dt, target, mesh, .. }, size) = (self, dvec2(v.w as f64, v.h as f64));
-        let (pass, list, _) = target.get_or_insert_with(|| {
-            let (pass, tex) = (DrawPass::new_with_name(cx, "skyline_trees"), Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true }));
-            pass.add_color_texture(cx, &tex, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
-            (pass, DrawList2d::new(cx), tex)
-        });
-        pass.set_size(cx, size); cx.attach_child_pass(pass.draw_pass_id(), consumer, None); cx.begin_pass(pass, Some(1.0)); list.begin_always(cx);
-        cx.begin_root_turtle(size, Layout::flow_overlay());
-        if let Some((_, _, geom, _)) = mesh.as_ref().filter(|m| m.3 > 0) {
+        let Self { draw_trees: dt, target, mesh, .. } = self;
+        let t = target.get_or_insert_with(|| SceneTarget::new(cx, "skyline_trees", false));
+        cx.attach_child_pass(t.pass.draw_pass_id(), consumer, None);
+        t.record(cx, v.w, v.h, |cx| if let Some((_, _, geom, _)) = mesh.as_ref().filter(|m| m.3 > 0) {
             sc.set_uniforms(cx, &mut dt.draw_vars); dt.draw_vars.geometry_id = Some(geom.geometry_id());
             for copy in 0..if part { 1 } else { 2 } { dt.copy = copy as f32; cx.add_instance(&dt.draw_vars); }
-        }
-        cx.end_pass_sized_turtle(); list.end(cx); cx.end_pass(pass);
+        });
     }
 
-    /// The coverage target (one channel per tree layer), once there is one.
-    pub fn coverage(&self) -> Option<&Texture> { self.target.as_ref().map(|t| &t.2) }
+    /// The coverage target (one channel per tree layer), once there is one; its pass.
+    pub fn coverage(&self) -> Option<&Texture> { self.target.as_ref().map(|t| &t.color) }
+    pub fn pass_id(&self) -> Option<DrawPassId> { self.target.as_ref().map(|t| t.pass.draw_pass_id()) }
+    /// Lets go of the target (an export core between jobs; the mesh stays: it is small and slow to build).
+    pub fn release(&mut self) { self.target = None; }
 }

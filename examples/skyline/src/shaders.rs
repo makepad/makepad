@@ -42,13 +42,9 @@ script_mod! {
         off_dir: uniform(0.55)
 
         // the fragment's centre in pass pixels
-        frag: fn() -> vec2 {
-            return self.rect_pos + self.pos * self.rect_size
-        }
+        frag: fn() -> vec2 { return self.rect_pos + self.pos * self.rect_size }
         // radians per pixel of the raw view
-        px0: fn() -> float {
-            return self.view_span.y * 6.2831853 / self.view_size.x
-        }
+        px0: fn() -> float { return self.view_span.y * 6.2831853 / self.view_size.x }
         // raw elevation (rad) of pass row y (mirrored in the reflection run)
         ang_raw: fn(y: float) -> float {
             let a = (self.view_horizon * self.view_size.y - y) * self.px0()
@@ -63,9 +59,7 @@ script_mod! {
             return self.cols.sample_nearest(vec2((xx + 0.5) / self.col_geom.x, (r + 7.0 * q + 0.5) / self.col_geom.y))
         }
         // coverage of a signed distance d over a pixel of size px
-        cover: fn(d: float, px: float) -> float {
-            return clamp(d / px + 0.5, 0.0, 1.0)
-        }
+        cover: fn(d: float, px: float) -> float { return clamp(d / px + 0.5, 0.0, 1.0) }
         // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
         view_raw: fn() -> vec3 {
             let pp = self.frag()
@@ -83,15 +77,9 @@ script_mod! {
             return vec3(fract(atan2(q.y, q.x) / 6.2831853), vr.y * t, vr.z * t)
         }
         // the city camera: downtown's distance (blocks) and direction, the real camera offset (blocks)
-        city_d: fn() -> float {
-            return 28.0 * self.ct_r
-        }
-        city_dir: fn() -> vec2 {
-            return vec2(cos(self.ct_c * 6.2831853), sin(self.ct_c * 6.2831853))
-        }
-        city_cam: fn() -> vec2 {
-            return (0.8 * self.off * self.city_d()) * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853))
-        }
+        city_d: fn() -> float { return 28.0 * self.ct_r }
+        city_dir: fn() -> vec2 { return vec2(cos(self.ct_c * 6.2831853), sin(self.ct_c * 6.2831853)) }
+        city_cam: fn() -> vec2 { return (0.8 * self.off * self.city_d()) * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853)) }
         // the page's `prCityView`: world point w (m; 70 m a block) from the city camera: raw azimuth, distance (m)
         city_view: fn(w: vec2) -> vec2 {
             let q = w - self.city_cam() * 70.0
@@ -116,12 +104,15 @@ script_mod! {
             return f32(self.hash3(u32(i32(id)) + 4096u, u32(i32(st)), u32(i32(ly))) >> 8u) / 16777216.0
         }
         // `hcell`: the hash of integer cell c, layer k (the city's lots, the trees' and the town's cells)
-        hcell: fn(c: vec2, k: float) -> u32 {
-            return self.hash3(u32(i32(c.x)) + 8192u, u32(i32(c.y)) + 8192u, u32(i32(k)))
-        }
+        hcell: fn(c: vec2, k: float) -> u32 { return self.hash3(u32(i32(c.x)) + 8192u, u32(i32(c.y)) + 8192u, u32(i32(k))) }
         // a hash's four bytes as 0..1
-        hb4: fn(h: u32) -> vec4 {
-            return vec4(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u), f32(h >> 24u)) * 0.003921569
+        hb4: fn(h: u32) -> vec4 { return vec4(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u), f32(h >> 24u)) * 0.003921569 }
+        // the page's `kelvin`: a black-body-like light colour at k K, brightest channel 1 (the city's windows, the props' lights)
+        kelvin: fn(k: float) -> vec3 {
+            let t = clamp(k, 1000.0, 12000.0) / 100.0
+            if t > 66.0 { return vec3(clamp(1.292936 * pow(t - 60.0, -0.1332047592), 0.0, 1.0), clamp(1.129891 * pow(t - 60.0, -0.0755148492), 0.0, 1.0), 1.0) }
+            var b = 1.0; if t < 66.0 { b = if t <= 19.0 { 0.0 } else { clamp(0.54320679 * log(t - 10.0) - 1.19625409, 0.0, 1.0) } }
+            return vec3(1.0, clamp(0.39008158 * log(t) - 0.63184144, 0.0, 1.0), b)
         }
     }
 
@@ -158,7 +149,8 @@ script_mod! {
             let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z; let r = self.col_row(pp.x, min(k, 5.0))
             var tm = 0.0
             if k > 1.5 {
-                let tr = self.tree_cov.sample_nearest(pp / self.view_size)
+                // the trees are drawn upright once a picture: the reflection run reads them at the mirrored row
+                let tr = self.tree_cov.sample_nearest(vec2(pp.x, mix(pp.y, 2.0 * self.view_horizon * self.view_size.y - pp.y, self.mirror)) / self.view_size)
                 let ch = vec4(step(abs(k - 2.0), 0.5), step(abs(k - 3.0), 0.5), step(abs(k - 4.0), 0.5), step(4.5, k))
                 tm = r.w * max(self.cover(r.z - ang, 1.5 * px), dot(tr, ch))
                 if ang < r.y - px { tm = r.w }
@@ -171,9 +163,7 @@ script_mod! {
             let rock = mix(mix(sil, fogc, ftop), fogc * (1.1 + 0.2 * t), fog * mix(0.1, 0.9, hz2) * (0.25 + 0.75 * t))
             return vec4(sil * (0.6 * tm) + rock * (m * (1.0 - tm)), tm + m * (1.0 - tm))
         }
-        fragment: fn(){
-            let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
-        }
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
     }
 
     // The ground band: the near ground rise over land, flat sea below the horizon.
@@ -185,9 +175,7 @@ script_mod! {
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
             return vec4(mix(self.sil * 0.5, self.sil * 1.6, g.x) * gm, gm)
         }
-        fragment: fn(){
-            let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
-        }
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
     }
 
     // The night sky behind a view (the page's CSS gradient), with a hard step to the sea at the horizon.
@@ -205,24 +193,9 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyGlow { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyGlow { #[deref] pub draw_super: DrawQuad }
 
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyRange {
-    #[deref] pub draw_super: DrawQuad,
-    /// The range (0 farthest .. 4 nearest; 5 the front treeline).
-    #[live] pub k: f32,
-    /// Its peak height (rad).
-    #[live] pub hk: f32,
-}
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyGround { #[deref] pub draw_super: DrawQuad }
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawSkyBackdrop { #[deref] pub draw_super: DrawQuad }
+/// `k`: the range (0 farthest .. 4 nearest; 5 the front treeline); `hk`: its peak height (rad).
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyRange { #[deref] pub draw_super: DrawQuad, #[live] pub k: f32, #[live] pub hk: f32 }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyGround { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyBackdrop { #[deref] pub draw_super: DrawQuad }

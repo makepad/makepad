@@ -142,10 +142,10 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 pub struct Props {
-    #[live] pub draw_part: DrawSkyPart, #[live] draw_blit: DrawSkyPartBlit,
-    #[rust] pub set: PropSet, #[rust] key: Option<u64>, #[rust] items: Vec<Item>,
+    #[live] pub draw_part: DrawSkyPart, #[live] pub draw_blit: DrawSkyPartBlit,
+    #[rust] pub set: PropSet, #[rust] pub key: Option<u64>, #[rust] items: Vec<Item>,
     /// The parts as texels (type and c, a, b) and their rows; whether the parts changed; the props layer's own pass.
-    #[rust] tex: Option<(Texture, usize)>, #[rust] dirty: bool, #[rust] pl: Option<SceneTarget>,
+    #[rust] tex: Option<(Texture, usize)>, #[rust] dirty: bool, #[rust] pub pl: Option<SceneTarget>,
 }
 
 impl Props {
@@ -158,8 +158,7 @@ impl Props {
     /// Draws the instances of one bucket into the scene (`sc.mirror`: the props layer seen from the mirrored eye). Over the
     /// sea band the props layer is first composited on its own, in a pass of its own (only the rows the ground band covers),
     /// then blitted with the waterline weight, as the page does: drawing each instance again with that weight would let
-    /// stacked bodies dim the lights in front of them many times over. The city's pass, made before this one, runs first
-    /// (siblings run in pass-id order).
+    /// stacked bodies dim the lights in front of them many times over. The trees' and the city's passes paint first.
     pub fn draw(&mut self, cx: &mut Cx2d, sc: &SceneCtx, bucket: Bucket) {
         let b = match bucket { Bucket::Range(k) => k as u8, Bucket::BehindCity => 5, Bucket::FrontOfCity => 6, Bucket::OverSea => 7 };
         let (lo, hi, v) = (self.items.partition_point(|it| it.b < b), self.items.partition_point(|it| it.b <= b), sc.view);
@@ -175,12 +174,12 @@ impl Props {
             self.dirty = false;
         }
         if b < 7 { return self.instances(cx, sc, lo..hi, 0.0, false); }
-        let rise = (0..v.w).map(|x| sc.col(x, 6)).map(|g| g[1] as f64 / (g[2] as f64).max(1e-3)).fold(0.0, f64::max);
-        let y0 = v.row_of(rise + 2.0 * v.px0()).floor().max(0.0);
+        let y0 = v.row_of(sc.rise() + 2.0 * v.px0()).floor().max(0.0);
         if y0 >= v.h as f64 { return; }
-        let mut pl = self.pl.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_props"));
+        let mut pl = self.pl.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_props", true));
         pl.record(cx, v.w, v.h, |cx| self.instances(cx, sc, lo..hi, y0, true));
         cx.make_child_pass(&pl.pass);
+        for i in sc.inputs.into_iter().flatten() { cx.attach_child_pass(i, pl.pass.draw_pass_id(), None); } // it reads the trees and the city
         let dv = &mut self.draw_blit.draw_vars;
         sc.set_uniforms(cx, dv); bind_texture(cx, dv, live_id!(pl_c), &pl.color); bind_texture(cx, dv, live_id!(pl_e), &pl.light);
         self.draw_blit.draw_abs(cx, Rect { pos: dvec2(0.0, y0), size: dvec2(v.w as f64, v.h as f64 - y0) });

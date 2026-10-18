@@ -124,7 +124,7 @@ fn gpu_march_time() {
             window.configure_window(cx, dvec2(64.0, 64.0), dvec2(0.0, 0.0), false, "City timing".into());
             let window_pass = DrawPass::new(cx);
             window.set_pass(cx, &window_pass);
-            let target = render::SceneTarget::new(cx, "city_bench");
+            let target = render::SceneTarget::new(cx, "city_bench", true);
             *handler.borrow_mut() = Some(Bench { _window: window, window_pass, root: DrawList2d::new(cx), target, draw, case: first.clone(), k: 1 });
             cx.redraw_all();
         }

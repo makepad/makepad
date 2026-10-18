@@ -18,7 +18,6 @@ pub struct ParamDef {
 macro_rules! params {
     ($($group:literal { $($name:ident $key:ident $web:literal $label:literal $min:literal $max:literal $step:literal $def:literal;)* })*) => {
         /// A parameter: its index in [`PARAMS`] and [`Params::v`] (not every one is named in code).
-        #[allow(dead_code)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum P { $($($name,)*)* }
         pub const PARAMS: &[ParamDef] = &[$($(ParamDef {
