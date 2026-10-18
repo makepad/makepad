@@ -33,6 +33,10 @@ pub const SUN_MODE_NAMES: &[&str] = &["time", "manual"];
 pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring", "polygon", "stroke", "scrim"];
 /// Accepted values of `LightParams::blend`; the first is the fallback.
 pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
+/// Accepted values of `LightParams::kind`; the first is the fallback (redesign §5):
+/// a light, or a shadow caster (a pattern layer that darkens what is drawn
+/// before it and adds no light).
+pub const LIGHT_KIND_NAMES: &[&str] = &["light", "caster"];
 /// Accepted values of `WeatherParams::kind`; the first is the fallback. The
 /// kinds follow apps/weather's SkyKind classes (clear, overcast, rain, snow,
 /// fog, thunder as "storm"), plus "hazy".
@@ -63,6 +67,18 @@ pub const KELVIN_DEFAULT: f32 = 6500.0;
 pub const POINT_LIMIT: usize = 64;
 /// Most width multipliers a stroke's profile keeps; clamp() drops the rest.
 pub const PROFILE_LIMIT: usize = 32;
+/// What clamp() keeps of `CasterParams::strength` (1 blocks fully). The panel's
+/// slider and the assistant's schema read the caster ranges from here (D17).
+pub const CASTER_STRENGTH_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `CasterParams::softness`.
+pub const CASTER_SOFTNESS_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `CasterParams::bloom_threshold_ev`: EV of the map's
+/// own radiance, as the map shows it (the sun's disc is about 2^18).
+pub const CASTER_BLOOM_THRESHOLD_EV_RANGE: (f32, f32) = (-10.0, 20.0);
+/// What clamp() keeps of `CasterParams::bloom_strength` (0 is bloom off).
+pub const CASTER_BLOOM_STRENGTH_RANGE: (f32, f32) = (0.0, 1.0);
+/// What clamp() keeps of `CasterParams::bloom_length_deg`, in degrees.
+pub const CASTER_BLOOM_LENGTH_RANGE: (f32, f32) = (0.0, 45.0);
 
 /// clamp()'s rule for one number: NaN is `fallback`, anything else
 /// (infinities too) is held into `lo..=hi`.
@@ -77,7 +93,7 @@ fn hold(value: f32, (lo, hi): (f32, f32), fallback: f32) -> f32 {
 /// `clamped()` on every settings block that has a range: the sky's sun,
 /// atmosphere, sun disc, deck, night, volume and weather, the studio's
 /// backdrop, a base image, and each light with its polygon, stroke, scrim,
-/// picture, gobo, aim and wear. A block's ranges, its defaults and its rule
+/// picture, gobo, aim, wear and caster block. A block's ranges, its defaults and its rule
 /// for NaN are written once, in its `clamp_fields` (D17): no layer holds a
 /// field on its own. Each layer's reader takes its block through
 /// `clamped()`: the atmosphere, the sun's direction, the deck, the night,
@@ -128,6 +144,7 @@ clamped_copy!(
     GoboParams,
     AimParams,
     ImperfectionParams,
+    CasterParams,
     BaseImageParams,
 );
 
@@ -149,7 +166,9 @@ pub struct HdriParams {
     pub seed: u32,
     pub sky: SkyParams,
     pub studio: StudioParams,
-    /// At most LIGHT_LIMIT. An overlay over the base layer in both modes, evaluated in list order.
+    /// At most LIGHT_LIMIT, lights and shadow casters (`LightParams::kind`)
+    /// together. An overlay over the base layer in both modes, evaluated in
+    /// list order: a later entry draws over the earlier ones.
     pub lights: Vec<LightParams>,
     /// A loaded equirect as the base under the lights (1b): the whole base, or
     /// only its part below the horizon with the generated sky above. None = off.
@@ -455,7 +474,8 @@ pub struct StudioParams {
     pub horizon_softness: f32,
 }
 
-/// One shaped light, placed on the sphere in its own angular frame.
+/// One layer of the map's list, placed on the sphere in its own angular
+/// frame: a shaped light, or (`kind` "caster") a shadow caster.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct LightParams {
     pub enabled: bool,
@@ -471,9 +491,9 @@ pub struct LightParams {
     pub azimuth_deg: f32,
     /// -90..=90.
     pub elevation_deg: f32,
-    /// 0.1..=170 degrees.
+    /// 0.1..=170 degrees; 0.1..=120 for a polygon, a scrim and a caster (`max_span_deg`).
     pub width_deg: f32,
-    /// 0.1..=170 degrees.
+    /// 0.1..=170 degrees; 0.1..=120 for a polygon, a scrim and a caster (`max_span_deg`).
     pub height_deg: f32,
     /// -180..=180, wrapped.
     pub roll_deg: f32,
@@ -489,7 +509,7 @@ pub struct LightParams {
     pub tint: f32,
     /// "add" | "multiply" (multiply darkens everything drawn before it: flags).
     pub blend: String,
-    /// At most one light is the key; clamp() keeps the first.
+    /// At most one light is the key; clamp() keeps the first. A caster never is.
     pub key: bool,
     /// Explicit linear colour, 0..=1 per channel; overrides kelvin and tint when Some.
     pub rgb: Option<[f32; 3]>,
@@ -521,6 +541,21 @@ pub struct LightParams {
     pub aim: Option<AimParams>,
     /// The wear of the light's diffuser: wrinkles, dust and weave (1b). None: a clean face.
     pub imperfections: Option<ImperfectionParams>,
+    /// `LIGHT_KIND_NAMES`: "light" (None, the default) or "caster": a shadow
+    /// caster, a pattern layer that darkens what is drawn before it and adds
+    /// no light (redesign §5). A caster reads its placement (azimuth,
+    /// elevation, width, height, roll, enabled, name) and its pattern, the
+    /// `gobo` block (None: the whole box covers); the pattern's own distance,
+    /// fill_sky and project_on_backdrop are not read. clamp() keeps its shape
+    /// "rect", its key false and its span within `max_span_deg`. The
+    /// light-only fields (intensity, colour, source, gels, picture, blend,
+    /// aim, surface, polygon, stroke, scrim) are kept but never read. An
+    /// unknown kind is a light. Last in the struct, so a file saved without
+    /// it is written as before.
+    pub kind: Option<String>,
+    /// A caster's own settings (redesign §5); None = CasterParams::default().
+    /// Kept, never read, on a light; clamp() holds it whatever the kind.
+    pub caster: Option<CasterParams>,
 }
 
 /// A picture shown by a light: it fills the light's box, is cut by the
@@ -651,10 +686,14 @@ impl LightImageParams {
     }
 }
 
-/// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
-/// them there and reports the change; the panel resyncs its Width and Height
-/// sliders to it (A11 resyncs whenever clamp() changed something).
+/// Widest a polygon, a scrim or a shadow caster may be, each way, in degrees.
+/// clamp() holds them there and reports the change; the panel resyncs its
+/// Width and Height sliders to it (A11 resyncs whenever clamp() changed
+/// something). `LightParams::max_span_deg` says which cap a light takes.
 pub const SHAPED_SPAN_MAX_DEG: f32 = 120.0;
+
+/// Widest any other light (rect, disc, ring, stroke) may be, each way, in degrees (A1).
+const LIGHT_SPAN_MAX_DEG: f32 = 170.0;
 
 /// A polygon light's outline, in the light's unit box: x and y from -1 to 1,
 /// y up and x toward increasing azimuth (the viewer's right on the panorama),
@@ -952,6 +991,64 @@ impl ImperfectionParams {
     }
 }
 
+/// A shadow caster's own settings (redesign §5), on an entry of
+/// `HdriParams::lights` whose `kind` is "caster". The caster multiplies what
+/// is drawn before it (everything listed before it: the base layer, the base
+/// image, the lights before it) by its transmission `1 - s*m + s*m*tint`,
+/// where `m` is its pattern's coverage after softness and bloom and `s` its
+/// strength, so it never adds light; what is listed after it is untouched.
+/// The fields are plain because the block itself is the Option; a field
+/// added later must be an `Option`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CasterParams {
+    /// `CASTER_STRENGTH_RANGE`, 0..=1 (default 1): 1 blocks fully where the
+    /// pattern covers, 0 is no caster.
+    pub strength: f32,
+    /// Linear, 0..=1 per channel (default black): what the caster lets
+    /// through where it covers. Black blocks every colour; a colour lets that
+    /// colour through (glass, foliage). Never above 1, so it never adds light.
+    pub tint: [f32; 3],
+    /// `CASTER_SOFTNESS_RANGE`, 0..=1 (default 0): blurs the whole caster (out
+    /// of focus) through the exact box filter the image gobos use, so the
+    /// light it lets through stays right. 0 is the sharp pattern.
+    pub softness: f32,
+    /// `CASTER_BLOOM_THRESHOLD_EV_RANGE`, -10..=20 (default 10): what behind
+    /// the caster counts as bright: luminance above 2^bloom_threshold_ev in
+    /// the map's own radiance, as the map shows it (after its intensity_ev).
+    /// The sun's disc is about 2^18, a softbox at EV 3 is 8.
+    pub bloom_threshold_ev: f32,
+    /// `CASTER_BLOOM_STRENGTH_RANGE`, 0..=1 (default 0 = bloom off): how much
+    /// that bright light eats into the caster's silhouette.
+    pub bloom_strength: f32,
+    /// `CASTER_BLOOM_LENGTH_RANGE`, 0..=45 degrees (default 5): how far it reaches in.
+    pub bloom_length_deg: f32,
+}
+
+impl Default for CasterParams {
+    fn default() -> Self {
+        CasterParams { strength: 1.0, tint: [0.0; 3], softness: 0.0, bloom_threshold_ev: 10.0, bloom_strength: 0.0, bloom_length_deg: 5.0 }
+    }
+}
+
+impl CasterParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = CasterParams::default();
+        f.range(prefix, "strength", &mut self.strength, CASTER_STRENGTH_RANGE.0, CASTER_STRENGTH_RANGE.1, d.strength);
+        f.color(prefix, "tint", &mut self.tint, 1.0, d.tint);
+        f.range(prefix, "softness", &mut self.softness, CASTER_SOFTNESS_RANGE.0, CASTER_SOFTNESS_RANGE.1, d.softness);
+        f.range(
+            prefix,
+            "bloom_threshold_ev",
+            &mut self.bloom_threshold_ev,
+            CASTER_BLOOM_THRESHOLD_EV_RANGE.0,
+            CASTER_BLOOM_THRESHOLD_EV_RANGE.1,
+            d.bloom_threshold_ev,
+        );
+        f.range(prefix, "bloom_strength", &mut self.bloom_strength, CASTER_BLOOM_STRENGTH_RANGE.0, CASTER_BLOOM_STRENGTH_RANGE.1, d.bloom_strength);
+        f.range(prefix, "bloom_length_deg", &mut self.bloom_length_deg, CASTER_BLOOM_LENGTH_RANGE.0, CASTER_BLOOM_LENGTH_RANGE.1, d.bloom_length_deg);
+    }
+}
+
 /// A stroke light (a Lumi-curve): a smooth curve through directions on the sky.
 #[derive(Clone, Debug, PartialEq, DeJson)]
 pub struct StrokeParams {
@@ -1158,6 +1255,17 @@ pub enum Blend {
     Multiply,
 }
 
+/// Typed view of `LightParams::kind` (redesign §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightKind {
+    /// A light: it adds its light over what is drawn before it (a Multiply
+    /// light, a flag, darkens it instead).
+    Light,
+    /// A shadow caster: its pattern multiplies what is drawn before it by its
+    /// transmission, and it never adds light.
+    Caster,
+}
+
 impl Mode {
     /// The string stored in `HdriParams::mode`.
     pub fn as_str(self) -> &'static str {
@@ -1195,6 +1303,15 @@ impl Blend {
         match self {
             Blend::Add => "add",
             Blend::Multiply => "multiply",
+        }
+    }
+}
+
+impl LightKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LightKind::Light => "light",
+            LightKind::Caster => "caster",
         }
     }
 }
@@ -1303,6 +1420,8 @@ impl Default for LightParams {
             gobo: None,
             aim: None,
             imperfections: None,
+            kind: None,
+            caster: None,
         }
     }
 }
@@ -1323,8 +1442,9 @@ impl HdriParams {
     }
 
     /// Sanitises NaN/∞, clamps every field into its documented range, maps unknown
-    /// enum strings to the default ("sky", "time", "rect", "add"), truncates lights
-    /// to LIGHT_LIMIT, and keeps at most one key light (the first).
+    /// enum strings to the default ("sky", "time", "rect", "add", "light"), truncates
+    /// lights to LIGHT_LIMIT (shadow casters count), and keeps at most one key light
+    /// (the first; a caster never is one: `LightParams::clamp_fields` clears its key).
     /// Returns the dotted paths it changed, e.g. "sky.clouds.coverage", "lights[2].shape".
     ///
     /// NaN becomes the field's default, infinities the nearest bound. Angles
@@ -1544,19 +1664,84 @@ impl LightParams {
         }
     }
 
+    /// Light or shadow caster. None, and a kind that is not a listed name,
+    /// read as a light; loose spellings read right before clamp() fixes them.
+    pub fn kind(&self) -> LightKind {
+        match self.kind.as_deref() {
+            Some(kind) if is_choice(kind, "caster") => LightKind::Caster,
+            _ => LightKind::Light,
+        }
+    }
+
+    /// True for a shadow caster (`kind` "caster").
+    pub fn is_caster(&self) -> bool {
+        self.kind() == LightKind::Caster
+    }
+
+    /// The caster block as clamp() holds it, or the defaults when there is none.
+    pub fn caster_params(&self) -> CasterParams {
+        self.caster.as_ref().map(CasterParams::clamped).unwrap_or_default()
+    }
+
+    /// The widest `width_deg` / `height_deg` clamp() keeps: SHAPED_SPAN_MAX_DEG
+    /// (120) for a polygon, a scrim and a caster, which are drawn in the
+    /// light's gnomonic box (it stretches toward its edges), 170 otherwise.
+    /// clamp_fields and the gizmo (R7) read it.
+    pub fn max_span_deg(&self) -> f32 {
+        if self.is_caster() || matches!(self.shape(), LightShape::Polygon | LightShape::Scrim) {
+            SHAPED_SPAN_MAX_DEG
+        } else {
+            LIGHT_SPAN_MAX_DEG
+        }
+    }
+
+    /// A new caster as "+ Caster" adds it (the app names and places it, R6):
+    /// a 60 x 45 degree box of leaves at azimuth 0, 15 degrees up, sharp,
+    /// blocking fully. It is also a Multiply flag at EV 0, so one that loses
+    /// its kind (a patch that leaves it out, an older build) adds no light.
+    /// Already clamped.
+    pub fn new_caster() -> LightParams {
+        LightParams {
+            name: "Caster".to_string(),
+            shape: LightShape::Rect.as_str().to_string(),
+            azimuth_deg: 0.0,
+            elevation_deg: 15.0,
+            width_deg: 60.0,
+            height_deg: 45.0,
+            roll_deg: 0.0,
+            softness: 0.0,
+            intensity_ev: 0.0,
+            blend: Blend::Multiply.as_str().to_string(),
+            gobo: Some(GoboParams { kind: GoboKind::Leaves.as_str().to_string(), distance: 0.0, ..GoboParams::default() }),
+            kind: Some(LightKind::Caster.as_str().to_string()),
+            caster: Some(CasterParams::default()),
+            ..LightParams::default()
+        }
+    }
+
     fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
         let d = LightParams::default();
+        // A shadow caster (redesign §5) reads only its placement and its
+        // pattern, laid in its rectangle: it is always a rect, never the key
+        // (below, after `blend`), and spans at most max_span_deg (below).
+        // `kind()` reads loose spellings, so this holds before `kind` itself
+        // is fixed at the end.
+        let caster_kind = self.is_caster();
         if self.name.chars().count() > LIGHT_NAME_LIMIT {
             self.name = self.name.chars().take(LIGHT_NAME_LIMIT).collect();
             f.push(prefix, "name");
+        }
+        if caster_kind && self.shape() != LightShape::Rect {
+            self.shape = LightShape::Rect.as_str().to_string();
+            f.push(prefix, "shape");
         }
         f.choice(prefix, "shape", &mut self.shape, LIGHT_SHAPE_NAMES);
         f.range(prefix, "corner", &mut self.corner, 0.0, 1.0, d.corner);
         f.range(prefix, "inner", &mut self.inner, 0.0, 0.95, d.inner);
         f.wrap360(prefix, "azimuth_deg", &mut self.azimuth_deg, d.azimuth_deg);
         f.range(prefix, "elevation_deg", &mut self.elevation_deg, -90.0, 90.0, d.elevation_deg);
-        f.range(prefix, "width_deg", &mut self.width_deg, 0.1, 170.0, d.width_deg);
-        f.range(prefix, "height_deg", &mut self.height_deg, 0.1, 170.0, d.height_deg);
+        f.range(prefix, "width_deg", &mut self.width_deg, 0.1, LIGHT_SPAN_MAX_DEG, d.width_deg);
+        f.range(prefix, "height_deg", &mut self.height_deg, 0.1, LIGHT_SPAN_MAX_DEG, d.height_deg);
         f.wrap180(prefix, "roll_deg", &mut self.roll_deg, d.roll_deg);
         f.range(prefix, "softness", &mut self.softness, 0.0, 1.0, d.softness);
         f.range(prefix, "hotspot", &mut self.hotspot, 0.0, 1.0, d.hotspot);
@@ -1564,6 +1749,12 @@ impl LightParams {
         f.range(prefix, "kelvin", &mut self.kelvin, KELVIN_RANGE.0, KELVIN_RANGE.1, d.kelvin);
         f.range(prefix, "tint", &mut self.tint, -1.0, 1.0, d.tint);
         f.choice(prefix, "blend", &mut self.blend, BLEND_NAMES);
+        if caster_kind && self.key {
+            // A caster adds no light, so it never is the key. Cleared here
+            // (and so in clamped()), it never takes clamp()'s single key slot.
+            self.key = false;
+            f.push(prefix, "key");
+        }
         if let Some(rgb) = self.rgb.as_mut() {
             f.color(prefix, "rgb", rgb, 1.0, [1.0; 3]);
         }
@@ -1576,13 +1767,14 @@ impl LightParams {
         if let Some(scrim) = self.scrim.as_mut() {
             scrim.clamp_fields(&join_path(prefix, "scrim"), f);
         }
-        // A polygon or a scrim is drawn in the light's gnomonic box, which
-        // stretches toward its edges: past about 120 degrees across a shape
-        // distorts (the spec's limit for one shaped light). A stroke may be
-        // longer, and rect, disc and ring keep A1's 170 above.
-        if matches!(self.shape(), LightShape::Polygon | LightShape::Scrim) {
-            f.range(prefix, "width_deg", &mut self.width_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.width_deg);
-            f.range(prefix, "height_deg", &mut self.height_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.height_deg);
+        // A polygon, a scrim or a caster is drawn in the light's gnomonic
+        // box, which stretches toward its edges: past about 120 degrees
+        // across a shape distorts (the spec's limit for one shaped light). A
+        // stroke may be longer, and rect, disc and ring keep A1's 170 above.
+        let span = self.max_span_deg();
+        if span < LIGHT_SPAN_MAX_DEG {
+            f.range(prefix, "width_deg", &mut self.width_deg, 0.1, span, d.width_deg);
+            f.range(prefix, "height_deg", &mut self.height_deg, 0.1, span, d.height_deg);
         }
         if let Some(gels) = self.gels.as_mut() {
             // Known names only, spelled as the table spells them, at most GEL_LIMIT.
@@ -1614,6 +1806,13 @@ impl LightParams {
         }
         if let Some(imperfections) = self.imperfections.as_mut() {
             imperfections.clamp_fields(&join_path(prefix, "imperfections"), f);
+        }
+        if let Some(kind) = self.kind.as_mut() {
+            f.choice(prefix, "kind", kind, LIGHT_KIND_NAMES);
+        }
+        if let Some(block) = self.caster.as_mut() {
+            // Held whatever the kind: a light keeps a block it does not read.
+            block.clamp_fields(&join_path(prefix, "caster"), f);
         }
     }
 }
@@ -1757,6 +1956,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].gobo" => json_tree(&GoboParams::default()).ok(),
         "lights[].aim" => json_tree(&AimParams::default()).ok(),
         "lights[].imperfections" => json_tree(&ImperfectionParams::default()).ok(),
+        "lights[].caster" => json_tree(&CasterParams::default()).ok(),
         "base_image" => json_tree(&BaseImageParams::default()).ok(),
         "sky.volumetric" => json_tree(&VolumetricParams::default()).ok(),
         "sky.weather" => json_tree(&WeatherParams::default()).ok(),
@@ -1786,7 +1986,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
 fn fixed_length(schema: &str) -> Option<usize> {
     match schema {
         "sky.atmosphere.ground_color" | "sky.night.glow_color" | "studio.top" | "studio.horizon" | "studio.floor" => Some(3),
-        "lights[].rgb" | "lights[].stroke.end_rgb" => Some(3),
+        "lights[].rgb" | "lights[].stroke.end_rgb" | "lights[].caster.tint" => Some(3),
         "lights[].aim.barn_doors" => Some(4),
         "lights[].polygon.points[]" | "lights[].stroke.points[]" => Some(2),
         _ => None,
@@ -2419,8 +2619,8 @@ mod tests {
         })
     }
 
-    /// M13: a list whose length its type fixes (a colour, the barn doors, a
-    /// point) given another length is refused naming its field, not by the
+    /// M13: a list whose length its type fixes (a colour, a caster's tint,
+    /// the barn doors, a point) given another length is refused naming its field, not by the
     /// typed parse's token at a position in an internal string. Every list of
     /// numbers a full map holds is tried one longer and one shorter, so a
     /// fixed-size field added without its length fails here; a list of any
@@ -2439,6 +2639,7 @@ mod tests {
                 ..Default::default()
             }),
             aim: Some(AimParams { barn_doors: [10.0, 0.0, 0.0, 0.0], ..Default::default() }),
+            caster: Some(CasterParams { tint: [0.2, 0.3, 0.1], ..CasterParams::default() }),
             ..LightParams::default()
         });
         let tree = json_tree(&full).unwrap();
@@ -2933,6 +3134,353 @@ mod fx_param_tests {
         assert_eq!(merged.lights[0].imperfections, Some(ImperfectionParams { dust: 0.3, seed: 8, ..ImperfectionParams::default() }));
         assert_eq!(report, ["lights[0].imperfections.seed"], "8.2 was rounded");
         assert_eq!(HdriParams::from_json(&merged.to_json()).expect("loads"), merged);
+    }
+}
+
+/// Redesign §5 (plan R1): an entry of `HdriParams::lights` is a light or a
+/// shadow caster (`kind`), and a caster carries its own block (`caster`).
+#[cfg(test)]
+mod layer_param_tests {
+    use super::*;
+
+    /// A default light with this `kind`.
+    fn with_kind(kind: Option<&str>) -> LightParams {
+        LightParams { kind: kind.map(str::to_string), ..LightParams::default() }
+    }
+
+    /// The entry as clamp() leaves it, alone in a map, and what clamp() reported.
+    fn clamp_one(light: LightParams) -> (LightParams, Vec<String>) {
+        let mut p = HdriParams { lights: vec![light], ..HdriParams::default() };
+        let changed = p.clamp();
+        (p.lights.remove(0), changed)
+    }
+
+    /// A studio map whose one light has every optional block older than R1,
+    /// held by clamp(): what a preset saved before R1 may hold.
+    fn every_older_block() -> HdriParams {
+        let mut p = HdriParams { mode: "studio".to_string(), ..HdriParams::default() };
+        p.lights.push(LightParams {
+            key: true,
+            rgb: Some([0.9, 0.8, 0.7]),
+            polygon: Some(PolygonParams::default()),
+            stroke: Some(StrokeParams { points: vec![[10.0, 20.0], [40.0, 30.0]], ..StrokeParams::default() }),
+            scrim: Some(ScrimParams::default()),
+            gels: Some(Vec::new()),
+            source: Some("led".to_string()),
+            source_quality: Some(0.5),
+            image: Some(LightImageParams { key: "a.png".to_string(), penumbra: Some(0.2), mask_softness: Some(0.4), ..LightImageParams::default() }),
+            gobo: Some(GoboParams { kind: "leaves".to_string(), ..GoboParams::default() }),
+            aim: Some(AimParams::default()),
+            imperfections: Some(ImperfectionParams::default()),
+            ..LightParams::default()
+        });
+        p.clamp();
+        p
+    }
+
+    #[test]
+    fn a_layer_kind_reads_loose_spellings_and_falls_back_to_light() {
+        assert_eq!(LIGHT_KIND_NAMES, &["light", "caster"]);
+        for (kind, want) in [
+            (None, LightKind::Light),
+            (Some("light"), LightKind::Light),
+            (Some("caster"), LightKind::Caster),
+            (Some(" Caster "), LightKind::Caster),
+            (Some("CASTER"), LightKind::Caster),
+            (Some(""), LightKind::Light),
+            (Some("shadow"), LightKind::Light),
+        ] {
+            let light = with_kind(kind);
+            assert_eq!(light.kind(), want, "{kind:?}");
+            assert_eq!(light.is_caster(), want == LightKind::Caster, "{kind:?}");
+        }
+        // Each listed name reads back as the variant spelled that way, and
+        // clamp() keeps it as it is.
+        let mut seen = Vec::new();
+        for name in LIGHT_KIND_NAMES {
+            let (held, changed) = clamp_one(with_kind(Some(*name)));
+            seen.push(held.kind().as_str());
+            assert!(changed.is_empty(), "kind {name}: {changed:?}");
+            assert_eq!(held.kind.as_deref(), Some(*name));
+        }
+        assert_eq!(seen, LIGHT_KIND_NAMES);
+        // A loose spelling is fixed once, and reported.
+        let (held, changed) = clamp_one(with_kind(Some(" Caster")));
+        assert_eq!(changed, ["lights[0].kind"]);
+        assert_eq!(held.kind.as_deref(), Some("caster"));
+        // Every variant has its name listed: the match stops compiling when a
+        // variant is added, until it is listed too.
+        for k in [LightKind::Light, LightKind::Caster] {
+            match k {
+                LightKind::Light | LightKind::Caster => assert!(LIGHT_KIND_NAMES.contains(&k.as_str()), "{k:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn clamp_holds_every_caster_field_and_reports_it() {
+        assert_eq!(CASTER_STRENGTH_RANGE, (0.0, 1.0));
+        assert_eq!(CASTER_SOFTNESS_RANGE, (0.0, 1.0));
+        assert_eq!(CASTER_BLOOM_THRESHOLD_EV_RANGE, (-10.0, 20.0));
+        assert_eq!(CASTER_BLOOM_STRENGTH_RANGE, (0.0, 1.0));
+        assert_eq!(CASTER_BLOOM_LENGTH_RANGE, (0.0, 45.0));
+        assert_eq!(
+            CasterParams::default(),
+            CasterParams { strength: 1.0, tint: [0.0; 3], softness: 0.0, bloom_threshold_ev: 10.0, bloom_strength: 0.0, bloom_length_deg: 5.0 }
+        );
+        let all = [
+            "lights[0].caster.strength",
+            "lights[0].caster.tint",
+            "lights[0].caster.softness",
+            "lights[0].caster.bloom_threshold_ev",
+            "lights[0].caster.bloom_strength",
+            "lights[0].caster.bloom_length_deg",
+        ];
+        let held = |block: CasterParams| {
+            let (light, changed) = clamp_one(LightParams { caster: Some(block), ..LightParams::new_caster() });
+            (light.caster.expect("the block stays"), changed)
+        };
+        // Above every range: each field to its top, reported in field order.
+        let (high, changed) = held(CasterParams { strength: 2.0, tint: [2.0, 0.5, 1.5], softness: 1.5, bloom_threshold_ev: 50.0, bloom_strength: 3.0, bloom_length_deg: 90.0 });
+        assert_eq!(high, CasterParams { strength: 1.0, tint: [1.0, 0.5, 1.0], softness: 1.0, bloom_threshold_ev: 20.0, bloom_strength: 1.0, bloom_length_deg: 45.0 });
+        assert_eq!(changed, all);
+        // Below: each field to its bottom.
+        let (low, changed) = held(CasterParams { strength: -1.0, tint: [-1.0, 0.5, -0.2], softness: -0.5, bloom_threshold_ev: -50.0, bloom_strength: -1.0, bloom_length_deg: -5.0 });
+        assert_eq!(low, CasterParams { strength: 0.0, tint: [0.0, 0.5, 0.0], softness: 0.0, bloom_threshold_ev: -10.0, bloom_strength: 0.0, bloom_length_deg: 0.0 });
+        assert_eq!(changed, all);
+        // NaN: each field to its default (a tint channel to black).
+        let nan = f32::NAN;
+        let (fallback, changed) = held(CasterParams { strength: nan, tint: [nan, 0.5, nan], softness: nan, bloom_threshold_ev: nan, bloom_strength: nan, bloom_length_deg: nan });
+        assert_eq!(fallback, CasterParams { tint: [0.0, 0.5, 0.0], ..CasterParams::default() });
+        assert_eq!(changed, all);
+        // Infinities: the nearest bound.
+        let (inf, changed) = held(CasterParams {
+            strength: f32::INFINITY,
+            tint: [f32::INFINITY; 3],
+            softness: f32::NEG_INFINITY,
+            bloom_threshold_ev: f32::INFINITY,
+            bloom_strength: f32::NEG_INFINITY,
+            bloom_length_deg: f32::INFINITY,
+        });
+        assert_eq!(inf, CasterParams { strength: 1.0, tint: [1.0; 3], softness: 0.0, bloom_threshold_ev: 20.0, bloom_strength: 0.0, bloom_length_deg: 45.0 });
+        assert_eq!(changed, all);
+        // The ends of each range stay put, and clamped() holds what clamp() holds.
+        for block in [high, low] {
+            assert_eq!(held(block.clone()), (block.clone(), Vec::<String>::new()));
+            assert_eq!(block.clamped(), block);
+        }
+        let wild = CasterParams { strength: 2.0, bloom_length_deg: nan, ..CasterParams::default() };
+        assert_eq!(wild.clamped(), CasterParams { strength: 1.0, ..CasterParams::default() });
+    }
+
+    #[test]
+    fn an_unknown_kind_is_a_light_and_is_reported() {
+        let raw = LightParams { kind: Some("flag".to_string()), shape: "disc".to_string(), key: true, width_deg: 150.0, ..LightParams::default() };
+        assert_eq!(raw.kind(), LightKind::Light, "read as a light before clamp()");
+        let (held, changed) = clamp_one(raw);
+        assert_eq!(changed, ["lights[0].kind"]);
+        assert_eq!(held.kind.as_deref(), Some("light"), "it falls back to the first name");
+        assert_eq!((held.shape.as_str(), held.key, held.width_deg), ("disc", true, 150.0), "and keeps what a light keeps");
+        // A patch that names a kind of its own makes a light too, and says so.
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"kind": "tree"}]}"#).expect("the patch merges");
+        assert_eq!(merged.lights[0].kind.as_deref(), Some("light"));
+        assert_eq!(report, ["lights[0].kind"]);
+    }
+
+    #[test]
+    fn a_caster_is_always_a_rect_and_never_the_key() {
+        // Every other shape becomes a rect, reported once (a loose or an
+        // unknown spelling too): a caster's pattern lies in its rectangle.
+        for shape in ["disc", "ring", "polygon", "stroke", "scrim", " Disc", "hexagon"] {
+            let (held, changed) = clamp_one(LightParams { shape: shape.to_string(), ..LightParams::new_caster() });
+            assert_eq!(changed, ["lights[0].shape"], "{shape:?}");
+            assert_eq!((held.shape.as_str(), held.shape()), ("rect", LightShape::Rect), "{shape:?}");
+        }
+        // A caster claimed as the key is not (it adds no light), and a light
+        // listed after it keeps the key: the caster never took the one slot.
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams { key: true, ..LightParams::new_caster() });
+        p.lights.push(LightParams { name: "Key".to_string(), key: true, ..LightParams::default() });
+        assert_eq!(p.clamp(), ["lights[0].key"]);
+        assert!(!p.lights[0].key && p.lights[1].key, "a caster never is the key");
+        // clamped() holds both rules, as every reader takes a light through it.
+        let held = LightParams { shape: "ring".to_string(), key: true, ..LightParams::new_caster() }.clamped();
+        assert_eq!((held.shape.as_str(), held.key), ("rect", false));
+        // A light keeps its shape and its key.
+        let light = LightParams { shape: "ring".to_string(), key: true, ..LightParams::default() };
+        assert_eq!(light.clamped(), light);
+    }
+
+    #[test]
+    fn a_caster_spans_at_most_120_degrees() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams { width_deg: 150.0, height_deg: 130.0, ..LightParams::new_caster() });
+        p.lights.push(LightParams { width_deg: 150.0, height_deg: 130.0, ..LightParams::default() });
+        assert_eq!(p.clamp(), ["lights[0].width_deg", "lights[0].height_deg"]);
+        assert_eq!((p.lights[0].width_deg, p.lights[0].height_deg), (SHAPED_SPAN_MAX_DEG, SHAPED_SPAN_MAX_DEG), "a caster lives in its gnomonic box");
+        assert_eq!((p.lights[1].width_deg, p.lights[1].height_deg), (150.0, 130.0), "a rect light keeps A1's 170");
+        // max_span_deg() says what clamp() keeps, for every shape and for a caster.
+        for (shape, light_span) in [("rect", 170.0), ("disc", 170.0), ("ring", 170.0), ("polygon", 120.0), ("stroke", 170.0), ("scrim", 120.0)] {
+            let light = LightParams { shape: shape.to_string(), ..LightParams::default() };
+            let caster = LightParams { shape: shape.to_string(), ..LightParams::new_caster() };
+            assert_eq!(light.max_span_deg(), light_span, "a {shape} light");
+            assert_eq!(caster.max_span_deg(), SHAPED_SPAN_MAX_DEG, "a caster that says {shape}");
+            for l in [light, caster] {
+                let wide = LightParams { width_deg: 1000.0, height_deg: 1000.0, ..l.clone() }.clamped();
+                assert_eq!((wide.width_deg, wide.height_deg), (l.max_span_deg(), l.max_span_deg()), "{shape}, caster {}", l.is_caster());
+            }
+        }
+    }
+
+    #[test]
+    fn a_light_keeps_a_caster_block_it_does_not_read() {
+        let block = CasterParams { strength: 3.0, softness: 0.4, ..CasterParams::default() };
+        let raw = LightParams { shape: "disc".to_string(), key: true, width_deg: 150.0, caster: Some(block), ..LightParams::default() };
+        assert_eq!(raw.kind(), LightKind::Light);
+        assert_eq!(raw.caster_params().strength, 1.0, "the accessor reads the block as clamp() holds it");
+        assert_eq!(raw.caster.as_ref().unwrap().strength, 3.0, "and leaves the block itself as it is");
+        let mut p = HdriParams { lights: vec![raw], ..HdriParams::default() };
+        assert_eq!(p.clamp(), ["lights[0].caster.strength"], "held, whatever the kind");
+        let held = &p.lights[0];
+        assert_eq!(held.caster, Some(CasterParams { strength: 1.0, softness: 0.4, ..CasterParams::default() }));
+        assert_eq!((held.shape.as_str(), held.key, held.width_deg), ("disc", true, 150.0), "a light keeps its shape, its key and its span");
+        assert!(!held.is_caster());
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()), "and saves the block");
+        // With no block, the accessor gives the defaults.
+        assert_eq!(LightParams::default().caster_params(), CasterParams::default());
+    }
+
+    /// Redesign §5: `kind` and `caster` are Options after every older field,
+    /// so a preset saved before them (no such keys) loads as lights with no
+    /// caster block, and one saved now is written as before: a light with
+    /// neither writes neither key (the derive writes struct order and leaves
+    /// a None out; Step 1's probe compares the text itself byte for byte).
+    #[test]
+    fn old_presets_load_unchanged() {
+        use super::super::presets::{preset, PRESET_NAMES};
+        let mut sets: Vec<(String, HdriParams)> = PRESET_NAMES.iter().map(|n| (n.to_string(), preset(n).unwrap())).collect();
+        sets.push(("every older block".to_string(), every_older_block()));
+        for (name, p) in &sets {
+            // Saved now: no light writes `kind` or `caster`.
+            let tree = JsonValue::deserialize_json(&p.to_json()).unwrap();
+            for (i, light) in tree.get("lights").and_then(JsonValue::as_array).unwrap().iter().enumerate() {
+                let fields = light.as_object().unwrap_or_else(|| panic!("{name}: lights[{i}] is an object"));
+                assert!(!fields.contains_key("kind") && !fields.contains_key("caster"), "{name}: lights[{i}] writes {:?}", sorted_keys(fields));
+            }
+            // A file from before R1: the same settings with both keys taken
+            // out of every light (written here first, then removed).
+            let mut marked = p.clone();
+            for light in &mut marked.lights {
+                light.kind = Some("light".to_string());
+                light.caster = Some(CasterParams::default());
+            }
+            let mut tree = JsonValue::deserialize_json(&marked.to_json()).unwrap();
+            for light in tree.get_mut("lights").and_then(JsonValue::as_array_mut).unwrap() {
+                let fields = light.as_object_mut().unwrap();
+                assert!(fields.remove("kind").is_some() && fields.remove("caster").is_some(), "{name}");
+            }
+            let old = tree.serialize_json();
+            assert!(!old.contains("\"caster\""), "{name}");
+            let loaded = HdriParams::from_json(&old).unwrap_or_else(|e| panic!("{name}: a preset saved before R1 loads: {e}"));
+            assert_eq!(&loaded, p, "{name}");
+            assert!(loaded.lights.iter().all(|l| l.kind.is_none() && l.caster.is_none() && l.kind() == LightKind::Light), "{name}");
+            assert_eq!(loaded.to_json(), p.to_json(), "{name}: saved again as it was");
+        }
+    }
+
+    #[test]
+    fn a_caster_round_trips_through_json() {
+        let mut p = HdriParams { mode: "studio".to_string(), ..HdriParams::default() };
+        p.lights.push(LightParams { name: "Key".to_string(), key: true, ..LightParams::default() });
+        p.lights.push(LightParams::new_caster());
+        p.lights.push(LightParams {
+            name: "Glass".to_string(),
+            gobo: Some(GoboParams { kind: "image".to_string(), image: "C:\\masks\\tree.png".to_string(), ..GoboParams::default() }),
+            caster: Some(CasterParams { strength: 0.7, tint: [0.2, 0.5, 0.1], softness: 0.3, bloom_threshold_ev: 12.5, bloom_strength: 0.6, bloom_length_deg: 8.0 }),
+            ..LightParams::new_caster()
+        });
+        assert!(p.clone().clamp().is_empty());
+        let json = p.to_json();
+        assert_eq!(HdriParams::from_json(&json), Ok(p.clone()), "presets save casters");
+        let tree = JsonValue::deserialize_json(&json).unwrap();
+        let lights = tree.get("lights").and_then(JsonValue::as_array).unwrap();
+        let kinds: Vec<Option<&str>> = lights.iter().map(|l| l.get("kind").and_then(JsonValue::as_str)).collect();
+        assert_eq!(kinds, [None, Some("caster"), Some("caster")], "a None kind is left out");
+        let blocks: Vec<bool> = lights.iter().map(|l| l.get("caster").is_some()).collect();
+        assert_eq!(blocks, [false, true, true], "Some(caster) is written, None is left out");
+        // Compact JSON too, and the block on its own.
+        assert_eq!(HdriParams::deserialize_json(&p.serialize_json()).unwrap(), p);
+        let block = p.lights[2].caster.clone().unwrap();
+        assert_eq!(CasterParams::deserialize_json(&block.serialize_json()).unwrap(), block);
+    }
+
+    #[test]
+    fn a_partial_caster_patch_is_completed_from_the_defaults() {
+        let patch = r#"{"lights": [{"name": "Tree", "kind": "caster", "caster": {"strength": 0.5, "tint": [0.1, 0.3, 0.1]}}]}"#;
+        let (merged, report) = HdriParams::default().merge_json(patch).expect("the patch merges");
+        let tree = &merged.lights[0];
+        assert!(tree.is_caster());
+        assert_eq!(tree.caster, Some(CasterParams { strength: 0.5, tint: [0.1, 0.3, 0.1], ..CasterParams::default() }), "a field left out takes its default");
+        assert!(report.is_empty(), "{report:?}");
+        // Held and reported as every other block is; an unknown key is named.
+        let (held, report) = merged
+            .merge_json(r#"{"lights": [{"kind": "caster", "caster": {"bloom_length_deg": 90, "blur": 1}}]}"#)
+            .expect("the patch merges");
+        assert_eq!(held.lights[0].caster, Some(CasterParams { bloom_length_deg: 45.0, ..CasterParams::default() }));
+        assert_eq!(report, ["ignored: lights[0].caster.blur", "lights[0].caster.bloom_length_deg"]);
+        // null takes the block away again: the caster reads the defaults.
+        let (cleared, _) = merged.merge_json(r#"{"lights": [{"kind": "caster", "caster": null}]}"#).expect("null merges");
+        assert_eq!(cleared.lights[0].caster, None);
+        assert_eq!(cleared.lights[0].caster_params(), CasterParams::default());
+    }
+
+    #[test]
+    fn a_caster_tint_of_the_wrong_length_is_refused_by_its_field() {
+        for (patch, says) in [
+            (r#"{"lights": [{"kind": "caster", "caster": {"tint": [0.2, 0.3]}}]}"#, "lights[0].caster.tint must be a list of 3 numbers"),
+            (r#"{"lights": [{"kind": "caster", "caster": {"tint": [0.2, 0.3, 0.4, 0.5]}}]}"#, "lights[0].caster.tint must be a list of 3 numbers"),
+            (r#"{"lights": [{"kind": "caster", "caster": {"tint": "green"}}]}"#, "lights[0].caster.tint must be a list of numbers"),
+        ] {
+            assert_eq!(HdriParams::default().merge_json(patch).unwrap_err(), says, "{patch}");
+        }
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"kind": "caster", "caster": {"tint": [0.2, 0.3, 0.4]}}]}"#)
+            .expect("three numbers merge");
+        assert_eq!(merged.lights[0].caster_params().tint, [0.2, 0.3, 0.4]);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn casters_count_toward_the_sixteen_layers() {
+        let mut p = HdriParams::default();
+        for i in 0..20 {
+            let mut layer = if i % 2 == 0 { LightParams::new_caster() } else { LightParams::default() };
+            layer.name = format!("L{i}");
+            p.lights.push(layer);
+        }
+        assert_eq!(p.clamp(), ["lights"]);
+        assert_eq!(p.lights.len(), LIGHT_LIMIT, "16 layers in all, lights and casters together");
+        assert_eq!(p.lights.iter().filter(|l| l.is_caster()).count(), 8);
+        assert_eq!(p.lights[15].name, "L15", "the list is cut at the end (the outliner's top)");
+        assert!(p.lights[14].is_caster() && !p.lights[15].is_caster());
+    }
+
+    #[test]
+    fn a_new_caster_is_already_clamped() {
+        let c = LightParams::new_caster();
+        assert_eq!(c.clamped(), c);
+        let mut p = HdriParams { mode: "studio".to_string(), lights: vec![c.clone()], ..HdriParams::default() };
+        assert!(p.clamp().is_empty(), "clamp() reports nothing");
+        assert_eq!(p.lights[0], c);
+        // What "+ Caster" adds (the app names and places it, R6).
+        assert_eq!((c.kind(), c.name.as_str(), c.shape(), c.enabled, c.key), (LightKind::Caster, "Caster", LightShape::Rect, true, false));
+        assert_eq!((c.azimuth_deg, c.elevation_deg, c.width_deg, c.height_deg, c.roll_deg, c.softness), (0.0, 15.0, 60.0, 45.0, 0.0, 0.0));
+        assert_eq!(c.gobo, Some(GoboParams { kind: "leaves".to_string(), distance: 0.0, ..GoboParams::default() }));
+        assert_eq!(c.caster, Some(CasterParams::default()));
+        // So that one which loses its kind is harmless: a Multiply flag at EV 0.
+        assert_eq!((c.blend(), c.intensity_ev), (Blend::Multiply, 0.0));
+        let lost = LightParams { kind: None, ..c.clone() };
+        assert!(!lost.is_caster() && lost.blend() == Blend::Multiply);
     }
 }
 
