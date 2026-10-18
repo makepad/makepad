@@ -83,7 +83,7 @@ script_mod! {
             let el = alj / q + dc * (al - alj) + amp * (nr - 0.5) * 2.0
             let du = rip * ((self.refl_h(c3, j, 2002.0) - 0.5) * 2.0 * (0.0012 + 0.03 * al) - 0.8 * (fx - step(0.5, fx)) * 6.2831853 / nu) / 6.2831853
             // the mirror point (raw azimuth vr.x + du, raw elevation -vr.y el / al), which the mirror target shows below its horizon
-            let x = ((fract(vr.x + du - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_size.x
+            let x = ((fract(vr.x + du - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_in().x + self.view_pad
             let y = self.mirror_horizon * self.view_size.y - vr.y * el / max(al, 0.00001) / vr.z
             let m = self.mirror_light.sample(clamp(vec2(x, y), vec2(0.5, 0.5), self.view_size - vec2(0.5, 0.5)) / self.view_size)
             return vec4(e.xyz + m.xyz * (w * sea * sqrt(dc) * mix(1.0, 0.85, rip) * self.cover(g.y - v.y, v.z)), e.w)
@@ -108,7 +108,7 @@ pub struct SceneOut<'a> { pub view: &'a ViewSpec, pub scene: &'a SceneTarget, pu
 /// `v` with `m` more pixels on every side (the same pixel centres; the horizon moved down by m).
 fn widen(v: &ViewSpec, m: usize) -> ViewSpec {
     let (w, h, mf) = (v.w as f64, v.h as f64, m as f64);
-    ViewSpec { u0: v.u0 - mf * v.span / w, span: v.span * (w + 2.0 * mf) / w, w: v.w + 2 * m, h: v.h + 2 * m, horizon: (v.horizon * h + mf) / (h + 2.0 * mf) }
+    ViewSpec { u0: v.u0 - mf * v.span / w, span: v.span * (w + 2.0 * mf) / w, w: v.w + 2 * m, h: v.h + 2 * m, horizon: (v.horizon * h + mf) / (h + 2.0 * mf), ..*v }
 }
 
 /// The blur's margin for view `v`: 3 sigma plus 2 px when the blur shows (the page's), else 0.
@@ -144,8 +144,9 @@ impl Post {
     /// neighbours as on the page, and by the water's when it reflects, so the ripple's sideways samples find the mirror
     /// there (tiles of an export meet without a seam); the final crops the margin off.
     pub fn scene_view(&mut self, p: &Params, v: &ViewSpec) -> ViewSpec {
-        self.margin = blur_margin(p, v) + if self.wants_mirror(p) { water_margin(p, v) } else { 0 };
-        widen(v, self.margin)
+        let pad = if self.wants_mirror(p) { water_margin(p, v) } else { 0 };
+        self.margin = blur_margin(p, v) + pad;
+        ViewSpec { pad, ..widen(v, self.margin) }
     }
 
     /// The passes between the scene and the final, recorded when the picture changes: the water when the mirror ran, the

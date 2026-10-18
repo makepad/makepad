@@ -267,7 +267,7 @@ script_mod! {
         ..mod.draw.DrawQuad,
         blend_op: @Max
         geom: vertex_buffer(mod.sky_geom.TreeVertex, mod.sky_geom.TreeGeom)
-        view_size: uniform(vec2(1.0, 1.0)) view_span: uniform(vec2(0.0, 1.0)) view_horizon: uniform(0.8)
+        view_size: uniform(vec2(1.0, 1.0)) view_span: uniform(vec2(0.0, 1.0)) view_horizon: uniform(0.8) view_pad: uniform(0.0)
         col_geom: uniform(vec4(1.0, 7.0, 0.0, 1.0)) off: uniform(0.0) off_dir: uniform(0.55) cols: texture_2d(float)
         v_v: varying(vec4f) v_c: varying(vec3f)
         // the camera's bearing (u) and distance factor of world azimuth uw
@@ -280,13 +280,13 @@ script_mod! {
             return self.cols.sample_nearest(vec2((c - q * self.col_geom.x + 0.5) / self.col_geom.x, (r + 7.0 * q + 0.5) / self.col_geom.y)).y
         }
         vertex: fn(){
-            let c = self.off * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853)); let sp = self.view_span; let sz = self.view_size
+            let c = self.off * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853)); let sp = self.view_span; let sz = self.view_size - 2.0 * self.view_pad
             let ra = self.raw_of(self.geom.an, c); let rv = self.raw_of(self.geom.an + self.geom.x / 6.2831853, c)
             var da = fract(ra.x - sp.x - 0.5 * sp.y + 0.5) - 0.5
             if self.copy > 0.5 { da = da - sign(da) }
-            let xs = ((da + fract(rv.x - ra.x + 0.5) - 0.5) / sp.y + 0.5) * sz.x; let x0 = floor(xs - 0.5); let l = floor(self.geom.c * 0.25 + 0.25)
+            let xs = ((da + fract(rv.x - ra.x + 0.5) - 0.5) / sp.y + 0.5) * sz.x + self.view_pad; let x0 = floor(xs - 0.5); let l = floor(self.geom.c * 0.25 + 0.25)
             let b = mix(self.foot(x0, l + 2.0), self.foot(x0 + 1.0, l + 2.0), xs - 0.5 - x0)
-            let ys = self.view_horizon * sz.y - (b + self.geom.y) / (rv.y * sp.y * 6.2831853 / sz.x)
+            let ys = self.view_horizon * sz.y - (b + self.geom.y) / (rv.y * sp.y * 6.2831853 / sz.x) + self.view_pad
             self.v_v = vec4(self.geom.a, self.geom.w, self.geom.bx, self.geom.by); self.v_c = vec3(self.geom.c - 4.0 * l, l, self.geom.h)
             self.world = self.draw_list.view_transform * vec4(xs, ys, self.draw_depth + self.draw_call.zbias, 1.0)
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)

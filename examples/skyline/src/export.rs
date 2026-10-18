@@ -40,7 +40,7 @@ impl Job {
     /// Tile i's view: its share of the turn.
     fn view(&self, i: usize) -> ViewSpec {
         let (cw, w) = (TILE.min(self.w - i * TILE), self.w as f64);
-        ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: self.p[P::Horizon] }
+        ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: self.p[P::Horizon], pad: 0 }
     }
 }
 

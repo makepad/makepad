@@ -25,6 +25,8 @@ script_mod! {
         view_span: uniform(vec2(0.0, 1.0))
         // the horizon line, a fraction of the height from the top
         view_horizon: uniform(0.8)
+        // the pass's margin past the view on each side (px; `ViewSpec::pad`): the view is view_in() px, the page's arithmetic
+        view_pad: uniform(0.0)
         // column texture width and height, margin columns, column count
         col_geom: uniform(vec4(1.0, 7.0, 0.0, 1.0))
         // 1 in the reflection run: the scene seen mirrored about the horizon
@@ -43,19 +45,20 @@ script_mod! {
         off: uniform(0.0)
         off_dir: uniform(0.55)
 
-        // the fragment's centre in pass pixels
-        frag: fn() -> vec2 { return self.rect_pos + self.pos * self.rect_size }
+        // the fragment's centre in pass pixels, exactly (the page's gl_FragCoord): the interpolated pos rounds by the quad's size
+        frag: fn() -> vec2 { return floor(self.rect_pos + self.pos * self.rect_size) + 0.5 }
         // radians per pixel of the raw view
-        px0: fn() -> float { return self.view_span.y * 6.2831853 / self.view_size.x }
+        px0: fn() -> float { return self.view_span.y * 6.2831853 / self.view_in().x }
+        view_in: fn() -> vec2 { return self.view_size - 2.0 * self.view_pad }
         // raw elevation (rad) of pass row y (mirrored in the reflection run)
         ang_raw: fn(y: float) -> float {
-            let a = (self.view_horizon * self.view_size.y - y) * self.px0()
+            let a = (self.view_horizon * self.view_in().y - (y - self.view_pad)) * self.px0()
             return mix(a, 0.0 - a, self.mirror)
         }
         // the fragment's place in the upright run's targets (the trees, the city): there, the row of its own raw elevation
         up_uv: fn() -> vec2 {
             let pp = self.frag()
-            return vec2(pp.x, self.view_horizon * self.view_size.y + self.up_dy - self.ang_raw(pp.y) / self.px0()) / self.view_size
+            return vec2(pp.x, self.view_horizon * self.view_in().y + self.up_dy - self.ang_raw(pp.y) / self.px0() + self.view_pad) / self.view_size
         }
         // row r of the column under pass x: rows 0-4 the ranges (ridge, tree foot, canopy top,
         // density), 5 the front treeline, 6 (land, ground rise, off-centre factor t, city glow)
@@ -70,7 +73,7 @@ script_mod! {
         // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
         view_raw: fn() -> vec3 {
             let pp = self.frag()
-            return vec3(fract(self.view_span.x + pp.x / self.view_size.x * self.view_span.y), self.ang_raw(pp.y), self.px0())
+            return vec3(fract(self.view_span.x + (pp.x - self.view_pad) / self.view_in().x * self.view_span.y), self.ang_raw(pp.y), self.px0())
         }
         // the page's `pixView`: raw view vr re-aimed for the off-centre camera (the scenery is a
         // ring of radius 1, the camera `off` from its centre toward `off_dir`): the world azimuth

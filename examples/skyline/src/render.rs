@@ -46,8 +46,9 @@ script_mod! {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewSpec {
     /// The first azimuth (0..1 = 0..360 degrees), the share of the turn shown, the size in pixels and
-    /// the horizon line (a fraction of the height from the top).
-    pub u0: f64, pub span: f64, pub w: usize, pub h: usize, pub horizon: f64,
+    /// the horizon line (a fraction of the height from the top); the margin (px a side) the scene shaders leave out of
+    /// their arithmetic, which stays the page's (the water's, `Post::scene_view`).
+    pub u0: f64, pub span: f64, pub w: usize, pub h: usize, pub horizon: f64, pub pad: usize,
 }
 
 impl ViewSpec {
@@ -58,7 +59,7 @@ impl ViewSpec {
     pub fn new(p: &Params, u0: f64, span: f64, w: usize) -> Self {
         let w = w.max(8);
         let h = ((w as f64 * p[P::Vfov] / (span * 360.0)).round() as usize).max(8);
-        Self { u0, span, w, h, horizon: p[P::Horizon] }
+        Self { u0, span, w, h, horizon: p[P::Horizon], pad: 0 }
     }
     /// Radians per pixel of the raw view.
     pub fn px0(&self) -> f64 { self.span * TAU / self.w as f64 }
@@ -122,10 +123,11 @@ impl SceneCtx<'_> {
     /// Every parameter (by its key), the view and the shared textures onto a scene shader.
     pub fn set_uniforms(&self, cx: &Cx, vars: &mut DrawVars) {
         self.p.set_uniforms(cx, vars);
-        let v = self.view;
+        let (v, m) = (self.view, self.view.pad as f64);
         vars.set_uniform(cx, live_id!(view_size), &[v.w as f32, v.h as f32]);
-        vars.set_uniform(cx, live_id!(view_span), &[v.u0 as f32, v.span as f32]);
-        vars.set_uniform(cx, live_id!(view_horizon), &[v.horizon as f32]);
+        vars.set_uniform(cx, live_id!(view_span), &[(v.u0 + m * v.span / v.w as f64) as f32, (v.span - 2.0 * m * v.span / v.w as f64) as f32]);
+        vars.set_uniform(cx, live_id!(view_horizon), &[(v.horizon + m * (2.0 * v.horizon - 1.0) / (v.h as f64 - 2.0 * m)) as f32]);
+        vars.set_uniform(cx, live_id!(view_pad), &[m as f32]);
         vars.set_uniform(cx, live_id!(col_geom), &self.col_geom);
         vars.set_uniform(cx, live_id!(mirror), &[if self.mirror { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(up_dy), &[self.up_dy as f32]);
