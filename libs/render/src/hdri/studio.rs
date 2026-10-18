@@ -28,7 +28,7 @@ use super::gels::gel_stack;
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
 use super::light_fx::LightFx;
-use super::caster::{caster_drawn, caster_flag, CasterLayer};
+use super::caster::{caster_drawn, caster_flag, CasterBloom, CasterLayer};
 use std::borrow::Cow;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
@@ -518,6 +518,34 @@ impl Studio {
         !self.lights.is_empty()
     }
 
+    /// The studio entries that are casters with bloom on (bloom_strength > 0
+    /// and bloom_length_deg > 0), in list order: the ones `Env`'s pre-pass
+    /// builds a raster for.
+    pub(super) fn bloom_casters(&self) -> Vec<usize> {
+        self.casters.iter().enumerate().filter_map(|(i, c)| c.as_ref().filter(|c| c.wants_bloom()).map(|_| i)).collect()
+    }
+
+    /// Hands caster `entry` its bloom. It is no longer plain, so the per-entry
+    /// loop runs from now on.
+    pub(super) fn set_caster_bloom(&mut self, entry: usize, bloom: CasterBloom) {
+        if let Some(Some(caster)) = self.casters.get_mut(entry) {
+            caster.set_bloom(bloom);
+            self.any_fx = true;
+        }
+    }
+
+    /// The caster at studio entry `entry`; None for a light.
+    pub(super) fn caster(&self, entry: usize) -> Option<&CasterLayer> {
+        self.casters.get(entry).and_then(Option::as_ref)
+    }
+
+    /// The analytic coverage of the caster at `entry` along `dir`
+    /// ([`caster_sharp_coverage`]), which its softness raster softens and its
+    /// bloom thins.
+    pub(super) fn caster_sharp(&self, entry: usize, dir: Vec3f) -> f32 {
+        caster_sharp_coverage(&self.lights[entry], &self.fx[entry], dir)
+    }
+
     /// The share of the key's emission that gets past its gobo, doors and
     /// grid, times its wear (B10): `LightFx::key_share`, weighted by what the
     /// key puts into the map, its own drawing (shape, soft edge, hotspot,
@@ -574,14 +602,28 @@ impl Studio {
     /// out leaves what it hides scaled as in the map and nothing of its own.
     ///
     /// A shadow caster multiplies what is drawn before it by its
-    /// transmission (redesign §5, `draw_caster`), here and over the key alike.
+    /// transmission (redesign §5, `draw_caster`), here and over the key alike,
+    /// its bloom included (R5).
     pub(super) fn apply_lights_sky(&self, dir: Vec3f, base: Vec3f, sky: &dyn Fn(Vec3f) -> Vec3f, without_key: bool) -> Vec3f {
         let skip = if without_key { self.key_index } else { None };
+        self.apply_entries(dir, base, sky, skip, self.lights.len())
+    }
+
+    /// [`Self::apply_lights_sky`] over the entries 0..end only, nothing left out:
+    /// what a caster at entry `end` stands in front of (its bloom's pre-pass,
+    /// `Env::content_before`). Entries past the list are none.
+    pub(super) fn apply_lights_until(&self, dir: Vec3f, base: Vec3f, sky: &dyn Fn(Vec3f) -> Vec3f, end: usize) -> Vec3f {
+        self.apply_entries(dir, base, sky, None, end.min(self.lights.len()))
+    }
+
+    /// The draw loop of both: the entries 0..end in list order, `skip` drawn as
+    /// the key left out.
+    fn apply_entries(&self, dir: Vec3f, base: Vec3f, sky: &dyn Fn(Vec3f) -> Vec3f, skip: Option<usize>, end: usize) -> Vec3f {
         if !self.any_fx {
-            return self.draw_lights(0..self.lights.len(), dir, base, skip);
+            return self.draw_lights(0..end, dir, base, skip);
         }
         let mut c = base;
-        for (i, fx) in self.fx.iter().enumerate() {
+        for (i, fx) in self.fx.iter().enumerate().take(end) {
             if let Some(caster) = &self.casters[i] {
                 // A caster multiplies what is drawn before it and adds nothing
                 // (`draw_caster`). It is never the key, so nothing skips it.
@@ -821,13 +863,14 @@ fn draw_caster(light: &PreparedLight, fx: &LightFx, caster: &CasterLayer, dir: V
         let after = light.draw(dir, acc, false);
         return if fx.is_plain() { after } else { fx.apply(dir, acc, after) };
     }
-    caster.transmit(acc, caster.coverage(dir, &|d| flag_coverage(light, fx, d)))
+    caster.transmit(acc, caster.coverage(dir, &|d| caster_sharp_coverage(light, fx, d)))
 }
 
 /// The share 0..=1 of a caster's flag that covers `dir`, its box under its
 /// pattern, whatever its strength and tint: what a black flag of it takes
 /// out of white.
-fn flag_coverage(light: &PreparedLight, fx: &LightFx, dir: Vec3f) -> f32 {
+/// R5: also what the bloom pre-pass reads (`Studio::caster_sharp`).
+fn caster_sharp_coverage(light: &PreparedLight, fx: &LightFx, dir: Vec3f) -> f32 {
     let white = Vec3f::all(1.0);
     let after = light.over(dir, white, Vec3f::default());
     let left = if fx.is_plain() { after } else { fx.apply(dir, white, after) };

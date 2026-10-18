@@ -41,7 +41,8 @@ pub fn bake_env_map_with_daylight(
     width: usize,
     run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
 ) -> (EnvMap, Option<EnvSun>, Option<Vec3f>) {
-    let env = Env::new(params);
+    // A shadow caster's bloom is rastered at this bake's width (R5).
+    let env = Env::new_for_width(params, &ImageSet::default(), width, &|| false).expect("an Env nothing cancels is built");
     let (sun, daylight) = (env.sun(), env.sun_dir());
     (env.bake_par(width, run), sun, daylight)
 }
@@ -81,8 +82,9 @@ pub fn bake_generated_env_map_with(params: &HdriParams, images: &ImageSet, width
 
 /// [`bake_generated_env_map_with`] for a job a newer request can overtake
 /// (the sandbox's map job): its `Env` is built through
-/// [`Env::new_cancellable`], so the first build of a seed's cloud volume
-/// noise (about 2.2 s in release) stops when `cancelled` says so, and the
+/// [`Env::new_for_width`] at `width` (a caster's bloom is rastered for it),
+/// so the first build of a seed's cloud volume noise (about 2.2 s in
+/// release) and the bloom's pre-pass stop when `cancelled` says so, and the
 /// bake is then None (D15, L:229). The rows are `run`'s to skip; a bake that
 /// was not stopped is `bake_generated_env_map_with`'s, bit for bit.
 pub fn bake_generated_env_map_cancellable(
@@ -92,7 +94,7 @@ pub fn bake_generated_env_map_cancellable(
     run: impl Fn(usize, &(dyn Fn(usize) + Sync)),
     cancelled: &dyn Fn() -> bool,
 ) -> Option<GeneratedEnvMap> {
-    let env = Env::new_cancellable(params, images, cancelled)?;
+    let env = Env::new_for_width(params, images, width, cancelled)?;
     let map = env.bake_par(width, &run);
     let keyless = env.bake_keyless_par(&map, &run);
     Some(GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() })
@@ -488,6 +490,30 @@ mod tests {
         // The default params are a midsummer noon sky: its sun is up.
         assert!(sun.is_some(), "the default noon sky has its sun up");
         assert!(sun.unwrap().dir.y > 0.0);
+    }
+
+    /// R5: the bakes that know their width build their Env for it
+    /// (`Env::new_for_width`), so a shadow caster's bloom is rastered at the
+    /// bake's texel: the map is that Env's, not the reference width's.
+    #[test]
+    fn a_generated_bake_rasters_a_casters_bloom_at_its_width() {
+        let mut p = HdriParams::default();
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.azimuth_deg = 200.0;
+        p.sky.sun.elevation_deg = 30.0;
+        p.lights.push(LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 47.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, seed: 3, ..GoboParams::default() }),
+            caster: Some(CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() }),
+            ..LightParams::new_caster()
+        });
+        let at_64 = Env::new_for_width(&p, &ImageSet::default(), 64, &|| false).expect("nothing cancels it").bake(64);
+        assert!(bake_generated_env_map(&p, 64, serial).map == at_64, "the generated bake builds its Env at its width");
+        assert!(bake_env_map(&p, 64, serial).0 == at_64, "bake_env_map builds its Env at its width");
+        assert!(Env::new(&p).bake(64) != at_64, "the reference width's raster is another");
     }
 
     #[test]

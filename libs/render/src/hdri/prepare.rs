@@ -1117,6 +1117,28 @@ mod tests {
                 0.02,
             ),
             case("4: key behind a caster with an image mask", studio_1b(vec![softbox.clone(), caster(5.0, 25.0, 50.0, 40.0, Some(stripes), CasterParams::default())]), 0.01),
+            // R5: the sun half behind a solid caster's soft lower edge (the caster's
+            // centre 10 degrees above the sun, 20 degrees tall). Its bloom thins the
+            // caster round the disc, in the map and in the key alike: one raster,
+            // read by the bake, the keyless copy and disc_share. Emission test only:
+            // with the key disabled its bloom goes too, so "keyless == key
+            // disabled" does not hold here.
+            case(
+                "5: sun behind a caster with bloom",
+                HdriParams {
+                    lights: vec![LightParams {
+                        azimuth_deg: 150.0,
+                        elevation_deg: 45.0,
+                        width_deg: 30.0,
+                        height_deg: 20.0,
+                        gobo: None,
+                        caster: Some(CasterParams { softness: 0.3, bloom_strength: 1.0, bloom_length_deg: 4.0, ..CasterParams::default() }),
+                        ..LightParams::new_caster()
+                    }],
+                    ..sun.clone()
+                },
+                0.03,
+            ),
         ]
     }
 

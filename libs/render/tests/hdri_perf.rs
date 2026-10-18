@@ -470,3 +470,77 @@ fn a_soft_casters_raster_stays_well_under_a_held_bake() {
         assert!(raster < 50.0, "softness {softness}: the raster takes {raster:.1} ms, a held preview's whole budget");
     }
 }
+
+/// Redesign §5 (R5): a caster's bloom pre-pass costs well under the bake it is
+/// for. This is the plan's hardest case for it: an 80 degree leaves caster in
+/// front of the sun with 45 degrees of bloom, on a clear sky and on a volumetric
+/// one, at the held (512) and released (1024) preview widths. The pre-pass is
+/// what `Env::new_for_width` takes with the bloom on, less what it takes with
+/// it off (medians of five); the bake is that Env's row-parallel bake. The
+/// pre-pass is one thread's work while the bake fans out, so it is held to a
+/// quarter of the bake on 8 cores, and to proportionally more on a machine with
+/// more.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let allowed = 0.25 * (cores as f64 / 8.0).max(1.0);
+    let with_caster = |sky: &HdriParams, bloom_strength: f32| {
+        let mut p = sky.clone();
+        p.lights = vec![LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 30.0,
+            width_deg: 80.0,
+            height_deg: 80.0,
+            gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, ..GoboParams::default() }),
+            caster: Some(CasterParams { bloom_strength, bloom_length_deg: 45.0, ..CasterParams::default() }),
+            ..LightParams::new_caster()
+        }];
+        p
+    };
+    let mut clear = cloudy_sky();
+    clear.sky.clouds.coverage = 0.0;
+    clear.sky.clouds.cirrus = 0.0;
+    let mut volumetric = cloudy_sky();
+    // A seed no other test in this binary bakes; its noise is built once, untimed, below.
+    volumetric.seed = 0x0b10_0c45;
+    volumetric.sky.volumetric = Some(VolumetricParams::default());
+    let images = ImageSet::default();
+    with_pool(|pool| {
+        let mut slow = Vec::new();
+        for (name, sky) in [("clear sky", &clear), ("volumetric sky", &volumetric)] {
+            let (on, off) = (with_caster(sky, 1.0), with_caster(sky, 0.0));
+            // Untimed: the pool's first fan-out and the volume's noise.
+            let warm = Env::new_for_width(&off, &images, 512, &|| false).expect("nothing cancels it");
+            let _ = warm.bake_par(512, |n, f| pool.fan_out(Lane::Heavy, n, f));
+            for width in [512usize, 1024] {
+                let build = |p: &HdriParams| {
+                    let start = Instant::now();
+                    let env = Env::new_for_width(p, &images, width, &|| false).expect("nothing cancels it");
+                    (start.elapsed().as_secs_f64() * 1000.0, env)
+                };
+                let (mut pre_pass, mut bakes) = (Vec::new(), Vec::new());
+                for _ in 0..5 {
+                    let (with_ms, env) = build(&on);
+                    let (without_ms, _) = build(&off);
+                    pre_pass.push((with_ms - without_ms).max(0.0));
+                    let start = Instant::now();
+                    let map = env.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, f));
+                    bakes.push(start.elapsed().as_secs_f64() * 1000.0);
+                    check_map(&map, width, name);
+                }
+                let (pre, bake) = (median(pre_pass), median(bakes));
+                println!(
+                    "hdri_perf: bloom pre-pass {width}x{} {name:<15} {pre:7.2} ms against its bake {bake:7.2} ms ({:4.1} %, allowed {:.0} %)",
+                    width / 2,
+                    100.0 * pre / bake,
+                    100.0 * allowed
+                );
+                if pre > allowed * bake {
+                    slow.push(format!("{name} at {width}: {pre:.1} ms against {bake:.1} ms"));
+                }
+            }
+        }
+        assert!(slow.is_empty(), "bloom pre-passes over {:.0} % of their bake: {}", 100.0 * allowed, slow.join(", "));
+    });
+}

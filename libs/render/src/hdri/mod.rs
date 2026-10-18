@@ -75,6 +75,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// so a layer bug cannot put infinity into an export or the SH projection.
 const MAX_RADIANCE: f32 = 1.0e30;
 
+/// The width a shadow caster's bloom raster is tied to when an `Env` is not told
+/// the width it is baked at ([`Env::new_for_width`]): the released preview's and
+/// the engine's bake width, and the end-to-end key test's.
+pub const CASTER_REFERENCE_WIDTH: usize = 1024;
+
 /// Sub-samples per axis for a texel that touches a hot spot.
 const HOT_SAMPLES: usize = 8;
 /// A feature is refined while its radius is under this many texels; a wider one is resolved by the grid itself.
@@ -200,7 +205,23 @@ impl Env {
     /// A map that was not stopped is `new_with`'s, bit for bit; a map with
     /// nothing slow to build (no volume, or a seed already built) is built
     /// whatever `cancelled` says, and the caller checks its token after.
+    /// A shadow caster's bloom is rastered at [`CASTER_REFERENCE_WIDTH`] ([`Self::new_for_width`]).
     pub fn new_cancellable(params: &HdriParams, images: &ImageSet, cancelled: &dyn Fn() -> bool) -> Option<Env> {
+        Env::new_for_width(params, images, CASTER_REFERENCE_WIDTH, cancelled)
+    }
+
+    /// [`Self::new_cancellable`] for a map baked `width` wide. A shadow caster's
+    /// bloom (redesign §5) is rastered at that width's texel, coarsened to a 32nd
+    /// of its bloom length and to at most width / 12 cells a side (and
+    /// `caster::CASTER_RASTER_MAX_SIDE`), so the held 512 preview pays for a
+    /// 512 raster and an export gets a fine one. `new`, `new_with` and
+    /// `new_cancellable` are this at [`CASTER_REFERENCE_WIDTH`]. Every lookup of
+    /// the Env (both bakes at any width, the keyless copy, the key, `disc_share`)
+    /// reads that one raster, so the key carries the light the map draws and the
+    /// copy lacks exactly it (D1, N3). The pre-pass polls `cancelled` too.
+    /// Without a caster whose bloom is on, `width` changes nothing: the Env is
+    /// `new_cancellable`'s, bit for bit.
+    pub fn new_for_width(params: &HdriParams, images: &ImageSet, width: usize, cancelled: &dyn Fn() -> bool) -> Option<Env> {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
@@ -311,6 +332,11 @@ impl Env {
             let sky_irradiance = if base.replace_sky { Some(env.base_irradiance()) } else { None };
             env.base_image = composite::BaseImage::new(&base, images, sky_irradiance);
         }
+        // A caster's bloom reads the finished layers behind it, so it comes
+        // last; a newer request stops it as it stops the cloud noise (R5).
+        if !env.build_caster_bloom(width, cancelled) {
+            return None;
+        }
         // The key is not measured here: the engine's first `sun` does that,
         // once (D15).
         Some(env)
@@ -375,6 +401,55 @@ impl Env {
     fn lights_over(&self, d: Vec3f, base: Vec3f, without_key: bool, at: Sampling) -> Vec3f {
         let sky = |w: Vec3f| self.window_sky_at(w, base, at);
         self.studio.apply_lights_sky(d, base, &sky, without_key)
+    }
+
+    /// What the map draws at `d` (map frame, the rotation already taken out)
+    /// from everything before studio entry `entry`, times 2^intensity_ev: what
+    /// a caster at `entry` stands in front of (its bloom's pre-pass). That is
+    /// the base (a base image, the sky with its discs, clouds and weather, or
+    /// the backdrop under its gobo shadow) and the lights and casters listed
+    /// before it, their bloom included. `at` samples it as a bake of the
+    /// pre-pass's width would, without a cloud cache.
+    fn content_before(&self, d: Vec3f, entry: usize, at: Sampling) -> Vec3f {
+        let base = self.base_at(d, None, at);
+        let sky = |w: Vec3f| self.window_sky_at(w, base, at);
+        self.studio.apply_lights_until(d, base, &sky, entry) * self.scale
+    }
+
+    /// The casters' bloom (redesign §5, decision 11). It is built once per map,
+    /// after every layer the casters stand in front of, for each caster with
+    /// bloom on, in list order, so a caster sees the bloom of the casters
+    /// before it. What the map draws behind the caster (`content_before`) and
+    /// its own coverage are rastered in its frame for a map `width` wide, the
+    /// sun's and the moon's discs area-averaged. A caster that nothing bright
+    /// stands behind keeps no raster: it stays exactly the flag it draws as.
+    /// False when `cancelled` stopped it.
+    fn build_caster_bloom(&mut self, width: usize, cancelled: &dyn Fn() -> bool) -> bool {
+        let entries = self.studio.bloom_casters();
+        if entries.is_empty() {
+            return true;
+        }
+        // The discs, turned into the map's own frame, as `studio_key` turns them.
+        let hot: Vec<(Vec3f, f32)> = self
+            .hot_spots()
+            .into_iter()
+            .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
+            .collect();
+        let at = Sampling::bake(width, None);
+        for entry in entries {
+            let built = {
+                let env: &Env = self;
+                let Some(caster) = env.studio.caster(entry) else { continue };
+                let behind = |d: Vec3f| env.content_before(d, entry, at);
+                let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
+                caster::CasterBloom::build(caster, width, &hot, &behind, &sharp, cancelled)
+            };
+            let Some(bloom) = built else { return false };
+            if bloom.thins_anything() {
+                self.studio.set_caster_bloom(entry, bloom);
+            }
+        }
+        true
     }
 
     /// The sky a window shows along `d` (map frame) over `base`, the base
@@ -1246,10 +1321,12 @@ pub(crate) mod probe {
         SoftMask,
         /// A soft shadow caster's coverage rastered (`caster::SoftCoverage::build`, R4).
         CasterSoft,
+        /// A caster's bloom raster built (`caster::CasterBloom::build`, R5).
+        CasterBloom,
     }
 
     thread_local! {
-        static COUNTS: [Cell<usize>; 6] = const { [const { Cell::new(0) }; 6] };
+        static COUNTS: [Cell<usize>; 7] = const { [const { Cell::new(0) }; 7] };
     }
 
     /// One more of `work` on this thread.
@@ -1676,6 +1753,38 @@ mod tests {
         p
     }
 
+    /// The sun of `sun_at(30.0)` (azimuth 200, 30 degrees up) 2 degrees under the bottom edge
+    /// of a 40 x 30 degree leaves caster: its centre is 17 degrees above the sun on the sun's
+    /// meridian, so its edge runs 15 degrees down from the centre, at 32. The sun shows in
+    /// full beside it whatever the pattern, and its bloom, `strength` over `length_deg` above
+    /// `threshold_ev`, eats into the leaves over it.
+    fn sun_under_leaves(strength: f32, length_deg: f32, threshold_ev: f32) -> HdriParams {
+        let mut p = sun_at(30.0);
+        p.lights.push(LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 47.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, seed: 3, ..GoboParams::default() }),
+            caster: Some(CasterParams { bloom_strength: strength, bloom_length_deg: length_deg, bloom_threshold_ev: threshold_ev, ..CasterParams::default() }),
+            ..LightParams::new_caster()
+        });
+        p
+    }
+
+    /// The light the map draws over the leaves the sun's bloom reaches: luminance summed over
+    /// a grid from 1 degree under the caster's edge to 11 degrees into it, 20 degrees either
+    /// side of the sun.
+    fn light_through_leaves(env: &Env) -> f64 {
+        let mut sum = 0.0f64;
+        for i in 0..81 {
+            for j in 0..49 {
+                sum += lum(env.radiance(dir_from_az_el(180.0 + 0.5 * i as f32, 31.0 + 0.25 * j as f32))) as f64;
+            }
+        }
+        sum
+    }
+
     /// What the sun's key would be with nothing fading it (a clear sky): the
     /// atmosphere's cone radiance, and the disc's outer limb in radians.
     fn unfaded_sun(p: &HdriParams) -> (Vec3f, f32) {
@@ -1896,5 +2005,176 @@ mod tests {
         assert_eq!(scene(s), s);
         let env = makepad_scene::Environment { sun: Some(s), ..makepad_scene::Environment::default() };
         assert!(env.validate().is_ok());
+    }
+
+    /// Redesign §5 (R5): bloom only thins a caster. Every texel with bloom is at most the map
+    /// without the caster and at least the map with bloom off, for a short bloom, a long one,
+    /// and one whose threshold the whole sky passes; and the bloom does thin somewhere.
+    #[test]
+    fn bloom_never_adds_light() {
+        let open = Env::new(&sun_at(30.0)).bake(128);
+        for (length_deg, threshold_ev) in [(8.0f32, 10.0f32), (20.0, 10.0), (20.0, -2.0)] {
+            let on = Env::new(&sun_under_leaves(1.0, length_deg, threshold_ev)).bake(128);
+            let off = Env::new(&sun_under_leaves(0.0, length_deg, threshold_ev)).bake(128);
+            let mut thinner = 0;
+            for ((a, b), c) in on.data.iter().zip(&off.data).zip(&open.data) {
+                for k in 0..3 {
+                    assert!(a[k] <= c[k] * (1.0 + 1.0e-5) + 1.0e-12, "bloom over {length_deg} deg above {threshold_ev} EV: {} is above the map without the caster, {}", a[k], c[k]);
+                    assert!(a[k] >= b[k] * (1.0 - 1.0e-5) - 1.0e-12, "bloom over {length_deg} deg above {threshold_ev} EV: {} is under the map with bloom off, {}", a[k], b[k]);
+                }
+                if a[1] > b[1] * 1.001 + 1.0e-9 {
+                    thinner += 1;
+                }
+            }
+            assert!(thinner > 0, "bloom over {length_deg} deg above {threshold_ev} EV thins nothing");
+        }
+    }
+
+    /// Redesign §5 (R5): more bloom strength or more bloom length thins more. Strength scales
+    /// one raster, so the light only grows (to the paths' rounding); a longer length widens the
+    /// kernel, so the light grows at every step.
+    #[test]
+    fn more_bloom_strength_or_length_thins_more() {
+        let by_strength: Vec<f64> = [0.0f32, 0.25, 0.5, 1.0].iter().map(|&s| light_through_leaves(&Env::new(&sun_under_leaves(s, 8.0, 10.0)))).collect();
+        assert!(by_strength.windows(2).all(|w| w[1] >= w[0] * (1.0 - 1.0e-6)), "by strength: {by_strength:?}");
+        assert!(by_strength[3] > 1.01 * by_strength[0], "bloom 1 shows: {by_strength:?}");
+        let by_length: Vec<f64> = [2.0f32, 5.0, 10.0, 20.0].iter().map(|&l| light_through_leaves(&Env::new(&sun_under_leaves(1.0, l, 10.0)))).collect();
+        assert!(by_length.windows(2).all(|w| w[1] > w[0]), "by length: {by_length:?}");
+    }
+
+    /// Redesign §5 (R5): a threshold above everything behind the caster changes nothing, bit
+    /// for bit: the pre-pass looks, keeps no raster, and the caster stays exactly its flag.
+    /// The map is dimmed by 5 EV so nothing in it, the sun's disc included, comes near 2^20.
+    #[test]
+    fn a_bloom_threshold_above_everything_changes_nothing() {
+        use probe::{counted, Work};
+        let dim = |mut p: HdriParams| {
+            p.intensity_ev = -5.0;
+            p
+        };
+        let on = dim(sun_under_leaves(1.0, 20.0, 20.0));
+        let off = dim(sun_under_leaves(0.0, 20.0, 20.0));
+        let before = counted(Work::CasterBloom);
+        let env = Env::new(&on);
+        assert_eq!(counted(Work::CasterBloom), before + 1, "the pre-pass looked behind the caster");
+        let sun = env.sun_dir().expect("a manual sun");
+        assert!(lum(env.radiance(sun)) < 2.0f32.powf(20.0), "nothing in this map reaches 2^20: the sun is {}", lum(env.radiance(sun)));
+        assert!(env.studio.caster(0).is_some_and(|c| c.bloom().is_none()), "nothing behind the caster is that bright, so no raster is kept");
+        assert!(env.bake(64) == Env::new(&off).bake(64), "bit for bit the map with bloom off");
+    }
+
+    /// Redesign §5 (R5): bloom strength 0, or a bloom length of 0, builds nothing and changes
+    /// nothing, even with a threshold the whole sky passes.
+    #[test]
+    fn bloom_strength_zero_changes_nothing() {
+        use probe::{counted, Work};
+        let plain = Env::new(&sun_under_leaves(0.0, 5.0, 10.0)).bake(64);
+        for (name, p) in [("strength 0 over 45 degrees above -10 EV", sun_under_leaves(0.0, 45.0, -10.0)), ("length 0 at strength 1 above -10 EV", sun_under_leaves(1.0, 0.0, -10.0))] {
+            let before = counted(Work::CasterBloom);
+            let map = Env::new(&p).bake(64);
+            assert_eq!(counted(Work::CasterBloom), before, "{name}: no pre-pass");
+            assert!(map == plain, "{name}: bit for bit the caster without bloom");
+        }
+    }
+
+    /// Redesign §5, decision 11 (R5): one raster per bloom caster per Env, built with the Env;
+    /// the bakes (serial and parallel), the key and the keyless copy read it and build no
+    /// other. None for bloom off, a disabled caster or one whose picture is missing.
+    #[test]
+    fn bloom_is_built_once_per_env_and_not_when_off() {
+        use probe::{counted, Work};
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| (0..n).for_each(f);
+        let on = sun_under_leaves(1.0, 10.0, 10.0);
+        let before = counted(Work::CasterBloom);
+        let env = Env::new(&on);
+        assert_eq!(counted(Work::CasterBloom), before + 1, "one bloom caster, one raster");
+        let map = env.bake(32);
+        assert!(env.bake_par(32, serial) == map);
+        let _ = env.sun().expect("the sun is the key");
+        assert!(env.bake_keyless_par(&map, serial).is_some());
+        assert_eq!(counted(Work::CasterBloom), before + 1, "the bakes, the key and the keyless copy read that raster");
+        let mut two = on.clone();
+        two.lights.push(LightParams { azimuth_deg: 160.0, ..on.lights[0].clone() });
+        let before = counted(Work::CasterBloom);
+        let _ = Env::new(&two);
+        assert_eq!(counted(Work::CasterBloom), before + 2, "two bloom casters, two rasters");
+        let mut disabled = on.clone();
+        disabled.lights[0].enabled = false;
+        let mut missing = on.clone();
+        missing.lights[0].gobo = Some(GoboParams { kind: "image".to_string(), image: "nowhere.png".to_string(), distance: 0.0, ..GoboParams::default() });
+        for (name, p) in [("bloom strength 0", sun_under_leaves(0.0, 10.0, 10.0)), ("bloom length 0", sun_under_leaves(1.0, 0.0, 10.0)), ("a disabled caster", disabled), ("a caster whose picture is missing", missing)] {
+            let before = counted(Work::CasterBloom);
+            let _ = Env::new(&p);
+            assert_eq!(counted(Work::CasterBloom), before, "{name}: no bloom raster");
+        }
+    }
+
+    /// R5: the bloom is fixed per Env, so a row-parallel bake is the serial bake, bit for bit,
+    /// at the reference width and at the widths the app bakes.
+    #[test]
+    fn a_bake_and_a_parallel_bake_agree_with_bloom() {
+        for width in [CASTER_REFERENCE_WIDTH, 512, 64] {
+            let env = Env::new_for_width(&sun_under_leaves(1.0, 10.0, 10.0), &ImageSet::default(), width, &|| false).expect("nothing cancels it");
+            assert!(env.studio.caster(0).is_some_and(|c| c.bloom().is_some()), "width {width}: the sun blooms");
+            assert!(env.bake_par(48, four_threads) == env.bake(48), "width {width}: the parallel bake is the serial one");
+        }
+    }
+
+    /// R5 (N3): the keyless copy reads the raster the map was built with, its key included.
+    /// It is the whole bake without the key, and the leaves the sun's bloom thins (outside
+    /// its disc) are as thin in it as in the map. Had the copy built its bloom without the
+    /// sun, they would be as dark as with bloom off.
+    #[test]
+    fn the_keyless_copy_reads_the_same_bloom() {
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| (0..n).for_each(f);
+        let env = Env::new(&sun_under_leaves(1.0, 10.0, 10.0));
+        assert!(matches!(env.key(), Some((KeyTerm::Sun, _))), "the sun is the key");
+        let map = env.bake(64);
+        assert!(env.bake_keyless_par(&map, serial) == env.bake_without_key(64), "the copy is the whole bake without the key");
+        let off = Env::new(&sun_under_leaves(0.0, 10.0, 10.0));
+        let mut thinned = 0;
+        for i in 0..40 {
+            for j in 0..24 {
+                let d = dir_from_az_el(194.0 + 0.3 * i as f32, 32.0 + 0.25 * j as f32);
+                let with_key = env.radiance(d);
+                let without = env.radiance_with(d, Some(KeyTerm::Sun), Sampling::default());
+                assert!((with_key - without).length() <= 1.0e-6 * with_key.length().max(1.0e-12), "{:?}: {with_key:?} in the map, {without:?} in the copy", az_el_from_dir(d));
+                if lum(with_key) > 1.01 * lum(off.radiance(d)) {
+                    thinned += 1;
+                }
+            }
+        }
+        assert!(thinned > 20, "the sun's bloom thins the leaves over it ({thinned} of 960 directions)");
+    }
+
+    /// R5, the bloom's property 4: the sun's disc (0.53 degrees) is smaller than a cell of
+    /// the raster at the reference width, and it is area-averaged into it. As it moves along
+    /// the caster's edge in tenths of a degree, the bright light the raster holds stays within
+    /// 5 % of its mean. Sampled at the cell centres alone, it swings from none to about twice.
+    #[test]
+    fn a_small_sun_behind_leaves_blooms_smoothly_as_it_moves() {
+        let mut energies = Vec::new();
+        for i in 0..=10 {
+            let mut p = sun_under_leaves(1.0, 5.0, 10.0);
+            p.sky.sun.azimuth_deg = 200.0 + 0.1 * i as f32;
+            let env = Env::new(&p);
+            let bloom = env.studio.caster(0).and_then(|c| c.bloom()).expect("the sun blooms");
+            assert!(bloom.cell() > 2.0 * 0.265f32.to_radians().tan(), "the disc is smaller than a cell: {}", bloom.cell());
+            energies.push(bloom.energy());
+        }
+        let mean = energies.iter().sum::<f64>() / energies.len() as f64;
+        assert!(mean > 0.0, "{energies:?}");
+        assert!(energies.iter().all(|e| (e / mean - 1.0).abs() < 0.05), "the bright light behind the caster as the sun moves: {energies:?}");
+    }
+
+    /// R5: the pre-pass polls `cancelled`, so a map with a bloom caster stops in it and is
+    /// None; one that is not cancelled is built; a map with no bloom to build is built
+    /// whatever the poll says.
+    #[test]
+    fn a_cancelled_bloom_pre_pass_builds_no_map() {
+        let images = ImageSet::default();
+        assert!(Env::new_cancellable(&sun_under_leaves(1.0, 10.0, 10.0), &images, &|| true).is_none(), "cancelled in the pre-pass");
+        assert!(Env::new_cancellable(&sun_under_leaves(1.0, 10.0, 10.0), &images, &|| false).is_some());
+        assert!(Env::new_cancellable(&sun_under_leaves(0.0, 10.0, 10.0), &images, &|| true).is_some(), "no bloom: nothing slow to stop");
     }
 }
