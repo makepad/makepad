@@ -6,8 +6,7 @@
 //! and a panel with the seed, the exports and every parameter as a grouped slider.
 //!
 //! Flags: `--params FILE` loads the web page's saved parameters; `--view-px N` renders both views
-//! N pixels wide whatever the window; `--bench` times the strip (warm-up, then samples, logged), then quits;
-//! `--dump-layout FILE` writes the zones and the strip's columns as JSON (checks against the page).
+//! N pixels wide whatever the window. The checks against the page are in `tests/checks.rs`.
 pub use makepad_widgets;
 
 use makepad_widgets::*;
@@ -23,8 +22,7 @@ mod shaders;
 mod terrain;
 mod zones;
 
-use export::{Export, ExportKind};
-use makepad_widgets::makepad_platform::gpu_frame_timer;
+use export::ExportKind;
 use params::{Params, COUNT, P, PARAMS};
 use render::{Skyline, ViewSpec};
 use shaders::DrawSkyBackdrop;
@@ -41,6 +39,7 @@ script_mod! {
         height: Fit
         draw_sky: mod.draw.DrawSkyBackdrop{}
         sky: mod.draw.Skyline{}
+        export: mod.draw.Skyline{}
     }
 
     let Caption = Label{
@@ -109,6 +108,7 @@ script_mod! {
                             export_png := Button{text: "Save PNG"}
                             export_exr := Button{text: "Save EXR"}
                         }
+                        message := Label{width: Fill text: "" draw_text +: {color: #xc8cedc text_style +: {font_size: 8}}}
                         status := Label{width: Fill text: "" draw_text +: {color: #x8c95aa text_style +: {font_size: 8}}}
                         params := mod.widgets.SkyParamPanel{}
                     }
@@ -126,8 +126,8 @@ pub enum SkylineViewAction {
     Pan(f64),
     /// The detail view was zoomed to this width.
     Zoom(f64),
-    /// Export progress.
-    Status(String),
+    /// Export progress and results, for the message line.
+    Message(String),
 }
 
 /// One view of the skyline: the strip, or the detail view at the parameters' pan and zoom.
@@ -155,8 +155,11 @@ pub struct SkylineView {
     rect: Rect,
     #[rust]
     drag: Option<(f64, f64)>,
+    /// The strip's exports run on a core of their own (`export.rs`), one tile a frame.
+    #[live]
+    export: Skyline,
     #[rust]
-    export: Export,
+    next_tile: NextFrame,
 }
 
 impl SkylineView {
@@ -178,8 +181,11 @@ impl SkylineView {
 
 impl Widget for SkylineView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if let Some(msg) = self.export.handle_event(cx, event) {
-            cx.widget_action(self.uid, SkylineViewAction::Status(msg));
+        if let Some(msg) = self.export.job_event(cx, event) {
+            cx.widget_action(self.uid, SkylineViewAction::Message(msg));
+        }
+        if self.next_tile.is_event(event).is_some() {
+            self.redraw(cx);
         }
         if !self.detail {
             return;
@@ -219,8 +225,8 @@ impl Widget for SkylineView {
         self.draw_sky.draw_vars.set_uniform(cx, live_id!(horizon), &[view.horizon as f32]);
         self.draw_sky.draw_abs(cx, rect);
         self.sky.draw_view(cx, rect, &view, &self.params, true);
-        if !self.detail {
-            self.export.draw(cx, &self.params);
+        if !self.detail && self.export.draw_job(cx) {
+            self.next_tile = cx.new_next_frame();
         }
         DrawStep::done()
     }
@@ -318,18 +324,6 @@ impl Widget for ParamPanel {
     }
 }
 
-/// `--bench`: the strip timed end to end (see `render::Probe`). Ticks alternate a draw that
-/// records every pass again with a baseline draw that only reads back; after a warm-up, first with
-/// the CPU inputs cached ("passes"), then rebuilt ("cold": zones and columns too).
-struct Bench {
-    tick: usize,
-    probe: render::Probe,
-}
-
-const BENCH_WARM: usize = 60;
-const BENCH_PAIRS: usize = 40;
-const BENCH_REPEAT: usize = 41;
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -338,10 +332,6 @@ pub struct App {
     params: Params,
     #[rust]
     timer: Timer,
-    #[rust]
-    bench: Option<Bench>,
-    #[rust]
-    bench_timer: Timer,
 }
 
 impl App {
@@ -370,109 +360,18 @@ impl App {
         }
     }
 
-    /// Hands every finished frame's GPU time of each view's scene pass to that view.
-    fn poll_gpu(&mut self, cx: &mut Cx) {
-        let frames = gpu_frame_timer::take_frames();
-        for detail in [false, true] {
-            self.view_mut(cx, detail, |v, _| {
-                for f in &frames {
-                    let ms: f32 = f.passes.iter().filter(|(n, _)| n == v.sky.scene_pass_name()).map(|(_, ms)| *ms).sum();
-                    if f.passes.iter().any(|(n, _)| n == v.sky.scene_pass_name()) {
-                        v.sky.add_gpu_sample(ms as f64);
-                    }
-                }
-            });
-        }
-    }
-
+    /// The timing line (the message line above it keeps export news).
     fn status(&mut self, cx: &mut Cx) {
-        self.poll_gpu(cx);
         let mut parts = Vec::new();
         for (detail, name) in [(false, "Strip"), (true, "Detail")] {
-            if let Some(s) = self.view_mut(cx, detail, |v, _| {
-                v.sky.stats.gpu_samples.clear();
-                v.sky.stats.clone()
-            }) {
-                let gpu = s.gpu_ms.map(|g| format!("{g:.2}")).unwrap_or_else(|| "-".into());
+            if let Some(s) = self.view_mut(cx, detail, |v, _| v.sky.stats.clone()) {
                 parts.push(format!(
-                    "{name} {}x{}: zones {:.1}, columns {:.1}, record {:.2}, GPU {gpu} ms; {} renders",
+                    "{name} {}x{}: zones {:.1}, columns {:.1}, record {:.2} ms; {} renders",
                     s.w, s.h, s.zones_ms, s.cols_ms, s.record_ms, s.renders
                 ));
             }
         }
         self.ui.label(cx, ids!(status)).set_text(cx, &parts.join("\n"));
-    }
-
-    fn bench_step(&mut self, cx: &mut Cx) {
-        let Some(b) = &mut self.bench else { return };
-        b.tick += 1;
-        let t = b.tick;
-        // tag 0 warm-up, 1 passes, 2 passes with the scene list drawn BENCH_REPEAT times, 3 cold, 4 done;
-        // odd ticks after the warm-up are baselines
-        let tag = if t <= BENCH_WARM { 0 } else { (1 + (t - BENCH_WARM - 1) / (2 * BENCH_PAIRS)).min(4) as u32 };
-        let render = t <= BENCH_WARM || (t - BENCH_WARM) % 2 == 1;
-        let probe = b.probe.clone();
-        if tag < 4 {
-            self.view_mut(cx, false, |v, cx| {
-                let repeat = if tag == 2 { BENCH_REPEAT } else { 1 };
-                v.sky.probe = Some(render::Probe { tag, repeat, samples: probe.samples.clone() });
-                if render {
-                    v.sky.invalidate(tag == 3);
-                }
-                v.redraw(cx);
-            });
-            return;
-        }
-        if t < BENCH_WARM + 6 * BENCH_PAIRS + 20 {
-            return; // the last reads are still on their way
-        }
-        let (w, h) = self.view_mut(cx, false, |v, _| {
-            v.sky.probe = None;
-            (v.sky.stats.w, v.sky.stats.h)
-        }).unwrap_or_default();
-        let samples = probe.samples.lock().unwrap().clone();
-        let stat = |tag: u32, rendered: bool| {
-            let mut v: Vec<f64> = samples.iter().filter(|s| s.0 == tag && s.1 == rendered).map(|s| s.2).collect();
-            v.sort_by(|a, b| a.total_cmp(b));
-            if v.is_empty() { (f64::NAN, f64::NAN, 0) } else { (v[v.len() / 2], v[0], v.len()) }
-        };
-        let repeated = format!("passes, scene list x {BENCH_REPEAT}");
-        for (tag, name) in [(1, "passes"), (2, repeated.as_str()), (3, "cold")] {
-            let (r, rmin, rn) = stat(tag, true);
-            let (base, bmin, bn) = stat(tag, false);
-            log!(
-                "skyline bench: strip {w}x{h} {name}: draw to read-back median {r:.2} ms (min {rmin:.2}, n {rn}), baseline {base:.2} ms (min {bmin:.2}, n {bn}), difference {:.2} ms",
-                r - base
-            );
-        }
-        let (one, two) = (stat(1, true).0, stat(2, true).0);
-        log!("skyline bench: each extra scene list (its recording and its GPU work) {:.3} ms", (two - one) / (BENCH_REPEAT - 1) as f64);
-        self.bench = None;
-        cx.stop_timer(self.bench_timer);
-        log!("skyline bench: done");
-        cx.quit();
-    }
-
-    fn dump_layout(&self, path: &str) {
-        let p = &self.params;
-        let z = zones::Zones::new(p);
-        let mut s = String::from("{\"zones\":{");
-        let named = z.named();
-        for (i, (k, v)) in named.iter().enumerate() {
-            s += &format!("{}\"{k}\":[{},{},{},{}]", if i > 0 { "," } else { "" }, v[0], v[1], v[2], v[3]);
-        }
-        let view = ViewSpec::strip(p, 1600);
-        let m = terrain::margin(p, view.span, view.w);
-        let cols = terrain::columns(&z, p, view.u0, view.span, view.w, m);
-        s += &format!("}},\"m\":{m},\"columns\":[");
-        for (i, c) in cols.iter().enumerate() {
-            s += &format!("{}{},{},{},{}", if i > 0 { "," } else { "" }, c[0], c[1], c[2], c[3]);
-        }
-        s += "]}";
-        match std::fs::write(path, s) {
-            Ok(_) => log!("skyline: layout written to {path}"),
-            Err(e) => error!("skyline: could not write {path}: {e}"),
-        }
     }
 }
 
@@ -491,25 +390,14 @@ impl MatchEvent for App {
                 self.view_mut(cx, detail, |v, _| v.fixed_px = Some(px));
             }
         }
-        if let Some(path) = arg("--dump-layout") {
-            self.dump_layout(&path);
-        }
         self.ui.text_input(cx, ids!(seed)).set_text(cx, &self.params.seed.to_string());
         self.apply(cx);
-        gpu_frame_timer::set_enabled(true);
         self.timer = cx.start_interval(0.5);
-        if args.iter().any(|a| a == "--bench") {
-            self.bench = Some(Bench { tick: 0, probe: render::Probe::default() });
-            self.bench_timer = cx.start_interval(0.05);
-        }
     }
 
     fn handle_timer(&mut self, cx: &mut Cx, e: &TimerEvent) {
         if self.timer.is_timer(e).is_some() {
             self.status(cx);
-        }
-        if self.bench_timer.is_timer(e).is_some() {
-            self.bench_step(cx);
         }
     }
 
@@ -541,7 +429,7 @@ impl MatchEvent for App {
                 match item.cast::<SkylineViewAction>() {
                     SkylineViewAction::Pan(pan) => self.set_param(cx, P::Pan, pan),
                     SkylineViewAction::Zoom(zoom) => self.set_param(cx, P::Zoom, zoom),
-                    SkylineViewAction::Status(msg) => self.ui.label(cx, ids!(status)).set_text(cx, &msg),
+                    SkylineViewAction::Message(msg) => self.ui.label(cx, ids!(message)).set_text(cx, &msg),
                     SkylineViewAction::None => {}
                 }
             }
@@ -551,10 +439,13 @@ impl MatchEvent for App {
                 let width = [2048, 4096, 8192][self.ui.drop_down(cx, ids!(export_w)).selected_item().min(2)];
                 let p = self.params.clone();
                 let msg = self
-                    .view_mut(cx, false, |v, cx| v.export.start(cx, kind, width, &p))
+                    .view_mut(cx, false, |v, cx| {
+                        v.redraw(cx);
+                        v.export.start_export(cx, kind, width, &p)
+                    })
                     .unwrap_or_else(|| Err("no strip view".into()))
                     .unwrap_or_else(|e| e);
-                self.ui.label(cx, ids!(status)).set_text(cx, &msg);
+                self.ui.label(cx, ids!(message)).set_text(cx, &msg);
             }
         }
     }

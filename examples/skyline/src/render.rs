@@ -189,25 +189,8 @@ pub struct Stats {
     pub zones_ms: f64,
     pub cols_ms: f64,
     pub record_ms: f64,
-    /// GPU time of the scene pass, ms (the latest sample).
-    pub gpu_ms: Option<f64>,
-    /// GPU samples not taken yet.
-    pub gpu_samples: Vec<f64>,
     /// How many times the passes were recorded.
     pub renders: u64,
-}
-
-/// A timing probe (`--bench`): every draw of the view reads its scene target back and records
-/// (tag, whether the passes were recorded in that draw, ms from the start of the draw until the
-/// read arrived): CPU record and frame build, the GPU, the copy and the hand-back, end to end, as
-/// the page timed `draw()` between two `gl.finish` syncs.
-#[derive(Clone, Default)]
-pub struct Probe {
-    pub tag: u32,
-    /// Draw the scene list this many times into its pass (at least once): the GPU cost of one
-    /// scene is the growth of the time per extra copy.
-    pub repeat: usize,
-    pub samples: std::sync::Arc<std::sync::Mutex<Vec<(u32, bool, f64)>>>,
 }
 
 struct ColumnCache {
@@ -243,8 +226,6 @@ pub struct Skyline {
     #[rust]
     scene: Option<SceneTarget>,
     #[rust]
-    scene_name: String,
-    #[rust]
     mirror: Option<SceneTarget>,
     #[rust]
     zones: Option<(u64, Zones)>,
@@ -257,15 +238,15 @@ pub struct Skyline {
     drawn: Option<u64>,
     #[rust]
     pub stats: Stats,
+    /// A running export or band (`export.rs`), on a Skyline of its own.
     #[rust]
-    pub probe: Option<Probe>,
+    pub job: Option<crate::export::Job>,
 }
 
 impl Skyline {
     /// Draws `view` into `rect` of the current pass: records the passes when the picture changed,
     /// then the final composite (`tone`: the display tone shoulder; an export keeps the raw HDR).
     pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, view: &ViewSpec, p: &Params, tone: bool) {
-        let t0 = Cx::monotonic_now();
         self.update_inputs(cx, view, p);
         // the picture: every parameter but the view's own (pan, zoom and the field of view only
         // place the view, which its first azimuth, span and size say), and the view
@@ -274,53 +255,19 @@ impl Skyline {
         picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon]);
         let key = p.hash(&[], &picture);
         if self.scene.is_none() {
-            // a name of its own, so its GPU time can be told apart from other views' (`gpu_frame_timer`)
-            static VIEWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let n = VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.scene_name = format!("skyline_scene_{n}");
-            self.scene = Some(SceneTarget::new(cx, &self.scene_name));
+            self.scene = Some(SceneTarget::new(cx, "skyline_scene"));
         }
-        let rendered = self.drawn != Some(key);
-        if rendered {
+        if self.drawn != Some(key) {
             let t1 = Cx::monotonic_now();
             self.record(cx, view, p);
             self.drawn = Some(key);
             self.stats.renders += 1;
             self.stats.record_ms = ms_since(t1);
         }
-        if let (Some(probe), Some(scene)) = (&self.probe, &self.scene) {
-            let (tag, samples) = (probe.tag, probe.samples.clone());
-            let _ = cx.read_render_texture(&scene.color, move |res| {
-                if res.is_ok() {
-                    samples.lock().unwrap().push((tag, rendered, ms_since(t0)));
-                }
-            });
-        }
         let (scene, mirror) = (self.scene.as_ref().unwrap(), self.mirror.as_ref());
         self.post.draw_final(cx, rect, p, &crate::post::SceneOut { view, scene, mirror }, tone);
         self.stats.w = view.w;
         self.stats.h = view.h;
-    }
-
-    /// Forget the recorded picture, so the next draw records every pass again (`cold` also drops
-    /// the CPU caches): for timing.
-    pub fn invalidate(&mut self, cold: bool) {
-        self.drawn = None;
-        if cold {
-            self.zones = None;
-            self.cols = None;
-        }
-    }
-
-    /// The scene pass's name: its GPU time in `gpu_frame_timer`'s frames.
-    pub fn scene_pass_name(&self) -> &str {
-        &self.scene_name
-    }
-
-    /// A GPU time of the scene pass (from `gpu_frame_timer`), ms.
-    pub fn add_gpu_sample(&mut self, ms: f64) {
-        self.stats.gpu_ms = Some(ms);
-        self.stats.gpu_samples.push(ms);
     }
 
     /// The zones and the columns for this view, rebuilt when what they depend on changed.
@@ -398,12 +345,7 @@ impl Skyline {
         // the scene, and its mirror image when the water reflects it
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
-        let repeat = self.probe.as_ref().map_or(1, |p| p.repeat.max(1));
-        scene.record(cx, view.w, view.h, |cx| {
-            for _ in 0..repeat {
-                draw_scene(cx, &sc, &mut parts);
-            }
-        });
+        scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
         if self.post.wants_mirror(p, z) {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror"));
             sc.mirror = true;

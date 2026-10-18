@@ -612,6 +612,7 @@ impl Zones {
     }
 
     /// Every zone by the page's uniform name (for checks against the page and for the shaders).
+    #[allow(dead_code)] // the layout check in tests/checks.rs
     pub fn named(&self) -> Vec<(&'static str, Zone)> {
         vec![
             ("uZCity", self.city),

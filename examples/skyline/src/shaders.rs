@@ -4,7 +4,9 @@
 //! Every scene shader writes the scene pass's two RGBA16F targets, both blending premultiplied-over:
 //! `fb0` the premultiplied colour and coverage, `fb1` the light and the same coverage. So a nearer
 //! silhouette hides the lights behind it, and the final pass adds the light back on top. Shaders
-//! of other stages (the city blit, the parts) join the scene with `..mod.draw.SkyScene`.
+//! of other stages (the city, the parts, the final pass) join the scene with `..mod.draw.SkyScene`,
+//! which also gives them the off-centre view, the city camera and the page's integer hashes
+//! (checked against `rng.rs` on the GPU by `tests/checks.rs`).
 use makepad_widgets::makepad_draw::*;
 
 script_mod! {
@@ -33,6 +35,11 @@ script_mod! {
         glow: uniform(0.5)
         sil: uniform(vec3(0.004, 0.006, 0.012))
         haze_col: uniform(vec3(0.16, 0.18, 0.28))
+        seed: uniform(7.0)
+        ct_c: uniform(0.55)
+        ct_r: uniform(1.0)
+        off: uniform(0.0)
+        off_dir: uniform(0.55)
 
         // the fragment's centre in pass pixels
         frag: fn() -> vec2 {
@@ -58,6 +65,63 @@ script_mod! {
         // coverage of a signed distance d over a pixel of size px
         cover: fn(d: float, px: float) -> float {
             return clamp(d / px + 0.5, 0.0, 1.0)
+        }
+        // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
+        view_raw: fn() -> vec3 {
+            let pp = self.frag()
+            return vec3(fract(self.view_span.x + pp.x / self.view_size.x * self.view_span.y), self.ang_raw(pp.y), self.px0())
+        }
+        // the page's `pixView`: raw view vr re-aimed for the off-centre camera (the scenery is a
+        // ring of radius 1, the camera `off` from its centre toward `off_dir`): the world azimuth
+        // the pixel sees, elevation and pixel size scaled by the distance t to that point
+        pix_view: fn(vr: vec3) -> vec3 {
+            let d = vec2(cos(vr.x * 6.2831853), sin(vr.x * 6.2831853))
+            let c = self.off * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853))
+            let cd = dot(c, d)
+            let t = 0.0 - cd + sqrt(max(cd * cd - dot(c, c) + 1.0, 0.0001))
+            let q = c + t * d
+            return vec3(fract(atan2(q.y, q.x) / 6.2831853), vr.y * t, vr.z * t)
+        }
+        // the city camera: downtown's distance (blocks) and direction, the real camera offset (blocks)
+        city_d: fn() -> float {
+            return 28.0 * self.ct_r
+        }
+        city_dir: fn() -> vec2 {
+            return vec2(cos(self.ct_c * 6.2831853), sin(self.ct_c * 6.2831853))
+        }
+        city_cam: fn() -> vec2 {
+            return (0.8 * self.off * self.city_d()) * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853))
+        }
+        // the page's `prCityView`: world point w (m; 70 m a block) from the city camera: raw azimuth, distance (m)
+        city_view: fn(w: vec2) -> vec2 {
+            let q = w - self.city_cam() * 70.0
+            return vec2(fract(atan2(q.y, q.x) / 6.2831853), length(q))
+        }
+        // the page's integer hashes, bit-exact with `rng.rs` (u32 arithmetic wraps on every backend;
+        // a negative i32 keeps its bits as u32, so `+ 4096u` is the page's `int(id) + 4096`)
+        hu: fn(x_in: u32) -> u32 {
+            var x = x_in
+            x = x ^ (x >> 16u)
+            x = x * 2146121005u
+            x = x ^ (x >> 15u)
+            x = x * 2221713035u
+            return x ^ (x >> 16u)
+        }
+        // `rnd`'s and `hcell`'s common form: hu(a K1 ^ (b K2 + c K3 + seed K4))
+        hash3: fn(a: u32, b: u32, c: u32) -> u32 {
+            return self.hu((a * 2654435761u) ^ ((b * 2246822507u) + (c * 3266489909u) + (u32(i32(self.seed)) * 668265263u)))
+        }
+        // `rnd(id, st, ly)`: 0..1 in steps of 2^-24
+        rnd: fn(id: float, st: float, ly: float) -> float {
+            return f32(self.hash3(u32(i32(id)) + 4096u, u32(i32(st)), u32(i32(ly))) >> 8u) / 16777216.0
+        }
+        // `hcell`: the hash of integer cell c, layer k (the city's lots, the trees' and the town's cells)
+        hcell: fn(c: vec2, k: float) -> u32 {
+            return self.hash3(u32(i32(c.x)) + 8192u, u32(i32(c.y)) + 8192u, u32(i32(k)))
+        }
+        // a hash's four bytes as 0..1
+        hb4: fn(h: u32) -> vec4 {
+            return vec4(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u), f32(h >> 24u)) * 0.003921569
         }
     }
 
