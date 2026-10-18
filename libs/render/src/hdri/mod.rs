@@ -55,6 +55,7 @@ pub mod cri;
 pub mod image_light;
 pub mod gobo;
 pub mod light_fx;
+pub mod caster;
 pub mod foliage;
 pub mod aim;
 pub mod imperfections;
@@ -255,11 +256,11 @@ impl Env {
         };
         // A window filled with sky looks out at this map's own sky settings.
         // In Studio mode that sky is a second, lightless Sky-mode Env, built
-        // only when a light asks for it. Its lights are cleared, so it never
-        // nests further, and it is made from the parameters alone: new_with
-        // stays pure.
+        // only when a light asks for it (a shadow caster never does). Its
+        // lights are cleared, so it never nests further, and it is made from
+        // the parameters alone: new_with stays pure.
         let window_sky = if params.mode() == Mode::Studio
-            && params.lights.iter().any(|l| l.enabled && l.blend() == Blend::Add && l.gobo.as_ref().is_some_and(|g| g.fill_sky))
+            && params.lights.iter().any(|l| l.enabled && !l.is_caster() && l.blend() == Blend::Add && l.gobo.as_ref().is_some_and(|g| g.fill_sky))
         {
             let mut outside = params.clone();
             outside.mode = "sky".to_string();
@@ -1243,10 +1244,12 @@ pub(crate) mod probe {
         WearNorm,
         /// A light picture's softened-mask table built (`image_light::SoftTable`, P1, P2).
         SoftMask,
+        /// A soft shadow caster's coverage rastered (`caster::SoftCoverage::build`, R4).
+        CasterSoft,
     }
 
     thread_local! {
-        static COUNTS: [Cell<usize>; 5] = const { [const { Cell::new(0) }; 5] };
+        static COUNTS: [Cell<usize>; 6] = const { [const { Cell::new(0) }; 6] };
     }
 
     /// One more of `work` on this thread.
@@ -1429,6 +1432,29 @@ mod tests {
         fn shareable<T: Send + Sync>() {}
         shareable::<Env>();
         shareable::<EnvSun>();
+    }
+
+    /// A caster's pattern only darkens (decision 8). Its light fields may
+    /// still say otherwise: an add blend, a key, or a gobo asking to fill
+    /// with sky and to be cast onto the backdrop. It still opens no window
+    /// onto a second sky and throws no shadow onto the studio backdrop. The
+    /// same entry as a light does both.
+    #[test]
+    fn a_caster_never_casts_on_the_backdrop_nor_opens_a_sky_window() {
+        let entry = LightParams {
+            blend: "add".to_string(),
+            key: true,
+            intensity_ev: 3.0,
+            gobo: Some(GoboParams { fill_sky: true, project_on_backdrop: true, ..GoboParams::default() }),
+            ..LightParams::new_caster()
+        };
+        let studio = |light: LightParams| HdriParams { mode: "studio".to_string(), lights: vec![light], ..HdriParams::default() };
+        let as_light = Env::new(&studio(LightParams { kind: None, caster: None, ..entry.clone() }));
+        assert!(as_light.window_sky.is_some() && as_light.backdrop_gobo.is_some(), "as a light it opens a window and casts");
+        let as_caster = Env::new(&studio(entry.clone()));
+        assert!(as_caster.window_sky.is_none(), "a caster opens no window onto the sky");
+        assert!(as_caster.backdrop_gobo.is_none(), "a caster throws no shadow onto the backdrop");
+        assert!(gobo::BackdropGobo::new(&[entry], &ImageSet::default()).is_none(), "nor when handed lights clamp() has not held");
     }
 
     /// D15 (M5): the key is measured only when the engine asks for it. The

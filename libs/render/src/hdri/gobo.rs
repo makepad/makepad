@@ -358,9 +358,10 @@ const SPOT_REACH: f32 = 0.75 * WALL_RADIUS;
 /// How dark a projected gobo's shadow gets: the studio's fill keeps it off black.
 pub const SHADOW_DEPTH: f32 = 0.8;
 
-/// A light whose gobo is cast: an enabled emitter that asks for it.
+/// A light whose gobo is cast: an enabled emitter that asks for it. Never a
+/// shadow caster, whose pattern only darkens the map (redesign §5).
 fn casts(l: &LightParams) -> bool {
-    l.enabled && l.blend() == Blend::Add && l.gobo.as_ref().map_or(false, |g| g.project_on_backdrop)
+    l.enabled && !l.is_caster() && l.blend() == Blend::Add && l.gobo.as_ref().map_or(false, |g| g.project_on_backdrop)
 }
 
 /// A gobo's shadow on the studio backdrop, thrown from its light's own

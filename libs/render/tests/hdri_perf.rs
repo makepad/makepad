@@ -16,7 +16,7 @@
 
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
-use makepad_render::hdri::{Env, HdriParams, ImageSet, VolumetricParams};
+use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, VolumetricParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -426,4 +426,47 @@ fn a_cancelled_first_cloud_noise_build_stops_at_once() {
     let start = Instant::now();
     assert!(Env::new_cancellable(&params, &ImageSet::default(), &|| false).is_some());
     println!("hdri_perf: the same seed built whole in {:6.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+}
+
+/// R4: a soft shadow caster rasters its pattern once per Env, on the job's
+/// thread before the bake, so a held drag pays it on every bake. A dense
+/// leaves canopy (the dearest pattern to sample) over the sun on a 60 x 45
+/// degree caster: at a slight softness the raster is at its sample budget,
+/// at full softness it is small. Against the same map with the caster
+/// sharp, which rasters nothing.
+#[test]
+#[ignore]
+fn a_soft_casters_raster_stays_well_under_a_held_bake() {
+    let with_caster = |softness: f32| {
+        let mut p = cloudy_sky();
+        p.lights = vec![LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 30.0,
+            gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.9, ..GoboParams::default() }),
+            caster: Some(CasterParams { softness, ..CasterParams::default() }),
+            ..LightParams::new_caster()
+        }];
+        p
+    };
+    let env_ms = |p: &HdriParams| {
+        median(
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    let env = Env::new(p);
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    drop(env);
+                    ms
+                })
+                .collect(),
+        )
+    };
+    let sharp = env_ms(&with_caster(0.0));
+    let held = with_pool(|pool| median((0..5).map(|_| timed_bake(pool, &with_caster(0.0), 512).total_ms).collect()));
+    println!("hdri_perf: a sharp caster's Env in {sharp:6.1} ms, its held 512 bake in {held:6.1} ms");
+    for softness in [0.05f32, 1.0] {
+        let raster = env_ms(&with_caster(softness)) - sharp;
+        println!("hdri_perf: softness {softness}: the raster takes {raster:6.1} ms");
+        assert!(raster < 50.0, "softness {softness}: the raster takes {raster:.1} ms, a held preview's whole budget");
+    }
 }

@@ -28,6 +28,8 @@ use super::gels::gel_stack;
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
 use super::light_fx::LightFx;
+use super::caster::{caster_drawn, caster_flag, CasterLayer};
+use std::borrow::Cow;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
 const TINT_STRENGTH: f32 = 0.4;
@@ -218,7 +220,7 @@ pub fn project_held(frame: &LightFrame, dir: Vec3f) -> Option<Vec2f> {
 /// Narrowest soft edge, in tangent units (about 0.006 degrees). A "hard" edge still
 /// gets this much, so the step is resolved below a pixel and never becomes a
 /// stair-step in an 8K bake.
-const MIN_EDGE: f32 = 1.0e-4;
+pub(super) const MIN_EDGE: f32 = 1.0e-4;
 /// P2: how deep, as a share of a long disc's depth (its short half axis),
 /// its soft edge's ramp starts (Softness / 2 + Penumbra) when the edge
 /// begins to read the exact ellipse distance, and by when it reads it
@@ -309,7 +311,7 @@ const WINDOW_FINE: usize = 2;
 /// moon) shows through a window in: the disc is far smaller than a cell.
 const DISC_SAMPLES_PER_RADIUS: f32 = 8.0;
 
-/// The backdrop gradient and the enabled lights, prepared once per map.
+/// The backdrop gradient and the enabled lights and shadow casters, prepared once per map.
 #[derive(Clone, Debug)]
 pub struct Studio {
     top: Vec3f,
@@ -322,9 +324,13 @@ pub struct Studio {
     /// and the one `key` measures.
     key_index: Option<usize>,
     /// What hangs in front of each light (1b: gobo, doors and grid, wear),
-    /// in step with `lights`.
+    /// in step with `lights`; a caster's is its pattern.
     fx: Vec<LightFx>,
-    /// False while no light has any: `apply_lights` then runs the loop as it was.
+    /// Each shadow caster's own layer (redesign §5, `caster.rs`): its
+    /// strength, tint and softness raster, in step with `lights`; None for a light.
+    casters: Vec<Option<CasterLayer>>,
+    /// False while no light has any extra and no caster a raster:
+    /// `apply_lights` then runs the loop as it was.
     any_fx: bool,
 }
 
@@ -360,22 +366,34 @@ impl Studio {
     /// `against_sky`: the lights hang against the sky (Sky mode), where a
     /// window filled with sky hides what is behind its frame and bars
     /// (`LightFx::against_sky`, D12).
+    ///
+    /// A shadow caster (redesign §5, `caster.rs`) is an entry like a light,
+    /// in its place in the list. It is prepared from its flag
+    /// (`caster::caster_flag`), so nothing here reads the light fields it
+    /// keeps but ignores, and it is never the key. One whose image mask is
+    /// not in `images` draws as no caster at all and is left out (spec §6).
     pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet, against_sky: bool) -> Studio {
         // The backdrop as clamp() holds it (D17); each light holds its own
         // (`PreparedLight::new`, `LightFx::new`).
         let studio = &studio.clamped();
         let rgb = |c: [f32; 3]| vec3f(c[0], c[1], c[2]);
-        let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
-        let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
+        let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled && (!l.is_caster() || caster_drawn(l, images))).collect();
+        // What the shared code draws: a light as it is, a caster as its flag.
+        let drawn: Vec<Cow<LightParams>> = enabled.iter().map(|l| if l.is_caster() { Cow::Owned(caster_flag(l)) } else { Cow::Borrowed(*l) }).collect();
+        let prepared: Vec<PreparedLight> = drawn.iter().map(|l| PreparedLight::new(l, images)).collect();
+        // A caster is never the key, whatever it is marked: clamp() clears
+        // its key, but the studio may be handed lights clamp() has not held.
         let key_index = enabled
             .iter()
             .zip(&prepared)
-            .position(|(l, p)| l.key && l.blend() == Blend::Add && !p.shaped.as_ref().is_some_and(too_wide_to_lead));
+            .position(|(l, p)| !l.is_caster() && l.key && l.blend() == Blend::Add && !p.shaped.as_ref().is_some_and(too_wide_to_lead));
         // What hangs in front of each light, built for the same lights in the
         // same order as the prepared lights above. Before the key: a flag's
-        // gobo cuts what the flag takes out of the key (B8).
-        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images).against_sky(against_sky)).collect();
-        let any_fx = fx.iter().any(|fx| !fx.is_plain());
+        // gobo cuts what the flag takes out of the key (B8). A caster's is
+        // its pattern.
+        let fx: Vec<LightFx> = drawn.iter().map(|l| LightFx::new(l, images).against_sky(against_sky)).collect();
+        let casters: Vec<Option<CasterLayer>> = enabled.iter().map(|l| if l.is_caster() { CasterLayer::new(l, images) } else { None }).collect();
+        let any_fx = fx.iter().any(|fx| !fx.is_plain()) || casters.iter().flatten().any(|c| !c.is_plain());
         Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
@@ -384,6 +402,7 @@ impl Studio {
             lights: prepared,
             key_index,
             fx,
+            casters,
             any_fx,
         }
     }
@@ -405,13 +424,13 @@ impl Studio {
             // lights after it: what the map draws of it, sampled where its band
             // runs (its extras are not taken as a share apart, as a boxed key's
             // are: the samples along its band see them).
-            let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
+            let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..], &self.casters[index + 1..]);
             let black = Vec3f::default();
             let drawn = |d: Vec3f| dimmed(&flags, d, fx.apply(d, black, light.draw(d, black, false)));
             let integral = over_cone(axis, cos_cover, &stroke_cells(path, cos_cover), &drawn);
             return Some(EnvSun { dir: axis, radiance: EnvSun::cone_radiance(integral.emission, cos_radius), cos_radius, facing: integral.facing, cos_cover });
         }
-        let integral = key_emission(&self.lights[index..], &self.fx[index..], KEY_GRID);
+        let integral = key_emission(&self.lights[index..], &self.fx[index..], &self.casters[index..], KEY_GRID);
         let key = EnvSun {
             dir: light.frame.center,
             // Over the cone the f32 cosine names, the one every consumer of
@@ -462,7 +481,7 @@ impl Studio {
         super::probe::count(super::probe::Work::Key);
         let (light, fx) = (&self.lights[index], &self.fx[index]);
         let (axis, cos_radius, cos_cover) = light.key_cones();
-        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
+        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..], &self.casters[index + 1..]);
         let drawn = |d: Vec3f| {
             let glass = fx.glass(d, self.cover(index, d));
             // Only the glass is looked through: the sky is worked out nowhere else.
@@ -509,7 +528,7 @@ impl Studio {
     /// its band.)
     fn key_share(&self, index: usize) -> f32 {
         let light = &self.lights[index];
-        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
+        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..], &self.casters[index + 1..]);
         let drawn = |dir: Vec3f| luminance(dimmed(&flags, dir, light.draw(dir, Vec3f::default(), false)));
         self.fx[index].key_share(&light.frame, light.reach, &drawn)
     }
@@ -553,6 +572,9 @@ impl Studio {
     /// Each light is drawn by its own code (`draw_lights`); what hangs in
     /// front of it then scales what it did (`LightFx::apply`), so a key left
     /// out leaves what it hides scaled as in the map and nothing of its own.
+    ///
+    /// A shadow caster multiplies what is drawn before it by its
+    /// transmission (redesign §5, `draw_caster`), here and over the key alike.
     pub(super) fn apply_lights_sky(&self, dir: Vec3f, base: Vec3f, sky: &dyn Fn(Vec3f) -> Vec3f, without_key: bool) -> Vec3f {
         let skip = if without_key { self.key_index } else { None };
         if !self.any_fx {
@@ -560,7 +582,11 @@ impl Studio {
         }
         let mut c = base;
         for (i, fx) in self.fx.iter().enumerate() {
-            if fx.is_plain() {
+            if let Some(caster) = &self.casters[i] {
+                // A caster multiplies what is drawn before it and adds nothing
+                // (`draw_caster`). It is never the key, so nothing skips it.
+                c = draw_caster(&self.lights[i], fx, caster, dir, c);
+            } else if fx.is_plain() {
                 c = self.draw_lights(i..i + 1, dir, c, skip);
             } else if fx.fills_with_sky() {
                 // A window is its glass showing the sky. Left out as the key it
@@ -649,6 +675,9 @@ struct KeyIntegral {
 ///   them: a scrim's cloth (B5, `ShapedLight::hide`) and a window filled with sky,
 ///   whose glass shows the sky in its place ([`dimmers`]). Any other Add light after
 ///   it is a light of its own, and a light before it touches only what came before.
+/// - Every shadow caster after it (redesign §5, `casters` in step with
+///   `lights`) scales it as the map draws the caster (`draw_caster`), its
+///   softness raster included; one before it does not touch it.
 /// - What hangs in front of each of those (`fx`, in step with `lights`) scales what it
 ///   does, as in the map: a flag with a gobo dims the key only behind the gobo's
 ///   opaque parts (B8).
@@ -658,11 +687,11 @@ struct KeyIntegral {
 /// is 1 / sqrt(1 + x² + y²). Outside that box the mask is exactly zero, so nothing is
 /// missed, and the farthest point of the box is its corner: the covering cone
 /// (`PreparedLight::box_cover`).
-fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegral {
+fn key_emission(lights: &[PreparedLight], fx: &[LightFx], casters: &[Option<CasterLayer>], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
         return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
-    let flags = dimmers(after, fx.get(1..).unwrap_or(&[]));
+    let flags = dimmers(after, fx.get(1..).unwrap_or(&[]), casters.get(1..).unwrap_or(&[]));
     // A picture gives the key its colour point by point: its drawing over black,
     // colour and all, is the weight, and the sum is not scaled by the colour again.
     let pictured = key.image.is_some();
@@ -725,23 +754,35 @@ fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegr
     KeyIntegral { emission, facing, cos_cover: key.box_cover() }
 }
 
-/// What dims the key as the map draws it, of the lights listed after it: the
-/// flags and gels, the scrims' cloth and the windows filled with sky in front
-/// of it (a window's glass shows the sky in place of what is behind it), each
-/// with what hangs in front of it (`fx`, in step with `after`).
-fn dimmers<'a>(after: &'a [PreparedLight], fx: &'a [LightFx]) -> Vec<(&'a PreparedLight, &'a LightFx)> {
+/// One entry of the lights listed after the key that dims it, with what
+/// hangs in front of it and, for a shadow caster, its own layer.
+type Dimmer<'a> = (&'a PreparedLight, &'a LightFx, Option<&'a CasterLayer>);
+
+/// What dims the key as the map draws it, of the lights listed after it:
+/// the flags and gels, the shadow casters, the scrims' cloth and the windows
+/// filled with sky in front of it (a window's glass shows the sky in place of
+/// what is behind it), each with what hangs in front of it (`fx`, in step
+/// with `after`, and `casters`).
+fn dimmers<'a>(after: &'a [PreparedLight], fx: &'a [LightFx], casters: &'a [Option<CasterLayer>]) -> Vec<Dimmer<'a>> {
     after
         .iter()
         .zip(fx)
-        .filter(|(l, fx)| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()) || fx.fills_with_sky())
+        .zip(casters)
+        .filter(|((l, fx), caster)| caster.is_some() || l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()) || fx.fills_with_sky())
+        .map(|((l, fx), caster)| (l, fx, caster.as_ref()))
         .collect()
 }
 
 /// `w`, the key's light along `dir`, as the lights in `flags` ([`dimmers`])
 /// leave it in the map.
-fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
+fn dimmed(flags: &[Dimmer], dir: Vec3f, w: Vec3f) -> Vec3f {
     let mut w = w;
-    for &(flag, fx) in flags {
+    for &(flag, fx, caster) in flags {
+        if let Some(caster) = caster {
+            // As `apply_lights_sky` draws a caster.
+            w = draw_caster(flag, fx, caster, dir, w);
+            continue;
+        }
         if fx.fills_with_sky() {
             // As `apply_lights_sky` draws a window: what is behind its glass
             // (its shape's cover, past its gobo's bars) gives way to the sky,
@@ -766,6 +807,31 @@ fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
         }
     }
     w
+}
+
+/// A shadow caster (redesign §5) drawn over `acc` along `dir`, in the map
+/// (`apply_lights_sky`) and over the key (`dimmed`) alike: one rule, so the
+/// key loses exactly what the map loses (D1).
+/// - Plain (no raster): exactly its flag (`caster::caster_flag`), through
+///   the flag's own code, its pattern after it (`LightFx::apply`).
+/// - Otherwise: `acc * (1 + s * (tint - 1) * m)`, with m its coverage
+///   (`CasterLayer::coverage`: softness, and R5's bloom).
+fn draw_caster(light: &PreparedLight, fx: &LightFx, caster: &CasterLayer, dir: Vec3f, acc: Vec3f) -> Vec3f {
+    if caster.is_plain() {
+        let after = light.draw(dir, acc, false);
+        return if fx.is_plain() { after } else { fx.apply(dir, acc, after) };
+    }
+    caster.transmit(acc, caster.coverage(dir, &|d| flag_coverage(light, fx, d)))
+}
+
+/// The share 0..=1 of a caster's flag that covers `dir`, its box under its
+/// pattern, whatever its strength and tint: what a black flag of it takes
+/// out of white.
+fn flag_coverage(light: &PreparedLight, fx: &LightFx, dir: Vec3f) -> f32 {
+    let white = Vec3f::all(1.0);
+    let after = light.over(dir, white, Vec3f::default());
+    let left = if fx.is_plain() { after } else { fx.apply(dir, white, after) };
+    (1.0 - left.x).max(0.0).min(1.0)
 }
 
 /// For [`over_cone`] over the covering cone (`cos_cover`) of the stroke whose
@@ -1161,7 +1227,7 @@ impl PreparedLight {
 
 /// Signed distance to a rect with half extents `half` and corner radius `radius`
 /// (iq's rounded box, the knob's `rect_d`). Everything is in tangent-plane units.
-fn sd_round_rect(p: Vec2f, half: Vec2f, radius: f32) -> f32 {
+pub(super) fn sd_round_rect(p: Vec2f, half: Vec2f, radius: f32) -> f32 {
     let qx = p.x.abs() - half.x + radius;
     let qy = p.y.abs() - half.y + radius;
     let ox = qx.max(0.0);
@@ -1249,6 +1315,7 @@ fn ellipse_distance(p: Vec2f, half: Vec2f) -> f32 {
 mod tests {
     use super::*;
     use crate::hdri::{az_el_from_dir, vec, Env, HdriParams};
+    use crate::hdri::{arr, CasterParams, GoboParams};
 
     /// P2: `ellipse_distance` is the exact signed distance to an ellipse,
     /// against the brute-force nearest of 4000 points on it refined by
@@ -1643,6 +1710,250 @@ mod tests {
         assert_eq!(Env::new(&p).bake(32), without);
     }
 
+    /// A shadow caster (redesign §5) at (az, el), `width_deg` x `height_deg`,
+    /// its pattern `gobo` (None: solid), with `settings`.
+    fn caster_at(azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32, gobo: Option<GoboParams>, settings: CasterParams) -> LightParams {
+        LightParams { azimuth_deg, elevation_deg, width_deg, height_deg, gobo, caster: Some(settings), ..LightParams::new_caster() }
+    }
+
+    fn leaves(density: f32) -> GoboParams {
+        GoboParams { kind: "leaves".to_string(), density, seed: 2, ..GoboParams::default() }
+    }
+
+    /// What the map draws of the key of `lights` over what the engine's key
+    /// light carries (light_fx.rs's `map_over_key_among`): ∫ (map - the map
+    /// without its key) dΩ in luminance over the key's covering cone, on a
+    /// 256 x 256 midpoint grid, over the key's irradiance.
+    fn map_over_key(lights: &[LightParams]) -> f32 {
+        let studio = Studio::new(&black_studio(), lights);
+        let key = studio.key().expect("a key light");
+        let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
+        let frame = light_frame(azimuth_deg, elevation_deg, 0.0);
+        let c = key.cos_cover.max(0.05);
+        let reach = (1.0 - c * c).sqrt() / c;
+        let n = 256;
+        let cell = 2.0 * reach / n as f32;
+        let black = Vec3f::default();
+        let mut sum = 0.0f64;
+        for j in 0..n {
+            let y = -reach + (j as f32 + 0.5) * cell;
+            for i in 0..n {
+                let x = -reach + (i as f32 + 0.5) * cell;
+                let dir = (frame.center + frame.right * x + frame.up * y).normalize();
+                let drawn = luminance(studio.apply_lights(dir, black)) - luminance(studio.apply_lights_without_key(dir, black));
+                sum += (drawn * (1.0 + x * x + y * y).powf(-1.5)) as f64;
+            }
+        }
+        (sum * (cell * cell) as f64) as f32 / luminance(key.irradiance())
+    }
+
+    /// Redesign §5: a caster multiplies what is drawn before it (the base and
+    /// the lights listed earlier) and leaves the lights listed after it
+    /// alone, sharp or soft.
+    #[test]
+    fn a_caster_darkens_what_is_below_it_and_not_what_is_above() {
+        // The default light: az 0, el 30, 30x20 degrees, 6500 K at +3 EV.
+        let soft = LightParams::default();
+        let centre = dir_from_az_el(0.0, 30.0);
+        let grey = Vec3f::all(0.5);
+        let level = luminance(light_color(&soft));
+        for softness in [0.0f32, 0.5] {
+            let c = caster_at(0.0, 30.0, 10.0, 10.0, None, CasterParams { softness, ..CasterParams::default() });
+            // Listed after the softbox it hides the backdrop and the softbox behind it.
+            let got = Studio::new(&black_studio(), &[soft.clone(), c.clone()]).apply_lights(centre, grey);
+            assert!(got.max_elem() <= 1.0e-5 * level, "softness {softness}: listed after, it hides the softbox and the base: {got:?}");
+            // Listed before, it hides the backdrop only; the softbox stays on top.
+            let got = Studio::new(&black_studio(), &[c, soft.clone()]).apply_lights(centre, grey);
+            assert!((got - light_color(&soft)).length() < 1.0e-5 * level, "softness {softness}: listed before, it hides only the base: {got:?}");
+        }
+    }
+
+    /// Strength 0 changes nothing, bit for bit: not the map, not the key,
+    /// sharp or soft, in Studio and Sky mode, whatever the tint.
+    #[test]
+    fn a_caster_of_strength_zero_changes_nothing() {
+        let lights = vec![LightParams { key: true, azimuth_deg: 20.0, elevation_deg: 25.0, ..LightParams::default() }];
+        let mut sky = HdriParams { lights: lights.clone(), ..HdriParams::default() };
+        sky.sky.sun.mode = "manual".to_string();
+        sky.sky.sun.azimuth_deg = 0.0;
+        sky.sky.sun.elevation_deg = 30.0;
+        for (mode, base) in [("studio", studio_params(lights)), ("sky", sky)] {
+            let open = Env::new(&base);
+            let (map, key) = (open.bake(64), open.sun().map(|k| k.radiance));
+            for softness in [0.0f32, 0.6] {
+                let mut p = base.clone();
+                p.lights.push(caster_at(10.0, 28.0, 50.0, 50.0, Some(leaves(0.6)), CasterParams { strength: 0.0, tint: [0.3, 0.6, 0.9], softness, ..CasterParams::default() }));
+                let env = Env::new(&p);
+                assert!(env.bake(64) == map, "{mode}, softness {softness}: strength 0 changed the map");
+                assert_eq!(env.sun().map(|k| k.radiance), key, "{mode}, softness {softness}: strength 0 changed the key");
+            }
+        }
+    }
+
+    /// Strength 1: where the caster covers, what is behind it is multiplied
+    /// by its tint (acc * tint); beyond the blur's reach it is untouched, and
+    /// in between it lies between the two.
+    #[test]
+    fn a_caster_of_strength_one_leaves_its_tint_where_it_covers() {
+        let tint = [0.2f32, 0.5, 0.8];
+        let base = vec3f(0.6, 0.3, 0.9);
+        let want_inside = arr(base * vec3f(tint[0], tint[1], tint[2]));
+        let frame = light_frame(90.0, 0.0, 0.0);
+        let half = 15f32.to_radians().tan();
+        for softness in [0.0f32, 0.5] {
+            let studio = Studio::new(&black_studio(), &[caster_at(90.0, 0.0, 30.0, 30.0, None, CasterParams { tint, softness, ..CasterParams::default() })]);
+            let reach = softness * crate::hdri::caster::CASTER_SOFT_SCALE * half;
+            for j in 0..21 {
+                for i in 0..21 {
+                    let (x, y) = (-1.5 * half + 3.0 * half * i as f32 / 20.0, -1.5 * half + 3.0 * half * j as f32 / 20.0);
+                    let dir = (frame.center + frame.right * x + frame.up * y).normalize();
+                    let got = arr(studio.apply_lights(dir, base));
+                    let r = x.abs().max(y.abs());
+                    for k in 0..3 {
+                        if r < half - reach - 0.01 {
+                            assert!((got[k] - want_inside[k]).abs() < 1.0e-5, "softness {softness} at ({x}, {y}): {got:?}, inside it is {want_inside:?}");
+                        } else if r > half + reach + 0.01 {
+                            assert_eq!(got[k], arr(base)[k], "softness {softness} at ({x}, {y}): beside it");
+                        } else {
+                            assert!(got[k] <= arr(base)[k] + 1.0e-6 && got[k] >= want_inside[k] - 1.0e-6, "softness {softness} at ({x}, {y}): {got:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A caster's tint is what it lets through where it covers:
+    /// acc * (1 - s*m + s*m*tint), the same coverage m in every channel (a
+    /// black caster of the same pattern measures it), sharp and soft.
+    #[test]
+    fn a_tinted_caster_lets_its_colour_through() {
+        let white = Vec3f::all(1.0);
+        let tint = [0.9f32, 0.4, 0.1];
+        for softness in [0.0f32, 0.5] {
+            for strength in [1.0f32, 0.6] {
+                let studio_of = |settings: CasterParams| Studio::new(&black_studio(), &[caster_at(0.0, 20.0, 60.0, 45.0, Some(leaves(0.7)), settings)]);
+                let tinted = studio_of(CasterParams { strength, tint, softness, ..CasterParams::default() });
+                let black = studio_of(CasterParams { strength: 1.0, tint: [0.0; 3], softness, ..CasterParams::default() });
+                let mut covered = 0;
+                for j in 0..41 {
+                    for i in 0..41 {
+                        let dir = dir_from_az_el(-35.0 + 70.0 * i as f32 / 40.0, -5.0 + 50.0 * j as f32 / 40.0);
+                        let m = 1.0 - black.apply_lights(dir, white).x;
+                        let got = arr(tinted.apply_lights(dir, white));
+                        for k in 0..3 {
+                            let want = 1.0 - strength * m + strength * m * tint[k];
+                            assert!((got[k] - want).abs() < 1.0e-5, "softness {softness}, strength {strength}: channel {k} is {}, want {want} (m {m})", got[k]);
+                        }
+                        if m > 0.5 {
+                            covered += 1;
+                            assert!(got[0] > got[1] && got[1] > got[2], "the tint's colour shows: {got:?}");
+                        }
+                    }
+                }
+                assert!(covered > 50, "softness {softness}, strength {strength}: only {covered} samples covered");
+            }
+        }
+    }
+
+    /// A caster never adds light: every texel of the map with it is at most
+    /// the map without it, sharp or soft, whatever its tint, in Sky and
+    /// Studio mode; a white tint changes nothing, bit for bit.
+    #[test]
+    fn a_caster_never_adds_light() {
+        let light = LightParams { azimuth_deg: -20.0, elevation_deg: 15.0, ..LightParams::default() };
+        let mut sky = HdriParams { lights: vec![light.clone()], ..HdriParams::default() };
+        sky.sky.sun.mode = "manual".to_string();
+        sky.sky.sun.azimuth_deg = 0.0;
+        sky.sky.sun.elevation_deg = 25.0;
+        let mut studio = studio_params(vec![light]);
+        studio.studio.top = [0.5; 3];
+        studio.studio.horizon = [0.5; 3];
+        studio.studio.floor = [0.5; 3];
+        for (mode, base) in [("sky", sky), ("studio", studio)] {
+            let open = Env::new(&base).bake(64);
+            for gobo in [None, Some(leaves(0.6))] {
+                for softness in [0.0f32, 0.5] {
+                    for tint in [[0.0f32; 3], [0.3, 1.0, 0.6], [1.0; 3]] {
+                        let mut p = base.clone();
+                        p.lights.push(caster_at(0.0, 20.0, 70.0, 50.0, gobo.clone(), CasterParams { softness, tint, ..CasterParams::default() }));
+                        let shaded = Env::new(&p).bake(64);
+                        if tint == [1.0; 3] {
+                            assert!(shaded == open, "{mode}, {gobo:?}, softness {softness}: a white caster changed the map");
+                            continue;
+                        }
+                        let mut darker = 0;
+                        for (o, s) in open.data.iter().zip(&shaded.data) {
+                            for k in 0..3 {
+                                assert!(s[k] <= o[k] * (1.0 + 1.0e-6) + 1.0e-7, "{mode}, {gobo:?}, softness {softness}, tint {tint:?}: {} over {}", s[k], o[k]);
+                                if s[k] < o[k] - 1.0e-4 {
+                                    darker += 1;
+                                }
+                            }
+                        }
+                        assert!(darker > 0, "{mode}, {gobo:?}, softness {softness}, tint {tint:?}: the caster took out nothing");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_disabled_caster_leaves_the_map_untouched() {
+        let mut p = studio_params(vec![round_light(90.0, 10.0)]);
+        p.studio.horizon = [0.3; 3];
+        let without = Env::new(&p).bake(32);
+        for softness in [0.0f32, 0.7] {
+            let mut off = caster_at(90.0, 10.0, 40.0, 40.0, None, CasterParams { softness, ..CasterParams::default() });
+            off.enabled = false;
+            let mut q = p.clone();
+            q.lights.push(off);
+            assert_eq!(Env::new(&q).bake(32), without, "softness {softness}");
+        }
+    }
+
+    /// A caster is never the key, whatever it says: clamp() clears its key,
+    /// and the studio, which may be handed lights clamp() has not held,
+    /// skips it. The light marked key after it leads.
+    #[test]
+    fn a_caster_is_never_the_key() {
+        let marked = LightParams { key: true, blend: "add".to_string(), intensity_ev: 3.0, ..caster_at(200.0, 35.0, 30.0, 20.0, None, CasterParams::default()) };
+        assert!(Studio::new(&black_studio(), &[marked.clone()]).key().is_none(), "a caster alone is no key");
+        let key = LightParams { key: true, azimuth_deg: 40.0, elevation_deg: 20.0, ..LightParams::default() };
+        let led = Studio::new(&black_studio(), &[marked.clone(), key.clone()]).key().expect("the light leads");
+        assert!((led.dir - dir_from_az_el(40.0, 20.0)).length() < 1.0e-6, "{:?}", led.dir);
+        let env = Env::new(&studio_params(vec![marked, key]));
+        assert!((env.sun().expect("a key").dir - dir_from_az_el(40.0, 20.0)).length() < 1.0e-5);
+    }
+
+    /// D1 with a caster (redesign §5, the key): listed after the key it dims
+    /// the key by what it takes out of the map (the map draws over the key's
+    /// covering cone what the key carries, to 2 %), sharp or soft, solid or
+    /// leaves; listed before the key it leaves the key exactly as it was.
+    #[test]
+    fn a_caster_in_front_of_the_key_dims_it_and_one_behind_does_not() {
+        let key = LightParams { key: true, azimuth_deg: 0.0, elevation_deg: 20.0, width_deg: 60.0, height_deg: 45.0, ..LightParams::default() };
+        let alone = Studio::new(&black_studio(), &[key.clone()]).key().expect("a key");
+        let mut off = Vec::new();
+        for softness in [0.0f32, 0.6] {
+            for (name, gobo) in [("solid", None), ("leaves", Some(leaves(0.5)))] {
+                let c = caster_at(15.0, 25.0, 40.0, 40.0, gobo, CasterParams { softness, tint: [0.2, 0.3, 0.1], ..CasterParams::default() });
+                let behind = Studio::new(&black_studio(), &[c.clone(), key.clone()]).key().expect("a key");
+                assert_eq!(behind.radiance, alone.radiance, "{name} at softness {softness}: a caster listed before the key changed it");
+                let lights = vec![key.clone(), c];
+                let front = Studio::new(&black_studio(), &lights).key().expect("a key");
+                let share = luminance(front.radiance) / luminance(alone.radiance);
+                assert!(share < 0.95, "{name} at softness {softness}: the caster in front leaves {share} of the key");
+                let ratio = map_over_key(&lights);
+                println!("{name} at softness {softness}: the key keeps {share:.4}; the map draws {ratio:.4} of it");
+                if (ratio - 1.0).abs() > 0.02 {
+                    off.push(format!("{name} at softness {softness}: the map draws {ratio:.4} of what the key carries"));
+                }
+            }
+        }
+        assert!(off.is_empty(), "{}", off.join("\n"));
+    }
+
     #[test]
     fn the_key_light_is_the_env_sun_in_world_space() {
         let key = LightParams {
@@ -1882,7 +2193,7 @@ mod tests {
         let studio = Studio::new(&black_studio(), lights);
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let i = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).expect("a key light");
-        key_emission(&studio.lights[i..], &studio.fx[i..], n).emission
+        key_emission(&studio.lights[i..], &studio.fx[i..], &studio.casters[i..], n).emission
     }
 
     #[test]
