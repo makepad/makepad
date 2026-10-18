@@ -712,6 +712,12 @@ impl CxFingers {
         area != Area::Empty && self.captures.iter().any(|v| v.area == area)
     }
 
+    /// Whether `digit_id` has a live capture on `area`.
+    pub fn is_digit_captured_by(&self, digit_id: DigitId, area: Area) -> bool {
+        area != Area::Empty
+            && self.captures.iter().any(|v| v.digit_id == digit_id && v.area == area)
+    }
+
     /// Whether `digit_id` is held by an area other than `area`, so a
     /// capture-overload hit can tell a press a child already owns.
     pub fn is_digit_captured_elsewhere(&self, digit_id: DigitId, area: Area) -> bool {
