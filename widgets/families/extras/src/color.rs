@@ -36,8 +36,8 @@
 //! only to the host that filled the strip.
 
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, text_input::*, value_input::*, widget::*,
-    CxWidgetExt,
+    family_api::orphan_sweep_locks, makepad_derive_widget::*, makepad_draw::*, text_input::*,
+    value_input::*, widget::*, CxWidgetExt,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -2248,6 +2248,21 @@ pub struct ColorPicker {
     /// redraw, which is a repaint that never settles.
     #[rust]
     pushed: Option<Hsva>,
+    /// The area the open popover holds the pointer with (the sweep lock,
+    /// `hold_pointer`), let go when it closes.
+    #[rust]
+    locked: Option<Area>,
+}
+
+/// A picker dropped with its popover open cannot let go of the pointer
+/// itself (a drop has no `Cx`): the area is left for the window to release
+/// on the next event, as `DropSlider` and `Modal` do.
+impl Drop for ColorPicker {
+    fn drop(&mut self) {
+        if let Some(area) = self.locked {
+            orphan_sweep_locks(&[area]);
+        }
+    }
 }
 
 impl ScriptHook for ColorPicker {
@@ -2374,6 +2389,7 @@ impl ColorPicker {
         }
         self.open = true;
         self.opened_with = self.hsva;
+        self.hold_pointer(cx);
         let uid = self.widget_uid();
         cx.widget_action(uid, ColorAction::Opened);
         if let Some(list) = &self.overlay {
@@ -2394,6 +2410,9 @@ impl ColorPicker {
         }
         self.publish(cx, true);
         self.open = false;
+        if let Some(area) = self.locked.take() {
+            cx.sweep_unlock(area);
+        }
         let uid = self.widget_uid();
         cx.widget_action(uid, ColorAction::Closed);
         if let Some(list) = &self.overlay {
@@ -2402,6 +2421,26 @@ impl ColorPicker {
         // The panel was painted in an overlay above every clip; nothing else
         // knows the room it occupied is free again.
         cx.redraw_all();
+    }
+
+    /// The open popover holds the pointer (the sweep lock), as a drop-down's
+    /// menu does: `hits` answers nothing to any other area while it is up,
+    /// and `handle_event` lets go of it for the picker's own controls. A view
+    /// hands an event to its children last to first, so the controls laid
+    /// out after the swatch hear a press before the picker, and a panel that
+    /// opened below the swatch lies over exactly those: without the lock they
+    /// took every press meant for the panel. Held with the swatch's area,
+    /// drawn in the host's own list, so a host that stops drawing the picker
+    /// while it is open leaves a lock the window lets go of as stale; each
+    /// draw moves it to the swatch's fresh area, in place (`sweep_lock`
+    /// keeps an owner's entry where it is in the stack).
+    fn hold_pointer(&mut self, cx: &mut Cx) {
+        let area = self.swatch.area();
+        if !self.open || area.is_empty() {
+            return;
+        }
+        cx.sweep_lock(area);
+        self.locked = Some(area);
     }
 
     /// The open panel's rect, or an empty one. A host that gives an open
@@ -2578,6 +2617,7 @@ impl Widget for ColorPicker {
         cx.end_turtle_with_area(&mut self.whole);
 
         if self.open {
+            self.hold_pointer(cx.cx.cx);
             let anchor = self.whole.rect(cx);
             let width = self.panel_width;
             // The height guess only decides which way the first frame opens;
@@ -2624,6 +2664,17 @@ impl Widget for ColorPicker {
             return;
         }
 
+        // The pointer lock (`hold_pointer`) is a wall against everything but
+        // the picker's own controls: let go of it for their dispatch when it
+        // is on top (an overlay opened over the panel keeps them turned
+        // away), and take it again at the end while the panel stays open.
+        let lifted = self
+            .locked
+            .filter(|area| cx.sweep_lock_area().is_some_and(|top| same_slot(top, *area)));
+        if let Some(area) = lifted {
+            cx.sweep_unlock(area);
+        }
+
         if self.popover && self.open {
             if let Event::KeyDown(ke) = event {
                 if ke.key_code == KeyCode::Escape {
@@ -2636,7 +2687,9 @@ impl Widget for ColorPicker {
                 if !self.panel_rect.contains(me.abs) && !anchor.contains(me.abs) {
                     self.close_panel(cx, false);
                     // Not a return: the press still belongs to whatever is
-                    // under it.
+                    // under it and hears it after the picker (laid out
+                    // before it); the lock is gone now. What heard it
+                    // before the picker was turned away by the lock.
                 }
             }
         }
@@ -2772,6 +2825,12 @@ impl Widget for ColorPicker {
                 }
             }
         }
+
+        if let Some(area) = lifted {
+            if self.open && self.locked == Some(area) {
+                cx.sweep_lock(area);
+            }
+        }
     }
 
     fn text(&self) -> String {
@@ -2786,6 +2845,21 @@ impl Widget for ColorPicker {
 
     fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
         Some(format_color_hex(self.hsva.to_rgba(), true))
+    }
+}
+
+/// Whether two handles name the same drawn slot, whatever redraw they were
+/// handed out in (the sweep lock's own notion of one owner).
+fn same_slot(a: Area, b: Area) -> bool {
+    match (a, b) {
+        (Area::Instance(a), Area::Instance(b)) => {
+            a.draw_list_id == b.draw_list_id
+                && a.draw_item_id == b.draw_item_id
+                && a.instance_offset == b.instance_offset
+        }
+        (Area::Rect(a), Area::Rect(b)) => a.draw_list_id == b.draw_list_id && a.rect_id == b.rect_id,
+        (Area::Empty, Area::Empty) => true,
+        _ => false,
     }
 }
 
@@ -3810,5 +3884,139 @@ mod channel_rows {
         assert_eq!(ends(&actions), 1, "the release did not commit, or committed twice");
         down.unhandle(&mut cx, &claimed(&down));
         cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// A popover is drawn over the page, so a press on it is the panel's alone.
+///
+/// A view hands an event to its children last to first, so whatever is laid
+/// out after the swatch hears a press before the picker does. A panel that
+/// opened below its swatch lies over exactly those controls, and without
+/// the pointer held they took every press meant for it: the square never
+/// moved, and the slider or the tick under it changed instead.
+#[cfg(test)]
+mod popover_pointer {
+    use super::pointer_capture_tests::{claimed, press, release, send};
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// `pointer_capture_tests::Target` with an overlay, which a popover
+    /// draws its panel into.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, WidgetRef, Target) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := ColorPickerButton{color: #xFF0000FF}
+                    under := Button{width: Fill height: 560 text: "under"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let pick = root.widget(cx, ids!(pick));
+        let under = root.widget(cx, ids!(under));
+        assert!(!pick.is_empty() && !under.is_empty(), "the scene has a picker and a button");
+        (root, pick, under, target)
+    }
+
+    fn click(cx: &mut Cx, root: &WidgetRef, at: Vec2d) -> (ActionsBuf, Area) {
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        let taken = claimed(&down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &taken);
+        cx.fingers.first_mouse_button = None;
+        (actions, taken)
+    }
+
+    fn heard(actions: &ActionsBuf, widget: &WidgetRef) -> bool {
+        actions.iter().filter_map(|a| a.as_widget_action()).any(|a| a.widget_uid == widget.widget_uid())
+    }
+
+    fn square_sv(pick: &WidgetRef) -> (f32, f32) {
+        let inner = pick.borrow::<ColorPicker>().unwrap();
+        let area = inner.square.borrow::<ColorArea>().expect("the panel has a square");
+        (area.hsva().s, area.hsva().v)
+    }
+
+    #[test]
+    fn a_press_on_a_popover_that_opened_below_is_the_pickers() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, pick, under, mut target) = start(&mut cx);
+        let swatch = pick.area().rect(&cx);
+        let (_, _) = click(&mut cx, &root, swatch.pos + swatch.size * 0.5);
+        assert!(pick.borrow::<ColorPicker>().unwrap().is_open(), "the swatch opened the panel");
+        // The first frame places the panel by a guess at its height, the
+        // second by its measured rect.
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+        let panel = pick.borrow::<ColorPicker>().unwrap().panel_rect();
+        assert!(panel.pos.y >= swatch.pos.y + swatch.size.y, "the panel opened below its swatch: {panel:?}");
+        let button = under.area().rect(&cx);
+        assert!(
+            button.contains(panel.pos + panel.size * 0.5),
+            "the button lies under the panel, so a press there is a fair test"
+        );
+
+        let square = pick.borrow::<ColorPicker>().unwrap().square.area().rect(&cx);
+        assert_eq!(square_sv(&pick), (1.0, 1.0), "red to start with");
+        let (actions, taken) = click(&mut cx, &root, square.pos + square.size * 0.25);
+        assert!(!heard(&actions, &under), "the button under the panel took the press");
+        assert_ne!(taken, under.area(), "the button under the panel holds the press");
+        let (s, v) = square_sv(&pick);
+        assert!(s < 0.5 && v > 0.5, "the square never moved: s {s} v {v}");
+        assert!(pick.borrow::<ColorPicker>().unwrap().is_open(), "a press on the panel closed it");
+
+        // A press beside the panel and the swatch closes it, and lets the
+        // pointer go: the next press on the button is the button's.
+        let beside = dvec2(button.pos.x + button.size.x - 4.0, button.pos.y + button.size.y - 4.0);
+        assert!(!panel.contains(beside));
+        click(&mut cx, &root, beside);
+        assert!(!pick.borrow::<ColorPicker>().unwrap().is_open(), "a press beside the panel closes it");
+        assert_eq!(cx.sweep_lock_area(), None, "the closed panel gives the pointer back");
+        target.draw(&mut cx, &root);
+        let (actions, _) = click(&mut cx, &root, beside);
+        assert!(heard(&actions, &under), "the button takes a press once the panel is shut");
     }
 }
