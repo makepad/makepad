@@ -36,7 +36,7 @@ use makepad_render_material::ibl::EnvMap;
 use super::*;
 use super::image_light::PictureMemo;
 use crate::sky::luminance;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The base layer is metered on a bake this wide (64 x 32) for the exposure
 /// match: `Env` bakes its own base at this size and `irradiance_above` reads it.
@@ -47,6 +47,9 @@ pub const SKY_METER_WIDTH: usize = 64;
 const PATCH_WIDTH: usize = 1024;
 /// The copy the exposure match and the sky key meter: 128 x 64.
 const METER_WIDTH: usize = 128;
+/// The widest level of an image's peaks (`Peaks`), a power of two: blocks of
+/// about 0.7 degrees.
+const PEAK_WIDTH: usize = 512;
 /// The sky key reads the image's own sky level in this many degrees above the
 /// mask's line.
 const SKY_BAND_DEG: f32 = 30.0;
@@ -63,12 +66,15 @@ pub struct ImageFacts {
     patch: Option<EnvMap>,
     /// A METER_WIDTH-wide copy for the metering.
     meter: EnvMap,
+    /// The most luminance over regions of the image (`Peaks`), worked out the
+    /// first time a caster's bloom asks (`BaseImage::peak`).
+    peaks: OnceLock<Peaks>,
 }
 
 impl ImageFacts {
     fn measure(map: &EnvMap) -> ImageFacts {
         if !well_formed(map) {
-            return ImageFacts { sun: None, patch: None, meter: EnvMap::constant(2, [0.0; 3]) };
+            return ImageFacts { sun: None, patch: None, meter: EnvMap::constant(2, [0.0; 3]), peaks: OnceLock::new() };
         }
         let sun = detect_sun(map);
         // remove_sun widens the cone by a texel of the map it fills, which is
@@ -78,7 +84,7 @@ impl ImageFacts {
             remove_sun(&mut small, sun);
             small
         });
-        ImageFacts { sun, patch, meter: map.resized(METER_WIDTH) }
+        ImageFacts { sun, patch, meter: map.resized(METER_WIDTH), peaks: OnceLock::new() }
     }
 
     /// The luminance a level surface receives from the image's upper
@@ -86,6 +92,95 @@ impl ImageFacts {
     /// box average, so the sun's energy is in it).
     pub fn irradiance(&self) -> f32 {
         irradiance_above(&self.meter, 0.0)
+    }
+}
+
+/// Upper bounds of an image's luminance over regions of the sphere, for a
+/// caster's bloom (`BaseImage::peak`, fix round 3 of S3's review): level 0
+/// holds the most luminance of the image's texels in each of its blocks (at
+/// most PEAK_WIDTH x PEAK_WIDTH / 2, a power of two wide), each later level the
+/// most of 2 x 2 of the one before. In the image's own frame and units.
+struct Peaks {
+    /// (width, height, the most of each block, row by row) per level.
+    levels: Vec<(usize, usize, Vec<f32>)>,
+    /// The image's texel, radians: a bilinear read reaches texels up to about
+    /// this far from where it reads.
+    texel: f32,
+}
+
+impl Peaks {
+    fn new(map: &EnvMap) -> Peaks {
+        let (w, h) = (map.width.max(1), map.height.max(1));
+        let mut gw = 2usize;
+        while gw * 2 <= w.min(PEAK_WIDTH) {
+            gw *= 2;
+        }
+        let gh = (gw / 2).max(1);
+        let mut top = vec![0.0f32; gw * gh];
+        if well_formed(map) {
+            for y in 0..h {
+                let by = y * gh / h;
+                for x in 0..w {
+                    let lum = luminance(clean(map.data[y * w + x]));
+                    let block = &mut top[by * gw + x * gw / w];
+                    *block = block.max(lum);
+                }
+            }
+        }
+        let mut levels = vec![(gw, gh, top)];
+        while let Some((lw, lh, below)) = levels.last().filter(|(lw, lh, _)| *lw > 1 || *lh > 1) {
+            let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
+            let mut next = vec![0.0f32; nw * nh];
+            for y in 0..*lh {
+                for x in 0..*lw {
+                    let at = &mut next[(y / 2).min(nh - 1) * nw + (x / 2).min(nw - 1)];
+                    *at = at.max(below[y * lw + x]);
+                }
+            }
+            levels.push((nw, nh, next));
+        }
+        let pi = std::f32::consts::PI;
+        Peaks { levels, texel: (pi / h as f32).max(std::f32::consts::TAU / w as f32) }
+    }
+
+    /// The most luminance the image may show within `radius` (radians) of
+    /// `dir` (its own frame), a bilinear read's reach included: never less
+    /// than what any read there returns.
+    fn max_in(&self, dir: Vec3f, radius: f32) -> f32 {
+        let (pi, tau) = (std::f32::consts::PI, std::f32::consts::TAU);
+        let (gw, gh) = (self.levels[0].0 as i64, self.levels[0].1 as i64);
+        let r = radius.max(0.0) + 1.5 * self.texel;
+        let uv = ibl::dir_to_equirect_uv(arr(dir));
+        let theta = uv[1] * pi;
+        let row = |t: f32| ((t / pi * gh as f32).floor() as i64).clamp(0, gh - 1);
+        let (y0, y1) = (row(theta - r), row(theta + r));
+        // The cap's reach in longitude, asin(sin r / sin theta), while it holds
+        // neither pole; all of it otherwise.
+        let reach = r.sin() / theta.sin();
+        let (x0, x1) = if theta - r <= 0.0 || theta + r >= pi || !(reach < 1.0) {
+            (0, gw - 1)
+        } else {
+            let du = reach.asin() / tau;
+            (((uv[0] - du) * gw as f32).floor() as i64, ((uv[0] + du) * gw as f32).floor() as i64)
+        };
+        let (x0, x1) = if x1 - x0 + 1 >= gw { (0, gw - 1) } else { (x0, x1) };
+        // The level at which the region spans at most four entries a side.
+        let span = (x1 - x0).max(y1 - y0);
+        let mut k = 0usize;
+        while (span >> k) > 3 && k + 1 < self.levels.len() {
+            k += 1;
+        }
+        let (lw, lh, values) = &self.levels[k];
+        let (lw, lh) = (*lw as i64, *lh as i64);
+        let scale = 1i64 << k;
+        let mut most = 0.0f32;
+        for y in y0.div_euclid(scale)..=y1.div_euclid(scale) {
+            let y = y.clamp(0, lh - 1);
+            for x in x0.div_euclid(scale)..=x1.div_euclid(scale) {
+                most = most.max(values[(y * lw + x.rem_euclid(lw)) as usize]);
+            }
+        }
+        most
     }
 }
 
@@ -285,6 +380,17 @@ impl BaseImage {
             return None;
         }
         self.sun().map(|sun| (sun.dir, sun.cos_cover.min(sun.cos_radius).clamp(-1.0, 1.0).acos()))
+    }
+
+    /// What a caster's bloom must look for in the image within `radius`
+    /// (radians) of `d` (map frame): the most luminance the map may draw of it
+    /// there, at its exposure (never less than it draws), and the spacing its
+    /// detail asks for (radians): half its texel, so its bilinear read between
+    /// texels is followed. The image's peaks are worked out on the first call
+    /// and kept with its facts.
+    pub fn peak(&self, d: Vec3f, radius: f32) -> (f32, f32) {
+        let peaks = self.facts.peaks.get_or_init(|| Peaks::new(&self.map));
+        (peaks.max_in(rotate_y(d, -self.yaw_deg), radius) * self.gain, 0.5 * peaks.texel)
     }
 
     /// The image's own value along `d`, in the image's units.

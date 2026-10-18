@@ -438,7 +438,8 @@ impl Env {
     /// its own coverage are rastered in its frame for a map `width` wide, the
     /// sun's and the moon's discs sampled on grids of their own (D6), what the
     /// lights before it may reach as finely as those lights ask
-    /// (`Studio::bright_boxes`), the rows spread by `run` (M5). A caster that
+    /// (`Studio::bright_boxes`), and the base's fine detail where it has any
+    /// (`base_peak`), the rows spread by `run` (M5). A caster that
     /// nothing bright stands behind keeps no raster: it stays exactly the flag
     /// it draws as. False when `cancelled` stopped it (or the runner skipped a
     /// row).
@@ -454,6 +455,7 @@ impl Env {
             .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
             .collect();
         let at = Sampling::bake(width, None);
+        let fine_base = self.base_image.is_some() || (self.atmo.is_some() && self.weather.is_some());
         for entry in entries {
             let built = {
                 let env: &Env = self;
@@ -461,7 +463,9 @@ impl Env {
                 let behind = |d: Vec3f| env.content_before(d, entry, at);
                 let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
                 let bright = env.studio.bright_boxes(entry);
-                caster::CasterBloom::build(caster, width, &hot, &bright, &behind, &sharp, cancelled, run)
+                let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius);
+                let peak: Option<&(dyn Fn(Vec3f, f32) -> Option<(f32, f32)> + Sync)> = if fine_base { Some(&peak) } else { None };
+                caster::CasterBloom::build(caster, width, &hot, &bright, peak, &behind, &sharp, cancelled, run)
             };
             let Some(bloom) = built else { return false };
             if bloom.thins_anything() {
@@ -469,6 +473,24 @@ impl Env {
             }
         }
         true
+    }
+
+    /// What a caster's bloom must look for in the base within `radius`
+    /// (radians) of `d` (map frame), detail a look at a raster cell's corners
+    /// may miss (fix round 3 of S3's review): the most luminance it may draw
+    /// there, times 2^intensity_ev, and the spacing that detail asks for
+    /// (radians). A base image's (`BaseImage::peak`, under or beside the sky it
+    /// replaces) and a storm's bolt (`Weather::fine_step_near`, no bound). None
+    /// where the base has no such detail: the sky's discs are sampled apart
+    /// (`hot_spots`), and the rest of a generated sky and the backdrop are
+    /// smooth at a cell's scale.
+    fn base_peak(&self, d: Vec3f, radius: f32) -> Option<(f32, f32)> {
+        let image = self.base_image.as_ref().map(|image| image.peak(d, radius)).map(|(lum, step)| (lum * self.scale, step));
+        let bolt = self.weather.as_ref().filter(|_| self.atmo.is_some()).and_then(|weather| weather.fine_step_near(d, radius)).map(|step| (f32::INFINITY, step));
+        match (image, bolt) {
+            (Some(a), Some(b)) => Some((a.0.max(b.0), a.1.min(b.1))),
+            (a, b) => a.or(b),
+        }
     }
 
     /// The sky a window shows along `d` (map frame) over `base`, the base

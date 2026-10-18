@@ -216,6 +216,13 @@ impl CasterLayer {
         m.max(0.0).min(1.0)
     }
 
+    /// About the mean of m before bloom over the box of half sides `half` round point `t` of
+    /// this caster's tangent plane, for a soft caster (`SoftCoverage::mean_over`); None for a
+    /// sharp one, whose pattern is looked at where it is wanted.
+    fn mean_unbloomed(&self, t: Vec2f, half: Vec2f) -> Option<f32> {
+        self.soft.as_ref().map(|soft| soft.mean_over(vec2f(self.sx * t.x, t.y), half).max(0.0).min(1.0))
+    }
+
     /// `acc * (1 + s * (tint - 1) * m)`: what is behind the caster where it
     /// covers `m` of it. Never above `acc` (tint and m are 0..=1); m 0 leaves
     /// `acc` exactly.
@@ -379,6 +386,16 @@ impl SoftCoverage {
         let (x, y, rx, ry) = self.texel_box(q);
         self.table.box_mean(x, y, rx, ry)[0] as f32
     }
+
+    /// About the mean of `at` over the box of half sides `half` round face point `q`, 0..=1, in
+    /// one look: the blur's box widened to the spread of both boxes together (sqrt(r² + h²) each
+    /// way, the box of the same second moment). A bloom raster reads its cells' coverage so (fix
+    /// round 3 of S3's review), where it took a look per map texel.
+    fn mean_over(&self, q: Vec2f, half: Vec2f) -> f32 {
+        let (x, y, _, _) = self.texel_box(q);
+        let widened = |h: f32, cell: f32| ((self.radius * self.radius + h * h).sqrt() / cell) as f64;
+        self.table.box_mean(x, y, widened(half.x, self.cell.x), widened(half.y, self.cell.y))[0] as f32
+    }
 }
 
 /// The bright light, in EV above the threshold times tangent-plane area (about steradians
@@ -402,7 +419,8 @@ const BLOOM_CELLS_PER_LENGTH: f32 = 6.0;
 /// before its cells grew to BLOOM_CELLS_PER_LENGTH), up to BLOOM_CELL_SAMPLES_MAX samples a
 /// side; the caster's coverage, which costs far less to look at, at the map's texel, up to
 /// BLOOM_COVERAGE_LOOKS_MAX looks a side, each sample of the light behind times the mean of
-/// the looks over its own part of the cell.
+/// the looks over its own part of the cell (a soft caster's mean in one look,
+/// `SoftCoverage::mean_over`: fix round 3 of S3's review, M5).
 const BLOOM_SAMPLES_PER_LENGTH: f32 = 32.0;
 const BLOOM_CELL_SAMPLES_MAX: usize = 8;
 const BLOOM_COVERAGE_LOOKS_MAX: usize = 16;
@@ -410,19 +428,43 @@ const BLOOM_COVERAGE_LOOKS_MAX: usize = 16;
 /// only, shared with its neighbours, and the caster's coverage at its samples: the light is
 /// read bilinearly between the corners where they differ by at most this many EV and all pass
 /// the threshold. A cell whose corners differ more (an edge of the light behind) takes the
-/// light at every sample, and one whose corners are all at or under the threshold holds none.
+/// light at every sample, and one whose corners are all well under the threshold
+/// (BLOOM_NEAR_EV) holds none.
 const BLOOM_SMOOTH_EV: f32 = 0.5;
+/// Fix round 3 of S3's review: what the cells' corners alone may miss of what is not a light
+/// listed before the caster. A cell whose corners are all at or under the threshold, but one of
+/// them within BLOOM_NEAR_EV of it (a cloud top, the band over the horizon, under a low
+/// threshold), takes the light behind at its samples; one whose corners are smooth takes a look
+/// at its centre too, and takes its samples where that look is more than BLOOM_CENTRE_EV off the
+/// corners' mean (a band brighter between them). What the base holds finer than that (a base
+/// image's highlights, a storm's bolt) the base reports itself (`Env::base_peak`): the cells it
+/// may brighten past their corners take the light behind at the spacing it asks for, from the
+/// cell's own count to BLOOM_LIGHT_SAMPLES_MAX a side (BLOOM_CELL_BUDGET).
+const BLOOM_NEAR_EV: f32 = 2.0;
+const BLOOM_CENTRE_EV: f32 = 0.1;
+/// The most cells the base's detail alone asks to sample finely that are kept as points
+/// (`BloomPoint`, each the light of its cell where it lies), as a light no wider than a cell is:
+/// a highlight or a few of them. A base that asks for more (a bright photograph) is rastered,
+/// each cell's light still where it lies in it (`CellLight`).
+const BLOOM_FINE_POINTS_MAX: usize = 32;
 /// The cells a light listed before the caster may reach (`BrightBox`) take the light behind at
 /// samples this many to its narrowest feature (a plain light) or to the map's texel where that
 /// is finer (a light with a picture, a shape core or something hung in front of it), and at the
 /// map's texel where their corners are not all alike inside it (its edge may cross them), so
 /// the light holds still as it moves; from the cell's own count to BLOOM_LIGHT_SAMPLES_MAX a
-/// side, and BLOOM_LIGHT_BUDGET samples for one light at most (a light that fills the raster is
-/// sampled more coarsely). A light no wider than BLOOM_LIGHT_POINT_CELLS takes the same spacing
-/// on a grid of its own.
+/// side (BLOOM_CELL_BUDGET). A light no wider than BLOOM_LIGHT_POINT_CELLS takes the same
+/// spacing on a grid of its own.
 const BLOOM_LIGHT_SAMPLES_PER_FEATURE: f32 = 6.0;
 const BLOOM_LIGHT_SAMPLES_MAX: usize = 16;
-const BLOOM_LIGHT_BUDGET: usize = 1 << 14;
+/// M5 (fix round 3 of S3's review): the most lookups behind the caster a bloom raster's cells
+/// take past their corners (the samples of the lights' cells, of the base's detail and of the
+/// cells whose corners are not alike) at CASTER_REFERENCE_WIDTH, in proportion to a wider map's
+/// texels: where they ask for more, every cell's samples a side are scaled alike, never under one
+/// (its centre); a cell left one sample reads its corners. A light with detail or dim parts that fills the raster asked for the map's texel over
+/// every cell, past any budget of its own: behind four soft blooming casters, a picture light took
+/// the held 512 bake's pre-pass to 65 % of the bake (hdri_perf's M5; 28 % so held, most of its
+/// cells read at their corners). The discs' cells and grids are not counted.
+const BLOOM_CELL_BUDGET: usize = 1 << 13;
 /// A light whose reach in the caster's plane is at most this many cells each way from its
 /// middle is sampled as a disc is, on a grid of its own square kept as points (`BloomPoint`),
 /// so the kernel blurs it from where it is, not from the cells it falls in.
@@ -593,6 +635,49 @@ fn spline(u: f32) -> f32 {
     }
 }
 
+/// The light a bloom raster's cell holds (`CasterBloom::build`): the mean of b over it, and its
+/// centroid in the cell, in cells from its middle (-0.5..=0.5 each way).
+#[derive(Clone, Copy, Debug, Default)]
+struct CellLight {
+    b: f32,
+    x: f32,
+    y: f32,
+}
+
+impl CellLight {
+    /// Sums `b` at (x, y) cells from the middle (`mean` makes the sums a mean).
+    fn add(&mut self, b: f32, x: f32, y: f32) {
+        self.b += b;
+        self.x += b * x;
+        self.y += b * y;
+    }
+
+    /// The sums of `count` samples as their mean times `share`, and their centroid.
+    fn mean(self, count: usize, share: f32) -> CellLight {
+        if !(self.b > 0.0) {
+            return CellLight::default();
+        }
+        CellLight { b: self.b / count as f32 * share, x: self.x / self.b, y: self.y / self.b }
+    }
+}
+
+/// What a bloom raster's cell takes the light behind at (`CasterBloom::build`).
+#[derive(Clone, Copy, Debug)]
+enum Plan {
+    /// Nothing: every corner well under the threshold.
+    Dark,
+    /// Its corners, read bilinearly: alike, its centre on their mean, or left one sample by
+    /// BLOOM_CELL_BUDGET.
+    Corners,
+    /// n x n samples, for a disc beside it (not held to BLOOM_CELL_BUDGET).
+    Disc(usize),
+    /// n x n samples, for a light that reaches it, or where its corners are not alike or its
+    /// centre is off them.
+    Samples(usize),
+    /// n x n samples, for the base's detail alone.
+    Fine(usize),
+}
+
 /// How much of a cell centred at `x`, `y` with side `cell` the discs' squares cover, 0..=1
 /// (overlapping squares counted once each; held to 1).
 fn square_share(squares: &[(Vec2f, f32)], x: f32, y: f32, cell: f32) -> f32 {
@@ -604,8 +689,9 @@ fn square_share(squares: &[(Vec2f, f32)], x: f32, y: f32, cell: f32) -> f32 {
 /// One caster's bloom (redesign §5): the share g (0..=1) of bright light behind it, blurred
 /// over its bloom length. It lives on a raster in the caster's own tangent plane, covering
 /// its box, its soft edge, the bloom length round them and two cells more, and, for the
-/// bright discs in that plane (the sun, the moon) and the lights no wider than a cell, in
-/// points blurred where they are looked up (D6; fix round 2 of S3's review). Built once per `Env` from what the map draws behind the caster
+/// bright discs in that plane (the sun, the moon), the lights no wider than a cell and a base's
+/// few highlights, in points blurred where they are looked up (D6; fix rounds 2 and 3 of S3's
+/// review). Built once per `Env` from what the map draws behind the caster
 /// (`Env::content_before`) and the caster's own coverage; read unchanged by every lookup.
 #[derive(Clone, Debug)]
 pub(crate) struct CasterBloom {
@@ -647,15 +733,20 @@ impl CasterBloom {
     ///   the square that shows. A light of `bright` (the lights listed before the caster, map
     ///   frame) no wider than BLOOM_LIGHT_POINT_CELLS cells is kept as points the same way, on
     ///   a grid as fine as its drawing asks (BLOOM_LIGHT_SAMPLES_PER_FEATURE).
-    /// - A raster cell holds the mean of b over its area (fix round 2 of S3's review): the light
-    ///   behind at the cells' corners, read bilinearly between them where they are smooth
-    ///   (BLOOM_SMOOTH_EV), at the spacing the raster's cells had before they grew with the
-    ///   length where they are not (BLOOM_SAMPLES_PER_LENGTH), none where no corner passes the
-    ///   threshold; the caster's coverage at the map's texel. A cell a wider light reaches takes
-    ///   the light behind at the spacing that light asks for, and at the map's texel where the
-    ///   light's edge may cross it; a cell a square covers part of takes only the samples
-    ///   outside the squares, times the share outside them; a cell a disc too near the plane's
-    ///   edge to project touches takes a grid fine enough for the disc.
+    /// - A raster cell holds the mean of b over its area (fix round 2 of S3's review), placed
+    ///   where it lies in the cell (`CellLight`, fix round 3): the light behind at the cells'
+    ///   corners, read bilinearly between them where they are smooth (BLOOM_SMOOTH_EV) and the
+    ///   cell's centre agrees (BLOOM_CENTRE_EV), at the spacing the raster's cells had before
+    ///   they grew with the length where not (BLOOM_SAMPLES_PER_LENGTH), none where every corner
+    ///   is well under the threshold (BLOOM_NEAR_EV); the caster's coverage at the map's texel.
+    ///   A cell a wider light reaches takes the light behind at the spacing that light asks
+    ///   for, and at the map's texel where the light's edge may cross it; a cell `peak` (the
+    ///   base's detail: what it may draw within a radius of a direction, and the spacing it
+    ///   asks for) may brighten past its corners takes the spacing that asks for, its light
+    ///   kept as a point while such cells are few (BLOOM_FINE_POINTS_MAX); a cell a square
+    ///   covers part of takes only the samples outside the squares, times the share outside
+    ///   them; a cell a disc too near the plane's edge to project touches takes a grid fine
+    ///   enough for the disc. All but the discs' cells are held to BLOOM_CELL_BUDGET (M5).
     /// - S: the bright light within the bloom length, nearer counting more: b blurred by the
     ///   kernel of three boxes of width w = 2/3 of the bloom length, scaled so its peak is 1.
     ///   On the raster that is the kernel as it falls over each cell while it spans few cells
@@ -671,6 +762,7 @@ impl CasterBloom {
         width: usize,
         hot: &[(Vec3f, f32)],
         bright: &[BrightBox],
+        peak: Option<&(dyn Fn(Vec3f, f32) -> Option<(f32, f32)> + Sync)>,
         behind: &(dyn Fn(Vec3f) -> Vec3f + Sync),
         sharp: &(dyn Fn(Vec3f) -> f32 + Sync),
         cancelled: &dyn Fn() -> bool,
@@ -721,10 +813,16 @@ impl CasterBloom {
             let m = caster.unbloomed(d, sharp);
             if !(m < 1.0) { 0.0 } else { 1.0 - m.max(0.0) }
         };
-        let ev_behind = |d: Vec3f| -> f32 {
+        // The share that shows over the box of half sides (hx, hy) round tangent point (x, y), in
+        // one look for a soft caster; None for a sharp one, which is looked at point by point.
+        let shows_over = |x: f32, y: f32, hx: f32, hy: f32| -> Option<f32> { caster.mean_unbloomed(vec2f(x, y), vec2f(hx, hy)).map(|m| 1.0 - m) };
+        // How far the light behind is over the threshold, in EV, under it too (-inf for none or
+        // NaN): the cells' corners keep how near they come (BLOOM_NEAR_EV).
+        let ev_signed = |d: Vec3f| -> f32 {
             let lum = luminance(behind(d));
-            if !(lum > threshold) { 0.0 } else { (lum.min(MAX_RADIANCE) / threshold).log2() }
+            if !(lum > 0.0) { f32::NEG_INFINITY } else { (lum.min(MAX_RADIANCE) / threshold).log2() }
         };
+        let ev_behind = |d: Vec3f| -> f32 { ev_signed(d).max(0.0) };
         let ev_over = |d: Vec3f| -> f32 {
             let open = shows(d);
             if !(open > 0.0) { 0.0 } else { ev_behind(d) * open }
@@ -801,24 +899,11 @@ impl CasterBloom {
         }
         let in_square = |earlier: &[(Vec2f, f32)], x: f32, y: f32| earlier.iter().any(|&(c, h)| (x - c.x).abs() < h && (y - c.y).abs() < h);
         let centre_of = |i: usize, j: usize| vec2f(-ext.x + (i as f32 + 0.5) * cell, -ext.y + (j as f32 + 0.5) * cell);
-        // A light on the raster: the samples a side a cell it reaches takes, the cells it
-        // reaches together held to BLOOM_LIGHT_BUDGET.
+        // Whether a light on the raster reaches the cell centred at `c`.
         let light_reaches = |reach: &LightReach, c: Vec2f| match *reach {
             LightReach::Plane(m, h) => (c.x - m.x).abs() < 0.5 * cell + h.x && (c.y - m.y).abs() < 0.5 * cell + h.y,
             LightReach::Angle(axis, cos) => at(c.x, c.y).dot(axis) >= cos,
         };
-        let lights: Vec<(LightReach, usize)> = raster_lights
-            .into_iter()
-            .filter_map(|(reach, step)| {
-                let count: usize = (0..rows).map(|j| (0..cols).filter(|&i| light_reaches(&reach, centre_of(i, j))).count()).sum();
-                if count == 0 {
-                    return None;
-                }
-                let wanted = if step > 0.0 { ((cell / step).ceil() as usize).clamp(1, BLOOM_LIGHT_SAMPLES_MAX) } else { BLOOM_LIGHT_SAMPLES_MAX };
-                let budget = ((BLOOM_LIGHT_BUDGET / count) as f32).sqrt() as usize;
-                Some((reach, wanted.min(budget).max(samples)))
-            })
-            .collect();
         // The samples a side the cell centred at `c` takes the light behind at for the discs (a
         // square over part of it, or a disc that only an angle finds), 0 for none.
         let disc_fine = |c: Vec2f| -> usize {
@@ -835,90 +920,203 @@ impl CasterBloom {
                 .max()
                 .unwrap_or(0)
         };
-        // The mean of b over the cell centred at (x, y): the light behind at `n` x `n` samples
-        // (those outside the squares), each times what shows over its own part of the cell at
-        // enough looks a side for `looks` over the cell (none taken behind where nothing
-        // shows), times the share of the cell outside the squares.
-        let sampled = |x: f32, y: f32, n: usize| -> f32 {
+        // The mean of b over the cell centred at (x, y), and where in the cell it lies
+        // (`CellLight`): the light behind at `n` x `n` samples (those outside the squares), each
+        // times what shows over its own part of the cell at enough looks a side for `looks` over
+        // the cell (none taken behind where nothing shows), times the share of the cell outside
+        // the squares.
+        let sampled = |x: f32, y: f32, n: usize| -> CellLight {
             let k = looks.div_ceil(n).max(1);
             let step = cell / n as f32;
-            let (mut sum, mut outside) = (0.0f32, 0usize);
+            let (mut light, mut outside) = (CellLight::default(), 0usize);
             for sj in 0..n {
-                let sy = y + ((sj as f32 + 0.5) / n as f32 - 0.5) * cell;
+                let fy = (sj as f32 + 0.5) / n as f32 - 0.5;
+                let sy = y + fy * cell;
                 for si in 0..n {
-                    let sx = x + ((si as f32 + 0.5) / n as f32 - 0.5) * cell;
+                    let fx = (si as f32 + 0.5) / n as f32 - 0.5;
+                    let sx = x + fx * cell;
                     if in_square(&squares, sx, sy) {
                         continue;
                     }
                     outside += 1;
-                    let mut open = 0.0f32;
-                    for v in 0..k {
-                        let ly = sy + ((v as f32 + 0.5) / k as f32 - 0.5) * step;
-                        for u in 0..k {
-                            open += shows(at(sx + ((u as f32 + 0.5) / k as f32 - 0.5) * step, ly));
+                    let open = shows_over(sx, sy, 0.5 * step, 0.5 * step).unwrap_or_else(|| {
+                        let mut open = 0.0f32;
+                        for v in 0..k {
+                            let ly = sy + ((v as f32 + 0.5) / k as f32 - 0.5) * step;
+                            for u in 0..k {
+                                open += shows(at(sx + ((u as f32 + 0.5) / k as f32 - 0.5) * step, ly));
+                            }
                         }
-                    }
+                        open / (k * k) as f32
+                    });
                     if open > 0.0 {
-                        sum += open / (k * k) as f32 * ev_behind(at(sx, sy));
+                        light.add(open * ev_behind(at(sx, sy)), fx, fy);
                     }
                 }
             }
-            if outside == 0 { 0.0 } else { sum / outside as f32 * (1.0 - square_share(&squares, x, y, cell)) }
+            if outside == 0 { CellLight::default() } else { light.mean(outside, 1.0 - square_share(&squares, x, y, cell)) }
         };
-        // The light behind at the cells' corners, (cols + 1) x (rows + 1) (0 in a square, whose
-        // disc the points hold), a row at a time where `run` puts it.
+        // The light behind at the cells' corners, (cols + 1) x (rows + 1), in EV over the
+        // threshold (`ev_signed`; none in a square, whose disc the points hold), a row at a time
+        // where `run` puts it.
         let corner_row = |j: usize| -> Vec<f32> {
             (0..=cols)
                 .map(|i| {
                     let (x, y) = (-ext.x + i as f32 * cell, -ext.y + j as f32 * cell);
-                    if in_square(&squares, x, y) { 0.0 } else { ev_behind(at(x, y)) }
+                    if in_square(&squares, x, y) { f32::NEG_INFINITY } else { ev_signed(at(x, y)) }
                 })
                 .collect()
         };
         let corners = rows_by(rows + 1, run, cancelled, &corner_row)?;
-        // b on the raster, a row at a time where `run` puts it.
-        let raster_row = |j: usize| -> Vec<f32> {
+        let corners_of = |i: usize, j: usize| [corners[j][i], corners[j][i + 1], corners[j + 1][i], corners[j + 1][i + 1]];
+        let span = |e: &[f32; 4]| e.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        // Corners alike (BLOOM_SMOOTH_EV): all over the threshold and near each other.
+        let alike = |(lo, hi): (f32, f32)| lo > 0.0 && hi - lo <= BLOOM_SMOOTH_EV;
+        // Each light on the raster, with the samples a side a cell it reaches asks for where the
+        // cell's corners are alike (at the spacing the light asks for) and where they are not
+        // (its edge or its detail may cross the cell: at the map's texel too).
+        let lights: Vec<(LightReach, usize, usize)> = raster_lights
+            .into_iter()
+            .map(|(reach, step)| {
+                let wanted = if step > 0.0 { ((cell / step).ceil() as usize).clamp(1, BLOOM_LIGHT_SAMPLES_MAX) } else { BLOOM_LIGHT_SAMPLES_MAX };
+                (reach, wanted.max(samples), wanted.max(looks).max(samples))
+            })
+            .collect();
+        // What each cell takes (`Plan`), a row at a time where `run` puts it: the samples a disc
+        // asks for; those a light that reaches it asks for, or the base's detail (`peak`) where
+        // that may pass the threshold and the corners' brightest by more than BLOOM_SMOOTH_EV;
+        // nothing where every corner is BLOOM_NEAR_EV or more under the threshold; its own
+        // samples where its corners are not alike, or alike but its centre is off their mean;
+        // else the corners, read bilinearly.
+        let half_diagonal = std::f32::consts::FRAC_1_SQRT_2 * cell;
+        let most = BLOOM_LIGHT_SAMPLES_MAX.max(samples);
+        let plan_row = |j: usize| -> Vec<Plan> {
             (0..cols)
                 .map(|i| {
                     let c = centre_of(i, j);
                     let n = disc_fine(c);
                     if n > 0 {
-                        return sampled(c.x, c.y, n);
+                        return Plan::Disc(n);
                     }
-                    let e = [corners[j][i], corners[j][i + 1], corners[j + 1][i], corners[j + 1][i + 1]];
-                    let (lo, hi) = e.iter().fold((f32::INFINITY, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-                    let smooth = lo > 0.0 && hi - lo <= BLOOM_SMOOTH_EV;
-                    // A light reaches the cell: at its own spacing inside it, and where the
-                    // cell's corners are not all inside it alike (its edge may cross the cell) at
-                    // the map's texel, so the edge holds still as it moves.
-                    let n = lights.iter().filter(|(reach, _)| light_reaches(reach, c)).map(|&(_, n)| n).max().unwrap_or(0);
-                    if n > 0 {
-                        return sampled(c.x, c.y, if smooth { n } else { n.max(looks) });
+                    let e = corners_of(i, j);
+                    let (lo, hi) = span(&e);
+                    let smooth = alike((lo, hi));
+                    let light = lights.iter().filter(|(reach, ..)| light_reaches(reach, c)).map(|&(_, inside, edge)| if smooth { inside } else { edge }).max().unwrap_or(0);
+                    let fine = peak.and_then(|peak| peak(at(c.x, c.y), half_diagonal)).map_or(0, |(lum, step)| {
+                        let over = if lum > 0.0 { (lum.min(MAX_RADIANCE) / threshold).log2() } else { f32::NEG_INFINITY };
+                        if !(over > 0.0 && over > hi + BLOOM_SMOOTH_EV) {
+                            0
+                        } else if step > 0.0 {
+                            ((cell / step).ceil() as usize).clamp(samples, most)
+                        } else {
+                            most
+                        }
+                    });
+                    if light > 0 {
+                        return Plan::Samples(light.max(fine));
                     }
-                    if !(hi > 0.0) {
-                        return 0.0;
+                    if fine > 0 {
+                        return Plan::Fine(fine);
+                    }
+                    if !(hi > -BLOOM_NEAR_EV) {
+                        return Plan::Dark;
                     }
                     if !smooth {
-                        return sampled(c.x, c.y, samples);
+                        return Plan::Samples(samples);
                     }
-                    // Smooth: the light behind bilinearly between the corners, times what shows
-                    // at each look.
-                    let mut sum = 0.0f32;
+                    let mean = 0.25 * (e[0] + e[1] + e[2] + e[3]);
+                    if (ev_signed(at(c.x, c.y)) - mean).abs() <= BLOOM_CENTRE_EV { Plan::Corners } else { Plan::Samples(samples) }
+                })
+                .collect()
+        };
+        let mut plans: Vec<Plan> = rows_by(rows, run, cancelled, &plan_row)?.concat();
+        // M5 (fix round 3 of S3's review): the cells' samples together at most the raster's budget
+        // (BLOOM_CELL_BUDGET at CASTER_REFERENCE_WIDTH, in proportion to a wider map's texels),
+        // every cell's samples a side scaled alike where they ask for more, never under one.
+        let budget = BLOOM_CELL_BUDGET * (width / CASTER_REFERENCE_WIDTH).pow(2);
+        let demand: usize = plans.iter().map(|plan| match *plan { Plan::Samples(n) | Plan::Fine(n) => n * n, _ => 0 }).sum();
+        let scale = if demand > budget { (budget as f32 / demand as f32).sqrt() } else { 1.0 };
+        if scale < 1.0 {
+            for plan in &mut plans {
+                *plan = match *plan {
+                    // A single sample is about what the corners hold already: they are read.
+                    Plan::Samples(n) if n as f32 * scale < 2.0 => Plan::Corners,
+                    Plan::Samples(n) => Plan::Samples((n as f32 * scale) as usize),
+                    Plan::Fine(n) => Plan::Fine(((n as f32 * scale) as usize).max(1)),
+                    other => other,
+                };
+            }
+        }
+        // The cells only the base's detail asks to sample, kept as points while they are few
+        // (BLOOM_FINE_POINTS_MAX); else rastered as the rest.
+        let pointed: Vec<usize> = {
+            let few: Vec<usize> = plans.iter().enumerate().filter(|(_, plan)| matches!(plan, Plan::Fine(_))).map(|(k, _)| k).take(BLOOM_FINE_POINTS_MAX + 1).collect();
+            if few.len() <= BLOOM_FINE_POINTS_MAX { few } else { Vec::new() }
+        };
+        let as_points = !pointed.is_empty();
+        // b on the raster, a row at a time where `run` puts it.
+        let raster_row = |j: usize| -> Vec<CellLight> {
+            (0..cols)
+                .map(|i| {
+                    let c = centre_of(i, j);
+                    match plans[j * cols + i] {
+                        Plan::Dark => return CellLight::default(),
+                        Plan::Fine(_) if as_points => return CellLight::default(),
+                        Plan::Disc(n) => return sampled(c.x, c.y, n),
+                        Plan::Samples(n) | Plan::Fine(n) => return sampled(c.x, c.y, n),
+                        Plan::Corners => {}
+                    }
+                    // The light behind bilinearly between the corners (none at those under the
+                    // threshold: a cell BLOOM_CELL_BUDGET left one sample may have some), times
+                    // what shows at each look (a soft caster's coverage over each quarter of the
+                    // cell, in one look).
+                    let e = corners_of(i, j).map(|v| v.max(0.0));
+                    let bilinear = |u: f32, v: f32| (e[0] * (1.0 - u) + e[1] * u) * (1.0 - v) + (e[2] * (1.0 - u) + e[3] * u) * v;
+                    let mut light = CellLight::default();
+                    if caster.soft.is_some() {
+                        for (u, v) in [(0.25f32, 0.25f32), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                            let open = shows_over(c.x + (u - 0.5) * cell, c.y + (v - 0.5) * cell, 0.25 * cell, 0.25 * cell).unwrap_or(0.0);
+                            if open > 0.0 {
+                                light.add(open * bilinear(u, v), u - 0.5, v - 0.5);
+                            }
+                        }
+                        return light.mean(4, 1.0);
+                    }
                     for lj in 0..looks {
                         let v = (lj as f32 + 0.5) / looks as f32;
                         for li in 0..looks {
                             let u = (li as f32 + 0.5) / looks as f32;
                             let open = shows(at(c.x + (u - 0.5) * cell, c.y + (v - 0.5) * cell));
                             if open > 0.0 {
-                                sum += open * ((e[0] * (1.0 - u) + e[1] * u) * (1.0 - v) + (e[2] * (1.0 - u) + e[3] * u) * v);
+                                light.add(open * bilinear(u, v), u - 0.5, v - 0.5);
                             }
                         }
                     }
-                    sum / (looks * looks) as f32
+                    light.mean(looks * looks, 1.0)
                 })
                 .collect()
         };
-        let b: Vec<f32> = rows_by(rows, run, cancelled, &raster_row)?.concat();
+        let lights_by_cell: Vec<CellLight> = rows_by(rows, run, cancelled, &raster_row)?.concat();
+        // Each cell's light where it lies in the cell (fix round 3 of S3's review: a light that
+        // fills part of a cell bloomed from the cell's middle), split between the cell and the
+        // ones beside it towards its centroid, bilinearly, so the raster keeps its centroid; a
+        // cell at the raster's border keeps what would leave it.
+        let mut b = vec![0.0f32; cols * rows];
+        for (index, light) in lights_by_cell.iter().enumerate() {
+            if !(light.b > 0.0) {
+                continue;
+            }
+            let (i, j) = (index % cols, index / cols);
+            let toward = |at: usize, f: f32, count: usize| -> (usize, f32) {
+                let next = if f < 0.0 { at.checked_sub(1) } else { Some(at + 1).filter(|&n| n < count) };
+                next.map_or((at, 0.0), |n| (n, f.abs().min(0.5)))
+            };
+            let ((ni, ax), (nj, ay)) = (toward(i, light.x, cols), toward(j, light.y, rows));
+            b[j * cols + i] += light.b * (1.0 - ax) * (1.0 - ay);
+            b[j * cols + ni] += light.b * ax * (1.0 - ay);
+            b[nj * cols + i] += light.b * (1.0 - ax) * ay;
+            b[nj * cols + ni] += light.b * ax * ay;
+        }
         // The squares, each on its own grid (a look in an earlier square is that one's), into
         // points merged to about half the kernel's width apart.
         let mut points = Vec::new();
@@ -982,6 +1180,45 @@ impl CasterBloom {
                     }
                     points.push(light.point(c));
                 }
+            }
+        }
+        // The few cells the base's detail alone asks for, each the point of its light: n x n
+        // samples of the light behind, each times what shows over its own part of the cell.
+        let cell_light = |t: usize| -> Moments {
+            let (i, j) = (pointed[t] % cols, pointed[t] / cols);
+            let Plan::Fine(n) = plans[pointed[t]] else { return Moments::default() };
+            let k = looks.div_ceil(n).max(1);
+            let (step, sub) = (cell / n as f32, cell / (n * k) as f32);
+            let area = (sub as f64) * (sub as f64);
+            let c = centre_of(i, j);
+            let mut light = Moments::default();
+            for sj in 0..n {
+                let sy = (sj as f32 + 0.5) * step - 0.5 * cell;
+                for si in 0..n {
+                    let sx = (si as f32 + 0.5) * step - 0.5 * cell;
+                    let mut sample = Moments::default();
+                    for v in 0..k {
+                        let y = sy + ((v as f32 + 0.5) / k as f32 - 0.5) * step;
+                        for u in 0..k {
+                            let x = sx + ((u as f32 + 0.5) / k as f32 - 0.5) * step;
+                            sample.add(shows(at(c.x + x, c.y + y)) as f64 * area, x, y, sub);
+                        }
+                    }
+                    if sample.mass > 0.0 {
+                        light.merge(&sample.scaled(ev_behind(at(c.x + sx, c.y + sy)) as f64));
+                    }
+                }
+            }
+            light
+        };
+        let pointed_lights = if pointed.is_empty() { Vec::new() } else { rows_by(pointed.len(), run, cancelled, &cell_light)? };
+        for (t, light) in pointed_lights.into_iter().enumerate() {
+            if light.mass / BLOOM_REF_ENERGY > BLOOM_FLUSH {
+                #[cfg(test)]
+                {
+                    point_energy += light.mass;
+                }
+                points.push(light.point(centre_of(pointed[t] % cols, pointed[t] / cols)));
             }
         }
         #[cfg(test)]
@@ -1500,14 +1737,14 @@ mod tests {
         let behind = |d: Vec3f| if d.dot(spot) >= cos_spot { Vec3f::all(16384.0) } else { Vec3f::all(0.5) };
         let open = |_: Vec3f| 0.0;
         let bright = [BrightBox { axis: spot, cos_cover: cos_spot, frame_reach: None, feature: 1f32.to_radians().tan(), detailed: false }];
-        let bloom = CasterBloom::build(&caster, 1024, &[], &bright, &behind, &open, &|| false, &serial_rows).expect("nothing cancels it");
+        let bloom = CasterBloom::build(&caster, 1024, &[], &bright, None, &behind, &open, &|| false, &serial_rows).expect("nothing cancels it");
         assert!(bloom.thins_anything(), "the spot is bright");
         assert!(bloom.share(spot) > 0.5, "on the spot: {}", bloom.share(spot));
         // 10 degrees from the spot: past 6 degrees of bloom, the spot's half degree and three cells.
         for (az, el) in [(13.0, 20.0), (-7.0, 20.0), (3.0, 30.0), (3.0, 10.0), (-15.0, 32.0)] {
             assert_eq!(bloom.share(dir_from_az_el(az, el)), 0.0, "at azimuth {az}, elevation {el}");
         }
-        assert!(CasterBloom::build(&caster, 1024, &[], &bright, &behind, &open, &|| true, &serial_rows).is_none(), "a cancelled pre-pass stops");
+        assert!(CasterBloom::build(&caster, 1024, &[], &bright, None, &behind, &open, &|| true, &serial_rows).is_none(), "a cancelled pre-pass stops");
     }
 
     /// The default sky's sun at azimuth 200, 30 degrees up, and a solid 40 x 30 degree caster
@@ -1668,7 +1905,7 @@ mod tests {
             // The disc's centre on the caster's bottom edge (5 degrees up), then lower.
             let sun = dir_from_az_el(0.0, 5.0 - 0.2 * k as f32);
             let behind = |d: Vec3f| if d.dot(sun) >= outer.cos() { Vec3f::all(16384.0) } else { Vec3f::all(0.5) };
-            let bloom = CasterBloom::build(&caster, CASTER_REFERENCE_WIDTH, &[(sun, outer)], &[], &behind, &solid, &|| false, &serial_rows).expect("nothing cancels it");
+            let bloom = CasterBloom::build(&caster, CASTER_REFERENCE_WIDTH, &[(sun, outer)], &[], None, &behind, &solid, &|| false, &serial_rows).expect("nothing cancels it");
             let reach = 5f32.to_radians().tan();
             let shares: Vec<f32> = (0..=200)
                 .map(|i| {
@@ -1817,6 +2054,249 @@ mod tests {
     /// softbox's middle, where its edges fall alike on both sides).
     const LEAVES_ENERGY: f64 = 0.04;
     const LEAVES_SHARE: f32 = 0.025;
+
+    /// Fix round 3 of S3's review: a highlight in a base image (no light of the list, no sun)
+    /// smaller than a cell blooms as its own area wherever it falls between the cells' corners.
+    /// A photograph 1024 wide, dark (0.5) but for a spot a degree across at 2^12 (2 EV over the
+    /// default threshold), with a broad glow under the threshold far behind the camera that
+    /// keeps the spot from being taken for a sun; a solid 40 x 30 degree caster with 20 degrees
+    /// of bloom (cells of 3.5 degrees), the spot about 3 degrees outside its edge, at nine places
+    /// 0.4 degrees apart (a cell in all): the bloom holds the spot's bright light to within
+    /// IMAGE_HIGHLIGHT_ENERGY of the brute force's, and its share is the brute force's blur to
+    /// within IMAGE_HIGHLIGHT_SHARE everywhere on the caster. (Read at the cells' corners alone,
+    /// such a spot bloomed only where a corner fell on it.)
+    #[test]
+    fn a_highlight_in_a_base_image_blooms_wherever_it_falls_between_the_cells_corners() {
+        use crate::hdri::{dir_from_az_el, BaseImageParams, ImageSet};
+        let mut off = Vec::new();
+        for k in 0..9 {
+            let el = 25.0 + 0.4 * k as f32;
+            let spot = dir_from_az_el(-27.0, el);
+            let glow = dir_from_az_el(180.0, 30.0);
+            let photo = ibl::EnvMap::from_fn(1024, |d| {
+                let d = vec3f(d[0], d[1], d[2]);
+                let v = if d.dot(spot) >= 0.5f32.to_radians().cos() {
+                    4096.0
+                } else if d.dot(glow) >= 25f32.to_radians().cos() {
+                    900.0
+                } else {
+                    0.5
+                };
+                [v; 3]
+            });
+            let mut images = ImageSet::default();
+            images.insert("photo", photo);
+            let caster = caster_at(0.0, 25.0, 40.0, 30.0, None, CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() });
+            let mut p = grey_studio(vec![caster]);
+            p.base_image = Some(BaseImageParams { key: "photo".to_string(), ..BaseImageParams::default() });
+            let env = Env::new_with(&p, &images);
+            assert!(env.base_image.as_ref().expect("the photograph is the base").drawn_sun().is_none(), "the premise: the spot is no sun");
+            if let Some(cell) = env.studio.caster(0).and_then(|c| c.bloom()).map(|b| b.cell()) {
+                assert!(cell > 3.0f32.to_radians().tan(), "the premise: a cell ({} degrees) is wider than the spot", cell.atan().to_degrees());
+            }
+            let frame = env.studio.caster(0).expect("the caster draws").frame;
+            let (cx, cy) = (spot.dot(frame.right) / spot.dot(frame.center), spot.dot(frame.up) / spot.dot(frame.center));
+            let r = 2.0f32.to_radians().tan();
+            let bright = bright_by_brute_force(&env, 0, (cx - r, cx + r), (cy - r, cy + r), (100, 100));
+            let (energy, share) = against_the_brute_force(&env, 0, &bright);
+            println!("spot at elevation {el:.1}: bright light {energy:.4} of the brute force's, share off by {share:.4}");
+            if !((energy - 1.0).abs() <= IMAGE_HIGHLIGHT_ENERGY && share <= IMAGE_HIGHLIGHT_SHARE) {
+                off.push(format!("at elevation {el:.1}: {energy:.3} of its light, share off by {share:.3}"));
+            }
+        }
+        assert!(off.is_empty(), "a highlight of the base image does not bloom as its area: {}", off.join(", "));
+    }
+
+    /// `a_highlight_in_a_base_image_blooms_wherever_it_falls_between_the_cells_corners`'s tolerances.
+    const IMAGE_HIGHLIGHT_ENERGY: f64 = 0.05;
+    const IMAGE_HIGHLIGHT_SHARE: f32 = 0.02;
+
+    /// Fix round 3 of S3's review: a storm's bolt, a line far thinner than a cell, blooms
+    /// wherever it falls between the cells' corners, though the storm round it is far under the
+    /// threshold (`Env::base_peak`). The threshold an EV under the bolt; a solid 40 x 30 degree
+    /// caster with 20 degrees of bloom, its left edge about 3 degrees right of the bolt, at nine
+    /// places 0.4 degrees apart (a cell in all, 3.5 degrees): the bright light its bloom holds
+    /// stays within BOLT_SPREAD of its mean, and is never none.
+    #[test]
+    fn a_storms_bolt_blooms_wherever_it_falls_between_the_cells_corners() {
+        use crate::hdri::{dir_from_az_el, WeatherParams};
+        let mut p = HdriParams::default();
+        p.sky.weather = Some(WeatherParams { kind: "storm".to_string(), lightning: true, ..WeatherParams::default() });
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.elevation_deg = 20.0;
+        // The bolt: the brightest of the storm, as a caster's pre-pass reads it.
+        let storm = Env::new(&p);
+        let at = Sampling::bake(CASTER_REFERENCE_WIDTH, None);
+        let (mut bolt, mut brightest) = ((0.0f32, 0.0f32), 0.0f32);
+        for i in 0..1440 {
+            for j in 0..30 {
+                let (az, el) = (-180.0 + 0.25 * i as f32, 5.0 + 0.5 * j as f32);
+                let lum = luminance(storm.content_before(dir_from_az_el(az, el), 0, at));
+                if lum > brightest {
+                    (bolt, brightest) = ((az, el), lum);
+                }
+            }
+        }
+        // The threshold an EV under the bolt's brightest; the storm round it is far under it.
+        let threshold_ev = brightest.log2() - 1.0;
+        let round = luminance(storm.content_before(dir_from_az_el(bolt.0 + 10.0, bolt.1), 0, at));
+        assert!(round.log2() < threshold_ev - BLOOM_NEAR_EV, "the premise: the storm 10 degrees off the bolt ({round}) is far under the threshold ({threshold_ev} EV)");
+        p.sky.sun.azimuth_deg = bolt.0 + 180.0;
+        let mut energies = Vec::new();
+        for k in 0..9 {
+            let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, bloom_threshold_ev: threshold_ev, ..CasterParams::default() };
+            p.lights = vec![caster_at(bolt.0 + 23.0 + 0.4 * k as f32, bolt.1, 40.0, 30.0, None, settings)];
+            let env = Env::new(&p);
+            energies.push(env.studio.caster(0).and_then(|c| c.bloom()).map_or(0.0, |b| b.energy()));
+        }
+        let mean = energies.iter().sum::<f64>() / energies.len() as f64;
+        let by_place: Vec<String> = energies.iter().map(|e| format!("{:.3}", e / mean)).collect();
+        println!("the bolt at {bolt:?} ({brightest:.0}): the bloom's bright light by place, of its mean {mean:.4e}: {}", by_place.join(" "));
+        assert!(energies.iter().all(|&e| e > 0.0 && (e / mean - 1.0).abs() <= BOLT_SPREAD), "the bolt does not bloom alike as it moves: {} of the mean {mean:.4e}", by_place.join(" "));
+    }
+
+    /// `a_storms_bolt_blooms_wherever_it_falls_between_the_cells_corners`'s tolerance.
+    const BOLT_SPREAD: f64 = 0.15;
+
+    /// Fix round 3 of S3's review: a sky under a low threshold blooms what passes it between
+    /// the cells' corners. The cloudy sky (coverage 0.6, cirrus 0.4, the sun behind the camera)
+    /// behind a 40 x 30 degree leaves caster with 20 degrees of bloom, its threshold at the
+    /// sky's 85th percentile over the caster, so what passes is cloud tops and the band over the
+    /// horizon, a few degrees across or less: the raster holds the bright light (all of it, the
+    /// border cells too) to within SKY_ENERGY of the brute force's. (Read at the corners alone,
+    /// it lost 5 to 12 % of it: cloud tops between the corners of cells whose corners stayed
+    /// under the threshold, and the band brighter between corners alike. The share is not held
+    /// here: with bright light all round the caster, the raster's blur, its cells a sixth of the
+    /// length, reaches past the length by about a cell and a half, so far from the brightest light
+    /// its share is up to about 0.15 over the brute force's, as it was before this fix.)
+    #[test]
+    fn a_sky_under_a_low_threshold_blooms_what_passes_between_the_cells_corners() {
+        let mut off = Vec::new();
+        for seed in [1u32, 2, 3] {
+            let mut p = HdriParams::default();
+            p.seed = seed;
+            p.sky.sun.mode = "manual".to_string();
+            p.sky.sun.azimuth_deg = 180.0;
+            p.sky.sun.elevation_deg = 30.0;
+            p.sky.clouds.coverage = 0.6;
+            p.sky.clouds.cirrus = 0.4;
+            let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() };
+            p.lights = vec![caster_at(0.0, 25.0, 40.0, 30.0, Some(leaves(0.6, 3)), settings)];
+            // The threshold: the sky's 85th percentile over the caster's box.
+            let probe = Env::new(&bloom_at(p.clone(), 0.0));
+            let frame = probe.studio.caster(0).expect("the caster draws").frame;
+            let (xs, ys) = (21f32.to_radians().tan(), 14f32.to_radians().tan());
+            let mut lums: Vec<f32> = (0..45 * 60)
+                .map(|i| {
+                    let (x, y) = (-xs + 2.0 * xs * ((i % 60) as f32 + 0.5) / 60.0, -ys + 2.0 * ys * ((i / 60) as f32 + 0.5) / 45.0);
+                    luminance(probe.content_before((frame.center + frame.right * x + frame.up * y).normalize(), 0, Sampling::bake(CASTER_REFERENCE_WIDTH, None)))
+                })
+                .collect();
+            lums.sort_by(|a, b| a.total_cmp(b));
+            let threshold_ev = lums[lums.len() * 85 / 100].log2();
+            p.lights[0].caster = Some(CasterParams { bloom_threshold_ev: threshold_ev, ..p.lights[0].caster_params() });
+            let env = Env::new(&p);
+            // All the raster holds: the box, the bloom length round it and its border cells.
+            let ext = env.studio.caster(0).and_then(|c| c.bloom()).expect("the sky blooms the caster").ext;
+            let bright = bright_by_brute_force(&env, 0, (-ext.x, ext.x), (-ext.y, ext.y), (360, 300));
+            let (energy, share) = against_the_brute_force(&env, 0, &bright);
+            println!("seed {seed}, threshold {threshold_ev:.2} EV: bright light {energy:.4} of the brute force's, share off by {share:.4}");
+            if !((energy - 1.0).abs() <= SKY_ENERGY) {
+                off.push(format!("seed {seed}: {energy:.3} of its light"));
+            }
+        }
+        assert!(off.is_empty(), "a sky under a low threshold does not bloom what passes it: {}", off.join(", "));
+    }
+
+    /// `a_sky_under_a_low_threshold_blooms_what_passes_between_the_cells_corners`'s tolerance: the
+    /// raster's cells at the samples BLOOM_CELL_BUDGET leaves them hold it to within about 3 %.
+    const SKY_ENERGY: f64 = 0.04;
+
+    /// Fix round 3 of S3's review: a light with detail inside it (a picture, a shape core,
+    /// something hung in front) that fills a long bloom's raster keeps to BLOOM_CELL_BUDGET
+    /// lookups behind the caster beyond the cells' corners, where its edges and its detail may
+    /// cross the cells as much as inside it. Behind an open 40 x 30 degree caster with 20
+    /// degrees of bloom (a raster of 3.5 degree cells, each ten map texels across), a light
+    /// over all of the raster whose content is a checker of degree squares 2 and 4 EV over the
+    /// threshold, so no cell's corners are alike.
+    #[test]
+    fn a_detailed_light_keeps_to_its_sample_budget_where_no_cells_corners_are_alike() {
+        use crate::hdri::{dir_from_az_el, ImageSet};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let light = caster_at(0.0, 20.0, 40.0, 30.0, None, CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, ..CasterParams::default() });
+        let caster = CasterLayer::new(&light, &ImageSet::default(), CASTER_REFERENCE_WIDTH, &serial_rows).expect("a solid caster draws");
+        let lookups = AtomicUsize::new(0);
+        let behind = |d: Vec3f| {
+            lookups.fetch_add(1, Ordering::Relaxed);
+            let (az, el) = (d.x.atan2(-d.z).to_degrees(), d.y.asin().to_degrees());
+            let odd = (az.floor() as i64 + el.floor() as i64).rem_euclid(2) == 1;
+            Vec3f::all(if odd { 16384.0 } else { 4096.0 })
+        };
+        let open = |_: Vec3f| 0.0;
+        let axis = dir_from_az_el(0.0, 20.0);
+        let frame = light_frame(0.0, 20.0, 0.0);
+        let reach = vec2f(60f32.to_radians().tan(), 55f32.to_radians().tan());
+        let bright = [BrightBox { axis, cos_cover: 70f32.to_radians().cos(), frame_reach: Some((frame, reach)), feature: 2.0 * reach.y, detailed: true }];
+        let bloom = CasterBloom::build(&caster, CASTER_REFERENCE_WIDTH, &[], &bright, None, &behind, &open, &|| false, &serial_rows).expect("nothing cancels it");
+        assert!(bloom.thins_anything(), "the light is bright");
+        let corners = (bloom.cols + 1) * (bloom.rows + 1);
+        let beyond = lookups.load(Ordering::Relaxed) - corners;
+        println!("{} cells: {corners} corners and {beyond} lookups more", bloom.cols * bloom.rows);
+        assert!(beyond <= BLOOM_CELL_BUDGET, "the light took {beyond} lookups beyond the corners, over its budget of {BLOOM_CELL_BUDGET}");
+    }
+
+    /// Fix round 3 of S3's review: a soft caster's bloom reads its coverage over each cell, or
+    /// each sample's part of it, in one look (`SoftCoverage::mean_over`, M5: it took a look per
+    /// map texel), and blooms as it does looking at that coverage point by point (the same caster
+    /// handed over as a sharp one whose coverage is the soft one's). A 40 x 30 degree leaves
+    /// caster with 10 degrees of bloom, at softness 0.05 (a blur far narrower than a cell) and
+    /// 0.3, in front of light 0.004 EV over its threshold that is even (its cells' corners
+    /// alike) or a checker of degree squares at it and 0.008 EV over it (no cell's corners alike,
+    /// its samples held to BLOOM_CELL_BUDGET), so the share stays well under 1: the bright light
+    /// within ONE_LOOK_ENERGY, the share within ONE_LOOK_SHARE everywhere on the caster.
+    #[test]
+    fn a_soft_casters_bloom_reads_its_coverage_over_a_cell_in_one_look() {
+        use crate::hdri::ImageSet;
+        let threshold = 2.0f32.powf(10.0);
+        let even = |_: Vec3f| Vec3f::all(threshold * 2.0f32.powf(0.004));
+        let checker = |d: Vec3f| {
+            let (az, el) = (d.x.atan2(-d.z).to_degrees(), d.y.asin().to_degrees());
+            let odd = (az.floor() as i64 + el.floor() as i64).rem_euclid(2) == 1;
+            Vec3f::all(threshold * 2.0f32.powf(if odd { 0.008 } else { 0.0 }))
+        };
+        let mut off = Vec::new();
+        for softness in [0.05f32, 0.3] {
+            let light = caster_at(0.0, 25.0, 40.0, 30.0, Some(leaves(0.6, 3)), CasterParams { softness, bloom_strength: 1.0, bloom_length_deg: 10.0, ..CasterParams::default() });
+            let soft = CasterLayer::new(&light, &ImageSet::default(), CASTER_REFERENCE_WIDTH, &serial_rows).expect("the caster draws");
+            assert!(soft.soft.is_some(), "the premise: a soft caster");
+            let looked = CasterLayer { soft: None, ..soft.clone() };
+            let point_by_point = |d: Vec3f| soft.unbloomed(d, &|_| f32::NAN);
+            for (name, behind) in [("even", &even as &(dyn Fn(Vec3f) -> Vec3f + Sync)), ("checker", &checker)] {
+                let build = |caster: &CasterLayer| CasterBloom::build(caster, CASTER_REFERENCE_WIDTH, &[], &[], None, behind, &point_by_point, &|| false, &serial_rows).expect("nothing cancels it");
+                let (one_look, looks) = (build(&soft), build(&looked));
+                let energy = one_look.energy() / looks.energy();
+                let mut share = 0.0f32;
+                for j in 0..31 {
+                    let y = soft.half.y * (-1.0 + 2.0 * (j as f32 + 0.5) / 31.0);
+                    for i in 0..41 {
+                        let x = soft.half.x * (-1.0 + 2.0 * (i as f32 + 0.5) / 41.0);
+                        let d = (soft.frame.center + soft.frame.right * x + soft.frame.up * y).normalize();
+                        share = share.max((one_look.share(d) - looks.share(d)).abs());
+                    }
+                }
+                let middle = looks.share(soft.frame.center);
+                println!("softness {softness}, {name} light: bright light {energy:.4} of the looks', share off by {share:.4} (the looks' share at the middle {middle:.3})");
+                if !((energy - 1.0).abs() <= ONE_LOOK_ENERGY && share <= ONE_LOOK_SHARE) {
+                    off.push(format!("softness {softness}, {name}: {energy:.4} of the light, share off by {share:.4}"));
+                }
+            }
+        }
+        assert!(off.is_empty(), "a soft caster's bloom in one look is not its bloom looked at point by point: {}", off.join(", "));
+    }
+
+    /// `a_soft_casters_bloom_reads_its_coverage_over_a_cell_in_one_look`'s tolerances.
+    const ONE_LOOK_ENERGY: f64 = 0.01;
+    const ONE_LOOK_SHARE: f32 = 0.004;
 
     /// `p` with every caster's bloom strength set to `strength`.
     fn bloom_at(mut p: HdriParams, strength: f32) -> HdriParams {

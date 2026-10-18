@@ -554,23 +554,39 @@ fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
     });
 }
 
+/// What the lit scene of `four_soft_blooming_casters_stay_well_under_a_held_bake` may take of its
+/// held bake on 8 cores, a third: light behind every cell of four rasters is read at every
+/// cell's corners, which no budget scales, and the four softness rasters take about 16 % of the
+/// bake by themselves, so the pre-pass's floor there is about a fifth. It measured 28 to 29 %
+/// (65 % before the rasters' cells were held to one budget, `caster::BLOOM_CELL_BUDGET`, and a
+/// soft caster's coverage was read in one look a sample).
+const LIT_SHARE: f64 = 1.0 / 3.0;
+
 /// M5 (plan 4's final review): four soft shadow casters with bloom stay well under the held
 /// bake. Four 60 x 45 degree leaves casters at softness 0.3 with 10 degrees of bloom: one in
 /// front of the sun, one on either side of it and one above it, on a clear sky, on the spec's
-/// cloudy one and on a volumetric one, at the held preview's width (512). Their pre-pass, the
+/// cloudy one and on a volumetric one, and on the clear sky with a light listed before them all
+/// that stands behind all four: a 110 x 80 degree picture of soft blotches (`gobo_picture`, a
+/// light with detail inside it) at EV 12, two EV over the casters' threshold at its brightest,
+/// so few of the cells it reaches have corners alike (fix round 3 of S3's review: such a light's
+/// cells took the light behind at every map texel, past its sample budget). At the held
+/// preview's width (512). Their pre-pass, the
 /// softness rasters and the bloom rasters, is what `Env::new_for_width_par` takes with them
 /// less what it takes with the same casters sharp and without bloom (medians of five), its
 /// rows spread over the pool as the app's preview job spreads them. The held bake is what the
 /// preview job pays without that pre-pass, as `a_soft_casters_raster_stays_well_under_a_held_bake`
 /// counts it: that Env's build and its row-parallel bake. The pre-pass is held to a quarter of
 /// the held bake on 8 cores (`a_bloom_casters_pre_pass_stays_well_under_its_bake`'s measured
-/// allowance), so the four casters together cost no more than one caster's bloom may.
+/// allowance), so the four casters together cost no more than one caster's bloom may. The lit
+/// scene is held to LIT_SHARE.
 #[test]
 #[ignore = "release timing; see the module comment"]
 fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
+    use makepad_render::hdri::LightImageParams;
+    // The sky's own lights first, then the casters.
     let with_casters = |sky: &HdriParams, softness: f32, bloom_strength: f32| {
         let mut p = sky.clone();
-        p.lights = [(200.0f32, 30.0f32), (160.0, 35.0), (240.0, 25.0), (200.0, 70.0)]
+        p.lights.extend([(200.0f32, 30.0f32), (160.0, 35.0), (240.0, 25.0), (200.0, 70.0)]
             .iter()
             .enumerate()
             .map(|(i, &(azimuth_deg, elevation_deg))| LightParams {
@@ -581,8 +597,7 @@ fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
                 gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, seed: 3 + i as u32, distance: 0.0, ..GoboParams::default() }),
                 caster: Some(CasterParams { softness, bloom_strength, bloom_length_deg: 10.0, ..CasterParams::default() }),
                 ..LightParams::new_caster()
-            })
-            .collect();
+            }));
         p
     };
     let mut clear = cloudy_sky();
@@ -592,11 +607,22 @@ fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
     // A seed no other test in this binary bakes; its noise is built once, untimed, below.
     volumetric.seed = 0x0b10_0c46;
     volumetric.sky.volumetric = Some(VolumetricParams::default());
-    let images = ImageSet::default();
+    let mut lit = clear.clone();
+    lit.lights = vec![LightParams {
+        azimuth_deg: 200.0,
+        elevation_deg: 40.0,
+        width_deg: 110.0,
+        height_deg: 80.0,
+        intensity_ev: 12.0,
+        image: Some(LightImageParams { key: "gobo.png".to_string(), ..LightImageParams::default() }),
+        ..LightParams::default()
+    }];
+    let mut images = ImageSet::default();
+    images.insert("gobo.png", gobo_picture());
     let width = 512;
     with_pool(|pool| {
         let mut slow = Vec::new();
-        for (name, sky) in [("clear sky", &clear), ("cloudy sky", &cloudy_sky()), ("volumetric sky", &volumetric)] {
+        for (name, sky, share) in [("clear sky", &clear, 0.25), ("cloudy sky", &cloudy_sky(), 0.25), ("volumetric sky", &volumetric, 0.25), ("lit clear sky", &lit, LIT_SHARE)] {
             let (on, soft_only, off) = (with_casters(sky, 0.3, 1.0), with_casters(sky, 0.3, 0.0), with_casters(sky, 0.0, 0.0));
             // Untimed: the pool's first fan-out and the volume's noise.
             let warm = Env::new_for_width(&off, &images, width, &|| false).expect("nothing cancels it");
@@ -626,7 +652,7 @@ fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
             let start = Instant::now();
             let _ = env.bake_par(width, |n, f| (0..n).for_each(f));
             let speed_up = start.elapsed().as_secs_f64() * 1000.0 / bake;
-            let allowed = 0.25 * (speed_up / 8.0).max(1.0);
+            let allowed = share * (speed_up / 8.0).max(1.0);
             println!(
                 "hdri_perf: four soft blooming casters {width}x{} {name:<15} pre-pass {pre:6.2} ms (softness {soft:5.2} ms) against the held bake {held:6.2} ms (Env {env_ms:6.2} + bake {bake:6.2}): {:4.1} %, allowed {:.0} % at {speed_up:4.1}x one thread",
                 width / 2,
