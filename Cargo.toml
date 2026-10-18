@@ -155,6 +155,7 @@ workspace.members = [
     "examples/hello_world",
     "examples/render_to_texture",
     "examples/gl_interop",
+    "examples/skyline",
     # === digital-fabrication product ===
     "apps/fab",
     "apps/fabric",
