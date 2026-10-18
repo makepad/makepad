@@ -219,6 +219,21 @@ pub fn project_held(frame: &LightFrame, dir: Vec3f) -> Option<Vec2f> {
 /// gets this much, so the step is resolved below a pixel and never becomes a
 /// stair-step in an 8K bake.
 const MIN_EDGE: f32 = 1.0e-4;
+/// P2: how deep, as a share of a long disc's depth (its short half axis),
+/// its soft edge's ramp starts (Softness / 2 + Penumbra) when the edge
+/// begins to read the exact ellipse distance, and by when it reads it
+/// alone (`PreparedLight::deep`). The first-order distance's levels have
+/// no waist down to half the depth (in the limit of a needle they are
+/// convex to exactly half) and are waisted deeper; blending from 0.5 to
+/// 0.6 leaves no waist at any depth for aspects from 1.25:1 to 100:1
+/// (review round 1 of P2, measured just below the peak). A ramp starting no
+/// deeper than half the depth draws as before P2, bit for bit: so does
+/// every disc without a picture, whose Softness reaches half the depth at
+/// most; only a picture's Penumbra reaches deeper. (At Softness 0 the
+/// narrowest edge, `MIN_EDGE`, starts a Penumbra 0.5 ramp a hair past half:
+/// a disc whose short side is a degree or more reads a blend under 1 %.)
+const DISC_EXACT_FROM: f32 = 0.5;
+const DISC_EXACT_BY: f32 = 0.6;
 /// With hotspot 1 the edge of the shape is e^-4 (about 2%) of its centre.
 const HOTSPOT_FALLOFF: f32 = 4.0;
 /// Grid points per axis of the key light's integral over its reach box
@@ -881,12 +896,11 @@ struct PreparedLight {
     /// the edge ramps from half the band plus this inside to half the band
     /// outside. 0 without a picture; a shaped light keeps its own.
     inset: f32,
-    /// How far a disc's edge reads the exact ellipse distance in place of
-    /// the first-order one (P2, `mask`): 0 while its ramp stays within the
-    /// disc's depth (Softness / 2 + Penumbra <= 1), rising smoothly to 1 as
-    /// the ramp reaches half a depth past it (the most Softness and Penumbra
-    /// give). 0 for every other shape.
-    deep: f32,
+    /// The depth of a disc that is not a circle (its short half axis),
+    /// against which `deep` measures how deep a ramp starts (P2, `mask`).
+    /// 0 for a circle, whose first-order distance is exact, and for every
+    /// other shape: their edges never read the exact ellipse distance.
+    long_disc_depth: f32,
     /// Outside this box (the half extents plus the edge) the light is exactly zero.
     reach: Vec2f,
     /// Exponent scale of the Gaussian centre falloff (HOTSPOT_FALLOFF x hotspot).
@@ -953,8 +967,8 @@ impl PreparedLight {
             ring_half,
             band,
             inset: inset * inradius,
-            deep: match shape {
-                LightShape::Disc => smoothstep(1.0, 1.5, (0.5 * band + inset * inradius) / short),
+            long_disc_depth: match shape {
+                LightShape::Disc if !is_circle(half) => short,
                 _ => 0.0,
             },
             reach: vec2f(half.x + band, half.y + band),
@@ -1068,6 +1082,19 @@ impl PreparedLight {
         }
     }
 
+    /// How far a disc's edge, its ramp widened inward by `inset`, reads the
+    /// exact ellipse distance in place of the first-order one (P2, `mask`):
+    /// 0 while the ramp starts no deeper than `DISC_EXACT_FROM` of the
+    /// disc's depth, rising smoothly to 1 by `DISC_EXACT_BY` of it and
+    /// staying 1 deeper. 0 for a circle and every other shape.
+    fn deep(&self, inset: f32) -> f32 {
+        if self.long_disc_depth > 0.0 {
+            smoothstep(DISC_EXACT_FROM, DISC_EXACT_BY, (0.5 * self.band + inset) / self.long_disc_depth)
+        } else {
+            0.0
+        }
+    }
+
     /// Coverage 0..=1 at tangent-plane point `p`: the soft edge times the
     /// hotspot falloff. `inset` widens the edge inward (P1, a picture's
     /// Penumbra): one smoothstep from half the band plus `inset` inside the
@@ -1089,20 +1116,24 @@ impl PreparedLight {
                 // The first-order distance (`ellipse_metric`) is (k0 - 1)
                 // times the half axis along the way in, so a long disc's
                 // centre reads as deep as its long half axis seen along it
-                // and as its short one seen across it. P2: a ramp that
-                // reaches deeper than the disc (Softness / 2 + Penumbra
-                // above 1) pinched the centre into a bow-tie. No point of
-                // the disc is deeper than its inradius (the short half
-                // axis), so the first-order distance is held there (every
-                // way into the centre then ends at one value), and as the
-                // ramp reaches past it (`deep`) the edge reads the exact
-                // distance instead, whose deepest point is the centre alone
-                // and whose levels have no waist: one smooth peak. A ramp
-                // that stays within the depth never reads the held part and
-                // has `deep` 0: it draws as before, bit for bit.
+                // and as its short one seen across it, and its levels
+                // deeper than about half the disc's depth are waisted. P2:
+                // a ramp that reached deeper than the disc (Softness / 2 +
+                // Penumbra above 1) pinched the centre into a bow-tie, and
+                // one that reached past half its depth had a core with a
+                // waist. No point of the disc is deeper than its inradius
+                // (the short half axis), so the first-order distance is
+                // held there (every way into the centre ends at one value),
+                // and as the ramp reaches deeper (`deep`) the edge reads the
+                // exact distance instead, whose levels are the disc's inner
+                // parallels: convex, no waist, the centre alone deepest. A
+                // ramp near the edge has `deep` 0: it draws as before, bit
+                // for bit. The ramp is this call's: the bare shape (`cover`,
+                // no inset) reads the blend its own ramp gives.
                 let (k0, scale) = ellipse_metric(p, self.half);
                 let first = ((k0 - 1.0) * scale).max(-self.half.x.min(self.half.y));
-                let distance = if self.deep > 0.0 { first + (ellipse_distance(p, self.half) - first) * self.deep } else { first };
+                let deep = self.deep(inset);
+                let distance = if deep > 0.0 { first + (ellipse_distance(p, self.half) - first) * deep } else { first };
                 (distance, k0 * k0)
             }
             LightShape::Ring => {
@@ -1145,7 +1176,8 @@ fn sd_round_rect(p: Vec2f, half: Vec2f, radius: f32) -> f32 {
 /// This is iq's first-order ellipse distance. It is exact for a circle and close
 /// near the edge, which is where the soft edge reads it. Deep inside a long
 /// ellipse it is not: the centre is as deep as the half axis along the way
-/// in, so a disc holds it at its inradius (`PreparedLight::mask`, P2).
+/// in, so a disc holds it at its inradius and a ramp that reaches deep reads
+/// the exact distance (`PreparedLight::mask`, P2).
 fn ellipse_metric(p: Vec2f, half: Vec2f) -> (f32, f32) {
     let nx = p.x / half.x;
     let ny = p.y / half.y;
@@ -1157,15 +1189,23 @@ fn ellipse_metric(p: Vec2f, half: Vec2f) -> (f32, f32) {
     (k0, scale)
 }
 
+/// Whether an ellipse with half axes `half` is a circle, as far as its
+/// distance goes: its first-order distance is then exact (`ellipse_metric`)
+/// and its exact one is its radius's (`ellipse_distance`).
+fn is_circle(half: Vec2f) -> bool {
+    let (ax, ay) = (half.x as f64, half.y as f64);
+    (ax - ay).abs() <= 1.0e-6 * ax.max(ay)
+}
+
 /// The exact signed distance from `p` to the ellipse with half axes `half`,
 /// negative inside (iq's closed-form ellipse distance, worked in f64: it
 /// solves a quartic for the nearest point). A circle, where the quartic
 /// degenerates, is its radius's distance. P2: a disc whose ramp reaches
-/// deeper than the disc reads it (`PreparedLight::mask`).
+/// deep reads it (`PreparedLight::mask`).
 fn ellipse_distance(p: Vec2f, half: Vec2f) -> f32 {
     let (mut px, mut py) = ((p.x as f64).abs(), (p.y as f64).abs());
     let (mut ax, mut ay) = (half.x as f64, half.y as f64);
-    if (ax - ay).abs() <= 1.0e-6 * ax.max(ay) {
+    if is_circle(half) {
         return ((px * px + py * py).sqrt() - 0.5 * (ax + ay)) as f32;
     }
     if px > py {
