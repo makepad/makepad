@@ -564,8 +564,10 @@ pub struct LightImageParams {
     ///   multiplied, so the light's reach is unchanged and at Penumbra 0
     ///   the edge is Softness's alone. Where that ramp starts deeper than
     ///   the light's deepest point (Softness / 2 + Penumbra above 1), it
-    ///   reads no deeper than that point: a long rect's or disc's (P2)
-    ///   deepest stretch, round its centre along its long axis, is flat.
+    ///   reads no deeper than that point: a long rect's deepest stretch,
+    ///   round its centre along its long axis, is flat; a long disc (P2)
+    ///   reads its exact distance more the deeper the ramp reaches, so it
+    ///   peaks at its centre alone.
     pub penumbra: Option<f32>,
     /// `IMAGE_MASK_SOFTNESS_RANGE`, 0..=1 (P2, the owner's decision; None =
     /// 0, NaN is held to 0): with `alpha_as_mask`, the picture's own cut-out

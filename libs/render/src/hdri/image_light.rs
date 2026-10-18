@@ -1201,13 +1201,16 @@ mod tests {
     /// the long half axis seen along the disc and as the short one seen
     /// across it. A 4:1 disc at Softness 1, Penumbra 1 now has no local
     /// minimum along either axis and its one maximum at the centre, which
-    /// every direction reaches alike (no pinch), in both fits.
+    /// every direction reaches alike (no pinch), in both fits; it falls away
+    /// from the centre along the long axis too (no plateau) and its bright
+    /// core has no waist (no bow-tie). Part way there (Penumbra 0.75, 0.55
+    /// at Softness 1) it is monotone and unpinched as well.
     #[test]
     fn a_long_discs_deep_ramp_peaks_at_its_centre_without_a_pinch() {
         let flat = set_of("flat", picture(4, 4, |_, _| [1.0, 1.0, 1.0, 1.0]));
         let hy = 10f32.to_radians().tan();
         let hx = 4.0 * hy;
-        for fit in ["stretch", "fill"] {
+        for (fit, penumbra) in [("stretch", 1.0f32), ("fill", 1.0), ("stretch", 0.75), ("fill", 0.55)] {
             let light = LightParams {
                 shape: "disc".to_string(),
                 width_deg: 2.0 * hx.atan().to_degrees(),
@@ -1215,10 +1218,11 @@ mod tests {
                 softness: 1.0,
                 rgb: Some([1.0; 3]),
                 intensity_ev: 0.0,
-                image: Some(soft_image("flat", fit, 1.0)),
+                image: Some(soft_image("flat", fit, penumbra)),
                 ..image_light("flat")
             };
             let env = Env::new_with(&dark_studio(vec![light.clone()]), &flat);
+            let fit = format!("{fit}, penumbra {penumbra}");
             let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
             let at = |x: f32, y: f32| luminance(env.radiance((f.center + f.right * x + f.up * y).normalize()));
             let centre = at(0.0, 0.0);
@@ -1249,6 +1253,23 @@ mod tests {
                 let angle = std::f32::consts::TAU * k as f32 / 64.0;
                 let near = at(1.0e-3 * hx * angle.cos(), 1.0e-3 * hy * angle.sin());
                 assert!((near - centre).abs() < 2.0e-3, "{fit}: {near} just off the centre at {} degrees, {centre} at it", angle.to_degrees());
+            }
+            if penumbra < 1.0 {
+                continue;
+            }
+            // One maximum, not a bow-tie plateau round it: the light falls
+            // away from the centre along the long axis too, and its bright
+            // core is widest across at the centre (no waist there).
+            for t in [0.25f32, 0.5, 0.75] {
+                let got = at(t * hx, 0.0);
+                assert!(got < centre - 1.0e-3, "{fit}: {got} at {t} of the long half axis, as bright as the centre's {centre} (a plateau)");
+            }
+            let level = 0.5 * (centre + at(0.0, 0.6 * hy));
+            let width_at = |x: f32| (0..=400).map(|j| 1.2 * hy * j as f32 / 400.0).take_while(|y| at(x, *y) >= level).last().unwrap_or(0.0);
+            let waist = width_at(0.0);
+            for t in [0.1f32, 0.2, 0.3] {
+                let w = width_at(t * hx);
+                assert!(w <= waist + 1.0e-3 * hy, "{fit}: the core is {w} across at {t} of the long half axis, {waist} at the centre (a waist)");
             }
         }
     }

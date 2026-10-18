@@ -881,6 +881,12 @@ struct PreparedLight {
     /// the edge ramps from half the band plus this inside to half the band
     /// outside. 0 without a picture; a shaped light keeps its own.
     inset: f32,
+    /// How far a disc's edge reads the exact ellipse distance in place of
+    /// the first-order one (P2, `mask`): 0 while its ramp stays within the
+    /// disc's depth (Softness / 2 + Penumbra <= 1), rising smoothly to 1 as
+    /// the ramp reaches half a depth past it (the most Softness and Penumbra
+    /// give). 0 for every other shape.
+    deep: f32,
     /// Outside this box (the half extents plus the edge) the light is exactly zero.
     reach: Vec2f,
     /// Exponent scale of the Gaussian centre falloff (HOTSPOT_FALLOFF x hotspot).
@@ -947,6 +953,10 @@ impl PreparedLight {
             ring_half,
             band,
             inset: inset * inradius,
+            deep: match shape {
+                LightShape::Disc => smoothstep(1.0, 1.5, (0.5 * band + inset * inradius) / short),
+                _ => 0.0,
+            },
             reach: vec2f(half.x + band, half.y + band),
             hotspot: HOTSPOT_FALLOFF * l.hotspot,
             key_cos: (0.5 * l.width_deg.max(l.height_deg)).to_radians().cos(),
@@ -1079,16 +1089,21 @@ impl PreparedLight {
                 // The first-order distance (`ellipse_metric`) is (k0 - 1)
                 // times the half axis along the way in, so a long disc's
                 // centre reads as deep as its long half axis seen along it
-                // and as its short one seen across it. No point of the disc
-                // is deeper than its inradius (the short half axis): held
-                // there, every way into the centre ends at one value. P2: a
-                // ramp that reaches that deep (Softness / 2 + Penumbra above
-                // 1) pinched the centre into a bow-tie; one that stays
-                // shallower never reads the held part and draws as before,
-                // bit for bit. Along the long axis the deepest stretch is
-                // flat, as a rect's is.
+                // and as its short one seen across it. P2: a ramp that
+                // reaches deeper than the disc (Softness / 2 + Penumbra
+                // above 1) pinched the centre into a bow-tie. No point of
+                // the disc is deeper than its inradius (the short half
+                // axis), so the first-order distance is held there (every
+                // way into the centre then ends at one value), and as the
+                // ramp reaches past it (`deep`) the edge reads the exact
+                // distance instead, whose deepest point is the centre alone
+                // and whose levels have no waist: one smooth peak. A ramp
+                // that stays within the depth never reads the held part and
+                // has `deep` 0: it draws as before, bit for bit.
                 let (k0, scale) = ellipse_metric(p, self.half);
-                (((k0 - 1.0) * scale).max(-self.half.x.min(self.half.y)), k0 * k0)
+                let first = ((k0 - 1.0) * scale).max(-self.half.x.min(self.half.y));
+                let distance = if self.deep > 0.0 { first + (ellipse_distance(p, self.half) - first) * self.deep } else { first };
+                (distance, k0 * k0)
             }
             LightShape::Ring => {
                 // abs(r - R) - w, with the radius measured in the ellipse's own units.
@@ -1142,10 +1157,100 @@ fn ellipse_metric(p: Vec2f, half: Vec2f) -> (f32, f32) {
     (k0, scale)
 }
 
+/// The exact signed distance from `p` to the ellipse with half axes `half`,
+/// negative inside (iq's closed-form ellipse distance, worked in f64: it
+/// solves a quartic for the nearest point). A circle, where the quartic
+/// degenerates, is its radius's distance. P2: a disc whose ramp reaches
+/// deeper than the disc reads it (`PreparedLight::mask`).
+fn ellipse_distance(p: Vec2f, half: Vec2f) -> f32 {
+    let (mut px, mut py) = ((p.x as f64).abs(), (p.y as f64).abs());
+    let (mut ax, mut ay) = (half.x as f64, half.y as f64);
+    if (ax - ay).abs() <= 1.0e-6 * ax.max(ay) {
+        return ((px * px + py * py).sqrt() - 0.5 * (ax + ay)) as f32;
+    }
+    if px > py {
+        std::mem::swap(&mut px, &mut py);
+        std::mem::swap(&mut ax, &mut ay);
+    }
+    let l = ay * ay - ax * ax;
+    let m = ax * px / l;
+    let m2 = m * m;
+    let n = ay * py / l;
+    let n2 = n * n;
+    let c = (m2 + n2 - 1.0) / 3.0;
+    let c3 = c * c * c;
+    let q = c3 + m2 * n2 * 2.0;
+    let d = c3 + m2 * n2;
+    let g = m + m * n2;
+    let co = if d < 0.0 {
+        let h = (q / c3).clamp(-1.0, 1.0).acos() / 3.0;
+        let s = h.cos();
+        let t = h.sin() * 3f64.sqrt();
+        let rx = (-c * (s + t + 2.0) + m2).max(0.0).sqrt();
+        let ry = (-c * (s - t + 2.0) + m2).max(0.0).sqrt();
+        (ry + l.signum() * rx + g.abs() / (rx * ry).max(1.0e-300) - m) / 2.0
+    } else {
+        let h = 2.0 * m * n * d.sqrt();
+        let s = (q + h).signum() * (q + h).abs().cbrt();
+        let u = (q - h).signum() * (q - h).abs().cbrt();
+        let rx = -s - u - c * 4.0 + 2.0 * m2;
+        let ry = (s - u) * 3f64.sqrt();
+        let rm = (rx * rx + ry * ry).sqrt();
+        (ry / (rm - rx).max(1.0e-300).sqrt() + 2.0 * g / rm.max(1.0e-300) - m) / 2.0
+    };
+    let co = co.clamp(0.0, 1.0);
+    let (rx, ry) = (ax * co, ay * (1.0 - co * co).sqrt());
+    let length = ((rx - px) * (rx - px) + (ry - py) * (ry - py)).sqrt();
+    let inside = (px / ax) * (px / ax) + (py / ay) * (py / ay) < 1.0;
+    (if inside { -length } else { length }) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hdri::{az_el_from_dir, vec, Env, HdriParams};
+
+    /// P2: `ellipse_distance` is the exact signed distance to an ellipse,
+    /// against the brute-force nearest of 4000 points on it refined by
+    /// Newton, over a grid in and round ellipses from a circle to 12:1, the
+    /// centre and both axes included.
+    #[test]
+    fn the_ellipse_distance_is_exact() {
+        for (hx, hy) in [(1.0f64, 1.0f64), (1.0, 0.999), (2.0, 1.0), (1.0, 4.0), (4.0, 1.0), (0.3, 3.6), (0.05, 0.02)] {
+            let size = hx.max(hy);
+            let brute = |x: f64, y: f64| {
+                let mut best = (f64::INFINITY, 0.0f64);
+                for i in 0..4000 {
+                    let t = std::f64::consts::TAU * i as f64 / 4000.0;
+                    let e = (hx * t.cos() - x).powi(2) + (hy * t.sin() - y).powi(2);
+                    if e < best.0 {
+                        best = (e, t);
+                    }
+                }
+                let mut t = best.1;
+                for _ in 0..8 {
+                    let (c, s) = (t.cos(), t.sin());
+                    let (ex, ey) = (hx * c - x, hy * s - y);
+                    let f = ex * (-hx * s) + ey * (hy * c);
+                    let df = hx * hx * s * s + hy * hy * c * c + ex * (-hx * c) + ey * (-hy * s);
+                    if df.abs() > 1.0e-12 {
+                        t -= f / df;
+                    }
+                }
+                let dist = ((hx * t.cos() - x).powi(2) + (hy * t.sin() - y).powi(2)).sqrt();
+                if (x / hx).powi(2) + (y / hy).powi(2) < 1.0 { -dist } else { dist }
+            };
+            for j in 0..=40 {
+                for i in 0..=40 {
+                    let (x, y) = (1.3 * hx * (i as f64 / 20.0 - 1.0), 1.3 * hy * (j as f64 / 20.0 - 1.0));
+                    let (x, y) = (x as f32 as f64, y as f32 as f64);
+                    let got = ellipse_distance(vec2f(x as f32, y as f32), vec2f(hx as f32, hy as f32)) as f64;
+                    let want = brute(x, y);
+                    assert!((got - want).abs() < 2.0e-5 * size, "{hx} x {hy} at ({x}, {y}): {got}, the nearest point says {want}");
+                }
+            }
+        }
+    }
     use makepad_render_material::ibl::{self, EnvMap};
 
     #[test]
