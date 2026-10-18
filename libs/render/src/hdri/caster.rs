@@ -31,7 +31,7 @@ use super::gobo::Gobo;
 use super::image_light::SummedArea;
 use super::light_fx::face_axes;
 use super::noise::hash01;
-use super::studio::{project, sd_round_rect, LightFrame, MIN_EDGE};
+use super::studio::{project, sd_round_rect, LightFrame, MIN_EDGE, PROJECT_MIN_COS};
 use crate::sky::luminance;
 use std::sync::Arc;
 
@@ -359,6 +359,15 @@ const BLOOM_DISC_SAMPLES_MAX: usize = 12;
 /// leaves exactly 0.
 const BLOOM_FLUSH: f64 = 1.0e-6;
 
+/// Where a bright disc touches a bloom raster (`CasterBloom::build`).
+enum Touch {
+    /// Its centre in the caster's tangent plane, and how far from it a cell's centre may lie
+    /// along either axis for the cell to touch it.
+    Plane(Vec2f, f32),
+    /// Its centre (map frame) and the cosine within which a cell's centre may lie.
+    Angle(Vec3f, f32),
+}
+
 /// One caster's bloom (redesign §5): the share g (0..=1) of bright light behind it, blurred
 /// over its bloom length. It lives on a raster in the caster's own tangent plane, covering
 /// its box, its soft edge, the bloom length round them and two cells more. Built once per
@@ -434,15 +443,26 @@ impl CasterBloom {
             }
             (lum.min(MAX_RADIANCE) / threshold).log2() * (1.0 - m.max(0.0))
         };
-        // Each disc: its centre, the cosine within which a cell's centre may lie for the cell
-        // to touch it (its radius and a cell's half diagonal, which is at least the angle it
-        // spans), and the samples a side such a cell takes.
-        let discs: Vec<(Vec3f, f32, usize)> = hot
+        // Each disc: where it touches the raster, and the samples a side a cell it touches
+        // takes. In the caster's tangent plane a disc is its centre's projection and its
+        // reach there, the outward side of its radius, which the plane stretches most
+        // (tan(theta + r) - tan(theta)): a cell touches it when its square comes within that
+        // reach. Only a disc too near the plane's edge to project (past PROJECT_MIN_COS)
+        // falls back to an angle round its centre: its radius and a cell's half diagonal.
+        let discs: Vec<(Touch, usize)> = hot
             .iter()
             .filter(|&&(c, r)| c.is_finite() && c.length() > 0.0 && r > 0.0)
             .map(|&(c, r)| {
                 let n = ((BLOOM_DISC_SAMPLES_PER_RADIUS * cell / r).ceil() as usize).clamp(2, BLOOM_DISC_SAMPLES_MAX);
-                (c.normalize(), (r + 0.75 * cell).min(std::f32::consts::PI).cos(), n)
+                let c = c.normalize();
+                let theta = c.dot(frame.center).clamp(-1.0, 1.0).acos();
+                let touch = if (theta + r).cos() >= PROJECT_MIN_COS {
+                    let centre = vec2f(c.dot(frame.right), c.dot(frame.up)) / theta.cos();
+                    Touch::Plane(centre, 0.5 * cell + (theta + r).tan() - theta.tan())
+                } else {
+                    Touch::Angle(c, (r + 0.75 * cell).min(std::f32::consts::PI).cos())
+                };
+                (touch, n)
             })
             .collect();
         let mut b = vec![0.0f32; cols * rows];
@@ -454,7 +474,14 @@ impl CasterBloom {
             for i in 0..cols {
                 let x = -ext.x + (i as f32 + 0.5) * cell;
                 let d = at(x, y);
-                let fine = discs.iter().filter(|&&(c, cos, _)| d.dot(c) >= cos).map(|&(_, _, n)| n).max();
+                let fine = discs
+                    .iter()
+                    .filter(|(touch, _)| match *touch {
+                        Touch::Plane(centre, within) => (x - centre.x).abs() <= within && (y - centre.y).abs() <= within,
+                        Touch::Angle(c, cos) => d.dot(c) >= cos,
+                    })
+                    .map(|&(_, n)| n)
+                    .max();
                 b[j * cols + i] = match fine {
                     None => ev_over(d),
                     Some(n) => {

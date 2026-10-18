@@ -478,13 +478,16 @@ fn a_soft_casters_raster_stays_well_under_a_held_bake() {
 /// what `Env::new_for_width` takes with the bloom on, less what it takes with
 /// it off (medians of five); the bake is that Env's row-parallel bake. The
 /// pre-pass is one thread's work while the bake fans out, so it is held to a
-/// quarter of the bake on 8 cores, and to proportionally more on a machine with
-/// more.
+/// quarter of the bake on 8 cores: of the bake itself, or of its one-thread
+/// time over 8 where that is less (a machine whose bake runs more than 8 times
+/// faster than on one thread). The speed-up is measured, not taken from
+/// `available_parallelism`, which counts logical processors: on an 8-core
+/// machine with two threads a core (16 logical) the bake runs about as fast
+/// as on 8 threads, so a quarter scaled by 16 / 8 would let a pre-pass take
+/// half of it.
 #[test]
 #[ignore = "release timing; see the module comment"]
 fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let allowed = 0.25 * (cores as f64 / 8.0).max(1.0);
     let with_caster = |sky: &HdriParams, bloom_strength: f32| {
         let mut p = sky.clone();
         p.lights = vec![LightParams {
@@ -530,17 +533,23 @@ fn a_bloom_casters_pre_pass_stays_well_under_its_bake() {
                     check_map(&map, width, name);
                 }
                 let (pre, bake) = (median(pre_pass), median(bakes));
+                // The same bake on this thread alone, once: its speed-up over one thread.
+                let env = build(&on).1;
+                let start = Instant::now();
+                let _ = env.bake_par(width, |n, f| (0..n).for_each(f));
+                let speed_up = start.elapsed().as_secs_f64() * 1000.0 / bake;
+                let allowed = 0.25 * (speed_up / 8.0).max(1.0);
                 println!(
-                    "hdri_perf: bloom pre-pass {width}x{} {name:<15} {pre:7.2} ms against its bake {bake:7.2} ms ({:4.1} %, allowed {:.0} %)",
+                    "hdri_perf: bloom pre-pass {width}x{} {name:<15} {pre:7.2} ms against its bake {bake:7.2} ms ({:4.1} %, allowed {:.0} % at {speed_up:4.1}x one thread)",
                     width / 2,
                     100.0 * pre / bake,
                     100.0 * allowed
                 );
                 if pre > allowed * bake {
-                    slow.push(format!("{name} at {width}: {pre:.1} ms against {bake:.1} ms"));
+                    slow.push(format!("{name} at {width}: {pre:.1} ms against {bake:.1} ms, over {:.0} %", 100.0 * allowed));
                 }
             }
         }
-        assert!(slow.is_empty(), "bloom pre-passes over {:.0} % of their bake: {}", 100.0 * allowed, slow.join(", "));
+        assert!(slow.is_empty(), "bloom pre-passes over their allowance: {}", slow.join(", "));
     });
 }

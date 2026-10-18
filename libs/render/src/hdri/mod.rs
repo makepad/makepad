@@ -2167,6 +2167,34 @@ mod tests {
         assert!(energies.iter().all(|e| (e / mean - 1.0).abs() < 0.05), "the bright light behind the caster as the sun moves: {energies:?}");
     }
 
+    /// R5 review round 1: a disc far from the caster's centre is found where the caster's
+    /// tangent plane puts it. The sun is 39 degrees out from the centre of a 70 x 40 degree
+    /// leaves caster, past its side edge, where the plane stretches the disc by about 1.6
+    /// outward; only the cells its projection reaches take the fine grid. As it climbs in
+    /// tenths of a degree, the bright light the raster holds stays within 5 % of its mean.
+    #[test]
+    fn a_small_sun_far_off_the_casters_centre_blooms_smoothly_as_it_moves() {
+        let mut energies = Vec::new();
+        for i in 0..=10 {
+            let mut p = sun_at(30.0 + 0.1 * i as f32);
+            p.lights.push(LightParams {
+                azimuth_deg: 245.0,
+                elevation_deg: 30.0,
+                width_deg: 70.0,
+                height_deg: 40.0,
+                gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.6, distance: 0.0, seed: 3, ..GoboParams::default() }),
+                caster: Some(CasterParams { bloom_strength: 1.0, bloom_length_deg: 10.0, ..CasterParams::default() }),
+                ..LightParams::new_caster()
+            });
+            let env = Env::new(&p);
+            let bloom = env.studio.caster(0).and_then(|c| c.bloom()).expect("the sun blooms");
+            energies.push(bloom.energy());
+        }
+        let mean = energies.iter().sum::<f64>() / energies.len() as f64;
+        assert!(mean > 0.0, "{energies:?}");
+        assert!(energies.iter().all(|e| (e / mean - 1.0).abs() < 0.05), "the bright light behind the caster as the sun climbs: {energies:?}");
+    }
+
     /// R5: the pre-pass polls `cancelled`, so a map with a bloom caster stops in it and is
     /// None; one that is not cancelled is built; a map with no bloom to build is built
     /// whatever the poll says.
