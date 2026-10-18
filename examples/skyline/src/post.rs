@@ -50,41 +50,26 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyFinal {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyFinal { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyBlur {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyBlur { #[deref] pub draw_super: DrawQuad }
 
 /// The scene's targets as post sees them.
 #[allow(dead_code)] // the blur and the reflections read the view and the mirror
 pub struct SceneOut<'a> {
-    pub view: &'a ViewSpec,
-    pub scene: &'a SceneTarget,
-    /// The mirrored scene, when [`Post::wants_mirror`] asked for it.
-    pub mirror: Option<&'a SceneTarget>,
+    /// `mirror`: the mirrored scene, when [`Post::wants_mirror`] asked for it.
+    pub view: &'a ViewSpec, pub scene: &'a SceneTarget, pub mirror: Option<&'a SceneTarget>,
 }
 
 #[derive(Script, ScriptHook)]
-pub struct Post {
-    #[live]
-    pub draw_final: DrawSkyFinal,
-    #[live]
-    pub draw_blur: DrawSkyBlur,
-}
+pub struct Post { #[live] pub draw_final: DrawSkyFinal, #[live] pub draw_blur: DrawSkyBlur }
 
 impl Post {
     /// Whether the scene list also runs mirrored into a second target (water reflections: some
     /// reflection strength and some sea in view). Stub: never.
-    pub fn wants_mirror(&self, _p: &Params, _z: &Zones) -> bool {
-        false
-    }
+    pub fn wants_mirror(&self, _p: &Params, _z: &Zones) -> bool { false }
 
     /// The passes between the scene and the final (the blur of the light target). Called only
     /// when the view's picture changes; their pass chain must end in a pass `draw_final` attaches.

@@ -154,29 +154,17 @@ script_mod! {
         k: 0.0
         hk: 0.2
         pixel: fn(){
-            let pp = self.frag()
-            let g = self.col_row(pp.x, 6.0)
-            let ang = self.ang_raw(pp.y) * g.z
-            let px = self.px0() * g.z
-            let k = self.k
-            let r = self.col_row(pp.x, min(k, 5.0))
-            let sil = self.sil
+            let pp = self.frag(); let g = self.col_row(pp.x, 6.0); let k = self.k; let sil = self.sil
+            let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z; let r = self.col_row(pp.x, min(k, 5.0))
             var tm = 0.0
             if k > 1.5 {
                 let tr = self.tree_cov.sample_nearest(pp / self.view_size)
                 let ch = vec4(step(abs(k - 2.0), 0.5), step(abs(k - 3.0), 0.5), step(abs(k - 4.0), 0.5), step(4.5, k))
                 tm = r.w * max(self.cover(r.z - ang, 1.5 * px), dot(tr, ch))
-                if ang < r.y - px {
-                    tm = r.w
-                }
+                if ang < r.y - px { tm = r.w }
             }
-            if k > 4.5 {
-                return vec4(sil * (0.6 * tm), tm)
-            }
-            let t = (4.0 - k) / 4.0
-            let hz = self.haze_col
-            let hz2 = self.haze * self.haze * 0.35
-            let m = self.cover(r.x - ang, px)
+            if k > 4.5 { return vec4(sil * (0.6 * tm), tm) }
+            let t = (4.0 - k) / 4.0; let hz = self.haze_col; let hz2 = self.haze * self.haze * 0.35; let m = self.cover(r.x - ang, px)
             let ftop = clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0)
             let fog = pow(1.0 - smoothstep(0.0, 0.55 * self.hk + 0.004, ang), 1.4)
             let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
@@ -184,9 +172,7 @@ script_mod! {
             return vec4(sil * (0.6 * tm) + rock * (m * (1.0 - tm)), tm + m * (1.0 - tm))
         }
         fragment: fn(){
-            let c = self.pixel()
-            self.fb0 = c
-            self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
+            let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
         }
     }
 
@@ -195,15 +181,12 @@ script_mod! {
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         pixel: fn(){
-            let pp = self.frag()
-            let g = self.col_row(pp.x, 6.0)
+            let pp = self.frag(); let g = self.col_row(pp.x, 6.0)
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
             return vec4(mix(self.sil * 0.5, self.sil * 1.6, g.x) * gm, gm)
         }
         fragment: fn(){
-            let c = self.pixel()
-            self.fb0 = c
-            self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
+            let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w)
         }
     }
 
@@ -212,21 +195,11 @@ script_mod! {
         ..mod.draw.DrawQuad,
         horizon: uniform(0.8)
         pixel: fn(){
-            let y = self.pos.y
-            let h = self.horizon
-            if y >= h {
-                return #x0a0d16
-            }
-            let f = y / h
-            if f < 0.45 {
-                return mix(#x050813, #x0a1230, f / 0.45)
-            }
-            if f < 0.8 {
-                return mix(#x0a1230, #x1b2547, (f - 0.45) / 0.35)
-            }
-            if f < 0.95 {
-                return mix(#x1b2547, #x4a4258, (f - 0.8) / 0.15)
-            }
+            let y = self.pos.y; let h = self.horizon; let f = y / h
+            if y >= h { return #x0a0d16 }
+            if f < 0.45 { return mix(#x050813, #x0a1230, f / 0.45) }
+            if f < 0.8 { return mix(#x0a1230, #x1b2547, (f - 0.45) / 0.35) }
+            if f < 0.95 { return mix(#x1b2547, #x4a4258, (f - 0.8) / 0.15) }
             return mix(#x4a4258, #x8a5a55, (f - 0.95) / 0.05)
         }
     }
@@ -234,34 +207,22 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyGlow {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyGlow { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSkyRange {
-    #[deref]
-    pub draw_super: DrawQuad,
+    #[deref] pub draw_super: DrawQuad,
     /// The range (0 farthest .. 4 nearest; 5 the front treeline).
-    #[live]
-    pub k: f32,
+    #[live] pub k: f32,
     /// Its peak height (rad).
-    #[live]
-    pub hk: f32,
+    #[live] pub hk: f32,
 }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyGround {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyGround { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyBackdrop {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyBackdrop { #[deref] pub draw_super: DrawQuad }

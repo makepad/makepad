@@ -45,47 +45,29 @@ script_mod! {
 /// What a view shows and at what size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewSpec {
-    /// The first azimuth (0..1 = 0..360 degrees) and the share of the turn shown.
-    pub u0: f64,
-    pub span: f64,
-    /// Size in pixels.
-    pub w: usize,
-    pub h: usize,
-    /// The horizon line, a fraction of the height from the top.
-    pub horizon: f64,
+    /// The first azimuth (0..1 = 0..360 degrees), the share of the turn shown, the size in pixels and
+    /// the horizon line (a fraction of the height from the top).
+    pub u0: f64, pub span: f64, pub w: usize, pub h: usize, pub horizon: f64,
 }
 
 impl ViewSpec {
     /// The full turn, `w` pixels wide.
-    pub fn strip(p: &Params, w: usize) -> Self {
-        Self::new(p, 0.0, 1.0, w)
-    }
+    pub fn strip(p: &Params, w: usize) -> Self { Self::new(p, 0.0, 1.0, w) }
     /// The detail view: `zoom` of the turn centred on `pan`.
-    pub fn detail(p: &Params, w: usize) -> Self {
-        Self::new(p, p[P::Pan] - p[P::Zoom] / 2.0, p[P::Zoom], w)
-    }
+    pub fn detail(p: &Params, w: usize) -> Self { Self::new(p, p[P::Pan] - p[P::Zoom] / 2.0, p[P::Zoom], w) }
     pub fn new(p: &Params, u0: f64, span: f64, w: usize) -> Self {
         let w = w.max(8);
         let h = ((w as f64 * p[P::Vfov] / (span * 360.0)).round() as usize).max(8);
         Self { u0, span, w, h, horizon: p[P::Horizon] }
     }
     /// Radians per pixel of the raw view.
-    pub fn px0(&self) -> f64 {
-        self.span * TAU / self.w as f64
-    }
+    pub fn px0(&self) -> f64 { self.span * TAU / self.w as f64 }
     /// Pass row of raw elevation `ang` (rad).
-    pub fn row_of(&self, ang: f64) -> f64 {
-        self.horizon * self.h as f64 - ang / self.px0()
-    }
+    pub fn row_of(&self, ang: f64) -> f64 { self.horizon * self.h as f64 - ang / self.px0() }
 }
 
 /// One scene target: a pass with two RGBA16F targets (colour + coverage, light + coverage).
-pub struct SceneTarget {
-    pub pass: DrawPass,
-    pub list: DrawList2d,
-    pub color: Texture,
-    pub light: Texture,
-}
+pub struct SceneTarget { pub pass: DrawPass, pub list: DrawList2d, pub color: Texture, pub light: Texture }
 
 impl SceneTarget {
     pub fn new(cx: &mut Cx, name: &str) -> Self {
@@ -115,16 +97,11 @@ impl SceneTarget {
 
 /// What every scene drawer gets: the view, the parameters, the zones and the shared inputs.
 pub struct SceneCtx<'a> {
-    pub view: &'a ViewSpec,
-    pub p: &'a Params,
+    pub view: &'a ViewSpec, pub p: &'a Params,
     /// The placement zones (the city and the props read them).
-    #[allow(dead_code)]
-    pub z: &'a Zones,
-    /// The column data texture and its geometry (width, height, margin, count).
-    pub cols: &'a Texture,
-    pub col_geom: [f32; 4],
-    /// The column data on the CPU (see [`terrain::ROWS`]).
-    pub col_data: &'a [[f32; 4]],
+    #[allow(dead_code)] pub z: &'a Zones,
+    /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
+    pub cols: &'a Texture, pub col_geom: [f32; 4], pub col_data: &'a [[f32; 4]],
     /// The single trees' coverage (or a blank texture).
     pub tree_cov: Texture,
     /// The city march's targets once stage A provides them: colour + alpha, emission + depth (m).
@@ -150,9 +127,7 @@ impl SceneCtx<'_> {
     }
 
     /// The column data of output column x (0..w) and row r.
-    pub fn col(&self, x: usize, r: usize) -> [f32; 4] {
-        self.col_data[(x + self.col_geom[2] as usize) * ROWS + r]
-    }
+    pub fn col(&self, x: usize, r: usize) -> [f32; 4] { self.col_data[(x + self.col_geom[2] as usize) * ROWS + r] }
 
     /// The pass rect from raw elevation `top` down to `bottom` (rad), across the view, flipped in
     /// the reflection run; None when it is empty.
@@ -166,40 +141,23 @@ impl SceneCtx<'_> {
 }
 
 /// Milliseconds since `t0` (seconds of the platform's monotonic clock).
-fn ms_since(t0: f64) -> f64 {
-    (Cx::monotonic_now() - t0) * 1000.0
-}
+fn ms_since(t0: f64) -> f64 { (Cx::monotonic_now() - t0) * 1000.0 }
 
 /// Binds `texture` to the shader's texture input `name`, if it has one.
 pub fn bind_texture(cx: &Cx, vars: &mut DrawVars, name: LiveId, texture: &Texture) {
-    if let Some(id) = vars.draw_shader_id {
-        if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name) {
-            vars.set_texture(slot, texture);
-        }
+    if let Some(slot) = vars.draw_shader_id.and_then(|id| cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name)) {
+        vars.set_texture(slot, texture);
     }
 }
 
 /// What the last draws of a view cost.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
-    /// Size of the last view drawn.
-    pub w: usize,
-    pub h: usize,
-    /// CPU: zones, columns (when rebuilt) and recording the passes, ms.
-    pub zones_ms: f64,
-    pub cols_ms: f64,
-    pub record_ms: f64,
-    /// How many times the passes were recorded.
-    pub renders: u64,
+    /// Size of the last view drawn; CPU ms of the zones, the columns (when rebuilt) and recording the passes; how many recordings.
+    pub w: usize, pub h: usize, pub zones_ms: f64, pub cols_ms: f64, pub record_ms: f64, pub renders: u64,
 }
 
-struct ColumnCache {
-    key: u64,
-    m: usize,
-    data: Vec<[f32; 4]>,
-    tex: Texture,
-    geom: [f32; 4],
-}
+struct ColumnCache { key: u64, m: usize, data: Vec<[f32; 4]>, tex: Texture, geom: [f32; 4] }
 
 /// The parameters the zones depend on (with the seed).
 const ZONE_KEYS: &[P] = &[
@@ -209,38 +167,23 @@ const ZONE_KEYS: &[P] = &[
 
 #[derive(Script, ScriptHook)]
 pub struct Skyline {
-    #[live]
-    draw_glow: DrawSkyGlow,
-    #[live]
-    draw_range: DrawSkyRange,
-    #[live]
-    draw_ground: DrawSkyGround,
-    #[live]
-    pub trees: Trees,
-    #[live]
-    pub city: City,
-    #[live]
-    pub props: Props,
-    #[live]
-    pub post: Post,
-    #[rust]
-    scene: Option<SceneTarget>,
-    #[rust]
-    mirror: Option<SceneTarget>,
-    #[rust]
-    zones: Option<(u64, Zones)>,
-    #[rust]
-    cols: Option<ColumnCache>,
-    #[rust]
-    blank: Option<Texture>,
+    #[live] draw_glow: DrawSkyGlow,
+    #[live] draw_range: DrawSkyRange,
+    #[live] draw_ground: DrawSkyGround,
+    #[live] pub trees: Trees,
+    #[live] pub city: City,
+    #[live] pub props: Props,
+    #[live] pub post: Post,
+    #[rust] scene: Option<SceneTarget>,
+    #[rust] mirror: Option<SceneTarget>,
+    #[rust] zones: Option<(u64, Zones)>,
+    #[rust] cols: Option<ColumnCache>,
+    #[rust] blank: Option<Texture>,
     /// The key of the picture the targets hold.
-    #[rust]
-    drawn: Option<u64>,
-    #[rust]
-    pub stats: Stats,
+    #[rust] drawn: Option<u64>,
+    #[rust] pub stats: Stats,
     /// A running export or band (`export.rs`), on a Skyline of its own.
-    #[rust]
-    pub job: Option<crate::export::Job>,
+    #[rust] pub job: Option<crate::export::Job>,
 }
 
 impl Skyline {
@@ -254,20 +197,15 @@ impl Skyline {
         let mut picture: Vec<f64> = p.v.iter().enumerate().filter(|(i, _)| !view_only.contains(i)).map(|(_, x)| *x).collect();
         picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon]);
         let key = p.hash(&[], &picture);
-        if self.scene.is_none() {
-            self.scene = Some(SceneTarget::new(cx, "skyline_scene"));
-        }
+        if self.scene.is_none() { self.scene = Some(SceneTarget::new(cx, "skyline_scene")); }
         if self.drawn != Some(key) {
             let t1 = Cx::monotonic_now();
             self.record(cx, view, p);
-            self.drawn = Some(key);
-            self.stats.renders += 1;
-            self.stats.record_ms = ms_since(t1);
+            (self.drawn, self.stats.renders, self.stats.record_ms) = (Some(key), self.stats.renders + 1, ms_since(t1));
         }
         let (scene, mirror) = (self.scene.as_ref().unwrap(), self.mirror.as_ref());
         self.post.draw_final(cx, rect, p, &crate::post::SceneOut { view, scene, mirror }, tone);
-        self.stats.w = view.w;
-        self.stats.h = view.h;
+        (self.stats.w, self.stats.h) = (view.w, view.h);
     }
 
     /// The zones and the columns for this view, rebuilt when what they depend on changed.
@@ -275,8 +213,7 @@ impl Skyline {
         let zkey = p.hash(ZONE_KEYS, &[]);
         if self.zones.as_ref().map(|z| z.0) != Some(zkey) {
             let t = Cx::monotonic_now();
-            self.zones = Some((zkey, Zones::new(p)));
-            self.stats.zones_ms = ms_since(t);
+            (self.zones, self.stats.zones_ms) = (Some((zkey, Zones::new(p))), ms_since(t));
         }
         let z = &self.zones.as_ref().unwrap().1;
         let m = terrain::margin(p, view.span, view.w);
@@ -285,8 +222,7 @@ impl Skyline {
             let t = Cx::monotonic_now();
             let data = terrain::columns(z, p, view.u0, view.span, view.w, m);
             let n = view.w + 2 * m;
-            let tw = n.min(TEX_W);
-            let bands = n.div_ceil(tw);
+            let (tw, bands) = (n.min(TEX_W), n.div_ceil(n.min(TEX_W)));
             let mut texels = vec![0f32; tw * ROWS * bands * 4];
             for (x, col) in data.chunks(ROWS).enumerate() {
                 let (b, xx) = (x / tw, x % tw);
@@ -296,24 +232,13 @@ impl Skyline {
                 }
             }
             let format = TextureFormat::VecRGBAf32 { width: tw, height: ROWS * bands, data: Some(texels), updated: TextureUpdated::Full };
-            let tex = match self.cols.take() {
-                Some(c) => {
-                    *c.tex.get_format(cx) = format;
-                    c.tex
-                }
-                None => Texture::new_with_format(cx, format),
-            };
+            let tex = match self.cols.take() { Some(c) => { *c.tex.get_format(cx) = format; c.tex } None => Texture::new_with_format(cx, format) };
             let geom = [tw as f32, (ROWS * bands) as f32, m as f32, n as f32];
             self.cols = Some(ColumnCache { key: ckey, m, data, tex, geom });
             self.stats.cols_ms = ms_since(t);
         }
         if self.blank.is_none() {
-            self.blank = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 {
-                width: 1,
-                height: 1,
-                data: Some(vec![0.0; 4]),
-                updated: TextureUpdated::Full,
-            }));
+            self.blank = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 { width: 1, height: 1, data: Some(vec![0.0; 4]), updated: TextureUpdated::Full }));
         }
     }
 
@@ -325,17 +250,7 @@ impl Skyline {
         let blank = self.blank.as_ref().unwrap();
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
-        let mut sc = SceneCtx {
-            view,
-            p,
-            z,
-            cols: &cols.tex,
-            col_geom: cols.geom,
-            col_data: &cols.data,
-            tree_cov: blank.clone(),
-            city: None,
-            mirror: false,
-        };
+        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, mirror: false };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
@@ -346,26 +261,20 @@ impl Skyline {
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-        if self.post.wants_mirror(p, z) {
+        self.mirror = self.post.wants_mirror(p, z).then(|| {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror"));
             sc.mirror = true;
             mirror.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
             sc.mirror = false;
-            self.mirror = Some(mirror);
-        } else {
-            self.mirror = None;
-        }
+            mirror
+        });
         self.post.draw_passes(cx, &sc, &crate::post::SceneOut { view, scene: &scene, mirror: self.mirror.as_ref() });
         self.scene = Some(scene);
     }
 }
 
 /// The foundation's own scene shaders.
-struct ScenePainter<'a> {
-    glow: &'a mut DrawSkyGlow,
-    range: &'a mut DrawSkyRange,
-    ground: &'a mut DrawSkyGround,
-}
+struct ScenePainter<'a> { glow: &'a mut DrawSkyGlow, range: &'a mut DrawSkyRange, ground: &'a mut DrawSkyGround }
 
 /// The scene list in painter's order (far to near). The mirror run leaves out what stands below
 /// the eye's own horizon: the front treeline and the ground band.
@@ -374,10 +283,8 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     let px0 = v.px0();
     // the glow dome over downtown, behind everything
     let c_d = 28.0 * p[P::CtR];
-    let (dx, dy) = (
-        (p[P::CtC] * TAU).cos() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).cos(),
-        (p[P::CtC] * TAU).sin() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).sin(),
-    );
+    let dx = (p[P::CtC] * TAU).cos() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).cos();
+    let dy = (p[P::CtC] * TAU).sin() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).sin();
     let dome_k = (dx * dx + dy * dy).sqrt() / c_d / (0.0147 * (6.0 + 44.0 * p[P::CtH]) * 0.05);
     if p[P::Glow] > 0.0 && p[P::CtW] >= 0.001 {
         if let Some(r) = sc.band(9.0 / dome_k, -0.012 - px0) {
@@ -391,21 +298,15 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     for k in 0..5 {
         props.draw(cx, sc, Bucket::Range(k));
         if let Some(r) = sc.band(band_top(sc, k), -2.0 * px0) {
-            sp.range.k = k as f32;
-            sp.range.hk = (p[P::MtH] * mt_scale(k)) as f32;
+            (sp.range.k, sp.range.hk) = (k as f32, (p[P::MtH] * mt_scale(k)) as f32);
             sp.range.draw_abs(cx, r);
         }
     }
     props.draw(cx, sc, Bucket::BehindCity);
     city.draw_blit(cx, sc);
     props.draw(cx, sc, Bucket::FrontOfCity);
-    if sc.mirror {
-        return;
-    }
-    if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) {
-        sp.range.k = 5.0;
-        sp.range.draw_abs(cx, r);
-    }
+    if sc.mirror { return; }
+    if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { sp.range.k = 5.0; sp.range.draw_abs(cx, r); }
     // the ground band: from the top of the near rise (raw elevation) down; the sea is all below the horizon
     let rise = (0..v.w).map(|x| sc.col(x, 6)).map(|g| g[1] as f64 / (g[2] as f64).max(1e-3)).fold(0.0, f64::max);
     if let Some(r) = sc.band(rise + 2.0 * px0, -10.0) {
@@ -419,15 +320,10 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
 /// canopy, its tallest single tree, plus two pixels.
 fn band_top(sc: &SceneCtx, k: usize) -> f64 {
     let hmax = if k >= 2 { terrain::tree_hmax(sc.p, k - 2) } else { 0.0 };
-    let mut top: f64 = 0.0;
-    for x in 0..sc.view.w {
+    let top = (0..sc.view.w).fold(0.0f64, |top, x| {
         let r = sc.col(x, k);
-        let t = sc.col(x, 6)[2] as f64;
-        let mut h = r[0] as f64;
-        if k >= 2 && r[3] > 0.0 {
-            h = h.max(r[2] as f64).max(r[1] as f64 + hmax);
-        }
-        top = top.max(h / t.max(1e-3));
-    }
+        let h = if k >= 2 && r[3] > 0.0 { (r[0] as f64).max(r[2] as f64).max(r[1] as f64 + hmax) } else { r[0] as f64 };
+        top.max(h / (sc.col(x, 6)[2] as f64).max(1e-3))
+    });
     top + 2.0 * sc.view.px0()
 }

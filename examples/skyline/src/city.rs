@@ -43,25 +43,14 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyCity {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyCity { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyCityBlit {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyCityBlit { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Script, ScriptHook)]
-pub struct City {
-    #[live]
-    pub draw_city: DrawSkyCity,
-    #[live]
-    pub draw_blit: DrawSkyCityBlit,
-}
+pub struct City { #[live] pub draw_city: DrawSkyCity, #[live] pub draw_blit: DrawSkyCityBlit }
 
 impl City {
     /// Marches the city into its own two targets, a pass the scene pass `consumer` samples (attach
@@ -74,7 +63,5 @@ impl City {
     pub fn draw_blit(&mut self, _cx: &mut Cx2d, _sc: &SceneCtx) {}
 
     /// The march's targets: colour + alpha, light + depth (m), once there are any.
-    pub fn textures(&self) -> Option<(Texture, Texture)> {
-        None
-    }
+    pub fn textures(&self) -> Option<(Texture, Texture)> { None }
 }

@@ -17,18 +17,11 @@ use crate::render::Skyline;
 use makepad_widgets::makepad_draw::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExportKind {
-    Png,
-    Exr,
-}
+pub enum ExportKind { Png, Exr }
 
 /// The strip as premultiplied linear HDR texels, `w` x `h`, top row first.
 #[allow(dead_code)] // the HDRI layer's input
-pub struct Band {
-    pub w: usize,
-    pub h: usize,
-    pub texels: Vec<[f32; 4]>,
-}
+pub struct Band { pub w: usize, pub h: usize, pub texels: Vec<[f32; 4]> }
 
 /// Receives a requested band once, on a worker thread.
 #[allow(dead_code)] // the HDRI layer's input
@@ -54,12 +47,8 @@ impl Skyline {
 
     /// Draws the running job's next tile into its own pass (attached to the current one), inside a
     /// Draw event. True while more tiles follow: the caller draws again the next frame.
-    pub fn draw_job(&mut self, _cx: &mut Cx2d) -> bool {
-        self.job.is_some()
-    }
+    pub fn draw_job(&mut self, _cx: &mut Cx2d) -> bool { self.job.is_some() }
 
     /// Progress and results for the message line, when there is news.
-    pub fn job_event(&mut self, _cx: &mut Cx, _event: &Event) -> Option<String> {
-        None
-    }
+    pub fn job_event(&mut self, _cx: &mut Cx, _event: &Event) -> Option<String> { None }
 }

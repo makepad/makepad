@@ -7,19 +7,7 @@
 //! the page's order.
 pub mod kit;
 
-mod bridge;
-mod churches;
-mod coast;
-mod cranes;
-mod fair;
-mod far;
-mod farms;
-mod industry;
-mod lamps;
-mod masts;
-mod pylons;
-mod town;
-mod turbines;
+mod bridge; mod churches; mod coast; mod cranes; mod fair; mod far; mod farms; mod industry; mod lamps; mod masts; mod pylons; mod town; mod turbines;
 
 use crate::params::{Params, P};
 use crate::render::SceneCtx;
@@ -32,19 +20,9 @@ pub type Generator = fn(&mut Ctx);
 
 /// The generators in the page's order (`pkBuild`).
 pub const GENERATORS: [(&str, Generator); 13] = [
-    ("turbines", turbines::build),
-    ("lamps", lamps::build),
-    ("pylons", pylons::build),
-    ("industry", industry::build),
-    ("cranes", cranes::build),
-    ("churches", churches::build),
-    ("town", town::build),
-    ("bridge", bridge::build),
-    ("fair", fair::build),
-    ("masts", masts::build),
-    ("far", far::build),
-    ("farms", farms::build),
-    ("coast", coast::build),
+    ("turbines", turbines::build), ("lamps", lamps::build), ("pylons", pylons::build), ("industry", industry::build), ("cranes", cranes::build),
+    ("churches", churches::build), ("town", town::build), ("bridge", bridge::build), ("fair", fair::build), ("masts", masts::build),
+    ("far", far::build), ("farms", farms::build), ("coast", coast::build),
 ];
 
 /// The parameters that place props (the page rebuilds them on any change but the view's).
@@ -73,9 +51,7 @@ pub enum Bucket {
 pub fn build(z: &Zones, p: &Params) -> PropSet {
     let mut set = PropSet::default();
     let mut c = Ctx { z, p, set: &mut set };
-    for (_, generate) in GENERATORS {
-        generate(&mut c);
-    }
+    for (_, generate) in GENERATORS { generate(&mut c); }
     set
 }
 
@@ -92,23 +68,13 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook)]
-pub struct Props {
-    #[live]
-    pub draw_part: DrawSkyPart,
-    #[rust]
-    pub set: PropSet,
-    #[rust]
-    key: Option<u64>,
-}
+pub struct Props { #[live] pub draw_part: DrawSkyPart, #[rust] pub set: PropSet, #[rust] key: Option<u64> }
 
 impl Props {
     /// Rebuilds the instances when a parameter that places them changed.
     pub fn update(&mut self, z: &Zones, p: &Params) {
         let key = p.hash(PROP_KEYS, &[]);
-        if self.key != Some(key) {
-            self.set = build(z, p);
-            self.key = Some(key);
-        }
+        if self.key != Some(key) { (self.set, self.key) = (build(z, p), Some(key)); }
     }
 
     /// Draws the instances of one bucket into the scene (`sc.mirror`: seen from the mirrored eye).

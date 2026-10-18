@@ -9,18 +9,10 @@
 //! from the same doubles and comes out the same for the same seed.
 use makepad_widgets::makepad_draw::*;
 
+/// `key` is the uniform's name (snake case) and the key of the app's own saved parameters, `web` the web page's.
 pub struct ParamDef {
-    /// The uniform's name (snake case), and the key of the app's own saved parameters.
-    pub key: &'static str,
-    pub id: LiveId,
-    /// The web page's key.
-    pub web: &'static str,
-    pub label: &'static str,
-    pub group: &'static str,
-    pub min: f64,
-    pub max: f64,
-    pub step: f64,
-    pub default: f64,
+    pub key: &'static str, pub id: LiveId, pub web: &'static str, pub label: &'static str, pub group: &'static str,
+    pub min: f64, pub max: f64, pub step: f64, pub default: f64,
 }
 
 macro_rules! params {
@@ -106,26 +98,15 @@ pub const SIL: [f32; 3] = [0.004, 0.006, 0.012];
 pub const HAZE_COL: [f32; 3] = [0.16, 0.18, 0.28];
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Params {
-    pub v: [f64; COUNT],
-    pub seed: u32,
-}
+pub struct Params { pub v: [f64; COUNT], pub seed: u32 }
 
 impl Default for Params {
-    fn default() -> Self {
-        let mut v = [0.0; COUNT];
-        for (x, d) in v.iter_mut().zip(PARAMS) {
-            *x = d.default;
-        }
-        Self { v, seed: 7 }
-    }
+    fn default() -> Self { Self { v: std::array::from_fn(|i| PARAMS[i].default), seed: 7 } }
 }
 
 impl std::ops::Index<P> for Params {
     type Output = f64;
-    fn index(&self, p: P) -> &f64 {
-        &self.v[p as usize]
-    }
+    fn index(&self, p: P) -> &f64 { &self.v[p as usize] }
 }
 
 impl Params {
@@ -139,26 +120,13 @@ impl Params {
     }
 
     /// Sets parameter `i` (snapped); true when it changed.
-    pub fn set(&mut self, i: usize, x: f64) -> bool {
-        let x = Self::snap(i, x);
-        let changed = self.v[i] != x;
-        self.v[i] = x;
-        changed
-    }
-
-    pub fn set_seed(&mut self, seed: u32) -> bool {
-        let seed = seed.min(SEED_MAX);
-        let changed = self.seed != seed;
-        self.seed = seed;
-        changed
-    }
+    pub fn set(&mut self, i: usize, x: f64) -> bool { let x = Self::snap(i, x); std::mem::replace(&mut self.v[i], x) != x }
+    pub fn set_seed(&mut self, seed: u32) -> bool { let seed = seed.min(SEED_MAX); std::mem::replace(&mut self.seed, seed) != seed }
 
     /// Every parameter onto the uniform of the same name, plus `seed`; a shader that does not
     /// declare a uniform ignores it.
     pub fn set_uniforms(&self, cx: &Cx, vars: &mut DrawVars) {
-        for (d, x) in PARAMS.iter().zip(self.v) {
-            vars.set_uniform(cx, d.id, &[x as f32]);
-        }
+        for (d, x) in PARAMS.iter().zip(self.v) { vars.set_uniform(cx, d.id, &[x as f32]); }
         vars.set_uniform(cx, live_id!(seed), &[self.seed as f32]);
     }
 
@@ -174,22 +142,15 @@ impl Params {
     /// A seed from the clock (the dice).
     pub fn random_seed() -> u32 {
         let mut x = (Cx::time_now() * 1e9) as u64 ^ 0x9e37_79b9_7f4a_7c15;
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        x ^= x >> 33;
-        (x % 100_000) as u32
+        x = (x ^ (x >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        ((x ^ (x >> 33)) % 100_000) as u32
     }
 
     /// Reads the page's saved parameter file (`{"format":"skyline-params","params":{...}}`, or a bare
     /// object of keys; the page's keys or this table's): every known key with a number, snapped like
     /// a slider. Returns how many were set.
     pub fn load_web_json(&mut self, text: &str) -> Result<usize, String> {
-        let body = match text.find("\"params\"") {
-            Some(i) => &text[i + 8..],
-            None => text,
-        };
-        let mut n = 0;
-        let mut rest = body;
+        let (mut n, mut rest) = (0, text.find("\"params\"").map_or(text, |i| &text[i + 8..]));
         while let Some(q0) = rest.find('"') {
             let after = &rest[q0 + 1..];
             let Some(q1) = after.find('"') else { break };
@@ -199,20 +160,10 @@ impl Params {
             let Some(tail) = tail.strip_prefix(':') else { continue };
             let num: String = tail.trim_start().chars().take_while(|c| c.is_ascii_digit() || "+-.eE".contains(*c)).collect();
             let Ok(x) = num.parse::<f64>() else { continue };
-            if !x.is_finite() {
-                continue;
-            }
-            if key == "seed" {
-                self.seed = (x.trunc().max(0.0) as u32).min(SEED_MAX);
-                n += 1;
-            } else if let Some(i) = PARAMS.iter().position(|d| d.web == key || d.key == key) {
-                self.v[i] = Self::snap(i, x);
-                n += 1;
-            }
+            if !x.is_finite() { continue; }
+            if key == "seed" { (self.seed, n) = ((x.trunc().max(0.0) as u32).min(SEED_MAX), n + 1); }
+            else if let Some(i) = PARAMS.iter().position(|d| d.web == key || d.key == key) { (self.v[i], n) = (Self::snap(i, x), n + 1); }
         }
-        if n == 0 {
-            return Err("no known settings found".into());
-        }
-        Ok(n)
+        if n == 0 { Err("no known settings found".into()) } else { Ok(n) }
     }
 }

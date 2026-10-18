@@ -29,16 +29,14 @@ pub fn margin(p: &Params, span: f64, w: usize) -> usize {
     (((0.045 / (span * TAU / w as f64 * (1.0 - p[P::Off]).max(0.1))).ceil() as usize) + 2).min(2048)
 }
 
-/// The off-centre camera: the world azimuth the raw view azimuth `ur` sees (the scenery is a ring
-/// of radius 1, the camera stands `off` from its centre toward `offDir`) and the distance factor t
-/// that heights and pixel sizes scale by. (For the trees and the props.)
+/// The off-centre camera (the page's `sgWarp`, bit-exact): the world azimuth the raw view azimuth `ur`
+/// sees (the scenery is a ring of radius 1, the camera `off` from its centre toward `offDir`) and
+/// the distance factor t that heights and pixel sizes scale by. For the trees and the props.
 #[allow(dead_code)]
 pub fn warp(p: &Params, ur: f64) -> (f64, f64) {
-    let (cx, cy) = (p[P::Off] * (p[P::OffDir] * TAU).cos(), p[P::Off] * (p[P::OffDir] * TAU).sin());
-    let th = ur * TAU;
-    let (dx, dy) = (th.cos(), th.sin());
+    let (cx, cy, dx, dy) = (p[P::Off] * (p[P::OffDir] * TAU).cos(), p[P::Off] * (p[P::OffDir] * TAU).sin(), (ur * TAU).cos(), (ur * TAU).sin());
     let cd = cx * dx + cy * dy;
-    let t = -cd + (cd * cd - (cx * cx + cy * cy) + 1.0).max(1e-4).sqrt();
+    let t = -cd + (cd * cd - cx * cx - cy * cy + 1.0).max(1e-4).sqrt();
     (fract((cy + t * dy).atan2(cx + t * dx) / TAU), t)
 }
 
@@ -60,9 +58,7 @@ pub fn columns(z: &Zones, p: &Params, u0: f64, span: f64, w: usize, m: usize) ->
     let (tr_d, tr_c) = (p[P::TrD], p[P::TrCon]);
     // the column part of the forest: undergrowth, the canopy top and its pixel-scale roughness
     let canopy = |u: f64, px: f64, cells: f64, ly: f64, hmax: f64, base: f64, reg: f64| -> [f64; 3] {
-        if reg < 0.05 {
-            return [base, base, 0.0];
-        }
+        if reg < 0.05 { return [base, base, 0.0]; }
         let rg = smooth(0.05, 0.3, reg);
         let nf = (TAU / (2.0 * px)).floor().max(1.0);
         let (mut b0, mut b1, mut b2) = (0.0, 0.0, 0.72);
@@ -154,19 +150,13 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawSkyTrees {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
+pub struct DrawSkyTrees { #[deref] pub draw_super: DrawQuad }
 
 /// The single trees of a view: their mesh (rebuilt when the trees' parameters or the pixel size
 /// change) and their coverage target. Stub until stage B: no single trees, so the forests show as
 /// their canopy bands.
 #[derive(Script, ScriptHook)]
-pub struct Trees {
-    #[live]
-    pub draw_trees: DrawSkyTrees,
-}
+pub struct Trees { #[live] pub draw_trees: DrawSkyTrees }
 
 impl Trees {
     /// Draws the trees into their coverage target, a pass the scene pass `consumer` samples
@@ -175,7 +165,5 @@ impl Trees {
     pub fn draw_pass(&mut self, _cx: &mut Cx2d, _sc: &SceneCtx, _consumer: DrawPassId) {}
 
     /// The coverage target (one channel per tree layer), once there is one.
-    pub fn coverage(&self) -> Option<&Texture> {
-        None
-    }
+    pub fn coverage(&self) -> Option<&Texture> { None }
 }

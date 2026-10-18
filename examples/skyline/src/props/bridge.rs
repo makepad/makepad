@@ -2,9 +2,6 @@
 //! (suspension, steel through-arch, girder / truss or cable-stayed), headlands or valley sides at
 //! both ends, deck lamps, car lights, red beacons; hidden by the industry in front (`hide_i`).
 //! Zones: `z.bridge`, `z.bridge_x`.
-//!
-//! Port of the page's `pkBridge` (stage C2, group 2): emit instances and parts through [`Ctx`].
-//! Stub: emits nothing yet.
 use super::kit::Ctx;
-
+/// The page's `pkBridge` (stage C2, group 2). Stub: emits nothing yet.
 pub fn build(_c: &mut Ctx) {}
