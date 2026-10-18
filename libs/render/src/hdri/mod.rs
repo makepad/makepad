@@ -439,7 +439,8 @@ impl Env {
     /// sun's and the moon's discs sampled on grids of their own (D6), what the
     /// lights before it may reach as finely as those lights ask
     /// (`Studio::bright_boxes`), and the base's fine detail where it has any
-    /// (`base_peak`), the rows spread by `run` (M5). A caster that
+    /// (`base_peak`), the rows spread by `run` and the samples held to one
+    /// budget for all of them (M5). A caster that
     /// nothing bright stands behind keeps no raster: it stays exactly the flag
     /// it draws as. False when `cancelled` stopped it (or the runner skipped a
     /// row).
@@ -455,6 +456,9 @@ impl Env {
             .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
             .collect();
         let at = Sampling::bake(width, None);
+        // M5: the casters share one budget of samples (`caster::BLOOM_CELL_BUDGET`), so many
+        // blooming casters cost no more than one may.
+        let casters = entries.len();
         let fine_base = self.base_image.is_some() || (self.atmo.is_some() && self.weather.is_some());
         for entry in entries {
             let built = {
@@ -465,7 +469,7 @@ impl Env {
                 let bright = env.studio.bright_boxes(entry);
                 let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius);
                 let peak: Option<&(dyn Fn(Vec3f, f32) -> Option<(f32, f32)> + Sync)> = if fine_base { Some(&peak) } else { None };
-                caster::CasterBloom::build(caster, width, &hot, &bright, peak, &behind, &sharp, cancelled, run)
+                caster::CasterBloom::build(caster, width, casters, &hot, &bright, peak, &behind, &sharp, cancelled, run)
             };
             let Some(bloom) = built else { return false };
             if bloom.thins_anything() {
