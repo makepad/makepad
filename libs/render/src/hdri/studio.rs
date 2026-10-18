@@ -1358,7 +1358,8 @@ fn ellipse_distance(p: Vec2f, half: Vec2f) -> f32 {
 mod tests {
     use super::*;
     use crate::hdri::{az_el_from_dir, vec, Env, HdriParams};
-    use crate::hdri::{arr, CasterParams, GoboParams};
+    use crate::hdri::{arr, CasterParams};
+    use crate::hdri::caster::fixtures::{caster_at, leaves};
 
     /// P2: `ellipse_distance` is the exact signed distance to an ellipse,
     /// against the brute-force nearest of 4000 points on it refined by
@@ -1753,16 +1754,6 @@ mod tests {
         assert_eq!(Env::new(&p).bake(32), without);
     }
 
-    /// A shadow caster (redesign §5) at (az, el), `width_deg` x `height_deg`,
-    /// its pattern `gobo` (None: solid), with `settings`.
-    fn caster_at(azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32, gobo: Option<GoboParams>, settings: CasterParams) -> LightParams {
-        LightParams { azimuth_deg, elevation_deg, width_deg, height_deg, gobo, caster: Some(settings), ..LightParams::new_caster() }
-    }
-
-    fn leaves(density: f32) -> GoboParams {
-        GoboParams { kind: "leaves".to_string(), density, seed: 2, ..GoboParams::default() }
-    }
-
     /// What the map draws of the key of `lights` over what the engine's key
     /// light carries (light_fx.rs's `map_over_key_among`): ∫ (map - the map
     /// without its key) dΩ in luminance over the key's covering cone, on a
@@ -1825,7 +1816,7 @@ mod tests {
             let (map, key) = (open.bake(64), open.sun().map(|k| k.radiance));
             for softness in [0.0f32, 0.6] {
                 let mut p = base.clone();
-                p.lights.push(caster_at(10.0, 28.0, 50.0, 50.0, Some(leaves(0.6)), CasterParams { strength: 0.0, tint: [0.3, 0.6, 0.9], softness, ..CasterParams::default() }));
+                p.lights.push(caster_at(10.0, 28.0, 50.0, 50.0, Some(leaves(0.6, 2)), CasterParams { strength: 0.0, tint: [0.3, 0.6, 0.9], softness, ..CasterParams::default() }));
                 let env = Env::new(&p);
                 assert!(env.bake(64) == map, "{mode}, softness {softness}: strength 0 changed the map");
                 assert_eq!(env.sun().map(|k| k.radiance), key, "{mode}, softness {softness}: strength 0 changed the key");
@@ -1875,7 +1866,7 @@ mod tests {
         let tint = [0.9f32, 0.4, 0.1];
         for softness in [0.0f32, 0.5] {
             for strength in [1.0f32, 0.6] {
-                let studio_of = |settings: CasterParams| Studio::new(&black_studio(), &[caster_at(0.0, 20.0, 60.0, 45.0, Some(leaves(0.7)), settings)]);
+                let studio_of = |settings: CasterParams| Studio::new(&black_studio(), &[caster_at(0.0, 20.0, 60.0, 45.0, Some(leaves(0.7, 2)), settings)]);
                 let tinted = studio_of(CasterParams { strength, tint, softness, ..CasterParams::default() });
                 let black = studio_of(CasterParams { strength: 1.0, tint: [0.0; 3], softness, ..CasterParams::default() });
                 let mut covered = 0;
@@ -1915,7 +1906,7 @@ mod tests {
         studio.studio.floor = [0.5; 3];
         for (mode, base) in [("sky", sky), ("studio", studio)] {
             let open = Env::new(&base).bake(64);
-            for gobo in [None, Some(leaves(0.6))] {
+            for gobo in [None, Some(leaves(0.6, 2))] {
                 for softness in [0.0f32, 0.5] {
                     for tint in [[0.0f32; 3], [0.3, 1.0, 0.6], [1.0; 3]] {
                         let mut p = base.clone();
@@ -1979,7 +1970,7 @@ mod tests {
         let alone = Studio::new(&black_studio(), &[key.clone()]).key().expect("a key");
         let mut off = Vec::new();
         for softness in [0.0f32, 0.6] {
-            for (name, gobo) in [("solid", None), ("leaves", Some(leaves(0.5)))] {
+            for (name, gobo) in [("solid", None), ("leaves", Some(leaves(0.5, 2)))] {
                 let c = caster_at(15.0, 25.0, 40.0, 40.0, gobo, CasterParams { softness, tint: [0.2, 0.3, 0.1], ..CasterParams::default() });
                 let behind = Studio::new(&black_studio(), &[c.clone(), key.clone()]).key().expect("a key");
                 assert_eq!(behind.radiance, alone.radiance, "{name} at softness {softness}: a caster listed before the key changed it");

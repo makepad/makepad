@@ -243,6 +243,7 @@ fn sane(env: &EnvMap) -> Cow<'_, EnvMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hdri::caster::fixtures::caster_at;
     use crate::sky::luminance;
 
     /// A w x w/2 map painted by direction at texel centres.
@@ -635,16 +636,7 @@ mod tests {
         cases.push(("the photographed sun behind a black flag", HdriParams { lights: vec![flag(120.0, 30.0, 10.0)], ..photo_sun.clone() }, photo_sun, &photo));
         // Redesign §5: a solid caster at strength 1 and a black tint hides
         // all of what is behind it, the sun's disc and a softbox key alike.
-        let solid = |azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32| LightParams {
-            name: "Caster".to_string(),
-            azimuth_deg,
-            elevation_deg,
-            width_deg,
-            height_deg,
-            gobo: None,
-            caster: Some(CasterParams::default()),
-            ..LightParams::new_caster()
-        };
+        let solid = |azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32| caster_at(azimuth_deg, elevation_deg, width_deg, height_deg, None, CasterParams::default());
         cases.push(("4: sun behind a solid caster", HdriParams { lights: vec![solid(150.0, 35.0, 10.0, 10.0)], ..sun.clone() }, sun.clone(), &photo));
         let boxed = LightParams { key: true, ..LightParams::default() };
         cases.push(("4: softbox behind a solid caster", studio_1b(vec![boxed.clone(), solid(0.0, 30.0, 60.0, 50.0)]), studio_1b(vec![boxed]), &photo));
@@ -903,18 +895,8 @@ mod tests {
             p
         };
         let one_pane = GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, ..GoboParams::default() };
-        // Shadow casters (redesign §5): pattern layers that add no light and
-        // darken what is listed before them, as "+ Caster" builds one.
-        let caster = |azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32, gobo: Option<GoboParams>, settings: CasterParams| LightParams {
-            name: "Caster".to_string(),
-            azimuth_deg,
-            elevation_deg,
-            width_deg,
-            height_deg,
-            gobo,
-            caster: Some(settings),
-            ..LightParams::new_caster()
-        };
+        // Shadow casters (redesign §5, `caster_at`): pattern layers that add
+        // no light and darken what is listed before them.
         let canopy = GoboParams { kind: "leaves".to_string(), density: 0.5, seed: 4, ..GoboParams::default() };
         let stripes = GoboParams { kind: "image".to_string(), image: "stripes".to_string(), ..GoboParams::default() };
         let case = |name: &str, params: HdriParams, tolerance: f64| KeyCase { name: name.to_string(), params, images: images.clone(), tolerance };
@@ -1093,30 +1075,30 @@ mod tests {
             ),
             case(
                 "4: softbox key behind a leaves caster",
-                studio_1b(vec![softbox.clone(), caster(10.0, 28.0, 50.0, 40.0, Some(canopy.clone()), CasterParams { strength: 0.9, ..CasterParams::default() })]),
+                studio_1b(vec![softbox.clone(), caster_at(10.0, 28.0, 50.0, 40.0, Some(canopy.clone()), CasterParams { strength: 0.9, ..CasterParams::default() })]),
                 0.02,
             ),
             // Listed before the key, the caster darkens the backdrop under it and leaves the key as it is.
-            case("4: caster listed before the key", studio_1b(vec![caster(10.0, 28.0, 50.0, 40.0, Some(canopy.clone()), CasterParams::default()), softbox.clone()]), 0.002),
+            case("4: caster listed before the key", studio_1b(vec![caster_at(10.0, 28.0, 50.0, 40.0, Some(canopy.clone()), CasterParams::default()), softbox.clone()]), 0.002),
             case(
                 "4: sun behind a tinted caster",
                 HdriParams {
-                    lights: vec![caster(150.0, 35.0, 20.0, 20.0, Some(canopy.clone()), CasterParams { strength: 0.8, tint: [0.6, 0.4, 0.2], softness: 0.3, ..CasterParams::default() })],
+                    lights: vec![caster_at(150.0, 35.0, 20.0, 20.0, Some(canopy.clone()), CasterParams { strength: 0.8, tint: [0.6, 0.4, 0.2], softness: 0.3, ..CasterParams::default() })],
                     ..sun.clone()
                 },
                 0.03,
             ),
             case(
                 "4: moon behind a caster",
-                HdriParams { lights: vec![caster(moon_az, moon_el, 16.0, 16.0, Some(canopy.clone()), CasterParams { softness: 0.4, ..CasterParams::default() })], ..night.clone() },
+                HdriParams { lights: vec![caster_at(moon_az, moon_el, 16.0, 16.0, Some(canopy.clone()), CasterParams { softness: 0.4, ..CasterParams::default() })], ..night.clone() },
                 0.03,
             ),
             case(
                 "4: stroke key behind a soft caster",
-                studio_1b(vec![arch_key(), caster(95.0, 10.0, 40.0, 30.0, Some(canopy.clone()), CasterParams { softness: 0.6, ..CasterParams::default() })]),
+                studio_1b(vec![arch_key(), caster_at(95.0, 10.0, 40.0, 30.0, Some(canopy.clone()), CasterParams { softness: 0.6, ..CasterParams::default() })]),
                 0.02,
             ),
-            case("4: key behind a caster with an image mask", studio_1b(vec![softbox.clone(), caster(5.0, 25.0, 50.0, 40.0, Some(stripes), CasterParams::default())]), 0.01),
+            case("4: key behind a caster with an image mask", studio_1b(vec![softbox.clone(), caster_at(5.0, 25.0, 50.0, 40.0, Some(stripes), CasterParams::default())]), 0.01),
             // R5: the sun half behind a solid caster's soft lower edge (the caster's
             // centre 10 degrees above the sun, 20 degrees tall). Its bloom thins the
             // caster round the disc, in the map and in the key alike: one raster,

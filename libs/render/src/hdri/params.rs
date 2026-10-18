@@ -22,6 +22,13 @@ use std::collections::{HashMap, HashSet};
 
 /// Most lights a map holds (16 since phase 1b).
 pub const LIGHT_LIMIT: usize = 16;
+/// The name `LightParams::default()` gives a light, and the one an app shows
+/// for a light whose name is empty.
+pub const DEFAULT_LIGHT_NAME: &str = "Light";
+/// The name a shadow caster gets where none is given (`LightParams::new_caster`,
+/// a caster a patch adds: `merge_json`), and the one an app shows for a caster
+/// whose name is empty.
+pub const DEFAULT_CASTER_NAME: &str = "Caster";
 /// The params format this build reads and writes; clamp() pins `version` to it.
 pub const PARAMS_VERSION: u32 = 1;
 /// Accepted values of `HdriParams::mode`; the first is where unknown strings fall back to.
@@ -1393,7 +1400,7 @@ impl Default for LightParams {
     fn default() -> Self {
         LightParams {
             enabled: true,
-            name: "Light".to_string(),
+            name: DEFAULT_LIGHT_NAME.to_string(),
             shape: "rect".to_string(),
             corner: 0.2,
             inner: 0.5,
@@ -1536,6 +1543,19 @@ impl HdriParams {
         // The typed struct keeps every key it knows, so a patch key missing
         // from its round trip is unknown: report it instead of dropping it silently.
         collect_ignored(&json_tree(&merged)?, patch_fields, "", &mut report);
+        // Every light of a patched list starts from the default light, whose
+        // name is "Light": a caster the patch names nothing is called what
+        // "+ Caster" calls one (plan 4's final review M9). Here and not in
+        // clamp(), which also holds a name typed in the panel: a caster typed
+        // "Light", or "Lighthouse" on its way there, keeps what was typed.
+        if let Some(JsonValue::Array(items)) = patch_fields.get("lights") {
+            for (light, item) in merged.lights.iter_mut().zip(items) {
+                let named = item.as_object().is_some_and(|fields| fields.contains_key("name"));
+                if !named && light.is_caster() {
+                    light.name = DEFAULT_CASTER_NAME.to_string();
+                }
+            }
+        }
         report.extend(merged.clamp());
         // Report each path once, at its first mention.
         let mut seen = HashSet::new();
@@ -1702,7 +1722,7 @@ impl LightParams {
     /// Already clamped.
     pub fn new_caster() -> LightParams {
         LightParams {
-            name: "Caster".to_string(),
+            name: DEFAULT_CASTER_NAME.to_string(),
             shape: LightShape::Rect.as_str().to_string(),
             azimuth_deg: 0.0,
             elevation_deg: 15.0,
@@ -3432,6 +3452,27 @@ mod layer_param_tests {
         let (cleared, _) = merged.merge_json(r#"{"lights": [{"kind": "caster", "caster": null}]}"#).expect("null merges");
         assert_eq!(cleared.lights[0].caster, None);
         assert_eq!(cleared.lights[0].caster_params(), CasterParams::default());
+    }
+
+    /// Plan 4's final review M9: a caster a patch adds without a name is
+    /// called "Caster", as "+ Caster" calls one, not the default light's
+    /// "Light". A name the patch gives is kept, and so is a light's. A name
+    /// typed in the panel ("Light", or "Lighthouse" on its way) never goes
+    /// through the merge, so clamp() leaves it as it is.
+    #[test]
+    fn a_caster_a_patch_adds_without_a_name_is_called_caster() {
+        let patch = r#"{"lights": [{"kind": "caster"}, {"kind": "Caster ", "name": "Tree"}, {"kind": "caster", "name": ""}, {}, {"kind": "light"}]}"#;
+        let (merged, report) = HdriParams::default().merge_json(patch).expect("the patch merges");
+        let names: Vec<&str> = merged.lights.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, [DEFAULT_CASTER_NAME, "Tree", "", DEFAULT_LIGHT_NAME, DEFAULT_LIGHT_NAME]);
+        assert_eq!(report, ["lights[1].kind"], "the name is no clamp: only the kind's spelling is reported");
+        assert_eq!(LightParams::new_caster().name, DEFAULT_CASTER_NAME);
+        assert_eq!(LightParams::default().name, DEFAULT_LIGHT_NAME);
+        // clamp() keeps a caster's name, whatever it says.
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams { name: DEFAULT_LIGHT_NAME.to_string(), ..LightParams::new_caster() });
+        assert!(p.clamp().is_empty());
+        assert_eq!(p.lights[0].name, DEFAULT_LIGHT_NAME);
     }
 
     #[test]

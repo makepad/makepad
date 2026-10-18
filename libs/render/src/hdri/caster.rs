@@ -593,9 +593,28 @@ fn box_mean_pass(grid: &[f32], cols: usize, rows: usize, radius: f64) -> Vec<f32
     out
 }
 
+/// The caster builders the core's tests share (caster.rs, studio.rs,
+/// prepare.rs): one copy, as plan 4's final review asked (D8).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use crate::hdri::{CasterParams, GoboParams, LightParams};
+
+    /// A shadow caster (redesign §5) as "+ Caster" builds one, at (az, el),
+    /// `width_deg` x `height_deg`, its pattern `gobo` (None: solid), with `settings`.
+    pub(crate) fn caster_at(azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32, gobo: Option<GoboParams>, settings: CasterParams) -> LightParams {
+        LightParams { azimuth_deg, elevation_deg, width_deg, height_deg, gobo, caster: Some(settings), ..LightParams::new_caster() }
+    }
+
+    /// A leaves pattern of `density`, grown from `seed`.
+    pub(crate) fn leaves(density: f32, seed: u32) -> GoboParams {
+        GoboParams { kind: "leaves".to_string(), density, seed, ..GoboParams::default() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::fixtures::{caster_at, leaves};
     use super::super::studio::{light_frame, Studio};
     use crate::sky::luminance;
     use makepad_render_material::ibl;
@@ -626,15 +645,6 @@ mod tests {
         LightParams { azimuth_deg, elevation_deg, width_deg: 40.0, height_deg: 30.0, softness: 0.3, intensity_ev: 2.0, ..LightParams::default() }
     }
 
-    /// A caster at (az, el), `width_deg` x `height_deg`, its pattern `gobo` (None: solid).
-    fn caster(azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32, gobo: Option<GoboParams>, settings: CasterParams) -> LightParams {
-        LightParams { azimuth_deg, elevation_deg, width_deg, height_deg, gobo, caster: Some(settings), ..LightParams::new_caster() }
-    }
-
-    fn leaves(density: f32) -> GoboParams {
-        GoboParams { kind: "leaves".to_string(), density, seed: 3, ..GoboParams::default() }
-    }
-
     /// The default caster settings (strength 1, black) at `softness`.
     fn soft(softness: f32) -> CasterParams {
         CasterParams { softness, ..CasterParams::default() }
@@ -647,10 +657,10 @@ mod tests {
     #[test]
     fn a_plain_caster_draws_as_its_flag() {
         let settings = CasterParams { strength: 0.8, tint: [0.2, 0.5, 0.1], ..CasterParams::default() };
-        let patterns = [None, Some(leaves(0.6)), Some(GoboParams { kind: "blinds".to_string(), slats: 8, ..GoboParams::default() }), Some(GoboParams::default())];
+        let patterns = [None, Some(leaves(0.6, 3)), Some(GoboParams { kind: "blinds".to_string(), slats: 8, ..GoboParams::default() }), Some(GoboParams::default())];
         let key = LightParams { key: true, ..softbox(5.0, 25.0) };
         for gobo in patterns {
-            let c = caster(0.0, 25.0, 50.0, 40.0, gobo.clone(), settings.clone());
+            let c = caster_at(0.0, 25.0, 50.0, 40.0, gobo.clone(), settings.clone());
             let pairs = [
                 ("studio", grey_studio(vec![key.clone(), c.clone()]), grey_studio(vec![key.clone(), caster_flag(&c)])),
                 ("sky", sun_sky(vec![c.clone()]), sun_sky(vec![caster_flag(&c)])),
@@ -675,7 +685,7 @@ mod tests {
         let half = 15f32.to_radians().tan();
         for softness in [0.0f32, 0.5] {
             let mut p = lit.clone();
-            p.lights.push(caster(90.0, 0.0, 30.0, 30.0, None, soft(softness)));
+            p.lights.push(caster_at(90.0, 0.0, 30.0, 30.0, None, soft(softness)));
             let shaded = Env::new(&p).bake(64);
             // The blur reaches CASTER_SOFT_SCALE x softness of the half size each way.
             let reach = softness * CASTER_SOFT_SCALE * half;
@@ -718,14 +728,14 @@ mod tests {
         let (open_map, open_key) = (open.bake(64), open.sun().expect("a key").radiance);
         for softness in [0.0f32, 0.5] {
             for name in ["nowhere.png", ""] {
-                let c = caster(0.0, 25.0, 50.0, 40.0, mask(name), soft(softness));
+                let c = caster_at(0.0, 25.0, 50.0, 40.0, mask(name), soft(softness));
                 assert!(!caster_drawn(&c, &images), "{name:?}: a missing picture");
                 assert!(CasterLayer::new(&c, &images).is_none(), "{name:?}: no layer");
                 let env = Env::new_with(&grey_studio(vec![key.clone(), c]), &images);
                 assert!(env.bake(64) == open_map, "softness {softness}, {name:?}: a caster with a missing picture drew");
                 assert_eq!(env.sun().expect("a key").radiance, open_key, "softness {softness}, {name:?}: it dimmed the key");
             }
-            let c = caster(0.0, 25.0, 50.0, 40.0, mask("stripes"), soft(softness));
+            let c = caster_at(0.0, 25.0, 50.0, 40.0, mask("stripes"), soft(softness));
             assert!(caster_drawn(&c, &images));
             let env = Env::new_with(&grey_studio(vec![key.clone(), c]), &images);
             assert!(env.bake(64) != open_map, "softness {softness}: the loaded stripes draw");
@@ -733,8 +743,8 @@ mod tests {
             assert!(share < 0.8, "softness {softness}: the stripes dim the key, which keeps {share}");
         }
         // Every other caster draws, on or off (the studio leaves out what is off).
-        assert!(caster_drawn(&caster(0.0, 25.0, 50.0, 40.0, None, soft(0.0)), &ImageSet::default()));
-        assert!(caster_drawn(&LightParams { enabled: false, ..caster(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5)), soft(0.0)) }, &ImageSet::default()));
+        assert!(caster_drawn(&caster_at(0.0, 25.0, 50.0, 40.0, None, soft(0.0)), &ImageSet::default()));
+        assert!(caster_drawn(&LightParams { enabled: false, ..caster_at(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5, 3)), soft(0.0)) }, &ImageSet::default()));
     }
 
     /// Decision 10: softness rasters the caster's pattern once per Env, and a
@@ -746,11 +756,11 @@ mod tests {
         use crate::hdri::probe::{counted, Work};
         let key = LightParams { key: true, ..softbox(0.0, 25.0) };
         let before = counted(Work::CasterSoft);
-        let sharp = Env::new(&grey_studio(vec![key.clone(), caster(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5)), soft(0.0))]));
+        let sharp = Env::new(&grey_studio(vec![key.clone(), caster_at(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5, 3)), soft(0.0))]));
         sharp.bake(32);
         sharp.sun();
         assert_eq!(counted(Work::CasterSoft), before, "a sharp caster rasters nothing");
-        let p = grey_studio(vec![key, caster(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5)), soft(0.4)), caster(90.0, 10.0, 30.0, 30.0, None, soft(1.0))]);
+        let p = grey_studio(vec![key, caster_at(0.0, 25.0, 50.0, 40.0, Some(leaves(0.5, 3)), soft(0.4)), caster_at(90.0, 10.0, 30.0, 30.0, None, soft(1.0))]);
         let env = Env::new(&p);
         assert_eq!(counted(Work::CasterSoft), before + 2, "one raster per soft caster");
         let serial = env.bake(32);
@@ -790,8 +800,8 @@ mod tests {
     #[test]
     fn softness_keeps_the_light_a_caster_lets_through() {
         let patterns = [
-            ("leaves", leaves(0.5)),
-            ("dense leaves", leaves(0.9)),
+            ("leaves", leaves(0.5, 3)),
+            ("dense leaves", leaves(0.9, 3)),
             ("fern", GoboParams { kind: "fern".to_string(), density: 0.6, ..GoboParams::default() }),
             ("window", GoboParams::default()),
             ("blinds", GoboParams { kind: "blinds".to_string(), slats: 10, ..GoboParams::default() }),
@@ -799,7 +809,7 @@ mod tests {
         // The widest blur reaches CASTER_SOFT_SCALE of the shorter half extent past the box.
         let pad = CASTER_SOFT_SCALE * 22.5f32.to_radians().tan() + 0.01;
         for (name, gobo) in patterns {
-            let sharp_caster = caster(0.0, 20.0, 60.0, 45.0, Some(gobo), soft(0.0));
+            let sharp_caster = caster_at(0.0, 20.0, 60.0, 45.0, Some(gobo), soft(0.0));
             // The sharp map's hard edges alias on a coarse grid (the window's
             // muntins read 2 % high at 300); the blurred one is smooth.
             let sharp = mean_coverage(&sharp_caster, pad, 600);
@@ -847,10 +857,10 @@ mod tests {
     fn a_soft_caster_is_a_box_filter_of_its_pattern() {
         let images = ImageSet::default();
         let cases = [
-            ("leaves", caster(30.0, 20.0, 60.0, 45.0, Some(leaves(0.6)), soft(0.5))),
-            ("a rolled window", LightParams { roll_deg: 20.0, ..caster(200.0, 40.0, 40.0, 30.0, Some(GoboParams::default()), soft(1.0)) }),
-            ("a small solid", caster(120.0, -10.0, 8.0, 5.0, None, soft(0.2))),
-            ("leaves at a slight softness", caster(300.0, 10.0, 90.0, 60.0, Some(leaves(0.8)), soft(0.05))),
+            ("leaves", caster_at(30.0, 20.0, 60.0, 45.0, Some(leaves(0.6, 3)), soft(0.5))),
+            ("a rolled window", LightParams { roll_deg: 20.0, ..caster_at(200.0, 40.0, 40.0, 30.0, Some(GoboParams::default()), soft(1.0)) }),
+            ("a small solid", caster_at(120.0, -10.0, 8.0, 5.0, None, soft(0.2))),
+            ("leaves at a slight softness", caster_at(300.0, 10.0, 90.0, 60.0, Some(leaves(0.8, 3)), soft(0.05))),
         ];
         let white = Vec3f::all(1.0);
         for (name, c) in cases {
