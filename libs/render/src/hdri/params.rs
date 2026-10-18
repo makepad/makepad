@@ -542,8 +542,9 @@ pub struct LightImageParams {
     /// at the border. The band is `penumbra` x the picture's depth in the
     /// light's tangent plane, the scale the light's Softness takes, so 1
     /// fades right to the picture's centre. Only the border fades; the
-    /// picture's content stays sharp. At 0 the light draws exactly as
-    /// without it.
+    /// picture's content stays sharp, and a masked picture's cut-out edges
+    /// are `mask_softness`'s (P2). At 0 the light draws exactly as without
+    /// it.
     /// - "fit": the border is the letterboxed picture's own, where the light
     ///   is dark past it; the band is penumbra x its inradius (half its
     ///   shorter side), the same along both of its axes (their product
@@ -563,21 +564,31 @@ pub struct LightImageParams {
     ///   multiplied, so the light's reach is unchanged and at Penumbra 0
     ///   the edge is Softness's alone.
     pub penumbra: Option<f32>,
-    /// With `alpha_as_mask` (P1; None = false): the picture's own cut-out
-    /// edges soften over the same band too, through an exact box filter of
-    /// the premultiplied picture (its colour times its alpha, and its
-    /// alpha), so the colour fades with its alpha and no dark fringe shows
-    /// where the alpha was 0. The box filter softens detail finer than the
-    /// band with the edges. Nothing without `alpha_as_mask` or at Penumbra 0.
-    pub soften_mask: Option<bool>,
+    /// `IMAGE_MASK_SOFTNESS_RANGE`, 0..=1 (P2, the owner's decision; None =
+    /// 0, NaN is held to 0): with `alpha_as_mask`, the picture's own cut-out
+    /// edges soften through an exact box filter of the premultiplied picture
+    /// (its colour times its alpha, and its alpha), so the colour fades with
+    /// its alpha and no dark fringe shows where the alpha was 0. The box is
+    /// `mask_softness` x `image_light::MASK_SOFTNESS_SHARE` (5 %) of the
+    /// picture's smaller side across, in the picture's own texels: 1 blurs a
+    /// hard edge over 5 % of it, 0 keeps the sharp cut-out. It is the
+    /// picture's own, whatever the Penumbra (which fades only the border)
+    /// and the fit. The box softens detail finer than it with the edges.
+    /// Nothing without `alpha_as_mask`. A preset saved with P1's
+    /// `soften_mask` tick, which this replaced, loads with its edges sharp:
+    /// presets load leniently, so the old field is skipped.
+    pub mask_softness: Option<f32>,
 }
 
 /// What clamp() keeps of `LightImageParams::penumbra`; NaN is 0.
 pub const IMAGE_PENUMBRA_RANGE: (f32, f32) = (0.0, 1.0);
 
+/// What clamp() keeps of `LightImageParams::mask_softness`; NaN is 0.
+pub const IMAGE_MASK_SOFTNESS_RANGE: (f32, f32) = (0.0, 1.0);
+
 impl Default for LightImageParams {
     fn default() -> Self {
-        LightImageParams { key: String::new(), fit: "stretch".to_string(), alpha_as_mask: false, penumbra: None, soften_mask: None }
+        LightImageParams { key: String::new(), fit: "stretch".to_string(), alpha_as_mask: false, penumbra: None, mask_softness: None }
     }
 }
 
@@ -615,9 +626,9 @@ impl LightImageParams {
         self.penumbra.unwrap_or(0.0)
     }
 
-    /// `soften_mask`, None read as false.
-    pub fn soften_mask(&self) -> bool {
-        self.soften_mask.unwrap_or(false)
+    /// `mask_softness`, None read as 0. As it is: a block clamp() holds is in range.
+    pub fn mask_softness(&self) -> f32 {
+        self.mask_softness.unwrap_or(0.0)
     }
 
     fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
@@ -628,6 +639,9 @@ impl LightImageParams {
         f.choice(prefix, "fit", &mut self.fit, IMAGE_FIT_NAMES);
         if let Some(penumbra) = self.penumbra.as_mut() {
             f.range(prefix, "penumbra", penumbra, IMAGE_PENUMBRA_RANGE.0, IMAGE_PENUMBRA_RANGE.1, 0.0);
+        }
+        if let Some(mask_softness) = self.mask_softness.as_mut() {
+            f.range(prefix, "mask_softness", mask_softness, IMAGE_MASK_SOFTNESS_RANGE.0, IMAGE_MASK_SOFTNESS_RANGE.1, 0.0);
         }
     }
 }
@@ -2718,44 +2732,74 @@ mod source_param_tests {
         assert!(!plain.to_json().contains("image"));
     }
 
-    /// P1: Penumbra and Soften mask edges are Options, so a preset saved
-    /// before them loads (with neither), and clamp() holds Penumbra to
-    /// `IMAGE_PENUMBRA_RANGE` (NaN to 0, the default) and reports it, as it
-    /// does every other field.
+    /// P1, P2: Penumbra and Mask softness are Options, so a preset saved
+    /// before them loads (with neither), and clamp() holds them to
+    /// `IMAGE_PENUMBRA_RANGE` and `IMAGE_MASK_SOFTNESS_RANGE` (NaN to 0, the
+    /// default) and reports it, as it does every other field.
     #[test]
-    fn a_pictures_penumbra_is_held_and_old_presets_load() {
+    fn a_pictures_penumbra_and_mask_softness_are_held_and_old_presets_load() {
         let mut p = HdriParams::default();
-        for penumbra in [-0.5, 1.5, f32::NAN, f32::INFINITY, 0.3, 0.0, 1.0] {
-            let image = LightImageParams { key: "a.png".to_string(), penumbra: Some(penumbra), soften_mask: Some(true), ..LightImageParams::default() };
+        for value in [-0.5, 1.5, f32::NAN, f32::INFINITY, 0.3, 0.0, 1.0] {
+            let image = LightImageParams { key: "a.png".to_string(), penumbra: Some(value), mask_softness: Some(value), ..LightImageParams::default() };
             p.lights.push(LightParams { image: Some(image), ..LightParams::default() });
         }
-        let held = ["lights[0].image.penumbra", "lights[1].image.penumbra", "lights[2].image.penumbra", "lights[3].image.penumbra"];
+        let held: Vec<String> = (0..4).flat_map(|i| [format!("lights[{i}].image.penumbra"), format!("lights[{i}].image.mask_softness")]).collect();
         assert_eq!(p.clamp(), held);
+        let want = [Some(0.0), Some(1.0), Some(0.0), Some(1.0), Some(0.3), Some(0.0), Some(1.0)];
         let penumbras: Vec<Option<f32>> = p.lights.iter().map(|l| l.image.as_ref().unwrap().penumbra).collect();
-        assert_eq!(penumbras, [Some(0.0), Some(1.0), Some(0.0), Some(1.0), Some(0.3), Some(0.0), Some(1.0)]);
+        let softnesses: Vec<Option<f32>> = p.lights.iter().map(|l| l.image.as_ref().unwrap().mask_softness).collect();
+        assert_eq!((penumbras.as_slice(), softnesses.as_slice()), (&want[..], &want[..]));
         assert!(p.clamp().is_empty(), "held values stay");
-        assert_eq!(IMAGE_PENUMBRA_RANGE, (0.0, 1.0));
+        assert_eq!((IMAGE_PENUMBRA_RANGE, IMAGE_MASK_SOFTNESS_RANGE), ((0.0, 1.0), (0.0, 1.0)));
         // Saved and loaded with the settings, as the other picture fields are.
         assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
         // A file from before P1: its image blocks have neither field.
         let mut tree = JsonValue::deserialize_json(&p.to_json()).unwrap();
         for light in tree.get_mut("lights").and_then(JsonValue::as_array_mut).unwrap() {
             let Some(JsonValue::Object(image)) = light.get_mut("image") else { panic!("an image block") };
-            assert!(image.remove("penumbra").is_some() && image.remove("soften_mask").is_some());
+            assert!(image.remove("penumbra").is_some() && image.remove("mask_softness").is_some());
         }
         let old = tree.serialize_json();
-        assert!(!old.contains("penumbra") && !old.contains("soften_mask"));
+        assert!(!old.contains("penumbra") && !old.contains("mask_softness"));
         let mut loaded = HdriParams::from_json(&old).expect("a preset saved before P1 loads");
         assert!(loaded.clamp().is_empty());
         for light in &loaded.lights {
             let image = light.image.as_ref().unwrap();
-            assert_eq!((image.penumbra, image.soften_mask, image.penumbra(), image.soften_mask()), (None, None, 0.0, false));
+            assert_eq!((image.penumbra, image.mask_softness, image.penumbra(), image.mask_softness()), (None, None, 0.0, 0.0));
         }
         // A patch names them as it names the other picture fields.
-        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"image": {"key": "a.png", "penumbra": 7, "soften_mask": true}}]}"#).unwrap();
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"image": {"key": "a.png", "penumbra": 7, "mask_softness": 3}}]}"#).unwrap();
         let image = merged.lights[0].image.as_ref().unwrap();
-        assert_eq!((image.penumbra, image.soften_mask), (Some(1.0), Some(true)));
-        assert_eq!(report, ["lights[0].image.penumbra"]);
+        assert_eq!((image.penumbra, image.mask_softness), (Some(1.0), Some(1.0)));
+        assert_eq!(report, ["lights[0].image.penumbra", "lights[0].image.mask_softness"]);
+    }
+
+    /// P2: a preset saved with P1's Soften mask edges tick (`soften_mask`,
+    /// a bool, only between P1 and P2) still loads: `from_json` reads
+    /// leniently, so the field this build no longer has is skipped and the
+    /// picture's cut-out edges load sharp (Mask softness None), the rest of
+    /// the block as it was; saved again it is gone. A patch that still names
+    /// it is told so ("ignored"), as for any unknown key.
+    #[test]
+    fn a_preset_saved_with_p1s_soften_mask_still_loads() {
+        // A preset as P1 saved it: its picture's block carries the tick.
+        let image = LightImageParams { key: "logo.png".to_string(), fit: "fit".to_string(), alpha_as_mask: true, penumbra: Some(0.3), mask_softness: None };
+        let saved = HdriParams { lights: vec![LightParams { name: "Logo".to_string(), image: Some(image), ..LightParams::default() }], ..HdriParams::default() };
+        let mut tree = JsonValue::deserialize_json(&saved.to_json()).unwrap();
+        let Some(JsonValue::Object(block)) = tree.get_mut("lights").and_then(JsonValue::as_array_mut).unwrap()[0].get_mut("image") else { panic!("an image block") };
+        block.remove("mask_softness");
+        block.insert("soften_mask".to_string(), JsonValue::Bool(true));
+        let p1 = tree.serialize_json();
+        assert!(p1.contains(r#""soften_mask":true"#) && !p1.contains("mask_softness\""), "{p1}");
+        let loaded = HdriParams::from_json(&p1).expect("a P1 preset with soften_mask loads");
+        let image = loaded.lights[0].image.as_ref().expect("its picture");
+        assert_eq!((image.key.as_str(), image.fit.as_str(), image.alpha_as_mask, image.penumbra), ("logo.png", "fit", true, Some(0.3)));
+        assert_eq!((image.mask_softness, image.mask_softness()), (None, 0.0));
+        assert_eq!(loaded.lights[0].name, "Logo");
+        assert!(!loaded.to_json().contains("soften_mask"), "never written back");
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"image": {"key": "a.png", "soften_mask": true}}]}"#).unwrap();
+        assert_eq!(merged.lights[0].image.as_ref().unwrap().mask_softness, None);
+        assert_eq!(report, ["ignored: lights[0].image.soften_mask"]);
     }
 
     #[test]

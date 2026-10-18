@@ -326,7 +326,7 @@ fn a_held_drag_on_a_heavy_studio_stays_fast() {
     });
 }
 
-/// P1: a 2048 x 2048 light picture's softened mask (Soften mask edges) is
+/// P1, P2: a 2048 x 2048 light picture's softened mask (Mask softness) is
 /// one summed-area table of four f64 sums an entry, (2049 x 2049) x 32 bytes
 /// = 134.3 MB, built for the first light that softens the picture. Timed as
 /// the first `Env::new_with` that softens a fresh picture against one that
@@ -350,7 +350,7 @@ fn a_softened_2048_picture_builds_its_table_once() {
                 fit: "fit".to_string(),
                 alpha_as_mask: true,
                 penumbra: Some(0.3),
-                soften_mask: Some(soften),
+                mask_softness: Some(if soften { 1.0 } else { 0.0 }),
             }),
             ..LightParams::default()
         }],

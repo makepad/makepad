@@ -697,8 +697,8 @@ mod tests {
 
     /// P1: a 60 x 40 degree soft rect key showing the picture "logo" in fit
     /// (letterboxed above and below), its alpha cutting it out, with a
-    /// penumbra, its cut-out edges softened or not.
-    fn logo_key(penumbra: f32, soften_mask: bool) -> LightParams {
+    /// penumbra, and its cut-out edges softened by `mask_softness` (P2).
+    fn logo_key(penumbra: f32, mask_softness: f32) -> LightParams {
         LightParams {
             key: true,
             azimuth_deg: 150.0,
@@ -711,7 +711,7 @@ mod tests {
                 fit: "fit".to_string(),
                 alpha_as_mask: true,
                 penumbra: Some(penumbra),
-                soften_mask: Some(soften_mask),
+                mask_softness: Some(mask_softness),
             }),
             ..LightParams::default()
         }
@@ -727,8 +727,8 @@ mod tests {
     /// and cross bars are transparent and whose glass runs warm to cool;
     /// "stripes", vertical opaque stripes on a transparent ground (a cut-out
     /// flag); "clear", all transparent; "logo" (P1), a 5:2 badge, an
-    /// ellipse and three bars running warm to cool on a transparent black
-    /// ground; "photo", a 256 x 128 equirect of a blue sky over brown
+    /// ellipse and four bars running warm to cool on a transparent black
+    /// ground, 200 x 80 so Mask softness 1 (P2) blurs it over 4 texels; "photo", a 256 x 128 equirect of a blue sky over brown
     /// ground; and "photo_sun", the same with a 3 degree sun at azimuth 120,
     /// 30 degrees up.
     fn images_1b() -> ImageSet {
@@ -750,10 +750,10 @@ mod tests {
         images.insert("clear", picture(8, 8, &|_, _| [1.0, 1.0, 1.0, 0.0]));
         images.insert(
             "logo",
-            picture(40, 16, &|x, y| {
-                let (dx, dy) = ((x as f32 - 19.5) / 18.0, (y as f32 - 7.5) / 6.0);
-                let bar = x % 10 < 3 && (4..12).contains(&y);
-                let t = x as f32 / 39.0;
+            picture(200, 80, &|x, y| {
+                let (dx, dy) = ((x as f32 - 99.5) / 90.0, (y as f32 - 39.5) / 30.0);
+                let bar = x % 50 < 15 && (20..60).contains(&y);
+                let t = x as f32 / 199.0;
                 if dx * dx + dy * dy < 1.0 || bar { [1.4 - t, 1.0, 0.4 + t, 1.0] } else { [0.0; 4] }
             }),
         );
@@ -923,8 +923,10 @@ mod tests {
             case("1b: a picture key with a masked window frame", studio_1b(vec![picture_key()]), 0.005),
             // P1: a picture's penumbra, and its softened cut-out edges, are in
             // the map's drawing, so the key carries them too.
-            case("1b: a logo key in fit mode with a penumbra", studio_1b(vec![logo_key(0.5, false)]), 0.005),
-            case("1b: a logo key in fit mode, its cut-out edges softened", studio_1b(vec![logo_key(0.3, true)]), 0.005),
+            case("1b: a logo key in fit mode with a penumbra", studio_1b(vec![logo_key(0.5, 0.0)]), 0.005),
+            case("1b: a logo key in fit mode, its cut-out edges softened", studio_1b(vec![logo_key(0.3, 1.0)]), 0.005),
+            // P2: Mask softness is the picture's own, Penumbra or none.
+            case("1b: a logo key, its cut-out edges softened without a penumbra", studio_1b(vec![logo_key(0.0, 0.6)]), 0.005),
             case(
                 "1b: a picture key in stretch, its penumbra widening its soft edge",
                 studio_1b(vec![{

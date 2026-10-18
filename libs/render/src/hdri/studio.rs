@@ -931,8 +931,9 @@ impl PreparedLight {
         // P1: a picture that covers the light (stretch, fill) has the light's
         // edge for its border, and its Penumbra widens the light's soft edge
         // inward by that share of the depth the Softness takes (a shaped
-        // light's own, `ShapedLight::depth`); its softened mask spans as
-        // much. A picture in fit fades inside its own border (`LightImage`).
+        // light's own, `ShapedLight::depth`). A picture in fit fades inside
+        // its own border (`LightImage`). Its Mask softness (P2) is the
+        // picture's own, in its texels, whatever the light.
         let depth = shaped.as_ref().map_or(inradius, ShapedLight::depth);
         let image = l.image.as_ref().and_then(|image| LightImage::new(image, images)).map(|image| image.with_depth(depth));
         let inset = image.as_ref().map_or(0.0, LightImage::edge_inset);

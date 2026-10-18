@@ -1241,7 +1241,7 @@ pub(crate) mod probe {
         PictureMean,
         /// A worn face's normaliser sampled (`Imperfections::mean_raw`).
         WearNorm,
-        /// A light picture's softened-mask table built (`image_light::SoftTable`, P1).
+        /// A light picture's softened-mask table built (`image_light::SoftTable`, P1, P2).
         SoftMask,
     }
 
