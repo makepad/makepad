@@ -1193,6 +1193,66 @@ mod tests {
         }
     }
 
+    /// P2 (a check finding on P1): an elongated disc in stretch or fill
+    /// whose widened ramp reaches deeper than the disc itself (Softness / 2
+    /// + Penumbra above 1) showed a bow-tie pinch at its centre. A3's
+    /// first-order ellipse distance (`studio::ellipse_metric`) is (k0 - 1)
+    /// times the half axis along the way in, so the centre read as deep as
+    /// the long half axis seen along the disc and as the short one seen
+    /// across it. A 4:1 disc at Softness 1, Penumbra 1 now has no local
+    /// minimum along either axis and its one maximum at the centre, which
+    /// every direction reaches alike (no pinch), in both fits.
+    #[test]
+    fn a_long_discs_deep_ramp_peaks_at_its_centre_without_a_pinch() {
+        let flat = set_of("flat", picture(4, 4, |_, _| [1.0, 1.0, 1.0, 1.0]));
+        let hy = 10f32.to_radians().tan();
+        let hx = 4.0 * hy;
+        for fit in ["stretch", "fill"] {
+            let light = LightParams {
+                shape: "disc".to_string(),
+                width_deg: 2.0 * hx.atan().to_degrees(),
+                height_deg: 20.0,
+                softness: 1.0,
+                rgb: Some([1.0; 3]),
+                intensity_ev: 0.0,
+                image: Some(soft_image("flat", fit, 1.0)),
+                ..image_light("flat")
+            };
+            let env = Env::new_with(&dark_studio(vec![light.clone()]), &flat);
+            let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
+            let at = |x: f32, y: f32| luminance(env.radiance((f.center + f.right * x + f.up * y).normalize()));
+            let centre = at(0.0, 0.0);
+            assert!(centre > 0.5, "{fit}: the centre is lit: {centre}");
+            // Along each axis, from the centre out past the reach both ways:
+            // never rising, so no local minimum, and the centre's the most.
+            for (name, axis) in [("the long axis", vec2f(1.5 * hx, 0.0)), ("the short axis", vec2f(0.0, 1.5 * hx))] {
+                for side in [1.0f32, -1.0] {
+                    let mut last = centre;
+                    for i in 1..=600 {
+                        let t = side * i as f32 / 600.0;
+                        let got = at(axis.x * t, axis.y * t);
+                        assert!(got <= last + 1.0e-6, "{fit}, {name} at {t}: it rises outward from {last} to {got} (a local minimum)");
+                        last = got;
+                    }
+                }
+            }
+            // The one maximum is the centre's: nothing over the disc is brighter.
+            for j in 0..=40 {
+                for i in 0..=80 {
+                    let (x, y) = (1.2 * hx * (i as f32 / 40.0 - 1.0), 1.2 * hy * (j as f32 / 20.0 - 1.0));
+                    let got = at(x, y);
+                    assert!(got <= centre + 1.0e-6, "{fit} at ({x}, {y}): {got} is brighter than the centre's {centre}");
+                }
+            }
+            // No pinch: every way into the centre ends at the centre's value.
+            for k in 0..64 {
+                let angle = std::f32::consts::TAU * k as f32 / 64.0;
+                let near = at(1.0e-3 * hx * angle.cos(), 1.0e-3 * hy * angle.sin());
+                assert!((near - centre).abs() < 2.0e-3, "{fit}: {near} just off the centre at {} degrees, {centre} at it", angle.to_degrees());
+            }
+        }
+    }
+
     /// The mean of the premultiplied picture (colour x alpha, and alpha)
     /// over the box centred on (x, y) with half-widths (rx, ry), in texels
     /// (texel (i, j) covers i..i+1 by j..j+1), each at least half a texel,

@@ -1076,8 +1076,19 @@ impl PreparedLight {
                 (sd_round_rect(p, self.half, self.corner), nx * nx + ny * ny)
             }
             LightShape::Disc => {
+                // The first-order distance (`ellipse_metric`) is (k0 - 1)
+                // times the half axis along the way in, so a long disc's
+                // centre reads as deep as its long half axis seen along it
+                // and as its short one seen across it. No point of the disc
+                // is deeper than its inradius (the short half axis): held
+                // there, every way into the centre ends at one value. P2: a
+                // ramp that reaches that deep (Softness / 2 + Penumbra above
+                // 1) pinched the centre into a bow-tie; one that stays
+                // shallower never reads the held part and draws as before,
+                // bit for bit. Along the long axis the deepest stretch is
+                // flat, as a rect's is.
                 let (k0, scale) = ellipse_metric(p, self.half);
-                ((k0 - 1.0) * scale, k0 * k0)
+                (((k0 - 1.0) * scale).max(-self.half.x.min(self.half.y)), k0 * k0)
             }
             LightShape::Ring => {
                 // abs(r - R) - w, with the radius measured in the ellipse's own units.
@@ -1117,7 +1128,9 @@ fn sd_round_rect(p: Vec2f, half: Vec2f, radius: f32) -> f32 {
 /// - the tangent-plane length of one unit of k0 near `p`, k0 / |grad k0|.
 ///
 /// This is iq's first-order ellipse distance. It is exact for a circle and close
-/// near the edge, which is where the soft edge reads it.
+/// near the edge, which is where the soft edge reads it. Deep inside a long
+/// ellipse it is not: the centre is as deep as the half axis along the way
+/// in, so a disc holds it at its inradius (`PreparedLight::mask`, P2).
 fn ellipse_metric(p: Vec2f, half: Vec2f) -> (f32, f32) {
     let nx = p.x / half.x;
     let ny = p.y / half.y;
