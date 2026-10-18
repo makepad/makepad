@@ -436,10 +436,12 @@ impl Env {
     /// bloom on, in list order, so a caster sees the bloom of the casters
     /// before it. What the map draws behind the caster (`content_before`) and
     /// its own coverage are rastered in its frame for a map `width` wide, the
-    /// sun's and the moon's discs sampled on grids of their own (D6), the rows
-    /// spread by `run` (M5). A caster that nothing bright stands behind keeps
-    /// no raster: it stays exactly the flag it draws as. False when `cancelled`
-    /// stopped it (or the runner skipped a row).
+    /// sun's and the moon's discs sampled on grids of their own (D6), what the
+    /// lights before it may reach as finely as those lights ask
+    /// (`Studio::bright_boxes`), the rows spread by `run` (M5). A caster that
+    /// nothing bright stands behind keeps no raster: it stays exactly the flag
+    /// it draws as. False when `cancelled` stopped it (or the runner skipped a
+    /// row).
     fn build_caster_bloom(&mut self, width: usize, cancelled: &dyn Fn() -> bool, run: caster::RowRunner) -> bool {
         let entries = self.studio.bloom_casters();
         if entries.is_empty() {
@@ -458,7 +460,8 @@ impl Env {
                 let Some(caster) = env.studio.caster(entry) else { continue };
                 let behind = |d: Vec3f| env.content_before(d, entry, at);
                 let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
-                caster::CasterBloom::build(caster, width, &hot, &behind, &sharp, cancelled, run)
+                let bright = env.studio.bright_boxes(entry);
+                caster::CasterBloom::build(caster, width, &hot, &bright, &behind, &sharp, cancelled, run)
             };
             let Some(bloom) = built else { return false };
             if bloom.thins_anything() {

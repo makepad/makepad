@@ -28,7 +28,7 @@ use super::gels::gel_stack;
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
 use super::light_fx::LightFx;
-use super::caster::{caster_drawn, caster_flag, serial_rows, CasterBloom, CasterLayer, RowRunner};
+use super::caster::{caster_drawn, caster_flag, serial_rows, BrightBox, CasterBloom, CasterLayer, RowRunner};
 use std::borrow::Cow;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
@@ -526,6 +526,17 @@ impl Studio {
     /// builds a raster for.
     pub(super) fn bloom_casters(&self) -> Vec<usize> {
         self.casters.iter().enumerate().filter_map(|(i, c)| c.as_ref().filter(|c| c.wants_bloom()).map(|_| i)).collect()
+    }
+
+    /// Where the lights listed before entry `end` may add light (an Add light, or a window
+    /// filled with sky), for a caster's bloom there (`CasterBloom::build`): each one's
+    /// [`BrightBox`]. Flags and casters only take light away and are left out.
+    pub(super) fn bright_boxes(&self, end: usize) -> Vec<BrightBox> {
+        let end = end.min(self.lights.len());
+        (0..end)
+            .filter(|&i| self.casters[i].is_none() && (self.lights[i].blend == Blend::Add || self.fx[i].fills_with_sky()))
+            .map(|i| self.lights[i].bright_box(!self.fx[i].is_plain()))
+            .collect()
     }
 
     /// Hands caster `entry` its bloom. It is no longer plain, so the per-entry
@@ -1138,6 +1149,28 @@ impl PreparedLight {
     /// (`PROJECT_MIN_COS`), past which nothing is drawn.
     fn box_cover(&self) -> f32 {
         (1.0 / (1.0 + self.reach.x * self.reach.x + self.reach.y * self.reach.y).sqrt()).max(PROJECT_MIN_COS)
+    }
+
+    /// Where this light may draw and how fine its drawing is (`Studio::bright_boxes`): the
+    /// cone that holds its reach (`key_cones`), its box (but a stroke's, which its points
+    /// place), and its narrowest feature, the shorter side of its box (a ring's band). It has
+    /// detail inside that box when a picture, a shape core or what hangs in front of it
+    /// (`hung`) draws it.
+    fn bright_box(&self, hung: bool) -> BrightBox {
+        let (axis, _, cos_cover) = self.key_cones();
+        let short = self.half.x.min(self.half.y);
+        let feature = match self.shape {
+            LightShape::Ring => 2.0 * self.ring_half * short,
+            _ => 2.0 * short,
+        };
+        let stroke = self.shaped.as_ref().is_some_and(|s| s.stroke_cones().is_some());
+        BrightBox {
+            axis,
+            cos_cover,
+            frame_reach: (!stroke).then_some((self.frame, self.reach)),
+            feature,
+            detailed: hung || self.image.is_some() || self.shaped.is_some(),
+        }
     }
 
     /// The key's cones when this light is the key, `(axis, cos_radius,
