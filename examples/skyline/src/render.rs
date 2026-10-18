@@ -64,6 +64,9 @@ impl ViewSpec {
     pub fn px0(&self) -> f64 { self.span * TAU / self.w as f64 }
     /// Pass row of raw elevation `ang` (rad).
     pub fn row_of(&self, ang: f64) -> f64 { self.horizon * self.h as f64 - ang / self.px0() }
+    /// The reflection run's view: the horizon moved by under a pixel, so the mirrored rows sample the elevations of the
+    /// upright rows (the water reads the mirror on the upright grid, as the page reads its upright layers).
+    pub fn mirrored(&self) -> Self { let y = self.horizon * self.h as f64; Self { horizon: (2.0 * y.round() - y) / self.h as f64, ..*self } }
 }
 
 /// A pass with RGBA16F targets cleared to transparent: two (colour + coverage, light + coverage), or one (`color` and
@@ -110,8 +113,9 @@ pub struct SceneCtx<'a> {
     pub city: Option<(Texture, Texture)>,
     /// The producers' passes (trees, city): a pass that samples them puts them under itself, so they paint first.
     pub inputs: [Option<DrawPassId>; 2],
-    /// The reflection run: everything seen mirrored about the horizon (or its own waterline).
-    pub mirror: bool,
+    /// The reflection run: everything seen mirrored about the horizon (or its own waterline); the upright run's horizon
+    /// row less this run's (px; see [`ViewSpec::mirrored`]).
+    pub mirror: bool, pub up_dy: f64,
 }
 
 impl SceneCtx<'_> {
@@ -124,6 +128,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(view_horizon), &[v.horizon as f32]);
         vars.set_uniform(cx, live_id!(col_geom), &self.col_geom);
         vars.set_uniform(cx, live_id!(mirror), &[if self.mirror { 1.0 } else { 0.0 }]);
+        vars.set_uniform(cx, live_id!(up_dy), &[self.up_dy as f32]);
         vars.set_uniform(cx, live_id!(sil), &SIL);
         vars.set_uniform(cx, live_id!(haze_col), &HAZE_COL);
         bind_texture(cx, vars, live_id!(cols), self.cols);
@@ -269,7 +274,8 @@ impl Skyline {
         let blank = self.blank.as_ref().unwrap();
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
-        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false };
+        let mv = view.mirrored();
+        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
@@ -283,9 +289,9 @@ impl Skyline {
         let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35);
         self.mirror = (self.post.wants_mirror(p) && sea).then(|| {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
-            sc.mirror = true;
+            (sc.mirror, sc.view, sc.up_dy) = (true, &mv, (view.horizon - mv.horizon) * view.h as f64);
             mirror.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-            sc.mirror = false;
+            (sc.mirror, sc.view, sc.up_dy) = (false, view, 0.0);
             mirror
         });
         self.post.draw_passes(cx, &sc, &crate::post::SceneOut { view, scene: &scene, mirror: self.mirror.as_ref() });

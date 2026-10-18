@@ -3,6 +3,7 @@
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
 use crate::params::{Params, P};
 use crate::render::{bind_texture, SceneCtx, SceneTarget, ViewSpec};
+use crate::rng::TAU;
 use makepad_widgets::makepad_draw::*;
 
 script_mod! {
@@ -60,6 +61,8 @@ script_mod! {
         ..mod.draw.SkyScene,
         scene_light: texture_2d(float)
         mirror_light: texture_2d(float)
+        // the mirror target's horizon (`ViewSpec::mirrored`)
+        mirror_horizon: uniform(0.8)
         pr_refl: uniform(0.6)
         pr_ripple: uniform(0.4)
         refl_h: fn(c: float, j: float, ly: float) -> float { return self.rnd(c, j + 8192.0, ly) }
@@ -81,10 +84,12 @@ script_mod! {
             let du = rip * ((self.refl_h(c3, j, 2002.0) - 0.5) * 2.0 * (0.0012 + 0.03 * al) - 0.8 * (fx - step(0.5, fx)) * 6.2831853 / nu) / 6.2831853
             // the mirror point (raw azimuth vr.x + du, raw elevation -vr.y el / al), which the mirror target shows below its horizon
             let x = ((fract(vr.x + du - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_size.x
-            let y = self.view_horizon * self.view_size.y - vr.y * el / max(al, 0.00001) / vr.z
+            let y = self.mirror_horizon * self.view_size.y - vr.y * el / max(al, 0.00001) / vr.z
             let m = self.mirror_light.sample(clamp(vec2(x, y), vec2(0.5, 0.5), self.view_size - vec2(0.5, 0.5)) / self.view_size)
             return vec4(e.xyz + m.xyz * (w * sea * sqrt(dc) * mix(1.0, 0.85, rip) * self.cover(g.y - v.y, v.z)), e.w)
         }
+        // one target, but SkyScene declares a second output: written too, so no backend leaves it undefined
+        fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = c }
     }
 
     mod.draw.SkyPostBase = #(Post::script_component(vm))
@@ -109,6 +114,13 @@ fn widen(v: &ViewSpec, m: usize) -> ViewSpec {
 /// The blur's margin for view `v`: 3 sigma plus 2 px when the blur shows (the page's), else 0.
 fn blur_margin(p: &Params, v: &ViewSpec) -> usize { let s = blur_sigma(p, v); if s > 0.0 { (3.0 * s).ceil() as usize + 2 } else { 0 } }
 
+/// The water's margin for view `v` (px): the farthest its ripple moves a mirror sample sideways, (0.0072 / tau + 0.4 / nu)
+/// of a turn at full ripple (`du` in DrawSkyWater, al < 0.2), plus a texel for the filter; 0 for a whole turn, which wraps.
+fn water_margin(p: &Params, v: &ViewSpec) -> usize {
+    let r = p[P::PrRipple] * (0.0072 / TAU + 0.4 / (160.0 + 540.0 * p[P::PrRipple]).floor());
+    if v.span < 1.0 && r > 0.0 { (r * v.w as f64 / v.span).ceil() as usize + 1 } else { 0 }
+}
+
 /// The blur's sigma in pixels of view `v` (the page's `blurSigmaPx`: a share of the turn, so every size looks the same),
 /// 0 below the 0.3 px the page skips.
 pub fn blur_sigma(p: &Params, v: &ViewSpec) -> f64 {
@@ -129,8 +141,12 @@ impl Post {
     pub fn wants_mirror(&self, p: &Params) -> bool { p[P::PrRefl] > 0.0 && p[P::Land] < 0.999 }
 
     /// The view to draw the scene at for `v`: widened by the blur's margin, so lights at its edges blur with their real
-    /// neighbours as on the page; the final crops the margin off.
-    pub fn scene_view(&mut self, p: &Params, v: &ViewSpec) -> ViewSpec { self.margin = blur_margin(p, v); widen(v, self.margin) }
+    /// neighbours as on the page, and by the water's when it reflects, so the ripple's sideways samples find the mirror
+    /// there (tiles of an export meet without a seam); the final crops the margin off.
+    pub fn scene_view(&mut self, p: &Params, v: &ViewSpec) -> ViewSpec {
+        self.margin = blur_margin(p, v) + if self.wants_mirror(p) { water_margin(p, v) } else { 0 };
+        widen(v, self.margin)
+    }
 
     /// The passes between the scene and the final, recorded when the picture changes: the water when the mirror ran, the
     /// horizontal blur when its sigma shows. Each is the parent of the passes it samples.
@@ -141,6 +157,7 @@ impl Post {
         if let Some(mirror) = out.mirror {
             let (t, d) = (self.water.get_or_insert_with(|| SceneTarget::new(cx, "skyline_water", false)), &mut self.draw_water);
             sc.set_uniforms(cx, &mut d.draw_vars);
+            d.draw_vars.set_uniform(cx, live_id!(mirror_horizon), &[v.mirrored().horizon as f32]);
             for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light)] { bind_texture(cx, &mut d.draw_vars, name, tex); }
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             for child in [head, mirror.pass.draw_pass_id()] { cx.attach_child_pass(child, t.pass.draw_pass_id(), None); }

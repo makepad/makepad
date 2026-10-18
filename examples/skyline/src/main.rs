@@ -35,7 +35,7 @@ script_mod! {
 
     mod.widgets.SkylineViewBase = #(SkylineView::register_widget(vm))
     mod.widgets.SkylineView = set_type_default() do mod.widgets.SkylineViewBase{
-        width: Fill height: Fit draw_sky: mod.draw.DrawSkyBackdrop{} sky: mod.draw.Skyline{} export: mod.draw.Skyline{}
+        width: Fill height: Fit draw_sky: mod.draw.DrawSkyBackdrop{} sky: mod.draw.Skyline{}
     }
 
     let Caption = Label{draw_text +: {color: #x8c95aa text_style +: {font_size: 8}} text: ""}
@@ -60,7 +60,7 @@ script_mod! {
                     views := ScrollYView{
                         width: Fill height: Fill flow: Down spacing: 4 padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
                         Caption{text: "FULL 360\u{b0} STRIP"}
-                        strip := mod.widgets.SkylineView{}
+                        strip := mod.widgets.SkylineView{export: mod.draw.Skyline{}}
                         View{height: 8}
                         detail_label := Caption{text: "DETAIL"}
                         detail := mod.widgets.SkylineView{detail: true}
@@ -105,8 +105,8 @@ pub struct SkylineView {
     #[rust] fixed_px: Option<usize>,
     #[rust] rect: Rect,
     #[rust] drag: Option<(f64, f64)>,
-    /// The strip's exports run on a core of their own (`export.rs`), one tile a frame.
-    #[live] export: Skyline,
+    /// The strip's exports run on a core of their own (`export.rs`), one tile a frame; the detail view has none.
+    #[live] export: Option<Skyline>,
     #[rust] next_tile: NextFrame,
 }
 
@@ -117,7 +117,7 @@ impl SkylineView {
 
 impl Widget for SkylineView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if let Some(msg) = self.export.job_event(cx, event) { cx.widget_action(self.uid, SkylineViewAction::Message(msg)); }
+        if let Some(msg) = self.export.as_mut().and_then(|e| e.job_event(cx, event)) { cx.widget_action(self.uid, SkylineViewAction::Message(msg)); }
         if self.next_tile.is_event(event).is_some() { self.redraw(cx); }
         if !self.detail { return; }
         match event.hits(cx, self.draw_sky.area()) {
@@ -154,7 +154,7 @@ impl Widget for SkylineView {
         self.draw_sky.draw_vars.set_uniform(cx, live_id!(horizon), &[view.horizon as f32]);
         self.draw_sky.draw_abs(cx, rect);
         self.sky.draw_view(cx, rect, &view, &self.params, true);
-        if !self.detail && self.export.draw_job(cx) { self.next_tile = cx.new_next_frame(); }
+        if self.export.as_mut().is_some_and(|e| e.draw_job(cx)) { self.next_tile = cx.new_next_frame(); }
         DrawStep::done()
     }
 }
@@ -299,8 +299,8 @@ impl MatchEvent for App {
             if self.ui.button(cx, button).clicked(actions) {
                 let width = [2048, 4096, 8192][self.ui.drop_down(cx, ids!(export_w)).selected_item().min(2)];
                 let p = self.params.clone();
-                let msg = self.view_mut(cx, false, |v, cx| { v.redraw(cx); v.export.start_export(cx, kind, width, &p) });
-                let msg = msg.unwrap_or_else(|| Err("no strip view".into())).unwrap_or_else(|e| e);
+                let msg = self.view_mut(cx, false, |v, cx| { v.redraw(cx); v.export.as_mut().map(|e| e.start_export(cx, kind, width, &p)) });
+                let msg = msg.flatten().unwrap_or_else(|| Err("no strip view".into())).unwrap_or_else(|e| e);
                 self.ui.label(cx, ids!(message)).set_text(cx, &msg);
             }
         }

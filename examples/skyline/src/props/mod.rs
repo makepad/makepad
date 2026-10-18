@@ -57,10 +57,10 @@ struct Item { b: u8, i: usize, win: [f64; 2], key: (u8, f64) }
 
 /// The draws in painter's order: by bucket, far to near (the page's farthest-first lists; ties keep the page's order). The
 /// page hides props behind nearer ranges per pixel; here they go before the range in front of them, and a line is cut in
-/// distance slices (bounds every 25% and at the two nearest ranges), each placed by its distance.
+/// distance slices (bounds every 25% from 100 m, one from 0 to 100 m, and at the two nearest ranges), each placed by its distance.
 fn items(set: &PropSet) -> Vec<Item> {
     let (d3, d4) = (mt_dist(3.0), mt_dist(4.0));
-    let mut bounds: Vec<f64> = (0..60).map(|j| 100.0 * 1.25f64.powi(j)).chain([d3, d4]).collect();
+    let mut bounds: Vec<f64> = (0..60).map(|j| 100.0 * 1.25f64.powi(j)).chain([0.0, d3, d4]).collect();
     bounds.sort_by(f64::total_cmp);
     let mut out = vec![];
     for (n, i) in set.inst.iter().enumerate() {

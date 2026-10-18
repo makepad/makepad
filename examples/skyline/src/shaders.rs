@@ -29,6 +29,8 @@ script_mod! {
         col_geom: uniform(vec4(1.0, 7.0, 0.0, 1.0))
         // 1 in the reflection run: the scene seen mirrored about the horizon
         mirror: uniform(0.0)
+        // the upright run's horizon row less this run's (px): 0, and under a pixel in the reflection run (`ViewSpec::mirrored`)
+        up_dy: uniform(0.0)
         cols: texture_2d(float)
         tree_cov: texture_2d(float)
         haze: uniform(0.5)
@@ -49,6 +51,11 @@ script_mod! {
         ang_raw: fn(y: float) -> float {
             let a = (self.view_horizon * self.view_size.y - y) * self.px0()
             return mix(a, 0.0 - a, self.mirror)
+        }
+        // the fragment's place in the upright run's targets (the trees, the city): there, the row of its own raw elevation
+        up_uv: fn() -> vec2 {
+            let pp = self.frag()
+            return vec2(pp.x, self.view_horizon * self.view_size.y + self.up_dy - self.ang_raw(pp.y) / self.px0()) / self.view_size
         }
         // row r of the column under pass x: rows 0-4 the ranges (ridge, tree foot, canopy top,
         // density), 5 the front treeline, 6 (land, ground rise, off-centre factor t, city glow)
@@ -150,7 +157,7 @@ script_mod! {
             var tm = 0.0
             if k > 1.5 {
                 // the trees are drawn upright once a picture: the reflection run reads them at the mirrored row
-                let tr = self.tree_cov.sample_nearest(vec2(pp.x, mix(pp.y, 2.0 * self.view_horizon * self.view_size.y - pp.y, self.mirror)) / self.view_size)
+                let tr = self.tree_cov.sample_nearest(self.up_uv())
                 let ch = vec4(step(abs(k - 2.0), 0.5), step(abs(k - 3.0), 0.5), step(abs(k - 4.0), 0.5), step(4.5, k))
                 tm = r.w * max(self.cover(r.z - ang, 1.5 * px), dot(tr, ch))
                 if ang < r.y - px { tm = r.w }

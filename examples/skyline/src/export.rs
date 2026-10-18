@@ -2,9 +2,9 @@
 //! [`Skyline::draw_view`] into an RGBA16F target and read back as it is, then written as PNG (toned, un-premultiplied
 //! 8-bit) or EXR (linear float32, premultiplied), or handed over as a [`Band`] (the HDRI generator's skyline layer).
 //! A job runs on a `Skyline` of its own, so the views are never disturbed. Tile k is drawn in frame k and read in frame
-//! k + 1 (two targets in turn); its scene has the blur's margin (`draw_view`), so tiles meet without a seam. Metal leaves out
-//! the first draw into a new target layout while it builds the pipeline, so there the first tile is read until two
-//! reads agree.
+//! k + 1 (two targets in turn); its scene has the blur's and the water's margins (`draw_view`), so tiles meet without a
+//! seam. Metal leaves out the first draw into a new target layout while it builds the pipeline (and a tile can be the first
+//! to draw the water or a props layer), so there every tile is read until two reads agree.
 use crate::params::{Params, P};
 use crate::render::{SceneTarget, Skyline, ViewSpec};
 use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, makepad_script::pod_heap::f16_to_f32, *};
@@ -29,7 +29,7 @@ enum Sink { File(ExportKind, std::path::PathBuf), Band(BandDone) }
 enum News { Tile(usize, Result<Texels, String>), Done(Result<String, String>) }
 
 /// A running job: the strip `w` x `h` at `p`; the next tile to draw, the one drawn last frame,
-/// the reads in flight, the tiles done; whether the first tile is still checked (`first`: its last read, `rounds`).
+/// the reads in flight, the tiles done; whether each tile is read until two reads agree (`first`: its last read, `rounds`).
 pub struct Job {
     p: Params, w: usize, h: usize, next: usize, drawn: Option<usize>, reads: usize, done: usize, check: bool,
     first: Option<Texels>, rounds: usize, out: Texels, sink: Option<Sink>, t0: f64, targets: Vec<SceneTarget>, tx: Sender<News>, rx: Receiver<News>,
@@ -61,7 +61,7 @@ impl Skyline {
     /// the reason it failed. The holder's draw must call [`Skyline::draw_job`].
     #[allow(dead_code)] // the HDRI layer's input
     pub fn request_band(&mut self, _cx: &mut Cx, p: &Params, w: usize, done: BandDone) {
-        if let Err((e, Sink::Band(done))) = self.start(p, w, Sink::Band(done)) { done(Err(e)) }
+        if let Err((e, Sink::Band(done))) = self.start(p, w, Sink::Band(done)) { std::thread::spawn(move || done(Err(e))); }
     }
 
     /// Starts a job, or hands the sink back when one is running.
@@ -81,12 +81,13 @@ impl Skyline {
     pub fn draw_job(&mut self, cx: &mut Cx2d) -> bool {
         let Some(mut job) = self.job.take() else { return false };
         if let Some(i) = job.drawn.take() {
-            let tx = job.tx.clone();
+            let (tx, size) = (job.tx.clone(), (job.view(i).w, job.h));
             let read = cx.read_render_texture(&job.targets[i % 2].color, move |r| {
                 let lut: Vec<f32> = (0..=u16::MAX).map(f16_to_f32).collect();
                 let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
-                let decode = |(_, _, b): (usize, usize, std::sync::Arc<[u8]>)| par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])]);
-                send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).map(decode)));
+                let decode = |(w, h, b): (usize, usize, std::sync::Arc<[u8]>)| if (w, h) != size { Err(format!("tile {i} read back {w} x {h}, not {} x {}", size.0, size.1)) }
+                    else { Ok(par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])])) };
+                send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).and_then(decode)));
             });
             if let Err(e) = read { send(&job.tx, News::Tile(i, Err(format!("{e:?}")))); }
             job.reads += 1;
@@ -115,11 +116,11 @@ impl Skyline {
                 News::Tile(i, Ok(t)) => {
                     job.reads -= 1;
                     if job.check && job.first.as_ref() != Some(&t) && job.rounds < 6 {
-                        (job.first, job.rounds, job.next) = (Some(t), job.rounds + 1, 0);
+                        (job.first, job.rounds, job.next) = (Some(t), job.rounds + 1, i);
                         continue;
                     }
                     let cw = job.view(i).w;
-                    (job.check, job.first, job.done) = (false, None, job.done + 1);
+                    (job.first, job.rounds, job.done) = (None, 0, job.done + 1);
                     for (y, row) in t.chunks(cw).enumerate() { job.out[y * job.w + i * TILE..][..cw].copy_from_slice(row); }
                     if job.done < job.tiles() { continue; }
                     let (w, h, out, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), job.sink.take(), job.tx.clone());

@@ -68,13 +68,9 @@ script_mod! {
     mod.draw.SkyCityDepth = {
         city_col: texture_2d(float)
         city_lit: texture_2d(float)
-        city_uv: fn() -> vec2 {
-            let pp = self.frag()
-            return vec2(pp.x, self.view_horizon * self.view_size.y - self.ang_raw(pp.y) / self.px0()) / self.view_size
-        }
         // the page's `prCityHide`: the share of the pixel hidden by a city surface nearer than d m
         city_hide: fn(d: float) -> float {
-            let uv = self.city_uv()
+            let uv = self.up_uv()
             if d > self.city_lit.sample_nearest(uv).w { return self.city_col.sample_nearest(uv).w }
             return 0.0
         }
@@ -292,7 +288,7 @@ script_mod! {
         ..mod.draw.SkyScene,
         ..mod.draw.SkyCityDepth,
         fragment: fn(){
-            let uv = self.city_uv(); let c = self.city_col.sample_nearest(uv)
+            let uv = self.up_uv(); let c = self.city_col.sample_nearest(uv)
             self.fb0 = c; self.fb1 = vec4(self.city_lit.sample_nearest(uv).xyz, c.w)
         }
     }
