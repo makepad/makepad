@@ -475,10 +475,9 @@ impl<'a> Build<'a> {
         self.span = Span { lo: self.ast.expr(init).lo, hi: self.ast.expr(init).hi };
         self.new_local(ret, LocalKind::Ret, true, None);
         self.extend_const_initializer(init);
-        // Unlike a function body, the constant root is not a terminating
-        // temporary scope. Nested statement/condition/tail scopes still are.
-        // A temporary reaching this root has no StorageDead or value drop.
-        self.push_scope(false);
+        // rustc_hir_analysis check/region.rs visit_body: a constant body has an outer temporary
+        // (destruction) scope; only the temporaries its extending expressions name (`extend`) outlive it.
+        self.push_scope(true);
         self.into_coerced(Place::local(0), init, ret);
         self.pop_scope();
         self.term(TermKind::Return);

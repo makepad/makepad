@@ -581,7 +581,11 @@ pub mod obligations {
         let item = ast.item(def.item);
         match def.kind {
             DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); }),
-            DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item)),
+            DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
+                let mut errors = with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item));
+                if def.kind != DefKind::ForeignFn { errors.extend(check_opaque_cycles(prog, tcx, did, item.lo)); }
+                errors
+            }
             DefKind::Impl => {
                 let mut errors = check_drop_impl(prog, tcx, did, ast, item);
                 errors.extend(with_wfcx(prog, tcx, did, |w| check_impl(w, ast, item)));
@@ -948,12 +952,120 @@ pub mod obligations {
         let def = prog.def(imp);
         match tcx.tys.kind(self_ty) {
             TyKind::Error => Vec::new(),
-            TyKind::Adt(d, _, _) if prog.def(*d).krate == def.krate => Vec::new(),
+            TyKind::Adt(d, args, regions) if prog.def(*d).krate == def.krate => always_applicable(prog, tcx, imp, item, def.file, *d, *args, *regions),
             _ => {
                 let pos = ast.as_impl(&item.kind).and_then(|i| ty_pos(ast, i.self_ty)).unwrap_or(item.lo);
                 vec![prog.record_error(def.file, pos, "typeck", "E0120: the `Drop` trait may only be implemented for local structs, enums, and unions".to_string())]
             }
         }
+    }
+
+    /// rustc_hir_analysis/src/check/always_applicable.rs check_drop_impl: the generic arguments of the
+    /// impl's self type are the impl's own distinct parameters (E0366), and every predicate of the impl
+    /// holds in the environment of the type's definition (E0367).
+    fn always_applicable(prog: &Program, tcx: &Tcx, imp: DefId, item: &ast::Item, file: u32, adt: DefId, args: crate::types::TyList, regions: crate::types::RegionArgsId) -> Vec<String> {
+        use crate::types::RegionKind;
+        let tys = &tcx.tys;
+        // uses_unique_generic_params(adt_to_impl_args, CheckRegions::OnlyParam)
+        let mut seen_tys = Vec::new();
+        let mut unique = true;
+        for &a in tys.list(args) {
+            let ok = match tys.kind(a) {
+                TyKind::Param(..) => true,
+                TyKind::Const(c) => matches!(tys.const_kind(*c), crate::consts::ConstKind::Param(..)),
+                _ => false,
+            };
+            if !ok || seen_tys.contains(&a) { unique = false; }
+            seen_tys.push(a);
+        }
+        let mut seen_regions = Vec::new();
+        for &r in tys.region_args(regions).iter() {
+            if !matches!(tys.region_kind(r), RegionKind::ReEarlyParam(_)) || seen_regions.contains(&r) { unique = false; }
+            seen_regions.push(r);
+        }
+        let trait_name = "Drop";
+        if !unique {
+            return vec![prog.record_error(file, item.lo, "typeck", format!("E0366: `{}` impls cannot be specialized", trait_name))];
+        }
+        if tys.list(args).iter().any(|&t| tys.has_error(t)) { return Vec::new(); }
+        // the predicates of the type, at the impl's arguments
+        let adt_args = tcx.complete_args(prog, adt, tys.list(args), regions);
+        let adt_env = tcx.param_env_id(prog, adt);
+        let clauses: Vec<_> = tcx.param_env_by_id(adt_env).clauses.iter().map(|p| tcx.instantiate_predicate(prog, adt, &adt_args, p)).collect();
+        let env = tcx.intern_param_env(crate::next_solver::ParamEnv { clauses: clauses.into() });
+        let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), imp);
+        let mut ocx = ObligationCtxt::new(&infcx, prog);
+        // the impl's parameters are inference variables, bound by equating its self type with the
+        // type at the impl's own arguments
+        let fresh = infcx.fresh_args_for_item(prog, imp);
+        let fresh_self = tcx.instantiate_ty(prog, imp, &fresh, tcx.impl_self[&imp]);
+        let mut goals = match infcx.at(prog, env.clone()).eq(tcx.impl_self[&imp], fresh_self) {
+            Ok(goals) => goals,
+            Err(_) => return Vec::new(),
+        };
+        for p in tcx.own_clauses_of(prog, imp) {
+            let p = &tcx.instantiate_predicate(prog, imp, &fresh, p);
+            let predicate = ocx.normalize_predicate(&env, p);
+            goals.push(Goal { param_env: env.clone(), predicate });
+        }
+        ocx.register_obligations(goals);
+        let errors = ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog);
+        let msg = |what: String| format!("E0367: `{}` impl requires `{}` but the {} it is implemented for does not", trait_name, what, match prog.def(adt).kind { DefKind::Enum => "enum", DefKind::Union => "union", _ => "struct" });
+        if !errors.is_empty() {
+            return vec![prog.record_error(file, item.lo, "typeck", msg("a predicate".to_string()))];
+        }
+        if !infcx.resolve_regions(prog, env, &[]).is_empty() {
+            return vec![prog.record_error(file, item.lo, "typeck", msg("an outlives bound".to_string()))];
+        }
+        Vec::new()
+    }
+
+    /// rustc_hir_analysis/src/check/check.rs check_opaque_for_cycles + rustc_middle/src/ty/util.rs
+    /// OpaqueTypeExpander: expanding the hidden type of an opaque the fn defines must not reach the
+    /// opaque again (E0720).
+    fn check_opaque_cycles(prog: &Program, tcx: &Tcx, owner: DefId, pos: u32) -> Vec<String> {
+        use crate::types::fold::{TypeFolder, super_fold_ty};
+        use crate::types::{AliasTyKind, Types};
+        struct Expander<'a> { prog: &'a Program, tcx: &'a Tcx, seen: Vec<DefId>, primary: DefId, found_recursion: bool, found_any: bool }
+        impl TypeFolder for Expander<'_> {
+            fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
+                if self.found_any { return t; }
+                if let TyKind::Alias(_, a) = tys.kind(t) {
+                    if let AliasTyKind::Opaque { def_id } = a.kind {
+                        if self.seen.contains(&def_id) {
+                            self.found_any = true;
+                            self.found_recursion = def_id == self.primary;
+                            return t;
+                        }
+                        let Ok(hidden) = self.tcx.type_of(self.prog, def_id) else { return t };
+                        let mut targs = Vec::new();
+                        for &x in tys.list(a.args) { targs.push(self.fold_ty(tys, x, depth)); }
+                        if self.found_any { return t; }
+                        let args = self.tcx.complete_args(self.prog, def_id, &targs, a.regions);
+                        let concrete = self.tcx.instantiate_ty(self.prog, def_id, &args, hidden);
+                        self.seen.push(def_id);
+                        let expanded = self.fold_ty(tys, concrete, 0);
+                        self.seen.pop();
+                        return expanded;
+                    }
+                }
+                if !tys.flags(t).contains(crate::types::TypeFlags::HAS_TY_OPAQUE) { return t; }
+                super_fold_ty(tys, t, self, depth)
+            }
+        }
+        let id = tcx.opaque_types_defined_by(prog, owner);
+        let mut errors = Vec::new();
+        for &o in tcx.defining_opaques(id) {
+            if tcx.typeck(prog, owner).errors.len() > 0 { break; }
+            let indices = tcx.generic_indices_of(prog, o);
+            let tys = &tcx.tys;
+            let regions = tys.intern_region_args(&vec![crate::types::RegionId::ERASED; indices.lifetimes.len()]);
+            let opaque = tys.intern(TyKind::Alias(crate::consts::IsRigid::No, crate::types::AliasTy { kind: AliasTyKind::Opaque { def_id: o }, args: tys.mk_list(&indices.identity_types_consts(tys)), regions }));
+            let mut e = Expander { prog, tcx, seen: Vec::new(), primary: o, found_recursion: false, found_any: false };
+            e.fold_ty(tys, opaque, 0);
+            if e.found_recursion { errors.push(prog.record_error(prog.def(owner).file, pos, "typeck", "E0720: cannot resolve opaque type".to_string())); }
+        }
+        errors
     }
 
     /// Whether every ADT / fn item / alias in `ty` carries as many arguments as its definition has

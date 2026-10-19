@@ -39,6 +39,14 @@ impl Program {
             for (v, pos) in fvs {
                 self.check_vis_path(&mut err, ast, def, &v, pos);
             }
+            // `impl Trait` nested in another (E0666) and in the output of `Fn` sugar (E0562), in a fn's signature
+            if let ItemKind::Fn(sig, ..) = it.kind {
+                let sig = ast.fn_sig(sig);
+                let feats = self.crates[def.krate as usize].features(self);
+                let fn_trait_return = feats.has("impl_trait_in_fn_trait_return");
+                for p in ast.list(sig.params) { self.check_nested_impl_trait(&mut err, ast, p.ty, false, fn_trait_return, it.lo); }
+                if let Some(r) = sig.ret { self.check_nested_impl_trait(&mut err, ast, r, false, fn_trait_return, it.lo); }
+            }
             let not_permitted = |vis: &Vis| !matches!(vis, Vis::Private);
             match def.kind {
                 DefKind::Impl => {
@@ -125,6 +133,62 @@ impl Program {
         out
     }
 
+    /// rustc_ast_passes ast_validation.rs `outer_impl_trait_span` / `with_impl_trait`: an `impl Trait` inside the
+    /// generic arguments of another is E0666, except in an associated-type binding or the output of `Fn` sugar,
+    /// which start afresh; rustc_ast_lowering path.rs: the output of `Fn` sugar may not hold `impl Trait`
+    /// without `impl_trait_in_fn_trait_return` (E0562).
+    fn check_nested_impl_trait(&self, err: &mut impl FnMut(u32, String), ast: &Ast, t: TyId, in_impl: bool, fn_ret_ok: bool, pos: u32) {
+        match ast.ty(t) {
+            Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => self.check_nested_impl_trait(err, ast, *x, in_impl, fn_ret_ok, pos),
+            Ty::Tuple(l) => for &x in ast.list(*l) { self.check_nested_impl_trait(err, ast, x, in_impl, fn_ret_ok, pos) },
+            Ty::Fn(f) => {
+                let f = ast.fn_ptr(*f);
+                for &x in ast.list(f.params) { self.check_nested_impl_trait(err, ast, x, in_impl, fn_ret_ok, pos); }
+                if let Some(r) = f.ret { self.check_nested_impl_trait(err, ast, r, in_impl, fn_ret_ok, pos); }
+            }
+            Ty::Path(p) => self.check_nested_in_segs(err, ast, ast.segs(p.segs), in_impl, fn_ret_ok, pos),
+            Ty::ImplTrait(bs) => {
+                if in_impl { err(pos, "E0666: nested `impl Trait` is not allowed".into()); }
+                self.check_nested_in_bounds(err, ast, *bs, true, fn_ret_ok, pos);
+            }
+            Ty::DynTrait(bs, _) => self.check_nested_in_bounds(err, ast, *bs, in_impl, fn_ret_ok, pos),
+            _ => {}
+        }
+    }
+
+    fn check_nested_in_bounds(&self, err: &mut impl FnMut(u32, String), ast: &Ast, bs: List<Bound>, in_impl: bool, fn_ret_ok: bool, pos: u32) {
+        for b in ast.list(bs) {
+            if let Bound::Trait { path, .. } = b { self.check_nested_in_segs(err, ast, ast.segs(path.segs), in_impl, fn_ret_ok, pos); }
+        }
+    }
+
+    fn check_nested_in_segs(&self, err: &mut impl FnMut(u32, String), ast: &Ast, segs: &[PathSeg], in_impl: bool, fn_ret_ok: bool, pos: u32) {
+        for seg in segs {
+            let Some(a) = ast.gargs(seg.args()) else { continue };
+            match a {
+                GenericArgs::Angle(v) => for g in ast.list(*v) {
+                    match g {
+                        GenericArg::Type(x) => self.check_nested_impl_trait(err, ast, *x, in_impl, fn_ret_ok, pos),
+                        // `Item = impl Debug` and `Item: Bound` start afresh
+                        GenericArg::Binding(_, _, x) => self.check_nested_impl_trait(err, ast, *x, false, fn_ret_ok, pos),
+                        GenericArg::Constraint(_, _, bs) => self.check_nested_in_bounds(err, ast, *bs, false, fn_ret_ok, pos),
+                        _ => {}
+                    }
+                },
+                GenericArgs::Paren(ins, out) => {
+                    for &x in ast.list(*ins) { self.check_nested_impl_trait(err, ast, x, in_impl, fn_ret_ok, pos); }
+                    if let Some(o) = out {
+                        if !fn_ret_ok && ty_holds_impl_trait(ast, *o) {
+                            err(pos, "E0562: `impl Trait` is not allowed in the return type of `Fn` trait bounds".into());
+                        } else {
+                            self.check_nested_impl_trait(err, ast, *o, false, fn_ret_ok, pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// rustc_resolve build_reduced_graph `resolve_visibility`: `pub(in path)` names an ancestor module.
     fn check_vis_path(&self, err: &mut impl FnMut(u32, String), ast: &Ast, def: &Def, vis: &Vis, pos: u32) {
         let Vis::In(row) = vis else { return };
@@ -202,5 +266,15 @@ impl Program {
             None if what == "function" => err(it.lo, "free function without a body".to_string()),
             None => err(it.lo, format!("free {free_what} without body")),
         }
+    }
+}
+
+/// Whether a written type is, or directly wraps, an `impl Trait` (the output of `Fn` sugar).
+fn ty_holds_impl_trait(ast: &Ast, t: TyId) -> bool {
+    match ast.ty(t) {
+        Ty::ImplTrait(_) => true,
+        Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => ty_holds_impl_trait(ast, *x),
+        Ty::Tuple(l) => ast.list(*l).iter().any(|&x| ty_holds_impl_trait(ast, x)),
+        _ => false,
     }
 }
