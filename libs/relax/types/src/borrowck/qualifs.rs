@@ -191,7 +191,7 @@ impl Queries for Provider<'_, '_> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct State { qualif: Vec<bool>, borrow: Vec<bool> }
+pub(super) struct State { pub(super) qualif: Vec<bool>, borrow: Vec<bool> }
 
 impl State {
     fn assign<Q: Queries>(&mut self, tx: &Tx, body: &Bir, queries: &Q, q: Qualif, p: &Place, mut value: bool) -> Result<(), Blocked> {
@@ -237,11 +237,39 @@ impl State {
     }
 }
 
+/// The effect of one statement on the qualif state (resolver.rs visit_statement).
+pub(super) fn transfer_stmt<Q: Queries>(state: &mut State, tx: &Tx, body: &Bir, queries: &Q, q: Qualif, kind: &StmtKind) -> Result<(), Blocked> {
+    match kind {
+        StmtKind::Assign(p, v) => {
+            let value = Qualifier { tx, body, queries, local: |_, l: Local| Ok(state.qualif[l as usize]) }.rvalue(q, v)?;
+            state.assign(tx, body, queries, q, p, value)?;
+            state.rvalue(tx, body, queries, q, v)?;
+        }
+        StmtKind::StorageDead(l) => { state.qualif[*l as usize] = false; state.borrow[*l as usize] = false; }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The effect of a block's terminator on the qualif state (resolver.rs visit_terminator).
+pub(super) fn transfer_term<Q: Queries>(state: &mut State, tx: &Tx, body: &Bir, queries: &Q, q: Qualif, term: &TermKind) -> Result<(), Blocked> {
+    match term {
+        TermKind::Call { args, dest, target, .. } => {
+            for o in args { state.operand(q, o); }
+            if target.is_some() {
+                let value = queries.type_qualif(q, super::moves::place_ty(tx, body, dest))?;
+                state.assign(tx, body, queries, q, dest, value)?;
+            }
+        }
+        TermKind::Switch(o, _) => state.operand(q, o),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Forward may-analysis with union joins and rustc's move/borrow transfer
-/// effects. Return places are read after convergence, never from syntax.
-fn return_qualif<Q: Queries>(tx: &Tx, body: &Bir, queries: &Q, q: Qualif) -> Result<bool, Blocked> {
-    let ret_ty = body.ty_of_local(0);
-    if !queries.type_qualif(q, ret_ty)? { return Ok(false); }
+/// effects: the state at the entry of every reachable block (None: unreachable).
+pub(super) fn entry_states<Q: Queries>(tx: &Tx, body: &Bir, queries: &Q, q: Qualif) -> Result<Vec<Option<State>>, Blocked> {
     let empty = State { qualif: vec![false; body.locals.len()], borrow: vec![false; body.locals.len()] };
     let mut states = vec![None::<State>; body.blocks.len()];
     if states.is_empty() { return Err(Blocked("constant initializer has no CFG")); }
@@ -251,34 +279,12 @@ fn return_qualif<Q: Queries>(tx: &Tx, body: &Bir, queries: &Q, q: Qualif) -> Res
     let mut pending = std::collections::VecDeque::from([0u32]);
     let mut queued = vec![false; body.blocks.len()];
     queued[0] = true;
-    let mut returns = HashMap::default();
     while let Some(bb) = pending.pop_front() {
         queued[bb as usize] = false;
         let mut state = states[bb as usize].clone().unwrap();
         let block = &body.blocks[bb as usize];
-        for s in &block.stmts {
-            match &s.kind {
-                StmtKind::Assign(p, v) => {
-                    let value = Qualifier { tx, body, queries, local: |_, l: Local| Ok(state.qualif[l as usize]) }.rvalue(q, v)?;
-                    state.assign(tx, body, queries, q, p, value)?;
-                    state.rvalue(tx, body, queries, q, v)?;
-                }
-                StmtKind::StorageDead(l) => { state.qualif[*l as usize] = false; state.borrow[*l as usize] = false; }
-                _ => {}
-            }
-        }
-        match block.term.as_ref().map(|t| &t.kind) {
-            Some(TermKind::Call { args, dest, target, .. }) => {
-                for o in args { state.operand(q, o); }
-                if target.is_some() {
-                    let value = queries.type_qualif(q, super::moves::place_ty(tx, body, dest))?;
-                    state.assign(tx, body, queries, q, dest, value)?;
-                }
-            }
-            Some(TermKind::Switch(o, _)) => state.operand(q, o),
-            Some(TermKind::Return) => { returns.insert(bb, state.qualif[0]); }
-            _ => {}
-        }
+        for s in &block.stmts { transfer_stmt(&mut state, tx, body, queries, q, &s.kind)?; }
+        if let Some(t) = block.term.as_ref() { transfer_term(&mut state, tx, body, queries, q, &t.kind)?; }
         for succ in super::moves::successors(body, bb) {
             let changed = match &mut states[succ as usize] {
                 None => { states[succ as usize] = Some(state.clone()); true }
@@ -293,6 +299,23 @@ fn return_qualif<Q: Queries>(tx: &Tx, body: &Bir, queries: &Q, q: Qualif) -> Res
             if changed && !queued[succ as usize] { pending.push_back(succ); queued[succ as usize] = true; }
         }
     }
+    Ok(states)
+}
+
+/// Return places are read after convergence, never from syntax.
+fn return_qualif<Q: Queries>(tx: &Tx, body: &Bir, queries: &Q, q: Qualif) -> Result<bool, Blocked> {
+    let ret_ty = body.ty_of_local(0);
+    if !queries.type_qualif(q, ret_ty)? { return Ok(false); }
+    let states = entry_states(tx, body, queries, q)?;
+    let mut returns = Vec::new();
+    for (bb, entry) in states.iter().enumerate() {
+        let Some(entry) = entry else { continue };
+        let block = &body.blocks[bb];
+        if !matches!(block.term.as_ref().map(|t| &t.kind), Some(TermKind::Return)) { continue; }
+        let mut state = entry.clone();
+        for s in &block.stmts { transfer_stmt(&mut state, tx, body, queries, q, &s.kind)?; }
+        returns.push(state.qualif[0]);
+    }
     // Diverging initializer: rustc uses type qualification.
-    Ok(returns.is_empty() || returns.values().any(|v| *v))
+    Ok(returns.is_empty() || returns.iter().any(|v| *v))
 }

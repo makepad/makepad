@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // Demand certificates belong to the graph; crate records keep only their own selection.
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 
 pub(crate) mod strings;
 

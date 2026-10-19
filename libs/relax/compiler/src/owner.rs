@@ -43,10 +43,46 @@ const RUNNING: u8 = 1;
 const DONE: u8 = 2;
 /// the owner touches the request no more: the requester may return (and free it)
 const RELEASED: u8 = 3;
-/// How long a requester spins for its answer, and the idle owner for the next request, before
-/// sleeping (a sleep/wake pair costs tens of microseconds; warm launches make thousands of
-/// short requests in a row)
-const SPIN: std::time::Duration = std::time::Duration::from_micros(60);
+/// Spin budgets, in microseconds of `spin_loop` iterations. The loops count iterations and read no
+/// clock: a clock read per iteration was a tenth of a cold start's cycles. The iteration cost is
+/// measured once (`calibrate`, on the owner thread at start), so a budget keeps its length on any
+/// core. A sleep/wake pair costs tens of microseconds; warm launches make thousands of short
+/// requests in a row. A requester spins only when the owner is free to take its request at once
+/// (not asleep, not serving another request, nothing else queued): then the answer of a short
+/// request comes within the budget. Behind a long request it sleeps straight away.
+///
+/// Wakeup protocol (the spin is only an optimisation in front of it, never part of it):
+/// - the requester sleeps on `req.done`: it checks `*done` under that mutex before each wait, and
+///   the owner sets `*done` and notifies under the same mutex, so a completion between the check
+///   and the wait is seen;
+/// - the owner sleeps on `WAKE` only with `Q` held and `OWNER_ASLEEP` set, after finding the lanes
+///   empty under `Q`; `push` adds under `Q` and then reads `OWNER_ASLEEP` (SeqCst), so a request
+///   posted between the owner's check and its wait is either seen by the check or notifies.
+const REQUESTER_SPIN_US: u32 = 60;
+const OWNER_SPIN_US: u32 = 60;
+/// spin iterations per microsecond (0: not measured yet, nobody spins)
+static SPIN_PER_US: AtomicU32 = AtomicU32::new(0);
+
+fn calibrate() {
+    static PROBE: AtomicU32 = AtomicU32::new(0);
+    const N: u32 = 4000;
+    let mut best = u128::MAX;
+    for _ in 0..3 {
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            if PROBE.load(Ordering::Relaxed) != 0 {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        best = best.min(t0.elapsed().as_nanos());
+    }
+    SPIN_PER_US.store(((N as u128 * 1000 / best.max(1)) as u32).clamp(1, 100_000), Ordering::Relaxed);
+}
+
+fn spin_iters(us: u32) -> u32 {
+    SPIN_PER_US.load(Ordering::Relaxed).saturating_mul(us)
+}
 
 struct Req {
     run: *mut dyn FnMut(),
@@ -102,6 +138,8 @@ static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
 static QUEUED_N: AtomicU32 = AtomicU32::new(0);
 /// the owner sleeps on WAKE (a push then notifies it; otherwise it is spinning or busy)
 static OWNER_ASLEEP: AtomicBool = AtomicBool::new(false);
+/// the owner is inside `serve` (a heuristic only: the requesters' spin budget reads it)
+static OWNER_SERVING: AtomicBool = AtomicBool::new(false);
 
 /// os thread id of the owner thread
 static OWNER_TID: AtomicU64 = AtomicU64::new(0);
@@ -403,12 +441,14 @@ fn dequeued(class: usize) {
 
 /// Waits for `req` to be done; true: withdrawn at the deadline before it started.
 fn wait(req: &Req, deadline: Option<std::time::Instant>) -> bool {
-    let t0 = std::time::Instant::now();
-    while t0.elapsed() < SPIN {
-        if req.state.load(Ordering::Acquire) == RELEASED {
-            return false;
+    let behind_other = OWNER_SERVING.load(Ordering::Relaxed) && req.state.load(Ordering::Relaxed) == QUEUED;
+    if !behind_other && !OWNER_ASLEEP.load(Ordering::Relaxed) && QUEUED_N.load(Ordering::Relaxed) <= 1 {
+        for _ in 0..spin_iters(REQUESTER_SPIN_US) {
+            if req.state.load(Ordering::Acquire) == RELEASED {
+                return false;
+            }
+            std::hint::spin_loop();
         }
-        std::hint::spin_loop();
     }
     let mut done = req.done.lock().unwrap_or_else(|e| e.into_inner());
     while !*done {
@@ -490,6 +530,7 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
 fn serve(r: usize) {
     let req = unsafe { &*(r as *const Req) };
     req.state.store(RUNNING, Ordering::Release);
+    let was_serving = OWNER_SERVING.swap(true, Ordering::Relaxed);
     let t0 = crate::jit::wall_ns();
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
@@ -530,6 +571,7 @@ fn serve(r: usize) {
     NOW_FROM.store(prev_now.1, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
     unsafe { crate::query::swap_context(prev_ctx) };
+    OWNER_SERVING.store(was_serving, Ordering::Relaxed);
     BUSY_NS[req.class as usize].fetch_add(crate::jit::wall_ns().saturating_sub(t0), Ordering::Relaxed);
     // the process is ending on another thread: this request is never answered (its requester
     // waits until the process is gone)
@@ -568,10 +610,13 @@ fn serve(r: usize) {
 }
 
 fn owner_loop() -> ! {
+    calibrate();
     loop {
         // idle: a short spin catches the next request of a burst without a sleep and wake
-        let t0 = std::time::Instant::now();
-        while QUEUED_N.load(Ordering::Relaxed) == 0 && FORK.load(Ordering::Relaxed) != 1 && t0.elapsed() < SPIN {
+        for _ in 0..spin_iters(OWNER_SPIN_US) {
+            if QUEUED_N.load(Ordering::Relaxed) != 0 || FORK.load(Ordering::Relaxed) == 1 {
+                break;
+            }
             std::hint::spin_loop();
         }
         let r = {

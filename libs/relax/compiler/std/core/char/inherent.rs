@@ -9,56 +9,56 @@ impl char {
     pub const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
     pub const UNICODE_VERSION: (u8, u8, u8) = crate::unicode::UNICODE_VERSION;
 
-    pub fn from_u32(i: u32) -> Option<char> {
+    pub const fn from_u32(i: u32) -> Option<char> {
         from_u32(i)
     }
-    pub unsafe fn from_u32_unchecked(i: u32) -> char {
+    pub const unsafe fn from_u32_unchecked(i: u32) -> char {
         from_u32_unchecked(i)
     }
-    pub fn from_digit(num: u32, radix: u32) -> Option<char> {
+    pub const fn from_digit(num: u32, radix: u32) -> Option<char> {
         from_digit(num, radix)
     }
     pub fn decode_utf16<I: IntoIterator<Item = u16>>(iter: I) -> DecodeUtf16<I::IntoIter> {
         decode_utf16(iter)
     }
 
-    pub fn is_digit(self, radix: u32) -> bool {
+    pub const fn is_digit(self, radix: u32) -> bool {
         is_digit(self, radix)
     }
-    pub fn to_digit(self, radix: u32) -> Option<u32> {
+    pub const fn to_digit(self, radix: u32) -> Option<u32> {
         to_digit(self, radix)
     }
-    pub fn len_utf8(self) -> usize {
+    pub const fn len_utf8(self) -> usize {
         len_utf8(self as u32)
     }
-    pub fn len_utf16(self) -> usize {
+    pub const fn len_utf16(self) -> usize {
         len_utf16(self as u32)
     }
     #[track_caller]
-    pub fn encode_utf8(self, dst: &mut [u8]) -> &mut str {
+    pub const fn encode_utf8(self, dst: &mut [u8]) -> &mut str {
         encode_utf8(self, dst)
     }
     #[track_caller]
-    pub fn encode_utf16(self, dst: &mut [u16]) -> &mut [u16] {
+    pub const fn encode_utf16(self, dst: &mut [u16]) -> &mut [u16] {
         encode_utf16(self, dst)
     }
 
     pub fn is_alphabetic(self) -> bool {
         is_alphabetic(self)
     }
-    pub fn is_lowercase(self) -> bool {
+    pub const fn is_lowercase(self) -> bool {
         is_lowercase(self)
     }
-    pub fn is_uppercase(self) -> bool {
+    pub const fn is_uppercase(self) -> bool {
         is_uppercase(self)
     }
-    pub fn is_whitespace(self) -> bool {
+    pub const fn is_whitespace(self) -> bool {
         is_whitespace(self)
     }
     pub fn is_alphanumeric(self) -> bool {
         is_alphanumeric(self)
     }
-    pub fn is_control(self) -> bool {
+    pub const fn is_control(self) -> bool {
         is_control(self)
     }
     pub fn is_numeric(self) -> bool {
@@ -85,59 +85,59 @@ impl char {
     pub const fn is_ascii(&self) -> bool {
         (*self as u32) < 0x80
     }
-    pub fn as_ascii(&self) -> Option<u8> {
+    pub const fn as_ascii(&self) -> Option<u8> {
         if self.is_ascii() {
             Some(*self as u8)
         } else {
             None
         }
     }
-    pub fn to_ascii_uppercase(&self) -> char {
+    pub const fn to_ascii_uppercase(&self) -> char {
         to_ascii_uppercase(*self)
     }
-    pub fn to_ascii_lowercase(&self) -> char {
+    pub const fn to_ascii_lowercase(&self) -> char {
         to_ascii_lowercase(*self)
     }
-    pub fn eq_ignore_ascii_case(&self, other: &char) -> bool {
+    pub const fn eq_ignore_ascii_case(&self, other: &char) -> bool {
         eq_ignore_ascii_case(*self, *other)
     }
-    pub fn make_ascii_uppercase(&mut self) {
+    pub const fn make_ascii_uppercase(&mut self) {
         *self = to_ascii_uppercase(*self);
     }
-    pub fn make_ascii_lowercase(&mut self) {
+    pub const fn make_ascii_lowercase(&mut self) {
         *self = to_ascii_lowercase(*self);
     }
-    pub fn is_ascii_alphabetic(&self) -> bool {
+    pub const fn is_ascii_alphabetic(&self) -> bool {
         is_ascii_alphabetic(*self)
     }
-    pub fn is_ascii_uppercase(&self) -> bool {
+    pub const fn is_ascii_uppercase(&self) -> bool {
         is_ascii_uppercase(*self)
     }
-    pub fn is_ascii_lowercase(&self) -> bool {
+    pub const fn is_ascii_lowercase(&self) -> bool {
         is_ascii_lowercase(*self)
     }
-    pub fn is_ascii_alphanumeric(&self) -> bool {
+    pub const fn is_ascii_alphanumeric(&self) -> bool {
         is_ascii_alphanumeric(*self)
     }
-    pub fn is_ascii_digit(&self) -> bool {
+    pub const fn is_ascii_digit(&self) -> bool {
         is_ascii_digit(*self)
     }
-    pub fn is_ascii_octdigit(&self) -> bool {
+    pub const fn is_ascii_octdigit(&self) -> bool {
         is_ascii_octdigit(*self)
     }
-    pub fn is_ascii_hexdigit(&self) -> bool {
+    pub const fn is_ascii_hexdigit(&self) -> bool {
         is_ascii_hexdigit(*self)
     }
-    pub fn is_ascii_punctuation(&self) -> bool {
+    pub const fn is_ascii_punctuation(&self) -> bool {
         is_ascii_punctuation(*self)
     }
-    pub fn is_ascii_graphic(&self) -> bool {
+    pub const fn is_ascii_graphic(&self) -> bool {
         is_ascii_graphic(*self)
     }
-    pub fn is_ascii_whitespace(&self) -> bool {
+    pub const fn is_ascii_whitespace(&self) -> bool {
         is_ascii_whitespace(*self)
     }
-    pub fn is_ascii_control(&self) -> bool {
+    pub const fn is_ascii_control(&self) -> bool {
         is_ascii_control(*self)
     }
 }

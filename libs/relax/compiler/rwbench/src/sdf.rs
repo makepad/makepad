@@ -56,7 +56,7 @@ const PAD: usize = 4;
 pub fn setup() -> Box<dyn FnMut() -> u64> {
     let font = inputs::read("widgets/resources/IBMPlexSans-Text.ttf");
     let chars: Vec<char> = "0123456789+-*/=.,%()ACDELMRSabcdefghilmnorstuvxy".chars().collect();
-    let mut bufs = esdt::ReusableBuffers::default();
+    let mut bufs: Option<esdt::ReusableBuffers> = None;
     Box::new(move || {
         let face = rustybuzz::ttf_parser::Face::parse(&font, 0).unwrap();
         let upem = face.units_per_em() as f32;
@@ -74,8 +74,8 @@ pub fn setup() -> Box<dyn FnMut() -> u64> {
                 b.r.for_each_pixel_2d(|x, y, a| {
                     cov[(x as usize, ht - 1 - y as usize)] = Unorm8::encode(a);
                 });
-                let mut out: Image2d<Unorm8> = Image2d::new(w + PAD * 2, ht + PAD * 2);
-                esdt::glyph_to_sdf_into(&mut cov, esdt::Params { pad: PAD, radius: 8.0, cutoff: 0.25, ..esdt::Params::default() }, &mut bufs, &mut out);
+                let (out, reused) = esdt::glyph_to_sdf(&mut cov, esdt::Params { pad: PAD, radius: 8.0, cutoff: 0.25, ..esdt::Params::default() }, bufs.take());
+                bufs = Some(reused);
                 h = fold(h, (w as u64) << 32 | ht as u64);
                 for y in 0..out.height() {
                     for x in 0..out.width() {

@@ -13,7 +13,7 @@ pub(crate) struct DeclarationQueries {
 #[derive(Default)]
 pub(crate) struct DefQueries {
     krate: u32,
-    pub own_clauses: DeclarationCell<Vec<Predicate>>,
+    pub own_clauses: DeclarationCell<(Vec<Predicate>, Vec<String>)>,
     pub super_predicates: DeclarationCell<Vec<Predicate>>,
     filtered_supers: Mutex<crate::fxhash::HashMap<Sym, Arc<DeclarationCell<Vec<Predicate>>>>>,
     pub explicit_item_bounds: DeclarationCell<Vec<Predicate>>,

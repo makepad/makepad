@@ -36,7 +36,7 @@ impl TryReserveError {
     pub(crate) fn capacity_overflow() -> TryReserveError {
         TryReserveError { kind: TryReserveErrorKind::CapacityOverflow }
     }
-    pub fn kind(&self) -> TryReserveErrorKind {
+    pub const fn kind(&self) -> TryReserveErrorKind {
         self.kind.clone()
     }
 }

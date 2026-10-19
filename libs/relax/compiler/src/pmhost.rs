@@ -639,6 +639,7 @@ pub fn flush_cache() {
     if let Some(Ok(w)) = world_now().as_deref() {
         crate::owner::call(crate::owner::Class::App, || {
             let u = unsafe { &mut *w.u };
+            u.flush_cache_records();
             if let Some(c) = u.cache.as_mut() {
                 let _ = c.flush();
             }

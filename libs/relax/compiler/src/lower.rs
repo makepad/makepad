@@ -222,6 +222,10 @@ pub struct Lcx<'a> {
     decl_depth: Vec<Option<usize>>,
     /// instructions run at function entry (drop flag initialisation)
     entry_inits: Vec<Inst>,
+    /// fold branches on known constants (a check only); the registers a fold relied on, which must
+    /// be written exactly once by the finished function (checked in lower_checked_body)
+    pub(crate) fold: bool,
+    pub(crate) fold_regs: std::cell::RefCell<Vec<VReg>>,
     /// rvalue temporaries to drop at the end of the current statement (with a drop flag
     /// when parts may have been moved out)
     stmt_temps: Vec<(VReg, TyId, Option<VReg>)>,
@@ -357,6 +361,8 @@ impl<'a> Lcx<'a> {
             drop_flags: vec![None; n],
             decl_depth: vec![None; n],
             entry_inits: Vec::new(),
+            fold: u.prog.session.options.const_fuel,
+            fold_regs: std::cell::RefCell::new(Vec::new()),
             caller_loc: None,
             stmt_temps: Vec::new(),
             match_root: None,
@@ -470,7 +476,7 @@ impl<'a> Lcx<'a> {
     }
 
     fn relax_only_instance(&self, t: TyId) -> bool {
-        !self.u.provided_shared.contains(&t)
+        !self.u.provided_shared_contains(t)
     }
 
     /// An opaque provided enum (provided.rs; rustc's layout, no tag known to Relax) cannot be
@@ -2985,6 +2991,7 @@ impl<'a> Lcx<'a> {
         let exit = self.f.block();
         self.goto(head);
         self.switch(head);
+        self.const_fuel_tick();
         let self_t = self.u.tcx.tys.intern(TyKind::Ref(true, iter_t, crate::types::RegionId::ERASED));
         let r = self.emit_instance(instance, vec![(Val::L(vec![iter_addr]), self_t)], opt_t);
         let rpl = self.val_to_place(r);
@@ -6047,6 +6054,7 @@ impl<'a> Lcx<'a> {
                 let exit = self.f.block();
                 self.goto(head);
                 self.switch(head);
+                self.const_fuel_tick();
                 let outer = self.scopes.len();
                 self.push_scope();
                 let mark = self.stmt_temps.len();
@@ -6082,6 +6090,7 @@ impl<'a> Lcx<'a> {
                 let res = self.result_place(t);
                 self.goto(head);
                 self.switch(head);
+                self.const_fuel_tick();
 
                 let l = label.map(|x| self.lifetime_sym(x));
                 self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: Some((res.clone(), t)), scope_depth: self.scopes.len(), temps_depth: self.stmt_temps.len() });
@@ -8366,6 +8375,50 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// The way the `Branch` that ends block `b` (to `tb` / `eb`) goes when its condition is a
+    /// constant computed in that block from constants (a const parameter's value, comparisons,
+    /// negation); None when it is not known.
+    fn known_branch(&self, b: u32, tb: u32, eb: u32) -> Option<bool> {
+        let blk = self.f.blocks.get(b as usize)?;
+        let Term::Branch(c, t, e) = blk.term else { return None };
+        if (t, e) != (tb, eb) { return None; }
+        // A register is a constant only if the whole function writes it exactly once (RIR
+        // registers are not SSA: a loop or a join may assign the same one again); the walk goes
+        // only through such registers.
+        fn value(f: &Func, insts: &[&Inst], writes: &dyn Fn(VReg) -> u32, used: &mut Vec<VReg>, v: VReg, depth: u32) -> Option<i128> {
+            if depth > 8 || writes(v) != 1 { return None; }
+            used.push(v);
+            let def = insts.iter().rev().copied().find(|i| matches!(i, Inst::Iconst(d, _) | Inst::Mov(d, _) | Inst::ICmpI(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) if *d == v))?;
+            match def {
+                Inst::Iconst(_, k) => Some(*k as i128),
+                Inst::Mov(_, a) => value(f, insts, writes, used, *a, depth + 1),
+                Inst::ICmpI(cond, signed, _, a, k) => {
+                    let (x, k) = (value(f, insts, writes, used, *a, depth + 1)?, *k as i128);
+                    Some(cmp(*cond, *signed, x, k) as i128)
+                }
+                Inst::ICmp(cond, signed, _, a, b) => {
+                    let (x, y) = (value(f, insts, writes, used, *a, depth + 1)?, value(f, insts, writes, used, *b, depth + 1)?);
+                    Some(cmp(*cond, *signed, x, y) as i128)
+                }
+                _ => None,
+            }
+        }
+        fn cmp(c: Cond, signed: bool, x: i128, y: i128) -> bool {
+            let (x, y) = if signed { (x as i64 as i128, y as i64 as i128) } else { (x as u64 as i128, y as u64 as i128) };
+            match c { Cond::Eq => x == y, Cond::Ne => x != y, Cond::Lt => x < y, Cond::Le => x <= y, Cond::Gt => x > y, Cond::Ge => x >= y }
+        }
+        // Only under a check (the post-monomorphization walk): RIR registers are not SSA, so a
+        // definition found by search is a proof only within the branch's own block; the code a
+        // run executes is lowered as written.
+        if !self.fold { return None; }
+        let local: Vec<&Inst> = self.entry_inits.iter().chain(blk.insts.iter()).collect();
+        let writes = |v: VReg| -> u32 { rir_writes(&self.f, &self.entry_inits, v) };
+        let mut used = Vec::new();
+        let known = value(&self.f, &local, &writes, &mut used, c, 0).map(|k| k != 0);
+        if known.is_some() { self.fold_regs.borrow_mut().extend(used); }
+        known
+    }
+
     fn lower_if(&mut self, c: ExprId, then: BlockId, els: Option<ExprId>, t: TyId) -> Val {
         let tb = self.f.block();
         let eb = self.f.block();
@@ -8389,13 +8442,23 @@ impl<'a> Lcx<'a> {
         }
         self.lower_cond(c, tb, eb);
         self.cond_rescope = saved_rescope;
+        // rustc_mir_transform SimplifyConstCondition: a branch on a constant (`if N != 0` once the
+        // const parameter has its value) is taken one way, and its dead successor is not
+        // lowered -- what it names (a constant that cannot be evaluated, a closure) is never
+        // instantiated, as rustc's monomorphization collector never sees it
+        let known = if let_scope { None } else { self.known_branch(self.cur, tb, eb) };
         self.switch(tb);
         // the body of an `if` and its `else` block are temporary scopes (Reference
         // destructors.scope.temporary: "The body of an if ... expression", "The else block")
         let mark = self.stmt_temps.len();
-        let v = self.lower_block(then);
-        if !self.is_never(t) {
-            self.write_place(&res, t, v);
+        if known == Some(false) {
+            self.term(Term::Unreachable);
+            self.dead();
+        } else {
+            let v = self.lower_block(then);
+            if !self.is_never(t) {
+                self.write_place(&res, t, v);
+            }
         }
         self.drop_stmt_temps_from(mark);
         if let_scope {
@@ -8414,7 +8477,10 @@ impl<'a> Lcx<'a> {
             self.scope_marks.truncate(depth);
             self.tail_marks.truncate(depth);
         }
-        if let Some(x) = els {
+        if known == Some(true) {
+            self.term(Term::Unreachable);
+            self.dead();
+        } else if let Some(x) = els {
             let mark = self.stmt_temps.len();
             let v = self.lower_expr_coerced(x, t);
             if !self.is_never(t) {
@@ -8743,6 +8809,14 @@ impl<'a> Lcx<'a> {
             return self.unit();
         }
         self.read_place(&res, t)
+    }
+
+    /// A loop head in a checked program counts one iteration of the constant being evaluated
+    /// (see Options::const_fuel).
+    fn const_fuel_tick(&mut self) {
+        if !self.u.prog.session.options.const_fuel { return; }
+        let rt = self.u.syms.intern(crate::syms::SymKind::Rt("const_fuel"), const_fuel_addr());
+        self.emit(Inst::Call(Callee::Host(rt), Vec::new(), Vec::new()));
     }
 
     fn lower_for(&mut self, p: PatId, it: ExprId, b: BlockId, label: Option<Ident>) {
@@ -13654,12 +13728,65 @@ rt_fn! {
 /// A panic reached the edge of a function that cannot unwind (an `extern "C"` body): rustc's
 /// panic_cannot_unwind -- the message, then abort.
 fn rt_cannot_unwind() {
+    if crate::jit::in_checked_const_eval() { crate::jit::leave_pending_panic(); }
     eprintln!("panic in a function that cannot unwind");
     std::process::abort();
 }
 }
 
+rt_fn! {
+/// A loop head of a checked program (Options::const_fuel).
+fn rt_const_fuel() {
+    crate::jit::const_fuel_tick();
+}
+}
+
+pub fn const_fuel_addr() -> u64 {
+    let f: rt_fn_ty!(fn()) = rt_const_fuel;
+    f as usize as u64
+}
+
+/// How many times the function (every block, the entry initialisations, its parameters) writes `v`.
+pub(crate) fn rir_writes(f: &Func, entry_inits: &[Inst], v: VReg) -> u32 {
+    let mut n = f.params.iter().filter(|p| **p == v).count() as u32;
+    for i in entry_inits.iter().chain(f.blocks.iter().flat_map(|b| b.insts.iter())) {
+        i.defs(&mut |d| if d == v { n += 1; });
+    }
+    n
+}
+
 pub fn cannot_unwind_addr() -> u64 {
     let f: rt_fn_ty!(fn()) = rt_cannot_unwind;
     f as usize as u64
+}
+
+#[cfg(test)]
+mod fold_soundness_tests {
+    use super::*;
+
+    /// RIR registers are not SSA: a register a loop assigns again is not a constant, however
+    /// constant its first definition looks (`rir_writes` counts every block, the parameters).
+    #[test]
+    fn a_register_assigned_in_a_loop_is_written_more_than_once() {
+        let mut f = Func::new("t".to_string(), 0);
+        let x = f.vreg(Cls::I);
+        let y = f.vreg(Cls::I);
+        let c = f.vreg(Cls::I);
+        let entry = f.block();
+        let head = f.block();
+        let body = f.block();
+        f.blocks[entry as usize].insts.push(Inst::Iconst(x, 0));
+        f.blocks[entry as usize].term = Term::Jump(head);
+        f.blocks[head as usize].insts.push(Inst::ICmpI(Cond::Ne, false, c, x, 0));
+        f.blocks[head as usize].term = Term::Branch(c, body, entry);
+        f.blocks[body as usize].insts.push(Inst::Iconst(y, 1));
+        f.blocks[body as usize].insts.push(Inst::Mov(x, y));
+        assert_eq!(rir_writes(&f, &[], x), 2, "x: Iconst in the entry block, Mov in the loop");
+        assert_eq!(rir_writes(&f, &[], y), 1);
+        assert_eq!(rir_writes(&f, &[], c), 1);
+        f.params.push(y);
+        assert_eq!(rir_writes(&f, &[], y), 2, "a parameter is a definition");
+        let entry_inits = [Inst::Iconst(c, 1)];
+        assert_eq!(rir_writes(&f, &entry_inits, c), 2, "the entry initialisations count");
+    }
 }

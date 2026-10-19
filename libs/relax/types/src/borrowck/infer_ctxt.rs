@@ -359,7 +359,7 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
                 let mut args = vec![*ty];
                 let state = crate::tcx::EvalState::new();
                 let cx = crate::tcx::EvalCx::new(self.prog, &self.tcx, crate::tcx::TypingEnv::fully_monomorphized(self.prog), &state);
-                self.tcx.fill_type_defaults(&cx, self.prog, def, &mut args, None);
+                let _ = self.tcx.fill_type_defaults(&cx, self.prog, def, &mut args, None);
                 tys.intern(TyKind::Adt(def, tys.mk_list(&args), crate::types::RegionArgsId::EMPTY))
             }
             Rvalue::Repeat(op, count) => {

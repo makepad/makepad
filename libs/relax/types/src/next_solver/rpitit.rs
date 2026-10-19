@@ -99,7 +99,12 @@ impl Tcx {
     }
 
     pub fn own_clauses_of(&self, prog: &Program, def: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def))
+        &self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def)).0
+    }
+
+    /// The errors of lowering the definition's clauses (see `own_clauses_uncached`).
+    pub fn own_clauses_errors(&self, prog: &Program, def: DefId) -> &[String] {
+        &self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def)).1
     }
 
     /// rustc_hir_analysis/src/collect/item_bounds.rs: elaboration belongs to the provider.
@@ -130,6 +135,12 @@ impl Tcx {
             for predicate in &mut bounds { *predicate = fold::fold_predicate(&self.tys, predicate, &mut folder); }
             return bounds;
         }
+        self.lower_assoc_item_bounds(prog, def_id, &crate::tcx::EvalState::new())
+    }
+
+    /// The bounds written on an associated type (`type A: Bound;`), lowered with `state`'s
+    /// error capture.
+    fn lower_assoc_item_bounds(&self, prog: &Program, def_id: DefId, state: &crate::tcx::EvalState) -> Vec<Predicate> {
         let def = prog.def(def_id);
         let ast = &prog.files[def.file as usize].ast;
         let Some(&crate::ast::TypeAliasItem { bounds, .. }) = ast.as_alias(&ast.item(def.item).kind) else { return Vec::new(); };
@@ -139,11 +150,18 @@ impl Tcx {
         for &i in &indices.lifetimes { regions.push(self.tys.intern_region(RegionKind::ReEarlyParam(i))); }
         let alias = self.tys.intern(TyKind::Alias(IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id }, args: self.tys.mk_list(&indices.identity_types_consts(&self.tys)), regions: self.tys.intern_region_args(&regions) }));
         env.regions = env.regions.with_binder(None);
-        let state = crate::tcx::EvalState::new();
-        let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv::fully_monomorphized(&prog), state);
         let mut bounds_out = Vec::new();
         self.lower_bounds(&cx, def_id, &env, alias, bounds, true, super::collect::PredicateFilter::All, &mut bounds_out);
         bounds_out
+    }
+
+    /// The errors of lowering an associated type's bounds (wfcheck lowers them for every item).
+    pub(crate) fn assoc_item_bounds_errors(&self, prog: &Program, def_id: DefId) -> Vec<String> {
+        let state = crate::tcx::EvalState::new();
+        state.errors.replace(Some(Vec::new()));
+        self.lower_assoc_item_bounds(prog, def_id, &state);
+        state.errors.take().unwrap_or_default()
     }
 }
 

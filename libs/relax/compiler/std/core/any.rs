@@ -11,7 +11,7 @@ pub struct TypeId {
 }
 
 impl TypeId {
-    pub fn of<T: ?Sized + 'static>() -> TypeId {
+    pub const fn of<T: ?Sized + 'static>() -> TypeId {
         unsafe { TypeId { hi: crate::intrinsics_mem::type_id_hi::<T>(), lo: crate::intrinsics_mem::type_id::<T>() } }
     }
 }
@@ -22,11 +22,11 @@ impl fmt::Debug for TypeId {
     }
 }
 
-pub fn type_name<T: ?Sized>() -> &'static str {
+pub const fn type_name<T: ?Sized>() -> &'static str {
     unsafe { crate::intrinsics_mem::type_name::<T>() }
 }
 
-pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
+pub const fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
     type_name::<T>()
 }
 

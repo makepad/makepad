@@ -232,7 +232,8 @@ impl Walk<'_> {
 
     fn ty(&mut self, t: TyId, v: V) {
         match self.tys.kind(t).clone() {
-            TyKind::Param(i) => self.constrain(self.indices.types_consts[i as usize], v),
+            // (a declaration whose generics failed to lower has no indices to constrain)
+            TyKind::Param(i) => if let Some(&full) = self.indices.types_consts.get(i as usize) { self.constrain(full, v) },
             TyKind::Ref(m, t, r) => {
                 self.region(r, v);
                 self.ty(t, xform(v, if m { V::Inv } else { V::Co }));

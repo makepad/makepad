@@ -124,6 +124,8 @@ struct PoolState {
     scans: std::collections::BTreeMap<ScanPriority, ScanKey>,
     scan_seq: u64,
     seen: HashSet<ScanKey>,
+    /// the scan that found each scanned module file (a `mod` cycle ends at a file already on its chain)
+    found_by: HashMap<ScanKey, ScanKey>,
     /// per crate: scans queued or running
     scan_left: Vec<usize>,
     scanned: Vec<HashMap<ScanKey, Option<Scanned>>>,
@@ -300,7 +302,14 @@ impl Pool {
         if let Some(s) = &r {
             for (p, d, m) in &s.children {
                 let k = (key.0, p.clone(), d.clone(), m.clone());
+                // rustc_expand: a file that includes itself through `mod` items is an error the
+                // loader reports; the prescan stops at the repeat
+                let mut on_chain = key.1 == *p;
+                let mut up = st.found_by.get(&key);
+                while let (false, Some(parent)) = (on_chain, up) { on_chain = parent.1 == *p; up = st.found_by.get(parent); }
+                if on_chain { continue; }
                 if st.seen.insert(k.clone()) {
+                    st.found_by.insert(k.clone(), key.clone());
                     st.scan_seq += 1;
                     let seq = st.scan_seq;
                     st.scans.insert((key.0, seq), k);
@@ -1238,6 +1247,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         scans: Default::default(),
         scan_seq: 0,
         seen: HashSet::default(),
+        found_by: HashMap::default(),
         scan_left: vec![1; n],
         scanned: (0..n).map(|_| HashMap::default()).collect(),
         publishing: false,

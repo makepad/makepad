@@ -67,16 +67,19 @@ pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
 pub trait FnOnce<Args> {
     #[cfg_attr(not(relax_check), lang = "fn_once_output")]
     type Output;
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_once(self, args: Args) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "fn_mut")]
 #[fundamental]
 pub trait FnMut<Args>: FnOnce<Args> {
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "fn")]
 #[fundamental]
 pub trait Fn<Args>: FnMut<Args> {
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call(&self, args: Args) -> Self::Output;
 }
 
@@ -385,25 +388,25 @@ impl<Idx> RangeInclusive<Idx> {
     pub const fn end(&self) -> &Idx {
         &self.end
     }
-    pub fn into_inner(self) -> (Idx, Idx) {
+    pub const fn into_inner(self) -> (Idx, Idx) {
         (self.start, self.end)
     }
 }
 
 impl<Idx: PartialOrd<Idx>> Range<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
         self.start <= *item && *item < self.end
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         !(self.start < self.end)
     }
 }
 
 impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -412,7 +415,7 @@ impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -421,7 +424,7 @@ impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -430,13 +433,13 @@ impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeInclusive<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
         self.start <= *item && *item <= self.end
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.exhausted || !(self.start <= self.end)
     }
 }
@@ -449,7 +452,7 @@ pub enum Bound<T> {
 }
 
 impl<T> Bound<T> {
-    pub fn as_ref(&self) -> Bound<&T> {
+    pub const fn as_ref(&self) -> Bound<&T> {
         match self {
             Bound::Included(x) => Bound::Included(x),
             Bound::Excluded(x) => Bound::Excluded(x),
@@ -466,7 +469,7 @@ impl<T> Bound<T> {
 }
 
 impl<T: Clone> Bound<&T> {
-    pub fn cloned(self) -> Bound<T> {
+    pub const fn cloned(self) -> Bound<T> {
         match self {
             Bound::Included(x) => Bound::Included(x.clone()),
             Bound::Excluded(x) => Bound::Excluded(x.clone()),
@@ -716,13 +719,13 @@ impl<B, C> FromResidual<ControlFlow<B, crate::convert::Infallible>> for ControlF
 }
 
 impl<B, C> ControlFlow<B, C> {
-    pub fn is_break(&self) -> bool {
+    pub const fn is_break(&self) -> bool {
         matches!(self, ControlFlow::Break(_))
     }
-    pub fn is_continue(&self) -> bool {
+    pub const fn is_continue(&self) -> bool {
         matches!(self, ControlFlow::Continue(_))
     }
-    pub fn break_value(self) -> Option<B> {
+    pub const fn break_value(self) -> Option<B> {
         match self {
             ControlFlow::Break(b) => Some(b),
             ControlFlow::Continue(_) => None,

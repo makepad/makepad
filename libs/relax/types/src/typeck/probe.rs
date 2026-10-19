@@ -379,7 +379,14 @@ impl Fcx<'_> {
         self.rollback_to(snapshot);
         let Some((mut candidate, autoderefs, autoref, unsize, const_ptr)) = result? else { return Ok(None); };
         let mut adjusted = self.shallow(receiver);
-        for step in 0..autoderefs { adjusted = self.deref_step(expr.0, step, adjusted).expect("confirmed autoderef step"); }
+        for step in 0..autoderefs {
+            // the steps were computed by the solver's overloaded_deref_ty (an opaque type of the
+            // function being defined derefs through its item bounds there)
+            adjusted = match self.deref_step(expr.0, step, adjusted) {
+                Some(next) => next,
+                None => overloaded_deref_ty(&self.infcx, self.prog, &self.param_env, self.infcx.deeply_resolve_ignoring_regions(adjusted)).expect("confirmed autoderef step"),
+            };
+        }
         if unsize { let TyKind::Array(element, _) = self.tcx.tys.kind(adjusted) else { panic!("unsize method receiver"); }; adjusted = self.tcx.tys.intern(TyKind::Slice(*element)); }
         // confirm.rs fresh_receiver_args reconstructs object and trait picks;
         // only a where-clause pick retains the caller's original predicate.

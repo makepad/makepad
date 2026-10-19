@@ -11,7 +11,7 @@ pub struct BinaryHeap<T> {
 }
 
 impl<T: Ord> BinaryHeap<T> {
-    pub fn new() -> BinaryHeap<T> {
+    pub const fn new() -> BinaryHeap<T> {
         BinaryHeap { data: Vec::new() }
     }
 

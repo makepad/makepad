@@ -604,7 +604,9 @@ pub(crate) fn capture_initial_data(u: &Unit, root: Sym) {
         }
         let size = match u.syms.kind(sym.id) {
             Some(SymKind::Static(d)) => match u.tcx.const_ty(&u.prog, d) {
-                Some(t) => u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t).size.max(1) as usize,
+                // the layout the static's storage was sized with (Unit::layout_of normalizes const aliases
+                // in array lengths: `[u8; N]` with `const N` is N bytes, not an unevaluated length)
+                Some(t) => u.layout_of(t).size.max(1) as usize,
                 None => continue,
             },
             Some(SymKind::Data(i)) => match u.syms.obj_info(i) {

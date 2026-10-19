@@ -202,7 +202,7 @@ fn rust_entry_points_agree_including_errors_and_appending() {
         let mut b = vec![sentinel];
         let old = lex(source.as_bytes(), 2021, &mut a).err();
         let new = lex_with(source.as_bytes(), &LexOptions { edition: 2021, mode: Mode::Rust, trivia: false }, &mut b).err();
-        assert_eq!(old.map(|e| (e.pos, e.msg.to_owned())), new.map(|e| (e.lo, e.msg)));
+        assert_eq!(old.map(|e| (e.pos, e.msg.into_owned())), new.map(|e| (e.lo, e.msg)));
         let flatten = |ts: &[Tok]| ts.iter().map(|t| (t.kind, t.lo, t.hi)).collect::<Vec<_>>();
         assert_eq!(flatten(&a), flatten(&b));
     }

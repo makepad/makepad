@@ -335,6 +335,9 @@ impl Plan {
                         if let Some(scan) = scan { for (path, dir, _) in &scan.children { directories.insert(path.clone(), dir.clone()); } }
                     }
                     let mut seen = scans.iter().map(|(path, module, ..)| (path.clone(), module.clone())).collect::<BTreeSet<_>>();
+                    // the module files each scanned file was reached through (rustc_expand: a file
+                    // that includes itself through `mod` items is the loader's circular-modules error)
+                    let mut chains: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
                     let mut pending = std::collections::VecDeque::from(std::mem::take(scans));
                     while let Some(mut entry) = pending.pop_front() {
                         let (path, module, _, scan, parameters, _) = &mut entry;
@@ -381,9 +384,13 @@ impl Plan {
                             if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, &c.cfg, scan.src_len,
                                 expanded_src, surface.toks, &contexts[*ci], false) { *scan = expanded; }
                         }
+                        let mut chain = chains.get(&(path.clone(), module.clone())).cloned().unwrap_or_default();
+                        chain.push(path.clone());
                         for (child, dir, child_module) in &scan.children {
                             directories.insert(child.clone(), dir.clone());
+                            if chain.contains(child) { continue; }
                             if !seen.insert((child.clone(), child_module.clone())) { continue; }
+                            chains.insert((child.clone(), child_module.clone()), chain.clone());
                             let source = contexts[*ci].read_source(child).ok();
                             let hash = source.as_ref().map(|s| crate::crate_image::file_hash(child, &s.src));
                             let child_scan = source.and_then(|s| scan_text_mode(child, dir, child_module, &c.name, c.edition, &c.cfg, (&s.src).into(), &contexts[*ci], true)).map(Arc::new);
@@ -818,6 +825,15 @@ impl Plan {
             hash.u8(self.reached.contains(key) as u8);
         }
         self.selection = hashes.into_iter().map(|h| h.map_or(0, |h| h.finish128())).collect();
+        // A crate whose indexed files are all reached loads exactly what an eager crate loads: its
+        // identity is the eager one. Otherwise the same crate would carry an identity that depends
+        // on whether the early prefix had reached it when its image was recorded or looked up (a
+        // timing accident), and no two programs could share its image or its fingerprint.
+        for ci in 0..self.selection.len() {
+            if self.selection[ci] != 0 && self.indexed.range((ci, String::new())..(ci + 1, String::new())).all(|k| self.reached.contains(k)) {
+                self.selection[ci] = 0;
+            }
+        }
         for (context, &identity) in self.contexts.iter().zip(&self.selection) {
             if identity != 0 { context.set_demand_identity(identity); }
         }

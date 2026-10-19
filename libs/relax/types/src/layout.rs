@@ -1215,6 +1215,19 @@ impl Layouts {
             2 => return true,
             _ => {}
         }
+        // `struct Foo(<&'static Foo as Deref>::Target)`: the tail is the struct itself through a
+        // projection -- rustc's layout query cycle (E0391)
+        let _cycle = match crate::cycle::enter(crate::cycle::Kind::UnsizedTail, t.0, 0) {
+            Ok(g) => g,
+            Err(()) => {
+                if let TyKind::Adt(d, ..) = tcx.tys.kind(t) {
+                    let def = lcx.prog.def(*d);
+                    tcx.dcx.report(crate::next_solver::fulfill::ObligationCause { body_id: *d, span: lcx.prog.files[def.file as usize].ast.item(def.item).lo },
+                        format!("E0391: cycle detected when computing layout of `{}`", lcx.prog.def_path(*d)));
+                }
+                return false;
+            }
+        };
         // by type structure only (no layouts: pointee layouts may be recursive)
         let r = match tcx.tys.kind(t) {
             TyKind::Foreign(_) | TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..) => true,

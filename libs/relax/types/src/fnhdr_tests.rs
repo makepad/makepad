@@ -17,6 +17,8 @@ fn collect_for_target(source: &str, target: &str) -> (Program, Tcx) {
     std::fs::write(&root, source).unwrap();
     let mut prog = Program::new(sess);
     prog.load_crate("custom", root.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+    // the checks that report only in a checked crate (casts, ...) run in this crate
+    for c in prog.crates.iter_mut() { c.validate = true; }
     std::fs::remove_file(root).unwrap();
     prog.resolve_imports();
     let mut tcx = Tcx::new();
@@ -84,9 +86,9 @@ fn check(source: &str, reject: bool) {
     let state = EvalState::new();
     let cx = EvalCx::new(&prog, &tcx, TypingEnv::fully_monomorphized(&prog), &state);
     let body = crate::typeck::instantiate_body(&cx, &prog, &tcx, named(&prog, "probe"), &[]);
-    assert_eq!(!body.errors.is_empty(), reject, "{:?}", body.errors);
+    assert_eq!(!body.errors.is_empty(), reject, "{source}: {:?}", body.errors);
     if reject {
-        assert!(body.errors.iter().any(|e| e.contains("mismatched types") || e.contains("E0061")), "{:?}", body.errors);
+        assert!(body.errors.iter().any(|e| e.contains("mismatched types") || e.contains("E0061") || e.contains("E0605")), "{:?}", body.errors);
     }
 }
 

@@ -248,6 +248,7 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
         // nothing; `--watch`: the warm session (type/borrow check only unless --deep), re-checking
         // what each edit invalidates
         "check" => {
+            crate::lexer::set_validation(true);
             os::proc::exit(serve_rpc::check(sess, &args[2..]));
         }
         // `makepad selftest [--root-only] <package>`: a test of Relax itself -- every fn of the

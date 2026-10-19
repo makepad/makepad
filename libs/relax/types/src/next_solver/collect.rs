@@ -193,21 +193,24 @@ impl Tcx {
         out
     }
 
-    pub(crate) fn own_clauses_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
+    /// The definition's own clauses and the errors lowering them reported (rustc `predicates_of`
+    /// reports a bound that names no trait, a wrong number of arguments, ...).
+    pub(crate) fn own_clauses_uncached(&self, prog: &Program, def_id: DefId) -> (Vec<Predicate>, Vec<String>) {
         if let Some(mut clauses) = self.rpitit_clauses(prog, def_id) {
             let count = self.clauses_of(prog, prog.def(def_id).parent).len();
             clauses.drain(..count);
-            return clauses;
+            return (clauses, Vec::new());
         }
         let def = prog.def(def_id);
         // rustc_hir_analysis/src/collect/generics_of.rs:96: MCG has no parent.
         if def.kind == DefKind::AnonConst && !prog.repeat_expr_counts.contains(&def_id)
-            && matches!(prog.def_id_to_node_id.get(&def_id), Some((_, relax_front::def_collector::NodeId::AnonConst(_)))) { return Vec::new(); }
+            && matches!(prog.def_id_to_node_id.get(&def_id), Some((_, relax_front::def_collector::NodeId::AnonConst(_)))) { return (Vec::new(), Vec::new()); }
         if matches!(def.kind, DefKind::AnonConst | DefKind::OpaqueTy | DefKind::Closure | DefKind::Field) {
-            return self.clauses_of(prog, def.parent);
+            return (self.clauses_of(prog, def.parent), Vec::new());
         }
         let env = self.declaration_env(prog, def_id);
         let state = EvalState::new();
+        state.errors.replace(Some(Vec::new()));
         let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(&prog), &state);
         let ast = &prog.files[def.file as usize].ast;
         let generics = match ast.kind_generics(&ast.item(def.item).kind) {
@@ -276,7 +279,7 @@ impl Tcx {
                 }
             }
         }
-        out
+        (out, state.errors.take().unwrap_or_default())
     }
 
     pub(crate) fn lower_bounds(&self, cx: &EvalCx<'_>, owner: DefId, env: &GenEnv, ty: TyId, bounds: ast::List<Bound>, sized: bool, filter: PredicateFilter, out: &mut Vec<Predicate>) {
@@ -330,7 +333,7 @@ impl Tcx {
             }
             return;
         };
-        let Some(td) = self.resolve_type_path_def(prog, def.file, def.scope, &path) else { return; };
+        let Some(td) = self.resolve_trait_path(cx, prog, def.file, def.scope, env, &path) else { return; };
         // hir_ty_lowering/bounds.rs: PointeeSized is absence of a sizedness bound.
         if self.lang_items.get(crate::lang_items::LangItem::PointeeSized) == Some(td) { return; }
         let mut env = env.clone();
@@ -370,7 +373,18 @@ impl Tcx {
                         _ => continue,
                     };
                     let name = prog.syms.get(prog.files[def.file as usize].text(name)).unwrap();
-                    let Some(ad) = self.trait_assoc(prog, td, name) else { continue; };
+                    let Some(ad) = self.trait_assoc(prog, td, name) else {
+                        let n = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _) => n, _ => continue };
+                        self.err(cx, prog, def.file, n.lo, format!("E0220: associated type `{}` not found for `{}`", prog.files[def.file as usize].text(n), prog.name(td)));
+                        continue;
+                    };
+                    // lower_assoc_item_constraint: the constraint's own arguments against the item's
+                    let errs = if !self.validates(prog, def.file) { Vec::new() } else { self.check_generic_arg_count(prog, ad, ast.gargs(own_args), ast, self.own_generic_counts(prog, ad, None), crate::tcx::arg_count::ArgPosition::AssocType, false, false) };
+                    if !errs.is_empty() || self.prohibit_constraints(cx, prog, def.file, own_args) {
+                        let lo = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _) => n.lo, _ => 0 };
+                        for e in errs { self.err(cx, prog, def.file, lo, e); }
+                        continue;
+                    }
                     let supertrait = if prog.def(ad).parent == td { pred.clone() } else { self.supertraits(prog, pred.clone()).into_iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(c)) if c.trait_ref.def_id == prog.def(ad).parent)).expect("associated item's supertrait") };
                     let PredicateKind::Clause(ClauseKind::Trait(c)) = supertrait.kind else { unreachable!() };
                     let mut args = Vec::new();
@@ -379,6 +393,7 @@ impl Tcx {
                         GenericArg::Type(t) => args.push(t), GenericArg::Const(c) => args.push(self.tys.intern(TyKind::Const(c))), GenericArg::Lifetime(r) => rs.push(r),
                     } }
                     let vars = supertrait.bound_vars;
+                    let (parent_args, parent_regions) = (args.len(), rs.len());
                     if let Some(GenericArgs::Angle(own)) = ast.gargs(own_args) {
                         for arg in ast.list(*own) {
                             match *arg {
@@ -396,6 +411,9 @@ impl Tcx {
                             }
                         }
                     }
+                    let (mut own_args, mut own_regions) = (args.split_off(parent_args), rs.split_off(parent_regions));
+                    self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
+                    args.extend(own_args); rs.extend(own_regions);
                     let alias = self.tys.intern(TyKind::Alias(IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id: ad }, args: self.tys.mk_list(&args), regions: self.tys.intern_region_args(&rs) }));
                     match *arg {
                         ast::GenericArg::Binding(_, _, value) => {

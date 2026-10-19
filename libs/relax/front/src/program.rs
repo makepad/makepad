@@ -9,6 +9,9 @@ use crate::parser::ParsedFile;
 use crate::fxhash::HashMap;
 
 mod collected;
+mod privacy;
+mod attrs;
+mod validate;
 
 pub type Sym = u32;
 
@@ -259,6 +262,9 @@ pub struct Def {
     pub scope: u32,
 }
 
+pub const IMPORT_PUB: u8 = 1;
+pub const IMPORT_EXTERN: u8 = 2;
+
 pub struct Module {
     pub def: DefId,
     /// lexical parent for anonymous block modules (lookups fall through)
@@ -275,9 +281,9 @@ pub struct Module {
     pub globs: Vec<(DefId, bool)>,
     /// traits imported `as _` (in scope for method calls, no name)
     pub anon_traits: Vec<(DefId, bool)>,
-    /// visibility of import bindings (name, type ns) -> `pub use`; an item's own binding has
-    /// its item's visibility
-    pub import_pub: HashMap<(Sym, bool), bool>,
+    /// import bindings (name, type ns) -> IMPORT_PUB (`pub use`) | IMPORT_EXTERN (`extern crate`);
+    /// an item's own binding has its item's visibility
+    pub import_pub: HashMap<(Sym, bool), u8>,
 }
 
 /// How good an import path is to suggest: this crate's, then std's facade, then other crates',
@@ -376,6 +382,17 @@ pub struct Import {
     pub done: bool,
     pub file: u32,
     pub pos: u32,
+    /// `extern crate` (not `use`)
+    pub ext: bool,
+    /// namespaces this import has bound so far (bit 0 types, bit 1 values)
+    pub bound: u8,
+}
+
+/// Module indexes of the std prelude (Program::prelude_ids).
+struct PreludeIds {
+    base: u32,
+    /// rust_2015, rust_2018, rust_2021, rust_2024 (the base module where one is missing)
+    editions: [u32; 4],
 }
 
 pub struct CrateInfo {
@@ -389,9 +406,14 @@ pub struct CrateInfo {
     pub cfg: CfgSet,
     /// a proc-macro crate: other crates see only its macros (rustc exports nothing else)
     pub proc_macro: bool,
+    /// the crate's errors are reported (set by the check for its checked crates): validation-only
+    /// checks run for it and for no other crate
+    pub validate: bool,
     /// relaxed-Rust features this crate opts in to (relaxed.rs; empty = strict), read on first
     /// use (only a relaxable error or the borrow checker asks; strict programs never read it)
     relaxed: std::sync::OnceLock<Vec<String>>,
+    /// the crate's `#![feature(..)]` declarations, read on first use (the check's gates)
+    features: std::sync::OnceLock<crate::features::Features>,
     /// the crate's root source file (for its manifest)
     root_path: String,
     pub context: std::sync::Arc<crate::source_context::Context>,
@@ -409,22 +431,9 @@ fn recursion_limit(file: &ParsedFile) -> usize {
 }
 
 impl CrateInfo {
-    /// rustc_expand/src/config.rs:47 and rustc_hir_typeck/src/expr.rs:660:
-    /// this feature changes sizedness checking inside core/alloc as well as
-    /// user crates; it cannot be discarded with the feature-gate diagnostics.
-    pub fn unsized_fn_params(&self, prog: &Program) -> bool {
-        let root_file = prog.mods[self.root_mod as usize].file;
-        let file = &prog.files[root_file as usize];
-        let attrs = crate::cfg::expand_cfg_attr_list(prog.src(root_file), &file.ast.root_attrs, &self.cfg);
-        for attr in &attrs {
-            let lo = attr.toks.lo;
-            let hi = attr.toks.hi;
-            if !attr.inner || hi < lo + 4 || file.tok_text(lo) != "feature" || file.tok_text(lo + 1) != "(" || file.tok_text(hi - 1) != ")" { continue; }
-            for tok in (lo + 2..hi - 1).step_by(2) {
-                if file.tok_text(tok) == "unsized_fn_params" { return true; }
-            }
-        }
-        false
+    /// The crate's `#![feature(..)]` declarations.
+    pub fn features(&self, prog: &Program) -> &crate::features::Features {
+        self.features.get_or_init(|| crate::features::Features::read(prog, prog.mods[self.root_mod as usize].file, &self.cfg))
     }
 
     /// the crate's root source file
@@ -527,6 +536,8 @@ pub struct Program {
     pub prelexed: HashMap<String, (Vec<u8>, Vec<crate::lexer::Tok>)>,
     /// glob lookups after import resolution: (module, name, type ns) -> result
     pub glob_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<(DefId, BindVis)>>,
+    /// the crates being checked (`makepad check`): the only ones whose paths are privacy-checked
+    pub own_crates: Vec<bool>,
     /// lexical lookups (`lookup_in_scope`) once imports are resolved: (module, name, ns_type);
     /// cleared whenever a binding is defined or imports are resolved again
     scope_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<DefId>>,
@@ -568,6 +579,8 @@ pub struct Program {
     load_graph: Option<LoadGraph>,
     /// module path of the file being loaded (`module_path!()`)
     pub cur_mod_path: String,
+    /// the module files being loaded, outermost first (rustc_expand circular module check)
+    pub module_load_stack: Vec<String>,
     /// `macro_rules!` definitions seen so far (files parse in load order)
     pub macros: crate::collected::Deferred<std::sync::Arc<crate::macros::MacroTable>>,
     /// per crate root: what the preload found (macro definitions, files; preload.rs)
@@ -662,6 +675,8 @@ pub struct Program {
     pub prim_defs: Vec<DefId>,
     /// index of the crate whose `prelude` module supplies the std prelude
     pub prelude_crate: Option<u32>,
+    /// the std prelude's module and its four edition modules, found once (`prelude_ids`)
+    prelude_ids: std::sync::OnceLock<PreludeIds>,
     /// per module: the traits in scope for method calls (computed on first use)
     trait_scope: crate::conc::MemoMap<u32, std::sync::Arc<crate::fxhash::HashSet<DefId>>>,
     pub errors: Vec<String>,
@@ -786,10 +801,12 @@ impl Program {
             collected_recollect: Vec::new(),
             prim_defs: Vec::new(),
             prelude_crate: None,
+            prelude_ids: Default::default(),
             trait_scope: Default::default(),
             errors: Vec::new(),
             macros: Default::default(),
             glob_cache: Default::default(),
+            own_crates: Vec::new(),
             scope_cache: Default::default(),
             body_memos: Default::default(),
             path_seg_cache: Default::default(),
@@ -824,6 +841,7 @@ impl Program {
             import_settle: false,
             load_graph: None,
             cur_mod_path: String::new(),
+            module_load_stack: Vec::new(),
         };
         for kw in ["Self", "self", "super", "crate", "prelude", "core", "std"] {
             p.syms.intern(kw);
@@ -1101,7 +1119,7 @@ impl Program {
         let root_mod = self.new_module(root_def, None, None, krate, 0);
         self.defs[root_def.0 as usize].sub = root_mod;
         self.defs[root_def.0 as usize].scope = root_mod;
-        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, relaxed: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
+        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, validate: false, relaxed: Default::default(), features: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
         let kname = self.syms.str(cname).to_string();
         let akey = (kname.clone(), root.to_string());
         if !self.ahead.contains_key(&akey) {
@@ -1206,7 +1224,7 @@ impl Program {
             let inj = self.syms.intern(if no_std { "core" } else { "std" });
             let bound = self.mods[root_mod as usize].types.contains_key(&inj) || self.imports.iter().any(|i| i.module == root_mod && i.bind == Some(inj));
             if !bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) {
-                self.imports.push(Import { module: root_mod, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0 });
+                self.imports.push(Import { module: root_mod, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: 4 });
             }
         }
         // files no module loads (cfg'd out in ways the scan does not see)
@@ -1442,7 +1460,7 @@ impl Program {
             }
             for (def, public) in &m.globs { if !skip_globs || self.def(*def).kind != DefKind::Mod || files.contains(self.file_paths.get(self.mods[self.def(*def).sub as usize].file as usize).map_or("", String::as_str)) { bindings.push(format!("glob {public} {}", key(*def))); } }
             for (def, public) in &m.anon_traits { bindings.push(format!("trait {public} {}", key(*def))); }
-            for ((name, types), public) in &m.import_pub { if kept(*name, None) { bindings.push(format!("visibility {} {types} {public}", self.syms.str(*name))); } }
+            for ((name, types), public) in &m.import_pub { if kept(*name, None) { bindings.push(format!("visibility {} {types} {}", self.syms.str(*name), public & IMPORT_PUB != 0)); } }
             bindings.sort();
             out.entry(module).or_default().push(format!("{bindings:?}"));
         }
@@ -2129,7 +2147,7 @@ impl Program {
             let inj = self.syms.intern(if no_std { "core" } else { "std" });
             let bound = self.mods[root as usize].types.contains_key(&inj) || self.imports.iter().any(|i| i.module == root && i.bind == Some(inj));
             if !bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) {
-                self.imports.push(Import { module: root, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0 });
+                self.imports.push(Import { module: root, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: 4 });
             }
         }
         self.expand_pending(krate, self.crates[krate as usize].edition);
@@ -2546,6 +2564,17 @@ impl Program {
                                         loaded = true;
                                         break;
                                     }
+                                    // rustc_expand module.rs: a file that includes itself through `mod` items
+                                    let root = self.crates[krate as usize].root_path().to_string();
+                                    if *c == root || self.module_load_stack.contains(c) {
+                                        let mut chain = vec![root];
+                                        chain.extend(self.module_load_stack.iter().cloned());
+                                        chain.push(c.clone());
+                                        let lo = self.files[file as usize].ast.item(iid).lo;
+                                        self.errors.push(self.record_error(file, lo, "collect", format!("circular modules: {}", chain.join(" -> "))));
+                                        loaded = true;
+                                        break;
+                                    }
                                     let edition = self.crates[krate as usize].edition;
                                     self.cur_mod_path = self.def_path(d);
                                     let f = self.load_file(c, edition, krate)?;
@@ -2553,7 +2582,10 @@ impl Program {
                                     let is_mod_rs = child_mod_rs || c.ends_with("/mod.rs");
                                     let cdir = if is_mod_rs { dir_of(c).to_string() } else { format!("{}/{}", dir_of(c), stem_of(c)) };
                                     let items = self.files[f as usize].ast.root_items.clone();
-                                    self.collect_items(f, &items, m, &cdir, is_mod_rs)?;
+                                    self.module_load_stack.push(c.clone());
+                                    let collected = self.collect_items(f, &items, m, &cdir, is_mod_rs);
+                                    self.module_load_stack.pop();
+                                    collected?;
                                     loaded = true;
                                     break;
                                 }
@@ -2574,6 +2606,7 @@ impl Program {
                             continue;
                         }
                         self.reject_specialization(file, si, None, true);
+                        self.validate_foreign_fn(file, si);
         let n = self.files[file as usize].ast.item(si).name;
                         let sn = self.ident(file, n);
                         let ip = !matches!(self.files[file as usize].ast.item(si).vis, Vis::Private);
@@ -2615,9 +2648,9 @@ impl Program {
                     // written against `makepad_draw::..` also compiles inside makepad-draw)
                     let this = self.syms.str(name) == "self";
                     if this {
-                        self.imports.push(Import { module, global: false, segs: vec![(SegKind::Crate, name)], bind: Some(bind), glob: false, is_pub, done: false, file, pos });
+                        self.imports.push(Import { module, global: false, segs: vec![(SegKind::Crate, name)], bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: true, bound: 0 });
                     } else {
-                        self.imports.push(Import { module, global: true, segs: vec![(SegKind::Ident, name)], bind: Some(bind), glob: false, is_pub, done: false, file, pos });
+                        self.imports.push(Import { module, global: true, segs: vec![(SegKind::Ident, name)], bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: true, bound: 0 });
                     }
                     // at the crate root it also names the crate in the extern prelude (rustc:
                     // `extern crate alloc_no_stdlib as alloc;` makes `alloc::..` that crate in
@@ -2661,6 +2694,21 @@ impl Program {
             }
         }
         Ok(())
+    }
+
+    /// rustc_ast_passes ast_validation.rs:1486-1491 (visit_foreign_item): an `fn` in an
+    /// `extern` block has no body (check_foreign_fn_bodyless) and no qualifiers
+    /// (check_foreign_fn_headerless: async, const; the block's ABI is copied into each fn, so an own `extern` is not told apart).
+    fn validate_foreign_fn(&mut self, file: u32, item: ItemId) {
+        let ast = &self.files[file as usize].ast;
+        let it = ast.item(item);
+        let ItemKind::Fn(sig, body, _) = &it.kind else { return; };
+        let sig = ast.fn_sig(*sig);
+        let lo = it.lo;
+        let mut messages = Vec::new();
+        if body.is_some() || sig.lazy_body.is_some() { messages.push("incorrect function inside `extern` block"); }
+        if sig.asyncness || sig.konst { messages.push("functions in `extern` blocks cannot have qualifiers"); }
+        for message in messages { self.errors.push(self.record_error(file, lo, "collect", message.to_string())); }
     }
 
     /// rustc_ast_passes/src/feature_gate.rs:168,374 @8d1a764. The stable
@@ -2791,12 +2839,16 @@ impl Program {
                         None => s,
                     };
                 }
-                self.imports.push(Import { module, global, segs, bind: Some(bind), glob: false, is_pub, done: false, file, pos });
+                self.imports.push(Import { module, global, segs, bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: false, bound: 0 });
             }
             UseTree::Glob => {
-                self.imports.push(Import { module, global, segs: prefix.clone(), bind: None, glob: true, is_pub, done: false, file, pos });
+                self.imports.push(Import { module, global, segs: prefix.clone(), bind: None, glob: true, is_pub, done: false, file, pos, ext: false, bound: 0 });
             }
             UseTree::Group(v) => {
+                // `use a::b::{};` imports nothing, but its prefix is resolved (and privacy-checked)
+                if v.is_empty() && !prefix.is_empty() {
+                    self.imports.push(Import { module, global, segs: prefix.clone(), bind: None, glob: true, is_pub: false, done: false, file, pos, ext: false, bound: 8 });
+                }
                 for x in self.files[file as usize].ast.list(*v).to_vec() {
                     self.flatten_use(file, module, global, &x, prefix, is_pub, pos);
                 }
@@ -3336,17 +3388,7 @@ impl Program {
         let invalid = graph.glob_closure(changed);
         // Scope/trait-scope also read the implicit prelude. A changed prelude
         // therefore invalidates those scopes even without an explicit glob edge.
-        let prelude_changed = self
-            .prelude_crate
-            .and_then(|pc| {
-                let root = self.crates[pc as usize].root_mod;
-                self.syms
-                    .get("prelude")
-                    .and_then(|n| self.mods[root as usize].types.get(&n))
-                    .map(|d| self.def(*d))
-                    .filter(|d| d.kind == DefKind::Mod)
-            })
-            .is_some_and(|d| invalid.contains(&d.sub));
+        let prelude_changed = self.prelude_modules().iter().any(|m| invalid.contains(m));
         let files: crate::fxhash::HashSet<u32> = invalid.iter().map(|&m| self.mods[m as usize].file).collect();
         let scope = retain_load_memos(&mut self.scope_cache, |(m, _, _), v| !prelude_changed && !invalid.contains(m) && v.is_some());
         let glob = retain_load_memos(&mut self.glob_cache, |(m, _, _), v| !invalid.contains(m) && v.is_some());
@@ -3388,11 +3430,8 @@ impl Program {
     fn import_reportable(&self, i: usize, macro_binds: &mut Option<crate::fxhash::HashSet<Sym>>) -> bool {
         let im = &self.imports[i];
         // bound in one namespace while waiting for the other: resolved
-        if let Some(b) = im.bind {
-            let m = &self.mods[im.module as usize];
-            if m.types.contains_key(&b) || m.values.contains_key(&b) {
-                return false;
-            }
+        if im.bound & 3 != 0 {
+            return false;
         }
         // `use std::eprintln;` / `use alloc::format;`: built-in macros need no import
         if !im.glob {
@@ -3480,9 +3519,17 @@ impl Program {
                 Some(t) => t,
                 None => return false,
             };
+            // only a module or an enum can be glob-imported (`use Alias::*` is unresolved)
+            if !matches!(self.def(target).kind, DefKind::Mod | DefKind::Enum) {
+                return false;
+            }
             // a proc-macro crate exports only macros: a glob over it brings in no items
             let tk = self.def(target).krate;
             if tk != my_crate && self.crates[tk as usize].proc_macro {
+                return true;
+            }
+            // (a prefix of an empty group: resolved, binds nothing)
+            if self.imports[i].bound & 8 != 0 {
                 return true;
             }
             let is_pub = self.imports[i].is_pub;
@@ -3563,6 +3610,12 @@ impl Program {
         if hidden(self, vdef) {
             vdef = None;
         }
+        // a tuple struct with a field this module cannot see is imported without its constructor
+        if let Some(d) = vdef {
+            if self.def(d).krate == my_crate && self.tuple_ctor_hidden(d, module) {
+                vdef = None;
+            }
+        }
         if tdef.is_none() && vdef.is_none() {
             return true;
         }
@@ -3580,18 +3633,27 @@ impl Program {
         if self.imports_done && (tdef.is_some() || vdef.is_some()) {
             self.scope_cache.clear();
         }
-        if let Some(d) = tdef {
+        let (ext, ipos, ifile, injected) = (self.imports[i].ext, self.imports[i].pos, self.imports[i].file, self.imports[i].bound & 4 != 0);
+        let flags = is_pub as u8 | if ext { IMPORT_EXTERN } else { 0 };
+        for (ns_type, found) in [(true, tdef), (false, vdef)] {
+            let Some(d) = found else { continue };
+            let bit = if ns_type { 1 } else { 2 };
             let m = &mut self.mods[module as usize];
-            if !m.types.contains_key(&bind) {
-                m.types.insert(bind, d);
-                m.import_pub.insert((bind, true), is_pub);
-            }
-        }
-        if let Some(d) = vdef {
-            let m = &mut self.mods[module as usize];
-            if !m.values.contains_key(&bind) {
-                m.values.insert(bind, d);
-                m.import_pub.insert((bind, false), is_pub);
+            let taken = if ns_type { m.types.get(&bind).copied() } else { m.values.get(&bind).copied() };
+            match taken {
+                None => {
+                    if ns_type { m.types.insert(bind, d); } else { m.values.insert(bind, d); }
+                    m.import_pub.insert((bind, ns_type), flags);
+                    self.imports[i].bound |= bit;
+                }
+                Some(old) => {
+                    // the name is bound twice (rustc_resolve diagnostics.rs `report_conflict`)
+                    if self.imports[i].bound & bit == 0 && !injected {
+                        let old_flags = m.import_pub.get(&(bind, ns_type)).copied();
+                        self.imports[i].bound |= bit;
+                        self.report_name_clash(bind, ns_type, old, old_flags, (ext, ipos, ifile));
+                    }
+                }
             }
         }
         // one namespace found while an import into the source module that binds the same name
@@ -3612,6 +3674,41 @@ impl Program {
             }
         }
         true
+    }
+
+    /// E0252/E0254/E0255/E0259/E0260 (rustc_resolve diagnostics.rs `report_conflict`): the import
+    /// `new` binds a name that `old` already bound in the module (`old_flags`: the import's flags,
+    /// None for an item). The error is on the later of the two bindings.
+    fn report_name_clash(&mut self, name: Sym, ns_type: bool, old: DefId, old_flags: Option<u8>, new: (bool, u32, u32)) {
+        let (n_ext, npos, nfile) = new;
+        let o_ext = old_flags.map_or(false, |f| f & IMPORT_EXTERN != 0);
+        let o_item = old_flags.is_none();
+        let code = if o_ext && n_ext {
+            "E0259"
+        } else if o_ext || n_ext {
+            if o_item { "E0260" } else { "E0254" }
+        } else if o_item {
+            "E0255"
+        } else {
+            "E0252"
+        };
+        // an item bound earlier than the import resolved may come later in the source
+        let (file, pos) = if o_item {
+            let od = self.def(old);
+            let item = od.item;
+            let f = od.file;
+            match self.files.get(f as usize).and_then(|pf| pf.ast.items.get(item.0 as usize)) {
+                Some(it) if item.0 != u32::MAX && f == nfile && it.lo > npos => (f, it.lo),
+                _ => (nfile, npos),
+            }
+        } else {
+            (nfile, npos)
+        };
+        let ns = if ns_type { "type" } else { "value" };
+        let n = self.syms.str(name).to_string();
+        let msg = format!("{code}: the name `{n}` is defined multiple times -- note: `{n}` must be defined only once in the {ns} namespace of this module");
+        let e = self.record_error(file, pos, "resolve", msg);
+        self.errors.push(e);
     }
 
     /// Whether module `src` or a module its resolved globs reach (transitively) has an open
@@ -3658,7 +3755,7 @@ impl Program {
         }
     }
 
-    fn vis_visible(&self, v: BindVis, to: u32) -> bool {
+    pub fn vis_visible(&self, v: BindVis, to: u32) -> bool {
         match v {
             None => true,
             Some(x) => self.in_module(to, x),
@@ -3684,7 +3781,7 @@ impl Program {
     fn binding_vis(&self, m: u32, name: Sym, ns_type: bool, d: DefId) -> BindVis {
         let md = &self.mods[m as usize];
         let is_pub = match md.import_pub.get(&(name, ns_type)) {
-            Some(p) => *p,
+            Some(p) => p & IMPORT_PUB != 0,
             None => self.def(d).is_pub,
         };
         if is_pub {
@@ -4005,7 +4102,7 @@ impl Program {
             let r = self.lookup_in_module_pass(m, name, ns_type, q);
             let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
             if !stale || pass > q.prev.len() + 1 {
-                if self.imports_done && !self.mods[m as usize].globs.is_empty()
+                if self.imports_done && !q.precise && !self.mods[m as usize].globs.is_empty()
                     && !self.mods[m as usize].values.contains_key(&name) && !self.mods[m as usize].types.contains_key(&name) {
                     self.glob_cache.insert((m, name, ns_type), r);
                 }
@@ -4020,7 +4117,7 @@ impl Program {
         let md = &self.mods[m as usize];
         let direct = if ns_type { md.types.get(&name) } else { md.values.get(&name) };
         if let Some(&d) = direct {
-            return Some((d, self.binding_vis(m, name, ns_type, d)));
+            return Some((d, if q.precise { self.precise_vis(m, name, ns_type, d) } else { self.binding_vis(m, name, ns_type, d) }));
         }
         if md.globs.is_empty() {
             return None;
@@ -4034,7 +4131,7 @@ impl Program {
             return *r;
         }
         // through globs: converged answers of earlier queries (glob graphs are wide and deep)
-        if self.imports_done {
+        if self.imports_done && !q.precise {
             if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
                 return r;
             }
@@ -4112,16 +4209,8 @@ impl Program {
                 None => break,
             }
         }
-        if let Some(pc) = self.prelude_crate {
-            let root = self.crates[pc as usize].root_mod;
-            if let Some(pn) = self.syms.get("prelude") {
-                if let Some(pm) = self.mods[root as usize].types.get(&pn) {
-                    let pmd = self.def(*pm);
-                    if pmd.kind == DefKind::Mod {
-                        self.module_traits(pmd.sub, &mut set, &mut visiting);
-                    }
-                }
-            }
+        if let Some(pm) = self.edition_prelude(module) {
+            self.module_traits(pm, &mut set, &mut visiting);
         }
         let a = std::sync::Arc::new(set);
         self.trait_scope.insert(module, a.clone());
@@ -4207,6 +4296,9 @@ impl Program {
             let gv = if gpub { None } else { Some(md.normal) };
             let inner = self.module_trait_bindings_pass(gd.sub, q);
             for &(d, v) in inner.iter() {
+                // a glob-imported trait whose name an explicit binding of this module shadows
+                // is not in scope (rustc: its methods are unavailable)
+                if md.types.get(&self.def(d).name).is_some_and(|x| *x != d) { continue; }
                 if self.vis_visible(v, m) {
                     let v = self.vis_min(gv, v);
                     // one entry per trait, the most visible binding
@@ -4278,6 +4370,41 @@ impl Program {
         r
     }
 
+    /// The std prelude module (`prelude` of the prelude crate) and its per-edition modules
+    /// (`rust_2015` .. `rust_2024`), found on the first lookup that sees them all.
+    fn prelude_ids(&self) -> Option<&PreludeIds> {
+        if let Some(p) = self.prelude_ids.get() { return Some(p); }
+        let pc = self.prelude_crate?;
+        let root = self.crates[pc as usize].root_mod;
+        let pm = self.syms.get("prelude").and_then(|n| self.mods[root as usize].types.get(&n))?;
+        let pmd = self.def(*pm);
+        if pmd.kind != DefKind::Mod { return None; }
+        let mut editions = [pmd.sub; 4];
+        for (i, ed) in ["rust_2015", "rust_2018", "rust_2021", "rust_2024"].into_iter().enumerate() {
+            if let Some(d) = self.syms.get(ed).and_then(|n| self.mods[pmd.sub as usize].types.get(&n)) {
+                if self.def(*d).kind == DefKind::Mod { editions[i] = self.def(*d).sub; }
+            }
+        }
+        Some(self.prelude_ids.get_or_init(|| PreludeIds { base: pmd.sub, editions }))
+    }
+
+    fn prelude_modules(&self) -> Vec<u32> {
+        self.prelude_ids().map_or_else(Vec::new, |p| std::iter::once(p.base).chain(p.editions).collect())
+    }
+
+    /// The prelude the edition of `module`'s crate injects (rustc: `std::prelude::rust_20NN`);
+    /// the plain `prelude` module for an edition the prelude crate has no module for.
+    fn edition_prelude(&self, module: u32) -> Option<u32> {
+        let p = self.prelude_ids()?;
+        Some(match self.crates[self.mods[module as usize].krate as usize].edition {
+            2015 => p.editions[0],
+            2018 => p.editions[1],
+            2021 => p.editions[2],
+            2024 => p.editions[3],
+            _ => p.base,
+        })
+    }
+
     /// The extern prelude, std prelude and primitive types (lookup_in_scope after the
     /// lexical modules).
     fn lookup_in_scope_outside(&self, module: u32, name: Sym, ns_type: bool) -> Option<DefId> {
@@ -4286,17 +4413,9 @@ impl Program {
                 return Some(self.mods[self.crates[c as usize].root_mod as usize].def);
             }
         }
-        if let Some(pc) = self.prelude_crate {
-            let root = self.crates[pc as usize].root_mod;
-            if let Some(pn) = self.syms.get("prelude") {
-                if let Some(pm) = self.mods[root as usize].types.get(&pn) {
-                    let pmd = self.def(*pm);
-                    if pmd.kind == DefKind::Mod {
-                        if let Some(d) = self.lookup_in_module(pmd.sub, name, ns_type, &mut Vec::new()) {
-                            return Some(d);
-                        }
-                    }
-                }
+        if let Some(pm) = self.edition_prelude(module) {
+            if let Some(d) = self.lookup_in_module(pm, name, ns_type, &mut Vec::new()) {
+                return Some(d);
             }
         }
         if ns_type {
@@ -4416,6 +4535,19 @@ pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
             }
             if let Some(b) = base.get() {
                 blocks_in_expr(ast, b, out);
+            }
+        }
+        // rustc_ast/src/visit.rs walk_path_segment: the blocks of const generic arguments
+        // (`Example::<{ const X: usize = 1; X }>`) are lexical blocks of the body
+        ExprKind::Path(path) => {
+            for seg in ast.segs(path.segs) {
+                if let Some(GenericArgs::Angle(v)) = ast.gargs(seg.args()) {
+                    for g in ast.list(*v) {
+                        if let GenericArg::Const(e) = g {
+                            blocks_in_expr(ast, *e, out);
+                        }
+                    }
+                }
             }
         }
         _ => {}
@@ -4978,6 +5110,8 @@ fn path_segs_uncached(prog: &Program, file: u32, p: &Path) -> Vec<(SegKind, Sym)
 /// One lookup through glob imports (a fixpoint over glob cycles, see lookup_in_module_vis).
 #[derive(Default)]
 struct GlobQuery {
+    /// bindings carry their written visibility (`pub(crate)`, `pub(super)`, ..) -- privacy checks
+    precise: bool,
     memo: HashMap<u32, Option<(DefId, BindVis)>>,
     /// the previous pass's answers (what a module still being looked through answers)
     prev: HashMap<u32, Option<(DefId, BindVis)>>,

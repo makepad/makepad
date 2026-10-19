@@ -67,7 +67,7 @@ pub type NonZeroI128 = NonZero<i128>;
 pub type NonZeroIsize = NonZero<isize>;
 
 impl<T: ZeroablePrimitive> NonZero<T> {
-    pub fn new(n: T) -> Option<NonZero<T>> {
+    pub const fn new(n: T) -> Option<NonZero<T>> {
         if n == T::ZERO {
             None
         } else {
@@ -82,6 +82,7 @@ impl<T: ZeroablePrimitive> NonZero<T> {
     }
 }
 
+impl<T> crate::marker::StructuralPartialEq for NonZero<T> where T: ZeroablePrimitive + crate::marker::StructuralPartialEq {}
 impl<T: ZeroablePrimitive> PartialEq for NonZero<T> {
     fn eq(&self, other: &NonZero<T>) -> bool {
         self.0 == other.0

@@ -4,12 +4,12 @@
 //
 // Output per workload (one line):
 //   | <name> steady_ms=<f> tts_main_ms=<f> tts_proc_ms=<f> iters=<n> first_ms=<f> <checksum>
-// steady_ms   median of the last N iteration times (N = min(10, iters/4), at least 3)
+// steady_ms   median of the last N iteration times (N = min(10, iterations started after 5 s), at least 3)
 // tts_main_ms ms from entering main until the iteration the per-iteration time settles within 10%
 //             of steady_ms (3-iteration running median) starts; tts_proc_ms the same measured from
 //             the process start (RW_WALL0 from run.py, else /proc on Linux; includes Relax's compile
 //             before main; else equal to tts_main_ms)
-// Env: RW_MS (run each workload at least this many ms, default 3000), RW_MIN_ITERS (default 20),
+// Env: RW_MS (run each workload at least this many ms, default 8000), RW_MIN_ITERS (default 20),
 //      RW_ROOT (the makepad tree root holding the inputs; default: the tree this crate is in).
 //      RW_ITERS (positive count: warm up for RW_MS, then run exactly this many iterations),
 //      RW_PERF_CTL=<control fifo>,<ack fifo> (fixed mode only; perf stat --control fifo:...
@@ -17,11 +17,14 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+mod audio;
+mod csg;
 mod inputs;
 mod layout;
 mod llm;
 mod maps;
 mod parsers;
+mod script;
 mod sdf;
 mod text;
 
@@ -29,7 +32,7 @@ fn main() {
     let t0 = Instant::now();
     let proc_ms_at_start = process_age_ms();
     let only: Vec<String> = std::env::args().skip(1).collect();
-    let all: [(&str, fn() -> Box<dyn FnMut() -> u64>); 12] = [
+    let all: [(&str, fn() -> Box<dyn FnMut() -> u64>); 17] = [
         ("text_shape_raster", text::setup),
         ("sdf_glyphs", sdf::setup),
         ("inflate_real", inputs::inflate_setup),
@@ -42,6 +45,11 @@ fn main() {
         ("rust_tokenize", parsers::rust_tokens_setup),
         ("markdown_parse", parsers::markdown_setup),
         ("html_parse", parsers::html_setup),
+        ("piano_render", audio::piano_setup),
+        ("ogg_decode", audio::ogg_setup),
+        ("audio_mix", audio::mix_setup),
+        ("splash_eval", script::setup),
+        ("csg_boolean", csg::setup),
     ];
     for (name, setup) in all.iter() {
         if only.is_empty() || only.iter().any(|o| o == name) {
@@ -73,7 +81,7 @@ fn median(v: &[f64]) -> f64 {
 }
 
 fn run(name: &str, setup: fn() -> Box<dyn FnMut() -> u64>, t0: Instant, proc_ms_at_start: Option<f64>) {
-    let budget_ms: f64 = std::env::var("RW_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000.0);
+    let budget_ms: f64 = std::env::var("RW_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(8000.0);
     let min_iters: usize = std::env::var("RW_MIN_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
     let begin = Instant::now();
     let mut iter = setup();
@@ -127,7 +135,11 @@ fn run(name: &str, setup: fn() -> Box<dyn FnMut() -> u64>, t0: Instant, proc_ms_
         }
     }
     let n = times.len();
-    let last = (n / 4).min(10).max(3).min(n);
+    // steady = the median of the last iterations that start after RW_STEADY_AFTER_MS (default 5000)
+    // from main: Relax installs its optimised code about 2 s in, so earlier iterations are not steady
+    let after: f64 = std::env::var("RW_STEADY_AFTER_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5000.0);
+    let eligible = starts.iter().filter(|s| **s >= after).count();
+    let last = eligible.min(10).max(3).min(n);
     let steady = median(&times[n - last..]);
     // settled: first i whose 3-iteration median is within 10% of steady
     let mut settled = n - 1;

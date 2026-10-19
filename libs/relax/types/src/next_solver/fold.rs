@@ -61,7 +61,10 @@ pub fn fold_predicate(tys: &Types, predicate: &Predicate, f: &mut dyn TypeFolder
 
 pub fn fold_param_env(tcx: &crate::tcx::Tcx, env: ParamEnvId, f: &mut dyn TypeFolder) -> ParamEnvId {
     if f.fold_flags().is_some_and(|flags| tcx.param_env_flags(env) & flags.bits() == 0) { return env; }
-    let clauses = tcx.param_env_by_id(env).clauses.iter().map(|p| fold_predicate(&tcx.tys, p, f)).collect::<Vec<_>>();
+    let old = tcx.param_env_by_id(env);
+    let clauses = old.clauses.iter().map(|p| fold_predicate(&tcx.tys, p, f)).collect::<Vec<_>>();
+    // nothing changed: the same environment, not interned (hashed) again
+    if clauses[..] == old.clauses[..] { return env; }
     tcx.intern_param_env(ParamEnv { clauses: clauses.into() })
 }
 

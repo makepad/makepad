@@ -73,6 +73,11 @@ impl Tcx {
         let raw = collector.fold_ty(&self.tys, trait_types, 0);
         let collected = std::mem::take(&mut collector.types); drop(collector);
         let normalized = ocx.normalize_ty(&env, raw);
+        // compare_impl_item.rs:560-562: `trait_sig.error_reported()?` -- an erroneous trait
+        // signature (already reported) has no hidden types to infer
+        if self.tys.has_error(normalized) || self.tys.has_error(raw) {
+            return Ok(prog.associated_types_for_impl_traits.get(&trait_method).into_iter().flatten().map(|&def| (def, self.tys.error)).collect());
+        }
         let universe = infcx.create_next_universe();
         let mut substitutions = Vec::new();
         for (index, (_, ty, _)) in collected.iter().enumerate() {

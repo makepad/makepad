@@ -630,8 +630,8 @@ impl BoundVarContext<'_> {
                     _ => {}
                 }
                 for param in ast.list(sig.params) { self.visit_ty(param.ty); }
-                if sig.asyncness {
-                    let opaque = self.prog.node_id_to_def_id[&(self.file, relax_front::def_collector::NodeId::AsyncReturn(def.item))];
+                // (ast_lowering of a foreign fn ignores `async`, rejected by ast validation: no opaque)
+                if let Some(&opaque) = sig.asyncness.then(|| self.prog.node_id_to_def_id.get(&(self.file, relax_front::def_collector::NodeId::AsyncReturn(def.item)))).flatten() {
                     self.visit_opaque_ty(opaque, Default::default(), sig.ret);
                 } else if let Some(ty) = sig.ret { self.visit_ty(ty); }
                 self.scopes.pop();

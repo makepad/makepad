@@ -259,7 +259,10 @@ impl Names {
                     if public { self.public.insert(name); }
                 }
             }
-            if text == "macro_rules" && i + 3 < toks.len() {
+            // `macro_rules ! name { .. }` (a bare `macro_rules`, `macro_rules! {}` and `tests!(macro_rules)` define nothing)
+            if text == "macro_rules" && i + 3 < toks.len() && toks[i + 1].kind == T::Not
+                && matches!(toks[i + 2].kind, T::Ident | T::RawIdent)
+                && matches!(toks[i + 3].kind, T::OpenBrace | T::OpenParen | T::OpenBracket) {
                 let name = word(src, &toks[i + 2]);
                 self.symbols.insert(format!("{module}::{name}"));
                 let end = close(toks, i + 3);

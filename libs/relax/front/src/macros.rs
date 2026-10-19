@@ -1860,10 +1860,13 @@ fn parse_matcher(toks: &[MTok]) -> Result<Vec<MNode>, String> {
             }
             if matches!(n.kind, T::Ident | T::RawIdent) || n.text.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 if i + 3 < toks.len() + 1 && i + 2 < toks.len() && toks[i + 2].kind == T::Colon && i + 3 < toks.len() {
-                    let f = frag_of(&toks[i + 3].text).ok_or_else(|| format!("unknown fragment specifier `{}`", toks[i + 3].text))?;
+                    let f = frag_of(&toks[i + 3].text).ok_or_else(|| format!("invalid fragment specifier `{}`", toks[i + 3].text))?;
                     out.push(MNode::Var(n.text.clone(), f));
                     i += 4;
                     continue;
+                }
+                if matches!(n.kind, T::Ident | T::RawIdent) {
+                    return Err(format!("missing fragment specifier for `${}`", n.text));
                 }
             }
         }
@@ -1958,6 +1961,143 @@ pub fn parse_def(name: &str, krate: &str, toks: &[MTok]) -> Result<MacroDef, Str
     }
     Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0,
         input: Some(std::sync::Arc::new(RuleInput { tokens: toks.to_vec(), local_inner: false })) })
+}
+
+/// What can come after a matcher fragment (rustc_expand mbe macro_rules.rs `check_matcher`).
+#[derive(Clone, Debug)]
+enum Follow {
+    End,
+    Tok(String),
+    Open(String),
+    Frag(Frag),
+}
+
+fn frag_name(f: Frag) -> &'static str {
+    match f {
+        Frag::Expr => "expr",
+        Frag::Ident => "ident",
+        Frag::Ty => "ty",
+        Frag::Tt => "tt",
+        Frag::Pat => "pat",
+        Frag::PatParam => "pat_param",
+        Frag::Path => "path",
+        Frag::Literal => "literal",
+        Frag::Block => "block",
+        Frag::Item => "item",
+        Frag::Stmt => "stmt",
+        Frag::Vis => "vis",
+        Frag::Lifetime => "lifetime",
+        Frag::Meta => "meta",
+    }
+}
+
+/// The tokens that can start `nodes`, and whether they can all match nothing.
+fn first_of(nodes: &[MNode]) -> (Vec<Follow>, bool) {
+    let mut out = Vec::new();
+    for n in nodes {
+        match n {
+            MNode::Tok(t) => {
+                out.push(Follow::Tok(t.text.clone()));
+                return (out, false);
+            }
+            MNode::Var(_, f) => {
+                out.push(Follow::Frag(*f));
+                return (out, false);
+            }
+            MNode::Group(open, _, _) => {
+                out.push(Follow::Open(open.text.clone()));
+                return (out, false);
+            }
+            MNode::Rep(inner, _, op) => {
+                let (f, nullable) = first_of(inner);
+                out.extend(f);
+                if !(*op == b'*' || *op == b'?' || nullable) {
+                    return (out, false);
+                }
+            }
+        }
+    }
+    (out, true)
+}
+
+fn follow_ok(frag: Frag, fol: &Follow, edition: u16) -> bool {
+    // (a fragment follower is judged by its first tokens; only `tt` starts with anything)
+    if let Follow::Frag(f) = fol {
+        return !(*f == Frag::Tt && !matches!(frag, Frag::Ident | Frag::Tt | Frag::Item | Frag::Lifetime | Frag::Literal | Frag::Meta | Frag::Block));
+    }
+    let tok_in = |set: &[&str]| matches!(fol, Follow::Tok(t) if set.contains(&t.as_str()));
+    match frag {
+        Frag::Expr | Frag::Stmt => matches!(fol, Follow::End) || tok_in(&["=>", ",", ";"]),
+        Frag::Pat if edition >= 2021 => matches!(fol, Follow::End) || tok_in(&["=>", ",", "=", "if", "in"]),
+        Frag::Pat => matches!(fol, Follow::End) || tok_in(&["=>", ",", "=", "|", "if", "in"]),
+        Frag::PatParam => matches!(fol, Follow::End) || tok_in(&["=>", ",", "=", "|", "if", "in"]),
+        Frag::Path | Frag::Ty => {
+            matches!(fol, Follow::End | Follow::Frag(Frag::Block)) || matches!(fol, Follow::Open(o) if o == "{" || o == "[")
+                || tok_in(&["{", "[", "=>", ",", ">", "=", ":", ";", "|", "as", "where", ">>", ">=", ">>="])
+        }
+        Frag::Vis => match fol {
+            Follow::End | Follow::Open(_) => true,
+            Follow::Tok(t) => t != "priv" && (t == "," || t.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_' || "&*!<:".contains(c)) || t == "::"),
+            Follow::Frag(_) => true,
+        },
+        _ => true,
+    }
+}
+
+fn follow_text(f: &Follow) -> String {
+    match f {
+        Follow::End => String::new(),
+        Follow::Tok(t) | Follow::Open(t) => t.clone(),
+        Follow::Frag(f) => format!("${}", frag_name(*f)),
+    }
+}
+
+fn check_seq(nodes: &[MNode], after: &[Follow], edition: u16) -> Result<(), String> {
+    for (i, n) in nodes.iter().enumerate() {
+        let (mut followers, nullable) = first_of(&nodes[i + 1..]);
+        if nullable {
+            followers.extend_from_slice(after);
+        }
+        match n {
+            MNode::Var(name, frag) => {
+                for fol in &followers {
+                    if !follow_ok(*frag, fol, edition) {
+                        let fname = frag_name(*frag);
+                        return Err(format!("`${name}:{fname}` is followed by `{}`, which is not allowed for `{fname}` fragments", follow_text(fol)));
+                    }
+                }
+            }
+            MNode::Group(_, _, inner) => check_seq(inner, &[Follow::End], edition)?,
+            MNode::Rep(inner, sep, op) => {
+                // (`?` repeats at most once: nothing of it follows itself)
+                let mut inner_after: Vec<Follow> = match sep {
+                    _ if *op == b'?' => Vec::new(),
+                    Some(t) => vec![Follow::Tok(t.text.clone())],
+                    None => first_of(inner).0,
+                };
+                inner_after.extend(followers);
+                check_seq(inner, &inner_after, edition)?;
+            }
+            MNode::Tok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// A `macro_rules!` definition's matchers: no variable bound twice in one rule, and every
+/// fragment followed only by what its fragment kind allows.
+pub fn check_rules(d: &MacroDef, edition: u16) -> Result<(), String> {
+    for (matcher, _) in &d.arms {
+        let mut vars = Vec::new();
+        vars_of(matcher, &mut vars);
+        for (i, v) in vars.iter().enumerate() {
+            if vars[..i].contains(v) {
+                return Err(format!("duplicate matcher binding `${v}`"));
+            }
+        }
+        check_seq(matcher, &[Follow::End], edition)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

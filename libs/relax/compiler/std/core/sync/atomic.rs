@@ -188,7 +188,7 @@ impl AtomicBool {
     pub fn get_mut(&mut self) -> &mut bool {
         unsafe { &mut *(self.v.get() as *mut bool) }
     }
-    pub fn into_inner(self) -> bool {
+    pub const fn into_inner(self) -> bool {
         self.v.into_inner() != 0
     }
     pub const fn as_ptr(&self) -> *mut bool {
@@ -289,7 +289,7 @@ impl<T> AtomicPtr<T> {
     pub fn get_mut(&mut self) -> &mut *mut T {
         self.p.get_mut()
     }
-    pub fn into_inner(self) -> *mut T {
+    pub const fn into_inner(self) -> *mut T {
         self.p.into_inner()
     }
     pub const fn as_ptr(&self) -> *mut *mut T {

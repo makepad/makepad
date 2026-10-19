@@ -21,6 +21,11 @@ use crate::types::{TyId, TyKind};
 const STEP_BUDGET: u32 = 4_000_000;
 const CALL_DEPTH: u32 = 32;
 
+thread_local! {
+    /// the constants whose data this thread's nested evaluations are reading (const_data)
+    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 struct Ctx<'a> {
     u: &'a mut Unit,
     steps: u32,
@@ -1225,8 +1230,17 @@ impl<'a> Ctx<'a> {
         let l = u.layout_of(t);
         let buf = u.data(&vec![0u8; l.size.max(1) as usize], l.align.max(8) as u64, crate::syms::DataKind::Typed(t));
         u.syms.set_data_name(buf, crate::jit::const_name(u, d, &args));
+        // a constant that reads itself, directly or through others, is outside the subset (the
+        // code path reports the cycle); each nested evaluation has a Ctx of its own, so
+        // `depth` alone does not bound this recursion
+        if CONSTS_READING.try_with(|c| c.borrow().iter().any(|(cd, ca)| *cd == d && *ca == args)).unwrap_or(false) {
+            return None;
+        }
+        struct Pop;
+        impl Drop for Pop { fn drop(&mut self) { let _ = CONSTS_READING.try_with(|c| { c.borrow_mut().pop(); }); } }
+        let _ = CONSTS_READING.try_with(|c| c.borrow_mut().push((d, args.clone())));
         self.depth += 1;
-        let ok = eval_into(self.u, d, &args, buf);
+        let ok = { let _pop = Pop; eval_into(self.u, d, &args, buf) };
         self.depth -= 1;
         if !ok {
             return None;

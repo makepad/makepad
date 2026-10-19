@@ -16,7 +16,7 @@ impl<T> UnsafeCell<T> {
     pub const fn new(value: T) -> UnsafeCell<T> {
         UnsafeCell { value }
     }
-    pub fn into_inner(self) -> T {
+    pub const fn into_inner(self) -> T {
         self.value
     }
 }
@@ -25,14 +25,14 @@ impl<T: ?Sized> UnsafeCell<T> {
     pub const fn get(&self) -> *mut T {
         &self.value as *const T as *mut T
     }
-    pub fn get_mut(&mut self) -> &mut T {
+    pub const fn get_mut(&mut self) -> &mut T {
         &mut self.value
     }
     pub const fn raw_get(this: *const UnsafeCell<T>) -> *mut T {
         this as *const T as *mut T
     }
     /// `&mut T` as `&mut UnsafeCell<T>` (repr(transparent)).
-    pub fn from_mut(value: &mut T) -> &mut UnsafeCell<T> {
+    pub const fn from_mut(value: &mut T) -> &mut UnsafeCell<T> {
         unsafe { &mut *(value as *mut T as *mut UnsafeCell<T>) }
     }
 }
@@ -62,7 +62,7 @@ impl<T> Cell<T> {
     pub const fn new(value: T) -> Cell<T> {
         Cell { value: UnsafeCell::new(value) }
     }
-    pub fn set(&self, val: T) {
+    pub const fn set(&self, val: T) {
         let old = self.replace(val);
         drop(old);
     }
@@ -72,19 +72,19 @@ impl<T> Cell<T> {
         }
         unsafe { crate::ptr::swap(self.value.get(), other.value.get()) }
     }
-    pub fn replace(&self, val: T) -> T {
+    pub const fn replace(&self, val: T) -> T {
         unsafe { crate::mem::replace(&mut *self.value.get(), val) }
     }
-    pub fn into_inner(self) -> T {
+    pub const fn into_inner(self) -> T {
         self.value.into_inner()
     }
 }
 
 impl<T: Copy> Cell<T> {
-    pub fn get(&self) -> T {
+    pub const fn get(&self) -> T {
         unsafe { *self.value.get() }
     }
-    pub fn update<F: FnOnce(T) -> T>(&self, f: F) {
+    pub const fn update<F: FnOnce(T) -> T>(&self, f: F) {
         let old = self.get();
         self.set(f(old));
     }
@@ -94,10 +94,10 @@ impl<T: ?Sized> Cell<T> {
     pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
-    pub fn get_mut(&mut self) -> &mut T {
+    pub const fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
-    pub fn from_mut(t: &mut T) -> &Cell<T> {
+    pub const fn from_mut(t: &mut T) -> &Cell<T> {
         unsafe { &*(t as *mut T as *const Cell<T>) }
     }
 }
@@ -117,7 +117,7 @@ impl<T, const N: usize> Cell<[T; N]> {
 }
 
 impl<T: Default> Cell<T> {
-    pub fn take(&self) -> T {
+    pub const fn take(&self) -> T {
         self.replace(T::default())
     }
 }
@@ -212,7 +212,7 @@ fn panic_already_borrowed() -> ! {
 
 #[cold]
 #[track_caller]
-fn panic_already_mutably_borrowed() -> ! {
+const fn panic_already_mutably_borrowed() -> ! {
     crate::panicking::panic_str("RefCell already mutably borrowed")
 }
 
@@ -220,11 +220,11 @@ impl<T> RefCell<T> {
     pub const fn new(value: T) -> RefCell<T> {
         RefCell { borrow: Cell::new(UNUSED), value: UnsafeCell::new(value) }
     }
-    pub fn into_inner(self) -> T {
+    pub const fn into_inner(self) -> T {
         self.value.into_inner()
     }
     #[track_caller]
-    pub fn replace(&self, t: T) -> T {
+    pub const fn replace(&self, t: T) -> T {
         crate::mem::replace(&mut *self.borrow_mut(), t)
     }
     #[track_caller]
@@ -234,20 +234,20 @@ impl<T> RefCell<T> {
         crate::mem::replace(mut_borrow, replacement)
     }
     #[track_caller]
-    pub fn swap(&self, other: &RefCell<T>) {
+    pub const fn swap(&self, other: &RefCell<T>) {
         crate::mem::swap(&mut *self.borrow_mut(), &mut *other.borrow_mut())
     }
 }
 
 impl<T: ?Sized> RefCell<T> {
     #[track_caller]
-    pub fn borrow(&self) -> Ref<'_, T> {
+    pub const fn borrow(&self) -> Ref<'_, T> {
         match self.try_borrow() {
             Ok(b) => b,
             Err(_) => panic_already_mutably_borrowed(),
         }
     }
-    pub fn try_borrow(&self) -> Result<Ref<'_, T>, BorrowError> {
+    pub const fn try_borrow(&self) -> Result<Ref<'_, T>, BorrowError> {
         let b = self.borrow.get();
         if b < 0 || b == isize::MAX {
             Err(BorrowError { _private: () })
@@ -257,13 +257,13 @@ impl<T: ?Sized> RefCell<T> {
         }
     }
     #[track_caller]
-    pub fn borrow_mut(&self) -> RefMut<'_, T> {
+    pub const fn borrow_mut(&self) -> RefMut<'_, T> {
         match self.try_borrow_mut() {
             Ok(b) => b,
             Err(_) => panic_already_borrowed(),
         }
     }
-    pub fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
+    pub const fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
         if self.borrow.get() != UNUSED {
             Err(BorrowMutError { _private: () })
         } else {
@@ -271,13 +271,13 @@ impl<T: ?Sized> RefCell<T> {
             Ok(RefMut { value: unsafe { &mut *self.value.get() }, borrow: &self.borrow })
         }
     }
-    pub fn as_ptr(&self) -> *mut T {
+    pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
-    pub fn get_mut(&mut self) -> &mut T {
+    pub const fn get_mut(&mut self) -> &mut T {
         self.value.get_mut()
     }
-    pub unsafe fn try_borrow_unguarded(&self) -> Result<&T, BorrowError> {
+    pub const unsafe fn try_borrow_unguarded(&self) -> Result<&T, BorrowError> {
         if self.borrow.get() < 0 {
             Err(BorrowError { _private: () })
         } else {
@@ -344,7 +344,7 @@ impl<'b, T: ?Sized> Deref for Ref<'b, T> {
 }
 
 impl<'b, T: ?Sized> Ref<'b, T> {
-    pub fn clone(orig: &Ref<'b, T>) -> Ref<'b, T> {
+    pub const fn clone(orig: &Ref<'b, T>) -> Ref<'b, T> {
         orig.borrow.set(orig.borrow.get() + 1);
         Ref { value: orig.value, borrow: orig.borrow }
     }
@@ -469,7 +469,7 @@ impl<T> OnceCell<T> {
             None => unsafe { crate::hint::unreachable_unchecked() },
         }
     }
-    pub fn into_inner(self) -> Option<T> {
+    pub const fn into_inner(self) -> Option<T> {
         self.inner.into_inner()
     }
     pub fn take(&mut self) -> Option<T> {

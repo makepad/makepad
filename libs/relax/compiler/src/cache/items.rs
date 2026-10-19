@@ -328,6 +328,62 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
     out
 }
 
+/// The interface fingerprints `plain` (bound-set free: what a collected image stores) with the
+/// loader's bound crates folded in. `bound` = (crate index, source identity) of the provided
+/// crates this program binds instead of compiling.
+///
+/// Whether a crate is bound changes the code of whatever can reach it (bridge calls instead of
+/// compiled callees), and so does which types cross the boundary: that set is global to the
+/// bound crates (`provided_shared_contains` walks every bound fn's signature, which reaches types
+/// of other bound crates; lower.rs check_provided_*). A bound crate's fn signature can only name
+/// the types of crates it depends on, so the types of P are affected by P and by the bound crates
+/// that depend on P. The view of a crate c is therefore: the bound crates reachable from c
+/// (through its dependencies, itself included) plus the bound crates depending on any of those,
+/// each by (name, source identity). A crate with an empty view (std, anything that cannot reach a
+/// bound crate) keeps its plain fingerprint and shares with every program.
+pub(crate) fn apply_bound(prog: &crate::program::Program, plain: &[u128], bound: &[(u32, u64)]) -> Vec<u128> {
+    let n = plain.len();
+    if bound.is_empty() { return plain.to_vec(); }
+    // bound crates sorted by name: bit k of a mask = sorted[k]
+    let mut sorted: Vec<(String, u64, u32)> = bound.iter().filter(|(k, _)| (*k as usize) < n)
+        .map(|(k, src)| (prog.syms.str(prog.crates[*k as usize].name).to_string(), *src, *k)).collect();
+    sorted.sort();
+    sorted.dedup_by(|a, b| a.2 == b.2);
+    assert!(sorted.len() <= 128, "more than 128 bound crates");
+    let mut reach = vec![0u128; n];
+    for (bit, (_, _, k)) in sorted.iter().enumerate() { reach[*k as usize] |= 1u128 << bit; }
+    loop {
+        let mut changed = false;
+        for c in 0..n {
+            let mut m = reach[c];
+            for &(_, d) in &prog.crates[c].deps {
+                if (d as usize) < n && d as usize != c { m |= reach[d as usize]; }
+            }
+            if m != reach[c] { reach[c] = m; changed = true; }
+        }
+        if !changed { break; }
+    }
+    // dependents[P] = bound crates Q that reach P
+    let mut dependents = vec![0u128; sorted.len()];
+    for (qbit, (_, _, q)) in sorted.iter().enumerate() {
+        for (p, dep) in dependents.iter_mut().enumerate() {
+            if reach[*q as usize] >> p & 1 == 1 { *dep |= 1u128 << qbit; }
+        }
+    }
+    (0..n).map(|c| {
+        let mut view = reach[c];
+        for p in 0..sorted.len() { if reach[c] >> p & 1 == 1 { view |= dependents[p]; } }
+        if view == 0 { return plain[c]; }
+        let mut h = Sip128::new();
+        h.str("iface-bound");
+        h.u128(plain[c]);
+        for (bit, (name, src, _)) in sorted.iter().enumerate() {
+            if view >> bit & 1 == 1 { h.str(name); h.u64(*src); }
+        }
+        h.finish128()
+    }).collect()
+}
+
 /// Every file's digest, on several threads (the cache's open).
 pub(crate) fn file_digests(prog: &crate::program::Program) -> Vec<Option<std::sync::Arc<FileDigest>>> {
     struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);

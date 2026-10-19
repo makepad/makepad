@@ -61,7 +61,7 @@ pub fn family(buf: &SockaddrStorage) -> c_int {
     }
 }
 
-pub fn zeroed() -> SockaddrStorage {
+pub const fn zeroed() -> SockaddrStorage {
     SockaddrStorage { bytes: [0; 16] }
 }
 

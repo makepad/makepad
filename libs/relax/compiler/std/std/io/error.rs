@@ -121,7 +121,7 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match *self {
             ErrorKind::AddrInUse => "address in use",
             ErrorKind::AddrNotAvailable => "address not available",

@@ -295,7 +295,7 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     a.field("provided_types");
     a.map(&u.provided_types, |_, _, _| {});
     a.field("provided_shared");
-    a.set(&u.provided_shared);
+    if let Some(s) = u.provided_shared_set() { a.set(s); }
     a.field("missing_stubs");
     if let Ok(g) = u.missing_stubs.try_lock() {
         a.map(&*g, |a, k, _| a.string(k));

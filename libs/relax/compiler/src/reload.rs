@@ -436,6 +436,7 @@ fn publish_reload(u: &mut Unit, versions: &[(u32, u32)], full: bool, scope: Opti
 pub unsafe fn rollback(up: *mut Unit, undo: Undo) -> Vec<String> {
     crate::owner::call(crate::owner::Class::App, || {
         let u = &mut *up;
+        u.flush_cache_records();
         jit::bump_patch_epoch();
         let ids = u.rollback_gen(undo.group);
         let names = ids.iter().map(|id| u.fns[*id as usize].name.to_string()).collect();
@@ -2043,6 +2044,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let options = &session.options;
     let u = &mut *up;
     let olds: Vec<u32> = edits.iter().map(|e| e.file).collect();
+    u.flush_cache_records();
     note_edited_crates(u, &olds);
     let cache_ahead0 = jit::CACHE_AHEAD.load(std::sync::atomic::Ordering::Relaxed);
     let mut out = Outcome { kept: 0, pending: false, rung: Rung::Refuse, files: olds.clone(), lines: Vec::new(), names: Vec::new(), changed: 0, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
@@ -2554,6 +2556,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let errors0 = u.prog.errors.len();
     trace_stage("gate_prepare");
     {
+        // parsing may have served requests: more startup installs may have been made since the
+        // first drain; their entries are encoded against the sources they were built from
+        u.flush_cache_records();
         let wait_from = jit::wall_ns();
         let fw = jit::front_write();
         if std::env::var_os("MAKEPAD_RUN_FRONT_TRACE").is_some() {
@@ -3100,6 +3105,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     if !errs.is_empty() {
         // nothing installs: the running versions come back, and everything built from the
         // refused text is dropped (built again from the running text when needed)
+        u.flush_cache_records();
         let fw = jit::front_write();
         let from = u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
         u.prog.unbind_defs(&added_defs);

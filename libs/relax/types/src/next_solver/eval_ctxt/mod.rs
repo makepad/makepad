@@ -288,7 +288,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
     }
 }
 
-pub(super) fn trait_is_auto(prog: &crate::program::Program, def: crate::program::DefId) -> bool {
+pub(crate) fn trait_is_auto(prog: &crate::program::Program, def: crate::program::DefId) -> bool {
     let def = prog.def(def);
     { let ast = &prog.files[def.file as usize].ast; ast.as_trait(&ast.item(def.item).kind).is_some_and(|t| t.auto) }
 }

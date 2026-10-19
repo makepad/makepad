@@ -50,7 +50,10 @@ static REPORT_PATH: relax_session::sync::Mutex<String> = relax_session::sync::Mu
 static ROOT_DIR: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
 
 fn phase(name: &str, t: Instant) {
-    let ms = t.elapsed().as_secs_f64() * 1e3;
+    phase_ms(name, t.elapsed().as_secs_f64() * 1e3);
+}
+
+fn phase_ms(name: &str, ms: f64) {
     if !SILENT.load(Ordering::Relaxed) {
         verbose!("makepad-run: {:<28} {:>9.1} ms   (t={:.0} ms)", name, ms, crate::clock::ms_since_start());
     }
@@ -207,6 +210,14 @@ pub(crate) struct Resolved {
     pub live_inputs: Option<crate::reload::Inputs>,
 }
 
+/// The boot's resolved package, handed to the app domain it starts (once: a relaunch resolves
+/// again, so an edited source or manifest is read).
+static HANDOFF: relax_session::sync::Mutex<Option<Resolved>> = relax_session::sync::Mutex::new(None);
+
+pub(crate) fn take_boot_resolved() -> Option<Resolved> {
+    HANDOFF.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
 pub(crate) fn resolve_package(
     sess: &std::sync::Arc<crate::Session>,
     workspace: &str,
@@ -236,14 +247,19 @@ pub(crate) fn resolve_package(
     }?;
     let t_load = Instant::now();
     let mut g = unitgraph::load(&units, check_only)?;
-    // The graph is enough to choose the host. Open its window before build scripts, parsing,
-    // source validation or JIT work; the process main thread is already serving the HAL.
-    if boot && HOSTED_RUN.load(Ordering::Acquire) && g.crates.iter().any(|c| c.name == "makepad_hal") {
-        (MAIN_HOST.get().expect("run host").open)(package, &g.pkg[g.root].0)?;
-        HAL_RUN.store(!MAIN_HOST.get().expect("run host").domain_zero, Ordering::Release);
-    }
+    let t_loaded = Instant::now();
+    // The graph is enough to choose the host. Its window opens now, beside the rest of the
+    // resolve (the watch inputs, the substitutions, the hash and the build scripts); the process
+    // main thread is already serving the HAL. The resolve ends when the window is open.
+    let window = (boot && HOSTED_RUN.load(Ordering::Acquire) && g.crates.iter().any(|c| c.name == "makepad_hal")).then(|| {
+        let (package, dir) = (package.to_string(), g.pkg[g.root].0.clone());
+        let _k = crate::zone_alloc::kept();
+        std::thread::Builder::new().name("run-open-window".into()).spawn(move || {
+            let _z = crate::zone_alloc::compiler_thread();
+            (MAIN_HOST.get().expect("run host").open)(&package, &dir)
+        })
+    });
     // provided crates bind only to their own source (before substitution rewrites deps)
-    let ts = Instant::now();
     let pkgs: Vec<crate::srchash::SrcPkg> = g
         .crates
         .iter()
@@ -251,9 +267,12 @@ pub(crate) fn resolve_package(
         .map(|(c, (dir, name, ver))| crate::srchash::SrcPkg { name: name.clone(), version: ver.clone(), dir: dir.clone(), features: c.features.clone(), deps: c.deps.iter().map(|d| d.0).collect(), proc_macro: c.proc_macro })
         .collect();
     let watches = boot || matches!(who, ResolveFor::Domain(id) if app_domain() == Some(id));
+    let t_inputs = Instant::now();
     let live_inputs = (watches && options.live).then(|| crate::reload::Inputs::collect(&g, std_dir, workspace));
+    let t_subst = Instant::now();
     // Validate native macros before any overlapping provided-crate identity error.
     crate::crates::apply_substitutes(sess, &mut g.crates, std_dir, !boot).map_err(|e| format!("crate substitution: {e}"))?;
+    let t_subst_done = Instant::now();
     {
         // The loader's provided crates are host code built for the machine: their shims bind
         // only where the program is read for the machine too. A program read for another target
@@ -265,25 +284,47 @@ pub(crate) fn resolve_package(
         // The boundary audit (`check --boundary`) binds as a run does: what it reports is what
         // JIT-compiled code reaches past the bound ops.
         let machine = crate::cfg::CfgSet::machine(sess, &[]).triple();
-        if crate::cfg::CfgSet::host(sess, &[]).triple() == machine && (!check_only || crate::boundary::requested()) {
-            crate::provided::check_sources(&pkgs)?;
-        } else {
-            crate::provided::read_identity_files(&pkgs);
+        let bind = crate::cfg::CfgSet::host(sess, &[]).triple() == machine && (!check_only || crate::boundary::requested());
+        // The sources are hashed while the build scripts run (and, for a run's boot, while the
+        // program loads): they share nothing (the hash reads the provided packages, the scripts
+        // write the graph's cfgs and env).
+        if boot { phase("unit graph", t); }
+        checkpoint("build scripts")?;
+        let t_scripts = Instant::now();
+        // The boot of a run does not wait for the hash at all: the load goes on and the unit is not
+        // built before the hash has passed (`finish_sources` below). A check, a domain's own
+        // resolve and a failing hash all end here.
+        let later = bind && boot && !check_only;
+        let pkgs = std::sync::Arc::new(pkgs);
+        if !bind { crate::provided::read_identity_files(&pkgs); }
+        if later { crate::provided::check_sources_later(pkgs.clone()); }
+        let (sources, scripts, scripts_ms, wait_ms) = std::thread::scope(|scope| {
+            let sources = (bind && !later).then(|| scope.spawn(|| {
+                let _z = crate::zone_alloc::compiler_thread();
+                let t = Instant::now();
+                (crate::provided::check_sources(&pkgs), t.elapsed())
+            }));
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir);
+            let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
+            let t_wait = Instant::now();
+            (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)
+        });
+        if boot {
+            phase_ms(&format!("build scripts ({})", g.build_scripts.len()), scripts_ms);
+            if !later { phase_ms("provided sources", wait_ms); }
         }
-        if boot { phase("provided sources", ts); }
+        if crate::preload::trace() {
+            if let Some((_, took)) = &sources { eprintln!("boot-trace: provided sources hashed in {:.1} ms (beside the build scripts)", took.as_secs_f64() * 1e3); }
+        }
+        if let Some((checked, _)) = sources { checked?; }
+        scripts?;
     }
     if crate::preload::trace() {
-        eprintln!("boot-trace: unit graph (resolve) {:.1} ms, graph {:.1} ms", (t_load - t).as_secs_f64() * 1e3, t_load.elapsed().as_secs_f64() * 1e3);
+        eprintln!("boot-trace: unit graph (resolve) {:.1} ms, graph {:.1} ms (load {:.1}, watch inputs {:.1}, substitutes {:.1})", (t_load - t).as_secs_f64() * 1e3, t_load.elapsed().as_secs_f64() * 1e3,
+            (t_loaded - t_load).as_secs_f64() * 1e3, (t_subst - t_inputs).as_secs_f64() * 1e3, t_subst_done.duration_since(t_subst).as_secs_f64() * 1e3);
     }
-    if boot {
-        phase("unit graph", t);
-    }
-    let t = Instant::now();
-    checkpoint("build scripts")?;
-    unitgraph::run_build_scripts(sess, &mut g, target_dir)?;
     checkpoint("loading crates")?;
     if boot {
-        phase(&format!("build scripts ({})", g.build_scripts.len()), t);
         // the scripts that still run (as Relax programs) that the source is to lose (unitgraph::script_role)
         let mut l = unitgraph::TO_REMOVE.lock().unwrap().clone();
         if !l.is_empty() && !SILENT.load(Ordering::Relaxed) {
@@ -302,6 +343,13 @@ pub(crate) fn resolve_package(
             cs.set.push(x.replace('"', ""));
         }
         cfgs.push(cs);
+    }
+    if let Some(window) = window {
+        let t_window = Instant::now();
+        let opened = window.map_err(|e| format!("opening the host window: {e}"))?.join().map_err(|_| "opening the host window: the thread panicked".to_string())?;
+        opened?;
+        if crate::preload::trace() { eprintln!("boot-trace: host window open, waited {:.1} ms for it at the end of the resolve", t_window.elapsed().as_secs_f64() * 1e3); }
+        HAL_RUN.store(!MAIN_HOST.get().expect("run host").domain_zero, Ordering::Release);
     }
     Ok(Resolved { units, g, order, cfgs, live_inputs })
 }
@@ -503,6 +551,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         a.extend(cargo_flags_in);
         a
     };
+    // a check runs code only to evaluate constants: their loops count iterations (long_running_const_eval)
+    driver_options.const_fuel = check;
+    // MAKEPAD_RUN_CHECK_EAGER=1 (check only): load every file of the provided crates instead of the demand
+    // plan's selection, so their front images do not depend on the checked crate (a sweep shares one
+    // read-only image cache)
+    driver_options.source_eager = check && std::env::var("MAKEPAD_RUN_CHECK_EAGER").is_ok_and(|v| v == "1");
     // kept: the settle swap (jit zone_swap) destroys the compiler arena; the session outlives it
     let frozen = crate::zone_alloc::kept_with(|| std::sync::Arc::new(crate::Session { options: driver_options.clone(), runtime: sess.runtime.clone() }));
     let sess = &frozen;
@@ -909,6 +963,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mem_g = crate::memstat::tag(crate::memstat::Tag::Sigs);
     // ---- signatures, layouts, impl tables
     let t = Instant::now();
+    // A check reports validation errors of its crates' impl headers and field types, which
+    // declaration collection lowers: the crates are marked before it runs (a run marks none).
+    if check {
+        let checked = if watch || root_only || session.is_some() { vec![root] } else if selftest || workspace_check { crate::check::workspace_crates(&prog, root) } else { crate::check::app_crates(&prog, root) };
+        for k in checked { prog.crates[k as usize].validate = true; }
+    }
     let mut tcx = collected_tcx.take().unwrap_or_else(crate::tcx::Tcx::new);
     // MAKEPAD_RUN_PERTURB: type ids shift (code must not depend on them; syms.rs reloc_sig)
     for i in 0..crate::syms::perturb(options) {
@@ -1100,6 +1160,16 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if options.live {
         crate::layout::LIVE_SESSION.store(true, Ordering::Relaxed);
     }
+    // The provided crates bind in Unit::new: their source check has passed before it.
+    {
+        let t = Instant::now();
+        if let Err(e) = crate::provided::finish_sources() {
+            if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "resolve")); }
+            eprintln!("makepad-run: {e}");
+            return 1;
+        }
+        phase("provided sources", t);
+    }
     let mut u = Unit::new(prog, tcx, core);
     // the program's unit names itself for the diagnostics that have no unit at hand (an
     // auxiliary unit -- the proc-macro world -- never takes it over)
@@ -1267,8 +1337,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if ahead {
         start_ahead(up, fn_defs);
     }
+    let mut domain_inputs = None;
     // a live session: hot reload of the program's own sources (reload.rs); none for store sources
     if crate::layout::LIVE_SESSION.load(Ordering::Relaxed) {
+        // the app domain this boot starts takes the same inputs (handoff below)
+        domain_inputs = if HAL_RUN.load(Ordering::Acquire) { live_inputs.as_ref().map(crate::zone_alloc::kept_clone) } else { None };
         crate::reload::start_watcher(up, live_inputs.unwrap_or_default());
     }
     jit::start_completion(up, runtime);
@@ -1375,6 +1448,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let main_def = main_def.expect("a run without --exports has main");
     if HAL_RUN.load(Ordering::Acquire) {
         unsafe { jit::set_runtime_unit(up) };
+        // The app domain is this very graph, resolved, verified and built a moment ago in this
+        // process: it takes it instead of resolving the package again (domain.rs start_prepared).
+        *HANDOFF.lock().unwrap() = Some(Resolved { units, g, order, cfgs, live_inputs: domain_inputs });
         let spec = crate::domain::AppSpec { package, cargo_flags, units_json, argv: Some(prog_args), ..Default::default() };
         let result = (MAIN_HOST.get().expect("run host").start)(spec);
         if result.is_ok() && !domain_packages.is_empty() { crate::domain::run_vehicle(up, domain_packages); }
@@ -1844,6 +1920,7 @@ fn try_settle(compiled: u64, drops: &mut jit::SettleDrops, trim: bool) -> bool {
         drops.rir += completed.rir;
         drops.typeck += completed.typeck;
         let drops = std::mem::take(drops);
+        unsafe { (&mut *up).flush_cache_records() };
         let retired = unsafe { jit::retire_type_side(up) };
         let u = unsafe { &mut *up };
         jit::zone_scan::settle_check(u);
@@ -2544,6 +2621,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     let held = Instant::now();
     let spill = {
         let u = unsafe { &mut *up };
+        u.flush_cache_records();
         // the startup manifest, once its window has closed (first present + 5 s after main):
         // what the exit recorded before, so a killed or force-quit app starts warm too; the exit
         // writes it again only if O2 code replaced startup code since (record_manifest)
@@ -2719,6 +2797,7 @@ fn summary_inner(why: &str) {
         // the disk cache: this run's new entries become a pack (on the owner thread: no compiles)
         if why != "stats" {
             let u = unsafe { &mut *up };
+            u.flush_cache_records();
             let (order, present) = jit::manifest_order(std::mem::take(&mut u.start_order), jit::ORDER_PRESENT_LEN.load(Ordering::Relaxed));
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {

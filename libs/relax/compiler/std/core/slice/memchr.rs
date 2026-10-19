@@ -5,13 +5,13 @@
 use crate::option::Option::{self, None, Some};
 
 #[inline]
-fn contains_zero_byte(x: usize) -> bool {
+const fn contains_zero_byte(x: usize) -> bool {
     let lo = usize::MAX / 255;
     x.wrapping_sub(lo) & !x & (lo * 128) != 0
 }
 
 #[inline]
-pub fn memchr(x: u8, text: &[u8]) -> Option<usize> {
+pub const fn memchr(x: u8, text: &[u8]) -> Option<usize> {
     let word = crate::mem::size_of::<usize>();
     let ptr = text.as_ptr();
     let len = text.len();

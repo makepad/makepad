@@ -202,7 +202,7 @@ fn relative(root: &std::path::Path, path: &std::path::Path) -> String {
 
 /// Library identity inputs and hashes, including transitive includes. Retain hashes, not
 /// asset contents; only the current file needs to stay in memory.
-fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
+pub fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
     use std::collections::{BTreeMap, BTreeSet};
     fn walk(dir: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
         if let Ok(entries) = crate::vfs::read_dir(dir) {
@@ -228,6 +228,9 @@ fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
         let bytes = crate::vfs::read(&path).unwrap_or_else(|e| panic!("source identity {}: {e}", path.display()));
         contents.entry(path.clone()).or_insert_with(|| { let mut h = H(0x5eed); h.bytes(&bytes); h.0 });
         if rust && scanned.insert(path.clone()) {
+            // `include!`, `include_str!` and `include_bytes!` are identifier tokens: a file that
+            // does not contain the bytes has none (invalid UTF-8 takes the lexer as before)
+            if std::str::from_utf8(&bytes).is_ok_and(|s| !s.contains("include")) { continue; }
             for (name, recurse) in includes(&String::from_utf8_lossy(&bytes)) {
                 let target = normalize(&path.parent().unwrap().join(name));
                 let rust = recurse && target.extension().is_some_and(|x| x == "rs");
@@ -243,6 +246,13 @@ fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
 pub type Manifest = std::collections::BTreeMap<(String, String), String>;
 
 pub fn closure_manifest(pkgs: &[SrcPkg], root: usize) -> Manifest {
+    closure_manifest_with(pkgs, root, &mut std::collections::HashMap::new())
+}
+
+/// As `closure_manifest`; `files` holds the identity files read per package folder, so a
+/// package that several closures reach is read and hashed once (the caller's scope: sources
+/// that change between calls are not seen through it).
+pub fn closure_manifest_with(pkgs: &[SrcPkg], root: usize, files: &mut std::collections::HashMap<String, Vec<(String, u64)>>) -> Manifest {
     let mut seen = vec![[false; 2]; pkgs.len()];
     let mut stack = vec![(root, false)];
     let mut out = Manifest::new();
@@ -260,10 +270,29 @@ pub fn closure_manifest(pkgs: &[SrcPkg], root: usize) -> Manifest {
         out.insert((key.clone(), "\0version".into()), p.version.clone());
         out.insert((key.clone(), "\0features".into()), feats.join(", "));
         if !immutable(&p.dir) {
-            for (rel, hash) in identity_files(std::path::Path::new(&p.dir)) {
-                out.insert((key.clone(), rel), format!("{hash:016x}"));
+            let list = files.entry(p.dir.clone()).or_insert_with(|| identity_files(std::path::Path::new(&p.dir)));
+            for (rel, hash) in list.iter() {
+                out.insert((key.clone(), rel.clone()), format!("{hash:016x}"));
             }
         }
+        stack.extend(p.deps.iter().map(|d| (*d, host)));
+    }
+    out
+}
+
+/// The package folders `closure_manifest_with(pkgs, root, ..)` reads identity files from (the
+/// same walk), in the order it first reaches them.
+pub fn closure_dirs(pkgs: &[SrcPkg], root: usize) -> Vec<String> {
+    let mut seen = vec![[false; 2]; pkgs.len()];
+    let mut stack = vec![(root, false)];
+    let mut out: Vec<String> = Vec::new();
+    while let Some((i, host)) = stack.pop() {
+        if i >= pkgs.len() { continue; }
+        let p = &pkgs[i];
+        let host = host || p.proc_macro;
+        if host && p.name == "relax-lex" { continue; }
+        if std::mem::replace(&mut seen[i][host as usize], true) { continue; }
+        if !immutable(&p.dir) && !out.contains(&p.dir) { out.push(p.dir.clone()); }
         stack.extend(p.deps.iter().map(|d| (*d, host)));
     }
     out

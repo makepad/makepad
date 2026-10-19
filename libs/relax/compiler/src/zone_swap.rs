@@ -488,6 +488,7 @@ unsafe fn prepare(up: *mut Unit) -> Result<(Option<crate::cache::Spill>, Counts)
     if !crate::run::front_recordable() {
         return Err("the program is not recordable".into());
     }
+    u.flush_cache_records();
     let c = u.cache.as_mut().ok_or("no cache")?;
     for (k, v) in crate::borrowck::lazy::take_verdict_keys() {
         c.record_borrowck(k, v);

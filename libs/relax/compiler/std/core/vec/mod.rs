@@ -49,7 +49,7 @@ fn is_zst<T>() -> bool {
     crate::mem::size_of::<T>() == 0
 }
 
-fn min_non_zero_cap(elem_size: usize) -> usize {
+const fn min_non_zero_cap(elem_size: usize) -> usize {
     if elem_size == 1 {
         8
     } else if elem_size <= 1024 {
@@ -60,7 +60,7 @@ fn min_non_zero_cap(elem_size: usize) -> usize {
 }
 
 #[cold]
-fn capacity_overflow() -> ! {
+const fn capacity_overflow() -> ! {
     crate::panicking::panic_str("capacity overflow")
 }
 
@@ -69,7 +69,7 @@ impl<T> Vec<T> {
         Vec { ptr: crate::ptr::NonNull::dangling(), cap: Cap::ZERO, len: 0 }
     }
 
-    pub fn with_capacity(capacity: usize) -> Vec<T> {
+    pub const fn with_capacity(capacity: usize) -> Vec<T> {
         let mut v = Vec::new();
         if capacity > 0 && !is_zst::<T>() {
             v.grow_to(capacity);
@@ -80,16 +80,16 @@ impl<T> Vec<T> {
     /// # Safety: `ptr` must be non-null and aligned, with `length` initialized elements.
     /// For non-ZSTs it must own an allocation for `capacity` elements, fitting in
     /// isize::MAX bytes, and `length` must not exceed `capacity`.
-    pub unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Vec<T> {
+    pub const unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Vec<T> {
         Vec { ptr: crate::ptr::NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length }
     }
 
-    pub fn into_raw_parts(self) -> (*mut T, usize, usize) {
+    pub const fn into_raw_parts(self) -> (*mut T, usize, usize) {
         let me = crate::mem::ManuallyDrop::new(self);
         (me.ptr.as_ptr(), me.len, me.capacity())
     }
 
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         if is_zst::<T>() {
             usize::MAX
         } else {
@@ -216,19 +216,19 @@ impl<T> Vec<T> {
         }
     }
 
-    pub fn as_slice(&self) -> &[T] {
+    pub const fn as_slice(&self) -> &[T] {
         unsafe { im::slice_from_raw(self.ptr.as_ptr() as *const T, self.len) }
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { im::slice_from_raw_mut(self.ptr.as_ptr(), self.len) }
     }
 
-    pub fn as_ptr(&self) -> *const T {
+    pub const fn as_ptr(&self) -> *const T {
         self.ptr.as_ptr() as *const T
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut T {
+    pub const fn as_mut_ptr(&mut self) -> *mut T {
         self.ptr.as_ptr()
     }
 
@@ -414,11 +414,11 @@ impl<T> Vec<T> {
         self.truncate(0)
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 

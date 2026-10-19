@@ -102,7 +102,7 @@ unsafe impl Send for Waker {}
 unsafe impl Sync for Waker {}
 
 impl Waker {
-    pub unsafe fn from_raw(waker: RawWaker) -> Waker {
+    pub const unsafe fn from_raw(waker: RawWaker) -> Waker {
         Waker { waker }
     }
     pub unsafe fn new(data: *const (), vtable: &'static RawWakerVTable) -> Waker {
@@ -124,7 +124,7 @@ impl Waker {
     pub fn vtable(&self) -> &'static RawWakerVTable {
         self.waker.vtable
     }
-    pub fn noop() -> &'static Waker {
+    pub const fn noop() -> &'static Waker {
         &NOOP_WAKER
     }
 }

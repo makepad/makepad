@@ -758,6 +758,14 @@ fn pump(
                     relaunched |= warm;
                     restartable = true;
                 }
+                Update::Failure(message) if !has_window => {
+                    // No window shows this failure and nobody can retry from it (a backend without
+                    // a shader dialect: headless, a plain program): the run ends with it. A program
+                    // that panicked in main used to leave the process running until it was killed.
+                    eprintln!("makepad: {message}");
+                    let _ = EXIT.compare_exchange(0, 101, Ordering::AcqRel, Ordering::Acquire);
+                    QUIT.store(true, Ordering::Release);
+                }
                 Update::Failure(message) => {
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
                     diagnostics_dirty = true;

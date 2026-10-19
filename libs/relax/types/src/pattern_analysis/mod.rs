@@ -46,6 +46,8 @@ pub struct Cx<'a> {
     pats: Vec<DPat>,
     next_opaque: u32,
     inhabited: RefCell<HashMap<TyId, bool>>,
+    /// errors of constants used as patterns (rustc const_to_pat), in order
+    const_errors: Vec<String>,
 }
 
 impl<'a> Cx<'a> {
@@ -481,13 +483,82 @@ impl<'a> Cx<'a> {
                 Some(self.push(ctor, Vec::new(), arity, t, pos))
             }
             DefKind::Const | DefKind::AssocConst => match self.const_value(d, p.0 | PAT_KEY, t) {
-                Some(v) => match self.valtree_to_pat(&v, t, pos, 0) {
-                    Some(x) => Some(x),
-                    None => Some(self.opaque(t, pos)),
-                },
+                Some(v) => {
+                    self.const_pattern_structural(&v, t, pos);
+                    match self.valtree_to_pat(&v, t, pos, 0) {
+                        Some(x) => Some(x),
+                        None => Some(self.opaque(t, pos)),
+                    }
+                }
+                // (no value tree to walk: nothing is judged)
                 None => Some(self.opaque(t, pos)),
             },
             _ => None,
+        }
+    }
+
+    /// rustc `type_marked_structural` (`Ty::is_structural_eq_shallow`): an ADT has an impl of
+    /// `StructuralPartialEq` (the PartialEq derive's, with its bounds).
+    fn type_marked_structural(&self, t: TyId) -> bool {
+        let t = self.tcx.tys.erase_all_regions(t);
+        let Some(td) = self.tcx.lang_items.get(crate::lang_items::LangItem::StructuralPeq) else { return true };
+        let infcx = crate::infer::InferCtxt::new(self.tcx, crate::tcx::TypingMode::non_body_analysis(), self.env.limit);
+        let goal = crate::next_solver::Goal { param_env: self.env.param_env, predicate: crate::next_solver::collect::trait_predicate(td, vec![crate::consts::GenericArg::Type(t)]) };
+        infcx.evaluate_obligation(self.prog, goal).may_apply()
+    }
+
+    /// const_to_pat.rs valtree_to_pat's check on every ADT of the constant's value: it must be
+    /// structural, else "constant of non-structural type `T` in a pattern".
+    fn const_pattern_structural(&mut self, v: &crate::consts::ValTree, t: TyId, pos: Option<u32>) {
+        let before = self.const_errors.len();
+        self.structural_walk(v, t, pos, 0);
+        // the whole constant needs a `PartialEq` impl (type_has_partial_eq_impl)
+        if self.const_errors.len() == before && matches!(self.kind(t), TyKind::Adt(..)) {
+            let t = self.tcx.tys.erase_all_regions(t);
+            if let Some(pe) = self.tcx.lang_items.get(crate::lang_items::LangItem::PartialEq) {
+                let infcx = crate::infer::InferCtxt::new(self.tcx, crate::tcx::TypingMode::non_body_analysis(), self.env.limit);
+                let goal = crate::next_solver::Goal { param_env: self.env.param_env, predicate: crate::next_solver::collect::trait_predicate(pe, vec![crate::consts::GenericArg::Type(t), crate::consts::GenericArg::Type(t)]) };
+                if !infcx.evaluate_obligation(self.prog, goal).may_apply() { self.not_structural(t, pos); }
+            }
+        }
+    }
+
+    fn not_structural(&mut self, t: TyId, pos: Option<u32>) {
+        let Some(lo) = pos else { return };
+        let name = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
+        let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", format!("constant of non-structural type `{}` in a pattern", name));
+        self.const_errors.push(e);
+    }
+
+    fn structural_walk(&mut self, v: &crate::consts::ValTree, t: TyId, pos: Option<u32>, depth: u32) {
+        if depth > 64 { return; }
+        let child = |cx: &Self, c: &crate::consts::Const| c.try_to_value(&cx.tcx.tys);
+        match self.kind(t) {
+            TyKind::Adt(d, args, _) => {
+                if !self.type_marked_structural(t) { self.not_structural(t, pos); return; }
+                let Some(a) = self.tcx.adts.get(&d) else { return };
+                if a.is_union { return; }
+                let Some(branches) = v.try_to_branch() else { return };
+                let branches: Vec<crate::consts::Value> = match branches.iter().map(|c| child(self, c)).collect::<Option<_>>() { Some(b) => b, None => return };
+                let (vi, fields): (usize, &[crate::consts::Value]) = if a.is_enum {
+                    let Some((first, rest)) = branches.split_first() else { return };
+                    let Some(l) = first.valtree.try_to_leaf() else { return };
+                    (l.to_bits(l.size()) as usize, rest)
+                } else { (0, &branches[..]) };
+                let tys = self.variant_field_tys(d, vi as u32, args);
+                for (f, ft) in fields.iter().zip(tys) { self.structural_walk(&f.valtree, ft, pos, depth + 1); }
+            }
+            TyKind::Ref(_, inner, _) => { let inner = self.reveal(inner); self.structural_walk(v, inner, pos, depth + 1) }
+            TyKind::Tuple(l) => {
+                let Some(branches) = v.try_to_branch() else { return };
+                let tys: Vec<TyId> = self.tcx.tys.list(l).to_vec();
+                for (c, ft) in branches.iter().zip(tys) { if let Some(f) = child(self, c) { self.structural_walk(&f.valtree, ft, pos, depth + 1); } }
+            }
+            TyKind::Array(e, _) | TyKind::Slice(e) => {
+                let Some(branches) = v.try_to_branch() else { return };
+                for c in branches.iter() { if let Some(f) = child(self, c) { self.structural_walk(&f.valtree, e, pos, depth + 1); } }
+            }
+            _ => {}
         }
     }
 
@@ -1003,9 +1074,12 @@ struct Checker<'a> {
 pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
     let d = prog.def(body.def);
     let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
-    let cx = Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()) };
+    let cx = Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()), const_errors: Vec::new() };
     let mut ck = Checker { cx, errors: Vec::new() };
     ck.run();
+    let mut const_errors = std::mem::take(&mut ck.cx.const_errors);
+    const_errors.dedup();
+    ck.errors.extend(const_errors);
     ck.errors
 }
 

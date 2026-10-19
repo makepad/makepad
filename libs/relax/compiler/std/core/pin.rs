@@ -35,32 +35,32 @@ macro_rules! pin {
 }
 
 impl<P: Deref> Pin<P> {
-    pub fn new(pointer: P) -> Pin<P>
+    pub const fn new(pointer: P) -> Pin<P>
     where
         P::Target: Unpin,
     {
         Pin { pointer }
     }
     #[cfg_attr(not(relax_check), lang = "new_unchecked")]
-    pub unsafe fn new_unchecked(pointer: P) -> Pin<P> {
+    pub const unsafe fn new_unchecked(pointer: P) -> Pin<P> {
         Pin { pointer }
     }
-    pub fn as_ref(&self) -> Pin<&P::Target> {
+    pub const fn as_ref(&self) -> Pin<&P::Target> {
         Pin { pointer: &*self.pointer }
     }
-    pub fn into_inner(pin: Pin<P>) -> P
+    pub const fn into_inner(pin: Pin<P>) -> P
     where
         P::Target: Unpin,
     {
         pin.pointer
     }
-    pub unsafe fn into_inner_unchecked(pin: Pin<P>) -> P {
+    pub const unsafe fn into_inner_unchecked(pin: Pin<P>) -> P {
         pin.pointer
     }
 }
 
 impl<P: DerefMut> Pin<P> {
-    pub fn as_mut(&mut self) -> Pin<&mut P::Target> {
+    pub const fn as_mut(&mut self) -> Pin<&mut P::Target> {
         Pin { pointer: &mut *self.pointer }
     }
     pub fn set(&mut self, value: P::Target)
@@ -72,19 +72,19 @@ impl<P: DerefMut> Pin<P> {
 }
 
 impl<'a, T: ?Sized> Pin<&'a T> {
-    pub fn get_ref(self) -> &'a T {
+    pub const fn get_ref(self) -> &'a T {
         self.pointer
     }
 }
 
 impl<'a, T: ?Sized> Pin<&'a mut T> {
-    pub fn get_mut(self) -> &'a mut T
+    pub const fn get_mut(self) -> &'a mut T
     where
         T: Unpin,
     {
         self.pointer
     }
-    pub unsafe fn get_unchecked_mut(self) -> &'a mut T {
+    pub const unsafe fn get_unchecked_mut(self) -> &'a mut T {
         self.pointer
     }
     pub unsafe fn map_unchecked_mut<U: ?Sized, F: FnOnce(&mut T) -> &mut U>(self, func: F) -> Pin<&'a mut U> {

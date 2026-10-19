@@ -6,20 +6,20 @@ use crate::intrinsics_mem as im;
 pub const fn size_of<T>() -> usize {
     unsafe { im::size_of::<T>() }
 }
-pub fn size_of_val<T: ?Sized>(val: &T) -> usize {
+pub const fn size_of_val<T: ?Sized>(val: &T) -> usize {
     unsafe { im::size_of_val(val) }
 }
 #[rustc_promotable]
 pub const fn align_of<T>() -> usize {
     unsafe { im::align_of::<T>() }
 }
-pub fn align_of_val<T: ?Sized>(val: &T) -> usize {
+pub const fn align_of_val<T: ?Sized>(val: &T) -> usize {
     unsafe { im::align_of_val(val) }
 }
-pub fn needs_drop<T>() -> bool {
+pub const fn needs_drop<T>() -> bool {
     unsafe { im::needs_drop::<T>() }
 }
-pub fn forget<T>(t: T) {
+pub const fn forget<T>(t: T) {
     unsafe { im::forget(t) }
 }
 pub fn drop<T>(_x: T) {}
@@ -32,7 +32,7 @@ pub fn replace<T>(dest: &mut T, src: T) -> T {
         old
     }
 }
-pub fn swap<T>(x: &mut T, y: &mut T) {
+pub const fn swap<T>(x: &mut T, y: &mut T) {
     unsafe {
         let pa = x as *mut T;
         let pb = y as *mut T;
@@ -44,13 +44,13 @@ pub fn swap<T>(x: &mut T, y: &mut T) {
 pub fn take<T: Default>(dest: &mut T) -> T {
     replace(dest, T::default())
 }
-pub unsafe fn zeroed<T>() -> T {
+pub const unsafe fn zeroed<T>() -> T {
     im::zeroed::<T>()
 }
-pub unsafe fn transmute<T, U>(e: T) -> U {
+pub const unsafe fn transmute<T, U>(e: T) -> U {
     im::transmute::<T, U>(e)
 }
-pub unsafe fn transmute_copy<T, U>(src: &T) -> U {
+pub const unsafe fn transmute_copy<T, U>(src: &T) -> U {
     im::ptr_read(src as *const T as *const U)
 }
 
@@ -60,7 +60,7 @@ pub struct Discriminant<T> {
     _m: crate::marker::PhantomData<T>,
 }
 
-pub fn discriminant<T>(v: &T) -> Discriminant<T> {
+pub const fn discriminant<T>(v: &T) -> Discriminant<T> {
     Discriminant { value: unsafe { im::discriminant_value(v) }, _m: crate::marker::PhantomData }
 }
 
@@ -100,13 +100,13 @@ impl<T> ManuallyDrop<T> {
     pub const fn new(value: T) -> ManuallyDrop<T> {
         ManuallyDrop { value }
     }
-    pub fn into_inner(slot: ManuallyDrop<T>) -> T {
+    pub const fn into_inner(slot: ManuallyDrop<T>) -> T {
         unsafe { im::ptr_read(&slot.value as *const T) }
     }
-    pub unsafe fn take(slot: &mut ManuallyDrop<T>) -> T {
+    pub const unsafe fn take(slot: &mut ManuallyDrop<T>) -> T {
         im::ptr_read(&slot.value as *const T)
     }
-    pub unsafe fn drop(slot: &mut ManuallyDrop<T>) {
+    pub const unsafe fn drop(slot: &mut ManuallyDrop<T>) {
         im::drop_in_place(&mut slot.value as *mut T)
     }
 }
@@ -122,6 +122,7 @@ impl<T: Default> Default for ManuallyDrop<T> {
         ManuallyDrop::new(T::default())
     }
 }
+impl<T: ?Sized> crate::marker::StructuralPartialEq for ManuallyDrop<T> {}
 impl<T: PartialEq> PartialEq for ManuallyDrop<T> {
     fn eq(&self, other: &ManuallyDrop<T>) -> bool {
         unsafe { self.value == other.value }
@@ -174,12 +175,12 @@ impl<T> MaybeUninit<T> {
     pub const fn uninit() -> MaybeUninit<T> {
         MaybeUninit { uninit: () }
     }
-    pub fn zeroed() -> MaybeUninit<T> {
+    pub const fn zeroed() -> MaybeUninit<T> {
         let mut u = MaybeUninit::<T>::uninit();
         unsafe { im::write_bytes(u.as_mut_ptr(), 0, 1) };
         u
     }
-    pub fn write(&mut self, val: T) -> &mut T {
+    pub const fn write(&mut self, val: T) -> &mut T {
         unsafe {
             im::ptr_write(self.as_mut_ptr(), val);
             &mut *self.as_mut_ptr()
@@ -188,22 +189,22 @@ impl<T> MaybeUninit<T> {
     pub const fn as_ptr(&self) -> *const T {
         self as *const MaybeUninit<T> as *const T
     }
-    pub fn as_mut_ptr(&mut self) -> *mut T {
+    pub const fn as_mut_ptr(&mut self) -> *mut T {
         self as *mut MaybeUninit<T> as *mut T
     }
-    pub unsafe fn assume_init(self) -> T {
+    pub const unsafe fn assume_init(self) -> T {
         ManuallyDrop::into_inner(self.value)
     }
-    pub unsafe fn assume_init_read(&self) -> T {
+    pub const unsafe fn assume_init_read(&self) -> T {
         im::ptr_read(self.as_ptr())
     }
-    pub unsafe fn assume_init_ref(&self) -> &T {
+    pub const unsafe fn assume_init_ref(&self) -> &T {
         &*self.as_ptr()
     }
-    pub unsafe fn assume_init_mut(&mut self) -> &mut T {
+    pub const unsafe fn assume_init_mut(&mut self) -> &mut T {
         &mut *self.as_mut_ptr()
     }
-    pub unsafe fn assume_init_drop(&mut self) {
+    pub const unsafe fn assume_init_drop(&mut self) {
         im::drop_in_place(self.as_mut_ptr())
     }
 }

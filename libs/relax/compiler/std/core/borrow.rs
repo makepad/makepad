@@ -63,10 +63,10 @@ pub enum Cow<'a, B: ?Sized + ToOwned + 'a> {
 pub use Cow::{Borrowed, Owned};
 
 impl<'a, B: ?Sized + ToOwned> Cow<'a, B> {
-    pub fn is_borrowed(&self) -> bool {
+    pub const fn is_borrowed(&self) -> bool {
         matches!(self, Borrowed(_))
     }
-    pub fn is_owned(&self) -> bool {
+    pub const fn is_owned(&self) -> bool {
         !self.is_borrowed()
     }
     pub fn to_mut(&mut self) -> &mut <B as ToOwned>::Owned {

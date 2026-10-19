@@ -97,7 +97,11 @@ impl<'a> Parser<'a> {
                 };
                 let fname = String::from_utf8_lossy(self.bytes(fname.lo, fname.hi)).trim_start_matches("r#").to_string();
                 let ty = String::from_utf8_lossy(self.bytes(f.ty_span.0, f.ty_span.1)).into_owned();
-                text.push_str(&format!("#[allow(non_upper_case_globals)] const {}: {} = {};\n", default_const_name(&name, variant.as_deref(), &fname), ty, src));
+                // a `#[rust(expr)]` initial value is a run-time expression, not a constant of the
+                // program: marked, so the const checker leaves it alone (a real default field
+                // value is an anonymous const like any other)
+                let marker = if f.default.is_none() { "#[relax_live_default] " } else { "" };
+                text.push_str(&format!("{}#[allow(non_upper_case_globals)] const {}: {} = {};\n", marker, default_const_name(&name, variant.as_deref(), &fname), ty, src));
             }
         }
         if text.is_empty() {

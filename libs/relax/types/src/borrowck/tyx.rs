@@ -180,7 +180,7 @@ impl<'a> Tx<'a> {
         };
         let infcx = self.infer_ctxt();
         let param_env = param_env.clone();
-        with_foreign_region_vars(&infcx, ty, |ty| in_signature_binder(tys, ty, |value| {
+        crate::type_queries::place_types::with_foreign_region_vars(&infcx, ty, |ty| crate::type_queries::place_types::in_signature_binder(tys, ty, |value| {
             let op = crate::next_solver::type_op::ParamEnvAnd { param_env, value: crate::next_solver::type_op::Normalize { value } };
             crate::next_solver::type_op::TypeOp::fully_perform(op, &infcx, self.prog).map(|out| out.output).ok()
         })).unwrap_or(ty)
@@ -478,47 +478,4 @@ impl<'a> Tx<'a> {
     pub fn crate_of(&self, d: DefId) -> u32 {
         self.prog.def(d).krate
     }
-}
-
-/// Region variables of another inference context (typeck's, which writeback keeps) cannot
-/// enter `infcx`: each is replaced by a variable of `infcx` for the operation and restored
-/// in its result. A variable the operation itself created is erased (a fresh slot).
-pub fn with_foreign_region_vars(infcx: &crate::infer::InferCtxt<'_>, ty: TyId, f: impl FnOnce(TyId) -> Option<TyId>) -> Option<TyId> {
-    use crate::types::{RegionId, RegionKind};
-    let tys = &infcx.tcx.tys;
-    let map = RefCell::new(Vec::<(RegionId, RegionId)>::new());
-    let local = if tys.flags(ty).contains(crate::types::TypeFlags::HAS_RE_INFER) {
-        tys.map_regions(ty, &|r, _| {
-            if !matches!(tys.region_kind(r), RegionKind::ReVar(_)) { return r; }
-            if let Some(&(_, l)) = map.borrow().iter().find(|(f, _)| *f == r) { return l; }
-            let l = infcx.next_region_var();
-            map.borrow_mut().push((r, l));
-            l
-        }, 0)
-    } else { ty };
-    let out = f(local)?;
-    let map = map.into_inner();
-    Some(tys.map_regions(out, &|r, _| match tys.region_kind(r) {
-        RegionKind::ReVar(_) => map.iter().find(|(_, l)| *l == r).map_or(RegionId::ERASED, |(f, _)| *f),
-        _ => r,
-    }, 0))
-}
-
-/// A type taken out of a signature can still mention the signature's late-bound regions.
-/// It is normalized under that binder (nightly normalizes the whole `PolyFnSig`): wrapped
-/// as the single input of a function-pointer binder and unwrapped afterwards.
-pub fn in_signature_binder(tys: &crate::types::Types, ty: TyId, f: impl FnOnce(TyId) -> Option<TyId>) -> Option<TyId> {
-    if !tys.has_vars_bound_at_or_above(ty, 0) { return f(ty); }
-    let bound = std::cell::Cell::new(0u32);
-    let outer = std::cell::Cell::new(false);
-    tys.map_regions(ty, &|r, depth| {
-        if let crate::types::RegionKind::ReBound(d, v) = tys.region_kind(r) {
-            if d == depth { bound.set(bound.get().max(v.0 + 1)); } else if d > depth { outer.set(true); }
-        }
-        r
-    }, 0);
-    // Escaping bound types/consts or regions of an outer binder: not a signature's own binder.
-    if outer.get() || bound.get() == 0 { return None; }
-    let wrapped = tys.intern(TyKind::FnPtr(tys.mk_list(&[ty]), tys.unit, crate::types::FnHeader::RUST, bound.get()));
-    match tys.kind(f(wrapped)?) { TyKind::FnPtr(ps, ..) => tys.list(*ps).first().copied(), _ => None }
 }

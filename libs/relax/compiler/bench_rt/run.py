@@ -41,7 +41,7 @@ def one(cmd, e, name):
             best = (t, m.group(2), cm.groups() if cm else None, fm.groups() if fm else None)
     return best, None
 
-steady_ms = int(os.environ.get("STEADY_MS", "2000"))
+steady_ms = int(os.environ.get("STEADY_MS", "7000"))
 print("| kernel | rustc ms | Relax ms | Relax/rustc | steady rustc ms | steady Relax ms | steady Relax/rustc | fns | opt+cg ms | sum ok |")
 print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
 ratios = []

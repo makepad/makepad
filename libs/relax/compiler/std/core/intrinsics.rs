@@ -40,16 +40,16 @@ pub mod intrinsics_mem {
         pub fn size_of<T>() -> usize;
         pub fn align_of<T>() -> usize;
         /// Size/alignment of the value behind a (possibly fat) reference: slices, str, dyn.
-        pub fn size_of_val<T: ?Sized>(v: &T) -> usize;
-        pub fn align_of_val<T: ?Sized>(v: &T) -> usize;
-        pub fn needs_drop<T>() -> bool;
+        pub const fn size_of_val<T: ?Sized>(v: &T) -> usize;
+        pub const fn align_of_val<T: ?Sized>(v: &T) -> usize;
+        pub const fn needs_drop<T>() -> bool;
         /// `T: Copy` for this instantiation (a constant per instance): std's Copy fast paths
         /// (real std specializes Clone-for-Copy into memcpy)
         pub fn is_copy<T>() -> bool;
         /// `T: Freeze` for this instantiation: no UnsafeCell outside indirection (rustc's auto
         /// trait)
         pub fn is_freeze<T>() -> bool;
-        pub fn drop_in_place<T: crate::marker::PointeeSized>(p: *mut T);
+        pub const fn drop_in_place<T: crate::marker::PointeeSized>(p: *mut T);
         pub fn ptr_read<T>(p: *const T) -> T;
         pub fn ptr_write<T>(p: *mut T, v: T);
         /// volatile access (never removed, merged, forwarded or reordered with other volatile ops)
@@ -63,25 +63,25 @@ pub mod intrinsics_mem {
         pub fn slice_ptr<T>(s: &[T]) -> *const T;
         pub fn str_from_raw<'a>(p: *const u8, len: usize) -> &'a str;
         /// memcpy of `n` elements
-        pub fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, n: usize);
+        pub const fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, n: usize);
         /// memmove of `n` elements
         pub fn copy<T>(src: *const T, dst: *mut T, n: usize);
         /// memset of `n` elements to byte `b`
-        pub fn write_bytes<T>(dst: *mut T, b: u8, n: usize);
-        pub fn forget<T>(v: T);
+        pub const fn write_bytes<T>(dst: *mut T, b: u8, n: usize);
+        pub const fn forget<T>(v: T);
         pub fn null_mut<T>() -> *mut T;
         /// all-zero value of T
-        pub fn zeroed<T>() -> T;
+        pub const fn zeroed<T>() -> T;
         /// reinterpret the bits; Relax checks size equality and R14 (repr(C)/scalars only)
         pub fn transmute<T, U>(v: T) -> U;
         /// enum discriminant as i64 (0 for non-enums)
-        pub fn discriminant_value<T>(v: &T) -> i64;
+        pub const fn discriminant_value<T>(v: &T) -> i64;
         /// stable 128-bit hash of the type (after monomorphisation): low and high halves
-        pub fn type_id<T: ?Sized>() -> u64;
+        pub const fn type_id<T: ?Sized>() -> u64;
         pub fn type_id_hi<T: ?Sized>() -> u64;
-        pub fn type_name<T: ?Sized>() -> &'static str;
+        pub const fn type_name<T: ?Sized>() -> &'static str;
         /// opaque to the optimiser
-        pub fn black_box<T>(v: T) -> T;
+        pub const fn black_box<T>(v: T) -> T;
         /// fat pointer parts of a `*const [T]` / `&[T]`
         pub fn slice_len<T>(s: &[T]) -> usize;
         pub fn str_as_bytes(s: &str) -> &[u8];
@@ -122,7 +122,7 @@ pub mod intrinsics_rt {
         /// AOT aborts. `msg` is the formatted message.
         pub fn panic_impl(msg: *const u8, msg_len: usize, file: *const u8, file_len: usize, line: u32, col: u32) -> !;
         /// The location of the caller of the enclosing #[track_caller] fn (or this call).
-        pub fn caller_location() -> &'static crate::panic::Location<'static>;
+        pub const fn caller_location() -> &'static crate::panic::Location<'static>;
         pub fn abort() -> !;
         /// Runs `f(data)` under a recovery point; true if it panicked or faulted (live: the
         /// panic was reported and the stack reset here; AOT: panics abort). std::thread uses it
@@ -131,7 +131,7 @@ pub mod intrinsics_rt {
         /// (argc, argv) as the process received them (Rt::args; `makepad run` passes the program's
         /// own arguments).
         pub fn args() -> (usize, *const *const crate::ffi::c_char);
-        pub fn unreachable() -> !;
+        pub const fn unreachable() -> !;
         /// Whether this thread is unwinding a panic (from the panic to the recovery point that
         /// catches it): std::thread::panicking.
         pub fn panicking() -> bool;
@@ -153,13 +153,13 @@ pub mod intrinsics_rt {
 /// unsigned integer type; counts are in bits of T.
 pub mod intrinsics_int {
     extern "relax-intrinsic" {
-        pub fn ctpop<T>(x: T) -> u32;
+        pub const fn ctpop<T>(x: T) -> u32;
         /// leading zeros; ctlz(0) = bits of T
-        pub fn ctlz<T>(x: T) -> u32;
+        pub const fn ctlz<T>(x: T) -> u32;
         /// trailing zeros; cttz(0) = bits of T
-        pub fn cttz<T>(x: T) -> u32;
-        pub fn bswap<T>(x: T) -> T;
-        pub fn bitreverse<T>(x: T) -> T;
+        pub const fn cttz<T>(x: T) -> u32;
+        pub const fn bswap<T>(x: T) -> T;
+        pub const fn bitreverse<T>(x: T) -> T;
         /// high 64 bits of the 128-bit product (signed for signed T); T is 64 bits wide
         pub fn mul_hi<T>(a: T, b: T) -> T;
     }

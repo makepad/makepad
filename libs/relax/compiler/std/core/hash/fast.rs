@@ -149,7 +149,7 @@ pub struct DefaultHasher {
 }
 
 impl DefaultHasher {
-    pub fn new() -> DefaultHasher {
+    pub const fn new() -> DefaultHasher {
         DefaultHasher { inner: FastHasher::with_seed(DEFAULT_SEED) }
     }
 }

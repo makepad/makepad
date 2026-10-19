@@ -62,7 +62,7 @@ impl Ordering {
             _ => self,
         }
     }
-    pub fn then_with<F: FnOnce() -> Ordering>(self, f: F) -> Ordering {
+    pub const fn then_with<F: FnOnce() -> Ordering>(self, f: F) -> Ordering {
         match self {
             Equal => f(),
             _ => self,

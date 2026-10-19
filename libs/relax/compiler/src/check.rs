@@ -108,7 +108,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     let mut own = vec![false; u.prog.crates.len()];
     for &k in crates {
         own[k as usize] = true;
+        u.prog.crates[k as usize].validate = true;
     }
+    u.prog.own_crates = own.clone();
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
     // context); errors in definition order
     {
@@ -124,6 +126,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         }
     }
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
+    errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
+    errors.extend(u.prog.import_privacy_errors(&own));
+    errors.extend(u.prog.attribute_errors(&own));
+    errors.extend(u.prog.ast_validation_errors(&own));
     let options = &u.prog.session.clone().options;
     crate::borrowck::lazy::disable_gandalf();
     if options.borrowck_all != crate::options::BorrowckAll::Default {
@@ -166,7 +172,21 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     let t_owners = t_check.elapsed();
     // typeck-audit 1.27: anonymous constants outside bodies are body owners of their own
     for anon in crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).collect::<Vec<_>>() {
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.typeck(&u.prog, anon).errors.clone()));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let body = u.tcx.typeck(&u.prog, anon);
+            let mut errs = body.errors.to_vec();
+            // rustc check_consts: an anonymous constant is a const context of its own
+            if errs.is_empty() && crate::borrowck::enabled(options) {
+                if let Some((_, relax_front::def_collector::NodeId::AnonConst(expr))) = u.prog.def_id_to_node_id.get(&anon) {
+                    let state = crate::tcx::EvalState::new();
+                    let cx = crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &state);
+                    for e in crate::borrowck::check_anon_const(&cx, &u.prog, &u.tcx, &body, *expr) {
+                        errs.push(e.render());
+                    }
+                }
+            }
+            errs
+        }));
         match r {
             Ok(e) => errors.extend(e),
             Err(_) => errors.push(format!("internal compiler error while checking {}", u.prog.def_path(anon))),
@@ -187,6 +207,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, retry: false };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let body = tcx.typeck(prog, d);
+            // library stability (E0658) of what the body names
+            let gates = relax_types::feature_gate::check_stability(prog, &body);
+            let inner = || {
             if !body.errors.is_empty() {
                 return (body.errors.to_vec(), Vec::new());
             }
@@ -217,6 +240,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             let args: Vec<_> = if owner.kind == crate::borrowck::body::BodyKind::Function && !generic { Vec::new() } else { body.args.to_vec() };
             let diags = crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()).collect();
             (Vec::new(), diags)
+            };
+            let (mut errs, diags) = inner();
+            errs.extend(gates);
+            (errs, diags)
         }));
         match r {
             Ok((errs, diags)) => {
@@ -286,10 +313,18 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         if let Some(d) = o.seed { seeds.push(d); }
     }
     let checked = seeds.len();
+    // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
+    for &k in crates {
+        errors.extend(relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
+        errors.extend(relax_types::feature_gate::check_bodies(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
+    }
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an
     // E0080 (the unit notes it, reported below with the builds' other notes)
     eval_items(up, &own);
+    // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
+    // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
+    if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
     let t_front = t_check.elapsed();
     // the type/borrow check's freed memory goes back before the compile starts (Stage: 4.6 GB
     // of malloc free pages held after it)
@@ -520,7 +555,8 @@ fn is_internal(u: &Unit, own: &[bool], e: &str) -> bool {
         return true;
     }
     let rest = rest.trim_start();
-    let coded = rest.len() > 5 && rest.starts_with('E') && rest[1..5].bytes().all(|b| b.is_ascii_digit());
+    // (an error rustc words without a code: Program::record_uncoded_error)
+    let coded = rest.starts_with(relax_front::diagnostics::UNCODED_PREFIX) || (rest.len() > 5 && rest.starts_with('E') && rest[1..5].bytes().all(|b| b.is_ascii_digit()));
     if !coded {
         return true;
     }
@@ -649,5 +685,77 @@ fn eval_items(up: *mut Unit, own: &[bool]) {
         while i < u.errors.len() {
             if u.errors[i].starts_with("compile error in ") && u.errors[i].contains("not found in the loaded libraries") { u.errors.remove(i); } else { i += 1; }
         }
+    }
+}
+
+/// rustc's collect_and_partition_mono_items for a binary, reduced to its constants: every
+/// instance of the checked crates' fns reachable from `main` is lowered (not compiled), which
+/// evaluates the constants it names with its type arguments; a failing one is reported
+/// (E0080) as rustc's codegen reports it. Library code is not entered: its constants are not
+/// the program's diagnostics.
+fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
+    let u = unsafe { &mut *up };
+    let main = (0..u.prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| {
+        let def = u.prog.def(d);
+        def.kind == DefKind::Fn && def.krate == root && u.prog.name(d) == "main"
+            && def.parent == u.prog.mods[u.prog.crates[root as usize].root_mod as usize].def
+    });
+    let Some(main) = main else { return };
+    let _job = jit::compile_job();
+    let mut work: Vec<u32> = vec![crate::owner::call(crate::owner::Class::App, || unsafe { (&mut *up).fn_id(FnKey::Inst(main, Vec::new())) })];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = work.pop() {
+        if !seen.insert(id) { continue; }
+        let callees = crate::owner::call(crate::owner::Class::App, || unsafe {
+            let u = &*up;
+            let mine = match &u.fns[id as usize].key {
+                FnKey::Inst(d, _) => own[u.prog.def(*d).krate as usize],
+                _ => false,
+            };
+            if !mine { return Vec::new(); }
+            // (a fn taking or returning a value of hundreds of MB is not lowered: its frame would
+            // be allocated for real)
+            // (instances over deeply nested types -- closures wrapped in closures -- cost more to
+            // lower than a constants check is worth)
+            if let FnKey::Inst(_, args) = &(&*up).fns[id as usize].key {
+                if args.iter().any(|t| (&*up).tcx.tys.depth(*t) > 6) { return Vec::new(); }
+            }
+            if let FnKey::Inst(d, _) = &(&*up).fns[id as usize].key {
+                let uu = &*up;
+                if uu.tcx.typeck(&uu.prog, *d).expr_ty.iter().any(|t| uu.tcx.tys.depth(*t) > 8) { return Vec::new(); }
+            }
+            let huge = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let FnKey::Inst(d, args) = &(&*up).fns[id as usize].key {
+                    let (d, args) = (*d, args.clone());
+                    let uu = &mut *up;
+                    if let Some(sig) = uu.tcx.fn_sig(&uu.prog, d).cloned() {
+                        let env = crate::tcx::TypingEnv::fully_monomorphized(&uu.prog);
+                        for t in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+                            let t = uu.tcx.tys.subst_erasing_regions(*t, &args);
+                            let Ok(t) = uu.tcx.try_normalize_erasing_regions(&uu.prog, env, t) else { return true };
+                            if uu.tcx.is_coroutine(t) { continue; }
+                            if uu.layout_of(t).size > (1 << 28) { return true; }
+                        }
+                    }
+                }
+                false
+            })).unwrap_or(true);
+            if huge { return Vec::new(); }
+            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| jit::build_rir(up, id)));
+            if !matches!(built, Ok(Ok(()))) { return Vec::new(); }
+            let mut out = Vec::new();
+            if let Some(f) = &(&*up).fns[id as usize].rir {
+                for b in &f.blocks {
+                    for i in &b.insts {
+                        match i {
+                            crate::rir::Inst::Call(crate::rir::Callee::Fn(c) | crate::rir::Callee::CFn(c, _), _, _) => out.push(*c),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            out
+        });
+        work.extend(callees);
     }
 }

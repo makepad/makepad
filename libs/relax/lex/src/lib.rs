@@ -5,3 +5,4 @@
 pub mod lexer;
 pub mod packed;
 pub mod tokens;
+pub mod validate;

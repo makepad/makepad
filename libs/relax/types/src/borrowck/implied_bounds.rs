@@ -309,14 +309,14 @@ pub fn mir_borrowck_implied_outlives_bounds(
     let failed = std::cell::Cell::new(false);
     for &ty in inputs_and_output {
         let snapshot = infcx.inner.borrow().region_obligations().len();
-        let normalized_ty = crate::borrowck::tyx::with_foreign_region_vars(&infcx, ty, |ty| crate::borrowck::tyx::in_signature_binder(&tcx.tys, ty, |ty| ocx.deeply_normalize_ty(param_env, ty).map_err(|_| failed.set(true)).ok())).unwrap_or(ty);
+        let normalized_ty = crate::type_queries::place_types::with_foreign_region_vars(&infcx, ty, |ty| crate::type_queries::place_types::in_signature_binder(&tcx.tys, ty, |ty| ocx.deeply_normalize_ty(param_env, ty).map_err(|_| failed.set(true)).ok())).unwrap_or(ty);
         if failed.get() { return Err(crate::next_solver::NoSolution); }
         bounds.implied_wf_args(tcx,prog,vec![ty,normalized_ty]);
         bounds.consider_implied_bounds_compat(tcx,prog,normalized_ty,&registered_since(snapshot));
         normalized_inputs_and_output.push(normalized_ty);
     }
     for &ty in assumed_wf {
-        let normalized_ty = crate::borrowck::tyx::with_foreign_region_vars(&infcx, ty, |ty| crate::borrowck::tyx::in_signature_binder(&tcx.tys, ty, |ty| ocx.deeply_normalize_ty(param_env, ty).map_err(|_| failed.set(true)).ok())).unwrap_or(ty);
+        let normalized_ty = crate::type_queries::place_types::with_foreign_region_vars(&infcx, ty, |ty| crate::type_queries::place_types::in_signature_binder(&tcx.tys, ty, |ty| ocx.deeply_normalize_ty(param_env, ty).map_err(|_| failed.set(true)).ok())).unwrap_or(ty);
         if failed.get() { return Err(crate::next_solver::NoSolution); }
         // Impl-header normalization obligations do not enter the compatibility rule.
         let snapshot = infcx.inner.borrow().region_obligations().len();

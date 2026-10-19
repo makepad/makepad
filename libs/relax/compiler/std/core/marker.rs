@@ -80,7 +80,28 @@ impl<T: PointeeSized> Unpin for *mut T {}
 impl !Unpin for PhantomPinned {}
 
 // :257: implemented by the PartialEq derive with its exact generic bounds.
+#[cfg_attr(not(relax_check), lang = "structural_peq")]
 pub trait StructuralPartialEq {}
+impl StructuralPartialEq for usize {}
+impl StructuralPartialEq for u8 {}
+impl StructuralPartialEq for u16 {}
+impl StructuralPartialEq for u32 {}
+impl StructuralPartialEq for u64 {}
+impl StructuralPartialEq for u128 {}
+impl StructuralPartialEq for isize {}
+impl StructuralPartialEq for i8 {}
+impl StructuralPartialEq for i16 {}
+impl StructuralPartialEq for i32 {}
+impl StructuralPartialEq for i64 {}
+impl StructuralPartialEq for i128 {}
+impl StructuralPartialEq for bool {}
+impl StructuralPartialEq for char {}
+impl StructuralPartialEq for str {}
+impl StructuralPartialEq for () {}
+impl<T, const N: usize> StructuralPartialEq for [T; N] {}
+impl<T> StructuralPartialEq for [T] {}
+impl<T: PointeeSized> StructuralPartialEq for &T {}
+impl<T: PointeeSized> StructuralPartialEq for PhantomData<T> {}
 
 // library/core/src/marker.rs:880-887,904-906,1059-1063.
 #[cfg_attr(not(relax_check), lang = "discriminant_kind")]

@@ -481,28 +481,55 @@ pub fn expand_cfg_attr_list(p: Src, attrs: &[Attr], cfg: &CfgSet) -> Vec<Attr> {
         if !pred(p, &mut i, end, cfg) {
             continue;
         }
-        let mut parts = Vec::new();
-        while i < end {
-            if p.tok(i).kind == T::Comma {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            let mut depth = 0i32;
-            while i < end {
-                match p.tok(i).kind {
-                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
-                    T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
-                    T::Comma if depth == 0 => break,
-                    _ => {}
-                }
-                i += 1;
-            }
-            if i > start {
-                parts.push(Attr { inner: a.inner, toks: TokRange { lo: start as u32, hi: i as u32 } });
-            }
-        }
+        let parts = cfg_attr_parts(p, a, i);
         out.extend(expand_cfg_attr_list(p, &parts, cfg));
     }
     out
+}
+
+/// The attributes of `cfg_attr(pred, a1, a2(..))` whose predicate ends before token `from`
+/// (the first token after it): `[a1, a2(..)]`, sub-ranges of the original tokens.
+pub fn cfg_attr_parts(p: Src, a: &Attr, from: usize) -> Vec<Attr> {
+    let end = a.toks.hi as usize - 1; // the closing paren
+    let mut i = from;
+    let mut parts = Vec::new();
+    while i < end {
+        if p.tok(i).kind == T::Comma {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut depth = 0i32;
+        while i < end {
+            match p.tok(i).kind {
+                T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                T::Comma if depth == 0 => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        if i > start {
+            parts.push(Attr { inner: a.inner, toks: TokRange { lo: start as u32, hi: i as u32 } });
+        }
+    }
+    parts
+}
+
+/// The token after the predicate of `cfg_attr(pred, ...)` (the predicate starts after the
+/// opening paren at `a.toks.lo + 2`).
+pub fn cfg_attr_pred_end(p: Src, a: &Attr) -> usize {
+    let end = a.toks.hi as usize - 1;
+    let mut i = a.toks.lo as usize + 2;
+    let mut depth = 0i32;
+    while i < end {
+        match p.tok(i).kind {
+            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+            T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+            T::Comma if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }

@@ -79,32 +79,32 @@ impl Layout {
     pub const fn align(&self) -> usize {
         self.align.get()
     }
-    pub fn new<T>() -> Layout {
+    pub const fn new<T>() -> Layout {
         unsafe { Layout::from_size_align_unchecked(crate::mem::size_of::<T>(), crate::mem::align_of::<T>()) }
     }
-    pub fn for_value<T: ?Sized>(t: &T) -> Layout {
+    pub const fn for_value<T: ?Sized>(t: &T) -> Layout {
         unsafe { Layout::from_size_align_unchecked(crate::mem::size_of_val(t), crate::mem::align_of_val(t)) }
     }
-    pub fn array<T>(n: usize) -> Result<Layout, LayoutError> {
+    pub const fn array<T>(n: usize) -> Result<Layout, LayoutError> {
         let size = match crate::mem::size_of::<T>().checked_mul(n) {
             Some(s) => s,
             None => return Err(LayoutError),
         };
         Layout::from_size_align(size, crate::mem::align_of::<T>())
     }
-    pub fn align_to(&self, align: usize) -> Result<Layout, LayoutError> {
+    pub const fn align_to(&self, align: usize) -> Result<Layout, LayoutError> {
         Layout::from_size_align(self.size, if align > self.align() { align } else { self.align() })
     }
-    pub fn pad_to_align(&self) -> Layout {
+    pub const fn pad_to_align(&self) -> Layout {
         let new_size = (self.size + self.align() - 1) & !(self.align() - 1);
         Layout { size: new_size, align: self.align }
     }
-    pub fn padding_needed_for(&self, align: usize) -> usize {
+    pub const fn padding_needed_for(&self, align: usize) -> usize {
         let len = self.size;
         let rounded = (len + align - 1) & !(align - 1);
         rounded - len
     }
-    pub fn extend(&self, next: Layout) -> Result<(Layout, usize), LayoutError> {
+    pub const fn extend(&self, next: Layout) -> Result<(Layout, usize), LayoutError> {
         let new_align = if next.align() > self.align() { next.align() } else { self.align() };
         let pad = self.padding_needed_for(next.align());
         let offset = match self.size.checked_add(pad) {
@@ -152,7 +152,7 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
     { std::alloc::realloc(ptr, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align()), new_size) }
 }
 
-pub fn handle_alloc_error(layout: Layout) -> ! {
+pub const fn handle_alloc_error(layout: Layout) -> ! {
     crate::panicking::panic_fmt(format_args!("memory allocation of {} bytes failed", layout.size))
 }
 

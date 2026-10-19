@@ -38,7 +38,7 @@ if not native:
     subprocess.run(prefix + ["cargo", "build", "--release", "--offline", "-q", "-j", "8"], cwd=here, env=env, check=True)
     native = os.path.join(target, "rustc/release/relax-rwbench" + exe)
 std = os.environ.get("MAKEPAD_RUN_STD", os.path.join(here, "../std"))
-base = dict(os.environ, RW_MS=os.environ.get("RW_MS", "4000"))
+base = dict(os.environ, RW_MS=os.environ.get("RW_MS", "8000"))
 LINE = r"^\| (\w+) steady_ms=([\d.]+) tts_main_ms=([\d.]+) tts_proc_ms=([\d.]+) iters=(\d+) first_ms=([\d.]+) (\d+)$"
 
 def one(cmd, e):
@@ -72,7 +72,10 @@ if profiled:
 def relax_env(n):
     suffix = n.upper().replace("-", "_")
     nstd = os.environ.get("MAKEPAD_RUN_STD_" + suffix, std)
+    # rwbench links the platform (the layout workload), so `makepad run` hosts it through the HAL: with no
+    # display (a bench box, node 165) it needs the HAL's headless backend; no window opens on the mini either
     e = dict(base, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STD=nstd, MAKEPAD_RUN_CACHE_DIR=os.path.join(target, "relax-" + n))
+    e.setdefault("MAKEPAD_HAL_BACKEND", "headless")
     if warm:
         e.update(MAKEPAD_RUN_CACHE="on")
     for item in shlex.split(os.environ.get("MAKEPAD_RUN_ENV_" + suffix, "")):
@@ -83,7 +86,7 @@ def relax_env(n):
     return e
 def prepare(n, p, w):
     renv = relax_env(n)
-    cmd = prefix + [p, "run", "--quiet", "relax-rwbench", "--", w]
+    cmd = prefix + [p, "run", "--quiet", "--verbose", "relax-rwbench", "--", w]
     if profiled:
         profile = profile_dir / (n + "-" + w + ".t1")
         renv["MAKEPAD_RUN_O3_PROFILE"] = str(profile)
@@ -120,7 +123,7 @@ for r in range(rounds):
             renv = prepare(n, p, w)
             if profiled:
                 Path(renv["MAKEPAD_RUN_O3_PROFILE"] + ".replay").unlink(missing_ok=True)
-            b, eb = one(prefix + [p, "run", "--quiet", "relax-rwbench", "--", w], renv)
+            b, eb = one(prefix + [p, "run", "--quiet", "--verbose", "relax-rwbench", "--", w], renv)
             runs[w][n].append(b)
             if eb: errs[(w, n)] = eb
     print("# round %d/%d done (order %s)" % (r + 1, rounds, ",".join(n for n, _ in order)), file=sys.stderr, flush=True)

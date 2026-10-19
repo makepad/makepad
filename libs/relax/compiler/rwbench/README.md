@@ -16,7 +16,12 @@ in-repo inputs; no UI, GPU or window. The micro-kernels live in `../bench_rt`.
 | `rust_tokenize` | makepad-rust-tokenizer over a large Rust source file |
 | `markdown_parse` | pulldown-cmark over two in-repo markdown documents |
 | `html_parse` | makepad-html over `libs/piano_model/piano-explained.html` |
-| `llm_host` | the LLM host path of one CUDA decode token with no GPU and no weight data (`makepad-ai-llm::host_bench`, makepad commit `e3fc4c003a`): a scaled-down qwen35 GGUF (64 blocks, real 248,320 vocab) written in setup, mapped as a session maps it; per iteration one decode-graph build plus 256 tokens of layout validation, input writes, readback shaping of a 1 MB logits vector, collapse and greedy sampling. `RW_LLM_GGUF=<path>` runs a real GGUF. The CUDA graph planner (`plan_raw_graph`) is not covered: it compiles only with the CUDA kernels built |
+| `llm_host` | the LLM host path of one CUDA decode token with no GPU and no weight data (`makepad-ai-llm::host_bench`, restored in libs/ai/llm from makepad commit `17b9036971`): a scaled-down qwen35 GGUF (64 blocks, real 248,320 vocab) written in setup, mapped as a session maps it; per iteration one decode-graph build plus 256 tokens of layout validation, input writes, readback shaping of a 1 MB logits vector, collapse and greedy sampling. `RW_LLM_GGUF=<path>` runs a real GGUF. The CUDA graph planner (`plan_raw_graph`) is not covered: it compiles only with the CUDA kernels built |
+| `piano_render` | makepad-piano-model: 0.3 s of a fixed pedalled chord phrase through the physical `Piano` (strings, soundboard, sympathetic bank, room) and through `LearnedPiano`; both built fresh per iteration (their `reset()` does not return to the constructed state) |
+| `ogg_decode` | makepad-audio-decode `decode_any` on the one in-repo compressed audio file (`libs/audio_decode/testdata/button-press.ogg`), 8 decodes per iteration. The repo holds no MP3 (the decoder's MP3 tests build streams bit by bit inside the test) |
+| `audio_mix` | makepad-audio-synth `SynthBus` (the game mixer): recipe voices placed around the listener, a tone, two engines with tyres moving past, room send and master dynamics, 40 blocks of 512 |
+| `splash_eval` | makepad-script VM calling a compute-heavy Splash fn (recursion, loops, array and object access, arithmetic); parsed and evaluated once in setup |
+| `csg_boolean` | makepad-csg: primitives meshed at fixed resolution, intersection / difference / union / `union_all` |
 
 Not here: an Amp program (there is no `apps/commercial/amp` in the tree), whisper. Build with `MAKEPAD_GGML_NO_CUDA=1` (the submit scripts set it) so the llm crate's CUDA store does not run nvcc.
 
@@ -46,11 +51,11 @@ Process failures or checksum mismatches make the runner exit nonzero.
 
 `relax-rwbench <workload>...` prints per workload
 `| name steady_ms=.. tts_main_ms=.. tts_proc_ms=.. iters=.. first_ms=.. <checksum>`.
-`steady_ms` is the median of the last iterations after warm-up; `tts_*` is the time until the
+`steady_ms` is the median of the last iterations that start after 5 s (`RW_STEADY_AFTER_MS`; Relax installs its optimised code about 2 s in); `tts_*` is the time until the
 per-iteration time is within 10% of steady (3-iteration running median): `tts_main` from entering
 `main`, `tts_proc` from process start (`RW_WALL0=<epoch ns>`, set by `run.py`, so it includes Relax's
 compile). Setup (reading inputs, building archives) counts towards time-to-steady. Env: `RW_MS`
-(iteration budget per process, default 3000), `RW_MIN_ITERS` (20), `RW_ROOT` (tree holding the inputs).
+(iteration budget per process, default 8000), `RW_MIN_ITERS` (20), `RW_ROOT` (tree holding the inputs).
 
 ## Run
 

@@ -208,6 +208,10 @@ pub struct Options {
     pub check_target: CheckTarget,
     /// `MAKEPAD_RUN_CTFE`; default `Ctfe::On`.
     pub ctfe: Ctfe,
+    /// Set by `makepad check` only: loops count their iterations while a constant is evaluated,
+    /// so one that never ends is rustc's `long_running_const_eval` error (the interpreter's
+    /// terminator limit) instead of a hang. Changes the compiled code.
+    pub const_fuel: bool,
     /// `MAKEPAD_RUN_FREQ_MODE`; default `Frequency::Blend`.
     pub freq_mode: Frequency,
     /// `MAKEPAD_RUN_RA_PRIO`; default `Priority::References`.
@@ -307,6 +311,7 @@ impl Default for Options {
             borrowck_all: BorrowckAll::Default,
             check_target: CheckTarget::Host,
             ctfe: Ctfe::On,
+            const_fuel: false,
             freq_mode: Frequency::Blend,
             ra_prio: Priority::References,
             ra_order: false,
@@ -419,6 +424,7 @@ impl Options {
             borrowck: { let os = get("MAKEPAD_RUN_BORROWCK"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("off") => Borrowck::Off, Some("moves") => Borrowck::Moves, _ => Borrowck::Full } },
             borrowck_all: { let os = get("MAKEPAD_RUN_BORROWCK_ALL"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("nongeneric") => BorrowckAll::Nongeneric, None => BorrowckAll::Default, Some("std") => BorrowckAll::Std, _ => BorrowckAll::All } },
             check_target: { let os = get("MAKEPAD_RUN_CHECK_TARGET"); let v = os.and_then(|v| v.into_string().ok()); CheckTarget::from_triple(v.as_deref().unwrap_or("")).unwrap_or(CheckTarget::Host) },
+            const_fuel: false,
             ctfe: { let os = get("MAKEPAD_RUN_CTFE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Ctfe::Off, Some("check") => Ctfe::Check, _ => Ctfe::On } },
             freq_mode: { let os = get("MAKEPAD_RUN_FREQ_MODE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("sampled") => Frequency::Sampled, Some("static") => Frequency::Static, _ => Frequency::Blend } },
             ra_prio: { let os = get("MAKEPAD_RUN_RA_PRIO"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("len") => Priority::Length, Some("sqrt") => Priority::Sqrt, _ => Priority::References } },
@@ -512,6 +518,7 @@ impl Options {
             borrowck_all,
             check_target,
             ctfe,
+            const_fuel,
             freq_mode,
             ra_prio,
             ra_order,
@@ -673,6 +680,8 @@ impl Options {
         h.u8(*check_target as u8);
         h.str("ctfe");
         h.u8(*ctfe as u8);
+        h.str("const_fuel");
+        h.u8(*const_fuel as u8);
         h.str("freq_mode");
         h.u8(*freq_mode as u8);
         h.str("ra_prio");

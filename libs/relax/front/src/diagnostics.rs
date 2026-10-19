@@ -2,6 +2,9 @@
 use crate::{diag::{Diagnostic, Suggestion}, program::Program};
 use crate::source::{SourceLocation, SourceRef, SourceSpan};
 
+/// The marker of an error rustc reports without a code (see `record_uncoded_error`).
+pub const UNCODED_PREFIX: &str = "error: ";
+
 impl Program {
     pub fn source_id(&self, path: &str) -> u32 { self.sources.source_id(path) }
 
@@ -82,6 +85,12 @@ impl Program {
         let message = format!("did you mean `{}`?",new);
         if let Some(old) = d.suggestion.take() { if old.message != message { d.notes.push(old.message); } }
         d.suggestion = Some(Suggestion { message, replacement });
+    }
+
+    /// An error rustc emits without an error code: shown exactly as rustc words it
+    /// (`path:l:c: error: message`); only a Relax-internal failure carries `internal:`.
+    pub fn record_uncoded_error(&self, file: u32, pos: u32, phase: &'static str, msg: String) -> String {
+        self.record_error(file, pos, phase, format!("{}{}", UNCODED_PREFIX, msg))
     }
 
     pub fn record_error(&self, file: u32, pos: u32, phase: &'static str, msg: String) -> String {

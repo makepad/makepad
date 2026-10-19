@@ -1,5 +1,5 @@
 // Layout / turtle, headless: a real widget tree (makepad-widgets-core's Views, Labels, Buttons,
-// Chips from its typed style library) laid out and drawn into a draw list by the real Cx2d turtle code,
+// Chips, made by the Splash widget library the way an app's document makes them) laid out and drawn into a draw list by the real Cx2d turtle code,
 // the way the widgets crate's own unit tests do (Cx::new + init_cx_os, no window, nothing submitted
 // to a GPU: the pass and draw list are built, never presented). Per iteration: 12 passes over the
 // tree at different pass widths (flow Right/Down, Fill/Fit sizes, wrapped text); the checksum folds
@@ -10,50 +10,55 @@ use makepad_widgets_core::*;
 
 const ROWS: usize = 120;
 
-// Build from the same library presets the original fixed document used. Only the row text
-// and IDs vary; neither comes from user source.
+fn eval_widget(cx: &mut Cx, source: impl FnOnce(&mut ScriptVm) -> ScriptValue) -> WidgetRef {
+    cx.with_vm(|vm| {
+        let value = source(vm);
+        WidgetRef::script_from_value(vm, value)
+    })
+}
+
+// A column of 120 rows built by the Splash widget library (the library the apps use), the row
+// text varying per row: a Label, a column holding a wrapping Label and a Button, and a Chip.
 fn scene(cx: &mut Cx) -> WidgetRef {
-    let mut root = View::new_default(cx);
-    root.walk.width = Size::fill();
-    root.walk.height = Size::fit();
-    root.layout.flow = Flow::Down;
-    root.layout.spacing = 4.0;
+    let root = eval_widget(cx, |vm| {
+        makepad_widgets_core::script_eval!(vm, {
+            use mod.prelude.widgets.*
+            use mod.widgets.*
+            View{ width: Fill height: Fit flow: Down spacing: 4. }
+        })
+    });
     for i in 0..ROWS {
-        let mut row = View::new_default(cx);
-        row.walk.width = Size::fill();
-        row.walk.height = Size::fit();
-        row.layout.flow = Flow::right();
-        row.layout.spacing = 6.0;
-        row.layout.align.y = 0.5;
-        let mut label = Label::new_default(cx);
-        label.set_text(cx, &format!("item number {i}: a label that is long enough to take some width in the row"));
-        row.children.push((LiveId(0), WidgetRef::new_with_inner(Box::new(label))));
-        let mut column = View::new_default(cx);
-        column.walk.width = Size::fill();
-        column.walk.height = Size::fit();
-        column.layout.flow = Flow::Down;
-        let mut label = Label::new_default(cx);
-        label.walk.width = Size::fill();
-        label.set_text(cx, &format!("second line of text for row {i}, which wraps when the row is narrow enough to need it"));
-        column.children.push((LiveId(0), WidgetRef::new_with_inner(Box::new(label))));
-        let mut button = Button::new_default(cx);
-        button.set_text(cx, &format!("open {i}"));
-        column.children.push((LiveId(1), WidgetRef::new_with_inner(Box::new(button))));
-        row.children.push((LiveId(1), WidgetRef::new_with_inner(Box::new(column))));
-        let mut chip = Chip::new_default(cx);
-        chip.set_text(cx, &format!("tag {i}"));
-        row.children.push((LiveId(2), WidgetRef::new_with_inner(Box::new(chip))));
-        root.children.push((LiveId::from_str(&format!("row{i}")), WidgetRef::new_with_inner(Box::new(row))));
+        let (t1, t2, t3, t4) = (
+            format!("item number {i}: a label that is long enough to take some width in the row"),
+            format!("second line of text for row {i}, which wraps when the row is narrow enough to need it"),
+            format!("open {i}"),
+            format!("tag {i}"),
+        );
+        let row = eval_widget(cx, |vm| {
+            makepad_widgets_core::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill height: Fit flow: Right spacing: 6. align: Align{y: 0.5}
+                    Label{ text: #(t1) }
+                    View{
+                        width: Fill height: Fit flow: Down
+                        Label{ width: Fill text: #(t2) }
+                        Button{ text: #(t3) }
+                    }
+                    Chip{ text: #(t4) }
+                }
+            })
+        });
+        root.borrow_mut::<View>().unwrap().children.push((LiveId::from_str(&format!("row{i}")), row));
     }
-    WidgetRef::new_with_inner(Box::new(root))
+    root
 }
 
 pub fn setup() -> Box<dyn FnMut() -> u64> {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.init_cx_os();
-    makepad_widgets_core::font_policy::register_theme_font_resources_typed(&mut cx);
-    let theme = makepad_widgets_core::desktop_style::base_tokens(&mut cx);
-    makepad_widgets_core::rr::CxStylesExt::set_theme(&mut cx, theme);
+    cx.with_vm(makepad_widgets_core::script_mod);
     let root = scene(&mut cx);
     let pass = DrawPass::new(&mut cx);
     let mut draw_list = DrawList2d::new(&mut cx);

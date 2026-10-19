@@ -848,6 +848,24 @@ impl Iterator for Succs {
 }
 
 impl Inst {
+    /// The registers this instruction writes (its results), conservatively: where a register
+    /// is both read and written (a vector lane insert, the FP control register, Xgetbv) it
+    /// counts as written.
+    pub fn defs(&self, mut f: impl FnMut(VReg)) {
+        match self {
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(*d),
+            Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VUn(_, d, _) | Inst::VSplat(d, _) | Inst::VShift(_, d, _, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
+            Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VBin(_, d, _, _) | Inst::VGather(d, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => f(*d),
+            Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
+            Inst::VInsert(d, _, _, _) => f(*d),
+            Inst::Call(_, _, rets) => rets.iter().for_each(|r| f(*r)),
+            Inst::FpEnv(_, v) => f(*v),
+            Inst::Cpuid(ds, a, b) => { ds.iter().for_each(|d| f(*d)); f(*a); f(*b); }
+            Inst::Xgetbv(d, a) => { f(*d); f(*a); }
+            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) => {}
+        }
+    }
+
     /// Every vreg operand and result, in place (renaming without rebuilding the instruction).
     pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
         match self {

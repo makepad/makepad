@@ -141,14 +141,26 @@ impl Tcx {
         }, 0)
     }
 
-    pub(crate) fn lower_region_args(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, module: u32, env: &GenEnv, p: &ast::Path) -> RegionArgsId {
-        if !env.regions.enabled { return RegionArgsId::EMPTY; }
+    /// The lifetime arguments written on the path's last segment.
+    pub(crate) fn written_lifetimes(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, p: &ast::Path) -> Vec<RegionId> {
         let ast = &prog.files[file as usize].ast;
         let mut out = Vec::new();
+        if !env.regions.enabled { return out; }
         if let Some(GenericArgs::Angle(v)) = ast.segs(p.segs).last().and_then(|s| ast.gargs(s.args())) {
             for a in ast.list(*v) {
                 if let GenericArg::Lifetime(lt) = a { out.push(env.regions.resolve(infcx, &self.tys, prog, file, Some(*lt))); }
             }
+        }
+        out
+    }
+
+    pub(crate) fn lower_region_args(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, module: u32, env: &GenEnv, p: &ast::Path) -> RegionArgsId {
+        if !env.regions.enabled { return RegionArgsId::EMPTY; }
+        let mut out = self.written_lifetimes(infcx, prog, file, env, p);
+        if let Some((_, count)) = self.resolve_type_path_def(prog, file, module, p).and_then(|d| self.own_param_counts(prog, d)) {
+            // rustc lowers only the declared lifetime parameters; an incomplete list takes
+            // error regions for the rest (E0107 reports the count).
+            if !out.is_empty() { out.resize(count, self.tys.intern_region(RegionKind::ReError)); }
         }
         if out.is_empty() {
             if let Some(d) = self.resolve_type_path_def(prog, file, module, p) {

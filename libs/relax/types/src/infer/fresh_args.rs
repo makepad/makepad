@@ -60,6 +60,9 @@ impl crate::tcx::Tcx {
 /// their position in the complete declaration argument list.
 pub struct ArgFolder<'a> { pub indices: &'a GenericIndices, pub args: &'a [GenericArg] }
 impl TypeFolder for ArgFolder<'_> {
+    /// Rewrites type and const parameters (F_PARAM: set for both) and early-bound regions;
+    /// a type without them is unchanged (rustc: GenericArgs::HAS_PARAM flags of ArgFolder).
+    fn fold_flags(&self) -> Option<crate::types::TypeFlags> { Some(crate::types::TypeFlags::HAS_TY_PARAM | crate::types::TypeFlags::HAS_RE_PARAM) }
     fn fold_ty(&mut self, tys: &Types, ty: TyId, depth: u32) -> TyId {
         if let TyKind::Param(index) = tys.kind(ty) {
             let full = self.indices.types_consts[*index as usize];

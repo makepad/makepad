@@ -1354,7 +1354,7 @@ impl u8 {
     pub const fn to_ascii_uppercase(&self) -> u8 { if self.is_ascii_lowercase() { *self - 32 } else { *self } }
     pub const fn to_ascii_lowercase(&self) -> u8 { if self.is_ascii_uppercase() { *self + 32 } else { *self } }
     pub const fn eq_ignore_ascii_case(&self, other: &u8) -> bool { self.to_ascii_lowercase() == other.to_ascii_lowercase() }
-    pub fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
-    pub fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
+    pub const fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
+    pub const fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
 }
 

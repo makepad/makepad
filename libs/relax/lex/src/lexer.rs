@@ -144,7 +144,7 @@ pub struct Tok {
 
 pub struct LexError {
     pub pos: u32,
-    pub msg: &'static str,
+    pub msg: std::borrow::Cow<'static, str>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -181,13 +181,13 @@ pub fn lex_with(src: &[u8], opts: &LexOptions, out: &mut Vec<Tok>) -> Result<(),
         return result.map_err(|e| TokenLexError {
             code: 2,
             lo: e.pos,
-            hi: if matches!(e.msg, "unexpected character" | "bad char literal" | "bad quote") {
+            hi: if matches!(&*e.msg, "unexpected character" | "bad char literal" | "bad quote") {
                 (e.pos as usize + src.get(e.pos as usize).map_or(0, |&c| utf8_len(c)))
                     .min(src.len()) as u32
             } else {
                 src.len() as u32
             },
-            msg: e.msg.into(),
+            msg: e.msg.into_owned(),
         });
     }
     let source = std::str::from_utf8(src).map_err(|e| TokenLexError {
@@ -270,7 +270,7 @@ trait ScanError {
 
 impl ScanError for LexError {
     fn ordinary(lo: usize, _hi: usize, msg: &'static str) -> Self {
-        Self { pos: lo as u32, msg }
+        Self { pos: lo as u32, msg: msg.into() }
     }
 
     fn dialect(_code: u16, _lo: usize, _hi: usize, _msg: String) -> Self {
@@ -424,8 +424,25 @@ pub fn keyword(s: &[u8], edition: u16) -> Option<T> {
     Some(k)
 }
 
+/// The diagnostic validation of the literals and identifiers of a written source file's tokens
+/// (rustc_parse's lexer cooking): `makepad check` only. Macro text lexed on the side is not held to it.
+pub fn validate_file(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), LexError> {
+    if !crate::validate::enabled() {
+        return Ok(());
+    }
+    crate::validate::validate(src, toks, edition).map_err(|(pos, msg)| LexError { pos, msg })
+}
+
+/// Turns the diagnostic validation of literals and identifiers on (`makepad check`).
+pub fn set_validation(on: bool) {
+    crate::validate::set_enabled(on);
+}
+
 pub fn lex(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {
-    scan::<false, false, true, LexError>(src, "", edition, out)
+    let start = out.len();
+    scan::<false, false, true, LexError>(src, "", edition, out)?;
+    let _ = start;
+    Ok(())
 }
 
 fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
@@ -805,6 +822,12 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                         j += 1;
                     }
                     let k = keyword(&src[i..j], edition).unwrap_or(T::Ident);
+                    // rustc_lexer `ident_or_unknown_prefix`: an identifier right before `#`, `"` or
+                    // `'` is a reserved prefix, an error from edition 2021 (the known prefixes
+                    // `b`, `br`, `c`, `cr`, `r` were taken above)
+                    if VALIDATE && edition >= 2021 && j < n && matches!(src[j], b'#' | b'"' | b'\'') {
+                        return Err(err(i, "prefix is unknown"));
+                    }
                     if k == T::Ident && is_raw_body(&src[i..j]) {
                         // `name! {` of a registered raw-body macro: hand the body over untokenised
                         let mut m = j;

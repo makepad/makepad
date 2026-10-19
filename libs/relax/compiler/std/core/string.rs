@@ -94,7 +94,7 @@ fn slice_range<R: RangeBounds<usize>>(range: &R, len: usize) -> (usize, usize) {
 
 #[track_caller]
 #[cold]
-fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {
+const fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {
     if start > len {
         panic!("range start index {} out of range for slice of length {}", start, len);
     }
@@ -157,15 +157,15 @@ impl String {
         ret
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
+    pub const fn into_bytes(self) -> Vec<u8> {
         self.vec
     }
 
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         unsafe { crate::str::from_utf8_unchecked(&self.vec[..]) }
     }
 
-    pub fn as_mut_str(&mut self) -> &mut str {
+    pub const fn as_mut_str(&mut self) -> &mut str {
         unsafe { crate::str::from_utf8_unchecked_mut(&mut self.vec[..]) }
     }
 
@@ -192,7 +192,7 @@ impl String {
         }
     }
 
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         self.vec.capacity()
     }
 
@@ -231,7 +231,7 @@ impl String {
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         &self.vec[..]
     }
 
@@ -334,15 +334,15 @@ impl String {
         }
     }
 
-    pub unsafe fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+    pub const unsafe fn as_mut_vec(&mut self) -> &mut Vec<u8> {
         &mut self.vec
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.vec.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 

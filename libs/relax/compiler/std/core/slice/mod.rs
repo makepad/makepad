@@ -32,19 +32,19 @@ pub use join::{concat_str, concat_vec, join_str, join_vec};
 use crate::cmp::Ordering;
 use crate::intrinsics_mem as im;
 
-pub unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
     im::slice_from_raw(data, len)
 }
 
-pub unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
+pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
     im::slice_from_raw_mut(data, len)
 }
 
-pub fn from_ref<T>(s: &T) -> &[T] {
+pub const fn from_ref<T>(s: &T) -> &[T] {
     unsafe { im::slice_from_raw(s as *const T, 1) }
 }
 
-pub fn from_mut<T>(s: &mut T) -> &mut [T] {
+pub const fn from_mut<T>(s: &mut T) -> &mut [T] {
     unsafe { im::slice_from_raw_mut(s as *mut T, 1) }
 }
 
@@ -133,7 +133,7 @@ pub fn reverse<T>(s: &mut [T]) {
     }
 }
 
-pub fn rotate_left<T>(s: &mut [T], mid: usize) {
+pub const fn rotate_left<T>(s: &mut [T], mid: usize) {
     if mid > s.len() {
         crate::panicking::panic_str("assertion failed: mid <= self.len()");
     }
@@ -145,7 +145,7 @@ pub fn rotate_left<T>(s: &mut [T], mid: usize) {
     reverse(s);
 }
 
-pub fn rotate_right<T>(s: &mut [T], k: usize) {
+pub const fn rotate_right<T>(s: &mut [T], k: usize) {
     if k > s.len() {
         crate::panicking::panic_str("assertion failed: k <= self.len()");
     }
@@ -180,7 +180,7 @@ pub fn clone_from_slice<T: Clone>(dst: &mut [T], src: &[T]) {
 
 #[cold]
 #[track_caller]
-fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {
+const fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {
     crate::panicking::panic_fmt(format_args!(
         "copy_from_slice: source slice length ({}) does not match destination slice length ({})",
         src_len, dst_len
@@ -250,7 +250,7 @@ pub fn ends_with<T: PartialEq>(s: &[T], needle: &[T]) -> bool {
 }
 
 #[track_caller]
-pub fn swap<T>(s: &mut [T], a: usize, b: usize) {
+pub const fn swap<T>(s: &mut [T], a: usize, b: usize) {
     let len = s.len();
     if a >= len {
         crate::panicking::panic_bounds(a, len);
