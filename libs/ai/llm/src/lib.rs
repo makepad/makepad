@@ -2,6 +2,7 @@ mod error;
 pub mod context;
 pub mod core;
 pub mod graph;
+pub mod host_bench;
 pub mod mmap;
 pub mod metal_compiled;
 pub mod metal_selector;
