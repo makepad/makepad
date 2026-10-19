@@ -242,6 +242,8 @@ workspace.members = [
     "libs/relax/lex",
     "platform/codegen",
     "libs/system_speech",
+    # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
+    "libs/relax/compiler/rwbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     "widgets/feedback",
     # === tests ===
@@ -289,7 +291,6 @@ workspace.members = [
 ]
 
 workspace.exclude = [
-    "libs/relax/compiler/rwbench",
     # Relax's own fixtures, benches and std check crates: Relax programs and standalone
     # workspaces (their own [workspace] / Cargo.lock), not members
     "libs/relax/compiler/bench_rt",
@@ -437,6 +438,11 @@ makepad-ai-llm = { path = "libs/ai/llm", version = "0.1.0" }
 makepad-widgets-core = { path = "widgets/core", version = "2.0.0" }
 makepad-widgets-sheets = { path = "widgets/sheets", version = "0.1.0" }
 makepad-mbtile-reader = { path = "libs/mbtile_reader", version = "1.0.0" }
+makepad-piano-model = { path = "libs/piano_model", version = "0.1.0" }
+makepad-audio-decode = { path = "libs/audio_decode", version = "0.1.0" }
+makepad-audio-synth = { path = "libs/audio_synth", version = "0.1.0" }
+makepad-script = { path = "platform/script", version = "1.0.0" }
+makepad-csg = { path = "libs/csg/csg", version = "0.1.0" }
 
 [profile.dev]
 debug = "line-tables-only"
