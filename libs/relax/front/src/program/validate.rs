@@ -52,6 +52,7 @@ impl Program {
                             err(ci.lo, "E0449: visibility qualifiers are not permitted here -- note: trait items always share the visibility of their trait".into());
                         }
                         self.body_required(ast, &mut err, ci, Some("`impl`"));
+                        self.assoc_const_name(&mut err, f, ci);
                     }
                 }
                 DefKind::Trait => {
@@ -61,6 +62,7 @@ impl Program {
                         if not_permitted(&ci.vis) {
                             err(ci.lo, "E0449: visibility qualifiers are not permitted here -- note: trait items always share the visibility of their trait".into());
                         }
+                        self.assoc_const_name(&mut err, f, ci);
                     }
                 }
                 DefKind::Struct => {
@@ -158,6 +160,13 @@ impl Program {
             } else {
                 seen.push(name);
             }
+        }
+    }
+
+    /// `const _` is only an item of a module or block (ast_validation `check_item_named`).
+    fn assoc_const_name(&self, err: &mut impl FnMut(u32, String), f: &ParsedFile, it: &Item) {
+        if matches!(it.kind, ItemKind::Const(..)) && f.text(it.name) == "_" {
+            err(it.lo, "`const` items in this context need a name".to_string());
         }
     }
 

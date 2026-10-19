@@ -554,6 +554,13 @@ pub mod obligations {
         }
     }
 
+    fn with_wfcx_env(prog: &Program, tcx: &Tcx, def: DefId, env: ParamEnvId, f: impl FnOnce(&mut Wfcx<'_, '_>)) -> Vec<String> {
+        let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), def);
+        let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env, def, only_dyn: false };
+        f(&mut w);
+        w.finish(prog.def(def).file)
+    }
+
     fn with_wfcx(prog: &Program, tcx: &Tcx, def: DefId, f: impl FnOnce(&mut Wfcx<'_, '_>)) -> Vec<String> {
         let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), def);
         let env = tcx.param_env_id(prog, def);
@@ -571,7 +578,7 @@ pub mod obligations {
         let ast = &prog.files[def.file as usize].ast;
         let item = ast.item(def.item);
         match def.kind {
-            DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| check_type_defn(w, ast, item)),
+            DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); }),
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item)),
             DefKind::Impl => {
                 let mut errors = check_drop_impl(prog, tcx, did, ast, item);
@@ -581,13 +588,16 @@ pub mod obligations {
             // (a trait's own environment is not built here: `param_env_id` of `trait Qux: Foo + AsRef<Self::Bar>` never
             // returns -- solver, crash lane)
             DefKind::Trait => {
+                // the defaults' own well-formedness mentions no parameter: no environment needed
+                let mut errors = with_wfcx_env(prog, tcx, did, ParamEnvId::EMPTY, |w| check_defaults(w, ast, item));
                 // dyn-compatibility of the `dyn` types its bounds mention needs no environment
                 let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), did);
                 let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env: ParamEnvId::EMPTY, def: did, only_dyn: true };
                 w.check_where_clauses(item.lo);
-                w.finish(def.file)
+                errors.extend(w.finish(def.file));
+                errors
             }
-            DefKind::Static => with_wfcx(prog, tcx, did, |w| check_static(w, ast, item)),
+            DefKind::Static | DefKind::ForeignStatic => with_wfcx(prog, tcx, did, |w| check_static(w, ast, item)),
             DefKind::AssocConst => with_wfcx(prog, tcx, did, |w| check_assoc_const(w, ast, item)),
             DefKind::AssocTy => with_wfcx(prog, tcx, did, |w| check_assoc_ty(w, ast, item)),
             _ => Vec::new(),
@@ -694,7 +704,10 @@ pub mod obligations {
         if w.tcx.tys.flags(ty).contains(crate::types::TypeFlags::HAS_ALIAS) { return; }
         let ty = w.normalize(ty);
         w.register_wf(ty, item.name.lo);
-        w.sized(ty, item.name.lo);
+        // an `extern` static may be unsized only through an extern type tail
+        let foreign = w.prog.def(w.def).kind == DefKind::ForeignStatic;
+        if !(foreign && matches!(w.tcx.tys.kind(ty), TyKind::Foreign(_))) { w.sized(ty, item.name.lo); }
+        if foreign { return; }
         // Ensure that the end result is `Sync` in a non-thread local `static`.
         let attrs: Vec<ast::Attr> = ast.list(item.attrs).to_vec();
         let thread_local = relax_front::lang_items::has_attr(w.prog, w.prog.def(w.def).file, &attrs, "thread_local");
@@ -818,5 +831,68 @@ pub mod obligations {
         let mut v = V { tcx, prog, ok: true };
         v.fold_ty(&tcx.tys, ty, 0);
         v.ok
+    }
+
+    /// wfcheck.rs check_where_clauses, the defaults part: a default that mentions no parameter is
+    /// well formed, and a predicate whose only parameter has such a default holds with it
+    /// (`struct Bounds<T: Copy = String>`).
+    fn check_defaults(w: &mut Wfcx<'_, '_>, ast: &ast::Ast, item: &ast::Item) {
+        use crate::types::TypeFlags;
+        let Some(generics) = ast.kind_generics(&item.kind).copied() else { return };
+        let def = w.prog.def(w.def);
+        let indices = w.tcx.generic_indices_of(w.prog, w.def);
+        let mut args = indices.identity_args(&w.tcx.tys);
+        let env = w.tcx.item_env(w.prog, w.def);
+        let state = crate::tcx::EvalState::new();
+        state.errors.replace(Some(Vec::new()));
+        let cx = crate::tcx::EvalCx::new(w.prog, w.tcx, crate::tcx::TypingEnv::fully_monomorphized(w.prog), &state);
+        let mut any = false;
+        // (a trait's first type slot is `Self`)
+        let mut k = usize::from(def.kind == DefKind::Trait);
+        for p in ast.list(generics.params) {
+            match p.kind {
+                ast::GenericParamKind::Lifetime(_) => continue,
+                ast::GenericParamKind::Type(_, Some(t)) => {
+                    let d = w.tcx.lower_ty(&cx, w.prog, def.file, def.scope, &env, t);
+                    let f = w.tcx.tys.flags(d);
+                    if !f.intersects(TypeFlags::HAS_PARAM) && !f.intersects(TypeFlags::HAS_ANY_INFER) && !w.tcx.tys.has_error(d) && crate::wfcheck::obligations::arity_ok(w.tcx, w.prog, d) {
+                        w.register_wf(d, ty_pos(ast, t).unwrap_or(item.lo));
+                        if let Some(&full) = indices.types_consts.get(k) { args[full as usize] = GenericArg::Type(d); any = true; }
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        let _ = state.errors.take();
+        if !any { return; }
+        let own = w.tcx.clauses_of(w.prog, w.def);
+        for q in &own {
+            let flags = q.flags(&w.tcx.tys);
+            // a clause with several parameters or any region is not checked (the other params may be given)
+            if flags & TypeFlags::HAS_RE_PARAM.bits() != 0 || flags & TypeFlags::HAS_RE_BOUND.bits() != 0 { continue; }
+            // several parameters in one clause: the others may be given, so it is not checked
+            if count_params(&w.tcx.tys, q) > 1 { continue; }
+            let inst = w.tcx.instantiate_predicate(w.prog, w.def, &args, q);
+            if inst.flags(&w.tcx.tys) & (TypeFlags::HAS_PARAM.bits() | TypeFlags::HAS_BOUND_VARS.bits() | TypeFlags::HAS_ANY_INFER.bits()) != 0 { continue; }
+            if own.iter().any(|o| *o == inst) { continue; }
+            if !matches!(inst.kind, PredicateKind::Clause(ClauseKind::Trait(_))) { continue; }
+            w.register(Goal { param_env: w.env.clone(), predicate: inst }, item.lo);
+        }
+    }
+
+    /// The number of distinct type / const parameters a clause mentions.
+    fn count_params(tys: &crate::types::Types, p: &Predicate) -> usize {
+        use crate::types::fold::{TypeFolder, super_fold_ty}; use crate::next_solver::fold::fold_predicate;
+        struct C(std::collections::HashSet<u32>);
+        impl TypeFolder for C {
+            fn fold_ty(&mut self, tys: &crate::types::Types, t: TyId, depth: u32) -> TyId {
+                if let TyKind::Param(i) = tys.kind(t) { self.0.insert(*i); }
+                super_fold_ty(tys, t, self, depth)
+            }
+        }
+        let mut c = C(Default::default());
+        fold_predicate(tys, p, &mut c);
+        c.0.len()
     }
 }

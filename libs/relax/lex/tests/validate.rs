@@ -39,6 +39,18 @@ fn bad_escapes_and_digits_are_errors() {
     assert!(err("let a = r#self;", 2021).unwrap().contains("raw identifier"));
     assert!(err("let a = b\"é\";", 2021).unwrap().contains("non-ASCII"));
     assert!(err("let 🦀 = 1;", 2021).unwrap().contains("Ferris"));
-    assert!(err("let a = f\"x\";", 2021).unwrap().contains("prefix `f` is unknown"));
+    assert!(err("let a = f\"x\";", 2021).unwrap().contains("is unknown"));
     assert_eq!(err("let a = f\"x\";", 2018), None);
+}
+
+#[test]
+fn literals_in_macro_token_trees_are_not_cooked_by_the_parser_checks() {
+    // rustc judges a literal's suffix and size when the parser consumes it, never inside a macro
+    // invocation's tokens (Splash colours: `#1a1b26`); the lexer's own errors still apply there
+    for s in ["m!{ x: #1a1b26 }", "m!(1x, \"a\"b, 'c'd, 340282366920938463463374607431768211456)", "macro_rules! m { () => { 1x } }", "#[a(1x)] fn f() {}"] {
+        assert_eq!(err(s, 2021), None, "{s}");
+    }
+    assert!(err("let a = 1x;", 2021).unwrap().contains("invalid suffix"));
+    assert!(err("m!{ 0b102 }", 2021).unwrap().contains("invalid digit for a base 2 literal"));
+    assert!(err("m!{ \"\\q\" }", 2021).unwrap().contains("unknown character escape"));
 }

@@ -570,6 +570,11 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
             }
             continue;
         }
+        if from_source {
+            if let Some(what) = attribute_target_error(prog, d, &name) {
+                errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("`#[{}]` attribute cannot be used on {}", String::from_utf8_lossy(&name), what)));
+            }
+        }
         let AttrSafety::Unsafe { since_2024 } = attr_safety(&String::from_utf8_lossy(&name)) else { continue };
         if !since_2024 || pf.edition >= 2024 {
             if from_source { errors.push(prog.record_uncoded_error(def.file, pos, "typeck", "unsafe attribute used without unsafe".to_string())); }
@@ -748,4 +753,48 @@ pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
         }
     }
     errors
+}
+
+/// rustc_attr_parsing `AllowedTargets::AllowList`: the targets a builtin attribute may be written
+/// on (a `Warn` target is only the `unused_attributes` lint and is accepted here). Returns the
+/// plural target name when the attribute is not allowed on definition `d`.
+fn attribute_target_error(prog: &Program, d: DefId, name: &[u8]) -> Option<&'static str> {
+    use crate::program::DefKind as K;
+    use crate::ast::ItemKind;
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let item = ast.item(def.item);
+    // (plural name, is a fn-like target with/without body, is static-like ...)
+    let (what, fn_like, trait_fn_no_body, static_like): (&'static str, bool, bool, bool) = match def.kind {
+        K::Fn | K::AssocFn => {
+            let body = matches!(item.kind, ItemKind::Fn(_, Some(_), _));
+            let in_trait = def.kind == K::AssocFn && prog.def(def.parent).kind == K::Trait;
+            ("functions", true, in_trait && !body, false)
+        }
+        K::ForeignFn => ("foreign functions", true, false, false),
+        K::Static => ("statics", false, false, true),
+        K::ForeignStatic => ("foreign statics", false, false, true),
+        K::Struct => ("structs", false, false, false),
+        K::Enum => ("enums", false, false, false),
+        K::Union => ("unions", false, false, false),
+        K::Const => ("constants", false, false, false),
+        K::AssocConst => ("associated constants", false, false, false),
+        K::Trait => ("traits", false, false, false),
+        K::Impl => ("implementation blocks", false, false, false),
+        K::TypeAlias => ("type aliases", false, false, false),
+        K::AssocTy => ("associated types", false, false, false),
+        K::Mod => ("modules", false, false, false),
+        _ => return None,
+    };
+    let ok = match name {
+        // Fn, Method, Closure, Delegation (+ Warn: trait fn without body, foreign fn, assoc const, ...)
+        b"inline" => fn_like || def.kind == K::AssocConst,
+        b"track_caller" => fn_like,
+        b"target_feature" => fn_like && def.kind != K::ForeignFn && !trait_fn_no_body,
+        b"used" => def.kind == K::Static,
+        b"export_name" => static_like && def.kind == K::Static || (fn_like && def.kind != K::ForeignFn && !trait_fn_no_body),
+        b"debugger_visualizer" => def.kind == K::Mod,
+        _ => return None,
+    };
+    if ok { None } else { Some(what) }
 }

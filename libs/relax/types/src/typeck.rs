@@ -2294,13 +2294,11 @@ impl<'a> Fcx<'a> {
                 self.coerce_or_unify(t, expected, Some(*e), ast.expr(*e).lo);
             }
             Pat::Range(a, b, _) => {
-                if let Some(a) = a {
-                    let t = self.check_expr(*a, Some(expected));
-                    self.eq(t, expected);
-                }
-                if let Some(b) = b {
-                    let t = self.check_expr(*b, Some(expected));
-                    self.eq(t, expected);
+                // rustc pat.rs check_pat_range: each end has the scrutinee's type (demand_eqtype_pat)
+                for end in [a, b].into_iter().flatten() {
+                    let t = self.check_expr(*end, Some(expected));
+                    let pos = self.ast().expr(*end).lo;
+                    self.demand_eq(expected, t, pos);
                 }
             }
             Pat::Tuple(v) => {
@@ -2546,7 +2544,7 @@ impl<'a> Fcx<'a> {
                         }
                         let v: Vec<TyId> = self.ast().list(elems).iter().map(|_| self.fresh(0)).collect();
                         let tt = self.tcx.tys.intern(TyKind::Tuple(self.tcx.tys.mk_list(&v)));
-                        self.eq(st, tt);
+                        self.demand_eq(st, tt, lo);
                         v
                     }
                 };
@@ -3185,6 +3183,18 @@ impl<'a> Fcx<'a> {
     fn resolve_qself_no_trait(&mut self, self_t: TyId, name: Sym, key: u32, lo: u32, path: &Path) -> (Res, TyId) {
         let error = self.tcx.tys.error;
         let st = self.shallow(self_t);
+        // `<Self>::Variant(..)`, `Alias::Variant`: an enum's variant (rustc
+        // resolve_fully_qualified_call looks up enum variants before probing: they win over inherent items)
+        if let TyKind::Adt(ad, aargs, _) = self.tcx.tys.kind(st).clone() {
+            if self.prog.def(ad).kind == DefKind::Enum {
+                if let Some(v) = self.prog.lookup_in_container(ad, name, false) {
+                    if self.prog.def(v).kind == DefKind::Variant {
+                        let t = self.value_def_ty(v, Some(self.tcx.tys.list(aargs).to_vec()), key);
+                        return (Res::Def(v), t);
+                    }
+                }
+            }
+        }
         if let TyKind::Dyn(td, targs, _, _, _, _, _) = self.tcx.tys.kind(st).clone() {
             let item = match self.dyn_method(td, name, lo) {
                 Ok(item) => item,
@@ -3236,18 +3246,6 @@ impl<'a> Fcx<'a> {
             let args = self.trait_call_args(item, imp, st, &given);
             let t = self.value_def_ty(item, Some(args), key);
             return (Res::Def(item), t);
-        }
-        // `<Self>::Variant(..)`, `Alias::Variant`: an enum's variant (rustc
-        // resolve_fully_qualified_call looks up enum variants before probing)
-        if let TyKind::Adt(ad, aargs, _) = self.tcx.tys.kind(st).clone() {
-            if self.prog.def(ad).kind == DefKind::Enum {
-                if let Some(v) = self.prog.lookup_in_container(ad, name, false) {
-                    if self.prog.def(v).kind == DefKind::Variant {
-                        let t = self.value_def_ty(v, Some(self.tcx.tys.list(aargs).to_vec()), key);
-                        return (Res::Def(v), t);
-                    }
-                }
-            }
         }
         // a rigid projection or param of a generic body (`<A as Alloc<T>>::Mem::default()`):
         // through its bounds
@@ -4618,6 +4616,8 @@ impl<'a> Fcx<'a> {
                     return unit;
                 }
                 let ta = self.check_expr(*a, None);
+                // rustc check_expr_assign: the assigned place is Sized (AssignmentLhsSized)
+                if self.tcx.validates(self.prog, self.file) { let apos = self.ast().expr(*a).lo; self.require_type_is_sized_deferred(ta, apos); }
                 let tb = self.check_expr(*b, Some(ta));
                 self.coerce_or_unify(tb, ta, Some(*b), lo);
                 unit
@@ -4979,7 +4979,9 @@ impl<'a> Fcx<'a> {
                     if self.loops[i].is_loop {
                         match self.loops[i].break_ty {
                             Some(prev) => {
-                                self.eq(prev, bt);
+                                // rustc check_expr_break: every `break` coerces to the loop's type
+                                let bpos = match x.get() { Some(v) => self.ast().expr(v).lo, None => lo };
+                                self.demand_eq(prev, bt, bpos);
                             }
                             None => self.loops[i].break_ty = Some(bt),
                         }

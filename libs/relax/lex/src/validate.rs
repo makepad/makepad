@@ -56,16 +56,34 @@ pub fn enabled() -> bool {
 
 /// Validates the tokens `toks[from..]` of `src`; the first error is returned.
 pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
+    // Delimiter stack: true inside a macro invocation/definition or an attribute, whose tokens are
+    // not literals yet. rustc cooks a literal's value and suffix when the parser consumes it
+    // (`report_lit_error`), so those checks are skipped there; the lexer's own (escapes, digits of a
+    // base, exponents, `_` suffix, token starts) apply everywhere.
+    let mut stack: Vec<bool> = Vec::new();
     for (k, t) in toks.iter().enumerate() {
         let (lo, hi) = (t.lo as usize, t.hi as usize);
+        let parse_level = !stack.last().copied().unwrap_or(false);
         match t.kind {
-            T::Str => quoted(src, lo, hi, 0, b'"', Mode::Str)?,
-            T::ByteStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::ByteStr)?,
-            T::CStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::CStr)?,
+            T::OpenParen | T::OpenBracket | T::OpenBrace => {
+                let prev = |n: usize| if k >= n { Some(toks[k - n].kind) } else { None };
+                let bang = prev(1) == Some(T::Not) || (prev(2) == Some(T::Not) && matches!(prev(1), Some(T::Ident)));
+                let attr = t.kind == T::OpenBracket && (prev(1) == Some(T::Pound) || (prev(1) == Some(T::Not) && prev(2) == Some(T::Pound)));
+                stack.push(!parse_level || bang || attr);
+            }
+            T::CloseParen | T::CloseBracket | T::CloseBrace => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        match t.kind {
+            T::Str => quoted(src, lo, hi, 0, b'"', Mode::Str, parse_level)?,
+            T::ByteStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::ByteStr, parse_level)?,
+            T::CStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::CStr, parse_level)?,
             T::ByteStr | T::CStr | T::RawStr => raw(src, lo, hi, t.kind)?,
-            T::Char => quoted(src, lo, hi, 0, b'\'', Mode::Char)?,
-            T::Byte => quoted(src, lo, hi, 1, b'\'', Mode::Byte)?,
-            T::Int | T::Float => number(src, lo, hi, t.kind == T::Float)?,
+            T::Char => quoted(src, lo, hi, 0, b'\'', Mode::Char, parse_level)?,
+            T::Byte => quoted(src, lo, hi, 1, b'\'', Mode::Byte, parse_level)?,
+            T::Int | T::Float => number(src, lo, hi, t.kind == T::Float, parse_level)?,
             T::Ident | T::RawIdent => {
                 if src[lo..hi].is_ascii() {
                     // an ASCII identifier directly followed by a quote is a reserved prefix
@@ -121,7 +139,7 @@ fn is_emoji_approx(c: char) -> bool {
 
 const NUMBER_SUFFIXES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f16", "f32", "f64", "f128"];
 
-fn number(src: &[u8], lo: usize, hi: usize, float: bool) -> Result<(), VErr> {
+fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> Result<(), VErr> {
     let b = &src[lo..hi];
     // the digits of the literal (suffix excluded) and, for an integer, its value
     let body_end;
@@ -180,10 +198,10 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool) -> Result<(), VErr> {
     }
     // (an integer's digits are all the literal holds before the suffix)
     let suffix = std::str::from_utf8(&b[body_end..]).unwrap_or("?");
-    if !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {
+    if parse_level && !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {
         return err(lo + body_end, format!("invalid suffix `{suffix}` for {} literal", if float { "float" } else { "number" }));
     }
-    if !float {
+    if parse_level && !float {
         let digits = if radix == 10 { &b[..body_end] } else { &b[2..body_end] };
         let mut v: u128 = 0;
         for &c in digits {
@@ -239,7 +257,7 @@ fn raw(src: &[u8], lo: usize, hi: usize, kind: T) -> Result<(), VErr> {
     Ok(())
 }
 
-fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode) -> Result<(), VErr> {
+fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, parse_level: bool) -> Result<(), VErr> {
     let body_lo = lo + prefix + 1;
     // the closing quote is the last one of the token (a suffix holds no quotes)
     let mut end = hi;
@@ -252,7 +270,10 @@ fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode) ->
         if suffix == "_" {
             return err(end, "underscore literal suffix is not allowed");
         }
-        return err(end, format!("suffixes on {} literals are invalid", if mode.is_single() { "char" } else { "string" }));
+        // (any other suffix on a quoted literal is judged when the parser consumes it)
+        if parse_level {
+            return err(end, format!("suffixes on {} literals are invalid", if mode.is_single() { "char" } else { "string" }));
+        }
     }
     // fast path: nothing to check in plain ASCII text without escapes
     let body = &src[body_lo..body_hi];
