@@ -32,6 +32,22 @@ struct Declaration<T> {
     misses: Vec<(u32, String)>,
 }
 impl<T> DeclarationCell<T> {
+    pub(crate) fn get_or_init_cyclic(&self, compute: impl FnOnce() -> T) -> &T where T: Default {
+        // A declaration that asks for itself on the thread computing it (a supertrait bound naming
+        // `Self::Name`, a bound whose projection needs the bounds being lowered) would wait on its
+        // own OnceLock forever. That is rustc's query cycle (E0391, reported by the item's own
+        // check); the nested ask sees the empty declaration.
+        thread_local! { static IN_FLIGHT: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) }; }
+        let key = self as *const Self as usize;
+        if self.0.get().is_none() && IN_FLIGHT.try_with(|v| v.borrow().contains(&key)).unwrap_or(false) {
+            return Box::leak(Box::new(T::default()));
+        }
+        struct Pop(usize);
+        impl Drop for Pop { fn drop(&mut self) { let k = self.0; let _ = IN_FLIGHT.try_with(|v| { let mut v = v.borrow_mut(); if let Some(i) = v.iter().rposition(|x| *x == k) { v.remove(i); } }); } }
+        let _ = IN_FLIGHT.try_with(|v| v.borrow_mut().push(key));
+        let _pop = Pop(key);
+        self.get_or_init(compute)
+    }
     pub(crate) fn get_or_init(&self, compute: impl FnOnce() -> T) -> &T {
         let declaration = self.0.get_or_init(|| {
             let enclosing = crate::program::missing_save();
@@ -52,7 +68,7 @@ impl DefQueries {
     pub(crate) fn filtered_supers(&self, name: Sym, compute: impl FnOnce() -> Vec<Predicate>) -> Vec<Predicate> {
         let cell = self.filtered_supers.lock().unwrap_or_else(|e| e.into_inner())
             .entry(name).or_default().clone();
-        cell.get_or_init(compute).clone()
+        cell.get_or_init_cyclic(compute).clone()
     }
 
     fn reset_with_misses(&mut self) {

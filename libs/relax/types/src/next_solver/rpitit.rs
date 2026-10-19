@@ -99,17 +99,17 @@ impl Tcx {
     }
 
     pub fn own_clauses_of(&self, prog: &Program, def: DefId) -> &[Predicate] {
-        &self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def)).0
+        &self.declaration_queries(prog, def).own_clauses.get_or_init_cyclic(|| self.own_clauses_uncached(prog, def)).0
     }
 
     /// The errors of lowering the definition's clauses (see `own_clauses_uncached`).
     pub fn own_clauses_errors(&self, prog: &Program, def: DefId) -> &[String] {
-        &self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def)).1
+        &self.declaration_queries(prog, def).own_clauses.get_or_init_cyclic(|| self.own_clauses_uncached(prog, def)).1
     }
 
     /// rustc_hir_analysis/src/collect/item_bounds.rs: elaboration belongs to the provider.
     pub fn item_bounds(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).item_bounds.get_or_init(|| self.item_bounds_uncached(prog, def_id))
+        self.declaration_queries(prog, def_id).item_bounds.get_or_init_cyclic(|| self.item_bounds_uncached(prog, def_id))
     }
     fn item_bounds_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
         let mut out = Vec::new();
@@ -121,7 +121,7 @@ impl Tcx {
         out
     }
     pub fn explicit_item_bounds(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).explicit_item_bounds.get_or_init(|| self.explicit_item_bounds_uncached(prog, def_id))
+        self.declaration_queries(prog, def_id).explicit_item_bounds.get_or_init_cyclic(|| self.explicit_item_bounds_uncached(prog, def_id))
     }
     pub(crate) fn explicit_item_bounds_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
         match prog.impl_trait_in_trait_data.get(&def_id) {

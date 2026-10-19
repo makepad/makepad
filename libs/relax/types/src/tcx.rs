@@ -1554,8 +1554,9 @@ impl Tcx {
         errors.extend_from_slice(self.signature_errors(prog, did));
         if prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             errors.extend(crate::item_checks::duplicate_generic_params(prog, did));
+            if self.validates(prog, def.file) { errors.extend(crate::item_checks::generic_param_rules(prog, did)); }
             errors.extend(crate::item_checks::repr_checks(prog, self, did));
-            crate::item_checks::assoc_const_elision(prog, did);
+            errors.extend(crate::item_checks::assoc_const_elision(prog, did));
             errors.extend(crate::item_checks::attribute_safety(prog, did));
             if def.kind == DefKind::AssocFn && self.validates(prog, def.file) && errors.is_empty() {
                 errors.extend(self.check_method_receiver(prog, did));
@@ -3429,7 +3430,7 @@ impl Tcx {
                     Ok(g) => g,
                     Err(()) => {
                         self.err(cx, prog, pd.file, ast.item(pd.item).lo, format!("E0391: cycle detected when computing type of `{}::{}`", prog.def_path(td), prog.files[pd.file as usize].text(g.name)));
-                        out.push(self.tys.error);
+                        out.push(if cdef.is_some() { self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))) } else { self.tys.error });
                         k += 1;
                         continue;
                     }

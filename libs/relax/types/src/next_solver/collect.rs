@@ -53,7 +53,7 @@ impl Tcx {
     }
 
     pub fn explicit_super_predicates_of(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).super_predicates.get_or_init(||
+        self.declaration_queries(prog, def_id).super_predicates.get_or_init_cyclic(||
             self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfOnly))
     }
 

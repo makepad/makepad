@@ -611,6 +611,18 @@ impl<'a> Cx<'a> {
                 let tys = self.variant_field_tys(d, vi as u32, args);
                 for (f, ft) in fields.iter().zip(tys) { self.structural_walk(&f.valtree, ft, pos, depth + 1); }
             }
+            // NaN equals nothing: no pattern (const_to_pat NaNPattern)
+            TyKind::Float(p) => {
+                if let Some(l) = v.try_to_leaf() {
+                    let bits = l.to_bits(l.size());
+                    let nan = if p == Prim::F32 { f32::from_bits(bits as u32).is_nan() } else if p == Prim::F64 { f64::from_bits(bits as u64).is_nan() } else { false };
+                    if nan {
+                        let Some(lo) = pos else { return };
+                        let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", "cannot use NaN in patterns".to_string());
+                        self.const_errors.push(e);
+                    }
+                }
+            }
             TyKind::Ref(_, inner, _) => { let inner = self.reveal(inner); self.structural_walk(v, inner, pos, depth + 1) }
             TyKind::Tuple(l) => {
                 let Some(branches) = v.try_to_branch() else { return };
@@ -670,7 +682,7 @@ impl<'a> Cx<'a> {
             return false;
         }
         match self.kind(t) {
-            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Str => true,
+            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str => true,
             TyKind::Ref(_, i, _) => self.valtree_type(i, depth + 1),
             TyKind::Array(e, _) | TyKind::Slice(e) => self.valtree_type(e, depth + 1),
             TyKind::Tuple(l) => self.tcx.tys.list(l).iter().all(|x| self.valtree_type(*x, depth + 1)),

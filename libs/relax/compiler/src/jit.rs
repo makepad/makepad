@@ -4057,6 +4057,16 @@ impl Unit {
             self.const_failed.insert((d, args));
             return None;
         }
+        // rustc's query depth limit (#![recursion_limit], 128 by default): a constant whose
+        // evaluation needs the same item at ever deeper arguments
+        let limit = self.prog.crates[self.prog.def(d).krate as usize].recursion_limit as usize;
+        if CONST_STACK.try_with(|s| s.borrow().len()).unwrap_or(0) > limit {
+            let def = self.prog.def(d);
+            let at = self.pos_str(def.file, self.prog.files[def.file as usize].ast.item(def.item).lo);
+            self.note_error(format!("{}: queries overflow the depth limit! [in {}]", at, self.prog.def_path(d)));
+            self.const_failed.insert((d, args));
+            return None;
+        }
         // (popped also when the evaluation unwinds: a cancelled request is retried)
         struct Pop;
         impl Drop for Pop { fn drop(&mut self) { let _ = CONST_STACK.try_with(|s| { s.borrow_mut().pop(); }); } }
