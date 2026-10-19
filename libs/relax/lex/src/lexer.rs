@@ -347,6 +347,70 @@ const IDENT_BYTES: [u8; 256] = {
     classes
 };
 
+
+const LO: u64 = 0x0101_0101_0101_0101;
+const HI: u64 = 0x8080_8080_8080_8080;
+
+/// The bytes of `w` equal to the byte repeated in `rep` have their high bit set in the result
+/// (exact for the lowest matching byte; higher ones may be flagged falsely after it).
+#[inline(always)]
+fn swar_eq(w: u64, rep: u64) -> u64 {
+    let x = w ^ rep;
+    x.wrapping_sub(LO) & !x & HI
+}
+
+#[inline(always)]
+fn load8(src: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(src[i..i + 8].try_into().unwrap())
+}
+
+/// Index of the first `a` at or after `i` (src.len() when there is none).
+#[inline]
+fn find_byte(src: &[u8], mut i: usize, a: u8) -> usize {
+    let rep = LO * a as u64;
+    while i + 8 <= src.len() {
+        let m = swar_eq(load8(src, i), rep);
+        if m != 0 {
+            return i + (m.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < src.len() && src[i] != a {
+        i += 1;
+    }
+    i
+}
+
+/// Index of the first `a` or `b` at or after `i` (src.len() when there is none).
+#[inline]
+fn find_byte2(src: &[u8], mut i: usize, a: u8, b: u8) -> usize {
+    let (ra, rb) = (LO * a as u64, LO * b as u64);
+    while i + 8 <= src.len() {
+        let w = load8(src, i);
+        let m = swar_eq(w, ra) | swar_eq(w, rb);
+        if m != 0 {
+            return i + (m.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < src.len() && src[i] != a && src[i] != b {
+        i += 1;
+    }
+    i
+}
+
+/// End of the run of ASCII spaces starting at `i`.
+#[inline]
+fn skip_spaces(src: &[u8], mut i: usize) -> usize {
+    while i + 8 <= src.len() && load8(src, i) == LO * 0x20 {
+        i += 8;
+    }
+    while i < src.len() && src[i] == b' ' {
+        i += 1;
+    }
+    i
+}
+
 #[inline]
 fn is_ident_start(c: u8) -> bool {
     IDENT_BYTES[c as usize] & 1 != 0
@@ -527,16 +591,19 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                 i += 1;
                 // Indentation and other whitespace runs need no token dispatch
                 // per byte. The accepted bytes are unchanged in every mode.
-                while i < n && matches!(src[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
-                    i += 1;
+                loop {
+                    i = skip_spaces(src, i);
+                    if i < n && matches!(src[i], b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
                 continue;
             }
             b'/' => {
                 if i + 1 < n && src[i + 1] == b'/' {
-                    while i < n && src[i] != b'\n' {
-                        i += 1;
-                    }
+                    i = find_byte(src, i, b'\n');
                     if !TRIVIA {
                         continue;
                     }
@@ -545,6 +612,8 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     let mut depth = 1;
                     i += 2;
                     while depth > 0 {
+                        // only a `/` or `*` can begin a delimiter
+                        i = find_byte2(src, i, b'/', b'*');
                         if i + 1 >= n {
                             return Err(err(lo, "unterminated block comment"));
                         }
@@ -948,17 +1017,18 @@ fn lex_quoted(src: &[u8], i: usize, q: u8) -> Option<usize> {
 
 fn lex_quoted_mode<const RX: bool>(src: &[u8], mut i: usize, q: u8) -> Option<usize> {
     let n = src.len();
-    while i < n {
-        let c = src[i];
-        if c == b'\\' {
+    loop {
+        // the body up to the next quote or escape
+        i = find_byte2(src, i, q, b'\\');
+        if i >= n {
+            return None;
+        }
+        if src[i] == b'\\' {
             i += if RX { 1 + src.get(i + 1).map_or(0, |&c| utf8_len(c)) } else { 2 };
-        } else if c == q {
-            return Some(i + 1);
         } else {
-            i += 1;
+            return Some(i + 1);
         }
     }
-    None
 }
 
 fn lex_suffix(src: &[u8], i: usize) -> usize {

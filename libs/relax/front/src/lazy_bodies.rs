@@ -254,6 +254,14 @@ impl TokBase<'_> {
             TokBase::Packed(p) => p.at(i),
         }
     }
+    #[inline]
+    fn kind_at(&self, i: usize) -> T {
+        match self {
+            TokBase::None => unreachable!(),
+            TokBase::Slice(s) => s[i].kind,
+            TokBase::Packed(p) => p.kind_at(i),
+        }
+    }
 }
 
 /// The parser's token array: the tokens of a published file (or of a working array) it
@@ -309,6 +317,18 @@ impl<'a> Toks<'a> {
             return self.patches[&(i as u32)];
         }
         self.base.at(i)
+    }
+    /// The kind of token `i`: `at(i).kind` without decoding the positions of a packed base token.
+    #[inline]
+    pub fn kind_at(&self, i: usize) -> T {
+        let nb = self.base.len();
+        if i >= nb {
+            return self.own[i - nb].kind;
+        }
+        if !self.patches.is_empty() && self.is_patched(i) {
+            return self.patches[&(i as u32)].kind;
+        }
+        self.base.kind_at(i)
     }
     /// Changes token `i` in place (a base token's original stays in the base).
     #[inline]

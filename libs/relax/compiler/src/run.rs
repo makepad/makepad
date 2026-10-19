@@ -1023,16 +1023,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         pre.extend(watch_load_errors);
         // the watch session reports its root crate's; a one-shot check every workspace crate's
         let checked = if watch || root_only || session.is_some() { vec![root] } else if selftest || workspace_check { crate::check::workspace_crates(&prog, root) } else { crate::check::app_crates(&prog, root) };
-        // A run checks coherence in the background; a check needs its errors now: the app
-        // check its own crates' impls (cargo check), every other check all of them.
-        let t = Instant::now();
-        if selftest || watch || root_only || session.is_some() { tcx.check_coherence(&prog); }
-        else { tcx.check_coherence_of(&prog, Some(&checked)); }
-        phase("coherence", t);
-        for k in checked {
-            pre.extend(crate::check::own_errors(&prog, k, &prog.errors, "resolve"));
-            pre.extend(crate::check::own_errors(&prog, k, &tcx.errors, "typeck"));
-        }
         crate::jit::compile_watch(Some(("check: unit", 0)));
         let t = Instant::now();
         let mut u = Unit::new(prog, tcx, core);
@@ -1040,6 +1030,17 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // auxiliary unit -- the proc-macro world -- never takes it over)
         crate::syms::set_unit(&mut *u as *mut Unit);
         phase("unit", t);
+        // Coherence evaluates the constants of impl headers, which needs the unit's evaluator (the
+        // provider Unit::new registers). A run checks coherence in the background; a check needs its errors now: the app
+        // check its own crates' impls (cargo check), every other check all of them.
+        let t = Instant::now();
+        if selftest || watch || root_only || session.is_some() { u.tcx.check_coherence(&u.prog); }
+        else { u.tcx.check_coherence_of(&u.prog, Some(&checked)); }
+        phase("coherence", t);
+        for k in checked {
+            pre.extend(crate::check::own_errors(&u.prog, k, &u.prog.errors, "resolve"));
+            pre.extend(crate::check::own_errors(&u.prog, k, &u.tcx.errors, "typeck"));
+        }
         // every body is checked, so the files the selection skipped load first: all of them for
         // selftest, a watch session or --root-only; the checked (app) crates' for the app check
         let t = Instant::now();

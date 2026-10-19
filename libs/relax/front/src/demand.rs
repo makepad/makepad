@@ -651,9 +651,8 @@ impl Names {
         if !def.arms.iter().all(|(matcher, _)| names_only(matcher)) { return None; }
         let mut parser = crate::parser::Parser::new(&c.cfg.session, src, toks, c.edition);
         parser.krate = c.name.clone();
-        let Ok((expanded, _, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
-        let mut tokens = Vec::new();
-        if crate::lexer::lex(expanded.as_bytes(), c.edition, &mut tokens).is_err() { return None; }
+        let Ok((expanded, mut tokens, _, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
+        tokens.push(Tok { kind: T::Eof, lo: expanded.len() as u32, hi: expanded.len() as u32 });
         let bytes = expanded.as_bytes();
         let mut at = 0;
         while at < tokens.len() && tokens[at].kind != T::Eof {

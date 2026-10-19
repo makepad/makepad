@@ -699,18 +699,6 @@ impl<'a> Parser<'a> {
                 g.p(&format!("__relax_a{}", i));
             }
         };
-        if !inline {
-            g.p("match (");
-            for s in srcs.iter() {
-                g.borrow(s);
-                g.p(",");
-            }
-            g.p(") { (");
-            for i in 0..srcs.len() {
-                g.p(&format!("__relax_a{},", i));
-            }
-            g.p(") => ");
-        }
         // args array: one entry per placeholder, then width/precision params
         let mut args: Vec<(usize, &'static str)> = Vec::new();
         for (i, s) in &phs {
@@ -747,9 +735,26 @@ impl<'a> Parser<'a> {
             specs.push(']');
         }
         if formatted {
-            g.p(&format!("{}::fmt::Arguments::new_v1_formatted({}, &[", CORE, lit_text));
+            g.p(&format!("{}::fmt::Arguments::new_v1_formatted({}, ", CORE, lit_text));
         } else {
-            g.p(&format!("{}::fmt::Arguments::new_v1({}, &[", CORE, lit_text));
+            g.p(&format!("{}::fmt::Arguments::new_v1({}, ", CORE, lit_text));
+        }
+        // rustc (pre-`super let`) lowering: the arguments array is `&[..]` when the placeholders use
+        // every slot once in order, else `&match (&a0, &a1) { (a0, a1) => [..] }`; either way the
+        // array temporary belongs to the enclosing expression, not to a match arm.
+        if inline {
+            g.p("&[");
+        } else {
+            g.p("&match (");
+            for s in srcs.iter() {
+                g.borrow(s);
+                g.p(",");
+            }
+            g.p(") { (");
+            for i in 0..srcs.len() {
+                g.p(&format!("__relax_a{},", i));
+            }
+            g.p(") => [");
         }
         for (k, (i, ctor)) in args.iter().enumerate() {
             if k > 0 {
@@ -760,14 +765,14 @@ impl<'a> Parser<'a> {
             g.p(")");
         }
         g.p("]");
+        if !inline {
+            g.p(" }");
+        }
         if formatted {
             g.p(", ");
             g.p(&specs);
         }
         g.p(")");
-        if !inline {
-            g.p(" }");
-        }
         Ok(())
     }
 

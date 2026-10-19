@@ -11,7 +11,8 @@ pub struct Reuse {
 }
 /// transcription text, fragment-token origins, definition-body-token origins, opaque fragment
 /// groups (text offsets of the first token's start and the last token's end)
-pub type Rules = (String, Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>, Vec<(u32, u32)>);
+/// a macro_rules expansion: its text, the tokens over it, token origins, body positions, token-tree groups
+pub type Rules = (String, Vec<crate::lexer::Tok>, Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>, Vec<(u32, u32)>);
 struct Reusing {
     previous: std::sync::Arc<Reuse>,
     next: Reuse,

@@ -1306,7 +1306,11 @@ fn item_location(p: &crate::parser::Parser, mut origin: u32) -> (usize,usize) {
     if origin >= p.src.len() as u32 {
         if let Some(span) = p.input_span(origin, origin + 1) { return (span.start.line as usize, span.start.column as usize); }
     }
-    crate::lexer::line_col(p.src,origin)
+    // the file's line starts are worked out once (FileCtx), not by counting from byte 0 per item
+    match &p.bctx {
+        Some(c) => c.byte_line_col(p.src, origin),
+        None => crate::lexer::line_col(p.src, origin),
+    }
 }
 
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
@@ -2287,6 +2291,13 @@ fn prescan_rules(tb: &[u8], krate: &str, cfg: &CfgSet) -> Vec<crate::macros::Mac
 
 #[cfg(test)]
 mod pm_input_tests {
+
+    /// An expansion given as text, lexed here (the parser takes tokens only).
+    fn expand_lexed(p: &mut crate::parser::Parser, text: &str, call_lo: u32) -> usize {
+        let mut toks = Vec::new();
+        assert!(crate::lexer::lex(text.as_bytes(), 2021, &mut toks).is_ok());
+        p.expand_toks(text, &toks, call_lo)
+    }
     use super::*;
 
     #[test]
@@ -2383,7 +2394,7 @@ mod pm_input_tests {
         p.token_input = true;
         p.sources = Some(sources);
         p.bctx = Some(std::rc::Rc::new(FileCtx::new("test", "/fake/module.rs", "test", &CfgSet::host(&sess, &[]))));
-        let start = p.expand_text("forward", "r#type", base).unwrap_or_else(|e| panic!("{}", e.msg));
+        let start = expand_lexed(&mut p, "r#type", base);
         let nested = p.toks.at(start).lo;
         p.tok_origin.push((nested, base, 6));
         for needed in [false, true] {
@@ -2435,19 +2446,19 @@ mod pm_input_tests {
         // expansion index. Deliberately use a single long line, as generated text does.
         p.ext.extend(std::iter::repeat_n(b' ', 2_000_000 - p.ext.len()));
         compare(&p, 0, p.toks.len(), 0, src.len() as u32);
-        let start = p.expand_text("test", "(forwarded >>= 2)", 0).unwrap_or_else(|e| panic!("{}", e.msg));
+        let start = expand_lexed(&mut p, "(forwarded >>= 2)", 0);
         let base = p.toks.at(start).lo;
         p.tok_origin.push((base + 1, 0, 2));
         compare(&p, start, p.toks.len(), base, p.toks.last().unwrap().hi);
         // Nested substitution, resolving a fragment through the preceding expansion.
-        let start = p.expand_text("test", "[forwarded]", base).unwrap_or_else(|e| panic!("{}", e.msg));
+        let start = expand_lexed(&mut p, "[forwarded]", base);
         let nested = p.toks.at(start).lo;
         p.tok_origin.push((nested + 1, base + 1, 2));
         compare(&p, start, p.toks.len(), nested, p.toks.last().unwrap().hi);
         // No call-site mapping: exercise the lazy expansion index, Unicode and EOF.
         p.exp_map.clear();
         p.tok_origin.clear();
-        let start = p.expand_text("test", "\n(\"é中🦀\", x)", u32::MAX).unwrap_or_else(|e| panic!("{}", e.msg));
+        let start = expand_lexed(&mut p, "\n(\"é中🦀\", x)", u32::MAX);
         p.exp_map.clear();
         compare(&p, start, p.toks.len(), p.toks.at(start).lo, p.toks.last().unwrap().hi);
     }
