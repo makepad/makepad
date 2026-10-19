@@ -128,7 +128,7 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
 }
 
 fn program(source: &str) -> (Program, Tcx) {
-    let dir = std::env::temp_dir().join(format!("relax-native-fcx-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!("relax-native-fcx-{}-{}", std::process::id(), crate::unique_test_suffix()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("lib.rs"); std::fs::write(&path, source).unwrap();
     let mut prog = Program::new(&std::sync::Arc::new(crate::Session::default()));

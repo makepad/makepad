@@ -1098,6 +1098,9 @@ fn install_ice_hook() {
             }
             return;
         }
+        // speculative work on an ahead helper: its panics are caught and the locked build redoes
+        // (and reports) that body, so they are not diagnostics
+        if std::thread::current().name().is_some_and(|n| n.starts_with("run-ahead")) { return; }
         prev(info);
     }));
 }

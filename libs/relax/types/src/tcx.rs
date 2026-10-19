@@ -1574,6 +1574,12 @@ impl Tcx {
                 }
             }
         }
+        // rustc_hir_analysis check_main_fn_ty: the crate's `main` takes no generic parameters
+        if def.kind == DefKind::Fn && prog.name(did) == "main" && prog.item_defs.get(&(def.file, def.item.0)) == Some(&did)
+            && def.parent == prog.mods[prog.crates[def.krate as usize].root_mod as usize].def
+            && !self.generic_indices_of(prog, did).types_consts.is_empty() {
+            errors.push(prog.record_error(def.file, prog.files[def.file as usize].ast.item(def.item).lo, "signature", "E0131: `main` function is not allowed to have generic parameters".into()));
+        }
         if def.kind == DefKind::AssocFn && prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             // rustc_ast_passes ast_validation check_trait_fn_not_const (E0379)
             let ast = &prog.files[def.file as usize].ast;

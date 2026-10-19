@@ -16,6 +16,8 @@ pub(super) fn try_instantiate_mir_and_normalize_erasing_regions(prog: &Program, 
 pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::TypingEnv, body: &Body, args: &[TyId]) -> Result<Body, crate::next_solver::NoSolution> {
     static COUNTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *COUNTS.get_or_init(|| std::env::var_os("MAKEPAD_RUN_BODY_COUNTS").is_some()) { eprintln!("body-count instantiate-clone"); }
+    // a body is instantiated with exactly its generics (a `fn main<T>()`, E0131, has no instance)
+    if args.len() != tcx.generic_indices_of(prog, body.def).types_consts.len() { return Err(crate::next_solver::NoSolution); }
     let mut b = body.clone();
     let root_errors = tcx.dcx.clone();
     let checkpoint = root_errors.checkpoint();

@@ -818,7 +818,7 @@ mod tests {
     use crate::types::RegionArgsId;
 
     fn program(source: &[u8]) -> (Program, Tcx) {
-        let dir = std::env::temp_dir().join(format!("relax-type-queries-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("relax-type-queries-{}-{}", std::process::id(), crate::unique_test_suffix()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("lib.rs");
         std::fs::write(&path, source).unwrap();

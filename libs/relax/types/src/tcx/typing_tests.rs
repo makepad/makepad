@@ -37,7 +37,7 @@ fn inference_diagnostics_do_not_mask_body_error() {
 }
 
 fn program(source: &[u8]) -> (Program, Tcx) {
-    let dir = std::env::temp_dir().join(format!("relax-typing-env-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!("relax-typing-env-{}-{}", std::process::id(), crate::unique_test_suffix()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("lib.rs");
     std::fs::write(&path, source).unwrap();

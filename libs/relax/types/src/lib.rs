@@ -85,3 +85,10 @@ pub mod upvar;
 pub mod region_scope;
 
 pub mod next_solver;
+
+/// A name no two tests of this process share (pid and clock alone collide under parallel test threads).
+#[cfg(test)]
+pub(crate) fn unique_test_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
