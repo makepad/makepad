@@ -8786,6 +8786,10 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
     // byte stores of one value's bytes -> one wide store (before address modes)
     relax_codegen::loops::merge_stores(options, func);
     if cfg.fold {
+        // steps of an unrolled copy hang off the first value (offsets fold into address modes)
+        if relax_codegen::loops::flatten_step_chains(func) {
+            crate::opt::live_dce(func);
+        }
         crate::opt::addr_modes(func);
         // results computed early for one later use move next to it (O3)
         crate::opt::sink_single_uses(func);

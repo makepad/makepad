@@ -216,3 +216,26 @@ pub const BUILTIN_TOOLS: &[&str] = &["clippy", "diagnostic", "miri", "rust_analy
 pub fn is_builtin_attr(name: &str) -> bool {
     BUILTIN_ATTRS.binary_search(&name).is_ok()
 }
+
+/// rustc_attr_parsing `AttributeSafety` of a built-in attribute.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttrSafety {
+    /// written `#[unsafe(..)]`; `since_2024`: only from edition 2024 (earlier it is a lint)
+    Unsafe { since_2024: bool },
+    Normal,
+    /// no built-in attribute of this name
+    Unknown,
+}
+
+/// The unsafe built-in attributes (`SAFETY = AttributeSafety::Unsafe { .. }` in rustc_attr_parsing):
+/// name and whether the requirement starts with edition 2024.
+pub const UNSAFE_ATTRS: &[(&str, bool)] = &[
+    ("export_name", true), ("ffi_const", false), ("ffi_pure", false), ("force_target_feature", false),
+    ("link_section", true), ("naked", false), ("no_mangle", true),
+];
+
+pub fn attr_safety(path: &str) -> AttrSafety {
+    if let Some(&(_, since_2024)) = UNSAFE_ATTRS.iter().find(|(n, _)| *n == path) { return AttrSafety::Unsafe { since_2024 }; }
+    // `diagnostic::on_unimplemented` and the other attributes of the diagnostic namespace
+    if path.starts_with("diagnostic::") || is_builtin_attr(path) { AttrSafety::Normal } else { AttrSafety::Unknown }
+}

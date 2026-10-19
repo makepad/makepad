@@ -2379,6 +2379,14 @@ impl<'a> Lcx<'a> {
                         self.f.noalias.push(regs[0]);
                     }
                 }
+                // a reference's (or fat reference's data) pointer is never null (rustc `nonnull`
+                // on reference parameters): the niche tests of iterators over a slice parameter
+                // fold
+                if let TyKind::Ref(_, inner, _) = self.kind(t) {
+                    if !regs.is_empty() && self.f.vregs[regs[0].0 as usize] == Cls::I && (regs.len() == 1 || self.unsized_ty(inner)) {
+                        self.f.nonnull.push(regs[0]);
+                    }
+                }
                 // `&T` / `&mut T` of a sized T: dereferenceable for the call (rustc
                 // dereferenceable(size_of::<T>()))
                 if let TyKind::Ref(_, inner, _) = self.kind(t) {

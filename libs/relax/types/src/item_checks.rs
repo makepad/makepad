@@ -388,7 +388,7 @@ pub fn copy_impl(prog: &Program, tcx: &Tcx, imp: DefId) -> Vec<String> {
             let ft = tcx.tys.subst(f.ty, &args);
             if tcx.tys.has_error(ft) { continue; }
             let predicate = crate::next_solver::collect::trait_predicate(td, vec![GenericArg::Type(ft)]);
-            if !infcx.evaluate_obligation(prog, Goal { param_env: env, predicate }).may_apply() {
+            if !infcx.evaluate_obligation(prog, Goal { param_env: env, predicate }).must_apply_modulo_regions() {
                 return vec![report("E0204", "the trait `Copy` cannot be implemented for this type")];
             }
         }
@@ -544,16 +544,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
 /// The edition is the attribute path's: attributes a macro expansion wrote are not judged (the
 /// expansion's tokens carry no edition).
 pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
-    // (name, unsafe since edition 2024 only)
-    const UNSAFE_ATTRS: &[(&[u8], bool)] = &[(b"no_mangle", true), (b"export_name", true), (b"link_section", true),
-        (b"force_target_feature", false), (b"ffi_const", false), (b"ffi_pure", false), (b"naked", false)];
-    const NORMAL_ATTRS: &[&[u8]] = &[b"cfg", b"cfg_attr", b"test", b"ignore", b"should_panic", b"bench", b"macro_use", b"macro_export", b"repr", b"derive",
-        b"inline", b"doc", b"allow", b"warn", b"deny", b"forbid", b"expect", b"must_use", b"deprecated", b"path", b"automatically_derived", b"cold",
-        b"track_caller", b"target_feature", b"non_exhaustive", b"diagnostic::on_unimplemented", b"diagnostic::do_not_recommend", b"link", b"link_name",
-        b"used", b"global_allocator", b"panic_handler", b"proc_macro", b"proc_macro_derive", b"proc_macro_attribute", b"no_std", b"no_implicit_prelude",
-        b"recursion_limit", b"type_length_limit", b"no_main", b"crate_type", b"crate_name", b"windows_subsystem", b"feature", b"macro_escape", b"no_link",
-        b"export_stable", b"thread_local", b"unstable", b"stable", b"coverage", b"optimize", b"instruction_set", b"debugger_visualizer",
-        b"collapse_debuginfo", b"rustc_builtin_macro", b"cfi_encoding"];
+    use crate::builtin_attrs::{attr_safety, AttrSafety};
     let def = prog.def(d);
     let pf = &prog.files[def.file as usize];
     let ast = &pf.ast;
@@ -574,12 +565,12 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
         }
         let pos = p.tok(lo).lo;
         if wrapped {
-            if NORMAL_ATTRS.contains(&name.as_slice()) {
+            if attr_safety(&String::from_utf8_lossy(&name)) == AttrSafety::Normal {
                 errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("`{}` is not an unsafe attribute", String::from_utf8_lossy(&name))));
             }
             continue;
         }
-        let Some(&(_, since_2024)) = UNSAFE_ATTRS.iter().find(|(n, _)| *n == name.as_slice()) else { continue };
+        let AttrSafety::Unsafe { since_2024 } = attr_safety(&String::from_utf8_lossy(&name)) else { continue };
         if !since_2024 || pf.edition >= 2024 {
             if from_source { errors.push(prog.record_uncoded_error(def.file, pos, "typeck", "unsafe attribute used without unsafe".to_string())); }
         } else {

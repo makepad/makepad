@@ -1701,6 +1701,9 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
         }
         let single = |v: VReg, ndef: &Vec<u32>| ndef[v.0 as usize] == 1;
         // known constants and copy aliases of single-def vregs
+        // vregs every definition of which is the same integer constant (an Option's `None` tag,
+        // built on several paths): known like a single definition
+        let mut same_k: Vec<Option<(i64, u32)>> = vec![None; nv];
         let mut kn: Vec<Option<K>> = vec![None; nv];
         let mut alias: Vec<u32> = (0..nv as u32).collect();
         let mut def_inst: Vec<Option<(IOp, VReg, i64)>> = vec![None; nv];
@@ -1744,6 +1747,14 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                 continue;
             }
             for (ii, i) in b.insts.iter().enumerate() {
+                if let Inst::Iconst(d, v) = i {
+                    same_k[d.0 as usize] = match same_k[d.0 as usize] {
+                        None => Some((*v, 1)),
+                        Some((w, n)) if w == *v && n != u32::MAX => Some((w, n + 1)),
+                        // two different constants: never known
+                        Some(_) => Some((0, u32::MAX)),
+                    };
+                }
                 if ic {
                     match *i {
                         Inst::Iconst(d, _) | Inst::Mov(d, _) => phi_defs[d.0 as usize].push((bi, ii)),
@@ -1820,7 +1831,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
             }
             for i in &b.insts {
                 match i {
-                    Inst::Iconst(d, v) if single(*d, &ndef) => kn[d.0 as usize] = Some(K::I(*v)),
+                    Inst::Iconst(d, v) if single(*d, &ndef) || matches!(same_k[d.0 as usize], Some((w, n)) if w == *v && n == ndef[d.0 as usize]) => kn[d.0 as usize] = Some(K::I(*v)),
                     Inst::Fconst(d, v, w) if single(*d, &ndef) => kn[d.0 as usize] = Some(K::F(*v, *w)),
                     Inst::Addr(d, a) if single(*d, &ndef) => kn[d.0 as usize] = Some(K::A(*a)),
                     Inst::Mov(d, s) if single(*d, &ndef) && single(*s, &ndef) => alias[d.0 as usize] = s.0,
