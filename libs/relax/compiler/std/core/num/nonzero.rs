@@ -51,6 +51,7 @@ impl ZeroablePrimitive for isize {
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 #[rustc_layout_scalar_valid_range_start(1)]
+#[rustc_nonnull_optimization_guaranteed]
 pub struct NonZero<T: ZeroablePrimitive>(T);
 
 pub type NonZeroU8 = NonZero<u8>;

@@ -12,6 +12,25 @@ pub use core::panic::{AssertUnwindSafe, Location, RefUnwindSafe, UnwindSafe};
 use crate::sync::RwLock;
 use crate::sys;
 
+// library/std/src/panic.rs:263-285 and the per-type impls of std/src/sync, io/stdio.rs: types with
+// interior mutability that poison or lock are unwind safe.
+impl<T: ?Sized> UnwindSafe for crate::sync::Mutex<T> {}
+impl<T: ?Sized> UnwindSafe for RwLock<T> {}
+impl UnwindSafe for crate::sync::Condvar {}
+impl<T: ?Sized> RefUnwindSafe for crate::sync::Mutex<T> {}
+impl<T: ?Sized> RefUnwindSafe for RwLock<T> {}
+impl RefUnwindSafe for crate::sync::Condvar {}
+impl UnwindSafe for crate::sync::Once {}
+impl RefUnwindSafe for crate::sync::Once {}
+impl RefUnwindSafe for crate::sync::Barrier {}
+impl<T: RefUnwindSafe + UnwindSafe> RefUnwindSafe for crate::sync::OnceLock<T> {}
+impl<T: UnwindSafe> UnwindSafe for crate::sync::OnceLock<T> {}
+impl<T: RefUnwindSafe + UnwindSafe, F: UnwindSafe> RefUnwindSafe for crate::sync::LazyLock<T, F> {}
+impl<T: UnwindSafe, F: UnwindSafe> UnwindSafe for crate::sync::LazyLock<T, F> {}
+impl<T: UnwindSafe + ?Sized> UnwindSafe for crate::sync::ReentrantLock<T> {}
+impl<T: RefUnwindSafe + ?Sized> RefUnwindSafe for crate::sync::ReentrantLock<T> {}
+impl<K, V, S> UnwindSafe for crate::collections::HashMap<K, V, S> where K: UnwindSafe, V: UnwindSafe, S: UnwindSafe {}
+
 pub type PanicInfo<'a> = PanicHookInfo<'a>;
 
 pub struct PanicHookInfo<'a> {

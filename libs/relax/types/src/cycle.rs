@@ -16,6 +16,8 @@ pub enum Kind {
     ConstParamType = 2,
     /// whether a struct's tail is unsized: (type id, 0)
     UnsizedTail = 3,
+    /// the layout of a type: (type id, 2)
+    Layout = 4,
 }
 
 pub struct Guard { kind: u8, a: u32, b: u32 }

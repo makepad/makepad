@@ -121,7 +121,7 @@ impl EvalCtxt<'_, '_> {
     }
     pub(super) fn match_assumption(&mut self, env: &ParamEnvId, goal: &GoalKind, p: &Predicate) -> Result<(), NoSolutionOrRerunNonErased> {
         let kind = self.delegate.instantiate_predicate_binder_with_infer(p);
-        let p = self.normalize_predicate(env, &Predicate::dummy(kind))?;
+        let p = Predicate::dummy(kind);
         match (goal, p.kind) {
             (GoalKind::Trait(goal), PredicateKind::Clause(ClauseKind::Trait(p))) => self.eq_args(env, &goal.trait_ref.args, &p.trait_ref.args),
             (GoalKind::NormalizesTo(goal), PredicateKind::Clause(ClauseKind::Projection(p))) => {

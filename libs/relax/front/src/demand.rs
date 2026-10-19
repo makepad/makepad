@@ -611,7 +611,7 @@ impl Names {
             kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo,
         }).collect::<Vec<_>>();
         let c = &self.crates[ci];
-        let Ok(def) = crate::macros::parse_def(&name, &c.name, &mtoks) else { return None; };
+        let Ok(def) = crate::macros::parse_def(&name, &c.name, c.edition, &mtoks) else { return None; };
         fn names_only(nodes: &[crate::macros::MNode]) -> bool {
             use crate::macros::{Frag, MNode};
             nodes.iter().all(|n| match n {
@@ -623,7 +623,7 @@ impl Names {
         if !def.arms.iter().all(|(matcher, _)| names_only(matcher)) { return None; }
         let mut parser = crate::parser::Parser::new(&c.cfg.session, src, toks, c.edition);
         parser.krate = c.name.clone();
-        let Ok((expanded, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
+        let Ok((expanded, _, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
         let mut tokens = Vec::new();
         if crate::lexer::lex(expanded.as_bytes(), c.edition, &mut tokens).is_err() { return None; }
         let bytes = expanded.as_bytes();
@@ -749,10 +749,12 @@ impl Names {
             "result", "option", "boxed", "string", "vec", "ffi::CStr", "cell::UnsafeCell", "hint", "intrinsics", "mem", "ptr", "slice", "str"] {
             out.extend(self.resolve(ci, "core", &path.split("::").map(str::to_owned).collect::<Vec<_>>()));
         }
-        if let Some(prelude) = self.bindings.id("core::prelude") {
-            for (_, &id) in self.bindings.modules.get(&prelude).into_iter().flatten() {
-                let binding = &self.bindings.values[id];
-                out.extend(binding.targets.iter().chain(binding.via.iter()).map(|id| self.bindings.spelling(id).to_string()));
+        for edition in ["rust_2015", "rust_2018", "rust_2021", "rust_2024"] {
+            if let Some(prelude) = self.bindings.id(&format!("core::prelude::{edition}")) {
+                for (_, &id) in self.bindings.modules.get(&prelude).into_iter().flatten() {
+                    let binding = &self.bindings.values[id];
+                    out.extend(binding.targets.iter().chain(binding.via.iter()).map(|id| self.bindings.spelling(id).to_string()));
+                }
             }
         }
         // Operators, comparisons, formatting, iteration, conversions, hashing
@@ -1453,9 +1455,9 @@ impl Names {
         let work: Vec<relax_session::sync::Mutex<Option<(NamespaceDelta, Vec<usize>)>>> = images.into_iter().zip(entries).map(|w| relax_session::sync::Mutex::new(Some(w))).collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let out: Vec<relax_session::sync::Mutex<(Vec<u8>, u128)>> = (0..work.len()).map(|_| Default::default()).collect();
-        std::thread::scope(|scope| {
+        crate::pool::scope(|scope| {
             for _ in 0..crate::preload::jobs().clamp(1, work.len().max(1)) {
-                scope.spawn(|| { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); loop {
+                scope.spawn(|| { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); loop {
                     let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(cell) = work.get(k) else { break };
                     let (mut image, entries) = cell.lock().unwrap().take().unwrap();

@@ -343,7 +343,7 @@ impl LifetimeCollector<'_> {
             GenericArg::Lifetime(name) => self.named(name),
             GenericArg::Type(ty) => self.ty(ty),
             GenericArg::Binding(_, args, ty) => { self.args(args); self.ty(ty); }
-            GenericArg::Constraint(_, bounds) => self.bounds(bounds),
+            GenericArg::Constraint(_, args, bounds) => { self.args(args); self.bounds(bounds); },
             GenericArg::Const(_) => {}
         }
     }
@@ -1023,7 +1023,7 @@ impl BoundVarContext<'_> {
             for argument in arguments {
                 let (name, own_args, ty, bounds) = match *argument {
                     GenericArg::Binding(name, args, ty) => (name, args, Some(ty), None),
-                    GenericArg::Constraint(name, bounds) => (name, ast::GenericArgsId::NONE, None, Some(bounds)),
+                    GenericArg::Constraint(name, args, bounds) => (name, args, None, Some(bounds)),
                     _ => continue,
                 };
                 let own_has_lifetimes = matches!(ast.gargs(own_args), Some(GenericArgs::Angle(args)) if ast.list(*args).iter().any(|a| matches!(a, GenericArg::Lifetime(_))));
@@ -1078,7 +1078,7 @@ impl BoundVarContext<'_> {
                     GenericArg::Type(ty) => self.visit_ty(ty),
                     GenericArg::Const(expr) => self.visit_anon_const(expr),
                     GenericArg::Binding(_, args, ty) => { self.visit_constraint_args(args); self.visit_ty(ty); }
-                    GenericArg::Constraint(_, bounds) => self.visit_bounds(bounds),
+                    GenericArg::Constraint(_, args, bounds) => { self.visit_constraint_args(args); self.visit_bounds(bounds); }
                 }
             }
         }

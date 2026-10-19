@@ -69,7 +69,6 @@ impl EvalCtxt<'_, '_> {
         if let (AliasTerm::Const(alias), Term::Const(ct)) = (&p.alias, value) {
             self.add_goal(GoalSource::Misc, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::ConstArgHasType(ct, self.const_type(alias)?))) })?;
         }
-        let value = match value { Term::Ty(t) => Term::Ty(self.normalize_ty(env, t)?), value => value };
         self.eq(env, p.term, value)
     }
     pub(super) fn rigid_alias_term(&self, alias: &AliasTerm) -> Term {

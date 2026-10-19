@@ -325,6 +325,69 @@ impl<'a> Cx<'a> {
         Some(cur)
     }
 
+    /// The pattern a destructuring assignment's assignee stands for (rustc lowers `(a, Some(b)) = v`
+    /// to `let (lhs0, Some(lhs1)) = v; a = lhs0; ..`): constructors where the assignee names
+    /// them, a wildcard for every place.
+    fn lower_assignee(&mut self, e: ExprId, t: TyId, depth: u32) -> Option<PIx> {
+        let ast = self.ast();
+        let pos = Some(ast.expr(e).lo);
+        let wild = |cx: &mut Self| Some(cx.push(Ctor::Wildcard, Vec::new(), 0, t, pos));
+        if depth > 32 { return wild(self); }
+        let is_rest = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Range(crate::ast::OptExprId::NONE, crate::ast::OptExprId::NONE, false));
+        // the fields of a positional list with an optional `..`
+        let positional = |cx: &mut Self, elems: &[ExprId], ctor: &Ctor, arity: usize| -> Option<Vec<(usize, PIx)>> {
+            let tys = cx.ctor_sub_tys(ctor, t);
+            let rest = elems.iter().position(|x| is_rest(*x) || matches!(ast.expr(*x).kind, ExprKind::Paren(i) if is_rest(i)));
+            let n = elems.len();
+            let mut out = Vec::new();
+            for (i, x) in elems.iter().enumerate() {
+                if Some(i) == rest { continue; }
+                let idx = match rest { Some(r) if i > r => (arity + i).checked_sub(n)?, _ => i };
+                if idx >= arity { return None; }
+                let (ft, _) = *tys.get(idx)?;
+                out.push((idx, cx.lower_assignee(*x, ft, depth + 1)?));
+            }
+            Some(out)
+        };
+        match ast.expr(e).kind {
+            ExprKind::Paren(x) => self.lower_assignee(x, t, depth + 1),
+            ExprKind::Tuple(elems) => {
+                let TyKind::Tuple(l) = self.kind(t) else { return wild(self) };
+                let arity = self.tcx.tys.list(l).len();
+                let fields = positional(self, ast.list(elems), &Ctor::Struct, arity)?;
+                Some(self.push(Ctor::Struct, fields, arity, t, pos))
+            }
+            ExprKind::Call(f, args) if matches!(ast.expr(f).kind, ExprKind::Path(_)) => {
+                let Some(Res::Def(d)) = self.body.res.get(&e.0).copied() else { return wild(self) };
+                let Some((ctor, arity)) = self.adt_ctor(t, d) else { return wild(self) };
+                let fields = positional(self, ast.list(args), &ctor, arity)?;
+                Some(self.push(ctor, fields, arity, t, pos))
+            }
+            ExprKind::Struct(row) => {
+                let Some(Res::Def(d)) = self.body.res.get(&e.0).copied() else { return wild(self) };
+                let Some((ctor, arity)) = self.adt_ctor(t, d) else { return wild(self) };
+                let TyKind::Adt(ad, _, _) = self.kind(t) else { return wild(self) };
+                let vi = if let Ctor::Variant(i) = ctor { i } else { 0 };
+                let tys = self.ctor_sub_tys(&ctor, t);
+                let mut fields = Vec::new();
+                for fe in ast.list(ast.row(row).fields) {
+                    let idx = self.field_index(ad, vi, fe.name)?;
+                    let (ft, _) = *tys.get(idx)?;
+                    fields.push((idx, self.lower_assignee(fe.expr, ft, depth + 1)?));
+                }
+                Some(self.push(ctor, fields, arity, t, pos))
+            }
+            ExprKind::Path(_) => match self.body.res.get(&e.0).copied() {
+                Some(Res::Def(d)) if matches!(self.prog.def(d).kind, DefKind::Variant | DefKind::Struct) => {
+                    let (ctor, arity) = self.adt_ctor(t, d)?;
+                    Some(self.push(ctor, Vec::new(), arity, t, pos))
+                }
+                _ => wild(self),
+            },
+            _ => wild(self),
+        }
+    }
+
     fn lower_inner(&mut self, p: PatId, t: TyId, pos: Option<u32>) -> Option<PIx> {
         let ast = self.ast();
         match *ast.pat(p) {
@@ -1064,6 +1127,17 @@ enum LetSource {
     Chain,
 }
 
+/// The analysis context of a body (also the lint passes' inhabitedness queries).
+pub fn body_cx<'a>(prog: &'a Program, tcx: &'a Tcx, body: &'a Body) -> Cx<'a> {
+    let d = prog.def(body.def);
+    let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
+    Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()), const_errors: Vec::new() }
+}
+
+impl Cx<'_> {
+    pub fn typing_env(&self) -> TypingEnv { self.env }
+}
+
 struct Checker<'a> {
     cx: Cx<'a>,
     errors: Vec<String>,
@@ -1072,9 +1146,7 @@ struct Checker<'a> {
 /// Checks the matches, lets and parameters of a type-checked body: the errors (E0004 /
 /// E0005, located); lints go to the lint sink.
 pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
-    let d = prog.def(body.def);
-    let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
-    let cx = Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()), const_errors: Vec::new() };
+    let cx = body_cx(prog, tcx, body);
     let mut ck = Checker { cx, errors: Vec::new() };
     ck.run();
     let mut const_errors = std::mem::take(&mut ck.cx.const_errors);
@@ -1115,6 +1187,11 @@ impl<'a> Checker<'a> {
                 ExprKind::For(row) => blocks.push(ast.row(row).body),
                 _ => {}
             }
+        }
+        for i in 0..n {
+            if !typed(i) { continue; }
+            let e = body.expr_at(i);
+            if let ExprKind::Assign(l, r) = ast.expr(e).kind { self.check_assignment_is_irrefutable(l, r); }
         }
         let fn_arg = if self.cx.prog.def(body.def).kind == DefKind::Closure { "closure argument" } else { "function argument" };
         let item_lo = ast.item(self.cx.prog.def(body.def).item).lo;
@@ -1316,6 +1393,25 @@ impl<'a> Checker<'a> {
     }
 
     /// A refutable binding's analysis: (witnesses), None when it is not analysed.
+    /// E0005 for a destructuring assignment `lhs = rhs` whose assignee is refutable.
+    fn check_assignment_is_irrefutable(&mut self, lhs: ExprId, rhs: ExprId) {
+        let ast = self.ast();
+        let destructuring = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Tuple(_) | ExprKind::Call(..) | ExprKind::Struct(_) | ExprKind::Path(_) | ExprKind::Paren(_));
+        if !destructuring(lhs) { return; }
+        let t = self.cx.body.ty(rhs);
+        if self.cx.tcx.tys.flags(t).intersects(TypeFlags::HAS_ERROR | TypeFlags::HAS_NON_REGION_INFER) { return; }
+        let t = self.cx.reveal(t);
+        let Some(pat) = self.cx.lower_assignee(lhs, t, 0) else { return };
+        let validity = if self.is_known_valid_scrutinee(rhs) { PlaceValidity::ValidOnly } else { PlaceValidity::MaybeInvalid };
+        let Some(report) = usefulness::compute_match_usefulness(&self.cx, &[MatchArm { pat, has_guard: false }], t, validity) else { return };
+        let witnesses = &report.non_exhaustiveness_witnesses;
+        if witnesses.is_empty() { return; }
+        let ty = self.cx.ty_str(t);
+        let joined = self.cx.joined_uncovered_patterns(witnesses);
+        let msg = format!("E0005: refutable pattern in local binding -- pattern{} {} not covered; the matched value is of type `{}`", if witnesses.len() == 1 { "" } else { "s" }, joined, ty);
+        self.errors.push(self.cx.prog.record_error(self.cx.body.file, ast.expr(lhs).lo, "typeck", msg));
+    }
+
     fn analyze_binding(&mut self, p: PatId, scrut: Option<ExprId>, fallback: u32) -> Option<(PIx, usefulness::UsefulnessReport)> {
         let pat = self.cx.lower(p)?;
         let ty = self.cx.pat(pat).ty;

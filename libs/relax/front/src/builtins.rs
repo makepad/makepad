@@ -302,6 +302,8 @@ pub enum Builtin {
     Bitflags,
     /// std's `thread_local!` (thread_local_mac.rs)
     ThreadLocal,
+    /// core's `cfg_select!` (rustc_builtin_macros cfg_select.rs)
+    CfgSelect,
 }
 
 const TABLE: &[(&str, Builtin)] = &[
@@ -317,6 +319,7 @@ const TABLE: &[(&str, Builtin)] = &[
     ("include_bytes", Builtin::IncludeBytes),
     ("include", Builtin::Include),
     ("thread_local", Builtin::ThreadLocal),
+    ("cfg_select", Builtin::CfgSelect),
 ];
 
 /// Names of every built-in function-like macro (importing them is a no-op).
@@ -360,7 +363,7 @@ pub fn is_item_level(id: u8) -> bool {
     if id >= HOSTED {
         return false;
     }
-    matches!(from_u8(id), Builtin::Include | Builtin::Bitflags | Builtin::ThreadLocal)
+    matches!(from_u8(id), Builtin::Include | Builtin::Bitflags | Builtin::ThreadLocal | Builtin::CfgSelect)
 }
 
 pub fn from_u8(x: u8) -> Builtin {
@@ -849,6 +852,72 @@ fn expand_text(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo:
                 v.push((t.kind, p.tok_text(t)));
             }
             return crate::thread_local_mac::expand(&v);
+        }
+        Builtin::CfgSelect => {
+            // `pred => { tokens }` / `pred => expr,` arms: the first true predicate (`_` is
+            // always true) emits its right-hand side, braces stripped (rustc cfg_select.rs
+            // parse_delimited_token_tree)
+            let ctx = ctx.ok_or_else(|| "cfg_select! needs a crate".to_string())?;
+            let view = crate::parser::lazy_bodies::TokView::new(p.src, &p.toks, &p.ext);
+            let src = view.src();
+            let kind = |i: usize| toks.at(i).kind;
+            let mut i = lo;
+            while i < hi {
+                let pred_lo = i;
+                while i < hi && kind(i) != T::FatArrow {
+                    i += 1;
+                }
+                if i >= hi {
+                    return Err("expected `=>` after a cfg_select! predicate".to_string());
+                }
+                let pred_hi = i;
+                i += 1;
+                let (body_lo, body_hi);
+                if i < hi && kind(i) == T::OpenBrace {
+                    let mut depth = 0;
+                    let open = i;
+                    while i < hi {
+                        match kind(i) {
+                            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                            T::CloseParen | T::CloseBracket | T::CloseBrace => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    if i >= hi {
+                        return Err("unbalanced braces in a cfg_select! arm".to_string());
+                    }
+                    body_lo = open + 1;
+                    body_hi = i;
+                    i += 1;
+                } else {
+                    body_lo = i;
+                    let mut depth = 0;
+                    while i < hi {
+                        match kind(i) {
+                            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                            T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                            T::Comma if depth == 0 => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    body_hi = i;
+                }
+                if i < hi && kind(i) == T::Comma {
+                    i += 1;
+                }
+                let wildcard = pred_hi == pred_lo + 1 && buf.get(toks.at(pred_lo).lo, toks.at(pred_lo).hi) == b"_";
+                if wildcard || crate::cfg::eval_tokens(src, pred_lo, pred_hi, &ctx.cfg) {
+                    return Ok(stringify_o(buf, toks, body_lo, body_hi, p.tok_origin.view(), p.src.len() as u32));
+                }
+            }
+            return Err("none of the predicates in this `cfg_select` evaluated to true".to_string());
         }
         Builtin::IncludeStr | Builtin::IncludeBytes => {
             let (path, data) = include_input(p, lo, hi, call_lo)?;
@@ -1719,10 +1788,10 @@ pub fn pre_expand_derives(files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition
     let t_wall = std::time::Instant::now();
     let jobs = crate::preload::jobs();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<Vec<(usize, Result<ItemOut, (u32, String)>)>> = std::thread::scope(|sc| {
+    let results: Vec<Vec<(usize, Result<ItemOut, (u32, String)>)>> = crate::pool::scope(|sc| {
         let mut hs = Vec::new();
         for _ in 0..jobs.min(sites.len()) {
-            hs.push(sc.spawn(|| { let _z = crate::zone_alloc::compiler_thread();
+            hs.push(sc.spawn(|| {
                 let mut out = Vec::new();
                 loop {
                     let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2007,6 +2076,9 @@ pub fn cfg_holds(pred: &[TokenTree], cfg: Option<&CfgSet>) -> bool {
                 _ => false,
             }
         }
+        // `cfg(true)` / `cfg(false)` (boolean literals, stable since 1.88)
+        [TokenTree::Ident(n)] if n.to_string() == "true" => true,
+        [TokenTree::Ident(n)] if n.to_string() == "false" => false,
         [TokenTree::Ident(n)] => cfg.set.iter().any(|x| *x == n.to_string()),
         [TokenTree::Ident(n), TokenTree::Punct(e), TokenTree::Literal(v)] if e.as_char() == '=' => {
             let v = v.to_string();
@@ -2199,7 +2271,7 @@ fn prescan_rules(tb: &[u8], krate: &str, cfg: &CfgSet) -> Vec<crate::macros::Mac
             let exported = attrs.iter().find(|a| a.toks.hi > a.toks.lo && tx(a.toks.lo as usize) == b"macro_export");
             let mt: Vec<crate::macros::MTok> =
                 t2[open + 1..close.min(t2.len())].iter().map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&tb[t.lo as usize..t.hi as usize]).into_owned(), pos: u32::MAX }).collect();
-            if let Ok(mut def) = crate::macros::parse_def(&mname, krate, &mt) {
+            if let Ok(mut def) = crate::macros::parse_def(&mname, krate, 2021, &mt) {
                 def.exported = exported.is_some();
                 if exported.is_some_and(|a| (a.toks.lo..a.toks.hi).any(|k| tx(k as usize) == b"local_inner_macros")) {
                     crate::macros::local_inner_macros(&mut def);

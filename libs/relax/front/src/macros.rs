@@ -934,8 +934,14 @@ fn resolve_path<'b, S: AsRef<str>>(r: &Res<'b>, k: &'b str, m: &'b str, path: &'
     } else if let Some(c) = s0.strip_prefix("__relax_crate_") {
         (r.crate_root(c), &path[1..])
     } else if s0.is_empty() {
-        // `::dep` (2018: the extern prelude)
-        (r.extern_crate(k, path.get(1)?.as_ref())?, &path[2.min(path.len())..])
+        // `::dep` (2018: the extern prelude); 2015: `::` is the crate root, `::m` its item `m`
+        match path.get(1) {
+            None => (r.crate_root(k), &path[1..]),
+            Some(n) => match r.extern_crate(k, n.as_ref()) {
+                Some(c) => (c, &path[2..]),
+                None => (r.crate_root(k), &path[1..]),
+            },
+        }
     } else {
         let first = match type_in(k, m, s0) {
             Some(x) => x,
@@ -1306,16 +1312,17 @@ impl MacroScope {
         MacroScope { table, local: Vec::new(), looked: Default::default(), local_uses: Default::default(), uses_base: Default::default(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default() }
     }
 
-    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, file: &str, pos: u32, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
+    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, pos: u32, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
         let same = self.table.defs.get(name).into_iter().flatten().rev().chain(self.local.iter().rev()).find(|d| {
             d.name == name && d.krate == krate && d.def_file == file && d.def_pos == pos && d.exported == exported && d.builtin == 0
                 && d.input.as_ref().is_some_and(|input| input.local_inner == local_inner && input.tokens == tokens)
         }).cloned();
         if let Some(d) = same {
+            uses::defined(&d);
             self.local.push(d);
             *self.memo.get_mut() = LookupMemo::default();
         } else {
-            let mut d = parse_def(name, krate, tokens)?;
+            let mut d = parse_def(name, krate, edition, tokens)?;
             d.exported = exported;
             if local_inner { local_inner_macros(&mut d); }
             d.def_file = file.into();
@@ -1338,6 +1345,7 @@ impl MacroScope {
     /// one equal to a registered one is that same definition (its identity is what `replays`
     /// compares).
     pub fn define(&mut self, d: MacroDef) {
+        uses::defined(&d);
         let same = self.table.defs.get(&d.name).and_then(|v| {
             v.iter().rev().find(|x| x.krate == d.krate && x.exported == d.exported && x.builtin == d.builtin && x.arms == d.arms && x.def_file == d.def_file && x.def_pos == d.def_pos).cloned()
         });
@@ -1518,7 +1526,10 @@ impl ImportLookup<'_> {
             "crate" => (ids(r.crate_root(ks)), &path[1..]),
             "self" => ((k, m), &path[1..]),
             "super" => ((k, names.id(ms.rsplit_once("::")?.0)), &path[1..]),
-            "" => (ids(r.extern_crate(ks, names.str(*path.get(1)?))?), &path[2..]),
+            "" => match path.get(1).and_then(|&n| r.extern_crate(ks, names.str(n))) {
+                Some(c) => (ids(c), &path[2..]),
+                None => (ids(r.crate_root(ks)), &path[1..]),
+            },
             _ => {
                 let at = if let Some(defining) = first.strip_prefix("__relax_crate_") {
                     ids(r.crate_root(defining))
@@ -1771,6 +1782,74 @@ fn same_expansion(a: &MacroDef, b: &MacroDef) -> bool {
     a.name == b.name && a.krate == b.krate && a.builtin == b.builtin && a.arms.len() == b.arms.len() && a.arms.iter().zip(&b.arms).all(|(x, y)| m(&x.0, &y.0) && t(&x.1, &y.1))
 }
 
+
+/// The `macro_rules!` definitions and uses a `makepad check` records for the `unused_macros` and
+/// `unused_macro_rules` lints (rustc_resolve: a macro is used when an invocation resolves to it,
+/// a rule when an expansion matched it).
+pub mod uses {
+    use super::{close_of, is_open, MTok, MacroDef};
+    use crate::lexer::T;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// A definition: where it is written, and for each rule the position of its matcher and
+    /// whether its transcriber holds a `compile_error!` (such a rule is never reported).
+    pub struct Defined {
+        pub file: String,
+        pub pos: u32,
+        pub name: String,
+        pub exported: bool,
+        pub rules: Vec<(u32, bool)>,
+    }
+
+    /// An invocation that resolved to a definition without matching any rule.
+    pub const RESOLVED: u32 = u32::MAX;
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static DEFS: Mutex<Vec<Defined>> = Mutex::new(Vec::new());
+    static USED: Mutex<Option<HashSet<(String, u32, u32)>>> = Mutex::new(None);
+
+    pub fn record(on: bool) { ON.store(on, Ordering::Relaxed); }
+    pub fn recording() -> bool { ON.load(Ordering::Relaxed) }
+
+    pub(super) fn defined(d: &MacroDef) {
+        if !recording() || d.builtin != 0 { return; }
+        let Some(input) = &d.input else { return };
+        let toks: &[MTok] = &input.tokens;
+        let mut rules = Vec::new();
+        let mut i = 0;
+        while i < toks.len() {
+            if toks[i].kind == T::Semi { i += 1; continue; }
+            if !is_open(toks[i].kind) { break; }
+            let mc = close_of(toks, i);
+            let pos = toks[i].pos;
+            i = mc + 1;
+            if i >= toks.len() || toks[i].kind != T::FatArrow { break; }
+            i += 1;
+            if i >= toks.len() || !is_open(toks[i].kind) { break; }
+            let bc = close_of(toks, i);
+            let compile_error = toks[i..bc].windows(3).any(|w| w[0].text == "compile_error" && w[1].kind == T::Not && is_open(w[2].kind));
+            rules.push((pos, compile_error));
+            i = bc + 1;
+        }
+        let mut defs = DEFS.lock().unwrap_or_else(|e| e.into_inner());
+        if !defs.iter().any(|x| x.file == d.def_file && x.pos == d.def_pos) {
+            defs.push(Defined { file: d.def_file.clone(), pos: d.def_pos, name: d.name.clone(), exported: d.exported, rules });
+        }
+    }
+
+    pub(super) fn used(d: &MacroDef, arm: u32) {
+        if !recording() || d.builtin != 0 { return; }
+        USED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((d.def_file.clone(), d.def_pos, arm));
+    }
+
+    /// The recorded definitions and uses (file, definition position, rule or `RESOLVED`).
+    pub fn take() -> (Vec<Defined>, HashSet<(String, u32, u32)>) {
+        (std::mem::take(&mut *DEFS.lock().unwrap_or_else(|e| e.into_inner())), USED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default())
+    }
+}
+
 fn is_open(k: T) -> bool {
     matches!(k, T::OpenParen | T::OpenBracket | T::OpenBrace)
 }
@@ -1796,12 +1875,14 @@ fn close_of(toks: &[MTok], i: usize) -> usize {
     toks.len().saturating_sub(1)
 }
 
-fn frag_of(s: &str) -> Option<Frag> {
+/// rustc_expand mbe/quoted.rs: `pat` is `PatParam` (no top-level `|`) before edition 2021.
+fn frag_of(s: &str, edition: u16) -> Option<Frag> {
     Some(match s {
         "expr" | "expr_2021" => Frag::Expr,
         "ident" => Frag::Ident,
         "ty" => Frag::Ty,
         "tt" => Frag::Tt,
+        "pat" if edition < 2021 => Frag::PatParam,
         "pat" => Frag::Pat,
         "pat_param" => Frag::PatParam,
         "path" => Frag::Path,
@@ -1845,7 +1926,7 @@ fn rep_at(toks: &[MTok], i: usize) -> Option<(usize, usize, Option<MTok>, u8, us
     None
 }
 
-fn parse_matcher(toks: &[MTok]) -> Result<Vec<MNode>, String> {
+fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < toks.len() {
@@ -1854,25 +1935,25 @@ fn parse_matcher(toks: &[MTok]) -> Result<Vec<MNode>, String> {
             let n = &toks[i + 1];
             if n.kind == T::OpenParen {
                 let (lo, hi, sep, op, next) = rep_at(toks, i).ok_or("bad repetition in macro matcher")?;
-                out.push(MNode::Rep(parse_matcher(&toks[lo..hi])?, sep, op));
+                out.push(MNode::Rep(parse_matcher(&toks[lo..hi], edition)?, sep, op));
                 i = next;
                 continue;
             }
             if matches!(n.kind, T::Ident | T::RawIdent) || n.text.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 if i + 3 < toks.len() + 1 && i + 2 < toks.len() && toks[i + 2].kind == T::Colon && i + 3 < toks.len() {
-                    let f = frag_of(&toks[i + 3].text).ok_or_else(|| format!("invalid fragment specifier `{}`", toks[i + 3].text))?;
+                    let f = frag_of(&toks[i + 3].text, edition).ok_or_else(|| format!("invalid fragment specifier `{}`", toks[i + 3].text))?;
                     out.push(MNode::Var(n.text.clone(), f));
                     i += 4;
                     continue;
                 }
-                if matches!(n.kind, T::Ident | T::RawIdent) {
+                if matches!(n.kind, T::Ident | T::RawIdent) && crate::lexer::validation_enabled() {
                     return Err(format!("missing fragment specifier for `${}`", n.text));
                 }
             }
         }
         if is_open(t.kind) {
             let c = close_of(toks, i);
-            out.push(MNode::Group(t.clone(), toks[c].clone(), parse_matcher(&toks[i + 1..c])?));
+            out.push(MNode::Group(t.clone(), toks[c].clone(), parse_matcher(&toks[i + 1..c], edition)?));
             i = c + 1;
             continue;
         }
@@ -1930,10 +2011,10 @@ pub fn forwarding_def(alias: &str, krate: &str, target: &str) -> Option<MacroRef
         .filter(|t| t.kind != T::Eof)
         .map(|t| MTok { kind: t.kind, text: String::from_utf8_lossy(&text.as_bytes()[t.lo as usize..t.hi as usize]).into_owned(), pos: u32::MAX })
         .collect();
-    parse_def(alias, krate, &mt).ok().map(std::sync::Arc::new)
+    parse_def(alias, krate, 2021, &mt).ok().map(std::sync::Arc::new)
 }
 
-pub fn parse_def(name: &str, krate: &str, toks: &[MTok]) -> Result<MacroDef, String> {
+pub fn parse_def(name: &str, krate: &str, edition: u16, toks: &[MTok]) -> Result<MacroDef, String> {
     let mut arms = Vec::new();
     let mut i = 0;
     while i < toks.len() {
@@ -1945,7 +2026,7 @@ pub fn parse_def(name: &str, krate: &str, toks: &[MTok]) -> Result<MacroDef, Str
             return Err(format!("macro `{}`: expected `(matcher) => {{..}}`", name));
         }
         let mc = close_of(toks, i);
-        let matcher = parse_matcher(&toks[i + 1..mc])?;
+        let matcher = parse_matcher(&toks[i + 1..mc], edition)?;
         i = mc + 1;
         if i >= toks.len() || toks[i].kind != T::FatArrow {
             return Err(format!("macro `{}`: expected `=>`", name));
@@ -2103,7 +2184,10 @@ pub fn check_rules(d: &MacroDef, edition: u16) -> Result<(), String> {
 #[derive(Clone, Debug)]
 pub enum Bind {
     /// a matched fragment: token index range in the parser's token list
-    One(usize, usize, Frag),
+    /// token index range; the source span of a leading part of the token at the range's end that
+    /// the fragment consumed (`>` of a `>>` it split: rustc break_and_eat)
+    /// The last: transcribed without parentheses (an expression that is complete as a statement).
+    One(usize, usize, Frag, Option<(u32, u32)>, bool),
     Seq(Vec<Bind>),
 }
 
@@ -2159,7 +2243,7 @@ impl<'a> Parser<'a> {
     }
 
     /// One fragment at token `i` (ending by `end`): its end index.
-    fn match_frag(&mut self, f: Frag, i: usize, end: usize) -> Option<usize> {
+    fn match_frag(&mut self, f: Frag, i: usize, end: usize) -> Option<(usize, Option<(u32, u32)>, bool)> {
         if i > end {
             return None;
         }
@@ -2167,19 +2251,19 @@ impl<'a> Parser<'a> {
         match f {
             Frag::Ident => {
                 if i < end && (matches!(k, T::Ident | T::RawIdent) || (T::KwAs as u8..=T::KwTry as u8).contains(&(k as u8))) && self.tok_text(self.toks.at(i)) != b"_" {
-                    Some(i + 1)
+                    Some((i + 1, None, false))
                 } else {
                     None
                 }
             }
-            Frag::Lifetime => (i < end && k == T::Lifetime).then_some(i + 1),
+            Frag::Lifetime => (i < end && k == T::Lifetime).then_some((i + 1, None, false)),
             Frag::Literal => {
                 let mut j = i;
                 if j < end && self.toks.at(j).kind == T::Minus {
                     j += 1;
                 }
                 if j < end && matches!(self.toks.at(j).kind, T::Int | T::Float | T::Str | T::ByteStr | T::CStr | T::RawStr | T::Char | T::Byte | T::KwTrue | T::KwFalse) {
-                    Some(j + 1)
+                    Some((j + 1, None, false))
                 } else {
                     None
                 }
@@ -2188,17 +2272,21 @@ impl<'a> Parser<'a> {
                 if i >= end {
                     return None;
                 }
+                let tok_lo = self.toks.at(i).lo;
+                if let Some(&group_end) = self.frag_groups.get(&tok_lo) {
+                    return (i..end).find(|&j| self.toks.at(j).hi == group_end).map(|j| (j + 1, None, false));
+                }
                 if is_open(k) {
-                    self.tok_close_of(i, end).map(|c| c + 1)
+                    self.tok_close_of(i, end).map(|c| (c + 1, None, false))
                 } else if is_close(k) {
                     None
                 } else {
-                    Some(i + 1)
+                    Some((i + 1, None, false))
                 }
             }
             Frag::Block => {
                 if i < end && k == T::OpenBrace {
-                    self.tok_close_of(i, end).map(|c| c + 1)
+                    self.tok_close_of(i, end).map(|c| (c + 1, None, false))
                 } else {
                     None
                 }
@@ -2206,11 +2294,11 @@ impl<'a> Parser<'a> {
             Frag::Vis => {
                 if i < end && k == T::KwPub {
                     if i + 1 < end && self.toks.at(i + 1).kind == T::OpenParen {
-                        return self.tok_close_of(i + 1, end).map(|c| c + 1);
+                        return self.tok_close_of(i + 1, end).map(|c| (c + 1, None, false));
                     }
-                    return Some(i + 1);
+                    return Some((i + 1, None, false));
                 }
-                Some(i)
+                Some((i, None, false))
             }
             _ => {
                 if i >= end {
@@ -2219,8 +2307,18 @@ impl<'a> Parser<'a> {
                 let save = self.pos;
                 let undo = self.tok_undo.len();
                 self.pos = i;
+                // a fragment match only checks syntax: macro calls inside it are not expanded
+                // (rustc_expand mbe/macro_parser.rs parses nonterminals without expanding)
+                let macros = self.macros.take();
+                let mut bare = false;
                 let r: PResult<()> = match f {
-                    Frag::Expr => self.expr().map(|_| ()),
+                    Frag::Expr => self.expr().map(|id| {
+                        // rustc_ast classify::expr_requires_semi_to_be_stmt: such an expression
+                        // is its own statement where the fragment starts one
+                        { use crate::ast::ExprKind as K; bare = matches!(self.ast.expr(id).kind, K::If(..) | K::Match(..) | K::Block(..) | K::Unsafe(..) | K::ConstBlock(..) | K::While(..) | K::Loop(..) | K::For(..)); }
+                    }),
+                    // `...` is no type start (rustc Token::can_begin_type): only a C-variadic parameter
+                    Frag::Ty if k == T::DotDotDot => Err(crate::parser::PErr { pos: self.toks.at(i).lo, msg: "expected a type".to_string() }),
                     Frag::Ty => self.ty().map(|_| ()),
                     Frag::Pat => self.pat_top().map(|_| ()),
                     Frag::PatParam => self.pat_no_or().map(|_| ()),
@@ -2230,23 +2328,38 @@ impl<'a> Parser<'a> {
                     Frag::Meta => self.meta_fragment(),
                     _ => Ok(()),
                 };
+                self.macros = macros;
                 let e = self.pos;
                 self.pos = save;
                 // a `>>` / `>=` the fragment's parse split and consumed whole is whole again (its
                 // text belongs to the fragment); one the fragment ends inside of stays split, its
-                // rest for the matcher (`Vec<$t:ty>` against `Vec<Option<u8>>`)
+                // rest for the matcher (`Vec<$t:ty>` against `Vec<Option<u8>>`), and the part the
+                // fragment took is its source span (rustc_parse break_and_eat / break_last_token)
+                let ok = r.is_ok() && e <= end && e > i;
+                let mut taken = None;
                 while self.tok_undo.len() > undo {
                     let (k, t) = self.tok_undo.pop().unwrap();
-                    if (k as usize) < e {
+                    if !ok || (k as usize) < e {
                         self.toks.edit(k as usize, |x| *x = t);
+                    } else if k as usize == e {
+                        // the earliest entry holds the unsplit token
+                        taken = Some((t.lo, self.toks.at(e).lo));
                     }
                 }
-                match r {
-                    Ok(()) if e <= end && e > i => Some(e),
-                    _ => None,
-                }
+                if ok { Some((e, taken, bare)) } else { None }
             }
         }
+    }
+
+    /// Are tokens `[lo, hi)` one macro call `path ! (..)`?
+    fn is_macro_call(&self, lo: usize, hi: usize) -> bool {
+        let mut i = lo;
+        if i < hi && self.toks.at(i).kind == T::PathSep { i += 1; }
+        while i < hi && matches!(self.toks.at(i).kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper) {
+            i += 1;
+            if i < hi && self.toks.at(i).kind == T::PathSep { i += 1; } else { break; }
+        }
+        i < hi && self.toks.at(i).kind == T::Not && i + 1 < hi && is_open(self.toks.at(i + 1).kind) && self.tok_close_of(i + 1, hi) == Some(hi - 1)
     }
 
     fn match_seq(&mut self, nodes: &[MNode], i: &mut usize, end: usize, binds: &mut HashMap<String, Bind>) -> bool {
@@ -2273,8 +2386,8 @@ impl<'a> Parser<'a> {
                     *i = c + 1;
                 }
                 MNode::Var(name, f) => match self.match_frag(*f, *i, end) {
-                    Some(e) => {
-                        binds.insert(name.clone(), Bind::One(*i, e, *f));
+                    Some((e, taken, bare)) => {
+                        binds.insert(name.clone(), Bind::One(*i, e, *f, taken, bare));
                         *i = e;
                     }
                     None => return false,
@@ -2329,7 +2442,7 @@ impl<'a> Parser<'a> {
     }
 
     fn transcribe(&self, nodes: &[TNode], binds: &HashMap<String, Bind>, idx: &mut Vec<usize>, krate_path: &str, out: &mut Transcript) -> Result<(), String> {
-        for n in nodes {
+        for (ni, n) in nodes.iter().enumerate() {
             match n {
                 TNode::Tok(t) => out.push(&t.text, None, t.pos),
                 TNode::Crate => out.push(krate_path, None, u32::MAX),
@@ -2339,14 +2452,29 @@ impl<'a> Parser<'a> {
                     out.push(&c.text, None, c.pos);
                 }
                 TNode::Var(v) => match Self::lookup_bind(binds, v, idx) {
-                    Some(Bind::One(lo, hi, f)) => {
-                        let wrap = *f == Frag::Expr && hi - lo > 1;
+                    Some(Bind::One(lo, hi, f, taken, bare)) => {
+                        // a macro-call expression stays unparenthesised only where it ends the
+                        // statement-like position (`$e;` / last): `m!{..} * 2` would otherwise parse as
+                        // a statement macro followed by `*2` (the fragment is one opaque expression)
+                        let ends = nodes.get(ni + 1).map_or(true, |n| matches!(n, TNode::Tok(t) if t.text == ";"));
+                        let bare_macro = *f == Frag::Expr && taken.is_none() && ends && self.is_macro_call(*lo, *hi);
+                        let wrap = *f == Frag::Expr && hi - lo + usize::from(taken.is_some()) > 1 && !*bare && !bare_macro;
                         if wrap {
                             out.push("(", None, u32::MAX);
                         }
+                        let group_start = out.s.len() + 1;
                         for k in *lo..*hi {
                             let t = self.toks.at(k);
                             out.push(&String::from_utf8_lossy(self.tok_text(t)), Some(t.lo), u32::MAX);
+                        }
+                        if let Some((a, b)) = *taken {
+                            out.push(&String::from_utf8_lossy(self.bytes(a, b)), Some(a), u32::MAX);
+                        }
+                        // a fragment of one of these kinds stays one token tree where the
+                        // expansion is matched again (`$i:item` forwarded to `$t:tt`)
+                        let opaque = !wrap && !matches!(f, Frag::Ident | Frag::Lifetime | Frag::Tt);
+                        if opaque && out.s.len() > group_start && hi - lo + usize::from(taken.is_some()) > 1 {
+                            out.groups.push((group_start as u32, out.s.len() as u32));
                         }
                         if wrap {
                             out.push(")", None, u32::MAX);
@@ -2449,20 +2577,22 @@ impl<'a> Parser<'a> {
     /// Expands a call of macro `def` with arguments in tokens [lo, hi): the expansion text
     /// (tokens joined by spaces) and, per token substituted from a fragment, (offset in the
     /// text, the fragment token's position) -- or an error naming the macro.
-    pub fn expand_rules(&mut self, def: &MacroDef, lo: usize, hi: usize) -> Result<(String, Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>), String> {
+    pub fn expand_rules(&mut self, def: &MacroDef, lo: usize, hi: usize) -> Result<crate::parse_work::Rules, String> {
         let _profile = crate::load_profile::span(self.session.runtime.profile, "macro-rules", &def.name);
         let (lo, hi) = self.desugar_doc_comments(lo, hi);
-        for (matcher, body) in &def.arms {
+        uses::used(def, uses::RESOLVED);
+        for (arm, (matcher, body)) in def.arms.iter().enumerate() {
             let mut binds = HashMap::default();
             let mut i = lo;
             if self.match_seq(matcher, &mut i, hi, &mut binds) && i == hi {
+                uses::used(def, arm as u32);
                 // `$crate` names the defining crate itself, even where the caller reaches the macro
                 // only through a re-export (no dependency of that name)
                 let krate_path = if def.krate == self.krate { "crate".to_string() } else { format!("::__relax_crate_{}", def.krate) };
                 let mut out = Transcript::default();
                 self.transcribe(body, &binds, &mut Vec::new(), &krate_path, &mut out)?;
                 out.s.push(' ');
-                return Ok((out.s, out.origins, out.bodies));
+                return Ok((out.s, out.origins, out.bodies, out.groups));
             }
         }
         Err(format!("no rule of `{}!` matches these arguments -- check the macro's patterns", def.name))
@@ -2477,6 +2607,7 @@ struct Transcript {
     s: String,
     origins: Vec<(u32, u32, u32)>,
     bodies: Vec<(u32, u32, u32)>,
+    groups: Vec<(u32, u32)>,
 }
 
 impl Transcript {

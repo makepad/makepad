@@ -313,6 +313,15 @@ fn pred(p: Src, i: &mut usize, end: usize, cfg: &CfgSet) -> bool {
     if *i >= end {
         return false;
     }
+    // a macro's `$e:expr` argument arrives parenthesized (macros.rs transcribe): `(any(..))`
+    if p.tok(*i).kind == T::OpenParen {
+        *i += 1;
+        let r = pred(p, i, end, cfg);
+        if *i < end && p.tok(*i).kind == T::CloseParen {
+            *i += 1;
+        }
+        return r;
+    }
     let name = tok_str(p, *i);
     *i += 1;
     if *i < end && p.tok(*i).kind == T::OpenParen && (name == b"all" || name == b"any" || name == b"not") {

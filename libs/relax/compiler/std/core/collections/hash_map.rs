@@ -486,6 +486,9 @@ impl<'a, K: fmt::Debug, V: fmt::Debug> fmt::Debug for Iter<'a, K, V> {
     }
 }
 
+// library/std/src/collections/hash/map.rs: IterMut holds `&mut` entries
+unsafe impl<K: Send, V: Send> Send for IterMut<'_, K, V> {}
+unsafe impl<K: Sync, V: Sync> Sync for IterMut<'_, K, V> {}
 pub struct IterMut<'a, K: 'a, V: 'a> {
     table: *mut RawTable<(K, V)>,
     pos: usize,

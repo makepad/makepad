@@ -276,6 +276,10 @@ impl Tcx {
                     binder.regions = env.regions.with_binder(Some(BinderId::Where(generics.where_.lo + where_index as u32)));
                     let ty = self.lower_ty(&cx, prog, def.file, def.scope, &binder, ty);
                     self.lower_bounds(&cx, def_id, &binder, ty, bounds, false, PredicateFilter::All, &mut out);
+                    // `where T:` (no bounds) is the clause "T is well formed" (rustc lowers it so)
+                    if bounds.is_empty() && !self.tys.has_error(ty) && crate::wfcheck::obligations::arity_ok(self, prog, ty) {
+                        out.push(Predicate { kind: PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(ty))), bound_vars: binder.regions.bound_vars().into() });
+                    }
                 }
             }
         }
@@ -369,19 +373,19 @@ impl Tcx {
                 for arg in ast.list(*bindings) {
                     let (name, own_args) = match *arg {
                         ast::GenericArg::Binding(name, args, _) => (name, args),
-                        ast::GenericArg::Constraint(name, _) => (name, ast::GenericArgsId::NONE),
+                        ast::GenericArg::Constraint(name, args, _) => (name, args),
                         _ => continue,
                     };
                     let name = prog.syms.get(prog.files[def.file as usize].text(name)).unwrap();
                     let Some(ad) = self.trait_assoc(prog, td, name) else {
-                        let n = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _) => n, _ => continue };
+                        let n = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _, _) => n, _ => continue };
                         self.err(cx, prog, def.file, n.lo, format!("E0220: associated type `{}` not found for `{}`", prog.files[def.file as usize].text(n), prog.name(td)));
                         continue;
                     };
                     // lower_assoc_item_constraint: the constraint's own arguments against the item's
                     let errs = if !self.validates(prog, def.file) { Vec::new() } else { self.check_generic_arg_count(prog, ad, ast.gargs(own_args), ast, self.own_generic_counts(prog, ad, None), crate::tcx::arg_count::ArgPosition::AssocType, false, false) };
                     if !errs.is_empty() || self.prohibit_constraints(cx, prog, def.file, own_args) {
-                        let lo = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _) => n.lo, _ => 0 };
+                        let lo = match *arg { ast::GenericArg::Binding(n, _, _) | ast::GenericArg::Constraint(n, _, _) => n.lo, _ => 0 };
                         for e in errs { self.err(cx, prog, def.file, lo, e); }
                         continue;
                     }
@@ -420,7 +424,7 @@ impl Tcx {
                             let value = self.lower_ty(cx, prog, def.file, def.scope, &env, value);
                             out.push(Predicate { kind: PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: AliasTerm::Ty(alias), term: Term::Ty(value) })), bound_vars: vars.clone() });
                         }
-                        ast::GenericArg::Constraint(_, bounds) => {
+                        ast::GenericArg::Constraint(_, _, bounds) => {
                             if matches!(filter, PredicateFilter::All) { self.lower_bounds(cx, owner, &env, alias, bounds, false, filter, out); }
                         }
                         _ => unreachable!(),

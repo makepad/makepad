@@ -29,6 +29,7 @@ unsafe impl<T: ?Sized + Send> Send for Box<T> {}
 unsafe impl<T: ?Sized + Sync> Sync for Box<T> {}
 
 impl<T> Box<T> {
+    #[rustc_diagnostic_item = "box_new"]
     pub fn new(x: T) -> Box<T> {
         let p = heap::alloc_or_abort(Layout::new::<T>()) as *mut T;
         unsafe { im::ptr_write(p, x) };
@@ -56,6 +57,7 @@ impl<T> Box<T> {
 }
 
 impl<T: ?Sized> Box<T> {
+    #[must_use = "call `drop(Box::from_raw(ptr))` if you intend to drop the `Box`"]
     pub unsafe fn from_raw(raw: *mut T) -> Box<T> {
         Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(raw) } }
     }

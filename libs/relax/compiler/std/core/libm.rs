@@ -19,7 +19,7 @@ extern "C" {
     pub fn log2(x: f64) -> f64;
     pub fn log10(x: f64) -> f64;
     pub fn log1p(x: f64) -> f64;
-    pub const fn pow(x: f64, y: f64) -> f64;
+    pub fn pow(x: f64, y: f64) -> f64;
     pub fn cbrt(x: f64) -> f64;
     #[cfg(not(windows))]
     pub fn hypot(x: f64, y: f64) -> f64;
@@ -27,7 +27,7 @@ extern "C" {
     #[cfg(windows)]
     #[link_name = "_hypot"]
     pub fn hypot(x: f64, y: f64) -> f64;
-    pub const fn round(x: f64) -> f64;
+    pub fn round(x: f64) -> f64;
     pub fn fma(x: f64, y: f64, z: f64) -> f64;
     pub fn fmod(x: f64, y: f64) -> f64;
     pub fn sinf(x: f32) -> f32;

@@ -10,6 +10,7 @@ pub mod fxhash;
 pub mod memstat;
 pub use relax_session::{gen_local, options, sip, Session};
 pub mod conc;
+pub mod pool;
 pub mod query;
 pub mod preempt;
 pub mod arena;

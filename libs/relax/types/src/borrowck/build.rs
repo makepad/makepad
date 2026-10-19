@@ -526,8 +526,23 @@ impl<'a> Build<'a> {
         let mut pi = 0usize;
         if fsig.self_param.is_some() {
             let t = self.b.locals.get(0).map_or(self.tx.unit(), |l| l.ty);
-            let mutable = self.b.locals.get(0).map_or(false, |l| l.mutable);
+            let mutable = self.b.locals.get(0).map_or(false, |l| l.mutable) || matches!(fsig.self_param, Some(crate::ast::SelfParam::Value(true) | crate::ast::SelfParam::Typed(true, _)));
             let a = self.new_local(t, LocalKind::Arg, mutable, Some("self".to_string()));
+            // the `self` token of the parameter list: where `mut self` is written (the check's
+            // unused_mut lint reads it; a run never needs it)
+            if crate::lint::enabled() {
+                let pf = &self.tx.prog.files[self.b.file as usize];
+                let mut i = 0u32;
+                loop {
+                    let t = pf.tok(i);
+                    if t.kind == crate::lexer::T::Eof { break; }
+                    if t.lo >= it.name.hi && t.kind == crate::lexer::T::KwSelfValue {
+                        self.out.locals[a as usize].span = Span { lo: t.lo, hi: t.hi };
+                        break;
+                    }
+                    i += 1;
+                }
+            }
             self.out.locals[a as usize].can_be_made_mutable = matches!(fsig.self_param, Some(crate::ast::SelfParam::Value(false) | crate::ast::SelfParam::Typed(false, _)));
             self.out.n_args += 1;
             self.locals.insert(0, Place::local(a));

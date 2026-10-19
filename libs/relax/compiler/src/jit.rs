@@ -4085,12 +4085,23 @@ impl Unit {
             return 0;
         } else {
             self.record_static(d, t, buf);
+            self.validate_final(d, t, buf);
         }
         let sym = self.syms.intern(crate::syms::SymKind::Static(d), buf);
         crate::sandbox::capture_initial_data(self, sym);
         // every other live domain gets its own copy of the new static (none: nothing to do)
         crate::domain::materialize(self, sym);
         buf
+    }
+
+    /// A check validates the final value of a constant or static (rustc: validity of the result).
+    fn validate_final(&mut self, d: DefId, t: TyId, buf: u64) {
+        if !self.prog.session.options.const_fuel { return; }
+        if let Some(msg) = crate::ctfe::invalid_scalar(self, t, buf, 0) {
+            let def = self.prog.def(d);
+            let at = self.pos_str(def.file, self.prog.files[def.file as usize].ast.item(def.item).lo);
+            self.note_error(format!("{}: E0080: {} [in {}]", at, msg, self.prog.def_path(d)));
+        }
     }
 
     fn eval_init(&mut self, d: DefId, args: Vec<TyId>, mutable: bool) -> Option<u64> {
@@ -4104,7 +4115,8 @@ impl Unit {
             self.syms.set_data_name(b, const_name(self, d, &args));
             b
         };
-        let r = self.run_init(d, args, buf);
+        let r = self.run_init(d, args.clone(), buf);
+        if r.is_some() { self.validate_final(d, t, buf); }
         // a constant's undefined bytes are 0 whichever way its initializer ran
         if r.is_some() && !mutable {
             crate::ctfe::zero_undefined(self, t, buf);
@@ -7959,8 +7971,6 @@ unsafe fn load_modules(up: *mut Unit, mods: &[u32], why: &str) {
                 Err(e) => {
                     bindings_changed = true; // collection may have published part of the file
                     eprintln!("makepad: loading a deferred module failed: {}", e);
-                    // (a missing module file is rustc's E0583; the check fails on it)
-                    u.prog.errors.push(if e.contains("module file not found") { format!("E0583: file not found for module -- {}", e) } else { e.to_string() });
                 }
             }
         }
@@ -12297,9 +12307,9 @@ pub(crate) unsafe fn compile_batch_off_lock(up: *mut Unit, ids: &[u32], threads:
     let work_cells: Vec<relax_session::sync::Mutex<Option<(u32, Front, String)>>> = work.into_iter().map(|w| relax_session::sync::Mutex::new(Some(w))).collect();
     let finished = std::sync::atomic::AtomicUsize::new(0);
     let helpers = threads.max(1).min(work_cells.len().max(1));
-    std::thread::scope(|sc| {
+    crate::pool::scope(|sc| {
         for _ in 0..helpers {
-            sc.spawn(|| { let _z = crate::zone_alloc::compiler_thread();
+            sc.spawn(|| {
                 // counted when this helper is done, also if it panics (the owner waits for all)
                 struct Done<'a>(&'a std::sync::atomic::AtomicUsize);
                 impl Drop for Done<'_> {

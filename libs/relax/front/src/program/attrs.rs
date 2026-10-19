@@ -86,10 +86,7 @@ impl Program {
                                 std_helpers.push("default");
                             }
                             if f.tok(i).kind == T::Ident && !STD_DERIVES.contains(&text(i)) && f.tok(i + 1).kind != T::PathSep {
-                                // (`std::fmt::Debug` and the like name their last segment)
-                                if f.tok(i.wrapping_sub(1)).kind != T::PathSep || !matches!(text(i), "Debug") {
-                                    helpers = true;
-                                }
+                                helpers = true;
                             }
                         }
                     }

@@ -408,6 +408,9 @@ impl String {
 
 // ---------------------------------------------------------------- Drain
 
+// library/alloc/src/string.rs
+unsafe impl Sync for Drain<'_> {}
+unsafe impl Send for Drain<'_> {}
 pub struct Drain<'a> {
     string: *mut String,
     start: usize,

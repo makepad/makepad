@@ -161,9 +161,8 @@ impl<'a> Parser<'a> {
                 }
                 let n = self.tok_text(t);
                 if let Some(e) = EXPANDED.iter().find(|x| x.as_bytes() == n) {
-                    if !wanted.contains(e) {
-                        wanted.push(e);
-                    }
+                    // (written twice, a derive is expanded twice: the impls then conflict, E0119)
+                    wanted.push(e);
                 }
             }
         }
@@ -246,7 +245,15 @@ impl<'a> Parser<'a> {
                     Some(b) => b,
                     None => return Err(PErr { pos: it.name.lo, msg: "derive(Default) on an enum needs one `#[default]` unit variant".to_string() }),
                 },
-                "Hash" => gen_hash(&name, is_enum, &shapes),
+                "Hash" => {
+                    // the method's hasher parameter must not shadow a generic of the type
+                    // (rustc's derive names it hygienically)
+                    let mut h = "__H".to_string();
+                    while gparams.iter().any(|g| g.1 == h) {
+                        h.push('_');
+                    }
+                    gen_hash(&name, is_enum, &shapes, &h)
+                }
                 "PartialOrd" => gen_ord(&name, is_enum, &shapes, true, &disc_ty),
                 _ => gen_ord(&name, is_enum, &shapes, false, &disc_ty),
             };
@@ -576,15 +583,16 @@ fn gen_debug(ty: &str, is_enum: bool, shapes: &[Shape]) -> String {
             0 => format!("f.write_str({:?})", shown),
             1 => {
                 let mut x = format!("f.debug_tuple({:?})", shown);
+                // rustc's derive(Debug) passes the last field as `&&self.f` (it may be unsized)
                 for i in 0..s.fields.len() {
-                    x.push_str(&format!(".field(__s{})", i));
+                    x.push_str(&format!(".field({}__s{})", if i + 1 == s.fields.len() { "&" } else { "" }, i));
                 }
                 x + ".finish()"
             }
             _ => {
                 let mut x = format!("f.debug_struct({:?})", shown);
                 for (i, n) in s.fields.iter().enumerate() {
-                    x.push_str(&format!(".field({:?}, __s{})", field_name(n), i));
+                    x.push_str(&format!(".field({:?}, {}__s{})", field_name(n), if i + 1 == s.fields.len() { "&" } else { "" }, i));
                 }
                 x + ".finish()"
             }
@@ -613,7 +621,7 @@ fn gen_default(ty: &str, is_enum: bool, shapes: &[Shape]) -> Option<String> {
     Some(format!("fn default() -> Self {{ {} }}", e))
 }
 
-fn gen_hash(_ty: &str, is_enum: bool, shapes: &[Shape]) -> String {
+fn gen_hash(_ty: &str, is_enum: bool, shapes: &[Shape], h: &str) -> String {
     let mut arms = String::new();
     for (vi, s) in shapes.iter().enumerate() {
         let mut body = String::new();
@@ -626,7 +634,7 @@ fn gen_hash(_ty: &str, is_enum: bool, shapes: &[Shape]) -> String {
         arms.push_str(&format!("{} => {{ {} }} ", pat("Self", s, "__s"), body));
     }
     let m = if is_enum && shapes.is_empty() { "match *self {}".to_string() } else { format!("match self {{ {} }}", arms) };
-    format!("fn hash<__H: {c}::hash::Hasher>(&self, state: &mut __H) {{ {m} }}", c = CORE, m = m)
+    format!("fn hash<{h}: {c}::hash::Hasher>(&self, state: &mut {h}) {{ {m} }}", c = CORE, m = m, h = h)
 }
 
 /// PartialOrd::partial_cmp (`partial`) or Ord::cmp: lexicographic over variants then fields.
@@ -750,7 +758,7 @@ impl Parser<'_> {
                 match arg {
                     GenericArg::Type(t) => self.find_type_parameters(t, names, bound, out),
                     GenericArg::Binding(_, args, t) => { self.find_args_type_parameters(args, names, bound, out); self.find_type_parameters(t, names, bound, out); }
-                    GenericArg::Constraint(_, bs) => self.find_bounds_type_parameters(bs, names, bound, out),
+                    GenericArg::Constraint(_, args, bs) => { self.find_args_type_parameters(args, names, bound, out); self.find_bounds_type_parameters(bs, names, bound, out); },
                     _ => {}
                 }
             },

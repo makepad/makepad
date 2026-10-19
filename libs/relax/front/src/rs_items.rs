@@ -725,10 +725,10 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
         let accumulated = &accumulated;
         let (files, names) = (&*files, &*names);
         let evaluation = crate::load_profile::span(profile, "rust-demand-reference-eval", "load");
-        let evaluated = std::thread::scope(|scope| {
+        let evaluated = crate::pool::scope(|scope| {
             let handles: Vec<_> = (0..jobs.max(1).min(batches.len())).map(|_| {
                 let (work, next, batches, evaluations) = (&work, &next, &batches, &evaluations);
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                scope.spawn(move || {
                     let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
                     let cpu = std::time::Instant::now();
                     let mut out = Vec::new();

@@ -253,7 +253,7 @@ fn check_body_with(prog: &Program, tcx: &Tcx, tx: &tyx::Tx, rty: &rty::Rty, body
             let flow = moves::init_flow(&md, bir, &order);
             let mut mc = moves::MoveCheck::new(tx, bir, &md);
             mc.run(&flow, &order);
-            if crate::lint::enabled() && mc.diags.is_empty() && bir.closure_kind.is_none() && i == 0 {
+            if crate::lint::enabled() && mc.diags.is_empty() {
                 // rustc gather_used_muts: a `mut` local no reachable code assigns (declared in
                 // dead code, or never initialized) counts as used
                 let mut used = mc.used_mut.clone();
@@ -579,7 +579,8 @@ fn lint_unused_mut(prog: &Program, owner: crate::program::DefId, bir: &bir::Bir,
             && (j + name.len() >= src.len() || !(src[j + name.len()] == b'_' || src[j + name.len()].is_ascii_alphanumeric()));
         let Some(pos) = (lo..hi).find(|&j| word(j)) else { continue };
         if pos < 4 || &src[pos - 4..pos] != b"mut " { continue; }
-        crate::lint::emit(prog, owner, &crate::lint::UNUSED_MUT, bir.file, (pos - 4) as u32,
+        let inner = crate::lint::attrs_at_binding(prog, owner, pos as u32);
+        crate::lint::emit_in(prog, owner, &inner, &crate::lint::UNUSED_MUT, bir.file, (pos - 4) as u32,
             &format!("variable does not need to be mutable -- help: remove this `mut` (`{}`)", name));
     }
 }

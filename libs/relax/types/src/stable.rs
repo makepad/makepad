@@ -318,9 +318,9 @@ pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
         })
         .collect();
     if chunk > 0 {
-        std::thread::scope(|s| {
+        crate::pool::scope(|s| {
             for (out, inp) in fh.chunks_mut(chunk).zip(inputs.chunks(chunk)) {
-                s.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                s.spawn(move || {
                     for (o, (path, src)) in out.iter_mut().zip(inp) {
                         *o = crate::crate_image::file_hash(path, src);
                     }
@@ -409,7 +409,7 @@ pub fn loaded_crate_fingerprint(prog: &Program, ci: usize, previous: &[Option<u1
         (prog.file_paths[i].as_str(), &f.src[..(f.src_len as usize).min(f.src.len())])
     }).collect();
     let name = prog.syms.str(c.name);
-    Some(std::thread::scope(|s| s.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    Some(crate::pool::scope(|s| s.spawn(move || {
         crate::crate_image::fingerprint(name, c.root_path(), c.edition, c.proc_macro, &c.cfg.set,
             inputs.into_iter().map(|(p, b)| crate::crate_image::file_hash(p, b)), &deps, c.context.fingerprint())
     }).join().expect("front fingerprint worker")))

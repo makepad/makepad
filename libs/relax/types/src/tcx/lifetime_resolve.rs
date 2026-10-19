@@ -3,7 +3,7 @@ use super::*;
 use super::resolve_bound_vars::{BinderId, LifetimeId, LifetimeKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum LifetimeRes { Param(LifetimeId), Static, Infer, Error }
+pub(crate) enum LifetimeRes { Param(LifetimeId), Static, Infer, Error }
 
 #[derive(Clone, Debug)]
 pub(super) struct LifetimeDecl {
@@ -22,6 +22,14 @@ pub(crate) struct LifetimeResolution {
 }
 
 impl LifetimeResolution {
+    /// The resolution of the elided lifetime of the reference type `ty` (`&T`).
+    pub(crate) fn reference(&self, ty: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Reference(ty)).copied() }
+    /// The resolution of the lifetime written at `lo..hi` (`'a`, `'_`, `'static`).
+    pub(crate) fn named(&self, lo: u32, hi: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Named(lo, hi)).copied() }
+    /// The resolution of the elided lifetime of an `&self` receiver.
+    pub(crate) fn self_reference(&self) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::SelfReference).copied() }
+    /// The resolution of the `index`th hidden lifetime of path segment `seg` (`Foo` for `Foo<'a>`).
+    pub(crate) fn path(&self, seg: u32, index: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Path(seg, index)).copied() }
     /// No lifetime declared, inherited or used anywhere in the owner (most items).
     fn is_empty(&self) -> bool { self.inherited.is_empty() && self.declarations.is_empty() && self.uses.is_empty() && self.binders.is_empty() }
     /// The answer to share: every empty resolution is the same value, kept once.
@@ -94,7 +102,7 @@ impl LifetimeResolver<'_> {
     fn declare(&mut self, binder: BinderId, name: Option<ast::Ident>, span: u32) -> LifetimeId {
         let id = LifetimeId { owner: self.owner, local: self.resolution.declarations.len() as u32 };
         self.resolution.declarations.push(LifetimeDecl {
-            id, binder, name: name.map(|n| self.prog.files[self.file as usize].text(n).to_owned()), span,
+            id, binder, name: name.map(|n| self.prog.files[self.file as usize].lifetime_text(n).into_owned()), span,
         });
         self.resolution.binders.entry(binder).or_default().push(id);
         id
@@ -108,7 +116,8 @@ impl LifetimeResolver<'_> {
     }
 
     fn resolve_lifetime(&mut self, key: LifetimeKey, name: Option<ast::Ident>, span: u32, in_path: bool) {
-        let text = name.map(|n| self.prog.files[self.file as usize].text(n));
+        let text = name.map(|n| self.prog.files[self.file as usize].lifetime_text(n));
+        let text = text.as_deref();
         if text == Some("'static") { self.record_lifetime_use(key, LifetimeRes::Static); return; }
         if text.is_none() || text == Some("'_") {
             self.resolve_anonymous_lifetime(key, span, in_path && name.is_none());
@@ -173,7 +182,7 @@ impl LifetimeResolver<'_> {
         let mut bindings = Vec::new();
         for p in self.prog.files[self.file as usize].ast.list(params) {
             if !matches!(p.kind, GenericParamKind::Lifetime(_)) { continue; }
-            let name = self.prog.files[self.file as usize].text(p.name).to_owned();
+            let name = self.prog.files[self.file as usize].lifetime_text(p.name).into_owned();
             if name == "'static" || name == "'_" { self.error(p.name.lo, &format!("E0262: invalid lifetime parameter name: `{}`", name)); }
             if bindings.iter().any(|(n, _)| *n == name) { self.error(p.name.lo, &format!("E0403: the name `{}` is already used for a generic parameter in this item's generic parameters", name)); }
             if self.ribs.iter().any(|r| r.bindings.iter().any(|(n, _)| *n == name)) {
@@ -450,7 +459,12 @@ impl LifetimeResolver<'_> {
                             self.ribs.pop();
                             self.visit_ty(ty);
                         }
-                        GenericArg::Constraint(_, bounds) => self.visit_bounds(bounds),
+                        GenericArg::Constraint(_, args, bounds) => {
+                            self.push(LifetimeRibKind::AnonymousReportError);
+                            self.visit_generic_args(args);
+                            self.ribs.pop();
+                            self.visit_bounds(bounds);
+                        }
                     }
                 }
             }
@@ -719,7 +733,7 @@ fn argument_types(ast: &ast::Ast, args: ast::GenericArgsId, out: &mut Vec<ast::T
             match *arg {
                 GenericArg::Type(ty) => out.push(ty),
                 GenericArg::Binding(_, args, ty) => { argument_types(ast, args, out); out.push(ty); }
-                GenericArg::Constraint(_, bounds) => bound_types(ast, bounds, out),
+                GenericArg::Constraint(_, _, bounds) => bound_types(ast, bounds, out),
                 _ => {}
             }
         },

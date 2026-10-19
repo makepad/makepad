@@ -180,12 +180,12 @@ impl Plan {
         // results in crate/DFS order, preserving lexical macro precedence.
         let next_crate = std::sync::atomic::AtomicUsize::new(0);
         let workers_profile = crate::load_profile::span(profile, "rust-demand-discovery-workers", "load");
-        let mut discovered = std::thread::scope(|scope| {
+        let mut discovered = crate::pool::scope(|scope| {
             let handles = (0..jobs().min(crates.len())).map(|_| {
                 let contexts = &contexts;
                 let template = &names;
                 let next_crate = &next_crate;
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                scope.spawn(move || {
                     let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
                     let mut output = Vec::new();
                     loop {
@@ -294,10 +294,10 @@ impl Plan {
                 let expected = scans.iter().filter(|entry| entry.3.is_some()).map(|(path, module, ..)| (path.clone(), module.clone())).collect::<BTreeSet<_>>();
                 let ready = (relax_session::sync::Mutex::new(BTreeMap::new()), relax_session::sync::Condvar::new());
                 let next_input = std::sync::atomic::AtomicUsize::new(0);
-                std::thread::scope(|scope| {
+                crate::pool::scope(|scope| {
                     for _ in 0..jobs().min(inputs.len()) {
                         let (inputs, ready, next_input, base, context) = (&inputs, &ready, &next_input, &base, &contexts[*ci]);
-                        scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                        scope.spawn(move || {
                             let _reads = context.bind_source_reads();
                             while let Some(input) = inputs.get(next_input.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                                 let (path, module, scan) = input.lock().unwrap().take().expect("each input is expanded once");
@@ -381,7 +381,7 @@ impl Plan {
                             if !surface.used.uses.is_empty() { Arc::make_mut(&mut table).add_exp_uses(&c.name, surface.used.uses); }
                             let dir = directories.get(path).cloned().unwrap_or_else(|| crate::program::dir_of(path).into());
                             let _profile = crate::load_profile::span(profile, "rust-demand-outline-scan", path);
-                            if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, &c.cfg, scan.src_len,
+                            if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, c.edition, &c.cfg, scan.src_len,
                                 expanded_src, surface.toks, &contexts[*ci], false) { *scan = expanded; }
                         }
                         let mut chain = chains.get(&(path.clone(), module.clone())).cloned().unwrap_or_default();
@@ -449,8 +449,8 @@ impl Plan {
                     let files = &mut prepared_files[start..];
                     let chunk = files.len().div_ceil(jobs().max(1)).max(1);
                     let (names, contexts, expanded_indexes, sources) = (&names, &contexts, &expanded_indexes, &sources);
-                    let mut flags = std::thread::scope(|scope| {
-                        let workers = files.chunks_mut(chunk).map(|files| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter_mut().map(|file| {
+                    let mut flags = crate::pool::scope(|scope| {
+                        let workers = files.chunks_mut(chunk).map(|files| scope.spawn(move || { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter_mut().map(|file| {
                             let source = sources.get(&(file.path.as_str(), file.module.as_str())).copied();
                             macro_surface(names, crates, contexts, expanded_indexes, profile, file, source.map(|(src, toks, _)| (src, toks)), source.map(|(_, _, parameters)| parameters))
                         }).collect::<Vec<_>>() })).collect::<Vec<_>>();
@@ -579,12 +579,12 @@ impl Plan {
             }
         }
         let references_profile = crate::load_profile::span(profile, "rust-demand-rust-refs", "load");
-        let references = std::thread::scope(|scope| {
+        let references = crate::pool::scope(|scope| {
             let chunk = rust.len().div_ceil(jobs().max(1)).max(1);
             let handles = rust.chunks(chunk).map(|files| {
                 let names = &names;
                 let relevant = &relevant;
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter().filter(|(ci, ..)| relevant.contains(ci)).map(|(ci, path, module, scan)| {
+                scope.spawn(move || { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter().filter(|(ci, ..)| relevant.contains(ci)).map(|(ci, path, module, scan)| {
                     let (src, toks) = (&scan.src, &scan.toks);
                     let opaque = names.opaque_scopes(*ci, src, toks, module);
                     let references = BTreeSet::<String>::new();

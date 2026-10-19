@@ -5,6 +5,7 @@ use crate::fmt;
 use crate::hash::{Hash, Hasher};
 use crate::ops::Deref;
 
+#[rustc_diagnostic_item = "Borrow"]
 pub trait Borrow<Borrowed: ?Sized> {
     fn borrow(&self) -> &Borrowed;
 }
@@ -14,6 +15,7 @@ pub trait BorrowMut<Borrowed: ?Sized>: Borrow<Borrowed> {
 }
 
 impl<T: ?Sized> Borrow<T> for T {
+    #[rustc_diagnostic_item = "noop_method_borrow"]
     fn borrow(&self) -> &T {
         self
     }

@@ -78,7 +78,7 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
                         }
                     }
                 } else {
-                    ident(src, lo, hi, t.kind == T::RawIdent)?;
+                    ident(src, lo, hi)?;
                 }
                 if t.kind == T::RawIdent && matches!(&src[lo + 2..hi], b"self" | b"super" | b"crate" | b"Self" | b"_") {
                     return err(lo, format!("`{}` cannot be a raw identifier", String::from_utf8_lossy(&src[lo + 2..hi])));
@@ -90,14 +90,16 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
     Ok(())
 }
 
-fn ident(src: &[u8], lo: usize, hi: usize, raw: bool) -> Result<(), VErr> {
+fn ident(src: &[u8], lo: usize, hi: usize) -> Result<(), VErr> {
     let mut i = lo;
     while i < hi {
         let c = match char_at(src, i) {
             Some(c) => c,
             None => return err(i, "invalid UTF-8"),
         };
-        if !c.is_ascii() && !xid_continue_approx(c) {
+        // (no Unicode property tables here: only what is certainly not an identifier character is
+        // rejected -- the emoji blocks, whitespace, control and format characters)
+        if !c.is_ascii() && (is_emoji_approx(c) || c.is_whitespace() || c.is_control() || matches!(c as u32, 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF)) {
             if c == '\u{1F980}' {
                 return err(i, "Ferris cannot be used as an identifier");
             }
@@ -108,17 +110,7 @@ fn ident(src: &[u8], lo: usize, hi: usize, raw: bool) -> Result<(), VErr> {
         }
         i += c.len_utf8();
     }
-    let _ = raw;
     Ok(())
-}
-
-/// No Unicode property tables are available (std only): alphanumerics plus the combining
-/// marks blocks stand in for XID_Continue.
-fn xid_continue_approx(c: char) -> bool {
-    c.is_alphanumeric()
-        || matches!(c as u32, 0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05C7 | 0x0610..=0x061A | 0x064B..=0x065F
-            | 0x0900..=0x0903 | 0x093A..=0x094F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x203F | 0x2040 | 0x20D0..=0x20FF
-            | 0x3099 | 0x309A | 0xFE20..=0xFE2F | 0x00B7 | 0x0387)
 }
 
 fn is_emoji_approx(c: char) -> bool {

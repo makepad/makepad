@@ -114,6 +114,8 @@ fn destroy_older_reclaims_all_prior_generations_and_preserves_the_current_one() 
         assert!(all_eq(current.0, 100, 3));
         assert_eq!(compiler_destroy_older(), (0, 0));
         RelaxAlloc.dealloc(current.0, current.1);
+        // the thread keeps its current chunk (empty now) until it hands it back
+        compiler_trim();
         // Empty generations also advance the sweep without disturbing tombstones.
         compiler_begin_generation();
         assert_eq!(compiler_destroy_older(), (0, 0));

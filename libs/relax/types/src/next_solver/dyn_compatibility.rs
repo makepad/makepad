@@ -49,24 +49,17 @@ impl Tcx {
                             }
                         }
                         let mut v = IllegalRpititVisitor { prog, illegal: false }; v.fold_ty(&self.tys, sig.ret, 0); illegal |= v.illegal;
-                        // dyn_compatibility.rs:594-614: method where-clauses may not
-                        // mention Self except outlives clauses and Self: AutoTrait.
+                        // dyn_compatibility.rs:540-590: method where-clauses may not
+                        // mention Self except type-outlives clauses, Self: AutoTrait, and
+                        // projections of Self through a supertrait.
                         for predicate in self.own_clauses_of(prog, item) {
                             match &predicate.kind {
-                                PredicateKind::Clause(ClauseKind::TypeOutlives(..) | ClauseKind::RegionOutlives(..)) => continue,
-                                PredicateKind::Clause(ClauseKind::Trait(t)) if eval_ctxt::trait_is_auto(prog, t.trait_ref.def_id) => continue,
+                                PredicateKind::Clause(ClauseKind::TypeOutlives(..)) => continue,
+                                PredicateKind::Clause(ClauseKind::Trait(t)) if eval_ctxt::trait_is_auto(prog, t.trait_ref.def_id)
+                                    && matches!(t.trait_ref.args.first(), Some(GenericArg::Type(s)) if matches!(self.tys.kind(*s), TyKind::Param(0))) => continue,
                                 _ => {}
                             }
-                            struct FindSelf(bool);
-                            impl TypeFolder for FindSelf {
-                                fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
-                                    if matches!(tys.kind(t), TyKind::Param(0)) { self.0 = true; return t; }
-                                    super_fold_ty(tys, t, self, depth)
-                                }
-                            }
-                            let mut visitor = FindSelf(false);
-                            fold::fold_predicate(&self.tys, &predicate, &mut visitor);
-                            illegal |= visitor.0;
+                            illegal |= predicate_contains_illegal_self_type_reference(self, prog, td, &predicate, true);
                         }
                         let receiver = liberate_late_bound_regions(self, item, sig.params[0]);
                         if !matches!(self.tys.kind(receiver), TyKind::Param(0)) { illegal |= !self.receiver_is_dispatchable(prog, item, receiver); }
@@ -121,33 +114,47 @@ fn predicate_references_self(tcx: &Tcx, prog: &Program, td: DefId, p: &Predicate
     false
 }
 fn contains_illegal_self_type_reference(tcx: &Tcx, prog: &Program, td: DefId, ty: TyId, allow: bool) -> bool {
-    struct IllegalSelfTypeVisitor<'a> { tcx: &'a Tcx, prog: &'a Program, supers: Vec<TraitRef>, allow: bool, illegal: bool }
-    impl TypeFolder for IllegalSelfTypeVisitor<'_> {
-        fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
-            if matches!(tys.kind(t), TyKind::Param(0)) { self.illegal = true; return t; }
-            if let TyKind::Alias(_, a) = tys.kind(t) { if let AliasTyKind::Projection { def_id } = a.kind {
-                if self.prog.impl_trait_in_trait_data.contains_key(&def_id) { return t; }
-                if self.allow {
-                    let parent = self.prog.def(def_id).parent;
-                    let mut args = self.tcx.complete_args(self.prog, def_id, tys.list(a.args), a.regions);
-                    let n = self.tcx.generic_indices_of(self.prog, parent); args.truncate(n.types_consts.len() + n.lifetimes.len());
-                    erase_args(tys, &mut args);
-                    if self.supers.contains(&TraitRef { def_id: parent, args }) { return t; }
-                }
-            } }
-            super_fold_ty(tys, t, self, depth)
+    let mut v = IllegalSelfTypeVisitor::new(tcx, prog, td, allow);
+    v.fold_ty(&tcx.tys, ty, 0);
+    v.illegal
+}
+/// rustc_trait_selection dyn_compatibility.rs contains_illegal_self_type_reference, applied to
+/// every type a predicate mentions (`pred.visit_with`).
+fn predicate_contains_illegal_self_type_reference(tcx: &Tcx, prog: &Program, td: DefId, p: &Predicate, allow: bool) -> bool {
+    let mut v = IllegalSelfTypeVisitor::new(tcx, prog, td, allow);
+    fold::fold_predicate(&tcx.tys, p, &mut v);
+    v.illegal
+}
+struct IllegalSelfTypeVisitor<'a> { tcx: &'a Tcx, prog: &'a Program, supers: Vec<TraitRef>, allow: bool, illegal: bool }
+impl<'a> IllegalSelfTypeVisitor<'a> {
+    fn new(tcx: &'a Tcx, prog: &'a Program, td: DefId, allow: bool) -> Self {
+        let mut supers = Vec::new();
+        for p in tcx.supertraits(prog, collect::trait_predicate(td, tcx.generic_indices_of(prog, td).identity_args(&tcx.tys))) {
+            if let PredicateKind::Clause(ClauseKind::Trait(mut p)) = p.kind { erase_args(&tcx.tys, &mut p.trait_ref.args); supers.push(p.trait_ref); }
         }
+        IllegalSelfTypeVisitor { tcx, prog, supers, allow, illegal: false }
     }
-    let mut supers = Vec::new();
-    for p in tcx.supertraits(prog, collect::trait_predicate(td, tcx.generic_indices_of(prog, td).identity_args(&tcx.tys))) {
-        if let PredicateKind::Clause(ClauseKind::Trait(mut p)) = p.kind { erase_args(&tcx.tys, &mut p.trait_ref.args); supers.push(p.trait_ref); }
+}
+impl TypeFolder for IllegalSelfTypeVisitor<'_> {
+    fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
+        if matches!(tys.kind(t), TyKind::Param(0)) { self.illegal = true; return t; }
+        if let TyKind::Alias(_, a) = tys.kind(t) { if let AliasTyKind::Projection { def_id } = a.kind {
+            if self.prog.impl_trait_in_trait_data.contains_key(&def_id) { return t; }
+            if self.allow {
+                let parent = self.prog.def(def_id).parent;
+                let mut args = self.tcx.complete_args(self.prog, def_id, tys.list(a.args), a.regions);
+                let n = self.tcx.generic_indices_of(self.prog, parent); args.truncate(n.types_consts.len() + n.lifetimes.len());
+                erase_args(tys, &mut args);
+                if self.supers.contains(&TraitRef { def_id: parent, args }) { return t; }
+            }
+        } }
+        super_fold_ty(tys, t, self, depth)
     }
-    let mut v = IllegalSelfTypeVisitor { tcx, prog, supers, allow, illegal: false }; v.fold_ty(&tcx.tys, ty, 0); v.illegal
 }
 fn erase_args(tys: &Types, args: &mut [GenericArg]) {
     for a in args { match a { GenericArg::Lifetime(r) => *r = crate::types::RegionId::ERASED, GenericArg::Type(t) => *t = tys.erase_regions(*t), GenericArg::Const(_) => {} } }
 }
-pub(super) fn liberate_late_bound_regions(tcx: &Tcx, owner: DefId, ty: TyId) -> TyId {
+pub(crate) fn liberate_late_bound_regions(tcx: &Tcx, owner: DefId, ty: TyId) -> TyId {
     let mut replacer = crate::types::fold::BoundVarReplacer::new(|var: crate::types::BoundVar| tcx.tys.intern_region(RegionKind::ReLateParam(RegionScope::Item(owner), LateParamKind::Anon(var.0))), |_| panic!("non-lifetime binder"));
     replacer.fold_ty(&tcx.tys, ty, 0)
 }

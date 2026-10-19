@@ -340,7 +340,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         }
         return apply_script_results(g, results.into_inner().unwrap());
     }
-    std::thread::scope(|s| {
+    crate::pool::scope(|s| {
         for bs in &g.build_scripts {
             let results = &results;
             let (dir, pname, ver) = g.pkg[bs.krate].clone();
@@ -369,7 +369,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
                 }
                 ScriptRole::Artefact => {}
             }
-            s.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+            s.spawn(move || {
                 let r = run_one(sess, bs, raw, &cenv, &dir, &pname, &ver, &name, target_dir);
                 results.lock().unwrap().push((bs.krate, r.0, r.1));
             });

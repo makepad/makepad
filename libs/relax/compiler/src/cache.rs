@@ -783,11 +783,11 @@ impl Cache {
             let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
             let next = std::sync::atomic::AtomicUsize::new(0);
             let mut out: Vec<Option<std::sync::Arc<Store>>> = (0..paths.len()).map(|_| None).collect();
-            let parts: Vec<Vec<(usize, Option<std::sync::Arc<Store>>)>> = std::thread::scope(|sc| {
+            let parts: Vec<Vec<(usize, Option<std::sync::Arc<Store>>)>> = crate::pool::scope(|sc| {
                 let hs: Vec<_> = (0..n)
                     .map(|_| {
                         let next = &next;
-                        sc.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                        sc.spawn(move || {
                             let mut v = Vec::new();
                             loop {
                                 let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1061,11 +1061,11 @@ impl Cache {
         unsafe impl Sync for Shared<'_> {}
         let sh = Shared(u);
         let ci = &self.crate_ident;
-        let results: Vec<Vec<(u32, HashMap<u128, DefId>, u64, HashMap<DefId, u128>)>> = std::thread::scope(|sc| {
+        let results: Vec<Vec<(u32, HashMap<u128, DefId>, u64, HashMap<DefId, u128>)>> = crate::pool::scope(|sc| {
             let hs: Vec<_> = (0..n)
                 .map(|_| {
                     let (sh, by, order, next) = (&sh, &by, &order, &next);
-                    sc.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                    sc.spawn(move || {
                         let u = sh.0;
                         let mut out = Vec::new();
                         let mut files = HashMap::new();
@@ -3605,9 +3605,9 @@ fn flush_front_graphs() -> Result<(), String> {
 fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: Vec<relax_session::sync::Mutex<Option<R>>> = items.iter().map(|_| relax_session::sync::Mutex::new(None)).collect();
-    std::thread::scope(|scope| {
+    crate::pool::scope(|scope| {
         for _ in 0..crate::preload::jobs().min(items.len()).max(1) {
-            scope.spawn(|| { let _z = crate::zone_alloc::compiler_thread(); loop {
+            scope.spawn(|| { loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(item) = items.get(i) else { break };
                 *out[i].lock().unwrap() = Some(f(item));
@@ -3794,8 +3794,8 @@ impl FrontImages {
         });
         cached.unwrap_or_else(|| {
             let chunk = inputs.len().div_ceil(crate::preload::jobs().clamp(1, 8)).max(1);
-            std::thread::scope(|scope| {
-                let workers: Vec<_> = inputs.chunks(chunk).map(|v| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); v.iter().all(|(p, h)| self.input_current(p, *h)) })).collect();
+            crate::pool::scope(|scope| {
+                let workers: Vec<_> = inputs.chunks(chunk).map(|v| scope.spawn(move || { v.iter().all(|(p, h)| self.input_current(p, *h)) })).collect();
                 workers.into_iter().all(|w| w.join().unwrap_or(false))
             })
         })
@@ -4028,8 +4028,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         let chunk = graph.probes.len().max(graph.inputs.len()).div_ceil(jobs).max(1);
         if graph.stamps.len() != graph.inputs.len() { rejected("input stamps"); return; }
         let g = &graph;
-        let probes_ok = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..jobs).map(|k| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+        let probes_ok = crate::pool::scope(|scope| {
+            let workers: Vec<_> = (0..jobs).map(|k| scope.spawn(move || {
                 let range = |n: usize| (k * chunk).min(n)..((k + 1) * chunk).min(n);
                 let ok = g.probes[range(g.probes.len())].iter().all(|(p, exists)| self.probe_current(p, *exists));
                 // An input whose stat is the recorded one is unchanged: its recorded hash goes in
@@ -4166,11 +4166,11 @@ impl crate::crate_image::CrateImages for FrontImages {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
             let chunk = keys.len().div_ceil(crate::preload::jobs().max(1)).max(1);
-            std::thread::scope(|scope| {
+            crate::pool::scope(|scope| {
                 let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).map(|(keys, names)| {
                     let store = &store;
                     let image_dir = &image_dir;
-                    scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); keys.iter().zip(names).map(|(key, name)| {
+                    scope.spawn(move || { keys.iter().zip(names).map(|(key, name)| {
                         let key = (*key)?;
                         let (kind, bytes) = store.as_ref()?.get(key)?;
                         if kind != KIND_DEMAND_PART { return None; }

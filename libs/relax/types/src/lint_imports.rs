@@ -1,0 +1,590 @@
+//! `unused_imports` (rustc_resolve/src/check_unused.rs): `use` declarations nothing refers to.
+//!
+//! rustc records, while resolving names, which import each resolution went through. Relax
+//! resolves imports to their targets without keeping the import a path went through, so the use
+//! of an import is read from the names written in its scope instead: an import is used when its
+//! name appears as a path (or single identifier) in the module or block it was declared in
+//! (macro expansions count at their call site, other imports count through the first segment of
+//! their path), when it names a trait whose methods a body calls, or when a path of the crate
+//! reaches it as `self::` / `super::` / `crate::`. A name written where it could be shadowed
+//! (a local variable, a generic parameter) still counts as a use: the lint never reports an
+//! import rustc would call used.
+//!
+//! Imports exported from the crate (`pub use` reachable from the root) are never reported;
+//! the message and the spans follow rustc's (`unused import: `a::b``, one span per unused leaf
+//! of the use tree). Check-only; `makepad run` never calls this.
+
+use crate::ast::*;
+use crate::lint::{self, Level, Lint};
+use crate::program::{DefId, DefKind, Program, NO_DEF};
+use crate::tcx::Tcx;
+use crate::lexer::T;
+use std::collections::{HashMap, HashSet};
+
+pub const UNUSED_IMPORTS: Lint = lint::lint("unused_imports", Level::Warn, &["unused"]);
+
+/// Traits one of whose methods a checked body calls (collected with the bodies).
+static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashSet<DefId>>> = relax_session::sync::Mutex::new(None);
+
+pub fn reset() {
+    *METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashSet::new());
+}
+
+/// A method or associated item a body resolved to: its trait counts as used.
+pub fn note_method(prog: &Program, tcx: &Tcx, d: DefId) {
+    let def = prog.def(d);
+    if def.parent == NO_DEF { return; }
+    let t = match prog.def(def.parent).kind {
+        DefKind::Trait => def.parent,
+        DefKind::Impl => match tcx.impl_trait.get(&def.parent) { Some(&t) => t, None => return },
+        _ => return,
+    };
+    METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).insert(t);
+}
+
+/// An identifier token of a file and where it is written.
+struct Ident {
+    /// the call site for tokens of macro expansions
+    site: u32,
+    name: String,
+    /// the segment before it when written after `::` (`m1::f`: `m1`)
+    prefix: Option<String>,
+}
+
+struct FileTokens {
+    /// identifiers by site position (outside `use` items)
+    idents: Vec<Ident>,
+    /// the first path segment of every `use` item, with its site
+    use_firsts: Vec<(u32, String)>,
+    /// (segment before, name) of every path written inside a `use` item
+    use_pairs: Vec<(u32, String, String)>,
+}
+
+fn scan_tokens(prog: &Program, file: u32) -> FileTokens {
+    let pf = &prog.files[file as usize];
+    let mut idents = Vec::new();
+    let mut use_firsts = Vec::new();
+    let mut use_pairs: Vec<(u32, String, String)> = Vec::new();
+    let mut use_site = 0u32;
+    let mut group_prefix: Vec<Option<String>> = Vec::new();
+    let mut kinds: Vec<(T, u32, u32)> = Vec::new();
+    let mut i = 0u32;
+    loop {
+        let t = pf.tok(i);
+        if t.kind == T::Eof { break; }
+        kinds.push((t.kind, t.lo, t.hi));
+        i += 1;
+    }
+    let text = |k: usize| String::from_utf8_lossy(pf.bytes(kinds[k].1, kinds[k].2)).into_owned();
+    let mut in_use = false;
+    // the token index a macro call's arguments end at: names there may be pasted into paths
+    let mut mac_end = 0usize;
+    for k in 0..kinds.len() {
+        if k >= mac_end && matches!(kinds[k].0, T::Ident | T::RawIdent) && k + 2 < kinds.len() && kinds[k + 1].0 == T::Not && matches!(kinds[k + 2].0, T::OpenParen | T::OpenBracket | T::OpenBrace) {
+            let mut depth = 0i32;
+            let mut e = k + 2;
+            while e < kinds.len() {
+                match kinds[e].0 { T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1, T::CloseParen | T::CloseBracket | T::CloseBrace => { depth -= 1; if depth == 0 { break; } } _ => {} }
+                e += 1;
+            }
+            mac_end = e;
+        }
+        let (kind, lo, _) = kinds[k];
+        if in_use {
+            match kind {
+                T::Semi => { in_use = false; group_prefix.clear(); }
+                T::OpenBrace => {
+                    // `a::b::{..}`: the group's prefix is `b`
+                    let p = if k >= 2 && kinds[k - 1].0 == T::PathSep { Some(text(k - 2)) } else { None };
+                    group_prefix.push(p);
+                }
+                T::CloseBrace => { group_prefix.pop(); }
+                T::Ident | T::RawIdent | T::KwSelfValue | T::KwSuper | T::KwCrate => {
+                    let prev = kinds[k - 1].0;
+                    let prefix = if prev == T::PathSep && k >= 2 { Some(text(k - 2)) }
+                        else if matches!(prev, T::OpenBrace | T::Comma) { group_prefix.last().cloned().flatten() }
+                        else { None };
+                    if let Some(p) = prefix { use_pairs.push((use_site, p, text(k))); }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match kind {
+            T::KwUse => {
+                in_use = true;
+                use_site = pf.diagnostic_pos(lo);
+                // `use a::b` / `use ::a::b` / `use {a, b}`: the first segment
+                let mut j = k + 1;
+                if j < kinds.len() && kinds[j].0 == T::PathSep { j += 1; }
+                if j < kinds.len() && matches!(kinds[j].0, T::Ident | T::RawIdent | T::KwSelfValue | T::KwSuper | T::KwCrate) {
+                    use_firsts.push((pf.diagnostic_pos(lo), text(j)));
+                }
+            }
+            T::Ident | T::RawIdent | T::KwSelfValue | T::KwSuper | T::KwCrate => {
+                let prev = if k > 0 { Some(kinds[k - 1].0) } else { None };
+                if prev == Some(T::Dot) && k >= mac_end { continue; }
+                let name = text(k);
+                let name = name.strip_prefix("r#").map(str::to_string).unwrap_or(name);
+                let prefix = if prev == Some(T::PathSep) && k >= 2 { Some(text(k - 2)) } else { None };
+                idents.push(Ident { site: pf.diagnostic_pos(lo), name, prefix });
+            }
+            T::RawBody => {
+                // the unparsed body of a macro: its words are names written at the call
+                let site = pf.diagnostic_pos(lo);
+                let bytes = pf.bytes(kinds[k].1, kinds[k].2).to_vec();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                        let s = i;
+                        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                        let mut p = s;
+                        while p > 0 && bytes[p - 1].is_ascii_whitespace() { p -= 1; }
+                        // a method or field name is no path
+                        if p > 0 && bytes[p - 1] == b'.' { continue; }
+                        let prefix = if p >= 2 && &bytes[p - 2..p] == b"::" {
+                            let mut e = p - 2;
+                            while e > 0 && bytes[e - 1].is_ascii_whitespace() { e -= 1; }
+                            let mut b = e;
+                            while b > 0 && (bytes[b - 1].is_ascii_alphanumeric() || bytes[b - 1] == b'_') { b -= 1; }
+                            Some(String::from_utf8_lossy(&bytes[b..e]).into_owned())
+                        } else { None };
+                        idents.push(Ident { site, name: String::from_utf8_lossy(&bytes[s..i]).into_owned(), prefix });
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    idents.sort_by_key(|i| i.site);
+    FileTokens { idents, use_firsts, use_pairs }
+}
+
+/// A leaf of a use tree: what it imports and the source range of the tree node.
+struct Leaf {
+    /// the name it binds in the scope (None: `as _` or an unnameable glob)
+    name: Option<String>,
+    glob: bool,
+    empty: bool,
+    span: (u32, u32),
+    /// the leaf's path as segments (for resolving the target)
+    segs: Vec<PathSeg>,
+}
+
+fn leaves(prog: &Program, file: u32, ast: &Ast, t: &UseTree, start: u32, item_hi: u32, prefix: &mut Vec<PathSeg>, out: &mut Vec<Leaf>) {
+    let pf = &prog.files[file as usize];
+    match *t {
+        UseTree::Name(seg, rename) => {
+            let mut segs = prefix.clone();
+            segs.push(seg);
+            let end = rename.map_or(seg.name.hi, |r| r.hi);
+            let name = match rename {
+                Some(r) => { let n = pf.text(r); if n == "_" { None } else { Some(n.to_string()) } }
+                None => {
+                    if seg.kind() == SegKind::SelfValue { prefix.last().map(|s| pf.text(s.name).to_string()) } else { Some(pf.text(seg.name).to_string()) }
+                }
+            };
+            out.push(Leaf { name, glob: false, empty: false, span: (start, end), segs });
+        }
+        UseTree::Path(seg, child) => {
+            prefix.push(seg);
+            let c = *ast.use_tree(child);
+            leaves(prog, file, ast, &c, start, item_hi, prefix, out);
+            prefix.pop();
+        }
+        UseTree::Glob => {
+            // `*` has no segment of its own: ends at the last segment's end + `::*`
+            let end = prefix.last().map_or(start, |s| s.name.hi);
+            out.push(Leaf { name: None, glob: true, empty: false, span: (start, end + 3) , segs: prefix.clone() });
+        }
+        UseTree::Group(l) => {
+            if ast.list(l).is_empty() {
+                // `use a::{};` imports nothing: unused, as a whole
+                out.push(Leaf { name: None, glob: false, empty: true, span: (start, item_hi) , segs: prefix.clone() });
+            }
+            for c in ast.list(l) {
+                // a nested tree starts at its own first segment
+                let s = first_pos(ast, c).unwrap_or(start);
+                leaves(prog, file, ast, c, s, item_hi, prefix, out);
+            }
+        }
+    }
+}
+
+fn ast_item_lo(prog: &Program, d: DefId) -> u32 {
+    let def = prog.def(d);
+    prog.files[def.file as usize].ast.item(def.item).lo
+}
+
+fn first_pos(ast: &Ast, t: &UseTree) -> Option<u32> {
+    match *t {
+        UseTree::Name(seg, _) | UseTree::Path(seg, _) => Some(seg.name.lo),
+        UseTree::Group(l) => ast.list(l).first().and_then(|c| first_pos(ast, c)),
+        UseTree::Glob => None,
+    }
+}
+
+struct Scope<'a> {
+    /// the module (or fn, for a block) whose attributes decide the lint level
+    def: DefId,
+    module: u32,
+    /// a block of a body (its `self::` is the module around it)
+    block: bool,
+    file: u32,
+    /// the byte ranges names in this scope are written in
+    ranges: Vec<(u32, u32)>,
+    items: Vec<ItemId>,
+    ast: &'a Ast,
+}
+
+pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::Reach, module_used: &HashMap<u32, HashSet<DefId>>) {
+    if !lint::enabled() { return; }
+    let traits = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    let mut scopes: Vec<Scope> = Vec::new();
+    for (m, md) in prog.mods.iter().enumerate() {
+        if !own.get(md.krate as usize).copied().unwrap_or(false) { continue; }
+        if md.lexical_parent.is_some() { continue; }
+        let (file, items) = crate::lint_dead::module_items(prog, m as u32);
+        let ast = &prog.files[file as usize].ast;
+        let mut ranges = Vec::new();
+        // each kept item's range reaches back to the end of the one before it: its attributes
+        // (`#[derive(Widget)]`) and doc comments are part of the scope
+        let mut prev_hi = if md.parent_mod.is_none() { 0 } else { ast_item_lo(prog, md.def) };
+        for &it in &items {
+            let item = ast.item(it);
+            match item.kind {
+                // child modules have scopes of their own; `use` items are checked, not scanned
+                ItemKind::Mod(_) | ItemKind::Use(_) => {}
+                // a `#[test]` fn is not part of the program outside a test build
+                ItemKind::Fn(..) if lint::has_attr(prog, file, ast.list(item.attrs), "test") => {}
+                _ => ranges.push((prev_hi.min(item.lo), item.hi)),
+            }
+            prev_hi = item.hi;
+        }
+        scopes.push(Scope { def: md.def, module: m as u32, block: false, file, ranges, items, ast });
+    }
+    // `use` declarations inside bodies: the block is the scope
+    for i in 0..prog.defs.len() {
+        let def = prog.defs[i];
+        if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+        if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) { continue; }
+        let ast = &prog.files[def.file as usize].ast;
+        let Ok(Some(b)) = prog.fn_body(def.file, def.item) else { continue };
+        collect_block_scopes(prog, DefId(i as u32), def.file, ast, b, &mut scopes);
+    }
+    // token sites are call-site positions; so are the ranges (code a macro wrote has its text in the
+    // file's expansion area)
+    for sc in scopes.iter_mut() {
+        let pf = &prog.files[sc.file as usize];
+        let mapped: Vec<(u32, u32)> = sc.ranges.iter().map(|&(lo, hi)| (pf.diagnostic_pos(lo), pf.diagnostic_pos(hi.saturating_sub(1)).saturating_add(1))).filter(|&(lo, hi)| hi > lo).collect();
+        sc.ranges.extend(mapped);
+    }
+    let mut tokens: HashMap<u32, FileTokens> = HashMap::new();
+    for sc in &scopes { tokens.entry(sc.file).or_insert_with(|| scan_tokens(prog, sc.file)); }
+    // the names written in each scope; the paths written anywhere in the crate
+    let mut written: Vec<HashSet<String>> = Vec::new();
+    for sc in &scopes {
+        let toks = &tokens[&sc.file];
+        let mut names: HashSet<String> = HashSet::new();
+        for &(lo, hi) in &sc.ranges {
+            let a = toks.idents.partition_point(|i| i.site < lo);
+            for id in &toks.idents[a..] {
+                if id.site >= hi { break; }
+                if crate::lint_dead::is_binding_site(sc.file, id.site) { continue; }
+                match id.prefix.as_deref() {
+                    None => { names.insert(id.name.clone()); }
+                    Some("self") if !sc.block => { names.insert(id.name.clone()); }
+                    Some(_) => {}
+                }
+            }
+        }
+        written.push(names);
+    }
+    // names written after `m::`, `self::`, `super::`, `crate::` (in paths and in `use` items): by
+    // the module they name (and the `use` item that wrote them: it does not use its own import)
+    let mut by_name: HashSet<(String, String)> = HashSet::new();
+    let mut resolved: Vec<(u32, String, u32)> = Vec::new();
+    for (si, sc) in scopes.iter().enumerate() {
+        let _ = si;
+        if sc.module == u32::MAX { continue; }
+        let toks = &tokens[&sc.file];
+        let md = &prog.mods[sc.module as usize];
+        let normal = md.normal;
+        let mut add = |p: &str, n: &str, src: u32| {
+            let target = match p {
+                "self" => Some(normal),
+                "super" => prog.mods[normal as usize].parent_mod,
+                "crate" => Some(prog.crates[md.krate as usize].root_mod),
+                _ => { by_name.insert((p.to_string(), n.to_string())); None }
+            };
+            if let Some(t) = target { resolved.push((t, n.to_string(), src)); }
+        };
+        for &(lo, hi) in &sc.ranges {
+            let a = toks.idents.partition_point(|i| i.site < lo);
+            for id in &toks.idents[a..] {
+                if id.site >= hi { break; }
+                if let Some(p) = &id.prefix { add(p, &id.name, u32::MAX); }
+            }
+        }
+        for &it in &sc.items {
+            let item = sc.ast.item(it);
+            if !matches!(item.kind, ItemKind::Use(_)) { continue; }
+            for (site, p, n) in &toks.use_pairs {
+                if *site >= item.lo && *site < item.hi { add(p, n, item.lo); }
+            }
+        }
+    }
+    // module -> modules that glob-import it
+    let mut globbed_by: HashMap<DefId, Vec<u32>> = HashMap::new();
+    for (g, md) in prog.mods.iter().enumerate() {
+        if !own.get(md.krate as usize).copied().unwrap_or(false) { continue; }
+        for &(t, _) in &md.globs { globbed_by.entry(t).or_default().push(g as u32); }
+    }
+    let scope_of_module: HashMap<u32, usize> = scopes.iter().enumerate().map(|(i, s)| (s.module, i)).collect();
+    for (si, sc) in scopes.iter().enumerate() {
+        let toks = &tokens[&sc.file];
+        let names = &written[si];
+        for &it in &sc.items {
+            let item = sc.ast.item(it);
+            let ItemKind::Use(row) = item.kind else { continue };
+            if lint::external(prog, sc.file, item.lo) { continue; }
+            // a declaration a macro wrote: its scope's names cannot be located
+            if item.lo >= prog.files[sc.file as usize].src_len { continue; }
+            let u = *sc.ast.row(row);
+            let mut ls = Vec::new();
+            let start = first_pos(sc.ast, &u.tree).unwrap_or(item.lo);
+            leaves(prog, sc.file, sc.ast, &u.tree, start, item.hi, &mut Vec::new(), &mut ls);
+            let ctx = Ctx { prog, sc, toks, names, traits: &traits, by_name: &by_name, resolved: &resolved, globbed_by: &globbed_by, written: &written, scope_of_module: &scope_of_module, module_used, item: (item.lo, item.hi) };
+            let mut unused: Vec<(u32, u32)> = Vec::new();
+            // `pub use` that leaves the crate cannot be judged (a glob of nothing exports nothing)
+            let exported = matches!(item.vis, Vis::Pub) && reach.defs.contains(&sc.def);
+            // a glob imported again in the scope (a `pub` one overwrites a private one) is not judged
+            let pf0 = &prog.files[sc.file as usize];
+            let dup_glob = |l: &Leaf| -> bool {
+                if !l.glob { return false; }
+                let text: Vec<&str> = l.segs.iter().map(|s| pf0.text(s.name)).collect();
+                let mut n = 0;
+                for &o in &sc.items {
+                    let oi = sc.ast.item(o);
+                    let ItemKind::Use(r2) = oi.kind else { continue };
+                    let u2 = *sc.ast.row(r2);
+                    let mut l2 = Vec::new();
+                    leaves(prog, sc.file, sc.ast, &u2.tree, first_pos(sc.ast, &u2.tree).unwrap_or(oi.lo), oi.hi, &mut Vec::new(), &mut l2);
+                    n += l2.iter().filter(|x| x.glob && x.segs.iter().map(|s| pf0.text(s.name)).collect::<Vec<_>>() == text).count();
+                }
+                n > 1
+            };
+            for l in &ls {
+                if dup_glob(l) { continue; }
+                if exported && !(l.glob && ctx.glob_imports_nothing(l)) && !l.empty { continue; }
+                if !ctx.leaf_used(l, item.lo) {
+                    unused.push(l.span);
+                }
+            }
+            let _ = tcx;
+            if unused.is_empty() { continue; }
+            let pf = &prog.files[sc.file as usize];
+            let mut snippets: Vec<String> = unused.iter().map(|&(a, b)| format!("`{}`", String::from_utf8_lossy(pf.bytes(a, b)).trim_end_matches(|c: char| c == ';' || c.is_whitespace()))).collect();
+            snippets.sort();
+            let list = match snippets.len() {
+                1 => snippets[0].clone(),
+                2 => format!("{} and {}", snippets[0], snippets[1]),
+                n => format!("{}, and {}", snippets[..n - 1].join(", "), snippets[n - 1]),
+            };
+            let msg = format!("unused import{}: {}", if snippets.len() == 1 { "" } else { "s" }, list);
+            let attrs = sc.ast.list(item.attrs).to_vec();
+            lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, unused[0].0, &msg);
+        }
+    }
+}
+
+fn collect_block_scopes<'a>(prog: &Program, owner: DefId, file: u32, ast: &'a Ast, b: BlockId, out: &mut Vec<Scope<'a>>) {
+    use crate::ast_visit::{self, Visitor};
+    struct W<'a, 'p> { prog: &'p Program, owner: DefId, file: u32, ast: &'a Ast, out: &'p mut Vec<Scope<'a>> }
+    impl<'a, 'p> Visitor<'a> for W<'a, 'p> {
+        fn ast(&self) -> &'a Ast { self.ast }
+        fn block(&mut self, b: BlockId) {
+            let ast = self.ast;
+            let items: Vec<ItemId> = ast.stmts(b).iter().filter_map(|s| if let Stmt::Item(i) = s { Some(*i) } else { None }).collect();
+            if items.iter().any(|&i| matches!(ast.item(i).kind, ItemKind::Use(_))) {
+                let blk = ast.block(b);
+                let module = self.prog.block_mods.get(&(self.file, b.0)).copied().unwrap_or(u32::MAX);
+                // the block minus the `use` items
+                let mut ranges = vec![(blk.lo, blk.hi)];
+                for &i in &items {
+                    if matches!(ast.item(i).kind, ItemKind::Use(_)) {
+                        let (lo, hi) = (ast.item(i).lo, ast.item(i).hi);
+                        let mut next = Vec::new();
+                        for (a, z) in ranges {
+                            if lo >= a && hi <= z { next.push((a, lo)); next.push((hi, z)); } else { next.push((a, z)); }
+                        }
+                        ranges = next;
+                    }
+                }
+                self.out.push(Scope { def: self.owner, module, block: true, file: self.file, ranges, items, ast });
+            }
+            ast_visit::walk_block(self, b);
+        }
+    }
+    W { prog, owner, file, ast, out }.block(b);
+}
+
+struct Ctx<'a, 'b> {
+    prog: &'a Program,
+    sc: &'b Scope<'a>,
+    toks: &'b FileTokens,
+    names: &'b HashSet<String>,
+    traits: &'b HashSet<DefId>,
+    by_name: &'b HashSet<(String, String)>,
+    resolved: &'b Vec<(u32, String, u32)>,
+    globbed_by: &'b HashMap<DefId, Vec<u32>>,
+    written: &'b [HashSet<String>],
+    scope_of_module: &'b HashMap<u32, usize>,
+    module_used: &'b HashMap<u32, HashSet<DefId>>,
+    /// the byte range of the `use` item being judged
+    item: (u32, u32),
+}
+
+impl Ctx<'_, '_> {
+    /// An import used by another `use` of the scope (through its first segment).
+    fn used_by_use(&self, n: &str, item_lo: u32) -> bool {
+        self.toks.use_firsts.iter().any(|(site, name)| name == n && *site != item_lo && self.in_use_item(*site))
+    }
+
+    fn in_use_item(&self, site: u32) -> bool {
+        self.sc.items.iter().any(|&i| { let it = self.sc.ast.item(i); matches!(it.kind, ItemKind::Use(_)) && site >= it.lo && site < it.hi })
+    }
+
+    /// An import other modules can name: `m::N` anywhere, or a glob of this module that uses `N`.
+    fn used_outside(&self, n: &str, _item_lo: u32) -> bool {
+        // a block's imports are named by nothing outside it
+        if self.sc.block || self.sc.module == u32::MAX { return false; }
+        let mname = self.prog.name(self.prog.mods[self.sc.module as usize].def);
+        if self.by_name.contains(&(mname.to_string(), n.to_string())) { return true; }
+        if self.resolved.iter().any(|(m, name, src)| *m == self.sc.module && name == n && *src != self.item.0) { return true; }
+        let mdef = self.prog.mods[self.sc.module as usize].def;
+        if let Some(gs) = self.globbed_by.get(&mdef) {
+            for g in gs {
+                if let Some(&si) = self.scope_of_module.get(g) { if self.written[si].contains(n) { return true; } }
+            }
+        }
+        false
+    }
+
+    /// Whether the import binds a name in the type namespace (a module, type or trait).
+    fn has_type_ns(&self, l: &Leaf) -> bool {
+        if self.sc.module == u32::MAX { return true; }
+        let prog = self.prog;
+        let pf = &prog.files[self.sc.file as usize];
+        let mut segs: Vec<(SegKind, crate::program::Sym)> = l.segs.iter().map(|s| (s.kind(), prog.syms.intern_late(pf.text(s.name)))).collect();
+        if segs.last().is_some_and(|s| s.0 == SegKind::SelfValue) { return true; }
+        let Some(last) = segs.pop() else { return true };
+        if segs.is_empty() { return true; }
+        let parent = prog.resolve_mod_path(self.sc.module, false, &segs, false, true).or_else(|| prog.resolve_mod_path(self.sc.module, true, &segs, false, true));
+        match parent {
+            Some(p) => prog.lookup_in_container(p, last.1, true).is_some(),
+            None => true,
+        }
+    }
+
+    /// A glob whose target has no name the importing module may use.
+    fn glob_imports_nothing(&self, l: &Leaf) -> bool {
+        let prog = self.prog;
+        let pf = &prog.files[self.sc.file as usize];
+        if self.sc.block { return false; }
+        let segs: Vec<(SegKind, crate::program::Sym)> = l.segs.iter().map(|s| (s.kind(), prog.syms.intern_late(pf.text(s.name)))).collect();
+        let Some(target) = prog.resolve_mod_path(self.sc.module, false, &segs, false, true).or_else(|| prog.resolve_mod_path(self.sc.module, true, &segs, false, true)) else { return false };
+        let td = prog.def(target);
+        if td.kind != DefKind::Mod { return false; }
+        let m = &prog.mods[td.sub as usize];
+        let visible = |d: DefId| prog.def(d).is_pub;
+        !(m.types.values().any(|&d| visible(d)) || m.values.values().any(|&d| visible(d)) || m.macros.values().any(|&d| visible(d)) || m.globs.iter().any(|_| true))
+    }
+
+    /// The definitions the leaf imports (a name has one per namespace).
+    fn leaf_targets(&self, l: &Leaf) -> Vec<DefId> {
+        let prog = self.prog;
+        if self.sc.module == u32::MAX { return Vec::new(); }
+        let pf = &prog.files[self.sc.file as usize];
+        let mut segs: Vec<(SegKind, crate::program::Sym)> = l.segs.iter().map(|s| (s.kind(), prog.syms.intern_late(pf.text(s.name)))).collect();
+        let mut out = Vec::new();
+        if segs.last().is_some_and(|s| s.0 == SegKind::SelfValue) {
+            segs.pop();
+            for global in [false, true] {
+                if let Some(d) = prog.resolve_mod_path(self.sc.module, global, &segs, false, true) { out.push(d); break; }
+            }
+            return out;
+        }
+        let Some(last) = segs.pop() else { return out };
+        for global in [false, true] {
+            let parent = if segs.is_empty() { None } else { prog.resolve_mod_path(self.sc.module, global, &segs, false, true) };
+            if let Some(p) = parent {
+                for ns in [true, false] { if let Some(d) = prog.lookup_in_container(p, last.1, ns) { out.push(d); } }
+                break;
+            }
+        }
+        if out.is_empty() && segs.len() <= 1 {
+            for ns in [true, false] { if let Some(d) = prog.lookup_in_scope(self.sc.module, last.1, ns) { out.push(d); } }
+        }
+        out
+    }
+
+    fn mentioned(&self, d: DefId) -> bool {
+        self.module_used.get(&self.sc.module).is_some_and(|s| s.contains(&d))
+    }
+
+    fn leaf_used(&self, l: &Leaf, item_lo: u32) -> bool {
+        let prog = self.prog;
+        let sc = self.sc;
+        let pf = &prog.files[sc.file as usize];
+        let names = self.names;
+        if l.glob {
+            // the names the glob brings in
+            let segs: Vec<(SegKind, crate::program::Sym)> = l.segs.iter().map(|s| (s.kind(), prog.syms.intern_late(pf.text(s.name)))).collect();
+            if sc.module == u32::MAX { return true; }
+            let Some(target) = prog.resolve_mod_path(sc.module, false, &segs, false, true).or_else(|| prog.resolve_mod_path(sc.module, true, &segs, false, true)) else { return true };
+            let td = prog.def(target);
+            // a proc-macro crate's macros are not bindings Relax lists: its glob cannot be judged
+            if prog.crates.get(td.krate as usize).is_some_and(|c| c.proc_macro) { return true; }
+            let mut bound: Vec<String> = Vec::new();
+            match td.kind {
+                DefKind::Mod => {
+                    // the module and what it glob-imports in turn
+                    let mut stack = vec![td.sub];
+                    let mut seen: HashSet<u32> = HashSet::new();
+                    while let Some(mi) = stack.pop() {
+                        if !seen.insert(mi) { continue; }
+                        let m = &prog.mods[mi as usize];
+                        for k in m.types.keys().chain(m.values.keys()).chain(m.macros.keys()) { bound.push(prog.syms.str(*k).to_string()); }
+                        if m.types.values().chain(m.values.values()).any(|&d| self.mentioned(d)) { return true; }
+                        for (_, &d) in m.types.iter() {
+                            if prog.def(d).kind == DefKind::Trait && self.traits.contains(&d) { return true; }
+                        }
+                        for (d, _) in &m.anon_traits { if self.traits.contains(d) { return true; } }
+                        for &(g, _) in &m.globs { if prog.def(g).kind == DefKind::Mod { stack.push(prog.def(g).sub); } }
+                    }
+                }
+                DefKind::Enum => {
+                    for &v in &prog.variants[td.sub as usize] { bound.push(prog.name(v).to_string()); }
+                }
+                _ => return true,
+            }
+            return bound.iter().any(|n| names.contains(n) || self.used_by_use(n, item_lo) || self.used_outside(n, item_lo));
+        }
+        if l.empty { return false; }
+        let Some(name) = l.name.as_deref() else { return true };
+        if self.leaf_targets(l).iter().any(|&d| self.mentioned(d)) { return true; }
+        if names.contains(name) || (self.has_type_ns(l) && self.used_by_use(name, item_lo)) { return true; }
+        if self.used_outside(name, item_lo) { return true; }
+        // a trait is used by calling its methods
+        if sc.module == u32::MAX { return false; }
+        for ns in [true, false] {
+            if let Some(d) = prog.lookup_in_scope(sc.module, prog.syms.intern_late(name), ns) {
+                if prog.def(d).kind == DefKind::Trait && self.traits.contains(&d) { return true; }
+            }
+        }
+        false
+    }
+}

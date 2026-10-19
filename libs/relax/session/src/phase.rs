@@ -19,7 +19,9 @@ pub static ROUTING: AtomicU8 = AtomicU8::new(0);
 /// Whether this thread's allocations belong to the compiler arena.
 #[inline]
 pub fn in_compiler() -> bool {
-    PHASE.with(|p| p.get()) == COMPILER
+    // `try_with` of a const TLS without a destructor never fails and compiles to one
+    // thread-pointer-relative load; `with` stays a call (it carries a panic path)
+    PHASE.try_with(|p| p.get()).map_or(false, |p| p == COMPILER)
 }
 
 /// Puts the calling thread in a phase until dropped. !Send: it restores this thread's TLS.

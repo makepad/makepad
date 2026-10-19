@@ -35,6 +35,7 @@ enum CastError {
     NeedViaInt,
     IllegalCast,
     NonScalar,
+    ForeignNonExhaustiveAdt,
     CastToBool,
     CastToChar,
     SizedUnsizedCast,
@@ -154,7 +155,12 @@ impl Fcx<'_> {
             self.err(lo, format!("E0620: cast to unsized type: `{}` as `{}`", es, cs));
             return;
         }
-        if self.cast_is_coercion(e, expr_ty, cast_ty) { return; }
+        if self.cast_is_coercion(e, expr_ty, cast_ty) {
+            // cast.rs: a raw pointer to raw pointer cast is not recorded as a coercion
+            let raw = |t: TyId| matches!(self.tcx.tys.kind(t), TyKind::Ptr(..));
+            if crate::lint::enabled() && !(raw(expr_ty) && raw(cast_ty)) { self.b.coercion_casts.insert(e.0, ()); }
+            return;
+        }
         match self.do_cast_check(e, expr_ty, cast_ty, lo) {
             Ok(()) => {}
             Err(err) => self.report_cast_error(err, &es, &cs, lo),
@@ -169,6 +175,7 @@ impl Fcx<'_> {
             CastError::Reported => {}
             CastError::NeedDeref | CastError::NeedViaPtr | CastError::NeedViaThinPtr | CastError::NeedViaInt | CastError::IllegalCast
             | CastError::DifferingKinds => self.err(lo, invalid),
+            CastError::ForeignNonExhaustiveAdt => self.err(lo, invalid),
             CastError::CastToBool => self.err(lo, format!("E0054: cannot cast `{}` as `bool`", es)),
             CastError::CastToChar => self.err(lo, format!("E0604: only `u8` can be cast as `char`, not `{}`", es)),
             CastError::NonScalar => self.err(lo, format!("E0605: non-primitive cast: `{}` as `{}`", es, cs)),
@@ -222,6 +229,19 @@ impl Fcx<'_> {
             },
             _ => return Err(CastError::NonScalar),
         };
+        // an enum with a non-exhaustive variant of another crate
+        if let TyKind::Adt(d, _, _) = self.tcx.tys.kind(expr_ty).clone() {
+            if self.prog.def(d).krate != self.prog.def(self.b.def).krate {
+                let hit = self.tcx.adts.get(&d).is_some_and(|a| a.variants.iter().any(|v| {
+                    let vd = self.prog.def(v.def);
+                    let ast = &self.prog.files[vd.file as usize].ast;
+                    // (a struct's own attributes are its variant's)
+                    let attrs = if vd.kind == DefKind::Variant { ast.list(ast.item(vd.item).attrs).to_vec() } else { ast.list(ast.item(self.prog.def(d).item).attrs).to_vec() };
+                    crate::lang_items::has_attr(self.prog, vd.file, &attrs, "non_exhaustive")
+                }));
+                if hit { return Err(CastError::ForeignNonExhaustiveAdt); }
+            }
+        }
         match (t_from, t_cast) {
             // these types have invariants: nothing casts into them
             (_, Int(IntKind::CEnum) | FnPtr) => Err(CastError::NonScalar),

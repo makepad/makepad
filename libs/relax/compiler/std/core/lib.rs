@@ -222,7 +222,7 @@ pub mod prelude {
         pub use crate::default::Default;
         pub use crate::iter::{DoubleEndedIterator, ExactSizeIterator, Extend, IntoIterator, Iterator};
         pub use crate::marker::{Copy, Send, Sized, Sync, Unpin};
-        pub use crate::mem::drop;
+        pub use crate::mem::{align_of, align_of_val, drop, size_of, size_of_val};
         pub use crate::ops::{AsyncFn, AsyncFnMut, AsyncFnOnce, Drop, Fn, FnMut, FnOnce};
         pub use crate::option::Option::{self, None, Some};
         pub use crate::result::Result::{self, Err, Ok};

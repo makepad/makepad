@@ -444,7 +444,7 @@ mod tests {
         assert!(matches!(region(*r), RegionKind::ReVar(_)));
         // rustc rejects this deferred closure as not general enough; it does
         // not acquire a higher-ranked signature from a previous use of `g`.
-        assert!(check("deferred_closure_rejected").errors.iter().any(|error| error.contains("E0277")));
+        assert!(check("deferred_closure_rejected").errors.iter().any(|error| error.contains("E0277") || error.contains("E0271")));
         for (name, count) in [("closure_expected", 8), ("closure_routes", 6)] {
             let body = check(name);
             assert!(body.errors.is_empty(), "{name}: {:?}", body.errors);

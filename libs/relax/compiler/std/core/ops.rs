@@ -32,6 +32,7 @@ pub trait DerefMut: Deref + PointeeSized {
 
 impl<'a, T: ?Sized> Deref for &'a T {
     type Target = T;
+    #[rustc_diagnostic_item = "noop_method_deref"]
     fn deref(&self) -> &T {
         *self
     }
@@ -64,6 +65,7 @@ pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
 // implements these for closures, fn items and fn pointers itself.
 #[cfg_attr(not(relax_check), lang = "fn_once")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnOnce<Args> {
     #[cfg_attr(not(relax_check), lang = "fn_once_output")]
     type Output;
@@ -72,12 +74,14 @@ pub trait FnOnce<Args> {
 }
 #[cfg_attr(not(relax_check), lang = "fn_mut")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnMut<Args>: FnOnce<Args> {
     #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "fn")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait Fn<Args>: FnMut<Args> {
     #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call(&self, args: Args) -> Self::Output;
@@ -194,61 +198,73 @@ pub trait AsyncFnKindHelper<GoalKind> {}
 #[cfg_attr(not(relax_check), lang = "add")]
 pub trait Add<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn add(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "sub")]
 pub trait Sub<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn sub(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "mul")]
 pub trait Mul<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn mul(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "div")]
 pub trait Div<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn div(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "rem")]
 pub trait Rem<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn rem(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "neg")]
 pub trait Neg {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn neg(self) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "not")]
 pub trait Not {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn not(self) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitand")]
 pub trait BitAnd<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitand(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitor")]
 pub trait BitOr<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitor(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitxor")]
 pub trait BitXor<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitxor(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "shl")]
 pub trait Shl<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shl(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "shr")]
 pub trait Shr<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shr(self, rhs: Rhs) -> Self::Output;
 }
 

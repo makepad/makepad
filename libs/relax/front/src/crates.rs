@@ -329,9 +329,9 @@ pub fn discover(sess: &std::sync::Arc<crate::Session>, crates: &[CrateUnit], cfg
             s.queue.push(Job { crate_idx: i as u32, path: crates[i].src_path.clone(), edition: crates[i].edition, mod_rs: true, active: true });
         }
     }
-    std::thread::scope(|scope| {
+    crate::pool::scope(|scope| {
         for _ in 0..threads {
-            scope.spawn(|| { let _z = crate::zone_alloc::compiler_thread(); loop {
+            scope.spawn(|| { loop {
                 let job = {
                     let mut s = state.lock().unwrap();
                     loop {

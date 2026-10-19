@@ -246,7 +246,7 @@ impl RPITVisitor<'_> {
                 match *arg {
                     GenericArg::Type(t) => self.visit_ty(t),
                     GenericArg::Binding(_, args, t) => { self.visit_args(args); self.visit_ty(t); }
-                    GenericArg::Constraint(_, bs) => self.visit_bounds(bs),
+                    GenericArg::Constraint(_, args, bs) => { self.visit_args(args); self.visit_bounds(bs); },
                     _ => {}
                 }
             },

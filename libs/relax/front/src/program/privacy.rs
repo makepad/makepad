@@ -183,7 +183,7 @@ impl Program {
         let mut out = Vec::new();
         for im in &self.imports {
             let krate = self.mods[im.module as usize].krate;
-            if !own.get(krate as usize).copied().unwrap_or(false) || im.bound & 4 != 0 {
+            if !own.get(krate as usize).copied().unwrap_or(false) || im.bound & BOUND_INJECTED != 0 {
                 continue;
             }
             let edition = self.crates[krate as usize].edition;
@@ -202,7 +202,7 @@ impl Program {
             };
             if let Some(e) = single.or_else(|| self.path_privacy(im.module, im.global, segs, ns, edition < 2018, true)) {
                 out.push(self.record_error(im.file, im.pos, "resolve", self.privacy_message(&e)));
-            } else if im.glob && im.bound & 8 == 0 && self.glob_of_own_module(im, segs, edition) {
+            } else if im.glob && im.bound & BOUND_PREFIX_ONLY == 0 && self.glob_of_own_module(im, segs, edition) {
                 out.push(self.record_error(im.file, im.pos, "resolve", "E0432: unresolved import -- cannot glob-import a module into itself".to_string()));
             } else if !im.glob && im.is_pub && !im.ext {
                 if let Some(msg) = self.cannot_reexport(im, segs, edition) {

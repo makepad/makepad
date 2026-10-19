@@ -4,10 +4,12 @@
 use crate::intrinsics_mem as im;
 
 #[rustc_promotable]
+#[rustc_diagnostic_item = "ptr_null"]
 pub const fn null<T>() -> *const T {
     0 as *const T
 }
 #[rustc_promotable]
+#[rustc_diagnostic_item = "ptr_null_mut"]
 pub const fn null_mut<T>() -> *mut T {
     0 as *mut T
 }
@@ -110,6 +112,7 @@ pub const fn from_mut<T: crate::marker::PointeeSized>(r: &mut T) -> *mut T {
 /// A non-null `*mut T` (gives `Option<NonNull<T>>` the null niche).
 #[repr(transparent)]
 #[rustc_layout_scalar_valid_range_start(1)]
+#[rustc_nonnull_optimization_guaranteed]
 #[cfg_attr(not(relax_check), lang = "non_null")]
 pub struct NonNull<T: crate::marker::PointeeSized> {
     pointer: *const T,
@@ -201,7 +204,9 @@ impl<'a, T: crate::marker::PointeeSized> From<&'a mut T> for NonNull<T> {
         NonNull { pointer: r as *mut T as *const T }
     }
 }
-unsafe impl<T: crate::marker::PointeeSized> Send for NonNull<T> where T: Send {}
+// library/core/src/ptr/non_null.rs:81-86
+impl<T: crate::marker::PointeeSized> !Send for NonNull<T> {}
+impl<T: crate::marker::PointeeSized> !Sync for NonNull<T> {}
 
 // ported from library/core/src/ptr/metadata.rs:56-68,158-169 @8d1a764
 #[cfg_attr(not(relax_check), lang = "pointee_trait")]

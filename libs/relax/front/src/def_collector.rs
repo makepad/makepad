@@ -600,7 +600,7 @@ impl DefCollector<'_> {
                     }
                     GenericArg::Const(e) => self.visit_anon_const(e),
                     GenericArg::Binding(_, args, t) => { self.visit_args(args, opaque); self.visit_ty(t, opaque); }
-                    GenericArg::Constraint(_, bs) => self.visit_bounds(bs, opaque),
+                    GenericArg::Constraint(_, args, bs) => { self.visit_args(args, opaque); self.visit_bounds(bs, opaque); },
                     GenericArg::Lifetime(_) => {}
                 }
             },

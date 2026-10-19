@@ -16,10 +16,12 @@ pub struct RwLock<T: ?Sized> {
 unsafe impl<T: Send> Send for RwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
+#[rustc_diagnostic_item = "RwLockReadGuard"]
 pub struct RwLockReadGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
 }
 
+#[rustc_diagnostic_item = "RwLockWriteGuard"]
 pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
     poison: poison::Guard,
@@ -27,6 +29,9 @@ pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
 
 unsafe impl<'a, T: Sync> Sync for RwLockReadGuard<'a, T> {}
 unsafe impl<'a, T: Sync> Sync for RwLockWriteGuard<'a, T> {}
+// library/std/src/sync/poison/rwlock.rs:140,168
+impl<T: ?Sized> !Send for RwLockReadGuard<'_, T> {}
+impl<T: ?Sized> !Send for RwLockWriteGuard<'_, T> {}
 
 impl<T> RwLock<T> {
     pub const fn new(t: T) -> RwLock<T> {

@@ -57,6 +57,13 @@ pub struct Cell<T: ?Sized> {
 }
 
 unsafe impl<T: ?Sized + Send> Send for Cell<T> {}
+// library/core/src/cell.rs:325,1439,2328: shared access to interior mutability is not thread-safe.
+impl<T: ?Sized> !Sync for UnsafeCell<T> {}
+impl<T: ?Sized> !Sync for Cell<T> {}
+impl<T: ?Sized> !Sync for RefCell<T> {}
+impl<T> !Sync for OnceCell<T> {}
+// library/core/src/panic/unwind_safe.rs: UnsafeCell is the one type that is not RefUnwindSafe.
+impl<T: ?Sized> !crate::panic::RefUnwindSafe for UnsafeCell<T> {}
 
 impl<T> Cell<T> {
     pub const fn new(value: T) -> Cell<T> {

@@ -260,6 +260,50 @@ pub fn defined_mask(u: &mut Unit, t: TyId, a: u64, mask: &mut [u8], off: usize, 
     }
 }
 
+/// rustc_const_eval interpret/validity.rs, the scalar part: a constant's final value holds only
+/// valid bools and chars (arrays, tuples and structs are walked). The message on the first invalid one.
+pub fn invalid_scalar(u: &mut Unit, t: TyId, a: u64, depth: u32) -> Option<String> {
+    if depth > 16 { return None; }
+    let t = u.tcx.normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), t);
+    let l = u.layout_of(t);
+    match u.tcx.tys.kind(t).clone() {
+        TyKind::Bool => {
+            let v = unsafe { *(a as *const u8) };
+            (v > 1).then(|| format!("constructing invalid value of type bool: encountered {:#04x}, but expected a boolean", v))
+        }
+        TyKind::Char => {
+            let v = unsafe { (a as *const u32).read_unaligned() };
+            (char::from_u32(v).is_none()).then(|| format!("constructing invalid value of type char: encountered {:#x}, but expected a valid unicode scalar value (in `0..=0x10FFFF` but not in `0xD800..=0xDFFF`)", v))
+        }
+        TyKind::Array(et, n) => {
+            let n = n.try_to_target_usize(&u.tcx.tys)?;
+            let es = u.layout_of(et).size as u64;
+            for i in 0..n.min(1 << 16) {
+                if let Some(m) = invalid_scalar(u, et, a + i * es, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        TyKind::Tuple(ts) => {
+            for (i, ft) in u.tcx.tys.list(ts).to_vec().into_iter().enumerate() {
+                let fo = l.fields.get(i).copied().unwrap_or(0) as u64;
+                if let Some(m) = invalid_scalar(u, ft, a + fo, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        TyKind::Adt(d, args, _) => {
+            let adt = u.tcx.adts.get(&d).cloned()?;
+            if adt.is_enum || adt.is_union { return None; }
+            for fi in 0..adt.variants[0].fields.len() {
+                let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, fi as u32, u.tcx.tys.list(args));
+                let fo = l.fields.get(fi).copied()? as u64;
+                if let Some(m) = invalid_scalar(u, ft, a + fo, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Zeroes the bytes of the value of type `t` at `a` that the value does not define (padding,
 /// inactive enum payloads), as rustc's constant allocations are emitted: a constant's bytes are
 /// then the same whichever way its initializer ran (evaluated here or compiled and run, whose

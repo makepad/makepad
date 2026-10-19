@@ -283,8 +283,10 @@ impl<'a> Parser<'a> {
                 g.p(if eq { "!(*__relax_l == *__relax_r)" } else { "*__relax_l == *__relax_r" });
                 g.p(&format!(" {{ {}::panicking::panic_at(", CORE));
                 let op = if eq { "==" } else { "!=" };
-                let l = Src::Ref("__relax_l".to_string());
-                let r = Src::Ref("__relax_r".to_string());
+                // rustc's assert_failed formats `&left` (a `&&T`, `T: ?Sized`): `&T: Debug`
+                // keeps unsized operands (`dyn Tr`, `[T]`) out of the Sized-bounded Argument::new_debug
+                let l = Src::Val("__relax_l".to_string());
+                let r = Src::Val("__relax_r".to_string());
                 let dbg = || default_spec("new_debug");
                 let mut pieces = vec![Piece::Lit(format!("assertion `left {} right` failed", op))];
                 let mut srcs = Vec::new();
@@ -395,7 +397,7 @@ impl<'a> Parser<'a> {
                         Src::Val("file!()".to_string()),
                         Src::Val("line!()".to_string()),
                         Src::Val("column!()".to_string()),
-                        Src::Ref("&__relax_tmp".to_string()),
+                        Src::Ref("&&__relax_tmp".to_string()),
                     ];
                     self.gen_pieces(&mut g, pieces, srcs, lo)?;
                     g.p("); __relax_tmp } }");
@@ -435,7 +437,44 @@ impl<'a> Parser<'a> {
 
     /// `name!(..)` at the cursor, up to the next top-level comma before `hi`, when it is a
     /// built-in that evaluates to a string literal: (its value, the token after it).
-    fn fmt_macro_literal(&self, hi: usize) -> Option<(String, usize)> {
+    /// The format string a macro call at the cursor expands to (rustc_builtin_macros format.rs
+    /// `expr_to_spanned_string`: the argument is expanded eagerly, through `macro_rules!` calls
+    /// that expand to further calls, down to a string literal); None when it is not one.
+    fn fmt_macro_literal(&mut self, hi: usize) -> PResult<Option<(String, usize)>> {
+        if self.macros.is_some() && self.mac_ahead() {
+            let save = self.pos;
+            let lo = self.lo();
+            let path = self.path(true)?;
+            if let Some(def) = self.rules_macro(&path) {
+                self.expect(T::Not)?;
+                let (_, toks) = self.delim_tt()?;
+                let end = self.pos;
+                if end == hi || self.toks.at(end).kind == T::Comma {
+                    let start = self.expand_call(&def, toks, lo)?;
+                    let eof = (start..).find(|&i| self.toks.at(i).kind == T::Eof).unwrap_or(start);
+                    let inner = self.in_expansion(start, |p| {
+                        if matches!(p.kind(), T::Str | T::RawStr) && p.pos + 1 == eof {
+                            let t = p.tok();
+                            let text = String::from_utf8_lossy(p.tok_text(t)).into_owned();
+                            p.pos += 1;
+                            return Ok(Some(crate::lit::unescape_str(&text)));
+                        }
+                        let inner = p.fmt_macro_literal(eof)?;
+                        if let Some((_, end)) = &inner {
+                            p.pos = *end;
+                        }
+                        Ok(inner.map(|(text, _)| text))
+                    })?;
+                    self.pos = end;
+                    return Ok(inner.map(|text| (text, end)));
+                }
+            }
+            self.pos = save;
+        }
+        Ok(self.fmt_builtin_literal(hi))
+    }
+
+    fn fmt_builtin_literal(&self, hi: usize) -> Option<(String, usize)> {
         if !(matches!(self.kind(), T::Ident) && self.nth(1) == T::Not) {
             return None;
         }
@@ -471,7 +510,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let text = String::from_utf8_lossy(self.tok_text(t)).into_owned();
             c.fmt = Some((crate::lit::unescape_str(&text), t.lo));
-        } else if let Some((text, end)) = self.fmt_macro_literal(hi) {
+        } else if let Some((text, end)) = self.fmt_macro_literal(hi)? {
             // a macro that expands to a string literal (`format!(concat!("a", "{}"), x)`):
             // rustc expands it eagerly as the format string (format_args's expr_to_spanned_string)
             c.fmt = Some((text, t.lo));

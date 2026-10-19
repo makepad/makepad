@@ -16,6 +16,7 @@ impl Clone for ! {
 }
 
 impl<'a, T: crate::marker::PointeeSized> Clone for &'a T {
+    #[rustc_diagnostic_item = "noop_method_clone"]
     fn clone(&self) -> &'a T {
         *self
     }

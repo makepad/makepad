@@ -933,10 +933,10 @@ fn scan_text_mode(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16,
     if declarations_only && !cfg.session.options.rs_lazy {
         toks = lazy::demand::active_tokens(&src, &toks, cfg);
     }
-    scan_tokens(path, dir, mpath, krate, cfg, src_len, src, toks, context, macro_surface)
+    scan_tokens(path, dir, mpath, krate, edition, cfg, src_len, src, toks, context, macro_surface)
 }
 
-fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, src_len: usize,
+fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, src_len: usize,
     src: ScanBytes, toks: Vec<Tok>, context: &crate::source_context::Context, macro_surface: bool,
 ) -> Option<Scanned> {
     let mut defs = Vec::new();
@@ -1147,7 +1147,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
                         .iter()
                         .map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo })
                         .collect();
-                    if let Ok(mut def) = crate::macros::parse_def(&name, krate, &mt) {
+                    if let Ok(mut def) = crate::macros::parse_def(&name, krate, edition, &mt) {
                         def.exported = attrs.exported;
                         if attrs.local_inner {
                             crate::macros::local_inner_macros(&mut def);

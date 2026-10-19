@@ -127,9 +127,28 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
+    errors.extend(relax_types::lint_levels::check(&u.prog, &own));
+    relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own);
+    relax_types::lint_dead::reset();
     errors.extend(u.prog.import_privacy_errors(&own));
     errors.extend(u.prog.attribute_errors(&own));
     errors.extend(u.prog.ast_validation_errors(&own));
+    // item well-formedness (rustc wfcheck): after the signatures, and only when they are sound -- an
+    // item with an unresolved or ill-counted type has no well-formedness to speak of
+    if errors.is_empty() {
+        let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
+        let (prog, tcx) = (&u.prog, &u.tcx);
+        for e in par_map(&defs, |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::wfcheck::obligations::check_def(prog, tcx, d)))
+            .unwrap_or_else(|p| vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
+                p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())])) {
+            errors.extend(e);
+        }
+        if errors.is_empty() {
+            if let Some(main) = crate::run::find_main(&u.prog, root) {
+                if relax_types::wfcheck::obligations::is_entry_main(&u.prog, main) { errors.extend(relax_types::wfcheck::obligations::check_main(&u.prog, &u.tcx, main)); }
+            }
+        }
+    }
     let options = &u.prog.session.clone().options;
     crate::borrowck::lazy::disable_gandalf();
     if options.borrowck_all != crate::options::BorrowckAll::Default {
@@ -188,7 +207,17 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             errs
         }));
         match r {
-            Ok(e) => errors.extend(e),
+            Ok(e) => {
+                // rustc evaluates every array length / const argument written in a signature (used
+                // or not): one that fails is reported there (E0080)
+                if e.is_empty() && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && u.prog.def(u.prog.def(anon).parent).kind != DefKind::Trait {
+                    let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+                    let before = u.tcx.dcx.err_count();
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.const_eval_resolve(&u.prog, env, anon, &[])));
+                    let _ = before;
+                }
+                errors.extend(e)
+            }
             Err(_) => errors.push(format!("internal compiler error while checking {}", u.prog.def_path(anon))),
         }
     }
@@ -206,6 +235,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: body {}", prog.def_path(d)); }
         let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, retry: false };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // the syntax-level lints do not wait for the types (rustc runs them before analysis)
+            relax_types::lint_early::check_def(prog, tcx, d);
             let body = tcx.typeck(prog, d);
             // library stability (E0658) of what the body names
             let gates = relax_types::feature_gate::check_stability(prog, &body);
@@ -214,6 +245,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                 return (body.errors.to_vec(), Vec::new());
             }
             relax_types::lint::check_literals(prog, tcx, &body);
+            relax_types::lint_pass::check_body(prog, tcx, &body);
             let unsafety = relax_types::unsafety::check_body(prog, tcx, &body);
             if !unsafety.is_empty() {
                 return (unsafety, Vec::new());
@@ -313,6 +345,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         if let Some(d) = o.seed { seeds.push(d); }
     }
     let checked = seeds.len();
+    relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root);
+    relax_types::lint_early2::finish(&u.prog, &own);
+    errors.extend(static_self_access(up, &own));
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
     for &k in crates {
         errors.extend(relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
@@ -395,6 +430,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     } else {
         eprintln!("makepad check: {} crates type- and borrow-checked in {:.1} s", crates.len(), t_front.as_secs_f64());
     }
+    relax_types::lint_levels::finish(&u.prog);
     let (lint_errors, mut lint_warnings) = relax_types::lint::take();
     errors.extend(lint_errors);
     lint_warnings.sort_by_cached_key(|e| error_position(e));
@@ -758,4 +794,64 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
         });
         work.extend(callees);
     }
+}
+
+/// rustc_const_eval interpret/memory.rs: "encountered static that tried to access itself during
+/// initialization" -- the initializer of a static reads the static's own value (`static A: u32 = A`).
+/// Taking its address (`&A`, `&A.0`, `addr_of!`) is fine. Initializers holding closures are left
+/// alone (a closure body runs later).
+fn static_self_access(up: *mut Unit, own: &[bool]) -> Vec<String> {
+    use crate::ast::ExprKind;
+    use crate::typeck::Res;
+    let u = unsafe { &*up };
+    let mut out = Vec::new();
+    for i in 0..u.prog.defs.len() {
+        let d = crate::program::DefId(i as u32);
+        let def = u.prog.def(d);
+        if def.kind != DefKind::Static || !own[def.krate as usize] { continue; }
+        if relax_types::const_eval::const_body(&u.prog, d).is_none() { continue; }
+        let Ok(body) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.typeck(&u.prog, d))) else { continue };
+        if !body.errors.is_empty() { continue; }
+        let ast = &u.prog.files[body.file as usize].ast;
+        let ids: Vec<crate::ast::ExprId> = (0..body.expr_ty.len()).map(|k| crate::ast::ExprId(if k < body.expr_n1 as usize { body.expr_lo + k as u32 } else { body.expr_lo2 + k as u32 - body.expr_n1 })).collect();
+        if ids.iter().any(|e| matches!(ast.expr(*e).kind, ExprKind::Closure(..) | ExprKind::Async(..))) { continue; }
+        let mut addr_only = std::collections::HashSet::new();
+        for e in &ids {
+            if let ExprKind::AddrOf(_, _, x) = ast.expr(*e).kind {
+                let mut x = x;
+                loop {
+                    addr_only.insert(x.0);
+                    match ast.expr(x).kind {
+                        ExprKind::Paren(y) | ExprKind::Field(y, _) | ExprKind::TupleField(y, _) | ExprKind::Index(y, _) => x = y,
+                        _ => break,
+                    }
+                }
+            }
+        }
+        // a write through a place rooted in another static
+        for e in &ids {
+            let (ExprKind::Assign(lhs, _) | ExprKind::AssignOp(_, lhs, _)) = ast.expr(*e).kind else { continue };
+            let mut x = lhs;
+            loop {
+                match ast.expr(x).kind {
+                    ExprKind::Paren(y) | ExprKind::Field(y, _) | ExprKind::TupleField(y, _) | ExprKind::Index(y, _) | ExprKind::AddrOf(_, _, y) | ExprKind::Unary(crate::ast::UnOp::Deref, y) => x = y,
+                    _ => break,
+                }
+            }
+            if matches!(ast.expr(x).kind, ExprKind::Path(_)) {
+                if let Some(Res::Def(t)) = body.res.get(&x.0) {
+                    if *t != d && u.prog.def(*t).kind == DefKind::Static {
+                        out.push(u.prog.record_error(body.file, ast.expr(*e).lo, "typeck", "E0080: modifying a static's initial value from another static's initializer".to_string()));
+                    }
+                }
+            }
+        }
+        for e in &ids {
+            if matches!(ast.expr(*e).kind, ExprKind::Path(_)) && !addr_only.contains(&e.0) && matches!(body.res.get(&e.0), Some(Res::Def(t)) if *t == d) {
+                out.push(u.prog.record_error(body.file, ast.expr(*e).lo, "typeck", "E0080: encountered static that tried to access itself during initialization".to_string()));
+                break;
+            }
+        }
+    }
+    out
 }

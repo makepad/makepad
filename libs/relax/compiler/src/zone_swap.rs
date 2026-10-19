@@ -75,6 +75,9 @@ pub(crate) fn remember_runtime(prog: &Program, krate: u32) {
 const ALLOWED: [&str; 5] = ["run-owner", "run-spec", "run-o3-", "run-O2", "run-complete"];
 
 fn unexpected_threads() -> Vec<String> {
+    // the front's fork/join workers idle with the arena chunks and thread-local caches of the
+    // generation they last ran in: they end before the swap (and start again on demand)
+    crate::pool::retire_idle();
     crate::zone_alloc::kept_with(|| {
         let mut v = crate::zone_alloc::live_compiler_threads();
         v.retain(|n| !ALLOWED.iter().any(|a| n.starts_with(a)));

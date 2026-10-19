@@ -26,6 +26,11 @@ pub unsafe auto trait Sync {}
 // thread-safe access; a mutable borrow transfers exclusive access.
 unsafe impl<T: Sync + PointeeSized> Send for &T {}
 unsafe impl<T: Send + PointeeSized> Send for &mut T {}
+// library/core/src/marker.rs:97-99,672-674: a raw pointer is neither Send nor Sync.
+impl<T: PointeeSized> !Send for *const T {}
+impl<T: PointeeSized> !Send for *mut T {}
+impl<T: PointeeSized> !Sync for *const T {}
+impl<T: PointeeSized> !Sync for *mut T {}
 #[cfg_attr(not(relax_check), lang = "unpin")]
 pub auto trait Unpin {}
 /// Zero-sized marker owning a `T` for variance/drop-check purposes.

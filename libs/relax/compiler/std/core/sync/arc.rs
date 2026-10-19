@@ -347,6 +347,19 @@ impl<T, const N: usize> From<[T; N]> for Arc<[T]> {
     }
 }
 
+/// `Arc<[T]>` of exactly N elements as `Arc<[T; N]>`, else the pointer back (alloc/src/arc.rs).
+impl<T, const N: usize> crate::convert::TryFrom<Arc<[T]>> for Arc<[T; N]> {
+    type Error = Arc<[T]>;
+    fn try_from(boxed_slice: Arc<[T]>) -> Result<Arc<[T; N]>, Arc<[T]>> {
+        if boxed_slice.len() == N {
+            let ptr = Arc::into_raw(boxed_slice) as *mut [T; N];
+            Ok(unsafe { Arc::from_raw(ptr) })
+        } else {
+            Err(boxed_slice)
+        }
+    }
+}
+
 impl<T> From<Vec<T>> for Arc<[T]> {
     fn from(v: Vec<T>) -> Arc<[T]> {
         let mut v = v;

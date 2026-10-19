@@ -67,6 +67,16 @@ pub struct StderrLock<'a> {
     inner: ReentrantLockGuard<'a, RefCell<Raw>>,
 }
 
+// library/std/src/io/stdio.rs:775-1075
+impl crate::panic::UnwindSafe for Stdout {}
+impl crate::panic::RefUnwindSafe for Stdout {}
+impl crate::panic::UnwindSafe for StdoutLock<'_> {}
+impl crate::panic::RefUnwindSafe for StdoutLock<'_> {}
+impl crate::panic::UnwindSafe for Stderr {}
+impl crate::panic::RefUnwindSafe for Stderr {}
+impl crate::panic::UnwindSafe for StderrLock<'_> {}
+impl crate::panic::RefUnwindSafe for StderrLock<'_> {}
+
 pub struct Stdin {
     inner: &'static Mutex<BufReader<Raw>>,
 }

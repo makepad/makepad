@@ -6,7 +6,9 @@ use crate::option::Option::{self, None, Some};
 
 #[cfg_attr(not(relax_check), lang = "eq")]
 pub trait PartialEq<Rhs: crate::marker::PointeeSized = Self>: crate::marker::PointeeSized {
+    #[must_use]
     fn eq(&self, other: &Rhs) -> bool;
+    #[must_use]
     fn ne(&self, other: &Rhs) -> bool {
         !self.eq(other)
     }
@@ -85,15 +87,19 @@ impl Ord for Ordering {
 #[cfg_attr(not(relax_check), lang = "partial_ord")]
 pub trait PartialOrd<Rhs: crate::marker::PointeeSized = Self>: PartialEq<Rhs> + crate::marker::PointeeSized {
     fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;
+    #[must_use]
     fn lt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less))
     }
+    #[must_use]
     fn le(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less | Equal))
     }
+    #[must_use]
     fn gt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater))
     }
+    #[must_use]
     fn ge(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater | Equal))
     }

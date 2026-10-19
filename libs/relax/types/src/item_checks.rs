@@ -206,6 +206,54 @@ pub fn representability(prog: &Program, tcx: &Tcx, d: DefId) -> Option<String> {
         if items.len() == 1 { "" } else { "s" }, list, if items.len() == 1 { "has" } else { "have" })))
 }
 
+/// E0391 for a bound that equates an associated type with another of the same parameter
+/// (`fn f<T: Trait<A = T::B>>()`): lowering `T::B` needs T's bounds, which are being lowered
+/// (rustc: cycle detected when computing the bounds for type parameter `T`).
+pub fn bound_assoc_cycles(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let Some(g) = ast.kind_generics(&ast.item(def.item).kind) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut check = |param: &str, bounds: &[ast::Bound], pos: u32| {
+        for b in bounds {
+            let ast::Bound::Trait { path, .. } = b else { continue };
+            let Some(bt) = tcx.resolve_type_path_def(prog, def.file, def.scope, path) else { continue };
+            for seg in ast.segs(path.segs) {
+                let Some(ast::GenericArgs::Angle(v)) = ast.gargs(seg.args()) else { continue };
+                for a in ast.list(*v) {
+                    let ast::GenericArg::Binding(_, _, t) = a else { continue };
+                    let ast::Ty::Path(p) = ast.ty(*t) else { continue };
+                    let segs = ast.segs(p.segs);
+                    if segs.len() == 2 && p.no_qself() && prog.files[def.file as usize].text(segs[0].name) == param {
+                        let sym = prog.syms.get(prog.files[def.file as usize].text(segs[1].name)).unwrap_or(u32::MAX);
+                        if tcx.trait_assoc(prog, bt, sym).is_some() {
+                            out.push(prog.record_error(def.file, pos, "typeck", format!("E0391: cycle detected when computing the bounds for type parameter `{}`", param)));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    for p in ast.list(g.params) {
+        if let ast::GenericParamKind::Type(bounds, _) = &p.kind {
+            let name = prog.files[def.file as usize].text(p.name).to_string();
+            check(&name, ast.list(*bounds), p.name.lo);
+        }
+    }
+    for w in ast.list(g.where_) {
+        if let ast::WherePred::Bound { ty, bounds, .. } = w {
+            if let ast::Ty::Path(p) = ast.ty(*ty) {
+                let segs = ast.segs(p.segs);
+                if segs.len() == 1 && p.no_qself() {
+                    let name = prog.files[def.file as usize].text(segs[0].name).to_string();
+                    check(&name, ast.list(*bounds), segs[0].name.lo);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// E0391 for a trait's supertrait bounds (rustc_hir_analysis collect/predicates_of.rs
 /// super_predicates_of): a trait that is its own supertrait, directly or through others, and a
 /// bound that names an associated type through `Self` (`trait T: Iterator<Item = Self::Item>`),
@@ -245,6 +293,25 @@ pub fn supertrait_cycles(prog: &Program, tcx: &Tcx, td: DefId) -> Vec<String> {
     }
     // `Self::X` in the arguments of a super bound whose trait (or its supertraits) defines an
     // associated type X: resolving it asks for exactly the bounds being lowered
+    // `trait B: A<T: B>`: an associated type bounded by the trait being defined (implied predicates)
+    for b in ast.list(*supers) {
+        if let ast::Bound::Trait { path, .. } = b {
+            for seg in ast.segs(path.segs) {
+                let Some(ast::GenericArgs::Angle(v)) = ast.gargs(seg.args()) else { continue };
+                for a in ast.list(*v) {
+                    let ast::GenericArg::Constraint(_, _, cbs) = a else { continue };
+                    for cb in ast.list(*cbs) {
+                        if let ast::Bound::Trait { path: cp, .. } = cb {
+                            if tcx.resolve_type_path_def(prog, def.file, def.scope, cp) == Some(td) {
+                                out.push(prog.record_error(def.file, ast.item(def.item).lo, "typeck",
+                                    format!("E0391: cycle detected when computing the implied predicates of `{}`", prog.def_path(td))));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut self_assoc = false;
     for b in ast.list(*supers) {
         if let ast::Bound::Trait { path, .. } = b {
@@ -289,50 +356,6 @@ fn self_assoc_names(ast: &ast::Ast, t: ast::TyId, depth: u32, out: &mut Vec<ast:
         ast::Ty::Tuple(v) => for x in ast.list(*v) { self_assoc_names(ast, *x, depth + 1, out); },
         _ => {}
     }
-}
-
-/// rustc_hir_analysis wfcheck.rs check_impl: a trait impl's trait reference is well formed --
-/// the trait's own where-clauses and supertraits hold for it, in the impl's environment
-/// (`trait Foo: Send {}` + `impl Foo for Rc<i8> {}`: E0277 "`Rc<i8>` cannot be sent between
-/// threads safely"). Ambiguous goals are left to the rest of the check.
-pub fn impl_trait_wf(prog: &Program, tcx: &Tcx, imp: DefId) -> Vec<String> {
-    use crate::consts::GenericArg;
-    use crate::next_solver::{ClauseKind, Goal, PredicateKind};
-    let Some(&td) = tcx.impl_trait.get(&imp) else { return Vec::new() };
-    let def = prog.def(imp);
-    let ast = &prog.files[def.file as usize].ast;
-    if ast.as_impl(&ast.item(def.item).kind).is_some_and(|i| i.negative) { return Vec::new(); }
-    let indices = tcx.generic_indices_of(prog, imp);
-    let trait_ref = tcx.impl_trait_ref(prog, imp, &indices.identity_args(&tcx.tys));
-    if trait_ref.args.iter().any(|a| matches!(*a, GenericArg::Type(t) if tcx.tys.has_error(t))) { return Vec::new(); }
-    let env = tcx.param_env_id(prog, imp);
-    let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), imp);
-    let mut errors = Vec::new();
-    for p in tcx.clauses_of(prog, td) {
-        let p = tcx.instantiate_predicate(prog, td, &trait_ref.args, &p);
-        let PredicateKind::Clause(ClauseKind::Trait(t)) = &p.kind else { continue };
-        // the trait's own `Self: Trait` predicate holds through this impl
-        if t.trait_ref.def_id == td { continue; }
-        let tr = t.trait_ref.clone();
-        let r = infcx.evaluate_obligation(prog, Goal { param_env: env, predicate: p.clone() });
-        if r.may_apply() { continue; }
-        let args: Vec<String> = tr.args.iter().map(|a| match a {
-            GenericArg::Type(t) => crate::typeck::ty_to_string(false, prog, tcx, *t),
-            GenericArg::Const(c) => tcx.tys.const_to_string(*c),
-            GenericArg::Lifetime(_) => "'_".to_string(),
-        }).collect();
-        let name = prog.name(tr.def_id).to_string();
-        let self_ty = args.first().cloned().unwrap_or_default();
-        let msg = match name.as_str() {
-            "Sized" => format!("the size for values of type `{}` cannot be known at compilation time", self_ty),
-            "Send" => format!("`{}` cannot be sent between threads safely", self_ty),
-            "Sync" => format!("`{}` cannot be shared between threads safely", self_ty),
-            _ if args.len() > 1 => format!("the trait bound `{}: {}<{}>` is not satisfied", self_ty, name, args[1..].join(", ")),
-            _ => format!("the trait bound `{}: {}` is not satisfied", self_ty, name),
-        };
-        errors.push(prog.record_error(def.file, ast.item(def.item).lo, "typeck", format!("E0277: {}", msg)));
-    }
-    errors
 }
 
 /// rustc_hir_analysis coherence/builtin.rs `visit_implementation_of_copy`: `impl Copy for T`

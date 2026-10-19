@@ -4296,6 +4296,56 @@ mod round32_tests {
 }
 
 #[cfg(test)]
+mod use_edit_tests {
+    use super::*;
+
+    /// Editing a `use` of a same-module enum / fn (the imported def's scope is the module itself)
+    /// takes its old bindings out: no E0252 against its own earlier binding, and the edit patches.
+    #[test]
+    fn editing_a_use_of_a_same_module_item_patches() {
+        isolated_test!(editing_a_use_of_a_same_module_item_patches);
+        const CHILD: &str = "MAKEPAD_RUN_USE_EDIT_CASE";
+        let Ok(case) = std::env::var(CHILD) else {
+            for case in ["enum_variants", "fn_rename"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "reload::use_edit_tests::editing_a_use_of_a_same_module_item_patches", "--nocapture", "--test-threads=1"])
+                    .env(CHILD, case).env("MAKEPAD_RUN_CTFE", "0").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0")
+                    .output().unwrap();
+                assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+            return;
+        };
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        crate::borrowck::lazy::disable_gandalf();
+        let (old, new) = match case.as_str() {
+            "enum_variants" => (
+                "enum M { A, B }\nuse M::{A, B};\nfn main() { let _ = (A, B); }\n",
+                "enum M { A, B }\nuse M::{B, A};\nfn main() { let _ = (A, B); }\n"),
+            _ => (
+                "fn f() {}\nuse self::f as g;\nfn main() { g(); }\n",
+                "fn f() {}\nuse self::f as g;\nfn main() { g(); g(); }\n"),
+        };
+        let path = std::env::temp_dir().join(format!("relax-use-edit-{}-{}.rs", case, std::process::id()));
+        std::fs::write(&path, old).unwrap();
+        let mut session = crate::Session::default();
+        session.options.ctfe = crate::options::Ctfe::Off;
+        let session = std::sync::Arc::new(session);
+        let (prog, core, krate) = crate::load_with_std(&session, path.to_str().unwrap(), "use_edit", false).unwrap();
+        let file = prog.defs.iter().find(|d| d.krate == krate && d.kind == DefKind::Fn).map(|d| d.file).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        crate::layout::set_root_crate(krate);
+        crate::layout::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut unit = Unit::new(prog, tcx, core);
+        let up = &mut *unit as *mut Unit;
+        let outcome = unsafe { apply(up, vec![Edit { file, path: path.to_string_lossy().into_owned(), src: new.as_bytes().to_vec() }]) };
+        assert_eq!(outcome.rung, Rung::Patch, "{case}: {:?}", outcome.lines);
+        std::mem::forget(unit);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod round43_tests {
     #[test]
     fn generated_impl_identity_ignores_tokenization_whitespace() {

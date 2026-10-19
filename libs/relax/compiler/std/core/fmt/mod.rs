@@ -174,6 +174,10 @@ pub struct Arguments<'a> {
     args: &'a [rt::Argument<'a>],
 }
 
+// library/core/src/fmt/mod.rs:904-906
+impl !Send for Arguments<'_> {}
+impl !Sync for Arguments<'_> {}
+
 impl<'a> Arguments<'a> {
     pub const fn new_const(pieces: &'a [&'static str]) -> Arguments<'a> {
         Arguments { pieces, fmt: None, args: &[] }
@@ -677,6 +681,38 @@ impl<'a, T: crate::marker::PointeeSized + LowerExp> LowerExp for &'a T {
     }
 }
 impl<'a, T: crate::marker::PointeeSized + UpperExp> UpperExp for &'a T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        UpperExp::fmt(&**self, f)
+    }
+}
+
+// rustc core/src/fmt/mod.rs fmt_refs!: the radix and exp traits also for `&mut T`
+impl<'a, T: crate::marker::PointeeSized + LowerHex> LowerHex for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        LowerHex::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + UpperHex> UpperHex for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        UpperHex::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + Octal> Octal for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        Octal::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + Binary> Binary for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        Binary::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + LowerExp> LowerExp for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        LowerExp::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + UpperExp> UpperExp for &'a mut T {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         UpperExp::fmt(&**self, f)
     }
