@@ -771,6 +771,16 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
             }
             continue;
         }
+        if from_source && matches!(name.as_slice(), b"track_caller" | b"target_feature") && def.kind == DefKind::Fn && prog.syms.str(def.name) == "main" && prog.def(def.parent).kind == DefKind::Mod && prog.mods[prog.def(def.parent).sub as usize].parent_mod.is_none() && crate::wfcheck::obligations::is_entry_main(prog, d) {
+            let what = if name == b"track_caller" { "be `#[track_caller]`" } else { "have `#[target_feature]`" };
+            errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("`main` function is not allowed to {what}")));
+        }
+        if from_source && name == b"deprecated" && ast.list(ast.item(def.item).attrs).iter().take_while(|b| b.toks.lo != a.toks.lo).any(|b| b.toks.hi > b.toks.lo && crate::cfg::tok_str(p, b.toks.lo as usize) == b"deprecated") {
+            errors.push(prog.record_uncoded_error(def.file, pos, "typeck", "multiple `deprecated` attributes".to_string()));
+        }
+        if from_source && name == b"macro_use" && hi > lo + 1 && crate::cfg::tok_str(p, lo + 1) == b"(" && !matches!(ast.item(def.item).kind, crate::ast::ItemKind::ExternCrate(_)) {
+            errors.push(prog.record_uncoded_error(def.file, pos, "typeck", "arguments to `macro_use` are not allowed here".to_string()));
+        }
         if from_source {
             if let Some(m) = attribute_args_error(p, lo, hi, &name) {
                 errors.push(prog.record_error(def.file, p.tok(m.0).lo, "typeck", format!("{}: malformed `{}` attribute input", m.1, String::from_utf8_lossy(&name))));
@@ -1051,6 +1061,7 @@ fn attribute_target_error(prog: &Program, d: DefId, name: &[u8]) -> Option<&'sta
         b"used" => def.kind == K::Static,
         b"export_name" => static_like && def.kind == K::Static || (fn_like && def.kind != K::ForeignFn && !trait_fn_no_body),
         b"debugger_visualizer" => def.kind == K::Mod,
+        b"link_ordinal" => matches!(def.kind, K::ForeignFn | K::ForeignStatic),
         _ => return None,
     };
     if ok { None } else { Some(what) }

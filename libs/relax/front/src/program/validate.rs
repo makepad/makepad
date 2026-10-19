@@ -53,6 +53,7 @@ impl Program {
                         }
                         self.body_required(ast, &mut err, ci, Some("`impl`"));
                         self.assoc_const_name(&mut err, f, ci);
+                        self.unresolved_assoc_macro(&mut err, f, ci);
                     }
                 }
                 DefKind::Trait => {
@@ -63,6 +64,7 @@ impl Program {
                             err(ci.lo, "E0449: visibility qualifiers are not permitted here -- note: trait items always share the visibility of their trait".into());
                         }
                         self.assoc_const_name(&mut err, f, ci);
+                        self.unresolved_assoc_macro(&mut err, f, ci);
                     }
                 }
                 DefKind::Struct => {
@@ -161,6 +163,19 @@ impl Program {
                 seen.push(name);
             }
         }
+    }
+
+    /// A macro call among the members of an impl or trait that expanded to nothing because no macro
+    /// of that name is in scope (the parser expands what resolves).
+    fn unresolved_assoc_macro(&self, err: &mut impl FnMut(u32, String), f: &ParsedFile, it: &Item) {
+        let ItemKind::Mac(m) = it.kind else { return };
+        let ast = &f.ast;
+        let Some(sg) = ast.segs(ast.row(m).path.segs).last() else { return };
+        let name = f.text(sg.name).trim_start_matches("r#");
+        if self.macros.defs.contains_key(name) || crate::builtins::macro_def(name).is_some() {
+            return;
+        }
+        err(it.lo, format!("cannot find macro `{name}` in this scope"));
     }
 
     /// `const _` is only an item of a module or block (ast_validation `check_item_named`).

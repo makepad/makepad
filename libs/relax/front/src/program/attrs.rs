@@ -9,6 +9,21 @@ use crate::lexer::T;
 const STD_DERIVES: &[&str] = &["Clone", "Copy", "Debug", "Default", "Eq", "Hash", "Ord", "PartialEq", "PartialOrd"];
 
 impl Program {
+    /// Does a derive macro of this name exist anywhere the crates could reach it: Relax's own derives,
+    /// a macro of the table, an import binding the name, or a glob import of another crate?
+    fn derive_in_scope(&self, name: &str, krate: u32) -> bool {
+        if crate::macro_reg::has_derive(name) || self.macros.defs.contains_key(name) {
+            return true;
+        }
+        self.imports.iter().filter(|im| self.file_crate.get(im.file as usize) == Some(&krate)).any(|im| {
+            if im.glob {
+                !matches!(im.segs.first().map(|s| self.syms.str(s.1)), Some("crate" | "self" | "super" | "std" | "core" | "alloc"))
+            } else {
+                im.bind.is_some_and(|b| self.syms.str(b) == name)
+            }
+        })
+    }
+
     /// E0433 / "cannot find attribute" for the attributes of the own crates' files.
     pub fn attribute_errors(&self, own: &[bool]) -> Vec<String> {
         let mut out = Vec::new();
@@ -67,6 +82,7 @@ impl Program {
             let mut tools: Vec<&str> = Vec::new();
             let mut helpers = false;
             let mut std_helpers: Vec<&str> = Vec::new();
+            let mut unknown_derives: Vec<(u32, &str)> = Vec::new();
             for a in &ranges {
                 let (lo, hi) = (a.toks.lo, a.toks.hi);
                 if hi <= lo || hi as usize > f.toks.len() {
@@ -81,6 +97,21 @@ impl Program {
                         }
                     }
                     "derive" => {
+                        // rustc_resolve: a derive name no macro in scope answers
+                        let mut depth = 0u32;
+                        for i in lo + 1..hi {
+                            match f.tok(i).kind {
+                                T::OpenParen => depth += 1,
+                                T::CloseParen => depth = depth.saturating_sub(1),
+                                T::Ident if depth == 1 && f.tok(i + 1).kind != T::PathSep && f.tok(i - 1).kind != T::PathSep => {
+                                    let name = text(i);
+                                    if !STD_DERIVES.contains(&name) && !self.derive_in_scope(name, krate) && !unknown_derives.iter().any(|&(_, n)| n == name) {
+                                        unknown_derives.push((f.tok(i).lo, name));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         for i in lo + 1..hi {
                             if f.tok(i).kind == T::Ident && text(i) == "Default" {
                                 std_helpers.push("default");
@@ -92,6 +123,9 @@ impl Program {
                     }
                     _ => {}
                 }
+            }
+            for (pos, name) in unknown_derives {
+                out.push(self.record_error(fi as u32, pos, "resolve", format!("cannot find derive macro `{name}` in this scope")));
             }
             if helpers {
                 continue;

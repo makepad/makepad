@@ -1057,6 +1057,22 @@ impl<'a> Parser<'a> {
     }
 
     /// The `macro_rules!` macro a call path names, if any.
+    /// Is `name` mentioned in a `use` item of this file (a macro can be imported by path)? Text scan, only
+    /// reached for a call of a macro defined further down.
+    fn name_imported(&self, name: &str) -> bool {
+        let text = String::from_utf8_lossy(self.src);
+        let mut from = 0;
+        while let Some(i) = text[from..].find(name) {
+            let at = from + i;
+            let line_start = text[..at].rfind('\n').map_or(0, |x| x + 1);
+            if text[line_start..at].contains("use ") || text[..at].rfind("use ").is_some_and(|u| !text[u..at].contains(';')) {
+                return true;
+            }
+            from = at + name.len();
+        }
+        false
+    }
+
     fn rules_macro(&self, path: &Path) -> Option<crate::macros::MacroRef> {
         let m = self.macros.as_ref()?;
         let seg = self.ast.segs(path.segs).last()?;
@@ -1086,7 +1102,16 @@ impl<'a> Parser<'a> {
         let module = self.cur_module();
         let qual = mpath.iter().find(|x| !x.is_empty()).cloned();
         let qual = qual.map(|q| q.strip_prefix("__relax_crate_").map(|x| x.to_string()).unwrap_or(q));
-        let r = m.lookup(&name, &self.krate, &mpath, &module);
+        let mut r = m.lookup(&name, &self.krate, &mpath, &module);
+        // textual scope (`macro_rules!` is visible only after its definition): a plain-name call of a
+        // macro this file defines further down is not in scope (check only; the call must be written
+        // code, not an expansion)
+        if let Some(d) = &r {
+            if qual.is_none() && d.builtin == 0 && !d.exported && crate::lexer::validation_enabled() && (seg.name.lo as usize) < self.src.len()
+                && self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) && seg.name.lo < d.def_pos && (d.def_pos as usize) < self.src.len() && !self.name_imported(&name) {
+                r = None;
+            }
+        }
         // Relax's built-in macros (builtins.rs) when no macro_rules! of that name is visible
         match r {
             Some(d) => Some(crate::builtins::override_rules(&self.session.options, d)),
@@ -1898,6 +1923,10 @@ impl<'a> Parser<'a> {
                 let bounds = if self.eat(T::Colon) { self.bounds()? } else { List::EMPTY };
                 self.where_clause(&mut generics)?;
                 let ty = if self.eat(T::Eq) { Some(self.ty_plus()?) } else { None };
+                // (a free alias takes its where clause before the `=`; only associated types may put it after)
+                if ty.is_some() && self.in_assoc == 0 && self.foreign_abi.is_none() && self.kind() == T::KwWhere {
+                    return self.err("where clauses are not allowed after the type for type aliases");
+                }
                 self.where_clause(&mut generics)?;
                 self.expect(T::Semi)?;
                 ItemKind::TypeAlias(self.ast.push_row(TypeAliasItem { generics, bounds, ty }))
@@ -2418,15 +2447,7 @@ impl<'a> Parser<'a> {
         self.foreign_abi = Some(abi);
         let items = self.assoc_items();
         self.foreign_abi = saved;
-        let items = items?;
-        // rustc_parse `parse_item_kind` in an extern block: `const` is not a foreign item
-        for &id in self.ast.list(items) {
-            let it = self.ast.item(id);
-            if matches!(it.kind, ItemKind::Const(..)) {
-                return Err(PErr { pos: it.lo, msg: "extern items cannot be `const`".into() });
-            }
-        }
-        Ok(items)
+        items
     }
 
     fn impl_generics_ahead(&self) -> bool {
@@ -3405,6 +3426,10 @@ impl<'a> Parser<'a> {
             let ty = if self.eat(T::Colon) { Some(self.ty()?) } else { None };
             let (init, else_) = if self.eat(T::Eq) {
                 let e = self.expr()?;
+                // rustc_parse `parse_local_mk`: the initializer of a `let .. else` does not end in `}`
+                if self.kind() == T::KwElse && self.pos > 0 && self.toks.at(self.pos - 1).kind == T::CloseBrace {
+                    return self.err("right curly brace `}` before `else` in a `let...else` statement not allowed");
+                }
                 let el = if self.eat(T::KwElse) { Some(self.block()?) } else { None };
                 (Some(e), el)
             } else {
