@@ -10,6 +10,7 @@ use {
         },
         window::CxWindowPool,
     },
+    makepad_objc_sys::declare::MethodImplementation,
     std::{
         cell::{Cell, RefCell},
         collections::HashMap,
@@ -365,6 +366,82 @@ impl IosApp {
             // Ensures the view resizes with the window on rotation, which is
             // required for safeAreaInsets to update correctly.
             let () = msg_send![mtk_view_obj, setAutoresizingMask: 18u64];
+
+            // iOS 27 can wrap the keyboard's predictive bar in a UICompatibilityInputViewController
+            // and ask it things only the real bar implements, so we give it answers that change nothing.
+            extern "C" fn assistant_bar_style(this: &Object, _: Sel) -> i64 {
+                // Only a bar that lost its real controller gets here, so log what UIKit wrapped.
+                static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+                LOG_ONCE.call_once(|| unsafe {
+                    let class_name = |obj: ObjcId| -> String {
+                        if obj.is_null() {
+                            return "nil".to_string();
+                        }
+                        let class: ObjcId = msg_send![obj, class];
+                        crate::os::apple::apple_util::nsstring_to_string(NSStringFromClass(class))
+                    };
+                    let view: ObjcId = msg_send![this, viewIfLoaded];
+                    let superview: ObjcId =
+                        if view.is_null() { nil } else { msg_send![view, superview] };
+                    let children: ObjcId = msg_send![this, childViewControllers];
+                    let child_count: u64 = msg_send![children, count];
+                    let child_names: Vec<String> = (0..child_count)
+                        .map(|i| class_name(msg_send![children, objectAtIndex: i]))
+                        .collect();
+                    crate::log!(
+                        "iOS: UIKit asked a UICompatibilityInputViewController for its assistantBarStyle \
+                        (view: {}, superview: {}, children: [{}])",
+                        class_name(view),
+                        class_name(superview),
+                        child_names.join(", "),
+                    );
+                });
+                0
+            }
+            extern "C" fn is_input_assistant_item_empty(_: &Object, _: Sel) -> BOOL {
+                NO
+            }
+            extern "C" fn bar_frame(_: &Object, _: Sel) -> NSRect {
+                NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize { width: 0.0, height: 0.0 },
+                }
+            }
+            let compat_input_vc_class = makepad_objc_sys::runtime::objc_getClass(
+                b"UICompatibilityInputViewController\0".as_ptr() as *const _,
+            ) as ObjcId;
+            if !compat_input_vc_class.is_null() {
+                let fallback_methods = [
+                    (
+                        sel!(assistantBarStyle),
+                        (assistant_bar_style as extern "C" fn(&Object, Sel) -> i64).imp(),
+                        i64::encode(),
+                    ),
+                    (
+                        sel!(isInputAssistantItemEmpty),
+                        (is_input_assistant_item_empty as extern "C" fn(&Object, Sel) -> BOOL).imp(),
+                        BOOL::encode(),
+                    ),
+                    (
+                        sel!(barFrame),
+                        (bar_frame as extern "C" fn(&Object, Sel) -> NSRect).imp(),
+                        NSRect::encode(),
+                    ),
+                ];
+                for (selector, imp, return_type) in fallback_methods {
+                    let responds: BOOL =
+                        msg_send![compat_input_vc_class, instancesRespondToSelector: selector];
+                    if responds != YES {
+                        let types = format!("{}@:\0", return_type.as_str());
+                        makepad_objc_sys::runtime::class_addMethod(
+                            compat_input_vc_class as *mut _,
+                            selector,
+                            imp,
+                            types.as_ptr() as *const _,
+                        );
+                    }
+                }
+            }
 
             // Invisible real UITextView client: makepad renders text/caret, this owns
             // the system keyboard session. show_keyboard focuses it.
