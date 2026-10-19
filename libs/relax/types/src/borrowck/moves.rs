@@ -398,11 +398,15 @@ pub struct MoveCheck<'a> {
     /// rustc MirBorrowckCtxt::used_mut: locals whose `mut` a write or mutable borrow needed
     /// (the `unused_mut` lint's input)
     pub used_mut: Bits,
+    /// closure bodies: the by-value captures (indices) the body writes or borrows mutably
+    pub used_mut_upvars: Vec<u32>,
+    /// the used-mut upvars of the closures created in this body (closure expression -> captures)
+    pub closure_upvars: Option<&'a HashMap<u32, Vec<u32>>>,
 }
 
 impl<'a> MoveCheck<'a> {
     pub fn new(tx: &'a Tx<'a>, bir: &'a Bir, md: &'a MoveData) -> MoveCheck<'a> {
-        MoveCheck { tx, bir, md, diags: Vec::new(), reported: Vec::new(), reported_moves: Vec::new(), buffered_mut_errors: HashMap::default(), used_mut: bits_new(bir.locals.len()) }
+        MoveCheck { tx, bir, md, diags: Vec::new(), reported: Vec::new(), reported_moves: Vec::new(), buffered_mut_errors: HashMap::default(), used_mut: bits_new(bir.locals.len()), used_mut_upvars: Vec::new(), closure_upvars: None }
     }
 
     pub fn run(&mut self, flow: &InitFlow, order: &[u32]) {
@@ -475,9 +479,12 @@ impl<'a> MoveCheck<'a> {
             Rvalue::Aggregate(kind, ops) => {
                 // a value moved into a closure that may mutate it there needs the binding's `mut`
                 // (rustc used_mut_upvars): every local a closure captures by value counts
-                if matches!(kind, AggKind::Closure(_)) {
-                    for o in ops {
-                        if let Operand::Move(p) | Operand::Copy(p) = o { if (p.local as usize) < self.bir.locals.len() { bit_set(&mut self.used_mut, p.local as usize); } }
+                if let AggKind::Closure(ci) = kind {
+                    let ups = self.bir.closures.get(*ci as usize).and_then(|ce| self.closure_upvars.and_then(|m| m.get(ce))).cloned();
+                    // a closure not checked yet (or not at all): every by-value capture counts
+                    for (k, o) in ops.iter().enumerate() {
+                        if ups.as_ref().is_some_and(|u| !u.contains(&(k as u32))) { continue; }
+                        if let Operand::Move(p) | Operand::Copy(p) = o { self.note_used_mut(p); }
                     }
                 }
                 for o in ops {
@@ -971,6 +978,18 @@ impl<'a> MoveCheck<'a> {
     /// none when the path goes through a `&mut` reference or a raw pointer (their referent's
     /// mutability is the reference's, not the binding's).
     fn note_used_mut(&mut self, p: &Place) {
+        // a by-value capture of this closure body (`_1.k` / `(*_1).k`) written or mutably
+        // borrowed in the body: rustc used_mut_upvars (a path through a `&mut` stops at it)
+        if self.bir.closure_kind.is_some() && p.local == 1 {
+            let s = if matches!(p.proj.first(), Some(Proj::Deref)) { 1 } else { 0 };
+            if let Some(Proj::Field(k, _)) = p.proj.get(s) {
+                for (i, pr) in p.proj.iter().enumerate().skip(s + 1) {
+                    if matches!(pr, Proj::Deref) && matches!(self.tx.kind(place_ty_n(self.tx, self.bir, p, i)), TyKind::Ref(..) | TyKind::Ptr(..)) { return; }
+                }
+                if self.bir.captures.get(*k as usize).is_some_and(|c| c.kind == 0) && !self.used_mut_upvars.contains(k) { self.used_mut_upvars.push(*k); }
+                return;
+            }
+        }
         for (i, pr) in p.proj.iter().enumerate() {
             if matches!(pr, Proj::Deref) && matches!(self.tx.kind(place_ty_n(self.tx, self.bir, p, i)), TyKind::Ref(..) | TyKind::Ptr(..)) {
                 return;

@@ -30,7 +30,7 @@ const IMPLEMENTED: &[&str] = &[
     "noop_method_call", "overflowing_literals", "path_statements", "redundant_semicolons", "single_use_lifetimes",
     "static_mut_refs", "suspicious_double_ref_op", "trivial_casts", "trivial_numeric_casts", "unconditional_panic",
     "undropped_manually_drops", "unreachable_code", "unreachable_patterns", "unsafe_attr_outside_unsafe", "unsafe_op_in_unsafe_fn",
-    "unused_allocation", "unused_assignments", "unused_braces", "unused_labels", "unused_lifetimes",
+    "unused_allocation", "unused_assignments", "non_shorthand_field_patterns", "break_with_label_and_loop", "drop_bounds", "dyn_drop", "missing_copy_implementations", "ambiguous_negative_literals", "function_casts_as_integer", "unused_braces", "unused_import_braces", "unused_imports", "unused_labels", "unused_lifetimes",
     "unused_must_use", "unused_mut", "unused_parens", "unused_results", "unused_unsafe", "unused_variables", "while_true",
     "mismatched_lifetime_syntaxes", "elided_lifetimes_in_paths", "explicit_outlives_requirements", 
     "absolute_paths_not_starting_with_crate", "unknown_diagnostic_attributes",

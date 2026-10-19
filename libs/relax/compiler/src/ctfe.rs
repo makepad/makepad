@@ -1277,7 +1277,10 @@ impl<'a> Ctx<'a> {
         // a constant that reads itself, directly or through others, is outside the subset (the
         // code path reports the cycle); each nested evaluation has a Ctx of its own, so
         // `depth` alone does not bound this recursion
-        if CONSTS_READING.try_with(|c| c.borrow().iter().any(|(cd, ca)| *cd == d && *ca == args)).unwrap_or(false) {
+        // (and nesting is bounded: each nested evaluation has a Ctx of its own, so `depth` alone does not
+        // stop `C<T>` reading `C<Option<T>>` reading ...)
+        let limit = u.prog.crates[u.prog.def(d).krate as usize].recursion_limit as usize;
+        if CONSTS_READING.try_with(|c| c.borrow().len() >= limit || c.borrow().iter().any(|(cd, ca)| *cd == d && *ca == args)).unwrap_or(false) {
             return None;
         }
         struct Pop;

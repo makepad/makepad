@@ -120,7 +120,12 @@ impl<'a> Cx<'a> {
         };
         let n = stmts.len() - usize::from(tail.is_some());
         for s in &stmts[..n] { self.stmt(s, b); }
-        if let Some(t) = tail { self.expr(t); }
+        if let Some(t) = tail {
+            let attrs = self.ast.stmt_attrs(t);
+            self.enter(attrs);
+            self.expr(t);
+            self.leave(attrs);
+        }
     }
 
     fn stmt(&mut self, s: &Stmt, b: BlockId) {

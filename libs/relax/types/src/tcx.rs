@@ -1558,6 +1558,7 @@ impl Tcx {
             errors.extend(crate::item_checks::repr_checks(prog, self, did));
             errors.extend(crate::item_checks::assoc_const_elision(prog, did));
             errors.extend(crate::item_checks::attribute_safety(prog, did));
+            errors.extend(crate::item_checks::attribute_shapes(prog, did));
             if def.kind == DefKind::AssocFn && self.validates(prog, def.file) && errors.is_empty() {
                 errors.extend(self.check_method_receiver(prog, did));
             }
@@ -2541,7 +2542,13 @@ impl Tcx {
             }
             // an argument list of the wrong length is E0107 / E0393; the object type still
             // carries one argument per declared parameter (error for the missing, none extra)
-            args.resize(n, self.tys.error);
+            // (a missing const argument is a const error, not a type: the object type's arguments keep
+            // their parameters' kinds)
+            let declaration = self.declaration_env(prog, td);
+            while args.len() < n {
+                let i = args.len() + 1;
+                args.push(if declaration.consts.iter().any(|c| c.0 as usize == i) { self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))) } else { self.tys.error });
+            }
             let bound = u16::try_from(bound).expect("dyn principal bound-region count");
             return self.tys.intern(TyKind::Dyn(td, self.tys.mk_list(&args), self.tys.mk_list(&binds), regions, region, bound, self.tys.mk_list(&autos)));
         }

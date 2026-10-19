@@ -734,7 +734,30 @@ impl<'a> Gates<'a> {
 
     // ---------------------------------------------------------------- types and paths
 
+    /// rustc_passes stability `check_path` for a path as written: `std::intrinsics::copy` names
+    /// the library's unstable definitions by the written path (a re-export has its own stability).
+    fn path_stability(&mut self, p: &Path) {
+        if p.has_qself() || !matches!(self.pf.expansion_kind(p.lo), crate::parser::ExpnKind::Root | crate::parser::ExpnKind::LocalRules) { return; }
+        let segs = self.ast.segs(p.segs);
+        let names: Vec<&str> = segs.iter().map(|sg| self.pf.text(sg.name)).collect();
+        if !matches!(names.first(), Some(&"std" | &"core" | &"alloc")) { return; }
+        // (a local item or crate of that name shadows the library's)
+        if !p.global() {
+            if let Some(s0) = self.prog.syms.get(names[0]) {
+                if let Some(d) = self.prog.lookup_in_scope(self.scope, s0, true) {
+                    if self.prog.def(d).krate == self.krate { return; }
+                }
+            }
+        }
+        if let Some((feature, reason)) = table_entry(&names) {
+            if self.feats.has(&feature) { return; }
+            let msg = match reason { Some(r) => format!("E0658: use of unstable library feature `{}`: {}", feature, r), None => format!("E0658: use of unstable library feature `{}`", feature) };
+            self.errors.push(self.prog.record_error(self.file, p.lo, "typeck", msg));
+        }
+    }
+
     fn path(&mut self, p: &Path) {
+        self.path_stability(p);
         if let Some(q) = self.ast.qself(p).copied() {
             self.ty(q.ty);
             if let Some(tp) = q.trait_path {
@@ -1143,8 +1166,73 @@ pub fn check_stability(prog: &Program, body: &crate::typeck::Body) -> Vec<String
 /// `#[unstable(feature = "name", reason = "..")]` on a definition's item: (feature, reason).
 fn unstable_of(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {
     let def = prog.def(d);
-    // (the other definitions -- primitives, modules, locals -- have no item of their own)
-    if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::TypeAlias | DefKind::AssocTy) { return None; }
+    // (the other definitions -- primitives, locals -- have no item of their own)
+    if !matches!(def.kind, DefKind::Mod | DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::TypeAlias | DefKind::AssocTy) { return None; }
+    unstable_in_attrs(prog, d)
+}
+
+/// The library's table entry for a path as written (`std::intrinsics::copy`): a re-export has
+/// its own stability, so the key is the written path, not the defining one.
+fn table_entry(names: &[&str]) -> Option<(String, Option<String>)> {
+    // a stable re-export of a module or item is the definition it names (rustc checks the
+    // stability of the path's final definition): rewrite the longest re-exported prefix
+    let mut key: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    for _ in 0..4 {
+        let joined = key.join("::");
+        if let Some(&(f, r)) = stability_table().get(joined.as_str()) {
+            if !f.is_empty() { return Some((f.to_string(), if r.is_empty() { None } else { Some(r.to_string()) })); }
+        }
+        let mut rewritten = false;
+        for k in (1..=key.len()).rev() {
+            let prefix = key[..k].join("::");
+            if let Some(&("", r)) = stability_table().get(prefix.as_str()) {
+                if let Some(target) = r.strip_prefix("reexport ") {
+                    let mut nk: Vec<String> = target.split("::").map(|s| s.to_string()).collect();
+                    nk.extend(key[k..].iter().cloned());
+                    key = nk;
+                    rewritten = true;
+                    break;
+                }
+            }
+        }
+        if !rewritten { return None; }
+    }
+    None
+}
+
+/// `path -> (feature, reason)` of the library's unstable definitions (std/stability.tsv).
+fn stability_table() -> &'static std::collections::HashMap<&'static str, (&'static str, &'static str)> {
+    static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, (&'static str, &'static str)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("../../compiler/std/stability.tsv").lines().filter_map(|l| {
+            let mut it = l.splitn(3, '\t');
+            Some((it.next()?, (it.next()?, it.next().unwrap_or(""))))
+        }).collect()
+    })
+}
+
+/// rustc_passes stability.rs `check_path` on `use` declarations: every module and item a checked
+/// crate's import names must be stable or have its feature enabled.
+pub fn check_imports(prog: &Program, krate: u32) -> Vec<String> {
+    let feats = prog.crates[krate as usize].features(prog);
+    let mut out = Vec::new();
+    for imp in prog.imports.iter() {
+        if imp.ext || prog.file_crate.get(imp.file as usize) != Some(&krate) { continue; }
+        let pf = &*prog.files[imp.file as usize];
+        if !matches!(pf.expansion_kind(imp.pos), crate::parser::ExpnKind::Root | crate::parser::ExpnKind::LocalRules) { continue; }
+        let names: Vec<&str> = imp.segs.iter().map(|sg| prog.syms.str(sg.1)).collect();
+        if !imp.global && !matches!(names.first(), Some(&"std" | &"core" | &"alloc")) { continue; }
+        if let Some((feature, reason)) = table_entry(&names) {
+            if feats.has(&feature) { continue; }
+            let msg = match reason { Some(r) => format!("E0658: use of unstable library feature `{}`: {}", feature, r), None => format!("E0658: use of unstable library feature `{}`", feature) };
+            out.push(prog.record_error(imp.file, imp.pos, "typeck", msg));
+        }
+    }
+    out
+}
+
+fn unstable_in_attrs(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {
+    let def = prog.def(d);
     let pf = &*prog.files[def.file as usize];
     let src = prog.src(def.file);
     let item = pf.ast.item(def.item);

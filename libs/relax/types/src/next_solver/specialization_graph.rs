@@ -75,7 +75,16 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
         let tr=tcx.impl_trait_ref(prog,im.def,&tcx.generic_indices_of(prog,im.def).identity_args(&tcx.tys));
         let erroneous=tr.args.iter().any(|a| match a {
             crate::consts::GenericArg::Type(t)=>tcx.tys.has_error(*t),
-            crate::consts::GenericArg::Const(c)=>matches!(tcx.tys.const_kind(*c),crate::consts::ConstKind::Error),
+            crate::consts::GenericArg::Const(c)=>match tcx.tys.const_kind(*c) {
+                crate::consts::ConstKind::Error=>true,
+                // an unevaluated constant of the header that fails to evaluate is a const error as well
+                // (rustc normalizes the header: coherence does not report conflicts over [const error])
+                crate::consts::ConstKind::Alias(_,alias) if alias.args.is_empty() => {
+                    let env=crate::tcx::TypingEnv::fully_monomorphized(prog);
+                    tcx.const_eval_resolve(prog,env,alias.kind.def_id(),&[]).is_err()
+                }
+                _=>false,
+            },
             _=>false,
         });
         let mut failed=false;

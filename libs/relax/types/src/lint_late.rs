@@ -12,6 +12,9 @@ use crate::tcx::Tcx;
 use crate::typeck::{Body, Res};
 use crate::types::{AliasTyKind, TyId, TyKind};
 
+pub const NON_SHORTHAND_FIELD_PATTERNS: Lint = lint::lint("non_shorthand_field_patterns");
+pub const FUNCTION_CASTS_AS_INTEGER: Lint = lint::lint("function_casts_as_integer");
+pub const MISSING_COPY_IMPLEMENTATIONS: Lint = lint::lint("missing_copy_implementations");
 pub const UNUSED_MUST_USE: Lint = lint::lint("unused_must_use");
 pub const UNUSED_RESULTS: Lint = lint::lint("unused_results");
 pub const PATH_STATEMENTS: Lint = lint::lint("path_statements");
@@ -431,7 +434,7 @@ impl<'a> Late<'a> {
                 self.check_atomic_load_store(e);
                 self.check_atomic_compare_exchange(e);
             }
-            ExprKind::Cast(x, _) => self.check_trivial_cast(e, x),
+            ExprKind::Cast(x, _) => { self.check_trivial_cast(e, x); self.check_function_cast(e, x); }
             ExprKind::AddrOf(true, _, x) => self.raw_operand = Some(unparen(self.ast, x)),
             ExprKind::Unary(UnOp::Deref, x) => self.check_deref_nullptr(e, x),
             ExprKind::For(row) => self.check_for_loop_fallible(*self.ast.row(row)),
@@ -779,6 +782,15 @@ impl<'a> Late<'a> {
         }
     }
 
+    /// rustc function_cast_as_integer.rs: `foo as usize` casts a function item to an integer.
+    fn check_function_cast(&self, e: ExprId, x: ExprId) {
+        let (Some(to), Some(from)) = (self.expr_ty(e), self.expr_ty(x)) else { return };
+        if matches!(self.kind(to), TyKind::FnDef(..) | TyKind::FnPtr(..) | TyKind::Ptr(..)) { return; }
+        if matches!(self.kind(from), TyKind::FnDef(..)) {
+            self.emit(&FUNCTION_CASTS_AS_INTEGER, self.ast.expr(x).hi + 1, "direct cast of function item into an integer");
+        }
+    }
+
     // ---- rustc_hir_typeck cast.rs trivial_cast_lint
     fn check_trivial_cast(&self, e: ExprId, x: ExprId) {
         if self.body.coercion_casts.get(&x.0).is_none() { return; }
@@ -811,6 +823,18 @@ impl<'a> Visitor<'a> for Late<'a> {
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0) { self.check_deprecated(*d, path.lo); }
             }
             _ => {}
+        }
+        // rustc NonShorthandFieldPatterns: `field: field` (any binding mode) can be `field`
+        if let Pat::Struct(_, fs, _) = *self.ast.pat(p) {
+            let pf = &self.prog.files[self.body.file as usize];
+            for f in self.ast.list(fs) {
+                if f.shorthand { continue; }
+                if let Pat::Ident { name, sub: None, .. } = *self.ast.pat(f.pat) {
+                    if self.body.pat_local.contains_key(&f.pat.0) && pf.text(name) == pf.text(f.name) && pf.expansion_kind(name.lo) == pf.expansion_kind(f.name.lo) {
+                        self.emit(&NON_SHORTHAND_FIELD_PATTERNS, f.name.lo, &format!("the `{}:` in this pattern is redundant", pf.text(f.name)));
+                    }
+                }
+            }
         }
         ast_visit::walk_pat(self, p);
     }
@@ -2392,5 +2416,50 @@ impl<'a> Dp<'a> {
             (None, true) => format!("use of {kind} `{path}` that will be deprecated in a future Rust version"),
         };
         Some((future, msg))
+    }
+}
+
+/// rustc builtin.rs `MissingCopyImplementations`: a reachable, non-generic ADT with no
+/// destructor, no raw pointer field, no `Iterator` impl, at most 256 bytes and only `Copy`
+/// fields could implement `Copy`.
+pub fn missing_copy_implementations(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::Reach) {
+    if !lint::enabled() { return; }
+    let Some(copy) = tcx.copy_trait else { return };
+    let iter = tcx.lang_items.get(LangItem::Iterator);
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if !matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) { continue; }
+        if !own.get(def.krate as usize).copied().unwrap_or(false) || !reach.defs.contains(&d) { continue; }
+        if lint::generated(prog, d) { continue; }
+        let Some(adt) = tcx.adts.get(&d) else { continue };
+        if adt.n_generics != 0 || adt.flags.contains(crate::tcx::AdtFlags::IS_VARIANT_LIST_NON_EXHAUSTIVE) { continue; }
+        if tcx.adt_destructor(d).is_some() { continue; }
+        if adt.variants.iter().any(|v| v.fields.iter().any(|f| matches!(tcx.tys.kind(f.ty), TyKind::Ptr(..)))) { continue; }
+        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR;
+        if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad))) { continue; }
+        let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
+        let env = tcx.param_env_id(prog, d);
+        let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), d);
+        let implements = |tr: DefId, t: TyId| {
+            let predicate = crate::next_solver::collect::trait_predicate(tr, vec![crate::consts::GenericArg::Type(t)]);
+            infcx.evaluate_obligation(prog, crate::next_solver::Goal { param_env: env, predicate }).must_apply_modulo_regions()
+        };
+        if implements(copy, ty) { continue; }
+        if iter.is_some_and(|it| implements(it, ty)) { continue; }
+        if tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR) { continue; }
+        let lay = crate::layout::Layouts::new();
+        if lay.of(&crate::layout::LayoutCx::new(prog), tcx, ty).size > 256 { continue; }
+        // every field must be Copy
+        let all_copy = adt.variants.iter().all(|v| v.fields.iter().all(|f| implements(copy, f.ty)));
+        if !all_copy { continue; }
+        let ast = &prog.files[def.file as usize].ast;
+        let item = ast.item(def.item);
+        if lint::has_attr(prog, def.file, ast.list(item.attrs), "non_exhaustive") { continue; }
+        if let ItemKind::Enum(r) = item.kind {
+            if ast.list(ast.row(r).variants).iter().any(|v| lint::has_attr(prog, def.file, ast.list(v.attrs), "non_exhaustive")) { continue; }
+        }
+        if lint::external(prog, def.file, item.lo) { continue; }
+        lint::emit(prog, d, &MISSING_COPY_IMPLEMENTATIONS, def.file, ast.item(def.item).lo, "type could implement `Copy`; consider adding `impl Copy`");
     }
 }

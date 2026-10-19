@@ -501,7 +501,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     unsafe { std::env::remove_var("MAKEPAD_RUN_PROGRESS") };
     let hosted = !entries.is_empty() || !export_names.is_empty();
     // the `unused_macros` lints need the macro uses of the whole load
-    if check { relax_types::macros::uses::record(true); }
+    if check { relax_types::macros::uses::record(true); relax_front::program::set_record_import_uses(true); }
     if !check && !watch && session.is_none() && !hosted {
         crate::tui::start(!driver_options.verbose && !QUIET.load(Ordering::Relaxed) && !crate::diag::enabled());
     }

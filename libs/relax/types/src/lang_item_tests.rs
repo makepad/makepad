@@ -125,8 +125,9 @@ fn lang_item_relax_std() {
     assert!(tcx.adt_destructor(named(&prog, "Vec")).is_some());
     assert!(tcx.adt_destructor(phantom).is_none());
     assert!(tcx.adt_destructor(cell).is_none());
-    // Relax's union cannot carry rustc's struct-only lang item; keep the mismatch visible.
-    assert!(tcx.lang_items.get(LangItem::ManuallyDrop).is_none());
-    assert!(tcx.adts[&named(&prog, "ManuallyDrop")].is_union());
+    // ManuallyDrop is a struct carrying the lang item, as in rustc.
+    let manually_drop = tcx.lang_items.require(LangItem::ManuallyDrop).unwrap();
+    assert!(tcx.adts[&manually_drop].is_manually_drop());
+    assert!(!tcx.adts[&manually_drop].is_union());
     assert!(tcx.lang_items.get(LangItem::UnsafePinned).is_none());
 }

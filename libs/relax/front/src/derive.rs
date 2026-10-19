@@ -810,9 +810,9 @@ impl Parser<'_> {
             }
         }
         let text = format!("{}impl{g} {trait_path} for {name}{a} {where_text} {{ {body} }}", if unsafe_ { "unsafe " } else { "" });
-        let first = self.extra_items.len();
         self.install_derive_text(text, it.name.lo)?;
-        let iid = self.extra_items[first];
+        // (`items_until` hands earlier extras back with the new item: the newest id is the one just installed)
+        let iid = *self.extra_items.iter().max_by_key(|i| i.0).expect("derived impl");
         let impl_row = match self.ast.item(iid).kind { ItemKind::Impl(r) => r, _ => unreachable!() };
         let mut generics = self.ast.row(impl_row).generics;
         if !field_params.is_empty() {

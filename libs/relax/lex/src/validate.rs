@@ -69,7 +69,11 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
                 let prev = |n: usize| if k >= n { Some(toks[k - n].kind) } else { None };
                 let bang = prev(1) == Some(T::Not) || (prev(2) == Some(T::Not) && matches!(prev(1), Some(T::Ident)));
                 let attr = t.kind == T::OpenBracket && (prev(1) == Some(T::Pound) || (prev(1) == Some(T::Not) && prev(2) == Some(T::Pound)));
-                stack.push(!parse_level || bang || attr);
+                // (the std macros that parse their arguments as expressions consume the literals)
+                let parsed_args = bang && prev(1) == Some(T::Not) && k >= 2 && toks[k - 2].kind == T::Ident && matches!(&src[toks[k - 2].lo as usize..toks[k - 2].hi as usize],
+                    b"println" | b"print" | b"eprintln" | b"eprint" | b"format" | b"format_args" | b"write" | b"writeln" | b"panic" | b"assert" | b"assert_eq" | b"assert_ne"
+                    | b"debug_assert" | b"debug_assert_eq" | b"debug_assert_ne" | b"vec" | b"unreachable" | b"todo" | b"unimplemented" | b"dbg");
+                stack.push(!parse_level || (bang && !parsed_args) || attr);
             }
             T::CloseParen | T::CloseBracket | T::CloseBrace => {
                 stack.pop();

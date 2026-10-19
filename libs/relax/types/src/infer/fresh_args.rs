@@ -74,7 +74,7 @@ impl TypeFolder for ArgFolder<'_> {
     fn fold_const(&mut self, tys: &Types, ct: Const, depth: u32) -> Const {
         if let ConstKind::Param(param) = tys.const_kind(ct) {
             let full = self.indices.types_consts[param.index as usize];
-            let GenericArg::Const(ct) = self.args[full as usize] else { panic!("wrong generic argument kind") };
+            let GenericArg::Const(ct) = self.args[full as usize] else { panic!("wrong generic argument kind: const param {} (slot {}) of {} args: {:?}", param.index, full, self.args.len(), self.args) };
             return tys.shift_const(ct, depth, false);
         }
         super_fold_const(tys, ct, self, depth)

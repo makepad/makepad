@@ -54,3 +54,10 @@ fn literals_in_macro_token_trees_are_not_cooked_by_the_parser_checks() {
     assert!(err("m!{ 0b102 }", 2021).unwrap().contains("invalid digit for a base 2 literal"));
     assert!(err("m!{ \"\\q\" }", 2021).unwrap().contains("unknown character escape"));
 }
+
+#[test]
+fn std_macros_that_parse_expressions_cook_their_literals() {
+    assert!(err("fn main() { println!(\"\"y); }", 2021).unwrap().contains("suffixes on string literals"));
+    assert!(err("fn main() { let v = vec![1x]; }", 2021).unwrap().contains("invalid suffix"));
+    assert_eq!(err("fn main() { m!(1x); }", 2021), None);
+}

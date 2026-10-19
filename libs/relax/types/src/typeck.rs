@@ -1069,7 +1069,18 @@ impl<'a> Fcx<'a> {
             _ => return false,
         };
         let (a, d) = (self.shallow(a), self.shallow(d));
-        matches!(self.tcx.tys.kind(a), TyKind::Infer(_)) && matches!(self.tcx.tys.kind(d), TyKind::Dyn(..))
+        matches!(self.tcx.tys.kind(a), TyKind::Infer(_)) && matches!(self.tcx.tys.kind(d), TyKind::Dyn(..)) && self.type_var_is_sized(a)
+    }
+
+    /// coercion.rs type_var_is_sized: a `$0: Sized` obligation is pending. Only then is `$0: Unsize<dyn
+    /// Trait>` pending too; a bare variable (`ptr as *mut _`) is unified with the pointee instead.
+    fn type_var_is_sized(&mut self, var: TyId) -> bool {
+        let Some(sized) = self.tcx.lang_items.get(crate::lang_items::LangItem::Sized) else { return true };
+        let v = self.shallow(var);
+        self.fulfillment_cx.pending_obligations().iter().any(|o| {
+            matches!(&o.goal.predicate.kind, PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(t))
+                if t.trait_ref.def_id == sized && matches!(t.trait_ref.args.first(), Some(crate::consts::GenericArg::Type(a)) if self.infcx.shallow_resolve(*a) == v))
+        })
     }
 
     /// Is item `d` visible from this body's module (`pub`, or private and defined in this module
@@ -1490,6 +1501,35 @@ impl<'a> Fcx<'a> {
         let (sx, sa) = if sx == sa { (ty_to_string_paths(self.prog, self.tcx, x), ty_to_string_paths(self.prog, self.tcx, a)) } else { (sx, sa) };
         self.err(pos, format!("E0308: mismatched types: expected `{}`, found `{}`", sx, sa));
         false
+    }
+
+    /// rustc_hir_typeck expr.rs check_lhs_assignable: the left side of an assignment is a place expression
+    /// (a local or static, a field, an index, a dereference); else E0070 (E0067 for `op=`).
+    fn check_lhs_assignable(&mut self, a: ExprId, compound: bool) {
+        if !self.tcx.validates(self.prog, self.file) { return; }
+        let mut e = a;
+        loop {
+            match self.ast().expr(e).kind {
+                ExprKind::Paren(i) => e = i,
+                _ => break,
+            }
+        }
+        let ok = match &self.ast().expr(e).kind {
+            ExprKind::Field(..) | ExprKind::TupleField(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _) => true,
+            ExprKind::Path(_) => match self.b.res.get(&e.0) {
+                Some(Res::Local(_)) | Some(Res::Err) | None => true,
+                // (a unit struct or variant is a destructuring-assignment pattern)
+                Some(Res::Def(d)) => matches!(self.prog.def(*d).kind, DefKind::Static | DefKind::ForeignStatic | DefKind::Struct | DefKind::Variant),
+                Some(_) => false,
+            },
+            ExprKind::Underscore => true,
+            _ => false,
+        };
+        if !ok {
+            let pos = self.ast().expr(a).lo;
+            if compound { self.err(pos, "E0067: invalid left-hand side of compound assignment".to_string()); }
+            else { self.err(pos, "E0070: invalid left-hand side of assignment".to_string()); }
+        }
     }
 
     /// A `&`/`&mut` pattern against a scrutinee of another shape: E0308.
@@ -2649,6 +2689,7 @@ impl<'a> Fcx<'a> {
             }
             _ => {
                 let ta = self.check_expr(a, None);
+                self.check_lhs_assignable(a, false);
                 self.coerce_or_unify(t, ta, None, lo);
                 return;
             }
@@ -4652,6 +4693,7 @@ impl<'a> Fcx<'a> {
                     return unit;
                 }
                 let ta = self.check_expr(*a, None);
+                self.check_lhs_assignable(*a, false);
                 // rustc check_expr_assign: the assigned place is Sized (AssignmentLhsSized)
                 if self.tcx.validates(self.prog, self.file) { let apos = self.ast().expr(*a).lo; self.require_type_is_sized_deferred(ta, apos); }
                 let tb = self.check_expr(*b, Some(ta));
@@ -4660,6 +4702,7 @@ impl<'a> Fcx<'a> {
             }
             ExprKind::AssignOp(op, a, b) => {
                 let ta = self.check_expr(*a, None);
+                self.check_lhs_assignable(*a, true);
                 let sa = self.shallow(ta);
                 // rustc_hir_typeck/src/op.rs:29-44: parameters and aliases keep
                 // the overloaded decision, even when an instance is primitive.

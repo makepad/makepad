@@ -1927,7 +1927,8 @@ impl<'a> Gen<'a> {
         for bi in 1..nb {
             let b = &self.f.blocks[bi];
             let Term::Jump(t) = b.term else { continue };
-            if !reach[bi] || t as usize == bi {
+            // the block that reads the domain base is not skipped, whatever else it holds
+            if !reach[bi] || t as usize == bi || bi == self.dom_block {
                 continue;
             }
             let silent = b.insts.iter().enumerate().all(|(ii, i)| match *i {

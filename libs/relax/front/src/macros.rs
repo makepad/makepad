@@ -227,6 +227,9 @@ impl Clone for ReplaySnapshot {
 pub struct Name(u32);
 
 /// `GLOB` and `GLOB_SEP`, interned first by every `MacroNames`.
+/// Set on the end of a recorded fragment group that is a `$t:ty` substitution.
+pub(crate) const TY_FRAG: u32 = 1 << 31;
+
 const GLOB_ID: Name = Name(0);
 const GLOB_SEP_ID: Name = Name(1);
 
@@ -2473,8 +2476,11 @@ impl<'a> Parser<'a> {
                         // a fragment of one of these kinds stays one token tree where the
                         // expansion is matched again (`$i:item` forwarded to `$t:tt`)
                         let opaque = !wrap && !matches!(f, Frag::Ident | Frag::Lifetime | Frag::Tt);
-                        if opaque && out.s.len() > group_start && hi - lo + usize::from(taken.is_some()) > 1 {
-                            out.groups.push((group_start as u32, out.s.len() as u32));
+                        // (a `$t:ty` is a type nonterminal even when it is one token: where a bound is
+                        // expected, it is not a trait -- rustc `parse_trait_bound`; the end carries TY_FRAG)
+                        let ty_frag = *f == Frag::Ty && !wrap;
+                        if opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag) {
+                            out.groups.push((group_start as u32, out.s.len() as u32 | if ty_frag { TY_FRAG } else { 0 }));
                         }
                         if wrap {
                             out.push(")", None, u32::MAX);

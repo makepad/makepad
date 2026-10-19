@@ -556,6 +556,11 @@ pub struct Program {
     /// lexical lookups (`lookup_in_scope`) once imports are resolved: (module, name, ns_type);
     /// cleared whenever a binding is defined or imports are resolved again
     scope_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<DefId>>,
+    /// the import bindings (module, bound name, type namespace) and the glob imports (module,
+    /// glob target) a name resolution went through (rustc_resolve `record_use`); recorded only
+    /// while `record_import_uses` is on (`makepad check`)
+    import_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, Sym, bool)>>,
+    glob_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, DefId)>>,
     /// the per-occurrence memo tables (scope lookups, path segments) are filled only once
     /// bodies are being checked: during collection nearly every lookup is unique, and a memo
     /// would cost more than it saves (set by jit::Unit::new)
@@ -824,6 +829,8 @@ impl Program {
             glob_cache: Default::default(),
             own_crates: Vec::new(),
             scope_cache: Default::default(),
+            import_used: Default::default(),
+            glob_used: Default::default(),
             body_memos: Default::default(),
             path_seg_cache: Default::default(),
             trait_bind_cache: Default::default(),
@@ -2478,6 +2485,8 @@ impl Program {
                     let li = self.variants.len() as u32;
                     self.variants.push(vars);
                     self.defs[d.0 as usize].sub = li;
+                    // items declared in a discriminant expression's block
+                    self.collect_body_items(file, iid, module, Some(d))?;
                 }
                 Tag::Const | Tag::Static => {
                     let k = if kind == Tag::Const { DefKind::Const } else { DefKind::Static };
@@ -3837,6 +3846,17 @@ impl Program {
         }
     }
 
+    /// Whether a resolution went through the import binding `name` of module `m`.
+    pub fn import_binding_used(&self, m: u32, name: Sym) -> bool {
+        let u = self.import_used.lock().unwrap_or_else(|e| e.into_inner());
+        u.contains(&(m, name, true)) || u.contains(&(m, name, false))
+    }
+
+    /// Whether a resolution went through the glob import of `target` in module `m`.
+    pub fn glob_import_used(&self, m: u32, target: DefId) -> bool {
+        self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).contains(&(m, target))
+    }
+
     /// The paths a missing name could be imported by from module `from` (rustc's E0412/E0425
     /// "consider importing", but over the whole program: items that exist, not look-alikes): for
     /// each item named `name` in the namespace, the shortest path through public modules and
@@ -4163,6 +4183,7 @@ impl Program {
         let md = &self.mods[m as usize];
         let direct = if ns_type { md.types.get(&name) } else { md.values.get(&name) };
         if let Some(&d) = direct {
+            if record_import_uses() && md.import_pub.contains_key(&(name, ns_type)) { self.import_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, name, ns_type)); }
             return Some((d, if q.precise { self.precise_vis(m, name, ns_type, d) } else { self.binding_vis(m, name, ns_type, d) }));
         }
         if md.globs.is_empty() {
@@ -4221,6 +4242,7 @@ impl Program {
                 }
                 let gv = if gpub { None } else { Some(md.normal) };
                 let v = self.vis_min(gv, v);
+                if record_import_uses() { self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, g)); }
                 match best {
                     None => best = Some((d, v)),
                     Some((bd, bv)) => {
@@ -4926,6 +4948,12 @@ pub struct SharedParse {
 
 /// The program's std parses by path, while its load runs (`share_std_begin` .. `share_std_end`)
 /// and after it (a world built again for hot reload takes them too).
+/// `makepad check` records which imports its name resolutions go through (the lint
+/// `unused_imports`); a run does not.
+static RECORD_IMPORT_USES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) }
+pub fn set_record_import_uses(on: bool) { RECORD_IMPORT_USES.store(on, std::sync::atomic::Ordering::Relaxed); }
+
 static SHARED_STD: relax_session::sync::Mutex<Option<HashMap<String, std::sync::Arc<SharedParse>>>> = relax_session::sync::Mutex::new(None);
 
 pub(crate) struct ZoneTaken(Option<HashMap<String, std::sync::Arc<SharedParse>>>);

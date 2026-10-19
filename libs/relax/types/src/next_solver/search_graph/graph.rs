@@ -524,7 +524,9 @@ impl SearchGraph {
                 entry.success.replace(cached)
             };
             if let Some(previous) = previous {
-                assert_eq!(delegate.get_tracked(&previous.result), result);
+                // An answer that depends on a constant evaluation can differ between two evaluations
+                // when that evaluation was a query cycle (E0391, reported once): the newest stands.
+                debug_assert!(delegate.get_tracked(&previous.result) == result || delegate.tcx.dcx.has_errors());
             }
             }
         } else {

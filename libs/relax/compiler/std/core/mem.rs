@@ -98,11 +98,12 @@ impl<T> crate::fmt::Debug for Discriminant<T> {
 
 // ---------------------------------------------------------------- ManuallyDrop
 
-/// Inhibits the compiler from calling `T`'s destructor: a union, whose fields never get drop
-/// glue (so the compiler needs no special case).
-#[repr(C)]
+/// Inhibits the compiler from calling `T`'s destructor (the lang item has no drop glue); like real core a
+/// struct, so `ManuallyDrop<dyn Trait>` is a dynamically sized type.
+#[repr(transparent)]
+#[cfg_attr(not(relax_check), lang = "manually_drop")]
 #[rustc_diagnostic_item = "ManuallyDrop"]
-pub union ManuallyDrop<T: ?Sized> {
+pub struct ManuallyDrop<T: ?Sized> {
     value: T,
 }
 

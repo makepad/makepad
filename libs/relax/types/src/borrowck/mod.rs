@@ -231,6 +231,8 @@ fn check_body_with(prog: &Program, tcx: &Tcx, tx: &tyx::Tx, rty: &rty::Rty, body
         }
     }
     let mut reqs: crate::fxhash::HashMap<u32, Vec<nll::ClosureOutlivesRequirement>> = Default::default();
+    // the by-value captures each checked closure body mutates (rustc used_mut_upvars)
+    let mut upvars: crate::fxhash::HashMap<u32, Vec<u32>> = Default::default();
     // nested closures first (they follow their parent in the list), the fn body last
     let mut order: Vec<usize> = (1..all.len()).rev().collect();
     order.push(0);
@@ -252,7 +254,9 @@ fn check_body_with(prog: &Program, tcx: &Tcx, tx: &tyx::Tx, rty: &rty::Rty, body
             let order = moves::rpo(bir);
             let flow = moves::init_flow(&md, bir, &order);
             let mut mc = moves::MoveCheck::new(tx, bir, &md);
+            mc.closure_upvars = Some(&upvars);
             mc.run(&flow, &order);
+            let own_upvars = mc.used_mut_upvars.clone();
             if crate::lint::enabled() && mc.diags.is_empty() {
                 // rustc gather_used_muts: a `mut` local no reachable code assigns (declared in
                 // dead code, or never initialized) counts as used
@@ -283,10 +287,11 @@ fn check_body_with(prog: &Program, tcx: &Tcx, tx: &tyx::Tx, rty: &rty::Rty, body
                 fvo = o.fv_only;
                 fvr = o.fv_records;
             }
-            (diags, req, fvo, fvr)
+            (diags, req, fvo, fvr, own_upvars)
         }));
         match r {
-            Ok((diags, req, fvo, fvr)) => {
+            Ok((diags, req, fvo, fvr, own_upvars)) => {
+                if let Some(ce) = closure_expr_of(&all, bir) { if bir.closure_kind.is_some() { upvars.insert(ce, own_upvars); } }
                 for (sp, t, dflt, access, hoist) in fvr {
                     v.fv_records.push(export::FvRecord { file: bir.file, span: sp, place: t, default: dflt, access, hoist });
                 }

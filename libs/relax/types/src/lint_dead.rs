@@ -72,7 +72,7 @@ struct TypeWalker<'a> {
 }
 
 impl<'a> TypeWalker<'a> {
-    fn new(prog: &'a Program, d: DefId) -> TypeWalker<'a> {
+    pub(crate) fn new(prog: &'a Program, d: DefId) -> TypeWalker<'a> {
         let def = prog.def(d);
         let mut w = TypeWalker { prog, file: def.file, ast: &prog.files[def.file as usize].ast, module: def.scope, params: HashSet::new(), self_def: None, out: Vec::new() };
         // generic parameters of the definition and the impl / trait around it
@@ -264,7 +264,7 @@ impl<'a> TypeWalker<'a> {
         }
     }
 
-    fn resolve_path_def(&self, p: &Path, ty_ns: bool) -> Option<DefId> {
+    pub(crate) fn resolve_path_def(&self, p: &Path, ty_ns: bool) -> Option<DefId> {
         let segs = crate::program::path_segs(self.prog, self.file, p);
         let first = *segs.first()?;
         if segs.len() == 1 && first.0 == SegKind::Ident && !p.global() {
@@ -310,6 +310,12 @@ fn item_refs(prog: &Program, d: DefId) -> Vec<Ref> {
 }
 
 /// `pub_only`: only what the item exposes (the `pub` fields of a struct).
+/// The trait definition a bound path of an item resolves to.
+pub(crate) fn resolve_trait_path(prog: &Program, d: DefId, p: &Path) -> Option<DefId> {
+    let w = TypeWalker::new(prog, d);
+    w.resolve_path_def(p, true)
+}
+
 fn item_refs_in(prog: &Program, d: DefId, pub_only: bool) -> Vec<Ref> {
     let def = prog.def(d);
     let ast = &prog.files[def.file as usize].ast;
@@ -1213,27 +1219,8 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
     let rep = Reporter { s: &s, reach: &reach };
     if executable { rep.run(&DEAD_CODE_PUB_IN_BINARY, &pre_live, true, &all); }
     rep.run(&DEAD_CODE, &s.live, false, &all);
-    // what each module's items and bodies mention (an import used through a macro expansion
-    // is seen here by what typeck resolved)
-    let mut module_used: HashMap<u32, HashSet<DefId>> = HashMap::new();
-    for i in 0..prog.defs.len() {
-        let d = DefId(i as u32);
-        if !s.local(d) { continue; }
-        let def = prog.def(d);
-        if matches!(def.kind, DefKind::Field | DefKind::Prim(_) | DefKind::MacroRules) { continue; }
-        let mut refs = item_refs(prog, d);
-        if let Some(b) = s.refs.get(&d) { refs.extend_from_slice(&b.refs); }
-        if refs.is_empty() { continue; }
-        let mut m = def.scope;
-        let mut guard = 0;
-        loop {
-            let set = module_used.entry(m).or_default();
-            for r in &refs { if let Ref::Use(x) = r { set.insert(*x); } }
-            guard += 1;
-            match prog.mods.get(m as usize).and_then(|md| md.lexical_parent) { Some(p) if guard < 64 => m = p, _ => break }
-        }
-    }
-    crate::lint_imports::check(prog, tcx, own, &reach, &module_used);
+    crate::lint_late::missing_copy_implementations(prog, tcx, own, &reach);
+    crate::lint_imports::check(prog, tcx, own, &reach);
 }
 
 fn is_executable(prog: &Program, root: u32) -> bool {

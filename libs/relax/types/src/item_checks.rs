@@ -637,6 +637,12 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
             }
             // (declarations of an extern block, plain or unsafe)
             for &it in ast.list(fm.items) {
+                if let ItemKind::Const(_, init) = ast.item(it).kind {
+                    errors.push(prog.record_error(file, ast.item(it).lo, "parse", "extern items cannot be `const`".to_string()));
+                    if init.is_some() {
+                        errors.push(prog.record_error(file, ast.item(it).lo, "parse", "incorrect `static` inside `extern` block".to_string()));
+                    }
+                }
                 if let ItemKind::Fn(sig, _, _) = ast.item(it).kind {
                     let sig = ast.fn_sig(sig);
                     if let Some(g) = ast.list(sig.generics.params).iter().find(|g| !matches!(g.kind, crate::ast::GenericParamKind::Lifetime(_))) {
@@ -671,6 +677,64 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
         }
     }
     errors
+}
+
+/// rustc_attr_parsing: the argument shapes of `inline`, `must_use`, `deprecated`, `link_name` and
+/// `link_ordinal`. Some((token, code)): the token to blame and the code (E0539 malformed, E0538
+/// repeated key, E0565 literal where a key is expected, E0805 wrong number of arguments).
+fn attribute_args_error(p: crate::cfg::Src<'_>, lo: usize, hi: usize, name: &[u8]) -> Option<(usize, &'static str)> {
+    use crate::cfg::tok_str;
+    let t = |i: usize| if i < hi { tok_str(p, i) } else { b"" };
+    let is_str = |i: usize| { let s = t(i); s.starts_with(b"\"") || s.starts_with(b"r\"") || s.starts_with(b"r#") };
+    let is_int = |i: usize| t(i).first().is_some_and(|c| c.is_ascii_digit());
+    let is_word = |i: usize| t(i).first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_');
+    let n = lo + 1;
+    let list = t(n) == b"(" && hi >= n + 2 && t(hi - 1) == b")";
+    let mut entries: Vec<(usize, usize)> = Vec::new();
+    if list {
+        let (mut start, mut depth) = (n + 1, 0i32);
+        for i in n + 1..hi - 1 {
+            match t(i) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"," if depth == 0 => { entries.push((start, i)); start = i + 1; }
+                _ => {}
+            }
+        }
+        if start < hi - 1 { entries.push((start, hi - 1)); }
+    }
+    match name {
+        b"inline" if list => {
+            if entries.len() != 1 { return Some((lo, "E0805")); }
+            let (a, b) = entries[0];
+            if !(b == a + 1 && matches!(t(a), b"always" | b"never")) { return Some((a, "E0539")); }
+        }
+        b"must_use" if list => return Some((lo, "E0539")),
+        b"link_name" if list || t(n) != b"=" => return Some((lo, "E0539")),
+        b"link_ordinal" => {
+            if !list { return Some((lo, "E0539")); }
+            if entries.len() != 1 { return Some((lo, "E0805")); }
+            let (a, b) = entries[0];
+            if !(b == a + 1 && is_int(a)) { return Some((a, "E0539")); }
+        }
+        b"deprecated" => {
+            if t(n) == b"=" {
+                if !(hi == n + 2 && is_str(n + 1)) { return Some((n + 1, "E0539")); }
+            } else if list {
+                let mut seen: Vec<&[u8]> = Vec::new();
+                for &(a, b) in &entries {
+                    if b == a + 1 && is_str(a) { return Some((a, "E0565")); }
+                    let key = t(a);
+                    if !is_word(a) || !matches!(key, b"since" | b"note" | b"suggestion") { return Some((a, "E0539")); }
+                    if !(b == a + 3 && t(a + 1) == b"=" && is_str(a + 2)) { return Some((a, "E0539")); }
+                    if seen.contains(&key) { return Some((a, "E0538")); }
+                    seen.push(key);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// rustc_attr_parsing `check_attribute_safety`, on the attributes of an item that survived cfg
@@ -708,6 +772,9 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
             continue;
         }
         if from_source {
+            if let Some(m) = attribute_args_error(p, lo, hi, &name) {
+                errors.push(prog.record_error(def.file, p.tok(m.0).lo, "typeck", format!("{}: malformed `{}` attribute input", m.1, String::from_utf8_lossy(&name))));
+            }
             if let Some(what) = attribute_target_error(prog, d, &name) {
                 errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("`#[{}]` attribute cannot be used on {}", String::from_utf8_lossy(&name), what)));
             }
@@ -987,4 +1054,126 @@ fn attribute_target_error(prog: &Program, d: DefId, name: &[u8]) -> Option<&'sta
         _ => return None,
     };
     if ok { None } else { Some(what) }
+}
+
+/// rustc_codegen_ssa / rustc_monomorphize: two definitions of the checked crates that export
+/// one symbol (`#[no_mangle]` names it after the item, `#[export_name = ".."]` as given) are
+/// "symbol `x` is already defined". The second, in definition order, is reported.
+pub fn duplicate_symbols(prog: &Program, own: &[bool]) -> Vec<String> {
+    use crate::program::DefKind as K;
+    let mut seen: crate::fxhash::HashMap<Vec<u8>, DefId> = Default::default();
+    let mut errors = Vec::new();
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if !own.get(def.krate as usize).copied().unwrap_or(false) || !matches!(def.kind, K::Fn | K::AssocFn | K::Static) { continue; }
+        if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
+        // (an inherent method's symbol clash is left to a build: the check-pass test
+        // lint/non-snake-case/non-snake-ffi-issue-31924 has one)
+        if def.kind == K::AssocFn && prog.def(def.parent).kind == K::Impl && { let pd = prog.def(def.parent); let pa = &prog.files[pd.file as usize].ast; pa.as_impl(&pa.item(pd.item).kind).is_some_and(|i| i.trait_.is_none()) } { continue; }
+        let pf = &prog.files[def.file as usize];
+        let ast = &pf.ast;
+        let p = prog.src(def.file);
+        let mut symbol: Option<Vec<u8>> = None;
+        for a in ast.list(ast.item(def.item).attrs) {
+            let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+            if hi <= lo { continue; }
+            // `unsafe(no_mangle)` and `no_mangle`
+            let first = if crate::cfg::tok_str(p, lo) == b"unsafe" && hi > lo + 2 { lo + 2 } else { lo };
+            match crate::cfg::tok_str(p, first) {
+                b"no_mangle" => symbol = Some(prog.name(d).as_bytes().to_vec()),
+                b"export_name" if first + 2 < hi && crate::cfg::tok_str(p, first + 1) == b"=" => {
+                    let v = crate::cfg::tok_str(p, first + 2);
+                    symbol = Some(v.trim_ascii().strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\"")).unwrap_or(v).to_vec());
+                }
+                _ => {}
+            }
+        }
+        let Some(sym) = symbol else { continue };
+        match seen.get(&sym) {
+            Some(&first) if first != d => errors.push(prog.record_uncoded_error(def.file, ast.item(def.item).lo, "typeck", format!("symbol `{}` is already defined", String::from_utf8_lossy(&sym)))),
+            Some(_) => {}
+            None => { seen.insert(sym, d); }
+        }
+    }
+    errors
+}
+
+/// rustc_attr_parsing: the shape of a few built-in attributes' arguments (the `template!` each
+/// parser checks): E0539 "expected this to be of the form ..", E0805 a wrong number of
+/// arguments, E0565 a literal where a meta item belongs.
+pub fn attribute_shapes(prog: &Program, d: DefId) -> Vec<String> {
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let p = prog.src(def.file);
+    let mut errors = Vec::new();
+    for a in ast.list(ast.item(def.item).attrs) {
+        let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+        if hi <= lo { continue; }
+        // `unsafe(name ..)` wraps
+        let first = if crate::cfg::tok_str(p, lo) == b"unsafe" && hi > lo + 2 && crate::cfg::tok_str(p, lo + 1) == b"(" { lo + 2 } else { lo };
+        let name = crate::cfg::tok_str(p, first).to_vec();
+        let name_str = String::from_utf8_lossy(&name).into_owned();
+        if !matches!(name.as_slice(), b"inline" | b"must_use" | b"deprecated" | b"link_name" | b"link_ordinal" | b"link") { continue; }
+        let pos = p.tok(lo).lo;
+        let end = if first > lo { hi.saturating_sub(1) } else { hi };
+        let next = if first + 1 < end { crate::cfg::tok_str(p, first + 1) } else { b"" };
+        // the arguments of `name(..)`: top-level comma separated token runs
+        let mut args: Vec<Vec<usize>> = Vec::new();
+        let mut list = false;
+        let mut eq_value: Option<usize> = None;
+        if next == b"(" {
+            list = true;
+            let mut depth = 0;
+            let mut cur: Vec<usize> = Vec::new();
+            let mut i = first + 2;
+            while i < end {
+                let t = crate::cfg::tok_str(p, i);
+                if t == b"(" { depth += 1; }
+                if t == b")" { if depth == 0 { break; } depth -= 1; }
+                if t == b"," && depth == 0 { args.push(std::mem::take(&mut cur)); } else { cur.push(i); }
+                i += 1;
+            }
+            if !cur.is_empty() { args.push(cur); }
+        } else if next == b"=" && first + 2 < end { eq_value = Some(first + 2); }
+        let is_str = |i: usize| p.tok(i).kind == crate::lexer::T::Str || p.tok(i).kind == crate::lexer::T::RawStr;
+        let mut bad = |code: &str| errors.push(prog.record_error(def.file, pos, "typeck", format!("{}: malformed `{}` attribute input", code, name_str)));
+        match name.as_slice() {
+            b"inline" => {
+                if list {
+                    if args.len() != 1 { bad("E0805"); }
+                    else if !(args[0].len() == 1 && matches!(crate::cfg::tok_str(p, args[0][0]), b"always" | b"never")) { bad("E0539"); }
+                }
+            }
+            b"must_use" => {
+                if list { bad("E0539"); }
+                else if let Some(v) = eq_value { if !is_str(v) { bad("E0539"); } }
+            }
+            b"link_name" => {
+                if eq_value.map_or(true, |v| !is_str(v)) { bad("E0539"); }
+            }
+            b"link" => {
+                if !list { bad("E0539"); }
+            }
+            b"link_ordinal" => {
+                if !list || args.is_empty() { bad("E0805"); }
+                else if args.len() > 1 { bad("E0805"); }
+                else if !(args[0].len() == 1 && p.tok(args[0][0]).kind == crate::lexer::T::Int) { bad("E0539"); }
+            }
+            b"deprecated" => {
+                if list {
+                    for arg in &args {
+                        // a bare literal where `key = value` belongs
+                        if arg.len() == 1 && matches!(p.tok(arg[0]).kind, crate::lexer::T::Str | crate::lexer::T::RawStr | crate::lexer::T::Int | crate::lexer::T::Float) { bad("E0565"); break; }
+                        let key = arg.first().map(|&i| crate::cfg::tok_str(p, i)).unwrap_or(b"");
+                        let ok_key = matches!(key, b"since" | b"note" | b"suggestion");
+                        let valued = arg.len() == 3 && crate::cfg::tok_str(p, arg[1]) == b"=" && is_str(arg[2]);
+                        if !ok_key || !valued { bad("E0539"); break; }
+                    }
+                } else if let Some(v) = eq_value { if !is_str(v) { bad("E0539"); } }
+            }
+            _ => {}
+        }
+    }
+    errors
 }

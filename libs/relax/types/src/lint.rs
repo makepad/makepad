@@ -228,9 +228,17 @@ pub struct Resolved {
 /// attribute from the crate root inwards applied in order. `until` stops before that attribute
 /// (the state an attribute sees).
 pub fn resolve(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, until: Option<(u32, u32)>) -> Resolved {
+    resolve_in(prog, def, def_file(prog, def), inner, lint, until)
+}
+
+fn def_file(prog: &Program, def: DefId) -> u32 { if def == NO_DEF { 0 } else { prog.def(def).file } }
+
+/// `resolve` with the file the `inner` attributes are written in (a module's own `use` items
+/// are in the module's file, not the file that declares the module).
+pub fn resolve_in(prog: &Program, def: DefId, inner_file: u32, inner: &[Attr], lint: &Lint, until: Option<(u32, u32)>) -> Resolved {
     let mut scopes = scopes(prog, def);
     if !inner.is_empty() && def != NO_DEF {
-        scopes.insert(0, (prog.def(def).file, inner.to_vec()));
+        scopes.insert(0, (inner_file, inner.to_vec()));
     }
     let edition = prog.files[prog.def(def).file as usize].edition;
     let mut spec = Resolved { level: if edition >= 2024 { lint.default_2024 } else { lint.default }, expect: None, forbid_from_group: false, source: None };
@@ -349,7 +357,7 @@ pub fn hard_error(prog: &Program, file: u32, pos: u32, msg: &str) {
 /// `emit` under the attributes `inner` of a node inside `def`'s body.
 pub fn emit_in(prog: &Program, def: DefId, inner: &[Attr], lint: &Lint, file: u32, pos: u32, msg: &str) {
     if !enabled() { return; }
-    let spec = resolve(prog, def, inner, lint, None);
+    let spec = resolve_in(prog, def, file, inner, lint, None);
     let level = spec.level;
     if level == Level::Allow {
         if let Some(k) = spec.expect { FULFILLED.lock().unwrap_or_else(|e| e.into_inner()).push(k); }

@@ -2963,6 +2963,27 @@ impl<'a> Gen<'a> {
                 let rs = self.use_i(*src, S1);
                 let size = *size as i64;
                 let mut o = 0i64;
+                if size >= 32 {
+                    // 16-byte vector moves through the float scratch (an `ldp`/`stp` pair moves 32
+                    // bytes in two instructions), the tail as one overlapping 16-byte move: a
+                    // 160-byte struct move is 10 instructions, not 40
+                    let pair = |o: i64| o <= 1008;
+                    while o + 32 <= size && pair(o) {
+                        self.a.e(0xAD40_0000 | (((o / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rs as u32) << 5 | FS0 as u32);
+                        self.a.e(0xAD00_0000 | (((o / 16) as u32) & 0x7f) << 15 | (FS1 as u32) << 10 | (rd as u32) << 5 | FS0 as u32);
+                        o += 32;
+                    }
+                    while o + 16 <= size {
+                        self.vldst(true, FS0, rs, o);
+                        self.vldst(false, FS0, rd, o);
+                        o += 16;
+                    }
+                    if o < size {
+                        self.vldst(true, FS0, rs, size - 16);
+                        self.vldst(false, FS0, rd, size - 16);
+                    }
+                    return;
+                }
                 while o + 8 <= size {
                     self.a.ldst(LDRX, 8, IP0, rs, o);
                     self.a.ldst(STRX, 8, IP0, rd, o);

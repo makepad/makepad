@@ -127,6 +127,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
+    errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
     if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
     errors.extend(relax_types::lint_levels::check(&u.prog, &own));
     relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own);
@@ -139,9 +140,20 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     if errors.is_empty() {
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
-        for e in par_map(&defs, |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::wfcheck::obligations::check_def(prog, tcx, d)))
-            .unwrap_or_else(|p| vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
-                p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())])) {
+        // (a constant a well-formedness check evaluates may find the compiler's owner busy: preempted
+        // work is asked again, as the body checks do)
+        for e in par_map(&defs, |&d| {
+            let mut tries = 0;
+            loop {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::wfcheck::obligations::check_def(prog, tcx, d)));
+                match r {
+                    Ok(v) => break v,
+                    Err(p) if (crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>()) && tries < 100 => { tries += 1; std::thread::yield_now(); }
+                    Err(p) => break if let Some(fatal) = p.downcast_ref::<relax_types::infer::diagnostics::FatalError>() { vec![fatal.0.clone()] } else { vec![format!("internal compiler error while checking the well-formedness of {} ({}) -- makepad run bug, report it", prog.def_path(d),
+                        p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())] },
+                }
+            }
+        }) {
             errors.extend(e);
         }
         if errors.is_empty() {
@@ -211,7 +223,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             Ok(e) => {
                 // rustc evaluates every array length / const argument written in a signature (used
                 // or not): one that fails is reported there (E0080)
-                if e.is_empty() && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && u.prog.def(u.prog.def(anon).parent).kind != DefKind::Trait {
+                if e.is_empty() && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && !matches!(u.prog.def(u.prog.def(anon).parent).kind, DefKind::Trait | DefKind::TypeAlias) {
                     let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
                     let before = u.tcx.dcx.err_count();
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.const_eval_resolve(&u.prog, env, anon, &[])));
@@ -347,12 +359,13 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     let checked = seeds.len();
     relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root);
-    relax_types::lint_early2::finish(&u.prog, &own);
+    relax_types::lint_early::finish(&u.prog, &own);
     errors.extend(static_self_access(up, &own));
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
     for &k in crates {
         errors.extend(relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
         errors.extend(relax_types::feature_gate::check_bodies(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
+        errors.extend(relax_types::feature_gate::check_imports(unsafe { &(*up).prog }, k));
     }
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an

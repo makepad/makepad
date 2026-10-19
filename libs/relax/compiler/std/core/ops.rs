@@ -14,6 +14,7 @@ impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a mut U
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*const U> for *const T {}
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*mut U> for *mut T {}
 
+#[rustc_diagnostic_item = "Drop"]
 #[cfg_attr(not(relax_check), lang = "drop")]
 pub trait Drop {
     fn drop(&mut self);
