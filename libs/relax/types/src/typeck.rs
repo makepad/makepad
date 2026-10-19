@@ -17,7 +17,7 @@ use crate::tcx::{ty_key, FnSigT, GenEnv, Tcx, TyKey};
 use crate::types::{Abi, FnHeader, Safety, TyId, TyKind};
 use crate::fxhash::HashMap;
 
-mod probe;
+pub(crate) mod probe;
 mod closure;
 mod writeback;
 mod opaque_types;
@@ -794,6 +794,12 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         let t = if pi < params.len() { params[pi] } else { fcx.tcx.tys.error };
         fcx.check_pat(p.pat, t);
         fcx.b.param_pats.push(p.pat);
+        // fn_ctxt check_fn: every parameter is Sized (unless unsized_fn_params), judged for the
+        // crates whose errors are reported
+        if tcx.validates(prog, file) && !prog.crates[d.krate as usize].features(prog).has("unsized_fn_params") {
+            let lo = ast.item(d.item).lo;
+            fcx.require_type_is_sized_deferred(t, lo);
+        }
         pi += 1;
     }
     if let (Some(bid), true) = (body, fsig.asyncness) {
@@ -5346,7 +5352,18 @@ impl<'a> Fcx<'a> {
                 }
                 if let Some(bx) = base {
                     let t = self.check_expr(bx, Some(adt_ty));
-                    self.eq(t, adt_ty);
+                    // expr.rs check_expr_struct_fields: a base of the same ADT with other
+                    // generic arguments is the unstable type_changing_struct_update
+                    let (bt, at) = (self.shallow(t), self.shallow(adt_ty));
+                    if let (TyKind::Adt(bd, ..), TyKind::Adt(ad, ..)) = (self.tcx.tys.kind(bt).clone(), self.tcx.tys.kind(at).clone()) {
+                        let krate = self.prog.def(self.b.def).krate;
+                        if bd == ad && !self.can_eq(bt, at) && !self.prog.crates[krate as usize].features(self.prog).has("type_changing_struct_update") {
+                            let pos = self.ast().expr(bx).lo;
+                            self.err(pos, "E0658: type changing struct updating is experimental".to_string());
+                        }
+                    }
+                    let pos = self.ast().expr(bx).lo;
+                    self.coerce_or_unify(t, adt_ty, Some(bx), pos);
                     // the fields taken from the base must be visible too (rustc_hir_typeck
                     // check_expr_struct_fields: private fields of a functional update)
                     if let TyKind::Adt(ad, _, _) = self.tcx.tys.kind(self.shallow(adt_ty)).clone() {
@@ -5759,7 +5776,7 @@ impl<'a> Fcx<'a> {
                 // a primitive left operand with a non-primitive right one is an operator trait
                 // call too (`3u32 * duration`: `impl Mul<Duration> for u32`; rustc is_builtin_binop
                 // needs both sides primitive)
-                if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..)) {
+                if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..)) {
                     let sa = self.shallow(ta);
                     if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo) {
                         return r;

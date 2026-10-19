@@ -189,7 +189,7 @@ impl Session {
                 // Check concrete instances reached in the package, with diagnostics owned by
                 // the caller. Closure bodies are already checked in their enclosing Body.
                 let cx = crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &state);
-                for (callee, args) in u.tcx.with_errors(&cx, || crate::jit::body_callees(&u.prog, &u.tcx, &body, false)).0 {
+                for (callee, args) in u.tcx.with_errors(&cx, || crate::jit::body_callees(&u.prog, &u.tcx, &body, false, None)).0 {
                     edges.push(callee);
                     if self.own_crates.contains(&u.prog.def(callee).krate) && !args.is_empty() { queue.push((callee, args)); }
                 }

@@ -140,6 +140,7 @@ pub unsafe fn box_free_after_move<T>(p: *mut T) {
     heap::free(p as *mut u8, Layout::new::<T>());
 }
 
+impl<T: ?Sized> crate::ops::LegacyReceiver for Box<T> {}
 impl<T: ?Sized> Deref for Box<T> {
     type Target = T;
     fn deref(&self) -> &T {

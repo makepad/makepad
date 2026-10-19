@@ -229,6 +229,10 @@ pub mod prelude {
         pub use crate::string::{String, ToString};
         pub use crate::vec::Vec;
     }
+    /// `core::prelude::v1`: the 2015/2018 set
+    pub mod v1 {
+        pub use super::rust_2015::*;
+    }
     pub mod rust_2018 {
         pub use super::rust_2015::*;
     }

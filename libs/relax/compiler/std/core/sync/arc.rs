@@ -246,6 +246,7 @@ impl<T: ?Sized> Drop for Arc<T> {
     }
 }
 
+impl<T: ?Sized> crate::ops::LegacyReceiver for Arc<T> {}
 impl<T: ?Sized> Deref for Arc<T> {
     type Target = T;
     fn deref(&self) -> &T {

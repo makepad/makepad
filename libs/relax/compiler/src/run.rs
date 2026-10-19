@@ -2944,6 +2944,10 @@ fn summary_inner(why: &str) {
         if ah(0) + ah(2) > 0 && !SILENT.load(Ordering::Relaxed) {
             verbose!("makepad-run: type checks ahead (off the lock): {} bodies ({} taken by builds, {} with errors), cpu callers {:.0} ms, workers {:.0} ms", ah(0), ah(1), ah(2), ah(3) as f64 / 1e6, ah(4) as f64 / 1e6);
         }
+        if ah(0) > 0 && !SILENT.load(Ordering::Relaxed) {
+            let p = |i: usize| jit::AHEAD_AT_PRESENT[i].load(Ordering::Relaxed);
+            verbose!("makepad-run: ahead until the first present: {} bodies checked, workers cpu {:.0} ms; {} lowered ({} taken by builds), cpu {:.0} ms", p(0), p(4) as f64 / 1e6, p(5), p(6), p(7) as f64 / 1e6);
+        }
         if s.ctfe_data + s.ctfe_code > 0 && !SILENT.load(Ordering::Relaxed) {
             verbose!("makepad-run: constant initializers: {} evaluated to data, {} compiled and run; evaluation cpu {:.1} ms", s.ctfe_data, s.ctfe_code, s.ctfe_ns as f64 / 1e6);
         }

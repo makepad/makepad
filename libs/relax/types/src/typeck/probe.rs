@@ -66,7 +66,7 @@ fn method_autoderef_steps(fcx: &Fcx<'_>, receiver: TyId) -> (Vec<CandidateStep>,
 }
 /// rustc_hir_analysis/src/autoderef.rs:149-202. Pending normalization goals
 /// belong to the deref query; confirmation records the chosen adjustments.
-fn overloaded_deref_ty(infcx: &crate::infer::InferCtxt<'_>, prog: &Program, env: &ParamEnvId, ty: TyId) -> Option<TyId> {
+pub(crate) fn overloaded_deref_ty(infcx: &crate::infer::InferCtxt<'_>, prog: &Program, env: &ParamEnvId, ty: TyId) -> Option<TyId> {
     let tcx = infcx.tcx;
     let td = tcx.lang_items.get(crate::lang_items::LangItem::Deref)?;
     let target = tcx.lang_items.get(crate::lang_items::LangItem::DerefTarget)?;

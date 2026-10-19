@@ -138,7 +138,7 @@ impl Fcx<'_> {
         crate::next_solver::eval_ctxt::trait_is_auto(self.prog, td) && self.tcx.tys.list(tautos).iter().all(|t| self.tcx.tys.list(sautos).contains(t))
     }
 
-    fn can_eq(&mut self, a: TyId, b: TyId) -> bool {
+    pub(super) fn can_eq(&mut self, a: TyId, b: TyId) -> bool {
         let snap = self.start_snapshot();
         let ok = self.infcx.at(self.prog, self.param_env.clone()).eq(a, b).is_ok();
         self.rollback_to(snap);

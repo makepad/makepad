@@ -548,7 +548,7 @@ fn obj_ptrs(u: &Unit, idx: u32) -> Option<(u64, u64, std::sync::Arc<Vec<(u32, Op
         }
         DataKind::Typed(t) => {
             let mut words = Vec::new();
-            if walk(u, *t, start, 0, &mut words, 0).is_none() {
+            if walk(u, *t, start, 0, &mut words, 0, &mut Vec::new()).is_none() {
                 opaque = true;
             }
             for (off, pointee) in words {
@@ -751,7 +751,7 @@ mod provenance_tests {
 /// Collects the pointer words of a value of type `t` at `base + off`: (offset, whether a data
 /// pointer is `&mut` / `*mut`; None for a fn pointer or a vtable word). None: the value cannot
 /// be classified (union, unknown layout): the whole object is opaque.
-fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>)>, depth: u32) -> Option<()> {
+fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>)>, depth: u32, discs: &mut Vec<(DefId, Vec<i128>)>) -> Option<()> {
     if depth > 24 {
         return None;
     }
@@ -795,12 +795,12 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             let n = n.min(1 << 20);
             // a scalar element type without pointers: nothing to walk per element
             let mut probe = Vec::new();
-            walk(u, et, base, off, &mut probe, depth + 1)?;
+            walk(u, et, base, off, &mut probe, depth + 1, discs)?;
             if probe.is_empty() && !has_enum(u, et, 0) {
                 return Some(());
             }
             for i in 0..n {
-                walk(u, et, base, off + (i * es) as u32, out, depth + 1)?;
+                walk(u, et, base, off + (i * es) as u32, out, depth + 1, discs)?;
             }
             Some(())
         }
@@ -808,12 +808,12 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             let l = u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t);
             for (i, ft) in u.tcx.tys.list(ts).iter().enumerate() {
                 let fo = *l.fields.get(i)?;
-                walk(u, *ft, base, off + fo, out, depth + 1)?;
+                walk(u, *ft, base, off + fo, out, depth + 1, discs)?;
             }
             Some(())
         }
         TyKind::Adt(d, args, _) => {
-            let adt = u.tcx.adts.get(&d)?.clone();
+            let adt = u.tcx.adts.get(&d)?;
             if adt.is_union {
                 return None;
             }
@@ -827,7 +827,16 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
                             raw[k] = unsafe { *p.add(k) };
                         }
                         let disc = crate::lower::decode_tag_const(u, i128::from_le_bytes(raw), &l, &adt)?;
-                        adt.discriminants(&u.tcx, &u.prog).iter().position(|(_, v)| v.signed_value() == disc)?
+                        // the enum's discriminant values are the type's, not the element's: worked
+                        // out once per walk (an array of enums asks once per element)
+                        let at = match discs.iter().position(|(x, _)| *x == d) {
+                            Some(at) => at,
+                            None => {
+                                discs.push((d, adt.discriminants(&u.tcx, &u.prog).iter().map(|(_, v)| v.signed_value()).collect()));
+                                discs.len() - 1
+                            }
+                        };
+                        discs[at].1.iter().position(|v| *v == disc)?
                     }
                     Some(_) => return None,
                     None => 0,
@@ -839,7 +848,7 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             for fi in 0..fields.len() {
                 let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args));
                 let fo = if adt.is_enum { l.variant_fields.get(vi).and_then(|v| v.get(fi)).copied() } else { l.fields.get(fi).copied() };
-                walk(u, ft, base, off + fo?, out, depth + 1)?;
+                walk(u, ft, base, off + fo?, out, depth + 1, discs)?;
             }
             Some(())
         }
@@ -1097,7 +1106,7 @@ pub(crate) fn pointer_offsets(u: &Unit, start: u64) -> Option<Vec<u32>> {
         DataKind::Words(w) => ((w.len() as u64) >= len / 8).then(|| w.iter().enumerate().filter(|(_, x)| x.is_some()).map(|(i, _)| (i * 8) as u32).collect()),
         DataKind::Typed(t) => {
             let mut words = Vec::new();
-            walk(u, t, start, 0, &mut words, 0)?;
+            walk(u, t, start, 0, &mut words, 0, &mut Vec::new())?;
             Some(words.into_iter().map(|(o, _)| o).collect())
         }
     }

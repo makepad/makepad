@@ -312,6 +312,7 @@ impl<T: ?Sized> Drop for Rc<T> {
     }
 }
 
+impl<T: ?Sized> crate::ops::LegacyReceiver for Rc<T> {}
 impl<T: ?Sized> Deref for Rc<T> {
     type Target = T;
     fn deref(&self) -> &T {

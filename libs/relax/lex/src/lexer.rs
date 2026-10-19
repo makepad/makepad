@@ -956,11 +956,9 @@ fn lex_quoted_mode<const RX: bool>(src: &[u8], mut i: usize, q: u8) -> Option<us
     None
 }
 
-fn lex_suffix(src: &[u8], mut i: usize) -> usize {
-    if i < src.len() && is_ident_start(src[i]) {
-        while i < src.len() && is_ident_cont(src[i]) {
-            i += 1;
-        }
+fn lex_suffix(src: &[u8], i: usize) -> usize {
+    if i < src.len() && is_ident_start(src[i]) && (src[i] < 0x80 || pattern_whitespace_len(src, i) == 0) {
+        return ident_run_end(src, i);
     }
     i
 }

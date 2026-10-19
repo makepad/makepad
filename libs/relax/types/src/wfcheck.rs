@@ -269,6 +269,96 @@ impl Tcx {
     }
 }
 
+/// rustc_hir_analysis check/wfcheck.rs `check_method_receiver` for a method that writes its
+/// receiver type (`self: Box<Self>`): the receiver must be `Self` or reach it through the
+/// autoderef chain, every step implementing `LegacyReceiver`. Where rustc would accept it with
+/// `arbitrary_self_types` (a `Deref` chain) or `arbitrary_self_types_pointers` (raw pointers),
+/// it reports the feature gate (E0658); otherwise E0307, or E0801 for a generic receiver.
+/// A receiver or `Self` that mentions a projection or opaque type is not judged.
+impl Tcx {
+    pub fn check_method_receiver(&self, prog: &Program, m: DefId) -> Vec<String> {
+        use crate::next_solver::{Goal, collect};
+        let def = prog.def(m);
+        if def.kind != DefKind::AssocFn { return Vec::new(); }
+        let f = &prog.files[def.file as usize];
+        let item = f.ast.item(def.item);
+        let ItemKind::Fn(sig_id, _, _) = item.kind else { return Vec::new() };
+        if !matches!(f.ast.fn_sig(sig_id).self_param, Some(crate::ast::SelfParam::Typed(..))) { return Vec::new(); }
+        let parent = prog.def(def.parent);
+        let self_ty = match parent.kind {
+            DefKind::Impl => match self.impl_self.get(&def.parent) { Some(&t) => t, None => return Vec::new() },
+            DefKind::Trait => self.tys.intern(TyKind::Param(0)),
+            _ => return Vec::new(),
+        };
+        let Some(sig) = self.fn_sig(prog, m) else { return Vec::new() };
+        let Some(&recv) = sig.params.first() else { return Vec::new() };
+        let (recv, self_ty) = (self.tys.erase_all_regions(recv), self.tys.erase_all_regions(self_ty));
+        for t in [recv, self_ty] {
+            if self.tys.has_error(t) || self.tys.has_assoc(t) || self.tys.has_opaque(t) || self.tys.has_infer(t) { return Vec::new(); }
+        }
+        let Some(legacy) = self.lang_items.get(crate::lang_items::LangItem::LegacyReceiver) else { return Vec::new() };
+        let env = self.param_env_id(prog, m);
+        let parent_params = self.generic_indices_of(prog, def.parent).types_consts.len() as u32;
+        // 0: neither feature, 1: arbitrary_self_types, 2: with pointers
+        let valid = |level: u8| -> Result<(), bool> {
+            let infcx = crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::non_body_analysis(), m);
+            let same = |a: TyId, b: TyId| infcx.at(prog, env.clone()).eq(a, b).is_ok();
+            if same(self_ty, recv) { return Ok(()); }
+            let generic_param = |t: TyId| matches!(self.tys.kind(t), TyKind::Param(i) if *i >= parent_params);
+            if generic_param(recv) { return Err(true); }
+            let mut cur = recv;
+            for _ in 0..32 {
+                if generic_param(cur) { return Err(true); }
+                if same(self_ty, cur) { return Ok(()); }
+                if level == 0 {
+                    // (a trait object implements no `LegacyReceiver`; asking would need the dyn
+                    // compatibility of a trait whose own signature is being checked)
+                    if matches!(self.tys.kind(cur), TyKind::Dyn(..)) { break; }
+                    let goal = Goal { param_env: env.clone(), predicate: collect::trait_predicate(legacy, vec![GenericArg::Type(cur)]) };
+                    if !infcx.evaluate_obligation(prog, goal).must_apply_modulo_regions() { break; }
+                }
+                let next = match self.tys.kind(cur) {
+                    TyKind::Ref(_, t, _) => Some(*t),
+                    TyKind::Ptr(_, t) if level == 2 => Some(*t),
+                    TyKind::Ptr(..) | TyKind::Error | TyKind::Infer(_) | TyKind::Dyn(..) => None,
+                    _ => crate::typeck::probe::overloaded_deref_ty(&infcx, prog, &env, cur),
+                };
+                let Some(next) = next else { break };
+                cur = self.tys.erase_all_regions(next);
+            }
+            Err(false)
+        };
+        let Err(generic) = valid(0) else { return Vec::new() };
+        let shown = crate::typeck::ty_to_string(false, prog, self, recv);
+        let pos = self_param_pos(prog, def.file, item.lo, item.name.hi);
+        let crate_features = prog.crates[def.krate as usize].features(prog);
+        if !generic {
+            if valid(1).is_ok() && !crate_features.has("arbitrary_self_types") && !crate_features.has("arbitrary_self_types_pointers") {
+                return vec![prog.record_error(def.file, pos, "typeck", format!("E0658: `{}` cannot be used as the type of `self` without the `arbitrary_self_types` feature", shown))];
+            }
+            if valid(2).is_ok() && !crate_features.has("arbitrary_self_types_pointers") {
+                return vec![prog.record_error(def.file, pos, "typeck", format!("E0658: `{}` cannot be used as the type of `self` without the `arbitrary_self_types_pointers` feature", shown))];
+            }
+        }
+        if crate_features.has("arbitrary_self_types") || crate_features.has("arbitrary_self_types_pointers") {
+            // (the features change which chains are valid; Relax does not model their errors)
+            return Vec::new();
+        }
+        if generic {
+            vec![prog.record_error(def.file, pos, "typeck", format!("E0801: invalid generic `self` parameter type: `{}`", shown))]
+        } else {
+            vec![prog.record_error(def.file, pos, "typeck", format!("E0307: invalid `self` parameter type: `{}`", shown))]
+        }
+    }
+}
+
+/// The position of the `self` of a method's parameter list (after its name).
+fn self_param_pos(prog: &Program, file: u32, lo: u32, name_hi: u32) -> u32 {
+    let f = &prog.files[file as usize];
+    let b = f.bytes(name_hi, (name_hi + 400).min(f.src_len));
+    b.windows(4).position(|w| w == b"self").map_or(lo, |i| name_hi + i as u32)
+}
+
 /// Trait obligations of rustc check/wfcheck.rs (`makepad check` only).
 pub mod obligations {
     // Item well-formedness: the trait obligations of rustc_hir_analysis/src/check/wfcheck.rs

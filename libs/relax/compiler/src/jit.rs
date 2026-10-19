@@ -2601,12 +2601,19 @@ impl Unit {
     fn crossing_of(&self, ks: &[u32]) -> std::collections::HashSet<TyId> {
         let pt = &self.provided_types;
         let provided = &self.provided;
+        // A bound fn has a shim under its key, and a key ends in the fn's own name. Only the
+        // fns of those names are keyed, and only the ones a shim names get their signature
+        // worked out (it drags in lifetime resolution): the provided crates have thousands of
+        // fns the shims do not name, and this ran on the first lowering of a provided type.
+        let names: std::collections::HashSet<&str> = provided.iter().filter(|(pk, _)| ks.contains(pk)).flat_map(|(_, pc)| pc.shims.keys()).filter_map(|k| k.rsplit("::").next()).collect();
         crate::provided::crossing_types(&self.prog, &self.tcx, ks, &|d| {
-            let k = self.prog.def(d).krate;
-            crate::provided::unbound_reason(&self.prog, &self.tcx, k, d, &|a| pt.contains_key(&a)).is_none() && {
-                let key = crate::provided::key(&self.prog, &self.tcx, d);
-                provided.iter().any(|(pk, pc)| *pk == k && pc.shims.contains_key(key.as_str()))
+            let def = self.prog.def(d);
+            if !names.contains(self.prog.syms.str(def.name)) {
+                return false;
             }
+            let key = crate::provided::key(&self.prog, &self.tcx, d);
+            provided.iter().any(|(pk, pc)| *pk == def.krate && pc.shims.contains_key(key.as_str()))
+                && crate::provided::unbound_reason(&self.prog, &self.tcx, def.krate, d, &|a| pt.contains_key(&a)).is_none()
         })
     }
 
@@ -11110,6 +11117,7 @@ extern "C" fn relax_first_present() {
             exec_check_now("first frame");
         }
         FIRST_PRESENT_NS.store(wall_ns(), Ordering::Release);
+        for i in 0..8 { AHEAD_AT_PRESENT[i].store(AHEAD_STATS[i].load(Ordering::Relaxed), Ordering::Relaxed); }
         crate::solver_work::report();
         crate::exec_census::first_present();
         crate::tcx::Tcx::report_declaration_counters();
@@ -13174,6 +13182,8 @@ fn lower_ahead(f: &FrontShared, id: u32) {
     if std::env::var_os("MAKEPAD_RUN_AHEAD_TRACE").is_some() {
         eprintln!("ahead-lower {} {} us: {}", if ready.is_some() { "ready" } else { "deferred" }, (cpu_ns() - t0) / 1000, u.prog.def_path(d));
     }
+    AHEAD_STATS[7].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+    if ready.is_some() { AHEAD_STATS[5].fetch_add(1, Ordering::Relaxed); }
     let mut pending = f.lowered.lock().unwrap_or_else(|e| e.into_inner());
     if f.built.contains(&key) {
         pending.remove(&id);
@@ -13190,6 +13200,7 @@ fn take_lowered_ahead(u: &mut Unit, id: u32) -> Option<crate::rir::Func> {
         || lowered.epoch != u.tcx.collect_epoch.load(Ordering::SeqCst)
         || lowered.file != u.fns[id as usize].file
     { return None; }
+    AHEAD_STATS[6].fetch_add(1, Ordering::Relaxed);
     if let FnKey::Inst(d, args) = &u.fns[id as usize].key {
         let key = (*d, args.clone());
         u.front.built.insert(key.clone(), ());
@@ -13248,8 +13259,11 @@ fn publish_ahead(f: &FrontShared, key: AheadKey, epoch: u64, body: std::sync::Ar
 }
 
 /// bodies checked ahead, taken by a build, checked with errors (dropped); cpu ns of the
-/// checks ahead on callers' threads and on the speculative workers
-pub static AHEAD_STATS: [AtomicU64; 5] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+/// checks ahead on callers' threads and on the speculative workers; bodies lowered ahead,
+/// lowered bodies a build took (the other builds lowered their own or never ran), cpu ns lowering
+pub static AHEAD_STATS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// AHEAD_STATS as they stood at the first present (the helpers end there).
+pub static AHEAD_AT_PRESENT: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 fn ahead_on(options: &crate::options::Options) -> bool {
     options.tyck_ahead
@@ -13415,7 +13429,7 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
         };
         // Discover only direct inline candidates; publish before checking any of them.
         let callees = if depth > 0 {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body_callees(prog, tcx, &b, true))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body_callees(prog, tcx, &b, true, Some(core)))) {
                 Ok(c) => c,
                 Err(_) => Vec::new(),
             }
@@ -13466,7 +13480,7 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
 /// miss only means the build checks that body itself. `warm_only`: calls inside a diverging
 /// call's expression (`panic!(..)`'s formatting, `unwrap_failed(..)`) are left out, as
 /// prepare_rir_from leaves the callees of cold blocks out of its inline candidates.
-pub(crate) fn body_callees(prog: &Program, tcx: &Tcx, b: &Body, warm_only: bool) -> Vec<(DefId, Vec<TyId>)> {
+pub(crate) fn body_callees(prog: &Program, tcx: &Tcx, b: &Body, warm_only: bool, only_krate: Option<u32>) -> Vec<(DefId, Vec<TyId>)> {
     use crate::ast::ExprKind;
     let ast = &prog.files[b.file as usize].ast;
     let cold: Vec<(u32, u32)> = if warm_only {
@@ -13488,6 +13502,12 @@ pub(crate) fn body_callees(prog: &Program, tcx: &Tcx, b: &Body, warm_only: bool)
     };
     let mut out: Vec<(DefId, Vec<TyId>)> = Vec::new();
     let mut add = |k: u32, d: DefId, args: &[TyId]| {
+        // `only_krate`: an instance in that crate is reached through a declaration in it (an impl
+        // of a trait sits in the trait's crate or the type's, never in a crate below both), so
+        // the other declarations are not resolved at all
+        if only_krate.is_some_and(|kr| prog.def(d).krate != kr) {
+            return;
+        }
         // rustc_ty_utils/src/instance.rs:187-198 @8d1a764: instance
         // discovery is a codegen boundary, including non-trait callees.
         let mut erased = Vec::with_capacity(args.len());

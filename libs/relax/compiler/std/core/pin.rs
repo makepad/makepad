@@ -92,6 +92,7 @@ impl<'a, T: ?Sized> Pin<&'a mut T> {
     }
 }
 
+impl<P: crate::ops::LegacyReceiver> crate::ops::LegacyReceiver for Pin<P> {}
 impl<P: Deref> Deref for Pin<P> {
     type Target = P::Target;
     fn deref(&self) -> &P::Target {

@@ -19,6 +19,13 @@ pub trait Drop {
     fn drop(&mut self);
 }
 
+/// Types a method may take as `self: Type` without `arbitrary_self_types` (rustc
+/// library/core/src/ops/deref.rs `LegacyReceiver`).
+#[cfg_attr(not(relax_check), lang = "legacy_receiver")]
+pub trait LegacyReceiver {}
+impl<T: ?Sized> LegacyReceiver for &T {}
+impl<T: ?Sized> LegacyReceiver for &mut T {}
+
 #[cfg_attr(not(relax_check), lang = "deref")]
 pub trait Deref: PointeeSized {
     #[cfg_attr(not(relax_check), lang = "deref_target")]

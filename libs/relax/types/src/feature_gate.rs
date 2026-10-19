@@ -53,13 +53,15 @@ struct Gates<'a> {
     feats: &'a Features,
     /// the innermost position recorded so far (types and patterns keep none of their own)
     cur_pos: u32,
+    /// names a body's lexical ribs bind: (name, is a type parameter) -- for `future_proof_import`
+    binders: Vec<(String, bool)>,
     errors: Vec<String>,
 }
 
 impl<'a> Gates<'a> {
     fn new(prog: &'a Program, tcx: &'a crate::tcx::Tcx, krate: u32, file: u32, feats: &'a Features) -> Gates<'a> {
         let pf = &*prog.files[file as usize];
-        Gates { prog, tcx, scope: prog.crates[krate as usize].root_mod, krate, file, pf, ast: &pf.ast, src: prog.src(file), cfg: &prog.crates[krate as usize].cfg, feats, cur_pos: 0, errors: Vec::new() }
+        Gates { prog, tcx, scope: prog.crates[krate as usize].root_mod, krate, file, pf, ast: &pf.ast, src: prog.src(file), cfg: &prog.crates[krate as usize].cfg, feats, cur_pos: 0, binders: Vec::new(), errors: Vec::new() }
     }
 
     /// A walker over another file of the crate (an out-of-line module), sharing nothing.
@@ -89,6 +91,11 @@ impl<'a> Gates<'a> {
             return;
         }
         self.errors.push(self.prog.record_error(self.file, pos, "typeck", format!("E0658: {}", msg)));
+    }
+
+    fn uncoded(&mut self, pos: u32, msg: &str) {
+        if !self.is_source(pos) { return; }
+        self.errors.push(self.prog.record_uncoded_error(self.file, pos, "typeck", msg.to_string()));
     }
 
     fn coded(&mut self, code: &str, pos: u32, msg: &str) {
@@ -845,6 +852,8 @@ impl<'a> Gates<'a> {
         let def = self.prog.def(owner);
         let item = *self.ast.item(def.item);
         let outer = std::mem::replace(&mut self.cur_pos, item.lo);
+        self.binders.clear();
+        if self.pf.edition >= 2018 { self.body_binders(owner); }
         match item.kind {
             ItemKind::Fn(_, Some(b), _) => self.block(b),
             ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { self.expr(e) },
@@ -853,12 +862,96 @@ impl<'a> Gates<'a> {
         self.cur_pos = outer;
     }
 
+    /// The generic parameters and fn parameters a body's outermost ribs bind.
+    fn body_binders(&mut self, owner: crate::program::DefId) {
+        let ast = self.ast;
+        let def = self.prog.def(owner);
+        let mut owners = vec![owner];
+        let parent = self.prog.def(def.parent);
+        if matches!(parent.kind, DefKind::Impl | DefKind::Trait) && parent.file == def.file { owners.push(def.parent); }
+        for o in owners {
+            let it = ast.item(self.prog.def(o).item);
+            if let Some(g) = ast.kind_generics(&it.kind) {
+                for p in ast.list(g.params) {
+                    match p.kind {
+                        GenericParamKind::Type(..) => self.binders.push((self.pf.text(p.name).to_string(), true)),
+                        GenericParamKind::Const(..) => self.binders.push((self.pf.text(p.name).to_string(), false)),
+                        GenericParamKind::Lifetime(_) => {}
+                    }
+                }
+            }
+            if o == owner {
+                if let ItemKind::Fn(sig, _, _) = it.kind {
+                    for p in ast.list(ast.fn_sig(sig).params).to_vec() { self.pat_binders(p.pat); }
+                }
+            }
+        }
+    }
+
+    /// Names a pattern binds (an identifier that names a constant or unit struct in scope is
+    /// not a binding).
+    fn pat_binders(&mut self, p: PatId) {
+        let ast = self.ast;
+        match *ast.pat(p) {
+            Pat::Ident { name, sub, .. } => {
+                let n = self.pf.text(name).to_string();
+                let is_const = self.prog.syms.get(&n).and_then(|s| self.prog.lookup_in_scope(self.scope, s, false))
+                    .is_some_and(|d| matches!(self.prog.def(d).kind, DefKind::Const | DefKind::Static | DefKind::Struct | DefKind::Variant | DefKind::AssocConst));
+                if !is_const { self.binders.push((n, false)); }
+                if let Some(s) = sub { self.pat_binders(s); }
+            }
+            Pat::TupleStruct(_, l) | Pat::Tuple(l) | Pat::Slice(l) | Pat::Or(l) => for &x in ast.list(l).to_vec().iter() { self.pat_binders(x) },
+            Pat::Struct(_, l, _) => for f in ast.list(l).to_vec() { self.pat_binders(f.pat) },
+            Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.pat_binders(x),
+            _ => {}
+        }
+    }
+
+    /// rustc_resolve late.rs `future_proof_import`: from edition 2018 a `use` whose first
+    /// segment names a type parameter or a local variable of the enclosing rib is an error.
+    fn future_proof_import(&mut self, tree: &UseTree, items: &[ItemId]) {
+        let ast = self.ast;
+        let (seg, simple_only) = match *tree {
+            UseTree::Path(seg, _) => (seg, false),
+            UseTree::Name(seg, _) => (seg, true),
+            UseTree::Glob => return,
+            UseTree::Group(l) => {
+                for t in ast.list(l).to_vec() { self.future_proof_import(&t, items); }
+                return;
+            }
+        };
+        if seg.kind() != SegKind::Ident { return; }
+        let name = self.pf.text(seg.name).to_string();
+        // (an item of the enclosing blocks with that name wins over an outer rib)
+        let declared = |ns_type: bool| items.iter().any(|&i| {
+            let it = ast.item(i);
+            if self.pf.text(it.name) != name { return false; }
+            let ty_ns = matches!(it.kind, ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Union(_) | ItemKind::Trait(_) | ItemKind::TypeAlias(_) | ItemKind::Mod(_) | ItemKind::TraitAlias(_));
+            let val_ns = matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..));
+            if ns_type { ty_ns } else { val_ns }
+        });
+        let nss: &[bool] = if simple_only { &[true, false] } else { &[true] };
+        for &ns_type in nss {
+            if declared(ns_type) { continue; }
+            // the innermost rib binding the name in that namespace
+            let hit = self.binders.iter().rev().find(|(n, tp)| *n == name && (*tp == ns_type || (!ns_type && !*tp)));
+            if let Some(&(_, tp)) = hit {
+                if tp != ns_type { continue; }
+                let what = if ns_type { "type parameters" } else { "local variables" };
+                self.uncoded(seg.name.lo, &format!("imports cannot refer to {}", what));
+            }
+        }
+    }
+
     fn block(&mut self, b: BlockId) {
         let ast = self.ast;
         if !ast.has_block(b) { return; }
         let blk = *ast.block(b);
         let _ = self.attrs(blk.attrs);
-        for s in ast.list(blk.stmts).to_vec() {
+        let mark = self.binders.len();
+        let stmts = ast.list(blk.stmts).to_vec();
+        let block_items: Vec<ItemId> = stmts.iter().filter_map(|s| if let Stmt::Item(i) = s { Some(*i) } else { None }).collect();
+        for s in stmts {
             match s {
                 Stmt::Let(r) => {
                     let l = *ast.row(r);
@@ -867,8 +960,17 @@ impl<'a> Gates<'a> {
                     if let Some(t) = l.ty { self.ty(t); }
                     if let Some(e) = l.init { self.expr(e); }
                     if let Some(eb) = l.else_ { self.block(eb); }
+                    if self.pf.edition >= 2018 { self.pat_binders(l.pat); }
                 }
-                Stmt::Item(i) => self.item(i, Ctx::Free),
+                Stmt::Item(i) => {
+                    if self.pf.edition >= 2018 {
+                        if let ItemKind::Use(r) = ast.item(i).kind {
+                            let u = *ast.row(r);
+                            if !u.global { self.future_proof_import(&u.tree, &block_items); }
+                        }
+                    }
+                    self.item(i, Ctx::Free)
+                }
                 Stmt::Expr(e, _) => self.expr(e),
                 Stmt::Attrs(r) => {
                     let a = *ast.row(r);
@@ -878,6 +980,7 @@ impl<'a> Gates<'a> {
                 Stmt::Empty => {}
             }
         }
+        self.binders.truncate(mark);
     }
 
     fn expr(&mut self, e: ExprId) {
@@ -931,8 +1034,11 @@ impl<'a> Gates<'a> {
                 for arm in ast.list(arms).to_vec() {
                     if self.attrs(arm.attrs).is_none() { continue; }
                     self.pat(arm.pat);
+                    let mark = self.binders.len();
+                    if self.pf.edition >= 2018 { self.pat_binders(arm.pat); }
                     if let Some(g) = arm.guard { self.expr(g) }
                     self.expr(arm.body);
+                    self.binders.truncate(mark);
                 }
             }
             ExprKind::While(r) => {
@@ -959,6 +1065,8 @@ impl<'a> Gates<'a> {
             ExprKind::Continue(_) | ExprKind::Underscore => {}
             ExprKind::Closure(r) => {
                 let c = *ast.row(r);
+                let mark = self.binders.len();
+                if self.pf.edition >= 2018 { for p in ast.list(c.params).to_vec() { self.pat_binders(p.pat); } }
                 if c.is_static { self.gate("coroutines", ex.lo, "coroutine syntax is experimental"); }
                 for p in ast.list(c.params).to_vec() {
                     if self.attrs(p.attrs).is_none() { continue; }
@@ -967,6 +1075,7 @@ impl<'a> Gates<'a> {
                 }
                 if let Some(t) = c.ret { self.ret_ty(t) }
                 self.expr(c.body);
+                self.binders.truncate(mark);
             }
             ExprKind::Tuple(l) | ExprKind::Array(l) => for &x in ast.list(l).to_vec().iter() { self.expr(x) },
             ExprKind::Struct(r) => {
