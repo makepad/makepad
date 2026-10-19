@@ -89,8 +89,6 @@ impl<'a, B: ?Sized + ToOwned> Cow<'a, B> {
 }
 
 impl<'a, B: ?Sized + ToOwned> Borrow<B> for Cow<'a, B>
-where
-    B::Owned: Borrow<B>,
 {
     fn borrow(&self) -> &B {
         &**self
@@ -98,8 +96,6 @@ where
 }
 
 impl<'a, B: ?Sized + ToOwned> Deref for Cow<'a, B>
-where
-    B::Owned: Borrow<B>,
 {
     type Target = B;
     fn deref(&self) -> &B {

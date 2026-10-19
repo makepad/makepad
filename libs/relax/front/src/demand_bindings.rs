@@ -35,6 +35,8 @@ impl Names {
     fn slice(&self) -> &[u32] {
         match self { Self::Small(len, ids) => &ids[..*len as usize], Self::Many(values) => values }
     }
+    /// The ascending ids.
+    pub fn ids(&self) -> &[u32] { self.slice() }
     /// `values` sorted ascending without duplicates.
     pub fn from_sorted(values: Vec<usize>) -> Self {
         let ids: Vec<u32> = values.into_iter().map(id32).collect();
@@ -148,6 +150,18 @@ pub struct Bindings {
     pub modules: HashMap<usize, HashMap<usize, usize>>,
 }
 impl Bindings {
+    /// One more than the largest id: the ids a frozen table holds are `0..len`.
+    pub fn len(&self) -> u32 { id32(self.text.len()) }
+    /// The id of a single path segment, if one was interned.
+    pub fn segment_id(&self, name: &str) -> Option<u32> { self.ids.get(name).map(|&id| id32(id)) }
+    /// The id of the qualified `module::name`, if one was interned.
+    pub fn pair_id(&self, module: u32, name: u32) -> Option<u32> { self.qualified.get(&(module, name)).copied() }
+    /// The (module, name) ids a qualified id was interned from.
+    pub fn pair_of(&self, id: u32) -> Option<(u32, u32)> {
+        match self.text.get(id as usize)? { Spelling::Qualified { module, name, .. } => Some((*module, *name)), Spelling::Segment(_) => None }
+    }
+    /// The id's spelling appended to `out`, without keeping it.
+    pub fn render_into(&self, id: u32, out: &mut String) { self.render(id as usize, out) }
     pub fn id(&self, name: &str) -> Option<usize> {
         let mut parts = name.split("::");
         let mut id = *self.ids.get(parts.next()?)?;
@@ -244,10 +258,6 @@ impl Bindings {
     }
     pub fn path(&mut self, path: &str) -> Vec<usize> {
         path.split("::").map(|part| self.segment(part)).collect()
-    }
-    pub fn lookup(&self, path: &str) -> Binding {
-        let Some(parts) = path.split("::").map(|part| self.id(part)).collect::<Option<Vec<_>>>() else { return Binding::default(); };
-        self.watched(&parts, |_, _| {})
     }
     pub fn watched(&self, path: &[usize], mut watch: impl FnMut(usize, usize)) -> Binding {
         let Some((&root, parts)) = path.split_first() else { return Binding::default(); };

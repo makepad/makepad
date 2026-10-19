@@ -973,7 +973,7 @@ impl<'a> Fcx<'a> {
     fn unsize_coercion(&mut self, ka: &TyKind, kx: &TyKind) -> bool {
         let save = self.start_snapshot();
         let ok = match (ka, kx) {
-            (TyKind::Ref(m1, a, _), TyKind::Ref(m2, d, _)) | (TyKind::Ref(m1, a, _), TyKind::Ptr(m2, d)) | (TyKind::Ptr(m1, a), TyKind::Ptr(m2, d)) if *m1 || !*m2 => self.array_to_slice(*a, *d),
+            (TyKind::Ref(m1, a, _), TyKind::Ref(m2, d, _)) | (TyKind::Ref(m1, a, _), TyKind::Ptr(m2, d)) | (TyKind::Ptr(m1, a), TyKind::Ptr(m2, d)) if *m1 || !*m2 => self.array_to_slice(*a, *d) || self.struct_unsize_goal(*a, *d),
             (TyKind::Adt(d1, xs, _), TyKind::Adt(d2, ys, _)) if d1 == d2 && self.prog.def(*d1).kind == DefKind::Struct && self.tcx.tys.list(*xs).len() == self.tcx.tys.list(*ys).len() => {
                 let (xs, ys) = (self.tcx.tys.list(*xs), self.tcx.tys.list(*ys));
                 let mut found = None;
@@ -996,6 +996,21 @@ impl<'a> Fcx<'a> {
         };
         if !ok { self.rollback_to(save); } else { self.commit_from(save); }
         ok
+    }
+
+    /// A struct to the same struct with other arguments (`Foo<i32, Count<N>>` -> `Foo<u32, ()>`): the
+    /// solver's `S<..>: Unsize<S<..>>` (the last-field rule, rustc coerce_unsized).
+    fn struct_unsize_goal(&mut self, a: TyId, d: TyId) -> bool {
+        let (a, d) = (self.shallow(a), self.shallow(d));
+        let (TyKind::Adt(d1, xs, _), TyKind::Adt(d2, ys, _)) = (self.tcx.tys.kind(a).clone(), self.tcx.tys.kind(d).clone()) else { return false };
+        if d1 != d2 || a == d || self.prog.def(d1).kind != DefKind::Struct || self.tcx.tys.list(xs).is_empty() || self.tcx.tys.list(xs).len() != self.tcx.tys.list(ys).len() { return false; }
+        let Some(unsize) = self.tcx.lang_items.get(crate::lang_items::LangItem::Unsize) else { return false };
+        // types that can be equal are related, not unsized (`W<?x>` -> `W<T>`)
+        let probe = self.start_snapshot();
+        let same = self.eq(a, d);
+        self.rollback_to(probe);
+        if same { return false; }
+        matches!(self.select_trait(unsize, a, &[d]), Ok(Some(_)))
     }
 
     /// `[T; N]` -> `[T]`, also as the tail of a struct (`Holder<[T; N]>` -> `Holder<[T]>`, rustc
@@ -3004,6 +3019,23 @@ impl<'a> Fcx<'a> {
                 return Res::Def(*ad);
             }
         }
+        // `Alias::Variant { .. }`: the variant of the enum a type alias names (rustc resolves the
+        // alias path as a type, then the variant type-relatively)
+        if path.segs.len() == 2 && !path.has_qself() {
+            let segs = crate::program::path_segs(prog, self.file, path);
+            if segs[0].0 == SegKind::Ident {
+                if let Some(alias) = prog.lookup_in_scope(self.module, segs[0].1, true).filter(|a| prog.def(*a).kind == DefKind::TypeAlias) {
+                    let at = self.tcx.alias_ty(&self.cx.with_infcx(&self.infcx), prog, alias);
+                    if let TyKind::Adt(ad, _, _) = self.tcx.tys.kind(at) {
+                        if prog.def(*ad).kind == DefKind::Enum {
+                            if let Some(v) = prog.lookup_in_container(*ad, segs[1].1, false).filter(|v| prog.def(*v).kind == DefKind::Variant) {
+                                return Res::Def(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (r, _) = self.resolve_value_path(path, u32::MAX, false);
         // rustc_resolve E0574: only a struct, variant or union names a struct literal / pattern
         if let Res::Def(d) = r {
@@ -3888,8 +3920,22 @@ impl<'a> Fcx<'a> {
             return None;
         }
         let t = self.shallow(t);
+        // a variable that is an opaque's hidden type in its defining scope derefs through the
+        // opaque's item bounds (autoderef.rs overloaded_deref_ty on a pending `?h: Deref`)
+        let hidden_of_opaque = matches!(self.tcx.tys.kind(t), TyKind::Infer(v) if self.infcx.has_opaques_with_sub_unified_hidden_type(*v));
         match self.tcx.tys.kind(t).clone() {
             TyKind::Ref(_, i, _) | TyKind::Ptr(_, i) => Some(self.shallow(i)),
+            TyKind::Infer(_) if hidden_of_opaque => {
+                let td = self.tcx.lang_items.get(crate::lang_items::LangItem::Deref)?;
+                let dt = self.infcx.deeply_resolve_ignoring_regions(t);
+                self.select_trait(td, dt, &[]).ok()?;
+                let target = self.tcx.trait_assoc(self.prog, td, self.prog.syms.get("Target")?)?;
+                let proj = self.tcx.tys.intern(TyKind::Alias(crate::consts::IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id: target }, args: self.tcx.tys.mk_list(&[dt]), regions: crate::types::RegionArgsId::EMPTY }));
+                let r = self.norm(proj);
+                let m = self.trait_fn(td, "deref")?;
+                self.b.ov_derefs.insert((e, step), (m, self.tcx.tys.mk_list(&[dt])));
+                Some(r)
+            }
             // (a param / rigid projection with a Deref bound derefs to its `Target` binding,
             // `D: DerefMut<Target = DrawVars>`)
             // (an opaque type derefs through its item bounds: `impl Deref<Target = Path>`,
