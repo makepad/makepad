@@ -10315,6 +10315,14 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::Conv(Conv::BitsToF(f64_), d, a[0]));
                 Some(Val::L(vec![d]))
             }
+            "tls_block" => {
+                // intrinsics_rt::tls_block() -> *mut usize: this thread's thread-local block (word 0
+                // the domain base, word 1 the runtime's per-thread record): the inline TLS sequence
+                let d = self.f.vreg(Cls::I);
+                let sym = self.u.rs.tls_base;
+                self.emit(Inst::TlsAddr(d, sym));
+                Some(Val::L(vec![d]))
+            }
             "str_as_bytes" => Some(Val::L(a)),
             "slice_len" => Some(Val::L(vec![a[1]])),
             "unreachable" => {

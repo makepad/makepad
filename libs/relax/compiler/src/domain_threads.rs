@@ -2,9 +2,31 @@
 //! destructor ordering otherwise lets the domain block disappear before a later key uses it.
 use std::ffi::c_void;
 
+/// The thread's record (word 1 of its thread-local block). The first three words are read by
+/// Relax std's `LocalKey` (std/thread/local.rs) as an inline fast path -- the layout is shared:
+/// the values of the domain `cache_base` (its key table: `cache_vals`, `cache_len` entries).
+/// The table moves only in `key_set`, which refreshes the cache; any other domain's access
+/// goes through `key_get`.
+#[repr(C)]
 pub(crate) struct ThreadData {
+    cache_base: u64,
+    cache_vals: *const usize,
+    cache_len: usize,
     pub registrations: Vec<(u64, u64)>,
     values: Vec<(u64, Vec<usize>)>,
+}
+
+impl ThreadData {
+    fn refresh(&mut self, base: u64) {
+        match self.values.iter().find(|v| v.0 == base) {
+            Some(v) => {
+                self.cache_base = base;
+                self.cache_vals = v.1.as_ptr();
+                self.cache_len = v.1.len();
+            }
+            None => self.cache_len = 0,
+        }
+    }
 }
 
 pub(crate) unsafe fn data(block: u64) -> &'static mut ThreadData {
@@ -14,6 +36,9 @@ pub(crate) unsafe fn data(block: u64) -> &'static mut ThreadData {
         // first asked for: the kept heap (the settle swap destroys the compiler generation)
         let _kept = crate::zone_alloc::kept();
         *slot = Box::into_raw(Box::new(ThreadData {
+            cache_base: 0,
+            cache_vals: std::ptr::null(),
+            cache_len: 0,
             registrations: Vec::new(),
             values: Vec::new(),
         })) as u64;
@@ -30,8 +55,12 @@ pub extern "C" fn key_delete(key: u32) {
 pub extern "C" fn key_get(key: u32) -> *mut c_void {
     let base = crate::domain::current();
     unsafe {
-        data(crate::jit::tls_block())
-            .values
+        let t = data(crate::jit::tls_block());
+        // the next reads of this domain's keys take the inline path
+        if t.cache_base != base || t.cache_len == 0 {
+            t.refresh(base);
+        }
+        t.values
             .iter()
             .find(|v| v.0 == base)
             .and_then(|v| v.1.get(key as usize))
@@ -56,6 +85,7 @@ pub extern "C" fn key_set(key: u32, value: *const c_void) {
             values.resize(key as usize + 1, 0);
         }
         values[key as usize] = value as usize;
+        t.refresh(base);
     }
 }
 

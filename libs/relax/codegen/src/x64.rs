@@ -670,6 +670,8 @@ struct Gen<'a> {
     sym_class: u64,
     /// rbp offset of the frame word holding the domain base (0: the function names no domain symbol)
     dom_slot: i32,
+    /// the block whose start reads the domain base into that slot (usize::MAX: none; 0: the prologue)
+    dom_block: usize,
     relocs: Vec<RelocAt>,
     /// emission order successor of each block (u32::MAX for the last)
     next_block: Vec<u32>,
@@ -974,10 +976,12 @@ impl<'a> Gen<'a> {
         }
         off += 8 * cells;
         self.stage = -(self.saved + off);
-        // the domain base, read once in the prologue when the function names a domain static
-        if uses_domain(self.f, self.sym_class) {
+        // the domain base, read once (where regalloc::domain_base_block puts it) when the function
+        // names a domain static
+        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
             off += 8;
             self.dom_slot = -(self.saved + off);
+            self.dom_block = b;
         }
         let mut frame = (off + 7) / 8 * 8;
         // keep rsp 16-aligned at calls
@@ -987,8 +991,8 @@ impl<'a> Gen<'a> {
         self.frame = frame;
         self.stack_probe(frame);
         self.a.sub_rsp(frame as u32);
-        if self.dom_slot != 0 {
-            self.dom_base_prologue();
+        if self.dom_block == 0 {
+            self.dom_base();
         }
         if self.cplan.is_some() {
             self.win64_saves(true);
@@ -1050,6 +1054,9 @@ impl<'a> Gen<'a> {
                 continue;
             }
             self.block_pos[bi] = self.a.pos();
+            if bi == self.dom_block && bi != 0 {
+                self.dom_base();
+            }
             let b = &self.f.blocks[bi];
             let n = b.insts.len();
             // compare feeding the branch: fused into cmp + jcc
@@ -1849,12 +1856,10 @@ impl<'a> Gen<'a> {
         self.fin_i(d, rd);
     }
 
-    /// Prologue of a function that names domain statics: the running thread's domain base
-    /// (slot 0 of its thread-local block) into the frame's domain slot, read once per call.
-    fn dom_base_prologue(&mut self) {
-        // the shared TLS routine (fast path inside), not the inline sequence: one call per entry
-        self.mov_reloc(RAX, Reloc::TlsSlow);
-        self.a.call_r(RAX);
+    /// The running thread's domain base (slot 0 of its thread-local block) into the frame's domain
+    /// slot: the inline TLS read, the shared routine only for a thread that has no block yet.
+    fn dom_base(&mut self) {
+        self.tls_block_r11();
         // mov r11, [r11]: the domain base
         self.a.load64(R11, R11, 0);
         self.a.store64(RBP, self.dom_slot, R11);
@@ -4357,6 +4362,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         apool: Vec::new(),
         sym_class: env.sym_class,
         dom_slot: 0,
+        dom_block: usize::MAX,
         relocs: Vec::new(),
         cplan: None,
         cbuf: Vec::new(),
@@ -4401,11 +4407,6 @@ pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
     a.mov_ri(R11, target as i64);
     a.jmp_r(R11);
     a.b
-}
-
-/// Whether `f` takes the address of a domain symbol (a static: its code reads the domain base).
-fn uses_domain(f: &Func, sym_class: u64) -> bool {
-    sym_class != 0 && f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Addr(_, s) if SymClass::of(sym_class, s.id) == SymClass::Domain)))
 }
 
 /// This thread's thread-local block in r11, preserving every other register JIT code may hold:

@@ -493,11 +493,16 @@ pub struct Fcx<'a> {
 /// as rustc_codegen_ssa::mir::FunctionCx::monomorphize does. Analysis consumers
 /// requesting fully normalized tables use instantiate_body instead.
 pub fn codegen_body(prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> std::sync::Arc<Body> {
+    try_codegen_body(prog, tcx, def, args).expect("failed to normalize body for codegen")
+}
+
+/// codegen_body for a caller that has a fallback: an instance whose types do not normalize
+/// (an ill-formed program, e.g. `bop::<dyn Bop>` with a `Self: Sized` associated type) is None.
+pub fn try_codegen_body(prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Option<std::sync::Arc<Body>> {
     let _cost_typeck = crate::fncost::phase(1);
     let _mem = crate::memstat::tag(crate::memstat::Tag::Typeck);
     let body = tcx.typeck(prog, def);
-    instantiate::try_instantiate_mir_and_normalize_erasing_regions(prog, tcx, body, args)
-        .expect("failed to normalize body for codegen")
+    instantiate::try_instantiate_mir_and_normalize_erasing_regions(prog, tcx, body, args).ok()
 }
 
 pub fn instantiate_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Body {

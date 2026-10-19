@@ -3481,3 +3481,49 @@ pub fn sink_compares(f: &Func) -> Option<Func> {
     }
     g
 }
+
+/// The block whose start reads the running thread's domain base for a function that names domain
+/// symbols (`SymClass::Domain`): the nearest block that dominates every use, lifted to the
+/// shallowest loop depth on its chain of dominators (the base is the same on every iteration, so
+/// it is read outside the loops that hold the uses, and not at all on paths that never get there:
+/// html_parse's `process_entity` names an entity table only after it has seen a `&`, and used to
+/// read the base on every call). None: the function names no domain symbol.
+pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool]) -> Option<usize> {
+    if sym_class == 0 {
+        return None;
+    }
+    let uses: Vec<usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(bi, b)| reach[*bi] && b.insts.iter().any(|i| matches!(i, Inst::Addr(_, s) if SymClass::of(sym_class, s.id) == SymClass::Domain)))
+        .map(|(bi, _)| bi)
+        .collect();
+    let first = *uses.first()?;
+    let idom = crate::opt::idoms(f);
+    // the dominator chain of a block, block first, entry last
+    let chain = |mut b: usize| {
+        let mut c = vec![b];
+        while b != 0 {
+            b = idom[b] as usize;
+            c.push(b);
+        }
+        c
+    };
+    // nearest common dominator: the longest common suffix of the chains
+    let mut common = chain(first);
+    for &u in &uses[1..] {
+        let c = chain(u);
+        let k = common.iter().rev().zip(c.iter().rev()).take_while(|(a, b)| a == b).count();
+        common.drain(..common.len() - k);
+    }
+    let depth = loop_depths(f, reach);
+    // from the common dominator up to the entry: the shallowest loop depth, the latest on a tie
+    let mut best = common[0];
+    for &b in &common {
+        if depth[b] < depth[best] {
+            best = b;
+        }
+    }
+    Some(best)
+}

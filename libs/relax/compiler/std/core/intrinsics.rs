@@ -123,6 +123,9 @@ pub mod intrinsics_rt {
         pub fn panic_impl(msg: *const u8, msg_len: usize, file: *const u8, file_len: usize, line: u32, col: u32) -> !;
         /// The location of the caller of the enclosing #[track_caller] fn (or this call).
         pub fn caller_location() -> &'static crate::panic::Location<'static>;
+        /// This thread's thread-local block: word 0 the domain base, word 1 the runtime's per-thread
+        /// record (thread-local keys: `std::thread::local`). An inline TLS access, not a call.
+        pub fn tls_block() -> *mut usize;
         pub fn abort() -> !;
         /// Runs `f(data)` under a recovery point; true if it panicked or faulted (live: the
         /// panic was reported and the stack reset here; AOT: panics abort). std::thread uses it

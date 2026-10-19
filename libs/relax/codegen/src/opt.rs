@@ -2361,14 +2361,116 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
     if branch_on_compare(f) {
         dce(f);
     }
-
+    fuse_sincos(f);
 }
 
-/// A block ending `d = !c; branch d, t, e` (d = `c == 0`, `c ^ 1`; `c != 0` is c itself) where c is
-/// a compare result (every definition of c an `ICmp` / `ICmpI` / `FCmp`, so 0 or 1) and d has no
-/// other use branches on c with the targets swapped. This is the only exact form for floats: `!(a <= b)`
-/// is not `a > b` on NaN, but the backends branch on a fused float compare with its unordered
-/// case handled, so the compare stays one compare + one jcc / b.cond (rustc's `if !(s <= z)`).
+/// Per width (f32, f64): libm's `sin` and `cos` symbol ids and the combined `sincos` routine. The
+/// embedder registers them only for targets whose rustc build combines the pair: LLVM's
+/// SelectionDAG turns an FSIN and an FCOS of the same value into one call of Darwin's
+/// `__sincosf_stret` / `__sincos_stret` (a two-float HFA on arm64), and its results are not always
+/// those of separate `sinf`/`cosf` calls (1 ulp in 127 of 4000 arguments), so a program's floats
+/// only match a rustc build's if we combine them too.
+static SINCOS: std::sync::Mutex<[Option<(u32, u32, Sym)>; 2]> = std::sync::Mutex::new([None, None]);
+
+pub fn set_sincos(wide: bool, sin: Sym, cos: Sym, both: Sym) {
+    SINCOS.lock().unwrap_or_else(|e| e.into_inner())[wide as usize] = Some((sin.id, cos.id, both));
+}
+
+/// `sin(x)` and `cos(x)` of the same value in one block become one combined call, as LLVM's
+/// legalizer does (LegalizeDAG: `useSinCos` / `ExpandSinCosLibCall`: an FSIN and an FCOS with the
+/// same operand in one DAG, i.e. one basic block). Runs at the end of `simplify`, when inlining has
+/// exposed the libm calls and the block splits of bounds checks and invokes are gone, as they are
+/// by the time LLVM selects instructions. The call goes where the earlier of the two was; the
+/// later's result is defined there too, so it must be neither read nor written in between (RIR
+/// vregs are mutable).
+pub fn fuse_sincos(f: &mut Func) -> bool {
+    let tab = *SINCOS.lock().unwrap_or_else(|e| e.into_inner());
+    if tab.iter().all(|t| t.is_none()) {
+        return false;
+    }
+    let kind = |i: &Inst| -> Option<(usize, bool, VReg, VReg)> {
+        let Inst::Call(Callee::CHost(s, _), args, rets) = i else { return None };
+        if args.len() != 1 || rets.len() != 1 {
+            return None;
+        }
+        (0..2).find_map(|w| {
+            let (sn, cs, _) = tab[w]?;
+            if s.id == sn { Some((w, true, args[0], rets[0])) } else if s.id == cs { Some((w, false, args[0], rets[0])) } else { None }
+        })
+    };
+    // the value an operand holds at instruction `at`: followed back through `Mov` copies within
+    // the block to (vreg, index of its defining instruction or none for a value live into the block)
+    let ident = |insts: &[Inst], at: usize, v: VReg| -> (VReg, Option<usize>) {
+        let (mut v, mut at) = (v, at);
+        loop {
+            let def = (0..at).rev().find(|&k| {
+                let mut hit = false;
+                for_defs(&insts[k], |d| hit |= d == v);
+                hit
+            });
+            match def {
+                Some(k) => match insts[k] {
+                    Inst::Mov(_, y) => {
+                        v = y;
+                        at = k;
+                    }
+                    _ => return (v, Some(k)),
+                },
+                None => return (v, None),
+            }
+        }
+    };
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        let mut n = 0;
+        while n < f.blocks[bi].insts.len() {
+            let found = (|| {
+                let insts = &f.blocks[bi].insts;
+                let (w, is_sin, x, r1) = kind(&insts[n])?;
+                let both = tab[w]?.2;
+                let id1 = ident(insts, n, x);
+                for m in n + 1..insts.len() {
+                    if let Some((w2, s2, x2, r2)) = kind(&insts[m]) {
+                        if w2 == w && s2 != is_sin && ident(insts, m, x2) == id1 {
+                            let touched = |v: VReg| {
+                                insts[n + 1..m].iter().any(|i| {
+                                    let mut t = false;
+                                    for_uses(i, |u| t |= u == v);
+                                    for_defs(i, |d| t |= d == v);
+                                    t
+                                })
+                            };
+                            let (rs, rc) = if is_sin { (r1, r2) } else { (r2, r1) };
+                            if rs == rc {
+                                return None;
+                            }
+                            // at the earlier call (reading its operand) or at the later one
+                            if !touched(r2) {
+                                return Some((m, n, rs, rc, both, x));
+                            }
+                            if !touched(r1) {
+                                return Some((m, m, rs, rc, both, x2));
+                            }
+                            return None;
+                        }
+                    }
+                }
+                None
+            })();
+            if let Some((m, at, rs, rc, both, x)) = found {
+                let b = &mut f.blocks[bi];
+                b.insts[at] = Inst::Call(Callee::Host(both), vec![x], vec![rs, rc]);
+                let drop = if at == n { m } else { n };
+                b.insts.remove(drop);
+                b.pos.remove(drop);
+                changed = true;
+            }
+            n += 1;
+        }
+    }
+    changed
+}
+
 fn branch_on_compare(f: &mut Func) -> bool {
     let nv = f.vregs.len();
     let mut cmp_only = vec![true; nv];
@@ -6642,10 +6744,9 @@ fn forward_only(f: &Func) -> bool {
     f.blocks.iter().enumerate().all(|(bi, b)| b.term.succs().all(|t| t as usize > bi))
 }
 
-pub fn licm(f: &mut Func) -> bool {
-    if forward_only(f) {
-        return false;
-    }
+/// Predecessors of the reachable blocks and the natural loops (header, member flags), inner
+/// loops (fewer blocks) first.
+fn natural_loops(f: &Func) -> (Vec<Vec<u32>>, Vec<(u32, Vec<bool>)>) {
     let n = f.blocks.len();
     let idom = idoms(f);
     let dominates = |a: u32, b: u32| -> bool {
@@ -6700,6 +6801,15 @@ pub fn licm(f: &mut Func) -> bool {
     }
     // inner loops first
     loops.sort_by_key(|l| l.1.iter().filter(|x| **x).count());
+    (preds, loops)
+}
+
+pub fn licm(f: &mut Func) -> bool {
+    if forward_only(f) {
+        return false;
+    }
+    let n = f.blocks.len();
+    let (preds, loops) = natural_loops(f);
     let nv = f.vregs.len();
     let mut uses = Vec::new();
     let mut defs = Vec::new();
@@ -6829,6 +6939,317 @@ pub fn licm(f: &mut Func) -> bool {
         }
     }
     changed
+}
+
+/// Scalar promotion of loop-carried memory (LLVM's LICM `promoteLoopAccessesToScalars`): a field
+/// of the pointee of a `noalias` pointer parameter (`&mut Self`) that a loop loads and stores
+/// each iteration lives in a register for the whole loop: loaded once in the preheader, kept in a
+/// fresh vreg, stored back on every edge that leaves the loop.
+///
+/// Legality, as LLVM decides it:
+/// * the pointer is `noalias` and not captured: no pointer that is not based on it (derived from it
+///   by moves and address arithmetic, or returned by a call that was given one) reaches its pointee,
+///   and it is never stored as a value; so nothing in the loop but accesses through the parameter
+///   itself can touch the field;
+/// * every access in the loop through a pointer based on the parameter is a plain load or store
+///   through the parameter, and every one overlapping the field has its exact offset and type;
+/// * no call, atomic or fence in the loop for a stored field (a call may unwind with the memory
+///   stale; a store is not delayed past one), calls are fine for a field that is only loaded when
+///   none is given a based-on pointer;
+/// * the field is dereferenceable in the preheader (`Func::deref`), so loading it there is safe
+///   even if the loop runs no iteration; the write-back on a path that never stored writes the
+///   value it loaded, which no one can observe through a unique pointer.
+/// Most fields promoted in one loop, and most exit write-back stores (exit targets x stored fields).
+const PROMOTE_MAX_FIELDS: usize = 4;
+const PROMOTE_MAX_WRITEBACKS: usize = 8;
+
+pub fn promote_loop_memory(f: &mut Func) -> bool {
+    if forward_only(f) || f.noalias.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    let mut done: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    loop {
+        let (preds, loops) = natural_loops(f);
+        let mut progressed = false;
+        for (h, body) in &loops {
+            if *h == 0 || done.contains(h) {
+                continue;
+            }
+            done.insert(*h);
+            if promote_in_loop(f, &preds, *h, body) {
+                changed = true;
+                progressed = true;
+                break;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    changed
+}
+
+fn promote_in_loop(f: &mut Func, preds: &[Vec<u32>], h: u32, body: &[bool]) -> bool {
+    let n = f.blocks.len();
+    let nv = f.vregs.len();
+    // vregs with one definition, the parameters among them
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    // anything in the loop that stops every promotion, and what stops only stored fields
+    let mut atomic_or_fence = false;
+    let mut has_call = false;
+    for bi in 0..n {
+        if !body[bi] {
+            continue;
+        }
+        for i in &f.blocks[bi].insts {
+            match i {
+                Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) | Inst::FpEnv(..) => atomic_or_fence = true,
+                Inst::Call(..) => has_call = true,
+                _ => {}
+            }
+        }
+    }
+    if atomic_or_fence {
+        return false;
+    }
+    let mut did = false;
+    for pi in 0..f.noalias.len() {
+        let p = f.noalias[pi];
+        // defined once, as a parameter
+        if ndef[p.0 as usize] != 1 || !f.params.contains(&p) {
+            continue;
+        }
+        // the vregs based on p: moves and arithmetic on one, and call results when a based-on
+        // pointer went into the call
+        let mut based = vec![false; nv];
+        based[p.0 as usize] = true;
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for b in &f.blocks {
+                for i in &b.insts {
+                    if matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::AtomicLoad(..)) {
+                        continue;
+                    }
+                    let mut any = false;
+                    for_uses(i, |u| any |= based[u.0 as usize]);
+                    if any {
+                        for_defs(i, |d| {
+                            if !based[d.0 as usize] {
+                                based[d.0 as usize] = true;
+                                grew = true;
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        // captured: stored as a value, or given to a call that may keep or return it
+        let mut captured = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                match i {
+                    Inst::Store(_, _, _, src) | Inst::StoreX(_, _, _, _, _, src) | Inst::VStore(_, _, src) | Inst::AtomicStore(_, _, _, src) => captured |= based[src.0 as usize],
+                    Inst::AtomicRmw(_, _, _, _, _, src) => captured |= based[src.0 as usize],
+                    Inst::AtomicCas(_, _, _, _, _, e, nw) => captured |= based[e.0 as usize] || based[nw.0 as usize],
+                    Inst::Call(c, args, _) => {
+                        captured |= args.iter().enumerate().any(|(k, a)| based[a.0 as usize] && !sroa_nocapture(c, k));
+                        if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
+                            captured |= based[v.0 as usize];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Term::Ret(vs) = &b.term {
+                captured |= vs.iter().any(|v| based[v.0 as usize]);
+            }
+        }
+        if captured {
+            continue;
+        }
+        // the accesses through p in the loop, and whether anything else based on p is used there
+        let mut fields: Vec<(i32, Mem, bool, bool, u32)> = Vec::new(); // offset, type, loaded, stored, accesses
+        let mut bad = false;
+        for bi in 0..n {
+            if !body[bi] {
+                continue;
+            }
+            for i in &f.blocks[bi].insts {
+                match i {
+                    Inst::Load(m, _, base, off) if *base == p => {
+                        match fields.iter_mut().find(|x| x.0 == *off && x.1 == *m) {
+                            Some(x) => {
+                                x.2 = true;
+                                x.4 += 1;
+                            }
+                            None => fields.push((*off, *m, true, false, 1)),
+                        }
+                    }
+                    Inst::Store(m, base, off, _) if *base == p => {
+                        match fields.iter_mut().find(|x| x.0 == *off && x.1 == *m) {
+                            Some(x) => {
+                                x.3 = true;
+                                x.4 += 1;
+                            }
+                            None => fields.push((*off, *m, false, true, 1)),
+                        }
+                    }
+                    Inst::Call(_, args, _) => bad |= args.iter().any(|a| based[a.0 as usize]),
+                    // any other dereference of a based-on pointer
+                    Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) | Inst::VLoad(_, base, _) | Inst::VStore(base, _, _) | Inst::VGather(_, base, _) => bad |= based[base.0 as usize],
+                    Inst::Copy(d, s, _) => bad |= based[d.0 as usize] || based[s.0 as usize],
+                    _ => {}
+                }
+            }
+        }
+        if bad {
+            continue;
+        }
+        // a field is promoted when nothing else in the loop overlaps its bytes
+        let size = |m: Mem| mem_size(m);
+        let mut take: Vec<(i32, Mem, bool, bool, u32)> = Vec::new();
+        for x in &fields {
+            let clash = fields.iter().any(|y| !(y.0 == x.0 && y.1 == x.1) && y.0 < x.0 + size(x.1) && x.0 < y.0 + size(y.1));
+            if clash || (x.3 && has_call) {
+                continue;
+            }
+            // dereferenceable in the preheader
+            if !f.deref.iter().any(|(q, sz)| *q == p && x.0 >= 0 && (x.0 as i64 + size(x.1) as i64) <= *sz as i64) {
+                continue;
+            }
+            take.push(*x);
+        }
+        // profitability: a loop is worth it for a field it both loads and stores (the carried state:
+        // a cursor index, a bit buffer); load-only fields come along, write-only ones are left
+        if !take.iter().any(|x| x.2 && x.3) {
+            continue;
+        }
+        take.retain(|x| x.2);
+        // the busiest few fields only (every promoted field is a register held across
+        // the loop), and stored fields only when the write-backs on the loop's exits stay few
+        take.sort_by(|a, b| b.4.cmp(&a.4));
+        take.truncate(PROMOTE_MAX_FIELDS);
+        let mut exit_targets: Vec<u32> = Vec::new();
+        for bi in 0..n {
+            if body[bi] {
+                for t in f.blocks[bi].term.succs() {
+                    if !body[t as usize] && !exit_targets.contains(&t) {
+                        exit_targets.push(t);
+                    }
+                }
+            }
+        }
+        let mut stored_n = 0;
+        take.retain(|x| {
+            if x.3 {
+                stored_n += 1;
+                exit_targets.len() * stored_n <= PROMOTE_MAX_WRITEBACKS
+            } else {
+                true
+            }
+        });
+        if take.is_empty() {
+            continue;
+        }
+        // a preheader: all edges into the header from outside the loop go through one jump block
+        let outside: Vec<u32> = preds[h as usize].iter().copied().filter(|q| !body[*q as usize]).collect();
+        if outside.is_empty() {
+            continue;
+        }
+        let pre = f.blocks.len() as u32;
+        let hp = f.blocks[h as usize].insts.first().map(|_| f.blocks[h as usize].pos[0]).unwrap_or(f.blocks[h as usize].term_pos);
+        f.blocks.push(Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(h), term_pos: hp });
+        for &o in &outside {
+            let t = &mut f.blocks[o as usize].term;
+            retarget(t, h, pre);
+        }
+        // the new vregs, their initial loads, the rewritten accesses
+        let mut regs: Vec<VReg> = Vec::new();
+        for x in &take {
+            let cls = match x.1 {
+                Mem::Int(..) => Cls::I,
+                Mem::F32 => Cls::F32,
+                Mem::F64 => Cls::F64,
+            };
+            let r = f.vreg(cls);
+            regs.push(r);
+            f.blocks[pre as usize].insts.push(Inst::Load(x.1, r, p, x.0));
+            f.blocks[pre as usize].pos.push(hp);
+        }
+        for bi in 0..n {
+            if !body[bi] {
+                continue;
+            }
+            for k in 0..f.blocks[bi].insts.len() {
+                let rewrite = match &f.blocks[bi].insts[k] {
+                    Inst::Load(m, d, base, off) if *base == p => take.iter().position(|x| x.0 == *off && x.1 == *m).map(|t| Inst::Mov(*d, regs[t])),
+                    Inst::Store(m, base, off, src) if *base == p => take.iter().position(|x| x.0 == *off && x.1 == *m).map(|t| match m {
+                        Mem::Int(w, signed) if *w < 8 => Inst::Conv(Conv::IntToInt(IntTy { bits: *w * 8, signed: *signed }), regs[t], *src),
+                        _ => Inst::Mov(regs[t], *src),
+                    }),
+                    _ => None,
+                };
+                if let Some(i) = rewrite {
+                    f.blocks[bi].insts[k] = i;
+                }
+            }
+        }
+        // write-back of the stored fields on every edge out of the loop: one block per distinct
+        // target (LoopSimplify's dedicated exits), the loop's edges to it redirected
+        let stored: Vec<usize> = (0..take.len()).filter(|t| take[*t].3).collect();
+        if !stored.is_empty() {
+            for &t in &exit_targets {
+                let x = f.blocks.len() as u32;
+                let tp = f.blocks.iter().enumerate().find(|(bi, b)| body[*bi] && b.term.succs().any(|s| s == t)).map(|(_, b)| b.term_pos).unwrap_or(0);
+                let ins: Vec<Inst> = stored.iter().map(|&k| Inst::Store(take[k].1, p, take[k].0, regs[k])).collect();
+                let np = ins.len();
+                f.blocks.push(Block { insts: ins, pos: vec![tp; np], term: Term::Jump(t), term_pos: tp });
+                for bi in 0..n {
+                    if body[bi] {
+                        retarget(&mut f.blocks[bi].term, t, x);
+                    }
+                }
+            }
+        }
+        did = true;
+        // the loop's structure changed (new blocks): the caller recomputes before the next field
+        break;
+    }
+    did
+}
+
+/// Redirects every edge of `term` to `from` to `to`.
+fn retarget(term: &mut Term, from: u32, to: u32) {
+    match term {
+        Term::Jump(t) if *t == from => *t = to,
+        Term::Branch(_, a, b) => {
+            if *a == from {
+                *a = to;
+            }
+            if *b == from {
+                *b = to;
+            }
+        }
+        Term::Invoke(a, b) => {
+            if *a == from {
+                *a = to;
+            }
+            if *b == from {
+                *b = to;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 64-bit shifts by a register take the count mod 64 on both backends (x64 shl/shr/sar/shlx,

@@ -72,6 +72,22 @@ extern "C" fn key_dtor(p: *mut c_void) {
     }
 }
 
+/// The calling thread's value of `key`: read inline from the table the runtime keeps in the
+/// thread's block (word 1 points at its record, whose first three words are the domain the table
+/// belongs to, the table and its length -- domain_threads.rs ThreadData), the host call only
+/// when the thread runs another domain, has no record yet or has not set that key.
+#[inline(always)]
+fn key_value(key: sys::Key) -> usize {
+    unsafe {
+        let block = core::intrinsics_rt::tls_block();
+        let record = *block.add(1) as *const usize;
+        if !record.is_null() && *record == *block && (key as usize) < *record.add(2) {
+            return *(*record.add(1) as *const usize).add(key as usize);
+        }
+    }
+    sys::key_get(key) as usize
+}
+
 impl<T: 'static> LocalKey<T> {
     pub const fn new(init: fn() -> T) -> LocalKey<T> {
         LocalKey { key: AtomicUsize::new(0), init }
@@ -97,7 +113,7 @@ impl<T: 'static> LocalKey<T> {
 
     fn slot(&'static self) -> Option<*const T> {
         let key = self.os_key();
-        let p = sys::key_get(key) as usize;
+        let p = key_value(key);
         if p == DESTROYED {
             return None;
         }

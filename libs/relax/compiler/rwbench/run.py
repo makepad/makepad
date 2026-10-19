@@ -39,7 +39,7 @@ if not native:
     native = os.path.join(target, "rustc/release/relax-rwbench" + exe)
 std = os.environ.get("MAKEPAD_RUN_STD", os.path.join(here, "../std"))
 base = dict(os.environ, RW_MS=os.environ.get("RW_MS", "8000"))
-LINE = r"^\| (\w+) steady_ms=([\d.]+) tts_main_ms=([\d.]+) tts_proc_ms=([\d.]+) iters=(\d+) first_ms=([\d.]+) (\d+)$"
+LINE = r"^\| (\w+) steady_ms=([\d.]+) tts_main_ms=([\d.]+) tts_proc_ms=([\d.]+) iters=(\d+) first_ms=([\d.]+) o3_ms=(-?\d+) (\d+)$"
 
 def one(cmd, e):
     e2 = dict(e, RW_WALL0=str(time.time_ns()))
@@ -50,12 +50,12 @@ def one(cmd, e):
     m = re.search(LINE, out.stdout, re.M)
     if out.returncode != 0 or not m:
         return None, ("exit %d: " % out.returncode) + (out.stdout + out.stderr)[-300:].replace("\n", " ").replace("|", "/")
-    t1 = re.search(r"makepad-run: O3: (\d+) hot, (\d+) installed.*?(\d+) from the disk cache", out.stderr, re.M)
+    t1 = re.search(r"makepad-run: O3: (\d+) hot, (\d+) installed(?:.*?(\d+) from the disk cache)?", out.stderr, re.M)
     replay = "-"
     profile = e.get("MAKEPAD_RUN_O3_PROFILE")
     if profile and os.path.isfile(profile + ".replay"):
         replay = Path(profile + ".replay").read_text().splitlines()[0]
-    return dict(replay=replay, steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(7), tier1="%s hot / %s inst / %s cache" % t1.groups() if t1 else "-"), None
+    return dict(replay=replay, steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
 
 # runs[workload]["rustc" | name] = [result per round or None]
 warm = os.environ.get("WARM") == "1"
@@ -69,13 +69,19 @@ assert len({n for n, _ in bins}) == len(bins), "Relax names must be unique"
 if profiled:
     assert all(n and "/" not in n and "\\" not in n for n, _ in bins), "profile names must not contain path separators"
 
-def relax_env(n):
+def relax_env(n, w=""):
     suffix = n.upper().replace("-", "_")
     nstd = os.environ.get("MAKEPAD_RUN_STD_" + suffix, std)
     # rwbench links the platform (the layout workload), so `makepad run` hosts it through the HAL: with no
     # display (a bench box, node 165) it needs the HAL's headless backend; no window opens on the mini either
     e = dict(base, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STD=nstd, MAKEPAD_RUN_CACHE_DIR=os.path.join(target, "relax-" + n))
     e.setdefault("MAKEPAD_HAL_BACKEND", "headless")
+    # the timed window starts when the JIT reports its optimised code settled (main.rs RW_O3_PROGRESS)
+    prog = os.path.join(target, "o3-progress-%s-%s" % (n, w))
+    e["MAKEPAD_RUN_O3_PROGRESS"] = prog
+    e["RW_O3_PROGRESS"] = prog
+    try: os.unlink(prog)
+    except OSError: pass
     if warm:
         e.update(MAKEPAD_RUN_CACHE="on")
     for item in shlex.split(os.environ.get("MAKEPAD_RUN_ENV_" + suffix, "")):
@@ -85,7 +91,7 @@ def relax_env(n):
         e[key] = value
     return e
 def prepare(n, p, w):
-    renv = relax_env(n)
+    renv = relax_env(n, w)
     cmd = prefix + [p, "run", "--quiet", "--verbose", "relax-rwbench", "--", w]
     if profiled:
         profile = profile_dir / (n + "-" + w + ".t1")
@@ -140,8 +146,8 @@ def ratios(w, num, den):
 
 for n, _ in bins:
     print("\n== %s  (%d rounds, medians; [min..max] over rounds)" % (n, rounds))
-    print("| workload | rustc steady ms | Relax steady ms | O3 replay (installed / recorded / unrecorded-live / divergences) | Relax/rustc (median of per-round ratios) | spread | Relax time-to-steady ms | Relax O3 coverage | checksums equal |")
-    print("|---|---:|---:|---|---:|---|---:|---|---|")
+    print("| workload | rustc steady ms | Relax steady ms | O3 replay (installed / recorded / unrecorded-live / divergences) | Relax/rustc (median of per-round ratios) | spread | Relax time-to-steady ms | O3 settled ms (since main; 0 = never within RW_MAX_MS) | Relax O3 coverage | checksums equal |")
+    print("|---|---:|---:|---|---:|---|---:|---:|---|---|")
     gm = []
     for w in names:
         a = [x for x in runs[w]["rustc"] if x]; b = [x for x in runs[w][n] if x]
@@ -150,7 +156,7 @@ for n, _ in bins:
         rt = ratios(w, n, "rustc")
         gm.append(med(rt))
         sums = {x["sum"] for x in a + b}
-        print("| %s | %.3f [%s] | %.3f [%s] | %s | %.2f | %s | %.0f | %s | %s |" % (w, med([x["steady"] for x in a]), rng([x["steady"] for x in a]), med([x["steady"] for x in b]), rng([x["steady"] for x in b]), "; ".join(dict.fromkeys(x["replay"] for x in b)), med(rt), rng(rt), med([x["tts"] for x in b]), b[-1]["tier1"], "yes" if len(sums) == 1 else "**NO** %s" % sorted(sums)))
+        print("| %s | %.3f [%s] | %.3f [%s] | %s | %.2f | %s | %.0f | %s | %s | %s |" % (w, med([x["steady"] for x in a]), rng([x["steady"] for x in a]), med([x["steady"] for x in b]), rng([x["steady"] for x in b]), "; ".join(dict.fromkeys(x["replay"] for x in b)), med(rt), rng(rt), med([x["tts"] for x in b]), "/".join(str(x["o3"]) for x in b), b[-1]["tier1"], "yes" if len(sums) == 1 else "**NO** %s" % sorted(sums)))
     if gm:
         print("\ngeomean Relax/rustc: %.3f (%d workloads)" % (geo(gm), len(gm)))
 
