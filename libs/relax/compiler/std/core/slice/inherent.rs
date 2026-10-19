@@ -129,9 +129,13 @@ impl<T> [T] {
     pub const unsafe fn get_unchecked_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> &mut I::Output {
         &mut *index.get_unchecked_mut(self)
     }
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *const T {
         self as *const [T] as *const T
     }
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         self as *mut [T] as *mut T
     }
@@ -455,6 +459,13 @@ impl<T> [T] {
         Concat::concat(self)
     }
     pub fn join<Separator>(&self, sep: Separator) -> <[T] as Join<Separator>>::Output
+    where
+        [T]: Join<Separator>,
+    {
+        Join::join(self, sep)
+    }
+    #[deprecated(since = "1.3.0", note = "renamed to join")]
+    pub fn connect<Separator>(&self, sep: Separator) -> <[T] as Join<Separator>>::Output
     where
         [T]: Join<Separator>,
     {

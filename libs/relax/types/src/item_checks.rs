@@ -755,6 +755,54 @@ pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
     errors
 }
 
+/// rustc_resolve late.rs: an associated constant of an impl whose header names an anonymous
+/// lifetime (`impl Foo<'_>`) with an elided `&` in its type -- the elided lifetime means
+/// `'static` there (lint `elided_lifetimes_in_associated_constant`).
+pub fn assoc_const_elision(prog: &Program, d: DefId) {
+    use crate::ast::{GenericArg, GenericArgs, ItemKind, Ty};
+    if !crate::lint::enabled() { return; }
+    let def = prog.def(d);
+    if def.kind != DefKind::AssocConst || def.parent == NO_DEF || prog.def(def.parent).kind != DefKind::Impl { return; }
+    let ast = &prog.files[def.file as usize].ast;
+    let pf = &prog.files[def.file as usize];
+    let ItemKind::Const(oty, _) = ast.item(def.item).kind else { return };
+    let Some(ty) = oty.get() else { return };
+    let imp = prog.def(def.parent);
+    let iast = &prog.files[imp.file as usize].ast;
+    let Some(im) = iast.as_impl(&iast.item(imp.item).kind) else { return };
+    // an anonymous lifetime written in a type
+    fn anon<'t>(ast: &crate::ast::Ast, text: &dyn Fn(crate::ast::Ident) -> &'t str, t: crate::ast::TyId, refs_too: bool, depth: u32) -> bool {
+        if depth > 16 { return false; }
+        let args = |gs: crate::ast::GenericArgsId, depth: u32| -> bool {
+            match ast.gargs(gs) {
+                Some(GenericArgs::Angle(v)) => ast.list(*v).iter().any(|a| match a {
+                    GenericArg::Lifetime(l) => text(*l) == "'_",
+                    GenericArg::Type(x) => anon(ast, text, *x, refs_too, depth + 1),
+                    _ => false,
+                }),
+                _ => false,
+            }
+        };
+        match ast.ty(t) {
+            Ty::Ref(lt, _, x) => (match lt { None => refs_too, Some(l) => text(*l) == "'_" }) || anon(ast, text, *x, refs_too, depth + 1),
+            Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => anon(ast, text, *x, refs_too, depth + 1),
+            Ty::Tuple(l) => ast.list(*l).iter().any(|x| anon(ast, text, *x, refs_too, depth + 1)),
+            Ty::Path(p) => ast.segs(p.segs).iter().any(|s| args(s.args(), depth)),
+            _ => false,
+        }
+    }
+    let itext = |i: crate::ast::Ident| -> &str { std::str::from_utf8(prog.files[imp.file as usize].bytes(i.lo, i.hi)).unwrap_or("") };
+    let ctext = |i: crate::ast::Ident| -> &str { std::str::from_utf8(pf.bytes(i.lo, i.hi)).unwrap_or("") };
+    let header = anon(iast, &itext, im.self_ty, false, 0)
+        || im.trait_.as_ref().is_some_and(|p| iast.segs(p.segs).iter().any(|s| match iast.gargs(s.args()) {
+            Some(GenericArgs::Angle(v)) => iast.list(*v).iter().any(|a| matches!(a, GenericArg::Lifetime(l) if itext(*l) == "'_")),
+            _ => false,
+        }));
+    if header && anon(ast, &ctext, ty, true, 0) {
+        crate::lint::emit(prog, d, &crate::lint::ELIDED_LIFETIMES_IN_ASSOCIATED_CONSTANT, def.file, ast.item(def.item).lo, "`&` without an explicit lifetime name cannot be used here");
+    }
+}
+
 /// rustc_attr_parsing `AllowedTargets::AllowList`: the targets a builtin attribute may be written
 /// on (a `Warn` target is only the `unused_attributes` lint and is accepted here). Returns the
 /// plural target name when the attribute is not allowed on definition `d`.

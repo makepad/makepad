@@ -173,3 +173,11 @@ pub fn walk_pat<'a, V: Visitor<'a>>(v: &mut V, p: PatId) {
         Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => v.pat(x),
     }
 }
+
+/// The lint attributes of the nodes around the one being visited, outermost first. Every pass
+/// that reports lints keeps one and hands it to `lint::emit_in`.
+pub fn push_attrs(stack: &mut Vec<Attr>, ast: &Ast, attrs: List<Attr>) { stack.extend_from_slice(ast.list(attrs)); }
+pub fn pop_attrs(stack: &mut Vec<Attr>, ast: &Ast, attrs: List<Attr>) {
+    let n = ast.list(attrs).len();
+    stack.truncate(stack.len() - n);
+}

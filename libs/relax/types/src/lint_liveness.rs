@@ -743,7 +743,7 @@ impl<'c, 'a> Unit<'c, 'a> {
 
     fn is_box(&self, e: ExprId) -> bool {
         match self.ty_kind_of(e) {
-            Some(TyKind::Adt(d, ..)) => self.cx.prog.def(d).kind == DefKind::Struct && self.cx.prog.name(d) == "Box",
+            Some(TyKind::Adt(d, ..)) => self.cx.prog.def(d).kind == DefKind::Struct && crate::lint::is_diagnostic_item(self.cx.prog, d, "Box"),
             _ => false,
         }
     }

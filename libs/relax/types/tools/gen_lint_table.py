@@ -11,7 +11,9 @@ root = sys.argv[1]
 lints = {}  # name -> dict
 
 def strip_docs(text):
-    return "\n".join(l for l in text.splitlines() if not l.strip().startswith("///"))
+    # doc comments and `#[doc = "..."]` attributes (their strings may hold unbalanced braces)
+    text = re.sub(r'#\[doc\s*=\s*"(?:[^"\\]|\\.)*"\]', "", text)
+    return "\n".join(l for l in text.splitlines() if not l.strip().startswith("//"))
 
 def parse_blocks(text, path):
     text = strip_docs(text)
@@ -73,7 +75,7 @@ print("pub enum LevelK { Allow, Warn, Deny, Forbid }")
 print("use LevelK::*;")
 print()
 print("/// (name, default level, (edition, level from it), groups, gated by an unstable feature)")
-print("pub static LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[")
+print("pub const LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[")
 for n in sorted(lints):
     i = lints[n]
     l2 = "None" if not i["level2024"] else "Some((%d, %s))" % (i["level2024"][0], i["level2024"][1])

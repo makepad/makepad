@@ -11,6 +11,7 @@ use crate::marker::PhantomData;
 
 use crate::ops::{Bound, Index, RangeBounds};
 
+#[rustc_insignificant_dtor]
 pub struct BTreeMap<K, V> {
     tree: Tree,
     _marker: PhantomData<(K, V)>,

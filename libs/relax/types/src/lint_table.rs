@@ -6,7 +6,7 @@ pub enum LevelK { Allow, Warn, Deny, Forbid }
 use LevelK::*;
 
 /// (name, default level, (edition, level from it), groups, gated by an unstable feature)
-pub static LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
+pub const LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
     ("aarch64_softfloat_neon", Warn, None, &["future_incompatible"], false),
     ("absolute_paths_not_starting_with_crate", Allow, None, &["rust_2018_compatibility"], false),
     ("ambiguous_associated_items", Deny, None, &["future_incompatible"], false),
@@ -165,14 +165,18 @@ pub static LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
     ("renamed_and_removed_lints", Warn, None, &[], false),
     ("repr_c_enums_larger_than_int", Warn, None, &["future_incompatible"], false),
     ("repr_transparent_non_zst_fields", Deny, None, &["future_incompatible"], false),
+    ("resolving_to_items_shadowing_supertrait_items", Allow, None, &[], true),
     ("rtsan_nonblocking_async", Warn, None, &[], false),
     ("rust_2021_incompatible_closure_captures", Allow, None, &["rust_2021_compatibility"], false),
     ("rust_2021_incompatible_or_patterns", Allow, None, &["rust_2021_compatibility"], false),
+    ("rust_2021_prefixes_incompatible_syntax", Allow, None, &["rust_2021_compatibility"], false),
     ("rust_2021_prelude_collisions", Allow, None, &["rust_2021_compatibility"], false),
+    ("rust_2024_guarded_string_incompatible_syntax", Allow, None, &["rust_2024_compatibility"], false),
     ("rust_2024_incompatible_pat", Allow, None, &["rust_2024_compatibility"], false),
     ("rust_2024_prelude_collisions", Allow, None, &["rust_2024_compatibility"], false),
     ("self_constructor_from_outer_item", Warn, None, &["future_incompatible"], false),
     ("semicolon_in_expressions_from_macros", Deny, None, &["future_incompatible"], false),
+    ("shadowing_supertrait_items", Allow, None, &[], true),
     ("single_use_lifetimes", Allow, None, &[], false),
     ("special_module_name", Warn, None, &[], false),
     ("stable_features", Warn, None, &[], false),
@@ -182,6 +186,7 @@ pub static LINTS: &[(&str, LevelK, Option<(u16, LevelK)>, &[&str], bool)] = &[
     ("tail_expr_drop_order", Allow, None, &["rust_2024_compatibility"], false),
     ("test_unstable_lint", Deny, None, &[], true),
     ("text_direction_codepoint_in_comment", Deny, None, &[], false),
+    ("text_direction_codepoint_in_literal", Deny, None, &[], false),
     ("trivial_bounds", Warn, None, &[], false),
     ("trivial_casts", Allow, None, &[], false),
     ("trivial_numeric_casts", Allow, None, &[], false),

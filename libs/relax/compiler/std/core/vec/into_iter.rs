@@ -5,6 +5,7 @@ use crate::fmt;
 use crate::heap;
 use crate::intrinsics_mem as im;
 
+#[rustc_insignificant_dtor]
 pub struct IntoIter<T> {
     buf: crate::ptr::NonNull<T>,
     cap: usize,

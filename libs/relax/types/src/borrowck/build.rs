@@ -532,10 +532,11 @@ impl<'a> Build<'a> {
             // unused_mut lint reads it; a run never needs it)
             if crate::lint::enabled() {
                 let pf = &self.tx.prog.files[self.b.file as usize];
-                let mut i = 0u32;
+                // from the fn's name on, up to its body: the parameter list holds the `self` token
+                let mut i = pf.toks.partition_point(|t| t.lo < it.name.hi) as u32;
                 loop {
                     let t = pf.tok(i);
-                    if t.kind == crate::lexer::T::Eof { break; }
+                    if matches!(t.kind, crate::lexer::T::Eof | crate::lexer::T::OpenBrace | crate::lexer::T::Semi) { break; }
                     if t.lo >= it.name.hi && t.kind == crate::lexer::T::KwSelfValue {
                         self.out.locals[a as usize].span = Span { lo: t.lo, hi: t.hi };
                         break;

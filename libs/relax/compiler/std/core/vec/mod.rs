@@ -36,6 +36,8 @@ impl Cap {
     }
 }
 
+#[rustc_diagnostic_item = "Vec"]
+#[rustc_insignificant_dtor]
 pub struct Vec<T> {
     ptr: crate::ptr::NonNull<T>,
     cap: Cap,
@@ -224,10 +226,14 @@ impl<T> Vec<T> {
         unsafe { im::slice_from_raw_mut(self.ptr.as_ptr(), self.len) }
     }
 
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *const T {
         self.ptr.as_ptr() as *const T
     }
 
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         self.ptr.as_ptr()
     }

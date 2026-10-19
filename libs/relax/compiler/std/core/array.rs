@@ -235,6 +235,7 @@ impl<T, const N: usize> IntoIterator for [T; N] {
 }
 
 /// By-value array iterator.
+#[rustc_insignificant_dtor]
 pub struct IntoIter<T, const N: usize> {
     data: ManuallyDrop<[T; N]>,
     start: usize,

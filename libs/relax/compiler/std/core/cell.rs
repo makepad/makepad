@@ -22,18 +22,64 @@ impl<T> UnsafeCell<T> {
 }
 
 impl<T: ?Sized> UnsafeCell<T> {
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn get(&self) -> *mut T {
         &self.value as *const T as *mut T
     }
     pub const fn get_mut(&mut self) -> &mut T {
         &mut self.value
     }
+    #[rustc_should_not_be_called_on_const_items]
+    pub unsafe fn replace(&self, value: T) -> T where T: Sized {
+        crate::mem::replace(&mut *self.get(), value)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub unsafe fn as_ref_unchecked(&self) -> &T {
+        &*self.get()
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub unsafe fn as_mut_unchecked(&self) -> &mut T {
+        &mut *self.get()
+    }
+    #[rustc_diagnostic_item = "unsafe_cell_raw_get"]
     pub const fn raw_get(this: *const UnsafeCell<T>) -> *mut T {
         this as *const T as *mut T
     }
     /// `&mut T` as `&mut UnsafeCell<T>` (repr(transparent)).
     pub const fn from_mut(value: &mut T) -> &mut UnsafeCell<T> {
         unsafe { &mut *(value as *mut T as *mut UnsafeCell<T>) }
+    }
+}
+
+/// `UnsafeCell` that is `Sync` when `T: Sync` (unstable `sync_unsafe_cell`).
+#[repr(transparent)]
+#[rustc_diagnostic_item = "SyncUnsafeCell"]
+pub struct SyncUnsafeCell<T: ?Sized> {
+    value: UnsafeCell<T>,
+}
+
+unsafe impl<T: ?Sized + Sync> Sync for SyncUnsafeCell<T> {}
+
+impl<T> SyncUnsafeCell<T> {
+    pub const fn new(value: T) -> SyncUnsafeCell<T> {
+        SyncUnsafeCell { value: UnsafeCell::new(value) }
+    }
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+impl<T: ?Sized> SyncUnsafeCell<T> {
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
+    #[rustc_should_not_be_called_on_const_items]
+    pub const fn get(&self) -> *mut T {
+        self.value.get()
+    }
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
     }
 }
 
@@ -52,6 +98,7 @@ impl<T> From<T> for UnsafeCell<T> {
 // ---------------------------------------------------------------- Cell
 
 #[repr(transparent)]
+#[rustc_diagnostic_item = "Cell"]
 pub struct Cell<T: ?Sized> {
     value: UnsafeCell<T>,
 }
@@ -69,16 +116,19 @@ impl<T> Cell<T> {
     pub const fn new(value: T) -> Cell<T> {
         Cell { value: UnsafeCell::new(value) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn set(&self, val: T) {
         let old = self.replace(val);
         drop(old);
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn swap(&self, other: &Cell<T>) {
         if crate::ptr::eq(self, other) {
             return;
         }
         unsafe { crate::ptr::swap(self.value.get(), other.value.get()) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn replace(&self, val: T) -> T {
         unsafe { crate::mem::replace(&mut *self.value.get(), val) }
     }
@@ -88,9 +138,11 @@ impl<T> Cell<T> {
 }
 
 impl<T: Copy> Cell<T> {
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn get(&self) -> T {
         unsafe { *self.value.get() }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn update<F: FnOnce(T) -> T>(&self, f: F) {
         let old = self.get();
         self.set(f(old));
@@ -98,6 +150,8 @@ impl<T: Copy> Cell<T> {
 }
 
 impl<T: ?Sized> Cell<T> {
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
@@ -231,16 +285,19 @@ impl<T> RefCell<T> {
         self.value.into_inner()
     }
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn replace(&self, t: T) -> T {
         crate::mem::replace(&mut *self.borrow_mut(), t)
     }
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub fn replace_with<F: FnOnce(&mut T) -> T>(&self, f: F) -> T {
         let mut_borrow = &mut *self.borrow_mut();
         let replacement = f(mut_borrow);
         crate::mem::replace(mut_borrow, replacement)
     }
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn swap(&self, other: &RefCell<T>) {
         crate::mem::swap(&mut *self.borrow_mut(), &mut *other.borrow_mut())
     }
@@ -248,12 +305,14 @@ impl<T> RefCell<T> {
 
 impl<T: ?Sized> RefCell<T> {
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn borrow(&self) -> Ref<'_, T> {
         match self.try_borrow() {
             Ok(b) => b,
             Err(_) => panic_already_mutably_borrowed(),
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn try_borrow(&self) -> Result<Ref<'_, T>, BorrowError> {
         let b = self.borrow.get();
         if b < 0 || b == isize::MAX {
@@ -264,12 +323,14 @@ impl<T: ?Sized> RefCell<T> {
         }
     }
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn borrow_mut(&self) -> RefMut<'_, T> {
         match self.try_borrow_mut() {
             Ok(b) => b,
             Err(_) => panic_already_borrowed(),
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
         if self.borrow.get() != UNUSED {
             Err(BorrowMutError { _private: () })
@@ -278,6 +339,7 @@ impl<T: ?Sized> RefCell<T> {
             Ok(RefMut { value: unsafe { &mut *self.value.get() }, borrow: &self.borrow })
         }
     }
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
@@ -454,6 +516,7 @@ impl<T> OnceCell<T> {
     pub fn get_mut(&mut self) -> Option<&mut T> {
         self.inner.get_mut().as_mut()
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn set(&self, value: T) -> Result<(), T> {
         if self.get().is_some() {
             return Err(value);
@@ -462,6 +525,7 @@ impl<T> OnceCell<T> {
         Ok(())
     }
     #[track_caller]
+    #[rustc_should_not_be_called_on_const_items]
     pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
         if let Some(v) = self.get() {
             return v;
@@ -473,6 +537,32 @@ impl<T> OnceCell<T> {
         unsafe { *self.inner.get() = Some(val) };
         match self.get() {
             Some(v) => v,
+            None => unsafe { crate::hint::unreachable_unchecked() },
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn try_insert(&self, value: T) -> Result<&T, (&T, T)> {
+        if let Some(old) = self.get() {
+            return Err((old, value));
+        }
+        unsafe { *self.inner.get() = Some(value) };
+        match self.get() {
+            Some(v) => Ok(v),
+            None => unsafe { crate::hint::unreachable_unchecked() },
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn get_or_try_init<F, E>(&self, f: F) -> Result<&T, E> where F: FnOnce() -> Result<T, E> {
+        if let Some(v) = self.get() {
+            return Ok(v);
+        }
+        let val = f()?;
+        if self.get().is_some() {
+            crate::panicking::panic_str("reentrant init");
+        }
+        unsafe { *self.inner.get() = Some(val) };
+        match self.get() {
+            Some(v) => Ok(v),
             None => unsafe { crate::hint::unreachable_unchecked() },
         }
     }
@@ -540,6 +630,7 @@ impl<T, F: FnOnce() -> T> LazyCell<T, F> {
     pub const fn new(f: F) -> LazyCell<T, F> {
         LazyCell { cell: OnceCell::new(), init: Cell::new(Some(f)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn force(this: &LazyCell<T, F>) -> &T {
         this.cell.get_or_init(|| match this.init.take() {
             Some(f) => f(),

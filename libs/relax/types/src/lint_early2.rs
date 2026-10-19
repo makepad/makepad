@@ -3,15 +3,15 @@
 //! macro definitions, or the source text between tokens. Check-only.
 
 use crate::ast::*;
-use crate::lint::{self, Level, Lint};
+use crate::lint::{self, Lint};
 use crate::lint_early::W;
 use crate::program::{DefId, DefKind, Program};
 use crate::tcx::lifetime_resolve::{LifetimeRes, LifetimeResolution};
 use crate::tcx::Tcx;
 use std::sync::Arc;
 
-pub const MISMATCHED_LIFETIME_SYNTAXES: Lint = lint::lint("mismatched_lifetime_syntaxes", Level::Warn, &[]);
-pub const ELIDED_LIFETIMES_IN_PATHS: Lint = lint::lint("elided_lifetimes_in_paths", Level::Allow, &["rust_2018_idioms"]);
+pub const MISMATCHED_LIFETIME_SYNTAXES: Lint = lint::lint("mismatched_lifetime_syntaxes");
+pub const ELIDED_LIFETIMES_IN_PATHS: Lint = lint::lint("elided_lifetimes_in_paths");
 
 /// The lifetime resolution of a definition's signature and body.
 pub(crate) fn names(prog: &Program, tcx: &Tcx, d: DefId) -> Arc<LifetimeResolution> { tcx.resolve_lifetime_names(prog, d) }
@@ -374,11 +374,10 @@ fn string_value(t: &[u8]) -> Option<String> {
     Some(out)
 }
 
-pub const INVALID_DOC_ATTRIBUTES: Lint = lint::lint("invalid_doc_attributes", Level::Warn, &[]);
-pub const UNKNOWN_DIAGNOSTIC_ATTRIBUTES: Lint = lint::lint("unknown_diagnostic_attributes", Level::Warn, &["unknown_or_malformed_diagnostic_attributes"]);
+pub const INVALID_DOC_ATTRIBUTES: Lint = lint::lint("invalid_doc_attributes");
+pub const UNKNOWN_DIAGNOSTIC_ATTRIBUTES: Lint = lint::lint("unknown_diagnostic_attributes");
 pub const UNUSED_ATTRIBUTES: Lint = crate::lint_early::UNUSED_ATTRIBUTES;
 /// A malformed attribute that rustc rejects outright (no lint of its own): never allowed.
-pub const MALFORMED_ATTRIBUTE: Lint = lint::lint("malformed_attribute", Level::Forbid, &[]);
 
 /// Whether `#![feature(name)]` is written in the crate root of `krate`.
 fn feature_enabled(prog: &Program, krate: u32, name: &str) -> bool {
@@ -443,6 +442,9 @@ pub(crate) fn attr_checks(prog: &Program, n: &AttrNode) {
         let emit = |lint: &Lint, pos: u32, msg: &str| {
             if !lint::external(prog, file, pos) { emit_in(prog, d, n.inner, lint, file, pos, msg); }
         };
+        let hard = |pos: u32, msg: &str| {
+            if !lint::external(prog, file, pos) { lint::hard_error(prog, file, pf.lint_pos(pos), msg); }
+        };
         let word = if path.len() == 1 { Some(String::from_utf8_lossy(&path[0]).into_owned()) } else { None };
         let full = joined(path);
         // ---- the diagnostic namespace
@@ -502,17 +504,17 @@ pub(crate) fn attr_checks(prog: &Program, n: &AttrNode) {
                             specific.push(apos);
                             for m in items {
                                 let ok = matches!(m, Meta::Item { path, args: Args::None, .. } if path.len() == 1 && is_ident(&path[0]));
-                                if !ok { emit(&MALFORMED_ATTRIBUTE, apos, "E0539: malformed `macro_use` attribute input"); }
+                                if !ok { hard(apos, "E0539: malformed `macro_use` attribute input"); }
                             }
                         }
                     }
-                    Args::Value { .. } => emit(&MALFORMED_ATTRIBUTE, apos, "E0539: malformed `macro_use` attribute input"),
+                    Args::Value { .. } => hard(apos, "E0539: malformed `macro_use` attribute input"),
                 }
             }
         }
         // ---- doc attributes
         if word.as_deref() == Some("doc") {
-            doc_attr(prog, n, file, apos, args, &emit);
+            doc_attr(prog, n, file, apos, args, &emit, &hard);
         }
     }
 }
@@ -541,10 +543,9 @@ fn is_executable_crate(prog: &Program, krate: u32) -> bool {
 }
 
 /// rustc_attr_parsing `DocParser`.
-fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emit: &dyn Fn(&Lint, u32, &str)) {
+fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emit: &dyn Fn(&Lint, u32, &str), hard: &dyn Fn(u32, &str)) {
     let _ = prog;
     let invalid = |pos: u32, msg: &str| emit(&INVALID_DOC_ATTRIBUTES, pos, msg);
-    let hard = |pos: u32, msg: &str| emit(&MALFORMED_ATTRIBUTE, pos, msg);
     match args {
         Args::None => {}
         Args::Value { pos, tok } => {
@@ -656,7 +657,7 @@ pub fn check_module_items(prog: &Program, own: &[bool]) {
 
 // ---------------------------------------------------------------- explicit_outlives_requirements
 
-pub const EXPLICIT_OUTLIVES_REQUIREMENTS: Lint = lint::lint("explicit_outlives_requirements", Level::Allow, &["rust_2018_idioms"]);
+pub const EXPLICIT_OUTLIVES_REQUIREMENTS: Lint = lint::lint("explicit_outlives_requirements");
 
 /// A subject of an inferred `X: 'a`: a type parameter or a lifetime parameter, by name.
 #[derive(Clone, PartialEq, Eq)]
@@ -893,8 +894,8 @@ fn back_kw_pos(pf: &crate::parser::ParsedFile, at: u32, kw: &str) -> u32 {
 
 // ---------------------------------------------------------------- unused_macros / unused_macro_rules
 
-pub const UNUSED_MACROS: Lint = lint::lint("unused_macros", Level::Warn, &["unused"]);
-pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules", Level::Allow, &["unused"]);
+pub const UNUSED_MACROS: Lint = lint::lint("unused_macros");
+pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 
 /// rustc_resolve `check_unused_macros`, after the checked crates' bodies are all expanded: a
 /// private `macro_rules!` no invocation resolved to, and the rules of the others that no
@@ -951,7 +952,7 @@ pub fn finish(prog: &Program, own: &[bool]) {
 
 // ---------------------------------------------------------------- absolute_paths_not_starting_with_crate
 
-pub const ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE: Lint = lint::lint("absolute_paths_not_starting_with_crate", Level::Allow, &["rust_2018_compatibility"]);
+pub const ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE: Lint = lint::lint("absolute_paths_not_starting_with_crate");
 const ABSOLUTE_PATHS_MSG: &str = "absolute paths must start with `self`, `super`, `crate`, or an external crate name in the 2018 edition";
 
 /// The crate root's `extern crate name;` items that keep their name (and the crate the compiler

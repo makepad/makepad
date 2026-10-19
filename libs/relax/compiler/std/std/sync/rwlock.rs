@@ -38,6 +38,7 @@ impl<T> RwLock<T> {
         RwLock { inner: RawRwLock::new(), poison: poison::Flag::new(), data: UnsafeCell::new(t) }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn read(&self) -> LockResult<RwLockReadGuard<'_, T>> {
         self.inner.read();
         let g = RwLockReadGuard { lock: self };
@@ -48,6 +49,7 @@ impl<T> RwLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<'_, T>> {
         if self.inner.try_read() {
             let g = RwLockReadGuard { lock: self };
@@ -61,11 +63,13 @@ impl<T> RwLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn write(&self) -> LockResult<RwLockWriteGuard<'_, T>> {
         self.inner.write();
         poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard })
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn try_write(&self) -> TryLockResult<RwLockWriteGuard<'_, T>> {
         if self.inner.try_write() {
             match poison::map_result(self.poison.guard(), |guard| RwLockWriteGuard { lock: self, poison: guard }) {
@@ -77,10 +81,27 @@ impl<T> RwLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn replace(&self, value: T) -> LockResult<T> {
+        match self.write() {
+            Ok(mut g) => Ok(crate::mem::replace(&mut *g, value)),
+            Err(e) => {
+                let mut g = e.into_inner();
+                Err(PoisonError::new(crate::mem::replace(&mut *g, value)))
+            }
+        }
+    }
+
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn set(&self, value: T) -> Result<(), PoisonError<T>> {
+        self.replace(value).map(drop)
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.poison.get()
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn clear_poison(&self) {
         self.poison.clear();
     }

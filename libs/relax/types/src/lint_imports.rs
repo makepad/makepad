@@ -15,13 +15,13 @@
 //! of the use tree). Check-only; `makepad run` never calls this.
 
 use crate::ast::*;
-use crate::lint::{self, Level, Lint};
+use crate::lint::{self, Lint};
 use crate::program::{DefId, DefKind, Program, NO_DEF};
 use crate::tcx::Tcx;
 use crate::lexer::T;
 use std::collections::{HashMap, HashSet};
 
-pub const UNUSED_IMPORTS: Lint = lint::lint("unused_imports", Level::Warn, &["unused"]);
+pub const UNUSED_IMPORTS: Lint = lint::lint("unused_imports");
 
 /// Traits one of whose methods a checked body calls (collected with the bodies).
 static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashSet<DefId>>> = relax_session::sync::Mutex::new(None);

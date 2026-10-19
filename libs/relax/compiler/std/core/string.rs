@@ -122,6 +122,11 @@ impl String {
         String { vec: Vec::with_capacity(capacity) }
     }
 
+    /// # Safety: `buf` holds `length` bytes of valid UTF-8 in an allocation of `capacity` bytes made by the global allocator.
+    pub unsafe fn from_raw_parts(buf: *mut u8, length: usize, capacity: usize) -> String {
+        String { vec: Vec::from_raw_parts(buf, length, capacity) }
+    }
+
     pub fn from_utf8(vec: Vec<u8>) -> Result<String, FromUtf8Error> {
         match crate::str::from_utf8(&vec[..]) {
             Ok(..) => Ok(String { vec }),

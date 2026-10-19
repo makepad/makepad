@@ -11,6 +11,7 @@ use crate::ops::Index;
 
 pub use crate::hash::{DefaultHasher, RandomState};
 
+#[rustc_insignificant_dtor]
 pub struct HashMap<K, V, S = RandomState> {
     table: RawTable<(K, V)>,
     hash_builder: S,

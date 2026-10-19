@@ -20,6 +20,7 @@ impl f64 {
     pub const MAX_EXP: i32 = 1024;
     pub const MIN_10_EXP: i32 = -307;
     pub const MAX_10_EXP: i32 = 308;
+    #[rustc_diagnostic_item = "f64_nan"]
     pub const NAN: f64 = f64::from_bits(0x7ff8_0000_0000_0000);
     pub const INFINITY: f64 = f64::from_bits(0x7ff0_0000_0000_0000);
     pub const NEG_INFINITY: f64 = f64::from_bits(0xfff0_0000_0000_0000);
@@ -107,6 +108,7 @@ impl f32 {
     pub const MAX_EXP: i32 = 128;
     pub const MIN_10_EXP: i32 = -37;
     pub const MAX_10_EXP: i32 = 38;
+    #[rustc_diagnostic_item = "f32_nan"]
     pub const NAN: f32 = f32::from_bits(0x7fc0_0000);
     pub const INFINITY: f32 = f32::from_bits(0x7f80_0000);
     pub const NEG_INFINITY: f32 = f32::from_bits(0xff80_0000);

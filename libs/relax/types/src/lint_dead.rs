@@ -21,8 +21,8 @@ use crate::types::TyKind;
 use relax_session::sync::Mutex;
 use std::collections::{HashMap, HashSet};
 
-pub const DEAD_CODE: Lint = lint::lint("dead_code", Level::Warn, &["unused"]);
-pub const DEAD_CODE_PUB_IN_BINARY: Lint = lint::lint("dead_code_pub_in_binary", Level::Allow, &[]);
+pub const DEAD_CODE: Lint = lint::lint("dead_code");
+pub const DEAD_CODE_PUB_IN_BINARY: Lint = lint::lint("dead_code_pub_in_binary");
 
 /// A field of a struct, union or enum variant: (ADT, variant index, field index).
 type FieldKey = (DefId, u32, u32);
@@ -477,7 +477,7 @@ impl<'a> BodyRefs<'a> {
         for _ in 0..derefs {
             match *self.tcx.tys.kind(t) {
                 TyKind::Ref(_, x, _) => t = x,
-                TyKind::Adt(d, args, _) if self.prog.name(d) == "Box" => t = *self.tcx.tys.list(args).first()?,
+                TyKind::Adt(d, args, _) if lint::is_diagnostic_item(self.prog, d, "Box") => t = *self.tcx.tys.list(args).first()?,
                 _ => return None,
             }
         }
@@ -606,11 +606,8 @@ impl<'a> BodyRefs<'a> {
 impl<'a> Visitor<'a> for BodyRefs<'a> {
     fn ast(&self) -> &'a Ast { self.ast }
 
-    fn enter_attrs(&mut self, attrs: List<Attr>) { self.stack.extend_from_slice(self.ast.list(attrs)); }
-    fn leave_attrs(&mut self, attrs: List<Attr>) {
-        let n = self.ast.list(attrs).len();
-        self.stack.truncate(self.stack.len() - n);
-    }
+    fn enter_attrs(&mut self, attrs: List<Attr>) { crate::ast_visit::push_attrs(&mut self.stack, self.ast, attrs); }
+    fn leave_attrs(&mut self, attrs: List<Attr>) { crate::ast_visit::pop_attrs(&mut self.stack, self.ast, attrs); }
 
     fn block(&mut self, b: BlockId) {
         let saved = self.tw.module;
@@ -781,7 +778,33 @@ impl Reach {
         for (k, c) in prog.crates.iter().enumerate() {
             if own.get(k).copied().unwrap_or(false) { r.module(prog, c.root_mod, &mut done); }
         }
-        // impls of reachable types
+        r.impls(prog, tcx, own);
+        // the types a reachable item mentions in its interface are reachable too
+        let mut done2: HashSet<u32> = HashSet::new();
+        loop {
+            let mut found: Vec<DefId> = Vec::new();
+            for &d in r.defs.iter() {
+                let k = prog.def(d).kind;
+                if !matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::AssocTy | DefKind::Impl | DefKind::ForeignFn | DefKind::ForeignStatic) { continue; }
+                for u in item_refs_in(prog, d, true) {
+                    if let Ref::Use(t) = u {
+                        let tk = prog.def(t).kind;
+                        if own.get(prog.def(t).krate as usize).copied().unwrap_or(false) && matches!(tk, DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias) && !r.defs.contains(&t) { found.push(t); }
+                    }
+                }
+            }
+            if found.is_empty() { break; }
+            for t in found { let td = prog.def(t); r.mark_item(prog, td.file, td.item, t, &mut done2); }
+            // the impls of the types just reached expose their items too
+            r.impls(prog, tcx, own);
+        }
+        r
+    }
+
+    /// The `pub` items of impls of reachable types, and every item of a trait impl whose trait
+    /// and type are reachable.
+    fn impls(&mut self, prog: &Program, tcx: &Tcx, own: &[bool]) {
+        let r = self;
         for i in 0..prog.defs.len() {
             let def = prog.defs[i];
             if def.kind != DefKind::Impl || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
@@ -807,24 +830,6 @@ impl Reach {
                 }
             }
         }
-        // the types a reachable item mentions in its interface are reachable too
-        let mut done2: HashSet<u32> = HashSet::new();
-        loop {
-            let mut found: Vec<DefId> = Vec::new();
-            for &d in r.defs.iter() {
-                let k = prog.def(d).kind;
-                if !matches!(k, DefKind::Fn | DefKind::AssocFn | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::AssocTy | DefKind::Impl | DefKind::ForeignFn | DefKind::ForeignStatic) { continue; }
-                for u in item_refs_in(prog, d, true) {
-                    if let Ref::Use(t) = u {
-                        let tk = prog.def(t).kind;
-                        if own.get(prog.def(t).krate as usize).copied().unwrap_or(false) && matches!(tk, DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::TypeAlias) && !r.defs.contains(&t) { found.push(t); }
-                    }
-                }
-            }
-            if found.is_empty() { break; }
-            for t in found { let td = prog.def(t); r.mark_item(prog, td.file, td.item, t, &mut done2); }
-        }
-        r
     }
 
     fn mark_item(&mut self, prog: &Program, file: u32, it: ItemId, d: DefId, done: &mut HashSet<u32>) {
@@ -1345,7 +1350,7 @@ impl<'a, 'b> Reporter<'a, 'b> {
             TyKind::Tuple(l) => tcx.tys.list(l).iter().all(|&x| self.is_zst(x, depth + 1)),
             TyKind::Array(x, _) => self.is_zst(x, depth + 1),
             TyKind::Adt(d, args, _) => {
-                if self.s.prog.name(d) == "PhantomData" { return true; }
+                if lint::is_diagnostic_item(self.s.prog, d, "PhantomData") { return true; }
                 let Some(a) = tcx.adts.get(&d) else { return false };
                 if a.is_enum || a.is_union || a.variants.len() != 1 { return false; }
                 let args: Vec<_> = tcx.tys.list(args).to_vec();
@@ -1363,7 +1368,7 @@ impl<'a, 'b> Reporter<'a, 'b> {
         let Some(a) = self.s.tcx.adts.get(&adt) else { return false };
         let f = &a.variants[vi as usize].fields[i as usize];
         // PhantomData fields; positional zero-sized fields
-        if let TyKind::Adt(d, ..) = *self.s.tcx.tys.kind(f.ty) { if self.s.prog.name(d) == "PhantomData" { return false; } }
+        if let TyKind::Adt(d, ..) = *self.s.tcx.tys.kind(f.ty) { if lint::is_diagnostic_item(self.s.prog, d, "PhantomData") { return false; } }
         let positional = a.variants[vi as usize].shape == 1;
         if positional && self.is_zst(f.ty, 0) { return false; }
         true

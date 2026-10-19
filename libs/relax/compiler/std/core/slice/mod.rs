@@ -32,10 +32,12 @@ pub use join::{concat_str, concat_vec, join_str, join_vec};
 use crate::cmp::Ordering;
 use crate::intrinsics_mem as im;
 
+#[rustc_diagnostic_item = "slice_from_raw_parts"]
 pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
     im::slice_from_raw(data, len)
 }
 
+#[rustc_diagnostic_item = "slice_from_raw_parts_mut"]
 pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
     im::slice_from_raw_mut(data, len)
 }

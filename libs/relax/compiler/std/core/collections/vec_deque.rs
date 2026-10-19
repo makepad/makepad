@@ -10,6 +10,7 @@ use crate::marker::PhantomData;
 use crate::ops::{Index, IndexMut, RangeBounds};
 use crate::ptr;
 
+#[rustc_insignificant_dtor]
 pub struct VecDeque<T> {
     buf: crate::ptr::NonNull<T>,
     cap: Cap,

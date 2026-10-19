@@ -35,6 +35,7 @@ fn weak_ptr(h: *mut Header) -> *mut usize {
     unsafe { &mut (*h).weak as *mut usize }
 }
 
+#[rustc_insignificant_dtor]
 pub struct Arc<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
 }
@@ -162,6 +163,7 @@ impl<T: Clone> Arc<T> {
 }
 
 impl<T: ?Sized> Arc<T> {
+    #[rustc_never_returns_null_ptr]
     pub fn as_ptr(this: &Arc<T>) -> *const T {
         this.ptr.as_ptr() as *const T
     }
@@ -489,6 +491,7 @@ impl<T: ?Sized> Weak<T> {
         self.ptr.as_ptr() as *const u8 == other.ptr.as_ptr() as *const u8
     }
 
+    #[rustc_never_returns_null_ptr]
     pub fn as_ptr(&self) -> *const T {
         self.ptr.as_ptr() as *const T
     }

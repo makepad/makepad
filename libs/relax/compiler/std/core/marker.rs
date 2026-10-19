@@ -34,6 +34,7 @@ impl<T: PointeeSized> !Sync for *mut T {}
 #[cfg_attr(not(relax_check), lang = "unpin")]
 pub auto trait Unpin {}
 /// Zero-sized marker owning a `T` for variance/drop-check purposes.
+#[rustc_diagnostic_item = "PhantomData"]
 #[cfg_attr(not(relax_check), lang = "phantom_data")]
 pub struct PhantomData<T: PointeeSized>;
 

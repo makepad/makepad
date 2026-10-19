@@ -20,7 +20,9 @@ use crate::string::String;
 use crate::vec::Vec;
 
 #[fundamental]
+#[rustc_diagnostic_item = "Box"]
 #[cfg_attr(not(relax_check), lang = "owned_box")]
+#[rustc_insignificant_dtor]
 pub struct Box<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
 }
@@ -69,9 +71,11 @@ impl<T: ?Sized> Box<T> {
     pub fn leak<'a>(b: Box<T>) -> &'a mut T {
         unsafe { &mut *Box::into_raw(b) }
     }
+    #[rustc_never_returns_null_ptr]
     pub fn as_ptr(b: &Box<T>) -> *const T {
         b.ptr.as_ptr() as *const T
     }
+    #[rustc_never_returns_null_ptr]
     pub fn as_mut_ptr(b: &mut Box<T>) -> *mut T {
         b.ptr.as_ptr()
     }
