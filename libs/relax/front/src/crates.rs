@@ -15,6 +15,8 @@ pub struct CrateUnit {
     /// (unit index, extern crate name)
     pub deps: Vec<(usize, String)>,
     pub proc_macro: bool,
+    /// the unit is a binary target (its `main` is checked)
+    pub bin: bool,
     pub build_script: bool,
     /// package version from cargo's pkg_id ("1.15.1")
     pub version: String,
@@ -200,7 +202,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
             None => String::new(),
         };
         map.push(out.len());
-        out.push(CrateUnit { name, src_path, edition, features, deps,  proc_macro: kind_pm, build_script, version });
+        out.push(CrateUnit { name, src_path, edition, features, deps,  proc_macro: kind_pm, bin: false, build_script, version });
     }
     // remap dependency indices to deduplicated crate indices; drop build-script deps
     for c in out.iter_mut() {

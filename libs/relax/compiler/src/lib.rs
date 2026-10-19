@@ -847,6 +847,7 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
         match prog.load_crate_deferred(&c.name, &c.src_path, c.edition, cs, deps) {
             Ok(k) => {
                 prog.crates[k as usize].proc_macro = c.proc_macro;
+                prog.crates[k as usize].is_bin = c.bin;
                 crate_of[ci] = k;
             }
             Err(e) => {

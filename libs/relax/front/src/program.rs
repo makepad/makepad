@@ -415,6 +415,8 @@ pub struct CrateInfo {
     pub cfg: CfgSet,
     /// a proc-macro crate: other crates see only its macros (rustc exports nothing else)
     pub proc_macro: bool,
+    /// a binary target: the check requires its `main`
+    pub is_bin: bool,
     /// the crate's errors are reported (set by the check for its checked crates): validation-only
     /// checks run for it and for no other crate
     pub validate: bool,
@@ -1133,7 +1135,7 @@ impl Program {
         let root_mod = self.new_module(root_def, None, None, krate, 0);
         self.defs[root_def.0 as usize].sub = root_mod;
         self.defs[root_def.0 as usize].scope = root_mod;
-        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, validate: false, relaxed: Default::default(), features: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
+        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, validate: false, relaxed: Default::default(), features: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
         let kname = self.syms.str(cname).to_string();
         let akey = (kname.clone(), root.to_string());
         if !self.ahead.contains_key(&akey) {
@@ -1357,6 +1359,7 @@ impl Program {
                 }
             };
             next.crates[k as usize].proc_macro = c.proc_macro;
+            next.crates[k as usize].is_bin = c.is_bin;
         }
         next.prelude_crate = self.prelude_crate;
         next.resolve_imports();

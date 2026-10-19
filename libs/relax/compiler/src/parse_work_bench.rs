@@ -32,7 +32,7 @@ fn amp_parse_medians() {
             let path = makepad.join(path);
             assert!(path.exists(), "missing macro source: {}", path.display());
             crate::crates::CrateUnit { name: name.into(), src_path: path.to_string_lossy().into_owned(), edition: 2021,
-                features: vec![], deps,  proc_macro, build_script: false, version: "1.0.0".into() }
+                features: vec![], deps,  proc_macro, bin: false, build_script: false, version: "1.0.0".into() }
         }).collect::<Vec<_>>();
         crate::pmhost::install();
         crate::macro_reg::register_and_strip(sess, &mut units, &crate::std_dir(), false).unwrap();

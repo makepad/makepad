@@ -186,7 +186,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             root = crates.len();
         }
         map[ui] = crates.len();
-        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps,  proc_macro: pm, build_script: false, version: ver.clone() });
+        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps,  proc_macro: pm, bin, build_script: false, version: ver.clone() });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
     }
