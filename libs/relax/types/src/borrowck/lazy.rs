@@ -48,7 +48,13 @@ pub fn verdict(src: usize, def: DefId, _args: &[TyId], epoch: u64) -> FnVerdict 
     VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(&def).and_then(|instances| instances.get(&(src, def, epoch))).cloned()
         .unwrap_or_else(|| FnVerdict::Unchecked("not queued".into()))
 }
-fn record(key: ItemKey, value: FnVerdict) { VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value); }
+/// Counts the verdicts recorded: a consumer waiting on verdicts (SPEC-V: the JIT's unverified slots)
+/// looks again only when it moved.
+pub static RECORDED: AtomicU64 = AtomicU64::new(0);
+fn record(key: ItemKey, value: FnVerdict) {
+    VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value);
+    RECORDED.fetch_add(1, Ordering::Release);
+}
 
 pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], errors: Vec<BorrowError>, origin: Origin) -> Vec<GandalfEvent> {
     let mut admitted = Vec::new();

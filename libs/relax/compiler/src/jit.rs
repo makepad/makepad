@@ -64,7 +64,7 @@ pub const GLUE_UNNAMED: u8 = 15;
 /// A slot. Heap classes (memlane zones, DESIGN-zones.md F): identity fields are KEPT (built and
 /// grown under `zone_alloc::kept`, they survive a destroy of the compiler arena): key, name,
 /// code/code_len, pc_map, file, history, compiled, patch_gen, refs, entry_ref*,
-/// version, the flags, spec_state/spec_depth, build_ns/cg_ns. Compile-generation fields
+/// version, the flags, unverified, spec_state/spec_depth, build_ns/cg_ns. Compile-generation fields
 /// live in the compiler arena and are forgotten at the swap: rir, rir_refs, build_err, spec,
 /// calls, building, inflight (rir_refs and uncalled spec code are copied to the kept heap).
 pub struct FnEntry {
@@ -121,6 +121,21 @@ pub struct FnEntry {
     pub o3: AtomicBool,
     /// its installed code is baseline code (note_base) the sampler has not found running yet
     pub base_code: AtomicBool,
+    /// SPEC-V: the body was built (and may run) without a clean borrow-check verdict: baseline code,
+    /// `noalias` dropped, no promotion and no inlining into verified code until the verdict is clean
+    /// (`Unit::refresh_verified`). Kept (the swap keeps the code, so it keeps its status).
+    pub unverified: AtomicBool,
+}
+
+/// SPEC-V: a body's standing with the borrow checker.
+pub(crate) enum Verdict {
+    Clean,
+    /// rejected (the checker's errors)
+    Failed(Vec<crate::borrowck::event::GandalfEvent>),
+    /// not checked yet
+    Pending,
+    /// the checker ended without a verdict (it does not cover this body): never verified
+    Unverifiable(String),
 }
 
 /// Uninstalled speculative code; boxed so slots without it only retain one pointer.
@@ -3638,7 +3653,7 @@ impl Unit {
         // most slots (the startup image's thousands) are never asked.
         let entry_ref = matches!(key, FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_)) && !matches!(key, FnKey::Glue(GLUE_UNNAMED, _));
         let name = crate::zone_alloc::kept_with(|| name.into_boxed_str());
-        FnEntry { key, name, code: stub_addr, code_len: stub_len, pc_map: PcMap::default(), file, history: None, compiled: false, patch_gen: 0, rir: None, refs: u32::from(entry_ref), rir_refs: Box::default(), entry_ref: AtomicBool::new(entry_ref), entry_ref_counted: entry_ref, building: false, build_err: None, build_ns: 0, cg_ns: 0, version: 0, inflight: false, spec: None, spec_state: 0, spec_depth: u8::MAX, baseline_hint: AtomicBool::new(false), hot_hint: AtomicBool::new(false), o3: AtomicBool::new(false), base_code: AtomicBool::new(false), calls: Box::default() }
+        FnEntry { key, name, code: stub_addr, code_len: stub_len, pc_map: PcMap::default(), file, history: None, compiled: false, patch_gen: 0, rir: None, refs: u32::from(entry_ref), rir_refs: Box::default(), entry_ref: AtomicBool::new(entry_ref), entry_ref_counted: entry_ref, building: false, build_err: None, build_ns: 0, cg_ns: 0, version: 0, inflight: false, spec: None, spec_state: 0, spec_depth: u8::MAX, baseline_hint: AtomicBool::new(false), hot_hint: AtomicBool::new(false), o3: AtomicBool::new(false), base_code: AtomicBool::new(false), unverified: AtomicBool::new(false), calls: Box::default() }
     }
 
     /// Slot `id` has its key: the front's slot keys and its ahead check (before the slot is
@@ -4709,6 +4724,48 @@ impl Unit {
         }
     }
 
+    /// SPEC-V: whether slot `id`'s body may run as verified code: the borrow checker's verdict for its
+    /// owner is clean, or the body is outside what the checker covers (framework, dependency and std
+    /// code, glue, twins; no checker at all: `--check-first` has already refused what fails, and
+    /// without Gandalf nothing will ever report). A closure answers for its parent (checked with it).
+    /// Pending, not queued, stale, unchecked and failed verdicts are not clean. Reads the verdict table
+    /// only (cheap, any thread that may read the unit).
+    pub(crate) fn verdict_clean(&self, id: u32) -> bool {
+        matches!(self.verdict_state(id), Verdict::Clean)
+    }
+
+    /// SPEC-V: where slot `id`'s body stands with the borrow checker (see `verdict_clean`).
+    pub(crate) fn verdict_state(&self, id: u32) -> Verdict {
+        use crate::borrowck::lazy::FnVerdict;
+        let options = &self.prog.session.options;
+        if CHECK_FIRST.load(Ordering::Relaxed) || !crate::borrowck::lazy::gandalf_enabled(options) { return Verdict::Clean; }
+        match &self.fns[id as usize].key {
+            FnKey::Inst(d, args) => {
+                if !crate::borrowck::event::admit(&self.prog, self.prog.def(*d).krate) || crate::borrowck::body::CheckedBody::item(&self.prog, *d).is_none() { return Verdict::Clean; }
+                let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
+                match crate::borrowck::lazy::verdict(std::sync::Arc::as_ptr(&self.front) as usize, *d, args, epoch) {
+                    FnVerdict::Clean => Verdict::Clean,
+                    FnVerdict::Errors(events) => Verdict::Failed(events),
+                    FnVerdict::Pending => Verdict::Pending,
+                    FnVerdict::Unchecked(why) if matches!(why.as_str(), "stale" | "not queued" | "changed") => Verdict::Pending,
+                    FnVerdict::Unchecked(why) => Verdict::Unverifiable(why),
+                }
+            }
+            FnKey::Closure(_, _, parent) => self.verdict_state(*parent),
+            _ => Verdict::Clean,
+        }
+    }
+
+    /// SPEC-V: whether slot `id`'s code is verified. A flagged slot whose verdict has become clean
+    /// is cleared here (the flag is only ever raised by a build that lacked the verdict).
+    pub(crate) fn refresh_verified(&self, id: u32) -> bool {
+        let f = &self.fns[id as usize];
+        if !f.unverified.load(Ordering::Relaxed) { return true; }
+        if !self.verdict_clean(id) { return false; }
+        f.unverified.store(false, Ordering::Relaxed);
+        true
+    }
+
     /// Installs slot `id`'s first code from the startup image (cache.rs prelink placed and linked
     /// it at `at`): what `install` does for a first install outside a patch group, except the
     /// borrowck note (prelink_startup sends those in the background).
@@ -4791,6 +4848,8 @@ impl Unit {
             f.pc_map = prev.2;
             f.patch_gen = prev.3;
             f.rir = None;
+            // SPEC-V: the previous code is what ran before the group (its own status is rebuilt with it)
+            f.unverified.store(false, Ordering::Relaxed);
             f.version += 1;
             if prev.1 == 0 {
                 f.compiled = false;
@@ -6053,6 +6112,10 @@ fn callee_attrs(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, fns: &cra
     if crate::sandbox::is_sandboxed_crate_key(prog, &fns[c as usize].key) {
         return None;
     }
+    // SPEC-V: unverified code is never inlined into other code
+    if fns[c as usize].unverified.load(Ordering::Relaxed) {
+        return None;
+    }
     Some(match &fns[c as usize].key {
         FnKey::Inst(d, args) => {
             let core = prog.def(*d).krate == core_crate;
@@ -6465,6 +6528,11 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     let t0 = cpu_ns();
     let epoch = PATCH_EPOCH.load(Ordering::SeqCst);
     let snapshot = !FIRST_PRESENT.load(Ordering::Acquire);
+    if !(&*up).refresh_verified(id) {
+        await_verdict(id, Await::O2);
+        O2_STATS[2].fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
     let f = &(&*up).fns[id as usize];
     // O3 code installed: an O2 build after the present is still the slot's cache entry
     if f.build_err.is_some() || matches!(f.key, FnKey::Sandbox(_)) || (snapshot && f.o3.load(Ordering::Relaxed)) {
@@ -7068,6 +7136,12 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
     build_rir_mode(up, id, RirMode::Tier0)
 }
 
+/// (tests) the upgrade of slot `id`'s baseline RIR to normal RIR that O3 starts from
+#[cfg(test)]
+pub(crate) unsafe fn build_normal(up: *mut Unit, id: u32) -> Result<(), String> {
+    build_rir_mode(up, id, RirMode::Normal)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RirMode {
     Tier0,
@@ -7129,6 +7203,10 @@ unsafe fn build_rir_mode(up: *mut Unit, id: u32, mode: RirMode) -> Result<(), St
 
 unsafe fn build_rir_unguarded(up: *mut Unit, id: u32, mode: RirMode) -> Result<(), String> {
     let normal = mode == RirMode::Normal;
+    // SPEC-V: no upgrade of a body without a clean verdict (its RIR stays baseline)
+    if normal && !(&*up).refresh_verified(id) {
+        return Ok(());
+    }
     let mut lowered = None;
     {
         let u = &mut *up;
@@ -7137,7 +7215,13 @@ unsafe fn build_rir_unguarded(up: *mut Unit, id: u32, mode: RirMode) -> Result<(
             if !normal || !(r.baseline || to_o2) || u.fns[id as usize].building || u.fns[id as usize].inflight {
                 return Ok(());
             }
-            lowered = Some((**r).clone());
+            let mut f = (**r).clone();
+            // SPEC-V: the verdict is clean (checked above): the body gets its noalias facts back
+            if !f.withheld_noalias.is_empty() {
+                let w = std::mem::take(&mut f.withheld_noalias);
+                f.noalias.extend(w);
+            }
+            lowered = Some(f);
         }
         if let Some(e) = &u.fns[id as usize].build_err {
             return Err(e.to_string());
@@ -7213,7 +7297,10 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     let options = &session.options;
     // Freeze the mode before lowering, which may release the lock or cross present.
     // (real-time code is never baseline: it runs against a device's deadline)
-    let baseline = mode == RirMode::Baseline || mode == RirMode::Tier0 && !o2_build() && !RT_KEEP.with(|k| k.get()) && match options.t0_baseline {
+    // SPEC-V: a body without a clean verdict is baseline code with its `noalias` facts dropped
+    let unverified = !(&*up).verdict_clean(id);
+    (&*up).fns[id as usize].unverified.store(unverified, Ordering::Relaxed);
+    let baseline = unverified || mode == RirMode::Baseline || mode == RirMode::Tier0 && !o2_build() && !RT_KEEP.with(|k| k.get()) && match options.t0_baseline {
         crate::options::Tier0Baseline::Off => false,
         crate::options::Tier0Baseline::Startup => startup_phase() || (&*up).fns[id as usize].baseline_hint.load(Ordering::Relaxed),
         crate::options::Tier0Baseline::Always => true,
@@ -7236,6 +7323,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     let u = &mut *up;
     let baseline = baseline && !u.pairs_sincos(&func);
     func.baseline = baseline;
+    if unverified { func.withheld_noalias = std::mem::take(&mut func.noalias); }
     // O2: a `#[relax(O2)]` fn built by the O2 worker (o2_thread) compiles as O1 does without
     // O3; its on-demand builds on the program's threads stay O1
     let full = !baseline && o2_build() && marked_hot(u, id);
@@ -9699,6 +9787,67 @@ unsafe fn call_rate(rec: *const AtomicU64, budget: u64, now: u64) -> u64 {
     ((calls as u128 * 1_000_000_000 / elapsed as u128).min(u64::MAX as u128)) as u64
 }
 
+/// SPEC-V: a promotion that waits for a body's clean verdict.
+#[derive(Clone, Copy)]
+enum Await {
+    /// an O3 build, queued for `why` at `rate`
+    Tier(u8, u64),
+    /// an O2 build of baseline code
+    O2,
+}
+static AWAIT_VERDICT: relax_session::sync::Mutex<Vec<(u32, Await)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// the verdict/patch state the last sweep saw (a new waiting promotion resets it)
+static SWEPT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn await_verdict(id: u32, w: Await) {
+    SWEPT.store(u64::MAX, Ordering::Relaxed);
+    let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
+    if !a.iter().any(|x| x.0 == id && matches!((x.1, w), (Await::Tier(..), Await::Tier(..)) | (Await::O2, Await::O2))) {
+        crate::zone_alloc::kept_with(|| a.push((id, w)));
+    }
+}
+
+/// SPEC-V: the verdicts moved (or a patch landed): flagged slots whose verdict is clean become
+/// verified, and the promotions that waited for them run. A no-op until `lazy::RECORDED` or the patch
+/// epoch changes. Any thread; the unit is read under a unit call.
+pub fn sweep_verdicts() {
+    let now = crate::borrowck::lazy::RECORDED.load(Ordering::Acquire).wrapping_mul(1 << 20).wrapping_add(PATCH_EPOCH.load(Ordering::SeqCst));
+    if SWEPT.swap(now, Ordering::Relaxed) == now {
+        return;
+    }
+    let up = TIER_UNIT.load(Ordering::Acquire);
+    if up.is_null() {
+        return;
+    }
+    let verified = owner::call(owner::Class::Background, || unsafe {
+        let u = &*up;
+        let mut n = 0u32;
+        for id in 0..u.fns.len() {
+            if u.fns[id].unverified.load(Ordering::Relaxed) && u.refresh_verified(id as u32) {
+                n += 1;
+            }
+        }
+        let released: Vec<(u32, Await)> = {
+            let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
+            let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *a).into_iter().partition(|(id, _)| !u.fns[*id as usize].unverified.load(Ordering::Relaxed));
+            crate::zone_alloc::kept_with(|| *a = keep);
+            go
+        };
+        for (id, w) in released {
+            match w {
+                Await::Tier(why, rate) => tier_push(id, why, rate),
+                Await::O2 => {
+                    O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).remove(&(up as usize, id));
+                    o2_base(up, id);
+                }
+            }
+        }
+        n
+    });
+    let _ = verified;
+}
+
 fn tier_push(id: u32, why: u8, rate: u64) {
     let mut q = TIER_QUEUE.lock().unwrap();
     q.push((id, why, wall_ns(), rate));
@@ -10167,6 +10316,12 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
                     }
                 }
                 q = TIER_WAKE.wait_timeout(q, TIER1_POLL).unwrap().0;
+                if k == 0 {
+                    // SPEC-V: verdicts that arrived release the promotions that waited for them
+                    drop(q);
+                    sweep_verdicts();
+                    q = TIER_QUEUE.lock().unwrap();
+                }
             }
         };
         let _active = TierActive(id);
@@ -10494,6 +10649,11 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // unit call (its back end too), so it cannot race a caller's first-call build.
     if t1prof_replay(options) && !owner::is_owner() {
         return owner::call(owner::Class::Background, || compile_tier1(up, id));
+    }
+    // SPEC-V: O3 needs the body's clean verdict
+    if !owner::call(owner::Class::Background, || (&*up).refresh_verified(id)) {
+        await_verdict(id, Await::Tier(Q_SAMPLES, 0));
+        return false;
     }
     trace_tier1_phase(id, "start");
     // Also pin direct callers (cache verification / embedders), not only queue workers.

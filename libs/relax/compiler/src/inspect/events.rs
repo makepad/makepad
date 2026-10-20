@@ -22,6 +22,8 @@ pub struct Event {
     /// the whole event as one JSON object
     pub json: std::sync::Arc<str>,
     at: std::time::Instant,
+    /// made while no patch group awaited its borrow-check verdict (SPEC-V)
+    verified: bool,
 }
 
 const KEEP: usize = 256;
@@ -57,7 +59,7 @@ pub fn parked_events(domain: u32) -> Option<Vec<std::sync::Arc<str>>> {
         .map(|p| p.event.clone()).collect())
 }
 
-pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "rtstall", "scripterr", "patchrefused"];
+pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
 
 /// Records an event (`fields`: the kind-specific JSON members, without braces). Returns its seq,
 /// or 0 when it repeated one sent in the last 30 s.
@@ -73,13 +75,15 @@ fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::
         }
     }
     let seq = SEQ.fetch_add(1, SeqCst) + 1;
+    let verified = crate::reload::observations_verified();
     let json = format!(
-        "{{\"event\":\"{}\",\"seq\":{},\"pid\":{},\"app\":{},\"at_ms\":{},{}}}",
+        "{{\"event\":\"{}\",\"seq\":{},\"pid\":{},\"app\":{},\"at_ms\":{},\"verified\":{},{}}}",
         kind,
         seq,
         std::process::id(),
         json_str(&super::APP.lock().unwrap_or_else(|e| e.into_inner())),
         now_ms(),
+        verified,
         fields
     );
     if super::AGENT.load(Relaxed) {
@@ -89,12 +93,22 @@ fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::
         crate::zone_alloc::kept_with(|| w.emit(&json));
     }
     let json: std::sync::Arc<str> = json.into();
-    q.push_back(Event { seq, kind, key: key.to_string(), json: json.clone(), at: std::time::Instant::now() });
+    q.push_back(Event { seq, kind, key: key.to_string(), json: json.clone(), at: std::time::Instant::now(), verified });
     while q.len() > KEEP {
         q.pop_front();
     }
     NEW.notify_all();
     (seq, json)
+}
+
+/// The sequence number of the newest event so far.
+pub fn last_seq() -> u64 {
+    SEQ.load(SeqCst)
+}
+
+/// SPEC-V: the retained events after `seq` that were made while a patch awaited its verdict.
+pub fn unverified_seqs_since(seq: u64) -> Vec<u64> {
+    EVENTS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|e| e.seq > seq && !e.verified).map(|e| e.seq).collect()
 }
 
 /// Someone may want events now (a watcher, a stream, `--agent`): detectors with a cost on the

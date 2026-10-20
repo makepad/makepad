@@ -194,6 +194,118 @@ fn gandalf_live_edit_guard_and_reporting() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// SPEC-V: a patch runs before its verdict as baseline code with `noalias` dropped; a rejected one
+/// is never promoted, is reported and reverts; a clean one is promoted with its `noalias` facts.
+#[test]
+fn specv_patch_before_verdict() {
+    const CHILD: &str = "MAKEPAD_RUN_SPECV_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for case in ["bad", "clean"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lazy_reload_tests::specv_patch_before_verdict", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0")
+                .output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
+            if case == "bad" {
+                assert!(stderr.lines().any(|l| l.contains("REVERTED") && l.contains("::value")), "{case}: {stderr}");
+            }
+        }
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-{}-{}", case, std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "pub fn value(out: &mut u32) { *out = 11; }\n").unwrap();
+    let log = dir.join("live.jsonl");
+    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_app", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "value").then_some(id)
+    }).unwrap();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let (id, entry) = crate::owner::call(crate::owner::Class::App, || {
+        let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
+        (id, u.entry(id))
+    });
+    let run = |expected| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }
+            .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, expected);
+    };
+    run(11);
+    let text: &[u8] = if case == "bad" {
+        b"pub fn value(out: &mut u32) { let mut x = 1u32; let r = &x; x = 2; *out = *r; }\n"
+    } else {
+        b"pub fn value(out: &mut u32) { *out = 23; }\n"
+    };
+    let old_file = u.prog.def(def).file;
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: old_file, path: app.clone(), src: text.to_vec() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    // the patch applied at once, before any verdict: baseline code, no noalias, flagged unverified
+    {
+        let f = &u.fns[id as usize];
+        assert!(f.unverified.load(Ordering::Relaxed), "the patch ran without a clean verdict");
+        assert_eq!(f.patch_gen, outcome.group);
+    }
+    run(if case == "bad" { 2 } else { 23 });
+    // the RIR of the patched body is built on demand (the first run built the code, not necessarily kept RIR)
+    unsafe { crate::jit::build_rir(up, id) }.unwrap();
+    {
+        let r = u.fns[id as usize].rir.as_ref().expect("RIR");
+        assert!(r.baseline && r.noalias.is_empty() && !r.withheld_noalias.is_empty(), "unverified: baseline, noalias dropped (baseline {}, noalias {})", r.baseline, r.noalias.len());
+    }
+    if case == "bad" {
+        assert!(!unsafe { crate::jit::compile_tier1(up, id) }, "no O3 build of a body without a clean verdict");
+    }
+    let mut undos = vec![outcome.undo.unwrap()];
+    let ids = vec![id];
+    let mut pending = vec![crate::reload::PendingPatch { group: outcome.group, what: "lib.rs".into(), ids, event_seq: crate::inspect::events::last_seq() }];
+    crate::reload::UNVERIFIED_PATCHES.fetch_add(1, Ordering::AcqRel);
+    assert!(!crate::reload::observations_verified());
+    // the worker acknowledges a settle request between checks: the second one is answered after the queued check ran
+    crate::borrowck::settle().recv().unwrap();
+    crate::borrowck::settle().recv().unwrap();
+    let t0 = std::time::Instant::now();
+    while !pending.is_empty() && t0.elapsed().as_secs() < 20 {
+        crate::reload::settle_verdicts(up, &mut pending, &mut undos);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(pending.is_empty(), "the verdict arrived");
+    assert!(crate::reload::observations_verified());
+    if case == "bad" {
+        assert!(undos.is_empty(), "the failed patch group was rolled back");
+        run(11); // the previous code runs again
+        assert_eq!(u.fns[id as usize].patch_gen, 0);
+        let events = std::fs::read_to_string(&log).unwrap();
+        assert!(events.lines().any(|l| l.contains("patch_reverted") && l.contains("::value")), "{events}");
+    } else {
+        run(23);
+        assert!(u.refresh_verified(id), "a clean verdict verifies the slot");
+        // promotion: the normal RIR O3 starts from keeps the `&mut` parameter's noalias
+        unsafe { crate::jit::build_normal(up, id) }.unwrap();
+        let r = u.fns[id as usize].rir.as_ref().expect("RIR");
+        assert!(!r.baseline && !r.noalias.is_empty(), "verified: promoted with its noalias facts (baseline {}, noalias {})", r.baseline, r.noalias.len());
+    }
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn gandalf_scope_uses_package_source_and_project_boundaries() {
     let tree = "/virtual/gandalf-project";

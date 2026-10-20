@@ -1308,7 +1308,7 @@ pub fn compact_vregs(f: &mut Func) {
             note(*v, &mut map, &mut cls, &f.vregs);
         }
     }
-    for v in &f.noalias {
+    for v in f.noalias.iter().chain(&f.withheld_noalias) {
         note(*v, &mut map, &mut cls, &f.vregs);
     }
     for (v, _) in &f.deref {
@@ -1334,7 +1334,7 @@ pub fn compact_vregs(f: &mut Func) {
     if let Some(p) = f.sret {
         f.sret = Some(m(p));
     }
-    for p in f.noalias.iter_mut() {
+    for p in f.noalias.iter_mut().chain(f.withheld_noalias.iter_mut()) {
         *p = m(*p);
     }
     for p in f.deref.iter_mut() {

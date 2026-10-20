@@ -36,6 +36,7 @@ fn fn_entry_size() {
         hot_hint: AtomicBool,
         o3: AtomicBool,
         base_code: AtomicBool,
+        unverified: AtomicBool,
         calls: Box<[u32]>,
     }
     let before = std::mem::size_of::<InlineFnEntry>();
