@@ -1,5 +1,5 @@
 use crate::animator::*;
-use crate::event::{ScrollEvent, ScrollPhase, TAP_COUNT_DISTANCE};
+use crate::event::{ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
@@ -509,6 +509,10 @@ impl ScrollBar {
         self.view_total - self.view_visible > 0.5
     }
 
+    pub fn drag_scrolling(&self) -> bool {
+        self.drag_scrolling
+    }
+
     /// Reveals an auto-hiding bar and starts its hide countdown afresh.
     fn show(&mut self, cx: &mut Cx) {
         if !self.auto_hide {
@@ -926,6 +930,28 @@ impl ScrollBar {
         }
     }
 
+    /// Stops a drag and lets go of any rubber band it stretched.
+    fn stop_drag(&mut self, cx: &mut Cx, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        self.scroll_state = ScrollState::Stopped;
+        if self.overscroll != 0.0 {
+            self.overscroll = 0.0;
+            dispatch_action(cx, self.make_scroll_action());
+        }
+    }
+
+    /// Stops whatever is moving the content (a drag, fling, bounce or trackpad coast)
+    /// and lets go of any stretched rubber band.
+    pub fn stop_motion(&mut self) {
+        self.scroll_state = ScrollState::Stopped;
+        self.overscroll = 0.0;
+        self.coasting = false;
+        self.owns_gesture = false;
+        self.caught_fling = None;
+        self.touch_caught_motion_at = None;
+        self.momentum_cut_at = None;
+        self.last_finger_scroll_time = None;
+    }
+
     /// Handles touch-based drag scrolling
     /// The drag lost the finger (another scroller owns it) or was taken
     /// away: no fling, no boost; a stretch springs back from rest.
@@ -961,22 +987,12 @@ impl ScrollBar {
         // `overscroll` set with the spring stopped would freeze the stretch on
         // screen with nothing left to pull it back.
         if !cx.is_scrolling_allowed_within(&scroll_area) {
-            self.scroll_state = ScrollState::Stopped;
-            if self.overscroll != 0.0 {
-                self.overscroll = 0.0;
-                dispatch_action(cx, self.make_scroll_action());
-            }
-            return;
+            return self.stop_drag(cx, dispatch_action);
         }
 
         // Check if scroll bar handle is not captured
         if self.is_area_captured(cx) {
-            self.scroll_state = ScrollState::Stopped;
-            if self.overscroll != 0.0 {
-                self.overscroll = 0.0;
-                dispatch_action(cx, self.make_scroll_action());
-            }
-            return;
+            return self.stop_drag(cx, dispatch_action);
         }
 
         // THE POINTER-CAPTURE RULE. Dragging the content is a gesture that
@@ -1010,36 +1026,69 @@ impl ScrollBar {
         // through to the gesture below; only a mouse-driven one stands down.
         // A cancellation is terminal cleanup of this box's own press: it is
         // never an unrelated mouse gesture, so no held mouse stops it.
+        // Another drag scroller holding the press doesn't count: nested scrollers split a drag by axis.
         let touch_event = matches!(event, Event::TouchUpdate(_) | Event::FingerCancel(_));
-        if !touch_event && cx.fingers.is_mouse_held_outside(&[scroll_area]) {
+        if !touch_event && cx.fingers.is_mouse_held_outside_scrollers(&[scroll_area]) {
             if matches!(self.scroll_state, ScrollState::Drag { .. }) {
-                self.scroll_state = ScrollState::Stopped;
-                if self.overscroll != 0.0 {
-                    self.overscroll = 0.0;
-                    dispatch_action(cx, self.make_scroll_action());
-                }
+                self.stop_drag(cx, dispatch_action);
             }
             return;
         }
 
-        match event.hits(cx, scroll_area) {
-            // A drag moves only the innermost scrollable that can scroll its way.
+        let axis = self.axis.vec_index();
+        // We can share a press that only nested drag scrollers hold, along an axis none of them took.
+        let joins = self.scrollable()
+            && match event {
+                Event::MouseDown(e) => {
+                    e.button.is_primary()
+                        && cx.fingers.can_join_scroll_drag(live_id!(mouse).into(), axis, scroll_area)
+                }
+                Event::TouchUpdate(e) => {
+                    let mut held = e
+                        .touches
+                        .iter()
+                        .filter(|t| {
+                            t.state == TouchState::Start
+                                && !t.handled.get().is_empty()
+                                && t.handled.get() != scroll_area
+                                && scroll_area.clipped_rect(cx).contains(t.abs)
+                        })
+                        .peekable();
+                    held.peek().is_some()
+                        && held.all(|t| {
+                            cx.fingers.can_join_scroll_drag(live_id_num!(touch, t.uid).into(), axis, scroll_area)
+                        })
+                }
+                _ => false,
+            };
+
+        match event.hits_with_capture_overload(cx, scroll_area, joins) {
+            // A second finger on content we already hold doesn't start a drag of its own.
             Hit::FingerDown(fe)
-                if fe.is_primary_hit()
-                    && self.scrollable()
-                    && cx.is_scroll_drag_owner(fe.digit_id, self.axis.vec_index(), scroll_area) =>
-            {
-                let abs = match self.axis {
-                    ScrollAxis::Horizontal => fe.abs.x,
-                    ScrollAxis::Vertical => fe.abs.y,
-                };
-                self.scroll_state = ScrollState::Drag {
-                    samples: vec![ScrollSample { abs, time: fe.time }],
-                };
-                self.drag_claimed = false;
-                self.drag_origin = abs;
+                if cx.fingers.find_digit_for_captured_area(scroll_area).is_some_and(|digit| digit != fe.digit_id) => {}
+            // A press that a widget claimed (like a text selection) never drags us, but it still stops our fling.
+            Hit::FingerDown(fe) if fe.is_primary_hit() && cx.fingers.is_drag_claimed_by_widget(fe.digit_id) => {
+                self.stop_fling(fe.time);
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                // So a scroller around us can share this drag along an axis we don't take.
+                cx.hold_scroll_drag(fe.digit_id, scroll_area);
+                // A drag moves only the innermost scrollable that can scroll its way.
+                if self.scrollable() && cx.is_scroll_drag_owner(fe.digit_id, axis, scroll_area) {
+                    let abs = match self.axis {
+                        ScrollAxis::Horizontal => fe.abs.x,
+                        ScrollAxis::Vertical => fe.abs.y,
+                    };
+                    self.scroll_state = ScrollState::Drag {
+                        samples: vec![ScrollSample { abs, time: fe.time }],
+                    };
+                    self.drag_claimed = false;
+                    self.drag_origin = abs;
+                }
             }
             Hit::FingerMove(e) => match &mut self.scroll_state {
+                // A widget that claimed the drag after we took it (its own hits run after ours) keeps it.
+                ScrollState::Drag { .. } if cx.fingers.is_drag_claimed_by_widget(e.digit_id) => self.stand_down(cx),
                 ScrollState::Drag { samples } => {
                     let new_abs = match self.axis {
                         ScrollAxis::Horizontal => e.abs.x,
@@ -1054,6 +1103,17 @@ impl ScrollBar {
                     // stands down, settling from rest.
                     let mut from = samples.last().unwrap().abs;
                     if !self.drag_claimed {
+                        // A drag we share with a scroller along the other axis keeps to the way it started out,
+                        // so it doesn't need to be mostly along our axis below.
+                        let is_shared = cx.fingers.is_scroll_drag_shared(e.digit_id);
+                        match cx.lock_scroll_drag(e.digit_id, e.abs - e.abs_start) {
+                            None => {
+                                push_sample(samples, new_abs, e.time);
+                                return;
+                            }
+                            Some(direction) if !direction.allows(axis) => return self.stand_down(cx),
+                            Some(_) => {}
+                        }
                         let travel = e.abs - e.abs_start;
                         let (along, across) = match self.axis {
                             ScrollAxis::Horizontal => (travel.x.abs(), travel.y.abs()),
@@ -1062,7 +1122,7 @@ impl ScrollBar {
                         // Touch only: a mouse drag scrolls from its first move,
                         // as it always has.
                         let slop = touch_drag_slop(TAP_COUNT_DISTANCE, e.device.is_touch());
-                        if e.device.is_touch() && (along < slop || along < across) {
+                        if e.device.is_touch() && (along < slop || (along < across && !is_shared)) {
                             push_sample(samples, new_abs, e.time);
                             return;
                         }

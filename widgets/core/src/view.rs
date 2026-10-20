@@ -1740,6 +1740,7 @@ impl View {
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.stop_motion();
             scroll_bars.set_scroll_pos(cx, v);
         } else {
             self.layout.scroll = v;

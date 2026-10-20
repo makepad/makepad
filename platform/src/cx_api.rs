@@ -13,7 +13,7 @@ use {
         event::xr::XrAnchor,
         event::{
             video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
-            QuitRequestedEvent, ScrollEvent, Timer, Trigger, VideoSource,
+            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, Trigger, VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -1780,6 +1780,18 @@ impl Cx {
     /// scrollable (which sees the press first) already did.
     pub fn is_scroll_drag_owner(&mut self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
         self.fingers.is_scroll_drag_owner(digit_id, axis, area)
+    }
+
+    /// Call on a drag scroller's press, even one it can't scroll, so a scroller around it can
+    /// join the drag along an axis it didn't take (see [`CxFingers::can_join_scroll_drag`]).
+    pub fn hold_scroll_drag(&mut self, digit_id: DigitId, area: Area) {
+        self.fingers.hold_scroll_drag(digit_id, area);
+    }
+
+    /// The way `digit_id`'s drag may go once it has traveled the tap distance, or `None` until then.
+    /// A drag that only one scroller takes is never held back.
+    pub fn lock_scroll_drag(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
+        self.fingers.lock_scroll_drag(digit_id, travel)
     }
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {

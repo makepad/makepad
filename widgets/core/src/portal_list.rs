@@ -1,7 +1,7 @@
 use {
     crate::{
         animator::AnimatorImpl,
-        event::{DigitId, FingerCancelEvent, ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
+        event::{DigitId, FingerCancelEvent, ScrollDirection, ScrollEvent, ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -3978,29 +3978,34 @@ impl Widget for PortalList {
                         fe.is_primary_hit(),
                         cx.is_scrolling_allowed_within(&self.area),
                         fe.device.is_touch(),
-                        held_elsewhere,
-                    ) && self.is_drag_scroll_allowed(cx, fe.digit_id) {
-                        // A touch enters the drag state over interactive widgets
-                        // too — that is how a finger scrolls a list of buttons —
-                        // and the threshold below keeps a tap from micro-scrolling;
-                        // children use `was_tap()` to tell a tap from a drag on
-                        // FingerUp. A mouse press a control holds never gets here:
-                        // dragging a slider's thumb must not also scroll the list
-                        // the slider sits in. A nested scrollable that took the
-                        // drag keeps it.
-                        let initial = fe.abs.index(vi);
-                        self.scroll_state = ScrollState::Drag {
-                            samples: vec![ScrollSample {
-                                abs: initial,
-                                time: fe.time,
-                            }],
-                            initial_abs: initial,
-                            // When on interactive items, require a drag threshold before
-                            // committing to scroll (for both touch and mouse).
-                            // For non-interactive areas, commit immediately since
-                            // there's no ambiguity.
-                            committed: !on_interactive,
-                        };
+                        // Another drag scroller holding the press doesn't count: nested scrollers split a drag by axis.
+                        cx.fingers.is_mouse_held_outside_scrollers(&[self.area]),
+                    ) {
+                        // So a scroller around us can share this drag along an axis we don't take.
+                        cx.hold_scroll_drag(fe.digit_id, self.area);
+                        if self.is_drag_scroll_allowed(cx, fe.digit_id) {
+                            // A touch enters the drag state over interactive widgets
+                            // too — that is how a finger scrolls a list of buttons —
+                            // and the threshold below keeps a tap from micro-scrolling;
+                            // children use `was_tap()` to tell a tap from a drag on
+                            // FingerUp. A mouse press a control holds never gets here:
+                            // dragging a slider's thumb must not also scroll the list
+                            // the slider sits in. A nested scrollable that took the
+                            // drag keeps it.
+                            let initial = fe.abs.index(vi);
+                            self.scroll_state = ScrollState::Drag {
+                                samples: vec![ScrollSample {
+                                    abs: initial,
+                                    time: fe.time,
+                                }],
+                                initial_abs: initial,
+                                // When on interactive items, require a drag threshold before
+                                // committing to scroll (for both touch and mouse).
+                                // For non-interactive areas, commit immediately since
+                                // there's no ambiguity.
+                                committed: !on_interactive,
+                            };
+                        }
                     }
                 }
                 Hit::FingerMove(e) => {
@@ -4050,7 +4055,7 @@ impl Widget for PortalList {
                         if matches!(self.scroll_state, ScrollState::Drag { .. })
                             && drag_scroll_stands_down(
                                 e.device.is_touch(),
-                                cx.fingers.is_mouse_held_outside(&[self.area]),
+                                cx.fingers.is_mouse_held_outside_scrollers(&[self.area]),
                             )
                         {
                             self.scroll_state = ScrollState::Stopped;
@@ -4063,6 +4068,19 @@ impl Widget for PortalList {
                             self.scroll_state = ScrollState::Stopped;
                             self.suppress_child_events = false;
                         }
+                        // A drag we share with a scroller along the other axis keeps to the way it started out,
+                        // so it doesn't need to be mostly along our axis below.
+                        let direction = match self.scroll_state {
+                            ScrollState::Drag { .. } if !self.drag_claimed => {
+                                cx.lock_scroll_drag(e.digit_id, e.abs - e.abs_start)
+                            }
+                            _ => Some(ScrollDirection::Free),
+                        };
+                        if matches!(direction, Some(direction) if !direction.allows(vi)) {
+                            self.scroll_state = ScrollState::Stopped;
+                            self.suppress_child_events = false;
+                        }
+                        let is_shared = cx.fingers.is_scroll_drag_shared(e.digit_id);
                         // Scrolling takes the finger the moment it is committed
                         // and past the threshold, once: this list becomes the
                         // gesture's one owner and the presses its children
@@ -4080,15 +4098,17 @@ impl Widget for PortalList {
                         // Touch only: a mouse drag keeps its desktop behaviour —
                         // it takes the pointer on its first move over bare
                         // content, past the threshold over an interactive row.
-                        let intent = match &self.scroll_state {
-                            ScrollState::Drag { committed, .. } if !e.device.is_touch() => {
-                                *committed || along >= self.drag_scroll_threshold
-                            }
-                            ScrollState::Drag { .. } => {
-                                along >= touch_drag_slop(self.drag_scroll_threshold, true) && along >= across
-                            }
-                            _ => false,
-                        };
+                        let intent = direction.is_some()
+                            && match &self.scroll_state {
+                                ScrollState::Drag { committed, .. } if !e.device.is_touch() => {
+                                    *committed || along >= self.drag_scroll_threshold
+                                }
+                                ScrollState::Drag { .. } => {
+                                    along >= touch_drag_slop(self.drag_scroll_threshold, true)
+                                        && (along >= across || is_shared)
+                                }
+                                _ => false,
+                            };
                         let takes = intent && !self.drag_claimed;
                         let mut just_claimed = false;
                         if takes {

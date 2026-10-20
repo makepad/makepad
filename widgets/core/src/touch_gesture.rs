@@ -193,12 +193,15 @@ impl TouchGesture {
                 // still drag-scroll what is under it, the way every native
                 // list behaves, so `is_mouse_held_outside` answers `false`
                 // for touch captures and the touch path is left as it was.
+                // Another drag scroller holding the press doesn't count: nested scrollers split a drag by axis.
                 if !press_starts_drag(
                     e.device.is_touch(),
-                    cx.fingers.is_mouse_held_outside(&[area]),
+                    cx.fingers.is_mouse_held_outside_scrollers(&[area]),
                 ) {
                     return TouchMotionChange::None;
                 }
+                // So a scroller around us can share this drag along an axis we don't take.
+                cx.hold_scroll_drag(e.digit_id, area);
                 // A scroller inside that took this drag keeps it.
                 if !cx.is_scroll_drag_owner(e.digit_id, Vec2Index::Y, area) {
                     return TouchMotionChange::None;
@@ -223,7 +226,7 @@ impl TouchGesture {
                 // the `set_cursor` below.
                 if drag_stands_down(
                     e.device.is_touch(),
-                    cx.fingers.is_mouse_held_outside(&[area]),
+                    cx.fingers.is_mouse_held_outside_scrollers(&[area]),
                 ) {
                     if self.is_dragging() {
                         self.scroll_state = ScrollState::Stopped;
@@ -234,6 +237,15 @@ impl TouchGesture {
                 cx.set_cursor(MouseCursor::Default);
                 match &mut self.scroll_state {
                     ScrollState::Drag { samples } => {
+                        // A drag we share with a scroller along the other axis keeps to the way it started out.
+                        match cx.lock_scroll_drag(e.digit_id, e.abs - e.abs_start) {
+                            None => return TouchMotionChange::None,
+                            Some(direction) if !direction.allows(Vec2Index::Y) => {
+                                self.scroll_state = ScrollState::Stopped;
+                                return TouchMotionChange::ScrollStateChanged;
+                            }
+                            Some(_) => {}
+                        }
                         let new_abs = e.abs.y;
                         let old_sample = *samples.last().unwrap();
                         samples.push(ScrollSample {

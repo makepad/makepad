@@ -290,6 +290,12 @@ impl ScrollBars {
         self.scroll
     }
 
+    /// Whether a shown bar scrolls its view when a finger or the mouse drags the content.
+    pub fn has_drag_scrolling(&self) -> bool {
+        (self.show_scroll_x && self.scroll_bar_x.drag_scrolling())
+            || (self.show_scroll_y && self.scroll_bar_y.drag_scrolling())
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -323,6 +329,21 @@ impl ScrollBars {
                             .add_margin(dvec2(5.0, 5.0)),
                     );
                 }
+            }
+        }
+
+        // A press that something outside us already holds (like an overlay drawn over us) is never ours to join.
+        if self.has_drag_scrolling() {
+            match event {
+                Event::MouseDown(e) if !e.handled.get().is_empty() => {
+                    cx.fingers.mark_press_as_held_outside(live_id!(mouse).into(), self.area);
+                }
+                Event::TouchUpdate(e) => {
+                    for touch in e.touches.iter().filter(|t| t.state == TouchState::Start && !t.handled.get().is_empty()) {
+                        cx.fingers.mark_press_as_held_outside(live_id_num!(touch, touch.uid).into(), self.area);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -492,6 +513,12 @@ impl ScrollBars {
             self.scroll_bar_y.stop_fling(press_time);
         }
         true
+    }
+
+    /// See [`ScrollBar::stop_motion`].
+    pub fn stop_motion(&mut self) {
+        self.scroll_bar_x.stop_motion();
+        self.scroll_bar_y.stop_motion();
     }
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {
