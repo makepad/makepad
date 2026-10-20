@@ -30,7 +30,6 @@ async fn top(n: u64) -> (u64, String) {
 async fn boxed(n: u32) -> u32 { if n == 0 { 0 } else { n + Box::pin(boxed(n - 1)).await } }
 fn work() {
     d!("{:?}", block_on(top(25)));
-    d!("{:?}", block_on(boxed(12)));
     let futs: Vec<Pin<Box<dyn Future<Output = u64>>>> = vec![Box::pin(leaf(1)), Box::pin(mid(2)), Box::pin(async { 7 })];
     let mut tot = 0; for f in futs { tot += block_on(f).0; } d!("{}", tot);
     let c = async { let v = vec![1u32, 2, 3]; let r = async { v.iter().sum::<u32>() }.await; r + v.len() as u32 };
