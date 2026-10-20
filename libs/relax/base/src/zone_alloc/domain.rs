@@ -65,6 +65,10 @@ impl DomainHeap {
     pub fn stats(&self) -> (usize, usize) {
         (self.inner.arena.requested_bytes(), self.inner.arena.committed())
     }
+    /// (bytes touched in small chunks, bytes in live slots, bytes in large blocks, chunks in the partial list)
+    pub fn detail(&self) -> (usize, usize, usize, usize) {
+        self.inner.arena.detail()
+    }
     pub fn range(&self) -> (usize, usize) {
         self.inner.arena.range()
     }

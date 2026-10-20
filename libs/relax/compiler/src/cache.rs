@@ -3572,6 +3572,30 @@ impl FrontGraphWrite {
     }
 }
 
+/// A boot's crate records and its graph, written after the first present (`flush_front_graphs`, from
+/// the first-present hook, the mid-run writer and the exit): the records first (each store is
+/// complete before the graph certifies it), then the graph.
+struct DeferredFront {
+    writers: Option<FrontWriters>,
+    graph: Option<FrontGraphWrite>,
+}
+static DEFERRED_FRONT: relax_session::sync::Mutex<Vec<DeferredFront>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// Starts the writer of the boot's deferred records and graph on its own thread (low priority). Called
+/// at the first present; anything not started by then is written by the mid-run writer or the exit.
+pub fn start_deferred_front() {
+    if DEFERRED_FRONT.lock().unwrap().is_empty() { return; }
+    let _k = crate::zone_alloc::kept();
+    let _ = std::thread::Builder::new().name("run-front-graph".into()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
+        crate::os::thread::lower_priority(true);
+        let t = std::time::Instant::now();
+        let r = flush_front_graphs();
+        if crate::preload::trace() {
+            eprintln!("makepad-run front: records and graph written after the first present: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
+        }
+    });
+}
+
 /// One graph writer at a time, for the whole write: a second caller (the exit while the quit
 /// or mid-run writer is writing) waits for that write instead of finding no pending job,
 /// recording the collected program against a graph not yet written ("graph certificate")
@@ -3584,6 +3608,10 @@ fn flush_front_graphs() -> Result<(), String> {
     // has finished the jobs it took. Exit must wait for their demand parts
     // and graph commit before publishing the collected image or terminating.
     let _writer = FRONT_GRAPH_WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    for mut d in std::mem::take(&mut *DEFERRED_FRONT.lock().unwrap()) {
+        if let Some(w) = d.writers.as_mut() { w.finish(); }
+        if let Some(job) = d.graph.take() { FRONT_GRAPH_WRITES.lock().unwrap().push(job); }
+    }
     let writes = std::mem::take(&mut *FRONT_GRAPH_WRITES.lock().unwrap());
     let mut writes = writes.into_iter();
     while let Some(job) = writes.next() {
@@ -3724,7 +3752,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
 }
 
 pub fn front_graph_pending() -> bool {
-    !FRONT_GRAPH_WRITES.lock().unwrap().is_empty()
+    !FRONT_GRAPH_WRITES.lock().unwrap().is_empty() || !DEFERRED_FRONT.lock().unwrap().is_empty()
 }
 
 #[derive(Default)]
@@ -4430,6 +4458,9 @@ pub struct ColdFront {
     writers: Option<FrontWriters>,
     /// crates whose record was written
     records: usize,
+    /// boot: the crate records are written after the first present, not while the load runs
+    /// (`finish_mode` hands them over, see `DeferredFront`)
+    hold: bool,
 }
 impl ColdFront {
     pub fn enabled(options: &crate::options::Options) -> bool {
@@ -4438,6 +4469,7 @@ impl ColdFront {
 
     pub fn loaded(&mut self, prog: &crate::program::Program, krate: u32) {
         if !Self::enabled(&prog.session.options) || !prog.record_front { return; }
+        self.hold = true;
         self.loaded_in(prog, krate, crate::dirs::cache_dir());
     }
 
@@ -4508,7 +4540,18 @@ impl ColdFront {
             self.pending.clear();
             for ci in remaining { self.enqueue(prog, ci, &dir); }
         }
-        let written = {
+        // The boot hands its crate records and the graph over to the writer that runs after the first
+        // present (or at a quit): a record is a function of the parse, so a crate is restored for this
+        // run's cache open as soon as its record is queued; a run killed before the writer ran leaves
+        // no record, which the next run sees as absent (a cold load, never a stale one).
+        let mut deferred_writers = None;
+        let written = if deferred {
+            if let Some(w) = self.writers.take() {
+                let queued = w.queued.clone();
+                deferred_writers = Some(w);
+                queued
+            } else { Vec::new() }
+        } else {
             let _wait = crate::load_profile::span(prog.session.runtime.profile, "front-record-wait", "main");
             self.writers.take().map_or_else(Vec::new, |mut writers| writers.finish())
         };
@@ -4534,18 +4577,11 @@ impl ColdFront {
             // certificate re-parsed every file although each crate's images were on disk.
             // A write that cannot record yet stays queued for the post-present or exit writer.
             if deferred {
-                FRONT_GRAPH_WRITES.lock().unwrap().push(job);
-                { let _k = crate::zone_alloc::kept();
-                let _ = std::thread::Builder::new().name("run-front-graph".into()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
-                    let t = std::time::Instant::now();
-                    let r = flush_front_graphs();
-                    if crate::preload::trace() {
-                        eprintln!("makepad-run front: graph written after load: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
-                    }
-                });
-                }
+                DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: deferred_writers.take(), graph: Some(job) });
             }
             else { write_front_graph(&job); }
+        } else if let Some(w) = deferred_writers.take() {
+            DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: Some(w), graph: None });
         }
     }
 
@@ -4558,7 +4594,8 @@ impl ColdFront {
         let path = dir.join(front_store_name(&prog.session.options, &view.name, self.fps[ci].unwrap()));
         let late = crate::sip::late_inputs();
         let marks = front_run::run_marks();
-        self.writers.get_or_insert_with(FrontWriters::new).enqueue(FrontWrite { ci, view, dir: dir.to_owned(), path, late, marks });
+        let hold = self.hold;
+        self.writers.get_or_insert_with(|| FrontWriters::new(hold)).enqueue(FrontWrite { ci, view, dir: dir.to_owned(), path, late, marks });
     }
 
     pub fn report(&self, prog: &crate::program::Program) {
@@ -4593,14 +4630,27 @@ struct FrontWriteQueue {
 struct FrontWriters {
     queue: std::sync::Arc<(relax_session::sync::Mutex<FrontWriteQueue>, relax_session::sync::Condvar)>,
     workers: Vec<std::thread::JoinHandle<Vec<usize>>>,
+    /// held: no worker runs until `start` (the boot's records are written after the first present)
+    held: bool,
+    /// the crates enqueued (a record is written for each unless its snapshot cannot be recorded)
+    queued: Vec<usize>,
 }
 
 impl FrontWriters {
-    fn new() -> Self {
-        let mut writers = Self { queue: std::sync::Arc::new(Default::default()), workers: Vec::new() };
+    fn new(hold: bool) -> Self {
+        let mut writers = Self { queue: std::sync::Arc::new(Default::default()), workers: Vec::new(), held: hold, queued: Vec::new() };
+        if !hold { writers.start(); }
+        writers
+    }
+
+    fn start(&mut self) {
+        let low = self.held;
+        self.held = false;
         for _ in 0..crate::preload::jobs() {
-            let queue = writers.queue.clone();
-            writers.workers.push(std::thread::Builder::new().name("run-front-writer".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+            let queue = self.queue.clone();
+            self.workers.push(std::thread::Builder::new().name("run-front-writer".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                // the records written after the first present must not slow the first frames
+                if low { crate::os::thread::lower_priority(true); }
                 let (queue, wake) = &*queue;
                 let mut recorded = Vec::new();
                 loop {
@@ -4629,16 +4679,17 @@ impl FrontWriters {
                 }
             }).expect("front record writer"));
         }
-        writers
     }
 
     fn enqueue(&mut self, job: FrontWrite) {
+        self.queued.push(job.ci);
         self.queue.0.lock().unwrap_or_else(|e| e.into_inner()).pending.push_back(job);
         self.queue.1.notify_one();
     }
 
     /// The crates whose record was written.
     fn finish(&mut self) -> Vec<usize> {
+        if self.held { self.start(); }
         self.queue.0.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         self.queue.1.notify_all();
         let mut recorded = Vec::new();

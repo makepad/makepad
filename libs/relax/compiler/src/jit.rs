@@ -2024,6 +2024,15 @@ rt_fn! {
     }
 }
 
+/// (exec, data, rw, syms, end) bases of the program unit's reservation (diagnostics: inspect memory).
+pub(crate) fn unit_areas() -> Option<[u64; 5]> {
+    unsafe {
+        if UNIT.is_null() { return None; }
+        let u = &*UNIT;
+        Some([u.exec_base, u.ro_base, u.rw_end - UNIT_RW_SIZE, u.syms.dom0(), u.rw_end + (crate::syms::SYM_CAP * 8) as u64])
+    }
+}
+
 /// Is `pc` in the unit's code memory (functions, stubs, glue)? Lock-free: the bounds are fixed
 /// once the unit exists (os::fault's Windows handler asks before anything else).
 pub(crate) fn in_jit_code(pc: u64) -> bool {
@@ -11311,6 +11320,8 @@ extern "C" fn relax_first_present() {
             eprintln!("makepad-run O2 at first present: {} installed ({:.1} ms worker cpu), {} dropped; main thread waited {:.2} ms in {} unit-lock waits on the O2 worker; {} baseline slots sampled (queued)", n(0), n(1) as f64 / 1e6, n(2), n(3) as f64 / 1e6, n(4), hit);
         }
         crate::warm::first_present();
+        // the boot's crate records and front graph (cold front end: queued, not written, at load)
+        crate::cache::start_deferred_front();
         if let Some(t) = STARTUP_THREAD.get() {
             t.unpark();
         }
