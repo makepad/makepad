@@ -4,6 +4,7 @@ use makepad_font_core::{
     font_face::{FontData, FontFace},
     rustybuzz,
 };
+use makepad_script::{id, LiveId};
 use makepad_hal::{
     font::{wire, FontSource, GlyphEntry},
     CmdWriter, HalEvent, Id,
@@ -145,6 +146,11 @@ impl Text {
         Ok(true)
     }
 
+    /// Where the baseline of a line of `size` sits below the line's top.
+    pub fn ascender(&self, size: f32) -> f32 {
+        self.font.ascender_in_ems() * size
+    }
+
     pub fn begin_layout(&mut self) {
         for run in self.runs.values_mut() {
             run.used = false;
@@ -272,6 +278,58 @@ impl Text {
             },
         );
         shaped
+    }
+
+    /// Appends the glyph instances of `line` (its top at `y`) clipped to `bounds`; the glyphs
+    /// the atlas lacks are asked for in `requests`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn glyph_instances(
+        &mut self,
+        program: &crate::document::Program,
+        line: &crate::TextLine,
+        y: f32,
+        bounds: [f32; 4],
+        dpi: f32,
+        requests: &mut Vec<(u32, f32)>,
+        out: &mut Vec<f32>,
+    ) {
+        for glyph in line.run.visible(
+            bounds[1] - y,
+            bounds[1] + bounds[3] - y,
+            line.style.size,
+            line.style.height,
+        ) {
+            let baseline = [
+                line.position[0]
+                    + glyph.x
+                    + (line.run.width - glyph.row_width) * line.style.align,
+                y + glyph.y,
+            ];
+            let Some(entry) = self.lookup(glyph.id, line.style.size, dpi, requests) else {
+                continue;
+            };
+            if entry.atlas_kind == wire::glyph::EMPTY {
+                continue;
+            }
+            let (rect, uv) = self.quad(entry, baseline, line.style.size);
+            let (rect, uv) = crate::crop(rect, uv, bounds);
+            if rect[2] <= 0.0 || rect[3] <= 0.0 {
+                continue;
+            }
+            program.pipes[crate::document::GLYPH].instances.write(
+                &[
+                    (id!(rect), &rect),
+                    (id!(uv), &uv),
+                    (id!(color), &line.style.color),
+                    (id!(atlas_plane), &[entry.plane as f32]),
+                    (
+                        id!(color_glyph),
+                        &[if entry.atlas_kind == wire::glyph::COLOR { 1.0 } else { 0.0 }],
+                    ),
+                ],
+                out,
+            );
+        }
     }
 
     pub fn begin_frame(&mut self) {

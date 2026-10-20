@@ -399,6 +399,26 @@ impl Pipeline {
         writer.pipeline_create(self.id, dialect, Attr::default(), &self.blob);
     }
 
+    /// One draw of `count` instances of the retained instance buffer `buffer`.
+    pub fn draw_buffer(&self, writer: &mut CmdWriter, buffer: Id, count: u32, uniforms: &[f32], scissor: [f32; 4]) {
+        if count == 0 {
+            return;
+        }
+        writer.draw(Draw {
+            pipeline: self.id,
+            vb: VERTICES,
+            ib: INDICES,
+            index: [0, 6],
+            inst: Inst::buffer(buffer, 0, count),
+            uniforms: [Slice::EMPTY, Slice::EMPTY, Slice::of(uniforms), Slice::of(&self.scope)],
+            tex: Default::default(),
+            scissor,
+            bounds: [f32::NAN; 4],
+            flags: Draw::BLEND | Draw::INDEX_U32,
+            ..Default::default()
+        });
+    }
+
     pub fn draw(
         &self,
         writer: &mut CmdWriter,

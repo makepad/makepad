@@ -748,7 +748,23 @@ pub fn main_post_present_wait() -> (f64, String) {
 
 /// O3 drops by reason (on the owner thread).
 unsafe fn drop_why(up: *mut Unit, why: &'static str) {
+    crate::boot_stats::O3_SUPERSEDED.fetch_add(1, Ordering::Relaxed);
     crate::zone_alloc::kept_with(|| *(&mut *up).stats.tier1_drop_why.entry(why).or_insert(0) += 1);
+}
+
+/// The boot window's arm of slot `id` (boot_stats): the crate of the function it is an instance of.
+fn boot_arm(u: &Unit, id: u32) -> usize {
+    let krate = match &u.fns[id as usize].key {
+        FnKey::Inst(d, _) => u.prog.def(*d).krate,
+        FnKey::Closure(file, ..) => match u.prog.file_crate.get(*file as usize) {
+            Some(k) => *k,
+            None => return crate::boot_stats::REST,
+        },
+        _ => return crate::boot_stats::REST,
+    };
+    crate::boot_stats::arm_of(krate, || {
+        crate::boot_stats::name_bytes(u.prog.crates.get(krate as usize).map_or("", |c| u.prog.syms.str(c.name)))
+    })
 }
 
 /// A recursive #[relax(O3)] build with a larger stack frame is not recorded in the disk cache
@@ -5590,10 +5606,14 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                     ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
                 }
             }
+            let linked_from_cache = !record && !u.fns[id as usize].compiled && !u.fns[id as usize].o3.load(Ordering::Relaxed);
             let a = match u.install_unchecked(id, code, relocs, map, 0) {
                 Ok(a) => a,
                 Err(e) => return install_error(up, id, &format!("link: {}", e)),
             };
+            if linked_from_cache {
+                crate::boot_stats::fn_installed(boot_arm(u, id));
+            }
             if perf_map_on() {
                 // the code's level: cached O3 / baseline / O2 (cached or marked) / O1
                 let tier = if u.fns[id as usize].o3.load(Ordering::Relaxed) {
@@ -5873,6 +5893,7 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
     u.fns[id as usize].cg_ns = cpu_ns() - t0;
     u.stats.compiled += 1;
     COMPILED_FNS.fetch_add(1, Ordering::Relaxed);
+    crate::boot_stats::fn_installed(boot_arm(u, id));
     Ok((c.code, c.pc_map, c.relocs))
 }
 
@@ -11264,6 +11285,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     }
                     u.stats.tier1_installed += 1;
                     TIER1_INSTALLS.fetch_add(1, Ordering::Relaxed);
+                    crate::boot_stats::o3_installed(boot_arm(u, id), id);
                     let a = install_compiled(up, id, &code, map, &relocs, false);
                     O3_FIRST_AT.with(|c| c.set(a));
                     true
@@ -11340,6 +11362,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 u.stats.code_bytes += code.len() as u64;
                 u.stats.tier1_installed += 1;
                 TIER1_INSTALLS.fetch_add(1, Ordering::Relaxed);
+                crate::boot_stats::o3_installed(boot_arm(u, id), id);
                 // deterministic O3, replay: installed (a build whose install was refused is retried
                 // by the next trigger)
                 if let Some(k) = &t1key {
@@ -13100,6 +13123,7 @@ unsafe fn split_finish(up: *mut Unit, d: BackDone) -> Split {
             }
             u.stats.compiled += 1;
             COMPILED_FNS.fetch_add(1, Ordering::Relaxed);
+            crate::boot_stats::fn_installed(boot_arm(u, id));
             if spec {
                 // a speculative build is valid code whether or not it gets called: cache it now
                 // (not an O2 fn's O1 code: the O2 worker records its entry)

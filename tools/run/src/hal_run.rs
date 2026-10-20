@@ -316,7 +316,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // Inside a makepad window manager the run is one of its windows: it is named by the app.
     #[cfg(target_os = "linux")]
     makepad_hal::wm_socket::set_client_name(package);
-    let info = hal.open_host(&OpenReq::from_env(0, flags, 0.0));
+    // MAKEPAD_RUN_DPI: the scale of a hidden window (tests of how the boot window looks on a HiDPI screen)
+    let dpi_hint = std::env::var("MAKEPAD_RUN_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let info = hal.open_host(&OpenReq::from_env(0, flags, dpi_hint));
     if info.backend == makepad_hal::backend_id::NONE {
         return Err("could not open the host HAL session".into());
     }
@@ -1027,8 +1029,10 @@ fn pump(
             host.update(data.clone());
             dirty = false;
         }
-        let draw = visible && Instant::now() >= next_frame;
-        let timeout = if visible {
+        let hold = !visible && host.hold();
+        host.offscreen(hold);
+        let draw = (visible || hold) && Instant::now() >= next_frame;
+        let timeout = if visible || hold {
             next_frame
                 .saturating_duration_since(Instant::now())
                 .as_nanos() as u64
@@ -1065,7 +1069,7 @@ fn pump(
         if draw {
             // frames on a fixed 60 Hz schedule: the time a turn takes is not added to every
             // interval; a turn that fell behind starts the schedule again from now
-            let period = Duration::from_nanos(16_666_667);
+            let period = Duration::from_nanos(host.frame_period_ns());
             let now = Instant::now();
             next_frame += period;
             if next_frame <= now {

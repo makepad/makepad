@@ -13,7 +13,8 @@ pub const BACKGROUND: usize = 0;
 pub const PROGRESS: usize = 1;
 pub const ERROR_BAND: usize = 2;
 pub const GLYPH: usize = 3;
-pub const ICON: usize = 4;
+pub const FIELD: usize = 4;
+pub const ICON: usize = 5;
 pub const PIPE_BANK_SIZE: u32 = 8;
 
 #[derive(Clone, Copy)]
@@ -302,7 +303,7 @@ impl Program {
                 hints.insert(key, label);
             }
             let mut pipes = Vec::new();
-            for (index, key) in [id!(background), id!(progress), id!(error_band), id!(glyph)]
+            for (index, key) in [id!(background), id!(progress), id!(error_band), id!(glyph), id!(ignition)]
                 .into_iter()
                 .enumerate()
             {

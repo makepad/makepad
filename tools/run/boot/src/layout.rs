@@ -9,6 +9,18 @@ use makepad_script::{id, LiveId};
 /// The close button's side, in points.
 const CLOSE_SIZE: f32 = 28.0;
 
+/// The document's label of a phase.
+pub(super) fn phase_key(phase: relax_base::run_state::Phase) -> LiveId {
+    match phase {
+        relax_base::run_state::Phase::Resolve => id!(resolve),
+        relax_base::run_state::Phase::Parse => id!(parse),
+        relax_base::run_state::Phase::Typecheck => id!(typecheck),
+        relax_base::run_state::Phase::Codegen => id!(codegen),
+        relax_base::run_state::Phase::Link => id!(link),
+        relax_base::run_state::Phase::FirstFrame => id!(first_frame),
+    }
+}
+
 impl Renderer {
     fn label(&mut self, value: &str, style: Line, rect: [f32; 4], fixed: bool) -> TextLine {
         let run = self.text.shape(value, style.size, rect[2], style.height);
@@ -54,14 +66,7 @@ impl Renderer {
         let paused_label = program.label(id!(paused));
         let resume_label = program.label(id!(tap_resume));
         let input_label = program.label(id!(input_label));
-        let phase_label = program.label(match state.phase {
-            relax_base::run_state::Phase::Resolve => id!(resolve),
-            relax_base::run_state::Phase::Parse => id!(parse),
-            relax_base::run_state::Phase::Typecheck => id!(typecheck),
-            relax_base::run_state::Phase::Codegen => id!(codegen),
-            relax_base::run_state::Phase::Link => id!(link),
-            relax_base::run_state::Phase::FirstFrame => id!(first_frame),
-        });
+        let phase_label = program.label(phase_key(state.phase));
         let has_icon = self.icon_aspect.is_some() && program.pipes.len() > crate::document::ICON;
         let overlay = state.mode == Mode::Overlay;
         let detail = overlay || !state.diagnostics.is_empty() || state.parked.is_some();

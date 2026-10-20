@@ -1,11 +1,13 @@
 //! Session 0's text/pass renderer. No platform client, draw tree, widgets or Cx.
 mod document;
+mod dump;
+mod field;
 mod gpu;
 mod icon;
 mod layout;
 mod text;
 
-use document::{Program, BACKGROUND, ERROR_BAND, GLYPH, ICON, PIPE_BANK_SIZE, PROGRESS};
+use document::{Program, BACKGROUND, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE, PROGRESS};
 pub use icon::Icon;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, font::wire, input, lifecycle, pass_load,
@@ -156,6 +158,7 @@ struct Renderer {
     layout_revision: u64,
     presented_revision: u64,
     presented_scroll: f32,
+    field: field::Field,
 }
 
 pub struct Boot {
@@ -174,6 +177,11 @@ pub struct Boot {
     latencies: Option<Vec<(u16, u64)>>,
     /// the last turn: ns its pump took beyond the asked timeout, ns its present took
     turn_parts: (u64, u64),
+    dump: Option<dump::Dump>,
+    /// the app has the window: the field is drawn offscreen (a dump with `MAKEPAD_RUN_BOOT_HOLD`)
+    offscreen: bool,
+    /// `MAKEPAD_RUN_BOOT_STATS=1`: the HAL's GPU time of the boot session's frames, printed as it goes
+    gpu: bool,
 }
 
 impl Boot {
@@ -200,6 +208,9 @@ impl Boot {
             environment: Environment::default(),
             latencies: None,
             turn_parts: (0, 0),
+            dump: dump::Dump::from_env(),
+            offscreen: false,
+            gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
         };
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
@@ -283,6 +294,7 @@ impl Boot {
             layout_revision: 0,
             presented_revision: 0,
             presented_scroll: 0.0,
+            field: field::Field::new(),
         });
         Ok(boot)
     }
@@ -458,6 +470,7 @@ impl Boot {
                 renderer.changed = 0.0;
                 renderer.began = Instant::now();
                 renderer.scroll = 0.0;
+                renderer.field.reset();
             }
             if let Some(program) = renderer
                 .active
@@ -762,6 +775,11 @@ impl Boot {
                         }
                     }
                 }
+                HalEvent::Readback { req, rect, pixels, .. } => {
+                    if let Some(dump) = &mut self.dump {
+                        dump.ready(req, rect, pixels);
+                    }
+                }
                 HalEvent::CloseRequested { window } if Some(window) == self.window => {
                     eprintln!("makepad-run: the boot window ends: the window was asked to close");
                     alive = false
@@ -837,12 +855,24 @@ impl Boot {
             return;
         }
         let Some(window) = self.window else { return };
+        if self.offscreen && !self.field_mode() {
+            return;
+        }
         let Some(renderer) = &mut self.renderer else {
             return;
         };
         if renderer.active.is_none() {
             return;
         }
+        if self.state.mode == Mode::Boot
+            && self.state.diagnostics.is_empty()
+            && self.state.parked.is_none()
+            && renderer.active.as_ref().unwrap().pipes.len() > FIELD
+        {
+            self.present_field();
+            return;
+        }
+        let renderer = self.renderer.as_mut().unwrap();
         let animating = renderer.layout.progress.is_some()
             && !self.environment.reduce_motion
             && renderer.began.elapsed().as_secs_f32() - renderer.changed
@@ -1095,6 +1125,197 @@ impl Boot {
         renderer.presented_revision = renderer.layout_revision;
         renderer.presented_scroll = renderer.scroll;
         renderer.redraw = false;
+    }
+}
+
+impl Boot {
+    /// Whether the boot window shows the Ignition Field (no errors or parked panic to list).
+    pub fn field_mode(&self) -> bool {
+        self.state.mode == Mode::Boot
+            && self.state.diagnostics.is_empty()
+            && self.state.parked.is_none()
+            && self.renderer.as_ref().is_some_and(|r| {
+                r.active.as_ref().is_some_and(|p| p.pipes.len() > FIELD)
+            })
+    }
+
+    /// Whether a dump keeps the field going after the app has the window.
+    pub fn hold(&self) -> bool {
+        self.dump.as_ref().is_some_and(|d| d.hold)
+    }
+
+    pub fn offscreen(&mut self, offscreen: bool) {
+        self.offscreen = offscreen;
+    }
+
+    /// The time between the window's frames: the field animates at 30 fps at most.
+    pub fn frame_period_ns(&self) -> u64 {
+        if self.field_mode() {
+            33_333_333
+        } else {
+            16_666_667
+        }
+    }
+
+    fn present_field(&mut self) {
+        let Some(window) = self.window else { return };
+        let viewport = [self.geometry[2], self.geometry[3]];
+        let dpi = self.dpi;
+        let touch = self.environment.touch;
+        let reduce_motion = self.environment.reduce_motion;
+        let build_start_ns = makepad_hal::clock_ns();
+        let renderer = self.renderer.as_mut().unwrap();
+        let program = renderer.active.as_ref().unwrap();
+        let mut writer = CmdWriter::new(HOST);
+        let time = renderer.began.elapsed().as_secs_f32();
+        renderer.text.begin_layout();
+        let frame = renderer.field.frame(
+            &mut writer,
+            &program.pipes[FIELD],
+            &self.state,
+            time,
+            viewport,
+            reduce_motion,
+        );
+        let hint = program.label(layout::phase_key(self.state.phase));
+        renderer.field.hud(
+            &mut renderer.text,
+            &self.state,
+            &hint,
+            viewport,
+            frame.view,
+            frame.params[0],
+            time,
+            !touch,
+            self.offscreen,
+            &mut renderer.layout,
+        );
+        renderer.text.end_layout();
+        renderer.text.begin_frame();
+        let mut requests = Vec::new();
+        let mut glyphs = Vec::new();
+        let bounds = [0.0, 0.0, viewport[0], viewport[1]];
+        for line in &renderer.layout.fixed_text {
+            let y = line.position[1];
+            renderer.text.glyph_instances(
+                program,
+                line,
+                y,
+                bounds,
+                dpi,
+                &mut requests,
+                &mut glyphs,
+            );
+        }
+        renderer.field.prime(&mut renderer.text, dpi, &mut requests);
+        let ready = renderer.text.finish_frame(&mut writer, &requests);
+        if !ready {
+            Hal::global().submit(&writer.buf());
+            return;
+        }
+        let sdf = makepad_font_core::raster::Settings::default().sdfer;
+        let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
+            pipe.uniforms.write(
+                &[
+                    (id!(viewport), &viewport),
+                    (id!(dpi), &[dpi]),
+                    (id!(dark), &[1.0]),
+                    (id!(reduce_motion), &[reduce_motion as u8 as f32]),
+                    (id!(time), &[time]),
+                    (id!(view), &frame.view),
+                    (id!(field_params), &frame.params),
+                    (id!(field_fall), &frame.fall),
+                    (id!(radius), &[sdf.radius]),
+                    (id!(cutoff), &[sdf.cutoff]),
+                ],
+                out,
+            );
+        };
+        let mut field_uniforms = Vec::new();
+        common(&program.pipes[FIELD], &mut field_uniforms);
+        let mut glyph_uniforms = Vec::new();
+        common(&program.pipes[GLYPH], &mut glyph_uniforms);
+        self.frame += 1;
+        let offscreen = if self.offscreen {
+            let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
+            Some((self.dump.as_mut().unwrap().target(&mut writer, size), size))
+        } else {
+            None
+        };
+        writer.frame_begin(
+            self.frame,
+            FrameMeta {
+                build_start_ns,
+                ..Default::default()
+            },
+        );
+        let mut color = [Id::NONE; 4];
+        if let Some((target, _)) = offscreen {
+            color[0] = target;
+        }
+        writer.pass(Pass {
+            color,
+            load: [pass_load::CLEAR; 5],
+            clear: [[0.0; 4]; 4],
+            viewport: [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi],
+            dpi,
+            ..Default::default()
+        });
+        let scissor = [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi];
+        program.pipes[FIELD].draw_buffer(
+            &mut writer,
+            field::INSTANCES,
+            frame.count,
+            &field_uniforms,
+            scissor,
+        );
+        program.pipes[GLYPH].draw(
+            &mut writer,
+            &glyphs,
+            &glyph_uniforms,
+            renderer.text.atlas(),
+            scissor,
+        );
+        writer.frame_set_build_end(makepad_hal::clock_ns());
+        let snapshot = self.dump.as_mut().and_then(|d| d.due());
+        if let Some((target, size)) = offscreen {
+            writer.frame_end(target, target::TEXTURE);
+            if let Some(req) = snapshot {
+                writer.texture_readback(target, req, [0, 0, size[0], size[1]]);
+            }
+        } else {
+            writer.frame_end(
+                window,
+                target::WINDOW
+                    | if snapshot.is_some() {
+                        target::SNAPSHOT
+                    } else {
+                        0
+                    },
+            );
+            if let Some(req) = snapshot {
+                writer.snapshot(window, req);
+            }
+        }
+        Hal::global().submit(&writer.buf());
+        if self.gpu && self.frame % 60 == 0 {
+            let stats = Hal::global().with_world(|w| {
+                w.session(HOST)
+                    .map(|s| (s.stats.gpu_frames, s.stats.gpu_ns_total, s.stats.gpu_ns_max))
+            });
+            if let Some((frames, total, max)) = stats.filter(|s| s.0 > 0) {
+                eprintln!(
+                    "makepad-run: boot window gpu: {} frames, mean {:.0} us, max {:.0} us",
+                    frames,
+                    total as f64 / frames as f64 / 1e3,
+                    max as f64 / 1e3
+                );
+            }
+        }
+        renderer.dirty = false;
+        renderer.redraw = false;
+        renderer.presented_revision = renderer.layout_revision;
+        renderer.presented_scroll = renderer.scroll;
     }
 }
 

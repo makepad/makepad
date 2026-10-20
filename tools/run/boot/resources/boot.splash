@@ -26,6 +26,74 @@ let marker = fn(p: vec2, boundary: float, size: vec2) -> float {
     let point = vec2(5.0 + boundary * (size.x - 10.0), size.y * 0.4 + 16.0)
     return (1.0 - smoothstep(1.2, 2.1, length(p - point))) * step(0.001, boundary) * (1.0 - step(0.999, boundary))
 }
+// ---- the Ignition Field: every star, dust grain and flare is one instance of one pipeline.
+// Instance: rect = (angle, radius, size, born), info = (kind, arm or dust order, 0, 0).
+// kinds: 0 star, 1 dust, 2 O3 star, 3 main() glow, 4 swap ring, 5 corner brackets, 6 backdrop.
+// Colours are the concept's tokens: ink #ece6ff, base #9d8cff, O3 #ffcf6a, dim #6e6593, bg #08060f.
+let project = fn(a: float, r: float, view: vec4, spin: float) -> vec2 {
+    return vec2(view.x + cos(a + spin) * r * view.z, view.y + sin(a + spin) * r * view.z * view.w)
+}
+// coverage of an axis-aligned square of half-size h (points) around the origin, anti-aliased at pixel scale
+let box_cov = fn(d: vec2, h: float, dp: float) -> float {
+    let q = vec2(h * dp + 0.5) - abs(d) * dp
+    return clamp(q.x, 0.0, 1.0) * clamp(q.y, 0.0, 1.0)
+}
+// coverage of a one-pixel stroke along a segment of the x axis [-l, l]
+let bar = fn(d: vec2, l: float, dp: float) -> float {
+    let e = length(vec2(d.x - clamp(d.x, -l, l), d.y))
+    return clamp((0.5 - e) * dp + 0.5, 0.0, 1.0)
+}
+let star_px = fn(d: vec2, size: float, age: float, hot: float, scale: float, dp: float) -> vec4 {
+    let body = box_cov(d, size * scale * 0.5, dp) * mix(0.42, 0.8, hot)
+    let f = clamp(1.0 - age / 0.16, 0.0, 1.0)
+    let flash = box_cov(d, 1.1 * scale, dp) * 0.45 * f
+    // over, not additive: a dense arm tends to the arm colour instead of burning to white;
+    // the birth flash is the only additive part
+    let c = #9d8cff * body + #ffffff * flash
+    return vec4(c.rgb, body)
+}
+let dust_px = fn(d: vec2, landed: float, fade: float, dp: float) -> vec4 {
+    let cover = box_cov(d, 0.6, dp) * fade
+    let c = mix(#ece6ff * 0.5, #6e6593 * 0.22, landed)
+    return vec4(c.rgb * cover, 0.0)
+}
+let o3_px = fn(d: vec2, age: float, scale: float, dp: float) -> vec4 {
+    let f = clamp(1.0 - age / 0.5, 0.0, 1.0)
+    let l = (6.0 * f + 2.0) * scale
+    let arms = max(bar(d, l, dp), bar(vec2(d.y, d.x), l, dp)) * f
+    let core = box_cov(d, scale, dp) * 0.85
+    let c = #ffcf6a * max(arms, core)
+    return vec4(c.rgb, 0.0)
+}
+let glow_px = fn(d: vec2, main_age: float, radius: float) -> vec4 {
+    let f = clamp(main_age / 0.5, 0.0, 1.0)
+    let reach = radius * (0.15 + 0.4 * f)
+    let g = clamp(1.0 - length(d) / max(reach, 1.0), 0.0, 1.0)
+    let a = (0.5 * (1.0 - f) + 0.12) * g * step(0.0, main_age)
+    // a little noise keeps the 8-bit gradient from banding
+    let noise = fract(sin(dot(d, vec2(12.9898, 78.233))) * 43758.5453) / 255.0
+    let c = mix(#9d8cff, #ffffff, g) * a
+    return vec4(c.rgb + vec3(noise * step(0.001, a)), a)
+}
+let ring_px = fn(d: vec2, swap_age: float, view: vec4) -> vec4 {
+    let f = clamp(swap_age, 0.0, 1.0)
+    let rr = view.z * (0.9 + f * 0.6)
+    let e = length(vec2(d.x, d.y / view.w))
+    let grad = length(vec2(d.x, d.y / (view.w * view.w))) / max(e, 0.001)
+    let dist = abs(e - rr) / max(grad, 0.001)
+    let a = clamp(1.0 - (dist - 0.75) / 0.75, 0.0, 1.0) * (1.0 - f) * 0.7 * step(0.0, swap_age)
+    let c = #ece6ff * a
+    return vec4(c.rgb, 0.0)
+}
+let brackets_px = fn(d: vec2, viewport: vec2, dp: float) -> vec4 {
+    let e = viewport * 0.5 - vec2(10.0) - abs(d)
+    let l = 16.0
+    let ex = length(vec2(e.x - clamp(e.x, 0.0, l), e.y))
+    let ey = length(vec2(e.x, e.y - clamp(e.y, 0.0, l)))
+    let a = clamp((0.5 - min(ex, ey)) * dp + 0.5, 0.0, 1.0) * 0.8
+    let c = #6e6593 * a
+    return vec4(c.rgb, 0.0)
+}
 let Quad = {
     geom: vertex_buffer(vec2f)
     rect: instance(vec4(0.0))
@@ -153,6 +221,59 @@ let Quad = {
             let border = mix(mix(#d2dfd8, #344b4c, self.dark), mix(#438877, #76c6ab, self.dark), self.selected)
             let stroke = 1.0 - smoothstep(0.8, 1.6, abs(distance))
             return mix(fill, border, stroke) * mask
+        }
+    }
+    ignition: {
+        geom: vertex_buffer(vec2f)
+        rect: instance(vec4(0.0))
+        info: instance(vec4(0.0))
+        viewport: uniform(vec2(1.0))
+        dpi: uniform(1.0)
+        reduce_motion: uniform(0.0)
+        time: uniform(0.0)
+        view: uniform(vec4(0.0))
+        field_params: uniform(vec4(0.0))
+        field_fall: uniform(vec4(0.0))
+        d: varying(vec2f)
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        vertex: fn() {
+            let k = self.info.x
+            let dust = step(0.5, k) * step(k, 1.5)
+            let fall = clamp((self.field_fall.x - self.info.y) / 0.03, 0.0, 1.0)
+            let eased = fall * fall * (3.0 - 2.0 * fall)
+            let r = mix(self.rect.y, 0.92, eased * dust)
+            let a = self.rect.x + dust * self.time * 0.07 * r * (1.0 - self.reduce_motion)
+            let at = project(a, r, self.view, self.field_params.x)
+            let vp = self.viewport
+            let center = if k < 2.5 { at } else if k < 4.5 { self.view.xy } else { vp * 0.5 }
+            let extent = if k < 0.5 { vec2(3.5) } else if k < 1.5 { vec2(2.0) } else if k < 2.5 { vec2(10.0 * self.field_params.y) } else if k < 3.5 { vec2(self.view.z) } else if k < 4.5 { vec2(self.view.z * 1.7 + 6.0, self.view.z * 1.7 * self.view.w + 6.0) } else { vp * 0.5 }
+            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent
+            self.d = p - center
+            self.vertex_pos = vec4(p.x / vp.x * 2.0 - 1.0, 1.0 - p.y / vp.y * 2.0, 0.0, 1.0)
+        }
+        fragment: fn() {
+            let k = self.info.x
+            let dp = max(self.dpi, 1.0)
+            let age = self.time - self.rect.w
+            let scale = self.field_params.y
+            let fall = clamp((self.field_fall.x - self.info.y) / 0.03, 0.0, 1.0)
+            let hot = 1.0 - step(0.5, abs(self.info.y - self.field_fall.z))
+            self.fb0 = if k < 0.5 {
+                star_px(self.d, self.rect.z, age, hot, scale, dp)
+            } else if k < 1.5 {
+                dust_px(self.d, step(1.0, fall), self.field_fall.y, dp)
+            } else if k < 2.5 {
+                o3_px(self.d, age, scale, dp)
+            } else if k < 3.5 {
+                glow_px(self.d, self.field_params.z, self.view.z)
+            } else if k < 4.5 {
+                ring_px(self.d, self.field_params.w, self.view)
+            } else if k < 5.5 {
+                brackets_px(self.d, self.viewport, dp)
+            } else {
+                #08060f
+            }
         }
     }
     icon: Quad{
