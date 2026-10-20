@@ -775,22 +775,24 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         let turtle_rect = cx.turtle().rect();
 
-        // A Fit editor uses the current turtle's combined content-box bound,
-        // covering both the legacy Size::Fit max and Walk::max_height.
-        let height_is_fit = walk.height.is_fit();
-        const MAX_HEIGHT: f64 = 10_000.0;
-        let fit_height = if height_is_fit {
-            cx.current_turtle_max_height().unwrap_or(MAX_HEIGHT)
-        } else {
-            MAX_HEIGHT
-        };
-
         let gutter_width = if self.show_gutter {
             self.gutter_chars = self.gutter_columns(session);
             self.gutter_chars as f64 * self.cell_size.x + self.gutter_pad as f64 * self.cell_size.x
         } else {
             self.gutter_chars = 0;
             0.0
+        };
+        let text_width = turtle_rect.size.x - gutter_width - self.pad_left_top.x - self.pad_right;
+        session.set_wrap_column(self.word_wrap.then(|| (text_width / self.cell_size.x) as usize));
+
+        // A Fit editor is bounded by its turtle's max (Size::Fit max or Walk::max_height),
+        // and with neither it's as tall as its text, so every line is in view.
+        let height_is_fit = walk.height.is_fit();
+        let fit_height = if height_is_fit {
+            cx.current_turtle_max_height()
+                .unwrap_or(session.layout().height() * self.cell_size.y + self.pad_left_top.y)
+        } else {
+            turtle_rect.size.y
         };
         self.gutter_rect = Rect {
             pos: turtle_rect.pos,
@@ -825,12 +827,6 @@ impl CodeEditor {
         self.viewport_rect.size -= self.pad_left_top;
         self.viewport_rect.size.x -= self.pad_right;
 
-        session.set_wrap_column(if self.word_wrap {
-            Some((self.viewport_rect.size.x / self.cell_size.x) as usize)
-        } else {
-            None
-        });
-
         let scroll_pos = self.scroll_bars.get_scroll_pos();
 
         self.line_start = session
@@ -839,6 +835,16 @@ impl CodeEditor {
         self.line_end = session.layout().find_first_line_starting_after_y(
             (scroll_pos.y + self.viewport_rect.size.y) / self.cell_size.y,
         );
+        // A Fit editor can be far taller than what the scroll views around it show, so skip what they clip.
+        if height_is_fit {
+            let (visible_top, visible_bottom) = cx.turtle_visible_y_range();
+            let to_lines = |y: f64| (y - self.viewport_rect.pos.y) / self.cell_size.y;
+            self.line_start = self.line_start.max(session.layout().find_first_line_ending_after_y(to_lines(visible_top)));
+            self.line_end = self.line_end
+                .min(session.layout().find_first_line_starting_after_y(to_lines(visible_bottom)))
+                // Scrolled entirely out of view, we draw nothing.
+                .max(self.line_start);
+        }
         self.unscrolled_rect = cx.turtle().rect_unscrolled();
 
         let bg_rect = Rect {
@@ -1002,6 +1008,7 @@ impl CodeEditor {
     /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
     /// Scroll the viewport (a host resetting to the top-left after new text).
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
+        self.scroll_bars.stop_motion();
         self.scroll_bars.set_scroll_pos(cx, pos);
         self.scroll_bars.redraw(cx);
     }
@@ -1049,9 +1056,8 @@ impl CodeEditor {
         session.handle_changes();
         if self.is_read_only() && Self::is_mutation_event(event) { return actions; }
 
-        if self.scroll_bars.handle_event(cx, event, scope).len() > 0 {
-            self.redraw(cx);
-        };
+        let mut scroll_actions = Vec::new();
+        self.scroll_bars.handle_main_event(cx, event, scope, &mut scroll_actions);
 
         if !self.is_read_only() && self.caret_policy == CaretPolicy::Blink && self.blink_timer.is_event(event).is_some() {
             if self.animator_in_state(cx, ids!(blink.off)) {
@@ -1062,7 +1068,16 @@ impl CodeEditor {
             self.blink_timer = cx.start_timeout(self.blink_speed)
         }
         let mut keyboard_moved_cursor = false;
-        match event.hits(cx, self.scroll_bars.area()) {
+        // With drag scrolling on, a touch drag scrolls instead of selecting text.
+        let can_touch_scroll = self.scroll_bars.has_drag_scrolling();
+        let hit = event.hits(cx, self.scroll_bars.area());
+        // A press that selects text claims its drag, so nothing scrolls under the selection.
+        if let Hit::FingerDown(fe) = &hit {
+            if !(can_touch_scroll && fe.device.is_touch()) {
+                cx.claim_finger_drag(fe.digit_id);
+            }
+        }
+        match hit {
             Hit::KeyFocusLost(_) => {
                 self.stop_input_timers(cx);
                 cx.hide_text_ime();
@@ -1360,6 +1375,15 @@ impl CodeEditor {
                 }
             }
             Hit::KeyDown(ke) => actions.push(CodeEditorAction::UnhandledKeyDown(ke)),
+            // A touch that can scroll only acts on the text once it's a tap.
+            Hit::FingerDown(FingerDownEvent { device: DigitDevice::Touch { .. }, .. })
+            | Hit::FingerMove(FingerMoveEvent { device: DigitDevice::Touch { .. }, .. })
+                if can_touch_scroll => {}
+            Hit::FingerUp(fe) if can_touch_scroll && fe.device.is_touch() => {
+                if fe.was_tap() {
+                    self.select_at(cx, session, fe.abs, fe.tap_count);
+                }
+            }
             Hit::FingerDown(FingerDownEvent {
                 abs,
                 tap_count,
@@ -1371,27 +1395,8 @@ impl CodeEditor {
                     },
                 ..
             }) => {
-                self.animator_play(cx, ids!(focus.on));
-                cx.set_key_focus(self.scroll_bars.area());
-                let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
-                session.set_selection(
-                    cursor,
-                    affinity,
-                    if is_in_gutter {
-                        SelectionMode::Line
-                    } else {
-                        match tap_count {
-                            1 => SelectionMode::Simple,
-                            2 => SelectionMode::Word,
-                            _ => SelectionMode::Line,
-                            //_ => SelectionMode::All,
-                        }
-                    },
-                    NewGroup::Yes,
-                );
-                self.reset_cursor_blinker(cx);
+                self.select_at(cx, session, abs, tap_count);
                 self.keep_cursor_in_view = KeepCursorInView::Always(abs, cx.new_next_frame());
-                self.redraw(cx);
             }
             Hit::FingerDown(FingerDownEvent {
                 abs,
@@ -1450,6 +1455,11 @@ impl CodeEditor {
             }
             _ => {}
         }
+        // After our own hits, so a mouse press that selects has already claimed its drag.
+        self.scroll_bars.handle_scroll_event(cx, event, scope, &mut scroll_actions);
+        if !scroll_actions.is_empty() {
+            self.redraw(cx);
+        }
         if keyboard_moved_cursor {
             self.keep_cursor_in_view = KeepCursorInView::Once;
             self.reset_cursor_blinker(cx);
@@ -1465,6 +1475,30 @@ impl CodeEditor {
             }
         }
         actions
+    }
+
+    /// Puts the cursor at `abs`, or selects the word or line there on a double or triple press.
+    fn select_at(&mut self, cx: &mut Cx, session: &CodeSession, abs: Vec2d, tap_count: u32) {
+        self.animator_play(cx, ids!(focus.on));
+        cx.set_key_focus(self.scroll_bars.area());
+        let ((cursor, affinity), is_in_gutter) = self.pick(session, abs);
+        session.set_selection(
+            cursor,
+            affinity,
+            if is_in_gutter {
+                SelectionMode::Line
+            } else {
+                match tap_count {
+                    1 => SelectionMode::Simple,
+                    2 => SelectionMode::Word,
+                    _ => SelectionMode::Line,
+                    //_ => SelectionMode::All,
+                }
+            },
+            NewGroup::Yes,
+        );
+        self.reset_cursor_blinker(cx);
+        self.redraw(cx);
     }
 
     fn gutter_columns(&self, session: &CodeSession) -> usize {
