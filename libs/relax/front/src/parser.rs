@@ -1487,6 +1487,16 @@ impl<'a> Parser<'a> {
             return None;
         }
         let mut r = m.lookup(&name, &self.krate, &mpath, &module);
+        // rustc legacy scope: a plain-name call sees the innermost macro_rules! of the name whose block or
+        // module is still open; the lookup returns the latest definition, which may be one a closed block
+        // (or a later definition) shadowed it with
+        if qual.is_none() && !path.global() && r.as_ref().is_some_and(|d| d.krate == self.krate && !self.rules_in_textual_scope(d, seg.name.lo)) {
+            let all = m.table.defs.get(&name).into_iter().flatten().chain(m.local.iter());
+            let seen: Vec<_> = all.filter(|x| x.name == name && x.krate == self.krate).collect();
+            if let Some(x) = seen.iter().rev().find(|x| self.rules_in_textual_scope(x, seg.name.lo)) {
+                r = Some((*x).clone());
+            }
+        }
         // textual scope (`macro_rules!` is visible only after its definition): a plain-name call of a
         // macro this file defines further down is not in scope (check only; the call must be written
         // code, not an expansion)
