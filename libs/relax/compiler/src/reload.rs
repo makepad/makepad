@@ -44,9 +44,15 @@ struct ReloadTrace {
     subs: std::collections::BTreeMap<&'static str, f64>,
     counts: std::collections::BTreeMap<&'static str, usize>,
 }
-crate::gen_local! {
-    static TRACE: std::cell::RefCell<ReloadTrace>;
+// The transaction runs on the watcher thread and on the owner thread (unit calls): one process-wide trace.
+static TRACE_CELL: relax_session::sync::Mutex<ReloadTrace> = relax_session::sync::Mutex::new(ReloadTrace::new());
+struct TraceCell;
+impl TraceCell {
+    fn with<R>(&self, f: impl FnOnce(&mut ReloadTrace) -> R) -> R {
+        f(&mut TRACE_CELL.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
+static TRACE: TraceCell = TraceCell;
 thread_local! {
     static TRACE_INPUT: std::cell::Cell<(f64, f64, usize)> = const { std::cell::Cell::new((0.0, 0.0, 0)) };
 }
@@ -57,7 +63,6 @@ pub(crate) fn trace_input(watch_ms: f64, read_ms: f64, scanned: usize) {
 }
 fn trace_stage(name: &'static str) {
     TRACE.with(|s| {
-        let mut s = s.borrow_mut();
         if let Some(last) = s.last {
             let now = Instant::now();
             *s.stages.entry(name).or_default() += (now - last).as_secs_f64() * 1000.;
@@ -73,7 +78,6 @@ fn trace_stage(name: &'static str) {
 /// A finer split of the running stage: wall time since the stage began or the previous sub mark.
 fn trace_sub(name: &'static str) {
     TRACE.with(|s| {
-        let mut s = s.borrow_mut();
         if let Some(prev) = s.sub_last.or(s.last) {
             let now = Instant::now();
             *s.subs.entry(name).or_default() += (now - prev).as_secs_f64() * 1000.;
@@ -84,7 +88,7 @@ fn trace_sub(name: &'static str) {
 /// A unit call for the reload transaction; MAKEPAD_RUN_RELOAD_TRACE reports a wait over 5 ms with
 /// the holder seen when the wait began (whose hold delayed the edit).
 fn call_traced<R>(at: &'static str, f: impl FnOnce() -> R) -> R {
-    let traced = TRACE.with(|s| s.borrow().started.is_some());
+    let traced = TRACE.with(|s| s.started.is_some());
     let holder = if traced { Some(crate::owner::serving_note()) } else { None };
     let t = Instant::now();
     crate::owner::call(crate::owner::Class::App, || {
@@ -97,11 +101,16 @@ fn call_traced<R>(at: &'static str, f: impl FnOnce() -> R) -> R {
 }
 fn trace_count(name: &'static str, n: usize) {
     TRACE.with(|s| {
-        let mut s = s.borrow_mut();
         if s.started.is_some() { *s.counts.entry(name).or_default() += n; }
     });
 }
 struct TraceTransaction;
+impl ReloadTrace {
+    const fn new() -> Self {
+        Self { started: None, last: None, cpu_last: 0, cpu: std::collections::BTreeMap::new(), stages: std::collections::BTreeMap::new(),
+            sub_last: None, subs: std::collections::BTreeMap::new(), counts: std::collections::BTreeMap::new() }
+    }
+}
 impl TraceTransaction {
     fn begin(files: usize) -> Self {
         if std::env::var_os("MAKEPAD_RUN_RELOAD_TRACE").is_some() {
@@ -112,7 +121,7 @@ impl TraceTransaction {
             state.stages.insert("read", read);
             state.counts.insert("watch_files", scanned);
             state.counts.insert("edit_files", files);
-            TRACE.with(|s| *s.borrow_mut() = state);
+            TRACE.with(|s| *s = state);
             crate::parse_work::begin();
         }
         Self
@@ -120,7 +129,6 @@ impl TraceTransaction {
     fn finish(&self, out: &Outcome) {
         trace_stage("other");
         TRACE.with(|s| {
-            let s = s.borrow();
             if let Some(start) = s.started {
                 let stages = s.stages.iter().map(|(k,v)| format!("{k}_ms={v:.3}")).collect::<Vec<_>>().join(" ");
                 let cpu = s.cpu.iter().map(|(k,v)| format!("{k}_cpu_ms={v:.3}")).collect::<Vec<_>>().join(" ");
@@ -135,7 +143,7 @@ impl TraceTransaction {
     }
 }
 impl Drop for TraceTransaction {
-    fn drop(&mut self) { TRACE.with(|s| *s.borrow_mut() = ReloadTrace::default()); }
+    fn drop(&mut self) { TRACE.with(|s| *s = ReloadTrace::default()); }
 }
 
 
@@ -2625,7 +2633,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
         trace_sub("imports");
         let lowered = if body_only {
-            u.prog.lower_body_declarations(&legacy_owners)
+            u.prog.lower_body_declarations(&legacy_owners, &news.iter().map(|&(_, n)| n).collect::<Vec<_>>())
         } else {
             crate::def_collector::lower_legacy_const_generics_in(&mut u.prog, Some(&visible_crates))
         };
@@ -4064,8 +4072,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         // the changed files keep their stamps for a full filesystem polling window. A
         // checkout spanning several writes must not be split into individual patches.
         let mut last: Vec<Option<(std::time::SystemTime, u64)>> = changed.iter().map(|&k| stamp(&files[k].0)).collect();
+        // (native notifications arrive at once: a quiet window of 10 ms ends the settle; the stat
+        // fallback needs a full filesystem polling window)
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(if events.is_some() { 10 } else { 100 }));
             let now: Vec<_> = changed.iter().map(|&k| stamp(&files[k].0)).collect();
             let mut more = false;
             let candidates = match events.as_mut().map(|w| w.changed()) {
@@ -4409,7 +4419,7 @@ mod round51_tests {
                 let version = prog.parse_version(file, "classify.rs", edited.into_bytes()).unwrap();
                 let pairs = pair_items(&prog.files[file as usize], &version.pf).0;
                 let new = prog.commit_body_version(version, &pairs).unwrap();
-                prog.lower_body_declarations(&[owner]);
+                prog.lower_body_declarations(&[owner], &[new]);
                 assert!(!ctfe_relevant_bodies(&prog, new, &[owner]), "removed: {body}");
                 prog.revert_version(file, new, &pairs);
                 assert!(ctfe_relevant_bodies(&prog, file, &[owner]), "restored: {body}");

@@ -1143,7 +1143,7 @@ mod round45_tests {
         let v = prog.parse_version(old, dir.join("lib.rs").to_str().unwrap(), src.into_bytes()).unwrap();
         let pairs = pairs(&prog, old, &v);
         let new = prog.commit_body_version(v, &pairs).unwrap();
-        assert_eq!(prog.lower_body_declarations(&[a]), 1);
+        assert_eq!(prog.lower_body_declarations(&[a], &[new]), 1);
         assert!(Arc::ptr_eq(&saved[&untouched], &prog.legacy_const_args[&untouched]));
         assert_eq!(prog.legacy_const_args[&a].children[0].1, a_child);
         assert_eq!(prog.legacy_const_args[&b].children[0].1, b_child);
@@ -1179,7 +1179,7 @@ mod round45_tests {
             let v = prog.parse_version(old, dir.join("lib.rs").to_str().unwrap(), text.as_bytes().to_vec()).unwrap();
             let pairs = pairs(&prog, old, &v);
             let new = prog.commit_body_version(v, &pairs).unwrap();
-            assert_eq!(prog.lower_body_declarations(&[a]), 1);
+            assert_eq!(prog.lower_body_declarations(&[a], &[new]), 1);
             if text.contains("N + 1") {
                 assert!(prog.errors.iter().any(|e| e.contains("generic parameters may not be used in const operations")));
             } else { assert!(prog.errors.is_empty(), "{:?}", prog.errors); }
@@ -1201,7 +1201,7 @@ mod round45_tests {
         let v = prog.parse_version(old, dir.join("inner.rs").to_str().unwrap(), inner.replace("(1, 2)", "(5, 6)").into_bytes()).unwrap();
         let body_pairs = pairs(&prog, old, &v);
         let new = prog.commit_body_version(v, &body_pairs).unwrap();
-        prog.lower_body_declarations(&[b]);
+        prog.lower_body_declarations(&[b], &[new]);
         prog.revert_version(old, new, &body_pairs);
         let v = prog.parse_version(root, dir.join("lib.rs").to_str().unwrap(), source.replace("dep::g as alias", "dep::f as alias").into_bytes()).unwrap();
         let pairs = pairs(&prog, root, &v);

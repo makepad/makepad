@@ -100,7 +100,7 @@ impl Session {
                 if let Ok(plan) = crate::reload::classify(&unit.prog, file, &v.pf, &path) {
                     if plan.changes.is_empty() && plan.added.is_empty() && plan.removed.is_empty() && plan.removed_uses.is_empty() && !plan.attributes_changed {
                         if let Ok(f) = unit.prog.commit_body_version(v, &plan.pairs) {
-                            unit.prog.lower_body_declarations(&[]);
+                            unit.prog.lower_body_declarations(&[], &[f]);
                             primed.push(file);
                             primed.push(f);
                             files.insert(path, f);
@@ -372,7 +372,7 @@ impl Session {
         }
         let parsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         if rebuild.is_empty() {
-            self.unit.prog.lower_body_declarations(&legacy_owners);
+            self.unit.prog.lower_body_declarations(&legacy_owners, &body_files);
             // The edited versions' body inputs, as reload.rs publish_reload.
             self.unit.tcx.queries.register_files(self.unit.prog.files.len());
             self.unit.tcx.publish_file_bodies(&body_files);

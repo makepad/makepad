@@ -738,8 +738,14 @@ impl DeclarationState {
     fn save(prog: &Program, file: u32, body_only: bool, visible: Option<&[bool]>) -> Self {
         let sees = |d: DefId| visible.map_or(true, |v| v.get(prog.def(d).krate as usize).copied().unwrap_or(true));
         let mut legacy = HashMap::default();
-        for (&owner, result) in &prog.legacy_const_args {
-            if if body_only { prog.def(owner).file == file } else { sees(owner) } { legacy.insert(owner, result.clone()); }
+        if body_only {
+            for &d in prog.defs_in_file(file) {
+                if let Some(result) = prog.legacy_const_args.get(&DefId(d)) { legacy.insert(DefId(d), result.clone()); }
+            }
+        } else {
+            for (&owner, result) in &prog.legacy_const_args {
+                if sees(owner) { legacy.insert(owner, result.clone()); }
+            }
         }
         let environment = if body_only { None } else { Some((prog.legacy_const_attrs.clone(), AssocState {
             rpitit: prog.impl_trait_in_trait_data.iter().map(|(k, v)| (*k, v.clone())).collect(), associated: prog.associated_types_for_impl_traits.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -1976,12 +1982,18 @@ impl Program {
             self.node_id_to_def_id.retain(|(f, _), _| *f != file);
             self.def_id_to_node_id.retain(|_, (f, _)| *f != file);
         }
-        self.collected_definitions.retain(|d| self.defs[d.0 as usize].file != file);
-        self.legacy_call_names.retain(|d, _| self.defs[d.0 as usize].file != file);
-        self.repeat_expr_counts.retain(|d| self.defs[d.0 as usize].file != file);
+        // (the file's defs from the per-file index: no scan of the program's tables)
+        for d in self.defs_in_file(file).to_vec() {
+            let d = DefId(d);
+            self.collected_definitions.remove(&d);
+            self.legacy_call_names.remove(&d);
+            self.repeat_expr_counts.remove(&d);
+        }
         self.def_disambiguators.retain(|(d, _, _), _| self.defs[d.0 as usize].file != file);
         let mut owners = Vec::new();
-        for (&(f, item), &def) in &self.item_defs { if f == file { owners.push((item, def)); } }
+        for item in 0..self.files[file as usize].ast.items.len() as u32 {
+            if let Some(&def) = self.item_defs.get(&(file, item)) { owners.push((item, def)); }
+        }
         owners.sort_unstable_by_key(|(item, _)| *item);
         for (_, def) in owners {
             // Variant owners must exist before collecting their fields/discriminants.
@@ -2023,10 +2035,13 @@ impl Program {
 
     /// Called once after all body-only versions have been committed under the
     /// front write lock. Unchanged owners retain their resolution results.
-    pub fn lower_body_declarations(&mut self, changed: &[DefId]) -> usize {
-        let owners: Vec<DefId> = self.legacy_const_args.keys().copied().collect();
+    /// `files`: the versions the transaction committed. Only the owners defined in them moved to
+    /// another file; every other owner's result already describes its file.
+    pub fn lower_body_declarations(&mut self, changed: &[DefId], files: &[u32]) -> usize {
+        let owners: Vec<DefId> = files.iter().flat_map(|&f| self.defs_in_file(f).iter().map(|&d| DefId(d)))
+            .filter(|d| self.legacy_const_args.contains_key(d) && !changed.contains(d)).collect();
         for owner in owners {
-            if !changed.contains(&owner) { crate::def_collector::retarget_legacy_owner(self, owner); }
+            crate::def_collector::retarget_legacy_owner(self, owner);
         }
         crate::def_collector::lower_legacy_const_owners(self, changed)
     }

@@ -1303,7 +1303,7 @@ mod tests {
         let version = prog.parse_version(old, "round49.rs", edited.into_bytes()).unwrap();
         let pairs: Vec<_> = (0..version.pf.ast.items.len() as u32).map(|i| (i, i)).collect();
         let new = prog.commit_body_version(version, &pairs).unwrap();
-        prog.lower_body_declarations(&[owners[0]]);
+        prog.lower_body_declarations(&[owners[0]], &[new]);
         tcx.publish_file_bodies(&[old, new]);
         let after = owners.map(|d| tcx.typeck(&prog, d));
         let mut recomputed = 0;
@@ -1341,7 +1341,7 @@ mod tests {
         let version = prog.parse_version(old, "round46.rs", edited.into_bytes()).unwrap();
         let pairs: Vec<_> = (0..version.pf.ast.items.len() as u32).map(|i| (i, i)).collect();
         let new = prog.commit_body_version(version, &pairs).unwrap();
-        prog.lower_body_declarations(&[owner]);
+        prog.lower_body_declarations(&[owner], &[new]);
         tcx.publish_file_bodies(&[old, new]);
         let after = tcx.resolve_bound_vars(&prog, owner);
         assert!(after.names.declarations.iter().any(|d| d.name.as_deref() == Some("'fresh")),
