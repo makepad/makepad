@@ -14,7 +14,7 @@
 
 use crate::jit::Unit;
 use crate::program::DefId;
-use crate::rir::{Mem, Sym, SymClass};
+use relax_backend::rir::{Mem, Sym, SymClass};
 use crate::types::{TyId, TyKind};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -220,7 +220,7 @@ impl Syms {
 
     fn push(&self, kind: SymKind, value: u64) -> Sym {
         // a domain symbol's table value is its offset in the domain static block (0: no storage)
-        let value = if class_of(&kind) == crate::rir::SymClass::Domain && value != 0 { value - self.dom0 } else { value };
+        let value = if class_of(&kind) == relax_backend::rir::SymClass::Domain && value != 0 { value - self.dom0 } else { value };
         let id = self.kinds.push(kind) as u32;
         if id as usize >= SYM_CAP {
             panic!("symbol table full");
@@ -431,19 +431,19 @@ pub fn set_unit(u: *mut Unit) {
     UNIT_PTR.store(u, Ordering::SeqCst);
 }
 
-/// The optimiser's constant-load reader (`opt::RoReader`): `n` bytes at symbol + offset of
+/// The optimiser's constant-load reader (`passes::RoReader`): `n` bytes at symbol + offset of
 /// the unit `ctx` points to -- the unit the function is built for (Unit::ro_reader), never a
 /// process-wide one: the proc-macro world's unit is made after the program's on a warm start,
 /// and folding the program's loads against its symbol tables (or, once the world is freed,
 /// freed memory) baked another object's bytes into the program's code (a constant slice's
 /// length read as 0; that O2 code went to the disk cache, so every later warm start ran it).
-pub fn ro_read(ctx: usize, s: Sym, n: u32) -> crate::opt::RoRead {
+pub fn ro_read(ctx: usize, s: Sym, n: u32) -> relax_backend::passes::RoRead {
     let u = unsafe { &*(ctx as *const Unit) };
     read_obj(u, s, n)
 }
 
-pub fn read_obj(u: &Unit, s: Sym, n: u32) -> crate::opt::RoRead {
-    use crate::opt::RoRead;
+pub fn read_obj(u: &Unit, s: Sym, n: u32) -> relax_backend::passes::RoRead {
+    use relax_backend::passes::RoRead;
     let idx = match u.syms.obj_of(s) {
         Some(i) => i,
         None => return RoRead::No,
@@ -485,7 +485,7 @@ pub fn read_obj(u: &Unit, s: Sym, n: u32) -> crate::opt::RoRead {
 }
 
 /// A constant leaf the front end reads at compile time (lower.rs const_val and pattern tests).
-pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> crate::opt::RoRead {
+pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
     let n = match m {
         Mem::Int(n, _) => n as u32,
         Mem::F32 => 4,
@@ -977,7 +977,7 @@ pub fn canon_dump(u: &Unit, d: &str) -> String {
 /// pool zeroed, its relocations by stable description and its pc map by file path. Two runs of
 /// the same program (one with MAKEPAD_RUN_PERTURB) must print the same lines: a difference is a
 /// run-dependent value that reached code without a relocation.
-pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &[crate::rir::RelocAt], pc_map: &[(u32, u64)]) {
+pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &[relax_backend::rir::RelocAt], pc_map: &[(u32, u64)]) {
     static F: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     let m = match F.get_or_init(|| std::env::var("MAKEPAD_RUN_RELOC_SIG").ok().and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new)) {
         Some(m) => m,
@@ -993,9 +993,9 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
             c[o..o + 8].fill(0);
         }
         let d = match r {
-            crate::rir::Reloc::Sym(s) => describe(u, *s),
-            crate::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
-            crate::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Sym(s) => describe(u, *s),
+            relax_backend::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
             other => format!("{:?}", other),
         };
         rs.push(format!("{}={}", off, d));
@@ -1128,8 +1128,8 @@ pub fn obj_pointer_words(u: &Unit, idx: u32) -> Option<Vec<(u32, Sym)>> {
 /// How code may refer to a symbol of this kind: the same in every run (it is part of the code's
 /// shape). Near = inside the unit's reservation (pc-relative), Far = anywhere (pool word), Imm =
 /// a per-run number (immediate field).
-pub fn class_of(k: &SymKind) -> crate::rir::SymClass {
-    use crate::rir::SymClass;
+pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
+    use relax_backend::rir::SymClass;
     match k {
         // glue emitted into the unit's code area; the rest are host functions
         SymKind::Rt(n) => match *n {

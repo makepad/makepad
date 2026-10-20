@@ -4,7 +4,7 @@
 //! is false.
 #![cfg(target_arch = "x86_64")]
 use relax_backend::{exec::Code, rir::*, x64};
-use relax_codegen::opt;
+use relax_backend::passes;
 
 const CONDS: [Cond; 6] = [Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge, Cond::Eq, Cond::Ne];
 
@@ -70,7 +70,7 @@ fn negated_compare_branches_on_the_flags() {
             for form in 0..4u8 {
                 for order in [false, true] {
                     let mut f = build(w, cc, form, order);
-                    opt::simplify(&options, &mut f, None, true, true);
+                    passes::simplify(&options, &mut f, None, true, true);
                     if form != 2 {
                         // the negation is gone: the compare is the block's last instruction and
                         // the branch reads it

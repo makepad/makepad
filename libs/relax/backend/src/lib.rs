@@ -1,7 +1,7 @@
 //! Relax's shared low-level back end: RIR ([`rir`], including its vector registers and ops), the
 //! register allocator ([`regalloc`]), the x86-64 and AArch64 machine-code emitters ([`x64`],
 //! [`arm64`]), jump-table lowering ([`switch`]), the C ABI planner ([`cabi`]) and executable
-//! memory ([`exec`]), with the dominator and block-order ([`dom`]), frame-layout ([`frame`]) and bit-op
+//! memory ([`exec`]), the passes every optimising tier runs ([`passes`]), with the dominator and block-order ([`dom`]), frame-layout ([`frame`]) and bit-op
 //! ([`bitops`]) analyses the emitters run. Front ends: Relax's Rust (relax-codegen optimises
 //! it first) and Splash kernels. [`probe`] lets a front end observe compile phases.
 
@@ -11,6 +11,7 @@ pub mod cabi;
 pub mod dom;
 pub mod exec;
 pub mod frame;
+pub mod passes;
 pub mod probe;
 pub mod regalloc;
 pub mod rir;

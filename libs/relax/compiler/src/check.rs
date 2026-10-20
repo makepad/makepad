@@ -825,7 +825,7 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
                 for b in &f.blocks {
                     for i in &b.insts {
                         match i {
-                            crate::rir::Inst::Call(crate::rir::Callee::Fn(c) | crate::rir::Callee::CFn(c, _), _, _) => out.push(*c),
+                            relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(c) | relax_backend::rir::Callee::CFn(c, _), _, _) => out.push(*c),
                             _ => {}
                         }
                     }

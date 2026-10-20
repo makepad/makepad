@@ -1665,7 +1665,7 @@ fn def_name(prog: &crate::program::Program, d: DefId) -> String {
 /// field offsets fold to). Ok(true): one of them is in `changed`. Err: the set is not exactly
 /// computable (an indirect call, a trait's associated constant, a RIR build failure).
 unsafe fn discriminant_deps_changed(up: *mut Unit, anon: DefId, changed: &[DefId], layout_defs: &[DefId]) -> Result<bool, String> {
-    use crate::rir::{Callee, Inst};
+    use relax_backend::rir::{Callee, Inst};
     let mut todo = vec![(&*up).fn_id(FnKey::Inst(anon, Vec::new()))];
     let mut seen: Vec<u32> = Vec::new();
     while let Some(s) = todo.pop() {
@@ -1714,16 +1714,16 @@ unsafe fn discriminant_deps_changed(up: *mut Unit, anon: DefId, changed: &[DefId
 }
 
 /// Slots referenced by compiled code (calls and fn values: table words and thunks).
-fn referenced_slots(relocs: &[crate::rir::RelocAt], out: &mut Vec<u32>) {
+fn referenced_slots(relocs: &[relax_backend::rir::RelocAt], out: &mut Vec<u32>) {
     for r in relocs {
         match r.target {
-            crate::rir::Reloc::Slot(id) | crate::rir::Reloc::Thunk(id) => out.push(id),
+            relax_backend::rir::Reloc::Slot(id) | relax_backend::rir::Reloc::Thunk(id) => out.push(id),
             _ => {}
         }
     }
 }
 
-type Code = (Vec<u8>, Vec<(u32, u64)>, Vec<crate::rir::RelocAt>);
+type Code = (Vec<u8>, Vec<(u32, u64)>, Vec<relax_backend::rir::RelocAt>);
 
 /// A closure's identity across versions of its parent: its ordinal among the closure
 /// expressions of the parent's item (source order), with its signature, captures and owner

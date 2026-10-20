@@ -3051,8 +3051,8 @@ fn summary_inner(why: &str) {
     if !SILENT.load(Ordering::Relaxed) {         verbose!("makepad-run: opt passes (cpu ms): {}", passes); }
             verbose!("makepad-run: invokes {} seen, {} made plain calls", crate::opt::INVOKES_SEEN.load(Ordering::Relaxed), crate::opt::INVOKES_DEMOTED.load(Ordering::Relaxed));
         }
-        if crate::rir::unwind_stats_on() {
-            let st = &crate::rir::UNWIND_STATS;
+        if relax_backend::rir::unwind_stats_on() {
+            let st = &relax_backend::rir::UNWIND_STATS;
             verbose!("makepad-run: unwind bytes: pads {} KB, landing stubs {} KB, trailers {} KB; invokes emitted {}", st[0].load(Ordering::Relaxed) / 1024, st[1].load(Ordering::Relaxed) / 1024, st[2].load(Ordering::Relaxed) / 1024, st[3].load(Ordering::Relaxed));
         }
         // startup list: non-generic fns compiled during this run, in slot order (first-call order)

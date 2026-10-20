@@ -31,7 +31,7 @@
 //! static. A scalar pointer constant needs nothing: lowering emits its target's symbol.
 
 use crate::jit::Unit;
-use crate::rir::Sym;
+use relax_backend::rir::Sym;
 use crate::sandbox::{initial_bytes, provenance_words};
 use crate::syms::SymKind;
 use std::collections::HashSet;

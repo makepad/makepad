@@ -2438,7 +2438,7 @@ pub fn variant_size_differences(prog: &Program, tcx: &Tcx, own: &[bool]) {
         let lay = crate::layout::Layouts::new();
         let l = lay.of(&lcx, tcx, ty);
         let (Some((_, mem)), crate::layout::TagEnc::Direct) = (l.tag, l.enc) else { continue };
-        let tag_size = match mem { crate::rir::Mem::Int(b, _) => b as u32, crate::rir::Mem::F32 => 4, crate::rir::Mem::F64 => 8 };
+        let tag_size = match mem { relax_backend::rir::Mem::Int(b, _) => b as u32, relax_backend::rir::Mem::F32 => 4, relax_backend::rir::Mem::F64 => 8 };
         if l.variant_fields.len() != adt.variants.len() { continue; }
         let (mut largest, mut slargest, mut li) = (0u32, 0u32, 0usize);
         for (vi, v) in adt.variants.iter().enumerate() {

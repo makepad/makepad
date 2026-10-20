@@ -151,7 +151,7 @@ pub fn same_value(u: &mut Unit, t: TyId, a: u64, b: u64, depth: u32) -> bool {
             }
             let vi = if adt.is_enum {
                 // same tag bytes, then that variant's fields
-                if let Some((toff, crate::rir::Mem::Int(n, _))) = l.tag {
+                if let Some((toff, relax_backend::rir::Mem::Int(n, _))) = l.tag {
                     if bytes(a + toff as u64, n as usize) != bytes(b + toff as u64, n as usize) {
                         return false;
                     }
@@ -227,7 +227,7 @@ pub fn defined_mask(u: &mut Unit, t: TyId, a: u64, mask: &mut [u8], off: usize, 
             };
             let vi = if adt.is_enum {
                 match l.tag {
-                    Some((toff, crate::rir::Mem::Int(n, _))) => {
+                    Some((toff, relax_backend::rir::Mem::Int(n, _))) => {
                         for b in mask.iter_mut().skip(off + toff as usize).take(n as usize) {
                             *b = 1;
                         }
@@ -1229,7 +1229,7 @@ impl<'a> Ctx<'a> {
                 let l = self.layout(from);
                 if l.uninhabited { return None; }
                 let disc = match l.tag {
-                    Some((toff, crate::rir::Mem::Int(tn, ts))) => {
+                    Some((toff, relax_backend::rir::Mem::Int(tn, ts))) => {
                         let raw = load_int(v.get(toff as usize..(toff + tn as u32) as usize)?, tn as usize, ts);
                         crate::lower::decode_tag_const(self.u, raw, &l, &adt)?
                     }
@@ -1355,7 +1355,7 @@ impl<'a> Ctx<'a> {
         }
         if adt.is_enum {
             // the tag (lower::emit_store_disc)
-            if let Some((toff, crate::rir::Mem::Int(tn, _))) = l.tag {
+            if let Some((toff, relax_backend::rir::Mem::Int(tn, _))) = l.tag {
                 let tv = match l.enc {
                     crate::layout::TagEnc::Direct => Some(adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi)?.val),
                     crate::layout::TagEnc::Single(_) => None,

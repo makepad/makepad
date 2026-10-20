@@ -6,7 +6,6 @@
 
 #![recursion_limit = "1024"]
 
-pub use relax_backend::{arm64, regalloc, rir, x64};
 pub use relax_codegen::{exec_census, fncost, warm, opt};
 
 pub mod fxhash;

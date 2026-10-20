@@ -8,7 +8,7 @@ pub use closure::ClosureStorage;
 use crate::next_solver::TraitRef;
 use crate::consts::GenericArg;
 use crate::program::Prim;
-use crate::rir::{Cls, Mem};
+use relax_backend::rir::{Cls, Mem};
 use crate::tcx::Tcx;
 use crate::types::{TyId, TyKind};
 

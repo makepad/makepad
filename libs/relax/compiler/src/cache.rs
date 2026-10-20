@@ -30,7 +30,7 @@ use crate::jit::{FnKey, Unit};
 use crate::pack::{self, NewEntry};
 use crate::store::Store;
 use crate::program::{DefId, DefKind, NO_DEF};
-use crate::rir::{Reloc, RelocAt, RelocKind, Sym};
+use relax_backend::rir::{Reloc, RelocAt, RelocKind, Sym};
 use crate::sip::Sip128;
 use crate::syms::{DataKind, SymKind};
 use crate::types::{TyId, TyKind};
@@ -6055,16 +6055,16 @@ mod data_tests {
         let fat = a.data(&words, 8, DataKind::Relocs(vec![(0, a.data_sym(table))]));
         let fat_sym = a.data_sym(fat);
         let reader = a.ro_reader().unwrap();
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         // a second unit (the proc-macro world), whose same symbol ids name zeroed objects
         let b = unit();
         for _ in 0..4 {
             b.data(&[0u8; 16], 8, DataKind::Bytes);
         }
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
-        assert!(matches!(a.ro_reader().unwrap().read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
+        assert!(matches!(a.ro_reader().unwrap().read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         drop(b);
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6263,7 +6263,7 @@ mod data_tests {
         assert_eq!(linked_ptrs[0].0, 1);
         assert_eq!(linked_ptrs[0].1.off, 2);
         assert_eq!(&linked_ptrs[1..], &[(9, rt), (17, static_sym), (25, thunk), (33, foreign)]);
-        assert!(matches!(crate::syms::read_obj(&u, Sym { id: u.data_sym(linked).id, off: 1 }, 8), crate::opt::RoRead::Ptr(s) if s == linked_ptrs[0].1));
+        assert!(matches!(crate::syms::read_obj(&u, Sym { id: u.data_sym(linked).id, off: 1 }, 8), relax_backend::passes::RoRead::Ptr(s) if s == linked_ptrs[0].1));
         // Force recording instead of returning a memoized key / existing disk entry.
         c.index.clear();
         c.pending_keys.clear();

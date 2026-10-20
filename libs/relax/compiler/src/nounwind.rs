@@ -4,7 +4,7 @@
 //! unwinding to the callee instance/ABI. Relax additionally analyzes its O1 RIR.
 
 use crate::query::{Fingerprint, QueryEngine, QueryError, QueryId, QueryTable};
-use crate::rir::{Callee, Func, Inst, Term};
+use relax_backend::rir::{Callee, Func, Inst, Term};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ fn facts_fp(facts: &[(u32, bool)]) -> Fingerprint {
 /// The projection of optimized RIR read by body_may_unwind. Non-call instructions
 /// affect this input only through reachability; invoked calls cannot escape their pad.
 fn body_fp(f: &Func) -> Fingerprint {
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     let mut h = crate::sip::Sip128::new();
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] { continue; }

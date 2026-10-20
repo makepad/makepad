@@ -40,7 +40,7 @@ pub fn active(id: u32) -> bool {
 }
 
 /// Applies one edit to `f`; true when it found its place (a line that is in the code).
-fn apply_edit(f: &mut crate::rir::Func, u: &crate::jit::Unit, slot: u32, e: Edit) -> bool {
+fn apply_edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32, e: Edit) -> bool {
     match e {
         Edit::Count { site, time } => super::instrument::edit_count(f, u, site, time),
         Edit::Break { site, line } => super::instrument::edit_break(f, u, slot, site, line),

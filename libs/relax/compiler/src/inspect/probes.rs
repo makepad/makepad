@@ -199,7 +199,7 @@ pub extern "C" fn relax_probe_pause() {
 // ------------------------------------------------------------------ adding a probe
 
 /// The probe call at the hook (entry: line None) with the hooked fn's own parameters.
-pub(super) fn edit(f: &mut crate::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32, line: Option<u32>) -> bool {
+pub(super) fn edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32, line: Option<u32>) -> bool {
     // where: block b before instruction k
     let (b, k) = match line {
         None => (0usize, 0usize),
@@ -219,15 +219,15 @@ pub(super) fn edit(f: &mut crate::rir::Func, u: &crate::jit::Unit, idx: u64, pro
             }
         }
     };
-    let args: Vec<crate::rir::VReg> = f.params.iter().copied().filter(|v| Some(*v) != f.sret).collect();
+    let args: Vec<relax_backend::rir::VReg> = f.params.iter().copied().filter(|v| Some(*v) != f.sret).collect();
     place_call(f, u, idx, probe_slot, b, k, args);
     true
 }
 
 /// A by-name probe's calls, lowered into the body already (lower.rs ProbePoint): each becomes the
 /// guarded invoke.
-pub(super) fn wrap_calls(f: &mut crate::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32) -> bool {
-    use crate::rir::{Callee, Inst, Term};
+pub(super) fn wrap_calls(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32) -> bool {
+    use relax_backend::rir::{Callee, Inst, Term};
     let mut found = false;
     let mut b = 0;
     while b < f.blocks.len() {
@@ -251,8 +251,8 @@ pub(super) fn wrap_calls(f: &mut crate::rir::Func, u: &crate::jit::Unit, idx: u6
 
 /// In block `b` before instruction `k`: `enter` guard, the probe as an invoke with `args`, `leave`
 /// on the normal path, `failed` on the unwind path; both go on with the rest of the block.
-fn place_call(f: &mut crate::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32, b: usize, k: usize, args: Vec<crate::rir::VReg>) {
-    use crate::rir::{Callee, Cls, Inst, Term};
+fn place_call(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, idx: u64, probe_slot: u32, b: usize, k: usize, args: Vec<relax_backend::rir::VReg>) {
+    use relax_backend::rir::{Callee, Cls, Inst, Term};
     let pos = f.blocks[b].pos.get(k).copied().unwrap_or(f.blocks[b].term_pos);
     let sym = |name: &'static str, a: u64| u.syms.intern(crate::syms::SymKind::Rt(name), a);
     let (enter, leave, failed) = (

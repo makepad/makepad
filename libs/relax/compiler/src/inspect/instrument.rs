@@ -128,7 +128,7 @@ enum Shape {
 }
 
 /// The parameters of slot `id` (on the owner) and how they map onto `f`'s integer parameter words.
-fn arg_plan(u: &crate::jit::Unit, id: u32, f: &crate::rir::Func) -> ArgPlan {
+fn arg_plan(u: &crate::jit::Unit, id: u32, f: &relax_backend::rir::Func) -> ArgPlan {
     use crate::types::TyKind;
     let crate::jit::FnKey::Inst(d, gargs) = &u.fns[id as usize].key else { return ArgPlan::default() };
     let Some(sig) = u.tcx.fn_sig(&u.prog, *d) else { return ArgPlan::default() };
@@ -172,7 +172,7 @@ fn arg_plan(u: &crate::jit::Unit, id: u32, f: &crate::rir::Func) -> ArgPlan {
         words += n as usize;
         params.push((names.get(k).cloned().unwrap_or_else(|| format!("arg{}", k)), text, n, shape));
     }
-    let int_params = f.params.iter().filter(|v| Some(**v) != f.sret && f.vregs[v.0 as usize] == crate::rir::Cls::I).count();
+    let int_params = f.params.iter().filter(|v| Some(**v) != f.sret && f.vregs[v.0 as usize] == relax_backend::rir::Cls::I).count();
     ArgPlan { params, exact: int_params == words }
 }
 
@@ -329,24 +329,24 @@ pub(super) fn pos_line(u: &crate::jit::Unit, p: u64) -> Option<u32> {
 
 /// Adds the probe calls to slot `id`'s RIR: `enter` (Some) at the entry or before the first
 /// instruction on `line`, `exit` before every return.
-fn edit(f: &mut crate::rir::Func, u: &crate::jit::Unit, site: u64, enter: (&'static str, u64), exit: Option<u64>, line: Option<u32>, with_args: bool, hit: &mut bool) {
-    use crate::rir::{Callee, Inst, Term};
+fn edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64, enter: (&'static str, u64), exit: Option<u64>, line: Option<u32>, with_args: bool, hit: &mut bool) {
+    use relax_backend::rir::{Callee, Inst, Term};
     let sym = |name: &'static str, addr: u64| u.syms.intern(crate::syms::SymKind::Rt(name), addr);
     let enter_sym = sym(enter.0, enter.1);
     // a breakpoint also receives the fn's first five integer parameter words (zeros past them)
-    let words: Vec<crate::rir::VReg> = if with_args {
-        f.params.iter().copied().filter(|v| Some(*v) != f.sret && f.vregs[v.0 as usize] == crate::rir::Cls::I).take(5).collect()
+    let words: Vec<relax_backend::rir::VReg> = if with_args {
+        f.params.iter().copied().filter(|v| Some(*v) != f.sret && f.vregs[v.0 as usize] == relax_backend::rir::Cls::I).take(5).collect()
     } else {
         Vec::new()
     };
-    let call = |f: &mut crate::rir::Func, b: usize, at: usize, s: crate::rir::Sym, pos: u64, words: &[crate::rir::VReg]| {
-        let v = f.vreg(crate::rir::Cls::I);
+    let call = |f: &mut relax_backend::rir::Func, b: usize, at: usize, s: relax_backend::rir::Sym, pos: u64, words: &[relax_backend::rir::VReg]| {
+        let v = f.vreg(relax_backend::rir::Cls::I);
         let mut args = vec![v];
         let mut consts = vec![(v, site as i64)];
         if with_args {
             args.extend_from_slice(words);
             while args.len() < 6 {
-                let z = f.vreg(crate::rir::Cls::I);
+                let z = f.vreg(relax_backend::rir::Cls::I);
                 consts.push((z, 0));
                 args.push(z);
             }
@@ -494,8 +494,8 @@ fn rt_inspect_return_word(k: u64) -> u64 {
 /// normal path becomes an invoke whose unwind edge goes there (existing cleanup pads end there
 /// instead of resuming); the arguments are kept in copies made at entry. Returns the return-word
 /// count when `return` can be offered.
-fn edit_restart(f: &mut crate::rir::Func, u: &crate::jit::Unit, site: u64) -> Option<usize> {
-    use crate::rir::{Callee, Cls, Cond, Inst, Term};
+fn edit_restart(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64) -> Option<usize> {
+    use relax_backend::rir::{Callee, Cls, Cond, Inst, Term};
     let nb = f.blocks.len();
     // blocks on the normal path (entry, jumps, branches, invoke normal edges)
     let mut normal = vec![false; nb];
@@ -622,14 +622,14 @@ fn edit_restart(f: &mut crate::rir::Func, u: &crate::jit::Unit, site: u64) -> Op
 }
 
 /// `count`'s edit: entry (and with `time`, exit) calls.
-pub(super) fn edit_count(f: &mut crate::rir::Func, u: &crate::jit::Unit, site: u64, time: bool) -> bool {
+pub(super) fn edit_count(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64, time: bool) -> bool {
     let mut hit = false;
     edit(f, u, site, ("inspect_enter", rt_inspect_enter as *const () as u64), time.then_some(rt_inspect_exit as *const () as u64), None, false, &mut hit);
     hit
 }
 
 /// `break`'s edit: the parking call with the fn's argument words at the entry or a line.
-pub(super) fn edit_break(f: &mut crate::rir::Func, u: &crate::jit::Unit, slot: u32, site: u64, line: Option<u32>) -> bool {
+pub(super) fn edit_break(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32, site: u64, line: Option<u32>) -> bool {
     if let Some(s) = self::site(site) {
         let _ = s.args.set(arg_plan(u, slot, f));
     }
@@ -639,7 +639,7 @@ pub(super) fn edit_break(f: &mut crate::rir::Func, u: &crate::jit::Unit, slot: u
 }
 
 /// `restartable`'s edit.
-pub(super) fn edit_restart_site(f: &mut crate::rir::Func, u: &crate::jit::Unit, site: u64) -> bool {
+pub(super) fn edit_restart_site(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64) -> bool {
     let n = edit_restart(f, u, site);
     if let Some(s) = self::site(site) {
         let _ = s.returns.set(n);
