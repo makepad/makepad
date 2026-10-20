@@ -1059,10 +1059,7 @@ fn pump(
                 warm_up_at = Some(Instant::now());
                 Stage::WarmUp
             }
-            Stage::WarmUp
-                if relax_compiler::postframe::ui_idle_ns() != u64::MAX
-                    && relax_compiler::postframe::ready(READY_QUIET_NS) =>
-            {
+            Stage::WarmUp if relax_compiler::postframe::ready(READY_QUIET_NS) => {
                 if let Some(at) = warm_up_at.take() {
                     eprintln!(
                         "makepad-run: warm-up {:.0} ms after the first present ({})",

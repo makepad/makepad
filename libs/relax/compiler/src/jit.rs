@@ -5590,6 +5590,26 @@ impl Unit {
     }
 }
 
+/// A background drain of the deferred cache records is queued (one at a time)
+static RECORD_DRAIN: AtomicBool = AtomicBool::new(false);
+
+/// After the first present: the deferred cache records are encoded in batches of
+/// POST_PRESENT_BATCH, each its own Background request (a program thread's request is served
+/// between two), until none is left.
+fn drain_cache_records() {
+    if RECORD_DRAIN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    owner::post_queued(owner::Class::Background, || {
+        let up = SPEC_UNIT.load(Ordering::Acquire);
+        let more = !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(POST_PRESENT_BATCH) };
+        RECORD_DRAIN.store(false, Ordering::Release);
+        if more {
+            drain_cache_records();
+        }
+    });
+}
+
 /// Installs a slot's compiled code (on the owner thread): perf map, O3 counter, and the
 /// speculative builds of its callees.
 /// Links and installs a slot's code (`relocs` are the code's own; `record`: the disk cache
@@ -5621,16 +5641,27 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
             let u = &mut *up;
             if record {
                 if let Some(mut c) = u.cache.take() {
-                    // before the first present the main thread waits for this install: its
-                    // entry (slot keys, dependency certificate) is encoded after the present
-                    let deferred = if startup_phase() && !FIRST_PRESENT.load(Ordering::Acquire) && owner::for_main() {
+                    // a program thread waits for this install (the main thread's before the first
+                    // present, every program thread's after it): its entry (slot keys, dependency
+                    // certificate) is encoded later, in background batches (drain_cache_records)
+                    let foreground = if FIRST_PRESENT.load(Ordering::Acquire) {
+                        matches!(owner::serving().0, owner::Class::Main | owner::Class::App | owner::Class::Finish)
+                    } else {
+                        startup_phase() && owner::for_main()
+                    };
+                    let deferred = if foreground {
                         c.defer_record(u, id, code, relocs, &map)
                     } else {
                         c.record(u, id, code, relocs, &map);
                         None
                     };
                     u.cache = Some(c);
-                    if let Some(p) = deferred { u.pending_cache_records.push(Some(p)); }
+                    if let Some(p) = deferred {
+                        u.pending_cache_records.push(Some(p));
+                        if FIRST_PRESENT.load(Ordering::Acquire) {
+                            drain_cache_records();
+                        }
+                    }
                 }
             }
             let u = &mut *up;
@@ -6605,7 +6636,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
             });
             if let Some((up, w)) = begin {
                 let done = w.run();
-                owner::call(owner::Class::Finish, || o2_finish(up, done));
+                owner::call(owner::Class::FinishBackground, || o2_finish(up, done));
             }
         }));
         if r.is_err() {
@@ -7409,7 +7440,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     (&*up).fns[id as usize].unverified.store(unverified, Ordering::Relaxed);
     let baseline = unverified || mode == RirMode::Baseline || mode == RirMode::Tier0 && !o2_build() && !RT_KEEP.with(|k| k.get()) && match options.t0_baseline {
         crate::options::Tier0Baseline::Off => false,
-        crate::options::Tier0Baseline::Startup => startup_phase() || (&*up).fns[id as usize].baseline_hint.load(Ordering::Relaxed),
+        crate::options::Tier0Baseline::Startup => startup_phase() || warmup_foreground() || (&*up).fns[id as usize].baseline_hint.load(Ordering::Relaxed),
         crate::options::Tier0Baseline::Always => true,
     };
     let r = match lowered { Some(f) => Ok(f), None => build_rir_inner(up, id) };
@@ -10187,6 +10218,14 @@ impl Drop for StartupCompile {
 // Recheck for every job: renewed foreground compilation immediately throttles new builds
 // back to worker zero. In-flight builds always finish and install, even during startup.
 const TIER1_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// ns since the program threads' last lazy compile ended; 0 while one runs (owner.rs's headroom).
+pub(crate) fn demand_quiet_ns() -> u64 {
+    if DEMAND_COMPILES.load(Ordering::SeqCst) != 0 {
+        return 0;
+    }
+    wall_ns().saturating_sub(DEMAND_LAST.load(Ordering::SeqCst))
+}
+
 fn tier1_workers_ready() -> bool {
     DEMAND_COMPILES.load(Ordering::SeqCst) == 0
         && wall_ns().saturating_sub(DEMAND_LAST.load(Ordering::SeqCst)) >= TIER1_POLL.as_nanos() as u64
@@ -11314,7 +11353,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let t2 = cpu_ns();
     if let Some(m) = measure.as_mut() { m.phase(2, t2); }
     trace_tier1_phase(id, "built");
-    let ok = owner::call(owner::Class::Finish, || {
+    // (an O3-always first build is a program thread's lazy compile: its finish is foreground)
+    let ok = owner::call(if o3_first() { owner::Class::Finish } else { owner::Class::FinishBackground }, || {
         trace_tier1_phase(id, "install");
         let _cost_install = relax_codegen::fncost::phase(6);
         let u = &mut *up;
@@ -11579,6 +11619,32 @@ pub fn begin_startup_phase() {
 
 fn startup_phase() -> bool {
     STARTUP_PHASE.load(Ordering::Acquire) == 1
+}
+
+/// The warm-up after the first present: the burst of lazy compiles the first frames make (a cold
+/// Stage: thousands in the first seconds, one at a time on the UI thread). It ends once the UI
+/// thread has gone WARMUP_QUIET_NS without waiting on the JIT, or WARMUP_MAX_NS after the present.
+const WARMUP_QUIET_NS: u64 = 300_000_000;
+const WARMUP_MAX_NS: u64 = 30_000_000_000;
+static WARMUP_OVER: AtomicBool = AtomicBool::new(false);
+
+fn warmup() -> bool {
+    if !FIRST_PRESENT.load(Ordering::Acquire) || WARMUP_OVER.load(Ordering::Relaxed) {
+        return false;
+    }
+    let since = wall_ns().saturating_sub(FIRST_PRESENT_NS.load(Ordering::Relaxed));
+    if since >= WARMUP_MAX_NS || crate::postframe::ui_idle_ns() >= WARMUP_QUIET_NS {
+        WARMUP_OVER.store(true, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+/// A program thread's lazy compile in the warm-up: built as the startup's are (baseline code, no
+/// inline candidates; hot code tiers up as startup code does), the cheapest code that runs.
+fn warmup_foreground() -> bool {
+    let class = if owner::is_owner() { owner::serving().0 } else { owner::program_class() };
+    matches!(class, owner::Class::Main | owner::Class::App) && !IS_WORKER.try_with(|w| w.get()).unwrap_or(false) && warmup()
 }
 
 fn startup_holds_tier1() -> bool {
@@ -11938,6 +12004,12 @@ fn cold_blocks(u: &Unit, func: &relax_backend::rir::Func) -> Vec<bool> {
     }
 }
 
+/// MAKEPAD_RUN_SPEC_DYN=0: speculation follows direct calls only, not fn pointers and vtables
+fn spec_dyn() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SPEC_DYN").map_or(true, |v| v != "0"))
+}
+
 /// Queues the slots `func` calls (but not `skip`) at depth + 1 (lock held).
 unsafe fn spec_enqueue_calls(up: *mut Unit, func: &relax_backend::rir::Func, skip: &[u32], depth: u8) {
     if startup_phase() { return; }
@@ -11970,14 +12042,36 @@ unsafe fn spec_enqueue_calls(up: *mut Unit, func: &relax_backend::rir::Func, ski
     }
     let mut front = Vec::new();
     let mut back = Vec::new();
+    let dyn_on = spec_dyn() && depth + 1 < spec_hot_from(options);
+    let mut dyn_refs: Vec<u32> = Vec::new();
+    let mut seen_dyn = crate::fxhash::HashSet::default();
     for (bi, b) in func.blocks.iter().enumerate() {
         if cold[bi] {
             SPEC_COLD_SKIPPED.fetch_add(b.insts.iter().filter(|i| matches!(i, Inst::Call(Callee::Fn(_), _, _))).count() as u64, Ordering::Relaxed);
             continue;
         }
         for i in &b.insts {
-            if let Inst::Call(Callee::Fn(c), _, _) = i {
-                if skip.contains(c) {
+            // what it calls, and (spec_dyn) the fns it can reach through data: fn pointers it takes,
+            // the methods of the vtables it makes (a widget's draw / event paths, which the program
+            // reaches only through `dyn`)
+            dyn_refs.clear();
+            let direct = match i {
+                Inst::Call(Callee::Fn(c), _, _) => Some(*c),
+                Inst::FnAddr(_, c) if dyn_on => { dyn_refs.push(*c); None }
+                Inst::Addr(_, sym) if dyn_on => {
+                    match u.syms.kind(sym.id) {
+                        Some(crate::syms::SymKind::Thunk(c)) => dyn_refs.push(c),
+                        Some(crate::syms::SymKind::Data(_)) => crate::syms::data_thunks(u, u.syms.value(relax_backend::rir::Sym { id: sym.id, off: 0 }), &mut dyn_refs),
+                        _ => {}
+                    }
+                    None
+                }
+                _ => None,
+            };
+            for &c in direct.iter().chain(dyn_refs.iter()) {
+                let is_dyn = direct.is_none();
+                let c = &c;
+                if skip.contains(c) || is_dyn && !seen_dyn.insert(*c) {
                     continue;
                 }
                 let f = &u.fns[*c as usize];
@@ -11994,12 +12088,13 @@ unsafe fn spec_enqueue_calls(up: *mut Unit, func: &relax_backend::rir::Func, ski
                 if !ok {
                     continue;
                 }
-                // deeper levels follow only the fall-through path (they are a guess on a guess)
-                if !hot[bi] && (spec_hot_only(options) || depth + 1 >= spec_hot_from(options)) {
+                // deeper levels follow only the fall-through path (they are a guess on a guess);
+                // what is reachable through data only from the code that ran
+                if (!hot[bi] || is_dyn) && (spec_hot_only(options) || depth + 1 >= spec_hot_from(options)) {
                     continue;
                 }
                 u.fns[*c as usize].spec_depth = depth + 1;
-                if hot[bi] {
+                if hot[bi] && !is_dyn {
                     front.push(*c);
                 } else {
                     back.push(*c);
@@ -13269,7 +13364,7 @@ unsafe fn spec_build(up: *mut Unit, id: u32) -> bool {
     match b {
         Begin::Back(w) => {
             let d = w.run();
-            owner::call(owner::Class::Finish, || split_finish(up, d));
+            owner::call(owner::Class::FinishBackground, || split_finish(up, d));
             COMPILE_LAST.store(wall_ns(), Ordering::Relaxed);
             true
         }
@@ -13570,7 +13665,7 @@ fn ahead_helper(f: std::sync::Arc<FrontShared>) {
         typeck_ahead(&f, d, args, 1, true, normal);
         AHEAD_STATS[4].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
         if let Some(id) = slot {
-            lower_ahead(&f, id);
+            lower_ahead(&f, id, false);
         }
     }
 }
@@ -13650,9 +13745,16 @@ pub(crate) fn lower_ahead_needs_unit() {
     }
 }
 
-fn lower_ahead(f: &FrontShared, id: u32) {
+/// Lowers slot `id`'s checked body off the unit (its build takes the RIR, take_lowered_ahead): the
+/// startup helpers' work, and after it the thread about to build `id` itself (`own`: the owner's
+/// front then only takes the RIR, so lowering runs on the program's threads in parallel, not on
+/// the one owner thread every lazy compile queues for).
+fn lower_ahead(f: &FrontShared, id: u32, own: bool) {
+    // not inside another lowering ahead (a compile its constant evaluation reached): this one's
+    // guard would end the outer one's temporary callee identities under it
+    if LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(true) { return; }
     let _r = front_read("lower_ahead");
-    if !f.alive.load(Ordering::SeqCst) || !startup_phase() { return; }
+    if !f.alive.load(Ordering::SeqCst) || !own && !startup_phase() { return; }
     let Some(FnKey::Inst(d, args)) = f.slot_keys.get(&id) else { return; };
     let key = (d, args);
     if f.built.contains(&key) { return; }
@@ -13875,6 +13977,8 @@ pub unsafe fn typeck_ahead_slot(up: *mut Unit, id: u32) {
         // a helper is checking this very body: wait for its result rather than check it again
         // under the unit lock (not while holding that lock: a constant evaluation's call)
         if !owner::is_owner() && f.inprog.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+            // (a wait for another thread: not a running job meanwhile, job_sleep's reason)
+            let _idle = JobIdle::enter();
             let mut g = AHEAD_DONE.0.lock().unwrap_or_else(|e| e.into_inner());
             while f.inprog.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) && f.alive.load(Ordering::SeqCst) {
                 g = AHEAD_DONE.1.wait_timeout(g, std::time::Duration::from_millis(5)).map(|x| x.0).unwrap_or_else(|e| e.into_inner().0);
@@ -13882,6 +13986,10 @@ pub unsafe fn typeck_ahead_slot(up: *mut Unit, id: u32) {
         }
         let w = IS_WORKER.try_with(|w| w.get()).unwrap_or(false);
         AHEAD_STATS[if w { 4 } else { 3 }].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+        // after the startup (its helpers lower then), the thread about to build the slot lowers it
+        if !owner::is_owner() && !startup_phase() && pipelined() {
+            lower_ahead(&f, id, true);
+        }
     }
 }
 
@@ -13976,7 +14084,7 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
             let it = prog.files[cd.file as usize].ast.item(cd.item);
             let toks = &prog.files[cd.file as usize].toks;
             let src = (toks.partition_point(|t| t.lo < it.hi) - toks.partition_point(|t| t.lo < it.lo)) as u32;
-            let baseline = !normal && startup_phase() && f.session.options.t0_baseline != crate::options::Tier0Baseline::Off;
+            let baseline = !normal && (startup_phase() || warmup_foreground()) && f.session.options.t0_baseline != crate::options::Tier0Baseline::Off;
             let want = if baseline { src <= BASE_INLINE_SRC_TOKS } else {
                 attr & relax_codegen::opt::ATTR_ALWAYS != 0 || src <= src_toks || (attr & relax_codegen::opt::ATTR_HINT != 0 && src <= INLINE_HINT_SRC_TOKS)
             };

@@ -32,8 +32,8 @@ static HOW: [[AtomicU64; 2]; 6] = [const { [const { AtomicU64::new(0) }; 2] }; 6
 static SUMMARY_DONE: AtomicBool = AtomicBool::new(false);
 /// the owner's service in the window by class (ns), and of it the requests a program thread's
 /// request was queued behind when they ended (ns)
-static SERVED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
-static SERVED_BLOCKING: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static SERVED: [AtomicU64; crate::owner::CLASSES] = [const { AtomicU64::new(0) }; crate::owner::CLASSES];
+static SERVED_BLOCKING: [AtomicU64; crate::owner::CLASSES] = [const { AtomicU64::new(0) }; crate::owner::CLASSES];
 
 // ------------------------------------------------------------ readiness (the warm-up veil)
 
@@ -103,10 +103,10 @@ pub fn ahead_progress() -> (u64, u64) {
     (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + AHEAD_RUNNING.load(Relaxed))
 }
 
-/// The app is ready after its first present: the UI thread has not waited on the JIT for
+/// The app is ready after its first present (false before it): the UI thread has not waited on the JIT for
 /// `quiet_ns` and nothing is left to build ahead.
 pub fn ready(quiet_ns: u64) -> bool {
-    ui_idle_ns() >= quiet_ns && ahead_progress().1 == 0
+    present_ns() != 0 && ui_idle_ns() >= quiet_ns && ahead_progress().1 == 0
 }
 
 fn present_ns() -> u64 {
@@ -259,8 +259,8 @@ fn summary_due(now: u64) {
     }
 }
 
-fn served(a: &[AtomicU64; 5]) -> String {
-    (0..5).map(|c| format!("{} {:.0}", crate::owner::CLASS_NAMES[c], ms(a[c].load(Relaxed)))).collect::<Vec<_>>().join(", ")
+fn served(a: &[AtomicU64; crate::owner::CLASSES]) -> String {
+    (0..crate::owner::CLASSES).map(|c| format!("{} {:.0}", crate::owner::CLASS_NAMES[c], ms(a[c].load(Relaxed)))).collect::<Vec<_>>().join(", ")
 }
 
 /// The window's sums (one line).

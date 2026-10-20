@@ -2653,7 +2653,8 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     let up = unsafe { RUN_UNIT };
     // one unit call: waits for the unit when `wait`, else only if it is free now
     fn unit_call<R>(wait: bool, f: impl FnOnce() -> R) -> Option<R> {
-        if wait { Some(crate::owner::call(crate::owner::Class::App, f)) } else { crate::owner::call_within(crate::owner::Class::Background, 0, f) }
+        // (the writer is a background thread: a program thread's request goes first either way)
+        if wait { Some(crate::owner::call(crate::owner::Class::Background, f)) } else { crate::owner::call_within(crate::owner::Class::Background, 0, f) }
     }
     if up.is_null() {
         return None;
