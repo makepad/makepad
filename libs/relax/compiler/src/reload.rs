@@ -3888,6 +3888,13 @@ pub(crate) fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
     Some((m.modified().ok()?, m.len()))
 }
 
+fn gate_note(g: u8) {
+    static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+    if LAST.swap(g, Ordering::Relaxed) != g && std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() {
+        eprintln!("makepad live: watcher gate {} at t={:.0} ms", ["open", "domain loading", "no first present", "restart required"][g as usize], crate::clock::ms_since_start());
+    }
+}
+
 unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
     // (path, running file index, last stamp)
@@ -3947,7 +3954,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
     loop {
         std::thread::sleep(std::time::Duration::from_millis(5));
         if WATCH_STOP.load(Ordering::SeqCst) { return; }
-        if DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire) { continue; }
+        if DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire) { gate_note(1); continue; }
         let latest = DOMAIN_REVISION.load(std::sync::atomic::Ordering::Acquire);
         if latest != revision {
             revision = latest;
@@ -3971,17 +3978,20 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         // Keep the original stamps and queued OS notifications intact until startup
         // finishes. In particular, do not acquire Reloading or drain streamed edits:
         // either can compete with the cold compiler before the first frame.
-        if !jit::live_startup_done() { continue; }
+        if !jit::live_startup_done() { gate_note(2); continue; }
         // Once the tree no longer matches this session, later saves must not patch a
         // mixture of revisions into the old process. A fresh run restores live editing.
-        if restart_required { continue; }
+        if restart_required { gate_note(3); continue; }
+        gate_note(0);
         let loads = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
         // a new watch set drops the events the old one had not delivered yet (a save made
         // while the post-boot loader loads was never seen): stat every file once instead
         let mut rewatched = std::mem::take(&mut startup_scan);
         if loads != loads_seen || rewatched {
             loads_seen = loads;
+            let t_own = Instant::now();
             let loaded = crate::owner::call_quick(crate::owner::Class::App, || own_files(&*up));
+            if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: rewatch (loads {loads}, startup scan {rewatched}): own files in {:.1} ms at t={:.0} ms", t_own.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start()); }
             let known: std::collections::HashMap<_, _> = files.iter().enumerate().map(|(i, f)| (f.0.clone(), i)).collect();
             let mut added = Vec::new();
             for (path, file) in loaded {
@@ -3995,7 +4005,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
                 rewatched = true;
             }
         }
+        let t_dr = Instant::now();
         drain_streams(up);
+        if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() && t_dr.elapsed().as_millis() > 20 { eprintln!("makepad live: drain_streams took {:.1} ms at t={:.0} ms", t_dr.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start()); }
         // Re-check an unchanged failing prefix once, after one second of silence.
         let due: Vec<_> = stalled.iter().filter(|(_, (t, _, _))| t.elapsed().as_secs_f64() >= 1.0).map(|(&k, _)| k).collect();
         for k in due {
@@ -4004,6 +4016,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             if stamp(&f.0) != f.2 { continue; }
             let seen = Instant::now();
             let mut o = apply_mode(up, vec![Edit { file: f.1, path: f.0.clone(), src }], 0, false);
+            if o.rung == Rung::Refuse {
+                // still refused: it was reported when it was saved
+                continue;
+            }
             if o.rung != Rung::Patch {
                 o.lines = refusal_lines(first, std::mem::take(&mut o.lines));
                 log_edit(&f.0, &o, f.2.map(|s| s.0), seen);
@@ -4026,7 +4042,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             }
         }
         tick = tick.wrapping_add(1);
+        let t_ev = Instant::now();
         let notifications = events.as_mut().and_then(|w| w.changed());
+        if t_ev.elapsed().as_millis() > 20 && std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: events drain took {:.1} ms", t_ev.elapsed().as_secs_f64() * 1e3); }
         let lost = events.is_some() && notifications.is_none();
         if lost { events = watch_events::Watch::new(files.iter().map(|f| f.0.as_str())); }
         let all = lost || rewatched || (events.is_none() && tick % 20 == 0);
@@ -4061,6 +4079,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             continue;
         }
         let seen = std::time::Instant::now();
+        if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: a change seen at t={:.0} ms ({} file(s))", crate::clock::ms_since_start(), changed.len()); }
         // from the save on, the post-boot loader keeps off the unit (the read below
         // compares with the running text on it)
         for &k in &changed {
@@ -4089,10 +4108,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             scanned += candidates.len() + changed.len();
             for k in candidates {
                 if stamp(&files[k].0) != files[k].2 && !changed.contains(&k) {
+                    if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: settle: {} changed too (+{:.0} ms)", files[k].0, seen.elapsed().as_secs_f64() * 1e3); }
                     changed.push(k);
                     more = true;
                 }
             }
+            if std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() && now != last { eprintln!("makepad live: settle: a stamp moved (+{:.0} ms)", seen.elapsed().as_secs_f64() * 1e3); }
             if !more && now == last {
                 break;
             }
@@ -4179,11 +4200,16 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         if incomplete {
             for (&k, src) in which.iter().zip(originals) { stalled.insert(k, (Instant::now(), src, if o.rung == Rung::Refuse { o.lines.clone() } else { Vec::new() })); }
         }
+        let what = names.join(", ");
         if o.rung == Rung::Refuse {
-            // Diagnostics are emitted only by the stalled-file check above.
+            // reported at once (the AI loop's feedback must not wait); the silence re-check above
+            // stays as a retry and says nothing more while it is still refused
+            log_edit(&what, &o, saved, seen);
+            eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what);
+            for l in &o.lines { eprintln!("makepad live:   {}", l); }
+            patch_refused_event(&what, true, &o.lines);
             continue;
         }
-        let what = names.join(", ");
         if o.rung == Rung::Restart {
             RESTART_SAVED_MS.store(saved.map_or(0.0, unix_ms) as u64, std::sync::atomic::Ordering::Relaxed);
         }

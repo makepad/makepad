@@ -72,8 +72,15 @@ pub fn lower_legacy_const_generics_in(prog: &mut Program, visible: Option<&[bool
     if std::env::var_os("MAKEPAD_RUN_INVALIDATION_TRACE").is_some() { eprintln!("invalidation-trace: legacy whole={} scoped={}", usize::from(visible.is_none()), usize::from(visible.is_some())); }
     let sees = |prog: &Program, d: DefId| visible.map_or(true, |v| v.get(prog.def(d).krate as usize).copied().unwrap_or(true));
     let mut owners: Vec<_> = Vec::new();
-    for &owner in &prog.collected_definitions {
-        if sees(prog, owner) { owners.push(owner); }
+    // (the defs of the files of the visible crates, from the per-file index: a scoped pass does
+    // not walk the whole program's definition table)
+    let visible_defs: Vec<DefId> = if visible.is_some() { prog.defs_in_visible_files(visible) } else { Vec::new() };
+    if visible.is_none() {
+        for &owner in &prog.collected_definitions { owners.push(owner); }
+    } else {
+        for &d in &visible_defs {
+            if sees(prog, d) && prog.collected_definitions.contains(&d) { owners.push(d); }
+        }
     }
     owners.sort_unstable_by_key(|d| d.0);
     let mut attrs = crate::fxhash::HashMap::default();
@@ -87,9 +94,8 @@ pub fn lower_legacy_const_generics_in(prog: &mut Program, visible: Option<&[bool
     }
     prog.legacy_const_attrs = std::sync::Arc::new(attrs);
     match visible {
-        Some(visible) => {
-            let defs = &prog.defs;
-            prog.legacy_const_args.retain(|d, _| !visible.get(defs[d.0 as usize].krate as usize).copied().unwrap_or(true));
+        Some(_) => {
+            for d in &visible_defs { prog.legacy_const_args.remove(d); }
         }
         None => prog.legacy_const_args.clear(),
     }

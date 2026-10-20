@@ -733,8 +733,9 @@ struct AssocState {
     associated: HashMap<DefId, Vec<DefId>>,
     opaque: HashMap<DefId, DefId>,
     trait_items: HashMap<DefId, DefId>,
-    traits: Vec<Vec<DefId>>,
-    impl_items: Vec<Vec<DefId>>,
+    /// (index, items) of the traits / impls saved: all of them, or only those of the visible crates
+    traits: Vec<(usize, Vec<DefId>)>,
+    impl_items: Vec<(usize, Vec<DefId>)>,
 }
 impl DeclarationState {
     fn save(prog: &Program, file: u32, body_only: bool, visible: Option<&[bool]>) -> Self {
@@ -744,15 +745,23 @@ impl DeclarationState {
             for &d in prog.defs_in_file(file) {
                 if let Some(result) = prog.legacy_const_args.get(&DefId(d)) { legacy.insert(DefId(d), result.clone()); }
             }
-        } else {
-            for (&owner, result) in &prog.legacy_const_args {
-                if sees(owner) { legacy.insert(owner, result.clone()); }
+        } else if visible.is_some() {
+            for d in prog.defs_in_visible_files(visible) {
+                if let Some(result) = prog.legacy_const_args.get(&d) { legacy.insert(d, result.clone()); }
             }
+        } else {
+            for (&owner, result) in &prog.legacy_const_args { legacy.insert(owner, result.clone()); }
         }
+        // A scoped pass (assoc::collect_in) rewrites only what belongs to the visible crates, so
+        // that is all the rollback needs; the maps are filtered, the item lists of other crates'
+        // traits and impls are not copied.
         let environment = if body_only { None } else { Some((prog.legacy_const_attrs.clone(), AssocState {
-            rpitit: prog.impl_trait_in_trait_data.iter().map(|(k, v)| (*k, v.clone())).collect(), associated: prog.associated_types_for_impl_traits.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            opaque: prog.opaque_to_rpitit.iter().map(|(k, v)| (*k, v.clone())).collect(), trait_items: prog.trait_item_def_id.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            traits: prog.traits.iter().cloned().collect(), impl_items: prog.impls.iter().map(|i| i.items.clone()).collect(),
+            rpitit: prog.impl_trait_in_trait_data.iter().filter(|(k, _)| sees(**k)).map(|(k, v)| (*k, v.clone())).collect(),
+            associated: prog.associated_types_for_impl_traits.iter().filter(|(k, _)| sees(**k)).map(|(k, v)| (*k, v.clone())).collect(),
+            opaque: prog.opaque_to_rpitit.iter().filter(|(k, _)| sees(**k)).map(|(k, v)| (*k, v.clone())).collect(),
+            trait_items: prog.trait_item_def_id.iter().filter(|(k, _)| sees(**k)).map(|(k, v)| (*k, v.clone())).collect(),
+            traits: prog.traits.iter().enumerate().filter(|(_, items)| visible.is_none() || items.first().is_some_and(|&m| sees(m))).map(|(i, items)| (i, items.clone())).collect(),
+            impl_items: prog.impls.iter().enumerate().filter(|(_, im)| sees(im.def)).map(|(i, im)| (i, im.items.clone())).collect(),
         })) };
         Self { legacy, visible: visible.map(|v| v.to_vec()), environment, errors: prog.errors.clone() }
     }
@@ -761,18 +770,33 @@ impl DeclarationState {
         if let Some((attrs, assoc)) = self.environment {
             match &self.visible {
                 Some(visible) => {
-                    let defs = &prog.defs;
-                    prog.legacy_const_args.retain(|d, _| !visible.get(defs[d.0 as usize].krate as usize).copied().unwrap_or(true));
+                    for d in prog.defs_in_visible_files(Some(visible)) { prog.legacy_const_args.remove(&d); }
                 }
                 None => prog.legacy_const_args.clear(),
             }
             prog.legacy_const_attrs = attrs;
-            prog.impl_trait_in_trait_data = assoc.rpitit.into_iter().collect();
-            prog.associated_types_for_impl_traits = assoc.associated.into_iter().collect();
-            prog.opaque_to_rpitit = assoc.opaque.into_iter().collect();
-            prog.trait_item_def_id = assoc.trait_items.into_iter().collect();
-            for (i, items) in assoc.traits.into_iter().enumerate() { prog.traits[i] = items; }
-            for (i, items) in assoc.impl_items.into_iter().enumerate() { prog.impls[i].items = items; }
+            match &self.visible {
+                Some(visible) => {
+                    let defs = &prog.defs;
+                    let seen = |d: &DefId| visible.get(defs[d.0 as usize].krate as usize).copied().unwrap_or(true);
+                    prog.impl_trait_in_trait_data.retain(|d, _| !seen(d));
+                    prog.associated_types_for_impl_traits.retain(|d, _| !seen(d));
+                    prog.opaque_to_rpitit.retain(|d, _| !seen(d));
+                    prog.trait_item_def_id.retain(|d, _| !seen(d));
+                    prog.impl_trait_in_trait_data.extend(assoc.rpitit);
+                    prog.associated_types_for_impl_traits.extend(assoc.associated);
+                    prog.opaque_to_rpitit.extend(assoc.opaque);
+                    prog.trait_item_def_id.extend(assoc.trait_items);
+                }
+                None => {
+                    prog.impl_trait_in_trait_data = assoc.rpitit.into_iter().collect();
+                    prog.associated_types_for_impl_traits = assoc.associated.into_iter().collect();
+                    prog.opaque_to_rpitit = assoc.opaque.into_iter().collect();
+                    prog.trait_item_def_id = assoc.trait_items.into_iter().collect();
+                }
+            }
+            for (i, items) in assoc.traits { prog.traits[i] = items; }
+            for (i, items) in assoc.impl_items { prog.impls[i].items = items; }
         }
         prog.legacy_const_args.extend(self.legacy);
         prog.errors = self.errors;
@@ -909,6 +933,12 @@ impl Program {
     fn reload_files_mut(&mut self) -> &mut ReloadFiles {
         self.reload_files();
         self.reload.get_mut().unwrap()
+    }
+    /// Every def of the files of the visible crates (None: every crate's), from the per-file index.
+    pub fn defs_in_visible_files(&self, visible: Option<&[bool]>) -> Vec<DefId> {
+        (0..self.files.len() as u32)
+            .filter(|&f| visible.map_or(true, |v| v.get(self.file_crate[f as usize] as usize).copied().unwrap_or(true)))
+            .flat_map(|f| self.defs_in_file(f).iter().map(|&d| DefId(d))).collect()
     }
     pub fn defs_in_file(&self, file: u32) -> &[u32] {
         self.reload_files().defs.get(&file).map_or(&[], Vec::as_slice)
@@ -1913,7 +1943,9 @@ impl Program {
 
     fn commit_version_inner(&mut self, v: FileVersion, pairs: &[(u32, u32)], same_scopes: bool, visible: Option<&[bool]>) -> Result<u32, String> {
         let old = v.old;
+        let t_save = std::time::Instant::now();
         let declarations = DeclarationState::save(self, old, same_scopes, visible);
+        let save_ms = t_save.elapsed().as_secs_f64() * 1e3;
         // Old ASTs stay alive for running frames, but old reuse entries do not.
         self.parse_reuse.remove(&old);
         self.parse_reuse.insert(self.files.len() as u32, v.reuse);
@@ -1970,7 +2002,12 @@ impl Program {
         self.file_blocks.push(v.blocks);
         self.retarget_file(old, new, pairs);
         self.declaration_versions.insert(new, declarations);
-        if let Err(error) = self.collect_version_definitions(new, !same_scopes, true, visible) {
+        let t_collect = std::time::Instant::now();
+        let collected = self.collect_version_definitions(new, !same_scopes, true, visible);
+        if std::env::var_os("MAKEPAD_RUN_COMMIT_TRACE").is_some() {
+            eprintln!("commit-trace: save {:.2} ms, collect definitions {:.2} ms, rest {:.2} ms", save_ms, t_collect.elapsed().as_secs_f64() * 1e3, t_save.elapsed().as_secs_f64() * 1e3 - save_ms - t_collect.elapsed().as_secs_f64() * 1e3);
+        }
+        if let Err(error) = collected {
             self.revert_version(old, new, pairs);
             return Err(error);
         }
