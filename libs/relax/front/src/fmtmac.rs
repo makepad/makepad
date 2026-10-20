@@ -112,6 +112,7 @@ struct FmtCall {
     first: Option<ExprId>,
     pos: Vec<ExprId>,
     named: Vec<(String, ExprId)>,
+    named_pos: Vec<u32>,
 }
 
 /// Generated tokens plus the expressions spliced into them.
@@ -457,7 +458,7 @@ impl<'a> Parser<'a> {
     /// `"fmt", args.., name = arg..` up to token `hi`. `loose`: the first argument may be any
     /// expression (`panic!(x)`, formatted with Display).
     fn fmt_call(&mut self, hi: usize, loose: bool) -> PResult<FmtCall> {
-        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new() };
+        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new(), named_pos: Vec::new() };
         if self.pos >= hi {
             return Ok(c);
         }
@@ -491,6 +492,7 @@ impl<'a> Parser<'a> {
                 }
                 let e = self.expr()?;
                 c.named.push((name, e));
+                c.named_pos.push(n.lo);
             } else {
                 if !c.named.is_empty() {
                     return self.err("positional format argument after a named one -- move it before the named ones");
@@ -536,6 +538,8 @@ impl<'a> Parser<'a> {
         // rebase indices and names onto slots; captures become new slots
         let mut next = 0usize;
         let mut captures: Vec<String> = Vec::new();
+        // named arguments reached by position (named_arguments_used_positionally)
+        let mut numeric_named: Vec<usize> = Vec::new();
         let mut resolve = |r: &ArgRef, next: &mut usize, srcs: &mut Vec<Src>| -> Result<usize, String> {
             Ok(match r {
                 ArgRef::Next => {
@@ -544,12 +548,14 @@ impl<'a> Parser<'a> {
                     if i >= npos + names.len() {
                         return Err(format!("format string needs argument {} but there are {} -- add the argument", i + 1, npos + names.len()));
                     }
+                    if i >= npos { numeric_named.push(i - npos); }
                     base + i
                 }
                 ArgRef::Index(i) => {
                     if *i >= npos + names.len() {
                         return Err(format!("format string refers to argument {} but there are {} -- add the argument", i, npos + names.len()));
                     }
+                    if *i >= npos { numeric_named.push(*i - npos); }
                     base + i
                 }
                 ArgRef::Name(n) => match names.iter().position(|x| x == n) {
@@ -601,6 +607,12 @@ impl<'a> Parser<'a> {
                 _ => flo,
             };
             return Err(PErr { pos: e, msg: "format argument never used -- remove it or add a `{}`".to_string() });
+        }
+        if crate::macros::uses::recording() {
+            let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
+            for k in numeric_named {
+                crate::macros::uses::named_arg_positional(&file, c.named_pos[k], &names[k]);
+            }
         }
         self.gen_pieces(g, out, srcs, flo)
     }

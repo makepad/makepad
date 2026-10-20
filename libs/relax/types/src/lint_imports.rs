@@ -77,6 +77,8 @@ fn scan_tokens(prog: &Program, file: u32) -> FileTokens {
     let mut mac_end = 0usize;
     // the token index an attribute's brackets end at
     let mut attr_end = 0usize;
+    // inside `#[macro_use(..)]`: the names listed are no uses
+    let mut in_macro_use = false;
     for k in 0..kinds.len() {
         if k >= mac_end && matches!(kinds[k].0, T::Ident | T::RawIdent) && k + 2 < kinds.len() && kinds[k + 1].0 == T::Not && matches!(kinds[k + 2].0, T::OpenParen | T::OpenBracket | T::OpenBrace) {
             let mut depth = 0i32;
@@ -98,6 +100,7 @@ fn scan_tokens(prog: &Program, file: u32) -> FileTokens {
                     e += 1;
                 }
                 attr_end = e;
+                in_macro_use = o + 1 < kinds.len() && text(o + 1) == "macro_use";
             }
         }
         // the paths of a `use` item are no uses
@@ -110,6 +113,7 @@ fn scan_tokens(prog: &Program, file: u32) -> FileTokens {
             T::Ident | T::RawIdent | T::KwSelfValue | T::KwSuper | T::KwCrate => {
                 let prev = if k > 0 { Some(kinds[k - 1].0) } else { None };
                 if prev == Some(T::Dot) && k >= mac_end { continue; }
+                if in_macro_use && k < attr_end { continue; }
                 let name = text(k);
                 let name = name.strip_prefix("r#").map(str::to_string).unwrap_or(name);
                 let prefix = if prev == Some(T::PathSep) && k >= 2 { Some(text(k - 2)) } else { None };
@@ -327,6 +331,15 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
     for sc in &scopes {
         unused_extern_crates(prog, sc);
     }
+    // the macro names written anywhere in each crate
+    let mut crate_written: HashMap<u32, HashSet<String>> = HashMap::new();
+    for (si, sc) in scopes.iter().enumerate() {
+        if sc.module == u32::MAX { continue; }
+        crate_written.entry(prog.mods[sc.module as usize].krate).or_default().extend(written[si].iter().cloned());
+    }
+    for sc in &scopes {
+        unused_macro_use(prog, sc, &crate_written);
+    }
     for (si, sc) in scopes.iter().enumerate() {
         let names = &written[si];
         for &it in &sc.items {
@@ -423,6 +436,51 @@ fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
         if used { continue; }
         let attrs = ast.list(item.attrs).to_vec();
         lint::emit_in(prog, sc.def, &attrs, &UNUSED_EXTERN_CRATES, sc.file, item.lo, "unused extern crate");
+    }
+}
+
+pub const UNUSED_MACRO_USE_MSG: &str = "unused `#[macro_use]` import";
+
+/// `#[macro_use] extern crate dep;` (also `#[macro_use(a, b)]`): unused when none of the macros it
+/// brings into the macro_use prelude is invoked by name in the crate (an approximation of
+/// rustc's per-resolution record: a macro reached only by path counts as a use here too).
+fn unused_macro_use(prog: &Program, sc: &Scope<'_>, written: &HashMap<u32, HashSet<String>>) {
+    if sc.block || sc.module == u32::MAX { return; }
+    let krate = prog.mods[sc.module as usize].krate;
+    let Some(used) = written.get(&krate) else { return };
+    let ast = sc.ast;
+    let pf = &prog.files[sc.file as usize];
+    for &it in &sc.items {
+        let item = ast.item(it);
+        let ItemKind::ExternCrate(_) = item.kind else { continue };
+                if lint::external(prog, sc.file, item.lo) || item.lo >= pf.src_len { continue; }
+        let target = pf.text(item.name).to_string();
+        for a in ast.list(item.attrs) {
+            if lint::attr_path(prog, sc.file, a) != b"macro_use" { continue; }
+            let p = prog.src(sc.file);
+            let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+            let attrs = ast.list(item.attrs).to_vec();
+            // `macro_use(a, b)`: the listed names
+            let mut names: Vec<(String, u32)> = Vec::new();
+            if hi > lo + 1 && crate::cfg::tok_str(p, lo + 1) == b"(" {
+                for i in lo + 2..hi {
+                    let t = crate::cfg::tok_str(p, i);
+                    if t.first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') { names.push((String::from_utf8_lossy(t).into_owned(), p.tok(i).lo)); }
+                }
+            }
+            if names.is_empty() {
+                // every exported macro of the crate
+                let mut all: Vec<String> = prog.macros.defs.iter().filter(|(_, v)| v.iter().any(|d| d.exported && d.krate == target)).map(|(k, _)| k.clone()).collect();
+                if matches!(target.as_str(), "core" | "std" | "alloc") { all.extend(crate::program::BUILTIN_MACROS.iter().map(|s| s.to_string())); }
+                if !all.iter().any(|n| used.contains(n)) {
+                    lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, p.tok(lo).lo, UNUSED_MACRO_USE_MSG);
+                }
+            } else {
+                for (n, pos) in names {
+                    if !used.contains(&n) { lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, pos, UNUSED_MACRO_USE_MSG); }
+                }
+            }
+        }
     }
 }
 

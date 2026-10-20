@@ -745,6 +745,8 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
 pub struct Reach {
     own: Vec<bool>,
     pub defs: HashSet<DefId>,
+    /// `defs` before the types of reachable interfaces were added: what a path can name
+    pub named: HashSet<DefId>,
     pub fields: HashSet<FieldKey>,
 }
 
@@ -779,12 +781,13 @@ fn use_leaves(ast: &Ast, t: &UseTree, prefix: &mut Vec<PathSeg>, out: &mut Vec<(
 
 impl Reach {
     fn compute(prog: &Program, tcx: &Tcx, own: &[bool]) -> Reach {
-        let mut r = Reach { own: own.to_vec(), defs: HashSet::new(), fields: HashSet::new() };
+        let mut r = Reach { own: own.to_vec(), defs: HashSet::new(), named: HashSet::new(), fields: HashSet::new() };
         let mut done: HashSet<u32> = HashSet::new();
         for (k, c) in prog.crates.iter().enumerate() {
             if own.get(k).copied().unwrap_or(false) { r.module(prog, c.root_mod, &mut done); }
         }
         r.impls(prog, tcx, own);
+        r.named = r.defs.clone();
         // the types a reachable item mentions in its interface are reachable too
         let mut done2: HashSet<u32> = HashSet::new();
         loop {
@@ -1220,6 +1223,10 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
     if executable { rep.run(&DEAD_CODE_PUB_IN_BINARY, &pre_live, true, &all); }
     rep.run(&DEAD_CODE, &s.live, false, &all);
     crate::lint_late::missing_copy_implementations(prog, tcx, own, &reach);
+    crate::lint_late::variant_size_differences(prog, tcx, own);
+    crate::lint_late::async_fn_in_trait(prog, own, &reach);
+    crate::lint_late::repr_transparent_fields(prog, tcx, own);
+    unnameable_types(prog, own, &reach);
     crate::lint_imports::check(prog, tcx, own, &reach);
 }
 
@@ -1469,5 +1476,25 @@ fn field_ast(prog: &Program, adt: DefId, vi: usize, fi: usize) -> (Vec<Attr>, u3
             (ast.list(f.attrs).to_vec(), f.name.map_or(f.ty_span.0, |n| n.lo))
         }
         None => (Vec::new(), ast.item(def.item).name.lo),
+    }
+}
+
+pub const UNNAMEABLE_TYPES: Lint = lint::lint("unnameable_types");
+
+/// rustc_privacy `check_unnameable`: a type reachable through the interface of a public item but
+/// not nameable by any public path.
+fn unnameable_types(prog: &Program, own: &[bool], reach: &Reach) {
+    for &d in reach.defs.iter() {
+        let def = prog.def(d);
+        if reach.named.contains(&d) || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
+        let kind = match def.kind {
+            DefKind::Struct => "struct", DefKind::Enum => "enum", DefKind::Union => "union", DefKind::Trait => "trait", DefKind::TypeAlias => "type alias",
+            _ => continue,
+        };
+        let pf = &prog.files[def.file as usize];
+        let item = pf.ast.item(def.item);
+        if lint::external(prog, def.file, item.lo) { continue; }
+        let name = pf.text(item.name);
+        lint::emit(prog, d, &UNNAMEABLE_TYPES, def.file, item.lo, &format!("{} `{}` is reachable but cannot be named", kind, name));
     }
 }

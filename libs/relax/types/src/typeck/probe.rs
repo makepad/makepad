@@ -327,7 +327,7 @@ impl Fcx<'_> {
             let (ty, _) = method_response::probe_instantiate_query_response(&self.infcx, self.prog, &self.param_env, &original, &step.response).expect("bad autoderef response");
             let edition = self.prog.crates[self.prog.mods[self.module as usize].krate as usize].edition;
             if step.from_unsafe_deref && edition < 2018 {
-                self.tcx.dcx.warn(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: lo }, "type annotations needed for raw pointer method call (future incompatible)".into());
+                crate::lint::emit(self.prog, self.b.def, &crate::lint::TYVAR_BEHIND_RAW_POINTER, self.file, lo, "type annotations needed");
             } else {
                 if !self.infcx.tainted_by_errors() && !self.tcx.tys.has_error(ty) { self.err(lo, "E0282: type annotations needed for method receiver".into()); }
                 self.eq(ty, self.tcx.tys.error);

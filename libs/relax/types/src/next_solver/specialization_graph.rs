@@ -109,8 +109,8 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
                 // specialization_graph.rs:130-152: leak-check-only overlap is a
                 // future-compat lint, not a rejection.
                 let def=prog.def(im.def);
-                tcx.dcx.warn(super::fulfill::ObligationCause { body_id:im.def,span:prog.files[def.file as usize].ast.item(def.item).lo },
-                    "conflicting implementations of trait (coherence_leak_check, future incompatible)".into());
+                crate::lint::emit(prog, im.def, &crate::lint::COHERENCE_LEAK_CHECK, def.file, prog.files[def.file as usize].ast.item(def.item).lo,
+                    &format!("conflicting implementations of trait `{}`", prog.def_path(trait_def)));
             }
         }
         if !failed { children.insert_blindly(key,im.def); }

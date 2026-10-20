@@ -995,6 +995,28 @@ impl<'a> Parser<'a> {
         if !v.iter().any(|a| a.toks.hi > a.toks.lo && crate::cfg::tok_str(p, a.toks.lo as usize) == b"cfg_attr") {
             return v;
         }
+        if crate::macros::uses::recording() {
+            // `#[cfg_attr(pred,)]`: one top-level comma, the last token (unused_attributes)
+            for a in &v {
+                if a.toks.hi <= a.toks.lo || crate::cfg::tok_str(p, a.toks.lo as usize) != b"cfg_attr" { continue; }
+                let (mut depth, mut commas, mut last_comma) = (0i32, 0u32, false);
+                let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+                for i in lo + 1..hi {
+                    let k = self.toks.at(i).kind;
+                    match k {
+                        T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                        T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                        T::Comma if depth == 1 => commas += 1,
+                        _ => {}
+                    }
+                    if k == T::Comma && depth == 1 && i + 2 == hi { last_comma = true; }
+                }
+                if commas == 1 && last_comma {
+                    let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
+                    crate::macros::uses::cfg_attr_empty(&file, self.toks.at(lo).lo);
+                }
+            }
+        }
         crate::cfg::expand_cfg_attr_list(p, &v, &ctx.cfg)
     }
 

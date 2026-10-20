@@ -10,6 +10,7 @@ use crate::ast::*;
 use crate::ast_visit::Visitor;
 use crate::lint::{self, AttrKey, Level, Lint};
 use crate::lint_table::{self, LevelK};
+use crate::lint_early::UNUSED_ATTRIBUTES;
 use crate::program::{DefId, DefKind, Program, NO_DEF};
 use relax_session::sync::Mutex;
 
@@ -30,7 +31,7 @@ const IMPLEMENTED: &[&str] = &[
     "noop_method_call", "overflowing_literals", "path_statements", "redundant_semicolons", "single_use_lifetimes",
     "static_mut_refs", "suspicious_double_ref_op", "trivial_casts", "trivial_numeric_casts", "unconditional_panic",
     "undropped_manually_drops", "unreachable_code", "unreachable_patterns", "invalid_reference_casting", "mutable_transmutes", "semicolon_in_expressions_from_macros", "overlapping_range_endpoints", "non_contiguous_range_endpoints", "unsafe_attr_outside_unsafe", "unsafe_op_in_unsafe_fn",
-    "unused_allocation", "unused_assignments", "non_shorthand_field_patterns", "break_with_label_and_loop", "drop_bounds", "dyn_drop", "missing_copy_implementations", "ambiguous_negative_literals", "function_casts_as_integer", "unused_braces", "unused_import_braces", "unused_imports", "late_bound_lifetime_arguments", "redundant_lifetimes", "impl_trait_redundant_captures", "redundant_imports", "unused_extern_crates", "unused_labels", "unused_lifetimes",
+    "unused_allocation", "unused_assignments", "non_shorthand_field_patterns", "break_with_label_and_loop", "drop_bounds", "dyn_drop", "missing_copy_implementations", "ambiguous_negative_literals", "function_casts_as_integer", "unused_braces", "unused_import_braces", "unused_imports", "unknown_crate_types", "coherence_leak_check", "uncovered_param_in_projection", "tyvar_behind_raw_pointer", "ambiguous_associated_items", "unnameable_types", "repr_transparent_non_zst_fields", "named_arguments_used_positionally", "unused_qualifications", "async_fn_in_trait", "variant_size_differences", "late_bound_lifetime_arguments", "redundant_lifetimes", "impl_trait_redundant_captures", "redundant_imports", "unused_extern_crates", "unused_labels", "unused_lifetimes",
     "unused_must_use", "unused_mut", "unused_parens", "unused_results", "unused_unsafe", "unused_variables", "while_true",
     "mismatched_lifetime_syntaxes", "elided_lifetimes_in_paths", "explicit_outlives_requirements", 
     "absolute_paths_not_starting_with_crate", "unknown_diagnostic_attributes",
@@ -77,7 +78,7 @@ pub fn check(prog: &Program, own: &[bool]) -> Vec<String> {
         seen_files.push(md.file);
         let ast = &prog.files[md.file as usize].ast;
         let attrs: Vec<Attr> = ast.root_attrs.iter().copied().collect();
-        check_list(prog, md.def, &[], &attrs, md.file, &mut errors);
+        check_list_at(prog, md.def, &[], &attrs, md.file, &mut errors, md.parent_mod.is_none());
     }
     for i in 0..prog.defs.len() {
         let def = prog.defs[i];
@@ -236,13 +237,35 @@ const LEVEL_WORDS: &[&str] = &["allow", "warn", "deny", "forbid", "expect"];
 
 /// One attribute list at a node of `def` (`before`: the attributes of the nodes around it inside
 /// the definition).
+/// The lints rustc declares `crate_level_only`: an attribute naming one anywhere but on the crate
+/// is ignored (`unused_attributes`).
+const CRATE_LEVEL_ONLY: &[&str] = &["ill_formed_attribute_input", "unused_crate_dependencies", "dead_code_pub_in_binary", "unknown_crate_types",
+    "macro_expanded_macro_exports_accessed_by_absolute_paths", "rust_2021_prefixes_incompatible_syntax", "text_direction_codepoint_in_comment",
+    "text_direction_codepoint_in_literal", "rust_2024_guarded_string_incompatible_syntax", "non_ascii_idents", "uncommon_codepoints",
+    "confusable_idents", "mixed_script_confusables"];
+
 fn check_list(prog: &Program, def: DefId, before: &[Attr], list: &[Attr], file: u32, errors: &mut Vec<String>) {
+    check_list_at(prog, def, before, list, file, errors, false)
+}
+
+fn check_list_at(prog: &Program, def: DefId, before: &[Attr], list: &[Attr], file: u32, errors: &mut Vec<String>, crate_node: bool) {
     for (ai, a) in list.iter().enumerate() {
         malformed(prog, file, a, errors);
         let Some(la) = lint::parse_level_attr(prog, file, a) else { continue };
         // the attributes in force when this one is read
         let mut inner: Vec<Attr> = before.to_vec();
         inner.extend_from_slice(&list[..ai]);
+        if !crate_node && !la.expect {
+            let hit = la.names.iter().find(|(name, pos)| {
+                let n = lint::current_name(name);
+                !lint::external(prog, file, *pos) && (CRATE_LEVEL_ONLY.contains(&n)
+                    || (is_group(n) && lint_table::LINTS.iter().any(|l| l.3.contains(&n) && CRATE_LEVEL_ONLY.contains(&l.0))))
+            });
+            if let Some((name, pos)) = hit {
+                let lvl = match la.level { Level::Allow => "allow", Level::Warn => "warn", Level::Forbid => "forbid", _ => "deny" };
+                lint::emit_in(prog, def, &inner, &UNUSED_ATTRIBUTES, file, *pos, &format!("{}({}) is ignored unless specified at crate level", lvl, name));
+            }
+        }
         for (idx, (name, pos)) in la.names.iter().enumerate() {
             if name.contains("::") { continue; }
             if lint::external(prog, file, *pos) { continue; }

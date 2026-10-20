@@ -2419,6 +2419,132 @@ impl<'a> Dp<'a> {
     }
 }
 
+pub const VARIANT_SIZE_DIFFERENCES: Lint = lint::lint("variant_size_differences");
+
+/// rustc_lint types.rs `VariantSizeDifferences`: a tagged enum whose largest variant is more than
+/// three times larger than the second largest (sizes without the tag).
+pub fn variant_size_differences(prog: &Program, tcx: &Tcx, own: &[bool]) {
+    if !lint::enabled() { return; }
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if def.kind != DefKind::Enum || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
+        let Some(adt) = tcx.adts.get(&d) else { continue };
+        if adt.n_generics != 0 || adt.variants.len() < 2 { continue; }
+        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
+        if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad))) { continue; }
+        let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
+        let lcx = crate::layout::LayoutCx::new(prog);
+        let lay = crate::layout::Layouts::new();
+        let l = lay.of(&lcx, tcx, ty);
+        let (Some((_, mem)), crate::layout::TagEnc::Direct) = (l.tag, l.enc) else { continue };
+        let tag_size = match mem { crate::rir::Mem::Int(b, _) => b as u32, crate::rir::Mem::F32 => 4, crate::rir::Mem::F64 => 8 };
+        if l.variant_fields.len() != adt.variants.len() { continue; }
+        let (mut largest, mut slargest, mut li) = (0u32, 0u32, 0usize);
+        for (vi, v) in adt.variants.iter().enumerate() {
+            let (mut end, mut align) = (tag_size, tag_size.max(1));
+            for (fi, f) in v.fields.iter().enumerate() {
+                let fl = lay.of(&lcx, tcx, f.ty);
+                let off = l.variant_fields[vi].get(fi).copied().unwrap_or(0);
+                if off == u32::MAX { continue; }
+                end = end.max(off + fl.size);
+                align = align.max(fl.align);
+            }
+            let size = crate::layout::round_up(end, align);
+            let bytes = size.saturating_sub(tag_size);
+            if bytes > largest { slargest = largest; largest = bytes; li = vi; }
+            else if bytes > slargest { slargest = bytes; }
+        }
+        if largest > slargest * 3 && slargest > 0 {
+            let ast = &prog.files[def.file as usize].ast;
+            let ItemKind::Enum(r) = ast.item(def.item).kind else { continue };
+            let Some(v) = ast.list(ast.row(r).variants).get(li) else { continue };
+            if lint::external(prog, def.file, v.name.lo) { continue; }
+            lint::emit(prog, d, &VARIANT_SIZE_DIFFERENCES, def.file, v.name.lo, &format!("enum variant is more than three times larger ({} bytes) than the next largest", largest));
+        }
+    }
+}
+
+pub const REPR_TRANSPARENT_NON_ZST_FIELDS: Lint = lint::lint("repr_transparent_non_zst_fields");
+
+/// rustc_hir_analysis check.rs `check_transparent`, the lint half: a zero-sized field of a
+/// `repr(transparent)` struct that contains a `repr(C)` type, next to a non-zero-sized field.
+pub fn repr_transparent_fields(prog: &Program, tcx: &Tcx, own: &[bool]) {
+    if !lint::enabled() { return; }
+    fn contains_repr_c(prog: &Program, tcx: &Tcx, t: TyId, depth: u32) -> bool {
+        if depth > 16 { return false; }
+        match *tcx.tys.kind(t) {
+            TyKind::Tuple(l) => tcx.tys.list(l).iter().any(|&x| contains_repr_c(prog, tcx, x, depth + 1)),
+            TyKind::Array(e, _) => contains_repr_c(prog, tcx, e, depth + 1),
+            TyKind::Adt(d, args, _) => {
+                let Some(adt) = tcx.adts.get(&d) else { return false };
+                if adt.repr_c { return true; }
+                adt.variants.iter().any(|v| v.fields.iter().any(|f| contains_repr_c(prog, tcx, tcx.tys.subst(f.ty, tcx.tys.list(args)), depth + 1)))
+            }
+            _ => false,
+        }
+    }
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if def.kind != DefKind::Struct || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
+        let pf = &prog.files[def.file as usize];
+        let ast = &pf.ast;
+        let item = ast.item(def.item);
+        let transparent = ast.list(item.attrs).iter().any(|a| lint::attr_path(prog, def.file, a) == b"repr" && lint::attr_text(prog, def.file, a).contains("transparent"));
+        if !transparent { continue; }
+        let Some(adt) = tcx.adts.get(&d) else { continue };
+        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
+        let Some(v) = adt.variants.first() else { continue };
+        if v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad)) { continue; }
+        let ItemKind::Struct(r) = item.kind else { continue };
+        let fields: Vec<FieldDef> = match ast.row(r).data { VariantData::Unit => Vec::new(), VariantData::Tuple(l) | VariantData::Struct(l) => ast.list(l).to_vec() };
+        if fields.len() != v.fields.len() { continue; }
+        let lcx = crate::layout::LayoutCx::new(prog);
+        let lay = crate::layout::Layouts::new();
+        let trivial: Vec<bool> = v.fields.iter().map(|f| {
+            let l = lay.of(&lcx, tcx, f.ty);
+            !lay.is_unsized(&lcx, tcx, f.ty) && l.size == 0 && l.align == 1
+        }).collect();
+        let non_trivial = trivial.iter().filter(|t| !**t).count();
+        let mut prev = false;
+        for (k, f) in v.fields.iter().enumerate() {
+            if !trivial[k] || !contains_repr_c(prog, tcx, f.ty, 0) { continue; }
+            if non_trivial > 0 || prev {
+                let pos = fields[k].name.map_or(fields[k].ty_span.0, |n| n.lo);
+                if lint::external(prog, def.file, pos) { continue; }
+                lint::emit(prog, d, &REPR_TRANSPARENT_NON_ZST_FIELDS, def.file, pos, "zero-sized fields in `repr(transparent)` cannot contain `repr(C)` types");
+            } else {
+                prev = true;
+            }
+        }
+    }
+}
+
+pub const ASYNC_FN_IN_TRAIT: Lint = lint::lint("async_fn_in_trait");
+
+/// rustc_lint async_fn_in_trait.rs: an `async fn` in a publicly reachable trait.
+pub fn async_fn_in_trait(prog: &Program, own: &[bool], reach: &crate::lint_dead::Reach) {
+    if !lint::enabled() { return; }
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if def.kind != DefKind::AssocFn || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+        if prog.def(def.parent).kind != DefKind::Trait || !reach.defs.contains(&def.parent) || lint::generated(prog, d) { continue; }
+        let pf = &prog.files[def.file as usize];
+        let ast = &pf.ast;
+        let item = ast.item(def.item);
+        let ItemKind::Fn(sig, _, _) = item.kind else { continue };
+        if !ast.fn_sig(sig).asyncness { continue; }
+        // the `async` keyword before the name
+        let head = pf.bytes(item.lo, item.name.lo);
+        let Some(k) = head.windows(5).position(|w| w == b"async") else { continue };
+        let pos = item.lo + k as u32;
+        if lint::external(prog, def.file, pos) { continue; }
+        lint::emit(prog, d, &ASYNC_FN_IN_TRAIT, def.file, pos, "use of `async fn` in public traits is discouraged as auto trait bounds cannot be specified");
+    }
+}
+
 /// rustc builtin.rs `MissingCopyImplementations`: a reachable, non-generic ADT with no
 /// destructor, no raw pointer field, no `Iterator` impl, at most 256 bytes and only `Copy`
 /// fields could implement `Copy`.

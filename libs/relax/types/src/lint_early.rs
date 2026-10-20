@@ -2578,6 +2578,8 @@ pub(crate) fn attr_checks(prog: &Program, n: &AttrNode) {
     // `#[macro_use]` state: Some(first position) once all macros are used; the specific lists seen so far
     let mut use_all: Option<u32> = None;
     let mut specific: Vec<u32> = Vec::new();
+    // the `doc(alias)` values of the node, across its doc attributes
+    let doc_aliases: std::cell::RefCell<Vec<String>> = Default::default();
     for &(file, a) in n.attrs {
         let pf = &prog.files[file as usize];
         let apos = attr_pos(pf, &a);
@@ -2659,7 +2661,7 @@ pub(crate) fn attr_checks(prog: &Program, n: &AttrNode) {
         }
         // ---- doc attributes
         if word.as_deref() == Some("doc") {
-            doc_attr(prog, n, file, apos, args, &emit, &hard);
+            doc_attr(prog, n, file, apos, args, &emit, &hard, &doc_aliases);
         }
     }
 }
@@ -2688,7 +2690,7 @@ fn is_executable_crate(prog: &Program, krate: u32) -> bool {
 }
 
 /// rustc_attr_parsing `DocParser`.
-fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emit: &dyn Fn(&Lint, u32, &str), hard: &dyn Fn(u32, &str)) {
+fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emit: &dyn Fn(&Lint, u32, &str), hard: &dyn Fn(u32, &str), aliases_seen: &std::cell::RefCell<Vec<String>>) {
     let _ = prog;
     let invalid = |pos: u32, msg: &str| emit(&INVALID_DOC_ATTRIBUTES, pos, msg);
     match args {
@@ -2700,8 +2702,7 @@ fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emi
             if !macro_call && string_value(tok).is_none() { invalid(*pos, "malformed `doc` attribute input"); }
         }
         Args::List { items, .. } => {
-            let mut aliases: Vec<String> = Vec::new();
-            let mut add_alias = |alias: String, pos: u32| {
+            let add_alias = |alias: String, pos: u32| {
                 if alias.is_empty() { hard(pos, "`#[doc(alias = \"...\")]` attribute cannot have empty value"); return; }
                 if let Some(c) = alias.chars().find(|&c| c == '"' || c == '\'' || (c.is_whitespace() && c != ' ')) {
                     hard(pos, &format!("{:?} character isn't allowed in `#[doc(alias = \"...\")]`", c));
@@ -2711,8 +2712,8 @@ fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emi
                 if n.is_crate { hard(pos, "`#![doc(alias = \"...\")]` isn't allowed as a crate-level attribute"); return; }
                 // check_attr.rs check_doc_alias_value: an alias is not the item's own name
                 if n.inner.is_empty() && prog.syms.str(prog.def(n.d).name) == alias { hard(pos, &format!("`#[doc(alias = \"{}\"]` is the same as the item's name", alias)); return; }
-                if aliases.contains(&alias) { emit(&UNUSED_ATTRIBUTES, pos, "doc alias is duplicated"); }
-                aliases.push(alias);
+                if aliases_seen.borrow().contains(&alias) { emit(&UNUSED_ATTRIBUTES, pos, "doc alias is duplicated"); }
+                aliases_seen.borrow_mut().push(alias);
             };
             for m in items {
                 match m {
@@ -3039,6 +3040,66 @@ fn back_kw_pos(pf: &crate::parser::ParsedFile, at: u32, kw: &str) -> u32 {
     if j >= n && pf.bytes(j - n, j) == kw.as_bytes() { j - n } else { at }
 }
 
+// ---------------------------------------------------------------- crate attributes
+
+pub const UNKNOWN_CRATE_TYPES: Lint = lint::lint("unknown_crate_types");
+pub const MISSING_DOCS: Lint = lint::lint("missing_docs");
+
+/// `#[cfg_attr(pred,)]` (the parser records it under `makepad check`): rustc_expand config.rs.
+fn cfg_attr_empties(prog: &Program, own: &[bool]) {
+    for (path, pos) in crate::macros::uses::take_cfg_attr_empty() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        let def = enclosing_def(prog, file as u32, pos, krate);
+        emit(prog, def, &UNUSED_ATTRIBUTES, file as u32, pos, "`#[cfg_attr]` does not expand to any attributes");
+    }
+}
+
+pub const NAMED_ARGUMENTS_USED_POSITIONALLY: Lint = lint::lint("named_arguments_used_positionally");
+
+fn named_args_positional(prog: &Program, own: &[bool]) {
+    for (path, pos, name) in crate::macros::uses::take_named_arg_positional() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        if lint::external(prog, file as u32, pos) { continue; }
+        let def = enclosing_def(prog, file as u32, prog.files[file].lint_pos(pos), krate);
+        emit(prog, def, &NAMED_ARGUMENTS_USED_POSITIONALLY, file as u32, pos, &format!("named argument `{}` is not used by name", name));
+    }
+}
+
+/// The crate-level attribute lints: `unknown_crate_types` (an invalid `#![crate_type]`) and the
+/// crate's `missing_docs`.
+fn crate_attr_lints(prog: &Program, own: &[bool]) {
+    const VALID: &[&str] = &["bin", "lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "sdylib"];
+    for md in prog.mods.iter() {
+        if md.parent_mod.is_some() || md.lexical_parent.is_some() || !own.get(md.krate as usize).copied().unwrap_or(false) { continue; }
+        let pf = &prog.files[md.file as usize];
+        let ast = &pf.ast;
+        let attrs: Vec<Attr> = ast.root_attrs.iter().copied().collect();
+        let root = md.def;
+        for a in &attrs {
+            if lint::attr_path(prog, md.file, a) != b"crate_type" { continue; }
+            let text = lint::attr_text(prog, md.file, a);
+            let Some(v) = text.split_once('=').map(|x| x.1.trim().trim_matches('"').to_string()) else { continue };
+            if !VALID.contains(&v.as_str()) {
+                let pos = prog.src(md.file).tok(a.toks.lo as usize).lo;
+                if !lint::external(prog, md.file, pos) { emit(prog, root, &UNKNOWN_CRATE_TYPES, md.file, pos, "invalid `crate_type` value"); }
+            }
+        }
+        // missing_docs for the crate: no `#![doc]` / `//!`
+        let first_item = ast.root_items.iter().next().map_or(pf.src_len, |&i| ast.item(i).lo);
+        let head = pf.bytes(0, first_item.min(pf.src_len));
+        let doc_comment = head.split(|&b| b == b'\n').any(|l| { let t = l.trim_ascii_start(); t.starts_with(b"//!") || t.starts_with(b"/*!") });
+        let doc_attr = attrs.iter().any(|a| lint::attr_path(prog, md.file, a) == b"doc" && lint::attr_text(prog, md.file, a).contains('='));
+        if !doc_comment && !doc_attr {
+            let pos = attrs.first().map(|a| prog.src(md.file).tok(a.toks.lo as usize).lo).or_else(|| ast.root_items.iter().next().map(|&i| ast.item(i).lo)).unwrap_or(0);
+            emit(prog, root, &MISSING_DOCS, md.file, pos, "missing documentation for the crate");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- semicolon_in_expressions_from_macros
 
 pub const SEMICOLON_IN_EXPRESSIONS_FROM_MACROS: Lint = lint::lint("semicolon_in_expressions_from_macros");
@@ -3072,6 +3133,9 @@ pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 pub fn finish(prog: &Program, own: &[bool]) {
     if !lint::enabled() { return; }
     trailing_semis(prog, own);
+    cfg_attr_empties(prog, own);
+    named_args_positional(prog, own);
+    crate_attr_lints(prog, own);
     let (defs, used) = crate::macros::uses::take();
     if defs.is_empty() { return; }
     // Bodies nothing demanded are never expanded, so an invocation inside one leaves no record:

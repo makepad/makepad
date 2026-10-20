@@ -24,7 +24,7 @@ pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body, block: Option<BlockId>
     let ast = &pf.ast;
     let mut w = L2 {
         prog, tcx, body, ast, stack: Vec::new(), fns: Vec::new(), owner: HashMap::new(), init: HashMap::new(), names: HashMap::new(),
-        inside_call_args: false, reset_block: false, closure: u32::MAX, active: false, skip_if: Default::default(), stmt_like: Default::default(), env: crate::pattern_analysis::body_cx(prog, tcx, body).typing_env(),
+        inside_call_args: false, reset_block: false, closure: u32::MAX, active: false, skip_if: Default::default(), stmt_like: Default::default(), module: u32::MAX, env: crate::pattern_analysis::body_cx(prog, tcx, body).typing_env(),
     };
     // pre-pass: which closure declares each local, the initialisers of plain bindings
     {
@@ -94,6 +94,8 @@ struct L2<'a> {
     closure: u32,
     /// inside a fn or closure body (rustc `check_fn`; const and static initialisers are not searched)
     active: bool,
+    /// the block module the walk is in (u32::MAX: none, the body owner's module)
+    module: u32,
 }
 
 /// The first pass.
@@ -468,6 +470,8 @@ impl<'a> Visitor<'a> for L2<'a> {
         let ast = self.ast;
         let reset = std::mem::replace(&mut self.reset_block, false);
         let blk = *ast.block(b);
+        let saved_module = self.module;
+        if let Some(&m) = self.prog.block_mods.get(&(self.body.file, b.0)) { self.module = m; }
         self.enter_attrs(blk.attrs);
         let saved = self.inside_call_args;
         let stmts = ast.stmts(b);
@@ -480,6 +484,7 @@ impl<'a> Visitor<'a> for L2<'a> {
         }
         self.inside_call_args = saved;
         self.leave_attrs(blk.attrs);
+        self.module = saved_module;
     }
 
     fn expr(&mut self, e: ExprId) {
@@ -493,7 +498,7 @@ impl<'a> Visitor<'a> for L2<'a> {
         self.lint_ptr_nulls(e);
         self.lint_transmutes(e);
         self.lint_reference_casting(e);
-        if matches!(ast.expr(e).kind, ExprKind::Path(_)) { self.lint_mutable_transmutes(e); }
+        if matches!(ast.expr(e).kind, ExprKind::Path(_)) { self.lint_mutable_transmutes(e); self.lint_unused_qualifications(e); }
         self.lint_unsafe_block(e);
         self.lint_invalid_value(e);
         self.lint_interior_mutable_consts(e);
@@ -1249,6 +1254,44 @@ impl<'a> L2<'a> {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------- unused_qualifications
+
+pub const UNUSED_QUALIFICATIONS: Lint = lint::lint("unused_qualifications");
+
+impl<'a> L2<'a> {
+    /// rustc_resolve late.rs `lint_unused_qualifications` for a value path: the longest qualified
+    /// prefix whose last segment names the same item when written alone in the current scope.
+    fn lint_unused_qualifications(&self, e: ExprId) {
+        let ast = self.ast;
+        let ExprKind::Path(p) = ast.expr(e).kind else { return };
+        if p.global() || p.has_qself() { return; }
+        let segs = ast.segs(p.segs);
+        if segs.len() < 2 { return; }
+        let pf = &self.prog.files[self.body.file as usize];
+        if lint::external(self.prog, self.body.file, p.lo) || p.lo >= pf.src_len { return; }
+        let module = if self.module == u32::MAX { self.tcx.item_module(self.prog, self.body.def) } else { self.module };
+        let Some(Res::Def(target)) = self.body.res.get(&e.0).copied() else { return };
+        // segments after the first one with generic arguments are not considered
+        let end = segs.iter().position(|s| ast.gargs(s.args()).is_some()).map_or(segs.len(), |i| i + 1);
+        for i in (1..end).rev() {
+            let last = i + 1 == segs.len();
+            let seg = &segs[i];
+            if seg.kind() != SegKind::Ident { continue; }
+            let res = if last {
+                target
+            } else {
+                let prefix: Vec<(SegKind, crate::program::Sym)> = segs[..=i].iter().map(|s| (s.kind(), self.prog.syms.intern_late(pf.text(s.name)))).collect();
+                match self.prog.resolve_mod_path(module, false, &prefix, false, false) { Some(d) => d, None => continue }
+            };
+            let name = self.prog.syms.intern_late(pf.text(seg.name));
+            if self.prog.lookup_in_scope(module, name, !last) == Some(res) {
+                self.emit(&UNUSED_QUALIFICATIONS, p.lo, "unnecessary qualification");
+                return;
+            }
         }
     }
 }
