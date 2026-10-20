@@ -92,6 +92,6 @@ impl TypeOutlivesDelegate for &InferCtxt<'_> {
         self.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.tcx.tys, a, b, false);
     }
     fn push_verify(&mut self, ty: TyId, region: RegionId, bound: VerifyBound) {
-        self.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound });
+        self.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound, span: self.origin_span.get() });
     }
 }

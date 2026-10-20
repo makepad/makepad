@@ -113,6 +113,10 @@ impl ImpliedBounds {
         }
     }
 
+    /// `inferred_outlives_of`: the outlives requirements the fields of `def` put on its own parameters.
+    pub fn inferred_outlives(tcx: &Tcx, prog: &Program, def: crate::program::DefId) -> Vec<OutlivesPredicate> {
+        Self::default().inferred_outlives_of(tcx, prog, def, &mut vec![])
+    }
     fn implied(&mut self, tcx: &Tcx, prog: &Program, t: TyId) {
         self.implied_wf_args(tcx,prog,vec![t]);
     }
@@ -243,7 +247,7 @@ impl ImpliedBounds {
         // Only the ADT's own early-bound parameters can be required of it.
         required.retain(|p| match *p {
             OutlivesPredicate::Region(a, b) => [a, b].iter().all(|&r| matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_))),
-            OutlivesPredicate::Type(t, r) => matches!(tcx.tys.kind(t), TyKind::Param(_)) && matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_) | RegionKind::ReStatic),
+            OutlivesPredicate::Type(t, r) => matches!(tcx.tys.kind(t), TyKind::Param(_) | TyKind::Alias(..)) && matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_)),
         });
         if visiting.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
         required
@@ -414,7 +418,7 @@ pub fn mir_borrowck_implied_outlives_bounds(
     let mut ocx = crate::next_solver::fulfill::ObligationCtxt::new(&infcx, prog);
     let erase_vars = |ty: TyId| tcx.tys.map_regions(ty, &|r, _| if matches!(tcx.tys.region_kind(r), RegionKind::ReVar(_)) { RegionId::ERASED } else { r }, 0);
     let registered_since = |snapshot: usize| -> Vec<OutlivesPredicate> {
-        infcx.inner.borrow().region_obligations()[snapshot..].iter().map(|&(t, r)| OutlivesPredicate::Type(erase_vars(t), if matches!(tcx.tys.region_kind(r), RegionKind::ReVar(_)) { RegionId::ERASED } else { r })).collect()
+        infcx.inner.borrow().region_obligations()[snapshot..].iter().map(|&(t, r, _)| OutlivesPredicate::Type(erase_vars(t), if matches!(tcx.tys.region_kind(r), RegionKind::ReVar(_)) { RegionId::ERASED } else { r })).collect()
     };
     let mut bounds = ImpliedBounds::create(tcx,prog,predicates,&[],&[],vec![]);
     let mut normalized_inputs_and_output = vec![];
@@ -457,7 +461,9 @@ pub fn implied_bounds_query_var_values(tcx: &Tcx, inputs_and_output: &[TyId], is
     }
     values.into_inner()
 }
-pub fn replace_erased_regions_with_placeholders(tcx: &Tcx, inputs_and_output: &[TyId]) -> Vec<TyId> {
+/// The placeholders are numbered from `base`: a nested body's are numbered after those it inherits from its creator,
+/// so that its own external regions stay different from the creator's.
+pub fn replace_erased_regions_with_placeholders(tcx: &Tcx, inputs_and_output: &[TyId], base: u32) -> Vec<TyId> {
     use crate::types::fold::TypeFolder;
     struct Replacer { next: u32 }
     impl TypeFolder for Replacer {
@@ -468,6 +474,6 @@ pub fn replace_erased_regions_with_placeholders(tcx: &Tcx, inputs_and_output: &[
             } else { r }
         }
     }
-    let mut replacer = Replacer { next:0 };
+    let mut replacer = Replacer { next:base };
     inputs_and_output.iter().map(|&ty| replacer.fold_ty(&tcx.tys,ty,0)).collect()
 }

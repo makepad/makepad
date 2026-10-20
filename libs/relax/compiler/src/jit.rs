@@ -4831,6 +4831,11 @@ impl Unit {
     /// SPEC-V: the unverified-mode twin of slot `id` (created on first use); `id` itself when it has
     /// none (only fn instances and closures are built from a body).
     pub(crate) fn plain_twin(&self, id: u32) -> u32 {
+        // a callee a helper's ahead lowering has only a temporary reference to (no slot yet): the
+        // twin is keyed by the real slot, so the body is built on the locked path instead
+        if lower_ahead_fn_key(id).is_some() {
+            lower_ahead_needs_unit();
+        }
         match self.fns[id as usize].key {
             FnKey::Inst(..) | FnKey::Closure(..) => self.fn_id(FnKey::Plain(id)),
             _ => id,

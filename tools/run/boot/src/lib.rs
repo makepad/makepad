@@ -3,14 +3,16 @@ mod document;
 mod dump;
 mod field;
 mod gpu;
+mod groups;
 mod icon;
 mod layout;
 mod text;
 
-use document::{Program, BACKGROUND, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE, PROGRESS};
+use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
+pub use groups::order as order_diagnostics;
 pub use icon::Icon;
 use makepad_hal::{
-    backend_id, buffer_kind, clock_ns, dialect, event_tag, font::wire, input, lifecycle, pass_load,
+    backend_id, buffer_kind, clock_ns, dialect, event_tag, input, lifecycle, pass_load,
     session::HOST, target, window_kind, Attr, CmdWriter, EventBuf, EventQueue, FrameMeta, Hal,
     HalEvent, HalInfo, Id, Pass, RawEvent,
 };
@@ -115,19 +117,27 @@ struct TextLine {
 struct Card {
     rect: [f32; 4],
     action: Action,
-    button: bool,
+    /// the card's look (document `error_band.accent`): 0 follow-on, 1 root cause or panic,
+    /// 2 a member row of a folded group, 3 a button, 4 the close button
+    accent: f32,
+    /// the list entries the card shows: it is drawn selected while one of them is
+    members: std::ops::Range<usize>,
     fixed: bool,
 }
 
 #[derive(Default)]
 struct Layout {
     panel: [f32; 4],
+    /// the halted view's frame (the window, or the overlay panel), its corner radius, and the
+    /// region its galaxy is drawn in
+    frame: [f32; 4],
+    corner: f32,
+    galaxy: [f32; 4],
     clip: [f32; 4],
     text: Vec<TextLine>,
     text_ends: Vec<f32>,
     fixed_text: Vec<TextLine>,
     cards: Vec<Card>,
-    progress: Option<[f32; 4]>,
     icon: Option<[f32; 4]>,
     icon_fixed: bool,
     content_height: f32,
@@ -141,9 +151,6 @@ struct Renderer {
     layout: Layout,
     dirty: bool,
     redraw: bool,
-    from: f32,
-    target: f32,
-    changed: f32,
     began: Instant,
     input: Option<String>,
     selected: usize,
@@ -152,7 +159,6 @@ struct Renderer {
     dialect: u32,
     bundled: bool,
     clear_errors_on_install: bool,
-    function_failed: bool,
     icon_aspect: Option<f32>,
     pressed: Option<Action>,
     layout_revision: u64,
@@ -277,9 +283,6 @@ impl Boot {
             layout: Layout::default(),
             dirty: true,
             redraw: true,
-            from: 0.0,
-            target: 0.0,
-            changed: 0.0,
             began: Instant::now(),
             input: None,
             selected: 0,
@@ -288,7 +291,6 @@ impl Boot {
             dialect: info.dialect,
             bundled,
             clear_errors_on_install,
-            function_failed: false,
             icon_aspect: None,
             pressed: None,
             layout_revision: 0,
@@ -311,15 +313,8 @@ impl Boot {
             .insets
             .map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
         if self.environment != environment {
-            let motion_changed = self.environment.reduce_motion != environment.reduce_motion;
             self.environment = environment;
             if let Some(renderer) = &mut self.renderer {
-                if motion_changed {
-                    // Leaving reduced motion must not interpolate backwards
-                    // from an endpoint older than the already-visible target.
-                    renderer.from = renderer.target;
-                    renderer.changed = renderer.began.elapsed().as_secs_f32();
-                }
                 renderer.dirty = true;
             }
         }
@@ -350,6 +345,7 @@ impl Boot {
         renderer
             .layout
             .visible_cards(renderer.scroll)
+            .rev()
             .find_map(|card| {
                 let mut rect = card.rect;
                 if !card.fixed {
@@ -463,62 +459,10 @@ impl Boot {
             self.set_overlay(None);
         }
         if let Some(renderer) = &mut self.renderer {
-            let reset = state.elapsed < self.state.elapsed;
-            if reset {
-                renderer.from = 0.0;
-                renderer.target = 0.0;
-                renderer.changed = 0.0;
+            if state.elapsed < self.state.elapsed {
                 renderer.began = Instant::now();
                 renderer.scroll = 0.0;
                 renderer.field.reset();
-            }
-            if let Some(program) = renderer
-                .active
-                .as_mut()
-                .filter(|_| !renderer.function_failed)
-            {
-                let now = renderer.began.elapsed().as_secs_f32();
-                let values = [
-                    renderer.target as f64,
-                    state.completed_weight,
-                    state.phase_weight,
-                    state.total_weight,
-                    state.done.unwrap_or(0) as f64,
-                    state.total.unwrap_or(0) as f64,
-                    state.phase_elapsed,
-                ];
-                match program.call(id!(phase_target), &values) {
-                    Ok(target) if target != renderer.target => {
-                        match program.call(
-                            id!(ease),
-                            &[
-                                renderer.from as f64,
-                                renderer.target as f64,
-                                (now - renderer.changed) as f64,
-                            ],
-                        ) {
-                            Ok(from) => {
-                                renderer.from = if self.environment.reduce_motion {
-                                    target
-                                } else {
-                                    from
-                                }
-                            }
-                            Err(errors) => {
-                                renderer.function_failed = true;
-                                self.events.push(Event::DocumentErrors(errors));
-                            }
-                        }
-                        renderer.redraw = true;
-                        renderer.target = target;
-                        renderer.changed = now;
-                    }
-                    Ok(_) => {}
-                    Err(errors) => {
-                        renderer.function_failed = true;
-                        self.events.push(Event::DocumentErrors(errors));
-                    }
-                }
             }
             renderer.dirty |= state.mode != self.state.mode
                 || state.app != self.state.app
@@ -538,14 +482,8 @@ impl Boot {
 
     pub fn choose(&mut self, diagnostic: usize) {
         if let Some(renderer) = &mut self.renderer {
-            let has_file = |i: usize| {
-                self.state
-                    .diagnostics
-                    .get(i)
-                    .is_some_and(|d| !d.file.is_empty())
-            };
-            renderer.dirty |=
-                self.environment.touch && has_file(renderer.selected) != has_file(diagnostic);
+            // the selection changes the text (a folded group shows its selected member)
+            renderer.dirty |= renderer.selected != diagnostic;
             renderer.selected = diagnostic;
             renderer.redraw = true;
         }
@@ -554,16 +492,9 @@ impl Boot {
     pub fn select(&mut self, diagnostic: usize) {
         self.choose(diagnostic);
         if let Some(renderer) = &mut self.renderer {
-            if renderer.dirty {
-                renderer.reveal_selection = true;
-            } else if let Some(card) = renderer
-                .layout
-                .cards
-                .iter()
-                .find(|c| c.action == Action::Select(diagnostic))
-            {
-                renderer.scroll = (card.rect[1] - renderer.layout.clip[1]).max(0.0);
-            }
+            // a selected member of a folded group may not have a row yet: lay out again
+            renderer.dirty = true;
+            renderer.reveal_selection = true;
         }
     }
 
@@ -827,10 +758,7 @@ impl Boot {
                     old.destroy(&mut writer);
                 }
                 renderer.active = renderer.pending.take();
-                renderer.from = renderer.target;
-                renderer.changed = renderer.began.elapsed().as_secs_f32();
                 renderer.dirty = true;
-                renderer.function_failed = false;
                 hal.submit(&writer.buf());
                 if renderer.clear_errors_on_install {
                     self.events.push(Event::DocumentErrors(Vec::new()));
@@ -867,17 +795,12 @@ impl Boot {
         if self.state.mode == Mode::Boot
             && self.state.diagnostics.is_empty()
             && self.state.parked.is_none()
-            && renderer.active.as_ref().unwrap().pipes.len() > FIELD
         {
             self.present_field();
             return;
         }
-        let renderer = self.renderer.as_mut().unwrap();
-        let animating = renderer.layout.progress.is_some()
-            && !self.environment.reduce_motion
-            && renderer.began.elapsed().as_secs_f32() - renderer.changed
-                < renderer.active.as_ref().unwrap().settle_seconds;
-        if !renderer.redraw && !renderer.dirty && !animating {
+        // the halted view: drawn when something changed, never animated (the field is frozen)
+        if !renderer.redraw && !renderer.dirty {
             return;
         }
         if renderer.dirty {
@@ -894,67 +817,47 @@ impl Boot {
         let program = renderer.active.as_ref().unwrap();
         let build_start_ns = makepad_hal::clock_ns();
         let mut writer = CmdWriter::new(HOST);
-        let mut data = vec![Vec::new(); program.pipes.len()];
         let viewport = [self.geometry[2], self.geometry[3]];
-        let background = if self.state.mode == Mode::Overlay {
-            renderer.layout.panel
-        } else {
-            [0.0, 0.0, viewport[0], viewport[1]]
-        };
-        program.pipes[BACKGROUND]
-            .instances
-            .write(&[(id!(rect), &background)], &mut data[BACKGROUND]);
+        let dpi = self.dpi;
+        let time = renderer.began.elapsed().as_secs_f32();
+        let field = renderer.field.frame(
+            &mut writer,
+            &program.pipes[FIELD],
+            &self.state,
+            time,
+            renderer.layout.galaxy,
+            self.environment.reduce_motion,
+            true,
+        );
         let max_scroll = (renderer.layout.content_height - renderer.layout.clip[3]).max(0.0);
         renderer.scroll = renderer.scroll.min(max_scroll);
         let scroll = renderer.scroll;
         let clip = renderer.layout.clip;
-        if let Some(mut rect) = renderer.layout.progress {
-            rect[1] -= scroll;
-            program.pipes[PROGRESS]
-                .instances
-                .write(&[(id!(rect), &rect)], &mut data[PROGRESS]);
-        }
+        let frame = renderer.layout.frame;
+        let mut data = vec![Vec::new(); program.pipes.len()];
         if let Some(mut rect) = renderer.layout.icon.filter(|_| program.pipes.len() > ICON) {
             if !renderer.layout.icon_fixed {
                 rect[1] -= scroll;
             }
+            let bounds = if renderer.layout.icon_fixed { frame } else { clip };
             program.pipes[ICON].instances.write(
-                &[
-                    (id!(rect), &rect),
-                    (
-                        id!(clip_rect),
-                        &if renderer.layout.icon_fixed {
-                            renderer.layout.panel
-                        } else {
-                            clip
-                        },
-                    ),
-                ],
+                &[(id!(rect), &rect), (id!(clip_rect), &bounds)],
                 &mut data[ICON],
             );
         }
         for card in renderer.layout.visible_cards(scroll) {
             let mut rect = card.rect;
-            let bounds = if card.fixed {
-                renderer.layout.panel
-            } else {
-                clip
-            };
+            let bounds = if card.fixed { frame } else { clip };
             if !card.fixed {
                 rect[1] -= scroll;
             }
-            if rect[1] + rect[3] < bounds[1] || rect[1] > bounds[1] + bounds[3] {
-                continue;
-            }
+            let selected = !card.fixed && card.members.contains(&renderer.selected);
             program.pipes[ERROR_BAND].instances.write(
                 &[
                     (id!(rect), &rect),
                     (id!(clip_rect), &bounds),
-                    (
-                        id!(selected),
-                        &[(card.action == Action::Select(renderer.selected)) as u8 as f32],
-                    ),
-                    (id!(action), &[card.button as u8 as f32]),
+                    (id!(selected), &[selected as u8 as f32]),
+                    (id!(accent), &[card.accent]),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -974,67 +877,15 @@ impl Boot {
         let visible = content[start..]
             .iter()
             .take_while(|line| line.position[1] <= clip[1] + clip[3] + scroll);
+        let mut glyphs = Vec::new();
         for line in visible.chain(renderer.layout.fixed_text.iter()) {
             let y = line.position[1] - if line.fixed { 0.0 } else { scroll };
-            let bounds = if line.fixed {
-                renderer.layout.panel
-            } else {
-                clip
-            };
-            for glyph in line.run.visible(
-                bounds[1] - y,
-                bounds[1] + bounds[3] - y,
-                line.style.size,
-                line.style.height,
-            ) {
-                let baseline = [
-                    line.position[0]
-                        + glyph.x
-                        + (line.run.width - glyph.row_width) * line.style.align,
-                    y + glyph.y,
-                ];
-                if !line.fixed
-                    && (baseline[1] + line.style.size < clip[1]
-                        || baseline[1] - line.style.size > clip[1] + clip[3])
-                {
-                    continue;
-                }
-                let Some(entry) =
-                    renderer
-                        .text
-                        .lookup(glyph.id, line.style.size, self.dpi, &mut requests)
-                else {
-                    continue;
-                };
-                if entry.atlas_kind == wire::glyph::EMPTY {
-                    continue;
-                }
-                let (rect, uv) = renderer.text.quad(entry, baseline, line.style.size);
-                // Clip in the vertex shader's coordinate space by cropping rect
-                // and UV together, so fixed key hints can share one glyph draw.
-                let (rect, uv) = crop(rect, uv, bounds);
-                if rect[2] <= 0.0 || rect[3] <= 0.0 {
-                    continue;
-                }
-                program.pipes[GLYPH].instances.write(
-                    &[
-                        (id!(rect), &rect),
-                        (id!(uv), &uv),
-                        (id!(color), &line.style.color),
-                        (id!(atlas_plane), &[entry.plane as f32]),
-                        (
-                            id!(color_glyph),
-                            &[if entry.atlas_kind == wire::glyph::COLOR {
-                                1.0
-                            } else {
-                                0.0
-                            }],
-                        ),
-                    ],
-                    &mut data[GLYPH],
-                );
-            }
+            let bounds = if line.fixed { frame } else { clip };
+            renderer
+                .text
+                .glyph_instances(program, line, y, bounds, dpi, &mut requests, &mut glyphs);
         }
+        data[GLYPH] = glyphs;
         let ready = renderer.text.finish_frame(&mut writer, &requests);
         if !ready {
             // Submit glyph requests without a FramePacket; retain the last image
@@ -1042,48 +893,25 @@ impl Boot {
             Hal::global().submit(&writer.buf());
             return;
         }
-        let mut uniforms = vec![Vec::new(); program.pipes.len()];
-        let mut marks = [0.0; 5];
-        let mut completed = 0.0;
-        for (i, weight) in self.state.phase_weights.iter().take(5).enumerate() {
-            completed += weight;
-            marks[i] = (completed / self.state.total_weight.max(f64::EPSILON)) as f32;
-        }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
+        let field_frame = frame;
+        let fault = [1.0, renderer.layout.corner, 0.0, 0.0];
+        let mut uniforms = vec![Vec::new(); program.pipes.len()];
         for (i, pipe) in program.pipes.iter().enumerate() {
             pipe.uniforms.write(
                 &[
                     (id!(viewport), &viewport),
-                    (id!(insets), &self.environment.insets),
-                    (
-                        id!(dark),
-                        &[self.environment.dark.unwrap_or(false) as u8 as f32],
-                    ),
-                    (id!(touch), &[self.environment.touch as u8 as f32]),
+                    (id!(dpi), &[dpi]),
                     (
                         id!(reduce_motion),
                         &[self.environment.reduce_motion as u8 as f32],
                     ),
-                    (id!(dpi), &[self.dpi]),
-                    (
-                        id!(overlay),
-                        &[(self.state.mode == Mode::Overlay) as u8 as f32],
-                    ),
-                    (id!(phase_marks), &marks[..4]),
-                    (id!(phase_last), &marks[4..]),
-                    (id!(phase), &[self.state.phase as usize as f32]),
-                    (id!(elapsed), &[self.state.elapsed as f32]),
-                    (id!(warm), &[self.state.warm as u8 as f32]),
-                    (id!(time), &[renderer.began.elapsed().as_secs_f32()]),
-                    (id!(from), &[renderer.from]),
-                    (id!(previous), &[renderer.target]),
-                    (id!(changed), &[renderer.changed]),
-                    (id!(completed), &[self.state.completed_weight as f32]),
-                    (id!(weight), &[self.state.phase_weight as f32]),
-                    (id!(total_weight), &[self.state.total_weight as f32]),
-                    (id!(done), &[self.state.done.unwrap_or(0) as f32]),
-                    (id!(total), &[self.state.total.unwrap_or(0) as f32]),
-                    (id!(phase_elapsed), &[self.state.phase_elapsed as f32]),
+                    (id!(time), &[time]),
+                    (id!(view), &field.view),
+                    (id!(field_params), &field.params),
+                    (id!(field_fall), &field.fall),
+                    (id!(field_frame), &field_frame),
+                    (id!(field_fault), &fault),
                     (id!(radius), &[sdf.radius]),
                     (id!(cutoff), &[sdf.cutoff]),
                 ],
@@ -1101,12 +929,22 @@ impl Boot {
         writer.pass(Pass {
             load: [pass_load::CLEAR; 5],
             clear: [[0.0; 4]; 4],
-            viewport: [0.0, 0.0, viewport[0] * self.dpi, viewport[1] * self.dpi],
-            dpi: self.dpi,
+            viewport: [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi],
+            dpi,
             ..Default::default()
         });
-        for i in 0..program.pipes.len() {
-            let rect = if i == PROGRESS { clip } else { background };
+        let scissor = frame.map(|v| v * dpi);
+        program.pipes[FIELD].draw_buffer(
+            &mut writer,
+            field::INSTANCES,
+            field.count,
+            &uniforms[FIELD],
+            scissor,
+        );
+        for i in [ERROR_BAND, ICON, GLYPH] {
+            if i >= program.pipes.len() {
+                continue;
+            }
             program.pipes[i].draw(
                 &mut writer,
                 &data[i],
@@ -1116,11 +954,18 @@ impl Boot {
                 } else {
                     renderer.text.atlas()
                 },
-                rect.map(|v| v * self.dpi),
+                scissor,
             );
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
-        writer.frame_end(window, target::WINDOW);
+        let snapshot = self.dump.as_mut().and_then(|d| d.now());
+        writer.frame_end(
+            window,
+            target::WINDOW | if snapshot.is_some() { target::SNAPSHOT } else { 0 },
+        );
+        if let Some(req) = snapshot {
+            writer.snapshot(window, req);
+        }
         Hal::global().submit(&writer.buf());
         renderer.presented_revision = renderer.layout_revision;
         renderer.presented_scroll = renderer.scroll;
@@ -1134,9 +979,7 @@ impl Boot {
         self.state.mode == Mode::Boot
             && self.state.diagnostics.is_empty()
             && self.state.parked.is_none()
-            && self.renderer.as_ref().is_some_and(|r| {
-                r.active.as_ref().is_some_and(|p| p.pipes.len() > FIELD)
-            })
+            && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
     }
 
     /// Whether a dump keeps the field going after the app has the window.
@@ -1174,8 +1017,9 @@ impl Boot {
             &program.pipes[FIELD],
             &self.state,
             time,
-            viewport,
+            [0.0, 0.0, viewport[0], viewport[1]],
             reduce_motion,
+            false,
         );
         let hint = program.label(layout::phase_key(self.state.phase));
         renderer.field.hud(
@@ -1320,15 +1164,14 @@ impl Boot {
 }
 
 impl Layout {
-    fn visible_cards(&self, scroll: f32) -> impl Iterator<Item = &Card> {
-        let (content, fixed) = self
-            .cards
-            .split_at(self.cards.partition_point(|c| !c.fixed));
-        let start = content.partition_point(|c| c.rect[1] + c.rect[3] < self.clip[1] + scroll);
-        content[start..]
+    /// The cards on screen at `scroll`: the list's cards that meet the clip, and the fixed ones
+    /// (last). A member row lies inside its group's card and comes after it.
+    fn visible_cards(&self, scroll: f32) -> impl DoubleEndedIterator<Item = &Card> {
+        let top = self.clip[1] + scroll;
+        let bottom = top + self.clip[3];
+        self.cards
             .iter()
-            .take_while(move |c| c.rect[1] <= self.clip[1] + self.clip[3] + scroll)
-            .chain(fixed.iter())
+            .filter(move |c| c.fixed || (c.rect[1] + c.rect[3] >= top && c.rect[1] <= bottom))
     }
 }
 

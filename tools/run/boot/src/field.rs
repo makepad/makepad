@@ -76,6 +76,8 @@ pub struct Field {
     o3_seen: u32,
     superseded_base: u32,
     p_smooth: f32,
+    /// the galaxy's turn at the last frame that moved
+    spin: f32,
     labels: [String; ARMS],
     labels_at: f32,
     hud: Hud,
@@ -146,6 +148,7 @@ impl Field {
             o3_seen: 0,
             superseded_base: 0,
             p_smooth: 0.0,
+            spin: 0.0,
             labels: Default::default(),
             labels_at: -1.0,
             hud: Hud::default(),
@@ -247,8 +250,9 @@ impl Field {
         pipe: &Pipeline,
         state: &State,
         time: f32,
-        viewport: [f32; 2],
+        region: [f32; 4],
         reduce_motion: bool,
+        halted: bool,
     ) -> Frame {
         use std::sync::atomic::Ordering::Relaxed;
         if self.pipe != Some(pipe.id) {
@@ -333,17 +337,26 @@ impl Field {
             .load(Relaxed)
             .saturating_sub(self.superseded_base);
 
-        // ---- the geometry of the picture
-        let [w, h] = viewport;
+        // ---- the geometry of the picture, in `region` (the window, or the halted view's part)
+        let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let radius = (w * if narrow { 0.40 } else { 0.30 })
-            .min(h * if tiny { 0.30 } else if narrow { 0.34 } else { 0.38 })
-            .max(16.0);
-        let cy = if tiny { h * 0.44 } else if narrow { h * 0.47 } else { h * 0.52 };
-        let view = [w * 0.5, cy, radius, TILT];
+        let (radius, cy) = if halted {
+            // the whole galaxy, scatter included, inside the region
+            ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
+        } else {
+            let radius = (w * if narrow { 0.40 } else { 0.30 })
+                .min(h * if tiny { 0.30 } else if narrow { 0.34 } else { 0.38 })
+                .max(16.0);
+            (radius, if tiny { h * 0.44 } else if narrow { h * 0.47 } else { h * 0.52 })
+        };
+        let view = [rx + w * 0.5, ry + cy, radius, TILT];
         let scale = (radius / 220.0).clamp(0.75, 2.0);
-        let spin = if reduce_motion { 0.0 } else { time * 0.04 };
+        // a halted field stands still where it stopped
+        if !halted {
+            self.spin = if reduce_motion { 0.0 } else { time * 0.04 };
+        }
+        let spin = self.spin;
 
         // ---- events on the loader's clock, as ages in the window's
         let age = |ms: u64, since: f64| -> f32 {
@@ -372,7 +385,7 @@ impl Field {
             1.0 - (swap_age / 0.3).clamp(0.0, 1.0)
         } else {
             1.0
-        };
+        } * if halted { 0.35 } else { 1.0 };
         Frame {
             count: self.count as u32,
             view,
@@ -415,7 +428,6 @@ impl Field {
         layout.fixed_text.clear();
         layout.text.clear();
         layout.cards.clear();
-        layout.progress = None;
         layout.icon = None;
         layout.panel = [0.0, 0.0, w, h];
         layout.clip = [0.0, 0.0, w, h];
@@ -432,7 +444,6 @@ impl Field {
                 height: size * 1.3,
                 gap: 0.0,
                 color,
-                light_color: color,
                 align,
             };
             let run = text.shape(s, size, wide, style.height);
@@ -559,7 +570,6 @@ impl Field {
                 height: 28.0,
                 gap: 0.0,
                 color: dim,
-                light_color: dim,
                 align: 0.5,
             };
             let run = text.shape("\u{00d7}", style.size, rect[2], style.height);
@@ -573,7 +583,8 @@ impl Field {
             layout.cards.push(Card {
                 rect,
                 action: Action::Close,
-                button: true,
+                accent: 4.0,
+                members: 0..0,
                 fixed: true,
             });
         }

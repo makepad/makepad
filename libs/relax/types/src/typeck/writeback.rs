@@ -20,6 +20,10 @@ impl WritebackCx<'_, '_> {
         } else {
             *ty = self.infcx.deeply_resolve_ignoring_regions(*ty);
         }
+        // writeback.rs Resolver::fold_region: the typeck's region variables mean nothing outside it; they are erased, and
+        // borrowck takes each erased region of a closure's signature as an external universal region of the closure.
+        let tys = &self.infcx.tcx.tys;
+        *ty = tys.map_regions(*ty, &|r, _| if matches!(tys.region_kind(r), crate::types::RegionKind::ReVar(_)) { tys.intern_region(crate::types::RegionKind::ReErased) } else { r }, 0);
         if self.infcx.tcx.tys.has_infer(*ty) {
             self.unresolved = true;
             *ty = self.infcx.tcx.tys.error;

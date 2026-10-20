@@ -246,6 +246,8 @@ impl BorrowCheckRootCtxt<'_> {
             }
             ClauseOwner::Def(_) => vec![],
         };
+        // the nested body numbers its own placeholders after those it inherits from this body (`UniversalRegionsBuilder::build`)
+        let placeholder_base = super::universal_regions::placeholder_base(self.tcx, universals.indices.iter().map(|(r, _)| *r));
         (0..num_external_vids).map(|vid| {
             let identity = child.universals.indices.iter().find(|(_, v)| *v == vid).map(|x| x.0)
                 .unwrap_or_else(|| panic!("external region {vid} of a nested body has no identity"));
@@ -255,7 +257,7 @@ impl BorrowCheckRootCtxt<'_> {
             // (`replace_erased_regions_with_placeholders` numbers them in order); the creator's closure type
             // has a variable at that position.
             let erased_slot = match tys.region_kind(identity) {
-                RegionKind::RePlaceholder { var, .. } => child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth(child.closure_sig_erased_offset + var.0 as usize).map(|(i, _)| i),
+                RegionKind::RePlaceholder { var, .. } => child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth(child.closure_sig_erased_offset + (var.0 - placeholder_base) as usize).map(|(i, _)| i),
                 // an erased region of the environment type (`SignatureRegions::with_closure_env`)
                 RegionKind::ReLateParam(_, crate::types::LateParamKind::Anon(n)) if n >= super::universal_regions::ENV_ERASED_BASE =>
                     child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth((n - super::universal_regions::ENV_ERASED_BASE) as usize).map(|(i, _)| i),

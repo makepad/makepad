@@ -96,15 +96,17 @@ pub struct ZoneTaken {
 }
 
 /// Takes this crate's compiler statics while every compiler thread is quiesced.
-pub fn zone_take() -> ZoneTaken {
-    ZoneTaken {
-        owner: owner::zone_take(),
+/// None, taking nothing, when the owner has requests queued.
+pub fn zone_take() -> Option<ZoneTaken> {
+    let owner = owner::zone_take()?;
+    Some(ZoneTaken {
+        owner,
         native_macros: native_macros::zone_take(),
         cache: cache::zone_take(),
         jit: jit::zone_take(),
         run: run::zone_take(),
         tui: tui::zone_take(),
-    }
+    })
 }
 
 /// Restores the statics after an aborted swap, forgetting the new generation's values.

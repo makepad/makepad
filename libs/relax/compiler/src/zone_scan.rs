@@ -41,14 +41,14 @@ impl ZoneTaken {
 
 /// Takes compiler statics before a restore, keeping rollback possible and compiler TLS valid.
 /// Every compiler thread is quiesced; the caller is already in the new compiler generation.
-pub(crate) fn zone_take_all() -> ZoneTaken {
-    ZoneTaken {
-        compiler: crate::zone_take(),
+pub(crate) fn zone_take_all() -> Option<ZoneTaken> {
+    Some(ZoneTaken {
+        compiler: crate::zone_take()?,
         types: relax_types::zone_take(),
         front: relax_front::zone_take(),
         codegen: relax_codegen::zone_take(),
         session: relax_session::zone_take(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -59,8 +59,8 @@ mod reset_tests {
         if std::env::var_os(CHILD).is_some() {
             // Take helpers assert their statics are empty. Repeat to cover an empty take.
             let _phase = crate::zone_alloc::compiler();
-            super::zone_take_all().forget();
-            super::zone_take_all().forget();
+            super::zone_take_all().unwrap().forget();
+            super::zone_take_all().unwrap().forget();
             return;
         }
         // Other native tests use these process-wide caches: reset only in an isolated child.

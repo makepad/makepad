@@ -383,6 +383,10 @@ pub mod obligations {
         def: DefId,
         /// errors of checks that are not obligations (region outlives)
         extra: Vec<String>,
+        /// rustc `assumed_wf_types`: the types whose well-formedness the item's regions may assume
+        assumed_wf: Vec<TyId>,
+        /// the normalized form of each type already normalized (one fresh region variable set per type, as rustc's wfcx shares)
+        normalized: std::collections::HashMap<TyId, TyId>,
     }
 
     impl<'a, 'tcx> Wfcx<'a, 'tcx> {
@@ -394,9 +398,12 @@ pub mod obligations {
         /// written: its own well-formedness reports the unmet bound.
         fn normalize(&mut self, ty: TyId) -> TyId {
             if !self.tcx.tys.has_assoc(ty) { return ty; }
+            if let Some(&done) = self.normalized.get(&ty) { return done; }
             let mut ocx = ObligationCtxt::new(self.infcx, self.prog);
             ocx.cause = ObligationCause { span: 0, body_id: self.def };
-            ocx.deeply_normalize_ty(&self.env, ty).unwrap_or(ty)
+            let done = ocx.deeply_normalize_ty(&self.env, ty).unwrap_or(ty);
+            self.normalized.insert(ty, done);
+            done
         }
 
         /// WfCheckingCtxt::register_wf_obligation: the obligations that make `term` well formed
@@ -498,7 +505,9 @@ pub mod obligations {
             let mut out: Vec<String> = std::mem::take(&mut self.extra);
             let mut seen = std::collections::HashSet::new();
             // wfcheck.rs: `select_all_or_error` -- an ambiguous obligation is an error (E0283)
-            for e in self.ocx.engine.evaluate_obligations_error_on_ambiguity(self.infcx, self.prog) {
+            let fulfillment = self.ocx.engine.evaluate_obligations_error_on_ambiguity(self.infcx, self.prog);
+            let fulfilled = fulfillment.is_empty();
+            for e in fulfillment {
                 let (code, o) = match e {
                     NextSolverError::TrueError(o) => ("E0277", o),
                     NextSolverError::Overflow(o) => ("E0275", o),
@@ -510,7 +519,86 @@ pub mod obligations {
                 if !seen.insert((o.cause.span, msg.clone())) { continue; }
                 out.push(self.prog.record_error(file, o.cause.span, "typeck", msg));
             }
+            // wfcheck.rs `resolve_regions_and_report_errors`: the region obligations the well-formedness goals registered,
+            // under the item's outlives environment and the types it may assume well formed.
+            if fulfilled {
+                let outlives = self.outlives_environment();
+                for e in self.infcx.resolve_regions_with_outlives_env(self.prog, &outlives) {
+                    if let crate::infer::lexical_region_resolve::RegionResolutionError::GenericBoundFailure(ty, sub, span) = e {
+                        if let Some(msg) = self.generic_bound_failure(ty, sub) {
+                            let span = if span == 0 { self.prog.files[file as usize].ast.item(self.prog.def(self.def).item).lo } else { span };
+                            if seen.insert((span, msg.clone())) { out.push(self.prog.record_error(file, span, "typeck", msg)); }
+                        }
+                    }
+                }
+            }
             out
+        }
+
+        /// rustc `OutlivesEnvironment::new` of a well-formedness check: the item's outlives clauses (an ADT's
+        /// `inferred_outlives_of` among them) and the bounds the assumed well-formed types imply, those the contracts
+        /// of the types they name give (RFC 2093 included) next to the ones the implied-bounds query finds.
+        fn outlives_environment(&self) -> crate::infer::outlives::env::OutlivesEnvironment {
+            use crate::infer::outlives::env::{OutlivesBound, OutlivesEnvironment};
+            use crate::tcx::outlives::OutlivesPredicate;
+            let tcx = self.tcx;
+            let tys = &tcx.tys;
+            let param_env = tcx.param_env_by_id(self.env.clone()).clone();
+            let known: Vec<Predicate> = param_env.clauses.iter().filter(|p| matches!(p.kind, PredicateKind::Clause(ClauseKind::TypeOutlives(..)))).cloned().collect();
+            let mut bounds = Vec::new();
+            for &ty in &self.assumed_wf { bounds.extend(crate::next_solver::implied_outlives_bounds::implied_outlives_bounds(self.infcx, self.prog, &self.env, ty)); }
+            // (region variables the query's equalities unified are one: the region of an obligation resolves the same way)
+            let mut resolver = crate::infer::resolve::DeepVariableResolver::new(self.infcx);
+            use crate::types::fold::TypeFolder;
+            for bound in &mut bounds {
+                *bound = match *bound {
+                    OutlivesBound::RegionSubRegion(a, b) => OutlivesBound::RegionSubRegion(resolver.fold_region(tys, a, 0), resolver.fold_region(tys, b, 0)),
+                    OutlivesBound::RegionSubParam(r, t) => OutlivesBound::RegionSubParam(resolver.fold_region(tys, r, 0), resolver.fold_ty(tys, t, 0)),
+                    OutlivesBound::RegionSubAlias(r, t) => OutlivesBound::RegionSubAlias(resolver.fold_region(tys, r, 0), resolver.fold_ty(tys, t, 0)),
+                };
+            }
+            if tcx.adts.contains_key(&self.def) {
+                // (the type's own `inferred_outlives_of` are among its predicates)
+                let mut pairs = Vec::new();
+                for p in crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, self.prog, self.def) {
+                    match p {
+                        OutlivesPredicate::Region(a, b) => bounds.push(OutlivesBound::RegionSubRegion(b, a)),
+                        OutlivesPredicate::Type(t, r) => pairs.push(if matches!(tys.kind(t), TyKind::Alias(..)) { OutlivesBound::RegionSubAlias(r, t) } else { OutlivesBound::RegionSubParam(r, t) }),
+                    }
+                }
+                bounds.extend(pairs);
+            }
+            OutlivesEnvironment::from_normalized_bounds(tys, param_env, known, bounds)
+        }
+
+        /// `construct_generic_bound_failure` (E0309, E0310, E0311): the message of a type that must outlive `sub`
+        /// and cannot be shown to.
+        fn generic_bound_failure(&self, ty: TyId, sub: crate::types::RegionId) -> Option<String> {
+            use crate::types::{LateParamKind, RegionKind};
+            let tcx = self.tcx;
+            let ty = self.infcx.deeply_resolve_ignoring_regions(ty);
+            let what = match tcx.tys.kind(ty) {
+                TyKind::Param(_) => "parameter type",
+                TyKind::Placeholder(..) => "placeholder type",
+                TyKind::Alias(..) => "associated type",
+                _ => return None,
+            };
+            let named = |r| -> bool {
+                match tcx.tys.region_kind(r) {
+                    RegionKind::ReLateParam(_, LateParamKind::Named(_)) => true,
+                    RegionKind::ReEarlyParam(_) => {
+                        let contract = tcx.fn_sig(self.prog, self.def).map(|s| &s.region_contract).or_else(|| tcx.nominal_region_contracts.get(&self.def));
+                        contract.and_then(|c| c.regions.iter().find(|(_, x)| *x == r)).map_or(true, |(n, _)| n != "'_")
+                    }
+                    _ => false,
+                }
+            };
+            let code = match tcx.tys.region_kind(sub) {
+                RegionKind::ReStatic => "E0310",
+                RegionKind::ReEarlyParam(_) | RegionKind::ReLateParam(..) if named(sub) => "E0309",
+                _ => "E0311",
+            };
+            Some(format!("{code}: the {what} `{}` may not live long enough", crate::typeck::ty_to_string(false, self.prog, tcx, ty)))
         }
 
         fn message(&self, code: &str, o: &PredicateObligation) -> Option<String> {
@@ -574,10 +662,40 @@ pub mod obligations {
         }
     }
 
+    /// rustc_ty_utils implied_bounds.rs `assumed_wf_types`: a fn assumes its liberated inputs and output (and its impl's
+    /// header), an impl its header (the self type and trait arguments), an associated item its parent's.
+    fn assumed_wf_types(w: &mut Wfcx<'_, '_>, def: DefId) -> Vec<TyId> {
+        let (prog, tcx) = (w.prog, w.tcx);
+        let d = prog.def(def);
+        let mut out = Vec::new();
+        let header = |imp: DefId| -> Vec<TyId> {
+            let mut v = vec![];
+            if let Some(&t) = tcx.impl_self.get(&imp) { v.push(t); }
+            if let Some(args) = tcx.impl_trait_args.get(&imp) { v.extend_from_slice(args); }
+            v
+        };
+        let parent_impl = (d.parent != crate::program::NO_DEF && prog.def(d.parent).kind == DefKind::Impl).then_some(d.parent);
+        match d.kind {
+            DefKind::Fn | DefKind::AssocFn => {
+                if let Some(imp) = parent_impl { out.extend(header(imp)); }
+                if let Some(sig) = tcx.fn_sig(prog, def) {
+                    let liberate = |t: TyId| crate::next_solver::dyn_compatibility::liberate_late_bound_regions(tcx, def, t);
+                    out.extend(sig.params.iter().map(|&t| liberate(t)));
+                    out.push(liberate(sig.ret));
+                }
+            }
+            DefKind::Impl => out.extend(header(def)),
+            DefKind::AssocConst | DefKind::AssocTy => { if let Some(imp) = parent_impl { out.extend(header(imp)); } }
+            _ => {}
+        }
+        out.into_iter().map(|t| w.normalize(t)).collect()
+    }
+
     fn with_wfcx(prog: &Program, tcx: &Tcx, def: DefId, f: impl FnOnce(&mut Wfcx<'_, '_>)) -> Vec<String> {
         let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), def);
         let env = tcx.param_env_id(prog, def);
-        let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env, def, extra: Vec::new()};
+        let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env, def, extra: Vec::new(), assumed_wf: Vec::new(), normalized: Default::default() };
+        w.assumed_wf = assumed_wf_types(&mut w, def);
         w.check_false_global_bounds();
         f(&mut w);
         w.finish(prog.def(def).file)

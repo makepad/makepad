@@ -280,7 +280,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                     external_constraints.region_constraints.push((constraint, c.visible_for_leak_check));
                 }
             }
-            for &(ty, region) in inner.region_obligations() {
+            for &(ty, region, _) in inner.region_obligations() {
                 external_constraints.region_constraints.push((RegionConstraint::TypeOutlives(ty, region), false));
             }
         }

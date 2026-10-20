@@ -110,8 +110,9 @@ impl UniversalRegionsBuilder<'_> {
             // bound by an enclosing callable. Instantiate that outer binder as
             // external query identities before the ordinary erased-region pass.
             let raw: Vec<_> = inputs.iter().copied().chain([output]).collect();
-            let mut replaced = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(tcx,&raw);
-            let next = std::cell::Cell::new(crate::borrowck::implied_bounds::implied_bounds_query_var_values(tcx,&replaced,
+            let base = self.parent.as_ref().map_or(0,|p| placeholder_base(tcx,p.regions.iter().filter_map(|u| match u.identity { Identity::Region(_,r) => Some(r), _ => None })));
+            let mut replaced = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(tcx,&raw,base);
+            let next = std::cell::Cell::new(base + crate::borrowck::implied_bounds::implied_bounds_query_var_values(tcx,&replaced,
                 |r| matches!(tcx.tys.region_kind(r),RegionKind::RePlaceholder { .. })).len() as u32);
             let outer = std::cell::RefCell::new(crate::fxhash::HashMap::default());
             replaced = replaced.into_iter().map(|ty| tcx.tys.map_regions(ty,&|r,depth| {
@@ -170,7 +171,16 @@ impl UniversalRegionsBuilder<'_> {
     }
     fn compute_indices(&mut self) -> UniversalRegionIndices {
         let mut regions = match self.parent.take() {
-            Some(parent) => parent.regions.into_iter().filter(|r| !matches!(r.identity,Identity::FnBody(_))).map(|mut r| {
+            // The parent's erased regions (its signature's placeholders, its environment's erased regions) are its own
+            // external regions: the nested closure's types hold them erased, as regions of their own.
+            Some(parent) => parent.regions.into_iter().filter(|r| !matches!(r.identity,Identity::FnBody(_)) && !match r.identity {
+                Identity::Region(_,x) => match self.tcx.tys.region_kind(x) {
+                    RegionKind::RePlaceholder { .. } => true,
+                    RegionKind::ReLateParam(_,LateParamKind::Anon(n)) => n >= ENV_ERASED_BASE,
+                    _ => false,
+                },
+                _ => false,
+            }).map(|mut r| {
                 if r.class != RegionClassification::Global { r.class = RegionClassification::External; } r
             }).collect(),
             None => vec![],
@@ -179,6 +189,12 @@ impl UniversalRegionsBuilder<'_> {
         UniversalRegionIndices { regions }
     }
 }
+/// The number the placeholders of a body nested in the one with these universal regions start from: after all of the
+/// creator's own, so that the two bodies' placeholders are different regions.
+pub fn placeholder_base(tcx: &Tcx, regions: impl Iterator<Item = RegionId>) -> u32 {
+    regions.filter_map(|r| match tcx.tys.region_kind(r) { RegionKind::RePlaceholder { var, .. } => Some(var.0 + 1), _ => None }).max().unwrap_or(0)
+}
+
 /// rustc's `replace_free_regions_with_nll_infer_vars` makes every region of the defining type, erased ones
 /// included, a universal region of its own: each erased occurrence of a closure's environment type takes a
 /// distinct identity, scoped to the closure (a nested closure inherits its creator's universal regions,
@@ -295,6 +311,22 @@ impl SignatureRegions {
         let mut signature = sig.liberated_bound();
         if !matches!(tcx.tys.kind(signature),TyKind::FnPtr(..)) { return None; }
         let mut bound = sig.bound;
+        // rustc universal_regions.rs: the closure's inputs and output are the closure type's (bound) signature with its
+        // late-bound regions liberated. The typeck's liberated signature (and a merged annotation's expected one) was normalized
+        // with region variables that writeback erases, which would make them unrelated external regions; the bound
+        // signature carries the higher-ranked regions as bound variables, so liberate it here.
+        if let TyKind::FnPtr(ps,ret,c,n) = tcx.tys.kind(bound).clone() {
+            let scope = RegionScope::Closure { owner, expr };
+            let regions: Vec<_> = (0..n).map(|v| tcx.tys.intern_region(RegionKind::ReLateParam(scope,LateParamKind::Anon(v)))).collect();
+            let replace = |r, depth| match tcx.tys.region_kind(r) {
+                RegionKind::ReBound(d, var) if d == depth => regions[var.0 as usize],
+                RegionKind::ReBound(d, var) if d > depth => tcx.tys.intern_region(RegionKind::ReBound(d - 1, var)),
+                _ => r,
+            };
+            let ps: Vec<_> = tcx.tys.list(ps).iter().map(|t| tcx.tys.map_regions(*t,&replace,0)).collect();
+            let ret = tcx.tys.map_regions(ret,&replace,0);
+            signature = tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&ps),ret,c,0));
+        }
         if let Some((plan, env)) = coroutine {
             signature = coroutine_closure_signature(tcx, owner, expr, signature, env, plan);
             // (the closure type's own signature names the coroutine's argument upvars the same way)

@@ -112,7 +112,7 @@ fn erased_signature_occurrences_get_distinct_query_placeholders() {
     let erased = tcx.tys.intern(crate::types::TyKind::Ref(false,b,RegionId::ERASED));
     let bound = tcx.tys.intern_region(RegionKind::ReBound(0,BoundVar(0)));
     let nested = tcx.tys.intern(crate::types::TyKind::FnPtr(tcx.tys.mk_list(&[tcx.tys.intern(crate::types::TyKind::Ref(false,b,bound))]),erased,crate::types::FnHeader::RUST,1));
-    let query = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(&tcx,&[erased,erased,nested]);
+    let query = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(&tcx,&[erased,erased,nested],0);
     assert_ne!(query[0],query[1]);
     let regions = crate::borrowck::implied_bounds::implied_bounds_query_var_values(&tcx,&query,|r| matches!(tcx.tys.region_kind(r),RegionKind::RePlaceholder { .. }));
     assert_eq!(regions.len(),3);

@@ -117,14 +117,18 @@ static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; C
 
 pub(crate) struct ZoneTaken(Queue);
 
-pub(crate) fn zone_take() -> ZoneTaken {
+/// None: a request was queued since the quiesce looked (an app thread asks the owner whenever it
+/// likes, and the gate does not hold it back): the swap is tried again later.
+pub(crate) fn zone_take() -> Option<ZoneTaken> {
     let mut queue = Q.lock().unwrap_or_else(|e| e.into_inner());
     // Quiescence includes draining every request before taking the lanes' buffers.
-    assert!(queue.lanes.iter().all(VecDeque::is_empty), "memlane swap with queued owner requests");
+    if !queue.lanes.iter().all(VecDeque::is_empty) {
+        return None;
+    }
     let taken = ZoneTaken(std::mem::replace(&mut *queue, Queue { lanes: [const { VecDeque::new() }; CLASSES] }));
     #[cfg(test)]
     assert!(queue.lanes.iter().all(|lane| lane.is_empty() && lane.capacity() == 0));
-    taken
+    Some(taken)
 }
 
 pub(crate) fn zone_put_back(taken: ZoneTaken) {

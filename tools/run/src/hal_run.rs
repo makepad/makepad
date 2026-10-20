@@ -1013,7 +1013,11 @@ fn pump(
         if diagnostics_dirty {
             let records = diagnostics.iter().cloned();
             let records = records.chain(document_errors.iter().cloned());
-            data.diagnostics = records.collect::<Vec<_>>().into();
+            // root causes first, a folded group's members together (the boot window's list order;
+            // the selection, Copy and Open index the same list)
+            let mut records = records.collect::<Vec<_>>();
+            relax_boot::order_diagnostics(&mut records);
+            data.diagnostics = records.into();
             diagnostics_dirty = false;
             dirty = true;
         }

@@ -41,7 +41,17 @@ impl Dump {
     /// The request number of a snapshot to take with this frame, if one is due.
     pub fn due(&mut self) -> Option<u32> {
         let ms = self.began.elapsed().as_millis();
-        if self.last.is_some_and(|last| ms < last + self.every_ms) || self.pending.len() > 4 {
+        if self.last.is_some_and(|last| ms < last + self.every_ms) {
+            return None;
+        }
+        self.now()
+    }
+
+    /// A snapshot of this frame whatever the interval: the halted view draws only when it
+    /// changes, so each of its frames is kept.
+    pub fn now(&mut self) -> Option<u32> {
+        let ms = self.began.elapsed().as_millis();
+        if self.pending.len() > 4 {
             return None;
         }
         self.last = Some(ms);

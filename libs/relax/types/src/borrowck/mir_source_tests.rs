@@ -51,6 +51,18 @@ pub(super) fn typeck_errors_source(source: &str, edition: u16) -> Vec<String> {
     errors
 }
 
+/// The well-formedness errors (wfcheck) of every definition of `source`.
+pub(super) fn wfcheck_errors(source: &str) -> Vec<String> {
+    let (prog, tcx, user) = load_source(source, 2021, "repro");
+    let mut errors = vec![];
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        if prog.def(d).krate != user { continue; }
+        errors.extend(crate::wfcheck::obligations::check_def(&prog, &tcx, d));
+    }
+    errors
+}
+
 /// `borrowck_source_in` for a crate of the given name.
 pub(super) fn borrowck_source_named(source: &str, edition: u16, crate_name: &str) -> (Vec<String>, Vec<String>) {
     borrowck_source_checked_named(source, edition, crate_name, false)
@@ -906,6 +918,33 @@ fn a_use_of_an_opaque_type_with_non_parameter_arguments_is_e0792() {
 }
 
 #[test]
+fn a_region_inferred_in_a_closure_signature_is_an_external_region_of_the_closure() {
+    // type-alias-impl-trait/implied_bounds_closure.rs: `T`'s region comes from the closure body, so it is erased by writeback
+    // and is a universal region of the closure that the creator maps to its own variable (here `'static`, from `T: 'static`).
+    let (errors, unchecked) = borrowck_source("
+        trait StaticDefaultRef: 'static { fn default_ref() -> &'static Self; }
+        impl StaticDefaultRef for str { fn default_ref() -> &'static str { \"\" } }
+        fn into_impl(x: &str) -> &(impl ?Sized + AsRef<str> + StaticDefaultRef + '_) { x }
+        fn extend_lifetime<'a>(x: &'a str) -> &'static str { let t = into_impl(x); helper(|_| t) }
+        fn helper<T: ?Sized + AsRef<str> + StaticDefaultRef>(f: impl FnOnce(&T) -> &T) -> &'static str { f(T::default_ref()).as_ref() }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("lifetime may not live long enough"), "{errors:?}");
+}
+
+#[test]
+fn a_type_that_must_outlive_a_region_in_a_well_formedness_check_reports_the_bound_failure() {
+    // wf/wf-in-fn-type-static.rs, lifetimes/lifetime-doesnt-live-long-enough.rs: wfcheck resolves the regions its
+    // obligations registered (E0310 for `'static`, E0309 for a named region).
+    let errors = wfcheck_errors("
+        struct Foo<T> { x: fn() -> &'static T }
+        struct Ok<'a, T> { x: &'a T }
+        fn f<'a, T>(_: &'a T) {}
+        fn main() {}");
+    assert_eq!(errors.iter().filter(|e| e.contains("E0310") && e.contains("may not live long enough")).count(), 1, "{errors:?}");
+}
+
+#[test]
 fn a_local_live_across_an_await_is_part_of_the_future_for_auto_traits() {
     // rustc mir_coroutine_witnesses: `Send` of an async block waits for the body's MIR, then asks every type
     // of the locals live across a suspension point.
@@ -930,4 +969,34 @@ fn the_witness_of_another_fns_future_is_made_on_demand() {
         async fn fine() { let n = 1u8; nothing().await; drop(n); }
         pub fn user() { needs_send(holds()); needs_send(fine()); }", 2021);
     assert_eq!(errors.len(), 1, "{errors:?}");
+}
+
+#[test]
+fn a_nested_closures_erased_signature_regions_are_not_its_creators() {
+    // the inner closure's erased output region is its own external region; it must not be the outer closure's erased input region
+    let (errors, unchecked) = borrowck_source("
+        fn connected(c: &mut u32) -> Option<&mut u32> { Some(c) }
+        fn g(c: &mut u32) -> Option<u32> {
+            connected(c).and_then(|client| {
+                let revisions = vec![*client];
+                let previous = Some(1usize).and_then(|index| revisions.get(index))?;
+                Some(*previous)
+            })
+        }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_closures_higher_ranked_signature_regions_survive_normalization_under_the_binder() {
+    // higher-ranked/trait-bounds/normalize-under-binder/issue-89436.rs
+    let (errors, unchecked) = borrowck_source("
+        trait MiniYokeable<'a> { type Output; }
+        struct Bar<'a> { string_1: &'a str, string_2: &'a str }
+        impl<'a> MiniYokeable<'a> for Bar<'static> { type Output = Bar<'a>; }
+        impl<'a> MiniYokeable<'a> for &'static str { type Output = &'a str; }
+        fn map<Y: for<'a> MiniYokeable<'a>, P: for<'a> MiniYokeable<'a>>(y: Y, f: impl for<'a> FnOnce(<Y as MiniYokeable<'a>>::Output, core::marker::PhantomData<&'a ()>) -> <P as MiniYokeable<'a>>::Output) {}
+        fn demo(bar: Bar<'static>) { map::<_, &'static str>(bar, |bar, _| bar.string_1) }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
 }

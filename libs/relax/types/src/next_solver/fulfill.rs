@@ -32,6 +32,7 @@ impl FulfillmentCtxt {
         loop {
             let mut any_changed = false;
             self.obligations.pending.retain_mut(|(obligation, stalled_on)| {
+                infcx.origin_span.set(obligation.cause.span);
                 let result = match infcx.evaluate_root_goal(prog, obligation.goal.clone(), stalled_on.as_ref()) {
                     Ok(result) => result,
                     Err(NoSolution) => { errors.push(NextSolverError::TrueError(obligation.clone())); return false; }

@@ -507,7 +507,7 @@ fn round10_leak_check_does_not_resolve_free_region_obligations() {
     // compare_impl_item.rs:697 needs resolve_regions_and_report_errors here.
     // A leak check only checks universe escape; these are ordinary free regions.
     assert!(infcx.leak_check(UniverseIndex::ROOT, None).is_ok());
-    assert_eq!(infcx.inner.borrow().region_obligations(), &[(ty, a)]);
+    assert_eq!(infcx.inner.borrow().region_obligations(), &[(ty, a, 0)]);
     assert_eq!(infcx.inner.borrow_mut().unwrap_region_constraints().constraints().len(), 1);
 }
 

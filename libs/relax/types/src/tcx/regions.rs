@@ -451,7 +451,7 @@ mod tests {
         let TyKind::FnPtr(ps, r, _, n) = tcx.tys.kind(explicit_output.bound) else { panic!("fn") };
         assert_eq!(*n, 1);
         assert_eq!(region(tcx.tys.list(*ps)[0]), RegionKind::ReBound(0, BoundVar(0)));
-        assert!(matches!(region(*r), RegionKind::ReVar(_)));
+        assert!(matches!(region(*r), RegionKind::ReErased)); // (writeback erases the typeck's region variables)
         // rustc rejects this deferred closure as not general enough; it does
         // not acquire a higher-ranked signature from a previous use of `g`.
         assert!(check("deferred_closure_rejected").errors.iter().any(|error| error.contains("E0277") || error.contains("E0271")));
@@ -468,7 +468,7 @@ mod tests {
                 assert!(!tcx.tys.has_infer(sig.bound));
                 let (supplied, expected) = sig.annotation_eq.unwrap();
                 let TyKind::FnPtr(ps, _, _, _) = tcx.tys.kind(supplied) else { panic!("fn") };
-                assert!(matches!(region(tcx.tys.list(*ps)[0]), RegionKind::ReVar(_) | RegionKind::ReLateParam(..)));
+                assert!(matches!(region(tcx.tys.list(*ps)[0]), RegionKind::ReErased | RegionKind::ReLateParam(..)));
                 assert!(tcx.tys.eq_mod_regions(supplied, expected));
             }
         }

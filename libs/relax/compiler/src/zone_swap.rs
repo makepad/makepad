@@ -418,7 +418,9 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     let t = Instant::now();
     crate::zone_alloc::compiler_begin_generation();
     trace("generation begun");
-    let taken = zone_scan::zone_take_all();
+    let Some(taken) = zone_scan::zone_take_all() else {
+        return abort("an owner request arrived after the quiesce".into());
+    };
     trace("statics taken");
     let fresh = {
         let _c = crate::zone_alloc::compiler();

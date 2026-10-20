@@ -9,7 +9,7 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionResolutionError {
     ConcreteFailure(RegionId, RegionId),
-    GenericBoundFailure(TyId, RegionId),
+    GenericBoundFailure(TyId, RegionId, u32),
     SubSupConflict(u32, RegionId, RegionId),
     UpperBoundUniverseConflict(u32, UniverseIndex, RegionId),
 }
@@ -137,7 +137,7 @@ impl LexicalResolver<'_> {
         for verify in &self.verifys {
             let sub = values.resolve_region(self.region_rels.tys, verify.region);
             let ty = values.fold_ty(self.region_rels.tys, verify.ty, 0);
-            if !self.bound_is_met(&verify.bound, values, ty, sub) { errors.push(RegionResolutionError::GenericBoundFailure(verify.ty, sub)); }
+            if !self.bound_is_met(&verify.bound, values, ty, sub) { errors.push(RegionResolutionError::GenericBoundFailure(verify.ty, sub, verify.span)); }
         }
     }
     fn bound_is_met(&self, bound: &VerifyBound, values: &LexicalRegionResolutions, ty: TyId, min: RegionId) -> bool {
