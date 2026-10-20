@@ -1794,7 +1794,7 @@ pub mod uses {
     use crate::lexer::T;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use relax_session::sync::Mutex;
 
     /// A definition: where it is written, and for each rule the position of its matcher and
     /// whether its transcriber holds a `compile_error!` (such a rule is never reported).

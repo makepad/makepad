@@ -1063,7 +1063,8 @@ thread_local! {
     /// saved host context of this thread's innermost `enter` (sp); 0 = no recovery point
     static CTX: std::cell::UnsafeCell<[u64; 2]> = const { std::cell::UnsafeCell::new([0; 2]) };
     /// stack of format buffers: format!/write! to non-Formatter targets push one
-    static FMT: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(vec![String::new()]);
+    // (the outer buffer is kept-heap: a thread-local past the compiler generations)
+    static FMT: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(crate::zone_alloc::kept_with(|| vec![String::new()]));
     /// the last popped buffer (valid until the next pop)
     static FMT_POPPED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
@@ -1336,7 +1337,7 @@ fn fmt_take_top() -> String {
 
 rt_fn! {
 fn rt_fmt_push() {
-    FMT.with(|f| f.borrow_mut().push(String::new()));
+    FMT.with(|f| { let _k = crate::zone_alloc::kept(); f.borrow_mut().push(String::new()) });
 }
 }
 
@@ -2045,6 +2046,21 @@ fn note_tombstone_fault(f: &os::fault::Fault) {
     if std::env::var_os("MAKEPAD_RUN_ZONE_TRACE").is_some() {
         let sym = os::proc::symbol_at(f.pc).map_or_else(|| "?".to_string(), |s| s.0);
         eprintln!("makepad-run zone: fault: {} at {:#x}, pc {:#x} in {}, thread `{}`\n", f.label(), f.addr, f.pc, sym, std::thread::current().name().unwrap_or("?"));
+        // the frame-pointer chain of the faulting thread (same stack, bounded by the sp)
+        let (mut fp, lo) = (f.fp, f.sp);
+        for _ in 0..24 {
+            if fp % 16 != 0 || fp < lo || fp - lo > (64 << 20) {
+                break;
+            }
+            let ret = unsafe { *((fp + 8) as *const u64) };
+            let name = os::proc::symbol_at(ret).map_or_else(|| "?".to_string(), |s| s.0);
+            eprintln!("makepad-run zone:   frame {:#x} in {}", ret, name);
+            let next = unsafe { *(fp as *const u64) };
+            if next <= fp {
+                break;
+            }
+            fp = next;
+        }
     }
     if let Some(g) = crate::zone_alloc::compiler_tombstone_of(f.addr as usize) {
         eprintln!("makepad: use after compiler-zone destroy (generation {g}): {} at {:#x}, pc {:#x}", f.label(), f.addr, f.pc);
@@ -12271,9 +12287,12 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
     }
 }
 
-thread_local! {
+crate::gen_local! {
     /// the constants (and their arguments) whose initializers this thread is evaluating, outermost first
-    static CONST_STACK: std::cell::RefCell<Vec<(DefId, Vec<TyId>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// (compiler TLS: the buffer is a generation's block, the settle swap must forget it)
+    static CONST_STACK: std::cell::RefCell<Vec<(DefId, Vec<TyId>)>>;
+}
+thread_local! {
     /// const/static initializers this thread is evaluating (run_init_code)
     static CONST_EVAL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// guarded run-time module calls this thread is inside (std::relax::guard)

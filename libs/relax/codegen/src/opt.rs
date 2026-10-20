@@ -2370,7 +2370,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
 /// `__sincosf_stret` / `__sincos_stret` (a two-float HFA on arm64), and its results are not always
 /// those of separate `sinf`/`cosf` calls (1 ulp in 127 of 4000 arguments), so a program's floats
 /// only match a rustc build's if we combine them too.
-static SINCOS: std::sync::Mutex<[Option<(u32, u32, Sym)>; 2]> = std::sync::Mutex::new([None, None]);
+static SINCOS: relax_session::sync::Mutex<[Option<(u32, u32, Sym)>; 2]> = relax_session::sync::Mutex::new([None, None]);
 
 pub fn set_sincos(wide: bool, sin: Sym, cos: Sym, both: Sym) {
     SINCOS.lock().unwrap_or_else(|e| e.into_inner())[wide as usize] = Some((sin.id, cos.id, both));

@@ -65,15 +65,15 @@ pub struct Cx {
 /// Count dispatches and calls (a build-time switch: the counting costs time in every handler).
 const COUNT: bool = option_env!("MAKEPAD_RUN_INTERP_COUNT").is_some();
 /// counting builds: dispatches per handler, and the RIR operation each handler was emitted for
-static HIST: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
-static HNAMES: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+static HIST: relax_session::sync::Mutex<Vec<(u64, u64)>> = relax_session::sync::Mutex::new(Vec::new());
+static HNAMES: relax_session::sync::Mutex<Vec<(u64, String)>> = relax_session::sync::Mutex::new(Vec::new());
 thread_local! {
     static THIST: std::cell::RefCell<std::collections::HashMap<u64, u64>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 thread_local! {
     static TPAIR: std::cell::RefCell<(u64, std::collections::HashMap<(u64, u64), u64>)> = std::cell::RefCell::new((0, std::collections::HashMap::new()));
 }
-static PAIRS: std::sync::Mutex<Vec<((u64, u64), u64)>> = std::sync::Mutex::new(Vec::new());
+static PAIRS: relax_session::sync::Mutex<Vec<((u64, u64), u64)>> = relax_session::sync::Mutex::new(Vec::new());
 #[inline(never)]
 fn hist_note(h: u64) {
     THIST.with(|t| *t.borrow_mut().entry(h).or_insert(0) += 1);
@@ -338,7 +338,7 @@ pub fn note_native(ns: u64, bytes: u64, insts: u64) {
         eprintln!("makepad-run native: {} fns compiled to machine code ({} RIR insts -> {} KB, backend {:.1} ms)", NATIVE[0].load(Ordering::Relaxed), NATIVE[3].load(Ordering::Relaxed), NATIVE[2].load(Ordering::Relaxed) / 1024, NATIVE[1].load(Ordering::Relaxed) as f64 / 1e6);
     }
 }
-static REFUSALS: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+static REFUSALS: relax_session::sync::Mutex<Vec<(String, u64)>> = relax_session::sync::Mutex::new(Vec::new());
 
 fn refuse(why: &str) {
     N_REFUSED.fetch_add(1, Ordering::Relaxed);
