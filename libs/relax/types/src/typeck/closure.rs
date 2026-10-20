@@ -354,7 +354,14 @@ impl Fcx<'_> {
                                 let sig = self.normalize_signature(sig);
                                 let mut mentions = MentionsTy { expected_ty, found: false };
                                 crate::types::fold::TypeFolder::fold_ty(&mut mentions, &self.tcx.tys, sig, 0);
-                                if !mentions.found { expected_sig = Some(sig); }
+                                if !mentions.found {
+                                    expected_sig = Some(sig);
+                                    if let (Some(crate::lang_items::LangItem::AsyncFnOnceOutput), Term::Ty(inner_ret)) = (projection, p.term) {
+                                        // the coroutine's return type, bound under the same binder
+                                        let inner = self.tcx.tys.intern(TyKind::FnPtr(ps, inner_ret, FnHeader::RUST, bound_regions));
+                                        self.async_expected_inner = Some(self.normalize_signature(inner));
+                                    }
+                                }
                             }
                         }
                     }
@@ -388,6 +395,7 @@ impl Fcx<'_> {
 
     pub(super) fn closure_signatures(&mut self, e: ExprId, params: &[ClosureParam], ret: Option<crate::ast::TyId>, expected: Option<TyId>) -> ClosureSignatures {
         let is_async = matches!(self.ast().expr(e).kind, ExprKind::Closure(row) if self.ast().row(row).is_async);
+        self.async_expected_inner = None;
         let expected = expected.and_then(|t| {
             let (sig, kind) = self.deduce_closure_signature(t, is_async);
             // The same direct Fn-family bound supplies the signature and the
@@ -410,6 +418,20 @@ impl Fcx<'_> {
         let expected = self.tcx.tys.intern(TyKind::FnPtr(ps, r, FnHeader::RUST, n));
         let expected = self.anonymize_signature(expected);
         let mut sigs = self.closure_sigs(e, expected);
+        if let Some(inner) = self.async_expected_inner.take() {
+            // rustc coroutine-closure `return_ty`: the async body's return type is the
+            // deduced `AsyncFnOnce::Output`, with the closure's own late-bound regions.
+            let inner = self.anonymize_signature(inner);
+            let (TyKind::FnPtr(_, _, _, n_inner), TyKind::FnPtr(_, _, _, n)) = (self.tcx.tys.kind(inner).clone(), self.tcx.tys.kind(expected).clone()) else { unreachable!() };
+            if n_inner == n {
+                let scope = RegionScope::Closure { owner: self.b.def, expr: e.0 };
+                let regions: Vec<_> = (0..n).map(|v| self.tcx.tys.intern_region(RegionKind::ReLateParam(scope, LateParamKind::Anon(v)))).collect();
+                let TyKind::FnPtr(ps, ret, _, _) = self.tcx.tys.kind(inner).clone() else { unreachable!() };
+                let (_, ret) = self.instantiate_signature_parts(self.tcx.tys.list(ps), ret, &regions);
+                let ret = self.normalize_signature(ret);
+                self.async_body_expected.insert(e.0, ret);
+            }
+        }
         let TyKind::FnPtr(_, _, _, n) = self.tcx.tys.kind(supplied) else { unreachable!() };
         let vars: Vec<_> = (0..*n).map(|_| self.fresh_region()).collect();
         let instantiated = self.instantiate_signature(supplied, &vars);
@@ -429,6 +451,24 @@ impl Fcx<'_> {
         }
     }
 
+    /// The signature of an async closure whose body return type came from the deduced
+    /// `AsyncFnOnce::Output`: its coroutine mentions the closure's late regions, which
+    /// are the bound signature's own binder (rustc coroutine-closure signature).
+    pub(super) fn async_closure_bound_signature(&mut self, e: ExprId) -> TyId {
+        let sig = self.b.closure_sigs[&e.0].bound;
+        if !self.async_body_expected.contains_key(&e.0) { return sig; }
+        let scope = RegionScope::Closure { owner: self.b.def, expr: e.0 };
+        let TyKind::FnPtr(ps, ret, c, n) = self.tcx.tys.kind(sig).clone() else { return sig; };
+        let ret = self.infcx.shallow_resolve(ret);
+        let ret = self.tcx.tys.map_regions(ret, &|r, depth| match self.tcx.tys.region_kind(r) {
+            RegionKind::ReLateParam(s, LateParamKind::Anon(v)) if s == scope => self.tcx.tys.intern_region(RegionKind::ReBound(depth, BoundVar(v))),
+            _ => r,
+        }, 0);
+        let bound = self.tcx.tys.intern(TyKind::FnPtr(ps, ret, c, n));
+        self.b.closure_sigs.get_mut(&e.0).unwrap().bound = bound;
+        bound
+    }
+
     pub(super) fn finish_closure_signatures(&mut self) {
         for (e, mut sig) in std::mem::take(&mut self.b.closure_sigs) {
             sig.bound = self.normalize_signature(sig.bound);
@@ -437,7 +477,7 @@ impl Fcx<'_> {
             // the body's result type. Its free regions must remain inferred in
             // the parent, not become the closure's input-only late parameters.
             // A declared/expected bound output is still ReBound in `bound`.
-            if sig.annotation_eq.is_none() {
+            if sig.annotation_eq.is_none() && !self.async_body_expected.contains_key(&e) {
                 let scope = RegionScope::Closure { owner:self.b.def, expr:e };
                 let replacements = std::cell::RefCell::new(HashMap::default());
                 if let TyKind::FnPtr(_,ret,_,_) = self.tcx.tys.kind(sig.bound) {

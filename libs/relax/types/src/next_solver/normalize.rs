@@ -8,20 +8,27 @@ use crate::consts::{ConstKind, IsRigid};
 use crate::types::fold::{TypeFolder, super_fold_ty, super_fold_const};
 
 pub struct NormalizationFolder<'a, 'b, 'tcx> {
-    ecx: &'a mut EvalCtxt<'b, 'tcx>, env: &'a ParamEnvId, universes: Vec<Option<UniverseIndex>>, error: Option<NoSolutionOrRerunNonErased>,
+    ecx: &'a mut EvalCtxt<'b, 'tcx>, env: &'a ParamEnvId, normalization_goal_source: GoalSource, universes: Vec<Option<UniverseIndex>>, error: Option<NoSolutionOrRerunNonErased>,
 }
 impl EvalCtxt<'_, '_> {
     pub(super) fn normalize_ty(&mut self, env: &ParamEnvId, ty: TyId) -> Result<TyId, NoSolutionOrRerunNonErased> {
         let tys = &self.delegate.tcx.tys;
-        let mut folder = NormalizationFolder { ecx: self, env, universes: Vec::new(), error: None };
+        let normalization_goal_source = GoalSource::NormalizeGoal(self.step_kind_for_source(GoalSource::TypeRelating));
+        let mut folder = NormalizationFolder { ecx: self, env, normalization_goal_source, universes: Vec::new(), error: None };
         let result = folder.fold_ty(tys, ty, 0);
         match folder.error { Some(e) => Err(e), None => Ok(result) }
     }
     pub(super) fn normalize_predicate(&mut self, env: &ParamEnvId, predicate: &Predicate) -> Result<Predicate, NoSolutionOrRerunNonErased> {
+        self.normalize_predicate_for_source(GoalSource::TypeRelating, env, predicate)
+    }
+    /// rustc ReplaceAliasWithInfer: the aliases of a goal added with `source` are normalized
+    /// as if inside that goal, inheriting its step kind.
+    pub(super) fn normalize_predicate_for_source(&mut self, source: GoalSource, env: &ParamEnvId, predicate: &Predicate) -> Result<Predicate, NoSolutionOrRerunNonErased> {
         // rustc_type_ir/src/inherent.rs:438-455: WF must inspect the original type.
         if matches!(predicate.kind, PredicateKind::Clause(ClauseKind::WellFormed(_))) { return Ok(predicate.clone()); }
         let tys = &self.delegate.tcx.tys;
-        let mut folder = NormalizationFolder { ecx: self, env, universes: Vec::new(), error: None };
+        let normalization_goal_source = GoalSource::NormalizeGoal(self.step_kind_for_source(source));
+        let mut folder = NormalizationFolder { ecx: self, env, normalization_goal_source, universes: Vec::new(), error: None };
         let result = fold::fold_predicate(tys, predicate, &mut folder);
         match folder.error { Some(e) => Err(e), None => Ok(result) }
     }
@@ -30,8 +37,8 @@ impl NormalizationFolder<'_, '_, '_> {
     fn normalize_alias_term(&mut self, alias: AliasTerm) -> Result<(Term, bool), NoSolutionOrRerunNonErased> {
         let term = self.ecx.next_term_infer_of_alias_kind(&alias);
         let goal = Goal { param_env: self.env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term }))) };
-        let evaluation = self.ecx.evaluate_goal(GoalSource::Normalization, goal.clone())?;
-        if !evaluation.certainty.is_yes() { self.ecx.nested_goals.push((GoalSource::Normalization, goal, evaluation.stalled_on)); }
+        let evaluation = self.ecx.evaluate_goal(self.normalization_goal_source, goal.clone())?;
+        if !evaluation.certainty.is_yes() { self.ecx.nested_goals.push((self.normalization_goal_source, goal, evaluation.stalled_on)); }
         let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(self.ecx.delegate);
         let term = match term { Term::Ty(t) => Term::Ty(resolver.fold_ty(&self.ecx.delegate.tcx.tys, t, 0)), Term::Const(c) => Term::Const(resolver.fold_const(&self.ecx.delegate.tcx.tys, c, 0)) };
         Ok((term, !evaluation.certainty.is_yes()))

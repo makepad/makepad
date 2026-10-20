@@ -116,6 +116,8 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
         item_blocks: Vec::new(),
         checked_opaque_types_storage_entries: None,
         expected_closure_kinds: HashMap::default(),
+        async_expected_inner: None,
+        async_body_expected: HashMap::default(),
         extra_arg: None,
         soft: false,
         last_lo: 0,

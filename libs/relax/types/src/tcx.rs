@@ -2929,7 +2929,7 @@ impl Tcx {
         let mut result = Vec::new();
         while let Some(predicate) = stack.pop() {
             let PredicateKind::Clause(ClauseKind::Trait(tr)) = &predicate.kind else { continue; };
-            if !seen.insert(predicate.clone()) { continue; }
+            if !seen.insert(predicate.anonymized()) { continue; }
             for bound in self.explicit_super_predicates_of(prog, tr.trait_ref.def_id) {
                 let instantiated = self.instantiate_supertrait(prog, &bound, &predicate);
                 if matches!(&instantiated.kind, PredicateKind::Clause(ClauseKind::Trait(t)) if t.polarity == ClausePolarity::Positive) { stack.push(instantiated); }

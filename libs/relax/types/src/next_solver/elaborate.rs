@@ -29,6 +29,18 @@ impl TypeFolder for BoundVarShifter {
     }
 }
 
+impl Predicate {
+    /// rustc anonymize_bound_vars: the kind with the binder's region names erased, the key
+    /// two predicates are deduplicated by.
+    pub fn anonymized(&self) -> (PredicateKind, Vec<BoundVariableKind>) {
+        let vars = self.bound_vars.iter().map(|var| match var {
+            BoundVariableKind::Region(_) => BoundVariableKind::Region(crate::types::BoundRegionKind::Anon),
+            other => other.clone(),
+        }).collect();
+        (self.kind.clone(), vars)
+    }
+}
+
 impl Tcx {
     pub fn instantiate_supertrait(&self, prog: &Program, pred: &Predicate, parent: &Predicate) -> Predicate {
         let PredicateKind::Clause(ClauseKind::Trait(tr)) = &parent.kind else { panic!("supertrait parent") };
@@ -43,16 +55,9 @@ impl Tcx {
     /// kind with anonymized bound variables (anonymize_bound_vars) was not seen before; :140-249
     /// pops, elaborates and yields.
     pub fn supertraits(&self, prog: &Program, initial: Predicate) -> Vec<Predicate> {
-        fn anonymized(pred: &Predicate) -> (PredicateKind, Vec<BoundVariableKind>) {
-            let vars = pred.bound_vars.iter().map(|var| match var {
-                BoundVariableKind::Region(_) => BoundVariableKind::Region(crate::types::BoundRegionKind::Anon),
-                other => other.clone(),
-            }).collect();
-            (pred.kind.clone(), vars)
-        }
         let mut visited = crate::fxhash::HashSet::default();
         let mut stack = Vec::new();
-        let mut push = |stack: &mut Vec<Predicate>, pred: Predicate| { if visited.insert(anonymized(&pred)) { stack.push(pred); } };
+        let mut push = |stack: &mut Vec<Predicate>, pred: Predicate| { if visited.insert(pred.anonymized()) { stack.push(pred); } };
         push(&mut stack, initial);
         let mut result = Vec::new();
         while let Some(pred) = stack.pop() {

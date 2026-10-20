@@ -322,23 +322,12 @@ impl Fcx<'_> {
         let (mut steps, original, overflow) = method_autoderef_steps(self, receiver);
         if overflow { self.err(lo, "E0055: reached the recursion limit while auto-dereferencing".into()); return Err(()); }
         // probe.rs:473-563: an unresolved final autoderef type is an error,
-        // with the 2015 raw-pointer compatibility lint and diverging-var exception.
+        // with the 2015 raw-pointer compatibility lint (rustc 1.97 has no diverging-variable exception).
         if let Some(step) = steps.last().filter(|s| s.bad_ty) {
             let (ty, _) = method_response::probe_instantiate_query_response(&self.infcx, self.prog, &self.param_env, &original, &step.response).expect("bad autoderef response");
             let edition = self.prog.crates[self.prog.mods[self.module as usize].krate as usize].edition;
-            let diverging = if let TyKind::Infer(var) = self.tcx.tys.kind(self.infcx.shallow_resolve(ty)) {
-                let mut inner = self.infcx.inner.borrow_mut();
-                let root = inner.type_variables().sub_unification_table_root_var(*var);
-                self.diverging.iter().any(|t| match self.tcx.tys.kind(*t) {
-                    TyKind::Infer(other) => inner.type_variables().sub_unification_table_root_var(*other) == root,
-                    _ => false,
-                })
-            } else { false };
             if step.from_unsafe_deref && edition < 2018 {
                 self.tcx.dcx.warn(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: lo }, "type annotations needed for raw pointer method call (future incompatible)".into());
-            } else if diverging {
-                self.tcx.dcx.warn(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: lo }, "method call on diverging inference variable".into());
-                self.eq(ty, self.tcx.tys.never);
             } else {
                 if !self.infcx.tainted_by_errors() && !self.tcx.tys.has_error(ty) { self.err(lo, "E0282: type annotations needed for method receiver".into()); }
                 self.eq(ty, self.tcx.tys.error);

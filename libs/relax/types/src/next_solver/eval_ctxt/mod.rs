@@ -12,7 +12,7 @@ pub mod fast_path;
 pub use probe::ProbeCtxt;
 
 #[derive(Clone, Copy)]
-pub(super) enum CurrentGoalKind { Misc, CoinductiveTrait, Projection, ProjectionComputeAssocTermCandidate }
+pub(super) enum CurrentGoalKind { Misc, CoinductiveTrait, NormalizesTo }
 
 pub struct EvalCtxt<'a, 'tcx> {
     pub(super) inspect: super::inspect::EvaluationStepBuilder,
@@ -63,7 +63,7 @@ impl InferCtxt<'_> {
         if stalled_on.is_some() {
             if let Some(result) = fast_path::compute_goal_fast_path(self, prog, &goal) { return Ok(result); }
         }
-        let evaluate = |ecx: &mut EvalCtxt<'_, '_>| ecx.evaluate_goal_raw(goal.clone()).map(|(nested, result)| { assert!(nested.is_empty()); result });
+        let evaluate = |ecx: &mut EvalCtxt<'_, '_>| ecx.evaluate_goal_raw(GoalSource::Misc, goal.clone()).map(|(nested, result)| { assert!(nested.is_empty()); result });
         let result = self.enter_root(prog, evaluate);
         result.map_err(NoSolutionOrRerunNonErased::assert_no_rerun)
     }
@@ -107,8 +107,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         let kind = match &instantiated.goal.predicate.kind {
             PredicateKind::Clause(ClauseKind::Trait(p)) if [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized].iter().any(|&item| solver.tcx.lang_items.get(item) == Some(p.trait_ref.def_id))
                 || trait_is_auto(solver.prog, p.trait_ref.def_id) => CurrentGoalKind::CoinductiveTrait,
-            PredicateKind::Clause(ClauseKind::Projection(_)) => CurrentGoalKind::Projection,
-            PredicateKind::NormalizesTo(_) => CurrentGoalKind::ProjectionComputeAssocTermCandidate,
+            PredicateKind::NormalizesTo(_) => CurrentGoalKind::NormalizesTo,
             _ => CurrentGoalKind::Misc,
         };
         let mut ecx = EvalCtxt { inspect: proof_tree.new_evaluation_step(values.clone()), delegate: &infcx, solver, search_graph: graph, var_values: values,
@@ -125,14 +124,37 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         proof_tree.finish_evaluation_step(ecx.inspect);
         (result, ecx.opaque_accesses)
     }
-    fn step_kind_to_nested(&self) -> PathKind {
-        match self.current_goal_kind {
-            CurrentGoalKind::Misc => PathKind::ForcedAmbiguity,
-            CurrentGoalKind::CoinductiveTrait => PathKind::Coinductive,
-            CurrentGoalKind::Projection | CurrentGoalKind::ProjectionComputeAssocTermCandidate => PathKind::Unknown,
+    /// rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs:296-333: the cycle step kind of a
+    /// nested goal, from where it comes from and what the current goal is.
+    pub(super) fn step_kind_for_source(&self, source: GoalSource) -> PathKind {
+        match source {
+            GoalSource::Misc => PathKind::Unknown,
+            GoalSource::NormalizeGoal(path_kind) => path_kind,
+            GoalSource::ImplWhereBound => match self.current_goal_kind {
+                // only a where-clause of a coinductive trait is a productive step
+                CurrentGoalKind::CoinductiveTrait => PathKind::Coinductive,
+                // accessing the associated item steps out of the impl again
+                CurrentGoalKind::NormalizesTo => PathKind::Inductive,
+                CurrentGoalKind::Misc => PathKind::Unknown,
+            },
+            GoalSource::TypeRelating => PathKind::Inductive,
+            GoalSource::AliasBoundConstCondition | GoalSource::AliasWellFormed => PathKind::Unknown,
         }
     }
-    pub(super) fn evaluate_goal_raw(&mut self, goal: Goal) -> Result<(Vec<(GoalSource, Goal)>, GoalEvaluation), NoSolutionOrRerunNonErased> {
+    /// rustc relate(): the goals a relation emits (`AliasRelate` is a `Projection` here).
+    pub(super) fn add_relate_goals(&mut self, goals: Vec<Goal>) -> Result<(), NoSolutionOrRerunNonErased> {
+        for goal in goals {
+            let source = match goal.predicate.kind {
+                PredicateKind::Subtype(_) | PredicateKind::Clause(ClauseKind::Projection(_)) => GoalSource::TypeRelating,
+                PredicateKind::Clause(ClauseKind::WellFormed(_)) => GoalSource::Misc,
+                ref p => unreachable!("unexpected nested goal in `relate`: {p:?}"),
+            };
+            self.add_goal(source, goal)?;
+        }
+        Ok(())
+    }
+    pub(super) fn evaluate_goal_raw(&mut self, source: GoalSource, goal: Goal) -> Result<(Vec<(GoalSource, Goal)>, GoalEvaluation), NoSolutionOrRerunNonErased> {
+        let step = self.step_kind_for_source(source);
         let goal = fold::fold_goal(self.delegate.tcx, &goal, &mut crate::infer::resolve::DeepVariableResolver::new(self.delegate));
         let opaque_types = self.delegate.resolved_opaque_types();
         let mode = self.delegate.typing_mode;
@@ -144,7 +166,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                 if matches!(mode, crate::tcx::TypingMode::ErasedNotCoherence) { return Err(self.opaque_accesses.rerun_always()); }
             } else {
                 let (original, input) = canonicalize_goal(self.delegate, &goal, &[], crate::tcx::TypingMode::ErasedNotCoherence);
-                let (result, accesses) = self.evaluate_in_search_graph(input);
+                let (result, accesses) = self.evaluate_in_search_graph(step, input);
                 match typing_mode::should_rerun_after_erased_canonicalization(self.delegate.tcx, &accesses.rerun, mode, &opaque_types) {
                     typing_mode::RerunDecision::No => break 'canonicalize (original, result.as_ref().map_err(|e| *e)?, SucceededInErased::Yes { accessed_opaques: accesses.clone() }, 0),
                     typing_mode::RerunDecision::EagerlyPropagateToParent => { self.opaque_accesses.update(accesses.clone())?; break 'canonicalize (original, result.as_ref().map_err(|e| *e)?, SucceededInErased::No, 0); }
@@ -152,7 +174,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                 }
             }
             let (original, input) = canonicalize_goal(self.delegate, &goal, &opaque_types, mode);
-            let (result, accesses) = self.evaluate_in_search_graph(input);
+            let (result, accesses) = self.evaluate_in_search_graph(step, input);
             assert!(!accesses.might_rerun());
             (original, result.as_ref().map_err(|e| *e)?, SucceededInErased::No, opaque_types.len())
         };
@@ -164,7 +186,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         };
         Ok((nested, GoalEvaluation { goal, certainty, has_changed, stalled_on }))
     }
-    fn evaluate_in_search_graph(&mut self, input: CanonicalQueryInput) -> &'tcx (QueryResult, AccessedOpaques) {
+    fn evaluate_in_search_graph(&mut self, step: PathKind, input: CanonicalQueryInput) -> &'tcx (QueryResult, AccessedOpaques) {
         let lower_depth = match &input.canonical.value.goal.predicate.kind {
             PredicateKind::NormalizesTo(_) => LowerAvailableDepth::No,
             PredicateKind::Clause(ClauseKind::Trait(p)) if trait_is_auto(self.solver.prog, p.trait_ref.def_id) => {
@@ -182,17 +204,17 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
             }
             _ => LowerAvailableDepth::Yes,
         };
-        let id = self.solver.input(input); let step = self.step_kind_to_nested();
+        let id = self.solver.input(input);
         let id = self.search_graph.evaluate_goal(self.solver, id, step, lower_depth, &mut Default::default());
         self.solver.result(id)
     }
-    pub(super) fn evaluate_goal(&mut self, _source: GoalSource, goal: Goal) -> Result<GoalEvaluation, NoSolutionOrRerunNonErased> {
+    pub(super) fn evaluate_goal(&mut self, source: GoalSource, goal: Goal) -> Result<GoalEvaluation, NoSolutionOrRerunNonErased> {
         if let Some(result) = fast_path::compute_goal_fast_path(self.delegate, self.solver.prog, &goal) { return Ok(result); }
-        let (nested, result) = self.evaluate_goal_raw(goal)?;
+        let (nested, result) = self.evaluate_goal_raw(source, goal)?;
         assert!(nested.is_empty());
         Ok(result)
     }
-    pub(super) fn add_goal(&mut self, source: GoalSource, mut goal: Goal) -> Result<(), NoSolutionOrRerunNonErased> { goal.predicate = self.normalize_predicate(&goal.param_env, &goal.predicate)?; self.inspect.add_goal(self.delegate, self.max_input_universe, source, goal.clone()); if let Some(result) = fast_path::compute_goal_fast_path(self.delegate, self.solver.prog, &goal) {
+    pub(super) fn add_goal(&mut self, source: GoalSource, mut goal: Goal) -> Result<(), NoSolutionOrRerunNonErased> { goal.predicate = self.normalize_predicate_for_source(source, &goal.param_env, &goal.predicate)?; self.inspect.add_goal(self.delegate, self.max_input_universe, source, goal.clone()); if let Some(result) = fast_path::compute_goal_fast_path(self.delegate, self.solver.prog, &goal) {
             if !result.certainty.is_yes() { self.nested_goals.push((source, goal, result.stalled_on)); }
         } else { self.nested_goals.push((source, goal, None)); } Ok(()) }
     pub(super) fn add_goals(&mut self, source: GoalSource, goals: Vec<Goal>) -> Result<(), NoSolutionOrRerunNonErased> {
@@ -206,14 +228,12 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
             (Term::Const(a), Term::Const(b)) => { relate.consts(a, b).map_err(|_| NoSolution)?; }
             _ => return Err(NoSolution.into()),
         }
-        self.add_goals(GoalSource::Misc, relate.goals)?;
-        Ok(())
+        self.add_relate_goals(relate.goals)
     }
     pub(super) fn eq_args(&mut self, env: &ParamEnvId, a: &[GenericArg], b: &[GenericArg]) -> Result<(), NoSolutionOrRerunNonErased> {
         let mut relate = SolverRelating::new(self.delegate, self.solver.prog, V::Inv, env.clone());
         relate_args(&mut relate, a, b).map_err(|_| NoSolution)?;
-        self.add_goals(GoalSource::Misc, relate.goals)?;
-        Ok(())
+        self.add_relate_goals(relate.goals)
     }
     pub(super) fn try_evaluate_added_goals(&mut self) -> Result<Certainty, NoSolutionOrRerunNonErased> {
         for _ in 0..8 {
@@ -243,7 +263,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         assert_eq!(self.tainted, Ok(()));
         self.delegate.leak_check(self.max_input_universe, None).map_err(|_| NoSolution)?;
         let mut external_constraints = ExternalConstraintsData::default();
-        let certainty = if matches!(self.current_goal_kind, CurrentGoalKind::ProjectionComputeAssocTermCandidate) && shallow.is_yes() {
+        let certainty = if matches!(self.current_goal_kind, CurrentGoalKind::NormalizesTo) && shallow.is_yes() {
             debug_assert!(!self.nested_goals.is_empty() || nested.is_yes());
             for (source, goal, _) in std::mem::take(&mut self.nested_goals) { external_constraints.normalization_nested_goals.push((source, goal)); }
             Certainty::Yes

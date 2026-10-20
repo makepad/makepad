@@ -149,6 +149,14 @@ impl Fcx<'_> {
     pub(super) fn check_cast_final(&mut self, e: ExprId, expr_ty: TyId, cast_ty: TyId, lo: u32) {
         let expr_ty = self.deeply_resolve_ignoring_regions_with_obligations(expr_ty);
         let cast_ty = self.deeply_resolve_ignoring_regions_with_obligations(cast_ty);
+        // rustc CastCheck::check: both types are structurally resolved first (E0282 at the
+        // offending subexpression / the cast target)
+        for (t, span) in [(expr_ty, self.ast().expr(e).lo), (cast_ty, lo)] {
+            if matches!(self.tcx.tys.kind(self.shallow(t)), TyKind::Infer(_)) {
+                if !self.infcx.tainted_by_errors() { self.err(span, "E0282: type annotations needed".into()); }
+                return;
+            }
+        }
         if self.tcx.tys.has_error(expr_ty) || self.tcx.tys.has_error(cast_ty) { return; }
         let (es, cs) = (self.cast_ty_str(expr_ty), self.cast_ty_str(cast_ty));
         if !self.type_is_sized_modulo_regions(cast_ty) && !self.tcx.tys.has_infer(cast_ty) {

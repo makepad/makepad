@@ -275,10 +275,12 @@ impl EvalCtxt<'_, '_> {
         for c in &candidates { if !seen_object && matches!(c.source, CandidateSource::BuiltinImpl(BuiltinImplSource::Object(_))) { seen_object = true; object = has_only_region_constraints(&self.delegate.tcx.tys, &c.result); } all_global &= c.source == CandidateSource::ParamEnv(true); }
         if all_global { return Ok(match self.try_merge_candidates(&candidates) { Some((r,_)) => (r,Some(TraitGoalProvenVia::ParamEnv)), None => (self.flounder(&candidates)?,None) }); }
         candidates.retain(|c| c.source != CandidateSource::ParamEnv(true) && !(object && matches!(c.source, CandidateSource::Impl(_))));
-        let mut all_builtin = true; for c in &candidates { all_builtin &= matches!(c.source, CandidateSource::BuiltinImpl(_)); }
-        if candidates.len() == 1 { return Ok((candidates.remove(0).result, Some(TraitGoalProvenVia::Misc))); }
-        if all_builtin { if let Some((r,_)) = self.try_merge_candidates(&candidates) { return Ok((r,Some(TraitGoalProvenVia::Misc))); } }
-        Ok((self.flounder(&candidates)?, None))
+        // trait_goals.rs:1523-1567 (merge_trait_candidates): every remaining candidate, impls
+        // included, merges when one always applies or all responses are equal.
+        match self.try_merge_candidates(&candidates) {
+            Some((response, _)) => Ok((response, Some(TraitGoalProvenVia::Misc))),
+            None => Ok((self.flounder(&candidates)?, None)),
+        }
     }
     pub(super) fn compute_trait_goal(&mut self, env: ParamEnvId, goal: TraitClause) -> QueryResultOrRerunNonErased {
         self.compute_trait_goal_with_source(&env, &goal).map(|r| r.0)

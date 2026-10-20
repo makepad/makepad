@@ -161,7 +161,13 @@ impl SolverDelegate<'_> {
         let certainty = match kind {
             PathKind::Coinductive => Certainty::Yes,
             PathKind::Unknown | PathKind::ForcedAmbiguity => Certainty::overflow(false),
-            PathKind::Inductive => unreachable!(),
+            // An unproductive cycle is no solution; coherence keeps it ambiguous (the
+            // implementation is not trusted for negative reasoning there yet).
+            PathKind::Inductive => if matches!(self.query_input(input).typing_mode.0, crate::tcx::TypingMode::Coherence) {
+                Certainty::overflow(false)
+            } else {
+                return self.result_id((Err(NoSolution), Default::default()));
+            },
         };
         self.unconstrained(input, certainty)
     }

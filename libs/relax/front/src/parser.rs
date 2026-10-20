@@ -3315,7 +3315,8 @@ impl<'a> Parser<'a> {
                     trailing = true;
                 }
                 self.expect(T::CloseParen)?;
-                if v.len() == 1 && !trailing {
+                // rustc parse_pat_tuple_or_parens: `(..)` is a tuple pattern (a lone rest pattern)
+                if v.len() == 1 && !trailing && !matches!(self.ast.pat(v[0]), Pat::Rest) {
                     Pat::Paren(v[0])
                 } else {
                     Pat::Tuple(self.ast.push_list(v))

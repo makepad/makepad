@@ -37,7 +37,7 @@ impl EvalCtxt<'_, '_> {
         }
         let term = self.next_term_infer_of_alias_kind(&p.projection_term);
         let goal = Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::NormalizesTo(NormalizesTo { alias: p.projection_term, term })) };
-        let (nested, evaluation) = self.evaluate_goal_raw(goal)?;
+        let (nested, evaluation) = self.evaluate_goal_raw(GoalSource::TypeRelating, goal)?;
         self.eq(&env, p.term, term)?;
         for (source, goal) in nested { self.add_goal(source, goal)?; }
         self.evaluate_added_goals_and_make_canonical_response(evaluation.certainty)

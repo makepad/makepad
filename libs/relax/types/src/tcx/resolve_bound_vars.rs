@@ -947,10 +947,10 @@ impl BoundVarContext<'_> {
 }
 
 impl BoundVarContext<'_> {
-    /// resolve_bound_vars.rs:904-944 (visit_qpath). HIR's QPath::TypeRelative is a path whose
-    /// resolution stops at a type (`<T>::A`, `T::A`, `Self::A`, `S::new`): its unresolved
-    /// segments, and the resolved prefix's type around them, see an indeterminate (`None`)
-    /// object lifetime default; the prefix's own containers still apply inside it.
+    /// HIR's QPath::TypeRelative is a path whose resolution stops at a type (`<T>::A`, `T::A`,
+    /// `Self::A`, `S::new`): its unresolved segments' arguments are walked without a scope of
+    /// their own (rustc's visit_segment_args only runs for resolved paths), so they see the
+    /// enclosing object lifetime default; the resolved prefix's own containers still apply.
     fn resolved_prefix_len(&self, path: &ast::Path) -> usize {
         let ast = &self.prog.files[self.file as usize].ast;
         let segs = ast.segs(path.segs);
@@ -971,8 +971,6 @@ impl BoundVarContext<'_> {
     fn visit_path(&mut self, path: &ast::Path) {
         let ast = &self.prog.files[self.file as usize].ast;
         let resolved_len = self.resolved_prefix_len(path);
-        let type_relative = resolved_len < path.segs.len();
-        if type_relative { self.scopes.push(Scope::ObjectLifetimeDefault(None)); }
         let resolved = ast::Path { segs: path.segs.prefix(resolved_len), ..*path };
         if let Some(qself) = ast.qself(path) {
             if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path); }
@@ -1045,7 +1043,6 @@ impl BoundVarContext<'_> {
             self.visit_ty(qself.ty);
             self.scopes.pop();
         }
-        if type_relative { self.scopes.pop(); }
     }
 
     /// resolve_bound_vars.rs:2000-2094: only the resolved declaration's
@@ -1496,17 +1493,16 @@ mod tests {
         assert_eq!(tcx.dcx.err_count(), 0);
     }
     #[test]
-    fn round33_lifetime_type_relative_paths_have_indeterminate_object_default() {
-        // resolve_bound_vars.rs:927-944 + collect.rs:506-520: `X::A<dyn Tr>` (type-relative)
-        // has no object lifetime default: E0228 in a signature; `<X as G>::A<dyn Tr>` is
-        // resolved and takes A's declared default.
+    fn round33_lifetime_type_relative_paths_take_the_enclosing_object_default() {
+        // resolve_bound_vars.rs:1686-1809 (visit_segment_args runs for resolved paths only):
+        // `X::A<dyn Tr>` (type-relative) pushes no object default scope, so a signature's
+        // `'static` applies (no E0228); `<X as G>::A<dyn Tr>` is resolved and takes A's
+        // declared default.
         let (prog, tcx) = source("#![no_std] trait Tr {} trait G { type A<T: ?Sized>; } fn relative<X: G>(_: X::A<dyn Tr>) {} fn qualified<X: G>(_: <X as G>::A<dyn Tr>) {}", 2021);
-        for name in ["relative"] {
+        for name in ["relative", "qualified"] {
             tcx.fn_sig(&prog, named(&prog, name));
-            assert!(sig_errors(&tcx, &prog, name).iter().any(|e| e.contains("E0228")), "{name}: {:?}", sig_errors(&tcx, &prog, name));
+            assert!(sig_errors(&tcx, &prog, name).is_empty(), "{name}: {:?}", sig_errors(&tcx, &prog, name));
         }
-        tcx.fn_sig(&prog, named(&prog, "qualified"));
-        assert!(sig_errors(&tcx, &prog, "qualified").is_empty(), "{:?}", sig_errors(&tcx, &prog, "qualified"));
         assert_eq!(object_default(&tcx, &prog, named(&prog, "qualified")), [RegionKind::ReStatic]);
     }
     #[test]

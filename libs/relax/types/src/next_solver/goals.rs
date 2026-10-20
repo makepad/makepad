@@ -75,7 +75,7 @@ impl EvalCtxt<'_, '_> {
             self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
         } else {
             let goals = self.delegate.at(self.solver.prog, env).sub(a, b).map_err(|_| NoSolution)?;
-            self.add_goals(GoalSource::Misc, goals)?;
+            self.add_relate_goals(goals)?;
             self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         }
     }
@@ -94,7 +94,7 @@ impl EvalCtxt<'_, '_> {
         };
         let Some(alias) = alias else { return Ok(term); };
         let value = self.next_term_infer_of_alias_kind(&alias);
-        self.add_goal(GoalSource::Normalization, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term: value }))) })?;
+        self.add_goal(GoalSource::TypeRelating, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term: value }))) })?;
         self.try_evaluate_added_goals()?;
         Ok(fold::fold_term(&self.delegate.tcx.tys, value, &mut crate::infer::resolve::DeepResolverIgnoringRegions::new(self.delegate), 0))
     }
