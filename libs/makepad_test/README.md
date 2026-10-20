@@ -73,7 +73,7 @@ Common locator actions:
 
 - `click`, `type_text`, `fill`, `clear`
 - `press_key`, `press_key_with_modifiers`
-- `scroll`, `drag_by`
+- `scroll`, `drag_by`, `touch_drag_by` (and `_and_hold` variants that don't fling)
 
 Common waits and assertions:
 

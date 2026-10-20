@@ -985,10 +985,13 @@ impl ComboBox {
         let Some(g) = self.geom else { return };
         match event {
             Event::Scroll(e) => {
-                if g.popup_rect().contains(e.abs) && !e.handled_y.get() {
+                // The popup takes scrolls over it, so nothing under it moves.
+                let is_over = g.popup_rect().contains(e.abs);
+                let area = self.draw_bg.area();
+                cx.is_scroll_owner(e, area, Vec2Index::X, is_over);
+                if cx.is_scroll_owner(e, area, Vec2Index::Y, is_over) {
                     let next = self.scroll + e.scroll.y;
                     self.set_scroll(cx, next);
-                    e.handled_y.set(true);
                 }
             }
             Event::MouseMove(e) => {

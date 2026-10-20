@@ -1,5 +1,5 @@
 use crate::animator::*;
-use crate::event::{ScrollPhase, TAP_COUNT_DISTANCE};
+use crate::event::{ScrollEvent, ScrollPhase, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
@@ -246,6 +246,15 @@ pub enum ScrollAxis {
     Vertical,
 }
 
+impl ScrollAxis {
+    pub fn vec_index(self) -> Vec2Index {
+        match self {
+            ScrollAxis::Horizontal => Vec2Index::X,
+            ScrollAxis::Vertical => Vec2Index::Y,
+        }
+    }
+}
+
 /// The scrolling state
 enum ScrollState {
     Stopped,
@@ -362,9 +371,8 @@ pub struct ScrollBar {
     #[rust(ScrollState::Stopped)]
     scroll_state: ScrollState,
 
-    /// Whether this bar applied the current trackpad gesture's most recent finger-driven
-    /// delta. It decides who owns the momentum that follows: a bar pinned at its scroll limit
-    /// leaves the delta unapplied, so ownership (and the fling) chains to an ancestor.
+    /// Whether this bar moved on the current trackpad gesture's most recent finger-driven
+    /// delta, which decides whether it follows the momentum after it.
     #[rust]
     owns_gesture: bool,
     /// Wall-clock time of the previous trackpad scroll event, used to seed the deceleration
@@ -645,6 +653,26 @@ impl ScrollBar {
         }
     }
 
+    /// Whether `e` is over `scroll_area` where scrolling isn't blocked.
+    fn is_scroll_over(cx: &mut Cx, e: &ScrollEvent, scroll_area: Area) -> bool {
+        // The CLIPPED rect: a scroll view partially hidden by an ancestor
+        // clip must not accept wheels over its invisible band — whatever
+        // is really drawn there owns them (the portallist_hit example's
+        // scroll-gate test pins this).
+        cx.is_scrolling_allowed_within(&scroll_area) && scroll_area.clipped_rect(cx).contains(e.abs)
+    }
+
+    /// The axes (x, y) this bar could take `e` along, for [`Cx::begin_scroll_container`].
+    pub fn scroll_container_axes(&self, cx: &mut Cx, e: &ScrollEvent, scroll_area: Area) -> [bool; 2] {
+        let is_candidate = self.scrollable()
+            && cx.is_scroll_area_unblocked(scroll_area)
+            && Self::is_scroll_over(cx, e, scroll_area);
+        match self.axis {
+            ScrollAxis::Horizontal => [is_candidate, is_candidate && self.use_vertical_finger_scroll],
+            ScrollAxis::Vertical => [false, is_candidate],
+        }
+    }
+
     pub fn handle_scroll_event(
         &mut self,
         cx: &mut Cx,
@@ -653,210 +681,179 @@ impl ScrollBar {
         dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
     ) {
         if let Event::Scroll(e) = event {
-            // The CLIPPED rect: a scroll view partially hidden by an ancestor
-            // clip must not accept wheels over its invisible band — whatever
-            // is really drawn there owns them (the portallist_hit example's
-            // scroll-gate test pins this).
-            if cx.is_scrolling_allowed_within(&scroll_area)
-                && scroll_area.clipped_rect(cx).contains(e.abs)
+            let is_over = Self::is_scroll_over(cx, e, scroll_area);
+            // The innermost scrollable under the pointer takes the whole gesture, even
+            // at its limits, so no ancestor ever moves along with it.
+            let is_candidate = is_over && self.scrollable();
+            let axis = self.axis.vec_index();
+            let mut is_owner = cx.is_scroll_owner(e, scroll_area, axis, is_candidate);
+            let mut scroll = if is_owner { e.scroll.index(axis) } else { 0.0 };
+            // Accept vertical scroll input too, so trackpad horizontal scrolling
+            // and mouse wheel vertical scrolling both work.
+            if self.use_vertical_finger_scroll
+                && axis == Vec2Index::X
+                && cx.is_scroll_owner(e, scroll_area, Vec2Index::Y, is_candidate)
             {
-                if !match self.axis {
-                    ScrollAxis::Horizontal => e.handled_x.get(),
-                    ScrollAxis::Vertical => e.handled_y.get(),
-                } {
-                    let scroll = match self.axis {
-                        ScrollAxis::Horizontal => {
-                            if self.use_vertical_finger_scroll {
-                                // Accept both horizontal and vertical scroll input,
-                                // so trackpad horizontal scrolling and mouse wheel
-                                // vertical scrolling both work.
-                                e.scroll.x + e.scroll.y
-                            } else {
-                                e.scroll.x
-                            }
+                is_owner = true;
+                scroll += e.scroll.y;
+            }
+            // On macOS, trackpad scrolling is a gesture with phases: user-driven deltas
+            // (`Began`/`Changed`), fingers lifted (`Ended`), then the OS's own `Momentum`
+            // deltas. Both are applied exactly as delivered, so the feel and the
+            // deceleration are the native ones, and the OS ending its stream on a touch
+            // gives the native instant stop. Phase-less events (`None`: wheels, X11,
+            // Windows) apply their delta directly.
+            match e.phase {
+                ScrollPhase::Touched => {
+                    // A trackpad touch stops kinetic scrolling here and on the owner; if it stopped
+                    // real motion, its press (at finger lift) finishes the catch, not a click.
+                    if is_over || is_owner {
+                        let was_moving = self.is_motion_live(e.time)
+                            || self
+                                .momentum_cut_at
+                                .is_some_and(|at| e.time - at < MOMENTUM_CUT_TOUCH_WINDOW);
+                        self.owns_gesture = false;
+                        self.coasting = false;
+                        self.momentum_cut_at = None;
+                        if matches!(self.scroll_state, ScrollState::Flick { .. }) {
+                            self.scroll_state = ScrollState::Stopped;
                         }
-                        ScrollAxis::Vertical => e.scroll.y,
-                    };
-                    let mark_handled = |e: &crate::event::ScrollEvent, axis: ScrollAxis| match axis
+                        if was_moving {
+                            self.touch_caught_motion_at = Some(e.time);
+                        }
+                    }
+                }
+                _ if !is_owner => {}
+                ScrollPhase::Momentum => {
+                    // Follow the momentum only if this bar moved on the gesture's
+                    // finger-driven deltas; pinned at a limit, the stream goes nowhere.
+                    if self.owns_gesture
+                        && matches!(self.scroll_state, ScrollState::Stopped)
+                        && scroll != 0.0
                     {
-                        ScrollAxis::Horizontal => e.handled_x.set(true),
-                        ScrollAxis::Vertical => e.handled_y.set(true),
-                    };
-                    // On macOS, trackpad scrolling is a gesture with phases: user-driven deltas
-                    // (`Began`/`Changed`), fingers lifted (`Ended`), then the OS's own `Momentum`
-                    // deltas. Both are applied exactly as delivered, so the feel and the
-                    // deceleration are the native ones, and the OS ending its stream on a touch
-                    // gives the native instant stop. Phase-less events (`None`: wheels, X11,
-                    // Windows) apply their delta directly.
-                    match e.phase {
-                        ScrollPhase::Momentum => {
-                            // Apply the momentum only if this bar owned the finger-driven
-                            // gesture. A bar pinned at its scroll limit didn't own it, so it
-                            // falls through and the momentum chains to the ancestor.
-                            if self.owns_gesture
-                                && matches!(self.scroll_state, ScrollState::Stopped)
-                                && scroll != 0.0
-                            {
-                                let scroll_pos = self.get_scroll_pos();
-                                if self.set_scroll_pos(cx, scroll_pos + scroll) {
-                                    self.coasting = true;
-                                    self.last_trackpad_time = e.time;
-                                } else {
-                                    // Pinned at a limit: drop the rest of the stream so
-                                    // presses on visibly stationary content aren't treated
-                                    // as catches. The remaining momentum feeds the
-                                    // rubber-band bounce when that edge has it enabled.
-                                    self.owns_gesture = false;
-                                    self.coasting = false;
-                                    let bounces = if scroll > 0.0 {
-                                        self.bounce_at_end
-                                    } else {
-                                        self.bounce_at_start
-                                    };
-                                    if bounces && self.scrollable() {
-                                        let dt = (e.time - self.last_trackpad_time)
-                                            .max(1.0 / 240.0);
-                                        let max_v = self.flick_scroll_maximum
-                                            * PER_FRAME_TO_PER_SECOND;
-                                        let v0 = (scroll / dt).clamp(-max_v, max_v);
-                                        self.scroll_state = ScrollState::Bounce {
-                                            next_frame: cx.new_next_frame(),
-                                            x0: 0.0,
-                                            v0,
-                                            clock: FrameClock::default(),
-                                            touch: false,
-                                        };
-                                    }
-                                }
-                                mark_handled(e, self.axis);
-                                return dispatch_action(cx, self.make_scroll_action());
-                            }
-                        }
-                        ScrollPhase::MomentumEnded => {
-                            // A stream that ends while still coasting was cut by a touch;
-                            // one that faded out at rest (or was dropped at a limit) just
-                            // ends. Record the cut for the touch handler, which may be
-                            // delivered after this event.
-                            if self.is_coasting(e.time) {
-                                self.momentum_cut_at = Some(e.time);
-                            }
-                            self.owns_gesture = false;
-                            self.coasting = false;
-                        }
-                        ScrollPhase::Touched => {
-                            // A finger contacted the trackpad: instantly stop any kinetic
-                            // scrolling, like the native catch. Not consumed, so every bar
-                            // in the chain stops; a drag in progress is left alone. If the
-                            // touch stopped real motion, its own press (delivered separately
-                            // at finger lift) is the second half of the catch, not a click.
-                            let was_moving = self.is_motion_live(e.time)
-                                || self
-                                    .momentum_cut_at
-                                    .is_some_and(|at| e.time - at < MOMENTUM_CUT_TOUCH_WINDOW);
-                            self.owns_gesture = false;
-                            self.coasting = false;
-                            self.momentum_cut_at = None;
-                            if matches!(self.scroll_state, ScrollState::Flick { .. }) {
-                                self.scroll_state = ScrollState::Stopped;
-                            }
-                            if was_moving {
-                                self.touch_caught_motion_at = Some(e.time);
-                            }
-                        }
-                        ScrollPhase::None => {
-                            self.owns_gesture = false;
-                            self.coasting = false;
-                            self.overscroll = 0.0;
-                            // A wheel scroll takes over from a running bounce; the
-                            // spring must stop too, or its next frame would rewrite
-                            // the overscroll just cleared above.
-                            if matches!(self.scroll_state, ScrollState::Bounce { .. }) {
-                                self.scroll_state = ScrollState::Stopped;
-                            }
-                            if !self.smoothing.is_none() && e.is_mouse {
-                                let scroll_pos_target = self.get_scroll_target();
-                                if self.set_scroll_target(cx, scroll_pos_target + scroll) {
-                                    mark_handled(e, self.axis);
-                                };
-                                self.move_towards_scroll_target(cx); // take the first step now
-                                return dispatch_action(cx, self.make_scroll_action());
-                            } else {
-                                let scroll_pos = self.get_scroll_pos();
-                                if self.set_scroll_pos(cx, scroll_pos + scroll) {
-                                    mark_handled(e, self.axis);
-                                }
-                                return dispatch_action(cx, self.make_scroll_action());
-                            }
-                        }
-                        ScrollPhase::Began | ScrollPhase::Changed => {
-                            // Fingers on the pad apply directly and stop any active fling, so
-                            // putting fingers back on the pad catches the scroll. `owns_gesture`
-                            // tracks whether this bar actually moved on the latest finger-driven
-                            // delta, which decides who owns the momentum that follows.
-                            self.coasting = false;
-                            self.scroll_state = ScrollState::Stopped;
-                            if scroll != 0.0 {
-                                self.last_finger_scroll_time = Some(e.time);
-                            }
-                            let mut scroll = scroll;
-                            // A stretched rubber band unwinds first, symmetrically.
-                            if self.overscroll != 0.0 && scroll * self.overscroll < 0.0 {
-                                let reduce = scroll / RUBBER_BAND_STRETCH_STIFFNESS;
-                                if reduce.abs() <= self.overscroll.abs() {
-                                    self.overscroll += reduce;
-                                    scroll = 0.0;
-                                } else {
-                                    scroll = (reduce + self.overscroll) * RUBBER_BAND_STRETCH_STIFFNESS;
-                                    self.overscroll = 0.0;
-                                }
-                                mark_handled(e, self.axis);
-                            }
-                            let scroll_pos = self.get_scroll_pos();
-                            self.owns_gesture = self.set_scroll_pos(cx, scroll_pos + scroll);
-                            if !self.owns_gesture && scroll != 0.0 {
-                                // Pinned at a limit: the delta stretches the rubber band
-                                // instead, displayed as the raw overscroll divided by the
-                                // stiffness.
-                                let bounces = if scroll > 0.0 {
-                                    self.bounce_at_end
-                                } else {
-                                    self.bounce_at_start
-                                };
-                                if bounces && self.scrollable() {
-                                    self.overscroll += scroll / RUBBER_BAND_STRETCH_STIFFNESS;
-                                    mark_handled(e, self.axis);
-                                }
-                            }
-                            if self.owns_gesture {
-                                mark_handled(e, self.axis);
-                            }
-                            return dispatch_action(cx, self.make_scroll_action());
-                        }
-                        ScrollPhase::Ended => {
-                            // Fingers lifted. Apply the final delta (usually zero); the momentum
-                            // fling starts on the first `Momentum` event, gated on `owns_gesture`
-                            // set during the finger-driven phase above. A stretched rubber band
-                            // springs back from here.
-                            self.coasting = false;
-                            self.scroll_state = ScrollState::Stopped;
+                        let scroll_pos = self.get_scroll_pos();
+                        if self.set_scroll_pos(cx, scroll_pos + scroll) {
+                            self.coasting = true;
                             self.last_trackpad_time = e.time;
-                            if self.overscroll != 0.0 {
-                                self.owns_gesture = false;
+                        } else {
+                            // Pinned at a limit: drop the rest of the stream so
+                            // presses on visibly stationary content aren't treated
+                            // as catches. The remaining momentum feeds the
+                            // rubber-band bounce when that edge has it enabled.
+                            self.owns_gesture = false;
+                            self.coasting = false;
+                            let bounces = if scroll > 0.0 {
+                                self.bounce_at_end
+                            } else {
+                                self.bounce_at_start
+                            };
+                            if bounces && self.scrollable() {
+                                let dt = (e.time - self.last_trackpad_time)
+                                    .max(1.0 / 240.0);
+                                let max_v = self.flick_scroll_maximum
+                                    * PER_FRAME_TO_PER_SECOND;
+                                let v0 = (scroll / dt).clamp(-max_v, max_v);
                                 self.scroll_state = ScrollState::Bounce {
                                     next_frame: cx.new_next_frame(),
-                                    x0: self.overscroll,
-                                    v0: 0.0,
+                                    x0: 0.0,
+                                    v0,
                                     clock: FrameClock::default(),
                                     touch: false,
                                 };
                             }
-                            let scroll_pos = self.get_scroll_pos();
-                            if self.set_scroll_pos(cx, scroll_pos + scroll) || self.owns_gesture {
-                                mark_handled(e, self.axis);
-                            }
-                            return dispatch_action(cx, self.make_scroll_action());
+                        }
+                        return dispatch_action(cx, self.make_scroll_action());
+                    }
+                }
+                ScrollPhase::MomentumEnded => {
+                    // A stream that ends while still coasting was cut by a touch;
+                    // one that faded out at rest (or was dropped at a limit) just
+                    // ends. Record the cut for the touch handler, which may be
+                    // delivered after this event.
+                    if self.is_coasting(e.time) {
+                        self.momentum_cut_at = Some(e.time);
+                    }
+                    self.owns_gesture = false;
+                    self.coasting = false;
+                }
+                ScrollPhase::None => {
+                    self.owns_gesture = false;
+                    self.coasting = false;
+                    self.overscroll = 0.0;
+                    // A wheel scroll takes over from a running bounce; the
+                    // spring must stop too, or its next frame would rewrite
+                    // the overscroll just cleared above.
+                    if matches!(self.scroll_state, ScrollState::Bounce { .. }) {
+                        self.scroll_state = ScrollState::Stopped;
+                    }
+                    if !self.smoothing.is_none() && e.is_mouse {
+                        let scroll_pos_target = self.get_scroll_target();
+                        self.set_scroll_target(cx, scroll_pos_target + scroll);
+                        self.move_towards_scroll_target(cx); // take the first step now
+                    } else {
+                        let scroll_pos = self.get_scroll_pos();
+                        self.set_scroll_pos(cx, scroll_pos + scroll);
+                    }
+                    return dispatch_action(cx, self.make_scroll_action());
+                }
+                ScrollPhase::Began | ScrollPhase::Changed => {
+                    // Fingers on the pad apply directly and catch any fling; `owns_gesture` records
+                    // whether this bar moved, which decides whether it follows the momentum after.
+                    self.coasting = false;
+                    self.scroll_state = ScrollState::Stopped;
+                    if scroll != 0.0 {
+                        self.last_finger_scroll_time = Some(e.time);
+                    }
+                    let mut scroll = scroll;
+                    // A stretched rubber band unwinds first, symmetrically.
+                    if self.overscroll != 0.0 && scroll * self.overscroll < 0.0 {
+                        let reduce = scroll / RUBBER_BAND_STRETCH_STIFFNESS;
+                        if reduce.abs() <= self.overscroll.abs() {
+                            self.overscroll += reduce;
+                            scroll = 0.0;
+                        } else {
+                            scroll = (reduce + self.overscroll) * RUBBER_BAND_STRETCH_STIFFNESS;
+                            self.overscroll = 0.0;
                         }
                     }
+                    let scroll_pos = self.get_scroll_pos();
+                    self.owns_gesture = self.set_scroll_pos(cx, scroll_pos + scroll);
+                    if !self.owns_gesture && scroll != 0.0 {
+                        // Pinned at a limit: the delta stretches the rubber band
+                        // instead, displayed as the raw overscroll divided by the
+                        // stiffness.
+                        let bounces = if scroll > 0.0 {
+                            self.bounce_at_end
+                        } else {
+                            self.bounce_at_start
+                        };
+                        if bounces && self.scrollable() {
+                            self.overscroll += scroll / RUBBER_BAND_STRETCH_STIFFNESS;
+                        }
+                    }
+                    return dispatch_action(cx, self.make_scroll_action());
+                }
+                ScrollPhase::Ended => {
+                    // Fingers lifted. Apply the final delta (usually zero); the momentum
+                    // fling starts on the first `Momentum` event, gated on `owns_gesture`
+                    // set during the finger-driven phase above. A stretched rubber band
+                    // springs back from here.
+                    self.coasting = false;
+                    self.scroll_state = ScrollState::Stopped;
+                    self.last_trackpad_time = e.time;
+                    if self.overscroll != 0.0 {
+                        self.owns_gesture = false;
+                        self.scroll_state = ScrollState::Bounce {
+                            next_frame: cx.new_next_frame(),
+                            x0: self.overscroll,
+                            v0: 0.0,
+                            clock: FrameClock::default(),
+                            touch: false,
+                        };
+                    }
+                    let scroll_pos = self.get_scroll_pos();
+                    self.set_scroll_pos(cx, scroll_pos + scroll);
+                    return dispatch_action(cx, self.make_scroll_action());
                 }
             }
         }
@@ -1026,7 +1023,12 @@ impl ScrollBar {
         }
 
         match event.hits(cx, scroll_area) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            // A drag moves only the innermost scrollable that can scroll its way.
+            Hit::FingerDown(fe)
+                if fe.is_primary_hit()
+                    && self.scrollable()
+                    && cx.is_scroll_drag_owner(fe.digit_id, self.axis.vec_index(), scroll_area) =>
+            {
                 let abs = match self.axis {
                     ScrollAxis::Horizontal => fe.abs.x,
                     ScrollAxis::Vertical => fe.abs.y,

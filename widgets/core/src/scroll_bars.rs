@@ -360,6 +360,26 @@ impl ScrollBars {
         }
     }
 
+    /// The axes (x, y) these bars could take `event` along, if it's a scroll
+    /// (see [`Cx::begin_scroll_container`]).
+    pub fn scroll_container_axes(&self, cx: &mut Cx, event: &Event) -> [bool; 2] {
+        let Event::Scroll(e) = event else {
+            return [false; 2];
+        };
+        let mut axes = [false; 2];
+        if self.ignore_scroll_input {
+            return axes;
+        }
+        let bars = [(self.show_scroll_x, &self.scroll_bar_x), (self.show_scroll_y, &self.scroll_bar_y)];
+        for (is_shown, bar) in bars {
+            if is_shown {
+                let [x, y] = bar.scroll_container_axes(cx, e, self.area);
+                axes = [axes[0] || x, axes[1] || y];
+            }
+        }
+        axes
+    }
+
     pub fn handle_scroll_event(
         &mut self,
         cx: &mut Cx,

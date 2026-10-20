@@ -19,6 +19,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DRAG_STEPS: usize = 6;
+/// How long a held drag rests at its end before letting go, which keeps it from flinging.
+const DRAG_HOLD: Duration = Duration::from_millis(300);
 const RECENT_LOG_LINES: usize = 200;
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -420,6 +422,33 @@ impl TestApp {
         Ok(())
     }
 
+    /// Scrolls at a point in the focused window: a mouse wheel when `phase` is `None`, else one step of
+    /// a trackpad gesture (`"began"`, `"changed"`, `"ended"`, `"momentum"`, `"momentum_ended"`, `"touched"`).
+    pub fn scroll_at(&self, x: f64, y: f64, sx: f64, sy: f64, phase: Option<&'static str>) {
+        if let Err(err) = self.try_scroll_at(x, y, sx, sy, phase) {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_scroll_at(
+        &self,
+        x: f64,
+        y: f64,
+        sx: f64,
+        sy: f64,
+        phase: Option<&'static str>,
+    ) -> TestResult<()> {
+        self.ensure_running()?;
+        self.client().mouse(&MouseInput {
+            dx: sx,
+            dy: sy,
+            phase,
+            ..MouseInput::at(MouseKind::Scroll, self.focus_window(), x, y)
+        })?;
+        self.pace_after_action();
+        Ok(())
+    }
+
     fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
         self.ensure_running()?;
         let (x, y) = snapshot_center_f64(target);
@@ -432,7 +461,47 @@ impl TestApp {
         Ok(())
     }
 
-    fn try_drag_from(&self, target: &WidgetSnapshot, dx: f64, dy: f64) -> TestResult<()> {
+    fn try_touch_drag_from(
+        &self,
+        target: &WidgetSnapshot,
+        dx: f64,
+        dy: f64,
+        is_held: bool,
+    ) -> TestResult<()> {
+        self.ensure_running()?;
+        let (start_x, start_y) = snapshot_center_f64(target);
+        let window = Some(target.window_index);
+        let client = self.client();
+        let touch = |phase, progress: f64| MouseInput {
+            phase: Some(phase),
+            ..MouseInput::at(
+                MouseKind::Touch,
+                window,
+                start_x + dx * progress,
+                start_y + dy * progress,
+            )
+        };
+        client.mouse(&touch("start", 0.0))?;
+        for step in 1..=DRAG_STEPS {
+            client.mouse(&touch("move", step as f64 / DRAG_STEPS as f64))?;
+        }
+        if is_held {
+            thread::sleep(DRAG_HOLD);
+            client.mouse(&touch("move", 1.0))?;
+        }
+        client.mouse(&touch("stop", 1.0))?;
+        self.inner.borrow_mut().focus_window = window;
+        self.pace_after_action();
+        Ok(())
+    }
+
+    fn try_drag_from(
+        &self,
+        target: &WidgetSnapshot,
+        dx: f64,
+        dy: f64,
+        is_held: bool,
+    ) -> TestResult<()> {
         self.ensure_running()?;
         let (start_x, start_y) = snapshot_center_f64(target);
         let window = Some(target.window_index);
@@ -446,6 +515,10 @@ impl TestApp {
                 start_x + dx * progress,
                 start_y + dy * progress,
             ))?;
+        }
+        if is_held {
+            thread::sleep(DRAG_HOLD);
+            client.mouse(&MouseInput::at(MouseKind::Move, window, start_x + dx, start_y + dy))?;
         }
         client.mouse(&MouseInput::at(
             MouseKind::Up,
@@ -863,7 +936,46 @@ impl Locator {
 
     pub fn try_drag_by(&self, dx: f64, dy: f64) -> TestResult<()> {
         let target = self.resolve_unique_visible()?;
-        self.app.try_drag_from(&target, dx, dy)
+        self.app.try_drag_from(&target, dx, dy, false)
+    }
+
+    /// Like [`Self::drag_by`], but rests at the end before letting go, so the drag doesn't fling.
+    pub fn drag_by_and_hold(self, dx: f64, dy: f64) -> Self {
+        if let Err(err) = self.try_drag_by_and_hold(dx, dy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_drag_by_and_hold(&self, dx: f64, dy: f64) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_drag_from(&target, dx, dy, true)
+    }
+
+    /// Like [`Self::drag_by`], with one finger on a touch screen instead of the mouse.
+    pub fn touch_drag_by(self, dx: f64, dy: f64) -> Self {
+        if let Err(err) = self.try_touch_drag_by(dx, dy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_touch_drag_by(&self, dx: f64, dy: f64) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_touch_drag_from(&target, dx, dy, false)
+    }
+
+    /// Like [`Self::drag_by_and_hold`], with one finger on a touch screen instead of the mouse.
+    pub fn touch_drag_by_and_hold(self, dx: f64, dy: f64) -> Self {
+        if let Err(err) = self.try_touch_drag_by_and_hold(dx, dy) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_touch_drag_by_and_hold(&self, dx: f64, dy: f64) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_touch_drag_from(&target, dx, dy, true)
     }
 
     pub fn snapshot(&self) -> WidgetSnapshot {

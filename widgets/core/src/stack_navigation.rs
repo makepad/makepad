@@ -733,7 +733,7 @@ impl Widget for StackNavigation {
                 let Some(candidate) = self.swipe_back_candidate.take() else { break 'touch };
                 let [touch] = e.touches.as_slice() else { break 'touch };
                 if touch.uid != candidate.uid
-                    || cx.fingers.is_touch_drag_claimed(touch.uid)
+                    || is_swipe_taken(cx, touch.uid)
                     || cx.sweep_lock_area().is_some()
                 {
                     break 'touch;
@@ -1694,6 +1694,13 @@ impl StackNavigationRef {
     pub fn show_stack_view_by_id(&self, view_id: LiveId, cx: &mut Cx) {
         self.push(cx, view_id);
     }
+}
+
+/// Whether a widget in the view keeps this touch's drag: one that gives it its own meaning,
+/// or a scroller that took its horizontal drag.
+fn is_swipe_taken(cx: &Cx, uid: u64) -> bool {
+    cx.fingers.is_touch_drag_claimed(uid)
+        || cx.fingers.scroll_drag_owner(live_id_num!(touch, uid).into(), Vec2Index::X).is_some()
 }
 
 /// Cancels `touch` for every widget that captured it and returns the `FingerCancel` that tells them,

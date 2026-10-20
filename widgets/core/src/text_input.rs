@@ -2979,19 +2979,18 @@ impl Widget for TextInput {
             // during draw_scroll_bar, so we don't update the ScrollBar here (which would
             // trigger next_frame callbacks and cause feedback loops).
             if let Event::Scroll(e) = event {
-                let bg_rect = self.draw_bg.area().rect(cx);
-                if !e.handled_y.get() && bg_rect.contains(e.abs) {
-                    // Use the cached max_scroll_y from the last draw pass to ensure
-                    // boundary checks match exactly, avoiding floating-point mismatch
-                    // with relative Fit bounds.
-                    let max_scroll_y = self.cached_max_scroll_y;
-                    if max_scroll_y > 0.0 {
-                        let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
-                        if new_scroll_y != self.scroll_y {
-                            self.scroll_y = new_scroll_y;
-                            self.draw_bg.redraw(cx);
-                            e.handled_y.set(true);
-                        }
+                let area = self.draw_bg.area();
+                let is_over = area.clipped_rect(cx).contains(e.abs);
+                // Use the cached max_scroll_y from the last draw pass to ensure
+                // boundary checks match exactly, avoiding floating-point mismatch
+                // with relative Fit bounds.
+                let max_scroll_y = self.cached_max_scroll_y;
+                // Overflowing text takes the whole gesture, even at its limits (see `Cx::is_scroll_owner`).
+                if cx.is_scroll_owner(e, area, Vec2Index::Y, is_over && max_scroll_y > 0.0) {
+                    let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
+                    if new_scroll_y != self.scroll_y {
+                        self.scroll_y = new_scroll_y;
+                        self.draw_bg.redraw(cx);
                     }
                 }
             }
@@ -3015,19 +3014,14 @@ impl Widget for TextInput {
         // vertical scroll should propagate to parent containers.
         if !self.is_multiline {
             if let Event::Scroll(e) = event {
-                if !e.handled_x.get() && e.scroll.x != 0.0 {
-                    let bg_rect = self.draw_bg.area().rect(cx);
-                    if bg_rect.contains(e.abs) {
-                        let max_scroll_x = self.cached_max_scroll_x;
-                        if max_scroll_x > 0.0 {
-                            let new_scroll_x =
-                                (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
-                            if new_scroll_x != self.scroll_x {
-                                self.scroll_x = new_scroll_x;
-                                self.draw_bg.redraw(cx);
-                                e.handled_x.set(true);
-                            }
-                        }
+                let area = self.draw_bg.area();
+                let is_over = area.clipped_rect(cx).contains(e.abs);
+                let max_scroll_x = self.cached_max_scroll_x;
+                if cx.is_scroll_owner(e, area, Vec2Index::X, is_over && max_scroll_x > 0.0) {
+                    let new_scroll_x = (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
+                    if new_scroll_x != self.scroll_x {
+                        self.scroll_x = new_scroll_x;
+                        self.draw_bg.redraw(cx);
                     }
                 }
             }

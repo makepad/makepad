@@ -1,4 +1,4 @@
-use crate::{Area, Cx, Event, Hit, MouseCursor, NextFrame};
+use crate::{makepad_draw::Vec2Index, Area, Cx, Event, Hit, MouseCursor, NextFrame};
 
 #[derive(Clone, Copy, Debug)]
 struct ScrollSample {
@@ -197,6 +197,10 @@ impl TouchGesture {
                     e.device.is_touch(),
                     cx.fingers.is_mouse_held_outside(&[area]),
                 ) {
+                    return TouchMotionChange::None;
+                }
+                // A scroller inside that took this drag keeps it.
+                if !cx.is_scroll_drag_owner(e.digit_id, Vec2Index::Y, area) {
                     return TouchMotionChange::None;
                 }
 
