@@ -43,6 +43,9 @@ fn main() {
     // (the Windows main-thread stack is the `makepad` binary's: tools/run/build.rs; a library
     // has no bin to give link args to)
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../base/src/json.rs");
+    println!("cargo:rerun-if-changed=../base/src/srchash.rs");
+    println!("cargo:rerun-if-changed=../base/src/sha256.rs");
     println!("cargo:rerun-if-changed=../build_stamp.rs");
     let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let std = std_digest(&dir);
