@@ -612,6 +612,20 @@ pub fn def_at(prog: &Program, file: u32, pos: u32) -> DefId {
     }
 }
 
+pub const AMBIGUOUS_GLOB_IMPORTS: Lint = lint("ambiguous_glob_imports");
+
+/// The message of a privacy / ambiguity finding as an error, or None when it is the lint
+/// `ambiguous_glob_imports` (emitted here under the levels in force at `pos`).
+pub fn privacy_diag(prog: &Program, file: u32, pos: u32, e: &crate::program::PrivacyError) -> Option<String> {
+    if !e.lint { return Some(prog.privacy_message(e)); }
+    if enabled() {
+        let def = def_at(prog, file, pos);
+        let n = prog.syms.str(e.name);
+        emit(prog, def, &AMBIGUOUS_GLOB_IMPORTS, file, pos, &format!("`{n}` is ambiguous"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

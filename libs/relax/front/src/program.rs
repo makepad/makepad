@@ -10,6 +10,7 @@ use crate::fxhash::HashMap;
 
 mod collected;
 mod privacy;
+pub use privacy::PrivacyError;
 mod attrs;
 mod validate;
 
@@ -551,6 +552,10 @@ pub struct Program {
     pub prelexed: HashMap<String, (Vec<u8>, Vec<crate::lexer::Tok>)>,
     /// glob lookups after import resolution: (module, name, type ns) -> result
     pub glob_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<(DefId, BindVis)>>,
+    /// `glob_ambiguity` answers once imports are resolved: (module, name, namespace, used from, skip_direct)
+    pub glob_amb_cache: crate::conc::MemoMap<(u32, Sym, bool, bool), u8>,
+    /// precise lookups of a name in a glob's module (what `glob_ambiguity` compares) once imports are resolved
+    pub glob_prec_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<(DefId, BindVis)>>,
     /// the crates being checked (`makepad check`): the only ones whose paths are privacy-checked
     pub own_crates: Vec<bool>,
     /// lexical lookups (`lookup_in_scope`) once imports are resolved: (module, name, ns_type);
@@ -827,6 +832,8 @@ impl Program {
             errors: Vec::new(),
             macros: Default::default(),
             glob_cache: Default::default(),
+            glob_amb_cache: Default::default(),
+            glob_prec_cache: Default::default(),
             own_crates: Vec::new(),
             scope_cache: Default::default(),
             import_used: Default::default(),
@@ -1246,6 +1253,7 @@ impl Program {
             let no_std = f.ast.root_attrs.iter().any(|a| a.inner && a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "no_std");
             let inj = self.syms.intern(if no_std { "core" } else { "std" });
             let bound = self.mods[root_mod as usize].types.contains_key(&inj) || self.imports.iter().any(|i| i.module == root_mod && i.bind == Some(inj));
+            if bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) { self.report_injected_clash(root_mod, inj); }
             if !bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) {
                 self.imports.push(Import { module: root_mod, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: BOUND_INJECTED });
             }
@@ -2097,7 +2105,7 @@ impl Program {
         }
         if self.imports_done {
             self.scope_cache.clear();
-            self.glob_cache.clear();
+            self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         }
         // only the crates that can see `file` can see what it added (lead decision 52 R1)
         let visible = self.crates_seeing_files([file].into_iter());
@@ -2170,6 +2178,7 @@ impl Program {
             let no_std = pf.ast.root_attrs.iter().any(|a| a.inner && a.toks.hi > a.toks.lo && pf.tok_text(a.toks.lo) == "no_std");
             let inj = self.syms.intern(if no_std { "core" } else { "std" });
             let bound = self.mods[root as usize].types.contains_key(&inj) || self.imports.iter().any(|i| i.module == root && i.bind == Some(inj));
+            if bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) { self.report_injected_clash(root, inj); }
             if !bound && self.crates[krate as usize].deps.iter().any(|x| x.0 == inj) {
                 self.imports.push(Import { module: root, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: BOUND_INJECTED });
             }
@@ -2207,7 +2216,7 @@ impl Program {
             }
         }
         self.scope_cache.clear();
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
     /// Hot reload: the imports of the `use` item at `pos` of file `file` go (a removed or edited
@@ -2244,7 +2253,7 @@ impl Program {
             out.push(UseUndo { index: i, module: m, bind, done, glob, bound, gone });
         }
         self.scope_cache.clear();
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         out
     }
 
@@ -2263,7 +2272,7 @@ impl Program {
             }
         }
         self.scope_cache.clear();
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
     /// Hot reload: takes out the imports from index `i0` on (a refused edit's `use` items) and
@@ -2291,7 +2300,7 @@ impl Program {
             self.imports_of_module.entry(im.module).or_default().push(j as u32);
         }
         self.scope_cache.clear();
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
     /// Hot reload: binds defs again (a refused edit that had removed them).
@@ -2314,7 +2323,7 @@ impl Program {
             }
         }
         self.scope_cache.clear();
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
     fn retarget_file(&mut self, from: u32, to: u32, map: &[(u32, u32)]) {
@@ -2704,6 +2713,14 @@ impl Program {
                     // `extern crate alloc_no_stdlib as alloc;` makes `alloc::..` that crate in
                     // every module, ahead of a sysroot crate of the same name)
                     if rename.is_some() && self.crates[krate as usize].root_mod == module {
+                        // build_reduced_graph_for_extern_crate: a macro-expanded `extern crate x as n;`
+                        // at the root must not shadow an extern prelude name from `--extern`
+                        if !this && self.syms.str(bind) != "_" && pos >= self.files[file as usize].src_len
+                            && self.crates[krate as usize].deps.iter().any(|x| x.0 == bind)
+                            && !self.imports.iter().any(|i| i.module == module && i.bind == Some(bind) && i.ext && i.pos < self.files[i.file as usize].src_len && i.file == file) {
+                            let e = self.record_error(file, pos, "resolve", "macro-expanded `extern crate` items cannot shadow names passed with `--extern`".to_string());
+                            self.errors.push(e);
+                        }
                         if this {
                             self.crates[krate as usize].deps.insert(0, (bind, krate));
                         } else if let Some(&(_, c)) = self.crates[krate as usize].deps.iter().find(|x| x.0 == name) {
@@ -2901,7 +2918,7 @@ impl Program {
 
     fn resolve_imports_in(&mut self, visible: Option<&[bool]>) {
         self.imports_done = false;
-        self.glob_cache.clear();
+        self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         self.trait_bind_cache.clear();
         self.scope_cache.clear();
         self.resolve_imports_fixpoint(0);
@@ -3472,6 +3489,21 @@ impl Program {
         // `use std::eprintln;` / `use alloc::format;`: built-in macros need no import
         if !im.glob {
             if let Some((_, last)) = im.segs.last() {
+                // a macro is named by the module that holds it: `use m::assert;` of a module of
+                // this crate that has no such macro (only `std`'s root and the crate root have
+                // macros by name) is unresolved however the name is known elsewhere
+                if im.segs.len() > 1 {
+                    let krate = self.mods[im.module as usize].krate;
+                    let edition = self.crates[krate as usize].edition;
+                    if let Some(parent) = self.resolve_mod_path(im.module, im.global, &im.segs[..im.segs.len() - 1], edition < 2018, true) {
+                        let pd = self.def(parent);
+                        if pd.kind == DefKind::Mod && pd.krate == krate && self.crates[krate as usize].root_mod != pd.sub
+                            && !self.mods[pd.sub as usize].macros.contains_key(last)
+                            && !macro_binds.get_or_insert_with(|| self.macro_import_binds()).contains(last) {
+                            return true;
+                        }
+                    }
+                }
                 if BUILTIN_MACROS.contains(&self.syms.str(*last)) {
                     return false;
                 }
@@ -3729,6 +3761,29 @@ impl Program {
             }
         }
         true
+    }
+
+    /// The injected `extern crate std;` (`core` under `#![no_std]`) of an edition 2015 root against
+    /// a binding of the same name written in the crate: E0259 (an `extern crate`), E0254 (a `use`),
+    /// E0260 (an item), reported on the written one.
+    fn report_injected_clash(&mut self, root: u32, name: Sym) {
+        let n = self.syms.str(name).to_string();
+        let found = self.imports.iter().find(|i| i.module == root && i.bind == Some(name) && i.bound & BOUND_INJECTED == 0).map(|i| (i.ext, i.pos, i.file));
+        let (code, file, pos) = match found {
+            Some((true, pos, file)) => ("E0259", file, pos),
+            Some((false, pos, file)) => ("E0254", file, pos),
+            None => {
+                let Some(&d) = self.mods[root as usize].types.get(&name) else { return };
+                let od = self.def(d);
+                if od.item.0 == u32::MAX { return; }
+                let (f, item) = (od.file, od.item);
+                let Some(it) = self.files.get(f as usize).and_then(|pf| pf.ast.items.get(item.0 as usize)) else { return };
+                ("E0260", f, it.lo)
+            }
+        };
+        let msg = format!("{code}: the name `{n}` is defined multiple times -- note: `{n}` must be defined only once in the type namespace of this module");
+        let e = self.record_error(file, pos, "resolve", msg);
+        self.errors.push(e);
     }
 
     /// E0252/E0254/E0255/E0259/E0260 (rustc_resolve diagnostics.rs `report_conflict`): the import

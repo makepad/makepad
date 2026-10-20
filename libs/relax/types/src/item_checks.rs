@@ -15,6 +15,9 @@ fn namespaces(prog: &Program, d: DefId) -> (bool, bool) {
         // (foreign items are left out: an `extern` block inside a fn body is collected into the
         // enclosing module, not the body's block, so two bodies' declarations would collide)
         DefKind::Fn | DefKind::Const | DefKind::Static => (false, true),
+        // the items of a trait (`duplicate_items` only asks for those of traits)
+        DefKind::AssocFn | DefKind::AssocConst => (false, true),
+        DefKind::AssocTy => (true, false),
         DefKind::Struct => {
             // tuple and unit structs also live in the value namespace
             let ast = &prog.files[def.file as usize].ast;
@@ -34,7 +37,7 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
         let d = DefId(i as u32);
         let def = prog.def(d);
         if !own.get(def.krate as usize).copied().unwrap_or(false) || def.parent == NO_DEF { continue; }
-        if prog.def(def.parent).kind != DefKind::Mod { continue; }
+        if !matches!(prog.def(def.parent).kind, DefKind::Mod | DefKind::Trait) { continue; }
         // only items the module's source declares (not the compiler's own definitions)
         if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
         let name = prog.syms.str(def.name);
@@ -53,7 +56,7 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
                     let ast = &prog.files[def.file as usize].ast;
                     let pos = ast.item(def.item).name.lo;
                     let ns_name = if ns { "type" } else { "value" };
-                    let module = if prog.block_owner.get(&prog.def(def.parent).sub).is_some() { "this block" } else { "this module" };
+                    let module = if prog.def(def.parent).kind == DefKind::Trait { "this trait" } else if prog.block_owner.get(&prog.def(def.parent).sub).is_some() { "this block" } else { "this module" };
                     errors.push(prog.record_error(def.file, pos, "resolve", format!(
                         "E0428: the name `{}` is defined multiple times -- note: `{}` must be defined only once in the {} namespace of {}",
                         name, name, ns_name, module)));
@@ -85,6 +88,10 @@ struct Representability<'a> {
     done: crate::fxhash::HashSet<ReprKey>,
     /// the first cycle met: its queries, outermost first
     cycle: Option<Vec<ReprKey>>,
+    /// `params_in_repr` results that no cycle cut short (rustc caches the query)
+    params_memo: std::cell::RefCell<crate::fxhash::HashMap<DefId, crate::fxhash::HashSet<u32>>>,
+    /// a cycle cut the `params_in_repr` computation now running
+    truncated: std::cell::Cell<bool>,
 }
 
 impl Representability<'_> {
@@ -149,7 +156,9 @@ impl Representability<'_> {
     /// `params_in_repr`: the type parameters (by compact index) an ADT's fields hold by value.
     fn params_in_repr(&self, d: DefId, visiting: &mut Vec<DefId>) -> crate::fxhash::HashSet<u32> {
         let mut out = crate::fxhash::HashSet::default();
-        if visiting.contains(&d) { return out; }
+        if visiting.contains(&d) { self.truncated.set(true); return out; }
+        if let Some(done) = self.params_memo.borrow().get(&d) { return done.clone(); }
+        let outer = self.truncated.replace(false);
         visiting.push(d);
         if let Some(adt) = self.tcx.adts.get(&d) {
             for v in &adt.variants {
@@ -157,6 +166,8 @@ impl Representability<'_> {
             }
         }
         visiting.pop();
+        if !self.truncated.get() { self.params_memo.borrow_mut().insert(d, out.clone()); }
+        self.truncated.set(outer || self.truncated.get());
         out
     }
 
@@ -181,7 +192,7 @@ impl Representability<'_> {
 /// representability.rs: a cycle among its queries; rustc_middle values.rs reports the ADTs of
 /// the cycle once, at the first). The cycle is reported by the first of its ADTs.
 pub fn representability(prog: &Program, tcx: &Tcx, d: DefId) -> Option<String> {
-    let mut r = Representability { tcx, active: Vec::new(), done: Default::default(), cycle: None };
+    let mut r = Representability { tcx, active: Vec::new(), done: Default::default(), cycle: None, params_memo: Default::default(), truncated: Default::default() };
     r.check_adt(d);
     let cycle = r.cycle?;
     let mut items: Vec<DefId> = Vec::new();
@@ -568,6 +579,46 @@ fn no_main_error(prog: &Program, root: u32, file: u32) -> String {
     prog.record_error(file, 0, "typeck", format!("E0601: `main` function not found in crate `{}`", name))
 }
 
+/// rustc_monomorphize: a binary exporting a second `main` symbol (`#[no_mangle]`, `#[export_name
+/// = "main"]` or a foreign `main` declaration) clashes with the entry symbol.
+pub fn entry_symbol_conflict(prog: &Program, own: &[bool], root: u32) -> Vec<String> {
+    let Some(main) = entry_main(prog, root) else { return Vec::new() };
+    // (`#![no_main]`: the program supplies the entry symbol itself)
+    {
+        let m = &prog.mods[prog.crates[root as usize].root_mod as usize];
+        let pf = &prog.files[m.file as usize];
+        if pf.ast.root_attrs.iter().any(|a| a.toks.hi > a.toks.lo && pf.tok_text(a.toks.lo) == "no_main") { return Vec::new(); }
+    }
+    let mut clash = false;
+    for (i, def) in prog.defs.iter().enumerate() {
+        if def.krate != root || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+        let d = DefId(i as u32);
+        match def.kind {
+            DefKind::ForeignFn => clash |= prog.name(d) == "main",
+            DefKind::Fn | DefKind::AssocFn | DefKind::Static => {
+                if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
+                let ast = &prog.files[def.file as usize].ast;
+                let p = prog.src(def.file);
+                for a in ast.list(ast.item(def.item).attrs) {
+                    let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+                    if hi <= lo { continue; }
+                    let first = if crate::cfg::tok_str(p, lo) == b"unsafe" && hi > lo + 2 { lo + 2 } else { lo };
+                    match crate::cfg::tok_str(p, first) {
+                        b"no_mangle" => clash |= prog.name(d) == "main",
+                        b"export_name" if first + 2 < hi && crate::cfg::tok_str(p, first + 1) == b"=" => clash |= crate::cfg::tok_str(p, first + 2) == b"\"main\"",
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !clash { return Vec::new(); }
+    let def = prog.def(main);
+    let at = prog.files[def.file as usize].ast.item(def.item).name.lo;
+    vec![prog.record_error(def.file, at, "typeck", "entry symbol `main` declared multiple times".to_string())]
+}
+
 /// rustc_ast_passes `extern` block validation and the lints on them: `unsafe extern` blocks
 /// (`unsafe_code`), plain `extern` blocks (`missing_unsafe_on_extern`, an error from edition
 /// 2024), and a safety qualifier on an item of a plain block.
@@ -643,8 +694,19 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
                         errors.push(prog.record_error(file, ast.item(it).lo, "parse", "incorrect `static` inside `extern` block".to_string()));
                     }
                 }
-                if let ItemKind::Fn(sig, _, _) = ast.item(it).kind {
+                if let ItemKind::Fn(sig, body, _) = ast.item(it).kind {
                     let sig = ast.fn_sig(sig);
+                    if body.is_some() || sig.lazy_body.is_some() {
+                        errors.push(prog.record_error(file, ast.item(it).lo, "parse", "incorrect function inside `extern` block".to_string()));
+                    }
+                    // check_abi: a C-variadic foreign function has a C-like calling convention
+                    if sig.variadic {
+                        let abi = fm.abi.map_or(&b"\"C\""[..], |a| pf.bytes(a.lo, a.hi));
+                        let abi = abi.strip_prefix(b"\"").and_then(|a| a.strip_suffix(b"\"")).unwrap_or(abi);
+                        if !matches!(abi, b"C" | b"C-unwind" | b"cdecl" | b"cdecl-unwind" | b"system" | b"system-unwind" | b"aapcs" | b"aapcs-unwind" | b"win64" | b"win64-unwind" | b"sysv64" | b"sysv64-unwind" | b"efiapi") {
+                            errors.push(prog.record_error(file, ast.item(it).lo, "typeck", format!("E0045: C-variadic functions with the \"{}\" calling convention are not supported", String::from_utf8_lossy(abi))));
+                        }
+                    }
                     if let Some(g) = ast.list(sig.generics.params).iter().find(|g| !matches!(g.kind, crate::ast::GenericParamKind::Lifetime(_))) {
                         let what = if matches!(g.kind, crate::ast::GenericParamKind::Const(..)) { "const" } else { "type" };
                         errors.push(prog.record_error(file, g.name.lo, "typeck", format!("E0044: foreign items may not have {} parameters", what)));
@@ -852,11 +914,13 @@ pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
     let mut ints: Vec<Vec<u8>> = Vec::new();
     let (mut c, mut transparent, mut packed, mut aligned, mut other) = (false, false, Vec::<u32>::new(), false, false);
     let mut first_pos = item.lo;
+    let mut first_repr: Option<u32> = None;
     for a in ast.list(item.attrs) {
         let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
         if hi <= lo || crate::cfg::tok_str(p, lo) != b"repr" { continue; }
         let pos = p.tok(lo).lo;
         first_pos = pos;
+        first_repr.get_or_insert(pos);
         if hi < lo + 3 || crate::cfg::tok_str(p, lo + 1) != b"(" {
             err(pos, "E0539: malformed `repr` attribute input".to_string());
             continue;
@@ -913,6 +977,10 @@ pub fn repr_checks(prog: &Program, tcx: &Tcx, d: DefId) -> Vec<String> {
         }
     }
     let _ = other;
+    // check_enum: a zero-variant enum takes no representation
+    if let (ItemKind::Enum(r), Some(pos)) = (item.kind, first_repr) {
+        if ast.list(ast.row(r).variants).is_empty() { err(pos, "E0084: unsupported representation for zero-variant enum".to_string()); }
+    }
     if transparent && (c || !packed.is_empty() || aligned || !ints.is_empty()) {
         err(first_pos, "E0692: transparent struct cannot have other repr hints".to_string());
     }
@@ -1187,4 +1255,10 @@ pub fn attribute_shapes(prog: &Program, d: DefId) -> Vec<String> {
         }
     }
     errors
+}
+
+fn entry_main(prog: &Program, root: u32) -> Option<DefId> {
+    let sym = prog.syms.get("main")?;
+    let d = prog.lookup_in_module(prog.crates[root as usize].root_mod, sym, false, &mut Vec::new())?;
+    (prog.def(d).kind == DefKind::Fn).then_some(d)
 }

@@ -194,6 +194,16 @@ impl<T: crate::marker::PointeeSized> PartialEq for NonNull<T> {
     }
 }
 impl<T: crate::marker::PointeeSized> Eq for NonNull<T> {}
+impl<T: crate::marker::PointeeSized> PartialOrd for NonNull<T> {
+    fn partial_cmp(&self, other: &NonNull<T>) -> Option<crate::cmp::Ordering> {
+        (self.pointer as *const T).partial_cmp(&(other.pointer as *const T))
+    }
+}
+impl<T: crate::marker::PointeeSized> Ord for NonNull<T> {
+    fn cmp(&self, other: &NonNull<T>) -> crate::cmp::Ordering {
+        (self.pointer as *const T).cmp(&(other.pointer as *const T))
+    }
+}
 impl<T: crate::marker::PointeeSized> crate::hash::Hash for NonNull<T> {
     fn hash<H: crate::hash::Hasher>(&self, state: &mut H) {
         (self.pointer as *const u8 as usize).hash(state)

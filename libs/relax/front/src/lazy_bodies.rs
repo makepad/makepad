@@ -271,6 +271,8 @@ impl TokBase<'_> {
 #[derive(Default)]
 pub struct Toks<'a> {
     base: TokBase<'a>,
+    /// the base's length (every lookahead splits on it: not matched out of `base` each time)
+    nb: usize,
     own: Vec<Tok>,
     patched: Vec<u64>,
     patches: crate::fxhash::HashMap<u32, Tok>,
@@ -281,16 +283,16 @@ impl From<Vec<Tok>> for Toks<'_> {
 }
 
 impl<'a> From<&'a [Tok]> for Toks<'a> {
-    fn from(base: &'a [Tok]) -> Self { Self { base: TokBase::Slice(base), ..Default::default() } }
+    fn from(base: &'a [Tok]) -> Self { Self { base: TokBase::Slice(base), nb: base.len(), ..Default::default() } }
 }
 
 impl<'a> From<&'a PackedToks> for Toks<'a> {
-    fn from(base: &'a PackedToks) -> Self { Self { base: TokBase::Packed(base), ..Default::default() } }
+    fn from(base: &'a PackedToks) -> Self { Self { base: TokBase::Packed(base), nb: base.len(), ..Default::default() } }
 }
 
 impl<'a> Toks<'a> {
     #[inline]
-    pub fn len(&self) -> usize { self.base.len() + self.own.len() }
+    pub fn len(&self) -> usize { self.nb + self.own.len() }
     #[inline]
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     #[inline]
@@ -307,24 +309,32 @@ impl<'a> Toks<'a> {
         &self.own
     }
     /// Token `i`.
-    #[inline]
+    #[inline(always)]
     pub fn at(&self, i: usize) -> Tok {
-        let nb = self.base.len();
+        let nb = self.nb;
         if i >= nb {
             return self.own[i - nb];
         }
+        self.base_at(i)
+    }
+    #[inline(never)]
+    fn base_at(&self, i: usize) -> Tok {
         if !self.patches.is_empty() && self.is_patched(i) {
             return self.patches[&(i as u32)];
         }
         self.base.at(i)
     }
     /// The kind of token `i`: `at(i).kind` without decoding the positions of a packed base token.
-    #[inline]
+    #[inline(always)]
     pub fn kind_at(&self, i: usize) -> T {
-        let nb = self.base.len();
+        let nb = self.nb;
         if i >= nb {
             return self.own[i - nb].kind;
         }
+        self.base_kind_at(i)
+    }
+    #[inline(never)]
+    fn base_kind_at(&self, i: usize) -> T {
         if !self.patches.is_empty() && self.is_patched(i) {
             return self.patches[&(i as u32)].kind;
         }

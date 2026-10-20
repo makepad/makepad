@@ -129,6 +129,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
     errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
     if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
+    if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
     errors.extend(relax_types::lint_levels::check(&u.prog, &own));
     relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own);
     relax_types::lint_dead::reset();

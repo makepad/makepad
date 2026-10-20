@@ -89,9 +89,10 @@ impl DefiningTy {
                 if body && sig.header.c_variadic {
                     let region = tcx.tys.intern_region(RegionKind::ReBound(0, BoundVar(bound_regions)));
                     bound_regions += 1;
-                    let va_list = tcx.lang_items.get(crate::lang_items::LangItem::VaList)
-                        .expect("C-variadic signature requires the va_list language item");
-                    inputs.push(tcx.tys.intern(TyKind::Adt(va_list, tcx.tys.mk_list(&[]), tcx.tys.intern_region_args(&[region]))));
+                    // (a core without the `va_list` lang item has no value for the `...` argument)
+                    if let Some(va_list) = tcx.lang_items.get(crate::lang_items::LangItem::VaList) {
+                        inputs.push(tcx.tys.intern(TyKind::Adt(va_list, tcx.tys.mk_list(&[]), tcx.tys.intern_region_args(&[region]))));
+                    }
                 }
                 (inputs, sig.ret, bound_regions)
             }

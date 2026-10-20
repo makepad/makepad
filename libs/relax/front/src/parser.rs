@@ -24,6 +24,9 @@ pub struct PErr {
 pub type PResult<X> = Result<X, PErr>;
 
 const NO_STRUCT: u8 = 1;
+/// rustc `Restrictions::ALLOW_LET`: set for `if`/`while` conditions and match guards, kept across
+/// binary operators and parentheses, cleared by every other primary expression
+const ALLOW_LET: u8 = 2;
 
 #[derive(Clone, Copy)]
 enum BodyOutline {
@@ -34,7 +37,7 @@ enum BodyOutline {
 
 /// MAKEPAD_RUN_VERIFY_TOKENS: every macro_rules expansion's transcribed tokens are compared with the
 /// lexed text.
-fn verify_tokens() -> bool {
+pub(crate) fn verify_tokens() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_TOKENS").is_some())
 }
@@ -1317,7 +1320,7 @@ impl<'a> Parser<'a> {
                 // that contains it, an item's with the module; the file still loads
                 Err(m) => {
                     let semi = if crate::builtins::is_item_level(b) { ";" } else { "" };
-                    crate::builtins::Expansion::lexed(format!("compile_error!({:?}){}", format!("`{}!`: {}", def.name, m), semi)).map_err(|m| PErr { pos: call_lo, msg: m })?
+                    crate::builtins::Expansion::from_buf(crate::tokbuf::TokBuf::compile_error(self.edition, &format!("`{}!`: {}", def.name, m), !semi.is_empty()))
                 }
             };
             // MAKEPAD_RUN_TRACE=expand:<macro name> prints expansions (debugger-free macro debugging)
@@ -1809,7 +1812,7 @@ impl<'a> Parser<'a> {
                 self.derive_after(*id, tok_lo)?;
             }
             if self.cfg_out == 0 && matches!(self.ast.item(*id).kind, ItemKind::Struct(..) | ItemKind::Enum(..)) {
-                self.default_consts(*id)?;
+                self.default_consts(*id, tok_lo)?;
             }
         }
         r
@@ -2492,7 +2495,15 @@ impl<'a> Parser<'a> {
         self.foreign_abi = Some(abi);
         let items = self.assoc_items();
         self.foreign_abi = saved;
-        items
+        let items = items?;
+        // rustc_parse `parse_item_kind` in an extern block: `const` is not a foreign item
+        for &id in self.ast.list(items) {
+            let it = self.ast.item(id);
+            if matches!(it.kind, ItemKind::Const(..)) {
+                return Err(PErr { pos: it.lo, msg: "extern items cannot be `const`".into() });
+            }
+        }
+        Ok(items)
     }
 
     fn impl_generics_ahead(&self) -> bool {
@@ -2536,6 +2547,12 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ use trees
 
     fn use_tree(&mut self) -> PResult<UseTree> {
+        self.use_tree_in(None, false)
+    }
+
+    /// `prefix`: the kind of the last segment of the path before this tree; `in_group`: the tree
+    /// is an element of a `{..}` list (rustc_resolve build_reduced_graph: `{self}` names its prefix).
+    fn use_tree_in(&mut self, prefix: Option<SegKind>, in_group: bool) -> PResult<UseTree> {
         match self.kind() {
             T::Star => {
                 self.pos += 1;
@@ -2546,7 +2563,7 @@ impl<'a> Parser<'a> {
                 let mut v = Vec::new();
                 while self.kind() != T::CloseBrace {
                     self.eat(T::PathSep);
-                    v.push(self.use_tree()?);
+                    v.push(self.use_tree_in(prefix, true)?);
                     if !self.eat(T::Comma) {
                         break;
                     }
@@ -2557,10 +2574,18 @@ impl<'a> Parser<'a> {
             _ => {
                 let seg = self.path_seg_name()?;
                 if self.eat(T::PathSep) {
-                    let rest = self.use_tree()?;
+                    let rest = self.use_tree_in(Some(seg.kind()), false)?;
                     Ok(UseTree::Path(seg, self.ast.push_use_tree(rest)))
                 } else {
                     let rename = if self.eat(T::KwAs) { Some(self.ident_or_underscore()?) } else { None };
+                    // rustc_resolve: importing a path keyword without renaming it
+                    if rename.is_none() && crate::lexer::validation_enabled() && self.cfg_out == 0 {
+                        let named = if seg.kind() == SegKind::SelfValue && (in_group || prefix.is_some()) { prefix.unwrap_or(seg.kind()) } else { seg.kind() };
+                        if matches!(named, SegKind::SelfValue | SegKind::Super | SegKind::Crate) {
+                            let e = PErr { pos: seg.name.lo, msg: "imports need to be explicitly named".to_string() };
+                            self.pending_shape.push((TokRange { lo: 0, hi: 0 }, Some(e)));
+                        }
+                    }
                     Ok(UseTree::Name(seg, rename))
                 }
             }
@@ -3567,6 +3592,16 @@ impl<'a> Parser<'a> {
     fn expr_ns(&mut self) -> PResult<ExprId> {
         self.expr_bp(0, NO_STRUCT)
     }
+    /// A match guard (rustc parse_match_guard_condition: chains always allowed)
+    fn guard_expr(&mut self) -> PResult<ExprId> {
+        let g = self.expr_bp(0, ALLOW_LET)?;
+        self.cond_check(g, false)?;
+        Ok(g)
+    }
+    /// An `if`/`while` condition (rustc parse_expr_cond)
+    fn expr_cond(&mut self) -> PResult<ExprId> {
+        self.expr_bp(0, NO_STRUCT | ALLOW_LET)
+    }
 
     fn can_begin_expr(&self, r: u8) -> bool {
         match self.kind() {
@@ -3631,10 +3666,6 @@ impl<'a> Parser<'a> {
             if prec < min {
                 break;
             }
-            // a `let` in a condition chains with `&&` only
-            if prec == P_OROR && self.has_let_chain(lhs) {
-                return self.err("`||` operators are not supported in let chain conditions");
-            }
             self.pos += 1;
             if prec == P_ASSIGN {
                 let rhs = self.expr_bp(P_ASSIGN, r)?;
@@ -3665,11 +3696,58 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
-    fn has_let_chain(&self, e: ExprId) -> bool {
-        match self.ast.expr(e).kind {
-            ExprKind::Let(..) => true,
-            ExprKind::Binary(BinOp::And, a, b) => self.has_let_chain(a) || self.has_let_chain(b),
-            _ => false,
+    /// rustc_parse `CondChecker`: after an `if`/`while` condition (edition-dependent chains) or a
+    /// match guard (chains always allowed), a `let` reachable only through `&&` is a chain; one
+    /// below any other operator is forbidden.
+    fn cond_check(&self, e: ExprId, edition_dependent: bool) -> PResult<()> {
+        // cheap exit: the condition holds no `let` operator position at all
+        if !matches!(self.ast.expr(e).kind, ExprKind::Let(..) | ExprKind::Binary(..) | ExprKind::Paren(..) | ExprKind::Unary(..) | ExprKind::AddrOf(..)
+            | ExprKind::Range(..) | ExprKind::Cast(..) | ExprKind::Assign(..) | ExprKind::AssignOp(..) | ExprKind::Field(..) | ExprKind::TupleField(..)
+            | ExprKind::Try(..) | ExprKind::Await(..) | ExprKind::Index(..) | ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Tuple(..))
+        {
+            return Ok(());
+        }
+        self.cond_visit(e, 0, 1, edition_dependent)
+    }
+
+    // forbid: 0 none, 1 `||`, 2 parentheses, 3 anything else
+    fn cond_visit(&self, e: ExprId, forbid: u8, depth: u32, ed: bool) -> PResult<()> {
+        let x = *self.ast.expr(e);
+        let walk = |s: &Self, f: u8, kids: &[ExprId]| -> PResult<()> {
+            for &k in kids {
+                s.cond_visit(k, f, depth + 1, ed)?;
+            }
+            Ok(())
+        };
+        match x.kind {
+            ExprKind::Let(..) => {
+                if forbid == 1 {
+                    return Err(PErr { pos: x.lo, msg: "`||` operators are not supported in let chain conditions".into() });
+                }
+                if forbid != 0 {
+                    return Err(PErr { pos: x.lo, msg: "expected expression, found `let` statement".into() });
+                }
+                // the edition of the code concerned; text a macro expanded has none known here
+                if depth > 1 && ed && self.edition < 2024 && (x.lo as usize) < self.src.len() {
+                    return Err(PErr { pos: x.lo, msg: "let chains are only allowed in Rust 2024 or later".into() });
+                }
+                Ok(())
+            }
+            ExprKind::Binary(BinOp::And, a, b) => walk(self, forbid, &[a, b]),
+            ExprKind::Binary(BinOp::Or, a, b) if forbid == 0 || forbid == 1 => walk(self, 1, &[a, b]),
+            ExprKind::Paren(a) if forbid == 0 || forbid == 2 => walk(self, 2, &[a]),
+            ExprKind::Assign(a, b) | ExprKind::AssignOp(_, a, b) | ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => walk(self, 3, &[a, b]),
+            ExprKind::Unary(_, a) | ExprKind::Await(a) | ExprKind::Try(a) | ExprKind::AddrOf(_, _, a) | ExprKind::Field(a, _)
+            | ExprKind::TupleField(a, _) | ExprKind::Paren(a) | ExprKind::Cast(a, _) | ExprKind::MethodCall(a, _) | ExprKind::Call(a, _) => walk(self, 3, &[a]),
+            ExprKind::Range(a, b, _) => {
+                let kids: Vec<ExprId> = a.get().into_iter().chain(b.get()).collect();
+                walk(self, 3, &kids)
+            }
+            ExprKind::Tuple(l) => {
+                let kids: Vec<ExprId> = self.ast.list(l).to_vec();
+                walk(self, 3, &kids)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -3739,6 +3817,63 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// rustc `parse_dot_suffix_expr`: the token after `expr.`; the flag says a float ended in
+    /// the next access's dot (`foo.1.`), so another suffix follows at once.
+    fn dot_suffix(&mut self, mut e: ExprId, lo: u32) -> PResult<(ExprId, bool)> {
+        match self.kind() {
+            T::KwAwait => {
+                self.pos += 1;
+                e = self.mk_expr(ExprKind::Await(e), lo);
+            }
+            T::Ident | T::RawIdent => {
+                let name = self.ident_tok()?;
+                let turbofish = if self.kind() == T::PathSep && matches!(self.nth(1), T::Lt | T::Shl | T::LArrow) {
+                    self.pos += 1;
+                    self.generic_args_angle()?
+                } else {
+                    GenericArgsId::NONE
+                };
+                if self.kind() == T::OpenParen {
+                    let args = self.call_args()?;
+                    let args = self.ast.push_list(args);
+                    let row = self.ast.push_row(MethodCallRow { name, turbofish, args });
+                    e = self.mk_expr(ExprKind::MethodCall(e, row), lo);
+                } else {
+                    e = self.mk_expr(ExprKind::Field(e, name), lo);
+                }
+            }
+            T::Int => {
+                let t = self.bump();
+                let n = parse_index(self.text_of(t));
+                e = self.mk_expr(ExprKind::TupleField(e, n), lo);
+            }
+            T::Float => {
+                // break_up_float: `1e2` | `1.` | `1.2` | `1.2e3`
+                let t = self.bump();
+                let s = self.text_of(t).to_vec();
+                let dot = s.iter().position(|&c| c == b'.');
+                match dot {
+                    None => {
+                        let n = parse_index(&s);
+                        e = self.mk_expr(ExprKind::TupleField(e, n), lo);
+                    }
+                    Some(d) => {
+                        let a = parse_index(&s[..d]);
+                        e = self.mk_expr(ExprKind::TupleField(e, a), lo);
+                        if d + 1 < s.len() {
+                            let b = parse_index(&s[d + 1..]);
+                            e = self.mk_expr(ExprKind::TupleField(e, b), lo);
+                        } else {
+                            return Ok((e, true));
+                        }
+                    }
+                }
+            }
+            _ => return self.err("expected field or method"),
+        }
+        Ok((e, false))
+    }
+
     fn postfix(&mut self, mut e: ExprId, lo: u32) -> PResult<ExprId> {
         loop {
             match self.kind() {
@@ -3748,57 +3883,13 @@ impl<'a> Parser<'a> {
                 }
                 T::Dot => {
                     self.pos += 1;
-                    match self.kind() {
-                        T::KwAwait => {
-                            self.pos += 1;
-                            e = self.mk_expr(ExprKind::Await(e), lo);
+                    // `foo.1.` leaves the access's own dot behind: the next token is the next field
+                    loop {
+                        let (ne, trailing) = self.dot_suffix(e, lo)?;
+                        e = ne;
+                        if !trailing {
+                            break;
                         }
-                        T::Ident | T::RawIdent => {
-                            let name = self.ident_tok()?;
-                            let turbofish = if self.kind() == T::PathSep && matches!(self.nth(1), T::Lt | T::Shl | T::LArrow) {
-                                self.pos += 1;
-                                self.generic_args_angle()?
-                            } else {
-                                GenericArgsId::NONE
-                            };
-                            if self.kind() == T::OpenParen {
-                                let args = self.call_args()?;
-                                let args = self.ast.push_list(args);
-                                let row = self.ast.push_row(MethodCallRow { name, turbofish, args });
-                                e = self.mk_expr(ExprKind::MethodCall(e, row), lo);
-                            } else {
-                                e = self.mk_expr(ExprKind::Field(e, name), lo);
-                            }
-                        }
-                        T::Int => {
-                            let t = self.bump();
-                            let n = parse_index(self.text_of(t));
-                            e = self.mk_expr(ExprKind::TupleField(e, n), lo);
-                        }
-                        T::Float => {
-                            // `x.0.1`
-                            let t = self.bump();
-                            let s = self.text_of(t).to_vec();
-                            let mut dot = s.len();
-                            for i in 0..s.len() {
-                                if s[i] == b'.' {
-                                    dot = i;
-                                    break;
-                                }
-                            }
-                            let a = parse_index(&s[..dot]);
-                            e = self.mk_expr(ExprKind::TupleField(e, a), lo);
-                            if dot + 1 < s.len() {
-                                let b = parse_index(&s[dot + 1..]);
-                                e = self.mk_expr(ExprKind::TupleField(e, b), lo);
-                            } else if self.kind() == T::Int {
-                                // `x.0. 0`: the float `0.` ends in the access's dot, the next token is the field
-                                let t = self.bump();
-                                let b = parse_index(self.text_of(t));
-                                e = self.mk_expr(ExprKind::TupleField(e, b), lo);
-                            }
-                        }
-                        _ => return self.err("expected field or method"),
                     }
                 }
                 T::OpenParen => {
@@ -3822,7 +3913,7 @@ impl<'a> Parser<'a> {
         self.expect(T::OpenParen)?;
         let mut v = Vec::new();
         while self.kind() != T::CloseParen {
-            if let Some(e) = self.list_elem()? {
+            if let Some(e) = self.list_elem(0)? {
                 v.push(e);
             }
             if !self.eat(T::Comma) {
@@ -3836,9 +3927,9 @@ impl<'a> Parser<'a> {
     /// An element of an array / tuple / call-argument list: None when a `#[cfg(..)]` on it is false
     /// (the element is removed; Reference expressions.md [expr.attr.restriction] and
     /// conditional-compilation.md [cfg.attr]; rustc_expand config.rs configure_expr).
-    fn list_elem(&mut self) -> PResult<Option<ExprId>> {
+    fn list_elem(&mut self, r: u8) -> PResult<Option<ExprId>> {
         let attrs = if self.kind() == T::Pound && self.nth(1) == T::OpenBracket { self.outer_attrs()? } else { Vec::new() };
-        let e = self.expr()?;
+        let e = self.expr_bp(0, r)?;
         Ok(if attrs.is_empty() || self.cfg_present(&attrs) { Some(e) } else { None })
     }
 
@@ -3854,6 +3945,9 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self, r: u8) -> PResult<ExprId> {
         let lo = self.lo();
+        // rustc parse_expr_bottom: only `let` and a parenthesised expression see ALLOW_LET
+        let let_ok = r & ALLOW_LET != 0;
+        let r = if matches!(self.kind(), T::KwLet | T::OpenParen) { r } else { r & !ALLOW_LET };
         match self.kind() {
             T::Interp => {
                 let e = self.interp.get(&(self.pos as u32)).copied();
@@ -3871,7 +3965,7 @@ impl<'a> Parser<'a> {
                 if self.eat(T::CloseParen) {
                     return Ok(self.mk_expr(ExprKind::Tuple(List::EMPTY), lo));
                 }
-                let first = self.list_elem()?;
+                let first = self.list_elem(r & ALLOW_LET)?;
                 if let Some(f) = first {
                     if self.eat(T::CloseParen) {
                         return Ok(self.mk_expr(ExprKind::Paren(f), lo));
@@ -3882,7 +3976,7 @@ impl<'a> Parser<'a> {
                     if self.kind() == T::CloseParen {
                         break;
                     }
-                    if let Some(e) = self.list_elem()? {
+                    if let Some(e) = self.list_elem(r & ALLOW_LET)? {
                         v.push(e);
                     }
                 }
@@ -3895,7 +3989,7 @@ impl<'a> Parser<'a> {
                 if self.eat(T::CloseBracket) {
                     return Ok(self.mk_expr(ExprKind::Array(List::EMPTY), lo));
                 }
-                let first = self.list_elem()?;
+                let first = self.list_elem(0)?;
                 if let Some(f) = first {
                     if self.eat(T::Semi) {
                         let n = self.expr()?;
@@ -3908,7 +4002,7 @@ impl<'a> Parser<'a> {
                     if self.kind() == T::CloseBracket {
                         break;
                     }
-                    if let Some(e) = self.list_elem()? {
+                    if let Some(e) = self.list_elem(0)? {
                         v.push(e);
                     }
                 }
@@ -3965,7 +4059,7 @@ impl<'a> Parser<'a> {
                 while self.kind() != T::CloseBrace {
                     let attrs = self.outer_attrs()?;
                     let pat = self.pat_top()?;
-                    let guard = if self.eat(T::KwIf) { Some(self.expr()?) } else { None };
+                    let guard = if self.eat(T::KwIf) { Some(self.guard_expr()?) } else { None };
                     self.expect(T::FatArrow)?;
                     let blo = self.lo();
                     let body;
@@ -3995,10 +4089,13 @@ impl<'a> Parser<'a> {
                 Ok(self.mk_expr(ExprKind::Match(scrut, arms), lo))
             }
             T::KwLet => {
+                if !let_ok {
+                    return self.err("expected expression, found `let` statement");
+                }
                 self.pos += 1;
                 let pat = self.pat_top()?;
                 self.expect(T::Eq)?;
-                let e = self.expr_bp(P_CMP, r | NO_STRUCT & r)?;
+                let e = self.expr_bp(P_CMP, r & NO_STRUCT)?;
                 Ok(self.mk_expr(ExprKind::Let(pat, e), lo))
             }
             T::KwReturn => {
@@ -4187,7 +4284,8 @@ impl<'a> Parser<'a> {
 
     fn if_expr(&mut self, lo: u32) -> PResult<ExprId> {
         self.expect(T::KwIf)?;
-        let cond = self.expr_ns()?;
+        let cond = self.expr_cond()?;
+        self.cond_check(cond, true)?;
         let then = self.block()?;
         let els = if self.eat(T::KwElse) {
             let elo = self.lo();
@@ -4219,7 +4317,8 @@ impl<'a> Parser<'a> {
     }
     fn while_expr(&mut self, label: Option<Ident>, lo: u32) -> PResult<ExprId> {
         self.expect(T::KwWhile)?;
-        let c = self.expr_ns()?;
+        let c = self.expr_cond()?;
+        self.cond_check(c, true)?;
         let b = self.block()?;
         self.no_loop_else("while")?;
         let row = self.ast.push_row(WhileRow { cond: c, body: b, label });

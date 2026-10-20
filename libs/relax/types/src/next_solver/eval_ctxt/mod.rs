@@ -64,18 +64,7 @@ impl InferCtxt<'_> {
             if let Some(result) = fast_path::compute_goal_fast_path(self, prog, &goal) { return Ok(result); }
         }
         let evaluate = |ecx: &mut EvalCtxt<'_, '_>| ecx.evaluate_goal_raw(goal.clone()).map(|(nested, result)| { assert!(nested.is_empty()); result });
-        let mut result = self.enter_root(prog, evaluate);
-        // eval_ctxt/mod.rs:338-380: keep the initial overflow if the doubled
-        // attempt still overflows; otherwise commit even a definitive failure.
-        if self.enable_next_solver_overflow_fcw && result.as_ref().is_ok_and(|r| r.certainty.is_overflow()) {
-            if let Ok(rerun) = self.commit_if_ok(|_| {
-                let rerun = self.enter_root_with_depth(prog, self.recursion_limit(prog) * 2, evaluate);
-                if rerun.as_ref().is_ok_and(|r| r.certainty.is_overflow()) { Err(()) } else { Ok(rerun) }
-            }) {
-                self.errors.warn(self.cause, "recursion depth exceeding crate limit; resolved with doubled recursion limit".into());
-                result = rerun;
-            }
-        }
+        let result = self.enter_root(prog, evaluate);
         result.map_err(NoSolutionOrRerunNonErased::assert_no_rerun)
     }
     /// rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs:283-300.
@@ -302,17 +291,7 @@ impl EvalCtxt<'_, '_> {
 impl InferCtxt<'_> {
     pub fn evaluate_root_goal_for_proof_tree(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
         let depth = self.recursion_limit(prog);
-        let mut result = self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal.clone(), depth);
-        if self.enable_next_solver_overflow_fcw && result.result.as_ref().is_ok_and(|r| r.value.certainty.is_overflow()) {
-            if let Ok(rerun) = self.commit_if_ok(|_| {
-                let rerun = self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth * 2);
-                if rerun.result.as_ref().is_ok_and(|r| r.value.certainty.is_overflow()) { Err(()) } else { Ok(rerun) }
-            }) {
-                self.errors.warn(self.cause, "recursion depth exceeding crate limit; resolved with doubled recursion limit".into());
-                result = rerun;
-            }
-        }
-        result
+        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth)
     }
     fn evaluate_root_goal_for_proof_tree_with_depth(&self, prog: &crate::program::Program, goal: Goal, root_depth: usize) -> super::inspect::GoalEvaluation {
         assert!(!self.typing_mode.is_erased_not_coherence());

@@ -52,7 +52,11 @@ impl FulfillmentCtxt {
     }
     pub fn evaluate_obligations_error_on_ambiguity(&mut self, infcx: &InferCtxt<'_>, prog: &Program) -> Vec<NextSolverError> {
         let mut errors = self.try_evaluate_obligations(infcx, prog);
-        for (obligation, _) in std::mem::take(&mut self.obligations.pending) { errors.push(NextSolverError::Ambiguity(obligation)); }
+        // fulfillment_error_for_stalled: an ambiguous goal that overflows when evaluated again is an overflow
+        for (obligation, _) in std::mem::take(&mut self.obligations.pending) {
+            let overflow = infcx.probe(|_| matches!(infcx.evaluate_root_goal(prog, obligation.goal.clone(), None), Ok(r) if r.certainty.is_overflow()));
+            errors.push(if overflow { NextSolverError::Overflow(obligation) } else { NextSolverError::Ambiguity(obligation) });
+        }
         errors
     }
 }

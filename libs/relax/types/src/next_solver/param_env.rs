@@ -174,6 +174,7 @@ fn do_normalize_clauses(tcx: &Tcx, prog: &Program, cause: ObligationCause, elabo
     let mut infcx = InferCtxt::for_item(tcx, prog, TypingMode::non_body_analysis(), cause.body_id);
     infcx.cause = cause;
 
+    let original = clauses.clone();
     let mut rigid_bounds = Vec::new();
     for p in &*elaborated_env.clauses { rigid_bounds.push(fold::fold_predicate(&tcx.tys, p, &mut Rigidness { types_rigid: true, opaques_only: false })); }
     set_projection_term_to_non_rigid(&tcx.tys, &mut rigid_bounds);
@@ -183,14 +184,25 @@ fn do_normalize_clauses(tcx: &Tcx, prog: &Program, cause: ObligationCause, elabo
     for p in clauses { normalized.push(ocx.normalize_predicate(&elaborated_env, &p)); }
     set_projection_term_to_non_rigid(&tcx.tys, &mut normalized);
     for p in &mut normalized { *p = fold::fold_predicate(&tcx.tys, p, &mut Rigidness { types_rigid: false, opaques_only: true }); }
-    for error in ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog) {
-        tcx.dcx.report(cause, format!("could not normalize parameter environment: {error:?}"));
-        normalized = replace_infer_and_non_rigid_alias_with_error(&infcx, normalized, false);
-    }
+    // (the next solver normalizes the environment lazily, rustc traits/mod.rs do_normalize_predicates returns
+    // the predicates unchanged under `next_trait_solver_globally`: an environment that does not normalize
+    // eagerly stays as it is written, there is nothing to report)
+    if !ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog).is_empty() { return original; }
     // There are no assumed WF types here; this cannot fail to build the outlives env.
     let _ = infcx.resolve_regions(prog, tcx.intern_param_env(ParamEnv { clauses: normalized.clone().into() }), &[]);
     match infcx.deeply_resolve_clauses_via_region_graph(&normalized) {
-        Ok(clauses) => clauses,
+        Ok(clauses) => {
+            // A region variable no constraint reaches (an unconstrained impl lifetime) stays in the
+            // clauses as in rustc's lexical resolution, but belongs to this inference context only:
+            // another context cannot resolve it, so it becomes an error region (as the Err path below does).
+            struct EraseVars;
+            impl TypeFolder for EraseVars {
+                fn fold_region(&mut self, tys: &Types, r: crate::types::RegionId, _: u32) -> crate::types::RegionId {
+                    if matches!(tys.region_kind(r), crate::types::RegionKind::ReVar(_)) { tys.intern_region(crate::types::RegionKind::ReError) } else { r }
+                }
+            }
+            clauses.iter().map(|c| fold::fold_predicate(&tcx.tys, c, &mut EraseVars)).collect()
+        }
         Err(error) => {
             tcx.dcx.delayed_bug(cause, format!("inference variables in normalized parameter environment: {error:?}"));
             replace_infer_and_non_rigid_alias_with_error(&infcx, normalized, true)

@@ -737,7 +737,7 @@ impl Arena {
         }
         self.base.load(Ordering::Relaxed) != 0
     }
-    #[inline]
+    #[inline(always)]
     pub fn owns(&self, p: *mut u8) -> bool {
         let base = self.base.load(Ordering::Relaxed);
         base != 0 && (p as usize).wrapping_sub(base) < RESERVE
@@ -1499,6 +1499,7 @@ impl Drop for Arena {
 pub fn init() -> bool {
     DEFAULT.init()
 }
+#[inline(always)]
 pub fn owns(p: *mut u8) -> bool {
     DEFAULT.owns(p)
 }

@@ -55,6 +55,11 @@ impl Fcx<'_> {
         use crate::next_solver::fulfill::ObligationCtxt;
         let formal_inputs = inputs;
         let ret = self.deeply_resolve_ignoring_regions_with_obligations(ret);
+        // the next solver's signature has its aliases normalized to inference variables (their
+        // projection goals registered): an alias left in the expectation would mention variables
+        // popped with the fudge scope (fudge-inference-with-aliases)
+        let normalized: Vec<TyId> = inputs.iter().map(|&t| self.norm(t)).collect();
+        let inputs = &normalized[..];
         let tuple = self.infcx.fudge_inference_if_ok(|| {
             let mut ocx = ObligationCtxt::new(&self.infcx, self.prog);
             let goals = self.infcx.at(self.prog, self.param_env).sub(ret, expected).map_err(|_| crate::next_solver::NoSolution)?;
@@ -65,8 +70,8 @@ impl Fcx<'_> {
         }).ok()?;
         let TyKind::Tuple(inputs) = self.tcx.tys.kind(tuple) else { unreachable!() };
         let mut result = Vec::with_capacity(self.tcx.tys.list(*inputs).len());
-        for (&expected, &formal) in self.tcx.tys.list(*inputs).iter().zip(formal_inputs) {
-            result.push(Some(if same_type_modulo_vars(self.tcx, self.prog, expected, formal) { formal } else { expected }));
+        for ((&expected, &formal), &norm) in self.tcx.tys.list(*inputs).iter().zip(formal_inputs).zip(normalized.iter()) {
+            result.push(Some(if same_type_modulo_vars(self.tcx, self.prog, expected, norm) { formal } else { expected }));
         }
         Some(result)
     }

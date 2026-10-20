@@ -95,6 +95,7 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
         ret_stack: Vec::new(),
         closure_depth: Vec::new(),
         in_const: false,
+        inline_const_floor: Vec::new(),
         in_anon_const: false,
         async_depth: 0,
         await_count: 0,

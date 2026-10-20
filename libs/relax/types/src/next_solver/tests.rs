@@ -1109,7 +1109,7 @@ fn round28_coherence_unknowable_candidate_proves_supertraits() {
 }
 
 #[test]
-fn round29_param_env_query_normalizes_and_reports_once() {
+fn round29_param_env_query_normalizes_and_keeps_failures_unnormalized() {
     let (p, t) = program("#![no_std] trait P { type A; } impl P for u8 { type A = u32; } trait Q<T> {} fn good<T>() where T: Q<<u8 as P>::A>, <u8 as P>::A: 'static {} fn bad<T>() where T: Q<<bool as P>::A> {} fn const_only<const N: usize>() {}", "r29_env");
     let good = named(&p, "good");
     let result = t.param_env(&p, good);
@@ -1119,10 +1119,12 @@ fn round29_param_env_query_normalizes_and_reports_once() {
     assert_eq!(bcx.param_env, result);
     let const_env = t.param_env(&p, named(&p, "const_only"));
     assert!(const_env.clauses.iter().any(|p| matches!(p.kind, PredicateKind::Clause(ClauseKind::ConstArgHasType(..)))));
-    for i in 0..2 {
-        let _bad = t.param_env(&p, named(&p, "bad"));
-        let errors = t.dcx.drain_reported().0;
-        assert_eq!(errors.is_empty(), i != 0);
+    // an environment that does not normalize keeps its clauses as written (lazy normalization of the
+    // next solver); the unmet `bool: P` is the well-formedness check's to report
+    for _ in 0..2 {
+        let bad = t.param_env(&p, named(&p, "bad"));
+        assert!(t.dcx.drain_reported().0.is_empty());
+        assert!(!bad.clauses.is_empty());
     }
 }
 

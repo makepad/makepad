@@ -267,12 +267,13 @@ macro_rules! addr_of_mut {
 /// builtin is a constant: `&[Field { offset: offset_of!(T, f), .. }]` is promoted to 'static.
 #[macro_export]
 macro_rules! offset_of {
-    ($T:ty, $($field:tt).+ $(,)?) => {
+    // the field tokens are transcribed as written (`0.1`, `0. 1.1`): the expression parser breaks up floats
+    ($T:ty, $($field:tt)+) => {
         const {
             let u = $crate::mem::MaybeUninit::<$T>::uninit();
             let base = u.as_ptr();
             #[allow(unused_unsafe)]
-            let f = unsafe { &raw const (*base).$($field).+ };
+            let f = unsafe { &raw const (*base).$($field)+ };
             f as *const u8 as usize - base as *const u8 as usize
         }
     };

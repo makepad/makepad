@@ -556,8 +556,20 @@ fields!(DemandSlice, image, start, len, hash);
 
 pub fn demand_token_hash(toks: &[crate::lexer::Tok]) -> u128 {
     let mut h = crate::sip::Sip128::new();
-    h.str("demand-tokens-v1");
-    for t in toks { h.u8(t.kind as u8); h.u32(t.lo); h.u32(t.hi); }
+    h.str("demand-tokens-v2");
+    // 9 bytes a token, written in blocks (one `write` per token field made the hash a
+    // per-byte tail loop)
+    let mut block = [0u8; 9 * 256];
+    for chunk in toks.chunks(256) {
+        for (i, t) in chunk.iter().enumerate() {
+            let (kind, lo, hi) = (t.kind as u8, t.lo, t.hi);
+            let at = i * 9;
+            block[at] = kind;
+            block[at + 1..at + 5].copy_from_slice(&lo.to_le_bytes());
+            block[at + 5..at + 9].copy_from_slice(&hi.to_le_bytes());
+        }
+        h.write(&block[..chunk.len() * 9]);
+    }
     h.finish128()
 }
 
