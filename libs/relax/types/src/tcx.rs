@@ -139,6 +139,8 @@ impl AdtFlags {
     pub const IS_UNSAFE_PINNED: Self = Self(1 << 7);
     pub const HAS_CTOR: Self = Self(1 << 8);
     pub const IS_VARIANT_LIST_NON_EXHAUSTIVE: Self = Self(1 << 9);
+    /// `#[repr(simd)]`: a vector type (layout: size rounded up to a power of two, aligned to it)
+    pub const IS_SIMD: Self = Self(1 << 10);
     pub fn contains(self, flag: Self) -> bool { self.0 & flag.0 == flag.0 }
     fn insert(&mut self, flag: Self) { self.0 |= flag.0; }
 }
@@ -147,6 +149,7 @@ impl AdtT {
     pub fn is_enum(&self) -> bool { self.flags.contains(AdtFlags::IS_ENUM) }
     pub fn is_union(&self) -> bool { self.flags.contains(AdtFlags::IS_UNION) }
     pub fn is_struct(&self) -> bool { self.flags.contains(AdtFlags::IS_STRUCT) }
+    pub fn is_simd(&self) -> bool { self.flags.contains(AdtFlags::IS_SIMD) }
     pub fn is_box(&self) -> bool { self.flags.contains(AdtFlags::IS_BOX) }
     pub fn is_phantom_data(&self) -> bool { self.flags.contains(AdtFlags::IS_PHANTOM_DATA) }
     pub fn is_manually_drop(&self) -> bool { self.flags.contains(AdtFlags::IS_MANUALLY_DROP) }
@@ -1436,7 +1439,8 @@ impl Tcx {
         let it = ast.item(def.item);
         let mut repr_c = false;
         let mut repr_int = None;
-        let (repr_align, repr_packed) = read_repr(prog, file, ast.list(it.attrs), &mut repr_c, &mut repr_int);
+        let mut repr_simd = false;
+        let (repr_align, repr_packed) = read_repr(prog, file, ast.list(it.attrs), &mut repr_c, &mut repr_int, &mut repr_simd);
         let (valid_start, valid_end, no_niche) = read_layout_attrs(prog, file, ast.list(it.attrs));
         let param_maybe_unsized = match &it.kind {
             k @ (ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Union(_)) => maybe_unsized_params(prog, file, ast.kind_generics(k).unwrap()),
@@ -1449,6 +1453,9 @@ impl Tcx {
         };
         if matches!(it.kind, ItemKind::Struct(r) if matches!(ast.row(r).data, VariantData::Unit | VariantData::Tuple(_))) {
             flags.insert(AdtFlags::HAS_CTOR);
+        }
+        if repr_simd && matches!(it.kind, ItemKind::Struct(..)) {
+            flags.insert(AdtFlags::IS_SIMD);
         }
         if matches!(it.kind, ItemKind::Enum(..)) && crate::lang_items::has_attr(prog, file, ast.list(it.attrs), "non_exhaustive") {
             flags.insert(AdtFlags::IS_VARIANT_LIST_NON_EXHAUSTIVE);
@@ -3517,7 +3524,7 @@ fn maybe_unsized_params(prog: &Program, file: u32, g: &ast::Generics) -> Vec<boo
     out
 }
 
-fn read_repr(prog: &Program, file: u32, attrs: &[ast::Attr], repr_c: &mut bool, repr_int: &mut Option<Prim>) -> (u32, u32) {
+fn read_repr(prog: &Program, file: u32, attrs: &[ast::Attr], repr_c: &mut bool, repr_int: &mut Option<Prim>, repr_simd: &mut bool) -> (u32, u32) {
     let f = &prog.files[file as usize];
     let (mut align, mut packed) = (0u32, 0u32);
     for a in attrs {
@@ -3530,6 +3537,9 @@ fn read_repr(prog: &Program, file: u32, attrs: &[ast::Attr], repr_c: &mut bool, 
             // the type out of live layout edits, layout.rs live_editable)
             if t == "C" || t == "transparent" {
                 *repr_c = true;
+            }
+            if t == "simd" {
+                *repr_simd = true;
             }
             if t == "align" || t == "packed" {
                 // `align(N)` / `packed(N)` / bare `packed`

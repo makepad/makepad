@@ -342,7 +342,26 @@ impl Cx {
         let n = hal_pump(timeout_ns, &mut buf);
         let intake_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
         let mut alive = true;
-        for (time_ns, event) in store.reader(n, buf.arena_len) {
+        // Pointer moves are coalesced per batch: a move directly followed by another move of
+        // the same window and modifiers is dropped and its delta carried into the next, so a
+        // fast pointer costs the app one move per pump, not one per hardware sample.
+        let mut events = store.reader(n, buf.arena_len).peekable();
+        let mut carry = (0.0, 0.0);
+        while let Some((time_ns, mut event)) = events.next() {
+            use makepad_hal::HalEvent;
+            if let HalEvent::MouseMove { window, dx, dy, mods, .. } = event {
+                if let Some((_, HalEvent::MouseMove { window: next_window, mods: next_mods, .. })) = events.peek() {
+                    if *next_window == window && *next_mods == mods {
+                        carry = (carry.0 + dx, carry.1 + dy);
+                        continue;
+                    }
+                }
+                if let HalEvent::MouseMove { dx, dy, .. } = &mut event {
+                    *dx += carry.0;
+                    *dy += carry.1;
+                }
+                carry = (0.0, 0.0);
+            }
             if log_enabled() {
                 use makepad_hal::HalEvent;
                 match event {

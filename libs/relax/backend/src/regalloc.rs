@@ -180,7 +180,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
         Inst::Cpuid(ds, a, b) => { uses.push(*a); uses.push(*b); defs.extend_from_slice(ds); }
         Inst::Xgetbv(d, a) => { uses.push(*a); defs.push(*d); }
         Inst::TlsAddr(d, _) => defs.push(*d),
-        Inst::VGather(d, a, b) => {
+        Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) => {
             uses.push(*a);
             uses.push(*b);
             defs.push(*d);
@@ -289,7 +289,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
         Inst::Cpuid(_, a, b) => { uses(*a); uses(*b); }
         Inst::Xgetbv(_, a) => uses(*a),
         Inst::TlsAddr(d, _) => {}
-        Inst::VGather(d, a, b) => {
+        Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) => {
             uses(*a);
             uses(*b);
         }
@@ -375,6 +375,7 @@ pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
         | Inst::Load(_, d, _, _)
         | Inst::LoadX(_, d, _, _, _, _)
         | Inst::VGather(d, _, _)
+        | Inst::VShuffle(d, _, _, _)
         | Inst::VX(_, d, _, _)
         | Inst::VX3(_, d, _, _, _)
         | Inst::VSplat(d, _)

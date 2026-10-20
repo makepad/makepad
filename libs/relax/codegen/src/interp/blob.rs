@@ -309,6 +309,13 @@ fn vx_code(op: VX) -> u64 {
         VX::FToI(w) => (81, Some(w), 0),
         VX::IToF(w) => (82, Some(w), 0),
         VX::Neg(w) => (83, Some(w), 0),
+        VX::UCmp(c, w) => (84, Some(w), cond_code(c)),
+        VX::FMinNum(w) => (85, Some(w), 0),
+        VX::FMaxNum(w) => (86, Some(w), 0),
+        VX::Narrow(w) => (87, Some(w), 0),
+        VX::FCvtNarrow => (88, None, 0),
+        VX::FCvtLo => (89, None, 0),
+        VX::MoveMask(w) => (90, Some(w), 0),
     };
     t << 16 | w.map_or(0, vw_code) << 8 | k as u64
 }
@@ -400,6 +407,13 @@ fn vx_of(v: u64) -> Option<VX> {
         81 => VX::FToI(w),
         82 => VX::IToF(w),
         83 => VX::Neg(w),
+        84 => VX::UCmp(cond_of(k)?, w),
+        85 => VX::FMinNum(w),
+        86 => VX::FMaxNum(w),
+        87 => VX::Narrow(w),
+        88 => VX::FCvtNarrow,
+        89 => VX::FCvtLo,
+        90 => VX::MoveMask(w),
         _ => return None,
     })
 }

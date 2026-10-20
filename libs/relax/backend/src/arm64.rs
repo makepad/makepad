@@ -1844,22 +1844,33 @@ impl<'a> Gen<'a> {
 
     /// Lane-typed vector ops (core::arch intrinsics), NEON. Scratch: v29-v31 (FS*) and
     /// v4-v7 (argument registers, unallocated inside an instruction).
-    /// The 32-bit-lane float, compare and per-lane shift ops (`VW::S`); false for other ops.
+    /// The lane-wise float, compare, shift, min/max and conversion ops of every width NEON
+    /// has them for (`vx_native`); false for other ops.
     fn vx_lanes(&mut self, op: VX, d: VReg, a: VReg, b: VReg) -> bool {
         use v4s::*;
-        let _ = b;
+        // integer three-same / two-reg-misc: the size field; float: the sz bit
+        let size = |w: VW| (w as u32) << 22;
+        let sz = |w: VW| if w == VW::D { 1u32 << 22 } else { 0 };
+        let s4 = !(3u32 << 22);
+        const T0: u8 = 4;
+        const T1: u8 = 5;
+        const FMINNM_V: u32 = 0x4EA0_C400;
+        const FMAXNM_V: u32 = 0x4E20_C400;
+        const CMHI: u32 = 0x6E20_3400;
+        const CMHS: u32 = 0x6E20_3C00;
         match op {
-            VX::FAdd(VW::S, _) | VX::FSub(VW::S, _) | VX::FMul(VW::S, _) | VX::FDiv(VW::S, _) | VX::FMinNeon(VW::S) | VX::FMaxNeon(VW::S) | VX::FMinLt(VW::S) | VX::FMaxGt(VW::S) | VX::ShlV(VW::S) | VX::ShrSV(VW::S) | VX::ShrUV(VW::S) | VX::FCmp(_, VW::S) | VX::ICmp(_, VW::S) => {
+            VX::FAdd(w, _) | VX::FSub(w, _) | VX::FMul(w, _) | VX::FDiv(w, _) | VX::FMinNeon(w) | VX::FMaxNeon(w) | VX::FMinLt(w) | VX::FMaxGt(w) | VX::FMinNum(w) | VX::FMaxNum(w) | VX::FCmp(_, w) | VX::MinS(w @ VW::D) | VX::MaxS(w @ VW::D) | VX::MinU(w @ VW::D) | VX::MaxU(w @ VW::D) if matches!(w, VW::S | VW::D) => {
                 let xa = self.use_f(a, FS0);
                 let xb = self.use_f(b, FS1);
                 let xd = self.def_f(d, FS0);
+                let f = sz(w);
                 match op {
-                    VX::FAdd(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FADD, xd, xa, xb),
-                    VX::FSub(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FSUB, xd, xa, xb),
-                    VX::FMul(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FMUL, xd, xa, xb),
-                    VX::FDiv(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FDIV, xd, xa, xb),
-                    VX::FMinNeon(VW::S) => self.v3(0x4EA0_F400, xd, xa, xb),
-                    VX::FMaxNeon(VW::S) => self.v3(0x4E20_F400, xd, xa, xb),
+                    VX::FAdd(_, NanBits::Host | NanBits::Neon) => self.v3(FADD | f, xd, xa, xb),
+                    VX::FSub(_, NanBits::Host | NanBits::Neon) => self.v3(FSUB | f, xd, xa, xb),
+                    VX::FMul(_, NanBits::Host | NanBits::Neon) => self.v3(FMUL | f, xd, xa, xb),
+                    VX::FDiv(_, NanBits::Host | NanBits::Neon) => self.v3(FDIV | f, xd, xa, xb),
+                    VX::FMinNeon(_) => self.v3(0x4EA0_F400 | f, xd, xa, xb),
+                    VX::FMaxNeon(_) => self.v3(0x4E20_F400 | f, xd, xa, xb),
                     VX::FAdd(VW::S, NanBits::Intel) | VX::FSub(VW::S, NanBits::Intel) | VX::FMul(VW::S, NanBits::Intel) | VX::FDiv(VW::S, NanBits::Intel) => {
                         let opc = match op {
                             VX::FAdd(..) => FADD,
@@ -1871,40 +1882,69 @@ impl<'a> Gen<'a> {
                         self.intel_nan(4, xa, xb);
                         self.vmov(xd, 4);
                     }
-                    VX::FMinLt(VW::S) | VX::FMaxGt(VW::S) => {
-                        // mask = b > a (min) / a > b (max), false for NaN lanes: pick a there
-                        if op == VX::FMinLt(VW::S) {
-                            self.v3(FCMGT, FS2, xb, xa);
+                    VX::FMinLt(_) | VX::FMaxGt(_) | VX::MinS(_) | VX::MaxS(_) | VX::MinU(_) | VX::MaxU(_) => {
+                        // mask = b > a (min) / a > b (max), false for NaN lanes: b there
+                        let (gt, min) = match op {
+                            VX::FMinLt(_) => (FCMGT | f, true),
+                            VX::FMaxGt(_) => (FCMGT | f, false),
+                            VX::MinS(_) => (CMGT & s4 | size(w), true),
+                            VX::MaxS(_) => (CMGT & s4 | size(w), false),
+                            VX::MinU(_) => (CMHI | size(w), true),
+                            _ => (CMHI | size(w), false),
+                        };
+                        if min {
+                            self.v3(gt, FS2, xb, xa);
                         } else {
-                            self.v3(FCMGT, FS2, xa, xb);
+                            self.v3(gt, FS2, xa, xb);
                         }
                         self.v3(BSL, FS2, xa, xb);
                         self.vmov(xd, FS2);
                     }
-                    VX::ShlV(VW::S) => self.v3(USHL, xd, xa, xb),
-                    VX::ShrSV(VW::S) | VX::ShrUV(VW::S) => {
-                        self.v2(NEG, FS2, xb);
-                        self.v3(if op == VX::ShrSV(VW::S) { SSHL } else { USHL }, xd, xa, FS2);
+                    VX::FMinNum(_) | VX::FMaxNum(_) => {
+                        // IEEE minimumNumber: quiet both inputs (fminnm x, x, x) so a
+                        // signaling NaN gives the other operand too, as rustc emits
+                        self.v3(FMINNM_V | f, T0, xa, xa);
+                        self.v3(FMINNM_V | f, T1, xb, xb);
+                        self.v3(if let VX::FMinNum(_) = op { FMINNM_V } else { FMAXNM_V } | f, xd, T0, T1);
                     }
-                    VX::FCmp(c, VW::S) => match c {
-                        Cond::Lt => self.v3(FCMGT, xd, xb, xa),
-                        Cond::Le => self.v3(FCMGE, xd, xb, xa),
-                        Cond::Gt => self.v3(FCMGT, xd, xa, xb),
-                        Cond::Ge => self.v3(FCMGE, xd, xa, xb),
-                        Cond::Eq => self.v3(FCMEQ, xd, xa, xb),
+                    VX::FCmp(c, _) => match c {
+                        Cond::Lt => self.v3(FCMGT | f, xd, xb, xa),
+                        Cond::Le => self.v3(FCMGE | f, xd, xb, xa),
+                        Cond::Gt => self.v3(FCMGT | f, xd, xa, xb),
+                        Cond::Ge => self.v3(FCMGE | f, xd, xa, xb),
+                        Cond::Eq => self.v3(FCMEQ | f, xd, xa, xb),
                         Cond::Ne => {
-                            self.v3(FCMEQ, xd, xa, xb);
+                            self.v3(FCMEQ | f, xd, xa, xb);
                             self.v2(NOT, xd, xd);
                         }
                     },
-                    VX::ICmp(c, VW::S) => match c {
-                        Cond::Lt => self.v3(CMGT, xd, xb, xa),
-                        Cond::Le => self.v3(CMGE, xd, xb, xa),
-                        Cond::Gt => self.v3(CMGT, xd, xa, xb),
-                        Cond::Ge => self.v3(CMGE, xd, xa, xb),
-                        Cond::Eq => self.v3(CMEQ, xd, xa, xb),
+                    _ => unreachable!("vx {:?}", op),
+                }
+                self.fin_f(d, xd);
+            }
+            VX::ShlV(w) | VX::ShrSV(w) | VX::ShrUV(w) | VX::ICmp(_, w) | VX::UCmp(_, w) => {
+                let xa = self.use_f(a, FS0);
+                let xb = self.use_f(b, FS1);
+                let xd = self.def_f(d, FS0);
+                let s = size(w);
+                let (gt, ge, eq) = match op {
+                    VX::UCmp(..) => (CMHI | s, CMHS | s, CMEQ & s4 | s),
+                    _ => (CMGT & s4 | s, CMGE & s4 | s, CMEQ & s4 | s),
+                };
+                match op {
+                    VX::ShlV(_) => self.v3(USHL & s4 | s, xd, xa, xb),
+                    VX::ShrSV(_) | VX::ShrUV(_) => {
+                        self.v2(NEG & s4 | s, FS2, xb);
+                        self.v3(if let VX::ShrSV(_) = op { SSHL } else { USHL } & s4 | s, xd, xa, FS2);
+                    }
+                    VX::ICmp(c, _) | VX::UCmp(c, _) => match c {
+                        Cond::Lt => self.v3(gt, xd, xb, xa),
+                        Cond::Le => self.v3(ge, xd, xb, xa),
+                        Cond::Gt => self.v3(gt, xd, xa, xb),
+                        Cond::Ge => self.v3(ge, xd, xa, xb),
+                        Cond::Eq => self.v3(eq, xd, xa, xb),
                         Cond::Ne => {
-                            self.v3(CMEQ, xd, xa, xb);
+                            self.v3(eq, xd, xa, xb);
                             self.v2(NOT, xd, xd);
                         }
                     },
@@ -1912,7 +1952,7 @@ impl<'a> Gen<'a> {
                 }
                 self.fin_f(d, xd);
             }
-            VX::FNeg(VW::S) | VX::FAbs(VW::S) | VX::FSqrt(VW::S, _) | VX::FRound(VW::S, _) | VX::FToI(VW::S) | VX::IToF(VW::S) | VX::Neg(VW::S) => {
+            VX::FNeg(w) | VX::FAbs(w) | VX::FSqrt(w, _) | VX::FRound(w, _) | VX::FToI(w) | VX::IToF(w) if matches!(w, VW::S | VW::D) => {
                 let xa = self.use_f(a, FS0);
                 let xd = self.def_f(d, FS0);
                 if op == VX::FSqrt(VW::S, NanBits::Intel) {
@@ -1925,18 +1965,70 @@ impl<'a> Gen<'a> {
                 let opc = match op {
                     VX::FNeg(_) => VFNEG,
                     VX::FAbs(_) => 0x4EA0_F800,
-                    VX::FSqrt(..) => 0x6EA1_F800,
+                    VX::FSqrt(_, NanBits::Host | NanBits::Neon) => 0x6EA1_F800,
                     VX::FRound(_, RoundTo::Floor) => 0x4E21_9800,
                     VX::FRound(_, RoundTo::Ceil) => 0x4EA1_8800,
                     VX::FRound(_, RoundTo::Trunc) => 0x4EA1_9800,
                     VX::FRound(_, RoundTo::Away) => 0x6E21_8800,
                     VX::FToI(_) => 0x4EA1_B800,
                     VX::IToF(_) => 0x4E21_D800,
-                    VX::Neg(_) => NEG,
-                    _ => unreachable!(),
+                    _ => unreachable!("vx {:?}", op),
                 };
-                self.v2(opc, xd, xa);
+                self.v2(opc | sz(w), xd, xa);
                 self.fin_f(d, xd);
+            }
+            VX::Neg(w) => {
+                let xa = self.use_f(a, FS0);
+                let xd = self.def_f(d, FS0);
+                self.v2(NEG & s4 | size(w), xd, xa);
+                self.fin_f(d, xd);
+            }
+            VX::Narrow(_) | VX::FCvtNarrow if op != VX::Narrow(VW::B) => {
+                // xtn / fcvtn into the low half, xtn2 / fcvtn2 into the high half
+                let w = if let VX::Narrow(w) = op { w } else { VW::D };
+                let xa = self.use_f(a, FS0);
+                let xb = self.use_f(b, FS1);
+                let (lo, hi) = match op {
+                    VX::Narrow(_) => (0x0E21_2800 | size(w) - (1 << 22), 0x4E21_2800 | size(w) - (1 << 22)),
+                    _ => (0x0E61_6800, 0x4E61_6800),
+                };
+                self.v2(lo, T0, xa);
+                self.v2(hi, T0, xb);
+                let xd = self.def_f(d, FS0);
+                self.vmov(xd, T0);
+                self.fin_f(d, xd);
+            }
+            VX::FCvtLo => {
+                let xa = self.use_f(a, FS0);
+                let xd = self.def_f(d, FS0);
+                self.v2(0x0E61_7800, xd, xa); // fcvtl .2d, .2s
+                self.fin_f(d, xd);
+            }
+            VX::MoveMask(w) if w != VW::B => {
+                // top bits to 0/1 lanes, each shifted to its lane index, summed across
+                let xa = self.use_f(a, FS0);
+                let es = w.bits();
+                self.v2(0x6F00_0400 | (es + 1) << 16, T0, xa); // ushr #(es - 1)
+                let (mut lo, mut hi) = (0u64, 0u64);
+                for k in 0..128 / es {
+                    let bit = k * es;
+                    if bit < 64 {
+                        lo |= (k as u64) << bit;
+                    } else {
+                        hi |= (k as u64) << (bit - 64);
+                    }
+                }
+                self.const128(T1, lo, hi);
+                self.v3(USHL & s4 | size(w), T0, T0, T1);
+                let rd = self.def_i(d, S0);
+                if w == VW::D {
+                    self.v2(0x5EF1_B800, T0, T0); // addp d, .2d
+                    self.v2(0x9E66_0000, rd, T0); // fmov x, d
+                } else {
+                    self.v2(0x4E31_B800 | size(w), T0, T0); // addv
+                    self.v2(0x0E00_3C00 | (1u32 << (w as u32)) << 16, rd, T0); // umov lane 0
+                }
+                self.fin_i(d, rd);
             }
             _ => return false,
         }
@@ -2242,7 +2334,7 @@ impl<'a> Gen<'a> {
                 self.v2(0x4E00_1C00 | imm5 << 16, xd, rb); // ins
                 self.fin_f(d, xd);
             }
-            VX::MoveMaskB => {
+            VX::MoveMaskB | VX::MoveMask(VW::B) => {
                 // top bit of each byte -> 0/1 bytes; gather each half with a multiply
                 let xa = self.use_f(a, FS0);
                 self.v2(0x6F09_0400, T0, xa); // ushr .16b, #7
@@ -2294,6 +2386,23 @@ impl<'a> Gen<'a> {
     fn vinst(&mut self, i: &Inst) {
         use v4s::*;
         match *i {
+            Inst::VShuffle(d, a, b, idx) => {
+                // tbl over the table {v4, v5} = {a, b} (indices >= 32 give 0); one source
+                // when no index reaches b
+                let one = idx.iter().all(|&i| i < 16 || i >= 32);
+                let xa = self.use_f(a, FS0);
+                self.vmov(4, xa);
+                if !one {
+                    let xb = self.use_f(b, FS1);
+                    self.vmov(5, xb);
+                }
+                let lo = u64::from_le_bytes(idx[..8].try_into().unwrap());
+                let hi = u64::from_le_bytes(idx[8..].try_into().unwrap());
+                self.const128(6, lo, hi);
+                let xd = self.def_f(d, FS0);
+                self.v3(if one { 0x4E00_0000 } else { 0x4E00_2000 }, xd, 4, 6); // tbl
+                self.fin_f(d, xd);
+            }
             Inst::VSel(d, m, a, b) => {
                 // bsl works in place on the mask: build it in d's register when a and b
                 // live elsewhere
@@ -2794,6 +2903,18 @@ impl<'a> Gen<'a> {
                 self.a.e(0x1E20_0C00 | if *f64_ { DBL } else { 0 } | (xb as u32) << 16 | (cond as u32) << 12 | (xa as u32) << 5 | xd as u32);
                 self.fin_f(*d, xd);
             }
+            Inst::FBin(op @ (FOp::Min | FOp::Max), f64_, d, a, b) => {
+                // IEEE minimumNumber (Rust min/max): a NaN operand, signaling too, gives the
+                // other one. fminnm turns a signaling NaN into a NaN result, so both inputs are
+                // quieted first (fminnm x, x, x), as rustc emits
+                let xa = self.use_f(*a, FS0);
+                let xb = self.use_f(*b, FS1);
+                self.a.fp3(FMINNM, *f64_, FS2, xa, xa);
+                self.a.fp3(FMINNM, *f64_, FS1, xb, xb);
+                let xd = self.def_f(*d, FS0);
+                self.a.fp3(if *op == FOp::Min { FMINNM } else { FMAXNM }, *f64_, xd, FS2, FS1);
+                self.fin_f(*d, xd);
+            }
             Inst::FBin(op, f64_, d, a, b) => {
                 let xa = self.use_f(*a, FS0);
                 let xb = self.use_f(*b, FS1);
@@ -2803,9 +2924,7 @@ impl<'a> Gen<'a> {
                     FOp::Sub => FSUB,
                     FOp::Mul => FMUL,
                     FOp::Div => FDIV,
-                    FOp::Min => FMINNM,
-                    FOp::Max => FMAXNM,
-                    FOp::MinLt | FOp::MaxGt => FMINNM,
+                    FOp::Min | FOp::Max | FOp::MinLt | FOp::MaxGt => unreachable!("min/max have their own arms"),
                 };
                 self.a.fp3(opc, *f64_, xd, xa, xb);
                 self.fin_f(*d, xd);
@@ -3007,7 +3126,7 @@ impl<'a> Gen<'a> {
                 self.a.e(0xD53B_4400 | rd as u32);
                 self.fin_i(*d, rd);
             }
-            Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
+            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
             Inst::VX(op, d, a, b) => self.vx(*op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::Sel(d, c, a, b) => {
@@ -3365,6 +3484,25 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
     compile_freq(options, f, env, None)
 }
 
+/// Whether the emitter encodes `op` (the legaliser expands the lane-wise ops it does not).
+pub fn vx_native(op: VX) -> bool {
+    use VW::*;
+    match op {
+        VX::Add(_) | VX::Sub(_) | VX::CmpEq(_) | VX::CmpGtS(_) | VX::And | VX::Or | VX::Xor | VX::AndNot => true,
+        VX::AddSatU(_) | VX::SubSatU(_) | VX::AddSatS(_) | VX::SubSatS(_) | VX::Abs(_) | VX::Neg(_) => true,
+        VX::MinS(_) | VX::MaxS(_) | VX::MinU(_) | VX::MaxU(_) => true,
+        VX::MulLo(w) | VX::AvgU(w) => w != D,
+        VX::ShlI(..) | VX::ShrUI(..) | VX::ShrSI(..) | VX::ShlV(_) | VX::ShrSV(_) | VX::ShrUV(_) => true,
+        VX::ICmp(..) | VX::UCmp(..) => true,
+        VX::FAdd(w, n) | VX::FSub(w, n) | VX::FMul(w, n) | VX::FDiv(w, n) | VX::FSqrt(w, n) => w == S || (w == D && n != NanBits::Intel),
+        VX::FMinLt(w) | VX::FMaxGt(w) | VX::FMinNeon(w) | VX::FMaxNeon(w) | VX::FMinNum(w) | VX::FMaxNum(w) | VX::FCmp(_, w) => matches!(w, S | D),
+        VX::FNeg(w) | VX::FAbs(w) | VX::FRound(w, _) | VX::FToI(w) | VX::IToF(w) => matches!(w, S | D),
+        VX::Narrow(w) => w != B,
+        VX::FCvtNarrow | VX::FCvtLo | VX::MoveMask(_) => true,
+        _ => true,
+    }
+}
+
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
@@ -3384,6 +3522,19 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
             }
         }
     }
+    // vector ops without an instruction sequence here: per-lane scalar code
+    let legal;
+    // (MAKEPAD_RUN_OPT=-vxnative: every expandable op, the legaliser's reference meaning)
+    let all = crate::stats::opt_off(options, "-vxnative");
+    let native = |op| !all && vx_native(op);
+    let f = if crate::legal::needed(f, &native, !all) {
+        let mut g = f.clone();
+        crate::legal::legalize(&mut g, &native, !all);
+        legal = g;
+        &legal
+    } else {
+        f
+    };
     // chains of compares of one value against constants: jump tables, bit tests, binary search
     let switched = crate::switch::lower_switches(options, f);
     let (f, freq_sw) = match &switched {

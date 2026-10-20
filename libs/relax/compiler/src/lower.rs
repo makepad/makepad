@@ -23,6 +23,7 @@ use crate::types::{TyId, TyKind};
 use crate::fxhash::HashMap;
 
 mod match_tree;
+mod simd;
 
 /// vtable layout: [drop_in_place (0 when no drop), size, align, methods...]
 pub const VT_DROP: u32 = 0;
@@ -10431,6 +10432,11 @@ impl<'a> Lcx<'a> {
         let name = self.u.prog.name(d).to_string();
         if name.starts_with("vx_") {
             return Some(self.vx_intrinsic(&name, vals, t));
+        }
+        if name.starts_with("simd_") {
+            if let Some(v) = self.simd_intrinsic(&name, vals, t) {
+                return Some(v);
+            }
         }
         if name.starts_with("atomic_") || name == "spin_loop_hint" {
             return Some(self.atomic_intrinsic(&name, gargs, vals));

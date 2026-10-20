@@ -34,7 +34,10 @@ job() {
         h=$(printf '%s' "$rv" | cat - "$src" | cksum | tr -d " ")
         bin=$cache/$p.$h
         if [ ! -x "$bin" ]; then
-            nice -n 10 rustc --edition 2021 -O --test "$src" -o "$bin.tmp" > "$out.build" 2>&1 || { echo "native build failed: $(head -5 "$out.build")" > "$out.raw"; echo 99 > "$out.rc"; return; }
+            # a program with #![feature(..)] (nightly APIs such as core::intrinsics::simd) builds with
+            # RUSTC_BOOTSTRAP=1 on the rustc side only
+            boot=; grep -q '^#!\[feature' "$src" && boot=1
+            env ${boot:+RUSTC_BOOTSTRAP=1} nice -n 10 rustc --edition 2021 -O --test "$src" -o "$bin.tmp" > "$out.build" 2>&1 || { echo "native build failed: $(head -5 "$out.build")" > "$out.raw"; echo 99 > "$out.rc"; return; }
             mv "$bin.tmp" "$bin"
         fi
         DIFF_SLEEP_MS=0 "$bin" --nocapture --test-threads=1 > "$out.raw" 2> "$out.err"

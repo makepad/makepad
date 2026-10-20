@@ -663,7 +663,7 @@ struct Gen<'a> {
     /// float constant pool: (patch offset, bits)
     fpool: Vec<(usize, u64)>,
     /// splatted 32-bit vector constants: (patch offset, lane bits), 16-byte entries
-    vpool: Vec<(usize, u32)>,
+    vpool: Vec<(usize, u128)>,
     /// address pool: (disp32 patch offset, relocated value), 8-byte entries
     apool: Vec<(usize, Reloc)>,
     /// `Env::sym_class`: how each symbol is encoded (SymClass::Domain: an offset in the domain block)
@@ -1274,14 +1274,14 @@ impl<'a> Gen<'a> {
             while self.a.pos() % 16 != 0 {
                 self.a.byte(0xcc);
             }
-            let mut placed: Vec<(u32, usize)> = Vec::new();
+            let mut placed: Vec<(u128, usize)> = Vec::new();
             for (at, bits) in std::mem::take(&mut self.vpool) {
                 let addr = match placed.iter().find(|(b2, _)| *b2 == bits) {
                     Some((_, a2)) => *a2,
                     None => {
                         let a2 = self.a.pos();
-                        for _ in 0..4 {
-                            self.a.u32(bits);
+                        for k in 0..4 {
+                            self.a.u32((bits >> (32 * k)) as u32);
                         }
                         placed.push((bits, a2));
                         a2
@@ -2215,7 +2215,7 @@ impl<'a> Gen<'a> {
             // recomputed at each use (Alloc::remat)
             Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) if self.al.remat[d.0 as usize].is_some() => {}
             Inst::Sel(d, c, a, b) => self.sel(options, *d, *c, *a, *b),
-            Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(options, i),
+            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(options, i),
             Inst::VX(op, d, a, b) => self.vx(options, *op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::FMulAdd(np, na, w, d, a, b, c) => self.fma(*np, *na, *w, *d, *a, *b, *c),
@@ -2678,7 +2678,7 @@ impl<'a> Gen<'a> {
         self.a.byte(((x & 7) << 3) | 5);
         let at = self.a.pos();
         self.a.u32(0);
-        self.vpool.push((at, bits));
+        self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
     }
 
     /// `op dst, src` two-address on a vector: d = a op b with aliasing handled.
@@ -2873,8 +2873,284 @@ impl<'a> Gen<'a> {
         true
     }
 
+    /// xmm `x` = the 128-bit constant `v` (pool entry)
+    fn vconst128(&mut self, x: u8, v: u128) {
+        // movups x, [rip + 16-byte pool entry]
+        self.a.rex(false, x, 0, 0, false);
+        self.a.byte(0x0f);
+        self.a.byte(0x10);
+        self.a.byte(((x & 7) << 3) | 5);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.vpool.push((at, v));
+    }
+
+    /// the sign bit of every lane of width `w`
+    fn lane_signs(w: VW) -> u128 {
+        let one: u128 = 1 << (w.bits() - 1);
+        (0..128 / w.bits()).fold(0, |m, k| m | one << (k * w.bits()))
+    }
+
+    /// d byte i = (a ++ b) byte idx[i] (>= 32: 0): pshufb of each source with constant masks
+    fn vshuffle(&mut self, d: VReg, a: VReg, b: VReg, idx: [u8; 16]) {
+        let (mut ma, mut mb) = (0u128, 0u128);
+        for (i, &k) in idx.iter().enumerate() {
+            let (ka, kb) = match k {
+                0..=15 => (k, 0x80),
+                16..=31 => (0x80, k - 16),
+                _ => (0x80, 0x80),
+            };
+            ma |= (ka as u128) << (8 * i);
+            mb |= (kb as u128) << (8 * i);
+        }
+        let from_b = idx.iter().any(|&k| (16..32).contains(&k));
+        if from_b {
+            let xb = self.use_f(b, XS2);
+            self.a.movf_rr(true, 0, xb);
+            self.vconst128(XS2, mb);
+            self.a.sse_ext(0x66, 0x38, 0x00, 0, XS2); // pshufb
+        }
+        let xa = self.use_f(a, XS);
+        self.a.movf_rr(true, 1, xa);
+        self.vconst128(XS2, ma);
+        self.a.sse_ext(0x66, 0x38, 0x00, 1, XS2);
+        if from_b {
+            self.a.sse_rr(0x66, 0xeb, 1, 0, false); // por
+        }
+        let xd = self.def_f(d, XS);
+        self.a.movf_rr(true, xd, 1);
+        self.fin_f(d, xd);
+    }
+
+    /// The lane-wise ops of widths other than the 32-bit ones `vx_lanes` encodes, unsigned
+    /// compares, minNum/maxNum, narrowing, f32/f64 conversion and lane masks (`vx_native`);
+    /// false for other ops. Scratch xmm0/xmm1 (never allocated) and XS/XS2 once the operands
+    /// are copied (a spilled operand is reloaded by `use_f`).
+    fn vx_wide(&mut self, options: &relax_session::Options, op: VX, d: VReg, a: VReg, b: VReg) -> bool {
+        use VW::*;
+        match op {
+            VX::FAdd(D, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 1, 1, 0x58, None),
+            VX::FSub(D, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 1, 1, 0x5c, None),
+            VX::FMul(D, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 1, 1, 0x59, None),
+            VX::FDiv(D, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 1, 1, 0x5e, None),
+            VX::FMinLt(D) => self.v3(d, a, b, 1, 1, 0x5d, None),
+            VX::FMaxGt(D) => self.v3(d, a, b, 1, 1, 0x5f, None),
+            VX::FCmp(c, D) => {
+                let (x, y, pred) = match c {
+                    Cond::Lt => (a, b, 1),
+                    Cond::Le => (a, b, 2),
+                    Cond::Gt => (b, a, 1),
+                    Cond::Ge => (b, a, 2),
+                    Cond::Eq => (a, b, 0),
+                    Cond::Ne => (a, b, 4),
+                };
+                self.v3(d, x, y, 1, 1, 0xc2, Some(pred));
+            }
+            VX::FMinNum(w) | VX::FMaxNum(w) => {
+                // IEEE minimumNumber: min(a, b) gives b when either is NaN; where b is NaN,
+                // take a (both NaN: a, a NaN)
+                let pd = if w == D { 0x66 } else { 0 };
+                let xa = self.use_f(a, XS);
+                let xb = self.use_f(b, XS2);
+                self.a.movf_rr(true, 1, xa);
+                self.a.sse_rr(pd, if let VX::FMinNum(_) = op { 0x5d } else { 0x5f }, 1, xb, false);
+                self.a.movf_rr(true, 0, xb);
+                self.a.sse_rr(pd, 0xc2, 0, 0, false);
+                self.a.byte(3); // unord: b is NaN
+                self.a.sse_ext(0x66, 0x38, if w == D { 0x15 } else { 0x14 }, 1, xa); // blendvp{s,d}, mask xmm0
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 1);
+                self.fin_f(d, xd);
+            }
+            VX::FNeg(D) | VX::FAbs(D) | VX::FSqrt(D, NanBits::Host | NanBits::Intel) | VX::FRound(D, _) => {
+                let xa = self.use_f(a, XS);
+                match op {
+                    VX::FNeg(_) | VX::FAbs(_) => {
+                        let neg = op == VX::FNeg(D);
+                        self.vconst128(1, if neg { Self::lane_signs(D) } else { !Self::lane_signs(D) });
+                        self.a.sse_rr(0x66, if neg { 0x57 } else { 0x54 }, 1, xa, false);
+                    }
+                    VX::FSqrt(..) => self.a.sse_rr(0x66, 0x51, 1, xa, false),
+                    VX::FRound(_, RoundTo::Away) => {
+                        // trunc(x + copysign(0.5 - ulp/2, x))
+                        self.vconst128(1, Self::lane_signs(D));
+                        self.a.sse_rr(0x66, 0x54, 1, xa, false);
+                        let h = 0.49999999999999994f64.to_bits() as u128;
+                        self.vconst128(0, h | h << 64);
+                        self.a.sse_rr(0x66, 0x56, 1, 0, false);
+                        self.a.sse_rr(0x66, 0x58, 1, xa, false);
+                        self.a.sse_ext(0x66, 0x3a, 0x09, 1, 1); // roundpd
+                        self.a.byte(11);
+                    }
+                    VX::FRound(_, t) => {
+                        self.a.sse_ext(0x66, 0x3a, 0x09, 1, xa);
+                        self.a.byte(match t {
+                            RoundTo::Floor => 9,
+                            RoundTo::Ceil => 10,
+                            _ => 11,
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 1);
+                self.fin_f(d, xd);
+            }
+            VX::FCvtLo | VX::FCvtNarrow => {
+                let xa = self.use_f(a, XS);
+                if op == VX::FCvtLo {
+                    self.a.sse_rr(0, 0x5a, 1, xa, false); // cvtps2pd
+                } else {
+                    let xb = self.use_f(b, XS2);
+                    self.a.sse_rr(0x66, 0x5a, 0, xb, false); // cvtpd2ps
+                    let xa = self.use_f(a, XS);
+                    self.a.sse_rr(0x66, 0x5a, 1, xa, false);
+                    self.a.sse_rr(0x66, 0x14, 1, 0, false); // unpcklpd
+                }
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 1);
+                self.fin_f(d, xd);
+            }
+            VX::ICmp(c, w) | VX::UCmp(c, w) if w != S || matches!(op, VX::UCmp(..)) => {
+                let (x, y, gt, not) = match c {
+                    Cond::Eq => (a, b, false, false),
+                    Cond::Ne => (a, b, false, true),
+                    Cond::Gt => (a, b, true, false),
+                    Cond::Lt => (b, a, true, false),
+                    Cond::Le => (a, b, true, true),
+                    Cond::Ge => (b, a, true, true),
+                };
+                let xy = self.use_f(y, XS2);
+                self.a.movf_rr(true, 1, xy);
+                let xx = self.use_f(x, XS);
+                self.a.movf_rr(true, 0, xx);
+                if gt && matches!(op, VX::UCmp(..)) {
+                    // unsigned order = signed order with the sign bits flipped
+                    self.vconst128(XS2, Self::lane_signs(w));
+                    self.a.sse_rr(0x66, 0xef, 0, XS2, false);
+                    self.a.sse_rr(0x66, 0xef, 1, XS2, false);
+                }
+                match (gt, w) {
+                    (true, D) => self.a.sse_ext(0x66, 0x38, 0x37, 0, 1),
+                    (false, D) => self.a.sse_ext(0x66, 0x38, 0x29, 0, 1),
+                    (true, _) => self.a.sse_rr(0x66, [0x64, 0x65, 0x66][w as usize], 0, 1, false),
+                    (false, _) => self.a.sse_rr(0x66, [0x74, 0x75, 0x76][w as usize], 0, 1, false),
+                }
+                if not {
+                    self.a.sse_rr(0x66, 0x76, 1, 1, false); // all ones
+                    self.a.sse_rr(0x66, 0xef, 0, 1, false);
+                }
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 0);
+                self.fin_f(d, xd);
+            }
+            VX::MinS(D) | VX::MaxS(D) | VX::MinU(D) | VX::MaxU(D) => {
+                // mask = a > b (pcmpgtq, sign-flipped for unsigned), blendvpd picks by xmm0
+                let xb = self.use_f(b, XS2);
+                self.a.movf_rr(true, 1, xb);
+                let xa = self.use_f(a, XS);
+                self.a.movf_rr(true, 0, xa);
+                if matches!(op, VX::MinU(_) | VX::MaxU(_)) {
+                    self.vconst128(XS2, Self::lane_signs(D));
+                    self.a.sse_rr(0x66, 0xef, 0, XS2, false);
+                    self.a.sse_rr(0x66, 0xef, 1, XS2, false);
+                }
+                self.a.sse_ext(0x66, 0x38, 0x37, 0, 1);
+                let min = matches!(op, VX::MinS(_) | VX::MinU(_));
+                // min: a > b ? b : a; max: a > b ? a : b
+                let (first, then) = if min { (a, b) } else { (b, a) };
+                let x1 = self.use_f(first, XS);
+                self.a.movf_rr(true, 1, x1);
+                let x2 = self.use_f(then, XS2);
+                self.a.sse_ext(0x66, 0x38, 0x15, 1, x2);
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 1);
+                self.fin_f(d, xd);
+            }
+            VX::MulLo(D) => {
+                // lo(a) * lo(b) + ((hi(a) * lo(b) + lo(a) * hi(b)) << 32), pmuludq
+                let xa = self.use_f(a, XS);
+                self.a.movf_rr(true, 0, xa);
+                self.a.sse_grp_imm(0x73, 2, 0, 32); // hi(a)
+                let xb = self.use_f(b, XS2);
+                self.a.sse_rr(0x66, 0xf4, 0, xb, false);
+                self.a.movf_rr(true, 1, xb);
+                self.a.sse_grp_imm(0x73, 2, 1, 32); // hi(b)
+                let xa = self.use_f(a, XS);
+                self.a.sse_rr(0x66, 0xf4, 1, xa, false);
+                self.a.sse_rr(0x66, 0xd4, 0, 1, false);
+                self.a.sse_grp_imm(0x73, 6, 0, 32);
+                self.a.movf_rr(true, 1, xa);
+                let xb = self.use_f(b, XS2);
+                self.a.sse_rr(0x66, 0xf4, 1, xb, false);
+                self.a.sse_rr(0x66, 0xd4, 0, 1, false);
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 0);
+                self.fin_f(d, xd);
+            }
+            VX::Abs(D) => {
+                // m = 0 > a; (a ^ m) - m
+                let xa = self.use_f(a, XS);
+                self.a.sse_rr(0x66, 0xef, 0, 0, false);
+                self.a.sse_ext(0x66, 0x38, 0x37, 0, xa);
+                self.a.movf_rr(true, 1, xa);
+                self.a.sse_rr(0x66, 0xef, 1, 0, false);
+                self.a.sse_rr(0x66, 0xfb, 1, 0, false);
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 1);
+                self.fin_f(d, xd);
+            }
+            VX::Neg(w) if w != S => {
+                let xa = self.use_f(a, XS);
+                self.a.sse_rr(0x66, 0xef, 0, 0, false);
+                self.a.sse_rr(0x66, [0xf8, 0xf9, 0xfa, 0xfb][w as usize], 0, xa, false);
+                let xd = self.def_f(d, XS);
+                self.a.movf_rr(true, xd, 0);
+                self.fin_f(d, xd);
+            }
+            VX::ShlV(D) | VX::ShrUV(D) => {
+                let xa = self.use_f(a, XS);
+                let xb = self.use_f(b, XS2);
+                let xd = self.def_f(d, XS);
+                self.a.vex_rr(1, 2, true, if op == VX::ShlV(D) { 0x47 } else { 0x45 }, xd, xa, xb); // vps{ll,rl}vq
+                self.fin_f(d, xd);
+            }
+            VX::Narrow(w) if w != B => {
+                // the low half of every lane, a's lanes then b's: a byte shuffle
+                let (n, h) = (w.bits() as usize / 8, w.bits() as usize / 16);
+                let lanes = 16 / n;
+                let mut idx = [0u8; 16];
+                for j in 0..2 * lanes {
+                    for k in 0..h {
+                        idx[j * h + k] = (j * n + k) as u8; // b's bytes are 16..31
+                    }
+                }
+                self.vshuffle(d, a, b, idx);
+            }
+            VX::MoveMask(w) => {
+                let xa = self.use_f(a, XS);
+                let rd = self.def_i(d, R10);
+                match w {
+                    S => self.a.sse_rr(0, 0x50, rd, xa, false), // movmskps
+                    D => self.a.sse_rr(0x66, 0x50, rd, xa, false), // movmskpd
+                    B => self.a.sse_w(0, 0xd7, rd, xa, false), // pmovmskb
+                    H => {
+                        self.a.movf_rr(true, 0, xa);
+                        self.a.sse_rr(0x66, 0x63, 0, 0, false); // packsswb: lanes to bytes, sign kept
+                        self.a.sse_w(0, 0xd7, rd, 0, false);
+                        self.a.extend(rd, 8, false);
+                    }
+                }
+                self.fin_i(d, rd);
+            }
+            _ => return false,
+        }
+        let _ = options;
+        true
+    }
+
     fn vx(&mut self, options: &relax_session::Options, op: VX, d: VReg, a: VReg, b: VReg) {
-        if self.vx_lanes(op, d, a, b) {
+        if self.vx_wide(options, op, d, a, b) || self.vx_lanes(op, d, a, b) {
             return;
         }
         // SHA-NI has legacy SSE encodings only, with NO mandatory 66 prefix.
@@ -3240,6 +3516,7 @@ impl<'a> Gen<'a> {
     /// 128-bit vector instructions (SSE4.1; AVX2 for per-lane shifts, FMA3 for VFma).
     fn vinst(&mut self, options: &relax_session::Options, i: &Inst) {
         match *i {
+            Inst::VShuffle(d, a, b, idx) => self.vshuffle(d, a, b, idx),
             Inst::VSel(d, m, a, b) => {
                 if self.avx && self.byte_masks[m.0 as usize] {
                     let xm = self.use_f(m, 0);
@@ -3357,7 +3634,7 @@ impl<'a> Gen<'a> {
                 self.a.byte(((xd & 7) << 3) | 5);
                 let at = self.a.pos();
                 self.a.u32(0);
-                self.vpool.push((at, bits));
+                self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
                 self.fin_f(d, xd);
             }
             Inst::VGather(d, base, idx) if !use_gather(options) => {
@@ -4227,6 +4504,29 @@ fn scalar_minmax(i: &Inst, a: VReg, b: VReg) -> Option<(bool, u8)> {
     }
 }
 
+/// Whether the emitter encodes `op` (the legaliser expands the lane-wise ops it does not).
+pub fn vx_native(options: &relax_session::Options, op: VX) -> bool {
+    use VW::*;
+    let avx2 = options.cpu.avx2;
+    match op {
+        VX::Add(_) | VX::Sub(_) | VX::CmpEq(_) | VX::CmpGtS(_) | VX::And | VX::Or | VX::Xor | VX::AndNot => true,
+        VX::MulLo(w) => w != B,
+        VX::MinS(_) | VX::MaxS(_) | VX::MinU(_) | VX::MaxU(_) | VX::Abs(_) | VX::Neg(_) | VX::ICmp(..) | VX::UCmp(..) => true,
+        VX::AddSatU(w) | VX::SubSatU(w) | VX::AddSatS(w) | VX::SubSatS(w) | VX::AvgU(w) => matches!(w, B | H),
+        VX::ShlI(..) | VX::ShrUI(..) | VX::ShrSI(..) => true,
+        VX::ShlV(w) | VX::ShrUV(w) => matches!(w, S | D) && avx2,
+        VX::ShrSV(w) => w == S && avx2,
+        VX::FAdd(w, n) | VX::FSub(w, n) | VX::FMul(w, n) | VX::FDiv(w, n) | VX::FSqrt(w, n) => w == S || (w == D && n != NanBits::Neon),
+        VX::FMinLt(w) | VX::FMaxGt(w) | VX::FMinNum(w) | VX::FMaxNum(w) | VX::FCmp(_, w) => matches!(w, S | D),
+        VX::FMinNeon(w) | VX::FMaxNeon(w) => w == S,
+        VX::FNeg(w) | VX::FAbs(w) | VX::FRound(w, _) => matches!(w, S | D),
+        VX::FToI(w) | VX::IToF(w) => w == S,
+        VX::Narrow(w) => w != B,
+        VX::FCvtNarrow | VX::FCvtLo | VX::MoveMask(_) => true,
+        _ => true,
+    }
+}
+
 /// Does this CPU (and the environment: MAKEPAD_RUN_NO_AVX) allow VEX-encoded AVX instructions?
 pub fn host_avx(options: &relax_session::Options) -> bool {
     options.cpu.avx
@@ -4276,6 +4576,19 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         });
         expanded = g;
         &expanded
+    } else {
+        f
+    };
+    // vector ops without an instruction sequence here: per-lane scalar code
+    let legal;
+    // (MAKEPAD_RUN_OPT=-vxnative: every expandable op, the legaliser's reference meaning)
+    let all = crate::stats::opt_off(options, "-vxnative");
+    let native = |op| !all && vx_native(options, op);
+    let f = if crate::legal::needed(f, &native, !all) {
+        let mut g = f.clone();
+        crate::legal::legalize(&mut g, &native, !all);
+        legal = g;
+        &legal
     } else {
         f
     };
@@ -4722,6 +5035,7 @@ pub fn detect_cpu(options: &relax_session::Options) -> relax_session::options::C
         cpu.lzcnt = !options.no_bitops && std::is_x86_feature_detected!("lzcnt");
         cpu.bmi1 = !options.no_bitops && std::is_x86_feature_detected!("bmi1");
         cpu.fma = cpu.avx && std::is_x86_feature_detected!("fma");
+        cpu.avx2 = cpu.avx && std::is_x86_feature_detected!("avx2");
         cpu
     }
     #[cfg(not(target_arch = "x86_64"))]

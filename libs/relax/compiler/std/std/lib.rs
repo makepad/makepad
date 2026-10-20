@@ -16,6 +16,18 @@ pub use core::f32;
 pub use core::f64;
 pub use core::hash;
 pub use core::hint;
+// rustc's std::simd: core::simd plus portable-simd's std_float (StdFloat)
+#[allow(dead_code)]
+mod std_float;
+pub mod simd {
+    pub use core::simd::*;
+    pub use crate::std_float::StdFloat;
+}
+mod sealed {
+    /// This trait being unreachable from outside the crate prevents outside implementations of
+    /// std's extension traits (rustc std/src/lib.rs).
+    pub trait Sealed {}
+}
 pub use core::iter;
 pub use core::marker;
 pub use core::mem;

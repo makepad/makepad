@@ -779,6 +779,14 @@ impl Layouts {
                         eprintln!("makepad: layout of `{}` with an unsized last field, but its definition requires that field sized (rustc: E0277); declare the parameter `?Sized`", name);
                     }
                     let mut l = self.struct_layout(lcx, tcx, &fts, repr, kind);
+                    if adt.is_simd() {
+                        // rustc's vector layout (x86-64, AArch64): the lanes' size rounded up to a
+                        // power of two, aligned to that size; passed in memory here
+                        let size = l.size.max(1).next_power_of_two();
+                        l.size = size;
+                        l.align = size;
+                        l.leaves = None;
+                    }
                     if adt.no_niche {
                         l.niche = None;
                     } else if adt.valid_start.is_some() || adt.valid_end.is_some() {

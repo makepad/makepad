@@ -165,6 +165,17 @@ pub unsafe fn vceq_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
     uint8x8_t(r)
 }
 
+/// TBL with one 8-byte table: an index >= 8 gives 0
+pub unsafe fn vtbl1_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = if b.0[i] < 8 { a.0[b.0[i] as usize] } else { 0 };
+        i += 1;
+    }
+    uint8x8_t(r)
+}
+
 pub unsafe fn vcgez_s8(a: int8x8_t) -> uint8x8_t {
     let mut r = [0; 8];
     let mut i = 0;

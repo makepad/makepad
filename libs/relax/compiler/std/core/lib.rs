@@ -20,6 +20,16 @@ pub mod libm;
 // ---- language support
 pub mod any;
 pub mod arch;
+// rustc's core::simd: portable-simd's core_simd (library/portable-simd/crates/core_simd/src),
+// pulled in as rustc's core does, over the generic SIMD intrinsics (intrinsics_simd)
+// rustc's core names itself `core` (core_simd's paths say core::)
+extern crate self as core;
+#[path = "core_simd/mod.rs"]
+#[allow(missing_debug_implementations, dead_code, unsafe_op_in_unsafe_fn)]
+mod core_simd;
+pub mod simd {
+    pub use crate::core_simd::simd::*;
+}
 pub mod borrow;
 pub mod cell;
 pub mod clone;
