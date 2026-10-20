@@ -893,7 +893,7 @@ impl<'a> Gen<'a> {
         // the domain base, read once (where regalloc::domain_base_block puts it) when the function
         // names a domain static
         let reach = regalloc::reachable(self.f);
-        let dom_fp = if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
+        let dom_fp = if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach, &self.jt_plan) {
             self.dom_block = b;
             off += 8;
             off

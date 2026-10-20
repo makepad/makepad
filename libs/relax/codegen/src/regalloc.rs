@@ -3488,7 +3488,7 @@ pub fn sink_compares(f: &Func) -> Option<Func> {
 /// it is read outside the loops that hold the uses, and not at all on paths that never get there:
 /// html_parse's `process_entity` names an entity table only after it has seen a `&`, and used to
 /// read the base on every call). None: the function names no domain symbol.
-pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool]) -> Option<usize> {
+pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool], tables: &std::collections::HashMap<u32, (VReg, i64, Vec<u32>, u32)>) -> Option<usize> {
     if sym_class == 0 {
         return None;
     }
@@ -3500,7 +3500,9 @@ pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool]) -> Option<usi
         .map(|(bi, _)| bi)
         .collect();
     let first = *uses.first()?;
-    let idom = crate::opt::idoms(f);
+    // a table dispatch enters its case blocks straight from the head: those are successors of the head too
+    let extra: std::collections::HashMap<u32, Vec<u32>> = tables.iter().map(|(h, (_, _, t, d))| (*h, t.iter().copied().chain([*d]).collect())).collect();
+    let idom = crate::opt::idoms_with(f, &extra);
     // the dominator chain of a block, block first, entry last
     let chain = |mut b: usize| {
         let mut c = vec![b];

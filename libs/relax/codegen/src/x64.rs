@@ -978,7 +978,7 @@ impl<'a> Gen<'a> {
         self.stage = -(self.saved + off);
         // the domain base, read once (where regalloc::domain_base_block puts it) when the function
         // names a domain static
-        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
+        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach, &self.jt_plan) {
             off += 8;
             self.dom_slot = -(self.saved + off);
             self.dom_block = b;

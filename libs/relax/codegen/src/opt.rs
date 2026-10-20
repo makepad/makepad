@@ -4593,6 +4593,13 @@ fn local_copy_prop(f: &mut Func) -> bool {
 
 /// Immediate dominators (Cooper/Harvey/Kennedy) over reachable blocks; entry's idom is itself.
 pub fn idoms(f: &Func) -> Vec<u32> {
+    idoms_with(f, &std::collections::HashMap::new())
+}
+
+/// `idoms` over the CFG plus `extra` edges (block -> more successors): the table dispatches of
+/// arm64::jump_tables, which enter their case blocks without passing the compare chain.
+pub fn idoms_with(f: &Func, extra: &std::collections::HashMap<u32, Vec<u32>>) -> Vec<u32> {
+    let succs_of = |b: u32| f.blocks[b as usize].term.succs().chain(extra.get(&b).into_iter().flatten().copied());
     let n = f.blocks.len();
     if n == 1 {
         return vec![0];
@@ -4610,11 +4617,8 @@ pub fn idoms(f: &Func) -> Vec<u32> {
             seen[b as usize] = true;
             stack.push((b, 1));
             // pushed in reverse: the first successor is visited first
-            let succ: [Option<u32>; 2] = {
-                let mut it = f.blocks[b as usize].term.succs();
-                [it.next(), it.next()]
-            };
-            for t in succ.iter().rev().flatten() {
+            let succ: Vec<u32> = succs_of(b).collect();
+            for t in succ.iter().rev() {
                 stack.push((*t, 0));
             }
         } else {
@@ -4629,7 +4633,7 @@ pub fn idoms(f: &Func) -> Vec<u32> {
     // predecessors in reverse postorder, flat (pred_off[b]..pred_off[b + 1])
     let mut pred_off = vec![0u32; n + 1];
     for &b in &rpo {
-        for t in f.blocks[b as usize].term.succs() {
+        for t in succs_of(b) {
             pred_off[t as usize + 1] += 1;
         }
     }
@@ -4639,7 +4643,7 @@ pub fn idoms(f: &Func) -> Vec<u32> {
     let mut fill = pred_off.clone();
     let mut preds = vec![0u32; pred_off[n] as usize];
     for &b in &rpo {
-        for t in f.blocks[b as usize].term.succs() {
+        for t in succs_of(b) {
             preds[fill[t as usize] as usize] = b;
             fill[t as usize] += 1;
         }
