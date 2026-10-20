@@ -119,6 +119,10 @@ pub enum FvNote {
     Narrowed { why: Vec<FvWho> },
     /// the conflict remains through field views: what the callees touch
     Remaining { why: Vec<FvWho> },
+    /// accepted under Polonius (relaxed Rust A2): the loan is not live where NLL thought it was
+    Polonius,
+    /// accepted with disjoint indices (relaxed Rust D3): proven distinct, or checked at run time
+    Disjoint { proven: bool },
 }
 #[derive(Clone, Debug)]
 pub struct FvWho { pub callee: Option<crate::program::DefId>, pub is_closure: bool, pub parts: Vec<(Place, bool)> }

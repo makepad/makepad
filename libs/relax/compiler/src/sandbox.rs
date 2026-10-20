@@ -1668,7 +1668,7 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
     // MAKEPAD_RUN_SANDBOX_DUMP=<substring>: the transformed RIR of matching twins
     if let Ok(pat) = std::env::var("MAKEPAD_RUN_SANDBOX_DUMP") {
         if f.name.contains(&pat) {
-            eprintln!("sandbox twin {} ({} insts):\n{}", f.name, crate::opt::inst_count(&f), f.dump());
+            eprintln!("sandbox twin {} ({} insts):\n{}", f.name, relax_codegen::opt::inst_count(&f), f.dump());
         }
     }
     Ok(f)

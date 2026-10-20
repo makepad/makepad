@@ -788,7 +788,7 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             u.stats.codegen_ns as f64 / 1e6
         );
         let mut rules = String::new();
-        for (i, n) in opt::RULE_NAMES.iter().enumerate() {
+        for (i, n) in relax_codegen::opt::RULE_NAMES.iter().enumerate() {
             rules.push_str(&format!("{} {}  ", n, u.stats.inline_rules[i]));
         }
         println!("inlined call sites by rule: {}", rules);

@@ -337,9 +337,9 @@ enum Bound {
 enum WOp {
     /// a vector load of a stream
     Load(Stream),
-    Bin(VOp, usize, usize),
+    Bin(VX, usize, usize),
     Int(VX, usize, usize),
-    Un(VUn, usize),
+    Un(VX, usize),
     /// a loop-invariant scalar (the root vreg) in every lane
     Splat(VReg),
     /// a 32-bit constant in every lane
@@ -552,13 +552,13 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                         sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                     }
                     Inst::FBin(op, false, d, a, b2) if store.is_none() && kind == Some(Lane::F32) => {
-                        let o = match op { FOp::Add => VOp::FAdd, FOp::Sub => VOp::FSub, FOp::Mul => VOp::FMul, FOp::Div => VOp::FDiv, FOp::MinLt => VOp::FMinLt, FOp::MaxGt => VOp::FMaxGt, _ => continue 'candidate };
+                        let o = match op { FOp::Add => VX::FAdd(VW::S, NanBits::Host), FOp::Sub => VX::FSub(VW::S, NanBits::Host), FOp::Mul => VX::FMul(VW::S, NanBits::Host), FOp::Div => VX::FDiv(VW::S, NanBits::Host), FOp::MinLt => VX::FMinLt(VW::S), FOp::MaxGt => VX::FMaxGt(VW::S), _ => continue 'candidate };
                         let (x, y) = (operand!(a, Lane::F32), operand!(b2, Lane::F32));
                         wops.push(WOp::Bin(o, x, y));
                         sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                     }
                     Inst::FUnary(op, false, d, a) if store.is_none() && kind == Some(Lane::F32) => {
-                        let o = match op { FUn::Neg => VUn::FNeg, FUn::Abs => VUn::FAbs, FUn::Sqrt => VUn::FSqrt, _ => continue 'candidate };
+                        let o = match op { FUn::Neg => VX::FNeg(VW::S), FUn::Abs => VX::FAbs(VW::S), FUn::Sqrt => VX::FSqrt(VW::S, NanBits::Host), _ => continue 'candidate };
                         let x = operand!(a, Lane::F32);
                         wops.push(WOp::Un(o, x));
                         sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
@@ -832,9 +832,9 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                     let a = addr_of(f, &mut wide, st);
                     wide.push(Inst::VLoad(v, a, st.disp as i32));
                 }
-                WOp::Bin(o, a, b2) => wide.push(Inst::VBin(o, v, vectors[a], vectors[b2])),
+                WOp::Bin(o, a, b2) => wide.push(Inst::VX(o, v, vectors[a], vectors[b2])),
                 WOp::Int(o, a, b2) => wide.push(Inst::VX(o, v, vectors[a], vectors[b2])),
-                WOp::Un(o, a) => wide.push(Inst::VUn(o, v, vectors[a])),
+                WOp::Un(o, a) => wide.push(Inst::VX(o, v, vectors[a], vectors[a])),
             }
         }
         let a = addr_of(f, &mut wide, dst);
@@ -1375,23 +1375,23 @@ fn emit_lanes(f: &mut Func, n: &LNode, ins: &mut Vec<Inst>) -> VReg {
             let a = emit_lanes(f, x, ins);
             let b = emit_lanes(f, y, ins);
             let o = match op {
-                FOp::Add => VOp::FAdd,
-                FOp::Sub => VOp::FSub,
-                FOp::Mul => VOp::FMul,
-                FOp::Div => VOp::FDiv,
-                FOp::MinLt => VOp::FMinLt,
-                _ => VOp::FMaxGt,
+                FOp::Add => VX::FAdd(VW::S, NanBits::Host),
+                FOp::Sub => VX::FSub(VW::S, NanBits::Host),
+                FOp::Mul => VX::FMul(VW::S, NanBits::Host),
+                FOp::Div => VX::FDiv(VW::S, NanBits::Host),
+                FOp::MinLt => VX::FMinLt(VW::S),
+                _ => VX::FMaxGt(VW::S),
             };
-            ins.push(Inst::VBin(o, v, a, b));
+            ins.push(Inst::VX(o, v, a, b));
         }
         LNode::Un(op, x) => {
             let a = emit_lanes(f, x, ins);
             let o = match op {
-                FUn::Neg => VUn::FNeg,
-                FUn::Abs => VUn::FAbs,
-                _ => VUn::FSqrt,
+                FUn::Neg => VX::FNeg(VW::S),
+                FUn::Abs => VX::FAbs(VW::S),
+                _ => VX::FSqrt(VW::S, NanBits::Host),
             };
-            ins.push(Inst::VUn(o, v, a));
+            ins.push(Inst::VX(o, v, a, a));
         }
     }
     v
@@ -1598,11 +1598,11 @@ fn apply_lane_group(f: &mut Func, head: u32, members: &[bool], preds: &[Vec<u32>
     let mut ins: Vec<Inst> = Vec::new();
     let x = emit_lanes(f, &g.tree, &mut ins);
     let o = match g.op {
-        FOp::Add => VOp::FAdd,
-        FOp::Sub => VOp::FSub,
-        _ => VOp::FMul,
+        FOp::Add => VX::FAdd(VW::S, NanBits::Host),
+        FOp::Sub => VX::FSub(VW::S, NanBits::Host),
+        _ => VX::FMul(VW::S, NanBits::Host),
     };
-    ins.push(if g.acc_left { Inst::VBin(o, va, va, x) } else { Inst::VBin(o, va, x, va) });
+    ins.push(if g.acc_left { Inst::VX(o, va, va, x) } else { Inst::VX(o, va, x, va) });
     // remove the scalar lanes, add the vector at the last one's place
     let at = *g.gone.last().unwrap();
     let b = &mut f.blocks[bi];

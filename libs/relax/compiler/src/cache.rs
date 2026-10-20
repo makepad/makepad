@@ -1201,7 +1201,7 @@ impl Cache {
             return mapped.definition(c, k);
         }
         if !self.def_maps.contains_key(&c) {
-            let t0 = crate::jit::cpu_ns();
+            let t0 = relax_backend::cpu_ns();
             if self.crate_defs.is_empty() {
                 let mut by = vec![Vec::new(); u.prog.crates.len()];
                 for i in 0..u.prog.defs.len() {
@@ -1227,7 +1227,7 @@ impl Cache {
                 self.stats.def_collisions += 1;
             }
             if self.verbose && trace_on() {
-                eprintln!("makepad-run cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (crate::jit::cpu_ns() - t0) as f64 / 1e6);
+                eprintln!("makepad-run cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_backend::cpu_ns() - t0) as f64 / 1e6);
             }
             self.def_maps.insert(c, m);
         }
@@ -1860,7 +1860,7 @@ impl Cache {
         if let Some(&k) = self.def_bodies.get(&d) {
             return k;
         }
-        let t0 = crate::jit::cpu_ns();
+        let t0 = relax_backend::cpu_ns();
         let def = u.prog.def(d);
         let f = def.file as usize;
         let mut h = Sip128::new();
@@ -1879,7 +1879,7 @@ impl Cache {
         }
         let k = h.finish128();
         self.def_bodies.insert(d, k);
-        self.stats.body_ns += crate::jit::cpu_ns() - t0;
+        self.stats.body_ns += relax_backend::cpu_ns() - t0;
         k
     }
 
@@ -2218,7 +2218,7 @@ impl Cache {
             self.stats.unencodable += 1;
             self.why("fn key");
             trace_lookup(u, id, "unstorable:fn key");
-            crate::warm::reason(id, "unstorable:fn key");
+            relax_codegen::warm::reason(id, "unstorable:fn key");
             self.remember_outcome(u, id, None, "cold record-rejected:fn key");
             return;
         };
@@ -2235,7 +2235,7 @@ impl Cache {
             let w = self.last_why;
             trace_lookup(u, id, &format!("norecord:encode:{}", w));
             if o3.is_none() {
-                crate::warm::reason(id, &format!("unstorable:{}", w));
+                relax_codegen::warm::reason(id, &format!("unstorable:{}", w));
                 self.remember_outcome(u, id, Some(key), &format!("cold record-rejected:{}", w));
             }
             return;
@@ -2277,9 +2277,9 @@ impl Cache {
     /// now. The entry links only while each still has that key (its body, position and
     /// interface unchanged). None: one has no key (the entry cannot be stored).
     fn cert_bytes(&mut self, u: &Unit, deps: &[u32]) -> Option<Vec<u8>> {
-        let t0 = crate::jit::cpu_ns();
+        let t0 = relax_backend::cpu_ns();
         let r = self.cert_bytes_inner(u, deps);
-        self.stats.cert_write_ns += crate::jit::cpu_ns() - t0;
+        self.stats.cert_write_ns += relax_backend::cpu_ns() - t0;
         r
     }
 
@@ -2629,7 +2629,7 @@ impl Cache {
     /// `stop` (a mid-run write: the main thread waits for the owner thread) is asked every 256
     /// slots; yes drops this record (false comes back) and a later write makes it again.
     pub fn record_manifest(&mut self, u: &Unit, root: u32, order: &[u32], present: usize, stop: &dyn Fn() -> bool) -> bool {
-        if !crate::preempt::is_stopped() && crate::warm::enabled() {
+        if !crate::preempt::is_stopped() && relax_codegen::warm::enabled() {
             for (id, f) in u.fns.iter().enumerate() {
                 if !f.compiled && !f.history().inlined_into.is_empty() {
                     self.remember_outcome(u, id as u32, None, "cold inlined-only; no standalone code entry");
@@ -6524,7 +6524,7 @@ impl Linker {
 
     pub fn lookup(&mut self, u: &mut Unit, id: u32) -> Option<LinkedCode> {
         if !self.cache().linking.insert(id) {
-            crate::warm::reason(id, "cache lookup already in progress");
+            relax_codegen::warm::reason(id, "cache lookup already in progress");
             return None;
         }
         let _link = LinkGuard { cache: self.cache, key: id as u128, data: false };
@@ -6533,7 +6533,7 @@ impl Linker {
         }
         let t0 = crate::jit::wall_ns();
         let Some(key0) = self.cache().slot_key(u, id) else {
-            crate::warm::reason(id, "unstorable:fn key");
+            relax_codegen::warm::reason(id, "unstorable:fn key");
             return None;
         };
         let key = key0;
@@ -6556,9 +6556,9 @@ impl Linker {
             }
         }
         if !found {
-            if crate::warm::enabled() {
+            if relax_codegen::warm::enabled() {
                 let reason = self.cache().miss_reason(u, id, key0);
-                crate::warm::reason(id, &reason);
+                relax_codegen::warm::reason(id, &reason);
             }
             self.cache().missed.insert(id);
             self.cache().stats.misses += 1;
@@ -6580,7 +6580,7 @@ impl Linker {
                 self.cache().missed.insert(id);
                 self.cache().stats.link_fail += 1;
                 trace_lookup(u, id, "linkfail");
-                crate::warm::reason(id, "cached entry could not decode/link");
+                relax_codegen::warm::reason(id, "cached entry could not decode/link");
                 None
             }
         }
@@ -6589,9 +6589,9 @@ impl Linker {
     /// Whether every slot a code entry's certificate names still has the recorded key. None:
     /// the payload does not decode.
     fn cert_valid(&mut self, u: &mut Unit, payload: &[u8]) -> Option<bool> {
-        let t0 = crate::jit::cpu_ns();
+        let t0 = relax_backend::cpu_ns();
         let r = self.cert_valid_inner(u, payload);
-        self.cache().stats.cert_check_ns += crate::jit::cpu_ns() - t0;
+        self.cache().stats.cert_check_ns += relax_backend::cpu_ns() - t0;
         r
     }
 
@@ -6812,7 +6812,7 @@ impl Cache {
     /// Optional diagnostic ledger: retain cold evidence for the strict run's
     /// taxonomy. An ordinary cache without this evidence reports uncertainty.
     fn remember_outcome(&mut self, u: &Unit, id: u32, code_key: Option<u128>, reason: &str) {
-        if !crate::warm::enabled() || self.mode == Mode::ReadOnly { return; }
+        if !relax_codegen::warm::enabled() || self.mode == Mode::ReadOnly { return; }
         let key = self.outcome_key(u, id);
         if !self.pending_keys.insert(key) { return; }
         let krate = match u.fns[id as usize].key {

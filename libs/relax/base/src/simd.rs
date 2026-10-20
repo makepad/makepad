@@ -406,7 +406,7 @@ pub fn covered(options: &crate::options::Options, name: &str) -> bool {
 /// arguments. Returns the function unchanged when the intrinsic (or this instance) is not
 /// covered or its lowered signature is not the expected one.
 pub fn lower_intrinsic(options: &crate::options::Options, name: &str, consts: &[i64], mut f: Func) -> Func {
-    if off(options) || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(..) | Inst::VBin(..) | Inst::VLoad(..) | Inst::VStore(..)))) {
+    if off(options) || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(..) | Inst::VLoad(..) | Inst::VStore(..)))) {
         // Explicit relax-intrinsic bridges already supplied vector RIR. Retain the
         // legacy table only for std wrappers that still have scalar bodies.
         return f;

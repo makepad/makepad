@@ -540,7 +540,7 @@ pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &
     if s.header.abi.is_c_like() || s.header.c_variadic || s.track_caller {
         return Some("abi");
     }
-    if crate::jit::inline_attrs(prog, d) & crate::opt::ATTR_ALWAYS != 0 {
+    if crate::jit::inline_attrs(prog, d) & relax_codegen::opt::ATTR_ALWAYS != 0 {
         return Some("#[inline(always)]: compiled on the caller's side");
     }
     let parent = prog.def(def.parent);

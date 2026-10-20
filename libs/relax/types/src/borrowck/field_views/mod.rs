@@ -568,6 +568,60 @@ pub struct FvRecordRaw {
     pub hoist: Option<Vec<Span>>,
 }
 
+/// A conflict accepted by an analysis stronger than rustc's NLL (relaxed Rust), with the MIR facts
+/// its export to rustc needs (`edit::plan_relaxed`).
+#[derive(Clone, Debug)]
+pub enum RelaxedRecord {
+    Polonius(PoloniusRecord),
+    Disjoint(DisjointRecord),
+}
+impl RelaxedRecord {
+    /// The same acceptance (a conflict is found again at an activation, or in the Polonius run).
+    pub fn same_site(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Self::Polonius(a), Self::Polonius(b)) => a.span == b.span && a.code == b.code,
+            (Self::Disjoint(a), Self::Disjoint(b)) => a.first == b.first && a.second == b.second,
+            _ => false,
+        }
+    }
+}
+
+/// Two borrows of elements of one array / slice / `Vec` accepted as disjoint (D3).
+#[derive(Clone, Debug)]
+pub struct DisjointRecord {
+    /// the body's owner (the run-time check is lowered into its code)
+    pub owner: DefId,
+    /// the index expressions (`v[i]`) of the earlier and the later borrow
+    pub first: Span,
+    pub second: Span,
+    /// the indices are distinct by the checker's proof (else: compared at run time)
+    pub proven: bool,
+    /// both borrows are `&mut` (the `get_disjoint_mut` rewrite needs that)
+    pub both_mut: bool,
+    pub code: &'static str,
+}
+
+/// An NLL error that Polonius does not have (A2).
+#[derive(Clone, Debug)]
+pub struct PoloniusRecord {
+    pub code: &'static str,
+    /// the error's primary span (the conflicting access)
+    pub span: Span,
+    /// the statement that made the loan NLL kept alive
+    pub loan: Span,
+    /// the std map lookup the loan is the receiver of, when a second lookup with its key finds the
+    /// same entry (the re-lookup rewrite)
+    pub lookup: Option<Lookup>,
+}
+
+/// `map.get_mut(key)` / `map.get(key)` of std's HashMap / BTreeMap with a std-compared key.
+#[derive(Clone, Copy, Debug)]
+pub struct Lookup {
+    pub mutable: bool,
+    /// the call expression
+    pub call: Span,
+}
+
 /// The field-view context of one body's check (C-NLL4 conflict check hook, check_hook.rs).
 pub struct FieldViews<'a> {
     pub prog: &'a Program,

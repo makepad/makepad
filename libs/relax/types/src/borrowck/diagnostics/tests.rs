@@ -321,7 +321,7 @@ fn e0373_closure_may_outlive_the_function() {
     let borrows = BorrowSet::build(&f.tcx, &b, true, &moves);
     let borrow = BorrowInfo::from(&borrows[0]);
     let error = BorrowckError::with(ErrorKind::DoesNotLiveLongEnough, f.sp("x)"), Detail::Lifetime { borrow, dropped_place: p(1), location: at(0, 5) });
-    let result = MirBorrowckResult { errors: vec![error], used_mut: crate::mir::dataflow::BitSet::new_empty(4), unsupported: vec![], used_mut_upvars: vec![], region_errors: vec![], tainted_by_errors: false, fv_only: vec![], fv_records: vec![] };
+    let result = MirBorrowckResult { errors: vec![error], used_mut: crate::mir::dataflow::BitSet::new_empty(4), unsupported: vec![], used_mut_upvars: vec![], region_errors: vec![], tainted_by_errors: false, fv_only: vec![], fv_records: vec![], relaxed_records: vec![] };
     let out = render(&f, &b, &regions, &moves, &names, &result);
     assert_eq!((out[0].code, out[0].line), ("E0373", 3), "{}", out[0].render());
     assert_eq!(out[0].message, "closure may outlive the current function, but it borrows `x`, which is owned by the current function");
@@ -345,7 +345,7 @@ fn e0713_e0712_e0626_rendered_from_checker_details() {
         (ErrorKind::BorrowAcrossYield, "E0626", Detail::BorrowAcrossYield { borrow: info.clone(), yield_location: at(0, 1) }),
     ] {
         let result = MirBorrowckResult { errors: vec![BorrowckError::with(kind, f.sp("&d.v"), detail)], used_mut: crate::mir::dataflow::BitSet::new_empty(3),
-            unsupported: vec![], used_mut_upvars: vec![], region_errors: vec![], tainted_by_errors: false, fv_only: vec![], fv_records: vec![] };
+            unsupported: vec![], used_mut_upvars: vec![], region_errors: vec![], tainted_by_errors: false, fv_only: vec![], fv_records: vec![], relaxed_records: vec![] };
         let out = render(&f, &b, &regions, &moves, &none, &result);
         assert_eq!((out[0].code, out[0].line), (code, 2), "{}", out[0].render());
     }
@@ -384,7 +384,7 @@ fn e0521_borrowed_data_escapes_and_e0621_explicit_lifetime_required() {
     let moves = gather(&f, &b);
     let regions = regions_of(&b, &r);
     let result = MirBorrowckResult { errors: vec![], used_mut: crate::mir::dataflow::BitSet::new_empty(2), unsupported: vec![], used_mut_upvars: vec![],
-        region_errors: regions.regioncx.errors.clone(), tainted_by_errors: false, fv_only: vec![], fv_records: vec![] };
+        region_errors: regions.regioncx.errors.clone(), tainted_by_errors: false, fv_only: vec![], fv_records: vec![], relaxed_records: vec![] };
     let out = render(&f, &b, &regions, &moves, &names, &result);
     assert_eq!((out[0].code, out[0].line), ("E0521", 2), "{}", out[0].render());
     assert_eq!(out[0].message, "borrowed data escapes outside of function");

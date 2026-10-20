@@ -68,7 +68,7 @@ fn trace_stage(name: &'static str) {
             *s.stages.entry(name).or_default() += (now - last).as_secs_f64() * 1000.;
             s.last = Some(now);
             s.sub_last = Some(now);
-            let cpu = crate::clock::cpu_ns();
+            let cpu = relax_backend::cpu_ns();
             let elapsed = cpu.saturating_sub(s.cpu_last) as f64 / 1e6;
             *s.cpu.entry(name).or_default() += elapsed;
             s.cpu_last = cpu;
@@ -116,7 +116,7 @@ impl TraceTransaction {
         if std::env::var_os("MAKEPAD_RUN_RELOAD_TRACE").is_some() {
             let now = Instant::now();
             let (watch, read, scanned) = TRACE_INPUT.with(|s| s.replace((0.0, 0.0, 0)));
-            let mut state = ReloadTrace { started: Some(now), last: Some(now), cpu_last: crate::clock::cpu_ns(), ..Default::default() };
+            let mut state = ReloadTrace { started: Some(now), last: Some(now), cpu_last: relax_backend::cpu_ns(), ..Default::default() };
             state.stages.insert("watch", watch);
             state.stages.insert("read", read);
             state.counts.insert("watch_files", scanned);

@@ -82,7 +82,7 @@ fn created_closures(mir: &Body, out: &mut Vec<u32>) {
 
 /// Check one typeck root. See the module doc.
 pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::Body, fv_cache: Option<&Rc<SummaryCx>>) -> Verdict {
-    let mut v = Verdict { errors: Vec::new(), unchecked: Vec::new(), fv_only: Vec::new(), fv_records: Vec::new(), bodies: 0 };
+    let mut v = Verdict { errors: Vec::new(), unchecked: Vec::new(), fv_only: Vec::new(), fv_records: Vec::new(), relaxed_records: Vec::new(), bodies: 0 };
     let name = prog.def_path(typeck.def);
     let env = TypingEnv {
         limit: crate::tcx::RecursionLimit::for_item(prog, typeck.def),
@@ -426,6 +426,7 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         }
         v.fv_only.extend(diagnostics::render_fv_only(&dcx, &checked.result));
         v.fv_records.extend(checked.result.fv_records.iter().cloned());
+        v.relaxed_records.extend(checked.result.relaxed_records.iter().cloned());
     }
 }
 

@@ -132,7 +132,7 @@ pub fn build_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
     let provider = BuildProvider { prog, tcx, memo: Default::default() };
     let passes = std::env::var_os("MAKEPAD_RUN_MIR_BUILD_NO_PASSES").is_none();
     let mut by_kind: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
-    let t0 = crate::clock::cpu_ns();
+    let t0 = relax_backend::cpu_ns();
     for owner in body::owners(prog) {
         let d = prog.def(owner.owner);
         if !with_std && std_crates.contains(&d.krate) {
@@ -241,7 +241,7 @@ pub fn build_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
     eprintln!(
         "makepad-run mir-build: {owners} owners ({typeck_fail} failed typeck), {built} bodies built, {validate_fail} failed validation, {panics} panicked, {} not built; cpu {:.1} ms",
         unbuilt.counts.values().sum::<usize>(),
-        (crate::clock::cpu_ns() - t0) as f64 / 1e6
+        (relax_backend::cpu_ns() - t0) as f64 / 1e6
     );
     if passes {
         eprintln!("makepad-run mir-build: mir_promoted: {promoted_ok} bodies ok ({promoted_invalid} invalid afterwards), {n_promoted} promoted bodies, {} blocked, {} const-check errors", blocked.counts.values().sum::<usize>(), const_errors.counts.values().sum::<usize>());

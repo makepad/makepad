@@ -4195,7 +4195,7 @@ impl Program {
             feature: "imports",
             code,
             msg: format!("accepted only with relaxed imports: `{}` is not in scope; will write: `use {};`", self.syms.str(name), path),
-            fix: Some((location.source.path().to_string(), at, format!("use {};\n", path))),
+            fix: Some((location.source.path().to_string(), vec![crate::relaxed::Edit { lo: at, hi: at, text: format!("use {};\n", path) }])),
         });
         Some(d)
     }

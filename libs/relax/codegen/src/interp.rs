@@ -1786,34 +1786,36 @@ unsafe extern "C" fn h_vbin(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     vput(c(fp, w, 0), r);
     next!(pc.add(3), fp, cx)
 }
-fn vop_code(op: VOp) -> u64 {
-    match op {
-        VOp::FAdd | VOp::FAddNeon => 0,
-        VOp::FSub | VOp::FSubNeon => 1,
-        VOp::FMul | VOp::FMulNeon => 2,
-        VOp::FDiv | VOp::FDivNeon => 3,
-        VOp::FAddIntel => 21,
-        VOp::FSubIntel => 22,
-        VOp::FMulIntel => 23,
-        VOp::FDivIntel => 24,
-        VOp::FMinNeon => 4,
-        VOp::FMaxNeon => 5,
-        VOp::FMinLt => 6,
-        VOp::FMaxGt => 7,
-        VOp::IAdd => 8,
-        VOp::ISub => 9,
-        VOp::IMul => 10,
-        VOp::And => 11,
-        VOp::Or => 12,
-        VOp::Xor => 13,
-        VOp::AndNot => 14,
-        VOp::UMin => 15,
-        VOp::Shl => 16,
-        VOp::ShrS => 17,
-        VOp::ShrU => 18,
-        VOp::FCmp(c) => 19 | (cond_code(c) as u64) << 8,
-        VOp::ICmp(c) => 20 | (cond_code(c) as u64) << 8,
-    }
+/// The `h_vbin` code of a 32-bit-lane float, compare or per-lane shift op.
+fn vop_code(op: VX) -> Option<u64> {
+    Some(match op {
+        VX::FAdd(VW::S, NanBits::Host | NanBits::Neon) => 0,
+        VX::FSub(VW::S, NanBits::Host | NanBits::Neon) => 1,
+        VX::FMul(VW::S, NanBits::Host | NanBits::Neon) => 2,
+        VX::FDiv(VW::S, NanBits::Host | NanBits::Neon) => 3,
+        VX::FAdd(VW::S, NanBits::Intel) => 21,
+        VX::FSub(VW::S, NanBits::Intel) => 22,
+        VX::FMul(VW::S, NanBits::Intel) => 23,
+        VX::FDiv(VW::S, NanBits::Intel) => 24,
+        VX::FMinNeon(VW::S) => 4,
+        VX::FMaxNeon(VW::S) => 5,
+        VX::FMinLt(VW::S) => 6,
+        VX::FMaxGt(VW::S) => 7,
+        VX::Add(VW::S) => 8,
+        VX::Sub(VW::S) => 9,
+        VX::MulLo(VW::S) => 10,
+        VX::And => 11,
+        VX::Or => 12,
+        VX::Xor => 13,
+        VX::AndNot => 14,
+        VX::MinU(VW::S) => 15,
+        VX::ShlV(VW::S) => 16,
+        VX::ShrSV(VW::S) => 17,
+        VX::ShrUV(VW::S) => 18,
+        VX::FCmp(c, VW::S) => 19 | (cond_code(c) as u64) << 8,
+        VX::ICmp(c, VW::S) => 20 | (cond_code(c) as u64) << 8,
+        _ => return None,
+    })
 }
 /// [h, d|a, op code]
 unsafe extern "C" fn h_vun(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
@@ -1840,20 +1842,22 @@ unsafe extern "C" fn h_vun(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     vput(c(fp, w, 0), r);
     next!(pc.add(3), fp, cx)
 }
-fn vun_code(op: VUn) -> u64 {
-    match op {
-        VUn::FNeg => 0,
-        VUn::FAbs => 1,
-        VUn::FSqrt | VUn::FSqrtNeon => 2,
-        VUn::FSqrtIntel => 11,
-        VUn::FFloor => 3,
-        VUn::FCeil => 4,
-        VUn::FTrunc => 5,
-        VUn::FRoundAway => 6,
-        VUn::FToI => 7,
-        VUn::IToF => 8,
-        VUn::INeg => 9,
-    }
+/// The `h_vun` code of a 32-bit-lane unary op.
+fn vun_code(op: VX) -> Option<u64> {
+    Some(match op {
+        VX::FNeg(VW::S) => 0,
+        VX::FAbs(VW::S) => 1,
+        VX::FSqrt(VW::S, NanBits::Host | NanBits::Neon) => 2,
+        VX::FSqrt(VW::S, NanBits::Intel) => 11,
+        VX::FRound(VW::S, RoundTo::Floor) => 3,
+        VX::FRound(VW::S, RoundTo::Ceil) => 4,
+        VX::FRound(VW::S, RoundTo::Trunc) => 5,
+        VX::FRound(VW::S, RoundTo::Away) => 6,
+        VX::FToI(VW::S) => 7,
+        VX::IToF(VW::S) => 8,
+        VX::Neg(VW::S) => 9,
+        _ => return None,
+    })
 }
 /// [h, d|m|a|b]
 unsafe extern "C" fn h_vsel(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
@@ -1945,22 +1949,6 @@ unsafe extern "C" fn h_vgather(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     }
     vput(c(fp, w, 0), r);
     next!(pc.add(2), fp, cx)
-}
-/// [h, d|a|amount, op]
-unsafe extern "C" fn h_vshift(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
-    let w = *pc.add(1);
-    let k = ((w >> 32) & 0xffff) as u32;
-    let op = *pc.add(2);
-    let mut v = vget(c(fp, w, 1));
-    for x in v.iter_mut() {
-        *x = match op {
-            16 => if k >= 32 { 0 } else { *x << k },
-            17 => ((*x as i32) >> k.min(31)) as u32,
-            _ => if k >= 32 { 0 } else { *x >> k },
-        };
-    }
-    vput(c(fp, w, 0), v);
-    next!(pc.add(3), fp, cx)
 }
 
 // ---- control
@@ -3162,13 +3150,13 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             l.emit(h_fpenv, &[w, *write as u64]);
         }
         Inst::Cpuid(..) | Inst::Xgetbv(..) => return Err("x86 instruction"),
-        Inst::VBin(op, d, a, b) => {
+        Inst::VX(op, d, a, b) if vop_code(*op).is_some() => {
             let w = l.w3(*d, *a, *b);
-            l.emit(h_vbin, &[w, vop_code(*op)]);
+            l.emit(h_vbin, &[w, vop_code(*op).unwrap()]);
         }
-        Inst::VUn(op, d, a) => {
+        Inst::VX(op, d, a, _) if vun_code(*op).is_some() => {
             let w = l.w2(*d, *a);
-            l.emit(h_vun, &[w, vun_code(*op)]);
+            l.emit(h_vun, &[w, vun_code(*op).unwrap()]);
         }
         Inst::VSel(d, m, a, b) => {
             let w = l.w4(*d, *m, *a, *b);
@@ -3181,10 +3169,6 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
         Inst::VSplat(d, s) => {
             let w = l.w2(*d, *s);
             l.emit(h_vsplat, &[w]);
-        }
-        Inst::VShift(op, d, a, k) => {
-            let w = l.w2(*d, *a) | (*k as u64) << 32;
-            l.emit(h_vshift, &[w, vop_code(*op)]);
         }
         Inst::VExtract(d, v, lane) => {
             let w = l.w2(*d, *v) | (*lane as u64) << 32 | ((l.cls(*d) == Cls::I) as u64) << 48;
@@ -3242,8 +3226,8 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::Call(_, _, rets) => out.extend_from_slice(rets),
         Inst::Cpuid(ds, _, _) => out.extend_from_slice(ds),
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => out.push(*d),
-        Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VUn(_, d, _) | Inst::VSplat(d, _) | Inst::VShift(_, d, _, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
-        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VBin(_, d, _, _) | Inst::VGather(d, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => out.push(*d),
+        Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
+        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => out.push(*d),
         Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }

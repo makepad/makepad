@@ -186,6 +186,10 @@ pub struct Lcx<'a> {
     /// SPEC-V: this body is unverified code: calls that pass `&mut` beside another pointer-holding
     /// argument go to the callee's unverified-mode twin
     plain_calls: bool,
+    /// Relaxed Rust D3: the run-time disjoint-index checks of this body's clean verdict ((earlier,
+    /// later) index expressions), and the slot each earlier index is kept in (by its span).
+    d3: Option<std::sync::Arc<Vec<(relax_types::mir::Span, relax_types::mir::Span)>>>,
+    d3_slots: HashMap<(u32, u32, u32), u32>,
     /// lowering a const/static initializer: borrowed temporaries live in static memory
     /// (rustc's constant promotion), not on the initializer's stack
     const_init: bool,
@@ -346,11 +350,16 @@ impl<'a> Lcx<'a> {
         let ret = u.tcx.normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), b.ret);
         let mut closure_storage = HashMap::default();
         for &ce in b.min_captures.keys() { closure_storage.insert(ce, crate::layout::ClosureStorage::for_codegen(&u.prog, &u.tcx, b, ce)); }
+        // the verdict's disjoint-index checks belong in verified code only (unverified code and its
+        // twins run as written, SPEC-V)
+        let d3 = if plain_calls || (cur_fn as usize) >= u.fns.len() { None } else { u.disjoint_checks(cur_fn) };
         Lcx {
             closure_storage,
             u,
             cur_fn,
             plain_calls,
+            d3,
+            d3_slots: HashMap::default(),
             b,
             f,
             cur: entry,
@@ -3043,7 +3052,7 @@ impl<'a> Lcx<'a> {
     }
 
     /// `base[i]` through `Index::index` / `IndexMut::index_mut`.
-    fn overloaded_index(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId, i: ExprId, t: TyId) -> (Place, TyId) {
+    fn overloaded_index(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId, i: ExprId, t: TyId, span: (u32, u32)) -> (Place, TyId) {
         let mut def = m;
         let mut mutbl = false;
         if self.want_mut {
@@ -3070,6 +3079,10 @@ impl<'a> Lcx<'a> {
         };
         let iv = self.lower_expr_coerced(i, it);
         self.want_mut = saved;
+        if self.d3.is_some() && it == self.u.tcx.tys.usize_ {
+            let leaves = self.to_leaves(iv.clone(), it);
+            self.disjoint_index(span.0, span.1, leaves[0]);
+        }
         let addr = self.place_addr(&pl, pt);
         // an array indexed through its slice's impl: `&[T; N]` unsizes to `&[T]`
         let (self_v, self_t) = match (self.kind(pt), self.kind(args[0])) {
@@ -6971,7 +6984,7 @@ impl<'a> Lcx<'a> {
                     if let Some(k) = (alo..ilo).find(|&k| src.get(k as usize) == Some(&b'[')) {
                         self.pos = k;
                     }
-                    return self.overloaded_index(m, args, pl, pt, *i, t);
+                    return self.overloaded_index(m, args, pl, pt, *i, t, (ex.lo, ex.hi));
                 }
                 let it = self.body_ty(*i);
                 let iv = self.lower_expr(*i);
@@ -6996,6 +7009,7 @@ impl<'a> Lcx<'a> {
                     }
                 };
                 self.bounds_check(iv[0], len);
+                self.disjoint_index(ex.lo, ex.hi, iv[0]);
                 let el = self.layout(elem);
                 let stride = crate::layout::round_up(el.size, el.align);
                 let s = self.iconst(stride as i64);
@@ -7043,6 +7057,49 @@ impl<'a> Lcx<'a> {
         match self.kind(self.body_ty(i)) {
             TyKind::Adt(d, _, _) => matches!(self.u.tcx.lang_items.by_def.get(&d), Some(LangItem::Range | LangItem::RangeFrom | LangItem::RangeTo | LangItem::RangeFull | LangItem::RangeInclusiveStruct | LangItem::RangeToInclusive)),
             _ => false,
+        }
+    }
+
+    /// Whether this lowering makes its verdict's run-time disjoint-index checks (D3).
+    pub fn lowers_disjoint_checks(&self) -> bool { self.d3.is_some() }
+
+    /// Relaxed Rust D3 (the verdict's run-time disjoint-index checks): the index `idx` of the index
+    /// expression at `lo..hi` is kept when a later borrow is checked against it, and compared with
+    /// every earlier index it must differ from; an overlap panics as `get_disjoint_mut(..).unwrap()`
+    /// does (the checker proved the earlier expression runs first on every path to this one).
+    fn disjoint_index(&mut self, lo: u32, hi: u32, idx: VReg) {
+        let Some(checks) = self.d3.clone() else { return };
+        let file = self.b.file;
+        let at = |s: &relax_types::mir::Span| s.file == file && s.lo == lo && s.hi == hi;
+        let slot_of = |this: &mut Self, s: &relax_types::mir::Span| -> u32 {
+            *this.d3_slots.entry((s.file, s.lo, s.hi)).or_insert_with(|| this.f.slot(8, 8))
+        };
+        for (first, second) in checks.iter() {
+            if at(second) {
+                let s = slot_of(self, first);
+                let a = self.f.vreg(Cls::I);
+                self.emit(Inst::SlotAddr(a, s));
+                let v = self.f.vreg(Cls::I);
+                self.emit(Inst::Load(Mem::Int(8, false), v, a, 0));
+                let c = self.f.vreg(Cls::I);
+                self.emit(Inst::ICmp(Cond::Eq, false, c, idx, v));
+                let ok = self.f.block();
+                let bad = self.f.block();
+                self.term(Term::Branch(c, bad, ok));
+                self.switch(bad);
+                let site = self.u.site_sym(self.b.file, lo, "called `Result::unwrap()` on an `Err` value: OverlappingIndices");
+                let sv = self.sym_val(site);
+                let rt = self.u.rs.panic_site;
+                self.emit(Inst::Call(Callee::Host(rt), vec![sv], Vec::new()));
+                self.term(Term::Unreachable);
+                self.switch(ok);
+            }
+        }
+        if checks.iter().any(|(first, _)| at(first)) {
+            let s = slot_of(self, &relax_types::mir::Span { file, lo, hi });
+            let a = self.f.vreg(Cls::I);
+            self.emit(Inst::SlotAddr(a, s));
+            self.emit(Inst::Store(Mem::Int(8, false), a, 0, idx));
         }
     }
 
@@ -10289,26 +10346,26 @@ impl<'a> Lcx<'a> {
                         }
                         40..=53 | 60..=63 => {
                             let fop = match op {
-                                40 => VOp::FAddIntel,
-                                60 => VOp::FAddNeon,
-                                41 => VOp::FSubIntel,
-                                61 => VOp::FSubNeon,
-                                42 => VOp::FMulIntel,
-                                62 => VOp::FMulNeon,
-                                43 => VOp::FDivIntel,
-                                63 => VOp::FDivNeon,
-                                44 => VOp::FMinLt,
-                                45 => VOp::FMaxGt,
-                                46 => VOp::FCmp(Cond::Eq),
-                                47 => VOp::FCmp(Cond::Ne),
-                                48 => VOp::FCmp(Cond::Lt),
-                                49 => VOp::FCmp(Cond::Le),
-                                50 => VOp::FCmp(Cond::Gt),
-                                52 => VOp::FMinNeon,
-                                53 => VOp::FMaxNeon,
-                                _ => VOp::FCmp(Cond::Ge),
+                                40 => VX::FAdd(VW::S, NanBits::Intel),
+                                60 => VX::FAdd(VW::S, NanBits::Neon),
+                                41 => VX::FSub(VW::S, NanBits::Intel),
+                                61 => VX::FSub(VW::S, NanBits::Neon),
+                                42 => VX::FMul(VW::S, NanBits::Intel),
+                                62 => VX::FMul(VW::S, NanBits::Neon),
+                                43 => VX::FDiv(VW::S, NanBits::Intel),
+                                63 => VX::FDiv(VW::S, NanBits::Neon),
+                                44 => VX::FMinLt(VW::S),
+                                45 => VX::FMaxGt(VW::S),
+                                46 => VX::FCmp(Cond::Eq, VW::S),
+                                47 => VX::FCmp(Cond::Ne, VW::S),
+                                48 => VX::FCmp(Cond::Lt, VW::S),
+                                49 => VX::FCmp(Cond::Le, VW::S),
+                                50 => VX::FCmp(Cond::Gt, VW::S),
+                                52 => VX::FMinNeon(VW::S),
+                                53 => VX::FMaxNeon(VW::S),
+                                _ => VX::FCmp(Cond::Ge, VW::S),
                             };
-                            self.emit(Inst::VBin(fop, d, a, b));
+                            self.emit(Inst::VX(fop, d, a, b));
                             return self.vx_result(d, t);
                         }
                         _ => {
@@ -10338,11 +10395,11 @@ impl<'a> Lcx<'a> {
                         5 => VX::BytesShrI(k),
                         6 => VX::BytesShlI(k),
                         7 | 9 => {
-                            self.emit(Inst::VUn(if op == 7 { VUn::FSqrtIntel } else { VUn::FSqrtNeon }, d, a));
+                            self.emit(Inst::VX(VX::FSqrt(VW::S, if op == 7 { NanBits::Intel } else { NanBits::Neon }), d, a, a));
                             return self.vx_result(d, t);
                         }
                         8 => {
-                            self.emit(Inst::VUn(VUn::FAbs, d, a));
+                            self.emit(Inst::VX(VX::FAbs(VW::S), d, a, a));
                             return self.vx_result(d, t);
                         }
                         _ => {

@@ -139,7 +139,7 @@ pub fn vector_byte_masks(f: &Func) -> Vec<bool> {
     for b in &f.blocks {
         for i in &b.insts {
             let mask = match i {
-                Inst::VX(VX::CmpEq(_) | VX::CmpGtS(_), ..) | Inst::VBin(VOp::ICmp(_) | VOp::FCmp(_), ..) => true,
+                Inst::VX(VX::CmpEq(_) | VX::CmpGtS(_) | VX::ICmp(..) | VX::FCmp(..), ..) => true,
                 Inst::VConst(_, k) => k.to_le_bytes().iter().all(|b| *b == 0 || *b == 255),
                 _ => false,
             };

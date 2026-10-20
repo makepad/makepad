@@ -2215,7 +2215,7 @@ impl<'a> Gen<'a> {
             // recomputed at each use (Alloc::remat)
             Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) if self.al.remat[d.0 as usize].is_some() => {}
             Inst::Sel(d, c, a, b) => self.sel(options, *d, *c, *a, *b),
-            Inst::VBin(..) | Inst::VUn(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) | Inst::VShift(..) => self.vinst(options, i),
+            Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(options, i),
             Inst::VX(op, d, a, b) => self.vx(options, *op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::FMulAdd(np, na, w, d, a, b, c) => self.fma(*np, *na, *w, *d, *a, *b, *c),
@@ -2742,7 +2742,141 @@ impl<'a> Gen<'a> {
     }
 
     /// Lane-typed vector ops (core::arch intrinsics): SSE2 .. SSE4.1, xmm0/xmm1 as scratch.
+    /// The 32-bit-lane float, compare and per-lane shift ops (`VW::S`); false for other ops.
+    fn vx_lanes(&mut self, op: VX, d: VReg, a: VReg, b: VReg) -> bool {
+        let _ = b;
+        match op {
+            VX::FAdd(VW::S, _) | VX::FSub(VW::S, _) | VX::FMul(VW::S, _) | VX::FDiv(VW::S, _) | VX::FMinNeon(VW::S) | VX::FMaxNeon(VW::S) | VX::FMinLt(VW::S) | VX::FMaxGt(VW::S) | VX::ShlV(VW::S) | VX::ShrSV(VW::S) | VX::ShrUV(VW::S) | VX::FCmp(_, VW::S) | VX::ICmp(_, VW::S) => {
+                match op {
+                    VX::FAdd(VW::S, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 0, 1, 0x58, None),
+                    VX::FSub(VW::S, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 0, 1, 0x5c, None),
+                    VX::FMul(VW::S, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 0, 1, 0x59, None),
+                    VX::FDiv(VW::S, NanBits::Host | NanBits::Intel) => self.v3(d, a, b, 0, 1, 0x5e, None),
+                    VX::FAdd(VW::S, NanBits::Neon) => self.neon_float(d, a, b, 0x58),
+                    VX::FSub(VW::S, NanBits::Neon) => self.neon_float(d, a, b, 0x5c),
+                    VX::FMul(VW::S, NanBits::Neon) => self.neon_float(d, a, b, 0x59),
+                    VX::FDiv(VW::S, NanBits::Neon) => self.neon_float(d, a, b, 0x5e),
+                    VX::FMinNeon(VW::S) => self.neon_float(d, a, b, 0x5d),
+                    VX::FMaxNeon(VW::S) => self.neon_float(d, a, b, 0x5f),
+                    VX::FMinLt(VW::S) => self.v3(d, a, b, 0, 1, 0x5d, None),
+                    VX::FMaxGt(VW::S) => self.v3(d, a, b, 0, 1, 0x5f, None),
+                    VX::ShlV(VW::S) | VX::ShrSV(VW::S) | VX::ShrUV(VW::S) => {
+                        let xa = self.use_f(a, XS);
+                        let xb = self.use_f(b, XS2);
+                        let xd = self.def_f(d, XS);
+                        let opc = match op {
+                            VX::ShlV(_) => 0x47,
+                            VX::ShrSV(_) => 0x46,
+                            _ => 0x45,
+                        };
+                        self.a.vex_rr(1, 2, false, opc, xd, xa, xb); // vps{ll,ra,rl}vd
+                        self.fin_f(d, xd);
+                    }
+                    VX::FCmp(c, VW::S) => {
+                        let (x, y, pred) = match c {
+                            Cond::Lt => (a, b, 1),
+                            Cond::Le => (a, b, 2),
+                            Cond::Gt => (b, a, 1),
+                            Cond::Ge => (b, a, 2),
+                            Cond::Eq => (a, b, 0),
+                            Cond::Ne => (a, b, 4),
+                        };
+                        self.v3(d, x, y, 0, 1, 0xc2, Some(pred));
+                    }
+                    VX::ICmp(c, VW::S) => {
+                        let (x, y, gt, not) = match c {
+                            Cond::Eq => (a, b, false, false),
+                            Cond::Ne => (a, b, false, true),
+                            Cond::Gt => (a, b, true, false),
+                            Cond::Lt => (b, a, true, false),
+                            Cond::Le => (a, b, true, true),
+                            Cond::Ge => (b, a, true, true),
+                        };
+                        self.v2(d, x, y, &move |m: &mut Asm, p: u8, q: u8| {
+                            m.sse_rr(0x66, if gt { 0x66 } else { 0x76 }, p, q, false);
+                            if not {
+                                m.sse_rr(0x66, 0x76, 1, 1, false); // xmm1 = all ones
+                                m.sse_rr(0x66, 0xef, p, 1, false);
+                            }
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            VX::FNeg(VW::S) | VX::FAbs(VW::S) | VX::FSqrt(VW::S, _) | VX::FRound(VW::S, _) | VX::FToI(VW::S) | VX::IToF(VW::S) | VX::Neg(VW::S) => {
+                let xa = self.use_f(a, XS);
+                match op {
+                    VX::FSqrt(_, NanBits::Neon) => self.neon_float(d, a, a, 0x51),
+                    VX::FNeg(_) | VX::FAbs(_) => {
+                        self.vsplat_const(1, if op == VX::FNeg(VW::S) { 0x8000_0000 } else { 0x7fff_ffff });
+                        self.a.sse_rr(0, if op == VX::FNeg(VW::S) { 0x57 } else { 0x54 }, 1, xa, false);
+                        let xd = self.def_f(d, XS);
+                        self.a.movf_rr(true, xd, 1);
+                        self.fin_f(d, xd);
+                    }
+                    VX::FSqrt(..) | VX::IToF(_) => {
+                        let xd = self.def_f(d, XS);
+                        self.a.sse_rr(0, if matches!(op, VX::FSqrt(..)) { 0x51 } else { 0x5b }, xd, xa, false);
+                        self.fin_f(d, xd);
+                    }
+                    VX::FRound(_, RoundTo::Floor | RoundTo::Ceil | RoundTo::Trunc) => {
+                        let xd = self.def_f(d, XS);
+                        self.a.sse_ext(0x66, 0x3a, 0x08, xd, xa); // roundps
+                        self.a.byte(match op {
+                            VX::FRound(_, RoundTo::Floor) => 9,
+                            VX::FRound(_, RoundTo::Ceil) => 10,
+                            _ => 11,
+                        });
+                        self.fin_f(d, xd);
+                    }
+                    VX::FRound(_, RoundTo::Away) => {
+                        // trunc(x + copysign(0.5 - ulp/2, x))
+                        self.vsplat_const(1, 0x8000_0000);
+                        self.a.sse_rr(0, 0x54, 1, xa, false);
+                        self.vsplat_const(0, 0.49999997f32.to_bits());
+                        self.a.sse_rr(0, 0x56, 1, 0, false);
+                        self.a.movf_rr(true, 0, xa);
+                        self.a.sse_rr(0, 0x58, 0, 1, false);
+                        let xd = self.def_f(d, XS);
+                        self.a.sse_ext(0x66, 0x3a, 0x08, xd, 0);
+                        self.a.byte(11);
+                        self.fin_f(d, xd);
+                    }
+                    VX::FToI(_) => {
+                        // cvttps2dq gives 0x80000000 for NaN and out of range: NaN -> 0,
+                        // x >= 2^31 -> 0x7fffffff (0x80000000 ^ all ones)
+                        self.a.sse_rr(0xf3, 0x5b, 0, xa, false);
+                        self.a.movf_rr(true, 1, xa);
+                        self.a.sse_rr(0, 0xc2, 1, 1, false);
+                        self.a.byte(3); // unord
+                        self.a.sse_rr(0x66, 0xdf, 1, 0, false); // xmm1 = !nan & r
+                        self.vsplat_const(XS2, 0x4f00_0000); // 2^31
+                        self.a.sse_rr(0, 0xc2, XS2, xa, false);
+                        self.a.byte(2); // 2^31 <= x
+                        self.a.sse_rr(0x66, 0xef, 1, XS2, false);
+                        let xd = self.def_f(d, XS);
+                        self.a.movf_rr(true, xd, 1);
+                        self.fin_f(d, xd);
+                    }
+                    VX::Neg(_) => {
+                        self.a.sse_rr(0x66, 0xef, 0, 0, false);
+                        self.a.sse_rr(0x66, 0xfa, 0, xa, false);
+                        let xd = self.def_f(d, XS);
+                        self.a.movf_rr(true, xd, 0);
+                        self.fin_f(d, xd);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn vx(&mut self, options: &relax_session::Options, op: VX, d: VReg, a: VReg, b: VReg) {
+        if self.vx_lanes(op, d, a, b) {
+            return;
+        }
         // SHA-NI has legacy SSE encodings only, with NO mandatory 66 prefix.
         // Do not route these through v3: AVX hosts must still get legacy SHA.
         let sha = match op {
@@ -3106,143 +3240,6 @@ impl<'a> Gen<'a> {
     /// 128-bit vector instructions (SSE4.1; AVX2 for per-lane shifts, FMA3 for VFma).
     fn vinst(&mut self, options: &relax_session::Options, i: &Inst) {
         match *i {
-            Inst::VBin(op, d, a, b) => {
-                match op {
-                    VOp::FAdd | VOp::FAddIntel => self.v3(d, a, b, 0, 1, 0x58, None),
-                    VOp::FSub | VOp::FSubIntel => self.v3(d, a, b, 0, 1, 0x5c, None),
-                    VOp::FMul | VOp::FMulIntel => self.v3(d, a, b, 0, 1, 0x59, None),
-                    VOp::FDiv | VOp::FDivIntel => self.v3(d, a, b, 0, 1, 0x5e, None),
-                    VOp::FAddNeon => self.neon_float(d, a, b, 0x58),
-                    VOp::FSubNeon => self.neon_float(d, a, b, 0x5c),
-                    VOp::FMulNeon => self.neon_float(d, a, b, 0x59),
-                    VOp::FDivNeon => self.neon_float(d, a, b, 0x5e),
-                    VOp::FMinNeon => self.neon_float(d, a, b, 0x5d),
-                    VOp::FMaxNeon => self.neon_float(d, a, b, 0x5f),
-                    VOp::FMinLt => self.v3(d, a, b, 0, 1, 0x5d, None),
-                    VOp::FMaxGt => self.v3(d, a, b, 0, 1, 0x5f, None),
-                    VOp::IAdd => self.v3(d, a, b, 1, 1, 0xfe, None),
-                    VOp::ISub => self.v3(d, a, b, 1, 1, 0xfa, None),
-                    VOp::IMul => self.v3(d, a, b, 1, 2, 0x40, None),
-                    VOp::And => self.v3(d, a, b, 1, 1, 0xdb, None),
-                    VOp::Or => self.v3(d, a, b, 1, 1, 0xeb, None),
-                    VOp::Xor => self.v3(d, a, b, 1, 1, 0xef, None),
-                    VOp::UMin => self.v3(d, a, b, 1, 2, 0x3b, None), // pminud
-                    VOp::AndNot => {
-                        // pandn x, y: x = !x & y; here d = a & !b
-                        let xa = self.use_f(a, XS);
-                        let xb = self.use_f(b, XS2);
-                        self.a.movf_rr(true, 0, xb);
-                        self.a.sse_rr(0x66, 0xdf, 0, xa, false);
-                        let xd = self.def_f(d, XS);
-                        self.a.movf_rr(true, xd, 0);
-                        self.fin_f(d, xd);
-                    }
-                    VOp::Shl | VOp::ShrS | VOp::ShrU => {
-                        let xa = self.use_f(a, XS);
-                        let xb = self.use_f(b, XS2);
-                        let xd = self.def_f(d, XS);
-                        let opc = match op {
-                            VOp::Shl => 0x47,
-                            VOp::ShrS => 0x46,
-                            _ => 0x45,
-                        };
-                        self.a.vex_rr(1, 2, false, opc, xd, xa, xb); // vps{ll,ra,rl}vd
-                        self.fin_f(d, xd);
-                    }
-                    VOp::FCmp(c) => {
-                        let (x, y, pred) = match c {
-                            Cond::Lt => (a, b, 1),
-                            Cond::Le => (a, b, 2),
-                            Cond::Gt => (b, a, 1),
-                            Cond::Ge => (b, a, 2),
-                            Cond::Eq => (a, b, 0),
-                            Cond::Ne => (a, b, 4),
-                        };
-                        self.v3(d, x, y, 0, 1, 0xc2, Some(pred));
-                    }
-                    VOp::ICmp(c) => {
-                        let (x, y, gt, not) = match c {
-                            Cond::Eq => (a, b, false, false),
-                            Cond::Ne => (a, b, false, true),
-                            Cond::Gt => (a, b, true, false),
-                            Cond::Lt => (b, a, true, false),
-                            Cond::Le => (a, b, true, true),
-                            Cond::Ge => (b, a, true, true),
-                        };
-                        self.v2(d, x, y, &move |m: &mut Asm, p: u8, q: u8| {
-                            m.sse_rr(0x66, if gt { 0x66 } else { 0x76 }, p, q, false);
-                            if not {
-                                m.sse_rr(0x66, 0x76, 1, 1, false); // xmm1 = all ones
-                                m.sse_rr(0x66, 0xef, p, 1, false);
-                            }
-                        });
-                    }
-                }
-            }
-            Inst::VUn(op, d, a) => {
-                let xa = self.use_f(a, XS);
-                match op {
-                    VUn::FSqrtNeon => self.neon_float(d, a, a, 0x51),
-                    VUn::FNeg | VUn::FAbs => {
-                        self.vsplat_const(1, if op == VUn::FNeg { 0x8000_0000 } else { 0x7fff_ffff });
-                        self.a.sse_rr(0, if op == VUn::FNeg { 0x57 } else { 0x54 }, 1, xa, false);
-                        let xd = self.def_f(d, XS);
-                        self.a.movf_rr(true, xd, 1);
-                        self.fin_f(d, xd);
-                    }
-                    VUn::FSqrt | VUn::FSqrtIntel | VUn::IToF => {
-                        let xd = self.def_f(d, XS);
-                        self.a.sse_rr(0, if matches!(op, VUn::FSqrt | VUn::FSqrtIntel) { 0x51 } else { 0x5b }, xd, xa, false);
-                        self.fin_f(d, xd);
-                    }
-                    VUn::FFloor | VUn::FCeil | VUn::FTrunc => {
-                        let xd = self.def_f(d, XS);
-                        self.a.sse_ext(0x66, 0x3a, 0x08, xd, xa); // roundps
-                        self.a.byte(match op {
-                            VUn::FFloor => 9,
-                            VUn::FCeil => 10,
-                            _ => 11,
-                        });
-                        self.fin_f(d, xd);
-                    }
-                    VUn::FRoundAway => {
-                        // trunc(x + copysign(0.5 - ulp/2, x))
-                        self.vsplat_const(1, 0x8000_0000);
-                        self.a.sse_rr(0, 0x54, 1, xa, false);
-                        self.vsplat_const(0, 0.49999997f32.to_bits());
-                        self.a.sse_rr(0, 0x56, 1, 0, false);
-                        self.a.movf_rr(true, 0, xa);
-                        self.a.sse_rr(0, 0x58, 0, 1, false);
-                        let xd = self.def_f(d, XS);
-                        self.a.sse_ext(0x66, 0x3a, 0x08, xd, 0);
-                        self.a.byte(11);
-                        self.fin_f(d, xd);
-                    }
-                    VUn::FToI => {
-                        // cvttps2dq gives 0x80000000 for NaN and out of range: NaN -> 0,
-                        // x >= 2^31 -> 0x7fffffff (0x80000000 ^ all ones)
-                        self.a.sse_rr(0xf3, 0x5b, 0, xa, false);
-                        self.a.movf_rr(true, 1, xa);
-                        self.a.sse_rr(0, 0xc2, 1, 1, false);
-                        self.a.byte(3); // unord
-                        self.a.sse_rr(0x66, 0xdf, 1, 0, false); // xmm1 = !nan & r
-                        self.vsplat_const(XS2, 0x4f00_0000); // 2^31
-                        self.a.sse_rr(0, 0xc2, XS2, xa, false);
-                        self.a.byte(2); // 2^31 <= x
-                        self.a.sse_rr(0x66, 0xef, 1, XS2, false);
-                        let xd = self.def_f(d, XS);
-                        self.a.movf_rr(true, xd, 1);
-                        self.fin_f(d, xd);
-                    }
-                    VUn::INeg => {
-                        self.a.sse_rr(0x66, 0xef, 0, 0, false);
-                        self.a.sse_rr(0x66, 0xfa, 0, xa, false);
-                        let xd = self.def_f(d, XS);
-                        self.a.movf_rr(true, xd, 0);
-                        self.fin_f(d, xd);
-                    }
-                }
-            }
             Inst::VSel(d, m, a, b) => {
                 if self.avx && self.byte_masks[m.0 as usize] {
                     let xm = self.use_f(m, 0);
@@ -3350,23 +3347,6 @@ impl<'a> Gen<'a> {
                 let rb = self.use_i(options, base, R11);
                 let xv = self.use_f(v, XS);
                 self.a.sse_rm(0, 0x11, xv, rb, off);
-            }
-            Inst::VShift(op, d, a, k) => {
-                // psll/psrl/psra d, imm8 (66 0F 72 /6, /2, /4)
-                let xa = self.use_f(a, XS);
-                let xd = self.def_f(d, XS);
-                self.a.movf_rr(true, xd, xa);
-                self.a.byte(0x66);
-                self.a.rex(false, 0, 0, xd, false);
-                self.a.byte(0x0f);
-                self.a.byte(0x72);
-                self.a.modrm_rr(match op {
-                    VOp::Shl => 6,
-                    VOp::ShrS => 4,
-                    _ => 2,
-                }, xd);
-                self.a.byte(k & 31);
-                self.fin_f(d, xd);
             }
             Inst::VConst(d, bits) => {
                 // movups xd, [rip + entry]

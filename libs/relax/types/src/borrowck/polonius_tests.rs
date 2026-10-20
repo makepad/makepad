@@ -78,17 +78,54 @@ fn get_default_and_filtering_lending_iterator_use_final_polonius_verdict() {
     // #92985 / #51526 reduce to the same return-or-loop graph. GAT/type
     // normalization is intentionally outside these MIR tests.
     for filtering in [false, true] {
-        let tcx = Tcx::new(); let (b, mut i) = conditional_return(&tcx, filtering);
-        let moves = gather(&tcx, &b);
-        generate(&tcx, &b, &moves, &mut i, &vec![vec![]; b.local_decls.len()]);
-        let mut regions = compute_regions(&tcx, &test_prog(), &b, i, false);
-        let nll = check_with_scopes(&test_prog(), &tcx, &b, &regions, &moves);
+        let tcx = Tcx::new();
+        // (owner, prog): strict (no crate), relaxed without `polonius`, relaxed with it
+        let run = |prog: &crate::program::Program, owner: Option<crate::program::DefId>| {
+            let (mut b, mut i) = conditional_return(&tcx, filtering);
+            if let Some(o) = owner { b.source.owner = o; }
+            let moves = gather(&tcx, &b);
+            generate(&tcx, &b, &moves, &mut i, &vec![vec![]; b.local_decls.len()]);
+            let mut regions = compute_regions(&tcx, &test_prog(), &b, i, false);
+            let nll = check_with_scopes(&test_prog(), &tcx, &b, &regions, &moves);
+            let result = mir_borrowck(&tcx, prog, &b, &mut regions, &moves);
+            let polonius = check_polonius(&tcx, &test_prog(), &b, &regions, &moves);
+            (nll, result, polonius)
+        };
+        let (nll, strict, polonius) = run(&test_prog(), None);
         assert!(!nll.accepted(), "fixture must expose NLL's imprecision");
         assert!(nll.errors.iter().any(|e| matches!(e.code(), "E0499" | "E0506")), "{nll:?}");
-        let result = mir_borrowck(&tcx, &test_prog(), &b, &mut regions, &moves);
+        assert!(polonius.accepted());
+        // Stable rustc is NLL: the strict verdict keeps the errors.
+        assert_eq!(codes(&strict), codes(&nll), "filtering={filtering}: strict must be NLL's verdict");
+        assert!(strict.fv_only.is_empty() && strict.relaxed_records.is_empty());
+        // Relaxed Rust without the `polonius` feature: still NLL.
+        let (prog, owner) = relaxed_prog("field-views,two-phase,mut");
+        let (_, other, _) = run(&prog, Some(owner));
+        assert_eq!(codes(&other), codes(&nll));
+        // Relaxed Rust `polonius`: accepted, every NLL error reported as accepted under Polonius.
+        let (prog, owner) = relaxed_prog("polonius");
+        let (_, result, _) = run(&prog, Some(owner));
         assert!(result.accepted(), "filtering={filtering}: {result:?}");
-        assert!(check_polonius(&tcx, &test_prog(), &b, &regions, &moves).accepted());
+        assert_eq!(result.fv_only.len(), nll.errors.len());
+        assert!(result.fv_only.iter().all(|e| matches!(e.fv.as_deref(), Some(crate::borrowck::borrowck_errors::FvNote::Polonius))));
+        assert_eq!(result.relaxed_records.len(), nll.errors.len());
     }
+}
+
+/// A program with one crate whose relaxed Rust features are `features` (MAKEPAD_RUN_RELAXED), and
+/// a fn of it to own fixture MIR.
+fn relaxed_prog(features: &str) -> (crate::program::Program, crate::program::DefId) {
+    let mut session = crate::Session::default();
+    session.options.relaxed = Some(features.to_string());
+    let session = std::sync::Arc::new(session);
+    let path = std::env::temp_dir().join(format!("relax-polonius-{}-{:?}.rs", std::process::id(), std::thread::current().id()));
+    std::fs::write(&path, "fn owner() {}\nfn main() {}\n").unwrap();
+    let mut prog = crate::program::Program::new(&session);
+    prog.load_crate("custom", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), Vec::new()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let owner = (0..prog.defs.len()).map(|i| crate::program::DefId(i as u32))
+        .find(|&d| prog.def(d).kind == crate::program::DefKind::Fn && prog.name(d) == "owner").unwrap();
+    (prog, owner)
 }
 #[test]
 fn lending_items_still_reject_overlapping_use_and_drop_liveness() {

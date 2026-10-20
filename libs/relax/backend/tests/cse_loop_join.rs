@@ -15,7 +15,7 @@ fn zero_is_not_read_from_a_vreg_the_loop_redefines() {
     f.rets = vec![Cls::I];
     let b: Vec<u32> = (0..8).map(|_| f.block()).collect();
     let (v, z, y) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
-    let mut push = |f: &mut Func, bi: u32, i: Inst| {
+    let push = |f: &mut Func, bi: u32, i: Inst| {
         f.blocks[bi as usize].insts.push(i);
         f.blocks[bi as usize].pos.push(0);
     };

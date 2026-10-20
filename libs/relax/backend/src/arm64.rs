@@ -23,6 +23,27 @@ use crate::cabi::{self, ArgPlan, PLoc, Plan, RetPlan};
 use crate::regalloc::{self, Alloc, Loc, MLoc, RegConfig, Remat};
 use crate::rir::*;
 
+// NEON vector instruction words (.4s / .16b forms; registers or-ed in by the emitters)
+mod v4s {
+    pub const FADD: u32 = 0x4E20_D400;
+    pub const FSUB: u32 = 0x4EA0_D400;
+    pub const FMUL: u32 = 0x6E20_DC00;
+    pub const FDIV: u32 = 0x6E20_FC00;
+    pub const FCMEQ: u32 = 0x4E20_E400;
+    pub const FCMGE: u32 = 0x6E20_E400;
+    pub const FCMGT: u32 = 0x6EA0_E400;
+    pub const BSL: u32 = 0x6E60_1C00;
+    pub const CMEQ: u32 = 0x6EA0_8C00;
+    pub const CMGT: u32 = 0x4EA0_3400;
+    pub const CMGE: u32 = 0x4EA0_3C00;
+    pub const SSHL: u32 = 0x4EA0_4400;
+    pub const USHL: u32 = 0x6EA0_4400;
+    pub const NEG: u32 = 0x6EA0_B800;
+    pub const NOT: u32 = 0x6E20_5800;
+    pub const VFNEG: u32 = 0x6EA0_F800;
+}
+
+
 pub const THUNK_SIZE: usize = 32;
 pub const STUB_SIZE: usize = 32;
 
@@ -1823,7 +1844,109 @@ impl<'a> Gen<'a> {
 
     /// Lane-typed vector ops (core::arch intrinsics), NEON. Scratch: v29-v31 (FS*) and
     /// v4-v7 (argument registers, unallocated inside an instruction).
+    /// The 32-bit-lane float, compare and per-lane shift ops (`VW::S`); false for other ops.
+    fn vx_lanes(&mut self, op: VX, d: VReg, a: VReg, b: VReg) -> bool {
+        use v4s::*;
+        let _ = b;
+        match op {
+            VX::FAdd(VW::S, _) | VX::FSub(VW::S, _) | VX::FMul(VW::S, _) | VX::FDiv(VW::S, _) | VX::FMinNeon(VW::S) | VX::FMaxNeon(VW::S) | VX::FMinLt(VW::S) | VX::FMaxGt(VW::S) | VX::ShlV(VW::S) | VX::ShrSV(VW::S) | VX::ShrUV(VW::S) | VX::FCmp(_, VW::S) | VX::ICmp(_, VW::S) => {
+                let xa = self.use_f(a, FS0);
+                let xb = self.use_f(b, FS1);
+                let xd = self.def_f(d, FS0);
+                match op {
+                    VX::FAdd(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FADD, xd, xa, xb),
+                    VX::FSub(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FSUB, xd, xa, xb),
+                    VX::FMul(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FMUL, xd, xa, xb),
+                    VX::FDiv(VW::S, NanBits::Host | NanBits::Neon) => self.v3(FDIV, xd, xa, xb),
+                    VX::FMinNeon(VW::S) => self.v3(0x4EA0_F400, xd, xa, xb),
+                    VX::FMaxNeon(VW::S) => self.v3(0x4E20_F400, xd, xa, xb),
+                    VX::FAdd(VW::S, NanBits::Intel) | VX::FSub(VW::S, NanBits::Intel) | VX::FMul(VW::S, NanBits::Intel) | VX::FDiv(VW::S, NanBits::Intel) => {
+                        let opc = match op {
+                            VX::FAdd(..) => FADD,
+                            VX::FSub(..) => FSUB,
+                            VX::FMul(..) => FMUL,
+                            _ => FDIV,
+                        };
+                        self.v3(opc, 4, xa, xb);
+                        self.intel_nan(4, xa, xb);
+                        self.vmov(xd, 4);
+                    }
+                    VX::FMinLt(VW::S) | VX::FMaxGt(VW::S) => {
+                        // mask = b > a (min) / a > b (max), false for NaN lanes: pick a there
+                        if op == VX::FMinLt(VW::S) {
+                            self.v3(FCMGT, FS2, xb, xa);
+                        } else {
+                            self.v3(FCMGT, FS2, xa, xb);
+                        }
+                        self.v3(BSL, FS2, xa, xb);
+                        self.vmov(xd, FS2);
+                    }
+                    VX::ShlV(VW::S) => self.v3(USHL, xd, xa, xb),
+                    VX::ShrSV(VW::S) | VX::ShrUV(VW::S) => {
+                        self.v2(NEG, FS2, xb);
+                        self.v3(if op == VX::ShrSV(VW::S) { SSHL } else { USHL }, xd, xa, FS2);
+                    }
+                    VX::FCmp(c, VW::S) => match c {
+                        Cond::Lt => self.v3(FCMGT, xd, xb, xa),
+                        Cond::Le => self.v3(FCMGE, xd, xb, xa),
+                        Cond::Gt => self.v3(FCMGT, xd, xa, xb),
+                        Cond::Ge => self.v3(FCMGE, xd, xa, xb),
+                        Cond::Eq => self.v3(FCMEQ, xd, xa, xb),
+                        Cond::Ne => {
+                            self.v3(FCMEQ, xd, xa, xb);
+                            self.v2(NOT, xd, xd);
+                        }
+                    },
+                    VX::ICmp(c, VW::S) => match c {
+                        Cond::Lt => self.v3(CMGT, xd, xb, xa),
+                        Cond::Le => self.v3(CMGE, xd, xb, xa),
+                        Cond::Gt => self.v3(CMGT, xd, xa, xb),
+                        Cond::Ge => self.v3(CMGE, xd, xa, xb),
+                        Cond::Eq => self.v3(CMEQ, xd, xa, xb),
+                        Cond::Ne => {
+                            self.v3(CMEQ, xd, xa, xb);
+                            self.v2(NOT, xd, xd);
+                        }
+                    },
+                    _ => unreachable!(),
+                }
+                self.fin_f(d, xd);
+            }
+            VX::FNeg(VW::S) | VX::FAbs(VW::S) | VX::FSqrt(VW::S, _) | VX::FRound(VW::S, _) | VX::FToI(VW::S) | VX::IToF(VW::S) | VX::Neg(VW::S) => {
+                let xa = self.use_f(a, FS0);
+                let xd = self.def_f(d, FS0);
+                if op == VX::FSqrt(VW::S, NanBits::Intel) {
+                    self.v2(0x6EA1_F800, 4, xa);
+                    self.intel_nan(4, xa, xa);
+                    self.vmov(xd, 4);
+                    self.fin_f(d, xd);
+                    return true;
+                }
+                let opc = match op {
+                    VX::FNeg(_) => VFNEG,
+                    VX::FAbs(_) => 0x4EA0_F800,
+                    VX::FSqrt(..) => 0x6EA1_F800,
+                    VX::FRound(_, RoundTo::Floor) => 0x4E21_9800,
+                    VX::FRound(_, RoundTo::Ceil) => 0x4EA1_8800,
+                    VX::FRound(_, RoundTo::Trunc) => 0x4EA1_9800,
+                    VX::FRound(_, RoundTo::Away) => 0x6E21_8800,
+                    VX::FToI(_) => 0x4EA1_B800,
+                    VX::IToF(_) => 0x4E21_D800,
+                    VX::Neg(_) => NEG,
+                    _ => unreachable!(),
+                };
+                self.v2(opc, xd, xa);
+                self.fin_f(d, xd);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn vx(&mut self, op: VX, d: VReg, a: VReg, b: VReg) {
+        if self.vx_lanes(op, d, a, b) {
+            return;
+        }
         // core::arch exposes Intel semantics on Arm too (check_arch's cross-ISA
         // fixtures exercise them). Keep these in hardware, with lane conversion.
         if matches!(op, VX::X86Sha1Rnds4(_) | VX::X86Sha1NextE | VX::X86Sha1Msg1
@@ -2169,125 +2292,8 @@ impl<'a> Gen<'a> {
 
     /// 128-bit vector instructions (NEON, 4 x 32-bit lanes; FPCR as the scalar code).
     fn vinst(&mut self, i: &Inst) {
-        const FADD: u32 = 0x4E20_D400;
-        const FSUB: u32 = 0x4EA0_D400;
-        const FMUL: u32 = 0x6E20_DC00;
-        const FDIV: u32 = 0x6E20_FC00;
-        const FCMEQ: u32 = 0x4E20_E400;
-        const FCMGE: u32 = 0x6E20_E400;
-        const FCMGT: u32 = 0x6EA0_E400;
-        const ADD: u32 = 0x4EA0_8400;
-        const SUB: u32 = 0x6EA0_8400;
-        const MUL: u32 = 0x4EA0_9C00;
-        const AND: u32 = 0x4E20_1C00;
-        const ORR: u32 = 0x4EA0_1C00;
-        const EOR: u32 = 0x6E20_1C00;
-        const BIC: u32 = 0x4E60_1C00;
-        const BSL: u32 = 0x6E60_1C00;
-        const CMEQ: u32 = 0x6EA0_8C00;
-        const CMGT: u32 = 0x4EA0_3400;
-        const CMGE: u32 = 0x4EA0_3C00;
-        const SSHL: u32 = 0x4EA0_4400;
-        const USHL: u32 = 0x6EA0_4400;
-        const NEG: u32 = 0x6EA0_B800;
-        const NOT: u32 = 0x6E20_5800;
-        const VFNEG: u32 = 0x6EA0_F800;
+        use v4s::*;
         match *i {
-            Inst::VBin(op, d, a, b) => {
-                let xa = self.use_f(a, FS0);
-                let xb = self.use_f(b, FS1);
-                let xd = self.def_f(d, FS0);
-                match op {
-                    VOp::FAdd | VOp::FAddNeon => self.v3(FADD, xd, xa, xb),
-                    VOp::FSub | VOp::FSubNeon => self.v3(FSUB, xd, xa, xb),
-                    VOp::FMul | VOp::FMulNeon => self.v3(FMUL, xd, xa, xb),
-                    VOp::FDiv | VOp::FDivNeon => self.v3(FDIV, xd, xa, xb),
-                    VOp::FMinNeon => self.v3(0x4EA0_F400, xd, xa, xb),
-                    VOp::FMaxNeon => self.v3(0x4E20_F400, xd, xa, xb),
-                    VOp::FAddIntel | VOp::FSubIntel | VOp::FMulIntel | VOp::FDivIntel => {
-                        let opc = match op {
-                            VOp::FAddIntel => FADD,
-                            VOp::FSubIntel => FSUB,
-                            VOp::FMulIntel => FMUL,
-                            _ => FDIV,
-                        };
-                        self.v3(opc, 4, xa, xb);
-                        self.intel_nan(4, xa, xb);
-                        self.vmov(xd, 4);
-                    }
-                    VOp::FMinLt | VOp::FMaxGt => {
-                        // mask = b > a (min) / a > b (max), false for NaN lanes: pick a there
-                        if op == VOp::FMinLt {
-                            self.v3(FCMGT, FS2, xb, xa);
-                        } else {
-                            self.v3(FCMGT, FS2, xa, xb);
-                        }
-                        self.v3(BSL, FS2, xa, xb);
-                        self.vmov(xd, FS2);
-                    }
-                    VOp::IAdd => self.v3(ADD, xd, xa, xb),
-                    VOp::ISub => self.v3(SUB, xd, xa, xb),
-                    VOp::IMul => self.v3(MUL, xd, xa, xb),
-                    VOp::And => self.v3(AND, xd, xa, xb),
-                    VOp::Or => self.v3(ORR, xd, xa, xb),
-                    VOp::Xor => self.v3(EOR, xd, xa, xb),
-                    VOp::AndNot => self.v3(BIC, xd, xa, xb),
-                    VOp::UMin => self.v3(0x6EA0_6C00, xd, xa, xb), // umin v.4s
-                    VOp::Shl => self.v3(USHL, xd, xa, xb),
-                    VOp::ShrS | VOp::ShrU => {
-                        self.v2(NEG, FS2, xb);
-                        self.v3(if op == VOp::ShrS { SSHL } else { USHL }, xd, xa, FS2);
-                    }
-                    VOp::FCmp(c) => match c {
-                        Cond::Lt => self.v3(FCMGT, xd, xb, xa),
-                        Cond::Le => self.v3(FCMGE, xd, xb, xa),
-                        Cond::Gt => self.v3(FCMGT, xd, xa, xb),
-                        Cond::Ge => self.v3(FCMGE, xd, xa, xb),
-                        Cond::Eq => self.v3(FCMEQ, xd, xa, xb),
-                        Cond::Ne => {
-                            self.v3(FCMEQ, xd, xa, xb);
-                            self.v2(NOT, xd, xd);
-                        }
-                    },
-                    VOp::ICmp(c) => match c {
-                        Cond::Lt => self.v3(CMGT, xd, xb, xa),
-                        Cond::Le => self.v3(CMGE, xd, xb, xa),
-                        Cond::Gt => self.v3(CMGT, xd, xa, xb),
-                        Cond::Ge => self.v3(CMGE, xd, xa, xb),
-                        Cond::Eq => self.v3(CMEQ, xd, xa, xb),
-                        Cond::Ne => {
-                            self.v3(CMEQ, xd, xa, xb);
-                            self.v2(NOT, xd, xd);
-                        }
-                    },
-                }
-                self.fin_f(d, xd);
-            }
-            Inst::VUn(op, d, a) => {
-                let xa = self.use_f(a, FS0);
-                let xd = self.def_f(d, FS0);
-                if op == VUn::FSqrtIntel {
-                    self.v2(0x6EA1_F800, 4, xa);
-                    self.intel_nan(4, xa, xa);
-                    self.vmov(xd, 4);
-                    self.fin_f(d, xd);
-                    return;
-                }
-                let opc = match op {
-                    VUn::FNeg => VFNEG,
-                    VUn::FAbs => 0x4EA0_F800,
-                    VUn::FSqrt | VUn::FSqrtIntel | VUn::FSqrtNeon => 0x6EA1_F800,
-                    VUn::FFloor => 0x4E21_9800,
-                    VUn::FCeil => 0x4EA1_8800,
-                    VUn::FTrunc => 0x4EA1_9800,
-                    VUn::FRoundAway => 0x6E21_8800,
-                    VUn::FToI => 0x4EA1_B800,
-                    VUn::IToF => 0x4E21_D800,
-                    VUn::INeg => NEG,
-                };
-                self.v2(opc, xd, xa);
-                self.fin_f(d, xd);
-            }
             Inst::VSel(d, m, a, b) => {
                 // bsl works in place on the mask: build it in d's register when a and b
                 // live elsewhere
@@ -2369,22 +2375,6 @@ impl<'a> Gen<'a> {
                 let rb = self.use_i(base, S1);
                 let xv = self.use_f(v, FS0);
                 self.vldst(false, xv, rb, off as i64);
-            }
-            Inst::VShift(op, d, a, k) => {
-                let xa = self.use_f(a, FS0);
-                let xd = self.def_f(d, FS0);
-                let k = (k & 31) as u32;
-                if k == 0 {
-                    self.vmov(xd, xa);
-                } else {
-                    let w = match op {
-                        VOp::Shl => 0x4F00_5400 | (32 + k) << 16,  // shl
-                        VOp::ShrS => 0x4F00_0400 | (64 - k) << 16, // sshr
-                        _ => 0x6F00_0400 | (64 - k) << 16,         // ushr
-                    };
-                    self.a.e(w | (xa as u32) << 5 | xd as u32);
-                }
-                self.fin_f(d, xd);
             }
             Inst::VConst(d, bits) => {
                 let xd = self.def_f(d, FS0);
@@ -3017,7 +3007,7 @@ impl<'a> Gen<'a> {
                 self.a.e(0xD53B_4400 | rd as u32);
                 self.fin_i(*d, rd);
             }
-            Inst::VBin(..) | Inst::VUn(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) | Inst::VShift(..) => self.vinst(i),
+            Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
             Inst::VX(op, d, a, b) => self.vx(*op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::Sel(d, c, a, b) => {

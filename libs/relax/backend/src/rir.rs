@@ -12,50 +12,8 @@ pub enum Cls {
     V128,
 }
 
-/// Lane-wise binary ops on V128 (four 32-bit lanes). Compares give lane masks (all ones /
-/// zero) with the scalar ops' meaning (float `Ne` is true for unordered lanes; integer
-/// compares are signed). Shift amounts are per lane and must be in 0..32.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum VOp {
-    FAdd,
-    FSub,
-    FMul,
-    FDiv,
-    /// SSE arithmetic NaN selection (first NaN operand; negative indefinite).
-    FAddIntel,
-    FSubIntel,
-    FMulIntel,
-    FDivIntel,
-    /// NEON arithmetic (signaling NaNs first; positive default NaN).
-    FAddNeon,
-    FSubNeon,
-    FMulNeon,
-    FDivNeon,
-    /// NEON propagating min/max, including signed-zero ordering.
-    FMinNeon,
-    FMaxNeon,
-    /// `a < b ? a : b` per lane
-    FMinLt,
-    /// `a > b ? a : b` per lane
-    FMaxGt,
-    IAdd,
-    ISub,
-    IMul,
-    And,
-    Or,
-    Xor,
-    /// a & !b
-    AndNot,
-    /// unsigned 32-bit minimum per lane
-    UMin,
-    Shl,
-    ShrS,
-    ShrU,
-    FCmp(Cond),
-    ICmp(Cond),
-}
-
-/// Lane width of a lane-typed vector op (`Inst::VX`): 8, 16, 32 or 64 bits.
+/// Lane width of a lane-typed vector op (`Inst::VX`): 8, 16, 32 or 64 bits (float ops: S = f32,
+/// D = f64).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum VW {
     B,
@@ -75,6 +33,27 @@ impl VW {
     }
 }
 
+/// Which NaN a float vector op produces when an input is NaN (the other bits are IEEE-exact).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum NanBits {
+    /// the host instruction's NaN (Rust leaves the payload unspecified)
+    Host,
+    /// SSE: the first NaN operand, quieted; the negative default NaN otherwise
+    Intel,
+    /// NEON: signaling NaNs first; the positive default NaN otherwise
+    Neon,
+}
+
+/// Rounding of `VX::FRound`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RoundTo {
+    Floor,
+    Ceil,
+    Trunc,
+    /// half away from zero
+    Away,
+}
+
 /// Lane-typed 128-bit vector ops (`Inst::VX(op, d, a, b)`): the core::arch intrinsics'
 /// operations (NEON / SSE2..SSE4.1 semantics; each backend picks its instructions).
 /// Unary ops ignore `b` (it repeats `a`). `d` is a V128 unless noted; scalar operands and
@@ -82,6 +61,26 @@ impl VW {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum VX {
     // ---- binary, V128 x V128 -> V128, lane-wise
+    /// float lanes (S: f32, D: f64)
+    FAdd(VW, NanBits),
+    FSub(VW, NanBits),
+    FMul(VW, NanBits),
+    FDiv(VW, NanBits),
+    /// `a < b ? a : b` per lane
+    FMinLt(VW),
+    /// `a > b ? a : b` per lane
+    FMaxGt(VW),
+    /// NEON propagating min/max, including signed-zero ordering
+    FMinNeon(VW),
+    FMaxNeon(VW),
+    /// all ones / zero per lane, the scalar compare's meaning (`Ne` is true for unordered lanes)
+    FCmp(Cond, VW),
+    /// signed integer compare, all ones / zero per lane
+    ICmp(Cond, VW),
+    /// shifts by per-lane amounts (each in 0..lane bits)
+    ShlV(VW),
+    ShrSV(VW),
+    ShrUV(VW),
     Add(VW),
     Sub(VW),
     /// low half of the product (H, S)
@@ -145,6 +144,16 @@ pub enum VX {
     ArmSha256H2,
     ArmSha256Su1,
     // ---- unary, V128 -> V128
+    FNeg(VW),
+    FAbs(VW),
+    FSqrt(VW, NanBits),
+    FRound(VW, RoundTo),
+    /// float -> integer of the same width, truncating, saturating, NaN -> 0 (Rust `as`)
+    FToI(VW),
+    /// signed integer -> float of the same width, round to nearest
+    IToF(VW),
+    /// wrapping integer negation
+    Neg(VW),
     Abs(VW),
     ShlI(VW, u8),
     ShrUI(VW, u8),
@@ -182,7 +191,7 @@ impl VX {
     /// Operands read: 1 (unary, scalar-from), 2, or 3 (Inst::VX3).
     pub fn arity(self) -> usize {
         match self {
-            VX::ArmSha1H | VX::Abs(_) | VX::ShlI(..) | VX::ShrUI(..) | VX::ShrSI(..) | VX::ShufS(_) | VX::BytesShrI(_) | VX::BytesShlI(_) | VX::WidenLoU(_) | VX::WidenHiU(_) | VX::WidenLoS(_) | VX::WidenHiS(_) | VX::PairAddLongU(_) | VX::Splat(_) | VX::Extract(..) | VX::MoveMaskB | VX::AddAcross(_) | VX::MaxAcrossU(_) | VX::FromLo64 => 1,
+            VX::ArmSha1H | VX::FNeg(_) | VX::FAbs(_) | VX::FSqrt(..) | VX::FRound(..) | VX::FToI(_) | VX::IToF(_) | VX::Neg(_) | VX::Abs(_) | VX::ShlI(..) | VX::ShrUI(..) | VX::ShrSI(..) | VX::ShufS(_) | VX::BytesShrI(_) | VX::BytesShlI(_) | VX::WidenLoU(_) | VX::WidenHiU(_) | VX::WidenLoS(_) | VX::WidenHiS(_) | VX::PairAddLongU(_) | VX::Splat(_) | VX::Extract(..) | VX::MoveMaskB | VX::AddAcross(_) | VX::MaxAcrossU(_) | VX::FromLo64 => 1,
             VX::X86Sha256Rnds2 | VX::ArmSha1C | VX::ArmSha1P | VX::ArmSha1M
             | VX::ArmSha1Su0 | VX::ArmSha256H | VX::ArmSha256H2 | VX::ArmSha256Su1 => 3,
             _ => 2,
@@ -193,27 +202,6 @@ impl VX {
     pub fn scalar_result(self) -> bool {
         matches!(self, VX::Extract(..) | VX::MoveMaskB | VX::AddAcross(_) | VX::MaxAcrossU(_))
     }
-}
-
-/// Lane-wise unary ops on V128.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum VUn {
-    FNeg,
-    FAbs,
-    FSqrt,
-    /// SSE sqrt NaN payload/sign semantics.
-    FSqrtIntel,
-    FSqrtNeon,
-    FFloor,
-    FCeil,
-    FTrunc,
-    /// round half away from zero
-    FRoundAway,
-    /// f32 -> i32, truncating, saturating, NaN -> 0 (Rust `as`)
-    FToI,
-    /// i32 -> f32, round to nearest
-    IToF,
-    INeg,
 }
 
 /// Bit operations on a 64-bit integer (`IBit`): counts are 0..=64 (clz/ctz of 0 = 64);
@@ -264,7 +252,7 @@ pub enum IOp {
     Rotl,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Cond {
     Eq,
     Ne,
@@ -781,8 +769,6 @@ pub enum Inst {
     /// d = address of this thread's copy of the thread-local block at the offset a symbol holds
     TlsAddr(VReg, Sym),
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
-    VBin(VOp, VReg, VReg, VReg), // d, a, b
-    VUn(VUn, VReg, VReg),        // d, a
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
     /// f32 lanes, one rounding: (neg_prod ? -(a*b) : a*b) + (neg_add ? -c : c)
@@ -791,8 +777,6 @@ pub enum Inst {
     VSplat(VReg, VReg),
     /// every lane = a 32-bit constant (a constant-pool load: cheap to rematerialise)
     VConst(VReg, u32),
-    /// lane shift by an immediate in 0..32 (op: Shl, ShrS or ShrU)
-    VShift(VOp, VReg, VReg, u8), // op, d, a, amount
     /// d = lane `lane` of v: an I vreg gets it sign-extended (i32), an F32 vreg as f32
     VExtract(VReg, VReg, u8),
     /// d = v with lane `lane` replaced by the low 32 bits of s (I or F32)
@@ -893,8 +877,8 @@ impl Inst {
     pub fn defs(&self, mut f: impl FnMut(VReg)) {
         match self {
             Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(*d),
-            Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VUn(_, d, _) | Inst::VSplat(d, _) | Inst::VShift(_, d, _, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
-            Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VBin(_, d, _, _) | Inst::VGather(d, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => f(*d),
+            Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
+            Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => f(*d),
             Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
             Inst::VInsert(d, _, _, _) => f(*d),
             Inst::Call(_, _, rets) => rets.iter().for_each(|r| f(*r)),
@@ -909,7 +893,7 @@ impl Inst {
     pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
         match self {
             Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(d),
-            Inst::Mov(d, a) | Inst::INeg(_, d, a) | Inst::INot(_, d, a) | Inst::IBit(_, d, a) | Inst::FUnary(_, _, d, a) | Inst::Conv(_, d, a) | Inst::IBinI(_, _, d, a, _) | Inst::ICmpI(_, _, d, a, _) | Inst::Load(_, d, a, _) | Inst::VUn(_, d, a) | Inst::VSplat(d, a) | Inst::VShift(_, d, a, _) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::AtomicLoad(_, _, d, a) => {
+            Inst::Mov(d, a) | Inst::INeg(_, d, a) | Inst::INot(_, d, a) | Inst::IBit(_, d, a) | Inst::FUnary(_, _, d, a) | Inst::Conv(_, d, a) | Inst::IBinI(_, _, d, a, _) | Inst::ICmpI(_, _, d, a, _) | Inst::Load(_, d, a, _) | Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::AtomicLoad(_, _, d, a) => {
                 f(d);
                 f(a);
             }
@@ -917,7 +901,7 @@ impl Inst {
                 f(a);
                 f(b);
             }
-            Inst::IBin(_, _, d, a, b) | Inst::ICmp(_, _, d, a, b) | Inst::FBin(_, _, d, a, b) | Inst::FCmp(_, _, d, a, b) | Inst::VBin(_, d, a, b) | Inst::VGather(d, a, b) | Inst::VX(_, d, a, b) | Inst::AtomicRmw(_, _, _, d, a, b) | Inst::LoadX(_, d, a, b, _, _) => {
+            Inst::IBin(_, _, d, a, b) | Inst::ICmp(_, _, d, a, b) | Inst::FBin(_, _, d, a, b) | Inst::FCmp(_, _, d, a, b) | Inst::VGather(d, a, b) | Inst::VX(_, d, a, b) | Inst::AtomicRmw(_, _, _, d, a, b) | Inst::LoadX(_, d, a, b, _, _) => {
                 f(d);
                 f(a);
                 f(b);
@@ -1192,12 +1176,7 @@ impl Func {
                     Inst::Cpuid(ds, a, b) => { regs.extend_from_slice(ds); regs.push(*a); regs.push(*b); }
                     Inst::Xgetbv(d, a) => { regs.push(*d); regs.push(*a); }
                     Inst::TlsAddr(d, _) => regs.push(*d),
-                    Inst::VBin(_, d, a, b) => {
-                        regs.push(*d);
-                        regs.push(*a);
-                        regs.push(*b);
-                    }
-                    Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VStore(d, _, a) | Inst::VAny(d, a) | Inst::VUn(_, d, a) | Inst::VShift(_, d, a, _) => {
+                    Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VStore(d, _, a) | Inst::VAny(d, a) => {
                         regs.push(*d);
                         regs.push(*a);
                     }

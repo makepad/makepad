@@ -105,7 +105,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
                 parts[k] += pp[k];
             }
             rir += b;
-            let n = crate::opt::inst_count(r);
+            let n = relax_codegen::opt::inst_count(r);
             let k = if n > 600 { 2 } else if n > 120 { 1 } else { 0 };
             rir_by[k] += b;
             rir_n[k] += 1;

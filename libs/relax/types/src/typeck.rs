@@ -558,7 +558,7 @@ pub fn codegen_body(prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> std
 /// codegen_body for a caller that has a fallback: an instance whose types do not normalize
 /// (an ill-formed program, e.g. `bop::<dyn Bop>` with a `Self: Sized` associated type) is None.
 pub fn try_codegen_body(prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Option<std::sync::Arc<Body>> {
-    let _cost_typeck = crate::fncost::phase(1);
+    let _cost_typeck = relax_codegen::fncost::phase(1);
     let _mem = crate::memstat::tag(crate::memstat::Tag::Typeck);
     let body = tcx.typeck(prog, def);
     // an instance with the wrong number of type/const arguments (`fn main<T>()`, E0131) has no
@@ -584,30 +584,30 @@ pub(crate) fn try_instantiate_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, 
     if sample != 0 && CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % sample == 0 {
         let trace = format!("makepad-run typeck-backtrace: {} def={} args={:?} origin={} time={}\n{}\nmakepad-run typeck-backtrace-end\n",
             prog.def_path(def), def.0, args, crate::clock::TYS_ORIGIN.with(|o| o.get()),
-            crate::fncost::mono(), std::backtrace::Backtrace::force_capture());
+            relax_codegen::fncost::mono(), std::backtrace::Backtrace::force_capture());
         // The app may write directly to fd 2 without Rust's stderr lock. Format
         // first, so its startup messages cannot split the diagnostic header.
         use std::io::Write;
         let _ = std::io::stderr().lock().write_all(trace.as_bytes());
     }
-    let _census = crate::exec_census::Record::body(crate::exec_census::instance(def.0,
+    let _census = relax_codegen::exec_census::Record::body(relax_codegen::exec_census::instance(def.0,
         || args.iter().map(|t| t.0).collect(), || {
             let d = prog.def(def);
-            crate::exec_census::Metadata {
+            relax_codegen::exec_census::Metadata {
                 name: format!("{}<{args:?}>", prog.def_path(def)),
                 krate: prog.syms.str(prog.crates[d.krate as usize].name).to_owned(),
                 module: prog.def_path(prog.mods[prog.mods[d.scope as usize].normal as usize].def),
                 initializer: match d.kind { DefKind::Static => "static-initializer", DefKind::Const | DefKind::AssocConst => "const-initializer", _ => "" },
             }
         }));
-    let _cost_typeck = crate::fncost::phase(1);
-    let cost_start = if crate::fncost::enabled() { (crate::fncost::mono(), crate::clock::cpu_ns()) } else { (0, 0) };
+    let _cost_typeck = relax_codegen::fncost::phase(1);
+    let cost_start = if relax_codegen::fncost::enabled() { (relax_codegen::fncost::mono(), relax_backend::cpu_ns()) } else { (0, 0) };
     let _mem = crate::memstat::tag(crate::memstat::Tag::Typeck);
     let body = tcx.typeck(prog, def);
     // Analysis uses the supplied environment; codegen supplies a monomorphic one.
     let b = instantiate::try_normalize_body(prog, tcx, cx.typing_env, &body, args)?;
-    if crate::fncost::enabled() {
-        crate::fncost::type_detail(def.0, &args.iter().map(|a| a.0).collect::<Vec<_>>(), b.expr_ty.len(), &prog.def_path(def), cost_start.0, cost_start.1);
+    if relax_codegen::fncost::enabled() {
+        relax_codegen::fncost::type_detail(def.0, &args.iter().map(|a| a.0).collect::<Vec<_>>(), b.expr_ty.len(), &prog.def_path(def), cost_start.0, cost_start.1);
     }
     Ok(b)
 }
@@ -620,14 +620,14 @@ pub(crate) fn check_fn(prog: &Program, tcx: &Tcx, def: DefId) -> Body {
     let cx = crate::tcx::EvalCx::new(prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
     static ST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let st = *ST.get_or_init(|| std::env::var("MAKEPAD_RUN_TYSTATS").is_ok());
-    let t0 = if st { crate::clock::cpu_ns() } else { 0 };
-    let _warm = crate::warm::enabled().then(|| crate::warm::Scope::body(def.0, &args.iter().map(|t| t.0).collect::<Vec<_>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()) == "gandalf", || {
+    let t0 = if st { relax_backend::cpu_ns() } else { 0 };
+    let _warm = relax_codegen::warm::enabled().then(|| relax_codegen::warm::Scope::body(def.0, &args.iter().map(|t| t.0).collect::<Vec<_>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()) == "gandalf", || {
         let args: Vec<_> = args.iter().map(|t| ty_to_string(false, prog, tcx, *t)).collect();
         if args.is_empty() { prog.def_path(def) } else { format!("{}<{}>", prog.def_path(def), args.join(", ")) }
     }));
     let b = check_fn_body(&cx, prog, tcx, def, &args);
     if st {
-        eprintln!("TYS\t{}\t{}\t{}\t{}\t{}\t{:?}\t{}", def.0, args.len(), crate::clock::cpu_ns() - t0, b.expr_ty.len(), prog.def_path(def), args.iter().map(|a| a.0).collect::<Vec<u32>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()));
+        eprintln!("TYS\t{}\t{}\t{}\t{}\t{}\t{:?}\t{}", def.0, args.len(), relax_backend::cpu_ns() - t0, b.expr_ty.len(), prog.def_path(def), args.iter().map(|a| a.0).collect::<Vec<u32>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()));
     }
     b
 }

@@ -120,6 +120,19 @@ impl<T> [T] {
     pub const fn get<I: SliceIndex<[T]>>(&self, index: I) -> Option<&I::Output> {
         index.get(self)
     }
+    pub fn get_disjoint_mut<I, const N: usize>(&mut self, indices: [I; N]) -> Result<[&mut I::Output; N], super::GetDisjointMutError>
+    where
+        I: super::GetDisjointMutIndex + SliceIndex<[T]>,
+    {
+        super::get_disjoint_mut(self, indices)
+    }
+    #[track_caller]
+    pub unsafe fn get_disjoint_unchecked_mut<I, const N: usize>(&mut self, indices: [I; N]) -> [&mut I::Output; N]
+    where
+        I: super::GetDisjointMutIndex + SliceIndex<[T]>,
+    {
+        super::get_disjoint_unchecked_mut(self, indices)
+    }
     pub fn get_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> Option<&mut I::Output> {
         index.get_mut(self)
     }

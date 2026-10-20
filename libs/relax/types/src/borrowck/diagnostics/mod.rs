@@ -161,6 +161,15 @@ pub fn render_error(cx: &DiagCx<'_>, error: &BorrowckError) -> Diag {
                 d.note(format!("accepted with field views (relaxed Rust): {}", fv_explain(cx, why)));
             }
             Remaining { why } => { d.note(format!("field views: {}", fv_explain(cx, why))); }
+            Disjoint { proven } => {
+                d.fv_only = true;
+                d.note(if *proven { "accepted with disjoint indices (relaxed Rust): the two indices are distinct; stable rustc rejects this" }
+                    else { "accepted with disjoint indices (relaxed Rust): the indices are compared when this runs and an overlap panics, as `get_disjoint_mut(..).unwrap()` does; stable rustc rejects this" });
+            }
+            Polonius => {
+                d.fv_only = true;
+                d.note("accepted under Polonius (relaxed Rust): the borrow is not used on the path through this access; stable rustc (NLL) rejects this");
+            }
         }
     }
     d

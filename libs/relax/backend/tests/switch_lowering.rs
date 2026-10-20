@@ -260,7 +260,7 @@ fn build_loop(arms: &[Vec<Vec<T>>], live: usize) -> Func {
         firsts.push(fa);
     }
     // one leaf block per arm adds 100 + arm to acc; the default adds 7
-    let mut leaf = |f: &mut Func, v: i64| -> u32 {
+    let leaf = |f: &mut Func, v: i64| -> u32 {
         let b = f.block();
         let k = f.vreg(Cls::I);
         push(f, b, Inst::Iconst(k, v));

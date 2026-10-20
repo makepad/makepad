@@ -49,6 +49,8 @@ pub struct Verdict {
     pub fv_only: Vec<event::BorrowError>,
     /// the field borrows (MIR spans and places) the export to rustc rewrites (field_views::edit)
     pub fv_records: Vec<field_views::FvRecordRaw>,
+    /// conflicts accepted by Polonius / disjoint indices, with their export facts (field_views::edit)
+    pub relaxed_records: Vec<field_views::RelaxedRecord>,
     pub bodies: usize,
 }
 
@@ -76,7 +78,7 @@ pub fn check_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, body: 
 /// caller reaches: see driver.rs.
 pub fn check_body_in(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, body: &Body, fv_cx: Option<&std::rc::Rc<field_views::SummaryCx>>) -> Verdict {
     crate::preempt::point();
-    let _cost_borrowck = crate::fncost::phase(2);
+    let _cost_borrowck = relax_codegen::fncost::phase(2);
     let checkpoint = tcx.dcx.checkpoint();
     let mut result = driver::check_root(cx, prog, tcx, body, fv_cx);
     if !result.errors.is_empty() || !body.errors.is_empty() { tcx.dcx.note_reported_error(); }
@@ -116,7 +118,7 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
     let mut errors = 0usize;
     let mut unchecked: std::collections::BTreeMap<String, usize> = Default::default();
     let mut unchecked_ex: std::collections::BTreeMap<String, String> = Default::default();
-    let t0 = crate::clock::cpu_ns();
+    let t0 = relax_backend::cpu_ns();
     let mut bck_ns = 0u64;
     let only = options.borrowck_only.clone();
     for owner in body::owners(prog) {
@@ -150,10 +152,10 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
                 continue;
             }
         };
-        let c0 = crate::clock::cpu_ns();
+        let c0 = relax_backend::cpu_ns();
         let v = check_body(&crate::tcx::EvalCx::new(prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &crate::tcx::EvalState::new()), prog, tcx, &body);
         note_verdict(&v);
-        bck_ns += crate::clock::cpu_ns() - c0;
+        bck_ns += relax_backend::cpu_ns() - c0;
         n_bodies += v.bodies;
         for u in &v.unchecked {
             let why = u.rsplit(": ").next().unwrap_or("").to_string();
@@ -166,7 +168,7 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
         errors += v.errors.len();
     }
     if options.verbose {
-        eprintln!("makepad-run borrowck: {} owners ({} failed typeck polymorphically), {} bodies, {} errors; borrowck cpu {:.1} ms, total {:.1} ms", n_fns, n_typeck_fail, n_bodies, errors, bck_ns as f64 / 1e6, (crate::clock::cpu_ns() - t0) as f64 / 1e6);
+        eprintln!("makepad-run borrowck: {} owners ({} failed typeck polymorphically), {} bodies, {} errors; borrowck cpu {:.1} ms, total {:.1} ms", n_fns, n_typeck_fail, n_bodies, errors, bck_ns as f64 / 1e6, (relax_backend::cpu_ns() - t0) as f64 / 1e6);
         for (k, n) in &unchecked {
             eprintln!("makepad-run borrowck: unchecked {:>6}  {}   e.g. {}", n, k, unchecked_ex.get(k).map_or("", |s| s.as_str()));
         }
@@ -177,11 +179,13 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
 
 static FV_ONLY: relax_session::sync::Mutex<Vec<event::BorrowError>> = relax_session::sync::Mutex::new(Vec::new());
 static FV_RECORDS: relax_session::sync::Mutex<Vec<field_views::FvRecordRaw>> = relax_session::sync::Mutex::new(Vec::new());
+static RELAXED_RECORDS: relax_session::sync::Mutex<Vec<field_views::RelaxedRecord>> = relax_session::sync::Mutex::new(Vec::new());
 
 /// `makepad check`: remember a verdict's field-view-only acceptances (relaxed crates).
 pub fn note_verdict(v: &Verdict) {
     FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_only.iter().cloned());
     FV_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_records.iter().cloned());
+    RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.relaxed_records.iter().cloned());
 }
 
 /// End of `makepad check`: the "accepted only with field views" report (what rustc would reject)
@@ -189,8 +193,12 @@ pub fn note_verdict(v: &Verdict) {
 pub fn finish_check(prog: &Program) {
     let fvo = std::mem::take(&mut *FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()));
     let recs = std::mem::take(&mut *FV_RECORDS.lock().unwrap_or_else(|e| e.into_inner()));
+    // Polonius / disjoint-index acceptances: one relaxed note each (`--strict-report`), with the
+    // structured edits `makepad fix --to-strict` applies when a rewrite is known.
+    let relaxed = std::mem::take(&mut *RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()));
+    for n in field_views::edit::plan_relaxed(prog, &relaxed) { crate::relaxed::note(n); }
     if !fvo.is_empty() {
-        eprintln!("makepad check: {} conflict(s) accepted only in relaxed Rust (field views, extended two-phase borrows; rustc would reject them):", fvo.len());
+        eprintln!("makepad check: {} conflict(s) accepted only in relaxed Rust (field views, extended two-phase borrows, Polonius, disjoint indices; rustc would reject them):", fvo.len());
         for d in &fvo {
             eprintln!("{}", d.render());
         }
@@ -204,8 +212,7 @@ pub fn finish_check(prog: &Program) {
                 let _ = std::fs::create_dir_all(p);
             }
             let pf = &prog.files[r.file as usize];
-            let src = String::from_utf8_lossy(&pf.src[..pf.src_len as usize]).into_owned();
-            let _ = std::fs::write(&out, field_views::edit::apply(&src, &r.edits));
+            let _ = std::fs::write(&out, crate::relaxed::apply(&pf.src[..pf.src_len as usize], &r.edits).0);
             for a in &r.applied {
                 eprintln!("makepad-run fv-export: {}", a);
             }

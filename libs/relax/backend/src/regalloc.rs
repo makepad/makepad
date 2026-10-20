@@ -192,12 +192,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             }
             defs.push(*d);
         }
-        Inst::VBin(_, d, a, b) => {
-            uses.push(*a);
-            uses.push(*b);
-            defs.push(*d);
-        }
-        Inst::VUn(_, d, a) | Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::VShift(_, d, a, _) => {
+        Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) => {
             uses.push(*a);
             defs.push(*d);
         }
@@ -304,11 +299,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
                 uses(*b);
             }
         }
-        Inst::VBin(_, d, a, b) => {
-            uses(*a);
-            uses(*b);
-        }
-        Inst::VUn(_, d, a) | Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::VShift(_, d, a, _) => {
+        Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) => {
             uses(*a);
         }
         Inst::VX3(_, d, m, a, b) | Inst::VSel(d, m, a, b) | Inst::VFma(_, _, d, m, a, b) => {
@@ -386,13 +377,10 @@ pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
         | Inst::VGather(d, _, _)
         | Inst::VX(_, d, _, _)
         | Inst::VX3(_, d, _, _, _)
-        | Inst::VBin(_, d, _, _)
-        | Inst::VUn(_, d, _)
         | Inst::VSplat(d, _)
         | Inst::VExtract(d, _, _)
         | Inst::VLoad(d, _, _)
         | Inst::VAny(d, _)
-        | Inst::VShift(_, d, _, _)
         | Inst::VSel(d, _, _, _)
         | Inst::VFma(_, _, d, _, _, _)
         | Inst::VInsert(d, _, _, _)

@@ -1243,7 +1243,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             Ok(mut c) => {
                 c.load_manifest(root_crate);
                 let warm = c.startup_manifest_valid() && c.stats.packs_rejected == 0 && c.stats.packs as usize == u.prog.crates.len() && (!u.prog.record_front || u.prog.front_restored.iter().all(|r| *r));
-                crate::warm::classify(warm);
+                relax_codegen::warm::classify(warm);
                 crate::run_state::emit(crate::run_state::Event::Warm { domain: None, warm });
                 u.front.warm_cache.store(warm, Ordering::Relaxed);
                 jit::CODE_CACHE_EMPTY.store(c.stats.code_stores == 0, Ordering::Relaxed);
@@ -1392,7 +1392,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     jit::start_completion(up, runtime);
     jit::live_needs_present(u.prog.crates.iter().any(|c| u.prog.syms.str(c.name) == "makepad_platform"));
     jit::startup_main(runtime);
-    crate::fncost::mark("boot done, calling main");
+    relax_codegen::fncost::mark("boot done, calling main");
     let main_ms = crate::clock::ms_since_start();
     MAIN_START_MS.store(main_ms as u64, Ordering::Relaxed);
     crate::boot_stats::main_called();
@@ -2783,14 +2783,14 @@ pub(crate) fn summary(why: &'static str) {
 }
 
 fn summary_inner(why: &str) {
-    crate::fncost::mark("summary");
+    relax_codegen::fncost::mark("summary");
     // Independent of owner thread state: still emit when exit quiescence times out.
     if why != "stats" { crate::exec_profile::report(false); }
     if why != "stats" {
         // the run is ending: background borrow checks stop at their next preemption point
         // (nothing waits for them; finished verdicts are stored below)
         crate::borrowck::lazy::stop();
-        crate::warm::finish();
+        relax_codegen::warm::finish();
         if let Some(console) = GANDALF_CONSOLE.lock().unwrap_or_else(|e| e.into_inner()).take() { console.detach(); }
         exit_mark("warm+console");
     }
@@ -3049,7 +3049,7 @@ fn summary_inner(why: &str) {
                 passes.push_str(&format!("{} {:.0}  ", relax_backend::stats::PASS_NAMES[i], relax_backend::stats::PASS_NS[i].load(Ordering::Relaxed) as f64 / 1e6));
             }
     if !SILENT.load(Ordering::Relaxed) {         verbose!("makepad-run: opt passes (cpu ms): {}", passes); }
-            verbose!("makepad-run: invokes {} seen, {} made plain calls", crate::opt::INVOKES_SEEN.load(Ordering::Relaxed), crate::opt::INVOKES_DEMOTED.load(Ordering::Relaxed));
+            verbose!("makepad-run: invokes {} seen, {} made plain calls", relax_codegen::opt::INVOKES_SEEN.load(Ordering::Relaxed), relax_codegen::opt::INVOKES_DEMOTED.load(Ordering::Relaxed));
         }
         if relax_backend::rir::unwind_stats_on() {
             let st = &relax_backend::rir::UNWIND_STATS;

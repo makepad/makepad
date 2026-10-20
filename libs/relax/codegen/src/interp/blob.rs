@@ -195,6 +195,33 @@ fn vw_of(v: u64) -> VW {
     }
 }
 
+fn nan_code(n: NanBits) -> u8 {
+    match n {
+        NanBits::Host => 0,
+        NanBits::Intel => 1,
+        NanBits::Neon => 2,
+    }
+}
+
+fn nan_of(k: u8) -> Option<NanBits> {
+    [NanBits::Host, NanBits::Intel, NanBits::Neon].get(k as usize).copied()
+}
+
+fn cond_code(c: Cond) -> u8 {
+    match c {
+        Cond::Eq => 0,
+        Cond::Ne => 1,
+        Cond::Lt => 2,
+        Cond::Le => 3,
+        Cond::Gt => 4,
+        Cond::Ge => 5,
+    }
+}
+
+fn cond_of(k: u8) -> Option<Cond> {
+    [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge].get(k as usize).copied()
+}
+
 /// A vector op as a word: variant << 16 | w << 8 | k.
 fn vx_code(op: VX) -> u64 {
     let (t, w, k): (u64, Option<VW>, u8) = match op {
@@ -262,6 +289,26 @@ fn vx_code(op: VX) -> u64 {
         VX::AddAcross(w) => (61, Some(w), 0),
         VX::MaxAcrossU(w) => (62, Some(w), 0),
         VX::FromLo64 => (63, None, 0),
+        VX::FAdd(w, n) => (64, Some(w), nan_code(n)),
+        VX::FSub(w, n) => (65, Some(w), nan_code(n)),
+        VX::FMul(w, n) => (66, Some(w), nan_code(n)),
+        VX::FDiv(w, n) => (67, Some(w), nan_code(n)),
+        VX::FMinLt(w) => (68, Some(w), 0),
+        VX::FMaxGt(w) => (69, Some(w), 0),
+        VX::FMinNeon(w) => (70, Some(w), 0),
+        VX::FMaxNeon(w) => (71, Some(w), 0),
+        VX::FCmp(c, w) => (72, Some(w), cond_code(c)),
+        VX::ICmp(c, w) => (73, Some(w), cond_code(c)),
+        VX::ShlV(w) => (74, Some(w), 0),
+        VX::ShrSV(w) => (75, Some(w), 0),
+        VX::ShrUV(w) => (76, Some(w), 0),
+        VX::FNeg(w) => (77, Some(w), 0),
+        VX::FAbs(w) => (78, Some(w), 0),
+        VX::FSqrt(w, n) => (79, Some(w), nan_code(n)),
+        VX::FRound(w, r) => (80, Some(w), r as u8),
+        VX::FToI(w) => (81, Some(w), 0),
+        VX::IToF(w) => (82, Some(w), 0),
+        VX::Neg(w) => (83, Some(w), 0),
     };
     t << 16 | w.map_or(0, vw_code) << 8 | k as u64
 }
@@ -333,6 +380,26 @@ fn vx_of(v: u64) -> Option<VX> {
         61 => VX::AddAcross(w),
         62 => VX::MaxAcrossU(w),
         63 => VX::FromLo64,
+        64 => VX::FAdd(w, nan_of(k)?),
+        65 => VX::FSub(w, nan_of(k)?),
+        66 => VX::FMul(w, nan_of(k)?),
+        67 => VX::FDiv(w, nan_of(k)?),
+        68 => VX::FMinLt(w),
+        69 => VX::FMaxGt(w),
+        70 => VX::FMinNeon(w),
+        71 => VX::FMaxNeon(w),
+        72 => VX::FCmp(cond_of(k)?, w),
+        73 => VX::ICmp(cond_of(k)?, w),
+        74 => VX::ShlV(w),
+        75 => VX::ShrSV(w),
+        76 => VX::ShrUV(w),
+        77 => VX::FNeg(w),
+        78 => VX::FAbs(w),
+        79 => VX::FSqrt(w, nan_of(k)?),
+        80 => VX::FRound(w, [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away].get(k as usize).copied()?),
+        81 => VX::FToI(w),
+        82 => VX::IToF(w),
+        83 => VX::Neg(w),
         _ => return None,
     })
 }

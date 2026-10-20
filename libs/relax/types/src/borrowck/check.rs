@@ -1,7 +1,7 @@
 // ported from N:rustc_borrowck/src/lib.rs @8d1a764 (MirBorrowckCtxt)
 use super::borrow_set::{BorrowData, BorrowSet, LocalsStateAtExit};
 use super::field_views::FieldViews;
-use super::borrowck_errors::{AccessKind, BorrowInfo, BorrowckError, Detail, ErrorKind, InitAction, MoveSite};
+use super::borrowck_errors::{AccessKind, BorrowInfo, BorrowckError, Detail, ErrorKind, FvNote, InitAction, MoveSite};
 use super::dataflow::{Borrowck, BorrowckDomain};
 use super::mir_nll::MirRegionResult;
 use super::path_utils::{each_borrow_involving_path, is_active};
@@ -32,6 +32,9 @@ pub struct MirBorrowckResult {
     /// (rustc would reject them), and the records the export to rustc rewrites.
     pub fv_only: Vec<BorrowckError>,
     pub fv_records: Vec<super::field_views::FvRecordRaw>,
+    /// Relaxed crates: conflicts accepted by an analysis stronger than NLL (Polonius, disjoint
+    /// indices), with the facts their export to rustc needs.
+    pub relaxed_records: Vec<super::field_views::RelaxedRecord>,
 }
 impl MirBorrowckResult {
     pub fn accepted(&self) -> bool { self.errors.is_empty() && self.unsupported.is_empty() && self.region_errors.is_empty() && !self.tainted_by_errors }
@@ -58,15 +61,113 @@ impl NestedUsedMut {
 }
 
 /// `mir_borrowck_fv` for a body that creates closures: `nested` has their results.
+///
+/// The verdict is NLL's, as stable rustc's (1.97.1 runs no Polonius). Polonius (rustc's location-sensitive
+/// "polonius alpha", `-Zpolonius=next`, ported in polonius/) decides only (a) for a body NLL rejects in a
+/// crate with relaxed Rust's `polonius` feature: the NLL errors Polonius does not have are accepted and
+/// reported as such (`fv_only`, with a `relaxed_records` entry for the export to rustc), and (b) in the
+/// opt-in verification sample, where Polonius must accept what NLL accepts.
 pub fn mir_borrowck_nested(tcx: &Tcx, prog: &Program, body: &Body, regions: &mut MirRegionResult, moves: &MoveData, fv: Option<&FieldViews<'_>>, nested: &NestedUsedMut) -> MirBorrowckResult {
     let nll = check_with_scopes_fv(prog, tcx, body, regions, moves, fv, nested);
     if !nll.unsupported.is_empty() { return nll; }
     let verify = nll.accepted() && verify_polonius_sample();
-    if nll.accepted() && !verify { return nll; }
-    *regions = compute_polonius_regions(tcx, prog, body, regions, moves);
-    let polonius = check_with_scopes_fv(prog, tcx, body, regions, moves, fv, nested);
-    if verify { assert!(polonius.accepted(), "Polonius must accept NLL-accepted MIR: {polonius:?}"); }
+    let relaxed = !nll.errors.is_empty() && relaxed_feature(prog, body, "polonius");
+    if !verify && !relaxed { return nll; }
+    let polonius_regions = compute_polonius_regions(tcx, prog, body, regions, moves);
+    let mut polonius = check_with_scopes_fv(prog, tcx, body, &polonius_regions, moves, fv, nested);
+    if verify {
+        assert!(polonius.accepted(), "Polonius must accept NLL-accepted MIR: {polonius:?}");
+        return nll;
+    }
+    let accepted: Vec<BorrowckError> = nll.errors.iter().filter(|e| !polonius.errors.contains(e)).cloned().collect();
+    if accepted.is_empty() { return nll; }
+    let feeds = super::field_views::find_feeds(body);
+    for mut error in accepted {
+        polonius.relaxed_records.push(super::field_views::RelaxedRecord::Polonius(polonius_record(tcx, prog, body, &feeds, &error)));
+        error.fv = Some(Box::new(FvNote::Polonius));
+        if !polonius.fv_only.contains(&error) { polonius.fv_only.push(error); }
+    }
+    *regions = polonius_regions;
     polonius
+}
+
+/// Whether relaxed Rust `feature` is on for the crate of `body`.
+pub(super) fn relaxed_feature(prog: &Program, body: &Body, feature: &str) -> bool {
+    // MIR whose owner is not a def of `prog` (unit fixtures) belongs to no crate: strict
+    let Some(def) = prog.defs.get(body.source.owner.0 as usize) else { return false };
+    prog.crates.get(def.krate as usize).is_some_and(|c| c.relaxed(prog).iter().any(|f| f == feature))
+}
+
+/// The export facts of an NLL error Polonius accepts: the loan NLL kept alive and, when it is the
+/// receiver of a std map lookup whose key compares by std's own `Hash`/`Eq`/`Ord`, that lookup (a second
+/// lookup with the same key then finds the same entry, which makes the re-lookup rewrite exact).
+fn polonius_record(tcx: &Tcx, prog: &Program, body: &Body, feeds: &crate::fxhash::HashMap<Local, super::field_views::Feed>, error: &BorrowckError) -> super::field_views::PoloniusRecord {
+    use super::field_views::{Feed, Lookup, PoloniusRecord};
+    let span_at = |at: Location| {
+        let block = &body.basic_blocks[at.block.0 as usize];
+        block.statements.get(at.statement_index).map_or_else(|| block.terminator.as_ref().unwrap().source_info.span, |s| s.source_info.span)
+    };
+    let Detail::Conflict { borrow, .. } = &error.detail else {
+        return PoloniusRecord { code: error.code(), span: error.span, loan: error.span, lookup: None };
+    };
+    let loan = span_at(borrow.reserve_location);
+    let lookup = (|| {
+        if !borrow.assigned_place.projection.is_empty() { return None; }
+        let Some(Feed::Call(bi, 0)) = feeds.get(&borrow.assigned_place.local).copied() else { return None };
+        let term = body.basic_blocks[bi].terminator.as_ref()?;
+        let TerminatorKind::Call { func: Operand::Constant(c), args, .. } = &term.kind else { return None };
+        let Const::Val(_, fty) = &c.const_ else { return None };
+        let TyKind::FnDef(d, _, _) = tcx.tys.kind(*fty) else { return None };
+        let mutable = match prog.name(*d) { "get_mut" => true, "get" => false, _ => return None };
+        // an inherent method of std's HashMap / BTreeMap (the map is what the loan borrows; Relax's
+        // std is one crate, compiler/std/core)
+        let map_ty = place_ty(tcx, body, &borrow.borrowed_place);
+        let TyKind::Adt(map, ..) = tcx.tys.kind(map_ty) else { return None };
+        // reached from a variable through built-in derefs only (no overloaded deref to run twice)
+        if !matches!(body.local_decls[borrow.borrowed_place.local.0 as usize].kind, LocalKind::UserVar | LocalKind::Arg) { return None; }
+        for (i, elem) in borrow.borrowed_place.projection.iter().enumerate() {
+            match elem {
+                PlaceElem::Field(..) => {}
+                PlaceElem::Deref => {
+                    let base = Place { local: borrow.borrowed_place.local, projection: borrow.borrowed_place.projection[..i].to_vec() };
+                    if !matches!(tcx.tys.kind(place_ty(tcx, body, &base)), TyKind::Ref(..)) { return None; }
+                }
+                _ => return None,
+            }
+        }
+        if !matches!(prog.def_path(*map).as_str(), "core::collections::hash_map::HashMap" | "core::collections::btree_map::BTreeMap") { return None; }
+        if prog.syms.str(prog.crates[prog.def(*d).krate as usize].name) != "core" { return None; }
+        // an inherent impl (no trait): std's own method
+        let imp = prog.def(prog.def(*d).parent);
+        if prog.def(*d).kind != crate::program::DefKind::AssocFn || imp.kind != crate::program::DefKind::Impl { return None; }
+        let ast = &prog.files[imp.file as usize].ast;
+        if ast.as_impl(&ast.item(imp.item).kind)?.trait_.is_some() { return None; }
+        // the key `&Q`: Q's Hash / Eq / Ord must be std's own
+        let key = args.get(1)?;
+        let key_ty = match key { Operand::Copy(p) | Operand::Move(p) => place_ty(tcx, body, p), Operand::Constant(c) => match &c.const_ { Const::Val(_, t) => *t, _ => return None }, _ => return None };
+        let TyKind::Ref(_, q, _) = tcx.tys.kind(key_ty) else { return None };
+        if !std_compared(tcx, *q, 0) { return None; }
+        Some(Lookup { mutable, call: term.source_info.span })
+    })();
+    PoloniusRecord { code: error.code(), span: error.span, loan, lookup }
+}
+
+fn place_ty(tcx: &Tcx, body: &Body, place: &Place) -> crate::types::TyId {
+    place.projection.iter().fold(PlaceTy::from_ty(body.local_decls[place.local.0 as usize].ty),
+        |ty, elem| ty.projection_ty(tcx, elem).expect("invalid MIR place")).ty
+}
+
+/// Types whose `Hash`, `Eq` and `Ord` are std's own impls (pure functions of the value): integers,
+/// `bool`, `char`, `str`, `String`, and references / tuples / arrays / slices of them.
+fn std_compared(tcx: &Tcx, ty: crate::types::TyId, depth: u32) -> bool {
+    if depth > 8 { return false; }
+    match tcx.tys.kind(ty) {
+        TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Str => true,
+        TyKind::Ref(_, t, _) | TyKind::Slice(t) | TyKind::Array(t, _) => std_compared(tcx, *t, depth + 1),
+        TyKind::Tuple(ts) => tcx.tys.list(*ts).iter().all(|t| std_compared(tcx, *t, depth + 1)),
+        TyKind::Adt(d, ..) => tcx.lang_items.get(crate::lang_items::LangItem::String) == Some(*d),
+        _ => false,
+    }
 }
 
 // Off by default. A rate of N checks every Nth NLL-accepted body (1 = all).
@@ -98,7 +199,7 @@ fn check_with_scopes_fv(prog: &Program, tcx: &Tcx, body: &Body, regions: &MirReg
     assert!(regions.locations.matches(body), "region locations belong to another MIR layout");
     let mut result = MirBorrowckResult { errors: vec![], used_mut: BitSet::new_empty(body.local_decls.len()),
         unsupported: vec![], used_mut_upvars: vec![], region_errors: regions.regioncx.errors.clone(), tainted_by_errors: regions.tainted_by_errors,
-        fv_only: vec![], fv_records: vec![] };
+        fv_only: vec![], fv_records: vec![], relaxed_records: vec![] };
     check_supported(tcx, body, Some(nested), &mut result.unsupported);
     if !result.unsupported.is_empty() { return result; }
     let invalidated = matches!(body.source.kind, BodyKind::Fn | BodyKind::Closure(_) | BodyKind::Shim(_));
@@ -109,7 +210,8 @@ fn check_with_scopes_fv(prog: &Program, tcx: &Tcx, body: &Body, regions: &MirReg
     let mut cx = MirBorrowckCtxt { prog, tcx, body, moves, borrows: &borrows, cfg: CheckCfg::new(body), result,
         access_errors: vec![], reservation_errors: vec![], uninitialized_errors: BitSet::new_empty(body.local_decls.len()),
         move_errors: vec![], buffered_move_errors: vec![], buffered_mut_errors: vec![],
-        fv: fv.map(|v| fv_hook::FvRun::new(v, body, &borrows)), fv_own: None, nested };
+        fv: fv.map(|v| fv_hook::FvRun::new(v, body, &borrows)), fv_own: None,
+        d3: relaxed_feature(prog, body, "disjoint-index"), d3_feeds: None, d3_taken: None, nested };
     for b in cx.cfg.reverse_postorder.clone() {
         let block = &body.basic_blocks[b];
         let block_id = BasicBlock(b as u32);
@@ -216,6 +318,9 @@ struct MirBorrowckCtxt<'a> {
     /// Relaxed-Rust field views (field_views/check_hook.rs) and the loan the access being
     /// checked creates (its parts are narrowed by the callee's summary).
     fv: Option<fv_hook::FvRun<'a>>, fv_own: Option<usize>,
+    /// Relaxed Rust D3 (disjoint indices, field_views/disjoint.rs): on for the body's crate; the
+    /// single-use borrow temps that feed calls, and the locals whose address is taken (lazily).
+    d3: bool, d3_feeds: Option<crate::fxhash::HashMap<Local, super::field_views::Feed>>, d3_taken: Option<BitSet>,
     /// The nested bodies' `used_mut_upvars`.
     nested: &'a NestedUsedMut,
 }
@@ -431,8 +536,17 @@ impl MirBorrowckCtxt<'_> {
                 },
             };
             let detail = Detail::Conflict { place: place.clone(), access: access.access_kind(), location: at, borrow: BorrowInfo::from(borrow) };
-            // Relaxed Rust: the conflict may disappear under the callees' field views.
             let mut error = BorrowckError::with(kind, span, detail);
+            // Relaxed Rust D3: two borrows of distinct elements of one array / slice / Vec.
+            if let Some(outcome) = self.disjoint_outcome(i, place, access, at) {
+                error.fv = Some(Box::new(FvNote::Disjoint { proven: outcome.record.proven }));
+                let r = super::field_views::RelaxedRecord::Disjoint(outcome.record);
+                if !self.result.relaxed_records.iter().any(|x| x.same_site(&r)) { self.result.relaxed_records.push(r); }
+                if !self.result.fv_only.contains(&error) { self.result.fv_only.push(error); }
+                if matches!(access, Reservation(_)) && !self.reservation_errors.contains(place) { self.reservation_errors.push(place.clone()); }
+                continue;
+            }
+            // Relaxed Rust: the conflict may disappear under the callees' field views.
             if let Some(outcome) = self.fv_outcome(i, place, depth, access, at, span) {
                 error.fv = outcome.note.map(Box::new);
                 if let Some(record) = outcome.record { self.result.fv_records.push(record); }
@@ -617,7 +731,7 @@ impl MirBorrowckCtxt<'_> {
         crate::relaxed::note(crate::relaxed::Note {
             at: at(span.lo), feature: "mut", code,
             msg: format!("accepted only with relaxed `mut`: `{name}` is not declared as mutable; will write: `mut {name}` at {}", at(pos)),
-            fix: Some((prog.file_paths[file].clone(), pos, "mut ".to_string())),
+            fix: Some((prog.file_paths[file].clone(), vec![crate::relaxed::Edit { lo: pos, hi: pos, text: "mut ".to_string() }])),
         });
         true
     }
@@ -1024,3 +1138,5 @@ fn check_promoted_moves(tcx: &Tcx, body: &Body, result: &mut MirBorrowckResult) 
 // private checker state).
 #[path = "field_views/check_hook.rs"]
 mod fv_hook;
+#[path = "field_views/disjoint.rs"]
+mod disjoint;
