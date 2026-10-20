@@ -83,14 +83,14 @@ impl<'a> DiagCx<'a> {
 /// closure/coroutine capture, and any other use. (FnSelfUse's receiver notes are not kept.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UseSpans {
-    ClosureUse { is_coroutine: bool, expr: u32, args_span: Span, capture_kind_span: Span, path_span: Span },
+    ClosureUse { is_coroutine: bool, is_coroutine_closure: bool, expr: u32, args_span: Span, capture_kind_span: Span, path_span: Span },
     OtherUse(Span),
 }
 impl UseSpans {
     pub fn args_or_use(self) -> Span { match self { Self::ClosureUse { args_span, .. } => args_span, Self::OtherUse(s) => s } }
     pub fn var_or_use(self) -> Span { match self { Self::ClosureUse { capture_kind_span, .. } => capture_kind_span, Self::OtherUse(s) => s } }
     pub fn var_or_use_path_span(self) -> Span { match self { Self::ClosureUse { path_span, .. } => path_span, Self::OtherUse(s) => s } }
-    pub fn for_closure(self) -> bool { matches!(self, Self::ClosureUse { is_coroutine: false, .. }) }
+    pub fn for_closure(self) -> bool { matches!(self, Self::ClosureUse { is_coroutine: false, is_coroutine_closure: false, .. }) }
     pub fn for_coroutine(self) -> bool { matches!(self, Self::ClosureUse { is_coroutine: true, .. }) }
     pub fn or_else(self, other: impl FnOnce() -> Self) -> Self { match self { Self::ClosureUse { .. } => self, Self::OtherUse(_) => other() } }
 }
@@ -284,13 +284,13 @@ impl<'a> DiagCx<'a> {
     pub fn move_spans(&self, moved_place: &Place, at: Location) -> UseSpans {
         let block = &self.body.basic_blocks[at.block.0 as usize];
         if let Some(Statement { kind: StatementKind::Assign(_, Rvalue::Aggregate(kind, operands)), source_info }) = block.statements.get(at.statement_index) {
-            let is_coroutine = match &**kind { AggregateKind::Closure(id, _) | AggregateKind::CoroutineClosure(id, _) => Some((false, id.expr)), AggregateKind::Coroutine(id, _) => Some((true, id.expr)), _ => None };
-            if let Some((is_coroutine, expr)) = is_coroutine {
+            let is_coroutine = match &**kind { AggregateKind::Closure(id, _) => Some((false, false, id.expr)), AggregateKind::CoroutineClosure(id, _) => Some((false, true, id.expr)), AggregateKind::Coroutine(id, _) => Some((true, false, id.expr)), _ => None };
+            if let Some((is_coroutine, is_coroutine_closure, expr)) = is_coroutine {
                 let captured = operands.iter().any(|op| matches!(op, Operand::Move(p) | Operand::Copy(p)
                     if p.local == moved_place.local && (p.projection.starts_with(&moved_place.projection) || moved_place.projection.starts_with(&p.projection))));
                 if captured {
                     let s = source_info.span;
-                    return UseSpans::ClosureUse { is_coroutine, expr, args_span: s, capture_kind_span: s, path_span: s };
+                    return UseSpans::ClosureUse { is_coroutine, is_coroutine_closure, expr, args_span: s, capture_kind_span: s, path_span: s };
                 }
             }
         }
@@ -308,10 +308,10 @@ impl<'a> DiagCx<'a> {
         if self.body.local_decls[target.0 as usize].kind != LocalKind::Temp { return UseSpans::OtherUse(use_span); }
         for stmt in block.statements.iter().skip(at.statement_index + 1) {
             if let StatementKind::Assign(_, Rvalue::Aggregate(kind, operands)) = &stmt.kind {
-                let is_coroutine = match &**kind { AggregateKind::Closure(id, _) | AggregateKind::CoroutineClosure(id, _) => Some((false, id.expr)), AggregateKind::Coroutine(id, _) => Some((true, id.expr)), _ => None };
-                if let Some((is_coroutine, expr)) = is_coroutine {
+                let is_coroutine = match &**kind { AggregateKind::Closure(id, _) => Some((false, false, id.expr)), AggregateKind::CoroutineClosure(id, _) => Some((false, true, id.expr)), AggregateKind::Coroutine(id, _) => Some((true, false, id.expr)), _ => None };
+                if let Some((is_coroutine, is_coroutine_closure, expr)) = is_coroutine {
                     if operands.iter().any(|op| matches!(op, Operand::Move(p) | Operand::Copy(p) if p.local == target)) {
-                        return UseSpans::ClosureUse { is_coroutine, expr, args_span: stmt.source_info.span, capture_kind_span: use_span, path_span: use_span };
+                        return UseSpans::ClosureUse { is_coroutine, is_coroutine_closure, expr, args_span: stmt.source_info.span, capture_kind_span: use_span, path_span: use_span };
                     }
                 }
             }

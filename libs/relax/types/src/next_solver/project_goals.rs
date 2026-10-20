@@ -86,7 +86,7 @@ impl EvalCtxt<'_, '_> {
         let item = tcx.fetch_eligible_assoc_item(self.solver.prog, def, imp);
         if !tcx.associated_item_has_value(self.solver.prog, item) {
             if self.delegate.impl_self_is_guaranteed_unsized(self.solver.prog, imp) {
-                if matches!(self.delegate.typing_mode, crate::tcx::TypingMode::Coherence) {
+                if matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Coherence) {
                     self.add_goal(GoalSource::Misc, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Ambiguous) })?;
                     return Ok(());
                 }

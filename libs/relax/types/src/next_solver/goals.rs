@@ -112,12 +112,12 @@ impl EvalCtxt<'_, '_> {
         let ct = f.fold_const(&tcx.tys, ct, 0);
         // eval_ctxt/mod.rs:1498-1513. generic_const_exprs is cut, but opaque
         // arguments still require evaluation in the caller's non-erased mode.
-        if self.delegate.typing_mode.is_erased_not_coherence() && tcx.tys.has_opaque(tcx.tys.intern(TyKind::Const(ct))) {
+        if self.delegate.typing_mode.get().is_erased_not_coherence() && tcx.tys.has_opaque(tcx.tys.intern(TyKind::Const(ct))) {
             return Err(self.opaque_accesses.rerun_always());
         }
         if ct.has_non_region_infer(&tcx.tys) { return Ok(None); }
         let ConstKind::Alias(_, alias) = tcx.tys.const_kind(ct) else { unreachable!() };
-        let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode };
+        let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode.get() };
         match tcx.const_eval_resolve(self.solver.prog, typing_env, alias.kind.def_id(), &alias.args) {
             Ok(value) => Ok(Some(crate::consts::Const::new_value(&tcx.tys, value, self.const_type(&alias)?))),
             Err(crate::const_eval::ErrorHandled::TooGeneric) => Ok(None),

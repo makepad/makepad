@@ -3,9 +3,9 @@ use crate::mir::dataflow::bitset::{BitMatrix, BitSet};
 use crate::types::RegionId;
 
 #[derive(Clone, Debug)]
-pub struct LivenessValues { num_points: usize, rows: Vec<Option<BitSet>>, live_loans: Option<crate::borrowck::polonius::LiveLoans> }
+pub struct LivenessValues { num_points: usize, rows: Vec<Option<BitSet>>, live_loans: Option<crate::borrowck::polonius::LiveLoans>, deferred: Vec<bool> }
 impl LivenessValues {
-    pub fn new(regions: usize, num_points: usize) -> Self { Self { num_points, rows: vec![None; regions], live_loans: None } }
+    pub fn new(regions: usize, num_points: usize) -> Self { Self { num_points, rows: vec![None; regions], live_loans: None, deferred: Vec::new() } }
     pub fn record_live_loans(&mut self, loans: crate::borrowck::polonius::LiveLoans) { self.live_loans = Some(loans); }
     pub fn live_loans(&self) -> Option<&crate::borrowck::polonius::LiveLoans> { self.live_loans.as_ref() }
     /// Rows grow with the region allocator: MIR type check creates call-site,
@@ -21,6 +21,17 @@ impl LivenessValues {
     /// Regions live at one or more points (N:region_infer/values.rs live_regions_unordered).
     pub fn live_regions(&self) -> impl Iterator<Item = usize> + '_ {
         self.rows.iter().enumerate().filter(|(_, r)| r.as_ref().is_some_and(|r| r.iter().next().is_some())).map(|(i, _)| i)
+    }
+    /// The liveness of `region` was computed on demand, for loan propagation (a local whose regions
+    /// outlive a universal region is boring: rustc's NLL computes no liveness for it at all).
+    pub fn mark_deferred(&mut self, region: usize) {
+        if region >= self.deferred.len() { self.deferred.resize(region + 1, false); }
+        self.deferred[region] = true;
+    }
+    /// `is_live_at_point` as the liveness constraints stand before any on-demand computation: a region of a
+    /// boring local is not live anywhere (diagnostics ask which regions the type check made live).
+    pub fn is_live_at_point_eagerly(&self, region: usize, point: usize) -> bool {
+        !self.deferred.get(region).copied().unwrap_or(false) && self.is_live_at_point(region, point)
     }
     pub fn point_liveness(&self, region: usize) -> Option<&BitSet> { self.rows.get(region)?.as_ref() }
     pub fn is_live_at_point(&self, region: usize, point: usize) -> bool {

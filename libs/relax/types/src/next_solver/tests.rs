@@ -757,7 +757,7 @@ fn round19_borrowck_type_ops_opaque_storage_and_failure_rollback() {
     let opaque = p.defs.iter().position(|d| d.kind == crate::program::DefKind::OpaqueTy).map(|i| DefId(i as u32)).unwrap();
     let alias = t.alias_ty_with_args(AliasTyKind::Opaque { def_id:opaque },&[]);
     let body = round19_body(&t, &p); let mut cx = round19_owner(&p,&t,&body);
-    cx.infcx.typing_mode = TypingMode::borrowck(&t,&p,def);
+    cx.infcx.typing_mode.set(TypingMode::borrowck(&t,&p,def));
     let mut out = MirTypeckRegionConstraints::new(2); let loc = Locations::All(crate::mir::Span::default());
     cx.relate_opaque(&mut out,alias,crate::types::variance::V::Inv,t.tys.bool_,loc,ConstraintCategory::Assignment).unwrap();
     assert!(!cx.infcx.inner.borrow_mut().opaque_types().is_empty());

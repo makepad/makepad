@@ -100,7 +100,7 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                         if self.ambient_variance == V::Inv && self.for_universe.can_name(universe) { return Ok(ty); }
                         let fresh = table.new_var(self.for_universe);
                         table.sub_unify(root, fresh);
-                        if !infcx.typing_mode.is_coherence() && self.in_alias { table.equate(root, fresh); }
+                        if !infcx.typing_mode.get().is_coherence() && self.in_alias { table.equate(root, fresh); }
                         infcx.tcx.tys.intern(TyKind::Infer(fresh))
                     }
                 }
@@ -135,7 +135,7 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                     ConstVariableValue::Unknown { universe } => {
                         if self.for_universe.can_name(universe) { return Ok(ct); }
                         let fresh = table.new_key(ConstVariableValue::Unknown { universe: self.for_universe });
-                        if !infcx.typing_mode.is_coherence() && self.in_alias { table.union(root, fresh); }
+                        if !infcx.typing_mode.get().is_coherence() && self.in_alias { table.union(root, fresh); }
                         Ok(tys.intern_const(ConstKind::Infer(InferConst::Var(crate::consts::ConstVid(fresh)))))
                     }
                 };

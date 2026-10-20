@@ -9,6 +9,11 @@ pub(super) fn borrowck_source(source: &str) -> (Vec<String>, Vec<String>) {
 }
 
 pub(super) fn borrowck_source_in(source: &str, edition: u16) -> (Vec<String>, Vec<String>) {
+    borrowck_source_named(source, edition, "repro")
+}
+
+/// The crate `source` (named `crate_name`, as `#![crate_name]` does in rustc's tests) over Relax's core, alloc and std.
+fn load_source(source: &str, edition: u16, crate_name: &str) -> (Program, Tcx, u32) {
     crate::borrowck::event::FORCE_USER_TYPES.with(|f| f.set(Some(true)));
     let sess = &std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(sess);
@@ -24,7 +29,7 @@ pub(super) fn borrowck_source_in(source: &str, edition: u16) -> (Vec<String>, Ve
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("lib.rs");
     std::fs::write(&path, source).unwrap();
-    let user = prog.load_crate("repro", path.to_str().unwrap(), edition, crate::cfg::CfgSet::host(sess, &[]), vec![(core, 0), (alloc_name, alloc), (std_name, std)]).unwrap();
+    let user = prog.load_crate(crate_name, path.to_str().unwrap(), edition, crate::cfg::CfgSet::host(sess, &[]), vec![(core, 0), (alloc_name, alloc), (std_name, std)]).unwrap();
     std::fs::remove_file(&path).unwrap(); std::fs::remove_dir(&dir).unwrap();
     prog.prelude_crate = Some(0);
     prog.resolve_imports();
@@ -32,6 +37,23 @@ pub(super) fn borrowck_source_in(source: &str, edition: u16) -> (Vec<String>, Ve
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    (prog, tcx, user)
+}
+
+/// The typeck errors of every fn of `source`, as the checker words them.
+pub(super) fn typeck_errors_source(source: &str, edition: u16) -> Vec<String> {
+    let (prog, tcx, user) = load_source(source, edition, "repro");
+    let mut errors = vec![];
+    for owner in crate::borrowck::body::owners(&prog) {
+        if prog.def(owner.owner).krate != user { continue; }
+        errors.extend(tcx.typeck(&prog, owner.owner).errors.iter().cloned());
+    }
+    errors
+}
+
+/// `borrowck_source_in` for a crate of the given name.
+pub(super) fn borrowck_source_named(source: &str, edition: u16, crate_name: &str) -> (Vec<String>, Vec<String>) {
+    let (prog, tcx, user) = load_source(source, edition, crate_name);
     let (mut errors, mut unchecked) = (vec![], vec![]);
     for owner in crate::borrowck::body::owners(&prog) {
         if prog.def(owner.owner).krate != user { continue; }
@@ -683,7 +705,7 @@ fn a_type_alias_prefix_of_a_path_instantiates_the_aliass_lifetimes() {
         impl<'a, 'b> Shl<&'b u32> for S<'a, 'b> { type Output = &'a u32; fn shl(self, t: &'b u32) -> &'a u32 { t } }
         pub fn f(s: S2) -> &u32 { S2::shl(s, &mut 3) }", 2015);
     assert!(unchecked.is_empty(), "{unchecked:?}");
-    assert!(errors.len() == 1 && errors[0].starts_with("E0716"), "{errors:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0515"), "{errors:?}");
 }
 
 #[test]
@@ -697,4 +719,166 @@ fn owning_pointers_own_their_pointee_for_dropck() {
         assert!(unchecked.is_empty(), "{owner}: {unchecked:?}");
         assert!(errors.len() == 1 && errors[0].starts_with("E0597"), "{owner}: {errors:?}");
     }
+}
+
+#[test]
+fn an_async_closure_returns_a_coroutine_that_borrows_from_its_environment() {
+    // The `FnMut` async closure's coroutine reborrows `i` from the closure's environment: its upvar has
+    // the environment's region (rustc `tupled_upvars_by_closure_kind`), not an unrelated external region.
+    let (errors, unchecked) = borrowck_source_in("
+        fn call_once<F>(_: impl FnOnce() -> F) {}
+        pub fn f() { let mut i = 0; let c = async || { i += 1; }; call_once(c); }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_async_closures_arguments_are_its_coroutines_leading_upvars() {
+    // The coroutine's argument upvar has the closure signature's own (higher-ranked) region.
+    let (errors, unchecked) = borrowck_source_in("
+        use std::future::Future;
+        trait Foo<'a> { type Future: Future<Output = u8> + 'a; fn start(self, f: &'a u8) -> Self::Future; }
+        impl<'a, Fn, Fut> Foo<'a> for Fn where Fn: FnOnce(&'a u8) -> Fut, Fut: Future<Output = u8> + 'a {
+            type Future = Fut;
+            fn start(self, f: &'a u8) -> Self::Future { (self)(f) }
+        }
+        fn foo<F>(f: F) where F: for<'a> Foo<'a> { let bar = 5; f.start(&bar); }
+        pub fn g() { foo(async move |f: &u8| { *f }); }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_async_closure_cannot_move_out_of_a_shared_reference() {
+    let (errors, unchecked) = borrowck_source_in("
+        pub struct Ty;
+        pub fn hello(x: &Ty) { let _c = async || { *x; }; }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.iter().any(|e| e.starts_with("E0507")), "{errors:?}");
+}
+
+#[test]
+fn bevys_param_set_takes_the_outlives_its_normalization_registers_as_implied_bounds() {
+    // `ParamSet<Query<&'a u8>>` is well-formed only where `'a: 'static` (the impl's `Q: 'static`); rustc keeps
+    // accepting bevy_ecs's use of it by assuming the region obligations normalizing its where clauses registers.
+    let source = "
+        pub trait WorldQuery {}
+        impl WorldQuery for &u8 {}
+        pub struct Query<Q: WorldQuery>(Q);
+        pub trait SystemParam { type State; }
+        impl<Q: WorldQuery + 'static> SystemParam for Query<Q> { type State = (); }
+        pub struct ParamSet<T: SystemParam>(T) where T::State: Sized;
+        fn handler<'a>(x: ParamSet<Query<&'a u8>>) { let _: ParamSet<_> = x; }
+        fn ref_handler<'a>(_: &ParamSet<Query<&'a u8>>) {}";
+    let (errors, unchecked) = borrowck_source_named(source, 2021, "bevy_ecs");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+    // another crate's ParamSet gets no such allowance
+    let (errors, _) = borrowck_source_named(source, 2021, "other_crate");
+    assert!(!errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_local_without_an_annotation_is_instantiated_by_the_coercion_of_its_initializer() {
+    // type-inference/generalize-subtyped-variables.rs: `let y = x` relates two type variables later, so the
+    // first use of `z` generalizes it to the non-higher-ranked `fn(&'0 ())`.
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn main() {
+            let mut x = None;
+            let y = x;
+            let z = Default::default();
+            let mut w = (&mut x, z, z);
+            let a = (&mut None::<fn(&())>, y, None::<fn(&'static ())>);
+            w = a;
+        }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_reference_to_a_local_returned_as_an_opaque_type_names_the_universal_region() {
+    // The argument's region is named (`'1`), so the borrow is explained by the opaque type's constraint:
+    // E0597 "opaque type requires that `y` is borrowed for `'1`" (regions/do-not-suggest-adding-bound-to-opaque-type).
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn b(x: &u32) -> impl Sized + '_ { let y = 5u32; &y }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0597") && errors[0].contains("opaque type requires that `y` is borrowed for `'1`"), "{errors:?}");
+}
+
+#[test]
+fn an_async_closure_returned_as_a_trait_object_references_a_local() {
+    // `(async || x)()` borrows `x` through a coroutine-closure, which is neither a closure nor a coroutine
+    // for the E0373 explanation: the error is E0515.
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn foo() -> Box<dyn std::future::Future<Output = u32>> { let x = 0u32; Box::new((async || x)()) }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0515"), "{errors:?}");
+}
+
+#[test]
+fn a_local_borrowed_by_a_returned_closure_or_async_block_is_e0373() {
+    // The returned value's region is boring (it outlives the `impl Trait` argument's universal region), so
+    // the borrow is explained by the constraint that returns it: a closure that escapes (E0373), not the
+    // generic "borrowed value does not live long enough".
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn boxed() -> Box<impl Fn() -> u32> { let x = 0u32; Box::new(|| x) }
+        pub fn by_ref(x: &u32) -> impl Fn() -> u32 + '_ { || *x }
+        pub async fn late() {}
+        pub fn block(x: &u32) -> impl std::future::Future<Output = u32> + '_ { async { *x } }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert_eq!(errors.iter().filter(|e| e.starts_with("E0373")).count(), 3, "{errors:?}");
+    assert_eq!(errors.len(), 3, "{errors:?}");
+}
+
+#[test]
+fn calling_a_function_that_returns_an_opaque_type_is_no_defining_use() {
+    // rustc's default solver does not define an opaque type while normalizing a callee's signature
+    // (impl-trait/member-constraints/incomplete-constraint.rs).
+    let (errors, unchecked) = borrowck_source_in("
+        fn new_defining_use<F: FnOnce(T) -> R, T, R>(_: F) {}
+        pub fn rpit1<'a, 'b: 'b>(x: &'b ()) -> impl Sized + use<'a, 'b> { new_defining_use(rpit1::<'a, 'b>); x }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_closure_stored_in_a_local_then_returned_as_an_opaque_type_is_e0597() {
+    // The returned value reaches the opaque type through the assignment to the local (category `Assignment`,
+    // "assignment requires that `p` is borrowed for `'static`"): no E0373 (closures/2229_closure_analysis/
+    // diagnostics/borrowck/borrowck-4.rs). Normalizing a place type does not define the opaque type.
+    let (errors, unchecked) = borrowck_source_in("
+        #[derive(Debug)] struct Point { x: i32, y: i32 }
+        pub fn foo() -> impl FnMut() {
+            let mut p = Point { x: 1, y: 2 };
+            let mut c = || { p.x += 5; println!(\"{:?}\", p); };
+            c
+        }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0597"), "{errors:?}");
+}
+
+#[test]
+fn an_ambiguous_subtype_predicate_is_a_type_annotation_error() {
+    // type/type-check/cannot_infer_local_or_array.rs: the local's variable is related to the array type's.
+    let errors = typeck_errors_source("pub fn main() { let x = []; }", 2021);
+    assert!(errors.iter().any(|e| e.contains("E0282")) && !errors.iter().any(|e| e.contains("E0283")), "{errors:?}");
+}
+
+#[test]
+fn a_use_of_an_opaque_type_with_non_parameter_arguments_is_e0792() {
+    // On stable a non-defining use of an opaque type in its defining scope is a hard error
+    // (impl-trait/rpit/non-defining-use.rs, non-defining-use-lifetimes.rs, recursive-ice-101862.rs).
+    let (errors, unchecked) = borrowck_source_in("
+        #![allow(unconditional_recursion)]
+        pub fn foo<T>() -> impl Sized { let _: () = foo::<u8>(); }
+        pub fn bar<T>(val: T) -> impl Sized { let _: u8 = bar(0u8); val }
+        pub fn ice(x: impl AsRef<str>) -> impl IntoIterator<Item = ()> { vec![].append(&mut ice(x.as_ref())); Vec::new() }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert_eq!(errors.iter().filter(|e| e.starts_with("E0792") && e.contains("expected generic type parameter, found")).count(), 3, "{errors:?}");
+    let (errors, _) = borrowck_source_in("
+        type Lt<'lt> = Option<*mut &'lt ()>;
+        pub fn foo<'a>(_: Lt<'a>) -> impl Sized + 'a { let _: () = foo(Lt::<'static>::None); }
+        pub fn equal<'a, 'b>(_: Lt<'a>, _: Lt<'b>) -> impl Sized + 'a + 'b { let _: () = equal(Lt::<'a>::None, Lt::<'a>::None); }", 2021);
+    assert!(errors.iter().any(|e| e.starts_with("E0792") && e.contains("expected generic lifetime parameter, found `'static`")), "{errors:?}");
+    assert!(errors.iter().any(|e| e.contains("non-defining opaque type use in defining scope")), "{errors:?}");
 }

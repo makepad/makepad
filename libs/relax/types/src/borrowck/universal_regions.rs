@@ -149,7 +149,7 @@ impl UniversalRegionsBuilder<'_> {
             for (t, expected) in inputs.iter().copied().chain([output]).map(|t| (t,false)).chain([(bound,true)]) {
                 let found = std::cell::RefCell::new(vec![]);
                 tcx.tys.map_regions(t,&|r,_| {
-                    if !matches!(tcx.tys.region_kind(r),RegionKind::ReBound(..)|RegionKind::ReErased|RegionKind::ReError|RegionKind::ReStatic)
+                    if !matches!(tcx.tys.region_kind(r),RegionKind::ReBound(..)|RegionKind::ReErased|RegionKind::ReError|RegionKind::ReStatic|RegionKind::ReLateParam(_,LateParamKind::ClosureEnv))
                         && (expected || !annotation_eq || !matches!(tcx.tys.region_kind(r),RegionKind::ReVar(_))) { found.borrow_mut().push(r); }
                     r
                 },0);
@@ -179,6 +179,83 @@ impl UniversalRegionsBuilder<'_> {
         UniversalRegionIndices { regions }
     }
 }
+/// rustc's `replace_free_regions_with_nll_infer_vars` makes every region of the defining type, erased ones
+/// included, a universal region of its own: each erased occurrence of a closure's environment type takes a
+/// distinct identity, scoped to the closure (a nested closure inherits its creator's universal regions,
+/// which must stay different) and numbered in order (the creator finds the slot by that number).
+fn env_erased_regions(tcx: &Tcx, owner: DefId, expr: u32, closure_ty: TyId) -> TyId {
+    let erased = std::cell::Cell::new(0u32);
+    let closure_scope = RegionScope::Closure { owner, expr };
+    tcx.tys.map_regions(closure_ty, &|r, depth| match tcx.tys.region_kind(r) {
+        RegionKind::ReErased => {
+            let n = erased.get(); erased.set(n + 1);
+            tcx.tys.intern_region(RegionKind::ReLateParam(closure_scope, LateParamKind::Anon(ENV_ERASED_BASE + n)))
+        }
+        RegionKind::ReBound(d, _) if d < depth => r,
+        _ => r,
+    }, 0)
+}
+
+/// How an async closure's output coroutine takes its upvars (rustc `CoroutineClosureSignature::
+/// tupled_upvars_by_closure_kind`): the closure's arguments first, then, for `Fn`/`FnMut`, the child
+/// captures that are borrowed from the closure's environment, for `FnOnce` the closure's own upvars.
+#[derive(Clone, Debug)]
+pub struct CoroutineUpvars {
+    /// the leading upvars of the coroutine that move the closure's arguments in
+    pub num_args: usize,
+    /// `Fn`/`FnMut`: the upvars (indices into the coroutine's tuple) that are by-reference captures
+    /// reborrowed from the environment (upvar.rs:394-470 `needs_ref`); empty for `FnOnce`
+    pub env_borrowed: Vec<usize>,
+    pub once: bool,
+}
+
+/// `Some` for an async closure's body (the closure that returns the coroutine).
+pub fn coroutine_closure_upvars(body: &crate::typeck::Body, expr: u32) -> Option<CoroutineUpvars> {
+    use crate::upvar::{CaptureKind, ClosureKind};
+    let parent = body.min_captures.get(&expr)?;
+    let view = parent.coroutine.as_ref()?;
+    let child = body.min_captures.get(&view.coroutine)?;
+    let once = parent.kind == ClosureKind::FnOnce;
+    let env_borrowed = if once { vec![] } else {
+        view.child_captures.iter()
+            .filter(|cc| cc.borrow_from_env && matches!(child.captures[cc.child].info.kind, CaptureKind::ByRef(_)))
+            .map(|cc| cc.child).collect()
+    };
+    Some(CoroutineUpvars { num_args: child.captures.len() - view.child_captures.len(), env_borrowed, once })
+}
+
+/// The signature of an async closure with its output coroutine's upvars as `tupled_upvars_by_closure_kind`
+/// gives them (the arguments of the signature, then the env-borrowed or the closure's own upvars).
+fn coroutine_closure_signature(tcx: &Tcx, owner: DefId, expr: u32, signature: TyId, env: TyId, plan: &CoroutineUpvars) -> TyId {
+    let TyKind::FnPtr(ins, output, header, bound) = *tcx.tys.kind(signature) else { return signature };
+    let inputs = tcx.tys.list(ins);
+    let closure_ty = match tcx.tys.kind(env) { TyKind::Ref(_, ct, _) => *ct, _ => env };
+    let closure_ty = env_erased_regions(tcx, owner, expr, closure_ty);
+    let env_region = matches!(tcx.tys.kind(env), TyKind::Ref(..)).then(|| tcx.tys.intern_region(RegionKind::ReLateParam(RegionScope::Closure { owner, expr }, LateParamKind::ClosureEnv)));
+    let TyKind::Closure(file, ce, args) = *tcx.tys.kind(output) else { return signature };
+    let TyKind::Tuple(upvars) = *tcx.tys.kind(args.tupled_upvars_ty) else { return signature };
+    let mut tys = tcx.tys.list(upvars).to_vec();
+    // (pattern parameters bind several locals: the leading upvars are then not the arguments)
+    if plan.num_args == inputs.len() && plan.num_args <= tys.len() { tys[..plan.num_args].copy_from_slice(inputs); }
+    if plan.once {
+        let TyKind::Closure(_, _, cargs) = *tcx.tys.kind(closure_ty) else { return signature };
+        let TyKind::Tuple(own) = *tcx.tys.kind(cargs.tupled_upvars_ty) else { return signature };
+        // (a child that captures a deeper place than the closure does keeps its own types)
+        let erased = |t| tcx.tys.map_regions(t, &|_, _| tcx.tys.intern_region(RegionKind::ReErased), 0);
+        let own = tcx.tys.list(own);
+        if tys.len() == plan.num_args + own.len() && tys[plan.num_args..].iter().zip(own).all(|(&a, &b)| erased(a) == erased(b)) {
+            tys[plan.num_args..].copy_from_slice(own);
+        }
+    } else if let Some(env) = env_region {
+        for &i in &plan.env_borrowed {
+            if let Some(TyKind::Ref(m, inner, _)) = tys.get(i).map(|&t| tcx.tys.kind(t).clone()) { tys[i] = tcx.tys.intern(TyKind::Ref(m, inner, env)); }
+        }
+    }
+    let upvars = tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&tys)));
+    let output = tcx.tys.intern(TyKind::Closure(file, ce, crate::types::ClosureArgs { tupled_upvars_ty: upvars, ..args }));
+    tcx.tys.intern(TyKind::FnPtr(ins, output, header, bound))
+}
+
 /// `LateParamKind::Anon` numbers from here name the erased regions of a closure's environment type.
 pub const ENV_ERASED_BASE: u32 = 0x4000_0000;
 
@@ -209,13 +286,22 @@ impl SignatureRegions {
     /// A closure's universal regions (universal_regions.rs `DefiningTy::Closure`): its parent's
     /// are external, its own signature's are local. The signature is the typeck result's, with
     /// the lifetime arguments of its types as written back.
-    pub fn closure_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, sig: &crate::typeck::ClosureSignatures, parent: Self) -> Option<Self> {
+    ///
+    /// An async closure (`coroutine`: its upvar plan and its environment type, `&C`, `&mut C` or `C`) returns
+    /// a coroutine whose upvars the signature fixes (`coroutine_closure_output`).
+    pub fn closure_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, sig: &crate::typeck::ClosureSignatures, coroutine: Option<(&CoroutineUpvars, TyId)>, parent: Self) -> Option<Self> {
         // compute_inputs_and_output: the closure's one (bound) signature, not
         // the body's supplied types; the annotation is ascribed onto it.
-        let signature = sig.liberated_bound();
+        let mut signature = sig.liberated_bound();
         if !matches!(tcx.tys.kind(signature),TyKind::FnPtr(..)) { return None; }
+        let mut bound = sig.bound;
+        if let Some((plan, env)) = coroutine {
+            signature = coroutine_closure_signature(tcx, owner, expr, signature, env, plan);
+            // (the closure type's own signature names the coroutine's argument upvars the same way)
+            bound = coroutine_closure_signature(tcx, owner, expr, bound, env, plan);
+        }
         Some(UniversalRegionsBuilder { tcx,prog,
-            defining_ty:DefiningTy::Closure { owner,expr,signature,bound:sig.bound,annotation_eq:sig.annotation_eq.is_some() },
+            defining_ty:DefiningTy::Closure { owner,expr,signature,bound,annotation_eq:sig.annotation_eq.is_some() },
             contract:parent.contract.clone(),parent:Some(parent) }.build())
     }
     /// The closure body's implicit first argument (the environment, `&'env C`, `&'env mut C`
@@ -229,16 +315,7 @@ impl SignatureRegions {
         // erased ones included, a universal region of its own: each erased occurrence takes a distinct
         // identity, scoped to this closure (a nested closure inherits its creator's universal regions,
         // which must stay different) and numbered in order (the creator finds the slot by that number).
-        let erased = std::cell::Cell::new(0u32);
-        let closure_scope = RegionScope::Closure { owner, expr };
-        let closure_ty = tcx.tys.map_regions(closure_ty, &|r, depth| match tcx.tys.region_kind(r) {
-            RegionKind::ReErased => {
-                let n = erased.get(); erased.set(n + 1);
-                tcx.tys.intern_region(RegionKind::ReLateParam(closure_scope, LateParamKind::Anon(ENV_ERASED_BASE + n)))
-            }
-            RegionKind::ReBound(d, _) if d < depth => r,
-            _ => r,
-        }, 0);
+        let closure_ty = env_erased_regions(tcx, owner, expr, closure_ty);
         let env = match tcx.tys.kind(env) { TyKind::Ref(m, _, r) => tcx.tys.intern(TyKind::Ref(*m, closure_ty, *r)), _ => closure_ty };
         let mut external = vec![];
         for r in crate::borrowck::mir_nll::free_regions_in_order(tcx, closure_ty) {

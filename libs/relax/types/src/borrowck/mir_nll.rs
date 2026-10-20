@@ -329,15 +329,15 @@ impl RegionDriverOps for super::infer_ctxt::BorrowckInferCtxt<'_> {
         // The environment's implicit argument only contributes bounds: it is last in the query.
         let raw: Vec<TyId> = sig.inputs.iter().copied().chain([sig.output]).chain(sig.implicit_input).collect();
         let (mut bounds, normalized) = super::implied_bounds::mir_borrowck_implied_outlives_bounds(
-            tcx, prog, self.root_def_id, self.infcx.typing_mode, &self.param_env_id(), nested, &sig.contract.predicates, &raw, &sig.contract.assumed_wf)
+            tcx, prog, self.root_def_id, self.infcx.typing_mode.get(), &self.param_env_id(), nested, &sig.contract.predicates, &raw, &sig.contract.assumed_wf)
             .unwrap_or_else(|_| super::implied_bounds::query_failed(tcx, prog, self.root_def_id, &sig.contract.predicates, &raw));
         // The query's external variables are the closure's universal regions; every other placeholder is residual.
         if nested { bounds.retain_instantiated_query_bounds(tcx, &sig.query_placeholders); } else { bounds.instantiate_query_bounds(tcx, &[]); }
         (bounds, normalized)
     }
     fn normalize_signature_ty(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, span: Span) -> TyId {
-        use crate::next_solver::type_op::{Normalize, ParamEnvAnd};
-        let op = ParamEnvAnd { param_env: self.param_env_id(), value: Normalize { value: ty } };
+        use crate::next_solver::type_op::{NormalizeSignature, ParamEnvAnd};
+        let op = ParamEnvAnd { param_env: self.param_env_id(), value: NormalizeSignature { value: ty } };
         let universals = self.universal_regions.as_ref().expect("install_universals precedes signature normalization");
         match super::type_check::canonical::fully_perform_op_raw(self, universals, &self.region_bound_pairs, &self.param_env.clauses, out,
             super::type_check::Locations::All(span), span, super::constraints::ConstraintCategory::Internal, op) {

@@ -232,7 +232,11 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     }
     fn relate_opaque(&mut self, out: &mut MirTypeckRegionConstraints, a: TyId, variance: V, b: TyId, locations: Locations, category: ConstraintCategory) -> Result<(), NoSolution> {
         let env = self.param_env_id();
-        self.fully_perform_op(out, locations, category, CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
+        // The regions relating the value to the opaque's hidden type are the opaque type's constraints (rustc
+        // adds them when it equates each use with the final hidden type, `ConstraintCategory::OpaqueType`),
+        // not those of the assignment that defines it (a returned value is `Return`, not the hidden type).
+        let _ = category;
+        self.fully_perform_op(out, locations, ConstraintCategory::OpaqueType, CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
             let goals = ocx.infcx.at(ocx.prog, env).relate(a, variance, b).map_err(|_| NoSolution)?;
             ocx.register_obligations(goals); Ok(())
         }))
@@ -248,6 +252,11 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     }
     fn normalize_and_prove_instantiated_clauses(&mut self, out: &mut MirTypeckRegionConstraints, owner: ClauseOwner, args: &[GenericArg], locations: Locations) {
         let def = self.clause_owner(owner); let env = self.param_env_id();
+        // (proving clauses never defines an opaque type: see `NormalizeSignature`)
+        let mode = self.infcx.typing_mode.get();
+        if matches!(mode, crate::tcx::TypingMode::PostTypeckUntilBorrowck { .. }) {
+            self.infcx.typing_mode.set(crate::tcx::TypingMode::PostTypeckUntilBorrowck { defining_opaque_types: Default::default() });
+        }
         let _ = self.fully_perform_op(out, locations, ConstraintCategory::Predicate(self.locations_span(locations), def), CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
             for p in ocx.infcx.tcx.clauses_of(ocx.prog, def) {
                 let p = ocx.infcx.tcx.instantiate_predicate(ocx.prog, def, args, &p);
@@ -256,6 +265,7 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
             }
             Ok(())
         }));
+        self.infcx.typing_mode.set(mode);
     }
     fn normalize(&mut self, out: &mut MirTypeckRegionConstraints, ty: TyId, locations: Locations) -> TyId {
         self.fully_perform_op(out, locations, ConstraintCategory::Boring, ParamEnvAnd { param_env: self.param_env_id(), value: Normalize { value: ty } }).unwrap_or(ty)

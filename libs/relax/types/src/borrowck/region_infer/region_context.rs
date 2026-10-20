@@ -203,7 +203,7 @@ impl RegionInferenceContext {
         let subset: Vec<_> = constraints.iter().copied().filter(|&(a,b)| self.eval_outlives(a,b)).collect();
         let propagated = if subset.is_empty() { constraints } else { subset };
         assert!(!propagated.is_empty());
-        let blame = self.best_blame_constraint(tcx,longer,shorter).expect("propagated region relation has no constraint path");
+        let blame = self.best_blame_constraint(tcx,longer,Origin::FreeRegion,shorter).expect("propagated region relation has no constraint path");
         self.propagated_outlives_requirements.extend(propagated.into_iter().map(|(sup,sub)| OutlivesConstraint { sup,sub,..blame }));
         true
     }
@@ -213,7 +213,7 @@ impl RegionInferenceContext {
             let illegally_outlived_r = match element {
                 RegionElement::RootUniversalRegion(r) => r,
                 RegionElement::PlaceholderRegion(p) => self.definitions.iter().position(|d| d.origin == Origin::Placeholder(p)).unwrap(),
-                RegionElement::Location(p) => self.constraint_path_to(longer_fr, |r| self.liveness_constraints.is_live_at_point(r,p), true).unwrap().1,
+                RegionElement::Location(p) => self.constraint_path_to(longer_fr, |r| self.liveness_constraints.is_live_at_point_eagerly(r,p), true).unwrap().1,
             };
             self.errors.push(RegionErrorKind::PlaceholderOutlivesIllegalRegion { longer_fr, illegally_outlived_r });
         }
@@ -255,12 +255,12 @@ impl RegionInferenceContext {
         }
         None
     }
-    pub fn best_blame_constraint(&self, tcx: &Tcx, from: usize, to: usize) -> Option<OutlivesConstraint> {
+    pub fn best_blame_constraint(&self, tcx: &Tcx, from: usize, from_origin: Origin, to: usize) -> Option<OutlivesConstraint> {
         let mut path = self.constraint_path_to(from, |r| r == to, true)?.0;
         if let Some(unnameable) = path.iter().find_map(|c| match c.category { Category::OutlivesUnnameablePlaceholder(r) => Some(r), _ => None }) {
             if unnameable != from { path = self.constraint_path_to(from, |r| r == unnameable, false)?.0; }
         }
-        let blame_source = self.definitions[from].origin == Origin::FreeRegion;
+        let blame_source = from_origin == Origin::FreeRegion;
         // N:region_infer/region_context.rs:711-727: an implicit unsizing coercion to an ADT
         // over a trait object ranks just after returns when blaming `'static`, unless a
         // type annotation is on the path.

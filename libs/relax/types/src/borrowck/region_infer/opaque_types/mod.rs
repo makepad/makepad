@@ -40,7 +40,7 @@ pub enum NonDefiningUseReason {
 /// with region errors, these are likely caused by them.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeferredOpaqueTypeError {
-    InvalidOpaqueTypeArgs(NonDefiningUseReason),
+    InvalidOpaqueTypeArgs(NonDefiningUseReason, (u32, u32)),
     LifetimeMismatchOpaqueParam { arg: GenericArg, prev: GenericArg, span: (u32, u32), prev_span: (u32, u32) },
     UnexpectedHiddenRegion { opaque_type_key: OpaqueTypeKey, hidden_type: TyId, span: (u32, u32), member_region: usize },
     NonDefiningUseInDefiningScope { opaque_type_key: OpaqueTypeKey, span: (u32, u32) },
@@ -167,7 +167,7 @@ pub fn compute_definition_site_hidden_types(tcx: &Tcx, prog: &Program, body: usi
     // `compute_regions` is not mutated, and this information is discarded at the end.
     let mut rcx = RegionCtxt::new(definitions, relations, constraints.outlives_constraints.clone());
     // Each use of an opaque type during type check whose generic arguments are fully universal is a defining use.
-    let defining_uses = collect_defining_uses(tcx, prog, infcx, &mut rcx, hidden_types, opaque_types);
+    let defining_uses = collect_defining_uses(tcx, prog, infcx, &mut rcx, opaque_types, &mut errors);
     // Compute and apply member constraints for all regions in the hidden types of each defining use.
     member_constraints::apply_member_constraints(&mut rcx, tcx, prog, &defining_uses);
     // All member regions are now equal to one of their choice regions: compute the opaque's hidden type.
@@ -175,8 +175,8 @@ pub fn compute_definition_site_hidden_types(tcx: &Tcx, prog: &Program, body: usi
     errors
 }
 
-fn collect_defining_uses(tcx: &Tcx, prog: &Program, infcx: &mut dyn OpaqueOps, rcx: &mut RegionCtxt<'_>, hidden_types: &mut HiddenTypes,
-    opaque_types: &[(OpaqueTypeKey, ProvisionalHiddenType)]) -> Vec<DefiningUse> {
+fn collect_defining_uses(tcx: &Tcx, prog: &Program, infcx: &mut dyn OpaqueOps, rcx: &mut RegionCtxt<'_>,
+    opaque_types: &[(OpaqueTypeKey, ProvisionalHiddenType)], errors: &mut Vec<DeferredOpaqueTypeError>) -> Vec<DefiningUse> {
     let tys = &tcx.tys;
     let mut defining_uses = vec![];
     for (key, hidden_type) in opaque_types {
@@ -188,11 +188,14 @@ fn collect_defining_uses(tcx: &Tcx, prog: &Program, infcx: &mut dyn OpaqueOps, r
             }
         });
         if let Err(err) = infcx.opaque_type_has_defining_use_args(&non_nll_key) {
-            // A non-defining use. With the next solver this is not an error by itself: it is
-            // ignored, and only reported if no defining use exists.
-            if err == NonDefiningUseReason::Tainted {
-                add_hidden_type(tcx, hidden_types, key.def_id, tys.error);
-            }
+            // A non-defining use is a hard error on stable (`use_typing_mode_borrowck()` is false; it is ignored
+            // with the next solver's typing mode).
+            // (Relax's typeck, unlike rustc's, resolves the type of a call to a function of the defining scope to
+            // the hidden type: a use at an inference region is then no use the program wrote down, and is ignored
+            // as the next solver does.)
+            let inferred_lifetime = matches!(&err, NonDefiningUseReason::NotAParam { opaque_type_key, param_index }
+                if matches!(opaque_type_key.args[*param_index], GenericArg::Lifetime(r) if matches!(tys.region_kind(r), RegionKind::ReVar(_))));
+            if !inferred_lifetime { errors.push(DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(err, hidden_type.span)); }
             continue;
         }
         // The original key, with its NLL variables, supplies the arg regions.
@@ -261,14 +264,10 @@ fn has_error(tcx: &Tcx, ty: TyId) -> bool { tcx.tys.flags(ty).intersects(crate::
 pub fn apply_definition_site_hidden_types(tcx: &Tcx, prog: &Program, infcx: &mut dyn OpaqueOps, constraints: &mut MirTypeckRegionConstraints,
     hidden_types: &mut HiddenTypes, opaque_types: &[(OpaqueTypeKey, ProvisionalHiddenType)]) -> Vec<DeferredOpaqueTypeError> {
     let tys = &tcx.tys;
-    let mut errors = vec![];
+    let errors = vec![];
     for (key, hidden_type) in opaque_types {
         let Some(&(_, expected)) = hidden_types.iter().find(|(d, _)| *d == key.def_id) else {
-            // A non-defining use in the defining scope with no defining use at all.
-            errors.push(DeferredOpaqueTypeError::NonDefiningUseInDefiningScope { opaque_type_key: key.clone(), span: hidden_type.span });
-            tcx.dcx.delayed_bug(crate::next_solver::fulfill::ObligationCause { span: 0, body_id: key.def_id },
-                "non-defining use in the defining scope with no defining uses".into());
-            add_hidden_type(tcx, hidden_types, key.def_id, tys.error);
+            // No defining use: every use was reported as an invalid use (`collect_defining_uses`).
             continue;
         };
         // We erase all non-member regions of the opaque and treat them as existentials.

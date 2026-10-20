@@ -7,7 +7,7 @@ use crate::types::{TyKind, AliasTyKind};
 use crate::consts::IsRigid;
 impl EvalCtxt<'_, '_> {
     pub(super) fn assemble_builtin_impl_candidates(&mut self, env: &ParamEnvId, goal: &GoalKind, candidates: &mut Vec<Candidate>) -> Result<(), NoSolutionOrRerunNonErased> {
-        if matches!(self.delegate.typing_mode, crate::tcx::TypingMode::Reflection) { return Ok(()); }
+        if matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Reflection) { return Ok(()); }
         if matches!(goal, GoalKind::Trait(TraitClause { polarity: ClausePolarity::Negative, .. })) { return Ok(()); }
         let tcx = self.delegate.tcx; let tr = goal.trait_ref(self); let ty = goal.self_ty(self);
         let lang = tcx.lang_items.by_def.get(&tr.def_id).copied();
@@ -59,7 +59,7 @@ impl EvalCtxt<'_, '_> {
                         if !response_values_are_identity(&tcx.tys, &response, true) {
                             return Ok(ecx.make_ambiguous_response_no_constraints(MaybeInfo::AMBIGUOUS));
                         }
-                        if !response.value.external_constraints.opaque_types.is_empty() && matches!(ecx.delegate.typing_mode,crate::tcx::TypingMode::Typeck { .. }) {
+                        if !response.value.external_constraints.opaque_types.is_empty() && matches!(ecx.delegate.typing_mode.get(),crate::tcx::TypingMode::Typeck { .. }) {
                             return Ok(ecx.make_ambiguous_response_no_constraints(MaybeInfo::AMBIGUOUS));
                         }
                         return Ok(response);

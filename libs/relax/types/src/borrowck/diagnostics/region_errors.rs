@@ -72,7 +72,7 @@ pub fn report_region_errors(cx: &DiagCx<'_>, errors: &[RegionErrorKind]) -> Vec<
 fn blame(cx: &DiagCx<'_>, from: RegionVid, to: RegionVid) -> (ConstraintCategory, Span, Vec<OutlivesConstraint>, bool) {
     let regioncx = &cx.regions.regioncx;
     let path = regioncx.constraint_path_to(from, |r| r == to, true).map(|p| p.0).unwrap_or_default();
-    match regioncx.best_blame_constraint(cx.tcx, from, to) {
+    match regioncx.best_blame_constraint(cx.tcx, from, regioncx.definitions[from].origin, to) {
         Some(c) => (c.category, c.span, path, c.from_closure),
         None => (ConstraintCategory::Boring, Span::default(), path, false),
     }

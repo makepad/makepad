@@ -301,23 +301,11 @@ impl ImpliedBounds {
     }
 
     // rustc_trait_selection::traits::implied_outlives_bounds @8d1a764.
-    // Match only ParamSet and references to it, not arbitrary nested arguments.
     pub fn consider_implied_bounds_compat(&mut self, tcx: &Tcx, prog: &crate::program::Program,
-        mut ty: TyId, registered_since_snapshot: &[OutlivesPredicate]) {
-        loop {
-            match tcx.tys.kind(ty) {
-                TyKind::Ref(_,inner,_) => ty = *inner,
-                TyKind::Adt(d,_,_) => {
-                    let def = prog.def(*d);
-                    if prog.name(*d) == "ParamSet" && prog.syms.str(prog.crates[def.krate as usize].name) == "bevy_ecs" {
-                        for &p in registered_since_snapshot {
-                            if matches!(p,OutlivesPredicate::Type(..)) { self.assume(tcx,p); }
-                        }
-                    }
-                    break;
-                }
-                _ => break,
-            }
+        ty: TyId, registered_since_snapshot: &[OutlivesPredicate]) {
+        if !contains_bevy_param_set(tcx, prog, ty) { return; }
+        for &p in registered_since_snapshot {
+            if matches!(p,OutlivesPredicate::Type(..)) { self.assume(tcx,p); }
         }
     }
 
@@ -339,6 +327,37 @@ impl ImpliedBounds {
             if has_placeholder.get() || contains_type_placeholder(tcx,t) { None } else { Some((t,r)) }
         }).collect();
     }
+}
+/// `ContainsBevyParamSet`: `ParamSet<T>` of crate `bevy_ecs`, or a reference to one (references only; the
+/// arguments of other types are not searched).
+fn contains_bevy_param_set(tcx: &Tcx, prog: &crate::program::Program, mut ty: TyId) -> bool {
+    loop {
+        match tcx.tys.kind(ty) {
+            TyKind::Ref(_,inner,_) => ty = *inner,
+            TyKind::Adt(d,_,_) => {
+                let def = prog.def(*d);
+                return prog.name(*d) == "ParamSet" && prog.syms.str(prog.crates[def.krate as usize].name) == "bevy_ecs";
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The search of `compute_implied_outlives_bounds` through `ty`'s well-formedness: every WF obligation is
+/// deeply normalized (which selects impls and registers their outlives obligations), and each WF predicate it
+/// yields is searched in turn. Only the registered region obligations matter to the bevy compatibility rule.
+fn normalize_wf_obligations(infcx: &crate::infer::InferCtxt<'_>, ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>, prog: &Program, param_env: &crate::next_solver::ParamEnvId, tys: &[TyId]) -> Result<(), crate::next_solver::NoSolution> {
+    use crate::next_solver::{ClauseKind, PredicateKind, Term};
+    let mut checked: crate::fxhash::HashSet<Term> = Default::default();
+    let mut wf_args: Vec<Term> = tys.iter().map(|&t| Term::Ty(t)).collect();
+    while let Some(arg) = wf_args.pop() {
+        if !checked.insert(arg) { continue; }
+        for goal in crate::next_solver::wf::unnormalized_obligations(infcx, prog, param_env, arg)?.into_iter().flatten() {
+            let pred = ocx.deeply_normalize_predicate(param_env, &goal.predicate)?;
+            if let PredicateKind::Clause(ClauseKind::WellFormed(term)) = pred.kind { wf_args.push(term); }
+        }
+    }
+    Ok(())
 }
 fn contains_type_placeholder(tcx: &Tcx, t: TyId) -> bool {
     tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_TY_PLACEHOLDER)
@@ -405,6 +424,7 @@ pub fn mir_borrowck_implied_outlives_bounds(
         let normalized_ty = crate::type_queries::place_types::with_foreign_region_vars(&infcx, ty, |ty| crate::type_queries::place_types::in_signature_binder(&tcx.tys, ty, |ty| ocx.deeply_normalize_ty(param_env, ty).map_err(|_| failed.set(true)).ok())).unwrap_or(ty);
         if failed.get() { return Err(crate::next_solver::NoSolution); }
         bounds.implied_wf_args(tcx,prog,vec![ty,normalized_ty]);
+        if contains_bevy_param_set(tcx, prog, ty) && normalize_wf_obligations(&infcx, &mut ocx, prog, param_env, &[ty, normalized_ty]).is_err() { return Err(crate::next_solver::NoSolution); }
         bounds.consider_implied_bounds_compat(tcx,prog,normalized_ty,&registered_since(snapshot));
         normalized_inputs_and_output.push(normalized_ty);
     }

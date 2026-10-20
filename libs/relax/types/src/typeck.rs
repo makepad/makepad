@@ -4737,6 +4737,14 @@ impl<'a> Fcx<'a> {
                                     self.coerce_or_unify(it, v, Some(*e), ast.expr(*e).lo);
                                     v
                                 }
+                                // (and the local's variable is instantiated by the coercion, as a generalization
+                                // of the initializer type, when that has inference variables inside: relating
+                                // the vars of two types is deferred, not unified)
+                                None if self.tcx.tys.has_infer(it) && !matches!(self.tcx.tys.kind(self.shallow(it)), TyKind::Infer(_)) => {
+                                    let v = self.fresh(0);
+                                    self.coerce_or_unify(it, v, Some(*e), ast.expr(*e).lo);
+                                    v
+                                }
                                 None => it,
                             }
                         }
@@ -7318,6 +7326,12 @@ impl<'a> Fcx<'a> {
                 let (prog, tcx) = (self.prog, self.tcx);
                 let msg = trait_error_message(prog, tcx, code, p, &mut |t| self.ty_str(t));
                 self.err(obligation.cause.span, format!("{code}: {msg}"));
+                continue;
+            }
+            // rustc maybe_report_ambiguity: an ambiguous subtype / coercion predicate relates two still unknown
+            // types (the first is named): "type annotations needed" (E0282), not an unsatisfied obligation.
+            if code == "E0283" && matches!(predicate.kind, PredicateKind::Subtype(_) | PredicateKind::Coerce(_)) {
+                self.err(obligation.cause.span, "E0282: type annotations needed".to_string());
                 continue;
             }
             if let Some(msg) = crate::wfcheck::obligations::fulfillment_message(&self.infcx, self.prog, code, &obligation.goal) {

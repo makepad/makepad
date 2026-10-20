@@ -157,7 +157,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         let step = self.step_kind_for_source(source);
         let goal = fold::fold_goal(self.delegate.tcx, &goal, &mut crate::infer::resolve::DeepVariableResolver::new(self.delegate));
         let opaque_types = self.delegate.resolved_opaque_types();
-        let mode = self.delegate.typing_mode;
+        let mode = self.delegate.typing_mode.get();
         if mode.is_erased_not_coherence() { assert!(opaque_types.is_empty()); }
         let skip_erased = matches!(mode, crate::tcx::TypingMode::Coherence | crate::tcx::TypingMode::Reflection) ||
             (matches!(goal.predicate.kind, PredicateKind::Clause(ClauseKind::Trait(_))) && opaque_types.iter().any(|(_, t)| matches!(self.delegate.tcx.tys.kind(self.delegate.shallow_resolve(*t)), crate::types::TyKind::Infer(_))));
@@ -314,10 +314,10 @@ impl InferCtxt<'_> {
         self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth)
     }
     fn evaluate_root_goal_for_proof_tree_with_depth(&self, prog: &crate::program::Program, goal: Goal, root_depth: usize) -> super::inspect::GoalEvaluation {
-        assert!(!self.typing_mode.is_erased_not_coherence());
+        assert!(!self.typing_mode.get().is_erased_not_coherence());
         let goal = fold::fold_goal(self.tcx, &goal, &mut crate::infer::resolve::DeepVariableResolver::new(self));
         let opaques = self.resolved_opaque_types();
-        let (original, input) = canonicalize_goal(self, &goal, &opaques, self.typing_mode);
+        let (original, input) = canonicalize_goal(self, &goal, &opaques, self.typing_mode.get());
         let mut solver = SolverDelegate::new(self.tcx, prog);
         solver.cause = self.cause; solver.limit = self.recursion_limit;
         let input = solver.input(input);

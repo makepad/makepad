@@ -915,7 +915,7 @@ mod driver {
             closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[capture]))) }));
         let env = rf(&tcx, tcx.tys.intern_region(RegionKind::ReErased), closure, false);
         let closure_sig = ClosureSignatures { bound: sig, liberated: sig, annotation_eq: None };
-        let u = SignatureRegions::closure_in(&tcx, &prog, f, 1, &closure_sig, parent).unwrap().with_closure_env(&tcx, f, 1, env);
+        let u = SignatureRegions::closure_in(&tcx, &prog, f, 1, &closure_sig, None, parent).unwrap().with_closure_env(&tcx, f, 1, env);
         // Everything of the parent is external; the captured region is one more external region; 'env and
         // the body region are the only locals.
         let classes: Vec<_> = u.regions.iter().map(|r| r.class).collect();

@@ -73,7 +73,7 @@ fn nested_region_requirements_reach_the_parent_before_it_is_solved() {
     assert!(!parent.result.accepted());
     assert!(parent.result.region_errors.iter().any(|e| matches!(e, super::region_infer::RegionErrorKind::RegionError { longer_fr: 2, shorter_fr: 1, .. })));
     // The original blame is kept: span, category and the use's location, marked as from the closure.
-    let blame = parent.regions.regioncx.best_blame_constraint(&tcx, 2, 1).unwrap();
+    let blame = parent.regions.regioncx.best_blame_constraint(&tcx, 2, parent.regions.regioncx.definitions[2].origin, 1).unwrap();
     assert_eq!((blame.span.lo, blame.span.file, blame.category, blame.location, blame.from_closure), (13, 7, Cat::Return(ReturnConstraint::Normal), Some(0), true));
 }
 

@@ -197,7 +197,7 @@ fn check_root(prog: &Program, tcx: &Tcx, owner: CheckedBody, tb: &crate::typeck:
                             out.unchecked.push(("enclosing closure without a recorded signature".into(), at));
                             return out;
                         };
-                        match SignatureRegions::closure_in(tcx, prog, tb.def, pe.0, psigs, owner_sig.clone()) {
+                        match SignatureRegions::closure_in(tcx, prog, tb.def, pe.0, psigs, None, owner_sig.clone()) {
                             Some(s) => s,
                             None => {
                                 out.unchecked.push(("enclosing closure has no signature regions".into(), at));
@@ -206,7 +206,8 @@ fn check_root(prog: &Program, tcx: &Tcx, owner: CheckedBody, tb: &crate::typeck:
                         }
                     }
                 };
-                let Some(sig) = SignatureRegions::closure_in(tcx, prog, tb.def, e.0, sigs, parent_sig) else {
+                let plan = crate::borrowck::universal_regions::coroutine_closure_upvars(tb, e.0);
+                let Some(sig) = SignatureRegions::closure_in(tcx, prog, tb.def, e.0, sigs, plan.as_ref().map(|p| (p, mir.local_decls[1].ty)), parent_sig) else {
                     out.unchecked.push(("closure has no signature regions".into(), at));
                     return out;
                 };

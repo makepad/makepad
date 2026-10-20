@@ -99,16 +99,6 @@ pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::B
     // independent root of its own (rustc: an anon const is its own typeck root and `mir_borrowck`).
     let mut owners: Vec<CheckedBody> = Vec::new();
     let closure_order = closures_inner_first(prog, tcx, typeck);
-    // An async closure is a closure returning a coroutine over its captures (CoroutineClosure); which
-    // captures the coroutine takes (by ref through `AsyncFn`, by move through `FnOnce`: rustc's
-    // by-move body) is not modelled, so the root is not checked rather than misreported.
-    {
-        let ast = &prog.files[typeck.file as usize].ast;
-        if closure_order.iter().any(|&c| c & crate::tcx::ASYNC_FN_BODY == 0 && matches!(ast.expr(crate::ast::ExprId(c)).kind, crate::ast::ExprKind::Closure(row) if ast.row(row).is_async)) {
-            v.unchecked.push(format!("{name}: async closures are not borrow-checked"));
-            return v;
-        }
-    }
     for &c in &closure_order {
         owners.push(CheckedBody { owner: typeck.def, kind: OwnerKind::Closure(crate::ast::ExprId(c)) });
     }
@@ -226,7 +216,8 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             None => item_sig.clone(),
         };
         let env_ty = mir.local_decls.get(1).map_or(tcx.tys.unit, |d| d.ty);
-        let Some(sig) = SignatureRegions::closure_in(tcx, prog, typeck.def, c, sigs, parent) else {
+        let plan = super::universal_regions::coroutine_closure_upvars(typeck, c);
+        let Some(sig) = SignatureRegions::closure_in(tcx, prog, typeck.def, c, sigs, plan.as_ref().map(|p| (p, env_ty)), parent) else {
             v.unchecked.push(format!("{name}: closure signature is not a function pointer")); return;
         };
         closure_sigs.insert(c, sig.with_closure_env(tcx, typeck.def, c, env_ty));
@@ -388,11 +379,14 @@ fn universal_names(tcx: &Tcx, prog: &Program, p: &Prepared<'_>) -> UniversalName
         };
         names.regions.push((vid, ext));
     }
+    // The signature's types name its universal regions by their variables, as the region names are looked up.
+    let by_vid = |ty| tcx.tys.map_regions(ty, &|r, _| match uni_vid(r) { Some(v) => tcx.tys.intern_region(crate::types::RegionKind::ReVar(v as u32)), None => r }, 0);
     for (i, &ty) in p.sig.inputs.iter().enumerate() {
+        let ty = by_vid(ty);
         let span = p.mir.local_decls.get(i + 1).map_or(Span::default(), |d| d.source_info.span);
         names.inputs.push(InputInfo { ty, ty_span: span, ref_span: matches!(tcx.tys.kind(ty), crate::types::TyKind::Ref(..)).then_some(span) });
     }
-    names.output = Some(OutputInfo { ty: p.sig.output, span: p.mir.span, ref_span: None, description: "" });
+    names.output = Some(OutputInfo { ty: by_vid(p.sig.output), span: p.mir.span, ref_span: None, description: "" });
     names.def_descr = match p.owner.kind { OwnerKind::Closure(_) => "closure", OwnerKind::Function => "function", _ => "constant" };
     names.is_fn_def = matches!(p.owner.kind, OwnerKind::Function);
     names.is_const = matches!(p.owner.kind, OwnerKind::Const | OwnerKind::Static | OwnerKind::AssocConst | OwnerKind::InlineConst(_) | OwnerKind::AnonConst(_));

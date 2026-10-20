@@ -54,7 +54,7 @@ impl Tcx {
 impl EvalCtxt<'_, '_> {
     pub(super) fn assemble_object_bound_candidates(&mut self, env: &ParamEnvId, goal: &GoalKind, candidates: &mut Vec<Candidate>) -> Result<(), NoSolutionOrRerunNonErased> {
         let tcx = self.delegate.tcx;
-        if [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized].iter().any(|&item| tcx.lang_items.get(item) == Some(goal.trait_ref(self).def_id)) || matches!(self.delegate.typing_mode, crate::tcx::TypingMode::Reflection) { return Ok(()); }
+        if [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized].iter().any(|&item| tcx.lang_items.get(item) == Some(goal.trait_ref(self).def_id)) || matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Reflection) { return Ok(()); }
         let ty = goal.self_ty(self);
         let TyKind::Dyn(principal, ..) = tcx.tys.kind(ty) else { return Ok(()); };
         if *principal != NO_DEF && self.check_dyn_compatible(*principal).is_err() { return Ok(()); }

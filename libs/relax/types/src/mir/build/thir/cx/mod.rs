@@ -214,6 +214,18 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The liberated output of the function's signature when it names an opaque type (the body's value defines
+    /// it), as the borrow checker's universal regions have it.
+    fn declared_output(&self, def: crate::program::DefId) -> Option<TyId> {
+        let tcx = self.tcx();
+        let sig = tcx.fn_item_sig(self.prog(), def)?;
+        // (only an `impl Trait` output differs from the typeck's own, normalized signature)
+        if !tcx.tys.has_opaque(sig.ret) { return None; }
+        let late = |v: crate::types::BoundVar| tcx.tys.intern_region(crate::types::RegionKind::ReLateParam(crate::types::RegionScope::Item(def), crate::types::LateParamKind::Anon(v.0)));
+        let mut f = crate::types::fold::BoundVarReplacer::new(late, |_| panic!("signature bound type"));
+        Some(f.instantiate(&tcx.tys, sig.ret))
+    }
+
     // ---- bodies
     /// rustc `thir_body`.
     pub fn thir_body(mut self) -> BuildResult<ThirBody> {
@@ -255,7 +267,8 @@ impl<'a> Cx<'a> {
                     let root = self.closure_aggregate_at(crate::tcx::ASYNC_FN_BODY | body.0, None, body_span, coroutine_ty, Some(crate::mir::Movability::Static))?;
                     let expr = self.push(root);
                                 let ret_span = self.span(b.lo, b.lo);
-                    return Ok(ThirBody { thir: self.thir, params, expr, body_ty: BodyTy::Fn { output: tb.ret, rust_call: false }, span: item_span, ret_span, coroutine: None, fn_scopes: scopes, prologue: Vec::new() });
+                    let output = self.declared_output(self.owner.owner).unwrap_or(tb.ret);
+                    return Ok(ThirBody { thir: self.thir, params, expr, body_ty: BodyTy::Fn { output, rust_call: false }, span: item_span, ret_span, coroutine: None, fn_scopes: scopes, prologue: Vec::new() });
                 }
                 let b = ast.block(body);
                 let params = self.fn_params(sig, item.lo)?;
@@ -263,7 +276,10 @@ impl<'a> Cx<'a> {
                 let root = Expr { kind: ExprKind::Block { block }, ty: tb.ret, temp_scope: None, span: self.span(b.lo, b.hi) };
                 let scopes = fn_scopes(&self, Node::Block(body.0), item_span)?;
                 let rust_call = false;
-                (params, self.push(root), BodyTy::Fn { output: tb.ret, rust_call }, item_span, self.span(b.lo, b.lo), scopes)
+                // the return place has the signature's declared output (an `impl Trait` stays the opaque type, which
+                // the body's value defines: rustc `construct_fn` takes `fn_sig.output()`)
+                let output = self.declared_output(self.owner.owner).unwrap_or(tb.ret);
+                (params, self.push(root), BodyTy::Fn { output, rust_call }, item_span, self.span(b.lo, b.lo), scopes)
             }
             OwnerKind::Const | OwnerKind::Static | OwnerKind::AssocConst => {
                 let init = match &item.kind {

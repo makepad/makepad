@@ -30,17 +30,19 @@ pub fn report_opaque_type_errors(cx: &DiagCx<'_>, errors: &[DeferredOpaqueTypeEr
     let mut last_unexpected_hidden_region: Option<(Span, String, String)> = None;
     for error in errors {
         match error {
-            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::Tainted) => {}
-            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::NotAParam { opaque_type_key, param_index }) => {
-                let span = Span { file, lo: 0, hi: 0 };
-                let mut d = Diag::new("E0792", span, format!("expected generic parameter, found `{}`", arg_string(cx, opaque_type_key.args[*param_index])));
-                d.span_label(span, "this generic parameter of the opaque type is not a parameter of the defining item");
+            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::Tainted, _) => {}
+            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::NotAParam { opaque_type_key, param_index }, span) => {
+                let span = at(*span);
+                let arg = opaque_type_key.args[*param_index];
+                let kind = match arg { GenericArg::Type(_) => "type", GenericArg::Lifetime(_) => "lifetime", GenericArg::Const(_) => "constant" };
+                let found = match arg { GenericArg::Lifetime(r) if cx.tcx.tys.region_kind(r) == crate::types::RegionKind::ReStatic => "'static".to_string(),
+                    GenericArg::Lifetime(_) => "'_".to_string(), _ => arg_string(cx, arg) };
+                let mut d = Diag::new("E0792", span, format!("expected generic {kind} parameter, found `{found}`"));
+                d.span_label(span, format!("this generic parameter of the opaque type is not a parameter of the defining item"));
                 out.push(d);
             }
-            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::DuplicateParam { opaque_type_key, .. }) => {
-                let span = Span { file, lo: 0, hi: 0 };
-                let _ = opaque_type_key;
-                out.push(Diag::new("", span, "non-defining opaque type use in defining scope"));
+            DeferredOpaqueTypeError::InvalidOpaqueTypeArgs(NonDefiningUseReason::DuplicateParam { .. }, span) => {
+                out.push(Diag::new("", at(*span), "non-defining opaque type use in defining scope"));
             }
             DeferredOpaqueTypeError::LifetimeMismatchOpaqueParam { arg, prev, span, prev_span } => {
                 let span = at(*span);

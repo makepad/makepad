@@ -173,7 +173,7 @@ fn free_region_constraint_info(cx: &DiagCx<'_>, borrow_region: RegionVid, outliv
     -> (ConstraintCategory, bool, Span, Option<RegionName>, Vec<OutlivesConstraint>) {
     let regioncx = &cx.regions.regioncx;
     let path = regioncx.constraint_path_to(borrow_region, |r| r == outlived_region, true).map(|p| p.0).unwrap_or_default();
-    let blame = regioncx.best_blame_constraint(cx.tcx, borrow_region, outlived_region);
+    let blame = regioncx.best_blame_constraint(cx.tcx, borrow_region, super::super::region_infer::NllRegionVariableOrigin::FreeRegion, outlived_region);
     let (category, from_closure, span) = match blame {
         Some(c) => (c.category, c.from_closure, c.span),
         None => (ConstraintCategory::Boring, false, Span::default()),
@@ -222,7 +222,7 @@ pub fn approx_universal_upper_bound(cx: &DiagCx<'_>, r: RegionVid) -> RegionVid 
 pub fn find_sub_region_live_at(cx: &DiagCx<'_>, fr1: RegionVid, location: Location) -> RegionVid {
     let regioncx = &cx.regions.regioncx;
     let point = cx.regions.locations.point(location);
-    regioncx.constraint_path_to(fr1, |r| regioncx.liveness_constraints().is_live_at_point(r, point), true)
+    regioncx.constraint_path_to(fr1, |r| regioncx.liveness_constraints().is_live_at_point_eagerly(r, point), true)
         .map(|p| p.1).unwrap_or(fr1)
 }
 

@@ -60,7 +60,7 @@ impl EvalCtxt<'_, '_> {
             self.try_assemble_bounds_via_registered_opaques(env, &goal, from, &mut candidates)?;
             return Ok((candidates, failed));
         }
-        if self.delegate.typing_mode.is_coherence() {
+        if self.delegate.typing_mode.get().is_coherence() {
             let local_crate = self.delegate.coherence_crate.expect("coherence crate context");
             if coherence::trait_ref_is_knowable(self,env,&goal.trait_ref(self),local_crate)?.is_err() {
                 // assembly/mod.rs:1022-1060: a known-false supertrait disproves
@@ -97,7 +97,7 @@ impl EvalCtxt<'_, '_> {
         if matches!(from, AssembleCandidatesFrom::All) {
             self.assemble_builtin_impl_candidates(env, &goal, &mut candidates)?;
             let mut shadowed = false;
-            if !self.delegate.typing_mode.is_coherence() {
+            if !self.delegate.typing_mode.get().is_coherence() {
                 for c in &candidates { if matches!(c.source, CandidateSource::ParamEnv(false) | CandidateSource::AliasBound(_)) && has_no_inference_or_external_constraints(&self.delegate.tcx.tys, &c.result) { shadowed = true; } }
             }
             if !shadowed { self.assemble_impl_candidates(env, &goal, &mut candidates)?; self.assemble_object_bound_candidates(env, &goal, &mut candidates)?; }
@@ -249,7 +249,7 @@ impl EvalCtxt<'_, '_> {
     pub(super) fn merge_trait_candidates(&mut self, tr: &TraitRef, mut candidates: Vec<Candidate>, failed: CandidateHeadUsages) -> Result<(canonical::Canonical<Response>, Option<TraitGoalProvenVia>), NoSolutionOrRerunNonErased> {
         if candidates.is_empty() { return Err(NoSolution.into()); }
         // trait_goals.rs:1628-1633: coherence does not prefer environment/object candidates.
-        if self.delegate.typing_mode.is_coherence() {
+        if self.delegate.typing_mode.get().is_coherence() {
             return Ok(match self.try_merge_candidates(&candidates) {
                 Some((response, _)) => (response, Some(TraitGoalProvenVia::Misc)),
                 None => (self.flounder(&candidates)?, None),

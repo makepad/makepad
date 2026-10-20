@@ -76,7 +76,7 @@ fn blame_follows_one_shortest_path_not_a_return_on_another_branch() {
     let mut edges = constraints(&[(1,2),(1,3)]);
     edges.push(constraint(3,2,ConstraintCategory::Return(ReturnConstraint::Normal)));
     let cx = solve(defs,edges,&[(0,Class::Global),(1,Class::Local),(2,Class::Local),(3,Class::Local)],&[],LivenessValues::new(4,0),0);
-    let blame = cx.best_blame_constraint(&crate::tcx::Tcx::new(),1,2).unwrap();
+    let blame = cx.best_blame_constraint(&crate::tcx::Tcx::new(),1,cx.definitions[1].origin,2).unwrap();
     assert_eq!((blame.sup,blame.sub),(1,2));
 }
 #[test]
@@ -280,7 +280,7 @@ fn reaudit_implicit_unsizing_to_trait_object_adt_is_blamed_for_static() {
     let run = |edges: &[(usize,usize,ConstraintCategory)], to: usize| {
         let mut set = OutlivesConstraintSet::default();
         for &(a,b,c) in edges { set.push(constraint(a,b,c)); }
-        solve(defs.clone(),set,&universals,&[],LivenessValues::new(4,0),0).best_blame_constraint(&tcx,1,to).unwrap().category
+        { let cx = solve(defs.clone(),set,&universals,&[],LivenessValues::new(4,0),0); cx.best_blame_constraint(&tcx,1,cx.definitions[1].origin,to).unwrap().category }
     };
     // Blaming 'static: the unsizing cast wins over the later assignment.
     assert_eq!(run(&[(1,2,unsize),(2,0,ConstraintCategory::Assignment)],0),unsize);

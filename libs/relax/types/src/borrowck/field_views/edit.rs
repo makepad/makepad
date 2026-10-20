@@ -270,7 +270,7 @@ fn rewrite_one(v: &FileView<'_>, r: &FvRecordRaw, n: usize) -> Result<(Vec<Typed
     }
     if !r.default { return Err("the place has no Default (needs the split-into-free-fn rewrite)"); }
     // the place occurs once in the statement, inside the borrow
-    let occurrences = v.exprs().filter(|(_, e)| stmt.lo <= e.lo && e.hi <= stmt.hi && v.text(e.lo, e.hi) == place_text && v.is_plain_span(e)).count();
+    let occurrences = v.exprs().filter(|(id, e)| stmt.lo <= e.lo && e.hi <= stmt.hi && !matches!(e.kind, ExprKind::Paren(_)) && v.is_plain(*id) && v.same_place(*id, place_id)).count();
     if occurrences != 1 { return Err("the place occurs more than once in the statement"); }
     Ok((vec![
         TypedEdit { lo: stmt.lo, hi: stmt.lo, text: format!("let mut {tmp} = std::mem::take(&mut {place_text});\n{indent}") },
@@ -280,8 +280,37 @@ fn rewrite_one(v: &FileView<'_>, r: &FvRecordRaw, n: usize) -> Result<(Vec<Typed
 }
 
 impl FileView<'_> {
-    fn is_plain_span(&self, e: &crate::ast::Expr) -> bool {
-        self.expr_at(Span { file: self.file, lo: e.lo, hi: e.hi }).is_some_and(|(id, _)| self.is_plain(id))
+    /// Whether two plain place expressions denote the same place: the same shape over the same
+    /// names (identifiers compare by name, as rustc's `Symbol`s do), field names, tuple indices and
+    /// literal indices (compared by their token). Parentheses are transparent. No source text of
+    /// a whole expression is compared.
+    fn same_place(&self, a: ExprId, b: ExprId) -> bool {
+        let ast = self.ast();
+        let (ea, eb) = (ast.expr(a), ast.expr(b));
+        match (ea.kind, eb.kind) {
+            (ExprKind::Paren(x), _) => self.same_place(x, b),
+            (_, ExprKind::Paren(y)) => self.same_place(a, y),
+            (ExprKind::Path(p), ExprKind::Path(q)) => {
+                let (sp, sq) = (ast.segs(p.segs), ast.segs(q.segs));
+                sp.len() == sq.len() && sp.iter().zip(sq).all(|(x, y)| self.pf().text(x.name) == self.pf().text(y.name))
+            }
+            (ExprKind::Field(x, n), ExprKind::Field(y, m)) => self.pf().text(n) == self.pf().text(m) && self.same_place(x, y),
+            (ExprKind::TupleField(x, i), ExprKind::TupleField(y, j)) => i == j && self.same_place(x, y),
+            (ExprKind::Unary(UnOp::Deref, x), ExprKind::Unary(UnOp::Deref, y)) => self.same_place(x, y),
+            (ExprKind::AddrOf(false, ma, x), ExprKind::AddrOf(false, mb, y)) => ma == mb && self.same_place(x, y),
+            (ExprKind::Index(x, i), ExprKind::Index(y, j)) => self.same_place(x, y) && self.same_index(i, j),
+            _ => false,
+        }
+    }
+    /// The index of a plain `Index` place: a literal (same kind, same token) or a path.
+    fn same_index(&self, a: ExprId, b: ExprId) -> bool {
+        let ast = self.ast();
+        let (ea, eb) = (ast.expr(a), ast.expr(b));
+        match (ea.kind, eb.kind) {
+            (ExprKind::Lit(ka), ExprKind::Lit(kb)) => ka == kb && self.pf().bytes(ea.lo, ea.hi) == self.pf().bytes(eb.lo, eb.hi),
+            (ExprKind::Path(_), ExprKind::Path(_)) => self.same_place(a, b),
+            _ => false,
+        }
     }
 }
 
@@ -289,7 +318,7 @@ impl FileView<'_> {
 mod tests {
     use super::*;
 
-    const SRC: &str = "struct V { a: Vec<u32>, b: Vec<u32> }\nfn add(v: &mut V, x: u32) {}\nfn count(v: &mut V) -> u32 { 0 }\nfn draw(v: &mut V, s: &Vec<u32>) {}\nfn clear(v: &mut V) {}\nfn f(vm: &mut V) {\n    add(vm, count(vm));\n}\nfn g(vm: &mut V) {\n    draw(vm, &vm.a);\n}\nfn h(vm: &mut V) -> u32 {\n    let first = &vm.a[0];\n    clear(vm);\n    *first\n}\nfn k(vm: &mut V) {\n    let c = || add(vm, count(vm));\n}\nfn main() {}\n";
+    const SRC: &str = "struct V { a: Vec<u32>, b: Vec<u32> }\nfn add(v: &mut V, x: u32) {}\nfn count(v: &mut V) -> u32 { 0 }\nfn draw(v: &mut V, s: &Vec<u32>) {}\nfn clear(v: &mut V) {}\nfn f(vm: &mut V) {\n    add(vm, count(vm));\n}\nfn g(vm: &mut V) {\n    draw(vm, &vm.a);\n}\nfn h(vm: &mut V) -> u32 {\n    let first = &vm.a[0];\n    clear(vm);\n    *first\n}\nfn k(vm: &mut V) {\n    let c = || add(vm, count(vm));\n}\nfn pair(v: &mut V, s: &Vec<u32>, n: usize) {}\nfn p(vm: &mut V) {\n    pair(vm, &vm.a, (vm .a).len());\n}\nfn main() {}\n";
 
     fn prog() -> Program {
         let session = std::sync::Arc::new(crate::Session::default());
@@ -318,6 +347,14 @@ mod tests {
         let mut plans = plan(prog, &[r]);
         let p = plans.pop().unwrap();
         (apply(SRC, &p.edits), p.applied, p.skipped)
+    }
+
+    #[test]
+    fn counts_the_place_by_structure_not_by_text() {
+        let prog = prog();
+        // `(vm .a)` is the same place as `vm.a` though its text differs
+        let (_, applied, skipped) = run(&prog, rec(within(&prog, "pair(vm, &vm.a, (vm .a).len())", 0, "&vm.a", 0), within(&prog, "pair(vm, &vm.a, (vm .a).len())", 0, "vm", 0), true, None));
+        assert!(applied.is_empty() && skipped[0].contains("more than once"), "{skipped:?}");
     }
 
     #[test]
