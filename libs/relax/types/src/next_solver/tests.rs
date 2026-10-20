@@ -194,6 +194,8 @@ fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
     // rustc_hir_analysis/src/coherence/orphan.rs:20-50,305-385 + rustc_next_trait_solver
     // coherence.rs (Alias arm): an uncovered type parameter inside a rigid projection fails in
     // Proper mode and passes in Compat mode (future-compat lint); a bare `T` fails in both.
+    // (the future-compat lint goes to the lint sink, which only collects while lints are on)
+    crate::lint::enable();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(sess);
     let dir = std::env::temp_dir().join(format!("relax-r33-orphan-{}", std::process::id()));
@@ -221,8 +223,8 @@ fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
     // The collection-time check reports E0210 for the bare parameter only and warns for the projection.
     assert_eq!(t.errors.iter().filter(|e| e.contains("E0210")).count(), 1, "{:?}", t.errors);
     assert_eq!(t.errors.iter().filter(|e| e.contains("E0117")).count(), 1, "{:?}", t.errors);
-    let (_, warnings) = t.dcx.drain_reported();
-    assert!(warnings.iter().any(|w| w.message.contains("uncovered_param_in_projection")));
+    let (_, warnings) = crate::lint::take();
+    assert!(warnings.iter().any(|w| w.contains("uncovered_param_in_projection")), "{warnings:?}");
 }
 #[test]
 fn round33_elaboration_dedups_alpha_equivalent_supertraits() {
