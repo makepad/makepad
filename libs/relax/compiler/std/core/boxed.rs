@@ -26,6 +26,7 @@ use crate::vec::Vec;
 #[rustc_insignificant_dtor]
 pub struct Box<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
+    _marker: crate::marker::PhantomData<T>,
 }
 
 unsafe impl<T: ?Sized + Send> Send for Box<T> {}
@@ -36,7 +37,7 @@ impl<T> Box<T> {
     pub fn new(x: T) -> Box<T> {
         let p = heap::alloc_or_abort(Layout::new::<T>()) as *mut T;
         unsafe { im::ptr_write(p, x) };
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
     pub fn pin(x: T) -> crate::pin::Pin<Box<T>> {
         unsafe { crate::pin::Pin::new_unchecked(Box::new(x)) }
@@ -50,7 +51,7 @@ impl<T> Box<T> {
     }
     pub fn new_uninit() -> Box<crate::mem::MaybeUninit<T>> {
         let p = heap::alloc_or_abort(Layout::new::<T>()) as *mut crate::mem::MaybeUninit<T>;
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
     pub fn new_zeroed() -> Box<crate::mem::MaybeUninit<T>> {
         let b = Box::<T>::new_uninit();
@@ -62,7 +63,7 @@ impl<T> Box<T> {
 impl<T: ?Sized> Box<T> {
     #[must_use = "call `drop(Box::from_raw(ptr))` if you intend to drop the `Box`"]
     pub unsafe fn from_raw(raw: *mut T) -> Box<T> {
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(raw) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(raw) }, _marker: crate::marker::PhantomData }
     }
     pub fn into_raw(b: Box<T>) -> *mut T {
         let p = b.ptr.as_ptr();

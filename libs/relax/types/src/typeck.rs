@@ -87,6 +87,9 @@ pub const DEREF_COERCE_KEY: u32 = 0x8000_0000;
 /// res_args of a path pattern are recorded under (pat id | PAT_KEY): pattern and expression
 /// ids are separate arenas (`<i32 as Foo>::NUM =>` needs Self = i32 to pick the impl's const)
 pub const PAT_KEY: u32 = 0x4000_0000;
+/// `pat_local` key of an async fn parameter whose pattern is matched inside the body coroutine: the parameter's
+/// pattern id with this bit gives the local holding the whole argument.
+pub const ASYNC_ARG_KEY: u32 = 0x2000_0000;
 
 #[derive(Clone)]
 pub struct Local {
@@ -865,9 +868,24 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         let param_pats: Vec<PatId> = ast.list(fsig.params).iter().map(|p| p.pat).collect();
         fcx.check_param_names(&param_pats);
     }
+    // An `async fn` moves each argument whole into the coroutine, which matches the pattern there
+    // (rustc_ast_lowering: `let <pat> = __arg;` first in the body). A parameter that is not a plain binding gets a
+    // local for the whole argument here, and its pattern is checked in the coroutine's scope below.
+    let async_fn_body = matches!((body, fsig.asyncness), (Some(_), true));
+    let mut matched_in_coroutine: Vec<(PatId, TyId)> = Vec::new();
     for p in ast.list(fsig.params) {
         let t = if pi < params.len() { params[pi] } else { fcx.tcx.tys.error };
-        fcx.check_pat(p.pat, t);
+        let plain = matches!(ast.pat(p.pat), Pat::Ident { by_ref: false, sub: None, .. });
+        if async_fn_body && !plain {
+            let li = fcx.b.locals.len() as u32;
+            fcx.b.locals.push(Local { name: prog.syms.get("_").or_else(|| prog.syms.get("self")).unwrap_or(0), ty: t, mutable: true, pat: u32::MAX - 1 });
+            fcx.local_hyg.resize(li as usize + 1, (Some(Vec::new()), 0));
+            fcx.local_hyg[li as usize] = (None, 0);
+            fcx.b.pat_local.insert(p.pat.0 | ASYNC_ARG_KEY, li);
+            matched_in_coroutine.push((p.pat, t));
+        } else {
+            fcx.check_pat(p.pat, t);
+        }
         fcx.b.param_pats.push(p.pat);
         // fn_ctxt check_fn: every parameter is Sized (unless unsized_fn_params), judged for the
         // crates whose errors are reported
@@ -891,9 +909,12 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         // `async fn f() -> impl Tr`: the output's own opaque types are defined by this body too
         let out = fcx.norm(out);
         let ce = crate::tcx::ASYNC_FN_BODY | bid.0;
+        // what the coroutine owns from outside: self, the plain parameters, the whole arguments of the others
         let caps: Vec<u32> = (0..fcx.b.locals.len() as u32).collect();
         let saved = fcx.scopes.len();
         fcx.closure_depth.push((ce, saved));
+        // (the bindings of those patterns are the coroutine's own locals, not captures)
+        for (pat, t) in matched_in_coroutine { fcx.check_pat(pat, t); }
         fcx.ret_stack.push(out);
         fcx.async_depth += 1;
         let t = fcx.check_block(bid, Some(out));
@@ -2440,8 +2461,11 @@ impl<'a> Fcx<'a> {
                         if let Some(&(_, l0)) = first.iter().find(|b| b.0 == s) {
                             let (t0, t1) = (self.b.locals[l0 as usize].ty, self.b.locals[li as usize].ty);
                             self.eq(t1, t0);
+                            // every binding that resolved to this alternative's local (a nested or-pattern's
+                            // other alternatives did) is the first alternative's variable
                             let pp = self.b.locals[li as usize].pat;
                             self.b.pat_local.insert(pp, l0);
+                            for v in self.b.pat_local.values_mut() { if *v == li { *v = l0; } }
                         }
                     }
                 }
@@ -4607,7 +4631,18 @@ impl<'a> Fcx<'a> {
                 while a.len() < need {
                     a.push(self.fresh_arg(d, a.len()));
                 }
-                Some(self.tcx.tys.subst(t, &a))
+                let t = self.tcx.tys.subst(t, &a);
+                // the alias's lifetime parameters: the ones written on the segment, else inferred
+                // (`S2::shl` for `type S2<'a> = S<'a, 'a>`)
+                let params = self.tcx.generic_indices_of(prog, d).lifetimes.clone();
+                if params.is_empty() { return Some(t); }
+                let written = self.seg_lifetimes(path, n - 1);
+                let regions: Vec<crate::types::RegionId> = if written.len() == params.len() { written } else { params.iter().map(|_| self.fresh_region()).collect() };
+                Some(self.tcx.tys.map_regions(t, &|r, depth| match self.tcx.tys.region_kind(r) {
+                    crate::types::RegionKind::ReBound(b, _) if b < depth => r,
+                    crate::types::RegionKind::ReEarlyParam(i) => params.iter().position(|&p| p == i).map_or(r, |k| regions[k]),
+                    _ => r,
+                }, 0))
             }
             _ => None,
         }

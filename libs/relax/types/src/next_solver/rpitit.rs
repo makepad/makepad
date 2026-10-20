@@ -33,7 +33,7 @@ impl Tcx {
     /// `map_opaque_lifetime_to_parent_lifetime` of each lifetime the opaque captures.
     pub(crate) fn opaque_captured_parent_lifetimes(&self, prog: &Program, opaque: DefId) -> Vec<RegionId> {
         let table = self.resolve_bound_vars(prog, prog.opaque_owner(opaque));
-        table.opaque_captured_parent_lifetimes(opaque).into_iter().map(|k| self.tys.intern_region(k)).collect()
+        table.opaque_captured_parent_lifetimes(opaque, prog.opaque_owner(opaque)).into_iter().map(|k| self.tys.intern_region(k)).collect()
     }
 
     /// hir_ty_lowering/mod.rs:3631-3690: opaque arguments use the resolved

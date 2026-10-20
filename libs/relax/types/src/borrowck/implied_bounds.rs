@@ -194,6 +194,18 @@ impl ImpliedBounds {
                 wf_args.push(*upvars);
             }
             TyKind::Dyn(d,args,_,rs,r,_,_) => {
+                // The projection bounds (the object's own and its supertraits') are well-formed terms:
+                // `dyn Foo<'a, T>` with `Foo: Bar<Assoc = &'a T>` implies `T: 'a`.
+                if !tcx.tys.has_vars_bound_at_or_above(t,0) && (d.0 as usize) < prog.defs.len() && tcx.tys.list(*args).len() + 1 == tcx.generic_indices_of(prog, *d).types_consts.len() {
+                    use crate::next_solver::{ClauseKind, PredicateKind, Term};
+                    let mut clauses = tcx.object_predicates(prog, t);
+                    if let Some(principal) = clauses.first().cloned() { clauses.extend(tcx.supertraits(prog, principal)); }
+                    for p in clauses {
+                        if let PredicateKind::Clause(ClauseKind::Projection(pc)) = p.kind {
+                            if let Term::Ty(term) = pc.term { if !tcx.tys.has_vars_bound_at_or_above(term,0) { wf_args.push(term); } }
+                        }
+                    }
+                }
                 // Object WF: the explicit bound implies each elaborated Self
                 // bound. Generic argument WF is deliberately NOT required.
                 if !tcx.tys.has_vars_bound_at_or_above(t,0) {

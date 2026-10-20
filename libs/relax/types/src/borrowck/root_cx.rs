@@ -62,7 +62,7 @@ pub struct RootResult {
 pub struct BorrowCheckRootCtxt<'a> { pub tcx: &'a Tcx, pub prog: &'a Program }
 
 /// What a parent needs to know about a nested body to instantiate its requirements.
-struct NestedInfo { universals: UniversalRegions, closure_slots: Vec<RegionId> }
+struct NestedInfo { universals: UniversalRegions, closure_slots: Vec<RegionId>, closure_sig_erased_offset: usize }
 
 impl BorrowCheckRootCtxt<'_> {
     /// `do_mir_borrowck`: `bodies` visit nested bodies before their parents. The schedule is not an
@@ -76,7 +76,7 @@ impl BorrowCheckRootCtxt<'_> {
     /// `do_mir_borrowck` with relaxed-Rust field views (S15) applied to every body's conflict check.
     pub fn do_mir_borrowck_fv(&self, bodies: Vec<RootBody<'_>>, fv: Option<&super::field_views::FieldViews<'_>>) -> RootResult {
         let n = bodies.len();
-        let info: Vec<NestedInfo> = bodies.iter().map(|b| NestedInfo { universals: b.typeck.universals.clone(), closure_slots: b.typeck.closure_slots.clone() }).collect();
+        let info: Vec<NestedInfo> = bodies.iter().map(|b| NestedInfo { universals: b.typeck.universals.clone(), closure_slots: b.typeck.closure_slots.clone(), closure_sig_erased_offset: b.typeck.closure_sig_erased_offset }).collect();
         let keys: Vec<ClauseOwner> = bodies.iter().map(|b| b.key).collect();
         // The nested bodies each body creates, and what they were written as.
         let created: Vec<Vec<usize>> = bodies.iter().map(|b| b.typeck.summary.deferred_closure_requirements.iter()
@@ -255,7 +255,7 @@ impl BorrowCheckRootCtxt<'_> {
             // (`replace_erased_regions_with_placeholders` numbers them in order); the creator's closure type
             // has a variable at that position.
             let erased_slot = match tys.region_kind(identity) {
-                RegionKind::RePlaceholder { var, .. } => child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth(var.0 as usize).map(|(i, _)| i),
+                RegionKind::RePlaceholder { var, .. } => child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth(child.closure_sig_erased_offset + var.0 as usize).map(|(i, _)| i),
                 // an erased region of the environment type (`SignatureRegions::with_closure_env`)
                 RegionKind::ReLateParam(_, crate::types::LateParamKind::Anon(n)) if n >= super::universal_regions::ENV_ERASED_BASE =>
                     child.closure_slots.iter().enumerate().filter(|(_, r)| **r == RegionId::ERASED).nth((n - super::universal_regions::ENV_ERASED_BASE) as usize).map(|(i, _)| i),

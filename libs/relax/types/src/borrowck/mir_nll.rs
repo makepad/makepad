@@ -162,6 +162,10 @@ pub struct MirTypeck {
     /// The free regions of a closure body's environment type (the closure type's region slots),
     /// as written before renumbering. A nested use maps them to its instantiation by position.
     pub closure_slots: Vec<RegionId>,
+    /// How many of the erased slots precede the signature's regions in the closure type (those of its parent's
+    /// arguments, which a coroutine's hidden type has erased): the signature's k-th erased region is the
+    /// (offset + k)-th.
+    pub closure_sig_erased_offset: usize,
 }
 impl MirTypeck {
     /// The inputs of region inference: the definitions of every variable that exists now.
@@ -170,7 +174,7 @@ impl MirTypeck {
         MirTypeck { universals: self.universals.clone(), known: self.known.clone(), n_explicit_known: self.n_explicit_known, constraints: self.constraints.clone(),
             polonius: self.polonius.clone(), tainted_by_errors: self.tainted_by_errors,
             summary: MirTypeckSummary { errors: vec![], mir_bugs: vec![], dropck_overflows: vec![], deferred_closure_requirements: vec![] },
-            closure_slots: vec![] }
+            closure_slots: vec![], closure_sig_erased_offset: 0 }
     }
     /// The definition of every region variable that exists now.
     pub fn definitions(&self, infcx: &dyn RegionDriverOps) -> Vec<RegionDefinition> {
@@ -273,6 +277,14 @@ pub fn type_check_body(tcx: &Tcx, prog: &Program, infcx: &mut dyn RegionDriverOp
         free_regions_in_order(tcx, env)
     }) } else { vec![] };
 
+    let closure_sig_erased_offset = if matches!(body.source.kind, BodyKind::Closure(_)) { body.local_decls.get(1).map_or(0, |env| {
+        let env = match tcx.tys.kind(env.ty) { TyKind::Ref(_, t, _) => *t, _ => env.ty };
+        match tcx.tys.kind(env) {
+            TyKind::Closure(_, _, args) => [args.parent_args, args.closure_kind_ty].iter().flat_map(|&t| free_regions_in_order(tcx, t)).filter(|&r| r == RegionId::ERASED).count(),
+            _ => 0,
+        }
+    }) } else { 0 };
+
     infcx.renumber(body);
     infcx.observe_body(body);
     let results = type_check::type_check(tcx, prog, infcx, body, TypeckInputs {
@@ -280,7 +292,7 @@ pub fn type_check_body(tcx: &Tcx, prog: &Program, infcx: &mut dyn RegionDriverOp
         universals: &universals, moves: input.moves, has_loans: input.has_loans, constraints });
     let MirTypeckResults { constraints, polonius, tainted_by_errors, errors, mir_bugs, dropck_overflows, deferred_closure_requirements } = results;
     MirTypeck { universals, known, n_explicit_known, constraints, polonius, tainted_by_errors,
-        summary: MirTypeckSummary { errors, mir_bugs, dropck_overflows, deferred_closure_requirements }, closure_slots }
+        summary: MirTypeckSummary { errors, mir_bugs, dropck_overflows, deferred_closure_requirements }, closure_slots, closure_sig_erased_offset }
 }
 
 /// `tcx.for_each_free_region`: the regions of `ty` not bound inside it, in visiting order.

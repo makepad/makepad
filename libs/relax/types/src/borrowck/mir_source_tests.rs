@@ -531,11 +531,18 @@ fn a_coroutine_without_suspension_points_needs_only_its_upvars_drop_live() {
 }
 
 #[test]
-fn an_async_fn_with_a_pattern_parameter_stops_the_check_instead_of_misreporting() {
+fn an_async_fn_matches_its_parameter_patterns_inside_the_coroutine() {
     let (errors, unchecked) = borrowck_source_in("
-        pub async fn c(ref vec: Vec<u32>) { vec.contains(&0); }", 2018);
+        pub async fn c(ref vec: Vec<u32>) { vec.contains(&0); }
+        pub async fn c2(n: u32, ref mut vec: Vec<u32>) { vec.push(n); }
+        pub async fn c3(((ref a, ref mut b), (ref mut c, ref d)): ((Vec<u32>, Vec<u32>), (Vec<u32>, Vec<u32>))) { let _ = (a, d); b.push(1); c.push(2); }
+        pub async fn d((a, b): (String, String), _: Vec<u8>, mut m: i32, &n: &i32) { let _ = (a, b, m, n); m += 1; }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
     assert!(errors.is_empty(), "{errors:?}");
-    assert!(unchecked.iter().any(|u| u.contains("async fn parameter pattern")), "{unchecked:?}");
+    let (errors, unchecked) = borrowck_source_in("pub async fn e((a, _b): (String, String)) -> &'static str { &a }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    // (rustc says E0515 for a coroutine's borrow of its own binding that is returned; the line is the same)
+    assert!(errors.len() == 1, "{errors:?}");
 }
 
 #[test]
@@ -626,4 +633,68 @@ fn a_coroutine_whose_witness_needs_drop_keeps_all_its_upvars_live_at_its_drop() 
         }", 2018);
     assert!(unchecked.is_empty(), "{unchecked:?}");
     assert!(errors.len() == 1 && errors[0].starts_with("E0505"), "{errors:?}");
+}
+
+#[test]
+fn nested_or_patterns_bind_one_variable_across_all_alternatives() {
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn f() { let (Ok((Ok(a) | Err(a), b)) | Err(Ok((a, b)) | Err((a, b)))): Result<(Result<i32, i32>, i32), Result<(i32, i32), (i32, i32)>> = Ok((Ok(1), 1)); let _ = (a, b); }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_async_fn_in_a_generic_impl_maps_the_signatures_erased_regions_after_its_parents() {
+    // The coroutine's hidden type has the parent's `'a` slot erased too: the signature's first erased region
+    // is not the first erased slot of the closure type.
+    let (errors, unchecked) = borrowck_source_in("
+        pub struct S<'a> { x: &'a u32 }
+        impl<'a> S<'a> { pub async fn t(f: &u32) -> &u32 { f } pub async fn u(self, f: &u32) -> &u32 { f } }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_late_bound_lifetime_equal_to_static_by_implied_bounds_is_a_defining_use_argument() {
+    // `&'static &'_ ()` implies `'_: 'static`: the opaque's captured `'_` is 'static in the canonical arguments.
+    let (errors, unchecked) = borrowck_source_in("pub async fn x(x: &'static &'_ ()) {} pub fn y(x: &'static &()) -> impl Sized { }", 2024);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_trait_objects_supertrait_projection_implies_the_outlives_of_its_term() {
+    let (errors, unchecked) = borrowck_source("
+        trait Trait { type Assoc; } trait Bar { type Assoc; }
+        trait Foo<'a, T: 'a>: Bar<Assoc = &'a T> {}
+        fn outlives<'a, T: 'a>() {}
+        pub fn implied_outlives<'a, T: Trait>(x: &dyn Foo<'a, T::Assoc>) { outlives::<'a, T::Assoc>(); }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_type_alias_prefix_of_a_path_instantiates_the_aliass_lifetimes() {
+    // `S2::shl` for `type S2<'a> = S<'a, 'a>`: the user self type has inference regions, not the alias's own parameter.
+    let (errors, unchecked) = borrowck_source_in("
+        use std::ops::Shl;
+        pub struct S<'a, 'b: 'a>(&'a &'b u32);
+        type S2<'a> = S<'a, 'a>;
+        impl<'a, 'b> Shl<&'b u32> for S<'a, 'b> { type Output = &'a u32; fn shl(self, t: &'b u32) -> &'a u32 { t } }
+        pub fn f(s: S2) -> &u32 { S2::shl(s, &mut 3) }", 2015);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0716"), "{errors:?}");
+}
+
+#[test]
+fn owning_pointers_own_their_pointee_for_dropck() {
+    // `Box`/`Rc`/`Arc`/`Vec` drop their `T`: a `Drop` type behind them keeps what it borrows live at their drop.
+    for owner in ["Box::new(Foo(&x))", "std::rc::Rc::new(Foo(&x))", "std::sync::Arc::new(Foo(&x))", "vec![Foo(&x)]"] {
+        let (errors, unchecked) = borrowck_source_in(&format!("
+            struct Foo<'a>(&'a String);
+            impl<'a> Drop for Foo<'a> {{ fn drop(&mut self) {{}} }}
+            pub fn main() {{ let y; let x = String::new(); y = {owner}; }}"), 2018);
+        assert!(unchecked.is_empty(), "{owner}: {unchecked:?}");
+        assert!(errors.len() == 1 && errors[0].starts_with("E0597"), "{owner}: {errors:?}");
+    }
 }

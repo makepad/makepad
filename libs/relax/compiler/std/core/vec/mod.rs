@@ -42,6 +42,7 @@ pub struct Vec<T> {
     ptr: crate::ptr::NonNull<T>,
     cap: Cap,
     len: usize,
+    _marker: crate::marker::PhantomData<T>,
 }
 
 unsafe impl<T: Send> Send for Vec<T> {}
@@ -68,7 +69,7 @@ const fn capacity_overflow() -> ! {
 
 impl<T> Vec<T> {
     pub const fn new() -> Vec<T> {
-        Vec { ptr: crate::ptr::NonNull::dangling(), cap: Cap::ZERO, len: 0 }
+        Vec { ptr: crate::ptr::NonNull::dangling(), cap: Cap::ZERO, len: 0, _marker: crate::marker::PhantomData }
     }
 
     pub const fn with_capacity(capacity: usize) -> Vec<T> {
@@ -83,7 +84,7 @@ impl<T> Vec<T> {
     /// For non-ZSTs it must own an allocation for `capacity` elements, fitting in
     /// isize::MAX bytes, and `length` must not exceed `capacity`.
     pub const unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Vec<T> {
-        Vec { ptr: crate::ptr::NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length }
+        Vec { ptr: crate::ptr::NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length, _marker: crate::marker::PhantomData }
     }
 
     pub const fn into_raw_parts(self) -> (*mut T, usize, usize) {
@@ -578,7 +579,7 @@ pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
         if p.is_null() {
             heap::handle_alloc_error(layout);
         }
-        return Vec { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) }, cap: unsafe { Cap::new::<T>(n) }, len: n };
+        return Vec { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) }, cap: unsafe { Cap::new::<T>(n) }, len: n, _marker: crate::marker::PhantomData };
     }
     let mut v = Vec::with_capacity(n);
     v.extend_with(n, elem);

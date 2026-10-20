@@ -236,6 +236,7 @@ impl<'a> Cx<'a> {
             }
         };
         let mut coroutine = None;
+        let mut prologue: Vec<(Pat, LocalVarId)> = Vec::new();
         let (params, expr, body_ty, body_span, ret_span, scopes) = match self.owner.kind {
             OwnerKind::Function => {
                 let ast::ItemKind::Fn(sig, _, _) = item.kind else { return self.unresolved(span, "function item") };
@@ -246,13 +247,6 @@ impl<'a> Cx<'a> {
                     // parameter by value; the coroutine's own body is `OwnerKind::Closure` with the
                     // expression id `ASYNC_FN_BODY | body block`
                     let params = self.fn_params(sig, item.lo)?;
-                    // rustc moves each argument whole into the coroutine and matches its pattern
-                    // there; this lowering matches in the function, which is only equivalent for a
-                    // plain by-value binding
-                    for &param in &params {
-                        let simple = self.thir[param].pat.as_ref().is_none_or(|p| matches!(p.kind, PatKind::Binding { mode: BindingMode(crate::mir::ByRef::No, _), subpattern: None, .. }));
-                        if !simple { return self.unresolved(item_span, "async fn parameter pattern"); }
-                    }
                     let b = ast.block(body);
                     let scopes = fn_scopes(&self, Node::Block(body.0), item_span)?;
                     let Some(&opaque) = prog.node_id_to_def_id.get(&(def.file, relax_front::def_collector::NodeId::AsyncReturn(def.item))) else { return self.unresolved(item_span, "async fn return type") };
@@ -261,7 +255,7 @@ impl<'a> Cx<'a> {
                     let root = self.closure_aggregate_at(crate::tcx::ASYNC_FN_BODY | body.0, None, body_span, coroutine_ty, Some(crate::mir::Movability::Static))?;
                     let expr = self.push(root);
                                 let ret_span = self.span(b.lo, b.lo);
-                    return Ok(ThirBody { thir: self.thir, params, expr, body_ty: BodyTy::Fn { output: tb.ret, rust_call: false }, span: item_span, ret_span, coroutine: None, fn_scopes: scopes });
+                    return Ok(ThirBody { thir: self.thir, params, expr, body_ty: BodyTy::Fn { output: tb.ret, rust_call: false }, span: item_span, ret_span, coroutine: None, fn_scopes: scopes, prologue: Vec::new() });
                 }
                 let b = ast.block(body);
                 let params = self.fn_params(sig, item.lo)?;
@@ -309,6 +303,15 @@ impl<'a> Cx<'a> {
                 let Some(&coroutine_ty) = tb.hidden_types.get(&opaque) else { return self.unresolved(item_span, "async fn coroutine type") };
                 let TyKind::Closure(_, _, closure_args) = *tcx.tys.kind(coroutine_ty) else { return self.unresolved(item_span, "coroutine type") };
                 let TyKind::FnPtr(_, output, _, _) = *tcx.tys.kind(closure_args.closure_sig_as_fn_ptr_ty) else { return self.unresolved(item_span, "coroutine signature") };
+                // the parameters whose pattern the coroutine matches itself, against the whole captured argument
+                if let ast::ItemKind::Fn(sig, _, _) = item.kind {
+                    for p in ast.list(ast.fn_sig(sig).params) {
+                        let Some(&whole) = tb.pat_local.get(&(p.pat.0 | crate::typeck::ASYNC_ARG_KEY)) else { continue };
+                        self.pat_hint = item.lo;
+                        let pat = self.lower_pattern(p.pat)?;
+                        prologue.push((pat, LocalVarId(whole)));
+                    }
+                }
                 let resume_ty = self.resume_ty(item_span)?;
                 let env = self.thir.alloc_param(Param { pat: None, ty: coroutine_ty, ty_span: None, self_kind: None, node: None });
                 let task_context = self.synthetic_binding(scopes.expect("scopes").1);
@@ -361,7 +364,7 @@ impl<'a> Cx<'a> {
                 }
             }
         };
-        Ok(ThirBody { thir: self.thir, params, expr, body_ty, span: body_span, ret_span, coroutine, fn_scopes: scopes })
+        Ok(ThirBody { thir: self.thir, params, expr, body_ty, span: body_span, ret_span, coroutine, fn_scopes: scopes, prologue })
     }
 
     /// The method `name` of the lang-item trait `item`.
@@ -427,7 +430,15 @@ impl<'a> Cx<'a> {
         let _ = next_param;
         for p in ast.list(sig.params) {
             self.pat_hint = hint;
-            let pat = self.lower_pattern(p.pat)?;
+            // an async fn's coroutine matches this pattern: the parameter is the whole argument
+            let pat = match tb.pat_local.get(&(p.pat.0 | crate::typeck::ASYNC_ARG_KEY)) {
+                Some(&whole) => {
+                    let local = &tb.locals[whole as usize];
+                    let span = self.span(0, 0);
+                    self.binding_pat(LocalVarId(whole), "_", local.ty, true, span)
+                }
+                None => self.lower_pattern(p.pat)?,
+            };
             let ty = pat.ty;
             out.push(self.thir.alloc_param(Param { pat: Some(Box::new(pat)), ty, ty_span: None, self_kind: None, node: Some(p.pat.0) }));
         }

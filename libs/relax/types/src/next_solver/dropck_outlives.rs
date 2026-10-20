@@ -81,6 +81,14 @@ pub fn adt_dtorck_constraint(tcx: &Tcx, prog: &Program, def: DefId, limit: usize
 }
 
 fn adt_dtorck_constraint_uncached(tcx: &Tcx, prog: &Program, def: DefId, limit: usize) -> DropckConstraint {
+    // A query cycle (rustc: a cycle error): an ADT that contains itself by value has no finite size, which
+    // is reported (E0072) where the item is checked; its dropck constraint is empty here.
+    thread_local! { static COMPUTING: std::cell::RefCell<Vec<DefId>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    if COMPUTING.with(|c| c.borrow().contains(&def)) { return DropckConstraint::default(); }
+    COMPUTING.with(|c| c.borrow_mut().push(def));
+    struct Pop;
+    impl Drop for Pop { fn drop(&mut self) { COMPUTING.with(|c| { c.borrow_mut().pop(); }); } }
+    let _pop = Pop;
     let adt = &tcx.adts[&def];
     let identity = tcx.generic_indices_of(prog, def).identity_args(&tcx.tys);
     if adt.is_phantom_data() {

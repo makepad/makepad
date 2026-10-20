@@ -40,6 +40,7 @@ fn weak_ptr(h: *mut Header) -> *mut usize {
 #[rustc_insignificant_dtor]
 pub struct Arc<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
+    _marker: crate::marker::PhantomData<T>,
 }
 
 unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
@@ -50,7 +51,7 @@ impl<T> Arc<T> {
         let (_, p) = alloc_block(crate::mem::size_of::<T>(), crate::mem::align_of::<T>(), 1, 1);
         let p = p as *mut T;
         unsafe { ptr::write(p, data) };
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
 
     pub fn new_cyclic<F: FnOnce(&Weak<T>) -> T>(data_fn: F) -> Arc<T> {
@@ -63,7 +64,7 @@ impl<T> Arc<T> {
             ia::atomic_store(strong_ptr(h), 1usize, RELEASE);
         }
         crate::mem::forget(weak);
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
 
     pub fn try_unwrap(this: Arc<T>) -> Result<T, Arc<T>> {
@@ -104,7 +105,7 @@ impl<T: ?Sized> Arc<T> {
     }
 
     pub unsafe fn from_raw(p: *const T) -> Arc<T> {
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut T) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut T) }, _marker: crate::marker::PhantomData }
     }
 
     pub unsafe fn increment_strong_count(p: *const T) {
@@ -205,7 +206,7 @@ impl<T: ?Sized> Arc<T> {
     }
 
     unsafe fn from_parts(ptr: *mut T) -> Arc<T> {
-        Arc { ptr: ptr::NonNull::new_unchecked(ptr) }
+        Arc { ptr: ptr::NonNull::new_unchecked(ptr), _marker: crate::marker::PhantomData }
     }
 
     fn drop_slow(&mut self) {
@@ -222,7 +223,7 @@ impl Arc<dyn crate::any::Any + Send + Sync> {
         if crate::any::Any::type_id(&*self) == crate::any::TypeId::of::<T>() {
             let p = self.ptr.as_ptr() as *mut T;
             crate::mem::forget(self);
-            Ok(Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) } })
+            Ok(Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData })
         } else {
             Err(self)
         }
@@ -235,7 +236,7 @@ impl<T: ?Sized> Clone for Arc<T> {
         if old > MAX_REFCOUNT {
             unsafe { crate::intrinsics_rt::abort() };
         }
-        Arc { ptr: self.ptr }
+        Arc { ptr: self.ptr, _marker: crate::marker::PhantomData }
     }
 }
 
@@ -462,7 +463,7 @@ impl<T: ?Sized> Weak<T> {
             }
             let (prev, ok) = unsafe { ia::atomic_cxchg_weak(sp, n, n + 1, ACQUIRE, RELAXED) };
             if ok {
-                return Some(Arc { ptr: self.ptr });
+                return Some(Arc { ptr: self.ptr, _marker: crate::marker::PhantomData });
             }
             n = prev;
         }
@@ -543,12 +544,12 @@ impl<T: ?Sized> fmt::Debug for Weak<T> {
 impl<T> Arc<T> {
     pub fn new_uninit() -> Arc<crate::mem::MaybeUninit<T>> {
         let (_, p) = alloc_block(crate::mem::size_of::<T>(), crate::mem::align_of::<T>(), 1, 1);
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut crate::mem::MaybeUninit<T>) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut crate::mem::MaybeUninit<T>) }, _marker: crate::marker::PhantomData }
     }
     pub fn new_zeroed() -> Arc<crate::mem::MaybeUninit<T>> {
         let (_, p) = alloc_block(crate::mem::size_of::<T>(), crate::mem::align_of::<T>(), 1, 1);
         unsafe { ptr::write_bytes(p, 0, crate::mem::size_of::<T>()) };
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut crate::mem::MaybeUninit<T>) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut crate::mem::MaybeUninit<T>) }, _marker: crate::marker::PhantomData }
     }
 }
 
@@ -560,7 +561,7 @@ impl<T> Arc<[T]> {
         };
         let (_, p) = alloc_block(size, crate::mem::align_of::<T>(), 1, 1);
         let s = ptr::slice_from_raw_parts_mut(p as *mut crate::mem::MaybeUninit<T>, len);
-        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(s) } }
+        Arc { ptr: unsafe { ptr::NonNull::new_unchecked(s) }, _marker: crate::marker::PhantomData }
     }
     pub fn new_zeroed_slice(len: usize) -> Arc<[crate::mem::MaybeUninit<T>]> {
         let r = Arc::<[T]>::new_uninit_slice(len);
@@ -573,7 +574,7 @@ impl<T> Arc<crate::mem::MaybeUninit<T>> {
     pub unsafe fn assume_init(self) -> Arc<T> {
         let p = self.ptr.as_ptr() as *mut T;
         crate::mem::forget(self);
-        Arc { ptr: ptr::NonNull::new_unchecked(p) }
+        Arc { ptr: ptr::NonNull::new_unchecked(p), _marker: crate::marker::PhantomData }
     }
 }
 
@@ -581,7 +582,7 @@ impl<T> Arc<[crate::mem::MaybeUninit<T>]> {
     pub unsafe fn assume_init(self) -> Arc<[T]> {
         let p = self.ptr.as_ptr() as *mut [T];
         crate::mem::forget(self);
-        Arc { ptr: ptr::NonNull::new_unchecked(p) }
+        Arc { ptr: ptr::NonNull::new_unchecked(p), _marker: crate::marker::PhantomData }
     }
 }
 

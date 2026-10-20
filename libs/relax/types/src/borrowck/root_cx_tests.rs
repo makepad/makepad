@@ -38,7 +38,7 @@ fn typeck(tcx: &Tcx, b: &Body, names: &[(RegionId, Class)], outlives: Vec<Outliv
     let mut fake = Fake::new(tcx, names.len());
     for (i, _) in names.iter().enumerate() { fake.regions[i].0 = Origin::FreeRegion; }
     (MirTypeck { universals, known: vec![], n_explicit_known: 0, constraints, polonius: PoloniusContext::default(), tainted_by_errors: false,
-        summary: MirTypeckSummary { errors: vec![], mir_bugs: vec![], dropck_overflows: vec![], deferred_closure_requirements: vec![] }, closure_slots: vec![] }, fake)
+        summary: MirTypeckSummary { errors: vec![], mir_bugs: vec![], dropck_overflows: vec![], deferred_closure_requirements: vec![] }, closure_slots: vec![], closure_sig_erased_offset: 0 }, fake)
 }
 fn edge(sup: usize, sub: usize, line: u32, category: Cat) -> OutlivesConstraint {
     OutlivesConstraint { sup, sub, location: Some(0), span: span(line), category, from_closure: false }

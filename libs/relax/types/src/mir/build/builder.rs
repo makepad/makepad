@@ -1,6 +1,6 @@
 //! rustc_mir_build/src/builder/mod.rs: the `Builder`, its state and local/temporary bookkeeping.
 use super::scope::Scopes;
-use super::place::PlaceBuilder;
+use super::place::{PlaceBase, PlaceBuilder};
 use super::scope::DropKind;
 use super::thir::{BodyTy as BodyKind, LocalVarId, PatKind, ThirBody};
 use super::{BuildError, BuildResult, BuildRoot, Cfg, UnsupportedReason};
@@ -265,6 +265,13 @@ impl<'a> Builder<'a> {
                 }
             }
             self.source_scope = original_source_scope;
+        }
+
+        // The patterns an async fn's coroutine matches against its captured arguments.
+        for (pat, var) in &thir.prologue {
+            scope = self.declare_bindings(scope, expr_span, pat, None, Some((None, pat.span)))?;
+            let place_builder = PlaceBuilder::from(PlaceBase::Upvar { var: *var });
+            block = self.place_into_pattern(block, pat, place_builder, false)?.into_block();
         }
 
         // Enter the argument pattern bindings source scope, if it exists.

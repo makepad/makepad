@@ -37,12 +37,15 @@ pub struct ThirBody {
     pub coroutine: Option<CoroutineThir>,
     /// The `CallSite` and `Arguments` region scopes of a fn-like body (None for constants).
     pub fn_scopes: Option<(ScopeId, ScopeId)>,
+    /// The body coroutine of an `async fn`: the patterns of the parameters it matches itself (rustc lowers
+    /// them as `let <pat> = __arg;` first in the body), each against the captured whole argument.
+    pub prologue: Vec<(Pat, LocalVarId)>,
 }
 impl ThirBody {
     /// A constant-shaped body around `thir` for unit tests that drive individual lowering functions.
     #[cfg(test)]
     pub fn for_test(thir: Thir, params: Vec<ParamId>, expr: ExprId, ty: TyId) -> Self {
-        ThirBody { thir, params, expr, body_ty: BodyTy::Const(ty), span: Span::default(), ret_span: Span::default(), coroutine: None, fn_scopes: None }
+        ThirBody { thir, params, expr, body_ty: BodyTy::Const(ty), span: Span::default(), ret_span: Span::default(), coroutine: None, fn_scopes: None, prologue: Vec::new() }
     }
 }
 /// rustc `BodyTy`.
