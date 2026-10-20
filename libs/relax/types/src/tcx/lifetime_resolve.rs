@@ -30,6 +30,11 @@ impl LifetimeResolution {
     pub(crate) fn self_reference(&self) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::SelfReference).copied() }
     /// The resolution of the `index`th hidden lifetime of path segment `seg` (`Foo` for `Foo<'a>`).
     pub(crate) fn path(&self, seg: u32, index: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Path(seg, index)).copied() }
+    /// The lifetimes in scope of the item itself: inherited from its parents, declared by its own
+    /// generics, and the anonymous ones its signature creates (a fn's late-bound lifetimes).
+    pub(crate) fn in_scope_lifetimes(&self) -> Vec<LifetimeId> {
+        self.inherited.iter().map(|d| d.id).chain(self.declarations.iter().filter(|d| d.binder == BinderId::Item).map(|d| d.id)).collect()
+    }
     /// No lifetime declared, inherited or used anywhere in the owner (most items).
     fn is_empty(&self) -> bool { self.inherited.is_empty() && self.declarations.is_empty() && self.uses.is_empty() && self.binders.is_empty() }
     /// The answer to share: every empty resolution is the same value, kept once.

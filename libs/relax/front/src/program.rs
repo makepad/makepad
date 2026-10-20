@@ -566,6 +566,8 @@ pub struct Program {
     /// while `record_import_uses` is on (`makepad check`)
     import_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, Sym, bool)>>,
     glob_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, DefId)>>,
+    /// extern prelude entries (crate, name) a path resolved through (recorded like `import_used`)
+    extern_used: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, Sym)>>,
     /// the per-occurrence memo tables (scope lookups, path segments) are filled only once
     /// bodies are being checked: during collection nearly every lookup is unique, and a memo
     /// would cost more than it saves (set by jit::Unit::new)
@@ -838,6 +840,7 @@ impl Program {
             scope_cache: Default::default(),
             import_used: Default::default(),
             glob_used: Default::default(),
+            extern_used: Default::default(),
             body_memos: Default::default(),
             path_seg_cache: Default::default(),
             trait_bind_cache: Default::default(),
@@ -3907,6 +3910,11 @@ impl Program {
         u.contains(&(m, name, true)) || u.contains(&(m, name, false))
     }
 
+    /// Whether a path resolved through the extern prelude entry `name` of crate `krate`.
+    pub fn extern_prelude_used(&self, krate: u32, name: Sym) -> bool {
+        self.extern_used.lock().unwrap_or_else(|e| e.into_inner()).contains(&(krate, name))
+    }
+
     /// Whether a resolution went through the glob import of `target` in module `m`.
     pub fn glob_import_used(&self, m: u32, target: DefId) -> bool {
         self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).contains(&(m, target))
@@ -4038,6 +4046,7 @@ impl Program {
         let krate = self.mods[module as usize].krate;
         for (n, c) in &self.crates[krate as usize].deps {
             if *n == name {
+                if record_import_uses() { self.extern_used.lock().unwrap_or_else(|e| e.into_inner()).insert((krate, name)); }
                 return Some(*c);
             }
         }
@@ -4544,7 +4553,7 @@ impl Program {
 
     /// The extern prelude, std prelude and primitive types (lookup_in_scope after the
     /// lexical modules).
-    fn lookup_in_scope_outside(&self, module: u32, name: Sym, ns_type: bool) -> Option<DefId> {
+    pub fn lookup_in_scope_outside(&self, module: u32, name: Sym, ns_type: bool) -> Option<DefId> {
         if ns_type {
             if let Some(c) = self.extern_crate(module, name) {
                 return Some(self.mods[self.crates[c as usize].root_mod as usize].def);

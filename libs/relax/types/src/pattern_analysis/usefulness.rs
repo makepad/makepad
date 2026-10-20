@@ -4,7 +4,7 @@
 //! matches (reachability). See rustc's module documentation for the theory; this is a
 //! line-by-line port with the patterns held in an arena (`PIx`) instead of references.
 
-use super::constructor::{ConstructorSet, Ctor};
+use super::constructor::{ConstructorSet, Ctor, IntRange};
 use super::{Cx, PIx};
 use crate::types::TyId;
 use std::collections::HashMap;
@@ -21,6 +21,12 @@ impl Bits {
     }
     fn insert_range(&mut self, n: usize) {
         for i in 0..n { self.insert(i); }
+    }
+    fn contains(&self, i: usize) -> bool {
+        self.0.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(|w| *w == 0)
     }
     fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.0.iter().enumerate().flat_map(|(wi, w)| (0..64).filter(move |b| w & (1 << b) != 0).map(move |b| wi * 64 + b))
@@ -351,11 +357,75 @@ impl WitnessMatrix {
     }
 }
 
+/// A lint about the range patterns of a column (usefulness.rs
+/// collect_overlapping_range_endpoints / collect_non_contiguous_range_endpoints).
+pub enum RangeLint {
+    /// `pat` overlaps on an endpoint with each of `overlaps_with`
+    Overlap { pat: PIx, overlaps_with: Vec<PIx>, on: IntRange },
+    /// `pat_before` is `lo..gap`; `gapped_with` start at `gap + 1` (empty: the gap is the type's max)
+    NonContiguous { pat_before: PIx, gapped_with: Vec<PIx>, gap: IntRange },
+}
+
 struct UsefulnessCtxt<'a, 'c> {
     cx: &'a Cx<'c>,
+    range_lints: Vec<RangeLint>,
     branch_usefulness: HashMap<PIx, BranchPatUsefulness>,
     complexity_limit: usize,
     complexity_level: usize,
+}
+
+/// Ranges that overlap like `lo..=overlap`/`overlap..=hi`: found after constructor splitting
+/// as a singleton range, using the row intersections (usefulness.rs
+/// collect_overlapping_range_endpoints).
+fn collect_overlapping_range_endpoints(mcx: &mut UsefulnessCtxt, overlap_range: &IntRange, matrix: &Matrix, specialized: &Matrix) {
+    let cx = mcx.cx;
+    let overlap = overlap_range.lo;
+    let mut prefixes: Vec<(usize, PIx)> = Vec::new();
+    let mut suffixes: Vec<(usize, PIx)> = Vec::new();
+    for (child_row_id, child_row) in specialized.rows.iter().enumerate() {
+        let Some(pat) = matrix.rows[child_row.parent_row].head() else { continue };
+        let Ctor::IntRange(this_range) = &cx.pat(pat).ctor else { continue };
+        if this_range.is_singleton() {
+            continue;
+        }
+        if this_range.lo == overlap {
+            if !prefixes.is_empty() {
+                let overlaps_with: Vec<PIx> = prefixes.iter().filter(|(o, _)| child_row.intersects_at_least.contains(*o)).map(|(_, p)| *p).collect();
+                if !overlaps_with.is_empty() {
+                    mcx.range_lints.push(RangeLint::Overlap { pat, overlaps_with, on: *overlap_range });
+                }
+            }
+            suffixes.push((child_row_id, pat));
+        } else if Some(this_range.hi) == overlap.plus_one() {
+            if !suffixes.is_empty() {
+                let overlaps_with: Vec<PIx> = suffixes.iter().filter(|(o, _)| child_row.intersects_at_least.contains(*o)).map(|(_, p)| *p).collect();
+                if !overlaps_with.is_empty() {
+                    mcx.range_lints.push(RangeLint::Overlap { pat, overlaps_with, on: *overlap_range });
+                }
+            }
+            prefixes.push((child_row_id, pat));
+        }
+    }
+}
+
+/// Ranges with a singleton gap between them (usefulness.rs collect_non_contiguous_range_endpoints).
+fn collect_non_contiguous_range_endpoints(mcx: &mut UsefulnessCtxt, gap_range: &IntRange, matrix: &Matrix) {
+    let cx = mcx.cx;
+    let gap = gap_range.lo;
+    let mut onebefore: Vec<PIx> = Vec::new();
+    let mut oneafter: Vec<PIx> = Vec::new();
+    for row in matrix.rows.iter() {
+        let Some(pat) = row.head() else { continue };
+        let Ctor::IntRange(this_range) = &cx.pat(pat).ctor else { continue };
+        if gap == this_range.hi {
+            onebefore.push(pat);
+        } else if gap.plus_one() == Some(this_range.lo) {
+            oneafter.push(pat);
+        }
+    }
+    for pat_before in onebefore {
+        mcx.range_lints.push(RangeLint::NonContiguous { pat_before, gapped_with: oneafter.clone(), gap: *gap_range });
+    }
 }
 
 /// usefulness.rs compute_exhaustiveness_and_usefulness. None: an error type or the
@@ -388,7 +458,20 @@ fn compute_exhaustiveness_and_usefulness(mcx: &mut UsefulnessCtxt, matrix: &mut 
         let mut witnesses = compute_exhaustiveness_and_usefulness(mcx, &mut spec_matrix)?;
         witnesses.apply_constructor(cx, ty, &missing_ctors, &ctor);
         ret.0.extend(witnesses.0);
+        if let Ctor::IntRange(overlap_range) = &ctor {
+            if overlap_range.is_singleton() && spec_matrix.rows.len() >= 2 && spec_matrix.rows.iter().any(|r| !r.intersects_at_least.is_empty()) {
+                collect_overlapping_range_endpoints(mcx, overlap_range, matrix, &spec_matrix);
+            }
+        }
         matrix.unspecialize(spec_matrix);
+    }
+    // singleton gaps between ranges
+    for missing in &missing_ctors {
+        if let Ctor::IntRange(gap) = missing {
+            if gap.is_singleton() {
+                collect_non_contiguous_range_endpoints(mcx, gap, matrix);
+            }
+        }
     }
     for row in matrix.rows.iter() {
         if row.head_is_branch {
@@ -415,10 +498,11 @@ pub enum Usefulness {
 pub struct UsefulnessReport {
     pub arm_usefulness: Vec<Usefulness>,
     pub non_exhaustiveness_witnesses: Vec<WitnessPat>,
+    pub range_lints: Vec<RangeLint>,
 }
 
 pub fn compute_match_usefulness(cx: &Cx, arms: &[MatchArm], scrut_ty: TyId, scrut_validity: PlaceValidity) -> Option<UsefulnessReport> {
-    let mut mcx = UsefulnessCtxt { cx, branch_usefulness: HashMap::new(), complexity_limit: 10_000_000, complexity_level: 0 };
+    let mut mcx = UsefulnessCtxt { cx, range_lints: Vec::new(), branch_usefulness: HashMap::new(), complexity_limit: 10_000_000, complexity_level: 0 };
     let place_info = PlaceInfo { ty: scrut_ty, private_uninhabited: false, validity: scrut_validity, is_scrutinee: true };
     let mut matrix = Matrix { rows: Vec::with_capacity(arms.len()), place_info: vec![place_info], wildcard_row_is_relevant: true };
     for (arm_id, arm) in arms.iter().enumerate() {
@@ -441,7 +525,7 @@ pub fn compute_match_usefulness(cx: &Cx, arms: &[MatchArm], scrut_ty: TyId, scru
             }
         });
     }
-    Some(UsefulnessReport { arm_usefulness, non_exhaustiveness_witnesses })
+    Some(UsefulnessReport { arm_usefulness, non_exhaustiveness_witnesses, range_lints: mcx.range_lints })
 }
 
 /// The redundant branches inside a useful pattern (stopping at the first redundant one).

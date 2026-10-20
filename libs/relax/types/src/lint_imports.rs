@@ -22,6 +22,8 @@ use crate::lexer::T;
 use std::collections::{HashMap, HashSet};
 
 pub const UNUSED_IMPORTS: Lint = lint::lint("unused_imports");
+pub const REDUNDANT_IMPORTS: Lint = lint::lint("redundant_imports");
+pub const UNUSED_EXTERN_CRATES: Lint = lint::lint("unused_extern_crates");
 
 /// Traits one of whose methods a checked body calls (collected with the bodies).
 static METHOD_TRAITS: relax_session::sync::Mutex<Option<HashSet<DefId>>> = relax_session::sync::Mutex::new(None);
@@ -156,6 +158,8 @@ struct Leaf {
     name: Option<String>,
     glob: bool,
     empty: bool,
+    /// written `as _`
+    under: bool,
     span: (u32, u32),
     /// the leaf's path as segments (for resolving the target)
     segs: Vec<PathSeg>,
@@ -174,7 +178,8 @@ fn leaves(prog: &Program, file: u32, ast: &Ast, t: &UseTree, start: u32, item_hi
                     if seg.kind() == SegKind::SelfValue { prefix.last().map(|s| pf.text(s.name).to_string()) } else { Some(pf.text(seg.name).to_string()) }
                 }
             };
-            out.push(Leaf { name, glob: false, empty: false, span: (start, end), segs });
+            let under = rename.is_some_and(|r| pf.text(r) == "_");
+            out.push(Leaf { name, glob: false, empty: false, under, span: (start, end), segs });
         }
         UseTree::Path(seg, child) => {
             prefix.push(seg);
@@ -185,12 +190,12 @@ fn leaves(prog: &Program, file: u32, ast: &Ast, t: &UseTree, start: u32, item_hi
         UseTree::Glob => {
             // `*` has no segment of its own: ends at the last segment's end + `::*`
             let end = prefix.last().map_or(start, |s| s.name.hi);
-            out.push(Leaf { name: None, glob: true, empty: false, span: (start, end + 3) , segs: prefix.clone() });
+            out.push(Leaf { name: None, glob: true, empty: false, under: false, span: (start, end + 3) , segs: prefix.clone() });
         }
         UseTree::Group(l) => {
             if ast.list(l).is_empty() {
                 // `use a::{};` imports nothing: unused, as a whole
-                out.push(Leaf { name: None, glob: false, empty: true, span: (start, item_hi) , segs: prefix.clone() });
+                out.push(Leaf { name: None, glob: false, empty: true, under: false, span: (start, item_hi) , segs: prefix.clone() });
             }
             for c in ast.list(l) {
                 // a nested tree starts at its own first segment
@@ -319,6 +324,9 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
         macro_closure(prog, &mut names);
         written.push(names);
     }
+    for sc in &scopes {
+        unused_extern_crates(prog, sc);
+    }
     for (si, sc) in scopes.iter().enumerate() {
         let names = &written[si];
         for &it in &sc.items {
@@ -353,12 +361,28 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
             };
             for l in &ls {
                 if dup_glob(l) { continue; }
-                if exported && !(l.glob && ctx.glob_imports_nothing(l)) && !l.empty { continue; }
+                if exported && !(l.glob && ctx.glob_imports_nothing(l)) && !l.empty {
+                    // check_import_as_underscore: an exported `as _` import of anything but a
+                    // trait binds nothing a user can name
+                    if l.under && !ctx.is_trait_import(l) { unused.push(l.span); }
+                    continue;
+                }
                 if !ctx.leaf_used(l) {
                     unused.push(l.span);
                 }
             }
             let _ = tcx;
+            if !exported && !matches!(item.vis, Vis::Pub) {
+                for l in &ls {
+                    if !unused.contains(&l.span) && ctx.redundant(l) {
+                        let pf = &prog.files[sc.file as usize];
+                        let attrs = sc.ast.list(item.attrs).to_vec();
+                        let name = l.name.as_deref().unwrap_or("");
+                        let _ = pf;
+                        lint::emit_in(prog, sc.def, &attrs, &REDUNDANT_IMPORTS, sc.file, l.span.0, &format!("the item `{}` is imported redundantly", name));
+                    }
+                }
+            }
             if unused.is_empty() { continue; }
             let pf = &prog.files[sc.file as usize];
             let mut snippets: Vec<String> = unused.iter().map(|&(a, b)| format!("`{}`", String::from_utf8_lossy(pf.bytes(a, b)).trim_end_matches(|c: char| c == ';' || c.is_whitespace()))).collect();
@@ -372,6 +396,33 @@ pub fn check(prog: &Program, tcx: &Tcx, own: &[bool], reach: &crate::lint_dead::
             let attrs = sc.ast.list(item.attrs).to_vec();
             lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, unused[0].0, &msg);
         }
+    }
+}
+
+/// `unused_extern_crates` (check_unused.rs report_unused_extern_crate_items, the fully unused
+/// case): an `extern crate` item nothing resolved through, neither its module binding nor (a
+/// renamed one at the crate root) its extern prelude entry.
+fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
+    if sc.block || sc.module == u32::MAX { return; }
+    let krate = prog.mods[sc.module as usize].krate;
+    let ast = sc.ast;
+    for &it in &sc.items {
+        let item = ast.item(it);
+        let ItemKind::ExternCrate(rename) = item.kind else { continue };
+        if matches!(item.vis, Vis::Pub) || lint::external(prog, sc.file, item.lo) || item.lo >= prog.files[sc.file as usize].src_len { continue; }
+        // attributes (`#[macro_use]`) may have semantics a removal loses
+        if !ast.list(item.attrs).is_empty() { continue; }
+        let pf = &prog.files[sc.file as usize];
+        let shown = pf.text(item.name).to_string();
+        if shown == "self" { continue; }
+        let bind_text = rename.map_or(shown.clone(), |r| pf.text(r).to_string());
+        if bind_text.starts_with('_') { continue; }
+        let bind = prog.syms.intern_late(&bind_text);
+        let root = prog.crates[krate as usize].root_mod == sc.module;
+        let used = prog.import_binding_used(sc.module, bind) || (rename.is_some() && root && prog.extern_prelude_used(krate, bind));
+        if used { continue; }
+        let attrs = ast.list(item.attrs).to_vec();
+        lint::emit_in(prog, sc.def, &attrs, &UNUSED_EXTERN_CRATES, sc.file, item.lo, "unused extern crate");
     }
 }
 
@@ -427,6 +478,57 @@ impl Ctx<'_, '_> {
         let m = &prog.mods[td.sub as usize];
         let visible = |d: DefId| prog.def(d).is_pub;
         !(m.types.values().any(|&d| visible(d)) || m.values.values().any(|&d| visible(d)) || m.macros.values().any(|&d| visible(d)) || m.globs.iter().any(|_| true))
+    }
+
+    /// Whether the leaf's path resolves to a trait in the type namespace.
+    /// (An unresolvable path counts as a trait: it is never reported.)
+    fn is_trait_import(&self, l: &Leaf) -> bool {
+        let prog = self.prog;
+        let pf = &prog.files[self.sc.file as usize];
+        if self.sc.block || self.sc.module == u32::MAX { return true; }
+        let Some((last, prefix)) = l.segs.split_last() else { return true };
+        let segs: Vec<(SegKind, crate::program::Sym)> = prefix.iter().map(|s| (s.kind(), prog.syms.intern_late(pf.text(s.name)))).collect();
+        let name = prog.syms.intern_late(pf.text(last.name));
+        let found = if segs.is_empty() {
+            prog.lookup_in_scope(self.sc.module, name, true)
+        } else {
+            let Some(m) = prog.resolve_mod_path(self.sc.module, false, &segs, false, true).or_else(|| prog.resolve_mod_path(self.sc.module, true, &segs, false, true)) else { return true };
+            let td = prog.def(m);
+            if td.kind != DefKind::Mod { return true; }
+            prog.mods[td.sub as usize].types.get(&name).copied()
+        };
+        match found {
+            Some(d) => prog.def(d).kind == DefKind::Trait,
+            None => true,
+        }
+    }
+
+    /// check_for_redundant_imports: a single import `use a::name;` (no rename) of an item the
+    /// scope reaches without it (outside the module: the preludes; in a block: the enclosing
+    /// scopes) under the same name, in every namespace the import binds.
+    fn redundant(&self, l: &Leaf) -> bool {
+        let prog = self.prog;
+        let sc = self.sc;
+        if l.glob || l.empty || l.under || sc.module == u32::MAX { return false; }
+        let Some(name) = l.name.as_deref() else { return false };
+        let pf = &prog.files[sc.file as usize];
+        // `use source as target` with another name is never redundant
+        if l.segs.last().is_none_or(|s| pf.text(s.name) != name) { return false; }
+        let sym = prog.syms.intern_late(name);
+        let mut any = false;
+        for ns in [true, false] {
+            let Some(mine) = prog.lookup_in_module(sc.module, sym, ns, &mut Vec::new()) else { continue };
+            let other = if sc.block {
+                match prog.mods[sc.module as usize].lexical_parent { Some(p) => prog.lookup_in_scope(p, sym, ns), None => None }
+            } else {
+                prog.lookup_in_scope_outside(sc.module, sym, ns)
+            };
+            match other {
+                Some(o) if o == mine => any = true,
+                _ => return false,
+            }
+        }
+        any
     }
 
     fn leaf_used(&self, l: &Leaf) -> bool {

@@ -283,9 +283,14 @@ impl<'a> L2<'a> {
     }
 
     /// `utils::peel_casts`.
-    fn peel_casts(&self, e: ExprId) -> ExprId {
+    fn peel_casts(&self, e: ExprId) -> ExprId { self.peel_casts_flag(e).0 }
+
+    /// `utils::peel_casts`: the innermost expression and whether a cast went through
+    /// `UnsafeCell::raw_get`.
+    fn peel_casts_flag(&self, e: ExprId) -> (ExprId, bool) {
         let ast = self.ast;
         let mut e = e;
+        let mut raw_get = false;
         loop {
             e = peel_blocks(ast, e);
             let next = match ast.expr(e).kind {
@@ -296,7 +301,10 @@ impl<'a> L2<'a> {
                 }
                 ExprKind::Call(f, args) if ast.list(args).len() == 1 && matches!(ast.expr(unparen(ast, f)).kind, ExprKind::Path(_)) => {
                     let name = match self.body.res.get(&unparen(ast, f).0) { Some(Res::Def(d)) => diag_name(self.prog, *d), _ => None };
-                    if matches!(name.as_deref(), Some("ptr_from_ref" | "unsafe_cell_raw_get" | "transmute")) { Some(ast.list(args)[0]) } else { None }
+                    if matches!(name.as_deref(), Some("ptr_from_ref" | "unsafe_cell_raw_get" | "transmute")) {
+                        if name.as_deref() == Some("unsafe_cell_raw_get") { raw_get = true; }
+                        Some(ast.list(args)[0])
+                    } else { None }
                 }
                 _ => None,
             };
@@ -304,7 +312,7 @@ impl<'a> L2<'a> {
                 Some(x) => x,
                 None => {
                     let init = self.expr_or_init(e);
-                    if init != e { init } else { return e }
+                    if init != e { init } else { return (e, raw_get) }
                 }
             };
         }
@@ -484,6 +492,8 @@ impl<'a> Visitor<'a> for L2<'a> {
         self.lint_comparisons(e);
         self.lint_ptr_nulls(e);
         self.lint_transmutes(e);
+        self.lint_reference_casting(e);
+        if matches!(ast.expr(e).kind, ExprKind::Path(_)) { self.lint_mutable_transmutes(e); }
         self.lint_unsafe_block(e);
         self.lint_invalid_value(e);
         self.lint_interior_mutable_consts(e);
@@ -1240,6 +1250,110 @@ impl<'a> L2<'a> {
             }
             _ => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------- reference_casting.rs
+
+pub const INVALID_REFERENCE_CASTING: Lint = lint::lint("invalid_reference_casting");
+pub const MUTABLE_TRANSMUTES: Lint = lint::lint("mutable_transmutes");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RcPat { Borrow(bool), Assign }
+
+impl<'a> L2<'a> {
+    /// rustc_lint builtin.rs MutableTransmutes: a use of `transmute` from `&T` to `&mut T`.
+    fn lint_mutable_transmutes(&self, e: ExprId) {
+        let Some(d) = self.call_def(e) else { return };
+        if self.prog.def(d).kind != DefKind::Fn || diag_name(self.prog, d).as_deref() != Some("transmute") { return; }
+        let targs = self.body.res_args.get(&e.0).map(|l| self.tcx.tys.list(*l).to_vec()).unwrap_or_default();
+        let (Some(&from), Some(&to)) = (targs.first(), targs.get(1)) else { return };
+        if let (TyKind::Ref(false, ..), TyKind::Ref(true, ..)) = (self.kind(from), self.kind(to)) {
+            self.emit(&MUTABLE_TRANSMUTES, self.ast.expr(e).lo, "transmuting &T to &mut T is undefined behavior, even if the reference is unused, consider instead using an UnsafeCell");
+        }
+    }
+
+    /// `borrow_or_assign`: `&(mut) *<e>`, `*<e> = ..`, `*<e> += ..`, `ptr::write(<e>, ..)`.
+    fn borrow_or_assign(&self, e: ExprId) -> Option<(ExprId, RcPat)> {
+        let ast = self.ast;
+        let (inner, pat) = match ast.expr(e).kind {
+            ExprKind::AddrOf(_, m, x) => (x, RcPat::Borrow(m)),
+            ExprKind::Assign(x, _) | ExprKind::AssignOp(_, x, _) => (x, RcPat::Assign),
+            ExprKind::Call(f, args) => {
+                let a = ast.list(args);
+                if a.len() != 2 { return None; }
+                let d = self.call_def(f)?;
+                if !matches!(diag_name(self.prog, d).as_deref(), Some("ptr_write" | "ptr_write_volatile" | "ptr_write_unaligned")) { return None; }
+                return Some((a[0], RcPat::Assign));
+            }
+            _ => return None,
+        };
+        // the paren-free operand `*<e>`
+        match ast.expr(inner).kind {
+            ExprKind::Unary(UnOp::Deref, x) => Some((x, pat)),
+            _ => None,
+        }
+    }
+
+    /// reference_casting.rs `InvalidReferenceCasting::check_expr`.
+    fn lint_reference_casting(&self, e: ExprId) {
+        let Some((x, pat)) = self.borrow_or_assign(e) else { return };
+        let init = self.expr_or_init(x);
+        let pos = self.ast.expr(e).lo;
+        let peeled = self.peel_casts_flag(init);
+        if matches!(pat, RcPat::Borrow(true) | RcPat::Assign) && self.is_cast_from_ref_to_mut_ptr(init, peeled).is_some() {
+            let msg = if pat == RcPat::Assign {
+                "assigning to `&T` is undefined behavior, consider using an `UnsafeCell`"
+            } else {
+                "casting `&T` to `&mut T` is undefined behavior, even if the reference is unused, consider instead using an `UnsafeCell`"
+            };
+            self.emit(&INVALID_REFERENCE_CASTING, pos, msg);
+        }
+        if self.is_cast_to_bigger_memory_layout(init, peeled) {
+            self.emit(&INVALID_REFERENCE_CASTING, pos, "casting references to a bigger memory layout than the backing allocation is undefined behavior, even if the reference is unused");
+        }
+    }
+
+    fn rc_layoutable(&self, t: TyId) -> bool {
+        let f = self.tcx.tys.flags(t);
+        !f.intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_INFER | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR)
+    }
+
+    /// Some(the pointee has interior mutability) when `orig` is a `*mut` made from a `&T`.
+    fn is_cast_from_ref_to_mut_ptr(&self, orig: ExprId, peeled: (ExprId, bool)) -> Option<bool> {
+        let end_ty = self.expr_ty(orig)?;
+        if !matches!(self.kind(end_ty), TyKind::Ptr(true, _)) { return None; }
+        let (e, need_check_freeze) = peeled;
+        let start_ty = self.expr_ty(e)?;
+        let TyKind::Ref(false, inner, _) = self.kind(start_ty) else { return None };
+        // `has_concrete_skeleton`: the outermost type is no parameter, inference variable or error
+        let skeleton = !matches!(self.kind(inner), TyKind::Param(_) | TyKind::Infer(_) | TyKind::IntVar(_) | TyKind::FloatVar(_) | TyKind::Error);
+        let interior = skeleton && !self.tcx.is_freeze(self.prog, crate::tcx::TypingEnv::fully_monomorphized(self.prog), inner);
+        (!need_check_freeze || !interior).then_some(interior)
+    }
+
+    fn is_cast_to_bigger_memory_layout(&self, orig: ExprId, peeled: (ExprId, bool)) -> bool {
+        let ast = self.ast;
+        let Some(end_ty) = self.expr_ty(orig) else { return false };
+        let TyKind::Ptr(_, inner_end) = self.kind(end_ty) else { return false };
+        let (e, _) = peeled;
+        let Some(start_ty) = self.expr_ty(e) else { return false };
+        let TyKind::Ref(_, inner_start, _) = self.kind(start_ty) else { return false };
+        let mut e_alloc = self.expr_or_init(e);
+        if let ExprKind::AddrOf(_, _, x) = ast.expr(e_alloc).kind { e_alloc = x; }
+        if matches!(ast.expr(e_alloc).kind, ExprKind::Index(..) | ExprKind::Field(..) | ExprKind::TupleField(..) | ExprKind::Unary(UnOp::Deref, _)) { return false; }
+        let Some(alloc_ty) = self.expr_ty(e_alloc) else { return false };
+        if matches!(self.kind(alloc_ty), TyKind::Ptr(..) | TyKind::Ref(..)) { return false; }
+        if !(self.rc_layoutable(alloc_ty) && self.rc_layoutable(inner_start) && self.rc_layoutable(inner_end)) { return false; }
+        let lcx = crate::layout::LayoutCx::new(self.prog);
+        let lay = crate::layout::Layouts::new();
+        if lay.is_unsized(&lcx, self.tcx, inner_start) { return false; }
+        let from = lay.of(&lcx, self.tcx, inner_start).size;
+        let alloc = lay.of(&lcx, self.tcx, alloc_ty).size;
+        // an unsized target has no size to compare
+        if lay.is_unsized(&lcx, self.tcx, inner_end) { return false; }
+        let to = lay.of(&lcx, self.tcx, inner_end).size;
+        to > from && to > alloc
     }
 }
 

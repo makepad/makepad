@@ -748,7 +748,13 @@ impl<'a> W<'a> {
     }
 
     /// rustc `UnusedDelimLint::check_unused_delims_expr` of UnusedParens (`parens`) or UnusedBraces.
-    fn delims(&self, parens: bool, value: ExprId, ctx: Ctx, followed_by_block: bool) {
+    fn delims(&self, parens: bool, mut value: ExprId, ctx: Ctx, followed_by_block: bool) {
+        // the parens a macro transcription adds around an `$e:expr` fragment are no node of
+        // rustc's (the fragment is one interpolated expression)
+        while let ExprKind::Paren(inner) = self.kind(value) {
+            if !crate::macros::uses::is_synth_paren(&self.prog.file_paths[self.file as usize], self.ast.expr(value).lo) { break; }
+            value = inner;
+        }
         let v = *self.ast.expr(value);
         if parens {
             match v.kind {
@@ -2065,12 +2071,129 @@ fn mismatched_lifetime_syntaxes(prog: &Program, tcx: &Tcx, d: DefId) {
     }
 }
 
+// ---------------------------------------------------------------- impl_trait_redundant_captures
+
+pub const IMPL_TRAIT_REDUNDANT_CAPTURES: Lint = lint::lint("impl_trait_redundant_captures");
+
+/// The `impl Trait` types written in `t` (outermost first), with the bounds each holds.
+fn opaque_types(ast: &Ast, t: TyId, out: &mut Vec<TyId>) {
+    fn bounds(ast: &Ast, l: List<Bound>, out: &mut Vec<TyId>) {
+        for b in ast.list(l) {
+            if let Bound::Trait { path, .. } = *b { path_args(ast, &path, out); }
+        }
+    }
+    fn path_args(ast: &Ast, p: &Path, out: &mut Vec<TyId>) {
+        if p.has_qself() {
+            if let Some(q) = ast.qself(p) {
+                opaque_types(ast, q.ty, out);
+                if let Some(tp) = q.trait_path { path_args(ast, &tp, out); }
+            }
+        }
+        for seg in ast.segs(p.segs) {
+            match ast.gargs(seg.args()) {
+                Some(GenericArgs::Angle(l)) => {
+                    for a in ast.list(*l) {
+                        match *a {
+                            GenericArg::Type(t) | GenericArg::Binding(_, _, t) => opaque_types(ast, t, out),
+                            GenericArg::Constraint(_, _, b) => bounds(ast, b, out),
+                            _ => {}
+                        }
+                    }
+                }
+                Some(GenericArgs::Paren(tys, ret)) => {
+                    for &t in ast.list(*tys) { opaque_types(ast, t, out); }
+                    if let Some(r) = ret { opaque_types(ast, *r, out); }
+                }
+                None => {}
+            }
+        }
+    }
+    match *ast.ty(t) {
+        Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => opaque_types(ast, x, out),
+        Ty::Tuple(l) => for &x in ast.list(l) { opaque_types(ast, x, out); },
+        Ty::Fn(f) => {
+            let f = *ast.fn_ptr(f);
+            for &x in ast.list(f.params) { opaque_types(ast, x, out); }
+            if let Some(r) = f.ret { opaque_types(ast, r, out); }
+        }
+        Ty::Path(p) => path_args(ast, &p, out),
+        Ty::ImplTrait(b) => { out.push(t); bounds(ast, b, out); }
+        Ty::DynTrait(b, _) => bounds(ast, b, out),
+        _ => {}
+    }
+}
+
+/// rustc_lint impl_trait_overcaptures.rs `check_fn`, the `use<..>` redundancy: in edition 2024 an
+/// opaque type in a fn's return type whose `use<..>` names every generic parameter and lifetime in
+/// scope (a parameter-position `impl Trait` is one that cannot be named).
+fn impl_trait_redundant_captures(prog: &Program, tcx: &Tcx, d: DefId) {
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    if pf.edition < 2024 { return; }
+    let ast = &pf.ast;
+    let item = *ast.item(def.item);
+    let ItemKind::Fn(sig, _, _) = item.kind else { return };
+    let sig = *ast.fn_sig(sig);
+    let Some(ret) = sig.ret else { return };
+    let mut opaques = Vec::new();
+    opaque_types(ast, ret, &mut opaques);
+    if !opaques.iter().any(|&t| matches!(*ast.ty(t), Ty::ImplTrait(b) if ast.list(b).iter().any(|x| matches!(x, Bound::Use(_))))) { return; }
+    // a parameter-position `impl Trait` is a generic parameter nothing can capture by name
+    if ast.list(sig.params).iter().any(|p| ty_has_impl_trait(ast, p.ty)) { return; }
+    if let Some(SelfParam::Typed(_, t)) = sig.self_param { if ty_has_impl_trait(ast, t) { return; } }
+    // the type and const parameters in scope, by name; `Self` in a trait
+    let mut params: Vec<String> = Vec::new();
+    fn add(params: &mut Vec<String>, ast: &Ast, pf: &ParsedFile, g: Generics) {
+        for p in ast.list(g.params) {
+            if !matches!(p.kind, GenericParamKind::Lifetime(_)) { params.push(pf.text(p.name).to_string()); }
+        }
+    }
+    add(&mut params, ast, pf, sig.generics);
+    if def.kind == DefKind::AssocFn {
+        let parent = prog.def(def.parent);
+        let ppf = &prog.files[parent.file as usize];
+        let past = &ppf.ast;
+        match past.item(parent.item).kind {
+            ItemKind::Impl(r) => add(&mut params, past, ppf, past.row(r).generics),
+            ItemKind::Trait(r) => { params.push("Self".to_string()); add(&mut params, past, ppf, past.row(r).generics) }
+            _ => {}
+        }
+    }
+    let names = names(prog, tcx, d);
+    let scope: Vec<crate::tcx::resolve_bound_vars::LifetimeId> = names.in_scope_lifetimes();
+    let w = W::new(prog, def.file, d);
+    for t in opaques {
+        let Ty::ImplTrait(b) = *ast.ty(t) else { continue };
+        let Some(args) = ast.list(b).iter().find_map(|x| if let Bound::Use(a) = *x { Some(a) } else { None }) else { continue };
+        let Some(GenericArgs::Angle(l)) = ast.gargs(args) else { continue };
+        let mut lifetimes = Vec::new();
+        let mut named: Vec<String> = Vec::new();
+        for a in ast.list(*l) {
+            match *a {
+                GenericArg::Lifetime(lt) => if let Some(LifetimeRes::Param(id)) = names.named(lt.lo, lt.hi) { lifetimes.push(id) },
+                GenericArg::Type(ty) => if let Ty::Path(p) = *ast.ty(ty) {
+                    if let Some(sg) = ast.segs(p.segs).last() { named.push(pf.text(sg.name).to_string()); }
+                },
+                GenericArg::Const(e) => if let ExprKind::Path(p) = ast.expr(e).kind {
+                    if let Some(sg) = ast.segs(p.segs).last() { named.push(pf.text(sg.name).to_string()); }
+                },
+                _ => {}
+            }
+        }
+        if scope.iter().all(|id| lifetimes.contains(id)) && params.iter().all(|p| named.contains(p)) {
+            let pos = w.ty_start(t).unwrap_or(item.lo);
+            if lint::external(prog, def.file, pos) { continue; }
+            emit(prog, d, &IMPL_TRAIT_REDUNDANT_CAPTURES, def.file, pos, "all possible in-scope parameters are already captured, so `use<...>` syntax is redundant");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- entry points
 
 /// The definition-level passes of this file over one definition.
 pub fn check_def_item(prog: &Program, tcx: &Tcx, d: DefId) {
     match prog.def(d).kind {
-        DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => mismatched_lifetime_syntaxes(prog, tcx, d),
+        DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => { mismatched_lifetime_syntaxes(prog, tcx, d); impl_trait_redundant_captures(prog, tcx, d); }
         DefKind::Struct | DefKind::Union | DefKind::Enum => explicit_outlives_requirements(prog, d),
         _ => {}
     }
@@ -2715,6 +2838,28 @@ fn back_kw_pos(pf: &crate::parser::ParsedFile, at: u32, kw: &str) -> u32 {
     if j >= n && pf.bytes(j - n, j) == kw.as_bytes() { j - n } else { at }
 }
 
+// ---------------------------------------------------------------- semicolon_in_expressions_from_macros
+
+pub const SEMICOLON_IN_EXPRESSIONS_FROM_MACROS: Lint = lint::lint("semicolon_in_expressions_from_macros");
+
+/// rustc_expand ParserAnyMacro::make: a local `macro_rules!` expansion parsed as an expression
+/// that ends with a `;`. The parser records the `;` (only under `makepad check`).
+fn trailing_semis(prog: &Program, own: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    for t in crate::macros::uses::take_trailing_semis() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == t.file) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        // `is_local`: the macro is defined in the crate that calls it
+        let local = prog.file_paths.iter().position(|p| *p == t.def_file).is_some_and(|f| prog.file_crate.get(f).copied() == Some(krate));
+        if !local { continue; }
+        if !seen.insert((file, t.semi)) { continue; }
+        let pf = &prog.files[file];
+        let def = enclosing_def(prog, file as u32, pf.lint_pos(t.call), krate);
+        emit(prog, def, &SEMICOLON_IN_EXPRESSIONS_FROM_MACROS, file as u32, t.semi, "trailing semicolon in macro used in expression position");
+    }
+}
+
 // ---------------------------------------------------------------- unused_macros / unused_macro_rules
 
 pub const UNUSED_MACROS: Lint = lint::lint("unused_macros");
@@ -2725,6 +2870,7 @@ pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 /// expansion matched.
 pub fn finish(prog: &Program, own: &[bool]) {
     if !lint::enabled() { return; }
+    trailing_semis(prog, own);
     let (defs, used) = crate::macros::uses::take();
     if defs.is_empty() { return; }
     // Bodies nothing demanded are never expanded, so an invocation inside one leaves no record:

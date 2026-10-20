@@ -1847,6 +1847,50 @@ pub mod uses {
         USED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((d.def_file.clone(), d.def_pos, arm));
     }
 
+    // The parentheses a transcription adds around a multi-token `$e:expr` fragment (the AST has
+    // no interpolated-expression node): the lints must see through them.
+    thread_local! { static SYNTH_PENDING: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    static SYNTH: Mutex<Option<HashSet<(String, u32)>>> = Mutex::new(None);
+
+    /// The transcriber added a paren at text offset `off` of the expansion being built.
+    pub(super) fn synth_note(off: u32) {
+        if recording() { SYNTH_PENDING.with(|p| p.borrow_mut().push(off)); }
+    }
+
+    /// The expansion built on this thread starts at `base` of `file`: its added parens are at `base + offset`.
+    pub fn synth_flush(file: &str, base: u32) {
+        let v = SYNTH_PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+        if v.is_empty() { return; }
+        let mut g = SYNTH.lock().unwrap_or_else(|e| e.into_inner());
+        let set = g.get_or_insert_with(Default::default);
+        for off in v { set.insert((file.to_string(), base + off)); }
+    }
+
+    /// Whether the `(` at `pos` of `file` was added by a transcription around an expression fragment.
+    pub fn is_synth_paren(file: &str, pos: u32) -> bool {
+        SYNTH.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&(file.to_string(), pos)))
+    }
+
+    /// A `;` that ends a macro_rules expansion parsed as an expression (rustc_expand
+    /// ParserAnyMacro::make, semicolon_in_expressions_from_macros): the expansion's file, the
+    /// `;` token's position, the call's position and the file of the macro's definition.
+    pub struct TrailingSemi {
+        pub file: String,
+        pub semi: u32,
+        pub call: u32,
+        pub def_file: String,
+    }
+
+    static SEMIS: Mutex<Vec<TrailingSemi>> = Mutex::new(Vec::new());
+
+    pub fn trailing_semi(file: &str, semi: u32, call: u32, def_file: &str) {
+        SEMIS.lock().unwrap_or_else(|e| e.into_inner()).push(TrailingSemi { file: file.to_string(), semi, call, def_file: def_file.to_string() });
+    }
+
+    pub fn take_trailing_semis() -> Vec<TrailingSemi> {
+        std::mem::take(&mut *SEMIS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// The recorded definitions and uses (file, definition position, rule or `RESOLVED`).
     pub fn take() -> (Vec<Defined>, HashSet<(String, u32, u32)>) {
         (std::mem::take(&mut *DEFS.lock().unwrap_or_else(|e| e.into_inner())), USED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default())
@@ -2467,6 +2511,7 @@ impl<'a> Parser<'a> {
                         let bare_macro = *f == Frag::Expr && taken.is_none() && ends && self.is_macro_call(*lo, *hi);
                         let wrap = *f == Frag::Expr && hi - lo + usize::from(taken.is_some()) > 1 && !*bare && !bare_macro;
                         if wrap {
+                            uses::synth_note(out.s.len() as u32 + 1);
                             out.push(T::OpenParen, "(", None, u32::MAX);
                         }
                         let group_start = out.s.len() + 1;
