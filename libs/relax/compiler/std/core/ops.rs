@@ -64,6 +64,9 @@ impl<'a, T: ?Sized> Deref for &'a mut T {
         &**self
     }
 }
+// library/core/src/ops/deref.rs: a shared reference is never `DerefMut`
+impl<T: ?Sized> !DerefMut for &T {}
+
 impl<'a, T: ?Sized> DerefMut for &'a mut T {
     fn deref_mut(&mut self) -> &mut T {
         &mut **self

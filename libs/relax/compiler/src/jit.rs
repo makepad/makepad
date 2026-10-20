@@ -1107,6 +1107,19 @@ fn install_ice_hook() {
 }
 
 /// " (at src/file.rs:line)" of the last panic caught inside the compiler, once.
+/// A fatal message raised without a source position (a constant that exhausts static memory)
+/// gets the position of the item being evaluated, as every other diagnostic carries one.
+fn positioned_fatal(u: &Unit, id: u32, msg: &str) -> String {
+    if msg.starts_with("E0080: tried to allocate") {
+        if let FnKey::Inst(d, _) = &u.fns[id as usize].key {
+            let def = u.prog.def(*d);
+            let lo = u.prog.files[def.file as usize].ast.item(def.item).lo;
+            u.tcx.dcx.report(relax_types::next_solver::fulfill::ObligationCause { span: lo, body_id: *d }, msg.to_string());
+        }
+    }
+    msg.to_string()
+}
+
 pub fn take_ice_location() -> String {
     ICE_LOC.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
@@ -5340,7 +5353,7 @@ unsafe fn compile_slot_locked(up: *mut Unit, id: u32, outer: bool) -> Compiled {
             };
             end_build(up, id);
             let u = &mut *up;
-            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { fatal.0.clone() } else { format!("internal compiler error in {}: {}{}", u.fns[id as usize].name, msg, take_ice_location()) })
+            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { positioned_fatal(u, id, &fatal.0) } else { format!("internal compiler error in {}: {}{}", u.fns[id as usize].name, msg, take_ice_location()) })
         }
     };
     Compiled::Code(match r {
@@ -7054,7 +7067,7 @@ unsafe fn build_rir_mode(up: *mut Unit, id: u32, mode: RirMode) -> Result<(), St
             };
             let u = &mut *up;
             let at = ICE_AT.lock().map(|g| g.clone()).unwrap_or_default();
-            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { fatal.0.clone() } else { format!("internal compiler error in {} (makepad run {}): {} -- makepad run bug, report it", u.fns[id as usize].name, at, msg) })
+            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { positioned_fatal(u, id, &fatal.0) } else { format!("internal compiler error in {} (makepad run {}): {} -- makepad run bug, report it", u.fns[id as usize].name, at, msg) })
         }
     }
 }
@@ -12569,7 +12582,7 @@ unsafe fn split_front(up: *mut Unit, id: u32) -> Result<Front, String> {
         Err(p) if p.is::<crate::preempt::OwnerBusy>() => std::panic::resume_unwind(p),
         Err(p) => {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".to_string());
-            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { fatal.0.clone() } else { format!("internal compiler error in {}: {}{}", u.fns[id as usize].name, msg, take_ice_location()) })
+            Err(if let Some(fatal) = p.downcast_ref::<crate::infer::diagnostics::FatalError>() { positioned_fatal(u, id, &fatal.0) } else { format!("internal compiler error in {}: {}{}", u.fns[id as usize].name, msg, take_ice_location()) })
         }
     }
 }

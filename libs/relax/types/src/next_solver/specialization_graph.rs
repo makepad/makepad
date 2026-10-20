@@ -94,6 +94,13 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
                 if let Some(overlap)=overlapping_impls(tcx,prog,sibling,im.def,krate,false,true) {
                     let def=prog.def(im.def);
                     let span=prog.files[def.file as usize].ast.item(def.item).lo;
+                    // rustc coherence: impls of different polarity that overlap are E0751, not E0119
+                    let negative=|d:DefId| { let dd=prog.def(d); let ast=&prog.files[dd.file as usize].ast; ast.as_impl(&ast.item(dd.item).kind).is_some_and(|i| i.negative) };
+                    if negative(sibling)!=negative(im.def) {
+                        let ty=crate::typeck::ty_to_string(false,prog,tcx,tcx.impl_self[&im.def]);
+                        tcx.dcx.report(super::fulfill::ObligationCause { body_id:im.def,span },format!("E0751: found both positive and negative implementation of trait `{}` for type `{}`:",prog.def_path(trait_def),ty));
+                        ok=false; failed=true; break;
+                    }
                     let mut message=format!("E0119: conflicting implementations of trait `{}`",prog.def_path(trait_def));
                     if !overlap.overflowing_predicates.is_empty() { message.push_str(" (overflow evaluating impl requirements)"); }
                     tcx.dcx.report(super::fulfill::ObligationCause { body_id:im.def,span },message);

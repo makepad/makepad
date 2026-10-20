@@ -22,6 +22,9 @@ impl<'a, T: crate::marker::PointeeSized> Clone for &'a T {
     }
 }
 
+// library/core/src/clone.rs: a mutable reference is never `Clone`
+impl<T: crate::marker::PointeeSized> !Clone for &mut T {}
+
 pub use crate::clone_uninit::CloneToUninit;
 
 // :283,458,468. Derive expansion emits these declarations' ordinary bounds.

@@ -604,7 +604,18 @@ impl Providers<'_> {
         let q = &self.tcx.queries;
         q.const_eval.get(&q.engine, key, &mut |key| {
             q.read_declarations()?;
+            let emitted = crate::infer::diagnostics::DiagCtxt::thread_emitted();
             let value = crate::const_eval::eval_to_valtree(self.tcx, self.prog, &key);
+            // a failure the evaluator already reported (its own "evaluation panicked" ..) is reported
+            // once; one it left unreported (an overflow found while lowering) gets the generic E0080
+            if let Err(ErrorHandled::Reported(error)) = &value {
+                if matches!(error, crate::const_eval::ValTreeCreationError::ErrorHandled(_)) && crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted {
+                    let d = self.prog.def(key.def);
+                    self.tcx.dcx.report(crate::next_solver::fulfill::ObligationCause {
+                        body_id: key.def, span: self.prog.files[d.file as usize].ast.item(d.item).lo,
+                    }, format!("E0080: constant evaluation failed: {error:?}"));
+                }
+            }
             Ok(value)
         }, &|id| self.force(id))
     }
