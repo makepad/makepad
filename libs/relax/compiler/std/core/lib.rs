@@ -23,10 +23,14 @@ pub mod arch;
 // rustc's core::simd: portable-simd's core_simd (library/portable-simd/crates/core_simd/src),
 // pulled in as rustc's core does, over the generic SIMD intrinsics (intrinsics_simd)
 // rustc's core names itself `core` (core_simd's paths say core::)
+// Relax: only in a program whose crate roots enable `portable_simd` (the loader's
+// relax_portable_simd cfg): no other program can name it, and 6k lines stay out of cold starts
 extern crate self as core;
+#[cfg(relax_portable_simd)]
 #[path = "core_simd/mod.rs"]
 #[allow(missing_debug_implementations, dead_code, unsafe_op_in_unsafe_fn)]
 mod core_simd;
+#[cfg(relax_portable_simd)]
 pub mod simd {
     pub use crate::core_simd::simd::*;
 }

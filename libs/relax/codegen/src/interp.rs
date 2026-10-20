@@ -2856,6 +2856,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
                             Cls::F32 => 1,
                             Cls::F64 => 2,
                             Cls::V128 => 3,
+                            Cls::V256 => unreachable!("V256 exists only inside the x64 back end (pair256)"),
                         };
                         ws.push(l.r(*v) | code << 32);
                     }
@@ -3186,6 +3187,8 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w2(*base, *src) | (*off as u32 as u64) << 32;
             l.emit(h_vstore, &[w]);
         }
+        // made by addr_modes for native code only
+        Inst::VLoadX(..) | Inst::VStoreX(..) => return Err("indexed vector access"),
         Inst::VAny(d, v) => {
             let w = l.w2(*d, *v);
             l.emit(h_vany, &[w]);
@@ -3218,7 +3221,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
 /// The vregs an instruction defines (its results).
 fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
     match i {
-        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::AtomicStore(..) | Inst::Fence(..) => {}
+        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::Fence(..) => {}
         Inst::FpEnv(w, v) => {
             if !*w {
                 out.push(*v)
@@ -3228,7 +3231,7 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::Cpuid(ds, _, _) => out.extend_from_slice(ds),
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => out.push(*d),
         Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
-        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) => out.push(*d),
+        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
         Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }

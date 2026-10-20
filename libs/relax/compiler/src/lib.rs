@@ -568,14 +568,15 @@ pub fn std_dir() -> String {
 /// Loads core, alloc (when present) and std; returns core and the dependency list user crates
 /// get ([core, alloc, std]).
 /// core, alloc (when the std has it) and std, as load_std_crates loads them (for a preload).
-pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::PreCrate> {
+/// `simd`: with core::simd / std::simd (see `std_simd_wanted`).
+pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<preload::PreCrate> {
     let dir = std_dir();
     let mut v = vec![preload::PreCrate {
         
         name: "core".to_string(),
         root: format!("{}/core/lib.rs", dir),
         edition: 2021,
-        cfg: cfg::CfgSet::host(sess, &[]),
+        cfg: std_cfg(sess, simd),
         deps: Vec::new(),
         proc_macro: false,
         image_deps: Vec::new(),
@@ -588,7 +589,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
             name: "alloc".to_string(),
             root: alloc_root,
             edition: 2021,
-            cfg: cfg::CfgSet::host(sess, &[]),
+            cfg: std_cfg(sess, simd),
             deps: Vec::new(),
             proc_macro: false,
             image_deps: Vec::new(),
@@ -600,7 +601,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
         name: "std".to_string(),
         root: format!("{}/std/lib.rs", dir),
         edition: 2021,
-        cfg: cfg::CfgSet::host(sess, &[]),
+        cfg: std_cfg(sess, simd),
         deps: Vec::new(),
         proc_macro: false,
         image_deps: Vec::new(),
@@ -611,6 +612,27 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
         v[i].image_deps = (0..i).collect();
     }
     v
+}
+
+/// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
+/// core::simd.
+pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
+    let mut c = cfg::CfgSet::host(sess, &[]);
+    if simd {
+        c.set.push("relax_portable_simd".to_string());
+    }
+    c
+}
+
+/// Whether a program with these crate roots can use core::simd / std::simd: only a crate whose
+/// root enables `#![feature(portable_simd)]` can name them (rustc: E0658 otherwise), so std
+/// leaves portable-simd out of every other program. A root that cannot be read counts as
+/// wanting it.
+pub fn std_simd_wanted<'a>(roots: impl IntoIterator<Item = &'a str>) -> bool {
+    roots.into_iter().any(|r| match crate::vfs::read_shared(r) {
+        Ok(src) => src.windows(13).any(|w| w == b"portable_simd"),
+        Err(_) => true,
+    })
 }
 
 pub fn load_std_crates(sess: &std::sync::Arc<crate::Session>, prog: &mut program::Program) -> Result<(u32, Vec<(program::Sym, u32)>), String> {
@@ -628,17 +650,18 @@ pub(crate) fn load_std_crates_with(sess: &std::sync::Arc<crate::Session>, prog: 
 }
 
 fn load_std_crates_inner(sess: &std::sync::Arc<crate::Session>, prog: &mut program::Program, loaded: &mut impl FnMut(&mut program::Program, u32)) -> Result<(u32, Vec<(program::Sym, u32)>), String> {
-    let pre = std_pre_crates(sess);
-    let core = prog.load_crate_deferred("core", &pre[0].root, 2021, cfg::CfgSet::host(sess, &[]), Vec::new())?;
+    let simd = prog.std_simd;
+    let pre = std_pre_crates(sess, simd);
+    let core = prog.load_crate_deferred("core", &pre[0].root, 2021, std_cfg(sess, simd), Vec::new())?;
     loaded(prog, core);
     let core_sym = prog.syms.intern("core");
     let mut deps = vec![(core_sym, core)];
     if pre.len() == 3 {
-        let alloc = prog.load_crate_deferred("alloc", &pre[1].root, 2021, cfg::CfgSet::host(sess, &[]), deps.clone())?;
+        let alloc = prog.load_crate_deferred("alloc", &pre[1].root, 2021, std_cfg(sess, simd), deps.clone())?;
         loaded(prog, alloc);
         deps.push((prog.syms.intern("alloc"), alloc));
     }
-    let std = prog.load_crate_deferred("std", &pre[pre.len() - 1].root, 2021, cfg::CfgSet::host(sess, &[]), deps.clone())?;
+    let std = prog.load_crate_deferred("std", &pre[pre.len() - 1].root, 2021, std_cfg(sess, simd), deps.clone())?;
     loaded(prog, std);
     deps.push((prog.syms.intern("std"), std));
     Ok((core, deps))
@@ -647,6 +670,7 @@ fn load_std_crates_inner(sess: &std::sync::Arc<crate::Session>, prog: &mut progr
 pub fn load_with_std(sess: &std::sync::Arc<crate::Session>, root: &str, name: &str, test: bool) -> Result<(program::Program, u32, u32), Vec<String>> {
     pmhost::install();
     let mut prog = program::Program::new(sess);
+    prog.std_simd = std_simd_wanted([root]);
     let (core, deps) = load_std_crates(sess, &mut prog).map_err(|e| vec![e])?;
     let mut cfgset = cfg::CfgSet::host(sess, &[]);
     if test {
@@ -836,6 +860,7 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
     };
     let t0 = Instant::now();
     let mut prog = program::Program::new(sess);
+    prog.std_simd = std_simd_wanted(crates.iter().map(|c| c.src_path.as_str()));
     let (core, std_deps) = load_std_crates(sess, &mut prog).unwrap();
     let mut load_errors = 0;
     // dependencies first: a crate's `macro_rules!` must be known when its users parse

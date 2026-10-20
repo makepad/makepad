@@ -2485,6 +2485,22 @@ impl<'a> Gen<'a> {
                 let xv = self.use_f(v, FS0);
                 self.vldst(false, xv, rb, off as i64);
             }
+            // (addr_modes makes these on x86-64 only; the address is computed into s1)
+            Inst::VLoadX(d, base, idx, sh, off) => {
+                let rb = self.use_i(base, S1);
+                let ri = self.use_i(idx, S0);
+                self.a.e(0x8B00_0000 | (ri as u32) << 16 | (sh as u32) << 10 | (rb as u32) << 5 | S1 as u32); // add s1, rb, ri, lsl sh
+                let xd = self.def_f(d, FS0);
+                self.vldst(true, xd, S1, off as i64);
+                self.fin_f(d, xd);
+            }
+            Inst::VStoreX(base, idx, sh, off, v) => {
+                let rb = self.use_i(base, S1);
+                let ri = self.use_i(idx, S0);
+                self.a.e(0x8B00_0000 | (ri as u32) << 16 | (sh as u32) << 10 | (rb as u32) << 5 | S1 as u32);
+                let xv = self.use_f(v, FS0);
+                self.vldst(false, xv, S1, off as i64);
+            }
             Inst::VConst(d, bits) => {
                 let xd = self.def_f(d, FS0);
                 if let Some(w) = vimm(bits) {
@@ -3126,7 +3142,7 @@ impl<'a> Gen<'a> {
                 self.a.e(0xD53B_4400 | rd as u32);
                 self.fin_i(*d, rd);
             }
-            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
+            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
             Inst::VX(op, d, a, b) => self.vx(*op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::Sel(d, c, a, b) => {

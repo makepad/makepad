@@ -77,6 +77,18 @@ pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64
     true
 }
 
+/// Evaluates the inline const block `bl` of the (instantiated) body `body` to the bytes of its
+/// value of type `t`; None outside the subset (lowering then runs the block).
+pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
+    if off(&u.prog.session.clone().options) {
+        return None;
+    }
+    let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
+    let mut env: Vec<Option<Vec<u8>>> = Vec::new();
+    let v = cx.block(body, &mut env, bl)?;
+    (v.len() == cx.size(t) as usize).then_some(v)
+}
+
 /// A successful N01 body is complete: constant queries resolve synchronously or unwind.
 fn check_quiet(u: &mut Unit, d: crate::program::DefId, args: &[TyId]) -> Option<std::sync::Arc<Body>> {
     let _o = crate::clock::origin("ctfe");
@@ -732,6 +744,26 @@ impl<'a> Ctx<'a> {
             ExprKind::ConstBlock(bl) => self.offset_of(b, e, bl).or_else(|| self.block(b, env, bl)),
             ExprKind::Block(bl, l) if l.is_none() => self.block(b, env, bl),
             ExprKind::Unsafe(bl) => self.block(b, env, bl),
+            ExprKind::While(row) => {
+                // `while cond { body }` (no label, no `while let`): body blocks without break or
+                // continue (those are outside the subset and end the evaluation)
+                let crate::ast::WhileRow { cond, body, label } = *self.u.prog.files[file].ast.row(row);
+                if label.is_some() || matches!(self.u.prog.files[file].ast.expr(cond).kind, ExprKind::Let(..)) {
+                    return None;
+                }
+                loop {
+                    self.steps += 1;
+                    if self.steps > STEP_BUDGET {
+                        return None;
+                    }
+                    let cv = self.eval(b, env, cond)?;
+                    if *cv.first()? & 1 == 0 {
+                        break;
+                    }
+                    self.block(b, env, body)?;
+                }
+                Some(Vec::new())
+            }
             ExprKind::If(c, then, els) => {
                 let cv = self.eval(b, env, c)?;
                 if *cv.first()? & 1 == 1 {

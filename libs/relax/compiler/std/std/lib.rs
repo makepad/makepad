@@ -16,9 +16,12 @@ pub use core::f32;
 pub use core::f64;
 pub use core::hash;
 pub use core::hint;
-// rustc's std::simd: core::simd plus portable-simd's std_float (StdFloat)
+// rustc's std::simd: core::simd plus portable-simd's std_float (StdFloat); as core::simd, only
+// with relax_portable_simd
+#[cfg(relax_portable_simd)]
 #[allow(dead_code)]
 mod std_float;
+#[cfg(relax_portable_simd)]
 pub mod simd {
     pub use core::simd::*;
     pub use crate::std_float::StdFloat;

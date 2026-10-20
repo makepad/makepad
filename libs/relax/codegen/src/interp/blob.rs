@@ -82,6 +82,7 @@ fn cls_code(c: Cls) -> u64 {
         Cls::F32 => 1,
         Cls::F64 => 2,
         Cls::V128 => 3,
+        Cls::V256 => unreachable!("V256 exists only inside the x64 back end (pair256)"),
     }
 }
 fn cls_of(v: u64) -> Option<Cls> {
@@ -225,6 +226,7 @@ fn cond_of(k: u8) -> Option<Cond> {
 /// A vector op as a word: variant << 16 | w << 8 | k.
 fn vx_code(op: VX) -> u64 {
     let (t, w, k): (u64, Option<VW>, u8) = match op {
+        VX::Join | VX::Half(_) => unreachable!("256-bit halves exist only inside the x64 back end (pair256)"),
         VX::Add(w) => (0, Some(w), 0),
         VX::Sub(w) => (1, Some(w), 0),
         VX::MulLo(w) => (2, Some(w), 0),

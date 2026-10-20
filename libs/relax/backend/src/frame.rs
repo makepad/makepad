@@ -127,10 +127,10 @@ pub fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u3
                         note(k, if split { p + 1 } else { p }, p + 1, kind, &mut acc, &mut ent, &mut ext)
                     });
                 }
-                Inst::Store(_, a, _, v) | Inst::StoreX(_, a, _, _, _, v) | Inst::VStore(a, _, v) | Inst::AtomicStore(_, _, a, v) => {
+                Inst::Store(_, a, _, v) | Inst::StoreX(_, a, _, _, _, v) | Inst::VStore(a, _, v) | Inst::VStoreX(a, _, _, _, v) | Inst::AtomicStore(_, _, a, v) => {
                     each(*a, &mut |k| note(k, p, p + 1, WRITE, &mut acc, &mut ent, &mut ext));
                     each(*v, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
-                    if let Inst::StoreX(_, _, x, ..) = i {
+                    if let Inst::StoreX(_, _, x, ..) | Inst::VStoreX(_, x, ..) = i {
                         each(*x, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
                     }
                 }
@@ -686,7 +686,7 @@ pub fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
                 src.clear();
                 match i {
                     Inst::SlotAddr(_, s) => src.push(*s),
-                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => continue,
+                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => continue,
                     // a call's results do not point into its own memory (a result buffer, an
                     // argument copy: see below; a copy that turns out not to be one escapes)
                     Inst::Call(c, args, rets) => {
@@ -830,7 +830,7 @@ pub fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
                             }
                         }
                     }
-                    Inst::Load(_, _, a, _) | Inst::LoadX(_, _, a, ..) | Inst::VLoad(_, a, _) | Inst::VGather(_, a, _) | Inst::AtomicLoad(_, _, _, a) | Inst::AtomicRmw(_, _, _, _, a, _) | Inst::AtomicCas(_, _, _, _, a, _, _) | Inst::Copy(_, a, _) => {
+                    Inst::Load(_, _, a, _) | Inst::LoadX(_, _, a, ..) | Inst::VLoad(_, a, _) | Inst::VLoadX(_, a, ..) | Inst::VGather(_, a, _) | Inst::AtomicLoad(_, _, _, a) | Inst::AtomicRmw(_, _, _, _, a, _) | Inst::AtomicCas(_, _, _, _, a, _, _) | Inst::Copy(_, a, _) => {
                         for &d in &der[a.0 as usize] {
                             arg_ok[d as usize] = false;
                         }

@@ -1311,7 +1311,7 @@ pub unsafe fn _mm_setr_ps(e0: f32, e1: f32, e2: f32, e3: f32) -> __m128 {
 }
 
 pub unsafe fn _mm_setzero_ps() -> __m128 {
-    __m128([0.0; 4])
+    vx::vx_splat(0, 32)
 }
 
 // Intel SDM SHA256MSG1: dst[i] = W[i] + sigma0(W[i + 1]) with W0..W3 = a, W4 = b[0].

@@ -1205,7 +1205,7 @@ pub fn start_in_run(spec: AppSpec) -> Result<DomainId, Vec<String>> {
 unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize], cfgs: &[crate::cfg::CfgSet], idents: &[u64], id: DomainId, reread: bool) -> Result<(u32, usize, Vec<String>, usize), Vec<String>> {
     use crate::modules::{Dep, NewCrate};
     let u = &mut *up;
-    let std_count = crate::std_pre_crates(&u.prog.session.clone()).len();
+    let std_count = crate::std_pre_crates(&u.prog.session.clone(), u.prog.std_simd).len();
     let std_deps: Vec<(String, Dep)> = (0..std_count).map(|k| (u.prog.syms.str(u.prog.crates[k].name).to_string(), Dep::Existing(k as u32))).collect();
     let mut crate_of = vec![u32::MAX; g.crates.len()];
     let mut batch_of = vec![usize::MAX; g.crates.len()];

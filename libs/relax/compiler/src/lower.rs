@@ -253,6 +253,8 @@ pub struct Lcx<'a> {
     /// the next indirect call is a virtual call of a #[track_caller] trait method: it passes
     /// the caller location (the vtable holds the tracked fn itself)
     indirect_tracked: bool,
+    /// integer SIMD values evaluated at compile time: (slot base, offset) -> their bytes
+    pub(crate) simd_consts: HashMap<(u32, i32), Vec<u8>>,
     /// temporaries whose lifetime a `let` extends to the end of its block (`let r = &make();`),
     /// one list per drop scope (parallel to `scopes`)
     /// temporaries living to the end of a scope (let-extended; `while let` scrutinees), with
@@ -400,6 +402,7 @@ impl<'a> Lcx<'a> {
             guard_flags: HashMap::default(),
             cond_rescope: None,
             indirect_tracked: false,
+            simd_consts: HashMap::default(),
             extend_ops: Default::default(),
             pat_path: None,
             field_moved: HashMap::default(),
@@ -6056,6 +6059,11 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Unsafe(b) => self.lower_block(*b),
             ExprKind::ConstBlock(b) => {
+                // an integer SIMD vector (simd_shuffle's index, `const { .. }` in core::simd's
+                // swizzles): evaluated here, its lanes known to the SIMD intrinsics
+                if let Some(v) = self.simd_const_block(*b, t) {
+                    return v;
+                }
                 let previous = self.overflow_checks;
                 self.overflow_checks = true;
                 let value = self.lower_block(*b);
@@ -6704,7 +6712,7 @@ impl<'a> Lcx<'a> {
                 d
             }
             // type layouts never have vector leaves
-            Cls::F64 | Cls::V128 => {
+            Cls::F64 | Cls::V128 | Cls::V256 => {
                 let d = self.f.vreg(Cls::F64);
                 self.emit(Inst::Fconst(d, raw, true));
                 d

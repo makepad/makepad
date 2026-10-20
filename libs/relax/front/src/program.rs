@@ -662,6 +662,8 @@ pub struct Program {
     /// the proc-macro world's program: its core/alloc/std files come from the program's load
     /// (SHARED_STD) when that load runs
     pub std_from_shared: bool,
+    /// the std crates include core::simd / std::simd (relax_portable_simd; `std_simd_wanted`)
+    pub std_simd: bool,
     /// item-level macro calls no macro resolved at their parse (file, item, module): expanded
     /// again once the crate is loaded (expand_pending: rustc's resolve/expand fixpoint for
     /// macros an expansion in a later file defines or imports), else errors
@@ -836,6 +838,7 @@ impl Program {
             syms: Interner::default(),
             files: Vec::new(),
             std_from_shared: false,
+            std_simd: false,
             part_interned: Default::default(),
             pending_macs: Vec::new(),
             file_paths: Vec::new(),

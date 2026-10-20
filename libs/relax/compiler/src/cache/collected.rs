@@ -77,7 +77,7 @@ impl FrontImages {
         // clean ones load from their crate images (proc-macro and build crates load after the
         // app's, so an app edit leaves clean crates behind it). The std crates may depend on
         // one another despite their load order: a change there uses the ordinary path.
-        (first >= crate::std_pre_crates(&pre[0].cfg.session).len()).then_some(first)
+        (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some(first)
     }
 
     pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate], swap: Option<&CollectedWritten>) -> Option<(Program, Tcx, Option<CollectedCache>)> {

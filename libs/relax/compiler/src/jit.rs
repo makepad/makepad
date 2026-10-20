@@ -4080,6 +4080,12 @@ impl Unit {
         owner::call(owner::Class::Job, || unsafe { (&mut *self.self_ptr.0).const_addr(d, args) })
     }
 
+    /// An inline const block's value from shared lowering (ctfe::eval_const_block, a unit call
+    /// as const_addr_shared).
+    pub fn const_block_shared(&self, body: &crate::typeck::Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
+        owner::call(owner::Class::Job, || unsafe { crate::ctfe::eval_const_block(&mut *self.self_ptr.0, body, bl, t) })
+    }
+
     /// static_addr from shared lowering (a unit call, as const_addr_shared).
     pub fn static_addr_shared(&self, d: DefId) -> u64 {
         owner::call(owner::Class::Job, || unsafe { (&mut *self.self_ptr.0).static_addr(d) })

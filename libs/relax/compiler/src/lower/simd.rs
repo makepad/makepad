@@ -69,6 +69,30 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// An inline const block of an integer SIMD type, evaluated now (rustc evaluates every inline
+    /// const at compile time): its lanes stored as constants, its bytes remembered for the
+    /// intrinsics that take a constant vector (simd_shuffle's index). None: lowered as code.
+    pub(super) fn simd_const_block(&mut self, bl: crate::ast::BlockId, t: TyId) -> Option<Val> {
+        let (l, n) = self.simd_shape(t)?;
+        if matches!(l, Lane::F(_)) || !matches!(self.kind(t), TyKind::Adt(..)) {
+            return None;
+        }
+        let bytes = self.u.const_block_shared(self.b, bl, t)?;
+        let w = (l.w().bits() / 8) as usize;
+        if bytes.len() < n as usize * w {
+            return None;
+        }
+        let out = self.new_slot_for(t);
+        for k in 0..n as usize {
+            let mut x = [0u8; 8];
+            x[..w].copy_from_slice(&bytes[k * w..(k + 1) * w]);
+            let r = self.iconst(i64::from_le_bytes(x));
+            self.emit(Inst::Store(Mem::Int(w as u8, false), out, (k * w) as i32, r));
+        }
+        self.simd_consts.insert((out.0, 0), bytes);
+        Some(Val::M(out, 0))
+    }
+
     /// The element type of a `#[repr(simd)]` struct (see `simd_shape`).
     fn simd_elem_ty(&mut self, t: TyId) -> Option<TyId> {
         let TyKind::Adt(d, args, _) = self.kind(t) else { return None };
@@ -272,6 +296,62 @@ impl<'a> Lcx<'a> {
         let d = self.f.vreg(Self::lane_cls(l));
         self.emit(Inst::Load(Self::lane_mem(l), d, base, off + (k * l.w().bits() / 8) as i32));
         d
+    }
+
+    /// simd_shuffle with a known index vector over sources that are whole 16-byte chunks:
+    /// per output chunk one VShuffle (pshufb / tbl) of the two source chunks its lanes come from.
+    fn simd_shuffle_const(&mut self, idx: &Val, ops: &[(VReg, i32)], l: Lane, n: u32, m: u32, t: TyId) -> Option<Val> {
+        let Val::M(ib, io) = *idx else { return None };
+        let bytes = self.simd_consts.get(&(ib.0, io))?.clone();
+        let lb = l.w().bits() / 8;
+        let (src, dst) = (n * lb, m * lb);
+        if src % 16 != 0 || dst % 16 != 0 || bytes.len() < 4 * m as usize {
+            return None;
+        }
+        let lane = |j: u32| u32::from_le_bytes(bytes[4 * j as usize..4 * j as usize + 4].try_into().unwrap());
+        if (0..m).any(|j| lane(j) >= 2 * n) {
+            return None;
+        }
+        // per output chunk: its source chunks (of x ++ y) and byte indices
+        let per = 16 / lb;
+        let mut plan: Vec<([u32; 2], [u8; 16])> = Vec::new();
+        for c in 0..dst / 16 {
+            let mut chunks: Vec<u32> = Vec::new();
+            let mut idx = [0u8; 16];
+            for k in 0..per {
+                let byte = lane(c * per + k) * lb;
+                let sc = byte / 16;
+                let at = match chunks.iter().position(|x| *x == sc) {
+                    Some(p) => p,
+                    None if chunks.len() < 2 => {
+                        chunks.push(sc);
+                        chunks.len() - 1
+                    }
+                    None => return None,
+                };
+                for b in 0..lb {
+                    idx[(k * lb + b) as usize] = (16 * at as u32 + byte % 16 + b) as u8;
+                }
+            }
+            let a = chunks[0];
+            plan.push(([a, *chunks.get(1).unwrap_or(&a)], idx));
+        }
+        let half = src / 16;
+        let load = |s: &mut Self, ch: u32| -> VReg {
+            let (base, off) = if ch < half { ops[0] } else { ops[1] };
+            let r = s.f.vreg(Cls::V128);
+            s.emit(Inst::VLoad(r, base, off + 16 * (ch % half) as i32));
+            r
+        };
+        let out = self.new_slot_for(t);
+        for (c, (chunks, idx)) in plan.into_iter().enumerate() {
+            let a = load(self, chunks[0]);
+            let b = if chunks[1] == chunks[0] { a } else { load(self, chunks[1]) };
+            let d = self.f.vreg(Cls::V128);
+            self.emit(Inst::VShuffle(d, a, b, idx));
+            self.emit(Inst::VStore(out, 16 * c as i32, d));
+        }
+        Some(Val::M(out, 0))
     }
 
     fn lane_put(&mut self, base: VReg, off: i32, l: Lane, k: u32, v: VReg) {
@@ -513,6 +593,11 @@ impl<'a> Lcx<'a> {
                     _ => return Some(self.simd_err(name, "the return type must have the input's element type and the index's lane count, found", t)),
                 }
                 let size = n * l.w().bits() / 8;
+                // a constant index (an inline const): one byte shuffle of two source chunks per
+                // 16-byte output chunk, when its bytes come from at most two chunks of x ++ y
+                if let Some(v) = self.simd_shuffle_const(&vals[2].0, &ops, l, n, m, t) {
+                    return Some(v);
+                }
                 let both = self.f.slot(2 * size, 16);
                 self.f.slots[both as usize].born = self.coro.is_none();
                 let xy = self.f.vreg(Cls::I);

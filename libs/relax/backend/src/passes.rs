@@ -80,6 +80,8 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::VInsert(d, v, l, a) => Inst::VInsert(m(*d), m(*v), *l, m(*a)),
         Inst::VLoad(d, b, o) => Inst::VLoad(m(*d), m(*b), *o),
         Inst::VStore(b, o, v) => Inst::VStore(m(*b), *o, m(*v)),
+        Inst::VLoadX(d, b, x, sh, o) => Inst::VLoadX(m(*d), m(*b), m(*x), *sh, *o),
+        Inst::VStoreX(b, x, sh, o, v) => Inst::VStoreX(m(*b), m(*x), *sh, *o, m(*v)),
         Inst::VAny(d, a) => Inst::VAny(m(*d), m(*a)),
         Inst::VConst(d, k) => Inst::VConst(m(*d), *k),
         Inst::VGather(d, b, i) => Inst::VGather(m(*d), m(*b), m(*i)),
@@ -357,7 +359,7 @@ pub fn is_pure(i: &Inst) -> bool {
 }
 
 pub fn is_mem_effect(i: &Inst) -> bool {
-    matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) | Inst::FpEnv(..) | Inst::Cpuid(..) | Inst::Xgetbv(..) | Inst::VStore(..))
+    matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) | Inst::FpEnv(..) | Inst::Cpuid(..) | Inst::Xgetbv(..) | Inst::VStore(..) | Inst::VStoreX(..))
 }
 
 pub fn const_inst(d: VReg, k: K) -> Inst {
@@ -468,6 +470,8 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
     let mut def: Vec<Option<(VX, VReg)>> = vec![None; nv];
     // single-def scalar results (zero-extended lanes) and their lane width
     let mut lane_bits = vec![0u8; nv];
+    // single-def integer constants
+    let mut ik: Vec<Option<i64>> = vec![None; nv];
     // single-def bit patterns of a single-def f32 (`x.to_bits()`, zero-extended): the float
     let mut f32_bits: Vec<Option<VReg>> = vec![None; nv];
     for b in &f.blocks {
@@ -479,6 +483,11 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
             }
             if let Inst::VConst(d, 0) = i {
                 zero[d.0 as usize] = ndef[d.0 as usize] == 1;
+            }
+            if let Inst::Iconst(d, k) = i {
+                if ndef[d.0 as usize] == 1 {
+                    ik[d.0 as usize] = Some(*k);
+                }
             }
             if let Inst::VX(op, d, a, _) = i {
                 if ndef[d.0 as usize] == 1 && ndef[a.0 as usize] == 1 {
@@ -503,6 +512,23 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
     };
     for b in &mut f.blocks {
         for i in &mut b.insts {
+            // the splat of a constant whose lanes repeat a 32-bit word: a pool constant (zero:
+            // xorps / movi), not a GPR move and a shuffle (`_mm_setzero_ps`, `_mm_set1_epi8(k)`)
+            if let Inst::VX(VX::Splat(w), d, a, _) = *i {
+                if let Some(k) = ik[a.0 as usize] {
+                    let k = k as u64;
+                    let word = match w {
+                        VW::B => Some((k & 0xff) as u32 * 0x0101_0101),
+                        VW::H => Some((k & 0xffff) as u32 * 0x0001_0001),
+                        VW::S => Some(k as u32),
+                        VW::D => ((k >> 32) as u32 == k as u32).then_some(k as u32),
+                    };
+                    if let Some(word) = word {
+                        *i = Inst::VConst(d, word);
+                        continue;
+                    }
+                }
+            }
             // a splat of a float's bits splats the float register itself (no round trip
             // through an integer register): `_mm_set1_ps(x)`, `vdupq_n_f32(x)`
             if let Inst::VX(VX::Splat(VW::S), d, a, _) = *i {
@@ -2046,7 +2072,7 @@ pub fn sink_to_successor(f: &mut Func) -> bool {
         for (ii, i) in b.insts.iter().enumerate().rev() {
             uses_defs(i, &mut uses, &mut defs);
             let load = matches!(i, Inst::Load(..));
-            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::TlsAddr(..));
+            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::TlsAddr(..));
             if movable && !fp_env && (!load || !memory_effect) && defs.len() == 1 && ndef[defs[0].0 as usize] == 1 {
                 let s = use_block[defs[0].0 as usize];
                 if s < nb && s != bi && s != 0 && npred[s] == 1 && b.term.succs().any(|t| t as usize == s)
@@ -5649,6 +5675,9 @@ pub fn addr_modes(f: &mut Func) {
             let (m, base, off) = match &b.insts[k] {
                 Inst::Load(m, _, base, off) => (*m, *base, *off),
                 Inst::Store(m, base, off, _) => (*m, *base, *off),
+                // vectors too on x86-64 (movups takes any SIB form; arm64's ldr q only an
+                // unscaled or x16-scaled register)
+                Inst::VLoad(_, base, off) | Inst::VStore(base, off, _) if cfg!(target_arch = "x86_64") => (Mem::Int(8, false), *base, *off),
                 i => {
                     for_defs(i, |d| {
                         if ndef[d.0 as usize] == 1 {
@@ -5742,6 +5771,8 @@ pub fn addr_modes(f: &mut Func) {
             b.insts[k] = match b.insts[k] {
                 Inst::Load(m, d, _, off2) => Inst::LoadX(m, d, pp, idx, sh, off2 + extra as i32),
                 Inst::Store(m, _, off2, v) => Inst::StoreX(m, pp, idx, sh, off2 + extra as i32, v),
+                Inst::VLoad(d, _, off2) => Inst::VLoadX(d, pp, idx, sh, off2 + extra as i32),
+                Inst::VStore(_, off2, v) => Inst::VStoreX(pp, idx, sh, off2 + extra as i32, v),
                 ref other => other.clone(),
             };
             let _ = off;
@@ -5998,7 +6029,7 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
                         *e = (*e).max(vs[base.0 as usize].1 + *off as i64 + 16);
                     }
                 }
-                Inst::LoadX(_, _, base, x, _, _) => {
+                Inst::LoadX(_, _, base, x, _, _) | Inst::VLoadX(_, base, x, _, _) => {
                     if sl(*base) != NONE {
                         rd_end[sl(*base) as usize] = i64::MAX;
                     }
@@ -6016,7 +6047,7 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
                         ret_call[sl(*src) as usize] = Some(BAD_CALL);
                     }
                 }
-                Inst::StoreX(_, base, x, _, _, src) => {
+                Inst::StoreX(_, base, x, _, _, src) | Inst::VStoreX(base, x, _, _, src) => {
                     if sl(*base) != NONE {
                         writes[sl(*base) as usize] += 1;
                     }
@@ -6087,7 +6118,7 @@ pub fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
     for b in &f.blocks {
         for i in &b.insts {
             match i {
-                Inst::Load(_, _, base, _) | Inst::VLoad(_, base, _) | Inst::LoadX(_, _, base, ..) | Inst::Copy(_, base, _) => {
+                Inst::Load(_, _, base, _) | Inst::VLoad(_, base, _) | Inst::LoadX(_, _, base, ..) | Inst::VLoadX(_, base, ..) | Inst::Copy(_, base, _) => {
                     if sl(*base) != NONE {
                         reads[sl(*base) as usize] += 1;
                     }

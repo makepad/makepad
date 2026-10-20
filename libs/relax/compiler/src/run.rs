@@ -693,7 +693,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     for (ci, c) in g.crates.iter().enumerate() {
         crate::crates::set_crate_env(&c.name, g.env[ci].clone());
     }
-    let mut pre = crate::std_pre_crates(sess);
+    prog.std_simd = crate::std_simd_wanted(g.crates.iter().map(|c| c.src_path.as_str()));
+    let mut pre = crate::std_pre_crates(sess, prog.std_simd);
     let std_count = pre.len();
     let std_names: Vec<_> = pre.iter().map(|c| (c.name.clone(), c.name.clone())).collect();
     let mut pre_index = vec![usize::MAX; g.crates.len()];
