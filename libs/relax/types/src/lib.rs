@@ -71,6 +71,14 @@ pub mod pattern_analysis;
 pub mod stable;
 pub mod mir;
 
+/// A process-unique number for test scratch names (a clock alone collides between parallel tests).
+#[cfg(test)]
+pub(crate) fn unique_test_id() -> u128 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    (nanos << 20) | NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+}
+
 #[cfg(test)]
 mod lang_item_tests;
 pub mod infer;

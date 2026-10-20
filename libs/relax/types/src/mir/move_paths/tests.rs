@@ -25,7 +25,7 @@ fn body(types: &[TyId], args: u32, blocks: Vec<BasicBlockData>) -> Body {
     }
     Body { phase: MirPhase::Built, source: MirSource { owner: DefId(0), kind: BodyKind::Fn }, basic_blocks: blocks, local_decls,
         source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }],
-        user_type_annotations: Vec::new(), var_debug_info: Vec::new(), arg_count: args,
+        user_type_annotations: Vec::new(), span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(), var_debug_info: Vec::new(), arg_count: args,
         spread_arg: None, promoted: Vec::new(), coroutine: None }
 }
 fn goto(i: u32) -> TerminatorKind { TerminatorKind::Goto { target: BasicBlock(i) } }
@@ -318,23 +318,6 @@ fn normalized_field_type_drives_box_projection() {
         let data = gather(&b, &prog, &tcx); assert_eq!(data.moves.len(), 1); assert_eq!(data.moves[0].path, exact(&data, &p));
         assert_eq!(PlaceTy::from_ty(root).field_ty(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), FieldIdx(0)), Some(heap));
     }
-}
-
-#[test]
-fn shallow_box_init_does_not_initialize_pointee() {
-    let (prog, tcx) = collect("#[lang = \"owned_box\"] struct Heap<T>(*mut T);"); let t = tcx.tys.u8_; let heap = adt(&prog, &tcx, "Heap", vec![t]);
-    let p = project(1, vec![PlaceElem::Deref]);
-    let b = body(&[tcx.tys.unit, heap, t], 0, vec![block(vec![
-        StatementKind::FakeRead(FakeReadCause::ForMatchedPlace(None), p.clone()),
-        StatementKind::Assign(place(1), Rvalue::ShallowInitBox(constant(t), t)),
-        StatementKind::Assign(p.clone(), Rvalue::Use(constant(t))),
-    ], TerminatorKind::Return)]);
-    let data = gather(&b, &prog, &tcx); let pointee = exact(&data, &p);
-    assert_eq!(data.inits[0].kind, InitKind::Shallow);
-    let init = MaybeInitializedPlaces::new(&prog, &tcx, &b, &data); let i = iterate_to_fixpoint(&b, &init);
-    after(&i, at(0, 1), &[1]); after(&i, at(0, 2), &[1, pointee]);
-    let uninit = MaybeUninitializedPlaces::new(&prog, &tcx, &b, &data); let u = iterate_to_fixpoint(&b, &uninit);
-    after(&u, at(0, 1), &[0, 2, pointee]); after(&u, at(0, 2), &[0, 2]);
 }
 
 #[test]

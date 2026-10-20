@@ -7,9 +7,14 @@ use crate::types::{RegionId, RegionKind, TyId, TyKind};
 #[derive(Clone, Debug, Default)]
 pub struct ImpliedBounds {
     pub outlives: Vec<(RegionId, RegionId)>,
+    /// How many leading `outlives` are the param-env's region-outlives clauses (rustc inserts those
+    /// into the universal region relations before the regions themselves, the implied ones after).
+    pub explicit_outlives: usize,
     /// Generic and alias subjects are retained as types, not flattened slots.
     pub type_outlives: Vec<(TyId, RegionId)>,
     pub obligations: Vec<OutlivesPredicate>,
+    /// `inferred_outlives_of` per ADT, in terms of its identity parameters (computed on demand).
+    inferred: crate::fxhash::HashMap<crate::program::DefId, Vec<OutlivesPredicate>>,
 }
 
 impl ImpliedBounds {
@@ -24,7 +29,11 @@ impl ImpliedBounds {
             obligations,
             ..Self::default()
         };
-        for p in predicates {
+        for p in predicates.iter().filter(|p| matches!(p, OutlivesPredicate::Region(..))) {
+            result.assume(tcx, *p);
+        }
+        result.explicit_outlives = result.outlives.len();
+        for p in predicates.iter().filter(|p| matches!(p, OutlivesPredicate::Type(..))) {
             result.assume(tcx, *p);
         }
         for i in 0..raw.len().max(normalized.len()) {
@@ -33,7 +42,11 @@ impl ImpliedBounds {
         }
         // Relation insertion order determines nightly's SCC representatives.
         let mut seen = crate::fxhash::HashSet::default();
-        result.outlives.retain(|p| seen.insert(*p));
+        let explicit = result.explicit_outlives;
+        let mut index = 0;
+        let mut kept_explicit = 0;
+        result.outlives.retain(|p| { let keep = seen.insert(*p); if keep && index < explicit { kept_explicit += 1; } index += 1; keep });
+        result.explicit_outlives = kept_explicit;
         let mut seen = crate::fxhash::HashSet::default();
         result.type_outlives.retain(|p| seen.insert(*p));
         result
@@ -123,6 +136,14 @@ impl ImpliedBounds {
             TyKind::Adt(d, args, rs) => {
                 if let Some(adt) = tcx.adts.get(d) {
                     self.nominal(tcx,&adt.region_contract,tcx.tys.list(*args),&tcx.tys.region_args(adt.region_params),*rs);
+                    // The ADT is only well-formed where its fields' types are (RFC 2093): `struct S<'a, T>(&'a T)`
+                    // implies `T: 'a` wherever an `S<'a, T>` is.
+                    let inferred = self.inferred_outlives_of(tcx,prog,*d,&mut vec![]);
+                    for p in inferred {
+                        let p = instantiate(tcx,p,tcx.tys.list(*args),&tcx.tys.region_args(adt.region_params),&tcx.tys.region_args(*rs));
+                        if matches!(p,OutlivesPredicate::Type(t,_) if tcx.tys.has_vars_bound_at_or_above(t,0)) { continue; }
+                        self.assume(tcx,p);
+                    }
                 }
                 for t in tcx.tys.list(*args) {
                     wf_args.push(*t);
@@ -190,6 +211,58 @@ impl ImpliedBounds {
             _ => {}
         }
     }
+    /// rustc_hir_analysis/src/outlives/implicit_infer.rs: the outlives predicates the field types of `def`
+    /// require, with those of the ADTs they name (`insert_required_predicates_to_be_wf`). A cycle through
+    /// `visiting` contributes nothing on its way back (rustc iterates to a fixpoint).
+    fn inferred_outlives_of(&mut self, tcx: &Tcx, prog: &Program, def: crate::program::DefId, visiting: &mut Vec<crate::program::DefId>) -> Vec<OutlivesPredicate> {
+        if let Some(done) = self.inferred.get(&def) { return done.clone(); }
+        if let Some(done) = tcx.inferred_outlives.get(&def) { return (*done).clone(); }
+        if visiting.contains(&def) { return vec![]; }
+        let Some(adt) = tcx.adts.get(&def) else { return vec![] };
+        visiting.push(def);
+        let mut required: Vec<OutlivesPredicate> = vec![];
+        for variant in &adt.variants {
+            for field in &variant.fields { self.required_to_be_wf(tcx, prog, field.ty, visiting, &mut required); }
+        }
+        visiting.pop();
+        // Only the ADT's own early-bound parameters can be required of it.
+        required.retain(|p| match *p {
+            OutlivesPredicate::Region(a, b) => [a, b].iter().all(|&r| matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_))),
+            OutlivesPredicate::Type(t, r) => matches!(tcx.tys.kind(t), TyKind::Param(_)) && matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_) | RegionKind::ReStatic),
+        });
+        if visiting.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
+        required
+    }
+    fn required_to_be_wf(&mut self, tcx: &Tcx, prog: &Program, ty: TyId, visiting: &mut Vec<crate::program::DefId>, out: &mut Vec<OutlivesPredicate>) {
+        let tys = &tcx.tys;
+        let push = |p: OutlivesPredicate, out: &mut Vec<OutlivesPredicate>| if !out.contains(&p) { out.push(p) };
+        match tys.kind(ty).clone() {
+            TyKind::Adt(d, args, rs) => {
+                if let Some(adt) = tcx.adts.get(&d) {
+                    let params = tys.region_args(adt.region_params);
+                    let explicit = adt.region_contract.predicates.clone();
+                    let inferred = self.inferred_outlives_of(tcx, prog, d, visiting);
+                    for p in explicit.into_iter().chain(inferred) {
+                        let p = instantiate(tcx, p, tys.list(args), &params, &tys.region_args(rs));
+                        if !matches!(p, OutlivesPredicate::Type(t, _) if tys.has_vars_bound_at_or_above(t, 0)) { push(p, out); }
+                    }
+                }
+                for t in tys.list(args).to_vec() { self.required_to_be_wf(tcx, prog, t, visiting, out); }
+            }
+            TyKind::Ref(_, inner, r) => {
+                // `&'r T` requires `T: 'r`: the components of T each outlive 'r.
+                if matches!(tys.region_kind(r), RegionKind::ReBound(..)) || tys.has_vars_bound_at_or_above(inner, 0) { return; }
+                let mut components = ImpliedBounds::default();
+                components.components(tcx, inner, r);
+                for (a, b) in components.outlives { push(OutlivesPredicate::Region(a, b), out); }
+                for (t, r) in components.type_outlives { push(OutlivesPredicate::Type(t, r), out); }
+                self.required_to_be_wf(tcx, prog, inner, visiting, out);
+            }
+            TyKind::Tuple(ts) => { for t in tys.list(ts).to_vec() { self.required_to_be_wf(tcx, prog, t, visiting, out); } }
+            TyKind::Array(t, _) | TyKind::Slice(t) | TyKind::Ptr(_, t) => self.required_to_be_wf(tcx, prog, t, visiting, out),
+            _ => {}
+        }
+    }
     fn nominal(&mut self, tcx: &Tcx, contract: &crate::tcx::outlives::RegionContract,
         args: &[TyId], params: &[RegionId], rs: crate::types::RegionArgsId) {
         for &p in &contract.predicates {
@@ -237,8 +310,13 @@ impl ImpliedBounds {
     pub fn instantiate_query_bounds(&mut self, tcx: &Tcx, replacements: &[(RegionId,RegionId)]) {
         let region = |r| replacements.iter().find(|p| p.0 == r).map_or(r,|p| p.1);
         let placeholder = |r| matches!(tcx.tys.region_kind(r),RegionKind::RePlaceholder { .. });
-        self.outlives = self.outlives.iter().map(|&(a,b)| (region(a),region(b)))
-            .filter(|&(a,b)| !placeholder(a) && !placeholder(b)).collect();
+        let explicit = self.explicit_outlives;
+        let mut kept_explicit = 0;
+        let mapped: Vec<(RegionId, RegionId)> = self.outlives.iter().enumerate().map(|(i, &(a,b))| (i, (region(a),region(b))))
+            .filter(|&(_, (a,b))| !placeholder(a) && !placeholder(b))
+            .map(|(i, p)| { if i < explicit { kept_explicit += 1; } p }).collect();
+        self.outlives = mapped;
+        self.explicit_outlives = kept_explicit;
         self.type_outlives = self.type_outlives.iter().filter_map(|&(t,r)| {
             let r = region(r);
             let has_placeholder = std::cell::Cell::new(placeholder(r));

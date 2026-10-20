@@ -570,10 +570,10 @@ impl LifetimeResolver<'_> {
             ast::Ty::Array(inner, length) => { self.visit_ty(inner); self.visit_anon_const(length); }
             ast::Ty::Tuple(types) => for &ty in ast.list(types) { self.visit_ty(ty); },
             ast::Ty::Path(path) => {
-                // a bare trait object (edition 2015) is a poly-trait ref: its parenthesized sugar has a binder of
-                // its own, as in `dyn Trait` (late.rs visit_poly_trait_ref)
-                let trait_object = self.tcx.lifetime_path_def(self.prog, self.owner, self.file, self.module, &path).is_some_and(|def| self.prog.def(def).kind == DefKind::Trait);
-                if trait_object {
+                // late.rs:925-945: a path naming a trait is a bare trait object; its Fn-sugar
+                // anonymous lifetimes are placed in a poly-trait rib of its own
+                let bare_trait = path.no_qself() && self.tcx.lifetime_path_def(self.prog, self.owner, self.file, self.module, &path).is_some_and(|def| self.prog.def(def).kind == DefKind::Trait);
+                if bare_trait {
                     self.push_generics(BinderId::Trait(path.segs.lo), ast::List::EMPTY);
                     self.visit_path(&path, false);
                     let rib = self.ribs.pop().unwrap();

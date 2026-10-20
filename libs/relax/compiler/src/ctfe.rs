@@ -377,7 +377,7 @@ impl<'a> Ctx<'a> {
                 ExprKind::MethodCall { .. } => b.methods.get(&e.0).map(|m| m.def),
                 _ => None,
             };
-            self.reason = Some(format!("{}: {:?}, call {:?}, coercion {:?}, source {:?}", self.u.prog.def_path(b.def), ex.kind, call.map(|d| self.u.prog.def_path(d)), b.coerce.get(&e.0), source));
+            self.reason = Some(format!("{}: {:?}, call {:?}, coercion {:?}, source {:?}", self.u.prog.def_path(b.def), ex.kind, call.map(|d| self.u.prog.def_path(d)), b.coerce(e.0), source));
         }
         result
     }
@@ -389,7 +389,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let v = self.eval_raw(b, env, e)?;
-        match b.coerce.get(&e.0).copied() {
+        match b.coerce(e.0) {
             None | Some(Coerce::MutToConst | Coerce::UnsafeFn | Coerce::RefToRaw(_)) => Some(v),
             Some(Coerce::ReifyFn) => self.fn_pointer(b.ty(e)),
             Some(Coerce::ClosureFn) => {
@@ -647,7 +647,7 @@ impl<'a> Ctx<'a> {
                 let (mut rv, rt) = match (m.derefs, m.autoref) {
                     (0, 0) => (self.eval(b, env, recv)?, b.ty(recv)),
                     (0, 1) => (self.borrow(b, env, recv)?, b.ty(recv)),
-                    (1, 1) if !b.ov_derefs.contains_key(&(recv.0, 0)) => {
+                    (1, 1) if !b.ov_deref(recv.0, 0).is_some() => {
                         let TyKind::Ref(_, inner, _) = self.kind(b.ty(recv)) else { return None };
                         (self.eval(b, env, recv)?, inner)
                     }
@@ -672,7 +672,7 @@ impl<'a> Ctx<'a> {
                 self.call_const_fn(m.def, self.u.tcx.tys.list(m.args).to_vec(), vals, t)
             }
             ExprKind::Call(f, args) => {
-                if b.legacy_args.contains_key(&e.0) || b.call_derefs.contains_key(&e.0) {
+                if b.legacy_args.contains_key(&e.0) || b.call_derefs(e.0).is_some() {
                     return None;
                 }
                 let fx = crate::lit::strip_paren(&self.u.prog.files[file].ast, f);
@@ -772,7 +772,7 @@ impl<'a> Ctx<'a> {
                 if b.ov_index.contains_key(&e.0) {
                     return None;
                 }
-                let derefs = b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = b.index_derefs(e.0);
                 let av = self.eval(b, env, a)?;
                 let iv = self.eval(b, env, i)?;
                 let idx = rd_u64(&iv, 0)? as usize;
@@ -844,7 +844,7 @@ impl<'a> Ctx<'a> {
             ExprKind::Path(_) => matches!(b.res.get(&e.0), Some(Res::Local(_))),
             ExprKind::Paren(x) => self.owned_local_place(b, x),
             ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => b.field_idx.get(&e.0).is_none_or(|f| f.0 == 0) && self.owned_local_place(b, x),
-            ExprKind::Index(x, _) => b.index_derefs.get(&e.0).copied().unwrap_or(0) == 0 && self.owned_local_place(b, x),
+            ExprKind::Index(x, _) => b.index_derefs(e.0) == 0 && self.owned_local_place(b, x),
             _ => false,
         }
     }
@@ -861,7 +861,7 @@ impl<'a> Ctx<'a> {
                 let (derefs, fi) = b.field_idx.get(&e.0).map(|&(d, f)| (d as usize, f))?;
                 let (mut ptr, t) = match (derefs, self.kind(b.ty(x))) {
                     (0, _) => (self.borrow(b, env, x)?, b.ty(x)),
-                    (1, TyKind::Ref(_, inner, _)) if !b.ov_derefs.contains_key(&(x.0, 0)) => (self.eval(b, env, x)?, inner),
+                    (1, TyKind::Ref(_, inner, _)) if !b.ov_deref(x.0, 0).is_some() => (self.eval(b, env, x)?, inner),
                     _ => return None,
                 };
                 let off = match self.kind(t) {
@@ -889,7 +889,7 @@ impl<'a> Ctx<'a> {
             }
             ExprKind::Index(x, index) => {
                 if b.ov_index.contains_key(&e.0) { return None; }
-                let derefs = b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = b.index_derefs(e.0);
                 let (ptr, t) = match (derefs, self.kind(b.ty(x))) {
                     (0, _) => (self.borrow(b, env, x)?, b.ty(x)),
                     (1, TyKind::Ref(_, inner, _)) => (self.eval(b, env, x)?, inner),
@@ -939,7 +939,7 @@ impl<'a> Ctx<'a> {
                 Some((li, base.checked_add(off as usize)?))
             }
             ExprKind::Index(x, index) => {
-                if b.ov_index.contains_key(&e.0) || b.index_derefs.get(&e.0).copied().unwrap_or(0) != 0 { return None; }
+                if b.ov_index.contains_key(&e.0) || b.index_derefs(e.0) != 0 { return None; }
                 let TyKind::Array(et, n) = self.kind(b.ty(x)) else { return None };
                 let n = n.try_to_target_usize(&self.u.tcx.tys)?;
                 let (li, base) = self.local_place(b, env, x)?;

@@ -398,7 +398,7 @@ impl<'a> L2<'a> {
                 // a field of a reference or a smart pointer is reached through a dereference
                 let t = self.expr_ty(b)?;
                 if !matches!(self.kind(t), TyKind::Adt(..) | TyKind::Tuple(_)) { return None; }
-                if self.body.ov_derefs.get(&(b.0, 0)).is_some() || self.body.ov_derefs.get(&(e.0, 0)).is_some() { return None; }
+                if self.body.ov_deref(b.0, 0).is_some() || self.body.ov_deref(e.0, 0).is_some() { return None; }
                 self.const_place_root(b)
             }
             ExprKind::Index(b, _) => {
@@ -446,7 +446,7 @@ impl<'a> L2<'a> {
                 let Some(m) = self.body.methods.get(&e.0) else { return };
                 if m.autoref != 2 { return; }
                 if m.derefs > 0 {
-                    let overloaded = [e.0, r.0, unparen(ast, r).0].iter().any(|k| self.body.ov_derefs.get(&(*k, 0)).is_some());
+                    let overloaded = [e.0, r.0, unparen(ast, r).0].iter().any(|k| self.body.ov_deref(*k, 0).is_some());
                     if !overloaded { return; }
                 }
                 if self.const_place_root(r).is_some() { self.emit(&CONST_ITEM_MUTATION, pos, BORROW); }
@@ -690,7 +690,7 @@ impl<'a> L2<'a> {
         let mut chain = vec![rt];
         let mut t = rt;
         for step in 0..m.derefs as usize {
-            let ov = [e.0, recv.0, unparen(self.ast, recv).0].iter().any(|k| self.body.ov_derefs.get(&(*k, step)).is_some());
+            let ov = [e.0, recv.0, unparen(self.ast, recv).0].iter().any(|k| self.body.ov_deref(*k, step).is_some());
             t = match self.kind(t) {
                 TyKind::Ref(_, i, _) if !ov => i,
                 TyKind::Adt(d, args, _) if !ov && Some(d) == self.lang(LangItem::OwnedBox) => match self.tcx.tys.list(args).first() { Some(&i) => i, None => return },
@@ -817,7 +817,7 @@ impl<'a> L2<'a> {
         let allow_from = |b: ExprId| -> bool {
             // the base has a `Deref` adjustment: a reference or smart pointer
             self.expr_ty(b).is_some_and(|t| matches!(self.kind(t), TyKind::Ref(..)) || (matches!(self.kind(t), TyKind::Adt(d, ..) if Some(d) == self.lang(LangItem::OwnedBox)) && false))
-                || self.body.ov_derefs.get(&(b.0, 0)).is_some() || self.body.ov_derefs.get(&(e.0, 0)).is_some()
+                || self.body.ov_deref(b.0, 0).is_some() || self.body.ov_deref(e.0, 0).is_some()
         };
         match self.ast.expr(e).kind {
             ExprKind::Path(_) => match self.body.res.get(&e.0).copied() {

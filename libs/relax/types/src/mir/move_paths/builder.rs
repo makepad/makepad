@@ -162,8 +162,7 @@ impl Builder<'_> {
             }
             StatementKind::Assign(place, rvalue) => {
                 self.move_path_for(place, false);
-                let kind = if matches!(rvalue, Rvalue::ShallowInitBox(..)) { InitKind::Shallow } else { InitKind::Deep };
-                self.init(place, kind);
+                self.init(place, InitKind::Deep);
                 self.rvalue(rvalue);
             }
             StatementKind::FakeRead(_, place) => self.move_path_for(place, false),
@@ -175,7 +174,7 @@ impl Builder<'_> {
             StatementKind::SetDiscriminant { .. } => panic!("SetDiscriminant must not exist during move gathering"),
             StatementKind::StorageLive(_) | StatementKind::PlaceMention(_)
             | StatementKind::AscribeUserType(..) | StatementKind::Intrinsic(_)
-            | StatementKind::ConstEvalCounter | StatementKind::Nop => (),
+            | StatementKind::ConstEvalCounter | StatementKind::Nop | StatementKind::BackwardIncompatibleDropHint { .. } => (),
         }
     }
     fn operand(&mut self, operand: &Operand) {
@@ -184,12 +183,12 @@ impl Builder<'_> {
     fn rvalue(&mut self, value: &Rvalue) {
         match value {
             Rvalue::Use(op) | Rvalue::Repeat(op, _) | Rvalue::Cast(_, op, _)
-            | Rvalue::UnaryOp(_, op) | Rvalue::ShallowInitBox(op, _) => self.operand(op),
+            | Rvalue::UnaryOp(_, op) => self.operand(op),
             Rvalue::BinaryOp(_, ops) => { self.operand(&ops.0); self.operand(&ops.1); }
             Rvalue::Aggregate(_, ops) => { for op in ops { self.operand(op); } }
             Rvalue::CopyForDeref(_) => unreachable!(),
-            Rvalue::Ref(..) | Rvalue::RawPtr(..) | Rvalue::Discriminant(_) | Rvalue::Len(_)
-            | Rvalue::ThreadLocalRef(_) | Rvalue::NullaryOp(..) => (),
+            Rvalue::Ref(..) | Rvalue::RawPtr(..) | Rvalue::Discriminant(_)
+            | Rvalue::ThreadLocalRef(_) => (),
         }
     }
     fn terminator(&mut self, term: &Terminator) {

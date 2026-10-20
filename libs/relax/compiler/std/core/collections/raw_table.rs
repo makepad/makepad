@@ -539,7 +539,7 @@ impl<T: Clone> RawTable<T> {
         t
     }
 }
-impl<T> Drop for RawTable<T> {
+unsafe impl<#[may_dangle] T> Drop for RawTable<T> {
     fn drop(&mut self) {
         self.drop_elements();
         if self.bucket_count != 0 {

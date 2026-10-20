@@ -53,11 +53,21 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
     for args in b.res_args.values_mut() { sl(args, &mut s)?; }
     for method in b.methods.values_mut() { sl(&mut method.args, &mut s)?; }
     for method in b.binops.values_mut() { sl(&mut method.args, &mut s)?; }
-    for c in b.coerce.values_mut() {
-        match c { Coerce::ToDyn(a, d) | Coerce::Upcast(a, d) => { *a = s(*a)?; *d = s(*d)?; }, _ => {} }
+    for adjust in b.adjust_payloads_mut() {
+        adjust.target = s(adjust.target)?;
+        match &mut adjust.kind {
+            adjustments::Adjust::Deref(Some((_, args))) => sl(args, &mut s)?,
+            adjustments::Adjust::Coerce(Coerce::ToDyn(a, d) | Coerce::Upcast(a, d)) => { *a = s(*a)?; *d = s(*d)?; }
+            _ => {}
+        }
     }
-    for (_, args) in b.ov_derefs.values_mut() { sl(args, &mut s)?; }
+    // The canonical annotations are the generic body's: they have no instantiated reading
+    // (regions are erased here), and nothing reads them from an instance.
+    b.user_provided_types = SideTable::new();
+    b.user_provided_sigs = SideTable::new();
     for (_, args) in b.ov_index.values_mut() { sl(args, &mut s)?; }
+    for (_, args) in b.mutable_index.values_mut() { sl(args, &mut s)?; }
+    for (_, args) in b.std_index.values_mut() { sl(args, &mut s)?; }
     for (_, args) in b.for_next.values_mut() { sl(args, &mut s)?; }
     for (_, args, ty) in b.for_into.values_mut() { sl(args, &mut s)?; *ty = s(*ty)?; }
     for (_, args, ty) in b.try_branch.values_mut() { sl(args, &mut s)?; *ty = s(*ty)?; }
@@ -71,7 +81,7 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
     for ty in b.inline_const_types.values_mut() { *ty = s(*ty)?; }
     for captures in b.min_captures.values_mut() {
         for capture in &mut captures.captures { instantiate_place(&mut capture.place, &mut s)?; }
-        for (place, _) in &mut captures.fake_reads { instantiate_place(place, &mut s)?; }
+        for (place, _, _) in &mut captures.fake_reads { instantiate_place(place, &mut s)?; }
         if let Some(coroutine) = &mut captures.coroutine {
             for capture in &mut coroutine.by_move { instantiate_place(&mut capture.place, &mut s)?; }
             for capture in &mut coroutine.child_captures { for (_, ty) in &mut capture.projections { *ty = s(*ty)?; } }

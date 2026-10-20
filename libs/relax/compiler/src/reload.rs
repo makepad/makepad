@@ -2026,15 +2026,15 @@ static TRANSACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 crate::gen_local! {
     /// The field-view summaries of the program as the last patched edit left it (the
     /// transaction number it was kept by).
-    static FV_SESSION: std::cell::RefCell<Option<(u64, std::rc::Rc<crate::borrowck::fv::SummaryCx>)>>;
+    static FV_SESSION: std::cell::RefCell<Option<(u64, std::rc::Rc<crate::borrowck::field_views::SummaryCx>)>>;
 }
-fn fv_session_take(transaction: u64) -> std::rc::Rc<crate::borrowck::fv::SummaryCx> {
+fn fv_session_take(transaction: u64) -> std::rc::Rc<crate::borrowck::field_views::SummaryCx> {
     match FV_SESSION.with(|s| s.borrow_mut().take()) {
         Some((kept, cx)) if kept + 1 == transaction => cx,
-        _ => crate::borrowck::fv::SummaryCx::new(),
+        _ => crate::borrowck::field_views::SummaryCx::new(),
     }
 }
-fn fv_session_keep(transaction: u64, cx: std::rc::Rc<crate::borrowck::fv::SummaryCx>) {
+fn fv_session_keep(transaction: u64, cx: std::rc::Rc<crate::borrowck::field_views::SummaryCx>) {
     FV_SESSION.with(|s| *s.borrow_mut() = Some((transaction, cx)));
 }
 
@@ -2522,7 +2522,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // layout or macro edit, or another transaction in between starts a fresh one.
     let same_bodies_elsewhere = layout_defs.is_empty() && !changes.iter().any(|c| matches!(c, Change::Macro(_)));
     let fv_cx = (crate::borrowck::enabled(options) && same_bodies_elsewhere).then(|| fv_session_take(transaction));
-    let pre_summaries = if crate::borrowck::enabled(options) { crate::borrowck::summaries_with(&u.prog, &u.tcx, &file_fns, fv_cx.as_ref()) } else { Vec::new() };
+    let pre_summaries = if crate::borrowck::enabled(options) && crate::jit::CHECK_FIRST.load(std::sync::atomic::Ordering::Relaxed) { crate::borrowck::summaries_with(&u.prog, &u.tcx, &file_fns, fv_cx.as_ref()) } else { Vec::new() };
     if let Some(fv_cx) = &fv_cx { fv_cx.invalidate(&body_defs); }
     trace_sub("gp_summaries");
     let mut news: Vec<(u32, u32)> = Vec::new();
@@ -2866,7 +2866,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
     }
     trace_stage("typecheck");
-    if errs.is_empty() && crate::borrowck::enabled(options) {
+    // D3: the gate is synchronous only under `makepad run --check-first`; otherwise the patched
+    // instances are queued to Gandalf when their new code is installed (jit.rs install, rank 0).
+    if errs.is_empty() && crate::borrowck::enabled(options) && crate::jit::CHECK_FIRST.load(std::sync::atomic::Ordering::Relaxed) {
         // Check/report one changed owner at a time: do not hold its diagnostics until
         // another body has finished, compilation has run, or the transaction unwinds.
         let epoch = u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);

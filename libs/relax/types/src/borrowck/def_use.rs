@@ -18,7 +18,7 @@ pub fn categorize(context: PlaceContext) -> Option<DefUse> {
         )
         | NonUse(U::AscribeUserTy(_)) => Some(DefUse::Use),
         MutatingUse(M::Drop) => Some(DefUse::Drop),
-        NonUse(U::VarDebugInfo) => None,
+        NonUse(U::VarDebugInfo | U::BackwardIncompatibleDropHint) => None,
         MutatingUse(M::SetDiscriminant | M::Retag) => panic!("statement not allowed in borrowck MIR phase"),
     }
 }

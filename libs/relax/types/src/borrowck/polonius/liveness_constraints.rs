@@ -72,7 +72,7 @@ impl VarianceExtractor<'_> {
             TyKind::Adt(d, ts, rs) | TyKind::FnDef(d, ts, rs) => {
                 let indices = self.tcx.adts.get(&d).map(|a| &a.generic_indices)
                     .or_else(|| self.tcx.fn_item_sig(self.prog, d).map(|s| &s.generic_indices));
-                let variances = self.tcx.variances_of(self.prog, d);
+                let variances = if matches!(self.tcx.tys.kind(ty), TyKind::FnDef(..)) { self.tcx.fn_def_variances(self.prog, d) } else { self.tcx.variances_of(self.prog, d) };
                 for (i, t) in self.tcx.tys.list(ts).iter().copied().enumerate() {
                     let arg = indices.and_then(|ix| ix.types_consts.get(i)).and_then(|&i| variances.get(i as usize)).copied().unwrap_or(V::Inv);
                     self.ty(t, xform(v, arg));

@@ -160,7 +160,7 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
             return Ok(());
         }
         // Variances are in declaration order. A missing declaration is invariant, as in variance.rs.
-        let variances = tcx.variances_of(self.type_checker.prog, def);
+        let variances = if matches!(tcx.tys.kind(a_ty), TyKind::FnDef(..)) { tcx.fn_def_variances(self.type_checker.prog, def) } else { tcx.variances_of(self.type_checker.prog, def).to_vec() };
         let variance = |full: u32| variances.get(full as usize).copied().unwrap_or(V::Inv);
         let mut has_unconstrained_bivariant_arg = false;
         for &(full, region, i) in &order {

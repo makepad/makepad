@@ -7,6 +7,7 @@ impl ConstraintSccs {
     pub fn new_with_annotation(graph: &[Vec<usize>], annotations: &mut SccAnnotations<'_>) -> Self {
         SccsConstruction::construct(graph, annotations)
     }
+    pub fn num_vars(&self) -> usize { self.scc_indices.len() }
     pub fn scc(&self, r: usize) -> usize { self.scc_indices[r] }
     pub fn num_sccs(&self) -> usize { self.scc_data.len() }
     pub fn all_sccs(&self) -> std::ops::Range<usize> { 0..self.num_sccs() }

@@ -32,6 +32,8 @@ pub enum NonUseContext {
     StorageDead,
     AscribeUserTy(Variance),
     VarDebugInfo,
+    /// rustc_middle/src/mir/visit.rs:1380.
+    BackwardIncompatibleDropHint,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaceContext {
@@ -79,7 +81,10 @@ pub trait Visitor {
             }
         }
         for annotation in &body.user_type_annotations {
-            self.visit_user_type(annotation);
+            self.visit_user_type_annotation(annotation);
+        }
+        for upvar in &body.upvars {
+            self.visit_captured_place(upvar);
         }
         for debug in &body.var_debug_info {
             self.visit_source_info(&debug.source_info);
@@ -106,15 +111,26 @@ pub trait Visitor {
             self.visit_user_type_projection(user, Location::default());
         }
         match &decl.local_info {
-            LocalInfo::User { match_place: Some((place, span)), .. } => {
-                if let Some(place) = place {
-                    self.visit_place(place, Non(N::VarDebugInfo), Location::default());
+            LocalInfo::User(BindingForm::Var(VarBindingForm { opt_match_place, opt_ty_info, pat_span, introductions, .. })) => {
+                if let Some((place, span)) = opt_match_place {
+                    if let Some(place) = place {
+                        self.visit_place(place, Non(N::VarDebugInfo), Location::default());
+                    }
+                    self.visit_span(span);
                 }
-                self.visit_span(span);
+                if let Some(span) = opt_ty_info {
+                    self.visit_span(span);
+                }
+                self.visit_span(pat_span);
+                for introduction in introductions {
+                    self.visit_span(&introduction.span);
+                }
             }
-            LocalInfo::StaticRef { def_id, .. } => self.visit_def(def_id),
-            LocalInfo::GuardBinding(local) => self.visit_local(local, Non(N::VarDebugInfo), Location::default()),
-            _ => {}
+            LocalInfo::User(BindingForm::RefForGuard(local)) => self.visit_local(local, Non(N::VarDebugInfo), Location::default()),
+            LocalInfo::User(BindingForm::ImplicitSelf(_)) => {}
+            LocalInfo::StaticRef { def_id, .. } | LocalInfo::ConstRef { def_id } => self.visit_def(def_id),
+            LocalInfo::BlockTailTemp(info) => self.visit_span(&info.span),
+            LocalInfo::AggregateTemp | LocalInfo::IfThenRescopeTemp { .. } | LocalInfo::DerefTemp | LocalInfo::FakeBorrow | LocalInfo::Boring => {}
         }
     }
     fn visit_basic_block_data(&mut self, bb: BasicBlock, data: &BasicBlockData) {
@@ -150,6 +166,7 @@ pub trait Visitor {
                 self.visit_operand(dst, at);
                 self.visit_operand(count, at);
             }
+            StatementKind::BackwardIncompatibleDropHint { place, .. } => self.visit_place(place, Non(N::BackwardIncompatibleDropHint), at),
             StatementKind::ConstEvalCounter | StatementKind::Nop => {}
         }
     }
@@ -254,9 +271,9 @@ pub trait Visitor {
                 };
                 self.visit_place(place, context, at)
             }
-            Rvalue::Len(place) | Rvalue::Discriminant(place) => self.visit_place(place, Read(R::Inspect), at),
+            Rvalue::Discriminant(place) => self.visit_place(place, Read(R::Inspect), at),
             Rvalue::CopyForDeref(place) => self.visit_place(place, Read(R::Inspect), at),
-            Rvalue::Cast(_, op, ty) | Rvalue::ShallowInitBox(op, ty) => {
+            Rvalue::Cast(_, op, ty) => {
                 self.visit_operand(op, at);
                 self.visit_ty(ty);
             }
@@ -264,7 +281,6 @@ pub trait Visitor {
                 self.visit_operand(&ops.0, at);
                 self.visit_operand(&ops.1, at);
             }
-            Rvalue::NullaryOp(_, ty) => self.visit_ty(ty),
             Rvalue::ThreadLocalRef(def) => self.visit_def(def),
             Rvalue::Aggregate(kind, ops) => {
                 self.visit_aggregate_kind(kind);
@@ -295,7 +311,7 @@ pub trait Visitor {
                     self.visit_user_type_index(user);
                 }
             }
-            AggregateKind::Closure(_, args) | AggregateKind::Coroutine(_, args) => {
+            AggregateKind::Closure(_, args) | AggregateKind::Coroutine(_, args) | AggregateKind::CoroutineClosure(_, args) => {
                 for ty in args {
                     self.visit_generic_arg(ty);
                 }
@@ -310,6 +326,7 @@ pub trait Visitor {
         match op {
             Operand::Copy(place) => self.visit_place(place, Read(R::Copy), at),
             Operand::Move(place) => self.visit_place(place, Read(R::Move), at),
+            Operand::RuntimeChecks(_) => {}
             Operand::Constant(c) => {
                 self.visit_span(&c.span);
                 if let Some(user) = &c.user_ty {
@@ -330,7 +347,12 @@ pub trait Visitor {
                     ConstValue::Scalar(Scalar::Int { .. }) | ConstValue::ZeroSized => {}
                 }
             }
-            Const::Unevaluated { def, args, .. } => {
+            Const::Ty(ty, ct) => {
+                self.visit_ty(ty);
+                self.visit_type_const(ct);
+            }
+            Const::Unevaluated { def, args, ty, .. } => {
+                self.visit_ty(ty);
                 self.visit_def(def);
                 for arg in args {
                     self.visit_generic_arg(arg);
@@ -360,10 +382,8 @@ pub trait Visitor {
         }
     }
     fn visit_user_type_projection(&mut self, user: &UserTypeProjection, at: Location) {
+        let _ = at;
         self.visit_user_type_index(&user.base);
-        for elem in &user.projection {
-            self.visit_projection_elem(elem, Non(N::AscribeUserTy(Variance::Invariant)), at);
-        }
     }
     fn visit_assert(&mut self, msg: &AssertKind, at: Location) {
         match msg {
@@ -394,7 +414,24 @@ pub trait Visitor {
     fn visit_span(&mut self, _span: &Span) {}
     fn visit_source_scope(&mut self, _scope: &SourceScope) {}
     fn visit_user_type_index(&mut self, _index: &UserTypeAnnotationIndex) {}
-    fn visit_user_type(&mut self, _user: &UserTypeId) {}
+    fn visit_user_type_annotation(&mut self, annotation: &CanonicalUserTypeAnnotation) {
+        self.super_user_type_annotation(annotation);
+    }
+    fn super_user_type_annotation(&mut self, annotation: &CanonicalUserTypeAnnotation) {
+        self.visit_span(&annotation.span);
+        self.visit_ty(&annotation.inferred_ty);
+    }
+    fn visit_captured_place(&mut self, upvar: &CapturedPlace) {
+        self.visit_ty(&upvar.root_ty);
+        self.visit_ty(&upvar.ty);
+        self.visit_span(&upvar.path_span);
+        self.visit_span(&upvar.kind_span);
+        for elem in &upvar.projection {
+            if let PlaceElem::Field(_, ty) = elem {
+                self.visit_ty(ty);
+            }
+        }
+    }
     fn visit_alloc_id(&mut self, _alloc: &AllocId) {}
 }
 
@@ -419,7 +456,10 @@ pub trait MutVisitor {
             }
         }
         for annotation in &mut body.user_type_annotations {
-            self.visit_user_type(annotation);
+            self.visit_user_type_annotation(annotation);
+        }
+        for upvar in &mut body.upvars {
+            self.visit_captured_place(upvar);
         }
         for debug in &mut body.var_debug_info {
             self.visit_source_info(&mut debug.source_info);
@@ -446,15 +486,26 @@ pub trait MutVisitor {
             self.visit_user_type_projection(user, Location::default());
         }
         match &mut decl.local_info {
-            LocalInfo::User { match_place: Some((place, span)), .. } => {
-                if let Some(place) = place {
-                    self.visit_place(place, Non(N::VarDebugInfo), Location::default());
+            LocalInfo::User(BindingForm::Var(VarBindingForm { opt_match_place, opt_ty_info, pat_span, introductions, .. })) => {
+                if let Some((place, span)) = opt_match_place {
+                    if let Some(place) = place {
+                        self.visit_place(place, Non(N::VarDebugInfo), Location::default());
+                    }
+                    self.visit_span(span);
                 }
-                self.visit_span(span);
+                if let Some(span) = opt_ty_info {
+                    self.visit_span(span);
+                }
+                self.visit_span(pat_span);
+                for introduction in introductions {
+                    self.visit_span(&mut introduction.span);
+                }
             }
-            LocalInfo::StaticRef { def_id, .. } => self.visit_def(def_id),
-            LocalInfo::GuardBinding(local) => self.visit_local(local, Non(N::VarDebugInfo), Location::default()),
-            _ => {}
+            LocalInfo::User(BindingForm::RefForGuard(local)) => self.visit_local(local, Non(N::VarDebugInfo), Location::default()),
+            LocalInfo::User(BindingForm::ImplicitSelf(_)) => {}
+            LocalInfo::StaticRef { def_id, .. } | LocalInfo::ConstRef { def_id } => self.visit_def(def_id),
+            LocalInfo::BlockTailTemp(info) => self.visit_span(&mut info.span),
+            LocalInfo::AggregateTemp | LocalInfo::IfThenRescopeTemp { .. } | LocalInfo::DerefTemp | LocalInfo::FakeBorrow | LocalInfo::Boring => {}
         }
     }
     fn visit_basic_block_data(&mut self, bb: BasicBlock, data: &mut BasicBlockData) {
@@ -490,6 +541,7 @@ pub trait MutVisitor {
                 self.visit_operand(dst, at);
                 self.visit_operand(count, at);
             }
+            StatementKind::BackwardIncompatibleDropHint { place, .. } => self.visit_place(place, Non(N::BackwardIncompatibleDropHint), at),
             StatementKind::ConstEvalCounter | StatementKind::Nop => {}
         }
     }
@@ -599,9 +651,9 @@ pub trait MutVisitor {
                 };
                 self.visit_place(place, context, at)
             }
-            Rvalue::Len(place) | Rvalue::Discriminant(place) => self.visit_place(place, Read(R::Inspect), at),
+            Rvalue::Discriminant(place) => self.visit_place(place, Read(R::Inspect), at),
             Rvalue::CopyForDeref(place) => self.visit_place(place, Read(R::Inspect), at),
-            Rvalue::Cast(_, op, ty) | Rvalue::ShallowInitBox(op, ty) => {
+            Rvalue::Cast(_, op, ty) => {
                 self.visit_operand(op, at);
                 self.visit_ty(ty);
             }
@@ -609,7 +661,6 @@ pub trait MutVisitor {
                 self.visit_operand(&mut ops.0, at);
                 self.visit_operand(&mut ops.1, at);
             }
-            Rvalue::NullaryOp(_, ty) => self.visit_ty(ty),
             Rvalue::ThreadLocalRef(def) => self.visit_def(def),
             Rvalue::Aggregate(kind, ops) => {
                 self.visit_aggregate_kind(kind);
@@ -640,7 +691,7 @@ pub trait MutVisitor {
                     self.visit_user_type_index(user);
                 }
             }
-            AggregateKind::Closure(_, args) | AggregateKind::Coroutine(_, args) => {
+            AggregateKind::Closure(_, args) | AggregateKind::Coroutine(_, args) | AggregateKind::CoroutineClosure(_, args) => {
                 for ty in args {
                     self.visit_generic_arg(ty);
                 }
@@ -655,6 +706,7 @@ pub trait MutVisitor {
         match op {
             Operand::Copy(place) => self.visit_place(place, Read(R::Copy), at),
             Operand::Move(place) => self.visit_place(place, Read(R::Move), at),
+            Operand::RuntimeChecks(_) => {}
             Operand::Constant(c) => {
                 self.visit_span(&mut c.span);
                 if let Some(user) = &mut c.user_ty {
@@ -675,7 +727,12 @@ pub trait MutVisitor {
                     ConstValue::Scalar(Scalar::Int { .. }) | ConstValue::ZeroSized => {}
                 }
             }
-            Const::Unevaluated { def, args, .. } => {
+            Const::Ty(ty, ct) => {
+                self.visit_ty(ty);
+                self.visit_type_const(ct);
+            }
+            Const::Unevaluated { def, args, ty, .. } => {
+                self.visit_ty(ty);
                 self.visit_def(def);
                 for arg in args {
                     self.visit_generic_arg(arg);
@@ -700,10 +757,8 @@ pub trait MutVisitor {
         }
     }
     fn visit_user_type_projection(&mut self, user: &mut UserTypeProjection, at: Location) {
+        let _ = at;
         self.visit_user_type_index(&mut user.base);
-        for elem in &mut user.projection {
-            self.visit_projection_elem(elem, Non(N::AscribeUserTy(Variance::Invariant)), at);
-        }
     }
     fn visit_assert(&mut self, msg: &mut AssertKind, at: Location) {
         match msg {
@@ -734,6 +789,23 @@ pub trait MutVisitor {
     fn visit_span(&mut self, _span: &mut Span) {}
     fn visit_source_scope(&mut self, _scope: &mut SourceScope) {}
     fn visit_user_type_index(&mut self, _index: &mut UserTypeAnnotationIndex) {}
-    fn visit_user_type(&mut self, _user: &mut UserTypeId) {}
+    fn visit_user_type_annotation(&mut self, annotation: &mut CanonicalUserTypeAnnotation) {
+        self.super_user_type_annotation(annotation);
+    }
+    fn super_user_type_annotation(&mut self, annotation: &mut CanonicalUserTypeAnnotation) {
+        self.visit_span(&mut annotation.span);
+        self.visit_ty(&mut annotation.inferred_ty);
+    }
+    fn visit_captured_place(&mut self, upvar: &mut CapturedPlace) {
+        self.visit_ty(&mut upvar.root_ty);
+        self.visit_ty(&mut upvar.ty);
+        self.visit_span(&mut upvar.path_span);
+        self.visit_span(&mut upvar.kind_span);
+        for elem in &mut upvar.projection {
+            if let PlaceElem::Field(_, ty) = elem {
+                self.visit_ty(ty);
+            }
+        }
+    }
     fn visit_alloc_id(&mut self, _alloc: &mut AllocId) {}
 }

@@ -679,7 +679,7 @@ impl<'a> Late<'a> {
         if !matches!(name.as_str(), "noop_method_borrow" | "noop_method_clone" | "noop_method_deref") { return; }
         let (Some(rt), Some(et)) = (self.expr_ty(recv), self.expr_ty(e)) else { return };
         // an overloaded deref among the receiver's adjustments: not linted
-        if (0..mr.derefs as usize).any(|i| [e.0, recv.0, unparen(self.ast, recv).0].iter().any(|k| self.body.ov_derefs.get(&(*k, i)).is_some())) { return; }
+        if (0..mr.derefs as usize).any(|i| [e.0, recv.0, unparen(self.ast, recv).0].iter().any(|k| self.body.ov_deref(*k, i).is_some())) { return; }
         let pos = self.ast.expr(recv).hi;
         let (rt, et) = (self.tcx.tys.erase_all_regions(rt), self.tcx.tys.erase_all_regions(et));
         let method = self.prog.files[self.body.file as usize].text(m.name).to_string();

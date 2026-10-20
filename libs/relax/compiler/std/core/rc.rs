@@ -17,6 +17,8 @@ use crate::pin::PinSafePointer;
 
 // library/alloc/src/rcs/rc.rs:357,2604 @8d1a764
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Rc<U>> for Rc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> crate::ops::CoerceUnsized<Rc<U>> for Rc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> crate::ops::CoerceUnsized<Weak<U>> for Weak<T> {}
 unsafe impl<T: ?Sized> PinSafePointer for Rc<T> {}
 use crate::ptr;
 
@@ -299,7 +301,7 @@ impl<T: ?Sized> Clone for Rc<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Rc<T> {
+unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
     fn drop(&mut self) {
         unsafe {
             (*header_of(self.ptr.as_ptr())).strong -= 1;
@@ -577,7 +579,7 @@ impl<T: ?Sized> Clone for Weak<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Weak<T> {
+unsafe impl<#[may_dangle] T: ?Sized> Drop for Weak<T> {
     fn drop(&mut self) {
         if is_dangling(self.ptr.as_ptr()) {
             return;

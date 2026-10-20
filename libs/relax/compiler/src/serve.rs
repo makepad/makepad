@@ -181,7 +181,7 @@ impl Session {
                     if let crate::typeck::Res::Def(d) = r { edges.push(*d); }
                 }
                 for m in body.methods.values().chain(body.binops.values()) { edges.push(m.def); }
-                for (d, _) in body.ov_derefs.values().chain(body.ov_index.values()).chain(body.for_next.values()) { edges.push(*d); }
+                for (d, _) in body.overloaded_derefs().map(|(_, _, ov)| ov).collect::<Vec<_>>().iter().chain(body.ov_index.values()).chain(body.for_next.values()) { edges.push(*d); }
                 for (d, _, _) in body.for_into.values() { edges.push(*d); }
                 for (d, _, _) in body.try_branch.values() { edges.push(*d); }
                 for (d, _) in body.try_from_residual.values() { edges.push(*d); }

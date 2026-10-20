@@ -95,7 +95,7 @@ impl<T> Default for IntoIter<T> {
     }
 }
 
-impl<T> Drop for IntoIter<T> {
+unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
     fn drop(&mut self) {
         while self.start < self.end {
             unsafe { im::drop_in_place(im::ptr_add_mut(self.buf.as_ptr(), self.start)) };

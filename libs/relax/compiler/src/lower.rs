@@ -1455,7 +1455,7 @@ impl<'a> Lcx<'a> {
                 ExprKind::Call(f, _) if matches!(self.kind_ref(b.ty(*f)), TyKind::Closure(..)) => self.mark_root(*f),
                 // overloaded index / deref take `&self` / `&mut self` of the base
                 ExprKind::Index(x, _) if b.ov_index.contains_key(&e.0) => self.mark_root(*x),
-                ExprKind::Unary(UnOp::Deref, x) if b.ov_derefs.contains_key(&(e.0, 0)) => self.mark_root(*x),
+                ExprKind::Unary(UnOp::Deref, x) if b.ov_deref(e.0, 0).is_some() => self.mark_root(*x),
                 _ => {}
             }
         }
@@ -2618,7 +2618,7 @@ impl<'a> Lcx<'a> {
                         Some(e)
                             if else_.is_none()
                                 && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, .. })
-                                && !self.b.coerce.contains_key(&e.0)
+                                && !self.b.coerce(e.0).is_some()
                                 && self.field_move_path(*e).is_some() =>
                         {
                             // `let S { a, .. } = local(.f)*;` binds in place: what is moved out
@@ -2636,7 +2636,7 @@ impl<'a> Lcx<'a> {
                         Some(e)
                             if else_.is_none()
                                 && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, by_ref: false, .. })
-                                && !self.b.coerce.contains_key(&e.0)
+                                && !self.b.coerce(e.0).is_some()
                                 && self.is_place_expr(*e)
                                 && (self.pat_binds_by_ref(*pat) || !self.pat_moves_droppable(*pat)) =>
                         {
@@ -2894,7 +2894,7 @@ impl<'a> Lcx<'a> {
     /// references/pointers, a `Deref::deref` (or `deref_mut` in a mutable context) call
     /// for overloaded steps.
     fn deref_place(&mut self, e: u32, k: usize, pl: Place, pt: TyId) -> (Place, TyId) {
-        if let Some((m, args)) = self.b.ov_derefs.get(&(e, k)).cloned() {
+        if let Some((m, args)) = self.b.ov_deref(e, k) {
             let args = self.mono_list(args);
             return self.overloaded_deref(m, args, pl, pt);
         }
@@ -3057,7 +3057,7 @@ impl<'a> Lcx<'a> {
         // (an index coerced to the impl's index type -- `S[bar]` with `impl Index<fn()>`,
         // `v[&string]` with `Index<&str>` -- passes the coerced value)
         let it = match args.get(1) {
-            Some(&ia) if self.b.coerce.contains_key(&i.0) => ia,
+            Some(&ia) if self.b.coerce(i.0).is_some() => ia,
             _ => self.body_ty(i),
         };
         let iv = self.lower_expr_coerced(i, it);
@@ -5620,7 +5620,7 @@ impl<'a> Lcx<'a> {
     }
 
     fn apply_coercion(&mut self, e: ExprId, v: Val, target: TyId) -> Val {
-        match self.b.coerce.get(&e.0).copied() {
+        match self.b.coerce(e.0) {
             None | Some(Coerce::MutToConst | Coerce::RefToRaw(_)) => v,
             Some(Coerce::Never) => {
                 // a `!` value used as another type (`fn f(x: !) -> T { x }`): control never gets
@@ -5869,7 +5869,7 @@ impl<'a> Lcx<'a> {
                         }
                         v
                     }
-                    UnOp::Deref if self.b.ov_derefs.contains_key(&(e.0, 0)) || self.box_inner(xt).is_some() => {
+                    UnOp::Deref if self.b.ov_deref(e.0, 0).is_some() || self.box_inner(xt).is_some() => {
                         let (pl, pt) = self.lower_place(e);
                         let v = self.read_place(&pl, pt);
                         // moving out of `*b` (a Box local): the box is freed without dropping
@@ -5995,7 +5995,7 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Cast(x, _) => {
                 let xt = self.body_ty(*x);
-                if let Some(Coerce::ToDyn(..) | Coerce::Upcast(..) | Coerce::Unsize | Coerce::DerefRef(_) | Coerce::ReifyFn | Coerce::ClosureFn | Coerce::UnsafeFn | Coerce::RefToRaw(_)) = self.b.coerce.get(&x.0) {
+                if let Some(Coerce::ToDyn(..) | Coerce::Upcast(..) | Coerce::Unsize | Coerce::DerefRef(_) | Coerce::ReifyFn | Coerce::ClosureFn | Coerce::UnsafeFn | Coerce::RefToRaw(_)) = self.b.coerce(x.0) {
                     return self.lower_expr_coerced(*x, t);
                 }
                 if matches!(self.kind_ref(t), TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..)) {
@@ -6899,7 +6899,7 @@ impl<'a> Lcx<'a> {
                     (self.temp_place(e, v, t), t)
                 }
             },
-            ExprKind::Unary(UnOp::Deref, x) if self.b.ov_derefs.contains_key(&(e.0, 0)) => {
+            ExprKind::Unary(UnOp::Deref, x) if self.b.ov_deref(e.0, 0).is_some() => {
                 let (pl, pt) = self.lower_place(*x);
                 self.deref_place(e.0, 0, pl, pt)
             }
@@ -6937,7 +6937,7 @@ impl<'a> Lcx<'a> {
                 (self.val_to_place(v), t)
             }
             ExprKind::Index(a, i) => {
-                let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = self.b.index_derefs(e.0);
                 let (mut pl, mut pt) = self.lower_place(*a);
                 for k in 0..derefs {
                     let (a2, b2) = self.deref_place(e.0, k, pl, pt);
@@ -7048,7 +7048,7 @@ impl<'a> Lcx<'a> {
         let at = self.body_ty(a);
         let (mut pl, mut pt) = self.lower_place(a);
         // autoderef recorded by type checking (Vec<T> -> [T], String -> str, &&[T] ..)
-        let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
+        let derefs = self.b.index_derefs(e.0);
         for k in 0..derefs {
             let (a2, b2) = self.deref_place(e.0, k, pl, pt);
             pl = a2;
@@ -9106,7 +9106,7 @@ impl<'a> Lcx<'a> {
         // a callable reached as a place (behind references / smart pointers, or a `dyn Fn`
         // place however it was reached: `(*raw_ptr)(..)`, `(*boxed)(..)`) is called through
         // the place (rustc: the overloaded call takes the callee place by reference)
-        let call_derefs = self.b.call_derefs.get(&e.0).copied().or_else(|| if matches!(self.kind_ref(ft), TyKind::Dyn(..)) { Some(0) } else { None });
+        let call_derefs = self.b.call_derefs(e.0).or_else(|| if matches!(self.kind_ref(ft), TyKind::Dyn(..)) { Some(0) } else { None });
         if let Some(n) = call_derefs {
             let (mut pl, mut pt) = self.lower_place(f);
             for k in 0..n {

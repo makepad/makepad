@@ -17,7 +17,12 @@ pub struct ValidationError {
 }
 
 pub fn validate(body: &Body, tcx: &Tcx) -> Vec<ValidationError> {
-    let mut checker = Checker { body, tcx, errors: Vec::new(), at: None, next_promoted: 0 };
+    validate_with_annotations(body, tcx, body.user_type_annotations.len())
+}
+/// `annotations`: the user type annotations a constant may name. A promoted body has none of its
+/// own and shares its root's (rustc_borrowck type_check: `user_type_annotations`).
+fn validate_with_annotations(body: &Body, tcx: &Tcx, annotations: usize) -> Vec<ValidationError> {
+    let mut checker = Checker { body, tcx, errors: Vec::new(), at: None, next_promoted: 0, annotations };
     checker.check_body();
     checker.errors
 }
@@ -27,6 +32,7 @@ struct Checker<'a> {
     errors: Vec<ValidationError>,
     at: Option<Location>,
     next_promoted: u32,
+    annotations: usize,
 }
 impl Checker<'_> {
     fn fail(&mut self, message: &str) {
@@ -89,6 +95,30 @@ impl Checker<'_> {
                 next = parent.parent_scope;
             }
         }
+        if !self.body.upvars.is_empty() && !matches!(self.body.source.kind, BodyKind::Closure(_)) {
+            self.fail("upvars outside a closure body");
+        }
+        // The upvar list names exactly the fields of the closure's tupled upvar type (the
+        // environment is the closure itself or a reference to it).
+        if matches!(self.body.source.kind, BodyKind::Closure(_)) && self.body.arg_count >= 1 {
+            let mut env = self.body.local_decls.get(1).map(|d| d.ty);
+            while let Some(ty) = env.filter(|t| (t.0 as usize) < self.tcx.tys.len()) {
+                match self.tcx.tys.kind(ty) {
+                    TyKind::Ref(_, inner, _) => env = Some(*inner),
+                    TyKind::Closure(_, _, args) => {
+                        let fields = match self.tcx.tys.kind(args.tupled_upvars_ty) {
+                            TyKind::Tuple(ts) => Some(self.tcx.tys.list(*ts).len()),
+                            _ => None,
+                        };
+                        if fields.is_some_and(|n| n != self.body.upvars.len()) {
+                            self.fail("upvar count disagrees with the closure's tupled upvar type");
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
         // Promoted bodies have independent local/block/scope indices.
         self.super_body(self.body);
     }
@@ -98,10 +128,8 @@ impl Checker<'_> {
     fn operand_ty(&self, op: &Operand) -> Option<TyId> {
         match op {
             Operand::Copy(place) | Operand::Move(place) => self.place_ty(place),
-            Operand::Constant(c) => match c.const_ {
-                Const::Val(_, ty) => Some(ty),
-                Const::Unevaluated { .. } => None,
-            },
+            Operand::Constant(c) => Some(c.const_.ty(&self.tcx.tys)),
+            Operand::RuntimeChecks(_) => Some(self.tcx.tys.bool_),
         }
     }
     fn rvalue_ty(&self, rv: &Rvalue) -> Option<TyId> {
@@ -109,8 +137,6 @@ impl Checker<'_> {
             Rvalue::Use(op) | Rvalue::UnaryOp(UnOp::Not | UnOp::Neg, op) => self.operand_ty(op),
             Rvalue::CopyForDeref(place) => self.place_ty(place),
             Rvalue::Cast(_, _, ty) => Some(*ty),
-            Rvalue::Len(_) | Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_), _) => Some(self.tcx.tys.usize_),
-            Rvalue::NullaryOp(NullOp::UbChecks | NullOp::ContractChecks, _) => Some(self.tcx.tys.bool_),
             Rvalue::BinaryOp(op, args) => match op {
                 BinOp::Eq | BinOp::Lt | BinOp::Le | BinOp::Ne | BinOp::Ge | BinOp::Gt => Some(self.tcx.tys.bool_),
                 BinOp::AddWithOverflow | BinOp::SubWithOverflow | BinOp::MulWithOverflow | BinOp::Cmp => None,
@@ -129,7 +155,7 @@ impl Visitor for Checker<'_> {
         // super_body visits promotions in index order; each has its own index spaces.
         let id = self.next_promoted;
         self.next_promoted += 1;
-        for mut error in validate(body, self.tcx) {
+        for mut error in validate_with_annotations(body, self.tcx, self.annotations) {
             error.promoted.insert(0, PromotedId(id));
             self.errors.push(error);
         }
@@ -166,8 +192,13 @@ impl Visitor for Checker<'_> {
             self.fail("source scope is out of range");
         }
     }
+    fn visit_alloc_id(&mut self, alloc: &AllocId) {
+        if alloc.0 as usize >= self.body.allocs.entries.len() {
+            self.fail("allocation is out of range");
+        }
+    }
     fn visit_user_type_index(&mut self, user: &UserTypeAnnotationIndex) {
-        if user.0 as usize >= self.body.user_type_annotations.len() {
+        if user.0 as usize >= self.annotations {
             self.fail("user type annotation is out of range");
         }
     }

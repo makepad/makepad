@@ -110,8 +110,7 @@ impl Fcx<'_> {
     fn cast_is_coercion(&mut self, e: ExprId, from: TyId, to: TyId) -> bool {
         let snap = self.start_snapshot();
         let n_dd = self.deferred_dyn.len();
-        let old = self.b.coerce.get(&e.0).copied();
-        let old_reborrow = self.b.reborrows.get(&e.0).copied();
+        let old = self.save_value_adjustments(e.0);
         let mut ok = self.coerce(from, to, Some(e), self.last_lo, false).is_some();
         if !ok {
             // the object and unsizing coercions the `Cast` arm applies on its own
@@ -121,8 +120,7 @@ impl Fcx<'_> {
         }
         self.rollback_to(snap);
         self.deferred_dyn.truncate(n_dd);
-        match old_reborrow { Some(v) => { self.b.reborrows.insert(e.0, v); } None => { self.b.reborrows.remove(&e.0); } }
-        match old { Some(c) => { self.b.coerce.insert(e.0, c); } None => { self.b.coerce.remove(&e.0); } }
+        self.restore_value_adjustments(e.0, old);
         ok
     }
 

@@ -39,7 +39,8 @@ pub trait Delegate {
     fn consume(&mut self, place: Place, mode: ConsumeMode);
     fn borrow(&mut self, place: Place, kind: BorrowKind);
     fn mutate(&mut self, place: Place);
-    fn fake_read(&mut self, place: Place, cause: FakeReadCause);
+    /// `node`: the expression the read is for, rustc's `diag_expr_id` (the scrutinee or initializer).
+    fn fake_read(&mut self, place: Place, cause: FakeReadCause, node: u32);
 }
 #[derive(Clone, Copy)]
 enum Access { Consume, Borrow(BorrowKind), Mutate }
@@ -111,31 +112,31 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
         let mut p = self.walk_place(e, mutable)?;
         // rustc walk_adjustment: Deref + Borrow(RawPtr) borrows the referent.
         // Cast operands go through this path just like implicit coercions.
-        if let Some(Coerce::RefToRaw(m)) = self.body.coerce.get(&e.0) {
+        if let Some(Coerce::RefToRaw(m)) = self.body.coerce(e.0) {
             let t = self.tcx.builtin_deref(p.ty())?;
             p = p.project(Projection::Deref, t);
-            self.delegate.borrow(p, if *m { BorrowKind::Mut } else { BorrowKind::Imm });
+            self.delegate.borrow(p, if m { BorrowKind::Mut } else { BorrowKind::Imm });
             return None;
         }
         // coerce_to_ref (:406, :515): reborrow mutable references, while an
         // equal shared reference coercion is a no-op. Autoref is an rvalue.
-        if let Some(&m) = self.body.reborrows.get(&e.0) {
+        if let Some(m) = self.body.reborrow(e.0) {
             if let Some(t) = self.tcx.builtin_deref(p.ty()) {
                 p = p.project(Projection::Deref, t);
-                if let Some(Coerce::DerefRef(n)) = self.body.coerce.get(&e.0) {
-                    for i in 0..*n { p = self.deref(p, e.0 | DEREF_COERCE_KEY, i, m)?; }
+                if let Some(Coerce::DerefRef(n)) = self.body.coerce(e.0) {
+                    for i in 0..n { p = self.deref(p, e.0 | DEREF_COERCE_KEY, i, m)?; }
                 }
                 self.delegate.borrow(p, if m { BorrowKind::Mut } else { BorrowKind::Imm });
                 return None;
             }
         }
-        if self.body.coerce.contains_key(&e.0) { self.consume_place(p); None } else { Some(p) }
+        if self.body.coerce(e.0).is_some() { self.consume_place(p); None } else { Some(p) }
     }
     fn deref(&mut self, p: Place, key: u32, step: usize, mutable: bool) -> Option<Place> {
         if let Some(t) = self.tcx.builtin_deref(p.ty()) {
             return Some(p.project(Projection::Deref, t));
         }
-        if self.body.ov_derefs.contains_key(&(key, step)) {
+        if self.body.ov_deref(key, step).is_some() {
             // place_op.rs:266 converts overloaded place operations in mutable
             // contexts. Selection must succeed before emitting its autoref.
             if mutable && !self.has_mutable_place_impl(crate::lang_items::LangItem::DerefMut, p.ty(), &[]) {
@@ -157,7 +158,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     /// callee type (rustc expr_use_visitor.rs:726-766).
     fn adjusted_deref_ty(&self, t: Type, key: u32, step: usize) -> Option<Type> {
         if let Some(target) = self.tcx.builtin_deref(t) { return Some(target); }
-        let (method, args) = self.body.ov_derefs.get(&(key, step))?;
+        let (method, args) = &self.body.ov_deref(key, step)?;
         let sig = self.tcx.fn_item_sig(self.cx.prog, *method)?;
         let ret = self.tcx.tys.subst(sig.ret, self.tcx.tys.list(*args));
         let ret = self.tcx.normalize_in_body(self.cx.prog, self.cx, self.body.def, ret);
@@ -191,7 +192,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 let p = self.walk_place(x, mutable);
                 self.consume_expr(i);
                 let mut p = p?;
-                for j in 0..self.body.index_derefs.get(&e.0).copied().unwrap_or(0) { p = self.deref(p, e.0, j, mutable)?; }
+                for j in 0..self.body.index_derefs(e.0) { p = self.deref(p, e.0, j, mutable)?; }
                 if self.body.ov_index.contains_key(&e.0) {
                     if mutable && !self.has_mutable_place_impl(crate::lang_items::LangItem::IndexMut, p.ty(), &[self.body.ty(i)]) {
                         self.errors.push((e.0, "unresolved IndexMut obligation"));
@@ -231,7 +232,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             }
             ExprKind::Call(f, args) => {
                 let selection = self.body.call_traits.get(&e.0);
-                let n = selection.map(|s| s.derefs).unwrap_or_else(|| self.body.call_derefs.get(&e.0).copied().unwrap_or(0));
+                let n = selection.map(|s| s.derefs).unwrap_or_else(|| self.body.call_derefs(e.0).unwrap_or(0));
                 let mut t = Some(self.body.ty(f));
                 for step in 0..n { t = t.and_then(|t| self.adjusted_deref_ty(t, e.0, step)); }
                 match t.and_then(|t| self.body.call_kind(self.tcx, self.cx, e, t)) {
@@ -254,13 +255,13 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             ExprKind::Let(pat, x) => {
                 if let Some(p) = self.adjusted_place(x, false) {
                     self.delegate.borrow(p.clone(), BorrowKind::Imm);
-                    self.delegate.fake_read(p.clone(), FakeReadCause::Let);
+                    self.delegate.fake_read(p.clone(), FakeReadCause::Let, x.0);
                     self.walk_pat(pat, p, false);
                 }
             },
             ExprKind::Match(x, arms) => {
                 let place = self.adjusted_place(x, false);
-                if let Some(p) = &place { self.delegate.fake_read(p.clone(), FakeReadCause::Matched); }
+                if let Some(p) = &place { self.delegate.fake_read(p.clone(), FakeReadCause::Matched, x.0); }
                 for a in self.ast().list(arms).to_vec() {
                     if let Some(p) = &place { self.walk_pat(a.pat, p.clone(), a.guard.is_some()); }
                     if let Some(g) = a.guard { self.consume_expr(g); }
@@ -269,7 +270,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             }
             ExprKind::Closure(_) | ExprKind::Async(..) => {
                 if let Some(caps) = self.body.min_captures.get(&e.0).cloned() {
-                    for (p, cause) in caps.fake_reads { self.delegate.fake_read(p, cause); }
+                    for (p, cause, node) in caps.fake_reads { self.delegate.fake_read(p, cause, node); }
                     for c in caps.captures {
                         match c.info.kind { crate::upvar::CaptureKind::ByValue => self.consume_place(c.place), crate::upvar::CaptureKind::ByRef(k) => self.delegate.borrow(c.place, k) }
                     }
@@ -348,7 +349,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     }
     fn walk_local(&mut self, pat: PatId, x: ExprId, cause: FakeReadCause, guard: bool) {
         if let Some(p) = self.adjusted_place(x, false) {
-            self.delegate.fake_read(p.clone(), cause);
+            self.delegate.fake_read(p.clone(), cause, x.0);
             self.walk_pat(pat, p, guard);
         }
     }
@@ -461,7 +462,7 @@ mod tests {
         fn consume(&mut self, p: Place, m: ConsumeMode) { self.0.push((p, if m == ConsumeMode::Copy { "copy" } else { "move" })); }
         fn borrow(&mut self, p: Place, k: BorrowKind) { self.0.push((p, if k == BorrowKind::Mut { "mut" } else { "imm" })); }
         fn mutate(&mut self, p: Place) { self.0.push((p, "mutate")); }
-        fn fake_read(&mut self, p: Place, _: FakeReadCause) { self.0.push((p, "fake")); }
+        fn fake_read(&mut self, p: Place, _: FakeReadCause, _: u32) { self.0.push((p, "fake")); }
     }
     #[test]
     fn mutable_reference_consumption_depends_on_recorded_reborrow() {
@@ -478,7 +479,7 @@ mod tests {
         let state = crate::tcx::EvalState::new();
         let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
         for reborrow in [false, true] {
-            if reborrow { b.reborrows.insert(id.0, true); }
+            if reborrow { b.adjustments.insert(id.0, crate::typeck::adjustments::Adjustments { operand: Default::default(), value: vec![crate::typeck::adjustments::Adjustment { kind: crate::typeck::adjustments::Adjust::Borrow(true), target: t, mutbl: false }].into() }); }
             let mut v = ExprUseVisitor { tcx: &tcx, cx: &cx, body: &b, delegate: Events::default(), errors: Vec::new() };
             v.consume_expr(id);
             assert!(v.errors.is_empty());

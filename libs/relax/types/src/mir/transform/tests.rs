@@ -184,6 +184,7 @@ impl<'a> Walker<'a> {
                 Const::Val(ConstValue::ZeroSized, _) => Value::Int(0),
                 _ => panic!("unsupported walker constant"),
             },
+            Operand::RuntimeChecks(_) => Value::Int(0),
         }
     }
     fn run(&mut self, b: &Body, args: Vec<Value>) -> Exit {

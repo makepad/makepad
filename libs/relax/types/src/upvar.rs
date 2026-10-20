@@ -42,7 +42,8 @@ pub struct Capture { pub place: Place, pub info: CaptureInfo }
 #[derive(Clone, Debug)]
 pub struct ClosureCaptures {
     pub captures: Vec<Capture>,
-    pub fake_reads: Vec<(Place, FakeReadCause)>,
+    /// rustc `closure_fake_reads`: (place, cause, the scrutinee / initializer expression)
+    pub fake_reads: Vec<(Place, FakeReadCause, u32)>,
     pub kind: ClosureKind,
     pub is_copy: bool,
     pub kind_origin: Option<Span>,
@@ -88,7 +89,7 @@ struct InferBorrowKind<'a, 'tx> {
     tx: &'a TyQ<'a, 'tx>,
     roots: &'a [u32],
     uses: Vec<Capture>,
-    fake_reads: Vec<(Place, FakeReadCause)>,
+    fake_reads: Vec<(Place, FakeReadCause, u32)>,
 }
 impl InferBorrowKind<'_, '_> {
     fn record(&mut self, place: Place, kind: CaptureKind) {
@@ -111,13 +112,13 @@ impl Delegate for InferBorrowKind<'_, '_> {
         self.record(c.place, c.info.kind);
     }
     fn mutate(&mut self, place: Place) { self.borrow(place, BorrowKind::Mut); }
-    fn fake_read(&mut self, place: Place, cause: FakeReadCause) {
+    fn fake_read(&mut self, place: Place, cause: FakeReadCause, node: u32) {
         if !self.roots.contains(&place.root) { return; }
         let span = place.span;
         let mut c = Capture { place, info: CaptureInfo { kind: CaptureKind::ByRef(BorrowKind::Imm), path_span: span, kind_span: span } };
         restrict_precision(self.tx, &mut c);
         restrict_packed(self.tx, &mut c);
-        self.fake_reads.push((c.place, cause));
+        self.fake_reads.push((c.place, cause, node));
     }
 }
 

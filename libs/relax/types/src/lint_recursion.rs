@@ -127,7 +127,7 @@ impl<'a> Rec<'a> {
     /// The autoderef calls of an expression's adjustments (steps `0..n`).
     fn deref_calls(&mut self, keys: &[u32], n: usize) -> bool {
         for step in 0..n {
-            if let Some(&(m, a)) = keys.iter().find_map(|k| self.body.ov_derefs.get(&(*k, step))) {
+            if let Some((m, a)) = keys.iter().find_map(|k| self.body.ov_deref(*k, step)) {
                 if self.rec_call(m, a, 1) { return false; }
             }
         }

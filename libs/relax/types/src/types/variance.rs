@@ -100,6 +100,20 @@ impl Tcx {
     pub fn variances_of(&self, prog: &crate::program::Program, def: DefId) -> Vec<V> {
         crate::type_queries::Providers { tcx: self, prog }.variances_of(def).expect("variances_of query")
     }
+    /// The variances of the arguments of a `FnDef` type. A tuple struct shares its DefId with its
+    /// constructor, and `variances_of` answers for the ADT; the constructor item (rustc
+    /// `DefKind::Ctor`) is a function whose variances come from its signature `fn(fields) -> S<..>`.
+    pub fn fn_def_variances(&self, prog: &crate::program::Program, def: DefId) -> Vec<V> {
+        let Some(sig) = self.ctor_sigs.get(&def).filter(|_| self.adts.contains_key(&def)) else { return self.variances_of(prog, def) };
+        let values = self.variances.get_or_init(|| infer(self));
+        let mut walk = Walk { tcx: self, tys: &self.tys, values, indices: &sig.generic_indices,
+            uses: vec![V::Bi; sig.generic_indices.len()], deps: HashSet::default() };
+        for &p in &sig.params { walk.ty(p, V::Contra); }
+        walk.ty(sig.ret, V::Co);
+        for &i in &sig.generic_indices.consts { walk.uses[i as usize] = V::Inv; }
+        for v in &mut walk.uses { if *v == V::Bi { *v = V::Inv; } }
+        walk.uses
+    }
     pub(crate) fn variances_of_uncached(&self, prog: &crate::program::Program, def: DefId) -> Vec<V> {
         if let Some(relax_front::assoc::ImplTraitInTraitData::Trait { opaque_def_id, .. }) = prog.impl_trait_in_trait_data.get(&def) {
             return self.variances_of(prog, *opaque_def_id);

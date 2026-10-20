@@ -133,6 +133,7 @@ pub struct NonNull<T: crate::marker::PointeeSized> {
     pointer: *const T,
 }
 
+impl<T: crate::marker::PointeeSized + crate::marker::Unsize<U>, U: crate::marker::PointeeSized> crate::ops::CoerceUnsized<NonNull<U>> for NonNull<T> {}
 impl<T> NonNull<T> {
     pub const fn dangling() -> NonNull<T> {
         NonNull { pointer: dangling::<T>() }

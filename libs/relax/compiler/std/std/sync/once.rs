@@ -301,7 +301,7 @@ impl<T> OnceLock<T> {
     }
 }
 
-impl<T> Drop for OnceLock<T> {
+unsafe impl<#[may_dangle] T> Drop for OnceLock<T> {
     fn drop(&mut self) {
         if self.once.is_completed() {
             unsafe { self.value.get_mut().assume_init_drop() };

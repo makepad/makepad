@@ -23,7 +23,7 @@ fn body(tys: &[TyId], blocks: Vec<BasicBlockData>) -> Body {
         basic_blocks: blocks, local_decls: tys.iter().enumerate().map(|(i, &ty)| LocalDecl { ty,
             mutability: Mutability::Mut, source_info: SourceInfo::default(), user_ty: vec![], local_info: LocalInfo::Boring,
             kind: if i == 0 { LocalKind::Return } else { LocalKind::UserVar } }).collect(),
-        source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }], user_type_annotations: vec![],
+        source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }], user_type_annotations: vec![], span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(),
         var_debug_info: vec![], arg_count: 1, spread_arg: None, promoted: vec![], coroutine: None }
 }
 fn reference(tcx: &Tcx, t: TyId, mutable: bool) -> TyId { tcx.tys.intern(TyKind::Ref(mutable, t, RegionId::ERASED)) }
@@ -40,7 +40,7 @@ fn input(body: &Body, scopes: &[Vec<Location>]) -> RegionInput {
     let mut liveness = LivenessValues::new(definitions.len(), map.num_points());
     liveness.add_all_points(0);
     for (r, points) in scopes.iter().enumerate() { for &at in points { liveness.add_point(r + 1, map.point(at)); } }
-    RegionInput { polonius: Default::default(), tainted_by_errors:false, relations: UniversalRegionRelations::create(UniversalRegions::new(0, None, vec![(0, Class::Global)]), definitions.len(), &[]),
+    RegionInput { universe_causes: vec![], polonius: Default::default(), tainted_by_errors:false, relations: UniversalRegionRelations::create(UniversalRegions::new(0, None, vec![(0, Class::Global)]), definitions.len(), &[]),
         definitions, outlives: OutlivesConstraintSet::default(), liveness, type_tests: vec![] }
 }
 fn gather(tcx: &Tcx, body: &Body) -> MoveData {
@@ -302,38 +302,83 @@ fn solved_outlives_constraints_extend_borrow_regions() {
 }
 fn external_input(b: &Body) -> RegionInput {
     let definitions=vec![RegionDefinition {origin:Origin::FreeRegion,universe:UniverseIndex(0),external_name:None};3];
-    RegionInput { polonius: Default::default(), tainted_by_errors:false, definitions, outlives:OutlivesConstraintSet::default(),
+    RegionInput { universe_causes: vec![], polonius: Default::default(), tainted_by_errors:false, definitions, outlives:OutlivesConstraintSet::default(),
         relations:UniversalRegionRelations::create(UniversalRegions::new(0,None,vec![(0,Class::Global),(1,Class::External),(2,Class::External)]),3,&[]),
         liveness:LivenessValues::new(3,LocationMap::new(b).num_points()),type_tests:vec![] }
 }
-#[test]
-fn root_propagates_nested_requirements_before_solving_parent() {
-    use super::root_cx::*;
-    let tcx=Tcx::new();
-    let mut b=body(&[tcx.tys.unit],vec![block(vec![],TerminatorKind::Return)]); b.arg_count=0;
-    let moves=gather(&tcx,&b); let mut child=external_input(&b);
-    child.outlives.push(OutlivesConstraint {sup:1,sub:2,location:Some(0),span:Span {file:7,lo:13,hi:14},category:ConstraintCategory::Return(super::constraints::ReturnConstraint::Normal),from_closure:false});
-    let checked=BorrowCheckRootCtxt {tcx:&tcx, prog:&test_prog()}.do_mir_borrowck(vec![
-        BodyInput {body:&b,moves:&moves,regions:child,nested:vec![],has_opaque_types:false},
-        BodyInput {body:&b,moves:&moves,regions:external_input(&b),nested:vec![NestedBodyUse {body:0,external_regions:vec![0,2,1],location:at(0,0)}],has_opaque_types:false},
-    ]);
-    assert!(checked[0].result.errors.is_empty() && checked[0].result.region_errors.is_empty());
-    assert!(checked[0].result.tainted_by_errors && !checked[0].result.accepted());
-    assert!(!checked[1].result.accepted());
-    assert!(checked[1].result.region_errors.iter().any(|e| matches!(e,super::region_infer::RegionErrorKind::RegionError {longer_fr:2,shorter_fr:1,..})));
-    let blame=checked[1].regions.regioncx.best_blame_constraint(&tcx,2,1).unwrap();
-    assert_eq!(blame.span.lo,13); assert_eq!(blame.category,ConstraintCategory::Return(super::constraints::ReturnConstraint::Normal)); assert_eq!(blame.span.file,7); assert_eq!(blame.location,Some(0));
+/// `_1: i32` borrowed as `_2 = &_1` (region living across the yield), then a yield: a coroutine body.
+fn yielding(tcx: &Tcx, movability: Movability, borrowed: Place) -> Body {
+    let t = tcx.tys.i32_; let r = reference(tcx, t, false);
+    let mut b = body(&[tcx.tys.unit, t, r], vec![block(vec![assign(1, val(t)), borrow(2, borrowed, 1, BorrowKind::Shared)],
+        TerminatorKind::Yield { value: val(tcx.tys.unit), resume: BasicBlock(1), resume_arg: p(0), drop: None }),
+        block(vec![assign(0, Operand::Copy(Place { local: Local(2), projection: vec![PlaceElem::Deref] }))], TerminatorKind::Return)]);
+    b.arg_count = 0;
+    b.coroutine = Some(CoroutineInfo { yield_ty: tcx.tys.unit, resume_ty: tcx.tys.unit, kind: CoroutineKind::Coroutine(movability) });
+    b
 }
 #[test]
-fn opaque_root_and_yield_are_explicit_stops() {
-    use super::root_cx::*;
-    let tcx=Tcx::new(); let mut b=body(&[tcx.tys.unit],vec![block(vec![],TerminatorKind::Return)]); b.arg_count=0;
-    let moves=gather(&tcx,&b);
-    let checked=BorrowCheckRootCtxt {tcx:&tcx, prog:&test_prog()}.do_mir_borrowck(vec![BodyInput {body:&b,moves:&moves,regions:input(&b,&[]),nested:vec![],has_opaque_types:true}]);
-    assert!(!checked[0].result.accepted()); assert!(checked[0].result.unsupported[0].contains("opaque"));
-    b.basic_blocks[0].terminator.as_mut().unwrap().kind=TerminatorKind::Yield {value:val(tcx.tys.unit),resume:BasicBlock(1),resume_arg:p(0),drop:None};
-    b.basic_blocks.push(block(vec![],TerminatorKind::Return));
-    let result=check(&tcx,&b,&[]); assert!(!result.accepted()); assert!(result.unsupported[0].contains("movability"));
+fn borrow_of_local_data_across_a_movable_coroutine_yield_is_e0626() {
+    let tcx = Tcx::new();
+    // `let r = &x; yield; *r`: the coroutine may be moved at the yield, so `x` cannot be borrowed across it.
+    let b = yielding(&tcx, Movability::Movable, p(1));
+    let result = check(&tcx, &b, &[points(3), points(3)]);
+    assert_eq!(codes(&result), ["E0626"]);
+    // A `static` (immovable) coroutine may keep the borrow.
+    let b = yielding(&tcx, Movability::Static, p(1));
+    assert!(check(&tcx, &b, &[points(3), points(3)]).accepted());
+}
+
+/// A closure body `|| { (*_1).0 = 1 }` over a one-field environment.
+fn closure_assigning_upvar(tcx: &Tcx, mutability: Mutability, env_mutable: bool) -> Body {
+    let t = tcx.tys.i32_;
+    let closure = tcx.tys.intern(TyKind::Closure(7, 1, crate::types::ClosureArgs { parent_args: tcx.tys.unit, closure_kind_ty: tcx.tys.prim(crate::program::Prim::I8),
+        closure_sig_as_fn_ptr_ty: tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&[]), tcx.tys.unit, crate::types::FnHeader::RUST, 0)),
+        tupled_upvars_ty: tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[t]))) }));
+    let env = tcx.tys.intern(TyKind::Ref(env_mutable, closure, RegionId::ERASED));
+    let field = Place { local: Local(1), projection: vec![PlaceElem::Deref, PlaceElem::Field(FieldIdx(0), t)] };
+    let mut b = body(&[tcx.tys.unit, env], vec![block(vec![StatementKind::Assign(field, Rvalue::Use(val(t)))], TerminatorKind::Return)]);
+    b.local_decls[1].kind = LocalKind::Arg; b.source.kind = BodyKind::Closure(1);
+    b.upvars = vec![CapturedPlace { name: "x".into(), var: 0, root_ty: t, projection: vec![], ty: t, capture: UpvarCapture::ByValue, mutability,
+        path_span: Span::default(), kind_span: Span::default() }];
+    b
+}
+#[test]
+fn assigning_a_mutable_upvar_is_reported_back_to_the_creator() {
+    let tcx = Tcx::new();
+    let b = closure_assigning_upvar(&tcx, Mutability::Mut, true);
+    let result = check(&tcx, &b, &[]);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.used_mut_upvars, [FieldIdx(0)]);
+    // An immutable binding cannot be assigned through the closure (E0594).
+    let b = closure_assigning_upvar(&tcx, Mutability::Not, true);
+    assert_eq!(codes(&check(&tcx, &b, &[])), ["E0594"]);
+    // And a mutable upvar of an `Fn` closure (shared environment) neither.
+    let b = closure_assigning_upvar(&tcx, Mutability::Mut, false);
+    assert_eq!(codes(&check(&tcx, &b, &[])), ["E0594"]);
+}
+#[test]
+fn a_variable_mutated_by_the_closure_it_is_moved_into_is_used_mut() {
+    use super::check::{mir_borrowck_nested, NestedUsedMut};
+    let tcx = Tcx::new(); let t = tcx.tys.i32_;
+    let id = ClosureId { file: 7, expr: 1 };
+    let closure = tcx.tys.intern(TyKind::Closure(7, 1, crate::types::ClosureArgs { parent_args: tcx.tys.unit, closure_kind_ty: tcx.tys.prim(crate::program::Prim::I8),
+        closure_sig_as_fn_ptr_ty: tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&[]), tcx.tys.unit, crate::types::FnHeader::RUST, 0)),
+        tupled_upvars_ty: tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[t]))) }));
+    // `let mut x = 0; let c = move || x += 1;` : `_2 = Closure(move _1)`.
+    let mut b = body(&[tcx.tys.unit, t, closure], vec![block(vec![assign(1, val(t)),
+        StatementKind::Assign(p(2), Rvalue::Aggregate(Box::new(AggregateKind::Closure(id, vec![])), vec![Operand::Move(p(1))]))], TerminatorKind::Return)]);
+    b.arg_count = 0;
+    b.local_decls[1].local_info = LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode: BindingMode(ByRef::No, Mutability::Mut), opt_ty_info: None,
+        opt_match_place: None, pat_span: Span::default(), introductions: vec![] }));
+    let moves = gather(&tcx, &b);
+    let run = |nested: NestedUsedMut| {
+        let mut regions = compute_regions(&tcx, &test_prog(), &b, input(&b, &[]), false);
+        mir_borrowck_nested(&tcx, &test_prog(), &b, &mut regions, &moves, None, &nested)
+    };
+    assert!(run(NestedUsedMut(vec![(id, vec![FieldIdx(0)])])).used_mut.contains(1));
+    assert!(!run(NestedUsedMut(vec![(id, vec![])])).used_mut.contains(1));
+    // Without the nested body's result the aggregate is an explicit stop.
+    assert!(!run(NestedUsedMut::default()).unsupported.is_empty());
 }
 #[test]
 fn subslice_reads_only_overlapping_moved_elements() {
@@ -362,23 +407,6 @@ fn used_mut_temporary_propagates_to_moved_user_local() {
     b.local_decls[2].kind = LocalKind::Temp;
     let moves = gather(&tcx, &b); let mut used = crate::mir::dataflow::BitSet::new_empty(3); used.insert(2);
     super::used_muts::gather_used_muts(&b, &moves, &mut used); assert!(used.contains(1));
-}
-#[test]
-fn nested_type_requirement_stops_at_conversion_boundary() {
-    use super::root_cx::*;
-    use super::region_infer::{TypeTest, VerifyBound};
-    let tcx = Tcx::new(); let mut b = body(&[tcx.tys.unit], vec![block(vec![], TerminatorKind::Return)]); b.arg_count = 0;
-    let moves = gather(&tcx, &b); let mut child = external_input(&b);
-    child.type_tests.push(TypeTest { generic_kind:tcx.tys.intern(TyKind::Param(0)),lower_bound:1,
-        span:super::constraints::Span {lo:4,hi:5},verify_bound:VerifyBound::AnyBound(vec![]) });
-    let checked = BorrowCheckRootCtxt {tcx:&tcx, prog:&test_prog()}.do_mir_borrowck(vec![
-        BodyInput {body:&b,moves:&moves,regions:child,nested:vec![],has_opaque_types:false},
-        BodyInput {body:&b,moves:&moves,regions:external_input(&b),nested:vec![NestedBodyUse {body:0,external_regions:vec![0,1,2],location:at(0,0)}],has_opaque_types:false},
-    ]);
-    assert!(checked[0].result.errors.is_empty() && checked[0].result.region_errors.is_empty());
-    assert!(checked[0].result.tainted_by_errors && !checked[0].result.accepted());
-    assert!(!checked[0].regions.regioncx.propagated_type_requirements.is_empty());
-    assert!(!checked[1].result.accepted()); assert!(checked[1].result.unsupported[0].contains("type-outlives"));
 }
 #[test]
 fn destructor_prefix_borrow_and_illegal_field_move() {
@@ -430,8 +458,7 @@ fn cnll4_used_mut_propagates_all_non_user_locals_and_excludes_arguments() {
 }
 
 #[test]
-fn cnll4_typecheck_taint_survives_region_solve_and_finalizes_the_entire_root() {
-    use super::root_cx::{BodyInput,BorrowCheckRootCtxt};
+fn cnll4_typecheck_taint_survives_region_solve() {
     let tcx = Tcx::new();
     let b = body(&[tcx.tys.unit,tcx.tys.i32_],vec![block(vec![],TerminatorKind::Return)]);
     let moves = gather(&tcx,&b);
@@ -440,12 +467,6 @@ fn cnll4_typecheck_taint_survives_region_solve_and_finalizes_the_entire_root() {
     let result = mir_borrowck(&tcx, &test_prog(), &b,&mut solved,&moves);
     assert!(result.errors.is_empty() && result.region_errors.is_empty());
     assert!(!result.accepted());
-    let mut failed = input(&b,&[]); failed.tainted_by_errors = true;
-    let checked = BorrowCheckRootCtxt {tcx:&tcx, prog:&test_prog()}.do_mir_borrowck(vec![
-        BodyInput {body:&b,moves:&moves,regions:input(&b,&[]),nested:vec![],has_opaque_types:false},
-        BodyInput {body:&b,moves:&moves,regions:failed,nested:vec![],has_opaque_types:false},
-    ]);
-    assert!(checked.iter().all(|c| c.result.tainted_by_errors && !c.result.accepted()));
 }
 
 #[test]
@@ -484,7 +505,7 @@ mod polonius_tests;
 
 // --- re-audit restorations (parity/reaudit.REPORT.md) ---
 fn user(can_be_made_mutable: bool, match_place: Option<(Option<Place>, Span)>) -> LocalInfo {
-    LocalInfo::User { is_ref_binding: false, can_be_made_mutable, match_place }
+    LocalInfo::user_var(BindingMode(if can_be_made_mutable { ByRef::No } else { ByRef::Yes(Mutability::Not) }, Mutability::Not), match_place, Span::default())
 }
 fn call(unit: TyId, args: Vec<Operand>, arg_spans: Vec<Span>, destination: Place) -> TerminatorKind {
     TerminatorKind::Call { func: val(unit), args, destination, target: Some(BasicBlock(1)),

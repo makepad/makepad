@@ -57,7 +57,7 @@ const STORE_FORMAT: u32 = 5;
 /// borrowck lane: a clean borrow-check verdict (empty payload)
 const KIND_BORROWCK: u32 = 4;
 /// the checker's own version: bump when its rules change (old verdicts are then ignored)
-pub const BORROWCK_VERSION: u32 = 1;
+pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
 const COHERENCE_VERSION: u32 = 1;
 

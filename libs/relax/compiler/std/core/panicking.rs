@@ -93,7 +93,7 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
 
 /// A constant message: like real core's `panic(&'static str)` its payload is the `&'static str`.
 #[track_caller]
-pub fn panic_str(msg: &'static str) -> ! {
+pub const fn panic_str(msg: &'static str) -> ! {
     let pieces = [msg];
     panic_fmt(fmt::Arguments::new_const(&pieces))
 }

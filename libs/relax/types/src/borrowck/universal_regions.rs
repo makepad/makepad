@@ -43,7 +43,6 @@ use crate::program::DefId;
 use crate::tcx::{Tcx, outlives::RegionContract};
 use crate::types::{TyId, TyKind, RegionId, RegionKind, RegionScope, LateParamKind, BoundVar};
 use crate::types::fold::{BoundVarReplacer, TypeFolder};
-use crate::borrowck::rty::Rty;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Identity { Static, Region(RegionScope, RegionId), FnBody(RegionScope) }
@@ -58,27 +57,7 @@ pub struct SignatureRegions {
     pub contract: RegionContract, pub fr_static: usize, pub fr_fn_body: usize,
     pub query_placeholders: Vec<RegionId>,
 }
-/// Selection may erase an ADT's entire lifetime argument list. Restore its
-/// declared arity before enumerating free regions, so signature projection and
-/// the BIR layout visit the same slots. Each erased occurrence is subsequently
-/// instantiated independently, as in nightly's closure argument renumbering.
-pub fn with_erased_adt_regions(tcx: &Tcx, ty: TyId) -> TyId {
-    struct Restore<'a>(&'a Tcx);
-    impl TypeFolder for Restore<'_> {
-        fn fold_ty(&mut self, tys: &crate::types::Types, ty: TyId, depth: u32) -> TyId {
-            let ty = crate::types::fold::super_fold_ty(tys, ty, self, depth);
-            if let TyKind::Adt(d, args, rs) = tys.kind(ty) {
-                let n = self.0.adts.get(d).map_or(0, |adt| adt.generic_indices.lifetimes.len());
-                if *rs == crate::types::RegionArgsId::EMPTY && n != 0 {
-                    return tys.intern(TyKind::Adt(*d, args.clone(), tys.intern_region_args(&vec![RegionId::ERASED; n])));
-                }
-            }
-            ty
-        }
-    }
-    Restore(tcx).fold_ty(&tcx.tys, ty, 0)
-}
-enum DefiningTy { FnDef(DefId, bool), Const(DefId), Closure { owner: DefId, expr: u32, signature: TyId, bound: TyId, annotation_eq: bool } }
+enum DefiningTy { FnDef(DefId, bool), Const(DefId), AnonConst(DefId), Closure { owner: DefId, expr: u32, signature: TyId, bound: TyId, annotation_eq: bool } }
 impl DefiningTy {
     fn inputs_and_output(&self, tcx: &Tcx, prog: &Program) -> (Vec<TyId>, TyId, u32) {
         match *self {
@@ -97,6 +76,7 @@ impl DefiningTy {
                 (inputs, sig.ret, bound_regions)
             }
             Self::Const(d) => (vec![],tcx.const_ty(prog, d).unwrap(),0),
+            Self::AnonConst(_) => (vec![],tcx.tys.usize_,0),
             Self::Closure { signature, bound, .. } => {
                 let TyKind::FnPtr(ins,out,_,_) = tcx.tys.kind(signature) else { unreachable!() };
                 let TyKind::FnPtr(_,_,_,n) = tcx.tys.kind(bound) else { unreachable!() };
@@ -105,7 +85,7 @@ impl DefiningTy {
         }
     }
     fn scope(&self) -> RegionScope {
-        match *self { Self::FnDef(d, _) | Self::Const(d) => RegionScope::Item(d), Self::Closure { owner,expr,.. } => RegionScope::Closure { owner,expr } }
+        match *self { Self::FnDef(d, _) | Self::Const(d) | Self::AnonConst(d) => RegionScope::Item(d), Self::Closure { owner,expr,.. } => RegionScope::Closure { owner,expr } }
     }
 }
 struct UniversalRegionIndices { regions: Vec<UniversalRegion> }
@@ -125,11 +105,11 @@ impl UniversalRegionsBuilder<'_> {
         let mut query_placeholders = vec![];
         if matches!(self.defining_ty,DefiningTy::Closure { .. }) {
             // Like the implied-bounds query, give each erased external occurrence
-            // a distinct identity. The BIR adapter instantiates these as free vars.
+            // a distinct identity. The MIR driver instantiates these as free vars.
             // Relax's liberated closure signature can still contain regions
             // bound by an enclosing callable. Instantiate that outer binder as
             // external query identities before the ordinary erased-region pass.
-            let raw: Vec<_> = inputs.iter().copied().chain([output]).map(|t| with_erased_adt_regions(tcx,t)).collect();
+            let raw: Vec<_> = inputs.iter().copied().chain([output]).collect();
             let mut replaced = crate::borrowck::implied_bounds::replace_erased_regions_with_placeholders(tcx,&raw);
             let next = std::cell::Cell::new(crate::borrowck::implied_bounds::implied_bounds_query_var_values(tcx,&replaced,
                 |r| matches!(tcx.tys.region_kind(r),RegionKind::RePlaceholder { .. })).len() as u32);
@@ -199,6 +179,9 @@ impl UniversalRegionsBuilder<'_> {
         UniversalRegionIndices { regions }
     }
 }
+/// `LateParamKind::Anon` numbers from here name the erased regions of a closure's environment type.
+pub const ENV_ERASED_BASE: u32 = 0x4000_0000;
+
 impl SignatureRegions {
     pub fn function(tcx: &Tcx, prog: &Program, owner: DefId) -> Option<Self> { Self::function_signature(tcx,prog,owner,true) }
     /// Calling a C-variadic function does not pass the body's implicit VaList.
@@ -210,17 +193,87 @@ impl SignatureRegions {
             (DefiningTy::Const(owner),tcx.const_region_contract(prog, owner).cloned().unwrap_or_default()) };
         Some(UniversalRegionsBuilder { tcx,prog,defining_ty,parent:None,contract }.build())
     }
-    pub fn closure(rty: &Rty<'_>, owner: DefId, expr: u32) -> Option<Self> {
-        let sig = *rty.closure_signatures.borrow().get(&expr)?;
+    /// An array-length anonymous constant: its own root, no inputs, output `usize`, no lifetime parameters in scope.
+    pub fn anon_const(tcx: &Tcx, prog: &Program, owner: DefId) -> Self {
+        UniversalRegionsBuilder { tcx,prog,defining_ty:DefiningTy::AnonConst(owner),parent:None,contract:Default::default() }.build()
+    }
+    /// A closure's universal regions (universal_regions.rs `DefiningTy::Closure`): its parent's
+    /// are external, its own signature's are local. The signature is the typeck result's, with
+    /// the lifetime arguments of its types as written back.
+    pub fn closure_in(tcx: &Tcx, prog: &Program, owner: DefId, expr: u32, sig: &crate::typeck::ClosureSignatures, parent: Self) -> Option<Self> {
         // compute_inputs_and_output: the closure's one (bound) signature, not
         // the body's supplied types; the annotation is ascribed onto it.
         let signature = sig.liberated_bound();
-        if !matches!(rty.tx.tcx.tys.kind(signature),TyKind::FnPtr(..)) { return None; }
-        let parent = match rty.closure_parents.borrow().get(&expr).copied().flatten() {
-            Some(p) => Self::closure(rty,owner,p)?, None => Self::function(rty.tx.tcx,rty.tx.prog,owner)?,
-        };
-        Some(UniversalRegionsBuilder { tcx:rty.tx.tcx,prog:rty.tx.prog,
+        if !matches!(tcx.tys.kind(signature),TyKind::FnPtr(..)) { return None; }
+        Some(UniversalRegionsBuilder { tcx,prog,
             defining_ty:DefiningTy::Closure { owner,expr,signature,bound:sig.bound,annotation_eq:sig.annotation_eq.is_some() },
             contract:parent.contract.clone(),parent:Some(parent) }.build())
+    }
+    /// The closure body's implicit first argument (the environment, `&'env C`, `&'env mut C`
+    /// or `C` for FnOnce), with the `'env` universal region inserted as the last local region,
+    /// ahead of the body region. The free regions of the closure type `C` (its signature and
+    /// captured places) are external regions, as for rustc's `DefiningTy::Closure` whose
+    /// arguments they are; a nested use maps them to its own instantiation by position.
+    pub fn with_closure_env(mut self, tcx: &Tcx, owner: DefId, expr: u32, env: TyId) -> Self {
+        let closure_ty = match tcx.tys.kind(env) { TyKind::Ref(_, ct, _) => *ct, _ => env };
+        // rustc's `replace_free_regions_with_nll_infer_vars` makes every region of the defining type,
+        // erased ones included, a universal region of its own: each erased occurrence takes a distinct
+        // identity, scoped to this closure (a nested closure inherits its creator's universal regions,
+        // which must stay different) and numbered in order (the creator finds the slot by that number).
+        let erased = std::cell::Cell::new(0u32);
+        let closure_scope = RegionScope::Closure { owner, expr };
+        let closure_ty = tcx.tys.map_regions(closure_ty, &|r, depth| match tcx.tys.region_kind(r) {
+            RegionKind::ReErased => {
+                let n = erased.get(); erased.set(n + 1);
+                tcx.tys.intern_region(RegionKind::ReLateParam(closure_scope, LateParamKind::Anon(ENV_ERASED_BASE + n)))
+            }
+            RegionKind::ReBound(d, _) if d < depth => r,
+            _ => r,
+        }, 0);
+        let env = match tcx.tys.kind(env) { TyKind::Ref(m, _, r) => tcx.tys.intern(TyKind::Ref(*m, closure_ty, *r)), _ => closure_ty };
+        let mut external = vec![];
+        for r in crate::borrowck::mir_nll::free_regions_in_order(tcx, closure_ty) {
+            if matches!(tcx.tys.region_kind(r), RegionKind::ReErased | RegionKind::ReError | RegionKind::ReStatic) { continue; }
+            let known = |u: &UniversalRegion| matches!(u.identity, Identity::Region(_, x) if x == r);
+            if self.regions.iter().any(known) || external.iter().any(known) { continue; }
+            let scope = match tcx.tys.region_kind(r) { RegionKind::ReLateParam(s, _) => s, _ => RegionScope::Item(owner) };
+            external.push(UniversalRegion { identity: Identity::Region(scope, r), class: RegionClassification::External, name: "'_".into() });
+        }
+        // Global and external regions precede the local ones.
+        let at = self.regions.iter().take_while(|u| matches!(u.class, RegionClassification::Global | RegionClassification::External)).count();
+        self.fr_fn_body += external.len();
+        self.regions.splice(at..at, external);
+        if let TyKind::Ref(m, ct, _) = tcx.tys.kind(env) {
+            let scope = RegionScope::Closure { owner, expr };
+            let r = tcx.tys.intern_region(RegionKind::ReLateParam(scope, LateParamKind::ClosureEnv));
+            self.regions.insert(self.fr_fn_body, UniversalRegion { identity: Identity::Region(scope, r), class: RegionClassification::Local, name: "'env".into() });
+            self.fr_fn_body += 1;
+            self.implicit_input = Some(tcx.tys.intern(TyKind::Ref(*m, *ct, r)));
+        } else {
+            self.implicit_input = Some(env);
+        }
+        self
+    }
+}
+
+impl UniversalRegions {
+    /// `UniversalRegions::new`'s region variables: one fresh variable per declared universal
+    /// region, in the signature's order (global, external, local, then the body region), so
+    /// that vids `0..n` are the universals and the type checker's variables follow.
+    pub fn from_signature(tcx: &Tcx, sig: &SignatureRegions, mut next_free_region: impl FnMut() -> RegionVid) -> Self {
+        let (mut regions, mut indices) = (vec![], vec![]);
+        let (mut fr_static, mut fr_fn_body) = (None, None);
+        for universal in &sig.regions {
+            let vid = next_free_region();
+            regions.push((vid, universal.class));
+            match universal.identity {
+                Identity::Static => { fr_static = Some(vid); indices.push((tcx.tys.intern_region(RegionKind::ReStatic), vid)); }
+                Identity::Region(_, r) => indices.push((r, vid)),
+                Identity::FnBody(_) => fr_fn_body = Some(vid),
+            }
+        }
+        let mut universals = Self::new(fr_static.expect("'static is the first universal region"), fr_fn_body, regions);
+        universals.indices = indices;
+        universals
     }
 }

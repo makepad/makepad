@@ -20,7 +20,7 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn cast_mut(self) -> *mut T {
         self as *mut T
     }
-    pub fn addr(self) -> usize {
+    pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
     pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {
@@ -151,7 +151,7 @@ impl<T: crate::marker::PointeeSized> *mut T {
     pub const fn cast_const(self) -> *const T {
         self as *const T
     }
-    pub fn addr(self) -> usize {
+    pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
     pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {

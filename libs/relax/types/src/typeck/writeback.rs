@@ -56,12 +56,17 @@ impl Fcx<'_> {
         for local in &mut body.locals { wbcx.resolve(&mut local.ty); }
         for args in body.res_args.values_mut() { wbcx.resolve_list(args); }
         for method in body.methods.values_mut().chain(body.binops.values_mut()) { wbcx.resolve_list(&mut method.args); }
-        for (_, args) in body.ov_derefs.values_mut().chain(body.ov_index.values_mut()).chain(body.for_next.values_mut()) { wbcx.resolve_list(args); }
+        for (_, args) in body.ov_index.values_mut().chain(body.mutable_index.values_mut()).chain(body.std_index.values_mut()).chain(body.for_next.values_mut()) { wbcx.resolve_list(args); }
         for (_, args, ty) in body.for_into.values_mut() { wbcx.resolve_list(args); wbcx.resolve(ty); }
         for (_, args, ty) in body.try_branch.values_mut() { wbcx.resolve_list(args); wbcx.resolve(ty); }
         for (_, args) in body.try_from_residual.values_mut() { wbcx.resolve_list(args); }
-        for coerce in body.coerce.values_mut() {
-            match coerce { Coerce::ToDyn(a, b) | Coerce::Upcast(a, b) => { wbcx.resolve(a); wbcx.resolve(b); } _ => {} }
+        for adjust in body.adjust_payloads_mut() {
+            wbcx.resolve(&mut adjust.target);
+            match &mut adjust.kind {
+                adjustments::Adjust::Deref(Some((_, args))) => wbcx.resolve_list(args),
+                adjustments::Adjust::Coerce(Coerce::ToDyn(a, b) | Coerce::Upcast(a, b)) => { wbcx.resolve(a); wbcx.resolve(b); }
+                _ => {}
+            }
         }
         for sig in body.closure_sigs.values_mut() {
             wbcx.resolve(&mut sig.bound); wbcx.resolve(&mut sig.liberated);
@@ -71,7 +76,7 @@ impl Fcx<'_> {
         for ty in body.inline_const_types.values_mut() { wbcx.resolve(ty); }
         for captures in body.min_captures.values_mut() {
             for capture in &mut captures.captures { wbcx.resolve_place(&mut capture.place); }
-            for (place, _) in &mut captures.fake_reads { wbcx.resolve_place(place); }
+            for (place, _, _) in &mut captures.fake_reads { wbcx.resolve_place(place); }
             if let Some(coroutine) = &mut captures.coroutine {
                 for capture in &mut coroutine.by_move { wbcx.resolve_place(&mut capture.place); }
                 for capture in &mut coroutine.child_captures {

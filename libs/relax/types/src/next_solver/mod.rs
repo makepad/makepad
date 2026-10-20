@@ -160,6 +160,7 @@ pub mod wf;
 pub mod fulfill;
 pub mod param_env;
 pub mod type_op;
+pub mod dropck_outlives;
 
 pub mod implied_outlives_bounds;
 

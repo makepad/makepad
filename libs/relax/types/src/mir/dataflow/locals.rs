@@ -40,9 +40,9 @@ impl Visitor for BorrowTransfer<'_> {
                 if !is_indirect(place) { self.0.insert(place.local.0 as usize); }
             }
             Rvalue::Ref(_, BorrowKind::Fake(_), _) | Rvalue::Use(_) | Rvalue::Repeat(..)
-            | Rvalue::ThreadLocalRef(_) | Rvalue::Len(_) | Rvalue::Cast(..) | Rvalue::BinaryOp(..)
-            | Rvalue::NullaryOp(..) | Rvalue::UnaryOp(..) | Rvalue::Discriminant(_) | Rvalue::Aggregate(..)
-            | Rvalue::ShallowInitBox(..) | Rvalue::CopyForDeref(_) => {}
+            | Rvalue::ThreadLocalRef(_) | Rvalue::Cast(..) | Rvalue::BinaryOp(..)
+            | Rvalue::UnaryOp(..) | Rvalue::Discriminant(_) | Rvalue::Aggregate(..)
+            | Rvalue::CopyForDeref(_) => {}
         }
     }
     fn visit_terminator(&mut self, term: &Terminator, at: Location) {

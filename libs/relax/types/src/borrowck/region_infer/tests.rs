@@ -99,8 +99,8 @@ fn opaque_member_uses_unique_smallest_choice() {
     let r = tys.intern_region(RegionKind::ReVar(2));
     let ty = tys.intern(crate::types::TyKind::Ref(false,tys.intern(crate::types::TyKind::Bool),r));
     let d = crate::program::DefId(0);
-    let uses = vec![opaque_types::DefiningUse { def_id:d,hidden_type:ty,arg_regions:vec![0,1] }];
-    let (hidden,errors) = opaque_types::compute_definition_site_hidden_types(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),defs,&relations,constraints(&[(1,2)]),&uses);
+    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(d),hidden_type:ty,arg_regions:vec![0,1] }];
+    let (hidden,errors) = opaque_types::hidden_types_from_uses(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),&mut crate::borrowck::type_check_tests::Fake::new(&tcx,0),defs,&relations,constraints(&[(1,2)]),&uses);
     assert!(errors.is_empty());
     assert!(matches!(tys.kind(hidden[0].1),crate::types::TyKind::Ref(_,_,region) if *region == a));
 }
@@ -186,8 +186,8 @@ fn opaque_members_exclude_parent_closure_arguments() {
     let owner = tys.intern(TyKind::FnDef(crate::program::DefId(2),tys.mk_list(&[]),tys.intern_region_args(&[tys.intern_region(RegionKind::ReVar(3))])));
     let signature = tys.intern(TyKind::FnPtr(tys.mk_list(&[]),unit,crate::types::FnHeader::RUST,0));
     let hidden_type = tys.intern(TyKind::Closure(0, 0, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: tys.prim(crate::program::Prim::I8), closure_sig_as_fn_ptr_ty: signature, tupled_upvars_ty: member }));
-    let uses = vec![opaque_types::DefiningUse { def_id:crate::program::DefId(0),hidden_type,arg_regions:vec![0,1] }];
-    let (hidden,errors) = opaque_types::compute_definition_site_hidden_types(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),defs,&relations,constraints(&[(1,2)]),&uses);
+    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type,arg_regions:vec![0,1] }];
+    let (hidden,errors) = opaque_types::hidden_types_from_uses(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),&mut crate::borrowck::type_check_tests::Fake::new(&tcx,0),defs,&relations,constraints(&[(1,2)]),&uses);
     assert!(errors.is_empty());
     let TyKind::Closure(_, _, crate::types::ClosureArgs { parent_args: owner, tupled_upvars_ty: member, .. }) = tys.kind(hidden[0].1) else { panic!() };
     assert!(matches!(tys.kind(*member),TyKind::Ref(_,_,r) if *r == named));
@@ -214,15 +214,15 @@ fn v1_if_eq_ignores_bivariant_opaque_arguments() {
     assert!(run(opaque(2, 0), opaque(1, 0)).errors.is_empty());
     assert!(matches!(run(opaque(0, 2), opaque(0, 1)).errors.as_slice(),[RegionErrorKind::TypeTest { test:0 }]));
 }
-fn opaque_witness(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, ty: TyId, universals: usize, edges: &[(usize,usize)]) -> (Vec<(crate::program::DefId,TyId)>,Vec<opaque_types::DeferredOpaqueTypeError>) {
+fn opaque_witness(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, ty: TyId, universals: usize, edges: &[(usize,usize)]) -> (opaque_types::HiddenTypes,Vec<opaque_types::DeferredOpaqueTypeError>) {
     let defs = (0..universals).map(|i| RegionDefinition {
         external_name:Some(tcx.tys.intern_region(if i == 0 { RegionKind::ReStatic } else { RegionKind::ReEarlyParam(i as u32) })),
         ..definition(NllRegionVariableOrigin::FreeRegion,0)
     }).collect();
     let regions = (0..universals).map(|i| (i,if i == 0 { Class::Global } else { Class::Local })).collect();
     let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,regions),universals,&[]);
-    opaque_types::compute_definition_site_hidden_types(tcx,prog,defs,&relations,constraints(edges),&[
-        opaque_types::DefiningUse { def_id:crate::program::DefId(0),hidden_type:ty,arg_regions:vec![0,1] }
+    opaque_types::hidden_types_from_uses(tcx,prog,&mut crate::borrowck::type_check_tests::Fake::new(tcx,0),defs,&relations,constraints(edges),&[
+        opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type:ty,arg_regions:vec![0,1] }
     ])
 }
 #[test]
@@ -316,3 +316,36 @@ fn round13_native_const_aliases_retain_regions_in_matching_and_opaque_folding() 
         [opaque_types::DeferredOpaqueTypeError::UnexpectedHiddenRegion { member_region:2,.. }]));
 }
 fn test_prog() -> crate::program::Program { crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())) }
+
+// The real inference context's answers for opaque uses in their defining scope.
+#[test]
+fn defining_use_validation_and_remapping_follow_the_opaque_declaration() {
+    use crate::borrowck::infer_ctxt::BorrowckInferCtxt;
+    use opaque_types::{NonDefiningUseReason as Reason, OpaqueOps};
+    use crate::consts::GenericArg;
+    use crate::infer::opaque_types::OpaqueTypeKey;
+    let (prog, tcx, opaque) = crate::borrowck::type_check_tests::opaque_fixture();
+    let owner = prog.opaque_owner(opaque);
+    let mut infcx = BorrowckInferCtxt::new(&tcx, &prog, owner, owner, &[]);
+    let tys = &tcx.tys;
+    let early = |i| tys.intern_region(RegionKind::ReEarlyParam(i));
+    let key = |a: RegionId, b: RegionId| OpaqueTypeKey { def_id: opaque, args: vec![GenericArg::Lifetime(a), GenericArg::Lifetime(b)].into() };
+    // Only the captured lifetime must be a parameter; the bivariant parent one is not a member.
+    assert_eq!(infcx.opaque_type_has_defining_use_args(&key(early(0), early(0))), Ok(()));
+    assert_eq!(infcx.opaque_type_has_defining_use_args(&key(tys.intern_region(RegionKind::ReStatic), early(0))), Ok(()));
+    // 'static is not a parameter unless the opaque's bounds make the parameter equal to it.
+    let not_a_param = key(early(0), tys.intern_region(RegionKind::ReStatic));
+    assert_eq!(infcx.opaque_type_has_defining_use_args(&not_a_param), Err(Reason::NotAParam { opaque_type_key: not_a_param.clone(), param_index: 1 }));
+    // The hidden type `&'a u32` of the use is `&'cap u32` in the opaque's own parameters: the last
+    // identity lifetime paired with the use's `'a` is the captured one.
+    let hidden = tys.intern(TyKind::Ref(false, tys.u32_, early(0)));
+    let remapped = infcx.remap_generic_params_to_declaration_params(&key(early(0), early(0)), hidden);
+    assert_eq!(remapped, tys.intern(TyKind::Ref(false, tys.u32_, early(1))));
+    // Static, bound and erased regions are left alone.
+    let fixed = tys.intern(TyKind::Tuple(tys.mk_list(&[tys.intern(TyKind::Ref(false, tys.u32_, tys.intern_region(RegionKind::ReStatic))),
+        tys.intern(TyKind::Ref(false, tys.u32_, RegionId::ERASED))])));
+    assert_eq!(infcx.remap_generic_params_to_declaration_params(&key(early(0), early(0)), fixed), fixed);
+    // The opaque storage is the context's: empty at first.
+    assert!(!infcx.has_opaque_types_in_storage());
+    assert!(infcx.clone_opaque_types().is_empty());
+}

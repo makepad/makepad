@@ -123,7 +123,7 @@ impl Analysis for Borrows<'_> {
             StatementKind::FakeRead(..) | StatementKind::SetDiscriminant { .. }
             | StatementKind::StorageLive(..) | StatementKind::PlaceMention(..)
             | StatementKind::AscribeUserType(..) | StatementKind::Intrinsic(..)
-            | StatementKind::ConstEvalCounter | StatementKind::Nop => {}
+            | StatementKind::ConstEvalCounter | StatementKind::Nop | StatementKind::BackwardIncompatibleDropHint { .. } => {}
         }
     }
     fn apply_early_terminator_effect(&self, state: &mut BitSet, _: &Terminator, at: Location) {

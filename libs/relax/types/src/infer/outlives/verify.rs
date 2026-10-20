@@ -79,7 +79,9 @@ impl VerifyBoundCx<'_> {
         let mut env_bounds = Vec::new();
         for p in self.approx_declared_bounds_from_env(ty) {
             let PredicateKind::Clause(ClauseKind::TypeOutlives(t, r)) = p.kind else { unreachable!() };
-            if !p.has_bound_vars(&self.tcx.tys) && t == ty { env_bounds.push(VerifyBound::OutlivedBy(r)); }
+            // (an exact match compares the alias itself, not its interned type: rigidity is not identity)
+            let exact = matches!((self.tcx.tys.kind(t), self.tcx.tys.kind(ty)), (TyKind::Alias(_, a), TyKind::Alias(_, b)) if a == b);
+            if !p.has_bound_vars(&self.tcx.tys) && exact { env_bounds.push(VerifyBound::OutlivedBy(r)); }
             else { env_bounds.push(VerifyBound::IfEq(p)); }
         }
         for r in self.declared_bounds_from_definition(ty) { env_bounds.push(VerifyBound::OutlivedBy(r)); }

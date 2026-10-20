@@ -691,6 +691,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         verbose!("makepad-run: gandalf app scope ({} crates): {}", app_roots.len(), app_roots.join(" "));
     }
     crate::borrowck::event::set_app_scope(app_roots);
+    // `makepad check` borrow-checks every crate it loads: all keep their user-written types
+    if check { crate::borrowck::event::set_check_scope(); }
     jit::zone_swap::remember_boot(&pre);
     let front_images = crate::cache::FrontImages::open(options);
     prog.record_front = front_images.is_some();

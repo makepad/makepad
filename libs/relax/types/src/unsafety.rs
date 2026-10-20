@@ -257,8 +257,8 @@ impl V<'_> {
         let mut t = self.body.ty(x);
         let mut known = true;
         for step in 0..n as usize {
-            if self.body.ov_derefs.contains_key(&(e.0, step)) {
-                match self.body.ov_derefs.get(&(e.0, step + 1)) {
+            if self.body.ov_deref(e.0, step).is_some() {
+                match &self.body.ov_deref(e.0, step + 1) {
                     Some((_, args)) if step + 1 < n as usize => t = self.tcx.tys.list(*args)[0],
                     _ => { known = false; break; }
                 }

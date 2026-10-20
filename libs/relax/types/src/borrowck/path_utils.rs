@@ -55,5 +55,18 @@ pub fn borrow_of_local_data(place: &Place) -> bool {
     !place.projection.iter().any(|elem| *elem == PlaceElem::Deref)
 }
 
-// STOP: is_upvar_field_projection needs MIR-owned CapturedPlace/is_by_ref metadata
-// and coroutine/CoroutineClosure type support. BIR capture records are not MIR metadata.
+/// path_utils.rs `is_upvar_field_projection`: if `place` is a field of a closure/coroutine environment
+/// (directly, or through the reference that a by-reference capture is), the upvar's index. This can only
+/// be `self` in the current MIR, because that is the only time we directly access the fields of a closure.
+pub fn is_upvar_field_projection(tcx: &Tcx, body: &Body, place: &Place) -> Option<crate::mir::FieldIdx> {
+    let mut projection = &place.projection[..];
+    let mut by_ref = false;
+    if let Some((PlaceElem::Deref, base)) = projection.split_last() {
+        projection = base;
+        by_ref = true;
+    }
+    let (PlaceElem::Field(field, _), base) = projection.split_last()? else { return None };
+    let base_ty = Place { local: place.local, projection: base.to_vec() }.ty(body, tcx)?.ty;
+    (matches!(tcx.tys.kind(base_ty), crate::types::TyKind::Closure(..))
+        && (!by_ref || body.upvars.get(field.0 as usize)?.is_by_ref())).then_some(*field)
+}

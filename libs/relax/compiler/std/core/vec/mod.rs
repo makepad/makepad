@@ -611,7 +611,7 @@ impl<'a> Drop for SetLenOnDrop<'a> {
     }
 }
 
-impl<T> Drop for Vec<T> {
+unsafe impl<#[may_dangle] T> Drop for Vec<T> {
     fn drop(&mut self) {
         unsafe {
             if crate::mem::needs_drop::<T>() {

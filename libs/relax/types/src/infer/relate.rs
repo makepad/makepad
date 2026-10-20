@@ -78,7 +78,7 @@ fn relate_ty_args(r: &mut dyn TypeRelation<'_>, def: DefId, a_ty: TyId, b_ty: Ty
     } else {
         let indices = if let Some(adt) = tcx.adts.get(&def) { adt.generic_indices.clone() }
             else { tcx.fn_item_sig(r.prog(), def).expect("variance declaration").generic_indices.clone() };
-        let variances = tcx.variances_of(r.prog(), def).to_vec();
+        let variances = if matches!(tcx.tys.kind(a_ty), TyKind::FnDef(..)) { tcx.fn_def_variances(r.prog(), def) } else { tcx.variances_of(r.prog(), def).to_vec() };
         for i in 0..a.len() {
             let variance = variances[indices.types_consts[i] as usize];
             if variance == V::Bi && (r.has_unresolved_infer(a[i]) || r.has_unresolved_infer(b[i])) { bivariant_infer = true; }

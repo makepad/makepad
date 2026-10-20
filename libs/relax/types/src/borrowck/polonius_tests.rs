@@ -21,8 +21,37 @@ fn edge(i: &mut RegionInput, b: &Body, sup: usize, sub: usize, at: Option<Locati
     i.outlives.push(OutlivesConstraint { sup, sub, location: at.map(|p| LocationMap::new(b).point(p)),
         span: Default::default(), category: ConstraintCategory::Assignment, from_closure: false });
 }
+/// Dropck answers by dropped type: the kinds are the given region vids (the fixtures' normalized
+/// `dropck_outlives` results). Region constraints and overflows are not exercised here.
+struct DropOps<'a> { tcx: &'a Tcx, dropck: std::collections::HashMap<TyId, Vec<usize>> }
+impl crate::borrowck::type_check::liveness::LivenessOps for DropOps<'_> {
+    fn dropck_outlives(&mut self, ty: TyId, _: Span) -> crate::borrowck::type_check::liveness::DropckData {
+        let kinds = self.dropck.get(&ty).into_iter().flatten()
+            .map(|&v| crate::consts::GenericArg::Lifetime(self.tcx.tys.intern_region(RegionKind::ReVar(v as u32)))).collect();
+        crate::borrowck::type_check::liveness::DropckData { kinds, ..Default::default() }
+    }
+    fn free_regions_for_liveness(&mut self, value: crate::consts::GenericArg) -> Vec<crate::types::RegionId> {
+        let found = std::cell::RefCell::new(vec![]);
+        let ty = match value { crate::consts::GenericArg::Lifetime(r) => return vec![r], crate::consts::GenericArg::Type(t) => t, _ => return vec![] };
+        self.tcx.tys.map_regions(ty, &|r, _| { found.borrow_mut().push(r); r }, 0);
+        found.into_inner()
+    }
+    fn push_region_constraints(&mut self, _: &mut crate::borrowck::type_check::MirTypeckRegionConstraints, _: crate::borrowck::type_check::Locations, _: Span,
+        _: ConstraintCategory, _: &crate::next_solver::type_op::QueryRegionConstraints) { unreachable!("no dropck constraints in these fixtures") }
+}
 fn generate(tcx: &Tcx, b: &Body, moves: &MoveData, i: &mut RegionInput, drops: &[Vec<usize>]) {
-    crate::borrowck::type_check::liveness::generate(tcx, &test_prog(), b, moves, i, drops);
+    use crate::borrowck::type_check::{liveness, MirTypeckRegionConstraints};
+    let locations = LocationMap::new(b);
+    let mut ops = DropOps { tcx, dropck: b.local_decls.iter().zip(drops).map(|(d, v)| (d.ty, v.clone())).collect() };
+    let mut constraints = MirTypeckRegionConstraints::new(locations.num_points());
+    constraints.outlives_constraints = std::mem::take(&mut i.outlives);
+    constraints.liveness_constraints = std::mem::replace(&mut i.liveness, LivenessValues::new(0, locations.num_points()));
+    let mut polonius = std::mem::take(&mut i.polonius);
+    let mut overflows = vec![];
+    liveness::generate(liveness::LivenessCx { tcx, prog: &test_prog(), infcx: &mut ops, body: b, moves, universals: &i.relations.universal_regions,
+        locations: &locations, has_loans: true, constraints: &mut constraints, polonius: &mut polonius, overflows: &mut overflows });
+    assert!(overflows.is_empty());
+    i.outlives = constraints.outlives_constraints; i.liveness = constraints.liveness_constraints; i.polonius = polonius;
 }
 
 // #21906, from_the_rfc/get_default: returning a borrow on Some must not
@@ -236,7 +265,7 @@ fn regular_generic_args_are_invariant_and_drop_variance_uses_the_whole_type() {
     let tcx = Tcx::new();
     let b = body(&[tcx.tys.unit, tcx.tys.i32_, rty(&tcx, 1)], vec![block(vec![assign(2,
         Operand::Constant(Box::new(ConstOperand { span: Span::default(), user_ty: None,
-            const_: Const::Unevaluated { def: DefId(100), args: vec![crate::consts::GenericArg::Type(rty(&tcx, 1))], promoted: None } })))], TerminatorKind::Return)]);
+            const_: Const::Unevaluated { def: DefId(100), args: vec![crate::consts::GenericArg::Type(rty(&tcx, 1))], promoted: None, ty: tcx.tys.i32_ } })))], TerminatorKind::Return)]);
     let mut i = input(&b, &[vec![]]); let moves = gather(&tcx, &b);
     generate(&tcx, &b, &moves, &mut i, &[vec![], vec![], vec![]]);
     assert_eq!(i.polonius.live_region_variances[1], Some(D::Bidirectional));
