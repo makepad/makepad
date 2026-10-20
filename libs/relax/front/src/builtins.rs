@@ -772,7 +772,7 @@ fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32) 
         format!("{}/{}", crate::program::dir_of(path), rel)
     } else { rel.clone() };
     let path = crate::vfs::normalize_path(&path);
-    let data = crate::vfs::read(&path).map_err(|e| format!("cannot read `{}`: {} -- check the path (relative to this file)", path, e))?;
+    let data = crate::vfs::read(&path).map_err(|e| format!("couldn't read `{}`: {}", path, e))?;
     crate::sip::note_late_input(p.bctx.as_ref().map_or("", |c| c.krate.as_str()), crate::sip::LATE_FILE, &path, Some(&data));
     Ok((path, data))
 }
@@ -939,7 +939,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
         Builtin::IncludeStr | Builtin::IncludeBytes => {
             let (path, data) = include_input(p, lo, hi, call_lo)?;
             return if b == Builtin::IncludeStr {
-                let s = String::from_utf8(data).map_err(|_| format!("`{}` is not UTF-8 -- use include_bytes!", path))?;
+                let s = String::from_utf8(data).map_err(|_| format!("`{}` wasn't a utf-8 file", path))?;
                 Ok(one_str(&s))
             } else {
                 // the bytes travel as a payload behind a short marker literal (escaping a

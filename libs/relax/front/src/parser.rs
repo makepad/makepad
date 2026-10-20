@@ -832,6 +832,21 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// `#[doc = include_str!(..)]`: the value is a literal-producing macro call; it is expanded
+    /// (and so checked) like any other macro call (rustc expands macros in attribute values).
+    fn check_doc_value(&self, lo: usize, hi: usize) -> PResult<()> {
+        let kind = |i: usize| if i < hi { self.toks.at(i).kind } else { T::Eof };
+        if kind(lo + 1) != T::Eq || kind(lo + 2) != T::Ident || kind(lo + 3) != T::Not { return Ok(()); }
+        match self.tok_text(self.toks.at(lo + 2)) {
+            b"include_str" | b"include_bytes" | b"concat" | b"env" | b"stringify" => {}
+            _ => return Ok(()),
+        }
+        if let Err(m) = crate::builtins::eval_lit_range(self, lo + 2, hi) {
+            return Err(PErr { pos: self.toks.at(lo + 2).lo, msg: m });
+        }
+        Ok(())
+    }
+
     fn check_attr_shape(&self, toks: TokRange) -> PResult<()> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
         if hi <= lo || hi > self.toks.len() || self.toks.kind_at(lo) != T::Ident {
@@ -842,6 +857,7 @@ impl<'a> Parser<'a> {
             b"cfg" => 0,
             b"cfg_attr" => 1,
             b"derive" => 2,
+            b"doc" => return self.check_doc_value(lo, hi),
             _ => return Ok(()),
         };
         let bad = |this: &Self, at: usize, what: &str| -> PResult<()> {
