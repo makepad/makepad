@@ -420,6 +420,9 @@ pub struct Unit {
     /// (`Box::pin(f(n - 1)).await` builds the callee future, of the same type, before the frame
     /// is known): the lowering is done again with the frame in place (coro_frame)
     pub coro_selfref: relax_session::sync::Mutex<Vec<TyId>>,
+    /// slots of coroutine poll functions being lowered again (coro_frame): they skip `coro_rir`,
+    /// which holds the first lowering made with the layout so far
+    pub coro_relower: relax_session::sync::Mutex<Vec<u32>>,
     /// drop_may_unwind answers
     pub unwind_drop_cache: crate::conc::MemoMap<TyId, bool>,
     /// types whose drop_may_unwind / is_unpin answer is being computed, per thread
@@ -2460,6 +2463,7 @@ impl Unit {
             coro_busy: Default::default(),
             spec_cached: Default::default(),
             coro_selfref: Default::default(),
+            coro_relower: Default::default(),
             unwind_drop_cache: Default::default(),
             cycle_inprog: Default::default(),
             vtables: crate::conc::MemoMap::new_kept(16),
@@ -3244,7 +3248,9 @@ impl Unit {
         };
         if again && r.is_ok() && unsafe { (&*up).tcx.coro_frames.get(&ct).is_some() } {
             unsafe { (&mut *up).coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).push(ct) };
+            unsafe { (&*up).coro_relower.lock().unwrap_or_else(|e| e.into_inner()).push(id) };
             r = unsafe { build_rir_lowered(up, id) };
+            unsafe { (&*up).coro_relower.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != id) };
             unsafe { (&*up).coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != ct) };
         }
         let u = unsafe { &mut *up };
@@ -8564,8 +8570,10 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<crate::rir::Fun
     let _why = why_function(&*up, id, "lower-fn");
     let _cost_lower = crate::fncost::phase(3);
     let _mem = crate::memstat::tag(crate::memstat::Tag::Lower);
-    if let Some(f) = (&*up).coro_rir.get(&id) {
-        return Ok(f.clone());
+    if !(&*up).coro_relower.lock().unwrap_or_else(|e| e.into_inner()).contains(&id) {
+        if let Some(f) = (&*up).coro_rir.get(&id) {
+            return Ok(f.clone());
+        }
     }
     let _warm = crate::warm::Scope::slot(id, "lowering");
     let key = (&*up).fns[id as usize].key.clone();

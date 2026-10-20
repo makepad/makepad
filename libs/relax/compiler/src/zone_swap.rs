@@ -607,6 +607,7 @@ unsafe fn commit(up: *mut Unit, f: Fresh) -> (usize, usize, (usize, usize)) {
     put(&mut u.coro_rir, Default::default());
     put(&mut u.coro_busy, Default::default());
     put(&mut u.coro_selfref, Default::default());
+    put(&mut u.coro_relower, Default::default());
     put(&mut u.spec_cached, Default::default());
     put(&mut u.unwind_drop_cache, Default::default());
     put(&mut u.cycle_inprog, Default::default());

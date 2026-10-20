@@ -1,5 +1,3 @@
-// KNOWN FAILING (O1 tier, MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0): a recursive boxed async fn; panics "`async fn` resumed after
-// completion". Found by diff_fast 2026-10-20. Move to ../diff/ when fixed.
 // diff_fast corpus program: `#[test] run` calls work() in rounds (the O3 tier installs between rounds); every
 // result line is `D ...`. rustc --test -O and `makepad test` (baseline and O3) must print identical D lines.
 macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
