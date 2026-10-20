@@ -200,6 +200,9 @@ pub struct OpaqueDecl {
 
 pub struct Tcx {
     pub dcx: crate::infer::diagnostics::DiagCtxt,
+    /// `adt_dtorck_constraint` per (ADT, recursion limit): a query in rustc; uncached, a chain of
+    /// ADTs that each hold the previous one several times is exponential
+    pub(crate) dtorck_constraints: std::sync::Mutex<crate::fxhash::HashMap<(DefId, usize), std::sync::Arc<crate::next_solver::dropck_outlives::DropckConstraint>>>,
     pub tys: Types,
     envs: env::Envs,
     /// Immutable entries; each declaration is lowered once by its first reader.
@@ -386,6 +389,7 @@ impl Tcx {
         Tcx {
             tys,
             dcx: Default::default(),
+            dtorck_constraints: Default::default(),
             envs: env::Envs::new(),
             sigs: Default::default(),
             ctor_sigs: Default::default(),

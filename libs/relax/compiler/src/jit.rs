@@ -13680,7 +13680,9 @@ fn bump(next: &AtomicU64, size: u64, align: u64, end: u64, full: &str) -> u64 {
     loop {
         let at = (cur + a - 1) / a * a;
         if at + size > end {
-            panic!("{}", full);
+            // (a constant that asks for more memory than the compiler has is a constant-evaluation
+            // error, not a compiler bug: rustc's `MemoryExhausted`)
+            std::panic::resume_unwind(Box::new(crate::infer::diagnostics::FatalError(format!("E0080: tried to allocate more memory than available to compiler ({full})"))));
         }
         match next.compare_exchange_weak(cur, at + size, Ordering::AcqRel, Ordering::Relaxed) {
             Ok(_) => {

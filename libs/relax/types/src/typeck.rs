@@ -7295,6 +7295,7 @@ impl<'a> Fcx<'a> {
                 NextSolverError::Overflow(o) => ("E0275", o),
             };
             let predicate = &obligation.goal.predicate;
+            if crate::wfcheck::obligations::predicate_mentions_error(&self.infcx, predicate) { continue; }
             // rustc's wording (rustc_trait_selection report_selection_error and core's
             // #[rustc_on_unimplemented] messages) for an unmet trait bound
             if let PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) = &predicate.kind {

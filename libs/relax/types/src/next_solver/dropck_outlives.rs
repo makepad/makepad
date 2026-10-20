@@ -74,6 +74,13 @@ fn type_param_decl_index(tcx: &Tcx, prog: &Program, imp: DefId, compact: u32) ->
 /// rustc_traits/src/dropck_outlives.rs:34 adt_dtorck_constraint, over the ADT's identity
 /// parameters.
 pub fn adt_dtorck_constraint(tcx: &Tcx, prog: &Program, def: DefId, limit: usize) -> DropckConstraint {
+    if let Some(done) = tcx.dtorck_constraints.lock().unwrap().get(&(def, limit)) { return (**done).clone(); }
+    let result = adt_dtorck_constraint_uncached(tcx, prog, def, limit);
+    tcx.dtorck_constraints.lock().unwrap().insert((def, limit), std::sync::Arc::new(result.clone()));
+    result
+}
+
+fn adt_dtorck_constraint_uncached(tcx: &Tcx, prog: &Program, def: DefId, limit: usize) -> DropckConstraint {
     let adt = &tcx.adts[&def];
     let identity = tcx.generic_indices_of(prog, def).identity_args(&tcx.tys);
     if adt.is_phantom_data() {
@@ -81,6 +88,11 @@ pub fn adt_dtorck_constraint(tcx: &Tcx, prog: &Program, def: DefId, limit: usize
         return DropckConstraint { outlives: vec![], dtorck_types: vec![t], overflows: vec![] };
     }
     let mut result = DropckConstraint::default();
+    // (rustc's Box owns its `T` through `Unique<T>`'s `PhantomData<T>` marker; Relax's Box holds
+    // only a `NonNull<T>`, so the owned `T` is the Box's dtorck type itself)
+    if adt.is_box() {
+        if let Some(GenericArg::Type(t)) = identity.iter().copied().find(|a| matches!(a, GenericArg::Type(_))) { result.dtorck_types.push(t); }
+    }
     for variant in &adt.variants {
         for field in &variant.fields { dtorck_constraint_for_ty_inner(tcx, prog, limit, 0, field.ty, &mut result); }
     }

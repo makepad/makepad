@@ -270,6 +270,14 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             v.errors.push(diagnostics::capture(prog, typeck.def, &d));
             let _ = &borrows;
         }
+        // E0320: the drop-check rules of a local's type overflowed the recursion limit
+        // (DropckOutlivesResult::report_overflows)
+        for o in std::mem::take(&mut tc.summary.dropck_overflows) {
+            let show = |t| crate::typeck::ty_to_string(false, prog, tcx, t);
+            let mut d = diagnostics::Diag::new("E0320", o.span, format!("overflow while adding drop-check rules for `{}`", show(o.ty)));
+            d.note(format!("overflowed on `{}`", show(o.overflow_ty)));
+            v.errors.push(diagnostics::capture(prog, typeck.def, &d));
+        }
     }
 
     // Field views of the root (S15): the MIR source of callees.
