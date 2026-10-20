@@ -8,7 +8,7 @@ fn reference(tcx: &Tcx, r: RegionId, t: TyId) -> TyId { tcx.tys.intern(TyKind::R
 fn bounds(tcx: &Tcx, raw: &[TyId], ps: &[P]) -> ImpliedBounds { ImpliedBounds::create(tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),ps,raw,&[],vec![]) }
 fn signature(_tcx: &Tcx, ret: TyId) -> FnSigT {
     FnSigT { region_contract:Default::default(),generic_indices:Default::default(),bound_regions:0,
-        params:vec![],ret,self_kind:0,n_generics:0,n_parent_generics:0,is_const:false,rustc_promotable:false,
+        params:vec![],ret,self_kind:0,n_generics:0,n_parent_generics:0,is_const:false,rustc_promotable:false,rustc_intrinsic:false,
         header:FnHeader::RUST,track_caller:false,target_features:vec![],safe_target_features:false }
 }
 #[test]

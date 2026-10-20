@@ -824,6 +824,21 @@ impl<'a> Visitor<'a> for Late<'a> {
             }
             _ => {}
         }
+        // check_match: a by-value binding named like a unit variant of the matched enum (the lint level
+        // is that of the enclosing arm, statement, .. attributes)
+        if let Pat::Ident { name, by_ref: false, mutbl: false, sub: None } = *self.ast.pat(p) {
+            if let Some(&l) = self.body.pat_local.get(&p.0) {
+                let mut t = self.body.locals[l as usize].ty;
+                while let TyKind::Ref(_, i, _) = self.kind(t) { t = i; }
+                if let TyKind::Adt(ed, _, _) = self.kind(t) {
+                    let text = self.prog.files[self.body.file as usize].text(name);
+                    if self.tcx.adts.get(&ed).is_some_and(|a| a.is_enum && a.variants.iter().any(|v| v.shape == 0 && self.prog.syms.str(v.name) == text)) {
+                        let en = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
+                        self.emit(&lint::BINDINGS_WITH_VARIANT_NAME, name.lo, &format!("E0170: pattern binding `{}` is named the same as one of the variants of the type `{}`", text, en));
+                    }
+                }
+            }
+        }
         // rustc NonShorthandFieldPatterns: `field: field` (any binding mode) can be `field`
         if let Pat::Struct(_, fs, _) = *self.ast.pat(p) {
             let pf = &self.prog.files[self.body.file as usize];

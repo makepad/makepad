@@ -528,6 +528,8 @@ pub struct Fcx<'a> {
     /// `[x; N]` expressions whose `Copy` check waits for the end of the body (rustc
     /// deferred_repeat_expr_checks): (element, element type, the array type)
     deferred_repeats: Vec<(ExprId, TyId, TyId)>,
+    /// goals drained as waiting for this body's coroutines (`TypeckResults::coroutine_stalled_predicates`)
+    stalled_coroutine_goals: Vec<crate::next_solver::fulfill::PredicateObligation>,
     /// the probe picked a by-value method of `&U` for receiver U: autoref it
     forced_autoref: Option<u8>,
     /// the expected type of the method call being checked (check_method's expectation)
@@ -664,6 +666,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
             n_parent_generics: 0,
             is_const: false,
             rustc_promotable: false,
+            rustc_intrinsic: false,
             header: FnHeader::RUST,
             track_caller: false,
             target_features: Vec::new(),
@@ -787,6 +790,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         value_path_enum_lifetimes: Vec::new(),
         value_path_parent_regions: Vec::new(),
         deferred_repeats: Vec::new(),
+        stalled_coroutine_goals: Vec::new(),
         forced_autoref: None,
         method_expected: None,
     };
@@ -844,6 +848,13 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
             fcx.b.ret = ct;
             fcx.ret_stack.push(ct);
             fcx.in_const = true;
+            // rustc_builtin_macros global_allocator: the static's methods are called as `GlobalAlloc`'s
+            if d.kind == DefKind::Static && tcx.validates(prog, file) && crate::lang_items::has_attr(prog, file, ast.list(ast.item(d.item).attrs), "global_allocator") {
+                if let Some(alloc) = fcx.lang_item(&["alloc", "GlobalAlloc"]) {
+                    let goal = fcx.trait_goal(alloc, ct, &[]);
+                    fcx.register_goal(goal, ast.expr(*init).lo);
+                }
+            }
             let t = fcx.check_expr(*init, Some(ct));
             fcx.coerce_or_unify(t, ct, Some(*init), ast.expr(*init).lo);
             fcx.finish();
@@ -1218,7 +1229,7 @@ impl<'a> Fcx<'a> {
             TyKind::FnDef(d, args, regions) => {
                 let sig = self.tcx.fn_item_sig(self.prog, d).cloned()?;
                 // coercion.rs:1259-1264: intrinsics have no addressable body.
-                if sig.header.abi == Abi::RelaxIntrinsic { return None; }
+                if sig.header.abi == Abi::RelaxIntrinsic || sig.rustc_intrinsic { return None; }
                 // coercion.rs:1270-1282 sig_for_fn_def_coercion: a safe #[target_feature] fn is a safe
                 // signature where the body has its features
                 let mut header = sig.header;
@@ -2003,6 +2014,7 @@ impl<'a> Fcx<'a> {
         self.b.min_captures = captures;
         crate::upvar::coroutine_closure_views(self.prog, self.tcx, &mut self.b);
         crate::upvar::dump_captures(self.prog, &self.b);
+        self.drain_stalled_coroutine_obligations();
         self.retry_goals(true);
         self.resolve_type_vars_in_body();
         for i in 0..self.b.expr_ty.len() {
@@ -2021,6 +2033,7 @@ impl<'a> Fcx<'a> {
                 _ => {}
             }
         }
+        self.record_stalled_coroutine_goals();
         self.detect_opaque_types_added_during_writeback();
     }
 
@@ -2215,6 +2228,18 @@ impl<'a> Fcx<'a> {
                     let lo = ast.list(*l).iter().find_map(|c| if let Pat::Ident { name, .. } = ast.pat(*c) { Some(name.lo) } else { None }).unwrap_or(0);
                     self.err(lo, format!("`..` can only be used once per {what} pattern"));
                 }
+                // ast_lowering lower_pat_tuple: `binding @ ..` is only allowed in a slice pattern
+                if report && !matches!(ast.pat(p), Pat::Slice(_)) {
+                    let what = if matches!(ast.pat(p), Pat::Tuple(_)) { "tuple" } else { "tuple struct" };
+                    for &c in ast.list(*l) {
+                        if let Pat::Ident { name, sub: Some(s), .. } = ast.pat(c) {
+                            if matches!(ast.pat(*s), Pat::Rest) {
+                                let shown = self.prog.syms.str(self.sym(*name)).to_string();
+                                self.err(name.lo, format!("`{shown} @` is not allowed in a {what}"));
+                            }
+                        }
+                    }
+                }
                 for &c in ast.list(*l) {
                     let more = self.pat_bindings(c, report);
                     add(self, &mut out, more);
@@ -2349,18 +2374,6 @@ impl<'a> Fcx<'a> {
                         };
                         if let Some(what) = what {
                             self.err(name.lo, format!("E0530: match bindings cannot shadow {}", what));
-                        }
-                    }
-                }
-                // check_match: a by-value binding named like a unit variant of the matched enum
-                if sub.is_none() && !*by_ref && !*mutbl && self.tcx.validates(self.prog, self.file) {
-                    let mut t = self.shallow(expected);
-                    while let TyKind::Ref(_, i, _) = self.tcx.tys.kind(t).clone() { t = self.shallow(i); }
-                    if let TyKind::Adt(ed, _, _) = self.tcx.tys.kind(t).clone() {
-                        if self.tcx.adts.get(&ed).is_some_and(|a| a.is_enum && a.variants.iter().any(|v| v.name == s && v.shape == 0)) {
-                            let en = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
-                            crate::lint::emit_in(self.prog, self.b.def, &self.arm_attrs, &crate::lint::BINDINGS_WITH_VARIANT_NAME, self.file, name.lo,
-                                &format!("E0170: pattern binding `{}` is named the same as one of the variants of the type `{}`", self.text(*name), en));
                         }
                     }
                 }
@@ -6642,6 +6655,19 @@ impl<'a> Fcx<'a> {
         self.coroutine_type(e.0, b, force_args, is_move, force_move_if_consumes, out, points)
     }
 
+    /// rustc's `defining_opaque_types_and_generators` holds the body's coroutines: goals about them wait for
+    /// the body's MIR (`try_stall_coroutine`). Relax's coroutines have no definitions of their own, so the
+    /// body's own definition stands for them, added when the body first has one.
+    fn stall_coroutines_of_body(&mut self) {
+        let crate::tcx::TypingMode::Typeck { defining_opaque_types_and_generators: defining } = self.infcx.typing_mode.get() else { return };
+        if self.tcx.defining_opaques(defining).contains(&self.b.def) { return; }
+        let mut owners = self.tcx.defining_opaques(defining).to_vec();
+        owners.push(self.b.def);
+        let mode = crate::tcx::TypingMode::Typeck { defining_opaque_types_and_generators: self.tcx.intern_defining_opaques(owners) };
+        self.infcx.typing_mode.set(mode);
+        self.cx.typing_env.mode = mode;
+    }
+
     /// Leave the environment tuple open until closure_analyze has processed the body.
     fn coroutine_type(&mut self, ce: u32, block: BlockId, force_args: Vec<u32>, is_move: bool, force_move_if_consumes: bool, out: TyId, points: u32) -> TyId {
         self.b.closures.push(ce);
@@ -6652,6 +6678,7 @@ impl<'a> Fcx<'a> {
             is_move, force_args, force_move_if_consumes, points: Some(points),
         });
         self.tcx.coroutines.insert((self.file, ce), ());
+        self.stall_coroutines_of_body();
         let sig = self.tcx.tys.intern(TyKind::FnPtr(crate::types::List::EMPTY, out, FnHeader::RUST, 0));
         let owner = self.tcx.tys.intern(TyKind::FnDef(self.b.def, self.tcx.tys.mk_list(&self.b.args), self.env.regions.identity_args(&self.tcx.tys)));
         self.tcx.tys.intern(TyKind::Closure(self.file, ce, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: up }))
@@ -7318,6 +7345,30 @@ impl<'a> Fcx<'a> {
         result
     }
 
+    /// rustc `drain_stalled_coroutine_obligations`: the goals waiting for this body's coroutines are not
+    /// ambiguities; they move to the body's `coroutine_stalled_predicates`, proven after its MIR is built.
+    fn drain_stalled_coroutine_obligations(&mut self) {
+        self.retry_goals(false);
+        let stalled = self.fulfillment_cx.drain_stalled_obligations_for_coroutines(&self.infcx);
+        self.stalled_coroutine_goals.extend(stalled);
+    }
+
+    /// The drained goals, fully resolved and with their regions erased (typeck writeback), recorded for the
+    /// borrow checker of this body.
+    fn record_stalled_coroutine_goals(&mut self) {
+        if self.stalled_coroutine_goals.is_empty() { return; }
+        // (only a checked crate's body is proven later: `makepad run` has no use for the verdict)
+        if !self.tcx.validates(self.prog, self.file) { self.stalled_coroutine_goals.clear(); return; }
+        let mut resolver = crate::infer::resolve::DeepVariableResolver::new(&self.infcx);
+        let mut goals = Vec::new();
+        for obligation in std::mem::take(&mut self.stalled_coroutine_goals) {
+            let predicate = crate::next_solver::fold::fold_predicate(&self.tcx.tys, &obligation.goal.predicate, &mut resolver);
+            let predicate = crate::next_solver::fold::fold_predicate(&self.tcx.tys, &predicate, &mut EraseFreeRegions);
+            goals.push((Goal { param_env: obligation.goal.param_env, predicate }, obligation.cause.span));
+        }
+        self.tcx.coroutine_stalled_predicates.lock().unwrap_or_else(|e| e.into_inner()).insert(self.b.def, goals);
+    }
+
     fn register_goal(&mut self, goal: Goal, lo: u32) {
         self.fulfillment_cx.register_predicate_obligation(&self.infcx, crate::next_solver::fulfill::PredicateObligation { goal, recursion_depth: 0, cause: crate::next_solver::fulfill::ObligationCause { span: lo, body_id: self.b.def } });
     }
@@ -7585,6 +7636,15 @@ impl<'a> Fcx<'a> {
 /// (disambiguates "expected `LiveId`, found `LiveId`").
 /// rustc's wording (rustc_trait_selection report_selection_error and core's
 /// #[rustc_on_unimplemented] messages) for an unmet or ambiguous trait bound.
+/// Replaces every region not bound inside the folded value by the erased region.
+struct EraseFreeRegions;
+impl crate::types::fold::TypeFolder for EraseFreeRegions {
+    fn fold_ty(&mut self, tys: &crate::types::Types, ty: TyId, depth: u32) -> TyId { crate::types::fold::super_fold_ty(tys, ty, self, depth) }
+    fn fold_region(&mut self, tys: &crate::types::Types, r: crate::types::RegionId, depth: u32) -> crate::types::RegionId {
+        if matches!(tys.region_kind(r), crate::types::RegionKind::ReBound(db, _) if db < depth) { r } else { crate::types::RegionId::ERASED }
+    }
+}
+
 pub(crate) fn trait_error_message(prog: &Program, tcx: &Tcx, code: &str, p: &crate::next_solver::TraitClause, ty_str: &mut dyn FnMut(TyId) -> String) -> String {
     let mut args = Vec::new();
     for arg in &p.trait_ref.args {

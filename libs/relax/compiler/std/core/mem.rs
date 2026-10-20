@@ -56,6 +56,7 @@ pub unsafe fn uninitialized<T>() -> T {
     MaybeUninit::<T>::uninit().assume_init()
 }
 #[rustc_diagnostic_item = "transmute"]
+#[rustc_intrinsic]
 pub const unsafe fn transmute<T, U>(e: T) -> U {
     im::transmute::<T, U>(e)
 }

@@ -150,6 +150,10 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let name = String::from_utf8_lossy(&name).into_owned();
+        // rustc_resolve: `#[no_implicit_prelude]` (edition 2018 and later) takes the std prelude's macros away
+        if self.no_prelude_hides(path, &name) {
+            return Err(PErr { pos: nlo, msg: format!("cannot find macro `{name}` in this scope") });
+        }
         let save = self.pos;
         self.pos = toks.lo as usize;
         let r = self.builtin_gen(&name, toks.hi as usize, lo);
@@ -617,6 +621,26 @@ impl<'a> Parser<'a> {
         self.gen_pieces(g, out, srcs, flo)
     }
 
+    /// Whether the parsed expression `e` has an `.await` or a `yield` in it (a suspension point).
+    fn expr_may_yield(&self, e: ExprId) -> bool {
+        let ex = self.ast.expr(e);
+        let (lo, hi) = (ex.lo, ex.hi);
+        let n = self.toks.len();
+        let (mut a, mut b) = (0, n);
+        while a < b {
+            let mid = (a + b) / 2;
+            if self.toks.at(mid).lo < lo { a = mid + 1 } else { b = mid }
+        }
+        let mut i = a;
+        while i < n {
+            let t = self.toks.at(i);
+            if t.lo >= hi { break; }
+            if matches!(t.kind, T::KwAwait | T::KwYield) { return true; }
+            i += 1;
+        }
+        false
+    }
+
     /// Emits `Arguments::new_const / new_v1 / new_v1_formatted` for resolved pieces
     /// (`Ph` indices are slots into `srcs`).
     fn gen_pieces(&mut self, g: &mut Gen, pieces: Vec<Piece>, srcs: Vec<Src>, _lo: u32) -> PResult<()> {
@@ -659,6 +683,11 @@ impl<'a> Parser<'a> {
         // each slot evaluated once, in slot order: inline when the placeholders use every slot
         // exactly once in order and nothing else refers to them; otherwise bind them first
         let mut inline = !formatted && phs.len() == srcs.len();
+        // rustc ast_lowering format.rs: the arguments of the later slots are evaluated before any `Argument` is
+        // made (`super let args = (&arg0, &arg1)`), so none of them is held across a suspension point in them
+        if inline && srcs.iter().skip(1).any(|s| matches!(s, Src::Expr(e) if self.expr_may_yield(*e))) {
+            inline = false;
+        }
         if inline {
             for (k, (i, _)) in phs.iter().enumerate() {
                 if *i != k {
@@ -953,6 +982,10 @@ fn parse_format(s: &str) -> Result<Vec<Piece>, String> {
                 let mut spec = default_spec("new_display");
                 if j < c.len() && c[j] == ':' {
                     let mut k = j + 1;
+                    // rustc_parse_format `format`: a character followed by an alignment is the fill, even `}`
+                    if matches!(c.get(k + 1), Some('<' | '>' | '^')) {
+                        k += 2;
+                    }
                     while k < c.len() && c[k] != '}' {
                         k += 1;
                     }

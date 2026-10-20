@@ -174,7 +174,7 @@ pub struct TokenLexError {
 pub fn lex_with(src: &[u8], opts: &LexOptions, out: &mut Vec<Tok>) -> Result<(), TokenLexError> {
     if opts.mode == Mode::Rust {
         let result = if opts.trivia {
-            scan::<false, true, true, LexError>(src, "", opts.edition, out)
+            scan::<false, true, true, LexError>(src, "", opts.edition, out, true)
         } else {
             lex(src, opts.edition, out)
         };
@@ -199,9 +199,9 @@ pub fn lex_with(src: &[u8], opts: &LexOptions, out: &mut Vec<Tok>) -> Result<(),
     // shader_ast currently has identical Declarative and Gpu lexical rules,
     // including durations in both modes. The parsers impose further restrictions.
     if opts.trivia {
-        scan::<true, true, true, TokenLexError>(src, source, opts.edition, out)
+        scan::<true, true, true, TokenLexError>(src, source, opts.edition, out, true)
     } else {
-        scan::<true, false, true, TokenLexError>(src, source, opts.edition, out)
+        scan::<true, false, true, TokenLexError>(src, source, opts.edition, out, true)
     }
 }
 
@@ -251,7 +251,7 @@ pub fn lex_deferred(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), 
         hi: (e.valid_up_to() + e.error_len().unwrap_or(src.len() - e.valid_up_to())) as u32,
         msg: "invalid source: expected UTF-8".into(),
     })?;
-    scan::<true, true, false, TokenLexError>(src, source, edition, out)
+    scan::<true, true, false, TokenLexError>(src, source, edition, out, true)
 }
 
 /// Whether a complete colour atom has a supported width and only hex digits.
@@ -528,11 +528,17 @@ pub fn set_validation(on: bool) {
 }
 
 pub fn lex(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {
-    scan::<false, false, true, LexError>(src, "", edition, out)
+    scan::<false, false, true, LexError>(src, "", edition, out, true)
+}
+
+/// `lex` for a file `include!`d as an expression or statement: rustc strips a shebang only from the files it
+/// parses as modules (`StripTokens::Nothing`), so a leading `#!` stays tokens there.
+pub fn lex_keep_shebang(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {
+    scan::<false, false, true, LexError>(src, "", edition, out, false)
 }
 
 fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
-    src: &[u8], source: &str, edition: u16, out: &mut Vec<Tok>,
+    src: &[u8], source: &str, edition: u16, out: &mut Vec<Tok>, strip_shebang: bool,
 ) -> Result<(), E> {
     let n = src.len();
     let mut i = 0usize;
@@ -542,7 +548,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
     }
     // shebang (rustc_lexer::strip_shebang: `#!` unless the next token past whitespace and plain
     // comments is `[`)
-    if (!RX || i == 0) && n >= i + 2 && src[i] == b'#' && src[i + 1] == b'!' {
+    if strip_shebang && (!RX || i == 0) && n >= i + 2 && src[i] == b'#' && src[i + 1] == b'!' {
         let mut j = i + 2;
         while !RX && j < n && (src[j] == b' ' || src[j] == b'\t') {
             j += 1;

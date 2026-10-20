@@ -50,6 +50,18 @@ impl FulfillmentCtxt {
         }
         errors
     }
+    /// rustc `drain_stalled_obligations_for_coroutines`: the pending goals that wait for a coroutine of the body
+    /// being type-checked (its witness is known once the body's MIR is built).
+    pub fn drain_stalled_obligations_for_coroutines(&mut self, infcx: &InferCtxt<'_>) -> Vec<PredicateObligation> {
+        if !matches!(infcx.typing_mode.get(), crate::tcx::TypingMode::Typeck { .. }) { return Vec::new(); }
+        let mut stalled = Vec::new();
+        self.obligations.pending.retain(|(obligation, stalled_on)| {
+            let drain = stalled_on.as_ref().is_some_and(|s| matches!(s.stalled_maybe_info.stalled_on_coroutines, crate::next_solver::StalledOnCoroutines::Yes));
+            if drain { stalled.push(obligation.clone()); }
+            !drain
+        });
+        stalled
+    }
     pub fn evaluate_obligations_error_on_ambiguity(&mut self, infcx: &InferCtxt<'_>, prog: &Program) -> Vec<NextSolverError> {
         let mut errors = self.try_evaluate_obligations(infcx, prog);
         // fulfillment_error_for_stalled: an ambiguous goal that overflows when evaluated again is an overflow

@@ -81,7 +81,12 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 match self.tcx.evaluate_trait_modulo_regions(self.cx.prog, self.cx, self.body.def, td, t, &[]) {
                     r if r.must_apply_modulo_regions() => Some(true),
                     crate::next_solver::evaluate_obligation::EvaluationResult::EvaluatedToErr => Some(false),
-                    _ => None,
+                    // (rustc type_is_copy_modulo_regions: what is not known to be Copy is not; here the type must not
+                    // be waiting for inference -- a goal waiting for a coroutine of the body never ends in it)
+                    _ => {
+                        let resolved = self.cx.infcx.map_or(t, |infcx| infcx.deeply_resolve_ignoring_regions(t));
+                        if self.tcx.tys.has_infer(resolved) { None } else { Some(false) }
+                    }
                 }
             }
             // structural_traits.rs instantiate_constituent_tys_for_copy_clone_trait: a closure

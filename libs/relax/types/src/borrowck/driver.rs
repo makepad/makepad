@@ -116,6 +116,108 @@ pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::B
     v
 }
 
+/// `mir_coroutine_witnesses` for each coroutine among `built` (the MIR of the coroutines of one typeck root,
+/// analysis MIR after promotion): the regions-erased types of the locals live across a suspension point
+/// (`coroutine_hidden_types`, StaticRef and fake-borrow locals ignored for traits), and whether any needs drop.
+fn publish_coroutine_witnesses(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck: &typeck::Body, built: &[(CheckedBody, Box<Body>)]) {
+    for (owner, mir) in built {
+        let (OwnerKind::Closure(e), true) = (owner.kind, mir.coroutine.is_some()) else { continue };
+        let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let movable = mir.coroutine.as_ref().is_some_and(|c| c.kind.movability() == crate::mir::Movability::Movable);
+            let saved = crate::mir::transform::coroutine::locals_live_across_suspend_points(mir, movable);
+            let mut tys: Vec<TyId> = Vec::new();
+            for local in saved.iter() {
+                let decl = &mir.local_decls[local];
+                if matches!(decl.local_info, crate::mir::LocalInfo::StaticRef { is_thread_local: false, .. } | crate::mir::LocalInfo::FakeBorrow) { continue; }
+                let ty = tcx.tys.erase_regions(decl.ty);
+                if !tys.contains(&ty) { tys.push(ty); }
+            }
+            let needs_drop = saved.iter().any(|local| tcx.needs_drop(prog, env, mir.local_decls[local].ty));
+            (tys, needs_drop)
+        }));
+        match witness {
+            Ok((tys, needs_drop)) => {
+                tcx.coroutine_witness_needs_drop.insert((typeck.file, e.0), needs_drop);
+                let _k = crate::zone_alloc::kept();
+                tcx.coroutine_hidden_types.insert((typeck.file, e.0), std::sync::Arc::new(tys));
+            }
+            Err(p) => { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } }
+        }
+    }
+}
+
+/// rustc `check_coroutine_obligations`: the goals the root's typeck stalled on its coroutines are proven now
+/// that the witnesses are known (mode `borrowck`, regions ignored); what does not hold is a normal error.
+fn check_coroutine_obligations(prog: &Program, tcx: &Tcx, env: TypingEnv, typeck: &typeck::Body, v: &mut Verdict) {
+    use crate::next_solver::fulfill::{NextSolverError, ObligationCause, ObligationCtxt};
+    let goals = tcx.coroutine_stalled_predicates.lock().unwrap_or_else(|e| e.into_inner()).remove(&typeck.def);
+    let Some(goals) = goals else { return };
+    let infcx = crate::infer::InferCtxt::for_item(tcx, prog, env.mode, typeck.def);
+    let mut ocx = ObligationCtxt::new(&infcx, prog);
+    for (goal, span) in goals {
+        ocx.cause = ObligationCause { span, body_id: typeck.def };
+        ocx.register_obligation(goal);
+    }
+    for error in ocx.engine.evaluate_obligations_error_on_ambiguity(&infcx, prog) {
+        let (code, o) = match error {
+            NextSolverError::TrueError(o) => ("E0277", o),
+            NextSolverError::Ambiguity(o) => ("E0283", o),
+            NextSolverError::Overflow(o) => ("E0275", o),
+        };
+        if crate::wfcheck::obligations::predicate_mentions_error(&infcx, &o.goal.predicate) { continue; }
+        let message = match &o.goal.predicate.kind {
+            crate::next_solver::PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) => {
+                let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
+                // rustc_on_unimplemented on `Send`/`Sync` for a future: "future cannot be sent between threads safely"
+                if message.ends_with("cannot be sent between threads safely") && matches!(p.trait_ref.args.first(), Some(crate::consts::GenericArg::Type(t)) if tcx.is_coroutine(*t)) {
+                    "future cannot be sent between threads safely".to_string()
+                } else { message }
+            }
+            predicate => crate::wfcheck::obligations::fulfillment_message(&infcx, prog, code, &o.goal).unwrap_or_else(|| format!("unsatisfied obligation {predicate:?}")),
+        };
+        let span = Span { file: typeck.file, lo: o.cause.span, hi: o.cause.span };
+        let mut d = diagnostics::Diag::new(code, span, message);
+        d.labels.push((span, String::new(), true));
+        v.errors.push(diagnostics::capture(prog, typeck.def, &d));
+    }
+}
+
+thread_local! { static WITNESS_IN_FLIGHT: std::cell::RefCell<Vec<DefId>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// The witnesses of the coroutines of `owner`'s body, made on demand (rustc's `mir_coroutine_witnesses`
+/// query): the owner's coroutine bodies are built and promoted without being borrow-checked. A body that is
+/// already being built further out (a cycle through its own coroutine) publishes nothing.
+pub fn ensure_coroutine_witnesses(prog: &Program, tcx: &Tcx, owner: DefId) {
+    if WITNESS_IN_FLIGHT.with(|f| f.borrow().contains(&owner)) { return; }
+    WITNESS_IN_FLIGHT.with(|f| f.borrow_mut().push(owner));
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let typeck = tcx.typeck(prog, owner);
+        if !typeck.errors.is_empty() { return; }
+        let env = TypingEnv {
+            limit: crate::tcx::RecursionLimit::for_item(prog, typeck.def),
+            param_env: typeck.param_env.unwrap_or_default(),
+            mode: crate::tcx::TypingMode::borrowck(tcx, prog, typeck.def),
+        };
+        let state = crate::tcx::EvalState::new();
+        let eval = EvalCx::new(prog, tcx, env, &state);
+        let Ok(root) = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, &typeck) else { return };
+        let provider = BuildProvider { prog, tcx, memo: Default::default() };
+        let mut built: Vec<(CheckedBody, Box<Body>)> = Vec::new();
+        for c in closures_inner_first(prog, tcx, &typeck) {
+            if !tcx.coroutines.contains(&(typeck.file, c)) { continue; }
+            let owner = CheckedBody { owner: typeck.def, kind: OwnerKind::Closure(crate::ast::ExprId(c)) };
+            let Ok(Ok(mir)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_mir(&root, owner))) else { return };
+            built.push((owner, Box::new(mir)));
+        }
+        for (_, mir) in &mut built {
+            if mir_promoted(prog, tcx, env, &provider, &mut **mir).is_err() { return; }
+        }
+        publish_coroutine_witnesses(prog, tcx, env, &typeck, &built);
+    }));
+    WITNESS_IN_FLIGHT.with(|f| { f.borrow_mut().pop(); });
+    if let Err(p) = done { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } }
+}
+
 /// What the bodies of one typeck root share.
 struct Group<'a, 'b> {
     cx: &'a EvalCx<'a>,
@@ -183,15 +285,9 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     let depth = |c: u32| { let (mut d, mut at) = (1usize, c); while let Some(Some(p)) = creator.get(&at) { d += 1; at = *p; if d > creator.len() + 1 { break; } } d };
     built.sort_by_key(|(o, _)| std::cmp::Reverse(match o.kind { OwnerKind::Closure(e) => depth(e.0), _ => 0 }));
     let closure_order: Vec<u32> = built.iter().filter_map(|(o, _)| match o.kind { OwnerKind::Closure(e) => Some(e.0), _ => None }).collect();
-    // `mir_coroutine_witnesses` of the coroutines of this root, for the dropck of their creators.
-    for (owner, mir) in &built {
-        let (OwnerKind::Closure(e), true) = (owner.kind, mir.coroutine.is_some()) else { continue };
-        let needs_drop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::mir::transform::coroutine::coroutine_witness_needs_drop(tcx, prog, env, mir)));
-        match needs_drop {
-            Ok(needs_drop) => tcx.coroutine_witness_needs_drop.insert((typeck.file, e.0), needs_drop),
-            Err(p) => { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } }
-        }
-    }
+    // `mir_coroutine_witnesses` of the coroutines of this root: dropck of their creators, auto traits.
+    publish_coroutine_witnesses(prog, tcx, env, typeck, &built);
+    check_coroutine_obligations(prog, tcx, env, typeck, v);
 
     // MoveData, signature regions, inference contexts, MIR type check.
     let mut prepared: Vec<Prepared<'_>> = Vec::new();

@@ -57,6 +57,8 @@ pub struct FnSigT {
     pub is_const: bool,
     /// Explicit promotion permission, from the resolved definition's attribute.
     pub rustc_promotable: bool,
+    /// `#[rustc_intrinsic]` (rustc `tcx.intrinsic(def_id)`): not coercible to a function pointer
+    pub rustc_intrinsic: bool,
     pub header: FnHeader,
     /// `#[track_caller]`: takes the caller's `&'static Location` as an implicit last argument
     /// (rustc's implicit caller-location parameter)
@@ -245,6 +247,12 @@ pub struct Tcx {
     /// `mir_coroutine_witnesses` reduced to what dropck asks (whether any local live across a suspension
     /// point needs drop), per coroutine (file, expr), set when borrowck has built the coroutine's MIR.
     pub coroutine_witness_needs_drop: crate::conc::MemoMap<(u32, u32), bool>,
+    /// `coroutine_hidden_types` (rustc mir_coroutine_witnesses): the regions-erased types of the locals live
+    /// across any suspension point, per coroutine (file, expr), in terms of its owner's generics.
+    pub coroutine_hidden_types: crate::conc::MemoMap<(u32, u32), std::sync::Arc<Vec<TyId>>>,
+    /// `TypeckResults::coroutine_stalled_predicates`, per typeck root: the goals that were stalled on a
+    /// coroutine of that body (regions erased), proven once the coroutines' witnesses are known.
+    pub coroutine_stalled_predicates: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<(crate::next_solver::Goal, u32)>>>,
     /// a coroutine type's saved locals after its upvars: (end offset, alignment), made when its
     /// poll function is lowered (coroutine_transform)
     pub coro_frames: crate::conc::MemoMap<TyId, (u32, u32)>,
@@ -415,6 +423,8 @@ impl Tcx {
             destructor_impls: Default::default(),
             coroutines: crate::conc::MemoMap::with_bits(10),
             coroutine_witness_needs_drop: crate::conc::MemoMap::with_bits(10),
+            coroutine_hidden_types: crate::conc::MemoMap::new_kept(10),
+            coroutine_stalled_predicates: Default::default(),
             coro_frames: Default::default(),
             coro_shapes: Default::default(),
             coro_slot_ty: Default::default(),
@@ -1401,6 +1411,7 @@ impl Tcx {
                         n_parent_generics: if adt.is_enum { n } else { 0 },
                         is_const: false,
                         rustc_promotable: false,
+                        rustc_intrinsic: false,
                         header: FnHeader::RUST,
                         track_caller: false,
                         target_features: Vec::new(),
@@ -1975,6 +1986,9 @@ impl Tcx {
                 rustc_promotable: sig.konst && ast.list(ast.item(def.item).attrs).iter().any(|a| {
                     a.toks.hi > a.toks.lo && crate::cfg::tok_str(prog.src(file), a.toks.lo as usize) == b"rustc_promotable"
                 }),
+                rustc_intrinsic: ast.list(ast.item(def.item).attrs).iter().any(|a| {
+                    a.toks.hi > a.toks.lo && crate::cfg::tok_str(prog.src(file), a.toks.lo as usize) == b"rustc_intrinsic"
+                }),
                 header,
                 track_caller: {
                     let has = |d2: DefId| {
@@ -2249,7 +2263,17 @@ impl Tcx {
             ast::Ty::Array(x, n) => {
                 let inner = self.lower_ty(cx, prog, file, module, env, *x);
                 if is_infer_len(ast, *n) {
-                    let length = match cx.infcx { Some(infcx) => infcx.next_const_var(), None => self.tys.intern_const(crate::consts::ConstKind::Error) };
+                    let length = match cx.infcx {
+                        Some(infcx) => infcx.next_const_var(),
+                        None => {
+                            // ItemCtxt::ct_infer: no `_` length in an item's signature either
+                            if self.validates(prog, file) {
+                                let pos = env.owner.filter(|o| prog.def(*o).file == file).map_or(0, |o| ast.item(prog.def(o).item).lo);
+                                self.err(cx, prog, file, pos, "E0121: the placeholder `_` is not allowed within types on item signatures".to_string());
+                            }
+                            self.tys.intern_const(crate::consts::ConstKind::Error)
+                        }
+                    };
                     return self.tys.mk_array(inner, length);
                 }
                 let lt = self.lower_const_arg(prog, file, env, *n, self.tys.usize_);
@@ -2540,7 +2564,11 @@ impl Tcx {
             predicate_env.regions = env.regions.with_binder(Some(resolve_bound_vars::BinderId::Trait(path.segs.lo)));
             let env = &predicate_env;
             let regions = self.lower_region_args(cx.infcx, prog, file, module, env, path);
-            let region = self.object_region_with_bounds(cx.infcx, prog, file, outer_env, bounds, td, regions, source_ty);
+            let mut ambiguous = false;
+            let region = self.object_region_with_bounds(cx.infcx, prog, file, outer_env, bounds, td, regions, source_ty, &mut ambiguous);
+            if ambiguous && self.validates(prog, file) {
+                self.err(cx, prog, file, lo, "E0227: ambiguous lifetime bound, explicit lifetime bound required".to_string());
+            }
             self.report_indeterminate_object_default(cx, prog, file, outer_env, region, source_ty, lo);
             let last = f.ast.segs(path.segs).last().unwrap();
             if !matches!(f.ast.gargs(last.args()), Some(GenericArgs::Paren(..))) {

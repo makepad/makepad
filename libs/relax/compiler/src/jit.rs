@@ -2064,6 +2064,7 @@ rt_fn! {
 }
 
 /// (exec, data, rw, syms, end) bases of the program unit's reservation (diagnostics: inspect memory).
+#[cfg(target_os = "macos")]
 pub(crate) fn unit_areas() -> Option<[u64; 5]> {
     unsafe {
         if UNIT.is_null() { return None; }

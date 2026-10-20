@@ -19,6 +19,9 @@ pub(super) enum UnsizeKind {
     Unsize,
 }
 
+/// rustc_trait_selection/src/solve/inspect/analyse.rs `ProofTreeVisitor::config`: the default `InspectConfig`.
+const INSPECT_MAX_DEPTH: usize = 10;
+
 struct CoerceVisitor { errored: bool }
 
 impl Fcx<'_> {
@@ -99,7 +102,7 @@ impl Fcx<'_> {
         let PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(pred)) = &goal.predicate.kind else { return false };
         // only `Unsize` and `CoerceUnsized` goals are looked at
         if pred.trait_ref.def_id != unsize && pred.trait_ref.def_id != coerce_unsized { return false; }
-        if depth >= self.infcx.recursion_limit(self.prog) {
+        if depth >= INSPECT_MAX_DEPTH {
             // on_recursion_limit: do not commit an unsizing while looking for the error source
             return visitor.errored;
         }

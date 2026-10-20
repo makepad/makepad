@@ -539,6 +539,8 @@ pub struct Program {
     pub demand_plan: Option<std::sync::Arc<crate::preload::DemandPlan>>,
     pub load_recipe: Vec<crate::preload::PreCrate>,
     pub module_probes: Vec<(String, bool)>,
+    /// `mod name;` without `#[path]` that found `name.rs`: (file, item position, krate, the `name/mod.rs` alternative)
+    /// -- a check reports E0761 when that exists too (rustc default_submod_path)
     /// per module being collected: the folder its `mod x;` items resolve in and whether that
     /// folder is the module file's own (rustc ModuleData::dir_path / DirOwnership); the modules
     /// of a fn body's blocks take their enclosing module's
@@ -2694,6 +2696,21 @@ impl Program {
                                     self.front_probes[krate as usize].push((c.clone(), exists));
                                 }
                                 if exists {
+                                    // rustc_expand module.rs `default_submod_path`: both `x.rs` and `x/mod.rs` exist
+                                    if path_attr.is_empty() && cands.len() == 2 && *c == cands[0] && crate::lexer::validation_enabled() {
+                                        let other = &cands[1];
+                                        let other_exists = self.check_files.as_ref().map_or(false, |m| m.contains_key(other)) || self.crates[krate as usize].context.exists(other);
+                                        self.module_probes.push((other.clone(), other_exists));
+                                        if self.record_front && !self.cur_image {
+                                            self.front_probes[krate as usize].push((other.clone(), other_exists));
+                                        }
+                                        if other_exists {
+                                            let lo = self.files[file as usize].ast.item(iid).lo;
+                                            self.errors.push(self.record_error(file, lo, "resolve", format!("E0761: file for module `{}` found at both \"{}\" and \"{}\"", sname, c, other)));
+                                            loaded = true;
+                                            break;
+                                        }
+                                    }
                                     if self.demand_plan.as_ref().is_some_and(|p| p.skips(self.crates[krate as usize].root_path(), c)) {
                                         let is_mod_rs = child_mod_rs || c.ends_with("/mod.rs");
                                         let cdir = if is_mod_rs { dir_of(c).to_string() } else { format!("{}/{}", dir_of(c), stem_of(c)) };

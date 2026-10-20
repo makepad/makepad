@@ -53,7 +53,29 @@ pub(super) fn typeck_errors_source(source: &str, edition: u16) -> Vec<String> {
 
 /// `borrowck_source_in` for a crate of the given name.
 pub(super) fn borrowck_source_named(source: &str, edition: u16, crate_name: &str) -> (Vec<String>, Vec<String>) {
-    let (prog, tcx, user) = load_source(source, edition, crate_name);
+    borrowck_source_checked_named(source, edition, crate_name, false)
+}
+
+/// `typeck_errors_source` for a crate that is being checked.
+pub(super) fn typeck_errors_checked(source: &str, edition: u16) -> Vec<String> {
+    let (mut prog, tcx, user) = load_source(source, edition, "repro");
+    prog.crates[user as usize].validate = true;
+    let mut errors = vec![];
+    for owner in crate::borrowck::body::owners(&prog) {
+        if prog.def(owner.owner).krate != user { continue; }
+        errors.extend(tcx.typeck(&prog, owner.owner).errors.iter().cloned());
+    }
+    errors
+}
+
+/// `borrowck_source_in` for a crate that is being checked (`makepad check`: its diagnostics are reported).
+pub(super) fn borrowck_source_checked(source: &str, edition: u16) -> (Vec<String>, Vec<String>) {
+    borrowck_source_checked_named(source, edition, "repro", true)
+}
+
+fn borrowck_source_checked_named(source: &str, edition: u16, crate_name: &str, validate: bool) -> (Vec<String>, Vec<String>) {
+    let (mut prog, tcx, user) = load_source(source, edition, crate_name);
+    prog.crates[user as usize].validate = validate;
     let (mut errors, mut unchecked) = (vec![], vec![]);
     for owner in crate::borrowck::body::owners(&prog) {
         if prog.def(owner.owner).krate != user { continue; }
@@ -881,4 +903,31 @@ fn a_use_of_an_opaque_type_with_non_parameter_arguments_is_e0792() {
         pub fn equal<'a, 'b>(_: Lt<'a>, _: Lt<'b>) -> impl Sized + 'a + 'b { let _: () = equal(Lt::<'a>::None, Lt::<'a>::None); }", 2021);
     assert!(errors.iter().any(|e| e.starts_with("E0792") && e.contains("expected generic lifetime parameter, found `'static`")), "{errors:?}");
     assert!(errors.iter().any(|e| e.contains("non-defining opaque type use in defining scope")), "{errors:?}");
+}
+
+#[test]
+fn a_local_live_across_an_await_is_part_of_the_future_for_auto_traits() {
+    // rustc mir_coroutine_witnesses: `Send` of an async block waits for the body's MIR, then asks every type
+    // of the locals live across a suspension point.
+    let (errors, unchecked) = borrowck_source_checked("
+        use std::rc::Rc;
+        fn needs_send<T: Send>(_: T) {}
+        async fn nothing() {}
+        pub fn held() { needs_send(async { let rc = Rc::new(1u8); nothing().await; drop(rc); }); }
+        pub fn dropped_first() { needs_send(async { { let rc = Rc::new(1u8); drop(rc); } nothing().await; }); }", 2021);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("future cannot be sent between threads safely"), "{errors:?}");
+}
+
+#[test]
+fn the_witness_of_another_fns_future_is_made_on_demand() {
+    let errors = typeck_errors_checked("
+        use std::rc::Rc;
+        fn needs_send<T: Send>(_: T) {}
+        async fn nothing() {}
+        async fn holds() { let rc = Rc::new(1u8); nothing().await; drop(rc); }
+        async fn fine() { let n = 1u8; nothing().await; drop(n); }
+        pub fn user() { needs_send(holds()); needs_send(fine()); }", 2021);
+    assert_eq!(errors.len(), 1, "{errors:?}");
 }

@@ -240,7 +240,7 @@ impl Tcx {
         seen.pop();
     }
 
-    pub(super) fn object_region_with_bounds(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, bounds: &[ast::Bound], td: DefId, rs: RegionArgsId, source_ty: Option<ast::TyId>) -> RegionId {
+    pub(super) fn object_region_with_bounds(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, bounds: &[ast::Bound], td: DefId, rs: RegionArgsId, source_ty: Option<ast::TyId>, ambiguous: &mut bool) -> RegionId {
         if !env.regions.enabled { return RegionId::ERASED; }
         let explicit = bounds.iter().find_map(|b| match b { ast::Bound::Lifetime(n) => Some(*n), _ => None });
         if let Some(n) = explicit {
@@ -252,7 +252,11 @@ impl Tcx {
         // escaping the existential predicate binder is not an object bound.
         derived.retain(|r| !matches!(self.tys.region_kind(*r), RegionKind::ReBound(..)));
         if let Some(r) = derived.iter().find(|r| self.tys.region_kind(**r) == RegionKind::ReStatic) { return *r; }
-        if let Some(r) = derived.first() { return *r; }
+        if let Some(r) = derived.first() {
+            // compute_object_lifetime_bound: more than one distinct bound and no `'static` (E0227)
+            *ambiguous = derived[1..].iter().any(|r1| r1 != r);
+            return *r;
+        }
         self.object_region(infcx, prog, file, env, bounds, source_ty)
     }
 }

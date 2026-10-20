@@ -33,14 +33,17 @@ pub fn is_transmute(prog: &Program, d: DefId) -> bool {
 
 /// check_transmute: the E0512 message when the sizes of `from` and `to` differ or depend on a parameter.
 pub fn check_transmute(prog: &Program, tcx: &Tcx, env: TypingEnv, from: TyId, to: TyId) -> Option<String> {
+    // (a type that does not normalize becomes an error type, which has no layout: E0512)
     let norm = |t: TyId| tcx.try_normalize_erasing_regions(prog, env, t).ok();
-    let (from, to) = (norm(from)?, norm(to)?);
+    let (Some(from), Some(to)) = (norm(from), norm(to)) else {
+        return Some("E0512: cannot transmute between types of different sizes, or dependently-sized types".to_string());
+    };
     for t in [from, to] {
         // (what the layout code cannot judge is not judged)
         if tcx.tys.has_error(t) || tcx.tys.has_infer(t) || tcx.tys.has_opaque(t) { return None; }
     }
     if from == to { return None; }
-    let cx = Cx { prog, tcx, env, lay: Layouts::new(), gave_up: Default::default() };
+    let cx = Cx { prog, tcx, env, lay: Layouts::erased_generics(), gave_up: Default::default() };
     let (a, b) = (cx.skeleton(from, 0), cx.skeleton(to, 0));
     if cx.gave_up.get() { return None; }
     if let (Some(a), Some(b)) = (a, b) {

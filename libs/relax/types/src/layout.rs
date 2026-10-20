@@ -248,6 +248,9 @@ pub struct Layouts {
     /// provided crates' opaque types (provided.rs): rustc's size and align, no fields Relax
     /// may read; set once when the unit is made
     pub opaque: std::collections::HashMap<crate::program::DefId, (u32, u32)>,
+    /// a field type that does not normalize stays as written (transmute's size skeletons erase
+    /// parameters to `()`, so `PhantomData<<() as Tr>::Assoc>` need not project)
+    lenient_fields: bool,
 }
 
 unsafe impl Send for Layouts {}
@@ -363,7 +366,22 @@ fn tz(x: u64) -> u64 {
 
 impl Layouts {
     pub fn new() -> Layouts {
-        Layouts { closure_storage: Default::default(), table: std::sync::atomic::AtomicPtr::new(Box::into_raw(LTable::new())), retired: Default::default(), ents: crate::conc::AppendVec::with_capacity(1 << 24), pool: Default::default(), opaque: Default::default() }
+        Layouts { closure_storage: Default::default(), table: std::sync::atomic::AtomicPtr::new(Box::into_raw(LTable::new())), retired: Default::default(), ents: crate::conc::AppendVec::with_capacity(1 << 24), pool: Default::default(), opaque: Default::default(), lenient_fields: false }
+    }
+
+    /// Layouts of types whose parameters were erased (see `lenient_fields`).
+    pub fn erased_generics() -> Layouts {
+        let mut l = Layouts::new();
+        l.lenient_fields = true;
+        l
+    }
+
+    fn field_ty(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, d: crate::program::DefId, variant: u32, field: u32, args: &[TyId]) -> TyId {
+        let env = crate::tcx::TypingEnv::fully_monomorphized(lcx.prog);
+        if !self.lenient_fields { return tcx.field_ty(lcx.prog, env, d, variant, field, args); }
+        let decl = tcx.adts[&d].variants[variant as usize].fields[field as usize].ty;
+        let ty = tcx.tys.subst(decl, args);
+        tcx.try_normalize_erasing_regions(lcx.prog, env, ty).unwrap_or(ty)
     }
 
     pub fn closure_storage(&self, prog: &crate::program::Program, tcx: &Tcx, ty: TyId) -> ClosureStorage {
@@ -723,7 +741,7 @@ impl Layouts {
                 if !adt.is_enum {
                     let mut fts = Vec::new();
                     for fi in 0..adt.variants[0].fields.len() {
-                        fts.push(tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), d, 0, fi as u32, tcx.tys.list(args)));
+                        fts.push(self.field_ty(lcx, tcx, d, 0, fi as u32, tcx.tys.list(args)));
                     }
                     // a live-editable struct (M10): its first version's fields, then the hidden
                     // extension word; the fields edits added live in the extension block
@@ -959,7 +977,7 @@ impl Layouts {
         for (vi, v) in adt.variants.iter().enumerate() {
             let mut fts = Vec::new();
             for fi in 0..v.fields.len() {
-                fts.push(tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), d, vi as u32, fi as u32, args));
+                fts.push(self.field_ty(lcx, tcx, d, vi as u32, fi as u32, args));
             }
             let (fl, ls) = self.field_ls(lcx, tcx, &fts);
             vfl.push(fl);
@@ -1215,7 +1233,7 @@ impl Layouts {
                         if !self.decl_maybe_unsized(lcx, tcx, d2, depth + 1) {
                             return false;
                         }
-                        let s = tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), d2, 0, adt2.variants[0].fields.len() as u32 - 1, tcx.tys.list(a2));
+                        let s = self.field_ty(lcx, tcx, d2, 0, adt2.variants[0].fields.len() as u32 - 1, tcx.tys.list(a2));
                         self.ty_maybe_unsized(lcx, tcx, s, params, depth + 1)
                     }
                 }
@@ -1259,7 +1277,7 @@ impl Layouts {
                 Some(adt) if !adt.is_enum && (!adt.is_union || adt.variants[0].fields.len() == 1) => match adt.variants[0].fields.last() {
                     Some(_) => {
                         // a projection tail (`A::Dyn` with `type Dyn = DynRef`) normalized first
-                        let ft = tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), *d, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(*args));
+                        let ft = self.field_ty(lcx, tcx, *d, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(*args));
                         self.is_unsized(lcx, tcx, ft)
                     }
                     None => false,
@@ -1281,7 +1299,7 @@ impl Layouts {
                 TyKind::Adt(def, args, _) => {
                     let Some(adt) = tcx.adts.get(def) else { return ty };
                     if adt.is_enum || adt.is_union || adt.variants[0].fields.is_empty() { return ty; }
-                    tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), *def, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(*args))
+                    self.field_ty(lcx, tcx, *def, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(*args))
                 }
                 _ => return ty,
             };
@@ -1309,7 +1327,7 @@ impl Layouts {
                     return None;
                 }
                 adt.variants[0].fields.last()?;
-                let ft = tcx.field_ty(lcx.prog, crate::tcx::TypingEnv::fully_monomorphized(lcx.prog), d, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(args));
+                let ft = self.field_ty(lcx, tcx, d, 0, adt.variants[0].fields.len() as u32 - 1, tcx.tys.list(args));
                 let (o, tail) = self.unsized_tail(lcx, tcx, ft)?;
                 let l = self.of(lcx, tcx, t);
                 Some((l.fields[adt.variants[0].fields.len() - 1] + o, tail))

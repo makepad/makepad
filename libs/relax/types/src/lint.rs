@@ -547,6 +547,44 @@ fn stmt_attrs_around(prog: &Program, owner: DefId, file: u32, item: crate::ast::
     f.found.unwrap_or_default()
 }
 
+/// The attributes of the statements, arms and blocks around the expression the macro call written at
+/// `call` expanded to, in the body of `owner` (outermost first): rustc's lint level builder sees them
+/// at the call's expansion.
+pub fn attrs_at_call(prog: &Program, owner: DefId, file: u32, call: u32) -> Vec<Attr> {
+    use crate::ast::*;
+    use crate::ast_visit::{self, Visitor};
+    struct Find<'a> { ast: &'a Ast, pf: &'a crate::parser::ParsedFile, call: u32, stack: Vec<Attr>, found: Option<Vec<Attr>> }
+    impl<'a> Visitor<'a> for Find<'a> {
+        fn ast(&self) -> &'a Ast { self.ast }
+        fn enter_attrs(&mut self, attrs: List<Attr>) { self.stack.extend_from_slice(self.ast.list(attrs)); }
+        fn leave_attrs(&mut self, attrs: List<Attr>) {
+            let n = self.ast.list(attrs).len();
+            self.stack.truncate(self.stack.len() - n);
+        }
+        fn expr(&mut self, e: ExprId) {
+            if self.found.is_some() { return; }
+            let lo = self.ast.expr(e).lo;
+            if lo as usize >= self.pf.src_len as usize && self.pf.diagnostic_pos(lo) == self.call { self.found = Some(self.stack.clone()); return; }
+            ast_visit::walk_expr(self, e);
+        }
+    }
+    let od = prog.def(owner);
+    if od.file != file || od.item.0 == u32::MAX { return Vec::new(); }
+    let pf = &prog.files[od.file as usize];
+    let ast = &pf.ast;
+    let mut f = Find { ast, pf, call: pf.diagnostic_pos(call), stack: Vec::new(), found: None };
+    match ast.item(od.item).kind {
+        ItemKind::Fn(..) => {
+            if let Ok(Some(b)) = prog.fn_body(od.file, od.item) { f.block(b); }
+        }
+        ItemKind::Const(..) | ItemKind::Static(..) => {
+            if let Ok(Some(e)) = prog.const_body(od.file, od.item) { f.expr(e); }
+        }
+        _ => {}
+    }
+    f.found.unwrap_or_default()
+}
+
 /// Whether impl `d` is the output of `#[derive]` (`#[automatically_derived]`; Relax expands
 /// derives as built-in macro output).
 pub fn is_automatically_derived(prog: &Program, d: DefId) -> bool {

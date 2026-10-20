@@ -235,6 +235,13 @@ pub struct Name(u32);
 /// `GLOB` and `GLOB_SEP`, interned first by every `MacroNames`.
 /// Set on the end of a recorded fragment group that is a `$t:ty` substitution.
 pub(crate) const TY_FRAG: u32 = 1 << 31;
+/// An `$e:expr` / `$l:literal` fragment (rustc's interpolated `NtExpr` / `NtLiteral` token): where the
+/// grammar wants an identifier or a literal, it is "a metavariable". A fragment of one token carries
+/// only its kind (META_ONLY: no token-tree group).
+pub(crate) const EXPR_FRAG: u32 = 1 << 30;
+pub(crate) const LIT_FRAG: u32 = 1 << 29;
+pub(crate) const META_ONLY: u32 = 1 << 28;
+pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY;
 
 const GLOB_ID: Name = Name(0);
 const GLOB_SEP_ID: Name = Name(1);
@@ -1863,9 +1870,18 @@ pub mod uses {
         if recording() { SYNTH_PENDING.with(|p| p.borrow_mut().push(off)); }
     }
 
-    /// The expansion built on this thread starts at `base` of `file`: its added parens are at `base + offset`.
-    pub fn synth_flush(file: &str, base: u32) {
-        let v = SYNTH_PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    /// Forget the parens noted so far (an expansion starts).
+    pub fn synth_clear() {
+        SYNTH_PENDING.with(|p| p.borrow_mut().clear());
+    }
+
+    /// The parens noted by the expansion just built on this thread (offsets in its text).
+    pub fn synth_take() -> Vec<u32> {
+        SYNTH_PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
+
+    /// The expansion starts at `base` of `file`: its added parens `v` are at `base + offset`.
+    pub fn synth_flush(file: &str, base: u32, v: Vec<u32>) {
         if v.is_empty() { return; }
         let mut g = SYNTH.lock().unwrap_or_else(|e| e.into_inner());
         let set = g.get_or_insert_with(Default::default);
@@ -2548,8 +2564,10 @@ impl<'a> Parser<'a> {
                         // (a `$t:ty` is a type nonterminal even when it is one token: where a bound is
                         // expected, it is not a trait -- rustc `parse_trait_bound`; the end carries TY_FRAG)
                         let ty_frag = *f == Frag::Ty && !wrap;
-                        if opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag) {
-                            out.groups.push((group_start as u32, out.s.len() as u32 | if ty_frag { TY_FRAG } else { 0 }));
+                        let kind_flag = match f { Frag::Expr if !wrap => EXPR_FRAG, Frag::Literal => LIT_FRAG, _ => 0 };
+                        let group = opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag);
+                        if group || (kind_flag != 0 && out.s.len() > group_start) {
+                            out.groups.push((group_start as u32, out.s.len() as u32 | if ty_frag { TY_FRAG } else { 0 } | kind_flag | if group { 0 } else { META_ONLY }));
                         }
                         if wrap {
                             out.push(T::CloseParen, ")", None, u32::MAX);

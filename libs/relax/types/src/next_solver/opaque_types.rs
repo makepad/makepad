@@ -38,7 +38,8 @@ impl EvalCtxt<'_, '_> {
             else if matches!(self.delegate.typing_mode.get(), TypingMode::PostTypeckUntilBorrowck { .. }) {
                 let actual = self.type_of(def, &args)?;
                 let actual = FreshErasedRegions(self.delegate).fold_ty(&tcx.tys, actual, 0);
-                let actual = self.normalize_ty(env, actual)?; self.eq(env, p.term, Term::Ty(actual))?;
+                let actual = self.normalize_ty(env, actual)?;
+                self.eq(env, p.term, Term::Ty(actual))?;
             }
             self.add_item_bounds_for_hidden_type(env, def, &normalized_args, expected)?;
         } else {

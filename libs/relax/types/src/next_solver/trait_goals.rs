@@ -67,6 +67,14 @@ impl EvalCtxt<'_, '_> {
                 }
                 let key = crate::tcx::ty_key(&tcx.tys, ty);
                 for key in [key, crate::tcx::TyKey::Other] { if tcx.trait_impls.get(&(key, tr.def_id)).is_some_and(|v| !v.is_empty()) { return Err(NoSolution.into()); } }
+                // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
+                if tcx.is_coroutine(ty) && matches!(ecx.delegate.typing_mode.get(), crate::tcx::TypingMode::ErasedNotCoherence) {
+                    // (trying to continue in the erased mode is not worth it)
+                    return Err(ecx.opaque_accesses.rerun_always());
+                }
+                if ecx.coroutine_is_stalled(ty) {
+                    return Ok(ecx.make_ambiguous_response_no_constraints(MaybeInfo { stalled_on_coroutines: StalledOnCoroutines::Yes, ..MaybeInfo::AMBIGUOUS }));
+                }
                 structural_traits::instantiate_constituent_tys_for_auto_trait(ecx, ty)?
             } else { match lang {
                 Some(LangItem::Sized) => structural_traits::instantiate_constituent_tys_for_sizedness_trait(ecx, super::sizedness::SizedTraitKind::Sized, ty)?,
@@ -83,6 +91,14 @@ impl EvalCtxt<'_, '_> {
         });
         if let Ok(result) = map_err_to_rerun(result)? { candidates.push(Candidate { source: CandidateSource::BuiltinImpl(source), result, head_usages }); }
         Ok(())
+    }
+    /// rustc `try_stall_coroutine`: a coroutine of the body being type-checked has no witness yet (it is
+    /// computed from the body's MIR), so goals about it wait (`Typeck` mode's defining generators).
+    fn coroutine_is_stalled(&self, ty: TyId) -> bool {
+        let tcx = self.delegate.tcx;
+        let TyKind::Closure(_, _, crate::types::ClosureArgs { parent_args: owner, .. }) = *tcx.tys.kind(ty) else { return false };
+        let TyKind::FnDef(def, ..) = *tcx.tys.kind(owner) else { return false };
+        tcx.is_coroutine(ty) && matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Typeck { defining_opaque_types_and_generators: defining } if tcx.defining_opaques(defining).contains(&def))
     }
     /// trait_goals.rs:355-391 / normalizes_to.rs:533-572.
     fn consider_builtin_fn_trait_candidates(&mut self, env: &ParamEnvId, goal: &GoalKind, tr: &TraitRef, ty: TyId, goal_kind: crate::upvar::ClosureKind) -> QueryResultOrRerunNonErased {

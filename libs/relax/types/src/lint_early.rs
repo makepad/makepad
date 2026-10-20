@@ -3437,10 +3437,11 @@ fn trailing_semis(prog: &Program, own: &[bool]) {
         // `is_local`: the macro is defined in the crate that calls it
         let local = prog.file_paths.iter().position(|p| *p == t.def_file).is_some_and(|f| prog.file_crate.get(f).copied() == Some(krate));
         if !local { continue; }
-        if !seen.insert((file, t.semi)) { continue; }
+        if !seen.insert((file, t.semi, t.call)) { continue; }
         let pf = &prog.files[file];
         let def = enclosing_def(prog, file as u32, pf.lint_pos(t.call), krate);
-        emit(prog, def, &SEMICOLON_IN_EXPRESSIONS_FROM_MACROS, file as u32, t.semi, "trailing semicolon in macro used in expression position");
+        let attrs = lint::attrs_at_call(prog, def, file as u32, t.call);
+        emit_in(prog, def, &attrs, &SEMICOLON_IN_EXPRESSIONS_FROM_MACROS, file as u32, t.semi, "trailing semicolon in macro used in expression position");
     }
 }
 

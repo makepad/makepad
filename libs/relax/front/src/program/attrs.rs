@@ -12,7 +12,8 @@ impl Program {
     /// Does a derive macro of this name exist anywhere the crates could reach it: Relax's own derives,
     /// a macro of the table, an import binding the name, or a glob import of another crate?
     fn derive_in_scope(&self, name: &str, krate: u32) -> bool {
-        if crate::macro_reg::has_derive(name) || self.macros.defs.contains_key(name) {
+        // (a macro_rules! macro is no derive macro)
+        if crate::macro_reg::has_derive(name) || self.macros.defs.get(name).is_some_and(|v| v.iter().any(|d| d.builtin != 0)) {
             return true;
         }
         self.imports.iter().filter(|im| self.file_crate.get(im.file as usize) == Some(&krate)).any(|im| {
@@ -76,6 +77,20 @@ impl Program {
                     }
                 }
                 targets.resize(ranges.len(), 3);
+                // the attributes of generic parameters (`struct S<#[x] T>`) resolve like any others
+                if let Some(g) = f.ast.kind_generics(&it.kind) {
+                    for p in f.ast.list(g.params) {
+                        ranges.extend_from_slice(f.ast.list(p.attrs));
+                    }
+                    targets.resize(ranges.len(), 3);
+                }
+            }
+            // `macro_rules!`, `use` and `extern crate` items define nothing of the program's: their attributes are the item's own
+            for (ii, it) in f.ast.items.iter().enumerate() {
+                if matches!(it.kind, ItemKind::MacroRules(_) | ItemKind::Use(..) | ItemKind::ExternCrate(_)) && it.lo < f.src_len && !self.item_defs.contains_key(&(fi as u32, ii as u32)) {
+                    ranges.extend_from_slice(f.ast.list(it.attrs));
+                    targets.resize(ranges.len(), 2);
+                }
             }
             // registered tools; derive helpers of non-std derives are not tracked: such a file
             // keeps its inert attributes
@@ -185,6 +200,11 @@ impl Program {
                 // `#[unsafe(name ..)]`
                 if f.tok(i).kind == T::KwUnsafe && f.tok(i + 1).kind == T::OpenParen {
                     i += 2;
+                    // rustc_parse `parse_attr_item`: the path of the inner attribute is an identifier
+                    if f.tok(i).kind == T::KwUnsafe && f.tok(i).lo < f.src_len {
+                        out.push(self.record_error(fi as u32, f.tok(i).lo, "parse", "expected identifier, found keyword `unsafe`".into()));
+                        continue;
+                    }
                 }
                 let first_i = i;
                 let mut global = false;
@@ -235,11 +255,32 @@ impl Program {
                     && matches!(f.tok(i + 1).kind, T::Str | T::RawStr) && matches!(f.tok_text(i + 1), "\"\"" | "r\"\"") {
                     out.push(self.record_error(fi as u32, f.tok(i + 1).lo, "parse", "crate name must not be empty".into()));
                 }
+                // rustc_attr_parsing debugger_visualizer: `natvis_file = ".."` or `gdb_script_file = ".."`, a readable file
+                // (relative to the file holding the attribute)
+                if segs.len() == 1 && !global && segs[0] == "debugger_visualizer" && f.tok(i).kind == T::OpenParen && f.tok(i).lo < f.src_len {
+                    let (key, eq, val) = (f.tok(i + 1), f.tok(i + 2), f.tok(i + 3));
+                    if key.kind == T::Ident && eq.kind == T::Eq && matches!(val.kind, T::Str | T::RawStr) {
+                        let k = f.tok_text(i + 1);
+                        if !matches!(k, "natvis_file" | "gdb_script_file") {
+                            out.push(self.record_error(fi as u32, key.lo, "parse", "E0539: malformed `debugger_visualizer` attribute input".into()));
+                        } else {
+                            let rel = crate::lit::unescape_str(f.tok_text(i + 3));
+                            let path = crate::vfs::normalize_path(&format!("{}/{}", dir_of(&self.file_paths[fi]), rel));
+                            if crate::vfs::read(&path).is_err() {
+                                out.push(self.record_uncoded_error(fi as u32, key.lo, "parse", format!("couldn't read {path}")));
+                            }
+                        }
+                    }
+                }
                 let tool = |n: &str| BUILTIN_TOOLS.contains(&n) || tools.contains(&n);
                 let msg = if segs.len() == 1 && !global {
                     let n = segs[0];
                     if is_builtin_attr(n) || std_helpers.contains(&n) || crate::macro_reg::has_attr(n) {
                         continue;
+                    }
+                    // rustc_resolve smart_resolve_macro_path: an unresolved `rustc*` attribute is also reserved
+                    if n.starts_with("rustc") && pos < f.src_len {
+                        out.push(self.record_error(fi as u32, pos, "resolve", "attributes starting with `rustc` are reserved for use by the `rustc` compiler".into()));
                     }
                     format!("cannot find attribute `{n}` in this scope")
                 } else {
