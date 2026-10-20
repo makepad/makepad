@@ -99,6 +99,10 @@ struct Req {
     panic: Cell<Option<Box<dyn Any + Send>>>,
     /// false: posted (heap, nobody waits); the owner frees it
     waited: bool,
+    /// main-thread request accounting (0: not a main-thread request): wall ns at the push, and at
+    /// the owner's completion
+    t_push: u64,
+    t_done: AtomicU64,
     /// the requester sleeps on these until Done (no thread handle: a thread's TLS destructors
     /// compile too, after std::thread::current() is gone)
     done: Mutex<bool>,
@@ -152,6 +156,10 @@ static EXIT_HELPER: AtomicU64 = AtomicU64::new(0);
 static CHILD: AtomicBool = AtomicBool::new(false);
 /// wall ns the owner spent serving, by class (the run summary)
 pub static BUSY_NS: [AtomicU64; CLASSES] = [const { AtomicU64::new(0) }; CLASSES];
+/// The main thread's requests to the owner (run summary): [count, wait ns, queue delay ns (push ->
+/// served), wake delay ns (owner done -> requester running), then count and wait ns of the waits
+/// below 20 us, 200 us, 2 ms and above]
+pub static MAIN_ACC: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 /// the main thread's longest wait for a request after the first present (ns), and the class and
 /// requester the owner was serving when it began (a frame hitch: run summary)
 pub static MAIN_WAIT_MAX: AtomicU64 = AtomicU64::new(0);
@@ -337,6 +345,8 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         waited: true,
+        t_push: if class == Class::Main && crate::jit::MAIN_TID.load(Ordering::Relaxed) == me() { crate::jit::wall_ns().max(1) } else { 0 },
+        t_done: AtomicU64::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     };
@@ -350,6 +360,19 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
         wait(&req, deadline)
     };
     in_call_add(-1);
+    if req.t_push != 0 {
+        let now = crate::jit::wall_ns();
+        let w = now.saturating_sub(req.t_push);
+        let done = req.t_done.load(Ordering::Relaxed);
+        MAIN_ACC[0].fetch_add(1, Ordering::Relaxed);
+        MAIN_ACC[1].fetch_add(w, Ordering::Relaxed);
+        if done != 0 {
+            MAIN_ACC[3].fetch_add(now.saturating_sub(done), Ordering::Relaxed);
+        }
+        let b = if w < 20_000 { 4 } else if w < 200_000 { 6 } else if w < 2_000_000 { 8 } else { 10 };
+        MAIN_ACC[b].fetch_add(1, Ordering::Relaxed);
+        MAIN_ACC[b + 1].fetch_add(w, Ordering::Relaxed);
+    }
     // makepad inspect: a real-time thread (an audio callback) that waited for the compiler
     if crate::inspect::events::watched() {
         let waited = std::time::Instant::now().duration_since(t_req);
@@ -408,6 +431,8 @@ pub fn post(class: Class, f: impl FnOnce() + Send + 'static) {
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         waited: false,
+        t_push: 0,
+        t_done: AtomicU64::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     });
@@ -532,6 +557,9 @@ fn serve(r: usize) {
     req.state.store(RUNNING, Ordering::Release);
     let was_serving = OWNER_SERVING.swap(true, Ordering::Relaxed);
     let t0 = crate::jit::wall_ns();
+    if req.t_push != 0 {
+        MAIN_ACC[2].fetch_add(t0.saturating_sub(req.t_push), Ordering::Relaxed);
+    }
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
     let prev_now = (NOW_CLASS.swap(req.class as u8, Ordering::Relaxed), NOW_FROM.swap(req.from, Ordering::Relaxed));
@@ -586,6 +614,9 @@ fn serve(r: usize) {
             if traced {
                 // the edge that ends the requester's wait
                 crate::inspect::timeline::push(crate::inspect::timeline::Kind::Served, "", req.from, 0);
+            }
+            if req.t_push != 0 {
+                req.t_done.store(crate::jit::wall_ns(), Ordering::Relaxed);
             }
             req.state.store(DONE, Ordering::Release);
             {

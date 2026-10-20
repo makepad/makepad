@@ -1333,8 +1333,11 @@ pub fn startup_trace_first_present() {
     if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
         let presented_at = Cx::time_now();
         FIRST_PRESENT_SEEN.store(true, std::sync::atomic::Ordering::Release);
-        relax_first_present();
+        // The launcher is told first: the loader's hook below starts the post-present work, and the
+        // owner thread serving it (a cache batch) made the first call of this report wait for it
+        // (a lazily compiled fn: ~55 ms on a quiet machine) before the launcher saw the frame.
         report_first_present();
+        relax_first_present();
         print_first_present(presented_at);
         startup_trace("FIRST PRESENT ON GLASS");
         startup_trace_flush("cumulative at first present");
