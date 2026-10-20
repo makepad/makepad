@@ -598,7 +598,7 @@ pub(super) mod tests {
     }
     pub(crate) fn lit(fx: &mut Fx, text: &str, ty: TyId, neg: bool) -> ExprId {
         let ast = fx.lits.iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("no literal {text}")).1;
-        fx.thir.alloc_expr(Expr { kind: ExprKind::Literal { expr: ast, neg }, ty, temp_scope: None, span: Span::default() })
+        fx.thir.alloc_expr(Expr { kind: ExprKind::Literal { expr: ast, neg }, ty, temp_scope: None, bid: None, span: Span::default() })
     }
     pub(crate) fn builder(fx: Fx) -> (Builder<'static>, &'static Tcx) {
         let (_, tcx, root, owner) = fx.builder_parts;
@@ -649,8 +649,8 @@ pub(super) mod tests {
         let (prog, tcx, _, _) = fx.builder_parts;
         let s = (0..prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| prog.name(d) == "S").unwrap();
         let c = (0..prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| prog.name(d) == "C").unwrap();
-        let sr = fx.thir.alloc_expr(Expr { kind: ExprKind::StaticRef { def: s, ty: tcx.tys.i32_ }, ty: tcx.tys.i32_, temp_scope: None, span: Span::default() });
-        let nc = fx.thir.alloc_expr(Expr { kind: ExprKind::NamedConst { def: c, args: Vec::new(), user_ty: None }, ty: tcx.tys.i32_, temp_scope: None, span: Span::default() });
+        let sr = fx.thir.alloc_expr(Expr { kind: ExprKind::StaticRef { def: s, ty: tcx.tys.i32_ }, ty: tcx.tys.i32_, temp_scope: None, bid: None, span: Span::default() });
+        let nc = fx.thir.alloc_expr(Expr { kind: ExprKind::NamedConst { def: c, args: Vec::new(), user_ty: None }, ty: tcx.tys.i32_, temp_scope: None, bid: None, span: Span::default() });
         let (mut b, _) = builder(fx);
         let first = b.as_constant(sr).unwrap();
         let second = b.as_constant(sr).unwrap();
@@ -662,7 +662,7 @@ pub(super) mod tests {
 
     fn binary(fx: &mut Fx, op: BinOp, ty: TyId, lhs: &str, rhs: &str, rhs_ty: TyId) -> ExprId {
         let (l, r) = (lit(fx, lhs, ty, false), lit(fx, rhs, rhs_ty, false));
-        fx.thir.alloc_expr(Expr { kind: ExprKind::Binary { op, lhs: l, rhs: r }, ty, temp_scope: None, span: Span::default() })
+        fx.thir.alloc_expr(Expr { kind: ExprKind::Binary { op, lhs: l, rhs: r }, ty, temp_scope: None, bid: None, span: Span::default() })
     }
     fn terminators(b: &Builder<'_>) -> Vec<&'static str> {
         b.cfg.basic_blocks.iter().filter_map(|bb| bb.terminator.as_ref()).map(|t| match t.kind { TerminatorKind::Assert { .. } => "assert", _ => "other" }).collect()

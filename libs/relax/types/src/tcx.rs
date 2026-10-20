@@ -3324,6 +3324,13 @@ impl Tcx {
                     let last = prog.files[file as usize].text(ast.segs(p.segs)[p.segs.len() - 1].name);
                     let parent = prog.files[file as usize].text(ast.segs(p.segs)[p.segs.len() - 2].name);
                     self.err(cx, prog, file, p.lo, format!("E0405: cannot find trait `{}` in `{}`", last, parent));
+                } else if ast.segs(p.segs)[0].kind() == SegKind::Ident {
+                    // the path starts with a name that is nothing in scope: no module, no crate
+                    let first = prog.files[file as usize].text(ast.segs(p.segs)[0].name);
+                    let known = prog.syms.get(first).is_some_and(|s| env.names.contains(&s) || prog.lookup_in_scope(module, s, true).is_some() || prog.lookup_in_scope(module, s, false).is_some() || prog.crates[prog.mods[module as usize].krate as usize].deps.iter().any(|d| d.0 == s));
+                    if !known {
+                        self.err(cx, prog, file, p.lo, format!("E0433: failed to resolve: use of unresolved module or unlinked crate `{}`", first));
+                    }
                 }
             }
             return None;

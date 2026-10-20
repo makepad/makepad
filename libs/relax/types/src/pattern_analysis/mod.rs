@@ -1203,6 +1203,8 @@ impl<'a> Cx<'a> {
 enum LetSource {
     IfLet,
     WhileLet,
+    /// the `if let` guard of a match arm
+    IfLetGuard,
     /// in a `&&` chain or elsewhere: never linted as irrefutable
     Chain,
 }
@@ -1247,6 +1249,8 @@ impl<'a> Checker<'a> {
         let typed = |i: usize| body.expr_typed.get(i);
         // the `let` expressions of `if` / `while` conditions
         let mut let_source: HashMap<u32, LetSource> = HashMap::new();
+        // the attributes of the arm an `if let` guard belongs to
+        let mut guard_attrs: HashMap<u32, Vec<Attr>> = HashMap::new();
         let mut blocks: Vec<BlockId> = body.body.into_iter().collect();
         for i in 0..n {
             if !typed(i) { continue; }
@@ -1265,6 +1269,16 @@ impl<'a> Checker<'a> {
                 }
                 ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => blocks.push(b),
                 ExprKind::For(row) => blocks.push(ast.row(row).body),
+                ExprKind::Match(_, arms) => {
+                    for arm in ast.list(arms) {
+                        let Some(g) = arm.guard else { continue };
+                        let g = crate::lit::strip_paren(ast, g);
+                        if let ExprKind::Let(..) = ast.expr(g).kind {
+                            let_source.insert(g.0, LetSource::IfLetGuard);
+                            guard_attrs.insert(g.0, ast.list(arm.attrs).to_vec());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1311,10 +1325,12 @@ impl<'a> Checker<'a> {
                         let msg = match source {
                             LetSource::IfLet => Some("irrefutable `if let` pattern -- this pattern will always match, so the `if let` is useless"),
                             LetSource::WhileLet => Some("irrefutable `while let` pattern -- this pattern will always match, so the loop will never exit"),
+                            LetSource::IfLetGuard => Some("irrefutable `if let` guard pattern -- this pattern will always match, so the guard is useless"),
                             LetSource::Chain => None,
                         };
                         if let Some(msg) = msg {
-                            self.lint(&crate::lint::IRREFUTABLE_LET_PATTERNS, ex.lo, msg);
+                            let attrs = guard_attrs.get(&e.0).cloned().unwrap_or_default();
+                            self.lint_in(&crate::lint::IRREFUTABLE_LET_PATTERNS, &attrs, ex.lo, msg);
                         }
                     }
                 }

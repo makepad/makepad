@@ -24,7 +24,7 @@ impl Cx<'_> {
     /// `value` wrapped in the scope of its HIR node (every expression of rustc's HIR is).
     fn scope_wrap(&mut self, e: ast::ExprId, scope: ScopeId, value: ExprId) -> ExprId {
         let inner = &self.thir.exprs[value.0 as usize];
-        let wrapped = Expr { kind: ExprKind::Scope { region_scope: scope, node: e.0, value }, ty: inner.ty, temp_scope: inner.temp_scope, span: inner.span };
+        let wrapped = Expr { kind: ExprKind::Scope { region_scope: scope, node: e.0, value }, ty: inner.ty, temp_scope: inner.temp_scope, bid: inner.bid, span: inner.span };
         self.push(wrapped)
     }
 
@@ -82,13 +82,13 @@ impl Cx<'_> {
             let else_block_scope = self.synthetic_scope(e, Synthetic::WhileElseBlock, ScopeData::Node, span)?;
             let break_stmt_scope = self.synthetic_scope(e, Synthetic::WhileBreak, ScopeData::Node, span)?;
             let break_scope = self.synthetic_scope(e, Synthetic::WhileBreakExpr, ScopeData::Node, span)?;
-            let brk = self.push(Expr { kind: ExprKind::Break { label: loop_scope, value: None }, ty: never, temp_scope: Some(break_scope), span });
-            let brk = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(break_scope), span });
+            let brk = self.push(Expr { kind: ExprKind::Break { label: loop_scope, value: None }, ty: never, temp_scope: Some(break_scope), bid: None, span });
+            let brk = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(break_scope), bid: None, span });
             let brk = self.scope_wrap(e, break_scope, brk);
             let stmt = self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope: break_stmt_scope, expr: brk } });
             let else_block = self.thir.alloc_block(Block { targeted_by_break: false, region_scope: else_block_scope, span, stmts: Box::new([stmt]), expr: None, safety_mode: BlockSafety::Safe });
-            let else_expr = self.push(Expr { kind: ExprKind::Block { block: else_block }, ty: never, temp_scope: Some(else_scope), span });
-            let else_expr = self.push(Expr { kind: ExprKind::NeverToAny { source: else_expr }, ty: unit, temp_scope: Some(else_scope), span });
+            let else_expr = self.push(Expr { kind: ExprKind::Block { block: else_block }, ty: never, temp_scope: Some(else_scope), bid: None, span });
+            let else_expr = self.push(Expr { kind: ExprKind::NeverToAny { source: else_expr }, ty: unit, temp_scope: Some(else_scope), bid: None, span });
             let else_opt = Some(self.scope_wrap(e, else_scope, else_expr));
             let if_expr = self.mk(e, ExprKind::If { if_then_scope, cond, then, else_opt }, unit);
             let if_id = self.push(if_expr);
@@ -123,11 +123,11 @@ impl Cx<'_> {
         let head = self.mirror_expr(row.iter)?;
         let head_span = self.espan(row.iter);
         let into_ty = self.fn_def_ty(into_def, tcx.tys.list(into_args));
-        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: into_ty, temp_scope: Some(for_match), span: head_span });
+        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: into_ty, temp_scope: Some(for_match), bid: None, span: head_span });
         let into_call = self.push(Expr {
             kind: ExprKind::Call { ty: into_ty, fun, args: Box::new([head]), from_hir_call: true, fn_span: head_span },
             ty: iter_ty,
-            temp_scope: Some(for_match),
+            temp_scope: Some(for_match), bid: None,
             span: head_span,
         });
         let into_scope = self.synthetic_scope(e, Synthetic::ForIntoIter, ScopeData::Node, span)?;
@@ -140,17 +140,17 @@ impl Cx<'_> {
         // `Iterator::next(&mut iter)`
         let opt_ty = self.method_output(next_def, tcx.tys.list(next_args), span)?;
         let next_ty = self.fn_def_ty(next_def, tcx.tys.list(next_args));
-        let iter_ref = self.push(Expr { kind: ExprKind::VarRef { id: iter_var }, ty: iter_ty, temp_scope: Some(for_body_stmt), span: head_span });
+        let iter_ref = self.push(Expr { kind: ExprKind::VarRef { id: iter_var }, ty: iter_ty, temp_scope: Some(for_body_stmt), bid: None, span: head_span });
         let ref_mut = self.ref_ty(true, iter_ty);
-        let borrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::Default }, arg: iter_ref }, ty: ref_mut, temp_scope: Some(for_body_stmt), span: head_span });
+        let borrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::Default }, arg: iter_ref }, ty: ref_mut, temp_scope: Some(for_body_stmt), bid: None, span: head_span });
         // the argument coerces to `&mut Self`: a (two-phase) reborrow of the borrow
-        let deref = self.push(Expr { kind: ExprKind::Deref { arg: borrow }, ty: iter_ty, temp_scope: Some(for_body_stmt), span: head_span });
-        let reborrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::TwoPhaseBorrow }, arg: deref }, ty: ref_mut, temp_scope: Some(for_body_stmt), span: head_span });
-        let next_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: next_ty, temp_scope: Some(for_body_stmt), span: head_span });
+        let deref = self.push(Expr { kind: ExprKind::Deref { arg: borrow }, ty: iter_ty, temp_scope: Some(for_body_stmt), bid: None, span: head_span });
+        let reborrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::TwoPhaseBorrow }, arg: deref }, ty: ref_mut, temp_scope: Some(for_body_stmt), bid: None, span: head_span });
+        let next_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: next_ty, temp_scope: Some(for_body_stmt), bid: None, span: head_span });
         let next_call = self.push(Expr {
             kind: ExprKind::Call { ty: next_ty, fun: next_fun, args: Box::new([reborrow]), from_hir_call: true, fn_span: head_span },
             ty: opt_ty,
-            temp_scope: Some(for_body_stmt),
+            temp_scope: Some(for_body_stmt), bid: None,
             span: head_span,
         });
         let next_scope = self.synthetic_scope(e, Synthetic::ForNext, ScopeData::Node, span)?;
@@ -162,8 +162,8 @@ impl Cx<'_> {
             let none_idx = self.lang_variant(DefId(0), LangItem::OptionNone, span)?;
             let some_idx = self.lang_variant(DefId(0), LangItem::OptionSome, span)?;
             let none_pat = self.variant_pat(opt_ty, none_idx, Vec::new(), span)?;
-            let brk = self.push(Expr { kind: ExprKind::Break { label: iteration, value: None }, ty: never, temp_scope: Some(for_body_stmt), span });
-            let none_body = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(for_body_stmt), span });
+            let brk = self.push(Expr { kind: ExprKind::Break { label: iteration, value: None }, ty: never, temp_scope: Some(for_body_stmt), bid: None, span });
+            let none_body = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(for_body_stmt), bid: None, span });
             let none_arm = self.thir.alloc_arm(Arm { pattern: Box::new(none_pat), guard: None, body: none_body, node: e.0, scope: for_body, span });
 
             self.pat_hint = self.pat_span(row.pat).lo;
@@ -178,24 +178,24 @@ impl Cx<'_> {
         let match_next = self.push(Expr {
             kind: ExprKind::Match { scrutinee: next_call, arms: arms.into_boxed_slice(), match_source: MatchSource::ForLoopDesugar },
             ty: unit,
-            temp_scope: Some(for_body_stmt),
+            temp_scope: Some(for_body_stmt), bid: None,
             span,
         });
         let stmt = self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope: for_body_stmt, expr: match_next } });
         let block = self.thir.alloc_block(Block { targeted_by_break: false, region_scope: for_arm_blocks, span, stmts: Box::new([stmt]), expr: None, safety_mode: BlockSafety::Safe });
-        let loop_body = self.push(Expr { kind: ExprKind::Block { block }, ty: unit, temp_scope: Some(iteration), span });
-        let loop_expr = self.push(Expr { kind: ExprKind::Loop { body: loop_body }, ty: unit, temp_scope: Some(iteration), span });
-        let loop_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: iteration, node: e.0, value: loop_expr }, ty: unit, temp_scope: Some(iteration), span });
+        let loop_body = self.push(Expr { kind: ExprKind::Block { block }, ty: unit, temp_scope: Some(iteration), bid: None, span });
+        let loop_expr = self.push(Expr { kind: ExprKind::Loop { body: loop_body }, ty: unit, temp_scope: Some(iteration), bid: None, span });
+        let loop_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: iteration, node: e.0, value: loop_expr }, ty: unit, temp_scope: Some(iteration), bid: None, span });
 
         // `mut iter => loop { .. }`
         let iter_arm = self.thir.alloc_arm(Arm { pattern: Box::new(iter_pat), guard: None, body: loop_scoped, node: e.0, scope: for_arm, span });
         let outer = self.push(Expr {
             kind: ExprKind::Match { scrutinee: into_call, arms: Box::new([iter_arm]), match_source: MatchSource::ForLoopDesugar },
             ty: unit,
-            temp_scope: self.temp_scope(e),
+            temp_scope: self.temp_scope(e), bid: self.bid_scope(e),
             span,
         });
-        let outer_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: for_match, node: e.0, value: outer }, ty: unit, temp_scope: self.temp_scope(e), span });
+        let outer_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: for_match, node: e.0, value: outer }, ty: unit, temp_scope: self.temp_scope(e), bid: self.bid_scope(e), span });
         // `DropTemps(..)`
         Ok(self.mk(e, ExprKind::Use { source: outer_scoped }, expr_ty))
     }
@@ -446,11 +446,11 @@ impl Cx<'_> {
         let into_ty = self.fn_def_ty(into_future, &[operand_ty]);
         let awaitee_ty = self.method_output(into_future, &[operand_ty], span)?;
         let outer_temp = self.temp_scope(e);
-        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: into_ty, temp_scope: outer_temp, span });
+        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: into_ty, temp_scope: outer_temp, bid: None, span });
         let scrutinee = self.push(Expr {
             kind: ExprKind::Call { ty: into_ty, fun, args: Box::new([operand]), from_hir_call: true, fn_span: span },
             ty: awaitee_ty,
-            temp_scope: outer_temp,
+            temp_scope: outer_temp, bid: None,
             span,
         });
         let into_scope = self.synthetic_scope(e, Synthetic::AwaitIntoFuture, ScopeData::Node, span)?;
@@ -463,25 +463,25 @@ impl Cx<'_> {
         // `Future::poll(Pin::new_unchecked(&mut __awaitee), get_context(task_context))`
         let at = Some(poll_scope);
         let ref_mut = self.ref_ty(true, awaitee_ty);
-        let awaitee_ref = self.push(Expr { kind: ExprKind::VarRef { id: awaitee }, ty: awaitee_ty, temp_scope: at, span });
-        let borrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::Default }, arg: awaitee_ref }, ty: ref_mut, temp_scope: at, span });
+        let awaitee_ref = self.push(Expr { kind: ExprKind::VarRef { id: awaitee }, ty: awaitee_ty, temp_scope: at, bid: None, span });
+        let borrow = self.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Mut { kind: MutBorrowKind::Default }, arg: awaitee_ref }, ty: ref_mut, temp_scope: at, bid: None, span });
         let new_ty = self.fn_def_ty(new_unchecked, &[ref_mut]);
         let pinned_ty = self.method_output(new_unchecked, &[ref_mut], span)?;
-        let new_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: new_ty, temp_scope: at, span });
-        let pinned = self.push(Expr { kind: ExprKind::Call { ty: new_ty, fun: new_fun, args: Box::new([borrow]), from_hir_call: true, fn_span: span }, ty: pinned_ty, temp_scope: at, span });
+        let new_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: new_ty, temp_scope: at, bid: None, span });
+        let pinned = self.push(Expr { kind: ExprKind::Call { ty: new_ty, fun: new_fun, args: Box::new([borrow]), from_hir_call: true, fn_span: span }, ty: pinned_ty, temp_scope: at, bid: None, span });
         let pinned_scope = self.synthetic_scope(e, Synthetic::AwaitNewUnchecked, ScopeData::Node, span)?;
         let pinned = self.scope_wrap(e, pinned_scope, pinned);
-        let ctx_arg = self.push(Expr { kind: ExprKind::VarRef { id: task_context }, ty: resume_ty, temp_scope: at, span });
+        let ctx_arg = self.push(Expr { kind: ExprKind::VarRef { id: task_context }, ty: resume_ty, temp_scope: at, bid: None, span });
         let ctx_ty = self.fn_def_ty(get_context, &[]);
         let context_ty = self.method_output(get_context, &[], span)?;
-        let ctx_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: ctx_ty, temp_scope: at, span });
-        let context = self.push(Expr { kind: ExprKind::Call { ty: ctx_ty, fun: ctx_fun, args: Box::new([ctx_arg]), from_hir_call: true, fn_span: span }, ty: context_ty, temp_scope: at, span });
+        let ctx_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: ctx_ty, temp_scope: at, bid: None, span });
+        let context = self.push(Expr { kind: ExprKind::Call { ty: ctx_ty, fun: ctx_fun, args: Box::new([ctx_arg]), from_hir_call: true, fn_span: span }, ty: context_ty, temp_scope: at, bid: None, span });
         let context_scope = self.synthetic_scope(e, Synthetic::AwaitGetContext, ScopeData::Node, span)?;
         let context = self.scope_wrap(e, context_scope, context);
         let poll_ty = self.fn_def_ty(poll, &[awaitee_ty]);
         let poll_result_ty = self.method_output(poll, &[awaitee_ty], span)?;
-        let poll_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: poll_ty, temp_scope: at, span });
-        let poll_call = self.push(Expr { kind: ExprKind::Call { ty: poll_ty, fun: poll_fun, args: Box::new([pinned, context]), from_hir_call: true, fn_span: span }, ty: poll_result_ty, temp_scope: at, span });
+        let poll_fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: poll_ty, temp_scope: at, bid: None, span });
+        let poll_call = self.push(Expr { kind: ExprKind::Call { ty: poll_ty, fun: poll_fun, args: Box::new([pinned, context]), from_hir_call: true, fn_span: span }, ty: poll_result_ty, temp_scope: at, bid: None, span });
         let poll_call_scope = self.synthetic_scope(e, Synthetic::AwaitPollCall, ScopeData::Node, span)?;
         let poll_call = self.scope_wrap(e, poll_call_scope, poll_call);
 
@@ -491,34 +491,34 @@ impl Cx<'_> {
         let result = self.synthetic_binding(ready_scope);
         let result_pat = self.binding_pat(result, "result", expr_ty, false, span);
         let ready_pat = self.variant_pat(poll_result_ty, ready_idx, vec![FieldPat { field: FieldIdx(0), pattern: result_pat }], span)?;
-        let result_ref = self.push(Expr { kind: ExprKind::VarRef { id: result }, ty: expr_ty, temp_scope: Some(ready_scope), span });
-        let brk = self.push(Expr { kind: ExprKind::Break { label: loop_scope, value: Some(result_ref) }, ty: never, temp_scope: Some(ready_scope), span });
-        let ready_body = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(ready_scope), span });
+        let result_ref = self.push(Expr { kind: ExprKind::VarRef { id: result }, ty: expr_ty, temp_scope: Some(ready_scope), bid: None, span });
+        let brk = self.push(Expr { kind: ExprKind::Break { label: loop_scope, value: Some(result_ref) }, ty: never, temp_scope: Some(ready_scope), bid: None, span });
+        let ready_body = self.push(Expr { kind: ExprKind::NeverToAny { source: brk }, ty: unit, temp_scope: Some(ready_scope), bid: None, span });
         let ready_arm = self.thir.alloc_arm(Arm { pattern: Box::new(ready_pat), guard: None, body: ready_body, node: e.0, scope: ready_scope, span });
         let pending_pat = self.variant_pat(poll_result_ty, pending_idx, Vec::new(), span)?;
-        let pending_body = self.push(Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: Some(pending_scope), span });
+        let pending_body = self.push(Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: Some(pending_scope), bid: None, span });
         let pending_arm = self.thir.alloc_arm(Arm { pattern: Box::new(pending_pat), guard: None, body: pending_body, node: e.0, scope: pending_scope, span });
         let inner_match = self.push(Expr {
             kind: ExprKind::Match { scrutinee: poll_call, arms: Box::new([ready_arm, pending_arm]), match_source: MatchSource::AwaitDesugar },
             ty: unit,
-            temp_scope: at,
+            temp_scope: at, bid: None,
             span,
         });
         let poll_stmt = self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope: poll_scope, expr: inner_match } });
 
         // `task_context = yield ();`
         let yt = Some(yield_scope);
-        let unit_value = self.push(Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: yt, span });
-        let yielded = self.push(Expr { kind: ExprKind::Yield { value: unit_value }, ty: resume_ty, temp_scope: yt, span });
-        let target = self.push(Expr { kind: ExprKind::VarRef { id: task_context }, ty: resume_ty, temp_scope: yt, span });
-        let assign = self.push(Expr { kind: ExprKind::Assign { lhs: target, rhs: yielded }, ty: unit, temp_scope: yt, span });
+        let unit_value = self.push(Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: yt, bid: None, span });
+        let yielded = self.push(Expr { kind: ExprKind::Yield { value: unit_value }, ty: resume_ty, temp_scope: yt, bid: None, span });
+        let target = self.push(Expr { kind: ExprKind::VarRef { id: task_context }, ty: resume_ty, temp_scope: yt, bid: None, span });
+        let assign = self.push(Expr { kind: ExprKind::Assign { lhs: target, rhs: yielded }, ty: unit, temp_scope: yt, bid: None, span });
         let yield_stmt = self.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope: yield_scope, expr: assign } });
 
         // `loop { .. }`
         let block = self.thir.alloc_block(Block { targeted_by_break: false, region_scope: body_scope, span, stmts: Box::new([poll_stmt, yield_stmt]), expr: None, safety_mode: BlockSafety::Safe });
-        let loop_body = self.push(Expr { kind: ExprKind::Block { block }, ty: unit, temp_scope: Some(loop_scope), span });
-        let loop_expr = self.push(Expr { kind: ExprKind::Loop { body: loop_body }, ty: expr_ty, temp_scope: Some(loop_scope), span });
-        let loop_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: loop_scope, node: e.0, value: loop_expr }, ty: expr_ty, temp_scope: Some(arm_scope), span });
+        let loop_body = self.push(Expr { kind: ExprKind::Block { block }, ty: unit, temp_scope: Some(loop_scope), bid: None, span });
+        let loop_expr = self.push(Expr { kind: ExprKind::Loop { body: loop_body }, ty: expr_ty, temp_scope: Some(loop_scope), bid: None, span });
+        let loop_scoped = self.push(Expr { kind: ExprKind::Scope { region_scope: loop_scope, node: e.0, value: loop_expr }, ty: expr_ty, temp_scope: Some(arm_scope), bid: None, span });
 
         // `mut __awaitee => loop { .. }`
         let awaitee_arm = self.thir.alloc_arm(Arm { pattern: Box::new(awaitee_pat), guard: None, body: loop_scoped, node: e.0, scope: arm_scope, span });
@@ -593,7 +593,7 @@ impl Cx<'_> {
         let mut stmts = Vec::new();
         let mut borrow_stmt = |this: &mut Self, arg: ExprId, arg_ty: TyId, arg_span: Span| {
             let ref_ty = this.ref_ty(false, arg_ty);
-            let borrow = this.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Shared, arg }, ty: ref_ty, temp_scope: Some(stmt_scope), span: arg_span });
+            let borrow = this.push(Expr { kind: ExprKind::Borrow { borrow_kind: BorrowKind::Shared, arg }, ty: ref_ty, temp_scope: Some(stmt_scope), bid: None, span: arg_span });
             let _ = arg_span;
             stmts.push(this.thir.alloc_stmt(Stmt { kind: StmtKind::Expr { scope: stmt_scope, expr: borrow } }));
         };
@@ -612,13 +612,13 @@ impl Cx<'_> {
                 let var = LocalVarId(index);
                 let ty = tb.locals[index as usize].ty;
                 let kind = if self.is_upvar(index) { ExprKind::UpvarRef { var } } else { ExprKind::VarRef { id: var } };
-                let arg = self.push(Expr { kind, ty, temp_scope: Some(stmt_scope), span });
+                let arg = self.push(Expr { kind, ty, temp_scope: Some(stmt_scope), bid: None, span });
                 borrow_stmt(self, arg, ty, span);
             }
         }
         let tail = if diverges {
             let never = self.tcx().tys.never;
-            Some(self.push(Expr { kind: ExprKind::Unreachable, ty: never, temp_scope: Some(stmt_scope), span }))
+            Some(self.push(Expr { kind: ExprKind::Unreachable, ty: never, temp_scope: Some(stmt_scope), bid: None, span }))
         } else {
             None
         };

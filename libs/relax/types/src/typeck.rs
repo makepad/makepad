@@ -451,6 +451,8 @@ pub struct Fcx<'a> {
     /// per local (by index): its hygiene context and the source position of its binding
     /// (u32::MAX context: `self`, matched by any use)
     local_hyg: Vec<(Option<crate::parser::HygCtxt>, u32)>,
+    /// the attributes of the match arm whose pattern is being checked (lint levels)
+    arm_attrs: Vec<Attr>,
     infcx: crate::infer::InferCtxt<'a>,
     fulfillment_cx: crate::next_solver::fulfill::FulfillmentCtxt,
     /// the pending obligations outside the open snapshots (innermost last): a snapshot works on
@@ -742,6 +744,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         },
         scopes: Vec::new(),
         local_hyg: Vec::new(),
+        arm_attrs: Vec::new(),
         fulfillment_cx: crate::next_solver::fulfill::FulfillmentCtxt::new(&infcx),
         suspended_fulfillment: Vec::new(),
         infcx,
@@ -859,8 +862,10 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         let s = prog.syms.get("self").unwrap_or(0);
         let li = fcx.b.locals.len() as u32;
         fcx.b.locals.push(Local { name: s, ty: params[0], mutable, pat: u32::MAX });
+        // `self` is hygienic like any local: a macro defined before the fn does not see it
         fcx.local_hyg.resize(li as usize + 1, (Some(Vec::new()), 0));
-        fcx.local_hyg[li as usize] = (None, 0);
+        let at = prog.files[file as usize].self_param_pos(ast.item(d.item).lo);
+        fcx.local_hyg[li as usize] = (Some(prog.files[file as usize].hyg_ctxt(at)), at);
         fcx.scopes.push((s, li));
         pi = 1;
     }
@@ -2354,7 +2359,7 @@ impl<'a> Fcx<'a> {
                     if let TyKind::Adt(ed, _, _) = self.tcx.tys.kind(t).clone() {
                         if self.tcx.adts.get(&ed).is_some_and(|a| a.is_enum && a.variants.iter().any(|v| v.name == s && v.shape == 0)) {
                             let en = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
-                            crate::lint::emit(self.prog, self.b.def, &crate::lint::BINDINGS_WITH_VARIANT_NAME, self.file, name.lo,
+                            crate::lint::emit_in(self.prog, self.b.def, &self.arm_attrs, &crate::lint::BINDINGS_WITH_VARIANT_NAME, self.file, name.lo,
                                 &format!("E0170: pattern binding `{}` is named the same as one of the variants of the type `{}`", self.text(*name), en));
                         }
                     }
@@ -3734,6 +3739,13 @@ impl<'a> Fcx<'a> {
                     let t = self.value_def_ty(d, explicit, key);
                     return (Res::Def(d), t);
                 }
+            }
+            if path.segs.len() == 1 && !path.global() && prog.syms.str(s) == "self" {
+                // `self` where no method's receiver is visible (a macro's `self` is hygienic)
+                // (reported where the macro body wrote it)
+                let at = self.prog.files[self.file as usize].lint_pos(path.lo);
+                self.err(at, "E0424: expected value, found module `self`".to_string());
+                return (Res::Err, error);
             }
             let help = import_help(prog, self.module, s, false);
             self.err(path.lo, format!("E0425: cannot find value `{}` in this scope{}", crate::tcx::path_str(prog, self.file, path), help));
@@ -5167,7 +5179,9 @@ impl<'a> Fcx<'a> {
                         continue;
                     }
                     let saved = self.scopes.len();
+                    self.arm_attrs = self.ast().list(arm.attrs).to_vec();
                     self.check_pat(arm.pat, st);
+                    self.arm_attrs.clear();
                     arm_bindings.push(self.scopes[saved..].to_vec());
                     self.scopes.truncate(saved);
                 }

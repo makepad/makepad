@@ -60,6 +60,8 @@ pub mod lint_dead;
 pub mod lint_imports;
 pub mod lint_late;
 pub mod lint_late2;
+pub mod significant_drop;
+pub mod lint_tail_drop;
 pub mod lint_recursion;
 pub mod lint_nonlocal;
 pub mod item_checks;

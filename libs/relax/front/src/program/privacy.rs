@@ -105,6 +105,15 @@ impl Program {
     /// 0: not ambiguous; 1: two globs of `m` bring different items; 2: only inherited through a
     /// glob whose module is itself ambiguous for `name`.
     pub fn glob_ambiguity(&self, m: u32, name: Sym, ns_type: bool, _from: u32, skip_direct: bool) -> u8 {
+        // a checked module: what the replay of rustc's import resolution found
+        if let Some(t) = &self.sim_ambiguity {
+            if self.own_crates.get(self.mods[m as usize].krate as usize).copied().unwrap_or(false) {
+                let md = &self.mods[m as usize];
+                if !skip_direct && (if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) }) { return 0; }
+                let v = t.get(&(m, name, ns_type)).copied().unwrap_or(0);
+                return if skip_direct { v >> 2 } else { v & 3 };
+            }
+        }
         let key = (m, name, ns_type, skip_direct);
         if let Some(r) = self.glob_amb_cache.get(&key) { return r; }
         let r = self.glob_ambiguity_in(m, name, ns_type, skip_direct, &mut crate::fxhash::HashMap::default());
@@ -175,6 +184,11 @@ impl Program {
             if ambig != 0 {
                 let def = self.lookup_in_module(m, name, ns_type, &mut Vec::new())?;
                 return Some(PrivacyError { name, def, import: true, ext: false, ambiguous: true, lint: ambig == 2 });
+            }
+            // the first scope that binds the name settles it (late resolution reports no ambiguity
+            // between a scope's glob and an outer scope)
+            if self.sim_ambiguity.as_ref().is_some_and(|t| self.own_crates.get(md.krate as usize).copied().unwrap_or(false) && t.contains_key(&(m, name, ns_type))) {
+                return None;
             }
             match md.lexical_parent {
                 Some(p) => m = p,

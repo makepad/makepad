@@ -112,6 +112,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     u.prog.own_crates = own.clone();
     errors.extend(u.prog.strict_import_errors(&own));
+    errors.extend(relax_types::lint::import_resolution_diags(&mut u.prog, &own));
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
     // context); errors in definition order
     {

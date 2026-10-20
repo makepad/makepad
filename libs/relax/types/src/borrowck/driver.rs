@@ -154,6 +154,13 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     for (owner, mir) in &mut built {
         match mir_promoted(prog, tcx, env, &provider, &mut **mir) {
             Ok(pre) => {
+                if crate::lint::enabled() {
+                    // (a lint of the promoted MIR, rustc runs it at the end of mir_promoted)
+                    let closure = matches!(owner.kind, OwnerKind::Closure(_));
+                    if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::lint_tail_drop::run_lint(prog, tcx, env, typeck.def, closure, mir))) {
+                        if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); }
+                    }
+                }
                 for e in pre.const_errors {
                     let mut d = diagnostics::Diag::new(e.code, e.span, e.message);
                     d.labels.push((e.span, String::new(), true));

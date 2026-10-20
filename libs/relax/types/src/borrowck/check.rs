@@ -246,7 +246,31 @@ impl MirBorrowckCtxt<'_> {
             StatementKind::Intrinsic(NonDivergingIntrinsic::Assume(op)) => self.consume_operand(op, at, span, state),
             StatementKind::AscribeUserType(..) | StatementKind::PlaceMention(..)
             | StatementKind::ConstEvalCounter | StatementKind::StorageLive(..) => {}
+            // does not affect borrowck itself: the lint `tail_expr_drop_order` for borrows still live there
+            StatementKind::BackwardIncompatibleDropHint { place, reason: BackwardIncompatibleDropReason::Edition2024 } => self.check_backward_incompatible_drop(place, state),
             _ => unreachable!("preflight rejected invalid phase"),
+        }
+    }
+    /// lib.rs `check_backward_incompatible_drop`: `BackwardIncompatibleDropHint`s are the places whose
+    /// drop moves in edition 2024; a borrow still live there makes the lint `tail_expr_drop_order`
+    /// (borrowck would fail at the new drop location). Reported against the crate.
+    fn check_backward_incompatible_drop(&mut self, place: &Place, state: BorrowckDomain<'_>) {
+        if !crate::lint::enabled() { return; }
+        let Some(pty) = place.ty(self.body, self.tcx) else { return };
+        // a type that does not need drop is treated like a `StorageDead`
+        let env = crate::tcx::TypingEnv::fully_monomorphized(self.prog);
+        let depth = if self.tcx.needs_drop(self.prog, env, pty.ty) { AccessDepth::Drop } else { Shallow(None) };
+        let mut found: Option<Span> = None;
+        each_borrow_involving_path(self.tcx, self.body, (depth, place), self.borrows, |i| state.borrows.contains(i), |_, borrow| {
+            if matches!(borrow.kind, BorrowKind::Fake(_)) { return ControlFlow::Continue(()); }
+            found = Some(self.span_at(borrow.reserve_location));
+            ControlFlow::Break(())
+        });
+        if let Some(span) = found {
+            let owner = self.body.source.owner;
+            if !crate::lint::external(self.prog, span.file, span.lo) {
+                crate::lint::emit(self.prog, owner, &crate::lint_tail_drop::TAIL_EXPR_DROP_ORDER, span.file, span.lo, "relative drop order changing in Rust 2024");
+            }
         }
     }
     fn visit_terminator(&mut self, term: &Terminator, at: Location, state: BorrowckDomain<'_>) {

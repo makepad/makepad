@@ -106,6 +106,22 @@ pub fn duplicate_exported_macros(prog: &Program, own: &[bool]) -> Vec<String> {
             }
             seen.push((krate, file as u32, kpos));
         }
+        // a macro the crate root imports under the same name (`pub use std::panic;`) is the same name
+        // in the macro namespace (E0255)
+        let sym = prog.syms.get(name);
+        for d in defs.iter().map(|d| &**d).filter(|d| d.exported && d.builtin == 0 && !d.def_file.is_empty()) {
+            let Some(file) = prog.file_paths.iter().position(|p| *p == d.def_file) else { continue };
+            let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+            if !own.get(krate as usize).copied().unwrap_or(false) || d.def_pos >= prog.files[file].src_len { continue; }
+            let root = prog.crates[krate as usize].root_mod;
+            let clash = prog.imports_iter().any(|im| im.module == root && !im.glob && !im.ext && im.bind == sym && sym.is_some()
+                && im.segs.len() > 1 && im.segs.last().map(|s| s.1) == sym
+                && (crate::program::BUILTIN_MACROS.contains(&name.as_str()) || relax_front::builtins::is_macro_name(name)));
+            if clash {
+                errors.push(prog.record_error(file as u32, d.def_pos, "resolve", format!(
+                    "E0255: the name `{}` is defined multiple times -- note: `{}` must be defined only once in the macro namespace of this module", name, name)));
+            }
+        }
     }
     errors
 }
@@ -194,6 +210,32 @@ pub fn impl_trait_path_privacy(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<S
     errors
 }
 
+/// A `pub(in path)` visibility path with a segment that names no module in the middle (rustc
+/// `resolve_path`: "cannot find module `String` in `string`" when it is a struct).
+fn vis_path_segments(prog: &Program, file: u32, scope: u32, p: crate::ast::Row<crate::ast::Path>, errors: &mut Vec<String>) {
+    use crate::ast::SegKind;
+    let ast = &prog.files[file as usize].ast;
+    let pf = &prog.files[file as usize];
+    let p = ast.row(p);
+    let segs = crate::program::path_segs(prog, file, p);
+    let written = ast.segs(p.segs);
+    let from = prog.mods[scope as usize].normal;
+    for k in 1..segs.len().saturating_sub(1) {
+        if written[k].kind() != SegKind::Ident { continue; }
+        match prog.resolve_mod_path(from, p.global(), &segs[..=k], false, false) {
+            Some(m) if prog.def(m).kind != DefKind::Mod => {
+                let at = written[k].name.lo;
+                if at < pf.src_len {
+                    errors.push(prog.record_error(file, at, "resolve", format!("E0433: cannot find module `{}` in `{}`", pf.text(written[k].name), pf.text(written[k - 1].name))));
+                }
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+}
+
 /// E0433 `too many leading `super` keywords`: a `pub(super)` / `pub(in super::super)` visibility
 /// (also one a macro expansion wrote) with fewer enclosing modules than `super`s; and a global
 /// `::super::x` path in a `use` (rustc_resolve: global paths cannot start with `super`).
@@ -220,11 +262,22 @@ pub fn super_paths(prog: &Program, own: &[bool]) -> Vec<String> {
         };
         if too_many {
             errors.push(prog.record_error(def.file, item.lo, "resolve", "E0433: failed to resolve: too many leading `super` keywords".to_string()));
+        } else if let Vis::In(p) = item.vis {
+            vis_path_segments(prog, def.file, scope, p, &mut errors);
         }
     }
+    let mut seen_items = crate::fxhash::HashSet::default();
     for im in prog.imports_iter() {
         let krate = prog.mods[im.module as usize].krate;
-        if !own.get(krate as usize).copied().unwrap_or(false) || im.ext || !im.global || im.segs.first().map(|s| s.0) != Some(SegKind::Super) { continue; }
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        // the visibility path of the `use` / `extern crate` item this import came from
+        if im.pos < prog.files[im.file as usize].src_len && seen_items.insert((im.file, im.pos)) {
+            let ast = &prog.files[im.file as usize].ast;
+            if let Some(item) = ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, crate::ast::ItemKind::Use { .. } | crate::ast::ItemKind::ExternCrate(_))) {
+                if let Vis::In(p) = item.vis { vis_path_segments(prog, im.file, im.module, p, &mut errors); }
+            }
+        }
+        if im.ext || !im.global || im.segs.first().map(|s| s.0) != Some(SegKind::Super) { continue; }
         if im.pos >= prog.files[im.file as usize].src_len { continue; }
         errors.push(prog.record_error(im.file, im.pos, "resolve", "E0433: failed to resolve: global paths cannot start with `super`".to_string()));
     }
@@ -1402,7 +1455,9 @@ pub fn assoc_const_elision(prog: &Program, d: DefId) -> Vec<String> {
     }
     let itext = |i: crate::ast::Ident| -> &str { std::str::from_utf8(prog.files[imp.file as usize].bytes(i.lo, i.hi)).unwrap_or("") };
     let ctext = |i: crate::ast::Ident| -> &str { std::str::from_utf8(pf.bytes(i.lo, i.hi)).unwrap_or("") };
-    let header = anon(iast, &itext, im.self_ty, false, 0)
+    // a lifetime is in scope: one the impl declares (`impl<'a>`), or an anonymous one its header names
+    let declared = iast.list(im.generics.params).iter().any(|p| matches!(p.kind, crate::ast::GenericParamKind::Lifetime(_)));
+    let header = declared || anon(iast, &itext, im.self_ty, false, 0)
         || im.trait_.as_ref().is_some_and(|p| iast.segs(p.segs).iter().any(|s| match iast.gargs(s.args()) {
             Some(GenericArgs::Angle(v)) => iast.list(*v).iter().any(|a| matches!(a, GenericArg::Lifetime(l) if itext(*l) == "'_")),
             _ => false,

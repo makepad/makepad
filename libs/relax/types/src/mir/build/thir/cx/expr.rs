@@ -56,9 +56,9 @@ impl Cx<'_> {
             expr = self.apply_adjustment(e, expr, adjustment, two_phase)?;
         }
         // Finally, wrap this up in the expr's scope.
-        let (ty, temp_scope) = (expr.ty, self.temp_scope(e));
+        let (ty, temp_scope, bid) = (expr.ty, self.temp_scope(e), self.bid_scope(e));
         let value = self.push(expr);
-        Ok(self.push(Expr { temp_scope, ty, span, kind: ExprKind::Scope { region_scope: expr_scope, node: e.0, value } }))
+        Ok(self.push(Expr { temp_scope, bid, ty, span, kind: ExprKind::Scope { region_scope: expr_scope, node: e.0, value } }))
     }
 
     pub(super) fn mirror_exprs(&mut self, list: &[ast::ExprId]) -> BuildResult<Box<[ExprId]>> {
@@ -99,7 +99,7 @@ impl Cx<'_> {
     }
 
     fn apply_adjustment(&mut self, e: ast::ExprId, expr: Expr, adjustment: Adjustment, two_phase: bool) -> BuildResult<Expr> {
-        let (temp_scope, span) = (expr.temp_scope, expr.span);
+        let (temp_scope, bid, span) = (expr.temp_scope, expr.bid, expr.span);
         let target = adjustment.target;
         let tcx = self.tcx();
         let kind = match adjustment.kind {
@@ -122,7 +122,7 @@ impl Cx<'_> {
                 Coerce::RefToRaw(mutable) => {
                     // `&T as *const T`: [Deref(None), Borrow(RawPtr)]
                     let TyKind::Ref(_, pointee, _) = *tcx.tys.kind(expr.ty) else { return self.unresolved(span, "RefToRaw of a non-reference") };
-                    let place = Expr { kind: ExprKind::Deref { arg: self.push(expr) }, ty: pointee, temp_scope, span };
+                    let place = Expr { kind: ExprKind::Deref { arg: self.push(expr) }, ty: pointee, temp_scope, bid, span };
                     ExprKind::RawBorrow { mutability: if mutable { Mutability::Mut } else { Mutability::Not }, arg: self.push(place) }
                 }
                 Coerce::DerefRef(_) => return self.unresolved(span, "DerefRef is a view, not a step"),
@@ -139,16 +139,16 @@ impl Cx<'_> {
                 let callee_ty = self.fn_def_ty(def, tcx.tys.list(args));
                 let ref_ty = self.ref_ty(mutable, expr.ty);
                 let borrow_kind = if mutable { mut_borrow(false) } else { BorrowKind::Shared };
-                let borrow = Expr { kind: ExprKind::Borrow { borrow_kind, arg: self.push(expr) }, ty: ref_ty, temp_scope, span };
+                let borrow = Expr { kind: ExprKind::Borrow { borrow_kind, arg: self.push(expr) }, ty: ref_ty, temp_scope, bid, span };
                 let arg = self.push(borrow);
-                return Ok(self.overloaded_place(e, temp_scope, target, callee_ty, Box::new([arg]), span)?);
+                return Ok(self.overloaded_place(e, (temp_scope, bid), target, callee_ty, Box::new([arg]), span)?);
             }
             Adjust::Borrow(mutable) => {
                 let borrow_kind = if mutable { mut_borrow(two_phase) } else { BorrowKind::Shared };
                 ExprKind::Borrow { borrow_kind, arg: self.push(expr) }
             }
         };
-        Ok(Expr { kind, ty: target, temp_scope, span })
+        Ok(Expr { kind, ty: target, temp_scope, bid, span })
     }
 
     /// The operand-site adjustments of `node` (the autoderef of a receiver, base or callee).
@@ -162,15 +162,15 @@ impl Cx<'_> {
 
     /// For an overloaded `*x` or `x[y]` of type T the method call returns an `&T` and we add the deref
     /// so that the types line up (the operators denote places): `*foo()`.
-    fn overloaded_place(&mut self, e: ast::ExprId, temp_scope: Option<crate::region_scope::ScopeId>, place_ty: TyId, callee_ty: TyId, args: Box<[ExprId]>, span: Span) -> BuildResult<Expr> {
+    fn overloaded_place(&mut self, e: ast::ExprId, (temp_scope, bid): (Option<crate::region_scope::ScopeId>, Option<crate::region_scope::ScopeId>), place_ty: TyId, callee_ty: TyId, args: Box<[ExprId]>, span: Span) -> BuildResult<Expr> {
         let tcx = self.tcx();
         let receiver_ty = self.thir.exprs[args[0].0 as usize].ty;
         let TyKind::Ref(mutable, _, region) = *tcx.tys.kind(receiver_ty) else { return self.unresolved(span, "overloaded place receiver is not a reference") };
         let ref_ty = tcx.tys.intern(TyKind::Ref(mutable, place_ty, region));
-        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: callee_ty, temp_scope, span });
-        let call = self.push(Expr { kind: ExprKind::Call { ty: callee_ty, fun, args, from_hir_call: false, fn_span: span }, ty: ref_ty, temp_scope, span });
+        let fun = self.push(Expr { kind: ExprKind::ZstLiteral { user_ty: None }, ty: callee_ty, temp_scope, bid, span });
+        let call = self.push(Expr { kind: ExprKind::Call { ty: callee_ty, fun, args, from_hir_call: false, fn_span: span }, ty: ref_ty, temp_scope, bid, span });
         let _ = e;
-        Ok(Expr { kind: ExprKind::Deref { arg: call }, ty: place_ty, temp_scope, span })
+        Ok(Expr { kind: ExprKind::Deref { arg: call }, ty: place_ty, temp_scope, bid, span })
     }
 
     /// A call of an overloaded operator: the trait method applied to the operands.
@@ -349,7 +349,7 @@ impl Cx<'_> {
                     };
                     let index = self.mirror_expr(index)?;
                     let callee_ty = self.fn_def_ty(def, tcx.tys.list(args));
-                    return self.overloaded_place(e, self.temp_scope(e), expr_ty, callee_ty, Box::new([base, index]), span);
+                    return self.overloaded_place(e, (self.temp_scope(e), self.bid_scope(e)), expr_ty, callee_ty, Box::new([base, index]), span);
                 }
                 let base = self.mirror_expr(lhs)?;
                 let base = self.apply_operand_adjustments_id(e, base)?;
@@ -372,7 +372,7 @@ impl Cx<'_> {
                     Some((def, args)) => {
                         let arg = self.autoref(e, arg, self.is_mut_method(def));
                         let callee_ty = self.fn_def_ty(def, tcx.tys.list(args));
-                        return self.overloaded_place(e, self.temp_scope(e), expr_ty, callee_ty, Box::new([arg]), span);
+                        return self.overloaded_place(e, (self.temp_scope(e), self.bid_scope(e)), expr_ty, callee_ty, Box::new([arg]), span);
                     }
                     None => ExprKind::Deref { arg },
                 }
@@ -873,7 +873,7 @@ impl Cx<'_> {
                 crate::upvar::CaptureKind::ByRef(crate::expr_use::BorrowKind::Mut) => BorrowKind::Mut { kind: MutBorrowKind::Default },
             };
             let arg = self.push(place);
-            upvars.push(self.push(Expr { kind: ExprKind::Borrow { borrow_kind: kind, arg }, ty, temp_scope: temp, span }));
+            upvars.push(self.push(Expr { kind: ExprKind::Borrow { borrow_kind: kind, arg }, ty, temp_scope: temp, bid: None, span }));
         }
         let mut fake_reads = Vec::new();
         for (place, cause, node) in &caps.fake_reads {
@@ -884,7 +884,7 @@ impl Cx<'_> {
             };
             fake_reads.push((self.push(expr), cause, *node));
         }
-        Ok(Expr { kind: ExprKind::Closure(Box::new(ClosureExpr { closure, args, upvars: upvars.into_boxed_slice(), movability, fake_reads, kind })), ty: expr_ty, temp_scope: temp, span })
+        Ok(Expr { kind: ExprKind::Closure(Box::new(ClosureExpr { closure, args, upvars: upvars.into_boxed_slice(), movability, fake_reads, kind })), ty: expr_ty, temp_scope: temp, bid: None, span })
     }
 
     /// The place a closure captures, as an expression of the creating body (starting from the
@@ -893,7 +893,7 @@ impl Cx<'_> {
         use crate::expr_use::Projection;
         let var = LocalVarId(place.root);
         let kind = if self.is_upvar(place.root) { ExprKind::UpvarRef { var } } else { ExprKind::VarRef { id: var } };
-        let mut expr = Expr { kind, ty: place.root_ty, temp_scope: temp, span };
+        let mut expr = Expr { kind, ty: place.root_ty, temp_scope: temp, bid: None, span };
         for (proj, ty) in &place.projections {
             let kind = match *proj {
                 Projection::Deref => ExprKind::Deref { arg: self.push(expr) },
@@ -901,7 +901,7 @@ impl Cx<'_> {
                 // we don't capture these projections, so we can ignore them here
                 Projection::Index | Projection::Subslice => continue,
             };
-            expr = Expr { kind, ty: *ty, temp_scope: temp, span };
+            expr = Expr { kind, ty: *ty, temp_scope: temp, bid: None, span };
         }
         expr
     }

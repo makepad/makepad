@@ -998,7 +998,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // declaration collection lowers: the crates are marked before it runs (a run marks none).
     if check {
         let checked = if watch || root_only || session.is_some() { vec![root] } else if selftest || workspace_check { crate::check::workspace_crates(&prog, root) } else { crate::check::app_crates(&prog, root) };
-        for k in checked { prog.crates[k as usize].validate = true; }
+        let mut own = vec![false; prog.crates.len()];
+        for k in checked { prog.crates[k as usize].validate = true; own[k as usize] = true; }
+        // rustc's import resolution replayed over the checked crates: the glob ambiguities it finds
+        // answer the name lookups of the declarations collected next
+        prog.own_crates = own.clone();
+        relax_types::lint::enable();
+        prog.run_import_sim(&own);
     }
     let mut tcx = collected_tcx.take().unwrap_or_else(crate::tcx::Tcx::new);
     // MAKEPAD_RUN_PERTURB: type ids shift (code must not depend on them; syms.rs reloc_sig)

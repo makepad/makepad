@@ -159,6 +159,9 @@ pub struct Expr {
     /// rustc `temp_scope_id`, resolved through the ScopeTree: the scope temporaries of this
     /// expression die in (None: static extension).
     pub temp_scope: Option<ScopeId>,
+    /// rustc `TempLifetime::backwards_incompatible`: the scope the temporaries of this expression
+    /// will die in from edition 2024 (None: no change, or the lint is off).
+    pub bid: Option<ScopeId>,
     pub span: Span,
 }
 

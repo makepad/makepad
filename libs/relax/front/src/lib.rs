@@ -60,6 +60,7 @@ pub mod program;
 pub mod def_collector;
 pub mod assoc;
 pub mod macros;
+pub mod macro_check;
 pub mod preload;
 pub mod crate_image;
 pub mod collected;

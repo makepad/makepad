@@ -138,6 +138,11 @@ impl Program {
                                                     path_derive_errors.push((segs[1].0, format!("E0433: cannot find derive macro `{}` in `{}`", n, segs[0].1)));
                                                 }
                                             }
+                                            // a trait or an enum holds no derive macros
+                                            Some(d) if segs.len() == 2 && matches!(self.def(d).kind, DefKind::Trait | DefKind::Enum) && !(global) => {
+                                                let kind = if self.def(d).kind == DefKind::Trait { "trait" } else { "enum" };
+                                                path_derive_errors.push((segs[1].0, format!("E0433: cannot find derive macro `{}` in {} `{}`", segs[1].1, kind, segs[0].1)));
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -238,7 +243,8 @@ impl Program {
                     }
                     format!("cannot find attribute `{n}` in this scope")
                 } else {
-                    if !global && tool(segs[0]) {
+                    // (a module of that name in scope shadows the tool: modules come first in the scope walk)
+                    if !global && tool(segs[0]) && !self.syms.get(segs[0]).is_some_and(|s| self.lookup_in_scope(module, s, true).is_some_and(|d| self.def(d).kind == DefKind::Mod && self.def(d).krate == krate)) {
                         continue;
                     }
                     let first = segs[0];

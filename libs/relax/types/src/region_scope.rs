@@ -42,6 +42,10 @@ pub struct ScopeTree {
     nodes: HashMap<(Node, ScopeData), ScopeId>,
     var_map: HashMap<u32, ScopeId>,
     pub rvalue_scopes: HashMap<u32, Option<ScopeId>>,
+    /// The tail expressions of blocks of editions before 2024, whose temporaries are dropped earlier
+    /// from edition 2024 (rustc `backwards_incompatible_scope`; recorded for the lint
+    /// `tail_expr_drop_order`, which only `makepad check` runs).
+    backwards_incompatible_nodes: std::collections::HashSet<Node>,
     positions: HashMap<u32, ExprPosition>,
     yield_in_scope: Vec<Vec<u32>>,
 }
@@ -57,14 +61,26 @@ impl ScopeTree {
     pub fn yields_in_scope(&self, scope: ScopeId) -> &[u32] { &self.yield_in_scope[scope.0 as usize] }
     /// `None` is static extension, never an unknown expression (which is a caller error).
     /// rustc_middle/src/middle/region.rs:308,346: return the child of Destruction.
-    pub fn temporary_scope(&self, expr: ExprId) -> Option<ScopeId> {
+    pub fn temporary_scope(&self, expr: ExprId) -> Option<ScopeId> { self.temp_lifetime(expr).0 }
+    /// rustc `ScopeTree::temporary_scope`: the scope the temporaries of `expr` die in, and the scope
+    /// they will die in from edition 2024 when that differs (`TempLifetime`).
+    pub fn temp_lifetime(&self, expr: ExprId) -> (Option<ScopeId>, Option<ScopeId>) {
         let mut scope = self.scope(Node::Expr(expr.0), ScopeData::Node).expect("expression outside scope tree");
-        if let Some(s) = self.rvalue_scopes.get(&expr.0) { return *s; }
+        if let Some(s) = self.rvalue_scopes.get(&expr.0) { return (*s, None); }
+        let mut backwards_incompatible = None;
         while let Some(p) = self.encl_scope(scope) {
-            match self.scopes[p.0 as usize].data {
-                ScopeData::Destruction => return Some(scope),
-                ScopeData::IfThenRescope | ScopeData::MatchGuard => return Some(p),
-                _ => scope = p,
+            let data = &self.scopes[p.0 as usize];
+            match data.data {
+                ScopeData::Destruction => return (Some(scope), backwards_incompatible),
+                ScopeData::IfThenRescope | ScopeData::MatchGuard => return (Some(p), backwards_incompatible),
+                _ => {
+                    // passing through a tail expression whose temporaries live longer than they will
+                    // from edition 2024: remember the first one (region.rs `default_temporary_scope`)
+                    if backwards_incompatible.is_none() && self.backwards_incompatible_nodes.contains(&data.node) {
+                        backwards_incompatible = self.scope(data.node, ScopeData::Node);
+                    }
+                    scope = p;
+                }
             }
         }
         panic!("expression without destruction scope")
@@ -140,7 +156,11 @@ impl Resolve<'_> {
         for (i, stmt) in ast.list(statements).iter().enumerate() {
             if i + 1 == statements.len() {
                 if let Some((e, false)) = ast.stmt_expr(stmt) {
-                    self.expr(e, node_edition(self.file, Node::Block(b.0)) >= 2024);
+                    let terminating = node_edition(self.file, Node::Block(b.0)) >= 2024;
+                    if !terminating && crate::lint::enabled() {
+                        self.tree.backwards_incompatible_nodes.insert(Node::Expr(e.0));
+                    }
+                    self.expr(e, terminating);
                     break;
                 }
             }

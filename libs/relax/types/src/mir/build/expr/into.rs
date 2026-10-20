@@ -389,7 +389,7 @@ mod tests {
         let tuple_ty = t.intern(TyKind::Tuple(t.mk_list(&[i32_, i32_])));
         let a = lit(&mut fx, "42", i32_, false);
         let b = lit(&mut fx, "42", i32_, true);
-        let tup = fx.thir.alloc_expr(Expr { kind: K::Tuple { fields: vec![a, b].into() }, ty: tuple_ty, temp_scope: None, span: Span::default() });
+        let tup = fx.thir.alloc_expr(Expr { kind: K::Tuple { fields: vec![a, b].into() }, ty: tuple_ty, temp_scope: None, bid: None, span: Span::default() });
         let (mut bl, _) = builder(fx);
         let dest = bl.temp(tuple_ty, Span::default());
         let start = bl.cfg.start_new_block();
@@ -404,7 +404,7 @@ mod tests {
 
     fn unit_tuple(fx: &mut super::super::as_rvalue::tests::Fx) -> ExprId {
         let unit = fx.builder_parts.1.tys.unit;
-        fx.thir.alloc_expr(Expr { kind: K::Tuple { fields: Vec::new().into() }, ty: unit, temp_scope: None, span: Span::default() })
+        fx.thir.alloc_expr(Expr { kind: K::Tuple { fields: Vec::new().into() }, ty: unit, temp_scope: None, bid: None, span: Span::default() })
     }
 
     #[test]
@@ -412,7 +412,7 @@ mod tests {
         let mut fx = fixture();
         let unit = fx.builder_parts.1.tys.unit;
         let body = unit_tuple(&mut fx);
-        let lp = fx.thir.alloc_expr(Expr { kind: K::Loop { body }, ty: unit, temp_scope: None, span: Span::default() });
+        let lp = fx.thir.alloc_expr(Expr { kind: K::Loop { body }, ty: unit, temp_scope: None, bid: None, span: Span::default() });
         let (mut bl, _) = builder(fx);
         let dest = bl.temp(unit, Span::default());
         let start = bl.cfg.start_new_block();
@@ -429,9 +429,9 @@ mod tests {
         let mut fx = fixture();
         let i32_ = fx.builder_parts.1.tys.i32_;
         let unit = fx.builder_parts.1.tys.unit;
-        let fun = fx.thir.alloc_expr(Expr { kind: K::ZstLiteral { user_ty: None }, ty: i32_, temp_scope: None, span: Span::default() });
+        let fun = fx.thir.alloc_expr(Expr { kind: K::ZstLiteral { user_ty: None }, ty: i32_, temp_scope: None, bid: None, span: Span::default() });
         let arg = lit(&mut fx, "42", i32_, false);
-        let call = fx.thir.alloc_expr(Expr { kind: K::Call { ty: i32_, fun, args: vec![arg].into(), from_hir_call: true, fn_span: Span::default() }, ty: unit, temp_scope: None, span: Span::default() });
+        let call = fx.thir.alloc_expr(Expr { kind: K::Call { ty: i32_, fun, args: vec![arg].into(), from_hir_call: true, fn_span: Span::default() }, ty: unit, temp_scope: None, bid: None, span: Span::default() });
         let (mut bl, _) = builder(fx);
         let dest = bl.temp(unit, Span::default());
         let start = bl.cfg.start_new_block();
@@ -462,7 +462,7 @@ mod tests {
         let adt = AdtExpr { adt_def: p, variant_index: crate::mir::VariantIdx(0), args: Vec::new(), user_ty: None,
             fields: vec![crate::mir::build::thir::FieldExpr { name: crate::mir::FieldIdx(1), expr: pos }, crate::mir::build::thir::FieldExpr { name: crate::mir::FieldIdx(0), expr: neg }].into(),
             base: AdtExprBase::None };
-        let e = fx.thir.alloc_expr(Expr { kind: K::Adt(Box::new(adt)), ty: adt_ty, temp_scope: None, span: Span::default() });
+        let e = fx.thir.alloc_expr(Expr { kind: K::Adt(Box::new(adt)), ty: adt_ty, temp_scope: None, bid: None, span: Span::default() });
         let (mut bl, _) = builder(fx);
         let dest = bl.temp(adt_ty, Span::default());
         let start = bl.cfg.start_new_block();

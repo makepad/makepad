@@ -15,7 +15,7 @@ use crate::types::TyKind;
 impl Builder<'_> {
     /// The temporary lifetime of `expr` (rustc `region_scope_tree.temporary_scope(expr.temp_scope_id)`).
     pub fn expr_temp_lifetime(&self, expr: ExprId) -> TempLifetime {
-        TempLifetime { temp_lifetime: self.thir.thir[expr].temp_scope, backwards_incompatible: None }
+        TempLifetime { temp_lifetime: self.thir.thir[expr].temp_scope, backwards_incompatible: self.thir.thir[expr].bid }
     }
 
     /// Compile `expr`, yielding a place that we can move from etc.

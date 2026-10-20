@@ -30,7 +30,7 @@ fn run<R>(source: &str, name: &str, f: impl FnOnce(&mut Builder<'_>, &[Pat], &ty
     let unit = tcx.tys.intern(crate::types::TyKind::Tuple(crate::types::List::EMPTY));
     // expression 0: a stand-in guard
     let mut arenas = Thir::default();
-    arenas.alloc_expr(crate::mir::build::thir::Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: None, span: Span::default() });
+    arenas.alloc_expr(crate::mir::build::thir::Expr { kind: ExprKind::Tuple { fields: Box::new([]) }, ty: unit, temp_scope: None, bid: None, span: Span::default() });
     let thir = ThirBody::for_test(arenas, Vec::new(), ExprId(0), tcx.tys.unit);
     let mut builder = Builder {
         root: &root,

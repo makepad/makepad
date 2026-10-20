@@ -130,6 +130,9 @@ pub struct Parser<'a> {
     foreign_abi: Option<Option<Ident>>,
     /// inside a cfg'd-out item (parse_cfg_out): nothing is generated
     cfg_out: u32,
+    /// the statement macro whose expansion is being parsed was called with a `;` after it: its
+    /// last statement gets that `;` (rustc add_trailing_semicolon), so it is not a trailing macro
+    expansion_semi: bool,
     /// attributes whose shape is checked once their item is known to be configured in (check only)
     pending_shape: Vec<(TokRange, Option<PErr>)>,
 }
@@ -186,6 +189,7 @@ impl<'a> Parser<'a> {
             in_assoc: 0,
             foreign_abi: None,
             cfg_out: 0,
+            expansion_semi: false,
             pending_shape: Vec::new(),
         }
     }
@@ -1592,8 +1596,8 @@ impl<'a> Parser<'a> {
             self.pos = save;
             return Ok(None);
         }
-        let trailing = delim != b'{' && matches!(self.kind(), T::CloseBrace | T::Eof);
-        self.eat(T::Semi);
+        let trailing = delim != b'{' && (self.kind() == T::CloseBrace || (self.kind() == T::Eof && !self.expansion_semi));
+        let had_semi = self.eat(T::Semi);
         let start = self.expand_call(&def, toks, lo)?;
         let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_u8(def.builtin) == crate::builtins::Builtin::Include;
         if trailing && def.builtin == 0 && crate::macros::uses::recording() {
@@ -1609,7 +1613,10 @@ impl<'a> Parser<'a> {
                 crate::macros::uses::trailing_semi(&file, semi, lo, &def.def_file);
             }
         }
-        Ok(Some(self.in_expansion(start, |p| f(p, include))?))
+        let outer = std::mem::replace(&mut self.expansion_semi, had_semi);
+        let r = self.in_expansion(start, |p| f(p, include));
+        self.expansion_semi = outer;
+        Ok(Some(r?))
     }
 
     /// Moves to the end of the current macro expansion's tokens.
@@ -4990,6 +4997,25 @@ impl ParsedFile {
     }
 
     /// Token `i`: the file's, then its lazily parsed bodies' expansion tokens.
+    /// The position of the `self` receiver token of the function item starting at `item_lo` (the
+    /// item's start when it has none in its parameter list): its hygiene context is the receiver's
+    /// own, which a macro may have passed in from the call site.
+    pub fn self_param_pos(&self, item_lo: u32) -> u32 {
+        let mut i = self.toks.partition_point(|t| t.lo < item_lo) as u32;
+        let mut depth = 0i32;
+        while (i as usize) < self.toks.len() {
+            match self.tok(i).kind {
+                T::OpenParen => depth += 1,
+                T::CloseParen => { depth -= 1; if depth <= 0 { break; } }
+                T::KwSelfValue if depth == 1 => return self.tok(i).lo,
+                T::OpenBrace | T::Semi if depth == 0 => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        item_lo
+    }
+
     pub fn tok(&self, i: u32) -> Tok {
         match self.toks.get(i as usize) {
             Some(t) => t,
@@ -5100,6 +5126,18 @@ impl ParsedFile {
             return ExpnKind::Builtin;
         }
         ExpnKind::Root
+    }
+
+    /// An identity for the expansion whose text holds `pos`: 0 for the file's own text, the start
+    /// of the `macro_rules!` output region for a rules expansion, 1 for derive / attribute /
+    /// built-in output.
+    pub fn expansion_region_id(&self, pos: u32) -> u32 {
+        if pos < self.src_len { return 0; }
+        let rules = self.part_at(pos).map_or(&self.rules_exp, |p| &p.rules_exp);
+        if let Some((_, r)) = OSegRef::from(rules).floor(pos) {
+            if pos < r.1 { return r.0.max(2); }
+        }
+        1
     }
 
     /// Which kind of expansion's text holds position `pos` (not following the origin of a token

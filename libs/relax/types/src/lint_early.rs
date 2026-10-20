@@ -2188,6 +2188,319 @@ fn impl_trait_redundant_captures(prog: &Program, tcx: &Tcx, d: DefId) {
     }
 }
 
+// ---------------------------------------------------------------- impl_trait_overcaptures
+
+pub const IMPL_TRAIT_OVERCAPTURES: Lint = lint::lint("impl_trait_overcaptures");
+
+/// rustc `ty::Variance` of a lifetime in a signature, as `V`.
+type Var = crate::types::variance::V;
+
+/// The variance of the lifetimes in the signature `sig` of `d` (rustc `FunctionalVariances`):
+/// arguments contravariant, the return type covariant; an `impl Trait` captures its lifetimes
+/// invariantly. A lifetime that does not occur has no entry.
+fn sig_lifetime_variances(prog: &Program, tcx: &Tcx, d: DefId, nm: &LifetimeResolution, captured: &HashMap<u32, Vec<crate::types::LifetimeId>>) -> HashMap<crate::types::LifetimeId, Var> {
+    use crate::types::variance::{join, xform, V};
+    struct Cx<'a> { prog: &'a Program, tcx: &'a Tcx, module: u32, ast: &'a Ast, pf: &'a ParsedFile, nm: &'a LifetimeResolution, captured: &'a HashMap<u32, Vec<crate::types::LifetimeId>>, out: HashMap<crate::types::LifetimeId, V> }
+    impl Cx<'_> {
+        fn record(&mut self, r: Option<LifetimeRes>, v: V) {
+            if let Some(LifetimeRes::Param(id)) = r {
+                let e = self.out.entry(id).or_insert(V::Bi);
+                *e = join(*e, v);
+            }
+        }
+        fn inv(&mut self, t: TyId, ctx: V) {
+            // everything inside is invariant
+            self.walk(t, xform(ctx, V::Inv));
+        }
+        fn walk(&mut self, t: TyId, ctx: V) {
+            let ast = self.ast;
+            match *ast.ty(t) {
+                Ty::Ref(lt, m, x) => {
+                    let r = match lt { Some(l) => self.nm.named(l.lo, l.hi), None => self.nm.reference(t.0) };
+                    self.record(r, xform(ctx, V::Co));
+                    self.walk(x, xform(ctx, if m { V::Inv } else { V::Co }));
+                }
+                Ty::Ptr(m, x) => self.walk(x, xform(ctx, if m { V::Inv } else { V::Co })),
+                Ty::Slice(x) | Ty::Paren(x) => self.walk(x, ctx),
+                Ty::Array(x, _) => self.walk(x, ctx),
+                Ty::Tuple(l) => for &x in ast.list(l) { self.walk(x, ctx); },
+                Ty::Fn(f) => {
+                    let f = *ast.fn_ptr(f);
+                    for &x in ast.list(f.params) { self.walk(x, xform(ctx, V::Contra)); }
+                    if let Some(r) = f.ret { self.walk(r, ctx); }
+                }
+                Ty::Path(p) => self.path(p, ctx),
+                Ty::ImplTrait(b) => {
+                    // an opaque type captures its lifetimes invariantly
+                    if let Some(ids) = self.prog.node_id_to_def_id.get(&(self.pf_index(), relax_front::def_collector::NodeId::OpaqueTy(t))).and_then(|o| self.captured.get(&o.0)) {
+                        for &id in ids.clone().iter() { self.record(Some(LifetimeRes::Param(id)), V::Inv); }
+                    }
+                    self.bounds(b, ctx);
+                }
+                Ty::DynTrait(b, _) => self.bounds(b, ctx),
+                _ => {}
+            }
+        }
+        fn pf_index(&self) -> u32 { self.prog.files.iter().position(|f| std::ptr::eq(&**f, self.pf)).unwrap_or(0) as u32 }
+        fn bounds(&mut self, l: List<Bound>, ctx: V) {
+            let ast = self.ast;
+            for b in ast.list(l) {
+                match *b {
+                    Bound::Trait { path, .. } => self.path_inv(path, ctx),
+                    Bound::Lifetime(lt) => { let r = self.nm.named(lt.lo, lt.hi); self.record(r, xform(ctx, V::Inv)); }
+                    Bound::Use(_) => {}
+                }
+            }
+        }
+        /// all lifetimes and types in a path, invariantly
+        fn path_inv(&mut self, p: Path, ctx: V) {
+            let ast = self.ast;
+            if let Some(q) = ast.qself(&p) { self.inv(q.ty, ctx); }
+            for (i, seg) in ast.segs(p.segs).iter().enumerate() {
+                let mut k = 0;
+                while let Some(r) = self.nm.path(p.segs.lo + i as u32, k) { self.record(Some(r), xform(ctx, V::Inv)); k += 1; }
+                match ast.gargs(seg.args()) {
+                    Some(GenericArgs::Angle(l)) => for a in ast.list(*l) {
+                        match *a {
+                            GenericArg::Lifetime(lt) => { let r = self.nm.named(lt.lo, lt.hi); self.record(r, xform(ctx, V::Inv)); }
+                            GenericArg::Type(t) | GenericArg::Binding(_, _, t) => self.inv(t, ctx),
+                            GenericArg::Constraint(_, _, b) => self.bounds(b, ctx),
+                            _ => {}
+                        }
+                    },
+                    Some(GenericArgs::Paren(tys, ret)) => {
+                        for &t in ast.list(*tys) { self.inv(t, ctx); }
+                        if let Some(r) = ret { self.inv(*r, ctx); }
+                    }
+                    None => {}
+                }
+            }
+        }
+        fn path(&mut self, p: Path, ctx: V) {
+            let ast = self.ast;
+            // `Adt<..>` of a single segment resolves to its declaration's variances
+            let segs = ast.segs(p.segs);
+            if let ([seg], false) = (segs, p.has_qself()) {
+                let name = self.prog.syms.intern_late(self.pf.text(seg.name));
+                if let Some(a) = self.prog.lookup_in_scope(self.module, name, true) {
+                    let adef = self.prog.def(a);
+                    if matches!(adef.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) {
+                        if let Some(adt) = self.tcx.adts.get(&a) {
+                            let variances = self.tcx.variances_of(self.prog, a);
+                            let idx = adt.generic_indices.clone();
+                            let (mut li, mut ti) = (0usize, 0usize);
+                            let mut k = 0;
+                            // hidden lifetime arguments (`Foo` for `Foo<'a>`)
+                            while let Some(r) = self.nm.path(p.segs.lo, k) {
+                                let v = idx.lifetimes.get(li).and_then(|&f| variances.get(f as usize)).copied().unwrap_or(V::Inv);
+                                self.record(Some(r), xform(ctx, v)); li += 1; k += 1;
+                            }
+                            if let Some(GenericArgs::Angle(l)) = ast.gargs(seg.args()) {
+                                for a in ast.list(*l) {
+                                    match *a {
+                                        GenericArg::Lifetime(lt) => {
+                                            let v = idx.lifetimes.get(li).and_then(|&f| variances.get(f as usize)).copied().unwrap_or(V::Inv);
+                                            let r = self.nm.named(lt.lo, lt.hi); self.record(r, xform(ctx, v)); li += 1;
+                                        }
+                                        GenericArg::Type(t) => {
+                                            let v = idx.types_consts.get(ti).and_then(|&f| variances.get(f as usize)).copied().unwrap_or(V::Inv);
+                                            self.walk(t, xform(ctx, v)); ti += 1;
+                                        }
+                                        GenericArg::Const(_) => ti += 1,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            self.path_inv(p, ctx);
+        }
+    }
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    let ast = &pf.ast;
+    let mut cx = Cx { prog, tcx, module: tcx.item_module(prog, d), ast, pf, nm, captured, out: HashMap::new() };
+    if let ItemKind::Fn(sig, _, _) = ast.item(def.item).kind {
+        let sig = *ast.fn_sig(sig);
+        for p in ast.list(sig.params) { cx.walk(p.ty, V::Contra); }
+        // the type `Self` stands for in an inherent or trait impl: its lifetimes occur in the receiver
+        let mut self_ty: Option<(TyId, std::sync::Arc<LifetimeResolution>, DefId)> = None;
+        if def.kind == DefKind::AssocFn {
+            let parent = prog.def(def.parent);
+            let past = &prog.files[parent.file as usize].ast;
+            if let ItemKind::Impl(r) = past.item(parent.item).kind {
+                self_ty = Some((past.row(r).self_ty, names(prog, tcx, def.parent), def.parent));
+            }
+        }
+        let mut receiver: Vec<(TyId, V)> = Vec::new();
+        match sig.self_param {
+            Some(SelfParam::Ref(lt, m)) => {
+                let r = match lt { Some(l) => nm.named(l.lo, l.hi), None => nm.self_reference() };
+                cx.record(r, V::Contra);
+                if let Some((t, _, _)) = &self_ty { receiver.push((*t, xform(V::Contra, if m { V::Inv } else { V::Co }))); }
+            }
+            Some(SelfParam::Typed(_, t)) => cx.walk(t, V::Contra),
+            Some(SelfParam::Value(..)) => if let Some((t, _, _)) = &self_ty { receiver.push((*t, V::Contra)); },
+            _ => {}
+        }
+        if let Some(r) = sig.ret { cx.walk(r, V::Co); }
+        let mut out = std::mem::take(&mut cx.out);
+        if let Some((_, pn, pd)) = &self_ty {
+            let parent = prog.def(*pd);
+            let ppf = &prog.files[parent.file as usize];
+            let mut pcx = Cx { prog, tcx, module: tcx.item_module(prog, *pd), ast: &ppf.ast, pf: ppf, nm: pn, captured, out: HashMap::new() };
+            for (t, v) in receiver { pcx.walk(t, v); }
+            for (id, v) in pcx.out { let e = out.entry(id).or_insert(V::Bi); *e = join(*e, v); }
+        }
+        return out;
+    }
+    cx.out
+}
+
+/// rustc_lint impl_trait_overcaptures.rs `check_fn`: in an edition before 2024 an `impl Trait` in a
+/// fn's return type captures only the lifetimes its bounds mention; from edition 2024 it captures
+/// every one in scope. Warns for an opaque type (without `use<..>`) that leaves a lifetime
+/// uncaptured, except a contravariant one that outlives a captured one.
+fn impl_trait_overcaptures(prog: &Program, tcx: &Tcx, d: DefId) {
+    use crate::tcx::resolve_bound_vars::ResolvedArg;
+    use crate::types::variance::V;
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    if pf.edition >= 2024 { return; }
+    let ast = &pf.ast;
+    let item = *ast.item(def.item);
+    let ItemKind::Fn(sig, _, _) = item.kind else { return };
+    let sig = *ast.fn_sig(sig);
+    let Some(ret) = sig.ret else { return };
+    let mut opaques = Vec::new();
+    opaque_types(ast, ret, &mut opaques);
+    if opaques.is_empty() { return; }
+    let nm = names(prog, tcx, d);
+    let rbv = tcx.resolve_bound_vars(prog, d);
+    // a captured lifetime of an opaque is a copy of a lifetime of the enclosing scope: map copies back
+    let mut origin: HashMap<crate::types::LifetimeId, crate::types::LifetimeId> = HashMap::new();
+    for caps in rbv.opaque_captured_lifetimes.values() {
+        for &(arg, copy) in caps {
+            if let ResolvedArg::EarlyBound(id) | ResolvedArg::LateBound(_, _, id) | ResolvedArg::Free(_, id) = arg { origin.insert(copy, id); }
+        }
+    }
+    let root = |mut id: crate::types::LifetimeId| { let mut n = 0; while let Some(&o) = origin.get(&id) { id = o; n += 1; if n > 64 { break; } } id };
+    let mut captured: HashMap<u32, Vec<crate::types::LifetimeId>> = HashMap::new();
+    for (&opaque, caps) in &rbv.opaque_captured_lifetimes {
+        let mut ids = Vec::new();
+        for &(arg, _) in caps {
+            if let ResolvedArg::EarlyBound(id) | ResolvedArg::LateBound(_, _, id) | ResolvedArg::Free(_, id) = arg { ids.push(root(id)); }
+        }
+        captured.insert(opaque.0, ids);
+    }
+    let in_scope = nm.in_scope_lifetimes();
+    let variances = sig_lifetime_variances(prog, tcx, d, &nm, &captured);
+    // the free region map: which in-scope lifetimes outlive which
+    let edges = outlives_edges(prog, tcx, d, &nm);
+    let mut all: Vec<LifetimeRes> = vec![LifetimeRes::Static];
+    all.extend(in_scope.iter().map(|&id| LifetimeRes::Param(id)));
+    let n = all.len();
+    let mut reach = vec![vec![false; n]; n];
+    for i in 0..n { reach[i][i] = true; reach[0][i] = true; }
+    for (a, b) in edges {
+        if let (Some(a), Some(b)) = (all.iter().position(|x| *x == a), all.iter().position(|x| *x == b)) { reach[a][b] = true; }
+    }
+    for k in 0..n { for i in 0..n { if reach[i][k] { for j in 0..n { if reach[k][j] { reach[i][j] = true; } } } } }
+    let outlives = |a: crate::types::LifetimeId, b: crate::types::LifetimeId| {
+        match (all.iter().position(|x| *x == LifetimeRes::Param(a)), all.iter().position(|x| *x == LifetimeRes::Param(b))) {
+            (Some(a), Some(b)) => reach[a][b],
+            _ => false,
+        }
+    };
+    let w = W::new(prog, def.file, d);
+    // walk the return type: each opaque, with the binders enclosing it
+    struct Walk<'a, F: FnMut(TyId, &[crate::types::LifetimeId])> { ast: &'a Ast, nm: &'a LifetimeResolution, binders: Vec<crate::types::LifetimeId>, f: F }
+    impl<F: FnMut(TyId, &[crate::types::LifetimeId])> Walk<'_, F> {
+        fn bounds(&mut self, l: List<Bound>) {
+            let ast = self.ast;
+            for b in ast.list(l) {
+                if let Bound::Trait { hrtb, path, .. } = *b {
+                    let mark = self.binders.len();
+                    for p in ast.list(hrtb) {
+                        if let GenericParamKind::Lifetime(_) = p.kind {
+                            if let Some(LifetimeRes::Param(id)) = self.nm.named(p.name.lo, p.name.hi).or_else(|| self.nm.declared_at(p.name.lo)) { self.binders.push(id); }
+                        }
+                    }
+                    self.path(path);
+                    self.binders.truncate(mark);
+                }
+            }
+        }
+        fn path(&mut self, p: Path) {
+            let ast = self.ast;
+            if let Some(q) = ast.qself(&p) { self.ty(q.ty); if let Some(tp) = q.trait_path { self.path(tp); } }
+            for seg in ast.segs(p.segs) {
+                match ast.gargs(seg.args()) {
+                    Some(GenericArgs::Angle(l)) => for a in ast.list(*l) {
+                        match *a {
+                            GenericArg::Type(t) | GenericArg::Binding(_, _, t) => self.ty(t),
+                            GenericArg::Constraint(_, _, b) => self.bounds(b),
+                            _ => {}
+                        }
+                    },
+                    Some(GenericArgs::Paren(tys, ret)) => {
+                        for &t in ast.list(*tys) { self.ty(t); }
+                        if let Some(r) = ret { self.ty(*r); }
+                    }
+                    None => {}
+                }
+            }
+        }
+        fn ty(&mut self, t: TyId) {
+            let ast = self.ast;
+            match *ast.ty(t) {
+                Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => self.ty(x),
+                Ty::Tuple(l) => for &x in ast.list(l) { self.ty(x); },
+                Ty::Fn(f) => {
+                    let f = *ast.fn_ptr(f);
+                    for &x in ast.list(f.params) { self.ty(x); }
+                    if let Some(r) = f.ret { self.ty(r); }
+                }
+                Ty::Path(p) => self.path(p),
+                Ty::ImplTrait(b) => {
+                    let binders = self.binders.clone();
+                    (self.f)(t, &binders);
+                    self.bounds(b);
+                }
+                Ty::DynTrait(b, _) => self.bounds(b),
+                _ => {}
+            }
+        }
+    }
+    let mut found: Vec<(TyId, Vec<crate::types::LifetimeId>)> = Vec::new();
+    {
+        let mut wk = Walk { ast, nm: &nm, binders: Vec::new(), f: |t, b: &[crate::types::LifetimeId]| found.push((t, b.to_vec())) };
+        wk.ty(ret);
+    }
+    for (t, binders) in found {
+        let Ty::ImplTrait(b) = *ast.ty(t) else { continue };
+        if ast.list(b).iter().any(|x| matches!(x, Bound::Use(_))) { continue; }
+        let Some(&opaque) = prog.node_id_to_def_id.get(&(def.file, relax_front::def_collector::NodeId::OpaqueTy(t))) else { continue };
+        let caps: &[crate::types::LifetimeId] = captured.get(&opaque.0).map_or(&[], |v| &v[..]);
+        // the lifetimes in scope: the item's, and those of the binders around the opaque
+        let mut uncaptured: Vec<(crate::types::LifetimeId, bool)> = in_scope.iter().filter(|id| !caps.contains(id)).map(|&id| (id, false)).collect();
+        uncaptured.extend(binders.iter().filter(|id| !caps.contains(id)).map(|&id| (id, true)));
+        // a contravariant lifetime that outlives a captured one need not be captured
+        uncaptured.retain(|&(id, late)| {
+            if late { return true; }
+            if !matches!(variances.get(&id), Some(V::Bi | V::Contra)) { return true; }
+            !caps.iter().any(|&r| outlives(id, r))
+        });
+        if uncaptured.is_empty() { continue; }
+        let pos = w.ty_start(t).unwrap_or(item.lo);
+        if lint::external(prog, def.file, pos) { continue; }
+        emit(prog, d, &IMPL_TRAIT_OVERCAPTURES, def.file, pos, &"`impl Trait` will capture more lifetimes than possibly intended in edition 2024");
+    }
+}
+
 // ---------------------------------------------------------------- redundant_lifetimes
 
 pub const REDUNDANT_LIFETIMES: Lint = lint::lint("redundant_lifetimes");
@@ -2292,25 +2605,13 @@ fn declared_edges(ast: &Ast, names: &LifetimeResolution, g: Generics, edges: &mu
     for w in ast.list(g.where_) { if let WherePred::Lifetime(a, bounds) = *w { add(a, bounds); } }
 }
 
-/// rustc_hir_analysis wfcheck `lint_redundant_lifetimes`: a lifetime parameter of the item that
-/// provably equals an earlier one (or `'static`). The outlives relation is the declared bounds
-/// plus what the well-formedness of the signature's reference types implies; where the walk
-/// cannot follow a type it adds no fact, so it can only report fewer lifetimes than rustc.
-fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
+/// The outlives relation the signature gives: the declared `'a: 'b` bounds of the item and its parents,
+/// plus what the well-formedness of the signature's reference types implies (rustc's implied bounds,
+/// `OutlivesEnvironment` free region map). `(a, b)`: `a` outlives `b`.
+fn outlives_edges(prog: &Program, tcx: &Tcx, d: DefId, nm: &LifetimeResolution) -> Vec<(LifetimeRes, LifetimeRes)> {
     let def = prog.def(d);
-    match def.kind {
-        DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::Fn | DefKind::Const | DefKind::Impl => {}
-        DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst => {
-            let p = prog.def(def.parent);
-            if p.kind == DefKind::Impl && tcx.impl_trait.contains_key(&def.parent) { return; }
-        }
-        _ => return,
-    }
     let pf = &prog.files[def.file as usize];
     let ast = &pf.ast;
-    let nm = names(prog, tcx, d);
-    let scope = nm.named_in_scope();
-    if !scope.iter().any(|s| s.3) { return; }
     let mut edges: Vec<(LifetimeRes, LifetimeRes)> = Vec::new();
     let item = *ast.item(def.item);
     let mut impl_self: Option<(TyId, std::sync::Arc<LifetimeResolution>)> = None;
@@ -2332,10 +2633,10 @@ fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
     match item.kind {
         ItemKind::Fn(sig, _, _) => {
             let sig = *ast.fn_sig(sig);
-            declared_edges(ast, &nm, sig.generics, &mut edges);
+            declared_edges(ast, nm, sig.generics, &mut edges);
             let cx = (prog, tcx.item_module(prog, d), def.file);
-            for p in ast.list(sig.params) { wf_edges(&cx, &nm, p.ty, &mut edges); }
-            if let Some(r) = sig.ret { wf_edges(&cx, &nm, r, &mut edges); }
+            for p in ast.list(sig.params) { wf_edges(&cx, nm, p.ty, &mut edges); }
+            if let Some(r) = sig.ret { wf_edges(&cx, nm, r, &mut edges); }
             match sig.self_param {
                 Some(SelfParam::Ref(lt, _)) => {
                     let r = match lt { Some(l) => nm.named(l.lo, l.hi), None => nm.self_reference() };
@@ -2346,21 +2647,42 @@ fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
                         for i in inner { edges.push((i, r)); }
                     }
                 }
-                Some(SelfParam::Typed(_, t)) => wf_edges(&cx, &nm, t, &mut edges),
+                Some(SelfParam::Typed(_, t)) => wf_edges(&cx, nm, t, &mut edges),
                 _ => {}
             }
         }
-        ItemKind::Struct(r) => declared_edges(ast, &nm, ast.row(r).generics, &mut edges),
-        ItemKind::Union(r) => declared_edges(ast, &nm, ast.row(r).generics, &mut edges),
-        ItemKind::Enum(r) => declared_edges(ast, &nm, ast.row(r).generics, &mut edges),
-        ItemKind::Trait(r) => declared_edges(ast, &nm, ast.row(r).generics, &mut edges),
+        ItemKind::Struct(r) => declared_edges(ast, nm, ast.row(r).generics, &mut edges),
+        ItemKind::Union(r) => declared_edges(ast, nm, ast.row(r).generics, &mut edges),
+        ItemKind::Enum(r) => declared_edges(ast, nm, ast.row(r).generics, &mut edges),
+        ItemKind::Trait(r) => declared_edges(ast, nm, ast.row(r).generics, &mut edges),
         ItemKind::Impl(r) => {
             let im = ast.row(r);
-            declared_edges(ast, &nm, im.generics, &mut edges);
-            wf_edges(&(prog, tcx.item_module(prog, d), def.file), &nm, im.self_ty, &mut edges);
+            declared_edges(ast, nm, im.generics, &mut edges);
+            wf_edges(&(prog, tcx.item_module(prog, d), def.file), nm, im.self_ty, &mut edges);
         }
         _ => {}
     }
+    edges
+}
+
+/// rustc_hir_analysis wfcheck `lint_redundant_lifetimes`: a lifetime parameter of the item that
+/// provably equals an earlier one (or `'static`). The outlives relation is the declared bounds
+/// plus what the well-formedness of the signature's reference types implies; where the walk
+/// cannot follow a type it adds no fact, so it can only report fewer lifetimes than rustc.
+fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
+    let def = prog.def(d);
+    match def.kind {
+        DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::Trait | DefKind::Fn | DefKind::Const | DefKind::Impl => {}
+        DefKind::AssocFn | DefKind::AssocTy | DefKind::AssocConst => {
+            let p = prog.def(def.parent);
+            if p.kind == DefKind::Impl && tcx.impl_trait.contains_key(&def.parent) { return; }
+        }
+        _ => return,
+    }
+    let nm = names(prog, tcx, d);
+    let scope = nm.named_in_scope();
+    if !scope.iter().any(|s| s.3) { return; }
+    let edges = outlives_edges(prog, tcx, d, &nm);
     // the candidates: 'static, then the named lifetimes in scope
     let mut all: Vec<LifetimeRes> = vec![LifetimeRes::Static];
     all.extend(scope.iter().map(|s| LifetimeRes::Param(s.0)));
@@ -2391,7 +2713,7 @@ fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
 /// The definition-level passes of this file over one definition.
 pub fn check_def_item(prog: &Program, tcx: &Tcx, d: DefId) {
     match prog.def(d).kind {
-        DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => { mismatched_lifetime_syntaxes(prog, tcx, d); impl_trait_redundant_captures(prog, tcx, d); redundant_lifetimes(prog, tcx, d); }
+        DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => { mismatched_lifetime_syntaxes(prog, tcx, d); impl_trait_redundant_captures(prog, tcx, d); impl_trait_overcaptures(prog, tcx, d); redundant_lifetimes(prog, tcx, d); }
         DefKind::Struct | DefKind::Union | DefKind::Enum => { explicit_outlives_requirements(prog, d); redundant_lifetimes(prog, tcx, d); }
         DefKind::Trait | DefKind::Impl | DefKind::Const => redundant_lifetimes(prog, tcx, d),
         _ => {}
@@ -3122,6 +3444,29 @@ fn trailing_semis(prog: &Program, own: &[bool]) {
     }
 }
 
+// ---------------------------------------------------------------- meta_variable_misuse
+
+pub const META_VARIABLE_MISUSE: Lint = lint::lint("meta_variable_misuse");
+
+/// rustc_expand `check_meta_variables`, for every `macro_rules!` of the checked crates.
+fn meta_variable_misuse(prog: &Program, own: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    for (_, defs) in prog.macros.defs.iter() {
+        for d in defs {
+            if d.builtin != 0 || d.def_file.is_empty() { continue; }
+            let Some(file) = prog.file_paths.iter().position(|p| *p == d.def_file) else { continue };
+            let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+            if !own.get(krate as usize).copied().unwrap_or(false) || d.def_pos >= prog.files[file].src_len || !seen.insert((file, d.def_pos)) { continue; }
+            let Some(found) = relax_front::macro_check::check_meta_variables(d) else { continue };
+            for f in found {
+                if f.pos >= prog.files[file].src_len { continue; }
+                let def = enclosing_def(prog, file as u32, f.pos, krate);
+                emit(prog, def, &META_VARIABLE_MISUSE, file as u32, f.pos, &f.msg);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- unused_macros / unused_macro_rules
 
 pub const UNUSED_MACROS: Lint = lint::lint("unused_macros");
@@ -3133,6 +3478,7 @@ pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 pub fn finish(prog: &Program, own: &[bool]) {
     if !lint::enabled() { return; }
     trailing_semis(prog, own);
+    meta_variable_misuse(prog, own);
     cfg_attr_empties(prog, own);
     named_args_positional(prog, own);
     crate_attr_lints(prog, own);

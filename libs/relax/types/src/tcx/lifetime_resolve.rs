@@ -26,6 +26,8 @@ impl LifetimeResolution {
     pub(crate) fn reference(&self, ty: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Reference(ty)).copied() }
     /// The resolution of the lifetime written at `lo..hi` (`'a`, `'_`, `'static`).
     pub(crate) fn named(&self, lo: u32, hi: u32) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::Named(lo, hi)).copied() }
+    /// The lifetime declared by the parameter whose name is at `pos` (a `for<'a>` binder's).
+    pub(crate) fn declared_at(&self, pos: u32) -> Option<LifetimeRes> { self.declarations.iter().find(|d| d.span == pos).map(|d| LifetimeRes::Param(d.id)) }
     /// The resolution of the elided lifetime of an `&self` receiver.
     pub(crate) fn self_reference(&self) -> Option<LifetimeRes> { self.uses.get(&LifetimeKey::SelfReference).copied() }
     /// The resolution of the `index`th hidden lifetime of path segment `seg` (`Foo` for `Foo<'a>`).

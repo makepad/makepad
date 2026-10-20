@@ -382,7 +382,10 @@ pub fn take() -> (Vec<String>, Vec<String>) {
     let all = std::mem::take(&mut *SINK.lock().unwrap_or_else(|e| e.into_inner()));
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
+    // (a diagnostic reported twice -- a body checked again by the second borrowck -- is one)
+    let mut seen = std::collections::HashSet::new();
     for (l, s) in all {
+        if !seen.insert(s.clone()) { continue; }
         if l >= Level::Deny { errors.push(s) } else { warnings.push(s) }
     }
     (errors, warnings)
@@ -631,6 +634,32 @@ pub fn privacy_diag(prog: &Program, file: u32, pos: u32, e: &crate::program::Pri
         emit(prog, def, &AMBIGUOUS_GLOB_IMPORTS, file, pos, &format!("`{n}` is ambiguous"));
     }
     None
+}
+
+pub const AMBIGUOUS_IMPORT_VISIBILITIES: Lint = lint("ambiguous_import_visibilities");
+
+/// What rustc's import resolution reports beyond Relax's own import errors (the replay in
+/// front's program/rsim.rs): errors, and the lints `ambiguous_glob_imports` /
+/// `ambiguous_import_visibilities` under the levels in force at the import.
+pub fn import_resolution_diags(prog: &mut Program, own: &[bool]) -> Vec<String> {
+    use relax_front::program::SimKind;
+    let mut errors = Vec::new();
+    if prog.sim_diags.is_none() { prog.own_crates = own.to_vec(); prog.run_import_sim(own); }
+    let diags = prog.sim_diags.take().unwrap_or_default();
+    let prog: &Program = prog;
+    for d in diags {
+        match d.kind {
+            SimKind::Error if d.msg.starts_with("E0") => errors.push(prog.record_error(d.file, d.pos, "resolve", d.msg)),
+            SimKind::Error => errors.push(prog.record_uncoded_error(d.file, d.pos, "resolve", d.msg)),
+            SimKind::Lint(name) => {
+                if !enabled() { continue; }
+                let def = def_at(prog, d.file, d.pos);
+                let l = match name { "ambiguous_import_visibilities" => AMBIGUOUS_IMPORT_VISIBILITIES, _ => AMBIGUOUS_GLOB_IMPORTS };
+                emit(prog, def, &l, d.file, d.pos, &d.msg);
+            }
+        }
+    }
+    errors
 }
 
 #[cfg(test)]
