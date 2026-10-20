@@ -1,0 +1,52 @@
+# Calculator input script for diff_full.sh: `click <widget name>`, `text <s>`, `step <frames>`, `snap`.
+# Every `snap` appends the display, the tape and the widget tree text to the state dump.
+step 5
+snap
+click k_1
+click k_2
+click k_mul
+click k_3
+click k_dot
+click k_5
+click k_eq
+step 3
+snap
+click k_clear
+click k_9
+click k_sqrt
+click k_eq
+step 3
+snap
+click k_clear
+click k_4
+click k_5
+click k_sin
+click k_add
+click k_2
+click k_power
+click k_1
+click k_0
+click k_eq
+step 3
+snap
+click k_clear
+text 7*8-6/4
+click k_eq
+step 3
+snap
+click k_clear
+click k_1
+click k_ln
+click k_add
+click k_pi
+click k_mul
+click k_e
+click k_eq
+step 3
+snap
+click k_back
+click k_sign
+click k_percent
+click k_fact
+step 3
+snap

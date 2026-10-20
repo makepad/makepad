@@ -5180,6 +5180,25 @@ fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
             None if parent != u32::MAX => {
                 // a join: keep what cannot change on the way from the dominator `parent`
                 let header = is_header[bi];
+                // blocks reachable from a definition block (memoised): a definition that `bi` dominates
+                // still reaches `bi` again when both sit in a loop, so it lies on a path from `parent`
+                let reaches: std::cell::RefCell<std::collections::HashMap<u32, Vec<bool>>> = Default::default();
+                let reaches_bi = |db: u32| -> bool {
+                    let mut memo = reaches.borrow_mut();
+                    let seen = memo.entry(db).or_insert_with(|| {
+                        let blocks = unsafe { &*blocks_ptr };
+                        let mut seen = vec![false; n];
+                        let mut stack: Vec<u32> = blocks[db as usize].term.succs().collect();
+                        while let Some(x) = stack.pop() {
+                            if !seen[x as usize] {
+                                seen[x as usize] = true;
+                                stack.extend(blocks[x as usize].term.succs());
+                            }
+                        }
+                        seen
+                    });
+                    seen[bi]
+                };
                 let stable = |v: VReg| -> bool {
                     if v.0 == u32::MAX || single(v) {
                         return true;
@@ -5195,7 +5214,7 @@ fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
                         // a latch that only jumps back to the dominator redefines v before
                         // the next pass through there: the last pass to the join sees no def
                         let latch_to_here = matches!(blocks[db as usize].term, Term::Jump(t) if t == parent);
-                        if !(dominates(db, parent) || dominates(bi as u32, db) || latch_to_here) {
+                        if !(dominates(db, parent) || (dominates(bi as u32, db) && !reaches_bi(db)) || latch_to_here) {
                             return false;
                         }
                     }

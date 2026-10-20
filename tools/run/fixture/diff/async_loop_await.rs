@@ -1,5 +1,5 @@
-// KNOWN FAILING (O3 tier): a `for` loop of `t += mid(i).await` inside an async fn; at O3 the 4th round dies with
-// "`async fn` resumed after completion". Found by diff_fast 2026-10-20. Move to ../diff/ when fixed.
+// Regression: a `for` loop of `t += mid(i).await` inside an async fn (nested coroutine polls inlined into one body).
+// At O3 the CSE of a join below a loop kept `Iconst 0` available through a multi-def vreg that the loop redefined.
 macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 fn rounds(f: fn()) {
     let ms: u64 = std::env::var("DIFF_SLEEP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
