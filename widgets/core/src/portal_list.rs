@@ -867,6 +867,10 @@ pub struct PortalList {
     #[live(true)]
     #[doc(hidden)]
     pub drag_scrolling: bool,
+    /// Whether a scroll that starts at this list's limit stays here instead of going on to a
+    /// scrollable around it, like CSS `overscroll-behavior: contain`.
+    #[live(false)]
+    contain_scroll: bool,
     /// The minimum distance (in pixels) a finger/mouse must move before a drag is
     /// "committed" and treated as a scroll gesture rather than a tap/click.
     /// This prevents accidental micro-scrolling when tapping interactive items.
@@ -2311,21 +2315,18 @@ impl PortalList {
         self.caught_fling = None;
     }
 
-    /// Whether this list keeps a scroll delta it is about to apply (positive
-    /// toward the start), judged from where it rests now; see
-    /// [`list_keeps_scroll_delta`]. `finger_driven` is a trackpad gesture with
-    /// the fingers down, the only input that stretches a rubber band.
-    fn keeps_scroll_delta(&self, delta: f64, finger_driven: bool) -> bool {
+    /// Whether this list takes a new scroll gesture that starts with `e`, judged from where it rests
+    /// now: it can move that way (see [`list_keeps_scroll_delta`]), or it contains its scrolls.
+    fn takes_new_scroll(&self, e: &ScrollEvent) -> bool {
+        // Positive toward the start.
+        let delta = -e.scroll.index(self.vec_index);
         let empty = self.range_start == self.range_end;
         let at_start = empty || (self.first_id == self.range_start && self.first_scroll >= 0.0);
         let at_end = empty || self.at_end;
-        let band = finger_driven
-            && !empty
-            && ((delta > 0.0 && self.bounce_at_start)
-                || (delta < 0.0 && self.bounce_at_end)
-                || (self.first_id == self.range_start && self.first_scroll > 0.0)
-                || self.bounce_overshoot > 0.0);
-        list_keeps_scroll_delta(delta, at_start, at_end, band)
+        let band = !empty
+            && ((self.first_id == self.range_start && self.first_scroll > 0.0) || self.bounce_overshoot > 0.0);
+        self.is_scrollable()
+            && (self.contain_scroll || delta == 0.0 || list_keeps_scroll_delta(delta, at_start, at_end, band))
     }
 
     /// Whether a press at `time` belongs to a touch that just stopped live motion.
@@ -3492,10 +3493,13 @@ impl Widget for PortalList {
             }
         }
 
-        // An item's list that can't scroll leaves a scroll to this one when it can take it.
-        let is_scroll_container = matches!(event, Event::Scroll(_))
-            && self.is_scrollable()
-            && matches!(event.hits(cx, self.area), Hit::FingerScroll(_));
+        // An item's list that can't move a new scroll's way leaves it to this one when it can take it.
+        let is_scroll_container = match event {
+            Event::Scroll(e) => {
+                self.takes_new_scroll(e) && matches!(event.hits(cx, self.area), Hit::FingerScroll(_))
+            }
+            _ => false,
+        };
         let container_axes = match self.vec_index {
             Vec2Index::X => [is_scroll_container, false],
             Vec2Index::Y => [false, is_scroll_container],
@@ -3783,12 +3787,12 @@ impl Widget for PortalList {
         if !self.scroll_bar.is_area_captured(cx) || is_scroll {
             let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
             if let Event::Scroll(e) = event {
-                // The innermost scrollable under the pointer takes the whole gesture, even
-                // at its limits, so no ancestor ever moves along with it.
+                // A new gesture goes to the innermost scrollable under the pointer that can move its
+                // way. It keeps the whole gesture, so no ancestor moves along with it.
                 let is_over = matches!(hit, Hit::FingerScroll(_));
-                // With nothing to scroll, it still takes it (to rubber-band and count travel),
+                // With nothing to scroll that way, it still takes it (to rubber-band and count travel),
                 // unless a scrollable around it can.
-                let is_candidate = is_over && (self.is_scrollable() || !cx.is_inside_scroll_container(vi));
+                let is_candidate = is_over && (self.takes_new_scroll(e) || !cx.is_inside_scroll_container(vi));
                 let is_owner = cx.is_scroll_owner(e, self.area, vi, is_candidate);
                 if is_owner || (is_over && e.phase == ScrollPhase::Touched) {
                     self.handle_scroll(cx, e);
@@ -4764,17 +4768,16 @@ fn selection_drag_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool 
     drag_scroll_stands_down(is_touch, mouse_held_outside)
 }
 
-/// Whether a list keeps a scroll delta it is handed, which makes the delta
-/// spent: the event is marked handled, and no scroll view around the list
-/// moves by it as well. `delta` is positive toward the list's start.
+/// Whether a list keeps a new scroll gesture whose first delta is `delta`, so no
+/// scroll view around the list moves by the gesture. `delta` is positive toward
+/// the list's start.
 ///
 /// A delta the list has room for is kept, even when the room is smaller than
-/// the delta. So is one a rubber band takes (`band`: the fingers are on the
-/// trackpad and the edge stretches, or a stretch is showing that the delta may
-/// unwind). A delta pointing past an edge the list already rests on is not, and
-/// the scroll view around the list moves by it instead — the rule a
-/// `ScrollBar` pinned at its limit follows, so nested scroll views and lists
-/// hand a wheel on the same way.
+/// the delta. So is one a rubber band takes (`band`: a stretch is showing that
+/// the gesture may unwind). A delta pointing past an edge the list already rests
+/// on is not, and the scroll view around the list takes the gesture instead.
+/// A `ScrollBar` at its limit follows the same rule, so nested scroll views and
+/// lists hand a new scroll on the same way.
 ///
 /// The list is judged before the delta is applied, and `at_end` comes from its
 /// last draw: a delta toward the end is added to the scroll even when the last
@@ -4987,8 +4990,8 @@ mod tests {
         });
     }
 
-    /// A rubber band past an edge is the list moving: fingers stretching it
-    /// keep the delta even at that edge.
+    /// A rubber band past an edge is the list moving: a stretch showing keeps
+    /// the delta even at that edge.
     #[test]
     fn a_rubber_band_keeps_what_it_stretches_by() {
         crate::on_test_cx(|| {

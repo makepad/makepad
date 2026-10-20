@@ -4,7 +4,7 @@ use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
     drag_origin, estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
-    touch_drag_slop, touch_fling_limits,
+    can_scroll_toward, touch_drag_slop, touch_fling_limits,
     soften_bounce_velocity, stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample,
     CATCH_PRESS_WINDOW, COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
     FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW, PER_FRAME_TO_PER_SECOND,
@@ -331,6 +331,10 @@ pub struct ScrollBar {
     /// Whether to enable drag scrolling
     #[live(false)]
     drag_scrolling: bool,
+    /// Whether a scroll that starts at this bar's limit stays here instead of going on to a
+    /// scrollable around it, like CSS `overscroll-behavior: contain`.
+    #[live(false)]
+    contain_scroll: bool,
     /// Whether the bar fades out once scrolling stops and the pointer leaves it.
     #[live(true)]
     auto_hide: bool,
@@ -666,14 +670,24 @@ impl ScrollBar {
         cx.is_scrolling_allowed_within(&scroll_area) && scroll_area.clipped_rect(cx).contains(e.abs)
     }
 
+    /// Whether this bar takes a new scroll gesture that starts with `delta` along it: it can move
+    /// that way, or it contains its scrolls.
+    fn takes_new_scroll(&self, delta: f64) -> bool {
+        let max_scroll = (self.view_total - self.view_visible).max(0.0);
+        self.contain_scroll || can_scroll_toward(self.get_scroll_pos(), max_scroll, delta)
+    }
+
     /// The axes (x, y) this bar could take `e` along, for [`Cx::begin_scroll_container`].
     pub fn scroll_container_axes(&self, cx: &mut Cx, e: &ScrollEvent, scroll_area: Area) -> [bool; 2] {
         let is_candidate = self.scrollable()
             && cx.is_scroll_area_unblocked(scroll_area)
             && Self::is_scroll_over(cx, e, scroll_area);
         match self.axis {
-            ScrollAxis::Horizontal => [is_candidate, is_candidate && self.use_vertical_finger_scroll],
-            ScrollAxis::Vertical => [false, is_candidate],
+            ScrollAxis::Horizontal => [
+                is_candidate && self.takes_new_scroll(e.scroll.x),
+                is_candidate && self.use_vertical_finger_scroll && self.takes_new_scroll(e.scroll.y),
+            ],
+            ScrollAxis::Vertical => [false, is_candidate && self.takes_new_scroll(e.scroll.y)],
         }
     }
 
@@ -686,17 +700,21 @@ impl ScrollBar {
     ) {
         if let Event::Scroll(e) = event {
             let is_over = Self::is_scroll_over(cx, e, scroll_area);
-            // The innermost scrollable under the pointer takes the whole gesture, even
-            // at its limits, so no ancestor ever moves along with it.
-            let is_candidate = is_over && self.scrollable();
+            // A new gesture goes to the innermost scrollable under the pointer that can move its way (or the
+            // innermost one, if nothing around it can), which keeps it, so no ancestor moves along with it.
+            let is_candidate = |cx: &Cx, axis: Vec2Index| {
+                is_over
+                    && self.scrollable()
+                    && (self.takes_new_scroll(e.scroll.index(axis)) || !cx.is_inside_scroll_container(axis))
+            };
             let axis = self.axis.vec_index();
-            let mut is_owner = cx.is_scroll_owner(e, scroll_area, axis, is_candidate);
+            let mut is_owner = cx.is_scroll_owner(e, scroll_area, axis, is_candidate(cx, axis));
             let mut scroll = if is_owner { e.scroll.index(axis) } else { 0.0 };
             // Accept vertical scroll input too, so trackpad horizontal scrolling
             // and mouse wheel vertical scrolling both work.
             if self.use_vertical_finger_scroll
                 && axis == Vec2Index::X
-                && cx.is_scroll_owner(e, scroll_area, Vec2Index::Y, is_candidate)
+                && cx.is_scroll_owner(e, scroll_area, Vec2Index::Y, is_candidate(cx, Vec2Index::Y))
             {
                 is_owner = true;
                 scroll += e.scroll.y;

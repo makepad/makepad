@@ -54,6 +54,12 @@ pub fn drag_origin(press_abs: f64, now_abs: f64, slop: f64, touch: bool) -> f64 
     }
 }
 
+/// Whether a scroller at `pos` (in `0..=max`) can move by `delta`, the first delta of a new scroll
+/// gesture (positive toward the end). Half a point from a limit counts as on it; zero goes either way.
+pub fn can_scroll_toward(pos: f64, max: f64, delta: f64) -> bool {
+    delta == 0.0 || (delta > 0.0 && pos < max - 0.5) || (delta < 0.0 && pos > 0.5)
+}
+
 /// The `(min, max)` fling speed (px/s) of a touch release: Android's
 /// `ViewConfiguration` values there, the widget's own `flick_scroll_*` elsewhere.
 pub fn touch_fling_limits(widget_min: f64, widget_max: f64, touch: bool) -> (f64, f64) {

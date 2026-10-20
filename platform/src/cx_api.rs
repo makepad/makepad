@@ -1739,8 +1739,8 @@ impl Cx {
         self.fingers.unblock_scrolling_within_area(scrollable_area);
     }
 
-    /// Whether `area` owns this scroll along `axis`. Each gesture goes to the first caller (call it
-    /// after your children) that is a candidate: under the pointer and able to scroll that way.
+    /// Whether `area` owns this scroll along `axis`. Each gesture goes to the first candidate to ask (after
+    /// its children): one under the pointer that can move the gesture's way, or that contains its scrolls.
     pub fn is_scroll_owner(&mut self, e: &ScrollEvent, area: Area, axis: Vec2Index, is_candidate: bool) -> bool {
         if !self.is_scroll_area_unblocked(area) {
             // An owner a popup now covers lets go, for whatever the pointer is over.
@@ -1756,8 +1756,8 @@ impl Cx {
         self.is_scrolling_allowed_within(&area) && !self.fingers.test_sweep_lock(area)
     }
 
-    /// Call before passing a scroll event to your children, with whether you could take it along
-    /// x and y, and `end_scroll_container` after: a child list that can't scroll then leaves it to you.
+    /// Call before passing a scroll event to your children, with whether you'd take a new scroll along x and y,
+    /// and `end_scroll_container` after: a child that can't move that way then leaves it to you.
     pub fn begin_scroll_container(&mut self, axes: [bool; 2]) {
         self.fingers.scroll_latch.begin_container(axes);
     }

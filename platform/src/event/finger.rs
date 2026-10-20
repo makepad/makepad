@@ -214,6 +214,9 @@ pub struct CxScrollLatch {
     direction: Option<ScrollDirection>,
     /// How far the gesture in progress traveled while its direction wasn't clear yet.
     travel: Vec2d,
+    /// Whether the gesture in progress has moved yet. A trackpad's `Began` can carry no delta,
+    /// so its first movement picks the scrollables that take it.
+    has_moved: bool,
 }
 
 fn axis_slot(axis: Vec2Index) -> usize {
@@ -258,6 +261,7 @@ impl CxScrollLatch {
             // A wheel only turns along one axis at a time, so only a trackpad gesture keeps to the way it started.
             self.direction = (e.phase == ScrollPhase::None).then_some(ScrollDirection::Free);
             self.travel = Vec2d::default();
+            self.has_moved = false;
         } else {
             if e.phase == ScrollPhase::Ended {
                 self.gesture = ScrollGesture::Lifted;
@@ -265,8 +269,9 @@ impl CxScrollLatch {
             let is_user_driven = matches!(e.phase, ScrollPhase::None | ScrollPhase::Changed);
             for (slot, axis) in [Vec2Index::X, Vec2Index::Y].into_iter().enumerate() {
                 if self.owners[slot].is_empty() {
-                    // A wheel latches only what took it, so an axis nothing took goes to whatever can take it.
-                    are_claimable[slot] = e.phase == ScrollPhase::None;
+                    // A wheel latches only what took it, and a gesture that hasn't moved took nothing,
+                    // so an axis nothing took goes to whatever can take it.
+                    are_claimable[slot] = e.phase == ScrollPhase::None || !self.has_moved;
                     continue;
                 }
                 if is_user_driven && !are_owners_live[slot] {
@@ -282,6 +287,7 @@ impl CxScrollLatch {
         if e.phase == ScrollPhase::None {
             self.wheel_time = e.time;
         }
+        self.has_moved |= e.scroll != Vec2d::default();
         if self.direction.is_none() {
             self.travel += e.scroll;
             self.direction = ScrollDirection::from_travel(self.travel);
@@ -360,8 +366,12 @@ impl CxScrollLatch {
                 if !owner.is_empty() {
                     return *owner == area;
                 }
-                // Mid-gesture, a trackpad axis nobody took at its start stays unowned.
+                // Mid-gesture, a trackpad axis nobody took once it moved stays unowned.
                 if !dispatch.are_claimable[slot] || !is_candidate || handled.get() || area.is_empty() {
+                    return false;
+                }
+                // A scroll that doesn't move claims nothing, since which way it goes decides who takes it.
+                if e.scroll == Vec2d::default() {
                     return false;
                 }
                 *owner = area;

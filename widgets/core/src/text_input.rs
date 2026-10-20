@@ -18,6 +18,7 @@ use {
         },
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         scroll_bar::{ScrollAxis, ScrollBar},
+        scroll_motion::can_scroll_toward,
         widget::*,
         widget_async::{CxSplashVmExt, ScriptAsyncResult},
     },
@@ -880,6 +881,10 @@ pub struct TextInput {
     return_key_type: ReturnKeyType,
     #[live(false)]
     is_multiline: bool,
+    /// Whether a scroll that starts at the text's limit stays here instead of going on to a
+    /// scrollable around it, like CSS `overscroll-behavior: contain`.
+    #[live(false)]
+    contain_scroll: bool,
     /// When `is_multiline` is true, controls whether plain Enter inserts a
     /// newline or emits the `Returned` action.
     ///
@@ -2985,8 +2990,12 @@ impl Widget for TextInput {
                 // boundary checks match exactly, avoiding floating-point mismatch
                 // with relative Fit bounds.
                 let max_scroll_y = self.cached_max_scroll_y;
-                // Overflowing text takes the whole gesture, even at its limits (see `Cx::is_scroll_owner`).
-                if cx.is_scroll_owner(e, area, Vec2Index::Y, is_over && max_scroll_y > 0.0) {
+                // Overflowing text takes a new gesture it can move by, or one nothing around it can take,
+                // and then keeps the whole gesture (see `Cx::is_scroll_owner`).
+                let takes = self.contain_scroll
+                    || can_scroll_toward(self.scroll_y, max_scroll_y, e.scroll.y)
+                    || !cx.is_inside_scroll_container(Vec2Index::Y);
+                if cx.is_scroll_owner(e, area, Vec2Index::Y, is_over && max_scroll_y > 0.0 && takes) {
                     let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
                     if new_scroll_y != self.scroll_y {
                         self.scroll_y = new_scroll_y;
@@ -3017,7 +3026,10 @@ impl Widget for TextInput {
                 let area = self.draw_bg.area();
                 let is_over = area.clipped_rect(cx).contains(e.abs);
                 let max_scroll_x = self.cached_max_scroll_x;
-                if cx.is_scroll_owner(e, area, Vec2Index::X, is_over && max_scroll_x > 0.0) {
+                let takes = self.contain_scroll
+                    || can_scroll_toward(self.scroll_x, max_scroll_x, e.scroll.x)
+                    || !cx.is_inside_scroll_container(Vec2Index::X);
+                if cx.is_scroll_owner(e, area, Vec2Index::X, is_over && max_scroll_x > 0.0 && takes) {
                     let new_scroll_x = (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
                     if new_scroll_x != self.scroll_x {
                         self.scroll_x = new_scroll_x;

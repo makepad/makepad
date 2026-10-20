@@ -145,6 +145,7 @@ script_mod! {
                                         width: Fill
                                         height: 160
                                         flow: Down
+                                        scroll_bars +: {scroll_bar_y.contain_scroll: true}
                                         inner_top := Label{height: 30 text: "InnerTop"}
                                         Label{height: 30 text: "Inner 1"}
                                         Label{height: 30 text: "Inner 2"}

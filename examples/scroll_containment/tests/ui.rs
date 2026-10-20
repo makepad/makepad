@@ -1,5 +1,5 @@
-//! Scroll containment: a scroll over a nested scrollable moves only that one, even at its limits,
-//! unless it has nothing to scroll, and a gesture stays with the scrollable it began on.
+//! Scroll containment: a scroll gesture goes to the innermost scrollable under the pointer that can
+//! move its way (or contains its scrolls), and stays with it, so nothing around it moves along.
 
 use makepad_test::{makepad_test, KeyCode, RemoteMouseMove, Selector, StudioToApp, TestApp};
 use std::thread;
@@ -80,7 +80,7 @@ fn trackpad(app: &TestApp, (x, y): (f64, f64), deltas: &[f64], momentum: &[f64])
 }
 
 #[makepad_test]
-fn wheel_over_a_nested_list_never_scrolls_the_page(app: TestApp) {
+fn wheel_over_a_nested_list_scrolls_the_page_only_with_a_new_scroll_at_its_end(app: TestApp) {
     let [page, log] = offsets(&app, ["page", "log"]);
     let over_log = center(&app, Selector::id("log_list"));
     wheel(&app, over_log, 0.0, 60.0);
@@ -90,9 +90,10 @@ fn wheel_over_a_nested_list_never_scrolls_the_page(app: TestApp) {
     wheel(&app, over_log, 0.0, 5000.0);
     let [_, log_end] = offsets(&app, ["page", "log"]);
     assert_eq!(offsets(&app, ["page"]), [page]);
+    // A new scroll that starts at the end goes on to the page, as in browsers.
     thread::sleep(NEW_SCROLL);
     wheel(&app, over_log, 0.0, 200.0);
-    assert_eq!(offsets(&app, ["page", "log"]), [page, log_end]);
+    assert_eq!(offsets(&app, ["page", "log"]), [page + 200.0, log_end]);
 }
 
 #[makepad_test]
@@ -123,22 +124,27 @@ fn a_list_with_nothing_to_scroll_still_takes_scrolls_when_nothing_around_it_can(
 }
 
 #[makepad_test]
-fn wheel_over_a_nested_scroll_view_or_text_input_never_scrolls_the_page(app: TestApp) {
+fn wheel_over_a_contained_scroll_view_never_scrolls_the_page(app: TestApp) {
     let [page, inner] = offsets(&app, ["page", "inner"]);
     let over_inner = center(&app, Selector::id("inner_view"));
     wheel(&app, over_inner, 0.0, 1000.0);
     let [_, inner_end] = offsets(&app, ["page", "inner"]);
     assert!(inner_end > inner, "the nested view scrolled");
+    // `contain_scroll` keeps even a new scroll that starts at its end.
     thread::sleep(NEW_SCROLL);
     wheel(&app, over_inner, 0.0, 100.0);
     assert_eq!(offsets(&app, ["page", "inner"]), [page, inner_end]);
+}
 
+#[makepad_test]
+fn a_new_wheel_scroll_at_a_text_inputs_end_scrolls_the_page(app: TestApp) {
+    let [page] = offsets(&app, ["page"]);
     let over_notes = center(&app, Selector::id("notes"));
-    thread::sleep(NEW_SCROLL);
     wheel(&app, over_notes, 0.0, 2000.0);
+    assert_eq!(offsets(&app, ["page"]), [page]);
     thread::sleep(NEW_SCROLL);
     wheel(&app, over_notes, 0.0, 100.0);
-    assert_eq!(offsets(&app, ["page"]), [page]);
+    assert_eq!(offsets(&app, ["page"]), [page + 100.0]);
 }
 
 #[makepad_test]
@@ -205,32 +211,45 @@ fn a_trackpad_gesture_stays_with_the_scrollable_it_began_on(app: TestApp) {
 }
 
 #[makepad_test]
-fn a_trackpad_gesture_at_a_nested_lists_limit_never_reaches_the_page(app: TestApp) {
+fn a_trackpad_gesture_that_starts_at_a_nested_lists_limit_scrolls_the_page(app: TestApp) {
     let [page] = offsets(&app, ["page"]);
     let over_log = center(&app, Selector::id("log_list"));
     wheel(&app, over_log, 0.0, 5000.0);
     let [_, log_end] = offsets(&app, ["page", "log"]);
     thread::sleep(NEW_SCROLL);
-    // Its rubber band stretches and springs back, and its momentum goes nowhere.
+    // Its momentum too.
     trackpad(&app, over_log, &[40.0; 3], &[30.0; 3]);
-    assert_eq!(offsets(&app, ["page", "log"]), [page, log_end]);
+    assert_eq!(offsets(&app, ["page", "log"]), [page + 210.0, log_end]);
 }
 
 #[makepad_test]
-fn a_list_nested_in_a_list_keeps_its_wheel_scrolls(app: TestApp) {
+fn a_trackpad_gesture_at_a_contained_views_limit_never_reaches_the_page(app: TestApp) {
+    let [page] = offsets(&app, ["page"]);
+    let over_inner = center(&app, Selector::id("inner_view"));
+    wheel(&app, over_inner, 0.0, 1000.0);
+    let [_, inner_end] = offsets(&app, ["page", "inner"]);
+    thread::sleep(NEW_SCROLL);
+    // Its rubber band stretches and springs back, and its momentum goes nowhere.
+    trackpad(&app, over_inner, &[40.0; 3], &[30.0; 3]);
+    assert_eq!(offsets(&app, ["page", "inner"]), [page, inner_end]);
+}
+
+#[makepad_test]
+fn a_list_nested_in_a_list_keeps_its_wheel_scroll_until_a_new_one_starts_at_its_end(app: TestApp) {
     let [outer, nested] = offsets(&app, ["outer", "nested"]);
     let over_nested = center(&app, Selector::id("nested"));
     wheel(&app, over_nested, 0.0, 3000.0);
-    let [_, nested_end] = offsets(&app, ["outer", "nested"]);
+    let [outer_after, nested_end] = offsets(&app, ["outer", "nested"]);
     assert!(nested_end > nested, "the nested list scrolled");
+    assert_eq!(outer_after, outer);
     thread::sleep(NEW_SCROLL);
     wheel(&app, over_nested, 0.0, 100.0);
-    assert_eq!(offsets(&app, ["outer", "nested"]), [outer, nested_end]);
+    assert_eq!(offsets(&app, ["outer", "nested"]), [outer + 100.0, nested_end]);
 
     // One with nothing to scroll leaves the wheel to the outer list.
     thread::sleep(NEW_SCROLL);
     wheel(&app, center(&app, Selector::id("nested_short")), 0.0, 30.0);
-    assert_eq!(offsets(&app, ["outer", "nested_short"]), [outer + 30.0, 0.0]);
+    assert_eq!(offsets(&app, ["outer", "nested_short"]), [outer + 130.0, 0.0]);
 }
 
 /// Scrolls the outer list until its far strip sits near the bottom, with a code block above it,
