@@ -70,6 +70,7 @@ pub const UNUSED_UNSAFE: Lint = lint("unused_unsafe");
 pub const UNSAFE_OP_IN_UNSAFE_FN: Lint = lint("unsafe_op_in_unsafe_fn");
 pub const STATIC_MUT_REFS: Lint = lint("static_mut_refs");
 pub const UNREACHABLE_PATTERNS: Lint = lint("unreachable_patterns");
+pub const LATE_BOUND_LIFETIME_ARGUMENTS: Lint = lint("late_bound_lifetime_arguments");
 pub const OVERLAPPING_RANGE_ENDPOINTS: Lint = lint("overlapping_range_endpoints");
 pub const NON_CONTIGUOUS_RANGE_ENDPOINTS: Lint = lint("non_contiguous_range_endpoints");
 pub const IRREFUTABLE_LET_PATTERNS: Lint = lint("irrefutable_let_patterns");

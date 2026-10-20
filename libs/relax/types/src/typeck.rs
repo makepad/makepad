@@ -4275,7 +4275,7 @@ impl<'a> Fcx<'a> {
 
     /// hir_ty_lowering check_generic_arg_count of a written segment against `def`'s own generics.
     /// False (reported) when the number of arguments is wrong.
-    fn check_seg_arg_count(&mut self, args: GenericArgsId, def: DefId, lo: u32) -> bool {
+    fn check_seg_arg_count(&mut self, args: GenericArgsId, def: DefId, lo: u32, method: bool) -> bool {
         use crate::tcx::arg_count::ArgPosition;
         let prog = self.prog;
         // (only a crate whose errors are reported validates; a call without written arguments has nothing to count)
@@ -4296,6 +4296,20 @@ impl<'a> Fcx<'a> {
             _ => return true,
         };
         let ast = self.ast();
+        // prohibit_explicit_late_bound_lifetimes
+        if late_bound {
+            if let Some(GenericArgs::Angle(v)) = ast.gargs(args) {
+                let lts: Vec<Ident> = ast.list(*v).iter().filter_map(|a| if let GenericArg::Lifetime(l) = *a { Some(l) } else { None }).collect();
+                if let Some(first) = lts.first() {
+                    let msg = "cannot specify lifetime arguments explicitly if late bound lifetime parameters are present";
+                    if !method && Some(lts.len()) != early {
+                        self.err(first.lo, format!("E0794: {}", msg));
+                    } else {
+                        crate::lint::emit(self.prog, self.b.def, &crate::lint::LATE_BOUND_LIFETIME_ARGUMENTS, self.file, first.lo, msg);
+                    }
+                }
+            }
+        }
         let counts = self.tcx.own_generic_counts(prog, def, early);
         let errs = self.tcx.check_generic_arg_count(prog, def, ast.gargs(args), ast, counts, pos, !matches!(ast.gargs(args), Some(GenericArgs::Angle(_))), late_bound);
         for e in &errs { self.err(lo, e.clone()); }
@@ -4314,7 +4328,7 @@ impl<'a> Fcx<'a> {
         let seg = self.ast().segs(path.segs).get(i)?;
         let a = self.ast().gargs(seg.args())?;
         let (args_id, lo) = (seg.args(), seg.name.lo);
-        if !self.check_seg_arg_count(args_id, def, lo) { return None; }
+        if !self.check_seg_arg_count(args_id, def, lo, false) { return None; }
         let mut out = Vec::new();
         if let GenericArgs::Angle(v) = a {
             // hir_ty_lowering/generics.rs: arguments beyond the declared parameters are not
@@ -6597,7 +6611,7 @@ impl<'a> Fcx<'a> {
         for arg in &impl_full { match *arg { crate::consts::GenericArg::Type(t) => gargs.push(t), crate::consts::GenericArg::Const(c) => gargs.push(self.tcx.tys.intern(TyKind::Const(c))), _ => {} } }
         let own = sig.n_generics - sig.n_parent_generics;
         let mut tf = Vec::new();
-        let turbofish_ok = self.check_seg_arg_count(turbofish, item, lo);
+        let turbofish_ok = self.check_seg_arg_count(turbofish, item, lo, true);
         if let (true, Some(GenericArgs::Angle(v))) = (turbofish_ok, self.ast().gargs(turbofish)) {
             for g in self.ast().list(*v) {
                 if let Some(lt) = self.generic_arg(g, item, self.tcx.fn_sig(self.prog, item).unwrap().n_parent_generics as usize + tf.len()) {
@@ -6890,7 +6904,7 @@ impl<'a> Fcx<'a> {
     fn check_trait_method_call(&mut self, e: ExprId, item: DefId, imp: DefId, self_ty: TyId, derefs: usize, turbofish: GenericArgsId, args: &[ExprId], lo: u32, method_expected: Option<TyId>) -> TyId {
         let error = self.tcx.tys.error;
         let mut tf = Vec::new();
-        let turbofish_ok = self.check_seg_arg_count(turbofish, item, lo);
+        let turbofish_ok = self.check_seg_arg_count(turbofish, item, lo, true);
         if let (true, Some(GenericArgs::Angle(v))) = (turbofish_ok, self.ast().gargs(turbofish)) {
             for g in self.ast().list(*v) {
                 if let Some(lt) = self.generic_arg(g, item, self.tcx.fn_sig(self.prog, item).unwrap().n_parent_generics as usize + tf.len()) {

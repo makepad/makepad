@@ -30,7 +30,7 @@ const IMPLEMENTED: &[&str] = &[
     "noop_method_call", "overflowing_literals", "path_statements", "redundant_semicolons", "single_use_lifetimes",
     "static_mut_refs", "suspicious_double_ref_op", "trivial_casts", "trivial_numeric_casts", "unconditional_panic",
     "undropped_manually_drops", "unreachable_code", "unreachable_patterns", "invalid_reference_casting", "mutable_transmutes", "semicolon_in_expressions_from_macros", "overlapping_range_endpoints", "non_contiguous_range_endpoints", "unsafe_attr_outside_unsafe", "unsafe_op_in_unsafe_fn",
-    "unused_allocation", "unused_assignments", "non_shorthand_field_patterns", "break_with_label_and_loop", "drop_bounds", "dyn_drop", "missing_copy_implementations", "ambiguous_negative_literals", "function_casts_as_integer", "unused_braces", "unused_import_braces", "unused_imports", "impl_trait_redundant_captures", "redundant_imports", "unused_extern_crates", "unused_labels", "unused_lifetimes",
+    "unused_allocation", "unused_assignments", "non_shorthand_field_patterns", "break_with_label_and_loop", "drop_bounds", "dyn_drop", "missing_copy_implementations", "ambiguous_negative_literals", "function_casts_as_integer", "unused_braces", "unused_import_braces", "unused_imports", "late_bound_lifetime_arguments", "redundant_lifetimes", "impl_trait_redundant_captures", "redundant_imports", "unused_extern_crates", "unused_labels", "unused_lifetimes",
     "unused_must_use", "unused_mut", "unused_parens", "unused_results", "unused_unsafe", "unused_variables", "while_true",
     "mismatched_lifetime_syntaxes", "elided_lifetimes_in_paths", "explicit_outlives_requirements", 
     "absolute_paths_not_starting_with_crate", "unknown_diagnostic_attributes",

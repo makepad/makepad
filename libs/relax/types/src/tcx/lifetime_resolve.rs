@@ -35,6 +35,13 @@ impl LifetimeResolution {
     pub(crate) fn in_scope_lifetimes(&self) -> Vec<LifetimeId> {
         self.inherited.iter().map(|d| d.id).chain(self.declarations.iter().filter(|d| d.binder == BinderId::Item).map(|d| d.id)).collect()
     }
+    /// The named lifetimes in scope of the item: (id, name, position, declared by the item itself),
+    /// inherited ones first.
+    pub(crate) fn named_in_scope(&self) -> Vec<(LifetimeId, String, u32, bool)> {
+        let inh = self.inherited.iter().filter_map(|d| d.name.clone().map(|n| (d.id, n, d.span, false)));
+        let own = self.declarations.iter().filter(|d| d.binder == BinderId::Item).filter_map(|d| d.name.clone().map(|n| (d.id, n, d.span, true)));
+        inh.chain(own).collect()
+    }
     /// No lifetime declared, inherited or used anywhere in the owner (most items).
     fn is_empty(&self) -> bool { self.inherited.is_empty() && self.declarations.is_empty() && self.uses.is_empty() && self.binders.is_empty() }
     /// The answer to share: every empty resolution is the same value, kept once.
