@@ -269,6 +269,9 @@ impl<'a> Gates<'a> {
         if let Ok(i) = GATED_ATTRS.binary_search_by(|(n, _, _)| (*n).cmp(name.as_str())) {
             let (_, feature, msg) = GATED_ATTRS[i];
             self.gate(feature, pos, msg);
+        } else if name.starts_with("rustc_") && crate::builtin_attrs::is_builtin_attr(&name) {
+            // rustc_feature builtin_attrs: every `rustc_*` attribute is gated by `rustc_attrs`
+            self.gate("rustc_attrs", pos, "use of an internal attribute");
         }
         match name.as_str() {
             "stable" | "unstable" | "rustc_const_stable" | "rustc_const_unstable" | "rustc_default_body_unstable"

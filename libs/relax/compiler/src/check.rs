@@ -133,6 +133,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own));
     errors.extend(relax_types::item_checks::gated_syntax(&u.prog, &own));
     errors.extend(relax_types::item_checks::node_attribute_targets(&u.prog, &own));
+    errors.extend(relax_types::item_checks::param_attributes(&u.prog, &own));
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
     errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
     errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own));

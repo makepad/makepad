@@ -1030,6 +1030,12 @@ fn attribute_args_error(p: crate::cfg::Src<'_>, lo: usize, hi: usize, name: &[u8
         }
         if start < hi - 1 { entries.push((start, hi - 1)); }
     }
+    // `NoArgsAttributeParser`s (+ `global_allocator`): any argument is malformed input
+    const NO_ARGS: &[&[u8]] = &[b"non_exhaustive", b"no_core", b"no_std", b"no_main", b"panic_runtime", b"needs_panic_runtime", b"profiler_runtime", b"no_builtins",
+        b"default_lib_allocator", b"may_dangle", b"coroutine", b"no_implicit_prelude", b"pin_v2", b"automatically_derived", b"macro_escape", b"allow_internal_unsafe",
+        b"no_link", b"cold", b"track_caller", b"no_mangle", b"thread_local", b"marker", b"fundamental", b"export_stable", b"ffi_const", b"ffi_pure",
+        b"needs_allocator", b"compiler_builtins", b"proc_macro", b"proc_macro_attribute", b"panic_handler", b"global_allocator"];
+    if n < hi && NO_ARGS.contains(&name) { return Some((lo, "E0565")); }
     match name {
         b"inline" if list => {
             if entries.len() != 1 { return Some((lo, "E0805")); }
@@ -1769,6 +1775,39 @@ pub fn node_attribute_targets(prog: &Program, own: &[bool]) -> Vec<String> {
             if !prog.item_defs.contains_key(&(f as u32, i as u32)) { continue; }
             for v in ast.list(ast.row(r).variants) {
                 check(ast.list(v.attrs), "enum variants");
+            }
+        }
+    }
+    errors
+}
+
+/// rustc_ast_passes `check_decl_attrs` (+ rustc_resolve): the attributes of a function parameter
+/// are `cfg`, `cfg_attr` and the lint attributes, or non-builtin ones; a built-in attribute macro
+/// (`#[test]`) is not a non-macro attribute.
+pub fn param_attributes(prog: &Program, own: &[bool]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (f, pf) in prog.files.iter().enumerate() {
+        let krate = prog.file_crate.get(f).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        let ast = &pf.ast;
+        let p = prog.src(f as u32);
+        for prm in ast.params.iter() {
+            for a in ast.list(prm.attrs) {
+                let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+                if hi <= lo { continue; }
+                let t = p.tok(lo);
+                if t.lo >= pf.src_len { continue; }
+                // a plain one-segment path
+                if hi > lo + 1 && !matches!(crate::cfg::tok_str(p, lo + 1), b"(" | b"=") { continue; }
+                let name = String::from_utf8_lossy(crate::cfg::tok_str(p, lo)).into_owned();
+                match name.as_str() {
+                    "allow" | "cfg" | "cfg_attr" | "deny" | "expect" | "forbid" | "warn" => {}
+                    "test" | "bench" | "test_case" | "derive" | "global_allocator" | "cfg_eval" | "alloc_error_handler" | "derive_const" =>
+                        errors.push(prog.record_uncoded_error(f as u32, t.lo, "resolve", format!("expected non-macro attribute, found attribute macro `{name}`"))),
+                    n if crate::builtin_attrs::is_builtin_attr(n) =>
+                        errors.push(prog.record_uncoded_error(f as u32, t.lo, "typeck", "allow, cfg, cfg_attr, deny, expect, forbid, and warn are the only allowed built-in attributes in function parameters".to_string())),
+                    _ => {}
+                }
             }
         }
     }

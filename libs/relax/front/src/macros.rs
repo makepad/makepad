@@ -2284,7 +2284,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Closing token index of the group opened at token `i` (bounded by `end`).
-    fn tok_close_of(&self, i: usize, end: usize) -> Option<usize> {
+    pub(crate) fn tok_close_of(&self, i: usize, end: usize) -> Option<usize> {
         let mut depth = 0i32;
         let mut j = i;
         while j < end {

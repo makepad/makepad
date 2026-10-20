@@ -329,6 +329,37 @@ impl<'a> Parser<'a> {
         self.doc_before_pos().is_some()
     }
 
+    /// An inner doc comment (`//!`, `/*!`) between the previous token and the current one.
+    fn inner_doc_before_pos(&self) -> Option<u32> {
+        let cur = self.tok();
+        let lo = cur.lo as usize;
+        if lo > self.src.len() { return None; }
+        let prev_hi = if self.pos == 0 { 0 } else { self.toks.at(self.pos - 1).hi as usize };
+        if prev_hi > lo { return None; }
+        let g = &self.src[prev_hi..lo];
+        let mut i = 0;
+        while i < g.len() {
+            match g[i] {
+                b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+                b'/' if g.get(i + 1) == Some(&b'/') => {
+                    if g.get(i + 2) == Some(&b'!') { return Some((prev_hi + i) as u32); }
+                    while i < g.len() && g[i] != b'\n' { i += 1; }
+                }
+                b'/' if g.get(i + 1) == Some(&b'*') => {
+                    if g.get(i + 2) == Some(&b'!') { return Some((prev_hi + i) as u32); }
+                    let mut depth = 0;
+                    while i < g.len() {
+                        if g[i] == b'/' && g.get(i + 1) == Some(&b'*') { depth += 1; i += 2; }
+                        else if g[i] == b'*' && g.get(i + 1) == Some(&b'/') { depth -= 1; i += 2; if depth == 0 { break; } }
+                        else { i += 1; }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// The start of the doc comment `doc_before` found.
     fn doc_before_pos(&self) -> Option<u32> {
         let cur = self.tok();
@@ -838,6 +869,11 @@ impl<'a> Parser<'a> {
         let kind = |i: usize| if i < hi { self.toks.at(i).kind } else { T::Eof };
         if kind(lo + 1) != T::Eq || kind(lo + 2) != T::Ident || kind(lo + 3) != T::Not { return Ok(()); }
         match self.tok_text(self.toks.at(lo + 2)) {
+            // the macro's own message is the error
+            b"compile_error" if kind(lo + 5) == T::Str => {
+                let msg = crate::lit::unescape_str(&String::from_utf8_lossy(self.tok_text(self.toks.at(lo + 5))));
+                return Err(PErr { pos: self.toks.at(lo + 2).lo, msg });
+            }
             b"include_str" | b"include_bytes" | b"concat" | b"env" | b"stringify" => {}
             _ => return Ok(()),
         }
@@ -851,6 +887,14 @@ impl<'a> Parser<'a> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
         if hi <= lo || hi > self.toks.len() || self.toks.kind_at(lo) != T::Ident {
             return Ok(());
+        }
+        // an attribute's path takes no generic arguments (`#[$p]` with `$p:path` = `inline<u8>`)
+        {
+            let mut i = lo + 1;
+            while i + 1 < hi && self.toks.kind_at(i) == T::PathSep && self.toks.kind_at(i + 1) == T::Ident { i += 2; }
+            if i < hi && self.toks.kind_at(i) == T::Lt {
+                return Err(PErr { pos: self.toks.at(i).lo, msg: "unexpected generic arguments in path".into() });
+            }
         }
         let name = self.tok_text(self.toks.at(lo));
         let which = match name {
@@ -1061,6 +1105,7 @@ impl<'a> Parser<'a> {
         if self.macros.is_none() {
             return Ok(());
         }
+        if crate::lexer::validation_enabled() { self.macro_rules_syntax(toks)?; }
         // a raw identifier names the same macro (`macro_rules! r#try` is `try!`)
         let n = String::from_utf8_lossy(self.bytes(name.lo, name.hi)).trim_start_matches("r#").to_string();
         let mt = crate::macros::mtoks(self, &self.toks.range(toks.lo as usize, toks.hi as usize));
@@ -1072,6 +1117,42 @@ impl<'a> Parser<'a> {
         if crate::lexer::validation_enabled() {
             if let Some(d) = scope.local.last() {
                 crate::macros::check_rules(d, edition).map_err(|msg| PErr { pos: name.lo, msg })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// rustc_expand `compile_declarative_macro`: the rules are `(matcher) => {body}` separated by
+    /// `;`, and a `$` is followed by an identifier, `(` or `{` (mbe `parse_tree`).
+    fn macro_rules_syntax(&self, toks: TokRange) -> PResult<()> {
+        let (lo, end) = (toks.lo as usize, toks.hi as usize);
+        let kind = |i: usize| if i < end { self.toks.at(i).kind } else { T::Eof };
+        let is_open = |k: T| matches!(k, T::OpenParen | T::OpenBracket | T::OpenBrace);
+        let desc = |this: &Self, i: usize| String::from_utf8_lossy(this.tok_text(this.toks.at(i))).into_owned();
+        for i in lo..end {
+            if kind(i) == T::Dollar && kind(i + 1) == T::OpenBracket {
+                return Err(PErr { pos: self.toks.at(i + 1).lo, msg: "expected `(` or `{`, found `[`".into() });
+            }
+        }
+        let mut i = lo;
+        while i < end {
+            if !is_open(kind(i)) { return Err(PErr { pos: self.toks.at(i).lo, msg: format!("expected one of: `(`, `[`, or `{{`, found `{}`", desc(self, i)) }); }
+            let Some(c) = self.tok_close_of(i, end) else { return Ok(()) };
+            i = c + 1;
+            if kind(i) != T::FatArrow {
+                if i >= end { return Err(PErr { pos: self.toks.at(c).lo, msg: "expected `=>`".into() }); }
+                return Err(PErr { pos: self.toks.at(i).lo, msg: format!("expected `=>`, found `{}`", desc(self, i)) });
+            }
+            i += 1;
+            if !is_open(kind(i)) {
+                if i >= end { return Err(PErr { pos: self.toks.at(i - 1).lo, msg: "expected macro body".into() }); }
+                return Err(PErr { pos: self.toks.at(i).lo, msg: "macro rhs must be delimited".into() });
+            }
+            let Some(c) = self.tok_close_of(i, end) else { return Ok(()) };
+            i = c + 1;
+            if i < end {
+                if kind(i) != T::Semi { return Err(PErr { pos: self.toks.at(i).lo, msg: format!("expected `;`, found `{}`", desc(self, i)) }); }
+                i += 1;
             }
         }
         Ok(())
@@ -2123,6 +2204,9 @@ impl<'a> Parser<'a> {
                 }
             }
             T::Ident if self.is_word(0, b"macro_rules") && self.nth(1) == T::Not => {
+                if !matches!(vis, Vis::Private) {
+                    return Err(PErr { pos: self.tok().lo, msg: "can't qualify macro_rules invocation with `pub`".into() });
+                }
                 self.pos += 2;
                 name = self.ident_tok()?;
                 let (d, toks) = self.delim_tt()?;
@@ -3498,7 +3582,12 @@ impl<'a> Parser<'a> {
         let mut rest = false;
         while self.kind() != T::CloseBrace {
             let attrs = self.outer_attrs()?;
+            let had_attrs = !attrs.is_empty();
             let attrs = self.ast.push_list(attrs);
+            if self.kind() == T::DotDot && had_attrs {
+                // rustc parse_pat_fields: the `..` rest takes no attributes
+                return self.err("expected identifier, found `..`");
+            }
             if self.eat(T::DotDot) {
                 rest = true;
                 break;
@@ -4411,6 +4500,9 @@ impl<'a> Parser<'a> {
         self.expect(T::KwIf)?;
         let cond = self.expr_cond()?;
         self.cond_check(cond, true)?;
+        if self.kind() == T::OpenBrace {
+            if let Some(pos) = self.inner_doc_before_pos() { return Err(PErr { pos, msg: "E0753: expected outer doc comment".into() }); }
+        }
         let then = self.block()?;
         let els = if self.eat(T::KwElse) {
             let elo = self.lo();
