@@ -35,8 +35,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use crate::cabi::{self, ArgPlan, PLoc, RetPlan};
-use crate::rir::*;
+use relax_backend::cabi::{self, ArgPlan, PLoc, RetPlan};
+use relax_backend::rir::*;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 pub type H = unsafe extern "C" fn(*const u64, *mut u64, *mut Cx);
@@ -2443,11 +2443,11 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
     let mut tu = Vec::new();
     for b in &f.blocks {
         for i in &b.insts {
-            crate::regalloc::for_defs(i, |v| defs[v.0 as usize] += 1);
-            crate::regalloc::for_uses(i, |v| uses[v.0 as usize] += 1);
+            relax_backend::regalloc::for_defs(i, |v| defs[v.0 as usize] += 1);
+            relax_backend::regalloc::for_uses(i, |v| uses[v.0 as usize] += 1);
         }
         tu.clear();
-        crate::regalloc::term_uses(&b.term, &mut tu);
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
         for v in &tu {
             uses[v.0 as usize] += 1;
         }
@@ -2464,23 +2464,23 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
     let reads = |alias: &[u32], i: &Inst, v: VReg| {
         let rv = root(alias, v.0);
         let mut r = false;
-        crate::regalloc::for_uses(i, |u| r |= root(alias, u.0) == rv);
+        relax_backend::regalloc::for_uses(i, |u| r |= root(alias, u.0) == rv);
         r
     };
     let writes = |alias: &[u32], i: &Inst, v: VReg| {
         let rv = root(alias, v.0);
         let mut r = false;
-        crate::regalloc::for_defs(i, |u| r |= root(alias, u.0) == rv);
+        relax_backend::regalloc::for_defs(i, |u| r |= root(alias, u.0) == rv);
         r
     };
     let single_def = |i: &Inst| {
         let mut k = 0;
-        crate::regalloc::for_defs(i, |_| k += 1);
+        relax_backend::regalloc::for_defs(i, |_| k += 1);
         k == 1 && !matches!(i, Inst::Call(..) | Inst::Cpuid(..))
     };
     for (bi, b) in f.blocks.iter().enumerate() {
         tu.clear();
-        crate::regalloc::term_uses(&b.term, &mut tu);
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
         for (j, ins) in b.insts.iter().enumerate() {
             let Inst::Mov(d, s) = *ins else { continue };
             if d == s || !scalar(d) || f.vregs[d.0 as usize] != f.vregs[s.0 as usize] {
@@ -2692,7 +2692,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
         let mut defs = vec![0u32; f.vregs.len()];
         for b in &f.blocks {
             for i in &b.insts {
-                crate::regalloc::for_defs(i, |v| defs[v.0 as usize] += 1);
+                relax_backend::regalloc::for_defs(i, |v| defs[v.0 as usize] += 1);
             }
         }
         for b in &f.blocks {
@@ -2730,14 +2730,14 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
                     }
                     _ => {}
                 }
-                crate::regalloc::for_uses(i, |u| {
+                relax_backend::regalloc::for_uses(i, |u| {
                     if !foldable.contains(&u) {
                         needs_cell[u.0 as usize] = true;
                     }
                 });
             }
             tu.clear();
-            crate::regalloc::term_uses(&b.term, &mut tu);
+            relax_backend::regalloc::term_uses(&b.term, &mut tu);
             for u in &tu {
                 needs_cell[u.0 as usize] = true;
             }

@@ -832,8 +832,8 @@ impl<'a> Gen<'a> {
         self.saved = 8 * n_saved as i64;
         // only slots something addresses take space (SROA and inlining leave many unreferenced:
         // the Splash VM's O3 opcode() had 1749 slots, 515 in use); slots whose lifetimes cannot
-        // overlap share it (opt::slot_layout)
-        let (slot_fp, mut off) = crate::opt::slot_layout(self.f, self.saved + self.al.spill_bytes as i64, !crate::opt::opt_off(options, "-slotcolor"));
+        // overlap share it (frame::slot_layout)
+        let (slot_fp, mut off) = crate::frame::slot_layout(self.f, self.saved + self.al.spill_bytes as i64, !crate::stats::opt_off(options, "-slotcolor"));
         // C ABI body: buffers that rebuild aggregate params from their registers, and the
         // buffer an aggregate result is written to before Ret loads it into registers
         let mut cbuf_fp: Vec<i64> = Vec::new();
@@ -3375,37 +3375,12 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
     compile_freq(options, f, env, None)
 }
 
-/// research (ios-interp): MAKEPAD_RUN_INTERP_STATS=1 also sums the machine-code backend's time and
-/// output for functions compiled natively, to compare with the interpreter's lowering
-fn compile_freq_timed(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_STATS").is_some()) {
-        return compile_freq_inner(options, f, env, freq);
-    }
-    let t = std::time::Instant::now();
-    let r = compile_freq_inner(options, f, env, freq);
-    if let Ok(c) = &r {
-        crate::interp::note_native(t.elapsed().as_nanos() as u64, c.code.len() as u64, f.blocks.iter().map(|b| b.insts.len() as u64 + 1).sum());
-    }
-    r
-}
-
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
-    // the function runs in the threaded interpreter (interp.rs, MAKEPAD_RUN_INTERP /
-    // MAKEPAD_RUN_NO_CODEGEN): its "code" is the interpreter's relocatable form (interp/blob.rs)
-    if let Some((code, relocs)) = crate::interp::maybe_compile(f, env.slots, env.syms, env.sym_class, env.tls_slow, env.resume) {
-        let n = code.len() as u32;
-        return Ok(Compiled { code, pc_map: Vec::new(), frame_size: 0, text_len: n, alloc_sig: 0, relocs, rir_map: Vec::new(), rir_emitted: String::new() });
-    }
-    compile_freq_timed(options, f, env, freq)
-}
-
-fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
-    let _warm = crate::warm::Scope::backend(&f.name);
-    let _cost_codegen = crate::fncost::phase(5);
-    crate::fncost::size(false, f);
+    let _warm = crate::probe::backend(&f.name);
+    let _cost_codegen = crate::probe::phase(5);
+    crate::probe::size(f);
     for b in &f.blocks {
         for i in &b.insts {
             if matches!(i, Inst::Cpuid(..) | Inst::Xgetbv(..)) {
@@ -3426,8 +3401,8 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
         None => (f, None),
     };
     let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
-    let _cost_ra = crate::fncost::phase(9);
-    let t_ra = crate::opt::pass_clock();
+    let _cost_ra = crate::probe::phase(9);
+    let t_ra = crate::stats::pass_clock();
     // immediates arm64 cannot encode, inside loops: registers set up once
     let hoisted = regalloc::hoist_loop_consts(f, &imm_fits);
     let f = hoisted.as_ref().unwrap_or(f);
@@ -3436,7 +3411,7 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
     let f = shared.as_ref().unwrap_or(f);
     let (split, mut al0) = regalloc::allocate_split(options, f, &RegConfig { sym_class: env.sym_class, ..reg_config() }, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
-    crate::opt::pass_time(11, t_ra);
+    crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al0);
     // a function past the branch ranges is emitted again in long mode: from the same
@@ -3444,8 +3419,8 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
     let mut long = false;
     loop {
     let al = al0;
-    let _cost_emit = crate::fncost::phase(10);
-    let t_emit = crate::opt::pass_clock();
+    let _cost_emit = crate::probe::phase(10);
+    let t_emit = crate::stats::pass_clock();
     let mut g = Gen {
         a: Asm { w: Vec::with_capacity(128) },
         test_fuse: None,
@@ -3506,8 +3481,8 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
     let frame = g.frame as u32;
     let code = words_to_bytes(&g.a.w);
     let text_len = (g.text_words * 4) as u32;
-    crate::opt::pass_time(12, t_emit);
-    crate::fncost::code(code.len());
+    crate::stats::pass_time(12, t_emit);
+    crate::probe::code(code.len());
     return Ok(Compiled { code, pc_map: g.pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_map: Vec::new(), rir_emitted: String::new() });
     }
 }

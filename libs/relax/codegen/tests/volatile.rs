@@ -2,7 +2,7 @@
 //! family: never removed (DCE, dead stores), merged (CSE), forwarded (slot store/load/copy forwarding,
 //! SROA), hoisted or speculated (LICM, if-conversion, layout) or reordered with each other.
 use relax_codegen::opt;
-use relax_codegen::rir::*;
+use relax_backend::rir::*;
 
 const U64: IntTy = IntTy { bits: 64, signed: false };
 

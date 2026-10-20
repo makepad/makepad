@@ -1,6 +1,6 @@
 //! Execute raw RIR so every select path is tested independently of if-conversion.
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::{exec::Code, rir::*, x64};
+use relax_backend::{exec::Code, rir::*, x64};
 
 fn push(f: &mut Func, i: Inst) {
     f.blocks[0].insts.push(i);
@@ -49,7 +49,7 @@ fn compile(w: bool, cond: Option<Cond>, swap_cmp: bool, swap_select: bool, share
     }
     f.verify().unwrap();
     let env = x64::Env {
-        slots: relax_codegen::rir::SlotsPtr::NONE,
+        slots: relax_backend::rir::SlotsPtr::NONE,
         tls_key: 0,
         tls_slow: 0,
         resume: 0,
@@ -163,7 +163,7 @@ fn unrelated_float_compare_and_redefined_input() {
             f.blocks[0].term = Term::Ret(vec![d]);
             f.verify().unwrap();
             let env = x64::Env {
-                slots: relax_codegen::rir::SlotsPtr::NONE,
+                slots: relax_backend::rir::SlotsPtr::NONE,
                 tls_key: 0,
                 tls_slow: 0,
                 resume: 0,
@@ -211,7 +211,7 @@ fn f64_compare_selects_f32() {
     f.blocks[0].term = Term::Ret(vec![d]);
     f.verify().unwrap();
     let env = x64::Env {
-        slots: relax_codegen::rir::SlotsPtr::NONE,
+        slots: relax_backend::rir::SlotsPtr::NONE,
         tls_key: 0,
         tls_slow: 0,
         resume: 0,

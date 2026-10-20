@@ -3,7 +3,7 @@
 
 // Share the clock with the optimiser: build and pass totals must use the same Windows
 // cycle calibration (and Unix thread CPU clock).
-pub use relax_codegen::cpu_ns;
+pub use relax_backend::cpu_ns;
 
 /// Wall time in ns since the first call of it in this process.
 pub fn wall_ns() -> u64 {

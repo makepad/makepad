@@ -1180,6 +1180,10 @@ impl<'a> Sim<'a> {
         for &i in &self.cannot_determine {
             if !seen.insert(i) { continue; }
             let (file, pos) = at(i);
+            // invariant: an import the replay cannot determine is one the real resolver left unresolved
+            let pim = &p.imports[self.imps[i as usize].pi];
+            debug_assert!(!pim.done || !(pim.glob || pim.bound & (BOUND_TYPES | BOUND_VALUES) != 0),
+                "replay cannot determine an import the real resolver resolved (file {file}, pos {pos})");
             out.push(SimDiag { file, pos, kind: SimKind::Error, msg: "cannot determine resolution for the import".to_string() });
         }
         // rustc throws the unresolved errors of the imports, and only when there are none the
@@ -1248,8 +1252,11 @@ impl<'a> Sim<'a> {
             IK::Single { source, decls, .. } => (*source, *decls),
             IK::Glob { .. } => return,
         };
+        // `use a::{self}` has the source `self` in rustc, which names the module in the type namespace only
+        let self_only = self.p.imports[self.imps[i as usize].pi].bound & BOUND_SELF_ONLY != 0;
         let mut all_ns_err = true;
         for ns in 0..2 {
+            if self_only && ns == 1 { continue; }
             let fin = Fin { imp: Some(summ), report_private: false };
             let binding = self.resolve_ident_in_module(module, source, ns, ps, Some(fin), decls[ns].decl(), Some(i));
             if let Ok(b) = binding {
@@ -1262,6 +1269,7 @@ impl<'a> Sim<'a> {
         if all_ns_err {
             let mut all_failed = true;
             for ns in 0..2 {
+                if self_only && ns == 1 { continue; }
                 let fin = Fin { imp: None, report_private: true };
                 if self.resolve_ident_in_module(module, source, ns, ps, Some(fin), None, None).is_ok() { all_failed = false; }
             }
@@ -1311,6 +1319,15 @@ mod tests {
     }
 
     fn has(v: &[(String, usize)], text: &str, line: usize) -> bool { v.iter().any(|(m, l)| m.contains(text) && *l == line) }
+
+    #[test]
+    fn a_self_import_of_a_module_whose_name_is_also_a_re_exported_fn_is_determined() {
+        // `use dep::render::{self, Timing}` where `dep` re-exports a fn `render` at its root
+        let d = replay("mod dep { pub mod render { pub struct Timing; pub fn render() {} } pub use self::render::render; }\nuse dep::render::{self, Timing};\nfn main() { let _ = Timing; render::render(); }\n", 2021);
+        assert!(!has(&d, "cannot determine", 2), "{d:?}");
+        let d = replay("mod dep { pub mod render { pub struct Timing; } pub fn render() {} }\nuse dep::{render::{self, Timing}};\nuse dep::render::{self as r2};\nfn main() { let _ = Timing; }\n", 2021);
+        assert!(d.iter().all(|(m, _)| !m.contains("cannot determine")), "{d:?}");
+    }
 
     #[test]
     fn a_glob_shadowed_by_a_pending_import_cannot_be_determined() {

@@ -9,4 +9,5 @@ publish = false
 [dependencies]
 relax-lex = { workspace = true }
 relax-session = { workspace = true }
+relax-backend = { workspace = true }
 relax-codegen = { workspace = true }

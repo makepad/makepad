@@ -4,7 +4,7 @@
 //! semantics on Arm.
 
 use super::{c, hist_note, Cx, COUNT, H};
-use crate::rir::{VW, VX};
+use relax_backend::rir::{VW, VX};
 use core::arch::aarch64::*;
 
 #[inline(always)]

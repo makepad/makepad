@@ -4,7 +4,8 @@
 //! the later redefinition of the vreg: the redefinition reaches the join again on the next iteration,
 //! so the constant must not be read from the vreg there (async `for` loop awaiting a nested future:
 //! a coroutine flag was stored from the loop's accumulator).
-use relax_codegen::{opt, rir::*};
+use relax_backend::rir::*;
+use relax_codegen::opt;
 
 #[test]
 fn zero_is_not_read_from_a_vreg_the_loop_redefines() {

@@ -3859,12 +3859,12 @@ impl Unit {
                         crate::rir::Inst::Call(crate::rir::Callee::Indirect(v), args, _) if !args.contains(v) => Some(*v),
                         _ => None,
                     };
-                    relax_codegen::regalloc::for_uses(i, |v| {
+                    relax_backend::regalloc::for_uses(i, |v| {
                         if Some(v) != local_call { escape(v); }
                     });
                 }
                 term_uses.clear();
-                relax_codegen::regalloc::term_uses(&b.term, &mut term_uses);
+                relax_backend::regalloc::term_uses(&b.term, &mut term_uses);
                 for v in &term_uses { escape(*v); }
             }
         }
@@ -5780,7 +5780,7 @@ fn error_stub(u: &mut Unit, msg: &str) -> (Vec<u8>, Vec<crate::rir::RelocAt>) {
         blk.pos.push(0);
     }
     blk.term = crate::rir::Term::Unreachable;
-    x64::compile(options, &f, &u.env).map(|c| (c.code, c.relocs)).unwrap_or_default()
+    relax_codegen::native::compile(options, &f, &u.env).map(|c| (c.code, c.relocs)).unwrap_or_default()
 }
 
 fn why_function(u: &Unit, id: u32, phase: &str) -> Option<crate::why::Scope> {
@@ -5854,7 +5854,7 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
     let mps = crate::memstat::peak_start();
     let c = crate::memstat::tagged(crate::memstat::Tag::Codegen, || {
         let _scratch = crate::zone_alloc::scratch(runtime);
-        x64::compile(options, func, env)
+        relax_codegen::native::compile(options, func, env)
     });
     crate::memstat::note_big("codegen", &func.name, mps, || cg_shape(func));
     compile_watch(None);
@@ -5904,7 +5904,7 @@ pub(crate) unsafe fn install_instrumented(up: *mut Unit, id: u32, gen: u32, base
     let cg = tier0_codegen_rir(options, &f, u.opt.fold, u.opt.layout);
     let c = {
         let _scratch = crate::zone_alloc::scratch(runtime);
-        x64::compile(options, &cg, &u.env)
+        relax_codegen::native::compile(options, &cg, &u.env)
     }?;
     note_frame(id, c.frame_size, slot_bytes(&cg), false);
     u.install(id, &c.code, &c.relocs, c.pc_map, gen)
@@ -6646,7 +6646,7 @@ impl O2Work {
             let (func, inlined) = optimize_tree(options, id, prep, &mut done)?;
             let cg = tier0_codegen_rir(options, &func, fold, layout);
             let _scratch = crate::zone_alloc::scratch(&session.runtime);
-            let c = x64::compile(options, &cg, &env)?;
+            let c = relax_codegen::native::compile(options, &cg, &env)?;
             Ok::<_, String>((func, inlined, c))
         }));
         O2Done { id, epoch, snapshot, t0, built, done }
@@ -7662,7 +7662,7 @@ pub unsafe fn backend_bench(up: *mut Unit) {
                 crate::opt::rotate_loops(&mut f);
             }
             let t1 = cpu_ns();
-            let _ = x64::compile(options, &f, &env);
+            let _ = relax_codegen::native::compile(options, &f, &env);
             let t2 = cpu_ns();
             opt_ns += t1 - t0;
             cg_ns += t2 - t1;
@@ -7697,10 +7697,10 @@ fn optimize_rir(options: &crate::options::Options, id: u32, prep: Prep) -> Resul
         let mut inlined = Vec::new();
         if cfg.inline && !callees.is_empty() {
             let get = |c: u32| -> Option<(*const crate::rir::Func, u8)> { callees.iter().find(|x| x.0 == c).map(|x| (&*x.1 as *const crate::rir::Func, x.2)) };
-            let ti = crate::opt::pass_clock();
+            let ti = relax_backend::stats::pass_clock();
             // Candidates can be baseline bodies too: conservatively keep their unwind edges.
             inlined = crate::opt::inline_calls(options, &mut func, id, &get, &|_| false, &crate::opt::InlineLimits::baseline());
-            crate::opt::pass_time(5, ti);
+            relax_backend::stats::pass_time(5, ti);
         }
         baseline_rir(options, &mut func, ro);
         // No callee facts were queried: missing nounwind answers conservatively mean false.
@@ -7716,9 +7716,9 @@ fn optimize_rir(options: &crate::options::Options, id: u32, prep: Prep) -> Resul
         let mut inlined = Vec::new();
         if cfg.inline {
             let get = |c: u32| -> Option<(*const crate::rir::Func, u8)> { callees.iter().find(|x| x.0 == c).map(|x| (&*x.1 as *const crate::rir::Func, x.2)) };
-            let ti = crate::opt::pass_clock();
+            let ti = relax_backend::stats::pass_clock();
             inlined = crate::opt::inline_calls(options, func, id, &get, nounwind, &crate::opt::InlineLimits::tier0(options));
-            crate::opt::pass_time(5, ti);
+            relax_backend::stats::pass_time(5, ti);
         }
         static HIST_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if backend_bench_on() {
@@ -7738,9 +7738,9 @@ fn optimize_rir(options: &crate::options::Options, id: u32, prep: Prep) -> Resul
                 eprintln!("{}", func.dump());
             }
         }
-        let tv = crate::opt::pass_clock();
+        let tv = relax_backend::stats::pass_clock();
         let v = func.verify();
-        crate::opt::pass_time(13, tv);
+        relax_backend::stats::pass_time(13, tv);
         if let Err(e) = v {
             return Err(format!("RIR verify after opt: {}\n{}", e, func.dump()));
         }
@@ -7918,7 +7918,7 @@ fn tier0_codegen_rir<'a>(options: &crate::options::Options, rir: &'a crate::rir:
     let mut cg = rir.clone();
     // field promotion belongs to the code made from the RIR, not to the RIR callers inline: it
     // makes a function bigger, and the inliner reads sizes
-    if fold && !crate::opt::opt_off(options, "-promote") { crate::opt::promote_loop_memory(&mut cg); }
+    if fold && !relax_backend::stats::opt_off(options, "-promote") { crate::opt::promote_loop_memory(&mut cg); }
     if fold { crate::opt::addr_modes(&mut cg); }
     if rotate && layout_for(options, &cg.name) { crate::opt::rotate_loops(&mut cg); }
     std::borrow::Cow::Owned(cg)
@@ -7950,7 +7950,7 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut crate::rir::
     if cfg.fold {
         if pipeline_variant(options) >= 1 {
             // SROA on the lowered code first: one simplify (with CSE) then sees the scalars
-            let t = crate::opt::pass_clock();
+            let t = relax_backend::stats::pass_clock();
             if full && cfg.sroa {
                 crate::opt::forward_slot_copies(func);
                 verify_pass(func, "forward_slot_copies");
@@ -7958,12 +7958,12 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut crate::rir::
                 verify_pass(func, "forward_slot_loads");
             }
             let s1 = cfg.sroa && crate::opt::sroa(func);
-            crate::opt::pass_time(8, t);
+            relax_backend::stats::pass_time(8, t);
             verify_pass(func, "sroa");
             if s1 {
-                let t = crate::opt::pass_clock();
+                let t = relax_backend::stats::pass_clock();
                 crate::opt::live_dce(func);
-                crate::opt::pass_time(9, t);
+                relax_backend::stats::pass_time(9, t);
                 verify_pass(func, "live_dce");
             }
             crate::opt::simplify(options, func, ro, cfg.imm, cfg.cse);
@@ -7994,7 +7994,7 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut crate::rir::
                 crate::opt::simplify(options, func, ro, cfg.imm, false);
                 verify_pass(func, "simplify");
             }
-            let t = crate::opt::pass_clock();
+            let t = relax_backend::stats::pass_clock();
             // copy prop has merged the slot address copies: chains the first pass could not
             // follow
             let mut fw = cfg.sroa && crate::opt::forward_const_slots(func, ro);
@@ -8006,21 +8006,21 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut crate::rir::
                 verify_pass(func, "forward_slot_loads");
             }
             let s2 = full && pipeline_variant(options) == 1 && cfg.sroa && crate::opt::sroa(func);
-            crate::opt::pass_time(8, t);
+            relax_backend::stats::pass_time(8, t);
             verify_pass(func, "sroa");
             if s2 {
-                let t = crate::opt::pass_clock();
+                let t = relax_backend::stats::pass_clock();
                 crate::opt::live_dce(func);
-                crate::opt::pass_time(9, t);
+                relax_backend::stats::pass_time(9, t);
                 verify_pass(func, "live_dce");
             }
             if s2 || fw {
                 crate::opt::simplify(options, func, ro, cfg.imm, false);
                 verify_pass(func, "simplify");
             }
-            let t = crate::opt::pass_clock();
+            let t = relax_backend::stats::pass_clock();
             let l = cfg.licm && crate::opt::licm(func);
-            crate::opt::pass_time(10, t);
+            relax_backend::stats::pass_time(10, t);
             verify_pass(func, "licm");
             if l {
                 crate::opt::simplify(options, func, ro, cfg.imm, false);
@@ -8044,20 +8044,20 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut crate::rir::
             }
         }
     }
-    let ts = crate::opt::pass_clock();
+    let ts = relax_backend::stats::pass_clock();
     if cfg.fold {
         crate::opt::sink_consts(func);
         verify_pass(func, "sink_consts");
     }
-    crate::opt::pass_time(6, ts);
-    let ts = crate::opt::pass_clock();
+    relax_backend::stats::pass_time(6, ts);
+    let ts = relax_backend::stats::pass_clock();
     if cfg.layout && relayout {
         crate::opt::relayout(func);
         verify_pass(func, "relayout");
     }
-    crate::opt::pass_time(7, ts);
+    relax_backend::stats::pass_time(7, ts);
     // slots with disjoint lifetimes share stack where the backend lays out the frame
-    // (opt::slot_layout, every tier)
+    // (relax_backend::frame::slot_layout, every tier)
     crate::opt::compact_slots(func);
 }
 
@@ -8957,7 +8957,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
     let mut limits = crate::opt::InlineLimits::tier1_for(func);
     let mut inlined: Vec<(u32, usize)> = Vec::new();
     if cfg.inline {
-        let ti = crate::opt::pass_clock();
+        let ti = relax_backend::stats::pass_clock();
         let freqs = frequencies(0, func);
         for (c, rule) in crate::opt::inline_calls_ordered(options, func, id, get, single, nounwind, &limits, freqs.as_deref(), inline_stats.as_mut()) {
             // a single-caller body moved into this fn: the second round's ceiling includes it
@@ -8970,16 +8970,16 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
                 inlined.push((c, rule));
             }
         }
-        crate::opt::pass_time(5, ti);
+        relax_backend::stats::pass_time(5, ti);
     }
     opt_pipeline(options, func, ro, cfg, layout_for(options, name), true, nounwind);
     // optimisation exposes calls inlining could not see (a call through a known fn address
     // became a direct call: `.map(GlyphId)`): one more inlining round for them
     if cfg.inline {
-        let ti = crate::opt::pass_clock();
+        let ti = relax_backend::stats::pass_clock();
         let freqs = frequencies(1, func);
         let more = crate::opt::inline_calls_ordered(options, func, id, get, single, nounwind, &limits, freqs.as_deref(), inline_stats.as_mut());
-        crate::opt::pass_time(5, ti);
+        relax_backend::stats::pass_time(5, ti);
         if !more.is_empty() {
             for (c, rule) in more {
                 if !inlined.iter().any(|x| x.0 == c) {
@@ -9000,7 +9000,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
     // small aggregate temporaries the inlined bodies copy through (Option payloads, sret results)
     // are forwarded from 32 bytes up, then groups copied in and out are tiled into registers;
     // later wider loads of narrower stores otherwise fail store forwarding (layout_widgets)
-    if cfg.sroa && !crate::opt::opt_off(options, "-postinline") {
+    if cfg.sroa && !relax_backend::stats::opt_off(options, "-postinline") {
         for _ in 0..3 {
             let ch = crate::opt::forward_slot_dests(func) | crate::opt::forward_slot_dests_x(options, func, 32);
             let ch = ch | crate::opt::split_wide_slot_accesses(func);
@@ -9064,7 +9064,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
         verify_pass(func, "vector slot cleanup");
     }
     crate::opt::compact_slots(func);
-    if cfg.licm && !crate::opt::opt_off(options, "-promote") && crate::opt::promote_loop_memory(func) {
+    if cfg.licm && !relax_backend::stats::opt_off(options, "-promote") && crate::opt::promote_loop_memory(func) {
         verify_pass(func, "promote_loop_memory");
     }
     if cfg.layout && layout_for(options, name) {
@@ -9180,7 +9180,7 @@ fn dump_o1(func: &crate::rir::Func, c: &x64::Compiled) {
     if let Some(base) = dump_base(&func.name) {
         let _ = std::fs::write(format!("{}.bin", base), &c.code[..c.text_len as usize]);
         let _ = std::fs::write(format!("{}.rir", base), func.dump());
-        let (at, end) = crate::opt::slot_layout(func, 0, true);
+        let (at, end) = relax_backend::frame::slot_layout(func, 0, true);
         let mut m = format!("frame {} slot-area {} of {}\n", c.frame_size, end, slot_bytes(func));
         for (k, sl) in func.slots.iter().enumerate() {
             m.push_str(&format!("slot {} {} {} at {}{}\n", k, sl.size, sl.align, at[k], if sl.arg { " arg" } else { "" }));
@@ -10001,14 +10001,14 @@ impl Tier1Measure {
     fn phase(&mut self, phase: usize, now: u64) {
         self.phases[self.phase] += now.saturating_sub(self.last);
         if self.phase == 1 {
-            let end = crate::opt::pass_local();
+            let end = relax_backend::stats::pass_local();
             for i in 0..16 { self.passes[i] += end[i] - self.pass_start[i]; }
         }
         self.phase = phase;
         self.last = now;
         if phase == 1 {
-            crate::opt::pass_timing_on();
-            self.pass_start = crate::opt::pass_local();
+            relax_backend::stats::pass_timing_on();
+            self.pass_start = relax_backend::stats::pass_local();
         }
     }
 }
@@ -10038,7 +10038,7 @@ pub(crate) fn tier1_stats_report() {
     let ms = |ns: u64| ns as f64 / 1e6;
     eprintln!("makepad-run o3-stats: builds={} cpu_ms={:.3} max_threads={} in_flight={} (completed attempts; Windows CPU is cycle-estimated)", s.builds, ms(s.cpu), s.max_active, s.active);
     eprintln!("makepad-run o3-stats: phases_cpu_ms snapshot={:.3} backend={:.3} install={:.3}", ms(s.phases[0]), ms(s.phases[1]), ms(s.phases[2]));
-    let passes: Vec<String> = crate::opt::PASS_NAMES.iter().enumerate().map(|(i, n)| format!("{}={:.3}", n, ms(s.passes[i]))).collect();
+    let passes: Vec<String> = relax_backend::stats::PASS_NAMES.iter().enumerate().map(|(i, n)| format!("{}={:.3}", n, ms(s.passes[i]))).collect();
     eprintln!("makepad-run o3-stats: backend_pass_ms {} (pass slots can overlap; MAKEPAD_RUN_PASS_TIMES=wall selects wall time)", passes.join(" "));
     let mut waits = s.waits.clone();
     waits.sort_unstable();
@@ -10887,7 +10887,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     Some((cold, _, _)) => cold.contains(&t1_key(up, c)),
                     None => !cf.compiled && cf.history().inlined_into.is_empty(),
                 };
-                let cost_admits = !crate::opt::opt_off(options, "-costmodel")
+                let cost_admits = !relax_backend::stats::opt_off(options, "-costmodel")
                     && callee_attrs(&u.prog, &u.tcx, &u.fns, u.core_crate, c, inline_all, true)
                         .map_or(false, |attrs| crate::opt::rustc_inline_cost(r, c) <= crate::opt::rustc_inline_threshold(r, attrs));
                 if never_run && crate::opt::inst_count(r) > crate::opt::INLINE_FREE_INSTS && !cost_admits {
@@ -11060,9 +11060,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let single = |owner: u32, c: u32| singles.get(&c) == Some(&owner);
         let trace = tier1_trace();
         if trace {
-            crate::opt::pass_timing_on();
+            relax_backend::stats::pass_timing_on();
         }
-        let (p0, n0) = if trace { (crate::opt::pass_local(), crate::opt::inst_count(&func)) } else { ([0; 16], 0) };
+        let (p0, n0) = if trace { (relax_backend::stats::pass_local(), crate::opt::inst_count(&func)) } else { ([0; 16], 0) };
         let mut inline_freq = [None, None];
         let mut frequencies = |round: usize, f: &crate::rir::Func| {
             let freq = match &t1_inline_freq {
@@ -11096,9 +11096,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 eprintln!("O3 RIR:\n{}", func.dump());
             }
         }
-        let tv = crate::opt::pass_clock();
+        let tv = relax_backend::stats::pass_clock();
         let verified = func.verify();
-        crate::opt::pass_time(13, tv);
+        relax_backend::stats::pass_time(13, tv);
         verified.map_err(|e| format!("RIR verify after O3: {}", e))?;
         let freq = match &t1_freq {
             Some(Some(fr)) if fr.len() == func.blocks.len() => Some(fr.clone()),
@@ -11115,7 +11115,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             // tools/run/tools/asmcmp: code offset -> RIR block/instruction of the dumped fn
             x64::set_rir_map(true);
         }
-        let c = crate::memstat::tagged(crate::memstat::Tag::Codegen, || x64::compile_freq(options, &func, &env, freq.as_deref()));
+        let c = crate::memstat::tagged(crate::memstat::Tag::Codegen, || relax_codegen::native::compile_freq(options, &func, &env, freq.as_deref()));
         crate::memstat::note_big("codegen O3", &func.name, mps, || cg_shape(&func));
         let c = c?;
         let mut profile_entry = None;
@@ -11140,8 +11140,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         note_frame(id, c.frame_size, slot_bytes(&func), true);
         if trace && cpu_ns() - t1 > 1_000_000_000 {
             // a slow build: where its time went (passes, sizes)
-            let p1 = crate::opt::pass_local();
-            let mut v: Vec<(u64, &str)> = (0..16).map(|i| (p1[i] - p0[i], crate::opt::PASS_NAMES[i])).collect();
+            let p1 = relax_backend::stats::pass_local();
+            let mut v: Vec<(u64, &str)> = (0..16).map(|i| (p1[i] - p0[i], relax_backend::stats::PASS_NAMES[i])).collect();
             v.sort_by(|a, b| b.0.cmp(&a.0));
             let split: Vec<String> = v.iter().take(6).map(|(ns, n)| format!("{} {:.0}ms", n, *ns as f64 / 1e6)).collect();
             eprintln!(
@@ -11165,7 +11165,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         }
         if let Some(base) = dump_base(&name) {
             let _ = std::fs::write(format!("{}.t1.bin", base), &c.code[..c.text_len as usize]);
-            let _ = std::fs::write(format!("{}.t1.frame", base), format!("frame {} slot-area {} of {}\n", c.frame_size, crate::opt::slot_layout(&func, 0, true).1, slot_bytes(&func)));
+            let _ = std::fs::write(format!("{}.t1.frame", base), format!("frame {} slot-area {} of {}\n", c.frame_size, relax_backend::frame::slot_layout(&func, 0, true).1, slot_bytes(&func)));
             let _ = std::fs::write(format!("{}.t1.rir", base), func.dump());
             // offset<TAB>block<TAB>instruction (- = terminator)<TAB>source position, per emitted RIR
             // instruction (tools/run/tools/asmcmp); the RIR is the emitted function (after back-end splits)
@@ -12754,7 +12754,7 @@ pub(crate) unsafe fn compile_batch_off_lock(up: *mut Unit, ids: &[u32], threads:
                         let cg = tier0_codegen_rir(options, &rir, fold, rotate);
                         let e = &env;
                         let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: e.opt_regs && !rir.baseline, syms: e.syms, sym_class: e.sym_class };
-                        let c = x64::compile(options, &cg, &env)?;
+                        let c = relax_codegen::native::compile(options, &cg, &env)?;
                         note_frame(id, c.frame_size, slot_bytes(&cg), false);
                         dump_o1(&cg, &c);
                         Ok((opt, c.code, c.pc_map, c.relocs))
@@ -13009,7 +13009,7 @@ impl BackWork {
             let mps = crate::memstat::peak_start();
             let c = crate::memstat::tagged(crate::memstat::Tag::Codegen, || {
                 let _scratch = crate::zone_alloc::scratch(runtime);
-                x64::compile(options, &cg, &env)
+                relax_codegen::native::compile(options, &cg, &env)
             });
             crate::memstat::note_big("codegen", &cg.name, mps, || cg_shape(&cg));
             compile_watch(None);

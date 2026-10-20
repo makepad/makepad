@@ -6,42 +6,11 @@
 //! - immediate operand forms, branch folding, jump threading, dead code removal,
 //! - block re-layout so fall-through follows the hot edge.
 
-use crate::regalloc::{for_defs, for_uses, reachable, term_uses, uses_defs};
-use std::cell::Cell;
-
-/// CPU ns per pass (all threads, MAKEPAD_RUN_PASS_TIMES): 0 fold/copy-prop, 1 cse, 2 local copy-prop,
-/// 3 dce, 4 jumps+merge, 5 inline, 6 sink, 7 layout, 8 sroa, 9 live_dce (top level), 10 licm,
-/// 11 regalloc, 12 emit, 13 verify, 14 compact, 15 thread_known
-pub static PASS_NS: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
-
-/// Per-pass timing is opt-in (MAKEPAD_RUN_PASS_TIMES): the thread CPU clock is a syscall.
-/// MAKEPAD_RUN_OPT diagnostic toggles beyond OptCfg's fields: `-freecap` (no size allowance for
-/// O3 free inlines: R13's 1.9 MB functions, to exercise arm64 branch relaxation),
-/// `-costmodel` (rustc MIR cost admission); `+single` turns the single-caller admission on;
-/// `-ic` disables the InstCombine subset (nonnull, phi compares, convs, niches, sinking).
-pub fn opt_off(options: &relax_session::Options, tok: &str) -> bool {
-    options.opt.iter().any(|t| t.trim() == tok)
-}
-
-pub fn pass_clock() -> u64 {
-    if PASS_ON.with(|c| c.get()) {
-        if fast_clock() && !crate::fncost::enabled() {
-            // monotonic (vDSO) clock: per-pass timing of tiny functions without the cost
-            // of the thread-CPU syscall dominating them
-            static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-            T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64 + 1
-        } else {
-            crate::cpu_ns()
-        }
-    } else {
-        0
-    }
-}
-
-fn fast_clock() -> bool {
-    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("MAKEPAD_RUN_PASS_TIMES").map_or(false, |v| v == "wall"))
-}
+use relax_backend::regalloc::{for_defs, for_uses, reachable, term_uses, uses_defs};
+use relax_backend::dom::{idoms, dom_numbers, relayout_order};
+use relax_backend::frame::slot_colors_used;
+use relax_backend::bitops::{vector_byte_masks, ext};
+use relax_backend::stats::{opt_off, pass_clock, pass_time};
 
 /// MAKEPAD_RUN_OPT=-ifconv: no if-conversion (bisection).
 fn if_conv_on(options: &relax_session::Options) -> bool {
@@ -53,39 +22,9 @@ fn thread_on(options: &relax_session::Options) -> bool {
     !options.opt.iter().any(|p| p == "-thread")
 }
 
-thread_local! {
-    static PASS_ON: Cell<bool> = Cell::new(std::env::var("MAKEPAD_RUN_PASS_TIMES").is_ok());
-    /// this thread's ns per pass (pass_local: one build's split)
-    static PASS_LOCAL: Cell<[u64; 16]> = const { Cell::new([0; 16]) };
-}
-
-/// Per-pass timing on this thread from now on (a O3 trace times each build's passes).
-pub fn pass_timing_on() {
-    PASS_ON.with(|c| c.set(true));
-}
-
-/// This thread's ns per pass so far (PASS_NAMES order); a build's split is the difference.
-pub fn pass_local() -> [u64; 16] {
-    PASS_LOCAL.with(|c| c.get())
-}
-
-pub fn pass_time(i: usize, t0: u64) {
-    if t0 == 0 {
-        return;
-    }
-    let now = pass_clock();
-    PASS_NS[i].fetch_add(now - t0, std::sync::atomic::Ordering::Relaxed);
-    PASS_LOCAL.with(|c| {
-        let mut a = c.get();
-        a[i] += now - t0;
-        c.set(a);
-    });
-}
-
 /// MAKEPAD_RUN_OPT_HIST: opt-pipeline cpu ns (0..6) and function counts (6..12) by optimised size
 pub static HIST: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
-pub const PASS_NAMES: [&str; 16] = ["fold", "cse", "lcopy", "dce", "jumps", "inline", "sink", "layout", "sroa", "live_dce", "licm", "regalloc", "emit", "verify", "compact", "thread_known"];
-use crate::rir::*;
+use relax_backend::rir::*;
 
 #[derive(Clone, Copy)]
 pub struct OptCfg {
@@ -104,6 +43,7 @@ pub struct OptCfg {
 impl OptCfg {
     /// `MAKEPAD_RUN_OPT=none` or a comma list of passes to disable (`-inline,-fold`).
     pub fn from_options(options: &relax_session::Options) -> OptCfg {
+        crate::native::install_probe();
         let mut c = OptCfg { inline: true, inline_all: true, fold: true, cse: true, sroa: true, licm: true, imm: true, layout: true };
         {
             let v = &options.opt;
@@ -481,7 +421,7 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
 pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self_id: u32, get: &dyn Fn(u32) -> Option<(*const Func, u8)>, single: &dyn Fn(u32, u32) -> bool, nounwind: &dyn Fn(u32) -> bool, lim: &InlineLimits, freqs: Option<&[f32]>, mut stats: Option<&mut InlineStats>) -> Vec<(u32, usize)> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
-    let depths = crate::regalloc::loop_depths(f, &reachable(f));
+    let depths = relax_backend::regalloc::loop_depths(f, &reachable(f));
     let freqs = freqs.filter(|v| v.len() == f.blocks.len());
     let mut priorities: Vec<(u32, bool, bool)> = depths.iter().enumerate().map(|(b, d)| {
         freqs.map_or((*d, *d >= 1 && f.blocks.len() <= 64, false), |v| (v[b].max(0.0).to_bits(), v[b] >= HOT_FREQ, v[b] == 0.0))
@@ -513,7 +453,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let Some((p, attrs)) = get(id) else { continue };
             if attrs & ATTR_CHAIN == 0 { continue; }
             let f = unsafe { &*p };
-            if crate::regalloc::loop_depths(f, &reachable(f)).iter().any(|d| *d != 0) { return true; }
+            if relax_backend::regalloc::loop_depths(f, &reachable(f)).iter().any(|d| *d != 0) { return true; }
             for b in &f.blocks {
                 for i in &b.insts {
                     if let Inst::Call(Callee::Fn(c), _, _) = i { pending.push(*c); }
@@ -622,7 +562,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         loop_sites.resize(f.blocks.len(), parent_loop);
         if !parent_loop {
             let cf = callee.unwrap();
-            for (cb, depth) in crate::regalloc::loop_depths(cf, &reachable(cf)).iter().enumerate() {
+            for (cb, depth) in relax_backend::regalloc::loop_depths(cf, &reachable(cf)).iter().enumerate() {
                 loop_sites[start + 1 + cb] = *depth > 0;
             }
         }
@@ -919,131 +859,6 @@ pub fn bit_op(o: BitOp, x: u64) -> u64 {
         BitOp::Bswap => x.swap_bytes(),
         BitOp::Rev => x.reverse_bits(),
     }
-}
-
-/// Rewrites `IBit` ops a target lacks (`keep(op)` false) into shift/mask sequences
-/// (branch-free SWAR in 64-bit arithmetic; bit reverse keeps a byte swap when kept).
-pub fn expand_bit_ops(f: &mut Func, keep: &dyn Fn(BitOp) -> bool) {
-    let u = IntTy { bits: 64, signed: false };
-    for bi in 0..f.blocks.len() {
-        if !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::IBit(o, _, _) if !keep(*o))) {
-            continue;
-        }
-        let old = std::mem::take(&mut f.blocks[bi].insts);
-        let old_pos = std::mem::take(&mut f.blocks[bi].pos);
-        let mut out: Vec<Inst> = Vec::with_capacity(old.len() + 32);
-        let mut pos: Vec<u64> = Vec::with_capacity(old.len() + 32);
-        for (k, i) in old.into_iter().enumerate() {
-            let p = old_pos.get(k).copied().unwrap_or(0);
-            let (o, d, x) = match i {
-                Inst::IBit(o, d, x) if !keep(o) => (o, d, x),
-                other => {
-                    out.push(other);
-                    pos.push(p);
-                    continue;
-                }
-            };
-            let mut e = BitEx { f: &mut *f, out: &mut out, u };
-            let r = match o {
-                BitOp::Popcnt => e.popcnt(x),
-                BitOp::Clz => {
-                    let mut y = x;
-                    for k in [1, 2, 4, 8, 16, 32] {
-                        let s = e.binc(IOp::Shr, y, k);
-                        y = e.bin(IOp::Or, y, s);
-                    }
-                    let pc = e.popcnt(y);
-                    let n = e.k(64);
-                    e.bin(IOp::Sub, n, pc)
-                }
-                BitOp::Ctz => {
-                    let xm1 = e.binc(IOp::Sub, x, 1);
-                    let nx = e.binc(IOp::Xor, x, -1);
-                    let y = e.bin(IOp::And, nx, xm1);
-                    e.popcnt(y)
-                }
-                BitOp::Bswap => {
-                    let y = e.swap(x, 8, 0x00ff_00ff_00ff_00ff);
-                    let y = e.swap(y, 16, 0x0000_ffff_0000_ffff);
-                    let a = e.binc(IOp::Shr, y, 32);
-                    let b = e.binc(IOp::Shl, y, 32);
-                    e.bin(IOp::Or, a, b)
-                }
-                BitOp::Rev => {
-                    let mut y = x;
-                    for (k, m) in [(1, 0x5555_5555_5555_5555u64), (2, 0x3333_3333_3333_3333), (4, 0x0f0f_0f0f_0f0f_0f0f)] {
-                        y = e.swap(y, k, m);
-                    }
-                    if keep(BitOp::Bswap) {
-                        let r = e.f.vreg(Cls::I);
-                        e.out.push(Inst::IBit(BitOp::Bswap, r, y));
-                        r
-                    } else {
-                        let y = e.swap(y, 8, 0x00ff_00ff_00ff_00ff);
-                        let y = e.swap(y, 16, 0x0000_ffff_0000_ffff);
-                        let a = e.binc(IOp::Shr, y, 32);
-                        let b = e.binc(IOp::Shl, y, 32);
-                        e.bin(IOp::Or, a, b)
-                    }
-                }
-            };
-            out.push(Inst::Mov(d, r));
-            while pos.len() < out.len() {
-                pos.push(p);
-            }
-        }
-        f.blocks[bi].insts = out;
-        f.blocks[bi].pos = pos;
-    }
-}
-
-struct BitEx<'a> {
-    f: &'a mut Func,
-    out: &'a mut Vec<Inst>,
-    u: IntTy,
-}
-
-impl BitEx<'_> {
-    fn k(&mut self, v: i64) -> VReg {
-        let d = self.f.vreg(Cls::I);
-        self.out.push(Inst::Iconst(d, v));
-        d
-    }
-    fn bin(&mut self, op: IOp, a: VReg, b: VReg) -> VReg {
-        let d = self.f.vreg(Cls::I);
-        self.out.push(Inst::IBin(op, self.u, d, a, b));
-        d
-    }
-    fn binc(&mut self, op: IOp, a: VReg, k: i64) -> VReg {
-        let c = self.k(k);
-        self.bin(op, a, c)
-    }
-    /// ((x >> k) & m) | ((x & m) << k)
-    fn swap(&mut self, x: VReg, k: i64, m: u64) -> VReg {
-        let a = self.binc(IOp::Shr, x, k);
-        let a = self.binc(IOp::And, a, m as i64);
-        let b = self.binc(IOp::And, x, m as i64);
-        let b = self.binc(IOp::Shl, b, k);
-        self.bin(IOp::Or, a, b)
-    }
-    fn popcnt(&mut self, x: VReg) -> VReg {
-        let s1 = self.binc(IOp::Shr, x, 1);
-        let s1 = self.binc(IOp::And, s1, 0x5555_5555_5555_5555);
-        let a = self.bin(IOp::Sub, x, s1);
-        let lo = self.binc(IOp::And, a, 0x3333_3333_3333_3333);
-        let s2 = self.binc(IOp::Shr, a, 2);
-        let hi = self.binc(IOp::And, s2, 0x3333_3333_3333_3333);
-        let b = self.bin(IOp::Add, lo, hi);
-        let s4 = self.binc(IOp::Shr, b, 4);
-        let c = self.bin(IOp::Add, b, s4);
-        let c = self.binc(IOp::And, c, 0x0f0f_0f0f_0f0f_0f0f);
-        let c = self.binc(IOp::Mul, c, 0x0101_0101_0101_0101);
-        self.binc(IOp::Shr, c, 56)
-    }
-}
-
-fn ext(v: i64, it: IntTy) -> i64 {
-    crate::rir::extend_const(v, it)
 }
 
 fn fold_ibin(op: IOp, it: IntTy, a: i64, b: i64) -> Option<i64> {
@@ -1362,29 +1177,6 @@ fn trace_opt(f: &Func, tag: &str) {
             eprintln!("=== {} {}\n{}", tag, f.name, f.dump());
         }
     }
-}
-
-/// Values whose every byte is a canonical boolean mask (0x00 or 0xff).
-pub(crate) fn vector_byte_masks(f: &Func) -> Vec<bool> {
-    // A byte blend is equivalent to a bitwise select only when each byte is
-    // entirely zero or one. Require this of every definition, including params.
-    let mut masks = vec![true; f.vregs.len()];
-    for p in &f.params {
-        masks[p.0 as usize] = false;
-    }
-    for b in &f.blocks {
-        for i in &b.insts {
-            let mask = match i {
-                Inst::VX(VX::CmpEq(_) | VX::CmpGtS(_), ..) | Inst::VBin(VOp::ICmp(_) | VOp::FCmp(_), ..) => true,
-                Inst::VConst(_, k) => k.to_le_bytes().iter().all(|b| *b == 0 || *b == 255),
-                _ => false,
-            };
-            if !mask {
-                for_defs(i, |d| masks[d.0 as usize] = false);
-            }
-        }
-    }
-    masks
 }
 
 /// Lane-op peepholes for intrinsic chains: redundant mask expansion, widening,
@@ -2146,7 +1938,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                             let dies = (root.0 as usize) < phi_nuse.len() && phi_nuse[root.0 as usize] == 1 && (narrow.is_none() || phi_nuse.get(x.0 as usize) == Some(&1));
                             if dies && ndef[root.0 as usize] > 1 && const_phi(f, &phi_defs, &ndef, root, 0) {
                                 let (depth, header) = phi_loops.get_or_insert_with(|| {
-                                    let depth = crate::regalloc::loop_depths(f, &reach);
+                                    let depth = relax_backend::regalloc::loop_depths(f, &reach);
                                     let header = loop_headers(f, &depth);
                                     (depth, header)
                                 });
@@ -2738,7 +2530,7 @@ pub fn live_dce(f: &mut Func) -> bool {
             }
         }
     }
-    let (live_in, _) = crate::regalloc::solve_liveness(f, &reach, words, &gen, &kill, false);
+    let (live_in, _) = relax_backend::regalloc::solve_liveness(f, &reach, words, &gen, &kill, false);
     let mut any = false;
     let mut live = vec![0u64; words];
     for bi in 0..nb {
@@ -2853,7 +2645,7 @@ pub fn may_unwind(c: &Callee, nounwind: &dyn Fn(u32) -> bool) -> bool {
 /// unwind outside an Invoke (an invoked call's unwinding is caught by its pad, which then
 /// resumes -- counted by the Resume).
 pub fn body_may_unwind(f: &Func, nounwind: &dyn Fn(u32) -> bool) -> bool {
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] {
             continue;
@@ -3014,7 +2806,7 @@ fn sink_to_successor(f: &mut Func) -> bool {
     const MANY: usize = usize::MAX - 1;
     let nv = f.vregs.len();
     let nb = f.blocks.len();
-    let depth = crate::regalloc::loop_depths(f, &reachable(f));
+    let depth = relax_backend::regalloc::loop_depths(f, &reachable(f));
     let header = loop_headers(f, &depth);
     let mut ndef = vec![0u32; nv];
     let mut use_block = vec![NONE; nv];
@@ -3527,82 +3319,6 @@ fn thread_jumps(f: &mut Func) {
 /// unreachable blocks and puts panic paths (blocks ending in `Unreachable`) last.
 pub fn relayout(f: &mut Func) {
     relayout_order(f);
-}
-
-/// `relayout`, returning the new order: per new block, the block it was.
-pub fn relayout_order(f: &mut Func) -> Vec<u32> {
-    let n = f.blocks.len();
-    if n <= 1 {
-        return (0..n as u32).collect();
-    }
-    let reach = reachable(f);
-    // blocks only reachable through unwind edges (cleanup pads) are cold
-    let mut normal = vec![false; n];
-    let mut st = vec![0u32];
-    while let Some(b) = st.pop() {
-        if normal[b as usize] {
-            continue;
-        }
-        normal[b as usize] = true;
-        match f.blocks[b as usize].term {
-            Term::Invoke(t, _) => st.push(t),
-            ref t => st.extend(t.succs()),
-        }
-    }
-    let mut placed = vec![false; n];
-    let mut order: Vec<u32> = Vec::new();
-    let mut cold: Vec<u32> = Vec::new();
-    let mut next = 0u32;
-    let mut unplaced = 0;
-    loop {
-        let mut b = next;
-        while !placed[b as usize] && reach[b as usize] {
-            placed[b as usize] = true;
-            if (matches!(f.blocks[b as usize].term, Term::Unreachable | Term::Resume) || !normal[b as usize]) && b != 0 {
-                cold.push(b);
-            } else {
-                order.push(b);
-            }
-            b = match f.blocks[b as usize].term {
-                Term::Jump(t) | Term::Invoke(t, _) => t,
-                Term::Branch(_, t, e) => {
-                    // fall through to the true successor (then-block, loop body) unless it is
-                    // placed already or a panic path
-                    let t_cold = matches!(f.blocks[t as usize].term, Term::Unreachable);
-                    if !placed[t as usize] && !t_cold {
-                        t
-                    } else {
-                        e
-                    }
-                }
-                _ => break,
-            };
-        }
-        // Placement is monotone: earlier blocks never need to be searched again.
-        while unplaced < n && (placed[unplaced] || !reach[unplaced]) {
-            unplaced += 1;
-        }
-        if unplaced == n {
-            break;
-        }
-        next = unplaced as u32;
-    }
-    order.extend(cold);
-    let mut map = vec![u32::MAX; n];
-    for (i, b) in order.iter().enumerate() {
-        map[*b as usize] = i as u32;
-    }
-    let old = std::mem::take(&mut f.blocks);
-    let mut slots: Vec<Option<Block>> = Vec::with_capacity(n);
-    for b in old {
-        slots.push(Some(b));
-    }
-    for b in &order {
-        let mut blk = slots[*b as usize].take().unwrap();
-        blk.term.map_succs(|t| map[t as usize]);
-        f.blocks.push(blk);
-    }
-    order
 }
 
 pub fn inst_count(f: &Func) -> usize {
@@ -4601,150 +4317,6 @@ fn local_copy_prop(f: &mut Func) -> bool {
         }
     }
     changed
-}
-
-/// Immediate dominators (Cooper/Harvey/Kennedy) over reachable blocks; entry's idom is itself.
-pub fn idoms(f: &Func) -> Vec<u32> {
-    let succs_of = |b: u32| f.blocks[b as usize].term.succs();
-    let n = f.blocks.len();
-    if n == 1 {
-        return vec![0];
-    }
-    // reverse postorder
-    let mut rpo: Vec<u32> = Vec::with_capacity(n);
-    let mut seen = vec![false; n];
-    let mut stack: Vec<(u32, u8)> = Vec::with_capacity(2 * n);
-    stack.push((0, 0));
-    while let Some((b, st)) = stack.pop() {
-        if st == 0 {
-            if seen[b as usize] {
-                continue;
-            }
-            seen[b as usize] = true;
-            stack.push((b, 1));
-            // pushed in reverse: the first successor is visited first
-            let succ: Vec<u32> = succs_of(b).collect();
-            for t in succ.iter().rev() {
-                stack.push((*t, 0));
-            }
-        } else {
-            rpo.push(b);
-        }
-    }
-    rpo.reverse();
-    let mut order = vec![u32::MAX; n];
-    for (i, b) in rpo.iter().enumerate() {
-        order[*b as usize] = i as u32;
-    }
-    // predecessors in reverse postorder, flat (pred_off[b]..pred_off[b + 1])
-    let mut pred_off = vec![0u32; n + 1];
-    for &b in &rpo {
-        for t in succs_of(b) {
-            pred_off[t as usize + 1] += 1;
-        }
-    }
-    for i in 0..n {
-        pred_off[i + 1] += pred_off[i];
-    }
-    let mut fill = pred_off.clone();
-    let mut preds = vec![0u32; pred_off[n] as usize];
-    for &b in &rpo {
-        for t in succs_of(b) {
-            preds[fill[t as usize] as usize] = b;
-            fill[t as usize] += 1;
-        }
-    }
-    let mut idom = vec![u32::MAX; n];
-    idom[0] = 0;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let mut new = u32::MAX;
-            for &p in &preds[pred_off[b as usize] as usize..pred_off[b as usize + 1] as usize] {
-                if idom[p as usize] == u32::MAX {
-                    continue;
-                }
-                if new == u32::MAX {
-                    new = p;
-                } else {
-                    let (mut x, mut y) = (p, new);
-                    while x != y {
-                        while order[x as usize] > order[y as usize] {
-                            x = idom[x as usize];
-                        }
-                        while order[y as usize] > order[x as usize] {
-                            y = idom[y as usize];
-                        }
-                    }
-                    new = x;
-                }
-            }
-            if new != u32::MAX && idom[b as usize] != new {
-                idom[b as usize] = new;
-                changed = true;
-            }
-        }
-    }
-    idom
-}
-
-/// Dominator-tree pre/post numbers: `a` dominates `b` iff pre[a] <= pre[b] && post[b] <= post[a].
-/// Dominator-tree children, flat: block b's children (ascending) are
-/// `child[off[b]..off[b + 1]]`.
-pub(crate) struct DomKids {
-    off: Vec<u32>,
-    child: Vec<u32>,
-}
-
-impl std::ops::Index<usize> for DomKids {
-    type Output = [u32];
-    #[inline]
-    fn index(&self, b: usize) -> &[u32] {
-        &self.child[self.off[b] as usize..self.off[b + 1] as usize]
-    }
-}
-
-pub(crate) fn dom_numbers(idom: &[u32]) -> (Vec<u32>, Vec<u32>, DomKids) {
-    let n = idom.len();
-    let mut off = vec![0u32; n + 1];
-    for b in 1..n {
-        if idom[b] != u32::MAX && idom[b] as usize != b {
-            off[idom[b] as usize + 1] += 1;
-        }
-    }
-    for i in 0..n {
-        off[i + 1] += off[i];
-    }
-    let mut fill = off.clone();
-    let mut child = vec![0u32; off[n] as usize];
-    for b in 1..n {
-        if idom[b] != u32::MAX && idom[b] as usize != b {
-            let p = idom[b] as usize;
-            child[fill[p] as usize] = b as u32;
-            fill[p] += 1;
-        }
-    }
-    let children = DomKids { off, child };
-    let mut pre = vec![u32::MAX; n];
-    let mut post = vec![0u32; n];
-    let mut clock = 0u32;
-    let mut stack: Vec<(u32, bool)> = Vec::with_capacity(2 * n);
-    stack.push((0, false));
-    while let Some((b, done)) = stack.pop() {
-        if done {
-            post[b as usize] = clock;
-            clock += 1;
-            continue;
-        }
-        pre[b as usize] = clock;
-        clock += 1;
-        stack.push((b, true));
-        for &c in children[b as usize].iter().rev() {
-            stack.push((c, false));
-        }
-    }
-    (pre, post, children)
 }
 
 /// Path state of the CSE walk kept in per-vreg arrays (set and cleared with an undo log,
@@ -6152,7 +5724,7 @@ fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -> bo
     let mut delta = vec![0i64; ns];
     let mut gcells: Vec<Vec<SroaCell>>;
     let mut first_groups = true;
-    let depth = crate::regalloc::loop_depths(f, &crate::regalloc::reachable(f));
+    let depth = relax_backend::regalloc::loop_depths(f, &relax_backend::regalloc::reachable(f));
     loop {
         fn find(p: &mut [u32], dl: &mut [i64], x: u32) -> (u32, i64) {
             // (root, delta of x relative to root)
@@ -9094,669 +8666,9 @@ pub fn forward_slot_dests(f: &mut Func) -> bool {
 /// Slots below `min` bytes are left alone. Returns, per slot, the slot whose storage it uses
 /// (itself when it keeps its own); None when nothing shares.
 pub fn slot_colors(f: &Func, min: u32) -> Option<Vec<u32>> {
-    let addressed = crate::rir::used_slots(f);
+    let addressed = relax_backend::rir::used_slots(f);
     slot_colors_used(f, min, &addressed)
 }
-
-fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u32>> {
-    let ns = f.slots.len();
-    let nb = f.blocks.len();
-    if ns < 2 || nb == 0 {
-        return None;
-    }
-    // a slot nothing addresses any more (forwarded into another: forward_slot_dests_x) has no
-    // lifetime, so it "fits" next to everything -- and a colour takes its members' largest size:
-    // Score's SamplerBackend::new, built in place into its result buffer, kept a 108 KB frame
-    // for the 768-byte temporaries that shared a colour with the dead 108 KB slot
-    // nothing much to share: not worth the analysis
-    let (n, bytes) = (0..ns).filter(|&s| addressed[s] && f.slots[s].size >= min).fold((0, 0u64), |(n, b), s| (n + 1, b + f.slots[s].size as u64));
-    if n < 2 || bytes < SLOT_SHARE_MIN_BYTES {
-        return None;
-    }
-    let (der, esc, arg_ok) = slot_sets(f)?;
-    // candidate slots: big, not escaping; the largest COLOR_MAX of them (colouring is
-    // candidates x colours x block words: a big inlined function has thousands of slots)
-    const COLOR_MAX: usize = 1024;
-    let mut cand: Vec<usize> = (0..ns).filter(|&s| f.slots[s].size >= min && !esc[s] && addressed[s]).collect();
-    if cand.len() > COLOR_MAX {
-        cand.sort_by(|&x, &y| f.slots[y].size.cmp(&f.slots[x].size).then(x.cmp(&y)));
-        cand.truncate(COLOR_MAX);
-        cand.sort_unstable();
-    }
-    if cand.len() < 2 {
-        return None;
-    }
-    let mut ci = vec![usize::MAX; ns];
-    for (k, &s) in cand.iter().enumerate() {
-        ci[s] = k;
-    }
-    let nc = cand.len();
-    // Positions: instruction i reads at 2i and writes at 2i + 1 (the terminator is instruction
-    // insts.len()). An access takes both, except a whole-slot copy between two slots' own
-    // addresses: its source is read at 2i, its destination written at 2i + 1, so a slot copied
-    // into another and dead after can share its storage (the copy then copies a slot onto
-    // itself, which changes nothing) -- the chains of temporaries a value is moved through.
-    let exact = slot_addr_vregs(f);
-    // which slot an exact address is the address of
-    let mut exact_slot = vec![u32::MAX; f.vregs.len()];
-    for b in &f.blocks {
-        for i in &b.insts {
-            if let Inst::SlotAddr(d, sl) = i {
-                if exact[d.0 as usize] {
-                    exact_slot[d.0 as usize] = *sl;
-                }
-            }
-        }
-    }
-    // A result buffer (`Slot::ret`) passed as one to one call only, by its own address: that
-    // is the call lowering made it for, which writes the whole value (its type is the slot's),
-    // so the slot's earlier contents are dead before it
-    let mut sret_uses = vec![0u32; ns];
-    for b in &f.blocks {
-        for i in &b.insts {
-            if let Inst::Call(Callee::Fn(id), args, _) = i {
-                if f.sret_callees.contains(id) {
-                    if let Some(a) = args.first() {
-                        for &sl in &der[a.0 as usize] {
-                            sret_uses[sl as usize] += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // accesses per candidate: (block, first, last position) per block with any, in block order,
-    // and per such block the access kinds that decide liveness at its ends: the first read or
-    // whole write (`ent`: Some(true) read, Some(false) whole write, None neither) and whether the
-    // last access is the consuming call of an argument copy (`ext`)
-    const READ: u8 = 0;
-    const WRITE: u8 = 1;
-    const KILL: u8 = 2;
-    const CONSUME: u8 = 3;
-    let mut acc: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nc];
-    let mut ent: Vec<Vec<Option<bool>>> = vec![Vec::new(); nc];
-    let mut ext: Vec<Vec<bool>> = vec![Vec::new(); nc];
-    let mut tu = Vec::new();
-    for (bi, b) in f.blocks.iter().enumerate() {
-        let note = |k: usize, lo: u32, hi: u32, kind: u8, acc: &mut Vec<Vec<(u32, u32, u32)>>, ent: &mut Vec<Vec<Option<bool>>>, ext: &mut Vec<Vec<bool>>| {
-            let a = &mut acc[k];
-            match a.last_mut() {
-                Some(x) if x.0 == bi as u32 => x.2 = x.2.max(hi),
-                _ => {
-                    a.push((bi as u32, lo, hi));
-                    ent[k].push(None);
-                    ext[k].push(false);
-                }
-            }
-            let e = ent[k].last_mut().unwrap();
-            if e.is_none() {
-                *e = match kind {
-                    READ | CONSUME => Some(true),
-                    KILL => Some(false),
-                    _ => None,
-                };
-            }
-            *ext[k].last_mut().unwrap() = kind == CONSUME;
-        };
-        let each = |v: VReg, g: &mut dyn FnMut(usize)| {
-            for &d in &der[v.0 as usize] {
-                let k = ci[d as usize];
-                if k != usize::MAX {
-                    g(k);
-                }
-            }
-        };
-        for (ii, i) in b.insts.iter().enumerate() {
-            let p = 2 * ii as u32;
-            // address arithmetic is no access to the slot's memory (slot addresses may sit at the
-            // function entry, computed once): only what reads or writes through the address, or
-            // hands it on (calls, compares, terminators), keeps the slot live
-            match i {
-                Inst::SlotAddr(..) | Inst::Mov(..) | Inst::IBin(IOp::Add, ..) | Inst::IBinI(IOp::Add, ..) | Inst::IBinI(IOp::Sub, ..) => {}
-                Inst::Copy(d, sv, n) => {
-                    let split = exact[d.0 as usize] && exact[sv.0 as usize];
-                    each(*sv, &mut |k| note(k, p, if split { p } else { p + 1 }, READ, &mut acc, &mut ent, &mut ext));
-                    let whole = |k: usize| exact[d.0 as usize] && exact_slot[d.0 as usize] as usize == cand[k] && *n >= f.slots[cand[k]].size;
-                    each(*d, &mut |k| {
-                        let kind = if whole(k) { KILL } else { WRITE };
-                        note(k, if split { p + 1 } else { p }, p + 1, kind, &mut acc, &mut ent, &mut ext)
-                    });
-                }
-                Inst::Store(_, a, _, v) | Inst::StoreX(_, a, _, _, _, v) | Inst::VStore(a, _, v) | Inst::AtomicStore(_, _, a, v) => {
-                    each(*a, &mut |k| note(k, p, p + 1, WRITE, &mut acc, &mut ent, &mut ext));
-                    each(*v, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
-                    if let Inst::StoreX(_, _, x, ..) = i {
-                        each(*x, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
-                    }
-                }
-                Inst::Call(c, args, _) => {
-                    let sret = matches!(c, Callee::Fn(id) if f.sret_callees.contains(id));
-                    if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
-                        each(*v, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
-                    }
-                    for (j, a) in args.iter().enumerate() {
-                        each(*a, &mut |k| {
-                            let s = cand[k];
-                            let only = der[a.0 as usize].len() == 1;
-                            let kind = if sret && j == 0 && only && f.slots[s].ret && sret_uses[s] == 1 && exact_slot[a.0 as usize] as usize == s && !args[1..].iter().any(|x| der[x.0 as usize].contains(&(s as u32))) {
-                                KILL
-                            } else if arg_ok[s] && only {
-                                CONSUME
-                            } else {
-                                READ
-                            };
-                            note(k, p, p + 1, kind, &mut acc, &mut ent, &mut ext)
-                        });
-                    }
-                }
-                _ => for_uses(i, |v| each(v, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext))),
-            }
-        }
-        term_uses(&b.term, &mut tu);
-        let p = 2 * b.insts.len() as u32;
-        for v in &tu {
-            each(*v, &mut |k| note(k, p, p + 1, READ, &mut acc, &mut ent, &mut ext));
-        }
-    }
-    let live = if let Some(positions) = f.baseline.then(|| slot_linear_positions(f)).flatten() {
-        // No back edges or joins: the access pass above already gives each slot's
-        // lifetime. Combine the blocks' intervals in execution order, without CFG
-        // fixed points or a second vreg-liveness analysis for born slots.
-        acc.iter().map(|accesses| {
-            let mut lo = u32::MAX;
-            let mut hi = 0;
-            for &(b, a, z) in accesses {
-                lo = lo.min(positions[b as usize] + a);
-                hi = hi.max(positions[b as usize] + z);
-            }
-            if lo == u32::MAX { Vec::new() } else { vec![(0, lo, hi)] }
-        }).collect()
-    } else {
-        slot_live_intervals(f, &cand, &der, &acc, &ent, &ext)
-    };
-    // MAKEPAD_RUN_COLOR_TRACE=<name substring>: each slot of the matching fns, escaping or not
-    static TRACE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(w) = TRACE.get_or_init(|| std::env::var("MAKEPAD_RUN_COLOR_TRACE").ok()) {
-        if f.name.contains(w.as_str()) {
-            for s in 0..ns {
-                if f.slots[s].size >= min && addressed[s] {
-                    let k = ci[s];
-                    let iv: &[(u32, u32, u32)] = if k != usize::MAX { &live[k] } else { &[] };
-                    eprintln!("color {}: slot {} size {} escapes {} candidate {} live {:?}", f.name, s, f.slots[s].size, esc[s], k != usize::MAX, iv);
-                }
-            }
-        }
-    }
-    // greedy colouring, biggest first; a colour's storage is its first (largest) member's. A
-    // candidate takes the first colour none of whose members' intervals meets one of its own:
-    // per block, the intervals placed there with their colours (merging each colour's interval
-    // list per placement and walking it per test was quadratic in a big function)
-    let mut order: Vec<usize> = (0..nc).collect();
-    order.sort_by(|&x, &y| f.slots[cand[y]].size.cmp(&f.slots[cand[x]].size).then(x.cmp(&y)));
-    let mut occ: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nb];
-    let mut reps: Vec<usize> = Vec::new();
-    let mut hit: Vec<u32> = Vec::new();
-    let mut to: Vec<u32> = (0..ns as u32).collect();
-    let mut shared = false;
-    for (n, k) in order.into_iter().enumerate() {
-        let s = cand[k];
-        let stamp = n as u32 + 1;
-        for &(b, lo, hi) in &live[k] {
-            for &(c, x, y) in &occ[b as usize] {
-                if !(y < lo || hi < x) {
-                    hit[c as usize] = stamp;
-                }
-            }
-        }
-        let c = match (0..reps.len()).find(|&c| hit[c] != stamp) {
-            Some(c) => {
-                to[s] = reps[c] as u32;
-                shared = true;
-                c
-            }
-            None => {
-                reps.push(s);
-                hit.push(0);
-                reps.len() - 1
-            }
-        };
-        for &(b, lo, hi) in &live[k] {
-            occ[b as usize].push((c as u32, lo, hi));
-        }
-    }
-    if shared { Some(to) } else { None }
-}
-
-/// Positions for a straight-line body, including chains of unconditional jumps.
-/// Require every block in the chain; all other CFGs keep the full lifetime analysis.
-fn slot_linear_positions(f: &Func) -> Option<Vec<u32>> {
-    if f.blocks.is_empty() || f.blocks.iter().any(|b| matches!(b.term, Term::Branch(..) | Term::Invoke(..))) {
-        return None;
-    }
-    let mut positions = vec![u32::MAX; f.blocks.len()];
-    let (mut b, mut pos, mut seen) = (0usize, 0u32, 0usize);
-    loop {
-        if positions[b] != u32::MAX {
-            return None;
-        }
-        positions[b] = pos;
-        seen += 1;
-        pos += 2 * f.blocks[b].insts.len() as u32 + 2;
-        match f.blocks[b].term {
-            Term::Jump(next) => b = next as usize,
-            Term::Ret(_) | Term::Unreachable | Term::Resume => return (seen == f.blocks.len()).then_some(positions),
-            Term::Branch(..) | Term::Switch(..) | Term::Invoke(..) => return None,
-        }
-    }
-}
-
-fn slot_live_intervals(f: &Func, cand: &[usize], der: &[Vec<u32>], acc: &[Vec<(u32, u32, u32)>], ent: &[Vec<Option<bool>>], ext: &[Vec<bool>]) -> Vec<Vec<(u32, u32, u32)>> {
-    let nb = f.blocks.len();
-    let nc = cand.len();
-    // predecessors
-    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); nb];
-    for (bi, b) in f.blocks.iter().enumerate() {
-        for s in b.term.succs() {
-            preds[s as usize].push(bi as u32);
-        }
-    }
-    // Live intervals per candidate, (block, first, last position) in block order: where the
-    // slot may hold a value (W: forward from its accesses, ended by an argument copy's
-    // consuming call -- the callee owns the copy, the caller never reads it) that may still be
-    // read (R: backward from its reads, ended by a whole write -- a copy over all of it, or the
-    // call it is the result buffer of). Within a block from its entry when live there, else
-    // from its first access, to its end when live there, else to its last access.
-    // All candidates at once, one bit each (per-candidate walks over the CFG were most of the
-    // analysis' cost at cold start: a slot live across a big function walked all of it).
-    let w = (nc + 63) / 64;
-    // per block: candidates with an access (acc), whose last access is no consuming call (W
-    // gen), whose first is a read (R gen), whose accesses neither read first nor kill (R passes)
-    let mut has = vec![0u64; nb * w];
-    let mut w_gen = vec![0u64; nb * w];
-    let mut r_gen = vec![0u64; nb * w];
-    let mut r_pass = vec![0u64; nb * w];
-    for k in 0..nc {
-        let bit = 1u64 << (k % 64);
-        for (j, &(b, _, _)) in acc[k].iter().enumerate() {
-            let o = b as usize * w + k / 64;
-            has[o] |= bit;
-            if !ext[k][j] {
-                w_gen[o] |= bit;
-            }
-            match ent[k][j] {
-                Some(true) => r_gen[o] |= bit,
-                Some(false) => {}
-                None => r_pass[o] |= bit,
-            }
-        }
-    }
-    // W (forward): w_out = gen | (w_in & !has), w_in = union of the predecessors' w_out
-    // R (backward): r_in = gen | (r_out & (!has | pass)), r_out = union of the successors' r_in
-    let mut w_in = vec![0u64; nb * w];
-    let mut w_out = w_gen.clone();
-    let mut r_in = r_gen.clone();
-    let mut r_out = vec![0u64; nb * w];
-    let order = block_rpo(f);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in &order {
-            let b = b as usize;
-            for j in 0..w {
-                let mut x = 0u64;
-                for &pb in &preds[b] {
-                    x |= w_out[pb as usize * w + j];
-                }
-                let o = b * w + j;
-                let y = w_gen[o] | (x & !has[o]);
-                if x != w_in[o] || y != w_out[o] {
-                    w_in[o] = x;
-                    w_out[o] = y;
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed = true;
-    while changed {
-        changed = false;
-        for &b in order.iter().rev() {
-            let b = b as usize;
-            for j in 0..w {
-                let mut x = 0u64;
-                for s in f.blocks[b].term.succs() {
-                    x |= r_in[s as usize * w + j];
-                }
-                let o = b * w + j;
-                let y = r_gen[o] | (x & (!has[o] | r_pass[o]));
-                if x != r_out[o] || y != r_in[o] {
-                    r_out[o] = x;
-                    r_in[o] = y;
-                    changed = true;
-                }
-            }
-        }
-    }
-    // intervals, in block order: within a block from its entry when live there, else from the
-    // first access, to its end when live there, else to the last access
-    let mut live: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nc];
-    let mut ai = vec![0usize; nc];
-    for b in 0..nb {
-        let end = 2 * f.blocks[b].insts.len() as u32 + 1;
-        for j in 0..w {
-            let o = b * w + j;
-            let lin = w_in[o] & r_in[o];
-            let lout = w_out[o] & r_out[o];
-            let mut m = lin | lout | has[o];
-            while m != 0 {
-                let t = m.trailing_zeros();
-                m &= m - 1;
-                let k = j * 64 + t as usize;
-                let (li, lo) = (lin >> t & 1 != 0, lout >> t & 1 != 0);
-                if has[o] >> t & 1 != 0 {
-                    let (_, x, y) = acc[k][ai[k]];
-                    ai[k] += 1;
-                    live[k].push((b as u32, if li { 0 } else { x }, if lo { end } else { y }));
-                } else {
-                    live[k].push((b as u32, 0, end));
-                }
-            }
-        }
-    }
-    // Lowered code (a baseline body: no pass has moved anything): lowering emits one SlotAddr
-    // per slot, where the slot's value begins (the temporary, the `let`, the call's result
-    // buffer or argument copy), so a slot's earlier contents are dead whenever its SlotAddr runs
-    // -- a temporary inside a loop body is a new one per iteration (rustc: StorageLive). And
-    // memory a slot that does not escape can be reached only through values derived from its
-    // address. So such a slot is live only where one of those values is: in a loop that frees
-    // what the reachability above cannot (it makes every slot a loop body touches live around
-    // the whole loop). Passes move, sink and duplicate SlotAddrs (and inlined bodies come
-    // optimised), so this holds only for `Slot::born` slots of a baseline body.
-    if f.baseline && cand.iter().any(|&s| f.slots[s].born) {
-        born_liveness(f, cand, der, &mut live);
-    }
-    live
-}
-
-/// Per vreg: defined once, by a SlotAddr (the slot's own address, offset 0).
-fn slot_addr_vregs(f: &Func) -> Vec<bool> {
-    let nv = f.vregs.len();
-    let mut ndef = vec![0u32; nv];
-    let mut sa = vec![false; nv];
-    for p in &f.params {
-        ndef[p.0 as usize] += 1;
-    }
-    for b in &f.blocks {
-        for i in &b.insts {
-            for_defs(i, |d| ndef[d.0 as usize] += 1);
-            if let Inst::SlotAddr(d, _) = i {
-                sa[d.0 as usize] = true;
-            }
-        }
-    }
-    (0..nv).map(|v| sa[v] && ndef[v] == 1).collect()
-}
-
-/// Every block once: reverse postorder of those reachable from the entry, then the others in
-/// index order (dataflow sweeps in this order settle in about loop depth + 2 passes; lowering's
-/// block numbers are not in flow order -- a join is made before the blocks that reach it).
-fn block_rpo(f: &Func) -> Vec<u32> {
-    let nb = f.blocks.len();
-    let mut seen = vec![false; nb];
-    let mut post: Vec<u32> = Vec::with_capacity(nb);
-    let mut stack: Vec<(u32, crate::rir::Succs)> = Vec::new();
-    if nb > 0 {
-        seen[0] = true;
-        stack.push((0, f.blocks[0].term.succs()));
-    }
-    while let Some((b, it)) = stack.last_mut() {
-        match it.next() {
-            Some(s) if !seen[s as usize] => {
-                seen[s as usize] = true;
-                stack.push((s, f.blocks[s as usize].term.succs()));
-            }
-            Some(_) => {}
-            None => {
-                post.push(*b);
-                stack.pop();
-            }
-        }
-    }
-    post.reverse();
-    post.extend((0..nb as u32).filter(|&b| !seen[b as usize]));
-    post
-}
-
-/// `slot_colors` for the `Slot::born` candidates of a baseline body: their intervals narrowed
-/// to where a value derived from their address is live (backward liveness of those values;
-/// within a block from the entry when one is live in, else from its first reference, to the
-/// end when one is live out, else to its last reference).
-fn born_liveness(f: &Func, cand: &[usize], der: &[Vec<u32>], live: &mut [Vec<(u32, u32, u32)>]) {
-    let nb = f.blocks.len();
-    let ns = f.slots.len();
-    let nc = cand.len();
-    let mut ci = vec![usize::MAX; ns];
-    for (k, &s) in cand.iter().enumerate() {
-        if f.slots[s].born {
-            ci[s] = k;
-        }
-    }
-    // the values that may point into a born candidate, numbered
-    let mut idx = vec![u32::MAX; der.len()];
-    let mut vals: Vec<u32> = Vec::new();
-    for (v, d) in der.iter().enumerate() {
-        if d.iter().any(|&s| ci[s as usize] != usize::MAX) {
-            idx[v] = vals.len() as u32;
-            vals.push(v as u32);
-        }
-    }
-    if vals.is_empty() {
-        return;
-    }
-    let nx = vals.len();
-    let w = (nx + 63) / 64;
-    let has = |set: &[u64], x: usize| set[x / 64] & (1 << (x % 64)) != 0;
-    // per block: values used before any def (gen), defined (kill)
-    let mut gen = vec![0u64; nb * w];
-    let mut kill = vec![0u64; nb * w];
-    let mut tu = Vec::new();
-    for (bi, b) in f.blocks.iter().enumerate() {
-        let (g, k) = (&mut gen[bi * w..(bi + 1) * w], &mut kill[bi * w..(bi + 1) * w]);
-        let use_v = |x: usize, g: &mut [u64], k: &[u64]| {
-            if k[x / 64] & (1 << (x % 64)) == 0 {
-                g[x / 64] |= 1 << (x % 64);
-            }
-        };
-        for i in &b.insts {
-            for_uses(i, |v| {
-                let x = idx[v.0 as usize];
-                if x != u32::MAX {
-                    use_v(x as usize, g, k);
-                }
-            });
-            for_defs(i, |v| {
-                let x = idx[v.0 as usize];
-                if x != u32::MAX {
-                    k[x as usize / 64] |= 1 << (x % 64);
-                }
-            });
-        }
-        term_uses(&b.term, &mut tu);
-        for v in &tu {
-            let x = idx[v.0 as usize];
-            if x != u32::MAX {
-                use_v(x as usize, g, k);
-            }
-        }
-    }
-    // live_in = gen | (live_out & !kill), live_out = union of the successors' live_in
-    let mut lin = vec![0u64; nb * w];
-    let mut lout = vec![0u64; nb * w];
-    let order = block_rpo(f);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &bi in order.iter().rev() {
-            let bi = bi as usize;
-            for j in 0..w {
-                let mut o = 0u64;
-                for s in f.blocks[bi].term.succs() {
-                    o |= lin[s as usize * w + j];
-                }
-                let i = gen[bi * w + j] | (o & !kill[bi * w + j]);
-                if o != lout[bi * w + j] || i != lin[bi * w + j] {
-                    lout[bi * w + j] = o;
-                    lin[bi * w + j] = i;
-                    changed = true;
-                }
-            }
-        }
-    }
-    // per block: each present value's interval, then each born candidate's (their hull)
-    let mut born: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nc];
-    let mut first = vec![u32::MAX; nx];
-    let mut last = vec![0u32; nx];
-    let mut touched: Vec<usize> = Vec::new();
-    let mut present: Vec<usize> = Vec::new();
-    for (bi, b) in f.blocks.iter().enumerate() {
-        touched.clear();
-        let mut note = |v: VReg, lo: u32, hi: u32, touched: &mut Vec<usize>| {
-            let x = idx[v.0 as usize];
-            if x != u32::MAX {
-                let x = x as usize;
-                if first[x] == u32::MAX {
-                    first[x] = lo;
-                    touched.push(x);
-                }
-                last[x] = hi;
-            }
-        };
-        for (ii, i) in b.insts.iter().enumerate() {
-            // positions as slot_colors' (a reference takes both of its instruction's)
-            let p = 2 * ii as u32;
-            for_uses(i, |v| note(v, p, p + 1, &mut touched));
-            for_defs(i, |v| note(v, p, p + 1, &mut touched));
-        }
-        let end = 2 * b.insts.len() as u32 + 1;
-        term_uses(&b.term, &mut tu);
-        for v in &tu {
-            note(*v, end - 1, end, &mut touched);
-        }
-        let (li, lo) = (&lin[bi * w..(bi + 1) * w], &lout[bi * w..(bi + 1) * w]);
-        present.clear();
-        present.extend_from_slice(&touched);
-        for j in 0..w {
-            let mut m = li[j] | lo[j];
-            while m != 0 {
-                let x = j * 64 + m.trailing_zeros() as usize;
-                m &= m - 1;
-                if first[x] == u32::MAX {
-                    present.push(x);
-                }
-            }
-        }
-        for &x in &present {
-            let a = if has(li, x) || first[x] == u32::MAX { 0 } else { first[x] };
-            let z = if has(lo, x) || first[x] == u32::MAX { end } else { last[x] };
-            for &s in &der[vals[x] as usize] {
-                let k = ci[s as usize];
-                if k == usize::MAX {
-                    continue;
-                }
-                match born[k].last_mut() {
-                    Some(e) if e.0 == bi as u32 => {
-                        e.1 = e.1.min(a);
-                        e.2 = e.2.max(z);
-                    }
-                    _ => born[k].push((bi as u32, a, z)),
-                }
-            }
-        }
-        for &x in &touched {
-            first[x] = u32::MAX;
-        }
-    }
-    // narrowed: the intersection of both (each covers every position the slot is live at)
-    for (k, &s) in cand.iter().enumerate() {
-        if !f.slots[s].born {
-            continue;
-        }
-        let (a, b) = (&live[k], &born[k]);
-        let mut out = Vec::with_capacity(a.len());
-        let mut j = 0;
-        for &(blk, x, y) in a.iter() {
-            while j < b.len() && b[j].0 < blk {
-                j += 1;
-            }
-            if j < b.len() && b[j].0 == blk {
-                let (lo, hi) = (x.max(b[j].1), y.min(b[j].2));
-                if lo <= hi {
-                    out.push((blk, lo, hi));
-                }
-            }
-        }
-        live[k] = out;
-    }
-}
-
-/// The frame offsets of a function's stack slots: `off` is where the slot area starts (bytes
-/// below the frame's base); each slot something addresses gets the end of its storage
-/// (offset of its lowest byte below the base, its alignment respected), slots sharing storage
-/// (`slot_colors`) the same; unaddressed slots take no space. Returns the offsets and the new
-/// end of the area. `share` false (MAKEPAD_RUN_OPT=-slotcolor): every slot keeps its own storage.
-pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
-    let ns = f.slots.len();
-    if ns == 0 {
-        return (Vec::new(), off);
-    }
-    let used = crate::rir::used_slots(f);
-    // Small baseline frames do not repay the address/lifetime analysis. Keep
-    // colouring sizeable frames: recursive parsers rely on their stack savings.
-    let share = share && (!f.baseline || ns >= 8 && f.slots.iter().map(|s| s.size as u64).sum::<u64>() >= SLOT_SHARE_MIN_BYTES);
-    let to = if share { slot_colors_used(f, SLOT_SHARE_MIN, &used) } else { None };
-    let mut at = vec![off; ns];
-    let Some(to) = to else {
-        for (s, slot) in f.slots.iter().enumerate() {
-            if used[s] {
-                let al = slot.align.max(1) as i64;
-                off += slot.size as i64;
-                off = (off + al - 1) / al * al;
-                at[s] = off;
-            }
-        }
-        return (at, off);
-    };
-    // a shared storage's size and alignment: its members' largest
-    let mut size: Vec<u32> = f.slots.iter().map(|s| s.size).collect();
-    let mut align: Vec<u32> = f.slots.iter().map(|s| s.align.max(1)).collect();
-    for s in 0..ns {
-        let r = to[s] as usize;
-        if r != s && used[s] {
-            size[r] = size[r].max(f.slots[s].size);
-            align[r] = align[r].max(f.slots[s].align.max(1));
-        }
-    }
-    for s in 0..ns {
-        if !used[s] || to[s] as usize != s {
-            continue;
-        }
-        let al = align[s] as i64;
-        off += size[s] as i64;
-        off = (off + al - 1) / al * al;
-        at[s] = off;
-    }
-    for s in 0..ns {
-        if to[s] as usize != s {
-            at[s] = at[to[s] as usize];
-        }
-    }
-    (at, off)
-}
-
-/// slots from this size up share storage when their lifetimes cannot overlap (slot_layout)
-pub const SLOT_SHARE_MIN: u32 = 8;
-/// functions whose slots of that size take less than this keep them apart (slot_colors)
-const SLOT_SHARE_MIN_BYTES: u64 = 256;
 
 /// Destination forwarding of big slots, across blocks and through address arithmetic: a slot
 /// B that is only written (stores and copies into it, through any index) and then copied whole
@@ -10313,215 +9225,6 @@ fn slot_derivation(f: &Func) -> Option<(Vec<u32>, Vec<bool>)> {
         }
     }
     Some((der, esc))
-}
-
-/// color_slots' address analysis: the SET of slots (up to SLOT_SET_MAX) each value may point
-/// into -- through moves, address arithmetic, selects and calls (a call's results may point
-/// into any slot its arguments point into: `slice::get(&a, &b) -> &T`); a value that may point
-/// into several slots keeps all of them live where it is used, instead of making them escape.
-/// esc[s]: an address into s is stored to memory, returned, a parameter, or in a set too big.
-fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
-    const SLOT_SET_MAX: usize = 4;
-    let ns = f.slots.len();
-    let nv = f.vregs.len();
-    let mut der: Vec<Vec<u32>> = vec![Vec::new(); nv];
-    let mut esc = vec![false; ns];
-    let mut changed = true;
-    let mut rounds = 0;
-    let mut src: Vec<u32> = Vec::new();
-    while changed && rounds < 16 {
-        changed = false;
-        rounds += 1;
-        for b in &f.blocks {
-            for i in &b.insts {
-                src.clear();
-                match i {
-                    Inst::SlotAddr(_, s) => src.push(*s),
-                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => continue,
-                    // a call's results do not point into its own memory (a result buffer, an
-                    // argument copy: see below; a copy that turns out not to be one escapes)
-                    Inst::Call(c, args, rets) => {
-                        if rets.is_empty() {
-                            continue;
-                        }
-                        if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
-                            src.extend(der[v.0 as usize].iter().copied());
-                        }
-                        let sret = matches!(c, Callee::Fn(id) if f.sret_callees.contains(id));
-                        for (k, a) in args.iter().enumerate() {
-                            let d = &der[a.0 as usize];
-                            if (sret && k == 0) || matches!(d.as_slice(), [x] if f.slots[*x as usize].arg) {
-                                continue;
-                            }
-                            for &x in d {
-                                if !src.contains(&x) {
-                                    src.push(x);
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        let mut has_def = false;
-                        for_defs(i, |_| has_def = true);
-                        if !has_def {
-                            continue;
-                        }
-                        for_uses(i, |v| {
-                            for &d in &der[v.0 as usize] {
-                                if !src.contains(&d) {
-                                    src.push(d);
-                                }
-                            }
-                        });
-                    }
-                }
-                if src.is_empty() {
-                    continue;
-                }
-                for_defs(i, |d| {
-                    let cur = &mut der[d.0 as usize];
-                    for &s in &src {
-                        if !cur.contains(&s) {
-                            cur.push(s);
-                            changed = true;
-                        }
-                    }
-                });
-            }
-        }
-        // sets too big: their slots escape, the sets stop growing
-        for v in der.iter_mut() {
-            if v.len() > SLOT_SET_MAX {
-                for &s in v.iter() {
-                    esc[s as usize] = true;
-                }
-                v.truncate(SLOT_SET_MAX);
-            }
-        }
-    }
-    if changed {
-        return None;
-    }
-    let mark = |v: VReg, esc: &mut Vec<bool>| {
-        for &s in &der[v.0 as usize] {
-            esc[s as usize] = true;
-        }
-    };
-    for b in &f.blocks {
-        for i in &b.insts {
-            match i {
-                Inst::Store(_, _, _, v) | Inst::StoreX(_, _, _, _, _, v) | Inst::AtomicStore(_, _, _, v) | Inst::AtomicRmw(_, _, _, _, _, v) => mark(*v, &mut esc),
-                Inst::AtomicCas(_, _, _, _, _, e, n) => {
-                    mark(*e, &mut esc);
-                    mark(*n, &mut esc);
-                }
-                _ => {}
-            }
-        }
-        if let Term::Ret(vs) = &b.term {
-            for v in vs {
-                mark(*v, &mut esc);
-            }
-        }
-    }
-    // a slot address handed to a call together with another argument that may point to memory:
-    // the callee may store the address there (an iterator adapter built into its result buffer
-    // keeps `&hist`: `hist.iter().enumerate().take(n)` not inlined), and later reads of that
-    // memory are loads, invisible to `der` -- the slot escapes. Only constants are known not to
-    // point anywhere. (deflate's radix_sort_symbols: `offsets` was coloured onto `hist`, dead by
-    // `der` after the adapter call while the loop still read it through the adapter.)
-    let mut konst = vec![false; nv];
-    let mut ndef = vec![0u32; nv];
-    for p in &f.params {
-        ndef[p.0 as usize] += 1;
-    }
-    for b in &f.blocks {
-        for i in &b.insts {
-            for_defs(i, |d| ndef[d.0 as usize] += 1);
-            if let Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::FnAddr(d, _) = i {
-                konst[d.0 as usize] = true;
-            }
-        }
-    }
-    // The call's own memory does not escape through it: a result buffer (the first argument of
-    // a call returning in memory: `sret_callees`) and a by-value argument copy (`Slot::arg`) --
-    // the callee writes the result / owns the copy and keeps no pointer to either past the call
-    // (rustc: indirect arguments and the indirect return place are `noalias captures(address)`:
-    // no access through a kept pointer after the return). A result buffer is still memory the
-    // callee may store the other arguments' addresses into (the result can hold them); a copy
-    // is not, when nothing reads it (the callee owns it). A copy counts as one only while it is
-    // what lowering made: handed to one call, as one argument, never read, nor mixed with other
-    // slots' addresses (passes such as destination forwarding may give it other uses).
-    let mut arg_ok: Vec<bool> = f.slots.iter().map(|s| s.arg).collect();
-    if arg_ok.iter().any(|x| *x) {
-        let mut calls = vec![0u32; ns];
-        let one = |v: VReg| -> Option<usize> {
-            match der[v.0 as usize].as_slice() {
-                [s] => Some(*s as usize),
-                _ => None,
-            }
-        };
-        for b in &f.blocks {
-            for i in &b.insts {
-                match i {
-                    Inst::Call(c, args, _) => {
-                        if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
-                            for &d in &der[v.0 as usize] {
-                                arg_ok[d as usize] = false;
-                            }
-                        }
-                        for a in args {
-                            match one(*a) {
-                                Some(d) => calls[d] += 1,
-                                None => {
-                                    for &d in &der[a.0 as usize] {
-                                        arg_ok[d as usize] = false;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Inst::Load(_, _, a, _) | Inst::LoadX(_, _, a, ..) | Inst::VLoad(_, a, _) | Inst::VGather(_, a, _) | Inst::AtomicLoad(_, _, _, a) | Inst::AtomicRmw(_, _, _, _, a, _) | Inst::AtomicCas(_, _, _, _, a, _, _) | Inst::Copy(_, a, _) => {
-                        for &d in &der[a.0 as usize] {
-                            arg_ok[d as usize] = false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for d in 0..ns {
-            if calls[d] != 1 {
-                arg_ok[d] = false;
-            }
-            // the derivation above left its call results out
-            if f.slots[d].arg && !arg_ok[d] {
-                esc[d] = true;
-            }
-        }
-    }
-    for b in &f.blocks {
-        for i in &b.insts {
-            if let Inst::Call(c, args, _) = i {
-                if args.iter().any(|a| !der[a.0 as usize].is_empty()) {
-                    let sret = matches!(c, Callee::Fn(id) if f.sret_callees.contains(id));
-                    let copy = |a: VReg| matches!(der[a.0 as usize].as_slice(), [d] if arg_ok[*d as usize]);
-                    // arguments that may point to memory the callee can store an address into
-                    let pointerish = |a: VReg| !(konst[a.0 as usize] && ndef[a.0 as usize] == 1) && !copy(a);
-                    let n = args.iter().filter(|a| pointerish(**a)).count();
-                    for (k, a) in args.iter().enumerate() {
-                        if (sret && k == 0) || copy(*a) {
-                            continue;
-                        }
-                        if n > pointerish(*a) as usize {
-                            mark(*a, &mut esc);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Some((der, esc, arg_ok))
 }
 
 /// Sinks a pure single-definition, single-use arithmetic result into the block that uses it when
@@ -11807,7 +10510,7 @@ mod instcombine_tests {
             f.blocks[4].term = if nested { Term::Jump(1) } else { Term::Ret(vec![VReg(2)]) };
             f.blocks[5].term = Term::Ret(vec![VReg(2)]);
             positions(&mut f);
-            let depth = crate::regalloc::loop_depths(&f, &reachable(&f));
+            let depth = relax_backend::regalloc::loop_depths(&f, &reachable(&f));
             assert_eq!((depth[3], depth[4]), if nested { (2, 1) } else { (1, 0) });
             let before = f.dump();
             assert!(!sink_to_successor(&mut f));
@@ -12220,7 +10923,7 @@ mod inline_priority_tests {
         f.blocks[2].insts = vec![Inst::Call(Callee::Fn(3), vec![], vec![])];
         f.blocks[2].pos = vec![0];
         f.blocks[2].term = Term::Jump(0);
-        assert!(crate::regalloc::loop_depths(&f, &reachable(&f)).iter().all(|d| *d >= 1));
+        assert!(relax_backend::regalloc::loop_depths(&f, &reachable(&f)).iter().all(|d| *d >= 1));
         let mut stats = InlineStats::default();
         assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.01, 1.0, 0.0]), Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
         assert_eq!(stats.hot_inlined, 1);
@@ -12545,6 +11248,7 @@ mod inline_priority_tests {
 #[cfg(test)]
 mod slot_layout_tests {
     use super::*;
+    use relax_backend::frame::slot_layout;
 
     /// slot_layout's offsets of two slots in a one-block loop `b1` (b0 jumps in, b1 loops on
     /// `c` or returns through b2), built by `body` from the slots' address vregs

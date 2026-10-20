@@ -2,7 +2,7 @@
 //! unordered compare of the second operand and a blend) must give the bits of the SSE lowering
 //! (min/max, compare, and/andn/or) for every pair, NaNs of both signs and payloads, zeros and infinities.
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::{exec::Code, rir::*, x64};
+use relax_backend::{exec::Code, rir::*, x64};
 
 fn build(op: FOp, w: bool, no_avx: bool) -> Code {
     let cls = if w { Cls::F64 } else { Cls::F32 };

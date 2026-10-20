@@ -3,8 +3,8 @@
 //! dispatching block: the table's targets are its successors, so the read is placed in the
 //! dispatching block and not in a case block the other cases skip (a warm-cached `match` in
 //! Stage's parser once faulted at a small address because a read sat in a skipped link block).
-use relax_codegen::regalloc;
-use relax_codegen::rir::*;
+use relax_backend::regalloc;
+use relax_backend::rir::*;
 use std::sync::Arc;
 
 #[test]

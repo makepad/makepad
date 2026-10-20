@@ -4,8 +4,8 @@
 //! HashMap::get's two results branched on the `add` of the found path while its None path
 //! jumped in with ZF=0, and loaded through the null.)
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::rir::*;
-use relax_codegen::x64;
+use relax_backend::rir::*;
+use relax_backend::x64;
 
 const U64: IntTy = IntTy { bits: 64, signed: false };
 
@@ -47,10 +47,10 @@ fn merge_fn() -> Func {
 #[test]
 fn branch_at_block_start_compares_again() {
     let f = merge_fn();
-    let env = x64::Env { slots: relax_codegen::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0 };
     let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     assert!(c.relocs.is_empty());
-    let code = relax_codegen::exec::Code::new(&c.code).unwrap();
+    let code = relax_backend::exec::Code::new(&c.code).unwrap();
     let run: extern "sysv64" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
     // the None path: v == 0 must take the branch whatever the flags it jumped in with
     assert_eq!(run(5, 0), 111);

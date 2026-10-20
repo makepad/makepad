@@ -1,8 +1,8 @@
 //! Loop transformations for hot code (run by O3 after the optimiser): unrolling of small
 //! single-block counted loops.
 
-use crate::regalloc::{for_defs, for_uses};
-use crate::rir::*;
+use relax_backend::regalloc::{for_defs, for_uses};
+use relax_backend::rir::*;
 
 fn unroll_on(options: &relax_session::Options) -> bool {
     !options.no_unroll
@@ -360,7 +360,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
     if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Store(Mem::Int(1, false) | Mem::Int(4, _) | Mem::F32, ..)))) {
         return false;
     }
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     let mut preds = vec![Vec::new(); f.blocks.len()];
     for (bi, b) in f.blocks.iter().enumerate() {
         if reach[bi] {
@@ -369,7 +369,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             }
         }
     }
-    let loops = crate::regalloc::natural_loops(f, &reach, &preds, false);
+    let loops = relax_backend::regalloc::natural_loops(f, &reach, &preds, false);
     let mut changed = false;
     let mut transformed = vec![false; f.blocks.len()];
     'candidate: for (head, members) in loops {
@@ -652,7 +652,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                 for_defs(i, |v| if (v.0 as usize) < nv { redefined[v.0 as usize] = true });
             }
             let mut uses = Vec::new();
-            crate::regalloc::term_uses(&block.term, &mut uses);
+            relax_backend::regalloc::term_uses(&block.term, &mut uses);
             bad |= uses.iter().any(|v| (v.0 as usize) < nv && defined[v.0 as usize] && !inputs[v.0 as usize] && !redefined[v.0 as usize]);
             if bad { continue 'candidate; }
         }
@@ -884,7 +884,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
     let mut nuse = vec![0u32; f.vregs.len()];
     // uses in blocks nothing reaches (a bounds check's panic call once the check folded) count
     // for nothing
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     for (bk, b) in f.blocks.iter().enumerate() {
         if !reach[bk] {
             continue;
@@ -1419,7 +1419,7 @@ pub fn vectorize_lane_accumulators(options: &relax_session::Options, f: &mut Fun
 
 fn lane_accumulators_once(f: &mut Func) -> bool {
     let nv = f.vregs.len();
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     let mut ndef = vec![0u32; nv];
     let mut nuse = vec![0u32; nv];
     let mut any_f32_add = false;
@@ -1436,7 +1436,7 @@ fn lane_accumulators_once(f: &mut Func) -> bool {
             any_f32_add |= matches!(i, Inst::FBin(FOp::Add | FOp::Sub | FOp::Mul, false, ..));
         }
         let mut tu = Vec::new();
-        crate::regalloc::term_uses(&b.term, &mut tu);
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
         for u in tu {
             nuse[u.0 as usize] += 1;
         }
@@ -1444,8 +1444,8 @@ fn lane_accumulators_once(f: &mut Func) -> bool {
     if !any_f32_add {
         return false;
     }
-    let preds = crate::regalloc::preds_of(f, &reach);
-    let loops = crate::regalloc::natural_loops(f, &reach, &preds, false);
+    let preds = relax_backend::regalloc::preds_of(f, &reach);
+    let loops = relax_backend::regalloc::natural_loops(f, &reach, &preds, false);
     for (head, members) in &loops {
         // straight-line loops: no calls, stores or exceptional edges anywhere in them
         let ok = members.iter().enumerate().all(|(bi, m)| {
@@ -1580,7 +1580,7 @@ fn lane_group(f: &Func, bi: usize, ndef: &[u32], nuse: &[u32], members: &[bool])
                 }
             }
             let mut tu = Vec::new();
-            crate::regalloc::term_uses(&f.blocks[mi].term, &mut tu);
+            relax_backend::regalloc::term_uses(&f.blocks[mi].term, &mut tu);
             touched |= tu.iter().any(|x| accs.contains(x));
         }
         if touched || accs.iter().any(|a| f.vregs[a.0 as usize] != Cls::F32) {
@@ -1873,9 +1873,9 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         return false;
     }
     let tr = std::env::var("MAKEPAD_RUN_UNROLL_TRACE").map_or(false, |w| f.name.ends_with(w.as_str()));
-    let reach = crate::regalloc::reachable(f);
-    let preds = crate::regalloc::preds_of(f, &reach);
-    let loops = crate::regalloc::natural_loops(f, &reach, &preds, false);
+    let reach = relax_backend::regalloc::reachable(f);
+    let preds = relax_backend::regalloc::preds_of(f, &reach);
+    let loops = relax_backend::regalloc::natural_loops(f, &reach, &preds, false);
     if loops.is_empty() {
         return false;
     }
@@ -1995,7 +1995,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         };
         // a step outside the latch: it must dominate the latch, and blocks it dominates read the
         // stepped counter in the copies
-        let idom = if sb != l { crate::opt::idoms(f) } else { Vec::new() };
+        let idom = if sb != l { relax_backend::dom::idoms(f) } else { Vec::new() };
         let dominated = |b: u32| -> bool {
             if sb == l {
                 return false;
@@ -2094,7 +2094,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 for_uses(i, |u| used |= u == c);
             }
             let mut tu = Vec::new();
-            crate::regalloc::term_uses(&b.term, &mut tu);
+            relax_backend::regalloc::term_uses(&b.term, &mut tu);
             if used || tu.contains(&c) {
                 if tr {
                     eprintln!("  counter v{} read outside the loop (b{})", c.0, bi);
@@ -2174,7 +2174,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                         }
                     });
                 }
-                crate::regalloc::term_vregs_mut(&mut blk.term, |r| {
+                relax_backend::regalloc::term_vregs_mut(&mut blk.term, |r| {
                     if *r == c {
                         *r = if step_blk || past { rj2 } else { rj };
                     } else if let Some(x) = fresh.get(&r.0) {
@@ -2257,7 +2257,7 @@ fn narrow_step(b: &Block, k: usize, c: VReg, x: VReg, ndef: &[u32]) -> Option<(I
 /// dominated by the definition (a later instruction of its block, or a block it dominates): the
 /// value of one iteration, never read by another or after the loop. The counter `c` is excluded.
 fn iteration_locals(f: &Func, members: &[u32], m: &[bool], ndef: &[u32], c: VReg) -> Vec<u32> {
-    let idom = crate::opt::idoms(f);
+    let idom = relax_backend::dom::idoms(f);
     let dominates = |a: u32, b: u32| -> bool {
         let mut x = b;
         for _ in 0..100_000 {
@@ -2302,7 +2302,7 @@ fn iteration_locals(f: &Func, members: &[u32], m: &[bool], ndef: &[u32], c: VReg
             for_uses(i, |u| check(u, k as u32));
         }
         let mut tu = Vec::new();
-        crate::regalloc::term_uses(&b.term, &mut tu);
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
         for u in tu {
             check(u, u32::MAX);
         }
@@ -2314,7 +2314,7 @@ fn iteration_locals(f: &Func, members: &[u32], m: &[bool], ndef: &[u32], c: VReg
 /// only its last copy's folded back edge entered): passes that scan every block (slot
 /// promotion, SROA) would otherwise still see their accesses. Returns whether any block emptied.
 pub fn clear_unreachable(f: &mut Func) -> bool {
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     let mut any = false;
     for (bi, b) in f.blocks.iter_mut().enumerate() {
         if !reach[bi] && (!b.insts.is_empty() || !matches!(b.term, Term::Unreachable)) {

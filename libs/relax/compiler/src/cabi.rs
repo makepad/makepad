@@ -1,6 +1,6 @@
 //! C signatures from Rust types (the classification itself is relax-codegen's cabi).
 
-pub use relax_codegen::cabi::*;
+pub use relax_backend::cabi::*;
 use crate::rir::{CAgg, CArg, CConv, CSig, Mem};
 use crate::types::{Abi, TyId, TyKind};
 

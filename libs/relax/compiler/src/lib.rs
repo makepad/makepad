@@ -794,8 +794,8 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         println!("inlined call sites by rule: {}", rules);
         if std::env::var("MAKEPAD_RUN_PASS_TIMES").is_ok() {
             let mut passes = String::new();
-            for i in 0..crate::opt::PASS_NAMES.len() {
-                passes.push_str(&format!("{} {:.2}  ", opt::PASS_NAMES[i], opt::PASS_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6));
+            for i in 0..relax_backend::stats::PASS_NAMES.len() {
+                passes.push_str(&format!("{} {:.2}  ", relax_backend::stats::PASS_NAMES[i], relax_backend::stats::PASS_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6));
             }
             println!("opt passes (ms): {}", passes);
         }

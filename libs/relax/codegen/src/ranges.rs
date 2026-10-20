@@ -22,8 +22,8 @@
 //! `d = (b + k) - b` becomes `k`. rustc's LLVM removes these checks the same way (correlated
 //! value propagation + instcombine); without it every masked index into a fixed array keeps its
 //! bounds check (deflate: four per hash-chain probe). MAKEPAD_RUN_NO_RANGES=1 turns it off.
-use crate::regalloc::{for_defs, reachable};
-use crate::rir::*;
+use relax_backend::regalloc::{for_defs, reachable};
+use relax_backend::rir::*;
 /// Maps keyed by vreg numbers and block pairs: a multiply-rotate hash (SipHash's per-key cost
 /// showed in O3 profiles: State is cloned and rebuilt per edge)
 type HashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<VHash>>;
@@ -591,7 +591,7 @@ fn iv_off(options: &relax_session::Options) -> bool {
 fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u32, u32), bool)>) -> bool {
     let n = f.blocks.len();
     let reach = reachable(f);
-    let idom = crate::opt::idoms(f);
+    let idom = relax_backend::dom::idoms(f);
     let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
     for (b, blk) in f.blocks.iter().enumerate() {
         if reach[b] {
@@ -643,7 +643,7 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
     let mut nuse = vec![0u32; nv];
     for b in &f.blocks {
         for i in &b.insts {
-            crate::regalloc::for_uses(i, |u| {
+            relax_backend::regalloc::for_uses(i, |u| {
                 if (u.0 as usize) < nv {
                     nuse[u.0 as usize] += 1
                 }

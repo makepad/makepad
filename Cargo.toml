@@ -232,6 +232,7 @@ workspace.members = [
     "libs/gpu_trace",
     "libs/relax/compiler",
     "libs/relax/base",
+    "libs/relax/backend",
     "libs/relax/codegen",
     "libs/relax/front",
     "tools/run/light_http",
@@ -405,6 +406,7 @@ unicode-segmentation = { path = "libs/unicode/unicode-segmentation" }
 relax-lex = { path = "libs/relax/lex", version = "0.1.0" }
 makepad-relax = { path = "libs/relax/attr", version = "1.0.0" }
 relax-base = { path = "libs/relax/base", version = "0.1.0" }
+relax-backend = { path = "libs/relax/backend", version = "0.1.0" }
 relax-codegen = { path = "libs/relax/codegen", version = "0.1.0" }
 relax-compiler = { path = "libs/relax/compiler", version = "0.1.0" }
 relax-front = { path = "libs/relax/front", version = "0.1.0" }

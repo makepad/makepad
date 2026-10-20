@@ -2,8 +2,8 @@
 //! compare must decide as the extended 64-bit value would, for every width, extension,
 //! condition and constant the fold accepts (and stay a register compare otherwise).
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::rir::*;
-use relax_codegen::x64;
+use relax_backend::rir::*;
+use relax_backend::x64;
 
 fn push(f: &mut Func, b: u32, i: Inst) {
     f.blocks[b as usize].insts.push(i);
@@ -59,7 +59,7 @@ fn holds(c: Cond, signed: bool, a: i64, b: i64) -> bool {
 
 #[test]
 fn load_compare_branches_as_the_extended_value() {
-    let env = x64::Env { slots: relax_codegen::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
     let vals: [u64; 9] = [0, 1, 2, 0x7f, 0x80, 0xff, 0x7fff_ffff, 0x8000_0000, u64::MAX];
     let ks: [i64; 13] = [0, 1, 2, -1, -2, 0x7f, 0x80, 0xff, -0x80, 0x7fff, 0xffff, 0x7fff_ffff, -0x8000_0000];
     let conds = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
@@ -71,7 +71,7 @@ fn load_compare_branches_as_the_extended_value() {
                     for &k in &ks {
                         let f = cmp_fn(sz, sx, cond, signed, k);
                         let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
-                        let code = relax_codegen::exec::Code::new(&c.code).unwrap();
+                        let code = relax_backend::exec::Code::new(&c.code).unwrap();
                         let run: extern "sysv64" fn(*const u8) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
                         for &v in &vals {
                             let mut buf = [0xa5u8; 16];
@@ -108,11 +108,11 @@ fn branch_fn(sz: u8, sx: bool) -> Func {
 
 #[test]
 fn branch_on_a_loaded_value_tests_its_bytes() {
-    let env = x64::Env { slots: relax_codegen::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
     for sz in [1u8, 2, 4, 8] {
         for sx in [false, true] {
             let c = x64::compile(&relax_session::Options::default(), &branch_fn(sz, sx), &env).unwrap();
-            let code = relax_codegen::exec::Code::new(&c.code).unwrap();
+            let code = relax_backend::exec::Code::new(&c.code).unwrap();
             let run: extern "sysv64" fn(*const u8) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
             for v in [0u64, 1, 0x80, 0x100, 0x1_0000, 0x1_0000_0000, u64::MAX] {
                 let mut buf = [0u8; 16];

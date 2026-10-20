@@ -1,6 +1,6 @@
 //! Check both explicit conventions against rustc-built callees and callers on every x86-64 OS.
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::{exec::Code, rir::*, x64};
+use relax_backend::{exec::Code, rir::*, x64};
 
 #[repr(C)]
 #[derive(Clone, Copy)]

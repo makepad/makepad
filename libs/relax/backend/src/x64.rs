@@ -919,8 +919,8 @@ impl<'a> Gen<'a> {
         }
         self.saved = 8 * self.al.used_callee_int.len() as i32;
         // only slots something addresses take space; slots whose lifetimes cannot overlap share
-        // it (opt::slot_layout)
-        let (at, end) = crate::opt::slot_layout(self.f, self.al.spill_bytes as i64, !crate::opt::opt_off(options, "-slotcolor"));
+        // it (frame::slot_layout)
+        let (at, end) = crate::frame::slot_layout(self.f, self.al.spill_bytes as i64, !crate::stats::opt_off(options, "-slotcolor"));
         self.slot_off.extend(at.iter().map(|&x| x as i32));
         let mut off = end as i32;
         off = (off + 7) / 8 * 8;
@@ -4280,14 +4280,14 @@ fn imm_fits(i: &Inst) -> bool {
 }
 
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
-    let _warm = crate::warm::Scope::backend(&f.name);
-    let _cost_codegen = crate::fncost::phase(5);
-    crate::fncost::size(false, f);
+    let _warm = crate::probe::backend(&f.name);
+    let _cost_codegen = crate::probe::phase(5);
+    crate::probe::size(f);
     let expanded;
     let f = if f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::IBit(..)))) {
         let (pc, lz, tz) = host_bits(options);
         let mut g = f.clone();
-        crate::opt::expand_bit_ops(&mut g, &|o| match o {
+        crate::bitops::expand_bit_ops(&mut g, &|o| match o {
             BitOp::Popcnt => pc,
             BitOp::Clz => lz,
             BitOp::Ctz => tz,
@@ -4316,15 +4316,15 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let f = sunk.as_ref().unwrap_or(f);
     let mut cfg = reg_config(options);
     cfg.sym_class = env.sym_class;
-    let _cost_ra = crate::fncost::phase(9);
-    let t_ra = crate::opt::pass_clock();
+    let _cost_ra = crate::probe::phase(9);
+    let t_ra = crate::stats::pass_clock();
     let (split, al) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
-    crate::opt::pass_time(11, t_ra);
+    crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al);
-    let _cost_emit = crate::fncost::phase(10);
-    let t_emit = crate::opt::pass_clock();
+    let _cost_emit = crate::probe::phase(10);
+    let t_emit = crate::stats::pass_clock();
     let (win, win_start) = {
         let mut w: std::collections::HashMap<u32, Vec<(u32, u32, u8)>> = std::collections::HashMap::new();
         let mut ws: std::collections::HashMap<u32, Vec<(u32, u8)>> = std::collections::HashMap::new();
@@ -4380,7 +4380,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         // cache-line separation does not change that (tested). Cause not proven.
         memconst: options.memconst || host_avx(options),
         avx: host_avx(options),
-        byte_masks: crate::opt::vector_byte_masks(f),
+        byte_masks: crate::bitops::vector_byte_masks(f),
         sel_cmp: None,
         sel_flags: None,
         vpool: Vec::new(),
@@ -4411,8 +4411,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     }
     let frame = g.frame as u32;
     let text_len = g.text_len;
-    crate::opt::pass_time(12, t_emit);
-    crate::fncost::code(g.a.b.len());
+    crate::stats::pass_time(12, t_emit);
+    crate::probe::code(g.a.b.len());
     Ok(Compiled { code: g.a.b, pc_map: g.pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_emitted: if g.rir_map_on { g.f.dump() } else { String::new() }, rir_map: g.rir_map })
 }
 

@@ -539,7 +539,7 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Fun
         }
     }
     let mut g = out?;
-    let order = crate::opt::relayout_order(&mut g);
+    let order = crate::dom::relayout_order(&mut g);
     let origin: Vec<u32> = order.iter().map(|b| origin[*b as usize]).collect();
     Some((g, origin))
 }

@@ -2,7 +2,8 @@
 //! subnormal) is `x * (1 / c)`: bit-equal for every x (NaN, inf, zeros, subnormal and
 //! overflowing / underflowing results), and no divide is left. Other constants keep the divide.
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::{exec::Code, opt, rir::*, x64};
+use relax_backend::{exec::Code, rir::*, x64};
+use relax_codegen::opt;
 
 fn build(w: bool, c: u64) -> (Func, bool) {
     let cls = if w { Cls::F64 } else { Cls::F32 };

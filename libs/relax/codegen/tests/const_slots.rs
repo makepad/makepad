@@ -1,4 +1,5 @@
-use relax_codegen::{opt, rir::*};
+use relax_backend::rir::*;
+use relax_codegen::opt;
 
 const U64: IntTy = IntTy { bits: 64, signed: false };
 fn ro(_: usize, s: Sym, n: u32) -> opt::RoRead {

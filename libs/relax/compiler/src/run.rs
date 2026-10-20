@@ -3042,8 +3042,8 @@ fn summary_inner(why: &str) {
     if !SILENT.load(Ordering::Relaxed) {     verbose!("makepad-run: compile timeline (100 ms buckets):{}", tl); }
         if std::env::var("MAKEPAD_RUN_PASS_TIMES").is_ok() {
             let mut passes = String::new();
-            for i in 0..crate::opt::PASS_NAMES.len() {
-                passes.push_str(&format!("{} {:.0}  ", crate::opt::PASS_NAMES[i], crate::opt::PASS_NS[i].load(Ordering::Relaxed) as f64 / 1e6));
+            for i in 0..relax_backend::stats::PASS_NAMES.len() {
+                passes.push_str(&format!("{} {:.0}  ", relax_backend::stats::PASS_NAMES[i], relax_backend::stats::PASS_NS[i].load(Ordering::Relaxed) as f64 / 1e6));
             }
     if !SILENT.load(Ordering::Relaxed) {         verbose!("makepad-run: opt passes (cpu ms): {}", passes); }
             verbose!("makepad-run: invokes {} seen, {} made plain calls", crate::opt::INVOKES_SEEN.load(Ordering::Relaxed), crate::opt::INVOKES_DEMOTED.load(Ordering::Relaxed));

@@ -3,7 +3,8 @@
 //! ordered compare is false on NaN so its negation is true; `!=` is true on NaN so its negation
 //! is false.
 #![cfg(target_arch = "x86_64")]
-use relax_codegen::{exec::Code, opt, rir::*, x64};
+use relax_backend::{exec::Code, rir::*, x64};
+use relax_codegen::opt;
 
 const CONDS: [Cond; 6] = [Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge, Cond::Eq, Cond::Ne];
 

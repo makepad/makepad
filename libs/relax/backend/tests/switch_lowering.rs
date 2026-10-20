@@ -4,19 +4,19 @@
 //! same results compiled as the first-match-wins reference, whichever of jump table, bit tests or
 //! binary search the lowering picks, with and without the thorough register allocation.
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]
-use relax_codegen::{exec::Code, rir::*, switch};
+use relax_backend::{exec::Code, rir::*, switch};
 
 #[cfg(target_arch = "x86_64")]
 fn compile(options: &relax_session::Options, f: &Func, regs: bool) -> Vec<u8> {
-    let env = relax_codegen::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
-    let c = relax_codegen::x64::compile(options, f, &env).unwrap();
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+    let c = relax_backend::x64::compile(options, f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }
 
 #[cfg(target_arch = "aarch64")]
 fn compile(options: &relax_session::Options, f: &Func, regs: bool) -> Vec<u8> {
-    let env = relax_codegen::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
-    let c = relax_codegen::arm64::compile(options, f, &env).unwrap();
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+    let c = relax_backend::arm64::compile(options, f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }
 
@@ -362,7 +362,7 @@ fn dominators_see_every_switch_target() {
     }
     f.blocks[head as usize].term = Term::Switch(x, std::sync::Arc::new(SwitchTable::new(0, leaves[..4].to_vec(), leaves[4])));
     f.verify().unwrap();
-    let idom = relax_codegen::opt::idoms(&f);
+    let idom = relax_backend::dom::idoms(&f);
     for &l in &leaves {
         assert_eq!(idom[l as usize], head, "block {l}");
     }

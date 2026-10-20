@@ -1002,7 +1002,7 @@ pub struct Slot {
     /// made by lowering as one call's by-value argument copy (Relax ABI: an aggregate argument
     /// goes by pointer to a private copy the callee owns): the call keeps no pointer to it past
     /// its return. Only a lowering fact -- passes may give the slot other uses, so its readers
-    /// check that the slot is still that (opt::slot_sets)
+    /// check that the slot is still that (frame::slot_sets)
     pub arg: bool,
     /// made by lowering with its one SlotAddr where its value begins (a temporary, a `let`, a
     /// call's result buffer or argument copy): its earlier contents are dead whenever that
