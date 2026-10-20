@@ -366,11 +366,19 @@ impl<T> Vec<T> {
     }
 
     pub fn push(&mut self, value: T) {
-        if self.len == self.capacity() {
-            self.reserve(1);
+        // as upstream `push_mut`: the length read once does not change across `grow_one`
+        let len = self.len;
+        if len == self.capacity() {
+            self.grow_one();
         }
-        unsafe { im::ptr_write(im::ptr_add_mut(self.ptr.as_ptr(), self.len), value) };
-        self.len += 1;
+        unsafe { im::ptr_write(im::ptr_add_mut(self.ptr.as_ptr(), len), value) };
+        self.len = len + 1;
+    }
+
+    /// `reserve(1)` of a full vector, out of line as upstream `RawVec::grow_one`
+    #[inline(never)]
+    fn grow_one(&mut self) {
+        self.reserve(1);
     }
 
     pub fn push_within_capacity(&mut self, value: T) -> Result<(), T> {
