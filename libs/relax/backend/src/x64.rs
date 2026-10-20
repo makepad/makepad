@@ -709,6 +709,9 @@ struct Gen<'a> {
     mem_const: Option<(VReg, u64)>,
     /// the block ends `t = x & K; t ==/!= 0; branch`: emitted as test x, K (the And skipped)
     test_fuse: Option<(VReg, i64)>,
+    /// the block ends `s = m >> t; c = s & 1; branch c` (s, c used once): emitted as bt m, t
+    /// (the bit-test switch clusters), the shift and mask skipped -- (m, t)
+    bt_fuse: Option<(VReg, VReg)>,
     /// `t = load [base + off]; c = t cmp K` feeding the branch (t used once): cmp [base + off], K
     /// in the load's width -- (base, off, bytes, K)
     load_fuse: Option<(VReg, i32, u8, i64)>,
@@ -1128,6 +1131,15 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // a branch on bit t of m: bt m, t (CF = bit t mod 64, as the 64-bit shift reads t)
+            self.bt_fuse = None;
+            if !fused && n >= 2 {
+                if let (Term::Branch(c, _, _), Inst::IBin(IOp::Shr, it, s, m, t), Inst::IBinI(IOp::And, _, d, s2, 1)) = (&b.term, &b.insts[n - 2], &b.insts[n - 1]) {
+                    if d == c && s == s2 && it.bits == 64 && !it.signed && m != s && t != s && self.al.uses[c.0 as usize] == 1 && self.al.uses[s.0 as usize] == 1 {
+                        self.bt_fuse = Some((*m, *t));
+                    }
+                }
+            }
             // a branch on a loaded value itself (a bool field): cmp [p + o], 0
             let mut load_branch = false;
             if !fused && n >= 1 {
@@ -1164,6 +1176,9 @@ impl<'a> Gen<'a> {
                 }
                 if load_branch && ii == n - 1 {
                     break;
+                }
+                if self.bt_fuse.is_some() && ii >= n - 2 {
+                    continue;
                 }
                 // a compare whose one use is the next select: fused into it (flags + cmov,
                 // or a scalar float branch)
@@ -2163,6 +2178,17 @@ impl<'a> Gen<'a> {
                         let (rb, disp) = self.base_disp(options, base, R11, off);
                         self.cmp_mem_imm(rb, disp, sz, k);
                         Some(CC_NE)
+                    }
+                    _ if self.bt_fuse.is_some() => {
+                        let (m, t) = self.bt_fuse.take().unwrap();
+                        let rm = self.use_i(options, m, R10);
+                        let rt = self.use_i(options, t, R11);
+                        // bt rm, rt (REX.W 0F A3 /r): CF = bit rt of rm
+                        self.a.rex(true, rt, 0, rm, false);
+                        self.a.byte(0x0f);
+                        self.a.byte(0xa3);
+                        self.a.modrm_rr(rt, rm);
+                        Some(CC_B)
                     }
                     _ => {
                         let r = self.use_i(options, *c, R10);
@@ -4918,6 +4944,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         text_len: 0,
         mem_const: None,
         test_fuse: None,
+        bt_fuse: None,
         load_fuse: None,
         jt_fix: Vec::new(),
         last_spill: None,

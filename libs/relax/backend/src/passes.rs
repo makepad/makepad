@@ -441,6 +441,10 @@ pub fn compact_vregs(f: &mut Func) {
     for p in f.nonnull.iter_mut() {
         *p = m(*p);
     }
+    f.ranged.retain(|r| (r.0 .0 as usize) < map.len() && map[r.0 .0 as usize] != NONE);
+    for r in f.ranged.iter_mut() {
+        r.0 = m(r.0);
+    }
     f.vregs = cls;
 }
 

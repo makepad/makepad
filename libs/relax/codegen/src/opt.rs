@@ -670,6 +670,9 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
     for v in &callee.nonnull {
         f.nonnull.push(vmap[v.0 as usize]);
     }
+    for &(v, n, lo, hi) in &callee.ranged {
+        f.ranged.push((vmap[v.0 as usize], n, lo, hi));
+    }
     let slot_base = f.slots.len() as u32;
     // an inlined body's SlotAddrs were moved by its own optimisation: not `born` here
     f.slots.extend(callee.slots.iter().map(|s| Slot { born: false, ..s.clone() }));

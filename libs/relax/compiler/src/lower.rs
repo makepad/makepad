@@ -994,12 +994,20 @@ impl<'a> Lcx<'a> {
                 // a pointer-sized leaf the type's niche keeps from 0 (references, Box, NonNull,
                 // a Vec's buffer pointer): codegen folds its null tests (Func::nonnull)
                 let nn = l.niche.filter(|n| n.bytes == 8 && n.start >= 1 && n.start <= n.end).map(|n| n.off);
+                // an unsigned scalar leaf the niche limits to start..=end (char, bool, enum
+                // tags): value ranges decide its niche tests (Func::ranged)
+                let rg = l.niche.filter(|n| n.bytes < 8 && n.start <= n.end && (n.start > 0 || n.end < (1u128 << (8 * n.bytes)) - 1));
                 let mut v = Vec::with_capacity(leaves.len());
                 for lf in leaves {
                     let d = self.f.vreg(lf.cls);
                     self.emit(Inst::Load(lf.mem, d, base, off + lf.off as i32));
                     if nn == Some(lf.off) && matches!(lf.mem, relax_backend::rir::Mem::Int(8, _)) {
                         self.f.nonnull.push(d);
+                    }
+                    if let (Some(n), relax_backend::rir::Mem::Int(b, false)) = (rg, lf.mem) {
+                        if n.off == lf.off && n.bytes == b as u32 {
+                            self.f.ranged.push((d, b, n.start as u64, n.end as u64));
+                        }
                     }
                     v.push(d);
                 }

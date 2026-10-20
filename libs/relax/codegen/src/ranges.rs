@@ -622,6 +622,8 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
         }
         rpo.reverse();
     }
+    // loads whose type limits their values (Func::ranged): (width, range) of the defining Load
+    let marks: HashMap<u32, (u8, R)> = f.ranged.iter().map(|&(v, b, lo, hi)| (v.0, (b, R { lo, hi }))).collect();
     let mut order = vec![u32::MAX; n];
     for (i, b) in rpo.iter().enumerate() {
         order[*b as usize] = i as u32;
@@ -810,7 +812,17 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
                 Inst::IBin(IOp::Sub, it, d, p, q) => st.lin.iter().find(|l| l.0 == p.0 && l.1 == q.0 && (l.3 as u32) == bits(*it)).map(|l| (*d, extend_const(l.2, *it))),
                 _ => None,
             };
-            let r = def_range(&st, i);
+            let mut r = def_range(&st, i);
+            if let Inst::Load(Mem::Int(w, false), d, ..) | Inst::LoadX(Mem::Int(w, false), d, ..) = &*i {
+                if let Some(&(mw, m)) = marks.get(&d.0) {
+                    if mw == *w {
+                        r = Some(match r {
+                            Some(x) if x.lo.max(m.lo) <= x.hi.min(m.hi) => R { lo: x.lo.max(m.lo), hi: x.hi.min(m.hi) },
+                            _ => m,
+                        });
+                    }
+                }
+            }
             let cmpf = match &*i {
                 Inst::ICmpI(c, s, d, x, k) if d != x => Some((d.0, *c, *s, x.0, Opnd::K(*k))),
                 Inst::ICmp(c, s, d, x, y) if d != x && d != y => Some((d.0, *c, *s, x.0, Opnd::V(y.0))),
