@@ -83,6 +83,7 @@ impl Program {
             let mut helpers = false;
             let mut std_helpers: Vec<&str> = Vec::new();
             let mut unknown_derives: Vec<(u32, &str)> = Vec::new();
+            let mut path_derive_errors: Vec<(u32, String)> = Vec::new();
             for a in &ranges {
                 let (lo, hi) = (a.toks.lo, a.toks.hi);
                 if hi <= lo || hi as usize > f.toks.len() {
@@ -112,17 +113,55 @@ impl Program {
                                 _ => {}
                             }
                         }
+                        // `derive(a::B)` / `derive(::B)`: the path's first segment is a module or crate
+                        let mut depth = 0u32;
+                        let mut i = lo + 1;
+                        while i < hi {
+                            match f.tok(i).kind {
+                                T::OpenParen => depth += 1,
+                                T::CloseParen => depth = depth.saturating_sub(1),
+                                T::Ident | T::PathSep if depth == 1 && matches!(f.tok(i - 1).kind, T::OpenParen | T::Comma) => {
+                                    let (start, mut j, mut global) = (i, i, false);
+                                    let mut segs: Vec<(u32, &str)> = Vec::new();
+                                    while j < hi && matches!(f.tok(j).kind, T::Ident | T::PathSep) {
+                                        if f.tok(j).kind == T::PathSep { if j == start { global = true; } } else { segs.push((f.tok(j).lo, text(j))); }
+                                        j += 1;
+                                    }
+                                    if (segs.len() >= 2 || global) && f.tok(start).lo < f.src_len {
+                                        let first = self.syms.get(segs[0].1);
+                                        let resolved = first.and_then(|s| self.resolve_mod_path(module, global, &[(SegKind::Ident, s)], false, false));
+                                        match resolved {
+                                            None => path_derive_errors.push((segs[0].0, format!("E0433: cannot find module or crate `{}` in {}", segs[0].1, if global { "the crate root" } else { "this scope" }))),
+                                            Some(d) if segs.len() == 2 && self.def(d).kind == DefKind::Mod && matches!(segs[0].1, "core" | "std" | "alloc") => {
+                                                let n = segs[1].1;
+                                                if !STD_DERIVES.contains(&n) && !crate::macro_reg::has_derive(n) {
+                                                    path_derive_errors.push((segs[1].0, format!("E0433: cannot find derive macro `{}` in `{}`", n, segs[0].1)));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    i = j;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                            i += 1;
+                        }
                         for i in lo + 1..hi {
                             if f.tok(i).kind == T::Ident && text(i) == "Default" {
                                 std_helpers.push("default");
                             }
-                            if f.tok(i).kind == T::Ident && !STD_DERIVES.contains(&text(i)) && f.tok(i + 1).kind != T::PathSep {
+                            if f.tok(i).kind == T::Ident && !STD_DERIVES.contains(&text(i)) && f.tok(i + 1).kind != T::PathSep && !path_derive_errors.iter().any(|(p, _)| *p == f.tok(i).lo) {
                                 helpers = true;
                             }
                         }
                     }
                     _ => {}
                 }
+            }
+            for (pos, msg) in path_derive_errors {
+                out.push(self.record_error(fi as u32, pos, "resolve", msg));
             }
             for (pos, name) in unknown_derives {
                 out.push(self.record_error(fi as u32, pos, "resolve", format!("cannot find derive macro `{name}` in this scope")));
@@ -230,6 +269,12 @@ impl Program {
                         Some(k) => {
                             // a macro of another crate's module, or of this one: not a type-namespace item
                             let container = cur.unwrap_or(NO_DEF);
+                            // `#[core::bench]`: a name the std crate's root has no macro of
+                            if k == 1 && container != NO_DEF && self.def(container).kind == DefKind::Mod && matches!(first, "core" | "std" | "alloc")
+                                && self.def(container).krate != krate && !self.lookup_macro_in_container(container, path[1].1) {
+                                out.push(self.record_error(fi as u32, f.tok(first_i + 2).lo, "resolve", format!("E0433: failed to resolve: cannot find `{}` in `{}`", segs[1], first)));
+                                continue;
+                            }
                             if container == NO_DEF || self.def(container).krate != krate {
                                 continue;
                             }

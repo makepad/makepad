@@ -111,6 +111,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         u.prog.crates[k as usize].validate = true;
     }
     u.prog.own_crates = own.clone();
+    errors.extend(u.prog.strict_import_errors(&own));
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
     // context); errors in definition order
     {
@@ -126,6 +127,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         }
     }
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
+    errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own));
+    errors.extend(relax_types::item_checks::super_paths(&u.prog, &own));
+    errors.extend(relax_types::item_checks::impl_trait_path_privacy(&u.prog, &u.tcx, &own));
+    errors.extend(relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own));
     errors.extend(relax_types::item_checks::gated_syntax(&u.prog, &own));
     errors.extend(relax_types::item_checks::node_attribute_targets(&u.prog, &own));
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));

@@ -3581,6 +3581,13 @@ impl<'a> Fcx<'a> {
                 Some(d) => d,
                 None => return (Res::Err, error),
             };
+            // the trait path of `<T as a::b::Trait>::item` is privacy-checked like any path
+            if self.tcx.validates(prog, self.file) && tp.segs.len() >= 2 && tp.no_qself() && tp.lo < prog.files[self.file as usize].src_len {
+                let tsegs = crate::program::path_segs(prog, self.file, tp);
+                if let Some(e) = prog.path_privacy(self.module, tp.global(), &tsegs, Some(true), false, false) {
+                    if let Some(m) = crate::lint::privacy_diag(prog, self.file, tp.lo, &e) { self.err(tp.lo, m); }
+                }
+            }
             let name = segs[segs.len() - 1].1;
             let mut item = None;
             for &it in &prog.traits[prog.def(td).sub as usize] {

@@ -273,6 +273,8 @@ pub const BOUND_PREFIX_ONLY: u8 = 8;
 /// the clash of this import with an earlier binding was reported (per namespace)
 pub const CLASH_TYPES: u8 = 16;
 pub const CLASH_VALUES: u8 = 32;
+/// `use a::f::{self}`: only the type namespace of `f` (a module, enum or trait) is imported
+pub const BOUND_SELF_ONLY: u8 = 64;
 
 pub struct Module {
     pub def: DefId,
@@ -2149,7 +2151,7 @@ impl Program {
         }
         for m in &mut self.mods { m.globs.clear(); m.anon_traits.clear(); m.import_pub.clear(); }
         self.imports.retain(|i| self.mods[i.module as usize].krate != krate);
-        for i in &mut self.imports { i.done = false; i.bound &= BOUND_INJECTED | BOUND_PREFIX_ONLY; }
+        for i in &mut self.imports { i.done = false; i.bound &= BOUND_INJECTED | BOUND_PREFIX_ONLY | BOUND_SELF_ONLY; }
         let old: Vec<_> = self.defs.iter().enumerate().filter(|(_, d)| d.krate == krate).map(|(i, _)| DefId(i as u32)).collect();
         self.unbind_defs(&old);
         self.impls.retain(|i| self.defs[i.def.0 as usize].krate != krate);
@@ -2722,6 +2724,21 @@ impl Program {
                     // `extern crate self as name;` names this crate (makepad-draw: derive output
                     // written against `makepad_draw::..` also compiles inside makepad-draw)
                     let this = self.syms.str(name) == "self";
+                    if this && rename.is_none() && pos < self.files[file as usize].src_len {
+                        let e = self.record_uncoded_error(file, pos, "resolve", "`extern crate self;` requires renaming".to_string());
+                        self.errors.push(e);
+                    }
+                    if this && pos < self.files[file as usize].src_len {
+                        let f = &self.files[file as usize];
+                        let attrs: Vec<Attr> = f.ast.list(f.ast.item(iid).attrs).to_vec();
+                        for a in attrs {
+                            if a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "macro_use" {
+                                let at = f.tok(a.toks.lo).lo;
+                                let e = self.record_uncoded_error(file, at, "resolve", "`#[macro_use]` is not supported on `extern crate self`".to_string());
+                                self.errors.push(e);
+                            }
+                        }
+                    }
                     if this {
                         self.imports.push(Import { module, global: false, segs: vec![(SegKind::Crate, name)], bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: true, bound: 0 });
                     } else {
@@ -2898,7 +2915,9 @@ impl Program {
                 let mut segs = prefix.clone();
                 // `use foo::{self}` imports `foo` itself
                 let bind;
+                let mut self_only = 0;
                 if seg.kind() == SegKind::SelfValue && !segs.is_empty() {
+                    self_only = BOUND_SELF_ONLY;
                     bind = match rename {
                         Some(r) => self.ident(file, *r),
                         None => segs[segs.len() - 1].1,
@@ -2910,7 +2929,7 @@ impl Program {
                         None => s,
                     };
                 }
-                self.imports.push(Import { module, global, segs, bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: false, bound: 0 });
+                self.imports.push(Import { module, global, segs, bind: Some(bind), glob: false, is_pub, done: false, file, pos, ext: false, bound: self_only });
             }
             UseTree::Glob => {
                 self.imports.push(Import { module, global, segs: prefix.clone(), bind: None, glob: true, is_pub, done: false, file, pos, ext: false, bound: 0 });
@@ -3642,7 +3661,7 @@ impl Program {
                 tdef = Some(self.mods[self.crates[c as usize].root_mod as usize].def);
             } else if !global {
                 tdef = self.lookup_in_scope(module, last, true);
-                vdef = self.lookup_in_scope(module, last, false);
+                vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_scope(module, last, false) };
             }
         } else if segs.len() == 1 && last_kind != SegKind::Ident {
             let m = match self.resolve_mod_path(module, global, &segs, edition < 2018, true) {
@@ -3678,7 +3697,7 @@ impl Program {
                 tdef = Some(parent);
             } else {
                 tdef = self.lookup_in_container(parent, last, true);
-                vdef = self.lookup_in_container(parent, last, false);
+                vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_container(parent, last, false) };
                 // rustc ignores a namespace whose binding this module cannot see when the other
                 // namespace is accessible (`use validate::validate;` where `validate` also holds
                 // a private glob-imported module of that name); with neither accessible the
@@ -3695,7 +3714,7 @@ impl Program {
             }
             if tdef.is_none() && vdef.is_none() {
                 // macros only (e.g. `use crate::log;` for macro_rules) count as resolved
-                if self.lookup_macro_in_container(parent, last) {
+                if self.imports[i].bound & BOUND_SELF_ONLY == 0 && self.lookup_macro_in_container(parent, last) {
                     return true;
                 }
                 return false;
@@ -3892,7 +3911,7 @@ impl Program {
 
     /// The more restrictive of two visibilities (rustc: a glob import's binding has
     /// min(glob visibility, imported binding's visibility)).
-    fn vis_min(&self, a: BindVis, b: BindVis) -> BindVis {
+    pub fn vis_min(&self, a: BindVis, b: BindVis) -> BindVis {
         match (a, b) {
             (None, x) | (x, None) => x,
             (Some(x), Some(y)) => {
@@ -3923,6 +3942,42 @@ impl Program {
     pub fn import_binding_used(&self, m: u32, name: Sym) -> bool {
         let u = self.import_used.lock().unwrap_or_else(|e| e.into_inner());
         u.contains(&(m, name, true)) || u.contains(&(m, name, false))
+    }
+
+    /// The imports of the program (use items and `extern crate`).
+    pub fn imports_iter(&self) -> impl Iterator<Item = &Import> { self.imports.iter() }
+
+    /// Imports of the checked crates that name nothing rustc would resolve but Relax's lenient
+    /// resolution accepts: a path through `alloc` without `extern crate alloc;` (not in the extern
+    /// prelude), and a macro-named import through a module that does not exist. Run once the
+    /// checked crates are known; each is rustc's E0432.
+    pub fn strict_import_errors(&self, own: &[bool]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
+        for i in 0..self.imports.len() {
+            let im = &self.imports[i];
+            let krate = self.mods[im.module as usize].krate;
+            if !own.get(krate as usize).copied().unwrap_or(false) || im.ext || im.segs.is_empty() { continue; }
+            if im.pos >= self.files[im.file as usize].src_len { continue; }
+            let edition = self.crates[krate as usize].edition;
+            let first_alloc = !im.global && edition >= 2018 && im.segs[0].0 == SegKind::Ident && self.syms.str(im.segs[0].1) == "alloc"
+                && !self.alloc_declared(krate) && self.lookup_in_module(im.module, im.segs[0].1, true, &mut Vec::new()).is_none();
+            let macro_through_missing = !im.done && !im.glob && im.segs.len() > 1
+                && self.resolve_mod_path(im.module, im.global, &im.segs[..im.segs.len() - 1], edition < 2018, true).is_none()
+                && !self.import_reportable(i, &mut macro_binds);
+            if !first_alloc && !macro_through_missing { continue; }
+            let p: Vec<&str> = im.segs.iter().map(|(k, s)| match k { SegKind::Crate => "crate", SegKind::SelfValue => "self", SegKind::Super => "super", _ => self.syms.str(*s) }).collect();
+            let f = &self.files[im.file as usize];
+            let pos = f.diagnostic_pos(im.pos).min(f.src_len);
+            out.push(self.record_error(im.file, pos, "resolve", format!("E0432: unresolved import `{}`", p.join("::"))));
+        }
+        out
+    }
+
+    /// `extern crate alloc;` is written at the root of `krate`.
+    fn alloc_declared(&self, krate: u32) -> bool {
+        let root = self.crates[krate as usize].root_mod;
+        self.imports.iter().any(|i| i.ext && i.module == root && i.segs.len() == 1 && self.syms.str(i.segs[0].1) == "alloc")
     }
 
     /// Whether a path resolved through the extern prelude entry `name` of crate `krate`.
@@ -4290,7 +4345,7 @@ impl Program {
     }
 
     /// Whether visibility `a` is wider than `b`.
-    fn vis_wider(&self, a: BindVis, b: BindVis) -> bool {
+    pub fn vis_wider(&self, a: BindVis, b: BindVis) -> bool {
         match (a, b) {
             (None, Some(_)) => true,
             (Some(x), Some(y)) => x != y && self.in_module(y, x),

@@ -12,9 +12,10 @@ fn namespaces(prog: &Program, d: DefId) -> (bool, bool) {
     let def = prog.def(d);
     match def.kind {
         DefKind::Mod | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::TypeAlias => (true, false),
-        // (foreign items are left out: an `extern` block inside a fn body is collected into the
-        // enclosing module, not the body's block, so two bodies' declarations would collide)
-        DefKind::Fn | DefKind::Const | DefKind::Static => (false, true),
+        // (foreign items count only in an `extern` block written at module level: one inside a fn
+        // body is collected into the enclosing module, not the body's block, so two bodies'
+        // declarations would collide)
+        DefKind::Fn | DefKind::Const | DefKind::Static | DefKind::ForeignFn | DefKind::ForeignStatic => (false, true),
         // the items of a trait (`duplicate_items` only asks for those of traits)
         DefKind::AssocFn | DefKind::AssocConst => (false, true),
         DefKind::AssocTy => (true, false),
@@ -33,6 +34,17 @@ fn namespaces(prog: &Program, d: DefId) -> (bool, bool) {
 pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
     let mut seen: crate::fxhash::HashMap<(DefId, bool, u32), DefId> = Default::default();
     let mut errors = Vec::new();
+    let mut top_foreign: crate::fxhash::HashSet<(u32, u32)> = Default::default();
+    for (m, md) in prog.mods.iter().enumerate() {
+        if !own.get(md.krate as usize).copied().unwrap_or(false) || md.lexical_parent.is_some() { continue; }
+        let (file, items) = crate::lint_dead::module_items(prog, m as u32);
+        let ast = &prog.files[file as usize].ast;
+        for it in items {
+            if let ast::ItemKind::ForeignMod(r) = ast.item(it).kind {
+                for &c in ast.list(ast.row(r).items) { top_foreign.insert((file, c.0)); }
+            }
+        }
+    }
     for i in 0..prog.defs.len() {
         let d = DefId(i as u32);
         let def = prog.def(d);
@@ -42,6 +54,8 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
         if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
         let name = prog.syms.str(def.name);
         if name == "_" || name.is_empty() { continue; }
+        let foreign = matches!(def.kind, DefKind::ForeignFn | DefKind::ForeignStatic);
+        if foreign && !top_foreign.contains(&(def.file, def.item.0)) { continue; }
         // a module file configured away by its own inner `#![cfg]` defines nothing
         if def.kind == DefKind::Mod {
             let m = &prog.mods[def.sub as usize];
@@ -54,7 +68,7 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
             match seen.get(&(def.parent, ns, def.name)) {
                 Some(&first) if first != d => {
                     let ast = &prog.files[def.file as usize].ast;
-                    let pos = ast.item(def.item).name.lo;
+                    let pos = if foreign { ast.item(def.item).lo } else { ast.item(def.item).name.lo };
                     let ns_name = if ns { "type" } else { "value" };
                     let module = if prog.def(def.parent).kind == DefKind::Trait { "this trait" } else if prog.block_owner.get(&prog.def(def.parent).sub).is_some() { "this block" } else { "this module" };
                     errors.push(prog.record_error(def.file, pos, "resolve", format!(
@@ -66,6 +80,153 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
                 None => { seen.insert((def.parent, ns, def.name), d); }
             }
         }
+    }
+    errors
+}
+
+/// E0428 for `#[macro_export]` macros: two exported `macro_rules!` of one name in a crate share the
+/// crate root's macro namespace (rustc_resolve build_reduced_graph define). The later one, in
+/// source order, is reported; a macro the definition of which another crate wrote is not ours.
+pub fn duplicate_exported_macros(prog: &Program, own: &[bool]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (name, defs) in prog.macros.defs.iter() {
+        let mut seen: Vec<(u32, u32, u32)> = Vec::new(); // (krate, file, pos)
+        let mut mine: Vec<&crate::macros::MacroDef> = defs.iter().map(|d| &**d).filter(|d| d.exported && d.builtin == 0 && !d.def_file.is_empty()).collect();
+        // (source order: a macro an expansion defines counts at its call)
+        let key = |d: &crate::macros::MacroDef| prog.file_paths.iter().position(|p| *p == d.def_file).map_or(d.def_pos, |f| prog.files[f].diagnostic_pos(d.def_pos));
+        mine.sort_by(|a, b| (a.def_file.as_str(), key(a)).cmp(&(b.def_file.as_str(), key(b))));
+        for d in mine {
+            let Some(file) = prog.file_paths.iter().position(|p| *p == d.def_file) else { continue };
+            let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+            if !own.get(krate as usize).copied().unwrap_or(false) || d.def_pos >= prog.files[file].src_len { continue; }
+            let kpos = key(d);
+            if d.def_pos < prog.files[file].src_len && seen.iter().any(|&(k, f, p)| k == krate && !(f == file as u32 && p == kpos)) {
+                errors.push(prog.record_error(file as u32, d.def_pos, "resolve", format!(
+                    "E0428: the name `{}` is defined multiple times -- note: `{}` must be defined only once in the macro namespace of this module", name, name)));
+            }
+            seen.push((krate, file as u32, kpos));
+        }
+    }
+    errors
+}
+
+/// E0446 (rustc_privacy `check_assoc_item` with `hard_error` for associated types): the type of an
+/// associated type of a trait impl is no less visible than the impl itself (the least visible of
+/// the trait and the types of its trait reference).
+pub fn private_assoc_types(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<String> {
+    fn adts(tcx: &Tcx, t: TyId, out: &mut Vec<DefId>, depth: u32) {
+        if depth > 24 { return; }
+        match tcx.tys.kind(t).clone() {
+            TyKind::Adt(d, args, _) => { out.push(d); for &a in tcx.tys.list(args) { adts(tcx, a, out, depth + 1); } }
+            TyKind::Dyn(td, args, binds, ..) => {
+                out.push(td);
+                for &a in tcx.tys.list(args) { adts(tcx, a, out, depth + 1); }
+                for b in tcx.tys.list(binds) { adts(tcx, b.1, out, depth + 1); }
+            }
+            TyKind::Ref(_, x, _) | TyKind::Ptr(_, x) | TyKind::Slice(x) | TyKind::Array(x, _) => adts(tcx, x, out, depth + 1),
+            TyKind::Tuple(l) => for &x in tcx.tys.list(l) { adts(tcx, x, out, depth + 1); },
+            _ => {}
+        }
+    }
+    let mut errors = Vec::new();
+    // (a definition an expansion wrote has no visibility the AST states: its checks are skipped)
+    let written = |d: DefId| { let def = prog.def(d); def.item.0 != u32::MAX && prog.files.get(def.file as usize).is_some_and(|f| f.ast.items.get(def.item.0 as usize).is_some_and(|it| it.lo < f.src_len)) };
+    for i in 0..prog.defs.len() {
+        let imp = DefId(i as u32);
+        let idef = prog.def(imp);
+        if idef.kind != DefKind::Impl || !own.get(idef.krate as usize).copied().unwrap_or(false) || !written(imp) { continue; }
+        let Some(&tr) = tcx.impl_trait.get(&imp) else { continue };
+        if !own.get(prog.def(tr).krate as usize).copied().unwrap_or(false) && prog.def(tr).krate != idef.krate { /* foreign trait: its vis is public */ }
+        // the impl's visibility
+        let mut vis = prog.def_item_vis(tr);
+        if !own.get(prog.def(tr).krate as usize).copied().unwrap_or(false) { vis = None; }
+        let mut tys: Vec<DefId> = Vec::new();
+        let args = tcx.generic_indices_of(prog, imp).identity_args(&tcx.tys);
+        for a in tcx.impl_trait_ref(prog, imp, &args).args.iter() {
+            if let crate::consts::GenericArg::Type(t) = a { adts(tcx, *t, &mut tys, 0); }
+        }
+        let mut known = written(tr) || !own.get(prog.def(tr).krate as usize).copied().unwrap_or(false);
+        for d in tys {
+            if own.get(prog.def(d).krate as usize).copied().unwrap_or(false) {
+                known &= written(d);
+                vis = prog.vis_min(vis, prog.def_item_vis(d));
+            }
+        }
+        if !known { continue; }
+        for j in 0..prog.defs.len() {
+            let ad = DefId(j as u32);
+            let adef = prog.def(ad);
+            if adef.kind != DefKind::AssocTy || adef.parent != imp { continue; }
+            let Ok(t) = tcx.type_of(prog, ad) else { continue };
+            let mut used = Vec::new();
+            adts(tcx, t, &mut used, 0);
+            for u in used {
+                if !own.get(prog.def(u).krate as usize).copied().unwrap_or(false) || !written(u) { continue; }
+                if prog.vis_wider(vis, prog.def_item_vis(u)) {
+                    let pos = prog.files[adef.file as usize].ast.item(adef.item).name.lo;
+                    errors.push(prog.record_error(adef.file, pos, "typeck", format!("E0446: private type `{}` in public interface", prog.syms.str(prog.def(u).name))));
+                    break;
+                }
+            }
+        }
+    }
+    errors
+}
+
+/// The path of an impl's trait is privacy-checked like any path (rustc_resolve: E0603 for a
+/// private module or trait on the way).
+pub fn impl_trait_path_privacy(prog: &Program, tcx: &Tcx, own: &[bool]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if def.kind != DefKind::Impl || !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
+        let ast = &prog.files[def.file as usize].ast;
+        let Some(imp) = ast.as_impl(&ast.item(def.item).kind) else { continue };
+        let Some(p) = imp.trait_ else { continue };
+        if p.segs.len() < 2 || !p.no_qself() || p.lo >= prog.files[def.file as usize].src_len { continue; }
+        let segs = crate::program::path_segs(prog, def.file, &p);
+        let module = tcx.item_module(prog, d);
+        if let Some(e) = prog.path_privacy(module, p.global(), &segs, Some(true), false, false) {
+            if let Some(m) = crate::lint::privacy_diag(prog, def.file, p.lo, &e) { errors.push(prog.record_error(def.file, p.lo, "resolve", m)); }
+        }
+    }
+    errors
+}
+
+/// E0433 `too many leading `super` keywords`: a `pub(super)` / `pub(in super::super)` visibility
+/// (also one a macro expansion wrote) with fewer enclosing modules than `super`s; and a global
+/// `::super::x` path in a `use` (rustc_resolve: global paths cannot start with `super`).
+pub fn super_paths(prog: &Program, own: &[bool]) -> Vec<String> {
+    use crate::ast::{SegKind, Vis};
+    let mut errors = Vec::new();
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if !own.get(def.krate as usize).copied().unwrap_or(false) || def.item.0 == u32::MAX { continue; }
+        if prog.item_defs.get(&(def.file, def.item.0)) != Some(&d) { continue; }
+        let ast = &prog.files[def.file as usize].ast;
+        let item = ast.item(def.item);
+        let depth = |m: u32| { let mut n = 0; let mut cur = prog.mods[prog.mods[m as usize].normal as usize].parent_mod; while let Some(p) = cur { n += 1; cur = prog.mods[p as usize].parent_mod; } n };
+        let scope = if matches!(def.kind, DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy) { prog.def(def.parent).scope } else { def.scope };
+        let too_many = match item.vis {
+            Vis::Super => depth(scope) == 0,
+            Vis::In(p) => {
+                let p = ast.row(p);
+                let supers = ast.segs(p.segs).iter().take_while(|s| s.kind() == SegKind::Super).count();
+                supers > depth(scope)
+            }
+            _ => false,
+        };
+        if too_many {
+            errors.push(prog.record_error(def.file, item.lo, "resolve", "E0433: failed to resolve: too many leading `super` keywords".to_string()));
+        }
+    }
+    for im in prog.imports_iter() {
+        let krate = prog.mods[im.module as usize].krate;
+        if !own.get(krate as usize).copied().unwrap_or(false) || im.ext || !im.global || im.segs.first().map(|s| s.0) != Some(SegKind::Super) { continue; }
+        if im.pos >= prog.files[im.file as usize].src_len { continue; }
+        errors.push(prog.record_error(im.file, im.pos, "resolve", "E0433: failed to resolve: global paths cannot start with `super`".to_string()));
     }
     errors
 }
@@ -543,6 +704,10 @@ pub fn entry_point(prog: &Program, root: u32) -> Vec<String> {
         }
     }
     let Some(sym) = prog.syms.get("main") else { return vec![no_main_error(prog, root, m.file)] };
+    // `main` bound by two globs that disagree: E0659 (rustc resolves the entry point by name)
+    if let Some(e) = prog.name_ambiguity(c.root_mod, sym, false, false) {
+        if let Some(msg) = crate::lint::privacy_diag(prog, m.file, 0, &e) { return vec![prog.record_error(m.file, 0, "resolve", msg)]; }
+    }
     let main = match prog.lookup_in_module(c.root_mod, sym, false, &mut Vec::new()) {
         Some(d) if prog.def(d).kind == DefKind::Fn => d,
         _ => return vec![no_main_error(prog, root, m.file)],
