@@ -1612,7 +1612,7 @@ impl Cache {
                 }
                 self.enc_tys(u, &shim.args, e, crates, 0)
             }
-            FnKey::Sandbox(_) => None,
+            FnKey::Sandbox(_) | FnKey::Plain(_) => None,
             FnKey::Inst(d, args) => {
                 e.u8(0);
                 self.enc_def(u, d, e, crates);
@@ -3236,7 +3236,7 @@ pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
     let krate = match &u.fns[id as usize].key {
         FnKey::Inst(d, _) => u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name).to_string(),
         FnKey::Closure(f, _, _) => u.prog.file_crate.get(*f as usize).map_or("-".to_string(), |c| u.prog.syms.str(u.prog.crates[*c as usize].name).to_string()),
-        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) => "-".to_string(),
+        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => "-".to_string(),
     };
     let on_main = crate::owner::for_main();
     // the code key and the identity of the fn (its key bytes without interfaces and bodies): the same

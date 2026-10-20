@@ -1061,6 +1061,7 @@ fn stable_fn_name_d(u: &Unit, id: u32, depth: u32) -> String {
             s
         }
         crate::jit::FnKey::Sandbox(b) => if b == u32::MAX { "sandbox:invalid".to_string() } else { format!("sandbox:{}", stable_fn_name_d(u, b, depth + 1)) },
+        crate::jit::FnKey::Plain(b) => format!("plain:{}", stable_fn_name_d(u, b, depth + 1)),
         crate::jit::FnKey::Closure(file, e, p) => {
             let parent = if depth < 16 { stable_fn_name_d(u, p, depth + 1) } else { String::new() };
             format!("closure:{}:{}@{}", u.prog.file_paths.get(file as usize).map_or("", |x| x.as_str()), e, parent)

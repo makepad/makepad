@@ -697,7 +697,7 @@ fn function_origin(u: &Unit, mut id: u32) -> Option<(u32,u32)> {
         match &u.fns[id as usize].key {
             FnKey::Inst(d,_) => { let d = u.prog.def(*d); return Some((d.file,u.prog.files[d.file as usize].ast.item(d.item).lo)); }
             FnKey::Closure(f,e,_) => return Some((*f,u.prog.files[*f as usize].ast.expr(crate::ast::ExprId(*e)).lo)),
-            FnKey::Sandbox(parent) => id = *parent,
+            FnKey::Sandbox(parent) | FnKey::Plain(parent) => id = *parent,
             FnKey::Shim(shim) => { let d = u.prog.def(shim.kind.def_id()); return Some((d.file, u.prog.files[d.file as usize].ast.item(d.item).lo)); }
             FnKey::Glue(_,t) => {
                 if let crate::types::TyKind::Adt(d,_, _) = u.tcx.tys.kind(*t) {

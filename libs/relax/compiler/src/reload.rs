@@ -1678,7 +1678,7 @@ unsafe fn discriminant_deps_changed(up: *mut Unit, anon: DefId, changed: &[DefId
                 FnKey::Inst(d, args) => break changed.contains(d) || args.iter().any(|t| ty_mentions(u, *t, layout_defs, 0)),
                 FnKey::Glue(_, t) => break ty_mentions(u, *t, layout_defs, 0),
                 FnKey::Shim(shim) => break shim.args.iter().any(|t| ty_mentions(u, *t, layout_defs, 0)),
-                FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) => k = *parent,
+                FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) | FnKey::Plain(parent) => k = *parent,
             }
         };
         if hit { return Ok(true); }
@@ -2934,9 +2934,20 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             u.reload_errors.remove(&id);
             u.reload_specs.remove(&id);
         }
+        // SPEC-V: the unverified-mode twins of the edited bodies are the old text: rebuilt if they had
+        // code, else only forgotten (they compile from the new text on their first call)
+        let plain: Vec<u32> = slots.iter().chain(fresh.iter()).filter_map(|&id| u.plain_twin_of(id)).collect();
+        for &id in &plain {
+            let f = &mut u.fns[id as usize];
+            f.rir = None;
+            f.build_err = None;
+            f.spec = None;
+            u.reload_errors.remove(&id);
+            u.reload_specs.remove(&id);
+        }
         // Module base slots only supply RIR. Their twins are already in the dependency
         // closure above; rebuild compiled twins and leave cold twins for first use.
-        let targets: Vec<u32> = slots.iter().chain(fresh.iter()).copied().filter(|&id| {
+        let targets: Vec<u32> = slots.iter().chain(fresh.iter()).copied().chain(plain.iter().copied().filter(|&id| u.fns[id as usize].compiled)).filter(|&id| {
             !crate::sandbox::is_sandboxed_slot(u, id)
                 && (!matches!(u.fns[id as usize].key, FnKey::Sandbox(_)) || u.fns[id as usize].compiled)
         }).collect();

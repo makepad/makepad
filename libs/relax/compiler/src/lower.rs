@@ -183,6 +183,9 @@ struct LoopCx {
 }
 
 pub struct Lcx<'a> {
+    /// SPEC-V: this body is unverified code: calls that pass `&mut` beside another pointer-holding
+    /// argument go to the callee's unverified-mode twin
+    plain_calls: bool,
     /// lowering a const/static initializer: borrowed temporaries live in static memory
     /// (rustc's constant promotion), not on the initializer's stack
     const_init: bool,
@@ -322,6 +325,7 @@ pub fn fn_name(u: &Unit, key: &FnKey) -> String {
         FnKey::Glue(k, t) => format!("glue{}<{}>", k, crate::typeck::ty_to_string(false, &u.prog, &u.tcx, *t)),
         FnKey::Sandbox(b) if *b == u32::MAX => "sandbox:invalid-fn-pointer".to_string(),
         FnKey::Sandbox(b) => format!("sandbox:{}", u.fns[*b as usize].name),
+        FnKey::Plain(b) => format!("{} [unverified]", u.fns[*b as usize].name),
     }
 }
 
@@ -333,6 +337,9 @@ const ARRAY_STEP: u32 = u32::MAX - 1;
 impl<'a> Lcx<'a> {
     /// `cur_fn`: the slot this body is built for (its closures' parent).
     pub fn new(u: &'a Unit, b: &'a Body, name: String, cur_fn: u32) -> Lcx<'a> {
+        // SPEC-V: unverified code (no clean verdict yet, or an unverified-mode twin) sends its
+        // aliasing-prone calls to unverified-mode twins
+        let plain_calls = crate::jit::PLAIN_LOWER.with(|c| c.get()) == Some(cur_fn) || ((cur_fn as usize) < u.fns.len() && !u.verdict_clean(cur_fn));
         let mut f = Func::new(name, b.file);
         let entry = f.block();
         let n = b.locals.len();
@@ -343,6 +350,7 @@ impl<'a> Lcx<'a> {
             closure_storage,
             u,
             cur_fn,
+            plain_calls,
             b,
             f,
             cur: entry,
@@ -8916,6 +8924,42 @@ impl<'a> Lcx<'a> {
         p
     }
 
+    /// SPEC-V: whether a call with these arguments could pass aliasing pointers to a `noalias`
+    /// parameter: a `&mut` of a sized `Unpin` type (the parameters lowered with `noalias`) and at least
+    /// one other argument that can hold a pointer. Two paths to the same bytes need two such values.
+    fn alias_prone(&mut self, args: &[(Val, TyId)]) -> bool {
+        let mut muts = false;
+        let mut holders = 0;
+        for (_, t) in args {
+            if let TyKind::Ref(true, inner, _) = self.kind_ref(*t).clone() {
+                if !self.unsized_ty(inner) && self.u.is_unpin(inner) { muts = true; }
+            }
+            if self.may_hold_pointer(*t, 0) { holders += 1; }
+        }
+        muts && holders >= 2
+    }
+
+    fn may_hold_pointer(&mut self, t: TyId, depth: u32) -> bool {
+        match self.kind_ref(t).clone() {
+            TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Never | TyKind::Str => false,
+            TyKind::Tuple(v) => {
+                let items: Vec<TyId> = self.u.tcx.tys.list(v).to_vec();
+                items.into_iter().any(|x| self.may_hold_pointer(x, depth + 1))
+            }
+            TyKind::Array(e, _) => depth < 4 && self.may_hold_pointer(e, depth + 1),
+            TyKind::Adt(d, args, _) if depth < 4 => {
+                if self.layout(t).size == 0 { return false; }
+                let u = self.u;
+                let fields: Vec<TyId> = match u.tcx.adts.get(&d) {
+                    Some(a) => a.variants.iter().flat_map(|v| v.fields.iter().map(|f| u.tcx.tys.subst_erasing_regions(f.ty, u.tcx.tys.list(args)))).collect(),
+                    None => return true,
+                };
+                fields.into_iter().any(|f| self.may_hold_pointer(f, depth + 1))
+            }
+            _ => true,
+        }
+    }
+
     /// Emits a call with Relax's ABI. Returns the result value.
     fn emit_call(&mut self, callee: Callee, mut args: Vec<(Val, TyId)>, ret: TyId) -> Val {
         let def = match &callee {
@@ -8932,6 +8976,9 @@ impl<'a> Lcx<'a> {
         if def.is_some_and(|d| self.u.tcx.fn_item_sig(&self.u.prog, d).is_some_and(|s| s.header.abi == crate::types::Abi::RustCall)) {
             self.spread_tuple_argument(&mut args);
         }
+        // SPEC-V: unverified code may break the borrow rules; the callee's `noalias` code must not
+        // see such arguments
+        let to_twin = self.plain_calls && matches!(callee, Callee::Fn(_)) && self.alias_prone(&args);
         // C ABI calls: every aggregate goes by pointer to a private copy, an aggregate
         // result through a result slot; the backend does the C placement (CSig)
         let csig = match &callee {
@@ -9015,6 +9062,17 @@ impl<'a> Lcx<'a> {
             let l = self.caller_location_val();
             abi_args.push(l);
         }
+        // (the twin has the original's ABI, hence its result slot and implicit caller location)
+        let callee = match callee {
+            Callee::Fn(id) if to_twin => {
+                let twin = self.u.plain_twin(id);
+                if sret.is_some() && !self.f.sret_callees.contains(&twin) {
+                    self.f.sret_callees.push(twin);
+                }
+                Callee::Fn(twin)
+            }
+            c => c,
+        };
         self.emit(Inst::Call(callee, abi_args, rets.clone()));
         if self.is_never(ret) {
             self.term(Term::Unreachable);

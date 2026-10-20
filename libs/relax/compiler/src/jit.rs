@@ -36,6 +36,11 @@ pub enum FnKey {
     /// the sandboxed twin of a slot (sandbox.rs): the same RIR compiled with every memory
     /// access confined to the calling module's arena, calls and fn values redirected to twins
     Sandbox(u32),
+    /// SPEC-V: the unverified-mode twin of a slot: the same body built as unverified code (baseline,
+    /// no `noalias`, its own aliasing-prone calls going to twins too). Unverified code calls it
+    /// instead of the slot when it passes `&mut` next to another pointer-holding argument, so a
+    /// call that breaks the borrow rules never runs code compiled under the `noalias` assumption.
+    Plain(u32),
 }
 
 /// Round 23: the erased nightly Instance identity survives slot interning and caching.
@@ -3537,7 +3542,7 @@ impl Unit {
             }
             FnKey::Inst(_, args) => args.iter_mut().for_each(|t| *t = self.tcx.tys.erase_regions(*t)),
             FnKey::Glue(_, t) => *t = self.tcx.tys.erase_regions(*t),
-            FnKey::Closure(..) | FnKey::Sandbox(_) => {}
+            FnKey::Closure(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => {}
         }
         key
     }
@@ -3643,6 +3648,7 @@ impl Unit {
             FnKey::Shim(_) | FnKey::Glue(..) => 0,
             FnKey::Sandbox(b) if *b == u32::MAX => 0,
             FnKey::Sandbox(b) => self.fns[*b as usize].file,
+            FnKey::Plain(b) => self.fns[*b as usize].file,
         }
     }
 
@@ -3651,7 +3657,7 @@ impl Unit {
         // Generated glue and sandbox entries are conservatively not local-linkage. A
         // definition's own entry/export markers are read only by single_ref (declared_entry):
         // most slots (the startup image's thousands) are never asked.
-        let entry_ref = matches!(key, FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_)) && !matches!(key, FnKey::Glue(GLUE_UNNAMED, _));
+        let entry_ref = matches!(key, FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_)) && !matches!(key, FnKey::Glue(GLUE_UNNAMED, _));
         let name = crate::zone_alloc::kept_with(|| name.into_boxed_str());
         FnEntry { key, name, code: stub_addr, code_len: stub_len, pc_map: PcMap::default(), file, history: None, compiled: false, patch_gen: 0, rir: None, refs: u32::from(entry_ref), rir_refs: Box::default(), entry_ref: AtomicBool::new(entry_ref), entry_ref_counted: entry_ref, building: false, build_err: None, build_ns: 0, cg_ns: 0, version: 0, inflight: false, spec: None, spec_state: 0, spec_depth: u8::MAX, baseline_hint: AtomicBool::new(false), hot_hint: AtomicBool::new(false), o3: AtomicBool::new(false), base_code: AtomicBool::new(false), unverified: AtomicBool::new(false), calls: Box::default() }
     }
@@ -3661,7 +3667,7 @@ impl Unit {
     fn slot_named(&self, id: u32, key: &FnKey) {
         if crate::exec_census::active() {
             let mut owner = key;
-            while let FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) = owner {
+            while let FnKey::Closure(_, _, parent) | FnKey::Sandbox(parent) | FnKey::Plain(parent) = owner {
                 if *parent as usize >= self.fns.len() { break; }
                 owner = &self.fns[*parent as usize].key;
             }
@@ -4752,8 +4758,24 @@ impl Unit {
                 }
             }
             FnKey::Closure(_, _, parent) => self.verdict_state(*parent),
+            // the unverified-mode twin is never promoted: it exists to run under aliasing
+            FnKey::Plain(_) => Verdict::Unverifiable("unverified-mode twin".into()),
             _ => Verdict::Clean,
         }
+    }
+
+    /// SPEC-V: the unverified-mode twin of slot `id` (created on first use); `id` itself when it has
+    /// none (only fn instances and closures are built from a body).
+    pub(crate) fn plain_twin(&self, id: u32) -> u32 {
+        match self.fns[id as usize].key {
+            FnKey::Inst(..) | FnKey::Closure(..) => self.fn_id(FnKey::Plain(id)),
+            _ => id,
+        }
+    }
+
+    /// SPEC-V: the twin of `id`, if one exists.
+    pub(crate) fn plain_twin_of(&self, id: u32) -> Option<u32> {
+        self.fn_map.get(&FnKey::Plain(id))
     }
 
     /// SPEC-V: whether slot `id`'s code is verified. A flagged slot whose verdict has become clean
@@ -6089,7 +6111,7 @@ pub fn src_size(u: &Unit, id: u32) -> u32 {
             let b = u.prog.files[*file as usize].ast.block(crate::ast::BlockId(*ce & !crate::tcx::ASYNC_FN_BODY));
             (*file, b.lo, b.hi)
         }
-        FnKey::Sandbox(_) => return u32::MAX,
+        FnKey::Sandbox(_) | FnKey::Plain(_) => return u32::MAX,
         FnKey::Closure(file, ce, _) => {
             let e = u.prog.files[*file as usize].ast.expr(crate::ast::ExprId(*ce));
             (*file, e.lo, e.hi)
@@ -6141,7 +6163,7 @@ fn callee_attrs(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, fns: &cra
         FnKey::Closure(..) if core_hint => crate::opt::ATTR_HINT,
         FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Closure(..) => 0,
         // twins are never inlined into anything (their callers are twins built from RIR)
-        FnKey::Sandbox(_) => return None,
+        FnKey::Sandbox(_) | FnKey::Plain(_) => return None,
     })
 }
 
@@ -6362,7 +6384,7 @@ pub(crate) unsafe fn o2_cached(up: *mut Unit, id: u32) {
 /// of the O1 code their start runs until O3 replaces it (O3 code is not cached). On the owner thread.
 unsafe fn o2_hot(up: *mut Unit, id: u32) {
     let u = &*up;
-    if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_)) || u.cache.is_none() {
+    if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_)) || u.cache.is_none() {
         return;
     }
     u.fns[id as usize].hot_hint.store(true, Ordering::Relaxed);
@@ -6454,7 +6476,7 @@ unsafe fn release_base(up: *mut Unit) {
 /// Queues baseline slot `id` for its O2 build (once; not glue or sandbox twins, as o2_hot).
 unsafe fn o2_base(up: *mut Unit, id: u32) {
     let u = &*up;
-    if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_)) || u.cache.is_none() || !o2_on() {
+    if (id as usize) >= u.fns.len() || matches!(u.fns[id as usize].key, FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_)) || u.cache.is_none() || !o2_on() {
         return;
     }
     {
@@ -6535,7 +6557,7 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     }
     let f = &(&*up).fns[id as usize];
     // O3 code installed: an O2 build after the present is still the slot's cache entry
-    if f.build_err.is_some() || matches!(f.key, FnKey::Sandbox(_)) || (snapshot && f.o3.load(Ordering::Relaxed)) {
+    if f.build_err.is_some() || matches!(f.key, FnKey::Sandbox(_) | FnKey::Plain(_)) || (snapshot && f.o3.load(Ordering::Relaxed)) {
         O2_STATS[2].fetch_add(1, Ordering::Relaxed);
         return None;
     }
@@ -7434,7 +7456,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
                 // a closure body is lowered from its parent's checked body: only once that exists
                 FnKey::Closure(cf, _, parent) => u.has_body(*parent, *cf),
                 FnKey::Shim(_) | FnKey::Glue(..) => true,
-                FnKey::Sandbox(_) => continue,
+                FnKey::Sandbox(_) | FnKey::Plain(_) => continue,
             };
             if !builtin && (!cfg.inline_all || matches!(u.fns[*c as usize].key, FnKey::Closure(..))) {
                 continue;
@@ -8521,7 +8543,24 @@ fn provided_bridge(u: &Unit, d: DefId) -> Result<Option<crate::rir::Func>, Strin
     }
 }
 
+thread_local! {
+    /// SPEC-V: the slot whose body this thread lowers for its unverified-mode twin (lower.rs Lcx::new)
+    pub(crate) static PLAIN_LOWER: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Lowers slot `id`. An unverified-mode twin is its base slot's body lowered again as unverified code.
 unsafe fn build_rir_lowered(up: *mut Unit, id: u32) -> Result<crate::rir::Func, String> {
+    if let FnKey::Plain(base) = (&*up).fns[id as usize].key {
+        let prev = PLAIN_LOWER.with(|c| c.replace(Some(base)));
+        let r = build_rir_lowered_as(up, base);
+        PLAIN_LOWER.with(|c| c.set(prev));
+        return r;
+    }
+    build_rir_lowered_as(up, id)
+}
+
+unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<crate::rir::Func, String> {
+    let plain = PLAIN_LOWER.with(|c| c.get()) == Some(id);
     let _why = why_function(&*up, id, "lower-fn");
     let _cost_lower = crate::fncost::phase(3);
     let _mem = crate::memstat::tag(crate::memstat::Tag::Lower);
@@ -8608,7 +8647,7 @@ unsafe fn build_rir_lowered(up: *mut Unit, id: u32) -> Result<crate::rir::Func, 
     }
     // Bridge, virtual and derived bodies above always keep their usual selection. Ahead
     // helpers only supply the source-body lowering below.
-    if let Some(f) = take_lowered_ahead(&mut *up, id) {
+    if let Some(f) = if plain { None } else { take_lowered_ahead(&mut *up, id) } {
         return Ok(f);
     }
     let t0 = cpu_ns();
@@ -8661,6 +8700,7 @@ unsafe fn build_rir_lowered(up: *mut Unit, id: u32) -> Result<crate::rir::Func, 
         }
         FnKey::Shim(_) | FnKey::Glue(..) => return Err("glue".to_string()),
         FnKey::Sandbox(_) => return Err("sandbox twins are built from their base slot's RIR".to_string()),
+        FnKey::Plain(_) => return Err("unverified-mode twins are lowered as their base slot".to_string()),
     };
     if !body.errors.is_empty() {
         return Err(body.errors[0].clone());
@@ -8748,7 +8788,7 @@ fn lower_checked_body(u: &Unit, id: u32, key: &FnKey, body: &Body) -> Result<(cr
     match key {
         FnKey::Inst(d, _) => lcx.lower_fn_body(*d),
         FnKey::Closure(_, ce, _) => lcx.lower_closure_body(*ce),
-        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) => {}
+        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => {}
     }
     lcx.finish();
     // A branch on a known constant was folded (check only) on the strength of registers written
@@ -8760,7 +8800,7 @@ fn lower_checked_body(u: &Unit, id: u32, key: &FnKey, body: &Body) -> Result<(cr
         match key {
             FnKey::Inst(d, _) => lcx.lower_fn_body(*d),
             FnKey::Closure(_, ce, _) => lcx.lower_closure_body(*ce),
-            FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) => {}
+            FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => {}
         }
         lcx.finish();
     }
@@ -10074,7 +10114,7 @@ impl Unit {
             FnKey::Inst(d, _) => self.prog.def(*d).kind != DefKind::ForeignFn,
             FnKey::Closure(..) => true,
             FnKey::Sandbox(base) => *base != u32::MAX,
-            FnKey::Shim(_) | FnKey::Glue(..) => false,
+            FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Plain(_) => false,
         };
         self.arm_counter_as(id, code, counted);
     }
@@ -10438,6 +10478,7 @@ unsafe fn t1_key(up: *const Unit, id: u32) -> String {
         FnKey::Closure(file, e, parent) => format!("closure:{}:{}:{}", file, e, t1_key(up, *parent)),
         FnKey::Shim(shim) => crate::lower::shim_name(&u.prog, &u.tcx, shim),
         FnKey::Glue(g, t) => format!("glue{}:{}", g, ty(*t)),
+        FnKey::Plain(b) => format!("plain:{}", t1_key(up, *b)),
         FnKey::Sandbox(b) if (*b as usize) < u.fns.len() => format!("sandbox:{}", t1_key(up, *b)),
         FnKey::Sandbox(b) => format!("sandbox:{}", b),
     };
@@ -11749,6 +11790,7 @@ fn slot_key_inner(u: &Unit, id: u32) -> String {
         FnKey::Glue(g, t) => format!("glue{}<{}>", g, crate::typeck::ty_to_string(true, &u.prog, &u.tcx, *t)),
         FnKey::Sandbox(b) if *b == u32::MAX => "sandbox<invalid>".to_string(),
         FnKey::Sandbox(b) => format!("sandbox<{}>", slot_key(u, *b)),
+        FnKey::Plain(b) => format!("plain<{}>", slot_key(u, *b)),
     }
 }
 
@@ -11835,7 +11877,7 @@ unsafe fn spec_enqueue_calls(up: *mut Unit, func: &crate::rir::Func, skip: &[u32
                 let ok = match &f.key {
                     FnKey::Inst(d, _) => u.prog.def(*d).kind != DefKind::ForeignFn,
                     FnKey::Closure(cf, _, parent) => u.has_body(*parent, *cf),
-                    FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) => false,
+                    FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => false,
                 };
                 if !ok {
                     continue;
@@ -13290,6 +13332,7 @@ fn canon_slots(d: String) -> String {
             FnKey::Shim(shim) => crate::lower::shim_name(prog, tcx, &shim),
             FnKey::Glue(g, t) => format!("glue{}:{}", g, crate::typeck::ty_to_string(false, prog, tcx, t)),
             FnKey::Sandbox(b) => format!("sandbox:{}", b),
+            FnKey::Plain(b) => format!("plain:{}", b),
         })
     };
     // `Fn(N)` / `CFn(N, ..)` callees and `FnAddr(VReg(v), N)`; a closure's name carries its parent's
@@ -14011,7 +14054,7 @@ unsafe fn ensure_parent_body(up: *mut Unit, id: u32, file: u32, depth: u32) -> R
                 Err(_) => ctfe_checked_body(u, d, &args).unwrap_or_else(|| crate::typeck::codegen_body(&u.prog, &u.tcx, d, &args)),
             }
         }
-        FnKey::Sandbox(_) => return Err("closure parent is a sandbox twin".to_string()),
+        FnKey::Sandbox(_) | FnKey::Plain(_) => return Err("closure parent is a twin".to_string()),
         FnKey::Closure(_, _, grand) => {
             ensure_parent_body(up, grand, file, depth + 1)?;
             match (&*up).body_of(grand, file) {
