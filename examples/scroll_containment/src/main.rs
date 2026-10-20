@@ -1,8 +1,10 @@
 //! Scroll containment harness: a page and a list with scrollables nested inside them, plus popups,
-//! a stack view, a sliding panel and a modal. `status` reports every offset, for `--remote` tests.
+//! a stack view, a sliding panel and two modals, one with wide code. `status` reports every offset,
+//! for `--remote` tests.
 
 pub use makepad_widgets;
 
+use makepad_code_editor::{code_view::CodeView, text::Position};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -168,6 +170,12 @@ script_mod! {
                                         Label{width: 120 text: "Carousel 5"}
                                         Label{width: 120 text: "Carousel 6"}
                                     }
+                                    fit_view := ScrollYView{
+                                        width: Fill
+                                        height: 60
+                                        flow: Down
+                                        Label{height: 30 text: "FitView"}
+                                    }
                                     Label{height: 40 text: "Page 1"}
                                     Label{height: 40 text: "Page 2"}
                                     Label{height: 40 text: "Page 3"}
@@ -207,6 +215,7 @@ script_mod! {
                                         Label{height: 30 text: "Under 11"}
                                         Label{height: 30 text: "Under 12"}
                                     }
+                                    open_code_modal := Button{text: "OpenCodeModal"}
                                 }
                                 stack_box := View{
                                     width: 200
@@ -277,6 +286,60 @@ script_mod! {
                                     Label{height: 30 text: "Modal 12"}
                                     Label{height: 30 text: "Modal 13"}
                                     Label{height: 30 text: "Modal 14"}
+                                }
+                            }
+                        }
+                        // Like Robrix's event source modal: a pinned title over one page that
+                        // scrolls, holding code that only ever scrolls sideways.
+                        code_modal := Modal{
+                            content +: {
+                                width: 360
+                                height: 420
+                                flow: Down
+                                code_title := Label{height: 30 text: "CodeTitle"}
+                                View{
+                                    width: Fill
+                                    height: Fill
+                                    flow: Overlay
+                                    align: Align{x: 1.0, y: 1.0}
+                                    code_page := ScrollYView{
+                                        width: Fill
+                                        height: Fill
+                                        flow: Down
+                                        code_page_top := Label{height: 30 text: "CodePageTop"}
+                                        code_button := Button{text: "CopySource"}
+                                        narrow_code_view := CodeView{
+                                            editor +: {
+                                                width: Fill
+                                                height: Fit
+                                                word_wrap: true
+                                                scroll_bars +: {
+                                                    show_scroll_x: true
+                                                    show_scroll_y: false
+                                                    scroll_bar_x.drag_scrolling: true
+                                                }
+                                            }
+                                        }
+                                        code_view := CodeView{
+                                            editor +: {
+                                                width: Fill
+                                                height: Fit
+                                                word_wrap: false
+                                                scroll_bars +: {
+                                                    show_scroll_x: true
+                                                    show_scroll_y: false
+                                                    scroll_bar_x.drag_scrolling: true
+                                                }
+                                            }
+                                        }
+                                        Label{height: 30 text: "CodePageEnd"}
+                                    }
+                                    // Drawn over the page's corner, not inside it, and with nothing to scroll.
+                                    code_floating := ScrollYView{
+                                        width: 100
+                                        height: 40
+                                        Label{height: 30 text: "CodeFloating"}
+                                    }
                                 }
                             }
                         }
@@ -401,6 +464,8 @@ fn row_list_position(cx: &mut Cx, widget: &WidgetRef) -> f64 {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    code_clicks: usize,
 }
 
 impl App {
@@ -445,12 +510,30 @@ impl App {
         let modal_page = ui.widget(cx, ids!(modal_page));
         let modal_y = -offset(cx, &modal_page, &ui.widget(cx, ids!(modal_top))).y;
         let modal_list = row_list_position(cx, &ui.widget(cx, ids!(modal_list)));
+        let code_page = ui.widget(cx, ids!(code_page));
+        let code_page_y = -offset(cx, &code_page, &ui.widget(cx, ids!(code_page_top))).y;
+        // The first glyph's spot in the code view moves opposite to its own scroll.
+        let (code_view_x, code_sel) = match ui.widget(cx, ids!(code_view)).borrow::<CodeView>() {
+            Some(code) => match &code.session {
+                Some(session) => {
+                    let selected = session.selections().iter().filter(|s| !s.is_empty()).count() as f64;
+                    match code.editor.position_rect(session, Position::zero()) {
+                        Some(first) => (-first.pos.x, selected),
+                        None => (-1.0, selected),
+                    }
+                }
+                None => (-1.0, -1.0),
+            },
+            None => (-1.0, -1.0),
+        };
         format!(
             "page={page_y:.0} log={log:.0} short={short:.0} inner={inner_y:.0} carousel={carousel_x:.0} \
              outer={outer:.0} nested={nested:.0} nested_short={nested_short:.0} strip={strip_x:.0} \
              code={code_y:.0} fit={fit:.1} fit_travel={fit_travel:.0} under={under_y:.0} \
              swipe={swipe_x:.0} stack_depth={stack_depth} panel={panel:.0} panel_list={panel_list:.0} \
-             modal={modal_y:.0} modal_list={modal_list:.0}"
+             modal={modal_y:.0} modal_list={modal_list:.0} code_page={code_page_y:.0} \
+             code_x={code_view_x:.0} code_sel={code_sel} code_clicks={}",
+            self.code_clicks
         )
     }
 }
@@ -461,11 +544,27 @@ impl MatchEvent for App {
         self.ui.text_input(cx, ids!(notes)).set_text(cx, &notes.join("\n"));
         self.ui.text_input(cx, ids!(short_notes)).set_text(cx, "Short note");
         self.ui.stack_navigation(cx, ids!(stack)).push_without_animation(cx, live_id!(detail_view));
+        // An event's source: more lines than the code modal shows, two of them far wider than it.
+        let mut source = vec![
+            "{".to_string(),
+            format!("  \"body\": \"{}\",", "a long message body ".repeat(12).trim_end()),
+            format!("  \"ed25519:key\": \"{}\",", "q3l2SXbAmAc0r3EGrbz0nNJgdFbK".repeat(8)),
+        ];
+        source.extend((0..40).map(|i| format!("  \"field_{i}\": {i},")));
+        source.push("  \"type\": \"m.room.message\"\n}".to_string());
+        self.ui.widget(cx, ids!(code_view)).set_text(cx, &source.join("\n"));
+        self.ui.widget(cx, ids!(narrow_code_view)).set_text(cx, "{\n  \"type\": \"m.reaction\"\n}");
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(open_modal)).clicked(actions) {
             self.ui.modal(cx, ids!(modal)).open(cx);
+        }
+        if self.ui.button(cx, ids!(open_code_modal)).clicked(actions) {
+            self.ui.modal(cx, ids!(code_modal)).open(cx);
+        }
+        if self.ui.button(cx, ids!(code_button)).clicked(actions) {
+            self.code_clicks += 1;
         }
     }
 }
@@ -473,6 +572,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        makepad_code_editor::script_mod(vm);
         self::script_mod(vm)
     }
 

@@ -461,35 +461,36 @@ impl TestApp {
         Ok(())
     }
 
+    /// Drags one finger from the target's center through each offset in `path` in turn.
     fn try_touch_drag_from(
         &self,
         target: &WidgetSnapshot,
-        dx: f64,
-        dy: f64,
+        path: &[(f64, f64)],
         is_held: bool,
     ) -> TestResult<()> {
         self.ensure_running()?;
         let (start_x, start_y) = snapshot_center_f64(target);
         let window = Some(target.window_index);
         let client = self.client();
-        let touch = |phase, progress: f64| MouseInput {
+        let touch = |phase, (dx, dy): (f64, f64)| MouseInput {
             phase: Some(phase),
-            ..MouseInput::at(
-                MouseKind::Touch,
-                window,
-                start_x + dx * progress,
-                start_y + dy * progress,
-            )
+            ..MouseInput::at(MouseKind::Touch, window, start_x + dx, start_y + dy)
         };
-        client.mouse(&touch("start", 0.0))?;
-        for step in 1..=DRAG_STEPS {
-            client.mouse(&touch("move", step as f64 / DRAG_STEPS as f64))?;
+        client.mouse(&touch("start", (0.0, 0.0)))?;
+        let mut from = (0.0, 0.0);
+        for &to in path {
+            for step in 1..=DRAG_STEPS {
+                let progress = step as f64 / DRAG_STEPS as f64;
+                let at = (from.0 + (to.0 - from.0) * progress, from.1 + (to.1 - from.1) * progress);
+                client.mouse(&touch("move", at))?;
+            }
+            from = to;
         }
         if is_held {
             thread::sleep(DRAG_HOLD);
-            client.mouse(&touch("move", 1.0))?;
+            client.mouse(&touch("move", from))?;
         }
-        client.mouse(&touch("stop", 1.0))?;
+        client.mouse(&touch("stop", from))?;
         self.inner.borrow_mut().focus_window = window;
         self.pace_after_action();
         Ok(())
@@ -962,7 +963,7 @@ impl Locator {
 
     pub fn try_touch_drag_by(&self, dx: f64, dy: f64) -> TestResult<()> {
         let target = self.resolve_unique_visible()?;
-        self.app.try_touch_drag_from(&target, dx, dy, false)
+        self.app.try_touch_drag_from(&target, &[(dx, dy)], false)
     }
 
     /// Like [`Self::drag_by_and_hold`], with one finger on a touch screen instead of the mouse.
@@ -975,7 +976,20 @@ impl Locator {
 
     pub fn try_touch_drag_by_and_hold(&self, dx: f64, dy: f64) -> TestResult<()> {
         let target = self.resolve_unique_visible()?;
-        self.app.try_touch_drag_from(&target, dx, dy, true)
+        self.app.try_touch_drag_from(&target, &[(dx, dy)], true)
+    }
+
+    /// Like [`Self::touch_drag_by_and_hold`], through each offset from the start in turn, like a finger that turns.
+    pub fn touch_drag_through_and_hold(self, path: &[(f64, f64)]) -> Self {
+        if let Err(err) = self.try_touch_drag_through_and_hold(path) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_touch_drag_through_and_hold(&self, path: &[(f64, f64)]) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_touch_drag_from(&target, path, true)
     }
 
     pub fn snapshot(&self) -> WidgetSnapshot {

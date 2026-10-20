@@ -406,3 +406,189 @@ fn a_list_partly_scrolled_out_of_a_modal_still_takes_its_scrolls(app: TestApp) {
     wheel(&app, over_list, 0.0, 30.0);
     assert_eq!(offsets(&app, ["modal", "modal_list"]), [modal, list + 30.0]);
 }
+
+/// Scrolls the page so the carousel and the view that fits below it are in view.
+fn reveal_carousel(app: &TestApp) -> f64 {
+    wheel(app, center(app, Selector::id("page_top")), 0.0, 300.0);
+    thread::sleep(NEW_SCROLL);
+    let [page] = offsets(app, ["page"]);
+    assert!(page > 250.0, "the page scrolled the carousel into view");
+    page
+}
+
+#[makepad_test]
+fn touch_dragging_a_horizontal_strip_in_a_page_scrolls_each_its_own_way(app: TestApp) {
+    let page = reveal_carousel(&app);
+    let [carousel] = offsets(&app, ["carousel"]);
+    app.locator(Selector::id("carousel")).touch_drag_by_and_hold(-100.0, -10.0);
+    let [page_after, carousel_after] = offsets(&app, ["page", "carousel"]);
+    assert!(carousel_after > carousel + 80.0, "the strip followed the finger ({carousel} -> {carousel_after})");
+    assert_eq!(page_after, page);
+
+    app.locator(Selector::id("carousel")).touch_drag_by_and_hold(10.0, -60.0);
+    let [page_after, carousel_after_vertical] = offsets(&app, ["page", "carousel"]);
+    assert!(page_after > page + 40.0, "the page followed the finger ({page} -> {page_after})");
+    assert_eq!(carousel_after_vertical, carousel_after);
+
+    // A drag that starts out mostly sideways moves only the strip.
+    app.locator(Selector::id("carousel")).touch_drag_by_and_hold(-60.0, -20.0);
+    let [page_after_diagonal, carousel_after_diagonal] = offsets(&app, ["page", "carousel"]);
+    assert_eq!(page_after_diagonal, page_after);
+    assert!(carousel_after_diagonal > carousel_after_vertical + 40.0);
+}
+
+#[makepad_test]
+fn mouse_dragging_a_horizontal_strip_in_a_page_scrolls_each_its_own_way(app: TestApp) {
+    let page = reveal_carousel(&app);
+    app.locator(Selector::id("carousel")).drag_by_and_hold(0.0, -60.0);
+    let [page_after] = offsets(&app, ["page"]);
+    assert!(page_after > page + 40.0, "the page followed the mouse ({page} -> {page_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_a_nested_scroll_view_with_nothing_to_scroll_drags_the_page(app: TestApp) {
+    let page = reveal_carousel(&app);
+    app.locator(Selector::id("fit_view")).touch_drag_by_and_hold(0.0, -60.0);
+    let [page_after] = offsets(&app, ["page"]);
+    assert!(page_after > page + 40.0, "the page followed the finger ({page} -> {page_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_a_multiline_input_never_drags_the_page(app: TestApp) {
+    let page = reveal_carousel(&app);
+    app.locator(Selector::id("short_notes")).touch_drag_by_and_hold(0.0, -60.0);
+    assert_eq!(offsets(&app, ["page"]), [page]);
+}
+
+fn open_code_modal(app: &TestApp) {
+    app.locator(Selector::id("open_code_modal")).click();
+    app.locator(Selector::id("code_view")).wait_visible();
+    thread::sleep(Duration::from_millis(300));
+}
+
+#[makepad_test]
+fn touch_dragging_wide_code_scrolls_it_sideways_and_its_page_down(app: TestApp) {
+    open_code_modal(&app);
+    let [page, x] = offsets(&app, ["code_page", "code_x"]);
+    // A little off each axis, so only the axis each drag mostly went along moves.
+    app.locator(Selector::id("code_view")).touch_drag_by_and_hold(-120.0, -12.0);
+    let [page_after, x_after] = offsets(&app, ["code_page", "code_x"]);
+    assert!(x_after >= x + 110.0, "the code followed the finger sideways ({x_after})");
+    assert_eq!(page_after, page);
+
+    app.locator(Selector::id("code_view")).touch_drag_by_and_hold(12.0, -80.0);
+    let [page_after, x_after_vertical] = offsets(&app, ["code_page", "code_x"]);
+    assert!(page_after >= page + 70.0, "the page followed the finger ({page_after})");
+    assert_eq!(x_after_vertical, x_after);
+
+    // A drag that starts out diagonally moves both.
+    app.locator(Selector::id("code_view")).touch_drag_by_and_hold(-60.0, -40.0);
+    let [page_diagonal, x_diagonal] = offsets(&app, ["code_page", "code_x"]);
+    assert!(page_diagonal >= page_after + 30.0, "the page followed the finger ({page_diagonal})");
+    assert!(x_diagonal >= x_after + 50.0, "the code followed the finger ({x_diagonal})");
+}
+
+#[makepad_test]
+fn touch_dragging_code_never_selects_it(app: TestApp) {
+    open_code_modal(&app);
+    // Toward both scroll limits, so neither scroller can keep the text under the finger.
+    app.locator(Selector::id("code_view")).touch_drag_by(60.0, 60.0);
+    assert_eq!(offsets(&app, ["code_sel"]), [0.0]);
+}
+
+#[makepad_test]
+fn mouse_dragging_code_selects_it_and_scrolls_nothing(app: TestApp) {
+    open_code_modal(&app);
+    let [page, x] = offsets(&app, ["code_page", "code_x"]);
+    app.locator(Selector::id("code_view")).drag_by(-120.0, -40.0);
+    assert_eq!(offsets(&app, ["code_sel", "code_page", "code_x"]), [1.0, page, x]);
+}
+
+#[makepad_test]
+fn touch_dragging_from_a_button_above_code_never_clicks_it(app: TestApp) {
+    open_code_modal(&app);
+    let [page] = offsets(&app, ["code_page"]);
+    app.locator(Selector::id("code_button")).touch_drag_by_and_hold(0.0, -60.0);
+    assert_eq!(offsets(&app, ["code_clicks", "code_page"]), [0.0, page]);
+
+    // A touch that stays put is still a tap.
+    app.locator(Selector::id("code_button")).touch_drag_by(0.0, 0.0);
+    wait_for(&app, "code_clicks", 1.0);
+}
+
+#[makepad_test]
+fn a_scroll_view_never_joins_a_drag_on_a_scroller_drawn_over_it(app: TestApp) {
+    open_code_modal(&app);
+    let [page] = offsets(&app, ["code_page"]);
+    app.locator(Selector::id("code_floating")).touch_drag_by_and_hold(0.0, -60.0);
+    assert_eq!(offsets(&app, ["code_page"]), [page]);
+}
+
+#[makepad_test]
+fn a_diagonal_touch_drag_on_a_strip_in_a_list_moves_only_one_of_them(app: TestApp) {
+    let [outer, strip] = offsets(&app, ["outer", "strip"]);
+    // Farther along x than y, so only the strip follows.
+    app.locator(Selector::id("strip")).touch_drag_by_and_hold(-60.0, -20.0);
+    let [outer_after, strip_after] = offsets(&app, ["outer", "strip"]);
+    assert_eq!(outer_after, outer);
+    assert!(strip_after >= strip + 40.0, "the strip followed the finger ({strip} -> {strip_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_code_that_fits_drags_its_page(app: TestApp) {
+    open_code_modal(&app);
+    let [page] = offsets(&app, ["code_page"]);
+    app.locator(Selector::id("narrow_code_view")).touch_drag_by_and_hold(8.0, -80.0);
+    let [page_after] = offsets(&app, ["code_page"]);
+    assert!(page_after >= page + 70.0, "the page followed the finger ({page_after})");
+}
+
+#[makepad_test]
+fn wheel_over_code_scrolls_its_page_down_and_the_code_sideways(app: TestApp) {
+    open_code_modal(&app);
+    let over_code = center(&app, Selector::id("code_view"));
+    let [page, x] = offsets(&app, ["code_page", "code_x"]);
+    wheel(&app, over_code, 0.0, 60.0);
+    assert_eq!(offsets(&app, ["code_page", "code_x"]), [page + 60.0, x]);
+    thread::sleep(NEW_SCROLL);
+    wheel(&app, over_code, 60.0, 0.0);
+    assert_eq!(offsets(&app, ["code_page", "code_x"]), [page + 60.0, x + 60.0]);
+}
+
+#[makepad_test]
+fn a_touch_drag_on_code_keeps_to_the_way_it_started(app: TestApp) {
+    open_code_modal(&app);
+    let [page, x] = offsets(&app, ["code_page", "code_x"]);
+    // Sideways first, then down without lifting the finger: only the code moves.
+    app.locator(Selector::id("code_view")).touch_drag_through_and_hold(&[(-60.0, 0.0), (-60.0, -100.0)]);
+    let [page_after, x_after] = offsets(&app, ["code_page", "code_x"]);
+    assert_eq!(page_after, page);
+    assert!(x_after >= x + 50.0, "the code followed the finger sideways ({x_after})");
+
+    // Down first, then sideways: only the page moves.
+    app.locator(Selector::id("code_view")).touch_drag_through_and_hold(&[(0.0, -60.0), (-80.0, -60.0)]);
+    let [page_last, x_last] = offsets(&app, ["code_page", "code_x"]);
+    assert!(page_last >= page_after + 50.0, "the page followed the finger ({page_last})");
+    assert_eq!(x_last, x_after);
+}
+
+#[makepad_test]
+fn a_trackpad_gesture_on_code_keeps_to_the_way_it_started(app: TestApp) {
+    open_code_modal(&app);
+    let (x, y) = center(&app, Selector::id("code_view"));
+    let gesture = |deltas: &[(f64, f64)]| {
+        app.scroll_at(x, y, deltas[0].0, deltas[0].1, Some("began"));
+        for &(dx, dy) in &deltas[1..] {
+            app.scroll_at(x, y, dx, dy, Some("changed"));
+        }
+        app.scroll_at(x, y, 0.0, 0.0, Some("ended"));
+    };
+    let [page, code_x] = offsets(&app, ["code_page", "code_x"]);
+    // Sideways first, then down without lifting the fingers: only the code moves.
+    gesture(&[(4.0, 0.0), (4.0, 0.0), (0.0, 40.0)]);
+    assert_eq!(offsets(&app, ["code_page", "code_x"]), [page, code_x + 8.0]);
+
+    // A diagonal start scrolls both ways.
+    gesture(&[(4.0, 4.0), (4.0, 4.0), (0.0, 40.0)]);
+    assert_eq!(offsets(&app, ["code_page", "code_x"]), [page + 48.0, code_x + 16.0]);
+}
