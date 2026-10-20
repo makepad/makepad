@@ -2007,6 +2007,12 @@ impl<'a> Gen<'a> {
             self.a.alu_rr(0x85, r, r);
             return;
         }
+        if k as i32 as i64 != k {
+            // no 64-bit immediate form: compare against the value in the scratch register
+            self.a.mov_ri(R11, k);
+            self.a.alu_rr(0x39, r, R11);
+            return;
+        }
         self.a.rex(true, 0, 0, r, false);
         if (-128..128).contains(&k) {
             self.a.byte(0x83);
@@ -2336,6 +2342,19 @@ impl<'a> Gen<'a> {
                 let xb = self.use_f(*b, XS2);
                 let pfx = if *f64_ { 0xf2 } else { 0xf3 };
                 let opc = if *op == FOp::Min { 0x5d } else { 0x5f };
+                if self.avx {
+                    // three instructions: tmp = op(a, b) (b if either is NaN); mask = b is NaN;
+                    // d = mask ? a : tmp (xmm0/xmm1 are never allocated; the sources are read before d is written)
+                    let (tmp, mask, pp) = (1u8, 0u8, if *f64_ { 3 } else { 2 });
+                    self.a.vex_rr(pp, 1, false, opc, tmp, xa, xb);
+                    self.a.vex_rr(pp, 1, false, 0xc2, mask, xb, xb);
+                    self.a.byte(3); // unordered
+                    let xd = self.def_f(*d, XS);
+                    self.a.vex_rr(1, 3, false, if *f64_ { 0x4b } else { 0x4a }, xd, tmp, xa); // vblendvpd/ps d, tmp, a, mask
+                    self.a.byte(mask << 4);
+                    self.fin_f(*d, xd);
+                    return;
+                }
                 // XS2 <- b, XS <- a (copies first: d may alias either)
                 if xb != XS2 {
                     self.a.movf_rr(true, XS2, xb);
