@@ -561,7 +561,10 @@ macro_rules! app_main {
             activity: *const std::ffi::c_void,
         ) {
             Cx::init_log();
-            $crate::os::linux::android::android_jni::apply_studio_env_from_activity(activity);
+            // Only a fresh app reads these, and a running one's threads may be reading the env.
+            if !$crate::os::linux::android::android_jni::from_java_messages_already_set() {
+                $crate::os::linux::android::android_jni::apply_studio_env_from_activity(activity);
+            }
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
                 let mut cx = Box::new($crate::new_cx_with_font_set(
