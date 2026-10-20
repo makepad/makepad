@@ -101,7 +101,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         let values = instantiate_canonical_vars(&infcx, input.canonical.max_universe, &input.canonical.var_kinds);
         let instantiated = instantiate_query_input(infcx.tcx, &input.canonical.value, &values);
         for (key, ty) in instantiated.predefined_opaques_in_body {
-            infcx.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType { ty });
+            infcx.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType::new(ty));
         }
         let initial = infcx.inner.borrow_mut().opaque_types().num_entries();
         let kind = match &instantiated.goal.predicate.kind {

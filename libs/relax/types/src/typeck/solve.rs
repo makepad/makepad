@@ -355,7 +355,7 @@ fn round28_writeback_rejects_new_opaque_definitions() {
     fcx.checked_opaque_types_storage_entries = Some(fcx.infcx.inner.borrow_mut().opaque_types().num_entries());
     fcx.infcx.inner.borrow_mut().opaque_types().register(
         crate::infer::opaque_types::OpaqueTypeKey { def_id: def, args: Vec::new().into() },
-        crate::infer::opaque_types::ProvisionalHiddenType { ty: tcx.tys.u32_ });
+        crate::infer::opaque_types::ProvisionalHiddenType::new(tcx.tys.u32_));
     fcx.detect_opaque_types_added_during_writeback();
 }
 

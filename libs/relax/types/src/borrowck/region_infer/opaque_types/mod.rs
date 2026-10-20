@@ -23,6 +23,8 @@ pub struct DefiningUse {
     /// 'static, then the NLL variables of the key's captured lifetime arguments.
     pub arg_regions: Vec<usize>,
     pub hidden_type: TyId,
+    /// Where the use was registered (source range of the location being type-checked).
+    pub span: (u32, u32),
 }
 
 /// Why a use of an opaque type in its defining scope does not define it
@@ -39,9 +41,9 @@ pub enum NonDefiningUseReason {
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeferredOpaqueTypeError {
     InvalidOpaqueTypeArgs(NonDefiningUseReason),
-    LifetimeMismatchOpaqueParam { arg: GenericArg, prev: GenericArg },
-    UnexpectedHiddenRegion { opaque_type_key: OpaqueTypeKey, hidden_type: TyId, member_region: usize },
-    NonDefiningUseInDefiningScope { opaque_type_key: OpaqueTypeKey },
+    LifetimeMismatchOpaqueParam { arg: GenericArg, prev: GenericArg, span: (u32, u32), prev_span: (u32, u32) },
+    UnexpectedHiddenRegion { opaque_type_key: OpaqueTypeKey, hidden_type: TyId, span: (u32, u32), member_region: usize },
+    NonDefiningUseInDefiningScope { opaque_type_key: OpaqueTypeKey, span: (u32, u32) },
 }
 
 /// This contains fully resolved hidden types (in the opaque's own generic parameters) or the
@@ -55,6 +57,7 @@ pub struct UnexpectedHiddenRegion {
     pub body: usize,
     pub opaque_type_key: OpaqueTypeKey,
     pub hidden_type: TyId,
+    pub span: (u32, u32),
     pub member_region: usize,
 }
 
@@ -74,7 +77,7 @@ pub trait OpaqueOps: BorrowckTypeOps {
     fn remap_generic_params_to_declaration_params(&mut self, key: &OpaqueTypeKey, ty: TyId) -> TyId;
     /// Equates the normalized types in the body's environment; its region constraints hold everywhere
     /// (`fully_perform_op_raw`, `Locations::All`, `OpaqueType`).
-    fn equate_hidden_types(&mut self, out: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId) -> Result<(), ()>;
+    fn equate_hidden_types(&mut self, out: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId, span: (u32, u32)) -> Result<(), ()>;
 }
 
 /// Maps an NLL var to a deterministically chosen equal universal region. This ignores changes to
@@ -126,7 +129,7 @@ pub fn clone_and_resolve_opaque_types(tcx: &Tcx, infcx: &mut dyn OpaqueOps, rela
             GenericArg::Type(t) => GenericArg::Type(fold(t, &resolve)),
             GenericArg::Const(c) => GenericArg::Const(tys.expect_const(fold(tys.intern(TyKind::Const(c)), &resolve))),
         }).collect();
-        result.push((OpaqueTypeKey { def_id: key.def_id, args: args.into() }, ProvisionalHiddenType { ty: fold(hidden.ty, &resolve) }));
+        result.push((OpaqueTypeKey { def_id: key.def_id, args: args.into() }, ProvisionalHiddenType { ty: fold(hidden.ty, &resolve), span: hidden.span }));
     }
     (entries, result)
 }
@@ -198,7 +201,7 @@ fn collect_defining_uses(tcx: &Tcx, prog: &Program, infcx: &mut dyn OpaqueOps, r
                 GenericArg::Lifetime(r) => match tys.region_kind(r) { RegionKind::ReVar(v) => Some(v as usize), _ => panic!("opaque argument was not renumbered") },
                 _ => None,
             })).collect();
-        defining_uses.push(DefiningUse { key: non_nll_key, arg_regions, hidden_type: hidden_type.ty });
+        defining_uses.push(DefiningUse { key: non_nll_key, arg_regions, hidden_type: hidden_type.ty, span: hidden_type.span });
     }
     defining_uses
 }
@@ -208,8 +211,8 @@ fn compute_definition_site_hidden_types_from_defining_uses(tcx: &Tcx, prog: &Pro
     hidden_types: &mut HiddenTypes, unconstrained_hidden_type_errors: &mut Vec<UnexpectedHiddenRegion>,
     defining_uses: &[DefiningUse], errors: &mut Vec<DeferredOpaqueTypeError>) {
     // Distinct region arguments of two opaques equal modulo regions: (key modulo regions) -> key.
-    let mut decls_modulo_regions: Vec<(OpaqueTypeKey, OpaqueTypeKey)> = vec![];
-    for DefiningUse { key, arg_regions, hidden_type } in defining_uses {
+    let mut decls_modulo_regions: Vec<(OpaqueTypeKey, (OpaqueTypeKey, (u32, u32)))> = vec![];
+    for DefiningUse { key, arg_regions, hidden_type, span } in defining_uses {
         // Map all regions in the hidden type to the `arg_regions` of this defining use. A region that
         // ended up not being equal to any is an error: with the next solver the unconstrained region
         // may be resolved by a fully defining use in another body, so the error is deferred.
@@ -217,7 +220,7 @@ fn compute_definition_site_hidden_types_from_defining_uses(tcx: &Tcx, prog: &Pro
         let hidden_type = match folded {
             Ok(ty) => ty,
             Err(member_region) => {
-                unconstrained_hidden_type_errors.push(UnexpectedHiddenRegion { body, opaque_type_key: key.clone(), hidden_type: *hidden_type, member_region });
+                unconstrained_hidden_type_errors.push(UnexpectedHiddenRegion { body, opaque_type_key: key.clone(), hidden_type: *hidden_type, span: *span, member_region });
                 continue;
             }
         };
@@ -228,15 +231,14 @@ fn compute_definition_site_hidden_types_from_defining_uses(tcx: &Tcx, prog: &Pro
         // new solver does various query operations modulo regions and could select unsound impls.
         let modulo = erase_key_regions(tcx, key);
         if let Some(pos) = decls_modulo_regions.iter().position(|(m, _)| *m == modulo) {
-            let prev = decls_modulo_regions[pos].1.clone();
-            decls_modulo_regions[pos].1 = key.clone();
+            let (prev, prev_span) = std::mem::replace(&mut decls_modulo_regions[pos].1, (key.clone(), *span));
             let variances = tcx.variances_of(prog, key.def_id);
             let captured: Vec<_> = iter_captured_args(&variances, &prev).map(|(_, a)| a)
                 .zip(iter_captured_args(&variances, key).map(|(_, a)| a)).collect();
             if let Some((arg1, arg2)) = captured.into_iter().find(|(a, b)| a != b) {
-                errors.push(DeferredOpaqueTypeError::LifetimeMismatchOpaqueParam { arg: arg1, prev: arg2 });
+                errors.push(DeferredOpaqueTypeError::LifetimeMismatchOpaqueParam { arg: arg1, prev: arg2, span: prev_span, prev_span: *span });
             }
-        } else { decls_modulo_regions.push((modulo, key.clone())); }
+        } else { decls_modulo_regions.push((modulo, (key.clone(), *span))); }
         add_hidden_type(tcx, hidden_types, key.def_id, hidden_type);
     }
 }
@@ -263,7 +265,7 @@ pub fn apply_definition_site_hidden_types(tcx: &Tcx, prog: &Program, infcx: &mut
     for (key, hidden_type) in opaque_types {
         let Some(&(_, expected)) = hidden_types.iter().find(|(d, _)| *d == key.def_id) else {
             // A non-defining use in the defining scope with no defining use at all.
-            errors.push(DeferredOpaqueTypeError::NonDefiningUseInDefiningScope { opaque_type_key: key.clone() });
+            errors.push(DeferredOpaqueTypeError::NonDefiningUseInDefiningScope { opaque_type_key: key.clone(), span: hidden_type.span });
             tcx.dcx.delayed_bug(crate::next_solver::fulfill::ObligationCause { span: 0, body_id: key.def_id },
                 "non-defining use in the defining scope with no defining uses".into());
             add_hidden_type(tcx, hidden_types, key.def_id, tys.error);
@@ -279,7 +281,7 @@ pub fn apply_definition_site_hidden_types(tcx: &Tcx, prog: &Program, infcx: &mut
         }, 0);
         drop(fresh);
         // We now simply equate the expected with the actual hidden type.
-        if infcx.equate_hidden_types(constraints, hidden_type.ty, expected).is_err() {
+        if infcx.equate_hidden_types(constraints, hidden_type.ty, expected, hidden_type.span).is_err() {
             add_hidden_type(tcx, hidden_types, key.def_id, tys.error);
         }
     }
@@ -302,7 +304,7 @@ pub fn handle_unconstrained_hidden_type_errors(tcx: &Tcx, hidden_types: &HiddenT
         tcx.dcx.delayed_bug(crate::next_solver::fulfill::ObligationCause { span: 0, body_id: e.opaque_type_key.def_id },
             "opaque type with non-universal region args".into());
         deferred_errors[e.body].push(DeferredOpaqueTypeError::UnexpectedHiddenRegion {
-            opaque_type_key: e.opaque_type_key, hidden_type: e.hidden_type, member_region: e.member_region });
+            opaque_type_key: e.opaque_type_key, hidden_type: e.hidden_type, span: e.span, member_region: e.member_region });
     }
 }
 
@@ -557,10 +559,10 @@ impl OpaqueOps for BorrowckInferCtxt<'_> {
         crate::types::fold::TypeFolder::fold_ty(&mut mapper, &tcx.tys, ty, 0)
     }
 
-    fn equate_hidden_types(&mut self, out: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId) -> Result<(), ()> {
+    fn equate_hidden_types(&mut self, out: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId, at: (u32, u32)) -> Result<(), ()> {
         use crate::next_solver::type_op::CustomTypeOp;
         let env = self.param_env_id();
-        let span = crate::mir::Span::default();
+        let span = crate::mir::Span { file: self.prog.def(self.root_def_id).file, lo: at.0, hi: at.1 };
         let universals = self.universal_regions.as_ref().expect("opaque handling follows the type check");
         // The types are normalized before they are equated.
         let op = CustomTypeOp::new(|ocx: &mut crate::next_solver::fulfill::ObligationCtxt<'_, '_>| {
@@ -585,11 +587,12 @@ fn canonical_opaque_args(tcx: &Tcx, prog: &Program, opaque: DefId) -> Vec<Generi
     // the opaque stands for.
     let mut args = tcx.generic_indices_of(prog, opaque).identity_args(tys);
     let generics = tcx.opaque_generics(prog, opaque);
+    let captured = tcx.opaque_captured_parent_lifetimes(prog, opaque);
     let n_parent_lifetimes = generics.parent.lifetimes.len();
     let indices = tcx.generic_indices_of(prog, opaque);
     for (k, &index) in indices.lifetimes.iter().enumerate().skip(n_parent_lifetimes) {
         let position = indices.lifetimes.iter().position(|&i| i == index).unwrap();
-        args[indices.lifetimes[position] as usize] = GenericArg::Lifetime(generics.captured_lifetimes[k - n_parent_lifetimes]);
+        args[indices.lifetimes[position] as usize] = GenericArg::Lifetime(captured[k - n_parent_lifetimes]);
     }
     // The free region relations of the parent's environment: declared bounds and the bounds its
     // signature implies.
@@ -696,7 +699,7 @@ pub(super) fn hidden_types_from_uses(tcx: &Tcx, prog: &Program, infcx: &mut dyn 
     let (mut hidden, mut unconstrained, mut errors) = (vec![], vec![], vec![]);
     compute_definition_site_hidden_types_from_defining_uses(tcx, prog, infcx, 0, &rcx, &mut hidden, &mut unconstrained, uses, &mut errors);
     for e in unconstrained {
-        errors.push(DeferredOpaqueTypeError::UnexpectedHiddenRegion { opaque_type_key: e.opaque_type_key, hidden_type: e.hidden_type, member_region: e.member_region });
+        errors.push(DeferredOpaqueTypeError::UnexpectedHiddenRegion { opaque_type_key: e.opaque_type_key, hidden_type: e.hidden_type, span: e.span, member_region: e.member_region });
     }
     (hidden, errors)
 }

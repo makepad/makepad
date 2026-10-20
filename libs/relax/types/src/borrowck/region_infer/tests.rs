@@ -99,7 +99,7 @@ fn opaque_member_uses_unique_smallest_choice() {
     let r = tys.intern_region(RegionKind::ReVar(2));
     let ty = tys.intern(crate::types::TyKind::Ref(false,tys.intern(crate::types::TyKind::Bool),r));
     let d = crate::program::DefId(0);
-    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(d),hidden_type:ty,arg_regions:vec![0,1] }];
+    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(d),hidden_type:ty,arg_regions:vec![0,1],span:(0,0) }];
     let (hidden,errors) = opaque_types::hidden_types_from_uses(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),&mut crate::borrowck::type_check_tests::Fake::new(&tcx,0),defs,&relations,constraints(&[(1,2)]),&uses);
     assert!(errors.is_empty());
     assert!(matches!(tys.kind(hidden[0].1),crate::types::TyKind::Ref(_,_,region) if *region == a));
@@ -186,7 +186,7 @@ fn opaque_members_exclude_parent_closure_arguments() {
     let owner = tys.intern(TyKind::FnDef(crate::program::DefId(2),tys.mk_list(&[]),tys.intern_region_args(&[tys.intern_region(RegionKind::ReVar(3))])));
     let signature = tys.intern(TyKind::FnPtr(tys.mk_list(&[]),unit,crate::types::FnHeader::RUST,0));
     let hidden_type = tys.intern(TyKind::Closure(0, 0, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: tys.prim(crate::program::Prim::I8), closure_sig_as_fn_ptr_ty: signature, tupled_upvars_ty: member }));
-    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type,arg_regions:vec![0,1] }];
+    let uses = vec![opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type,arg_regions:vec![0,1],span:(0,0) }];
     let (hidden,errors) = opaque_types::hidden_types_from_uses(&tcx,&crate::program::Program::new(&std::sync::Arc::new(crate::Session::default())),&mut crate::borrowck::type_check_tests::Fake::new(&tcx,0),defs,&relations,constraints(&[(1,2)]),&uses);
     assert!(errors.is_empty());
     let TyKind::Closure(_, _, crate::types::ClosureArgs { parent_args: owner, tupled_upvars_ty: member, .. }) = tys.kind(hidden[0].1) else { panic!() };
@@ -222,7 +222,7 @@ fn opaque_witness(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, ty: TyI
     let regions = (0..universals).map(|i| (i,if i == 0 { Class::Global } else { Class::Local })).collect();
     let relations = UniversalRegionRelations::create(UniversalRegions::new(0,None,regions),universals,&[]);
     opaque_types::hidden_types_from_uses(tcx,prog,&mut crate::borrowck::type_check_tests::Fake::new(tcx,0),defs,&relations,constraints(edges),&[
-        opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type:ty,arg_regions:vec![0,1] }
+        opaque_types::DefiningUse { key:opaque_types::test_key(crate::program::DefId(0)),hidden_type:ty,arg_regions:vec![0,1],span:(0,0) }
     ])
 }
 #[test]

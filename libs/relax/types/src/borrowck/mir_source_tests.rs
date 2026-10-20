@@ -545,3 +545,85 @@ fn an_async_closure_with_a_macro_body_orders_its_coroutine_before_it() {
     assert!(unchecked.iter().all(|u| u.contains("async closures")), "{unchecked:?}");
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+#[test]
+fn a_nested_opaque_captures_the_items_lifetimes_through_the_enclosing_opaque() {
+    // Equal `'a`/`'b` are the same canonical argument of the nested opaque: a defining use, not a duplicate parameter.
+    let (errors, unchecked) = borrowck_source("
+        pub fn test<'a: 'b, 'b: 'a>() -> impl IntoIterator<Item = (&'a u8, impl Into<(&'b u8, &'a u8)>)> {
+            None::<(_, (_, _))>
+        }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_closure_cast_to_a_higher_ranked_fn_pointer_takes_the_signature_from_the_target() {
+    let (errors, unchecked) = borrowck_source("
+        pub fn foo() -> impl Into<for<'a> fn(&'a ())> { (|_| {}) as for<'a> fn(&'a ()) }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn the_region_bound_pairs_of_a_closure_name_the_universal_regions_of_its_type() {
+    // The upvar type carries typeck's own region variables; the pairs `Opaque<..>: 'env` must name
+    // the closure's external regions, not whatever NLL variable has the same number.
+    let (errors, unchecked) = borrowck_source("
+        pub struct It;
+        pub trait Resolver {}
+        impl<R: Resolver> Resolver for &R {}
+        impl Resolver for It {}
+        pub fn get2<'a, 'b: 'b>(mut items: impl Iterator<Item = &'a It>) -> impl Resolver + 'a { items.next().unwrap() }
+        pub struct Container<'a> { name: String, resolver: Box<dyn Resolver + 'a> }
+        impl<'a> Container<'a> { fn new<R: Resolver + 'a>(name: &str, resolver: R) -> Self { Self { name: name.to_owned(), resolver: Box::new(resolver) } } }
+        pub fn main() {
+            let it = It;
+            let resolver = get2(Some(&it).into_iter());
+            let f = |n: &str| Container::new(n, &resolver);
+            f(\"a\");
+        }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_opaque_types_implied_bounds_follow_its_lifetime_parameters_by_index() {
+    // The late-bound `'c` is in the opaque's contract but not among its lifetime arguments: the where
+    // clauses of `'d`/`'e` must not swap, or `'b: 'd` is assumed and the member constraint picks neither.
+    let (errors, unchecked) = borrowck_source("
+        trait Trait<'a, 'b> {}
+        impl<T> Trait<'_, '_> for T {}
+        struct Ordinary<'a>(&'a u8);
+        fn upper_bounds<'a, 'b, 'c, 'd, 'e>(a: Ordinary<'a>, b: Ordinary<'b>) -> impl Trait<'d, 'e>
+        where 'a: 'e, 'b: 'e, 'a: 'd { let p = if true { a } else { b }; p }");
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_coroutine_whose_witness_needs_no_drop_needs_only_its_upvars_drop_live() {
+    // rust-lang/rust#116242: the locals saved across the await (`&String`, `Ready<()>`) have no drop glue,
+    // so the future's drop needs the captured borrow of `s` only if the borrowed type itself has drop glue.
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn f() {
+            let s = String::new();
+            let fut = async { let r = &s; core::future::ready(()).await; let _x = r.len(); };
+            drop(s);
+        }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_coroutine_whose_witness_needs_drop_keeps_all_its_upvars_live_at_its_drop() {
+    // The `String` is saved across the await and has drop glue: the captured borrow of `s` is live at the drop.
+    let (errors, unchecked) = borrowck_source_in("
+        pub fn f() {
+            let s = String::new();
+            let fut = async { let r = &s; let t = String::new(); core::future::ready(()).await; let _x = (r.len(), t.len()); };
+            drop(s);
+        }", 2018);
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.len() == 1 && errors[0].starts_with("E0505"), "{errors:?}");
+}

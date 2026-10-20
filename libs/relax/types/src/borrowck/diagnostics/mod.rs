@@ -21,6 +21,7 @@ pub mod conflict_errors;
 pub mod explain_borrow;
 pub mod move_errors;
 pub mod mutability_errors;
+pub mod opaque_types;
 pub mod region_errors;
 pub mod region_name;
 #[cfg(test)]

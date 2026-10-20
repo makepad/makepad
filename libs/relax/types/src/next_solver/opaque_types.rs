@@ -33,7 +33,7 @@ impl EvalCtxt<'_, '_> {
                 GenericArg::Const(c) => { let Term::Const(c) = self.structurally_normalize_term(env, Term::Const(c))? else { unreachable!() }; GenericArg::Const(c) }
             }); }
             let key = OpaqueTypeKey { def_id: def, args: normalized_args.clone().into() };
-            let previous = self.delegate.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType { ty: expected });
+            let previous = self.delegate.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType::new(expected));
             if let Some(prev) = previous { self.eq(env, p.term, Term::Ty(prev))?; }
             else if matches!(self.delegate.typing_mode, TypingMode::PostTypeckUntilBorrowck { .. }) {
                 let actual = self.type_of(def, &args)?;

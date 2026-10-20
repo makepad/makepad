@@ -78,7 +78,7 @@ impl super::region_infer::opaque_types::OpaqueOps for Fake<'_> {
         if self.non_defining.contains(key) { Err(super::region_infer::opaque_types::NonDefiningUseReason::NotAParam { opaque_type_key: key.clone(), param_index: 0 }) } else { Ok(()) }
     }
     fn remap_generic_params_to_declaration_params(&mut self, _: &crate::infer::opaque_types::OpaqueTypeKey, ty: TyId) -> TyId { ty }
-    fn equate_hidden_types(&mut self, _: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId) -> Result<(), ()> { self.equated.push((actual, expected)); Ok(()) }
+    fn equate_hidden_types(&mut self, _: &mut MirTypeckRegionConstraints, actual: TyId, expected: TyId, _: (u32, u32)) -> Result<(), ()> { self.equated.push((actual, expected)); Ok(()) }
 }
 impl super::mir_nll::RegionDriverOps for Fake<'_> {
     fn num_region_vars(&self) -> usize { self.regions.len() }

@@ -34,7 +34,7 @@ fn method_autoderef_steps(fcx: &Fcx<'_>, receiver: TyId) -> (Vec<CandidateStep>,
     let (goal, original) = method_response::canonicalize_method_autoderef_goal(&fcx.infcx, fcx.param_env.clone(), receiver);
     let infcx = crate::infer::InferCtxt::new(fcx.tcx, fcx.infcx.typing_mode, fcx.infcx.recursion_limit);
     let (goal, values) = method_response::instantiate_method_autoderef_goal(&infcx, &goal);
-    for (key, ty) in goal.predefined_opaques_in_body { infcx.inner.borrow_mut().opaque_types().register(key, crate::infer::opaque_types::ProvisionalHiddenType { ty }); }
+    for (key, ty) in goal.predefined_opaques_in_body { infcx.inner.borrow_mut().opaque_types().register(key, crate::infer::opaque_types::ProvisionalHiddenType::new(ty)); }
     let previous = infcx.inner.borrow_mut().opaque_types().num_entries();
     let mut steps = Vec::new();
     let mut cur = infcx.deeply_resolve_ignoring_regions(goal.self_ty);

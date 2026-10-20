@@ -30,6 +30,12 @@ impl Tcx {
         OpaqueGenerics { parent: table.generic_indices.clone(), captured_lifetimes }
     }
 
+    /// `map_opaque_lifetime_to_parent_lifetime` of each lifetime the opaque captures.
+    pub(crate) fn opaque_captured_parent_lifetimes(&self, prog: &Program, opaque: DefId) -> Vec<RegionId> {
+        let table = self.resolve_bound_vars(prog, prog.opaque_owner(opaque));
+        table.opaque_captured_parent_lifetimes(opaque).into_iter().map(|k| self.tys.intern_region(k)).collect()
+    }
+
     /// hir_ty_lowering/mod.rs:3631-3690: opaque arguments use the resolved
     /// capture map. Lowering never discovers or publishes declaration inputs.
     pub(crate) fn lower_opaque_ty(&self, prog: &Program, opaque: DefId) -> TyId {

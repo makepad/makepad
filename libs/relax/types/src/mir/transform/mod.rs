@@ -1,5 +1,6 @@
 //! Runtime preparation passes; no production consumer is switched here.
 pub mod const_check;
+pub mod coroutine;
 pub mod elaborate_drops;
 pub(crate) mod elaborate_drop;
 pub(crate) mod patch;

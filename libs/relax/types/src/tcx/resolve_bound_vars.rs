@@ -1662,6 +1662,18 @@ impl ResolveBoundVars {
         };
         Some(self.region_for_arg(arg))
     }
+    /// `map_opaque_lifetime_to_parent_lifetime` for each lifetime the opaque captures: a lifetime
+    /// that maps to a parameter of an enclosing opaque keeps mapping until it reaches the item's own.
+    pub(crate) fn opaque_captured_parent_lifetimes(&self, opaque: DefId) -> Vec<RegionKind> {
+        self.opaque_captured_lifetimes[&opaque].iter().map(|&(mut arg, _)| {
+            while let ResolvedArg::EarlyBound(id) = arg {
+                let decl = self.names.declarations.iter().chain(self.names.inherited.iter()).find(|d| d.id == id).expect("lifetime declaration");
+                let BinderId::Opaque(outer) = decl.binder else { break };
+                arg = self.opaque_captured_lifetimes[&outer].iter().find(|(_, own)| *own == id).expect("captured lifetime of the enclosing opaque").0;
+            }
+            self.region_for_arg(arg)
+        }).collect()
+    }
     pub(crate) fn region_for_arg(&self, arg: ResolvedArg) -> RegionKind {
         match arg {
             ResolvedArg::StaticLifetime => RegionKind::ReStatic,

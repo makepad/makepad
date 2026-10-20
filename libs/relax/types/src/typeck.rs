@@ -4957,6 +4957,10 @@ impl<'a> Fcx<'a> {
                         TyKind::Ptr(..) | TyKind::FnDef(..) | TyKind::FnPtr(..) => Some(self.tcx.tys.usize_),
                         _ => None,
                     }
+                } else if matches!(self.ast().expr(inner).kind, ExprKind::Closure(_)) {
+                    // ExpectCastableToType reaches the closure's signature deduction (`to_option`):
+                    // `(|_| {}) as for<'a> fn(&'a ())` is higher-ranked.
+                    Some(st)
                 } else { None };
                 let xt = self.check_expr(*x, hint);
                 if self.tcx.validates(self.prog, self.file) { self.cast_checks.push((*x, xt, target, lo)); }

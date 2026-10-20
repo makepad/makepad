@@ -137,9 +137,12 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         let before = self.infcx.universe();
         let input = op.input();
         let input_dbg = input.clone();
+        let opaques_before = self.infcx.inner.borrow_mut().opaque_types().num_entries();
         let result = super::type_check::canonical::fully_perform_op_raw(self,
             self.universal_regions.as_ref().expect("MIR type ops require universal regions"), &self.region_bound_pairs,
             &self.param_env.clauses, out, locations, span, category, op);
+        // The uses of opaque types the op registered are at this location.
+        self.infcx.inner.borrow_mut().opaque_types().set_span_since(opaques_before, (span.lo, span.hi));
         if result.is_err() {
             self.tainted_by_errors.set(true);
             if std::env::var_os("MAKEPAD_RUN_NOSOLUTION_TRACE").is_some() {

@@ -116,7 +116,7 @@ fn bodies_depending_on_opaques_get_requirements_twice_and_hidden_types_are_share
     pf.query_ty = Some(tcx.tys.i32_);
     // The parent defines the opaque `Opaque<'static, 'static> := i32`; the child has no opaque use.
     let key = OpaqueTypeKey { def_id: opaque, args: vec![GenericArg::Lifetime(stat), GenericArg::Lifetime(stat)].into() };
-    pf.opaques = vec![(key.clone(), ProvisionalHiddenType { ty: tcx.tys.i32_ })];
+    pf.opaques = vec![(key.clone(), ProvisionalHiddenType::new(tcx.tys.i32_))];
     let result = BorrowCheckRootCtxt { tcx: &tcx, prog: &prog }.do_mir_borrowck(vec![
         RootBody { key: ClauseOwner::Closure(CHILD), body: &body, moves: &moves, infcx: &mut cf, typeck: child, nested: true },
         RootBody { key: ClauseOwner::Def(DefId(0)), body: &body, moves: &moves, infcx: &mut pf, typeck: parent, nested: false },
@@ -142,9 +142,9 @@ fn a_nested_body_with_opaque_uses_applies_its_requirements_modulo_opaques_and_th
     pf.query_ty = Some(tcx.tys.i32_);
     // The child uses the opaque (a non-defining use there); the parent has the defining use.
     let key = OpaqueTypeKey { def_id: opaque, args: vec![GenericArg::Lifetime(stat), GenericArg::Lifetime(stat)].into() };
-    cf.opaques = vec![(key.clone(), ProvisionalHiddenType { ty: tcx.tys.i32_ })];
+    cf.opaques = vec![(key.clone(), ProvisionalHiddenType::new(tcx.tys.i32_))];
     cf.non_defining = vec![key.clone()];
-    pf.opaques = vec![(key, ProvisionalHiddenType { ty: tcx.tys.i32_ })];
+    pf.opaques = vec![(key, ProvisionalHiddenType::new(tcx.tys.i32_))];
     let result = BorrowCheckRootCtxt { tcx: &tcx, prog: &prog }.do_mir_borrowck(vec![
         RootBody { key: ClauseOwner::Closure(CHILD), body: &body, moves: &moves, infcx: &mut cf, typeck: child, nested: true },
         RootBody { key: ClauseOwner::Def(DefId(0)), body: &body, moves: &moves, infcx: &mut pf, typeck: parent, nested: false },

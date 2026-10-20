@@ -193,9 +193,18 @@ impl SignatureRegions {
             (DefiningTy::Const(owner),tcx.const_region_contract(prog, owner).cloned().unwrap_or_default()) };
         Some(UniversalRegionsBuilder { tcx,prog,defining_ty,parent:None,contract }.build())
     }
-    /// An array-length anonymous constant: its own root, no inputs, output `usize`, no lifetime parameters in scope.
-    pub fn anon_const(tcx: &Tcx, prog: &Program, owner: DefId) -> Self {
-        UniversalRegionsBuilder { tcx,prog,defining_ty:DefiningTy::AnonConst(owner),parent:None,contract:Default::default() }.build()
+    /// An anonymous constant of the typeck root `root`: its own body, no inputs, output
+    /// `usize`. Its universal regions are the identity regions of the root's generics (rustc
+    /// `DefiningTy::Const` takes `identity_for_item(typeck_root_def_id)`): the early-bound lifetime
+    /// parameters, local, with the root's where clauses. The root's signature (late-bound regions,
+    /// assumed well-formed types) is not part of it.
+    pub fn anon_const(tcx: &Tcx, prog: &Program, root: DefId) -> Self {
+        let mut contract = if let Some(sig) = tcx.fn_sig(prog, root).or_else(|| tcx.ctor_sigs.get(&root)) { sig.region_contract.clone() }
+            else { tcx.const_region_contract(prog, root).cloned().unwrap_or_default() };
+        contract.regions.retain(|(_, r)| matches!(tcx.tys.region_kind(*r), RegionKind::ReEarlyParam(_)));
+        contract.callable_signatures.clear();
+        contract.assumed_wf.clear();
+        UniversalRegionsBuilder { tcx,prog,defining_ty:DefiningTy::AnonConst(root),parent:None,contract }.build()
     }
     /// A closure's universal regions (universal_regions.rs `DefiningTy::Closure`): its parent's
     /// are external, its own signature's are local. The signature is the typeck result's, with

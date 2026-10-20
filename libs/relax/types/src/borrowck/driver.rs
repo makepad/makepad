@@ -186,6 +186,15 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     let depth = |c: u32| { let (mut d, mut at) = (1usize, c); while let Some(Some(p)) = creator.get(&at) { d += 1; at = *p; if d > creator.len() + 1 { break; } } d };
     built.sort_by_key(|(o, _)| std::cmp::Reverse(match o.kind { OwnerKind::Closure(e) => depth(e.0), _ => 0 }));
     let closure_order: Vec<u32> = built.iter().filter_map(|(o, _)| match o.kind { OwnerKind::Closure(e) => Some(e.0), _ => None }).collect();
+    // `mir_coroutine_witnesses` of the coroutines of this root, for the dropck of their creators.
+    for (owner, mir) in &built {
+        let (OwnerKind::Closure(e), true) = (owner.kind, mir.coroutine.is_some()) else { continue };
+        let needs_drop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::mir::transform::coroutine::coroutine_witness_needs_drop(tcx, prog, env, mir)));
+        match needs_drop {
+            Ok(needs_drop) => tcx.coroutine_witness_needs_drop.insert((typeck.file, e.0), needs_drop),
+            Err(p) => { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } }
+        }
+    }
 
     // MoveData, signature regions, inference contexts, MIR type check.
     let mut prepared: Vec<Prepared<'_>> = Vec::new();
@@ -309,6 +318,10 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             lint_unused_mut(prog, typeck.def, &p.mir, &checked.result.used_mut);
         }
         v.errors.extend(diagnostics::render_errors(&dcx, &checked.result));
+        // `report_opaque_type_errors`: only when the region inference found no error (those would explain them).
+        if checked.regions.regioncx.errors.is_empty() {
+            v.errors.extend(diagnostics::opaque_types::report_opaque_type_errors(&dcx, &checked.deferred_opaque_type_errors).iter().map(|d| diagnostics::capture(prog, p.owner.owner, d)));
+        }
         v.fv_only.extend(diagnostics::render_fv_only(&dcx, &checked.result));
         v.fv_records.extend(checked.result.fv_records.iter().cloned());
     }
