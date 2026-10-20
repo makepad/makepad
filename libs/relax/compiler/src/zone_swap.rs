@@ -606,6 +606,7 @@ unsafe fn commit(up: *mut Unit, f: Fresh) -> (usize, usize, (usize, usize)) {
     put(&mut u.old_bodies, Default::default());
     put(&mut u.coro_rir, Default::default());
     put(&mut u.coro_busy, Default::default());
+    put(&mut u.coro_selfref, Default::default());
     put(&mut u.spec_cached, Default::default());
     put(&mut u.unwind_drop_cache, Default::default());
     put(&mut u.cycle_inprog, Default::default());
@@ -648,6 +649,7 @@ unsafe fn commit(up: *mut Unit, f: Fresh) -> (usize, usize, (usize, usize)) {
     crate::run::set_diagnostics(u.tcx.dcx.clone());
     // Only commit invalidates TLS; an aborted restore must keep the running state's TLS valid.
     relax_session::gen_local::bump();
+    zone_scan::stale_roots(crate::zone_alloc::compiler_generation().saturating_sub(1));
     trace("commit: destroying");
     let (chunks, touched) = crate::zone_alloc::compiler_destroy_older();
     trace("commit: destroyed");

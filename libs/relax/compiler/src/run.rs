@@ -215,7 +215,21 @@ pub(crate) struct Resolved {
 static HANDOFF: relax_session::sync::Mutex<Option<Resolved>> = relax_session::sync::Mutex::new(None);
 
 pub(crate) fn take_boot_resolved() -> Option<Resolved> {
-    HANDOFF.lock().unwrap_or_else(|e| e.into_inner()).take()
+    let mut g = HANDOFF.lock().unwrap_or_else(|e| e.into_inner());
+    let taken = g.take();
+    clear_dead(&mut g);
+    taken
+}
+
+/// An `Option` taken out of a static keeps its payload bytes (only the discriminant changes):
+/// words in them that point into a compiler generation are dead, but the swap's static scan
+/// (MAKEPAD_RUN_ZONE_CHECK=2) and anyone reading raw memory would take them for roots. Zeroed.
+pub(crate) fn clear_dead<T>(slot: &mut Option<T>) {
+    debug_assert!(slot.is_none());
+    unsafe {
+        std::ptr::write_bytes(slot as *mut Option<T> as *mut u8, 0, std::mem::size_of::<Option<T>>());
+        std::ptr::write(slot, None);
+    }
 }
 
 pub(crate) fn resolve_package(

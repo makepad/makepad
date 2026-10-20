@@ -421,6 +421,20 @@ pub(crate) fn static_scan() {
     tls_scan(g);
 }
 
+/// MAKEPAD_RUN_ZONE_CHECK=2, just before a swap destroys generation `old`: the statics already hold
+/// the new generation's values, so a word still pointing into `old` is a root the swap missed (the
+/// next use of it faults).
+pub(crate) fn stale_roots(old: u64) {
+    if level() < 2 {
+        return;
+    }
+    let mut hits = Vec::new();
+    for (name, base, start, len) in data_regions() {
+        scan_words(start, len, old, |a| format!("{name}+{:#x}", a - base), &mut hits);
+    }
+    print_hits("STALE statics before destroy", &hits, &format!(" (generation {old})"));
+}
+
 /// (module, load base, start, len) of every writable data range of the executable and, when
 /// Relax is a library, of libmakepad.
 #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]

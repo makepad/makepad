@@ -396,8 +396,10 @@ pub struct Unit {
     /// slots queued for speculation whose code the disk cache has: their worker links it and
     /// skips the type check ahead (a warm run checked ~11k bodies ahead it never used)
     pub spec_cached: crate::conc::MemoMap<u32, ()>,
-    /// a coroutine that needed its own layout (a cycle): rustc E0733
-    pub coro_cycle: AtomicBool,
+    /// coroutine types whose layout was asked for while their own poll function was being lowered
+    /// (`Box::pin(f(n - 1)).await` builds the callee future, of the same type, before the frame
+    /// is known): the lowering is done again with the frame in place (coro_frame)
+    pub coro_selfref: relax_session::sync::Mutex<Vec<TyId>>,
     /// drop_may_unwind answers
     pub unwind_drop_cache: crate::conc::MemoMap<TyId, bool>,
     /// types whose drop_may_unwind / is_unpin answer is being computed, per thread
@@ -2428,7 +2430,7 @@ impl Unit {
             coro_rir: Default::default(),
             coro_busy: Default::default(),
             spec_cached: Default::default(),
-            coro_cycle: Default::default(),
+            coro_selfref: Default::default(),
             unwind_drop_cache: Default::default(),
             cycle_inprog: Default::default(),
             vtables: crate::conc::MemoMap::new_kept(16),
@@ -3145,11 +3147,25 @@ impl Unit {
             if lcx.missing.borrow().is_empty() {
                 return l;
             }
+            let mut waiting = false;
             for ct in lcx.missing.into_inner() {
                 if self.tcx.coro_frames.get(&ct).is_none() {
+                    // the coroutine whose poll function is being lowered right now: the layout
+                    // so far (its state without the saved locals) answers this lowering; the
+                    // lowering is repeated once the frame is known (coro_frame)
+                    if self.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).contains(&self.tcx.tys.erase_regions(ct)) {
+                        let mut s = self.coro_selfref.lock().unwrap_or_else(|e| e.into_inner());
+                        let ct = self.tcx.tys.erase_regions(ct);
+                        if !s.contains(&ct) { let _k = crate::zone_alloc::kept(); s.push(ct); }
+                        waiting = true;
+                        continue;
+                    }
                     // lowering a body changes the unit: a unit call
                     owner::call(owner::Class::Job, || unsafe { (&mut *self.self_ptr.0).coro_frame(ct) });
                 }
+            }
+            if waiting {
+                return l;
             }
         }
     }
@@ -3163,8 +3179,6 @@ impl Unit {
             return;
         }
         if self.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).contains(&ct) {
-            self.coro_cycle.store(true, Ordering::Relaxed);
-            self.tcx.coro_frames.insert(ct, (0, 1));
             return;
         }
         let id = match self.closure_fn_id(ct) {
@@ -3188,7 +3202,22 @@ impl Unit {
         }
         self.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).push(ct);
         let up = self as *mut Unit;
-        let r = unsafe { build_rir_lowered(up, id) };
+        let mut r = unsafe { build_rir_lowered(up, id) };
+        // the body asked for the layout of its own future (a temporary that moves into a box): it
+        // was lowered with the state so far, the frame is known now, so lower it again. A saved
+        // local of the future's own type makes the frame differ: E0733 (lower.rs)
+        let again = {
+            let u = unsafe { &*up };
+            let mut s = u.coro_selfref.lock().unwrap_or_else(|e| e.into_inner());
+            let n = s.len();
+            s.retain(|x| *x != ct);
+            n != s.len()
+        };
+        if again && r.is_ok() && unsafe { (&*up).tcx.coro_frames.get(&ct).is_some() } {
+            unsafe { (&mut *up).coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).push(ct) };
+            r = unsafe { build_rir_lowered(up, id) };
+            unsafe { (&*up).coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != ct) };
+        }
         let u = unsafe { &mut *up };
         u.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| *x != ct);
         match r {

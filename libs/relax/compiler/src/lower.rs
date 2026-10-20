@@ -798,14 +798,6 @@ impl<'a> Lcx<'a> {
                 (l, too_big)
             }
         };
-        // Another shared layout operation can have found a cycle even on a cache hit.
-        if u.coro_cycle.load(std::sync::atomic::Ordering::Relaxed) {
-            // Only the locked build may consume a coroutine layout's cycle diagnostic.
-            crate::jit::lower_ahead_needs_unit();
-            if u.coro_cycle.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
-            }
-        }
         if too_big {
             let t = u.tcx.tys.erase_regions(t);
             let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
@@ -1521,7 +1513,13 @@ impl<'a> Lcx<'a> {
                         }
                         match self.u.tcx.coro_frames.get(&c.ct) {
                             Some(prev) if prev != area => {
-                                self.err(self.pos, format!("internal: coroutine saved locals {:?} lowered again as {:?}", prev, area));
+                                // the second lowering of a future that asked for its own layout
+                                // (jit.rs coro_frame) saved a local of its own type across a suspension
+                                if self.u.coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).contains(&c.ct) {
+                                    self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
+                                } else {
+                                    self.err(self.pos, format!("internal: coroutine saved locals {:?} lowered again as {:?}", prev, area));
+                                }
                             }
                             Some(_) => {}
                             None => self.u.tcx.coro_frames.insert(c.ct, area),

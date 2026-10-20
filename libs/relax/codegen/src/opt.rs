@@ -1347,12 +1347,18 @@ pub fn compact_vregs(f: &mut Func) {
     f.vregs = cls;
 }
 
-// OnceLock cannot be reset through a shared static; see this crate's zone_take.
-pub(crate) static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+// OnceLock cannot be reset through a shared static; see this crate's zone_take. The string is
+// leaked in the kept heap: it outlives every compiler generation (a settle swap destroys the
+// compiler phase's allocations).
+pub(crate) static T: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
 
 fn trace_opt(f: &Func, tag: &str) {
-    if let Some(t) = T.get_or_init(|| std::env::var("MAKEPAD_RUN_TRACE_OPT").ok()) {
-        if f.name.contains(t.as_str()) {
+    let t = T.get_or_init(|| {
+        let _k = relax_session::phase::kept();
+        std::env::var("MAKEPAD_RUN_TRACE_OPT").ok().map(|s| &*Box::leak(s.into_boxed_str()))
+    });
+    if let Some(t) = t {
+        if f.name.contains(*t) {
             eprintln!("=== {} {}\n{}", tag, f.name, f.dump());
         }
     }

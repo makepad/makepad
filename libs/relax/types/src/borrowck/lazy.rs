@@ -264,6 +264,13 @@ pub(crate) fn zone_take() -> ZoneTaken {
         keys: std::mem::take(&mut *keys),
         queue: std::mem::take(&mut *queue),
     };
+    // the taken queue's payload bytes stay in the static (only the discriminant changes): zeroed, so
+    // a raw scan of the statics (MAKEPAD_RUN_ZONE_CHECK=2) finds no dead pointer there
+    unsafe {
+        let slot: *mut Option<Queue> = &mut *queue;
+        std::ptr::write_bytes(slot as *mut u8, 0, std::mem::size_of::<Option<Queue>>());
+        std::ptr::write(slot, None);
+    }
     #[cfg(test)]
     { assert!(verdicts.is_empty()); assert!(keys.is_empty()); assert!(queue.is_none()); }
     taken

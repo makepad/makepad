@@ -23,11 +23,8 @@ pub struct ZoneTaken;
 
 /// Takes this crate's compiler statics while every compiler thread is quiesced.
 pub fn zone_take() -> ZoneTaken {
-    // opt::T is a OnceLock<Option<String>>: shared statics cannot reset OnceLock safely.
-    // MAKEPAD_RUN_TRACE_OPT's cached string therefore still needs kept allocation before swaps
-    // are enabled with tracing; this reset deliberately does not initialise that lazy.
-    #[cfg(test)]
-    assert!(opt::T.get().is_none(), "trace_opt's OnceLock cannot be reset once initialised");
+    // opt::T is a OnceLock: shared statics cannot reset it. Its string is leaked in the kept
+    // heap, so it needs no reset.
     ZoneTaken
 }
 
