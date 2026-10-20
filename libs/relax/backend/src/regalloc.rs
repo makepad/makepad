@@ -1967,6 +1967,15 @@ fn affinities(f: &Func, reach: &[bool], block_start: &[u32], ranges: &Ranges, wt
                     }
                     continue;
                 }
+                // fused multiply-add accumulates in place on both targets (arm64 fmla/fmls
+                // vd += vn*vm, x64 vfmadd231 d += a*b): the result prefers the addend's register
+                Inst::VFma(_, _, d, _, _, c) => {
+                    if d != c && dies_at(ranges, c.0, p) {
+                        edges.push((d.0, c.0, w));
+                        edges.push((c.0, d.0, w));
+                    }
+                    continue;
+                }
                 _ => {}
             }
             let (d, a, b2, comm) = match i {
@@ -3206,9 +3215,13 @@ fn remat_on(options: &relax_session::Options) -> bool {
 ///   into `IBin` / `ICmp` on a constant vreg;
 /// - constants used inside loops are defined once at the entry, one vreg per value.
 /// The allocator then keeps such a constant in a register across the loop, or recomputes it at
-/// the use when none is free (what the backend did at every use before). Returns the rewritten
-/// copy, or None when there is nothing to do.
-pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool) -> Option<Func> {
+/// the use when none is free (what the backend did at every use before).
+/// - with `floats`, float constants defined inside loops move to the entry too (one vreg per
+///   value and width): for targets that build them with instructions or a literal-pool load at
+///   each definition (arm64 `fmov #imm`, `mov + fmov`, `ldr d, =lit`), not for those that fold
+///   them into the using instruction's memory operand (x64).
+/// Returns the rewritten copy, or None when there is nothing to do.
+pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -> Option<Func> {
     let reach = reachable(f);
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
@@ -3235,6 +3248,8 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool) -> Option<Func>
     let mut changed = false;
     let mut g = f.clone();
     let mut consts: Vec<(i64, VReg)> = Vec::new();
+    // float constants by (bits, f64?)
+    let mut fconsts: Vec<((u64, bool), VReg)> = Vec::new();
     let mut moved = vec![false; nv];
     for bi in 0..g.blocks.len() {
         if !reach[bi] {
@@ -3269,6 +3284,13 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool) -> Option<Func>
                     }
                     changed = true;
                 }
+                Inst::Fconst(d, bits, w) if floats && ndef[d.0 as usize] == 1 => {
+                    moved[d.0 as usize] = true;
+                    if !fconsts.iter().any(|x| x.0 == (bits, w)) {
+                        fconsts.push(((bits, w), d));
+                    }
+                    changed = true;
+                }
                 Inst::IBinI(op, it, d, a, v) if !fits(&i) => {
                     let c = const_vreg(&mut g, &mut consts, v);
                     g.blocks[bi].insts[k] = Inst::IBin(op, it, d, a, c);
@@ -3296,10 +3318,15 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool) -> Option<Func>
                         map[d.0 as usize] = consts.iter().find(|x| x.0 == *v).unwrap().1 .0;
                     }
                 }
+                if let Inst::Fconst(d, bits, w) = i {
+                    if moved[d.0 as usize] {
+                        map[d.0 as usize] = fconsts.iter().find(|x| x.0 == (*bits, *w)).unwrap().1 .0;
+                    }
+                }
             }
         }
         for b in g.blocks.iter_mut() {
-            let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::Iconst(d, _) if (d.0 as usize) < nv && moved[d.0 as usize])).collect();
+            let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::Iconst(d, _) | Inst::Fconst(d, _, _) if (d.0 as usize) < nv && moved[d.0 as usize])).collect();
             let mut k = 0;
             b.insts.retain(|_| {
                 k += 1;
@@ -3317,8 +3344,8 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool) -> Option<Func>
         }
     }
     let p0 = g.blocks[0].pos.first().copied().unwrap_or(g.blocks[0].term_pos);
-    let n = consts.len();
-    g.blocks[0].insts.splice(0..0, consts.iter().map(|(v, c)| Inst::Iconst(*c, *v)));
+    let n = consts.len() + fconsts.len();
+    g.blocks[0].insts.splice(0..0, consts.iter().map(|(v, c)| Inst::Iconst(*c, *v)).chain(fconsts.iter().map(|((bits, w), c)| Inst::Fconst(*c, *bits, *w))));
     g.blocks[0].pos.splice(0..0, std::iter::repeat(p0).take(n));
     Some(g)
 }

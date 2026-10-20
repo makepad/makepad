@@ -468,8 +468,15 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
     let mut def: Vec<Option<(VX, VReg)>> = vec![None; nv];
     // single-def scalar results (zero-extended lanes) and their lane width
     let mut lane_bits = vec![0u8; nv];
+    // single-def bit patterns of a single-def f32 (`x.to_bits()`, zero-extended): the float
+    let mut f32_bits: Vec<Option<VReg>> = vec![None; nv];
     for b in &f.blocks {
         for i in &b.insts {
+            match *i {
+                Inst::Conv(Conv::FToBits(false), d, x) if ndef[d.0 as usize] == 1 && ndef[x.0 as usize] == 1 => f32_bits[d.0 as usize] = Some(x),
+                Inst::Conv(Conv::IntToInt(t), d, x) if ndef[d.0 as usize] == 1 && !t.signed && t.bits >= 32 => f32_bits[d.0 as usize] = f32_bits[x.0 as usize],
+                _ => {}
+            }
             if let Inst::VConst(d, 0) = i {
                 zero[d.0 as usize] = ndef[d.0 as usize] == 1;
             }
@@ -496,6 +503,14 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
     };
     for b in &mut f.blocks {
         for i in &mut b.insts {
+            // a splat of a float's bits splats the float register itself (no round trip
+            // through an integer register): `_mm_set1_ps(x)`, `vdupq_n_f32(x)`
+            if let Inst::VX(VX::Splat(VW::S), d, a, _) = *i {
+                if let Some(x) = f32_bits[a.0 as usize] {
+                    *i = Inst::VSplat(d, x);
+                    continue;
+                }
+            }
             if let Inst::VX(VX::CmpGtS(VW::B), d, a, b) = *i {
                 // Expanding an already canonical comparison mask's sign bits
                 // is an identity (the lowering of blendv_epi8 does this).

@@ -3544,8 +3544,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
     let _cost_ra = crate::probe::phase(9);
     let t_ra = crate::stats::pass_clock();
-    // immediates arm64 cannot encode, inside loops: registers set up once
-    let hoisted = regalloc::hoist_loop_consts(f, &imm_fits);
+    // immediates arm64 cannot encode and float constants, inside loops: registers set up once
+    let hoisted = regalloc::hoist_loop_consts(f, &imm_fits, true);
     let f = hoisted.as_ref().unwrap_or(f);
     // indexed accesses with displacements on one base and index: one address register
     let shared = regalloc::share_index_bases(f);
