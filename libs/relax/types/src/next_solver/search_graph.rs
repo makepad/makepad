@@ -196,7 +196,8 @@ impl SolverDelegate<'_> {
         let input = self.query_input(input);
         // Append-only publication preserves this cache only when no existing impl set
         // changes. Entries with deferred misses (including nested hits) are evicted.
-        let result = EvalCtxt::enter_canonical(self, graph, &input, inspect);
+        // rustc search_graph.rs compute_goal: nested goals recurse once per level
+        let result = crate::stack::ensure_sufficient_stack(|| EvalCtxt::enter_canonical(self, graph, &input, inspect));
         self.result_id(result)
     }
 }

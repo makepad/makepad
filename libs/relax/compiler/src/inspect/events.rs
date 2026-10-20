@@ -59,7 +59,7 @@ pub fn parked_events(domain: u32) -> Option<Vec<std::sync::Arc<str>>> {
         .map(|p| p.event.clone()).collect())
 }
 
-pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
+pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
 
 /// Records an event (`fields`: the kind-specific JSON members, without braces). Returns its seq,
 /// or 0 when it repeated one sent in the last 30 s.
@@ -68,6 +68,7 @@ pub fn emit(kind: &'static str, key: &str, fields: &str) -> u64 {
 }
 
 fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::Arc<str>) {
+    let _k = crate::zone_alloc::kept();
     let mut q = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(e) = q.iter().rev().find(|e| e.kind == kind && e.key == key) {
         if e.at.elapsed().as_secs() < 30 {
@@ -164,6 +165,10 @@ pub fn cmd_watch(req: &Req, out: &mut Out) {
         if timeout > 0 && t0.elapsed().as_secs() >= timeout {
             break None;
         }
+        // the client went away: the watch ends (it counted as a watcher)
+        if out.cancelled() {
+            break None;
+        }
         q = NEW.wait_timeout(q, std::time::Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
     };
     drop(q);
@@ -171,6 +176,9 @@ pub fn cmd_watch(req: &Req, out: &mut Out) {
         super::timeline::set_frame_watch(false);
     }
     retry_update();
+    if found.is_none() && out.cancelled() {
+        return;
+    }
     match found {
         Some((seq, json)) => out.line(&format!("{},\"rearm\":\"watch since={}\"}}", &json[..json.len() - 1], seq)),
         None => out.line(&format!("{{\"event\":\"none\",\"waited_s\":{},\"rearm\":\"watch since={}\"}}", timeout, since)),
@@ -200,12 +208,12 @@ pub fn cmd_events(req: &Req, out: &mut Out) {
             out.line(j);
             since = *seq;
         }
-        if !follow || !out.flush() {
+        if !follow || !out.flush() || out.cancelled() {
             break;
         }
         let q = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
         if q.back().map_or(true, |e| e.seq <= since) {
-            let _ = NEW.wait_timeout(q, std::time::Duration::from_secs(5));
+            let _ = NEW.wait_timeout(q, std::time::Duration::from_millis(500));
         }
         // a heartbeat-free stream: a closed client is noticed at the next write
     }
@@ -291,6 +299,7 @@ pub fn release_domain(domain: crate::domain::DomainId) {
 }
 
 pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
+    let _k = crate::zone_alloc::kept();
     if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() {
         return;
     }

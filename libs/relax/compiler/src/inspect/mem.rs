@@ -69,6 +69,7 @@ pub fn tick(n: u64, rss: u64) {
 
 /// A phase marker on the memory timeline (main start, first present, snapshots, the app's marks).
 pub fn mark(label: &str) {
+    let _k = crate::zone_alloc::kept();
     let mut m = MARKS.lock().unwrap_or_else(|e| e.into_inner());
     if m.len() < 1024 {
         crate::zone_alloc::kept_with(|| m.push((now_ms(), label.to_string())));

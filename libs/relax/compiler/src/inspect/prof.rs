@@ -24,16 +24,24 @@ pub struct Run {
     pub secs: f64,
     pub hz: u64,
     pub lost: u64,
+    /// why sampling stopped early or skipped rounds (client gone, capture lock busy)
+    pub notes: Vec<String>,
 }
 
-/// Collects samples for `secs` at `hz` per thread of CPU time, from the threads `want` picks.
-pub fn collect(secs: f64, hz: u64, want: &dyn Fn(&super::threads::Thread) -> bool) -> Run {
+/// Collects samples for `secs` at `hz` per thread of CPU time, from the threads `want` picks
+/// (never inspect's own: the caller would suspend itself). Stops early once `cancel` says the
+/// client is gone.
+pub fn collect(secs: f64, hz: u64, want: &dyn Fn(&super::threads::Thread) -> bool, cancel: &dyn Fn() -> bool) -> Run {
     super::cfi::refresh();
     let skip = super::SERVER_TIDS.lock().unwrap().clone();
     let mut threads = super::threads::list();
     super::name_handles(&mut threads);
-    threads.retain(|t| !skip.contains(&t.os_id) && want(t) && !t.name.starts_with("run-inspect") || t.name.starts_with("makepad-remote"));
-    imp::collect(threads, secs, hz)
+    threads.retain(|t| !super::is_inspect_thread(t, &skip) && want(t));
+    let mut run = imp::collect(threads, secs, hz, cancel);
+    if cancel() {
+        run.notes.push(format!("stopped after {:.1} s: the client went away", run.secs));
+    }
+    run
 }
 
 #[cfg(target_os = "linux")]
@@ -142,12 +150,13 @@ mod imp {
         Some(Sample { os_id, frames: buf[..n].to_vec() })
     }
 
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64) -> Run {
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, cancel: &dyn Fn() -> bool) -> Run {
         let rings: Vec<Ring> = threads.iter().filter_map(|t| open(t.os_id, hz)).collect();
         let mut samples = Vec::new();
         let mut lost = 0u64;
         let t0 = std::time::Instant::now();
-        while t0.elapsed().as_secs_f64() < secs {
+        crate::inspect::activity::phase("sampling (perf rings)", 0);
+        while t0.elapsed().as_secs_f64() < secs && !cancel() {
             std::thread::sleep(std::time::Duration::from_millis(10));
             for r in &rings {
                 drain(r, &mut samples, &mut lost);
@@ -160,7 +169,9 @@ mod imp {
                 close(r.fd);
             }
         }
-        Run { samples, threads, secs, hz, lost }
+        let secs = t0.elapsed().as_secs_f64().min(secs);
+        crate::inspect::activity::phase("running", 0);
+        Run { samples, threads, secs, hz, lost, notes: Vec::new() }
     }
 }
 
@@ -168,22 +179,37 @@ mod imp {
 mod imp {
     use super::{Run, Sample};
 
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64) -> Run {
-        let _g = crate::inspect::CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut samples = Vec::new();
+    /// Each round suspends the picked threads that are on a CPU, one at a time, walks it into a
+    /// fixed array and resumes it before anything is allocated or locked (a suspended thread may
+    /// hold malloc's lock). The capture lock is taken per round, so `stacks` and `why-hung` get
+    /// in between.
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, cancel: &dyn Fn() -> bool) -> Run {
+        let mut notes = Vec::new();
+        let mut busy_rounds = 0u64;
+        let mut samples = Vec::with_capacity(((secs * hz as f64) as usize).min(1 << 16));
         let mut raw = crate::inspect::threads::Raw::new();
         let period = std::time::Duration::from_micros(1_000_000 / hz.max(1));
         let t0 = std::time::Instant::now();
         let mut last_cpu: Vec<u64> = threads.iter().map(|t| t.cpu_ns).collect();
         let mut live = crate::inspect::threads::list();
         let mut next_list = std::time::Instant::now();
-        while t0.elapsed().as_secs_f64() < secs {
+        while t0.elapsed().as_secs_f64() < secs && !cancel() {
             let tick = std::time::Instant::now();
             // which threads ran since the last look (every 50 ms): only those are suspended
             if tick >= next_list {
                 live = crate::inspect::threads::list();
                 next_list = tick + std::time::Duration::from_millis(50);
             }
+            let _g = match crate::inspect::capture::lock("prof", 1000) {
+                Ok(g) => g,
+                Err(e) => {
+                    busy_rounds += 1;
+                    if busy_rounds == 1 {
+                        notes.push(e);
+                    }
+                    continue;
+                }
+            };
             for (k, t) in threads.iter().enumerate() {
                 let Some(now) = live.iter().find(|x| x.os_id == t.os_id) else { continue };
                 // CPU samples only: a thread that ran lately and is on a CPU right now
@@ -198,20 +224,27 @@ mod imp {
                     samples.push(Sample { os_id: t.os_id, frames: raw.frames().to_vec() });
                 }
             }
+            drop(_g);
             let spent = tick.elapsed();
             if spent < period {
+                crate::inspect::activity::phase("sampling (between rounds)", 0);
                 std::thread::sleep(period - spent);
             }
         }
-        Run { samples, threads, secs, hz, lost: 0 }
+        if busy_rounds > 0 {
+            notes.push(format!("{} sampling round(s) skipped: the capture lock was busy", busy_rounds));
+        }
+        crate::inspect::activity::phase("running", 0);
+        let secs = t0.elapsed().as_secs_f64().min(secs);
+        Run { samples, threads, secs, hz, lost: 0, notes }
     }
 }
 
 #[cfg(any(windows, target_os = "android"))]
 mod imp {
     use super::Run;
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64) -> Run {
-        Run { samples: Vec::new(), threads, secs, hz, lost: 0 }
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _cancel: &dyn Fn() -> bool) -> Run {
+        Run { samples: Vec::new(), threads, secs, hz, lost: 0, notes: vec!["no CPU sampler on this target".into()] }
     }
 }
 
@@ -270,7 +303,11 @@ pub fn cmd_prof(req: &Req, out: &mut Out) {
     let secs = (req.num("s", 3) as f64).clamp(0.2, 30.0);
     let hz = req.num("hz", 200).clamp(10, 2000);
     let n = req.num("n", 15) as usize;
-    let run = collect(secs, hz, &*pick(req.get("threads").unwrap_or("all")));
+    let gone = out.gone();
+    let run = collect(secs, hz, &*pick(req.get("threads").unwrap_or("all")), &*gone);
+    if gone() {
+        return;
+    }
     report(&run, n, req.get("save") == Some("1"), out);
 }
 
@@ -286,6 +323,7 @@ fn report(run: &Run, n: usize, save: bool, out: &mut Out) {
     if run.lost > 0 {
         partial.push(format!("{} sample batches lost (ring overflow)", run.lost));
     }
+    partial.extend(run.notes.iter().cloned());
     let syms = names(run, &mut partial);
     let total = run.samples.len().max(1);
     let ms_per = 1000.0 / run.hz as f64;
@@ -374,10 +412,14 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     let cpu0 = super::threads::list();
     let busy0 = crate::owner::BUSY_NS.iter().map(|b| b.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>();
     let wait0 = crate::owner::MAIN_WAIT_MAX.load(std::sync::atomic::Ordering::Relaxed);
-    let run = collect(secs, 250, &*pick("all"));
+    let gone = out.gone();
+    let run = collect(secs, 250, &*pick("all"), &*gone);
+    if gone() {
+        return;
+    }
     let cpu1 = super::threads::list();
     let busy1 = crate::owner::BUSY_NS.iter().map(|b| b.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>();
-    let mut partial = Vec::new();
+    let mut partial = run.notes.clone();
     let syms = names(&run, &mut partial);
     out.measured(&format!("{:.1} s: CPU samples of every thread at 250 Hz, thread CPU times, owner service counters", run.secs), "perf_event / thread suspend + owner counters", &partial);
     let pid = std::process::id() as u64;

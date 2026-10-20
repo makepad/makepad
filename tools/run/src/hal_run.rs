@@ -227,11 +227,8 @@ fn document(package_dir: &str) -> Result<Document, String> {
         relax_compiler::vfs::read_to_string(&manifest).map_err(|e| format!("{manifest}: {e}"))?;
     let manifest = relax_compiler::toml::parse_toml(&text).map_err(|e| e.to_string())?;
     let Some(value) = manifest.get_path(&["package", "metadata", "makepad", "bootloader"]) else {
-        let mut document = Document::bundled();
-        if let Ok(source) = relax_compiler::vfs::read_to_string(&document.path) {
-            document.source = source.into();
-        }
-        return Ok(document);
+        // the binary's own document: embedded, never the source tree's copy
+        return Ok(Document::bundled());
     };
     let relative = value
         .as_str()
@@ -243,6 +240,7 @@ fn document(package_dir: &str) -> Result<Document, String> {
     Ok(Document {
         path,
         source: source.into(),
+        live: true,
     })
 }
 
@@ -509,7 +507,8 @@ fn retry() -> Result<(), String> {
 
 fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
     let _kept = relax_compiler::zone_alloc::kept();
-    let document_path = document.path.clone();
+    // only a package's own document is watched (the bundled one is the binary's)
+    let document_path = if document.live { document.path.clone() } else { PathBuf::new() };
     let mut roots = Vec::new();
     if package_dir.is_dir() {
         roots.push(makepad_filesystem_watcher::WatchRoot {
@@ -533,7 +532,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
         use makepad_filesystem_watcher::FileSystemWatcher;
         FileSystemWatcher::start(roots, move |event| {
             // Watch roots catch atomic saves and backend rescan notifications too.
-            if event.path == document_path || event.path.is_dir() {
+            if !document_path.as_os_str().is_empty() && (event.path == document_path || event.path.is_dir()) {
                 match relax_compiler::vfs::read_to_string(&document_path) {
                     Ok(source) => {
                         let source: std::sync::Arc<str> = source.into();
@@ -544,6 +543,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                             post(Update::Document(Document {
                                 path: document_path.clone(),
                                 source,
+                                live: true,
                             }));
                         }
                     }

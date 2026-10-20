@@ -63,14 +63,20 @@ pub enum Action {
 
 #[derive(Clone)]
 pub struct Document {
+    /// where it came from (diagnostics name it)
     pub path: PathBuf,
     pub source: Arc<str>,
+    /// a package's own document (`package.metadata.makepad.bootloader`): edits of the file are
+    /// shown live. The bundled one belongs to the binary: it is never read from or watched in
+    /// a source tree (a tree of another build may hold a document in another format).
+    pub live: bool,
 }
 impl Document {
     pub fn bundled() -> Self {
         Self {
             path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/boot.splash"),
             source: DEFAULT_DOCUMENT.into(),
+            live: false,
         }
     }
 }

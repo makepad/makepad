@@ -48,6 +48,93 @@ static SITES: Mutex<Vec<std::sync::Arc<Site>>> = Mutex::new(Vec::new());
 static GROUPS: Mutex<Vec<(u32, u32, Vec<u32>, String)>> = Mutex::new(Vec::new());
 static NEXT_GROUP: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
+    if let Ok(sites) = SITES.try_lock() {
+        a.field("inspect.sites");
+        a.vec(&sites);
+        for s in sites.iter() {
+            a.arc(s);
+            a.string(&s.label);
+            if let Some(p) = s.args.get() {
+                a.vec(&p.params);
+                for x in &p.params {
+                    a.string(&x.0);
+                    a.string(&x.1);
+                }
+            }
+        }
+    }
+    if let Ok(g) = GROUPS.try_lock() {
+        a.field("inspect.groups");
+        a.vec(&g);
+        for x in g.iter() {
+            a.vec(&x.2);
+            a.string(&x.3);
+        }
+    }
+    if let Ok(p) = PARKED.try_lock() {
+        a.field("inspect.parked");
+        a.vec(&p);
+        for x in p.iter() {
+            a.arc(x);
+        }
+    }
+}
+
+/// Are any counters installed (count groups or injected probes)? Cheap: a frame log asks it
+/// at each frame's start.
+pub fn any_counters() -> bool {
+    !GROUPS.lock().unwrap_or_else(|e| e.into_inner()).is_empty() || super::probes::any()
+}
+
+/// Every installed counter: ("<site> <fn>", hits, ns) for count sites, then the probes'.
+pub fn counters() -> Vec<(String, u64, u64)> {
+    let mut out = Vec::new();
+    {
+        let sites = SITES.lock().unwrap_or_else(|e| e.into_inner());
+        for (i, s) in sites.iter().enumerate() {
+            if s.on.load(Relaxed) && s.kind == Kind::Count {
+                out.push((format!("{}{} {}", site_letter(s.kind), i, s.label), s.hits.load(Relaxed), s.ns.load(Relaxed)));
+            }
+        }
+    }
+    super::probes::counters(&mut out);
+    out
+}
+
+/// `probes` snapshots: (seq, wall ns, counters), the newest last (`probes since=<seq>`).
+static SNAPS: Mutex<std::collections::VecDeque<(u64, u64, Vec<(String, u64, u64)>)>> = Mutex::new(std::collections::VecDeque::new());
+static SNAP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// `probes since=<seq>`: each counter's change since snapshot `seq`, per second, and whether it
+/// started or stopped moving compared with the interval before `seq`.
+fn probes_since(since: u64, now: &[(String, u64, u64)], t: u64, out: &mut Out) {
+    let snaps = SNAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(k) = snaps.iter().position(|x| x.0 == since) else {
+        out.err(&format!("no probes snapshot {} (kept: the last 32); `probes` starts a new one", since));
+        return;
+    };
+    let (_, t0, base) = &snaps[k];
+    let prev = if k > 0 { Some(&snaps[k - 1]) } else { None };
+    let secs = (t.saturating_sub(*t0) as f64 / 1e9).max(1e-3);
+    let get = |v: &[(String, u64, u64)], key: &str| v.iter().find(|x| x.0 == key).map(|x| (x.1, x.2));
+    for (key, hits, ns) in now {
+        let (h0, ns0) = get(base, key).unwrap_or((0, 0));
+        let delta = hits.saturating_sub(h0);
+        let before = prev.and_then(|p| get(&p.2, key).map(|x| h0.saturating_sub(x.0)));
+        let change = match (get(base, key).is_some(), before, delta > 0) {
+            (false, _, _) => "new",
+            (true, Some(0), true) => "started",
+            (true, _, true) => "active",
+            (true, Some(b), false) if b > 0 => "stopped",
+            _ => "idle",
+        };
+        let time = if ns.saturating_sub(ns0) > 0 { format!(",\"ms\":{:.3}", ns.saturating_sub(ns0) as f64 / 1e6) } else { String::new() };
+        out.line(&format!("{{\"counter\":{},\"delta\":{},\"per_s\":{:.1},\"change\":\"{}\"{}}}", json_str(&short(key, 160)), delta, delta as f64 / secs, change, time));
+    }
+    out.line(&format!("{{\"interval_s\":{:.2}}}", secs));
+}
+
 /// Is slot `id` instrumented now? (jit.rs: O3 / O2 installs keep its probes)
 pub fn active(id: u32) -> bool {
     super::patches::active(id)
@@ -67,6 +154,9 @@ fn rt_inspect_enter(i: u64) {
     if let Some(s) = site(i) {
         if s.on.load(Relaxed) {
             s.hits.fetch_add(1, Relaxed);
+            // a counted fn may run inside a compile (constant evaluation): the thread-local stack
+            // is the thread's, never the compiler arena's
+            let _k = crate::zone_alloc::kept();
             let _ = ENTRIES.try_with(|e| e.borrow_mut().push((i, crate::clock::wall_ns())));
         }
     }
@@ -232,6 +322,7 @@ fn rt_inspect_break(i: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) {
 /// Parks the calling thread as a breakpoint hit (site index `i`, u64::MAX for none) and raises
 /// the `break` event; returns once an agent continues it (or after 10 minutes).
 pub fn park_here(i: u64, site_tag: &str, label: &str, extra: &str) {
+    let _k = crate::zone_alloc::kept();
     let id = PARK_IDS.fetch_add(1, SeqCst) + 1;
     let p = std::sync::Arc::new(Parked { id, site: i, os_id: super::threads::self_os_id(), go: AtomicBool::new(false) });
     let me = crate::os::thread::current();
@@ -631,7 +722,8 @@ pub(super) fn edit_count(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit,
 /// `break`'s edit: the parking call with the fn's argument words at the entry or a line.
 pub(super) fn edit_break(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32, site: u64, line: Option<u32>) -> bool {
     if let Some(s) = self::site(site) {
-        let _ = s.args.set(arg_plan(u, slot, f));
+        // kept state (the site outlives the compiler arena); this edit runs inside a compile
+        let _ = s.args.set(crate::zone_alloc::kept_with(|| arg_plan(u, slot, f)));
     }
     let mut hit = false;
     edit(f, u, site, ("inspect_break", rt_inspect_break as *const () as u64), None, line, true, &mut hit);
@@ -645,6 +737,23 @@ pub(super) fn edit_restart_site(f: &mut relax_backend::rir::Func, u: &crate::jit
         let _ = s.returns.set(n);
     }
     true
+}
+
+/// A new site (its index): kept state whatever the caller's phase (the owner compiles in the
+/// compiler arena; the instrumented code reads the site after a settle swap destroyed it).
+fn register_site(kind: Kind, slot: u32, label: String, group: u32) -> u64 {
+    let _k = crate::zone_alloc::kept();
+    let label = label.as_str().to_string();
+    let mut sites = SITES.lock().unwrap_or_else(|e| e.into_inner());
+    sites.push(std::sync::Arc::new(Site { kind, slot, label, args: std::sync::OnceLock::new(), returns: std::sync::OnceLock::new(), group, hits: AtomicU64::new(0), ns: AtomicU64::new(0), on: AtomicBool::new(true) }));
+    sites.len() as u64 - 1
+}
+
+/// A new probe group's record (kept state, like the sites).
+fn register_group(group: u32, slots: Vec<u32>, query: &str) {
+    let _k = crate::zone_alloc::kept();
+    let slots = slots.as_slice().to_vec();
+    GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push((group, 0, slots, query.to_string()));
 }
 
 /// Installs probes of `kind` for `query` (on the owner, within `ms`): (group, sites).
@@ -668,6 +777,10 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
     };
     let group = NEXT_GROUP.fetch_add(1, SeqCst) as u32;
     let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || -> Result<(u32, Vec<(u64, String, u32)>), String> {
+        // the sites, groups and patch edits are kept state (the instrumented code calls into them
+        // after a settle swap destroyed the compiler arena); patches::rebuild compiles in the
+        // compiler phase
+        let _kept = crate::zone_alloc::kept();
         let u = unsafe { &mut *up };
         let found = match target {
             Target::Query(ref q) => find(u, q, if kind == Kind::Break { 4 } else { 32 }),
@@ -676,13 +789,23 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
         if found.is_empty() {
             return Err(format!("no compiled fn or line matches `{}` (a fn not called yet has no code to patch)", query));
         }
+        // a slot and its SPEC-V twin run the same fn (unverified callers call the twin): both are
+        // instrumented, into one site each (a twin compiled later joins on its first install)
+        let mut found = found;
+        for k in 0..found.len() {
+            let (id, line, _) = found[k].clone();
+            let sib = match u.fns[id as usize].key {
+                crate::jit::FnKey::Plain(b) => Some(b),
+                crate::jit::FnKey::Inst(..) | crate::jit::FnKey::Closure(..) => u.plain_twin_of(id),
+                _ => None,
+            };
+            if let Some(s) = sib.filter(|&s| u.fns[s as usize].compiled && !found.iter().any(|f| f.0 == s)) {
+                found.push((s, line, u.fns[s as usize].name.to_string()));
+            }
+        }
         let mut out = Vec::new();
         for (id, line, name) in found {
-            let si = {
-                let mut sites = SITES.lock().unwrap_or_else(|e| e.into_inner());
-                sites.push(std::sync::Arc::new(Site { kind, slot: id, label: match line { Some(l) => format!("{} (line {})", name, l), None => name.clone() }, args: std::sync::OnceLock::new(), returns: std::sync::OnceLock::new(), group, hits: AtomicU64::new(0), ns: AtomicU64::new(0), on: AtomicBool::new(true) }));
-                sites.len() as u64 - 1
-            };
+            let si = register_site(kind, id, match line { Some(l) => format!("{} (line {})", name, l), None => name.clone() }, group);
             let e = match kind {
                 Kind::Count => super::patches::Edit::Count { site: si, time },
                 Kind::Break => super::patches::Edit::Break { site: si, line },
@@ -694,8 +817,7 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
                 Err(e) => out.push((si, format!("{}: not instrumented: {}", name, e), id)),
             }
         }
-        let gen = 0;
-        GROUPS.lock().unwrap_or_else(|e| e.into_inner()).push((group, gen, out.iter().map(|x| x.2).collect(), query.clone()));
+        register_group(group, out.iter().map(|x| x.2).collect(), &query);
         Ok((group, out))
     });
     r.unwrap_or_else(|| Err(format!("the owner did not take the request in 10 s ({})", crate::owner::serving_note())))
@@ -703,6 +825,7 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
 
 /// Removes probe group `group` (all groups with None): the code they replaced comes back.
 fn remove(group: Option<u32>) -> Result<usize, String> {
+    let _k = crate::zone_alloc::kept();
     let up = crate::jit::current_unit();
     let groups: Vec<(u32, u32, Vec<u32>, String)> = {
         let mut g = GROUPS.lock().unwrap_or_else(|e| e.into_inner());
@@ -732,6 +855,7 @@ fn remove(group: Option<u32>) -> Result<usize, String> {
     let n = groups.len();
     let ids: Vec<u32> = groups.iter().map(|g| g.0).collect();
     let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || {
+        let _kept = crate::zone_alloc::kept();
         for g in ids {
             unsafe { super::patches::remove_owner(up, super::patches::Owner::Group(g)) };
         }
@@ -764,17 +888,66 @@ fn program_thread(t: &super::threads::Thread) -> bool {
 #[cfg(target_os = "macos")]
 mod pause_imp {
     static HELD: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
+    extern "C" {
+        static mach_task_self_: u32;
+        fn malloc_get_all_zones(task: u32, reader: *const u8, out: *mut *const usize, count: *mut u32) -> i32;
+    }
+
+    /// Every malloc zone's lock taken (zone->introspect->force_lock, as fork() does) while the
+    /// threads are suspended: no thread stops holding an allocator lock, so inspect's commands
+    /// (which allocate) keep working while the program is paused. Nothing may allocate between
+    /// `lock_zones` and `unlock_zones` (this thread would wait for itself).
+    unsafe fn zones() -> &'static [usize] {
+        let mut addrs: *const usize = std::ptr::null();
+        let mut n = 0u32;
+        if malloc_get_all_zones(mach_task_self_, std::ptr::null(), &mut addrs, &mut n) != 0 || addrs.is_null() {
+            return &[];
+        }
+        std::slice::from_raw_parts(addrs, n as usize)
+    }
+    /// malloc_zone_t: introspect is its 13th word; malloc_introspection_t: force_lock, force_unlock
+    /// are its 6th and 7th
+    unsafe fn zone_fn(zone: usize, k: usize) -> Option<unsafe extern "C" fn(usize)> {
+        let intro = *((zone as *const usize).add(12));
+        if intro == 0 {
+            return None;
+        }
+        let f = *((intro as *const usize).add(k));
+        (f != 0).then(|| std::mem::transmute::<usize, unsafe extern "C" fn(usize)>(f))
+    }
+
     pub fn pause(want: &dyn Fn(&crate::inspect::threads::Thread) -> bool) -> usize {
         let skip = crate::inspect::SERVER_TIDS.lock().unwrap().clone();
+        let mut list = crate::inspect::threads::list();
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-        for t in crate::inspect::threads::list() {
-            if skip.contains(&t.os_id) || t.name.starts_with("run-inspect") || t.name.starts_with("makepad-remote") || !want(&t) {
-                continue;
+        held.reserve(list.len());
+        let picked: Vec<bool> = list.iter().map(|t| !(crate::inspect::is_inspect_thread(t, &skip) || !want(t))).collect();
+        let _ = crate::inspect::threads::self_os_id();
+        let mut rest: Vec<crate::inspect::threads::Thread> = Vec::with_capacity(list.len());
+        unsafe {
+            let zs = zones();
+            for &z in zs {
+                if let Some(f) = zone_fn(z, 5) {
+                    f(z);
+                }
             }
-            if crate::inspect::threads::suspend(&t) {
-                held.push(t);
+            // no allocation or free from here to the unlock: `held` has room, the threads move
+            // out of `list` by drain (its buffer is freed after the unlock)
+            for (k, t) in list.drain(..).enumerate() {
+                if picked[k] && crate::inspect::threads::suspend(&t) {
+                    held.push(t);
+                } else {
+                    // dropping a thread frees its name: after the unlock
+                    rest.push(t);
+                }
+            }
+            for &z in zs.iter().rev() {
+                if let Some(f) = zone_fn(z, 6) {
+                    f(z);
+                }
             }
         }
+        drop((list, picked, rest));
         held.len()
     }
     pub fn resume() -> usize {
@@ -877,8 +1050,22 @@ pub fn cmd(req: &Req, out: &mut Out) {
             }
         }
         "probes" => {
-            let sites = SITES.lock().unwrap_or_else(|e| e.into_inner());
+            // a snapshot per call: `probes since=<seq>` reports the change since one
+            let now = counters();
+            let t = crate::clock::wall_ns();
+            let seq = SNAP_SEQ.fetch_add(1, SeqCst) + 1;
             out.measured("installed probes", "probe counters", &[]);
+            if let Some(since) = req.get("since").and_then(|v| v.parse::<u64>().ok()) {
+                probes_since(since, &now, t, out);
+            }
+            {
+                let mut snaps = SNAPS.lock().unwrap_or_else(|e| e.into_inner());
+                snaps.push_back((seq, t, now));
+                while snaps.len() > 32 {
+                    snaps.pop_front();
+                }
+            }
+            let sites = SITES.lock().unwrap_or_else(|e| e.into_inner());
             for (i, s) in sites.iter().enumerate() {
                 if !s.on.load(Relaxed) {
                     continue;
@@ -892,7 +1079,13 @@ pub fn cmd(req: &Req, out: &mut Out) {
             for p in parked.iter() {
                 out.line(&format!("{{\"parked\":\"K{}\",\"site\":\"B{}\",\"tid\":\"T{}\"}}", p.id, p.site, p.os_id));
             }
-            out.line(&format!("{{\"paused\":{}}}", PAUSED.load(Relaxed)));
+            drop(sites);
+            let mut injected = Vec::new();
+            super::probes::counters(&mut injected);
+            for (k, h, ns) in injected.iter().filter(|x| !x.0.contains(" count ")) {
+                out.line(&format!("{{\"probe\":{},\"hits\":{}{}}}", json_str(&short(k, 160)), h, if *ns > 0 { format!(",\"est_ms\":{:.3}", *ns as f64 / 1e6) } else { String::new() }));
+            }
+            out.line(&format!("{{\"paused\":{},\"seq\":{},\"rearm\":\"probes since={}\"}}", PAUSED.load(Relaxed), seq, seq));
         }
         "rm" => {
             let w = req.pos.first().map(String::as_str).unwrap_or("all");
@@ -936,5 +1129,53 @@ pub fn cmd(req: &Req, out: &mut Out) {
             out.line(&format!("{{\"resumed_threads\":{}}}", n));
         }
         _ => out.err("unknown probe command"),
+    }
+}
+
+#[cfg(test)]
+mod zone_tests {
+    /// The P0 of 2026-10-20 (Stage: count / rm / count, then the settle swap: "use after
+    /// compiler-zone destroy" in the counted fn): inspect's records were allocated in the owner's
+    /// compiler phase. Registering, removing and registering again from the compiler phase -- as
+    /// the owner does -- leaves nothing of inspect's state in the compiler arena (the kept scan
+    /// that MAKEPAD_RUN_ZONE_CHECK=1 runs at every settle reports 0 for it).
+    #[test]
+    fn probe_records_outlive_the_compiler_arena() {
+        assert!(crate::zone_alloc::compiler_arena_enabled());
+        let count = || {
+            let mut a = crate::jit::zone_scan::Acc::new_for_test();
+            super::super::scan_kept(&mut a);
+            a.total()
+        };
+        // the control: the scan sees an inspect-like record built in the compiler phase
+        {
+            let _c = crate::zone_alloc::compiler();
+            let mut a = crate::jit::zone_scan::Acc::new_for_test();
+            a.field("control");
+            let v: Vec<String> = vec!["x".repeat(40)];
+            a.vec(&v);
+            a.string(&v[0]);
+            assert_eq!(a.total(), 2, "the compiler arena is not in use: the fixture would prove nothing");
+        }
+        for round in 0..3 {
+            {
+                let _c = crate::zone_alloc::compiler();
+                let label = format!("fixture::counted_fn round {}", round);
+                let g = 9000 + round;
+                let si = super::register_site(super::Kind::Count, 1, label, g);
+                super::register_group(g, vec![1, 2, 3], "fixture::counted_fn");
+                let (p, _) = super::super::probes::register_probe_for_test(g, "fixture::probed_fn");
+                assert!(si < u64::MAX && p.id == g);
+            }
+            assert_eq!(count(), 0, "round {}: inspect state in the compiler arena", round);
+            // rm: the groups go, the sites stay (off), as `rm all` does
+            {
+                let _c = crate::zone_alloc::compiler();
+                let mut g = super::GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+                let _k = crate::zone_alloc::kept();
+                g.retain(|x| x.0 < 9000);
+            }
+            assert_eq!(count(), 0, "round {} after rm", round);
+        }
     }
 }

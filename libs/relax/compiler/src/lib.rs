@@ -690,6 +690,9 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             return 1;
         }
     };
+    // the crate under test is the program's own crate (run.rs): its #![recursion_limit] and
+    // #![type_length_limit] govern monomorphization (TypingEnv::fully_monomorphized)
+    crate::layout::set_root_crate(krate);
     let t1 = Instant::now();
     let mut tcx = tcx::Tcx::new();
     tcx.collect(&prog);

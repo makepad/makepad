@@ -92,7 +92,14 @@ fn relate_ty_args(r: &mut dyn TypeRelation<'_>, def: DefId, a_ty: TyId, b_ty: Ty
     Ok((args, tcx.tys.intern_region_args(&regions)))
 }
 
+/// Recursive relation can overflow the stack: a type nested 1000 deep (rustc: the generalizer's
+/// relate_with_variance runs under ensure_sufficient_stack, for a deeper
+/// `ui/associated-consts/issue-93775.rs`)
 pub fn structurally_relate_tys(r: &mut dyn TypeRelation<'_>, a: TyId, b: TyId) -> Result<TyId, TypeError> {
+    crate::stack::ensure_sufficient_stack(|| structurally_relate_tys_inner(r, a, b))
+}
+
+fn structurally_relate_tys_inner(r: &mut dyn TypeRelation<'_>, a: TyId, b: TyId) -> Result<TyId, TypeError> {
     let tys = &r.tcx().tys;
     let ak = tys.kind(a).clone();
     let bk = tys.kind(b).clone();

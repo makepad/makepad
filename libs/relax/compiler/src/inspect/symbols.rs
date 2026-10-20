@@ -116,6 +116,9 @@ fn enumerate() -> Vec<Image> {
             let name = std::ffi::CStr::from_ptr(_dyld_get_image_name(i)).to_string_lossy().into_owned();
             // mach_header_64: magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved
             let ncmds = *(h.add(16) as *const u32);
+            // MH_DYLIB_IN_CACHE: the image lives in the dyld shared cache, laid out unlike its
+            // file on disk (the file's symbol addresses name other code): no file symbols, dladdr
+            let in_cache = *(h.add(24) as *const u32) & 0x8000_0000 != 0;
             let mut p = h.add(32);
             for _ in 0..ncmds {
                 let cmd = *(p as *const u32);
@@ -126,7 +129,7 @@ fn enumerate() -> Vec<Image> {
                     if seg.starts_with(b"__TEXT\0") {
                         let vmaddr = *(p.add(24) as *const u64);
                         let vmsize = *(p.add(32) as *const u64);
-                        v.push(Image { lo: vmaddr.wrapping_add(slide), hi: vmaddr.wrapping_add(slide) + vmsize, path: name.clone(), bias: slide, syms: None });
+                        v.push(Image { lo: vmaddr.wrapping_add(slide), hi: vmaddr.wrapping_add(slide) + vmsize, path: name.clone(), bias: slide, syms: if in_cache { Some(Vec::new()) } else { None } });
                     }
                 }
                 p = p.add(size);

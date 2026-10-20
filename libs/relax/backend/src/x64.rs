@@ -3826,20 +3826,23 @@ impl<'a> Gen<'a> {
         let xa = self.use_f(a, XS);
         let xb = self.use_f(b, XS2);
         let xc = self.use_f(c, 1);
-        self.a.movf_rr(true, 0, xc);
+        // the C library's operand placement (glibc fma/fmaf: vfmadd213 with x in the destination,
+        // y in vvvv, z in r/m), what rustc's code calls without the fma target feature: a NaN
+        // result takes the first NaN of vvvv, the destination, then r/m -- b, a, c
+        self.a.movf_rr(true, 0, xa);
         let op = match (neg_prod, neg_add) {
-            (false, false) => 0xb9, // vfmadd231
-            (false, true) => 0xbb,  // vfmsub231
-            (true, false) => 0xbd,  // vfnmadd231
-            (true, true) => 0xbf,   // vfnmsub231
+            (false, false) => 0xa9, // vfmadd213
+            (false, true) => 0xab,  // vfmsub213
+            (true, false) => 0xad,  // vfnmadd213
+            (true, true) => 0xaf,   // vfnmsub213
         };
-        // VEX.LIG.66.0F38.W{0,1} op /r: reg = xmm0, vvvv = xa, rm = xb
+        // VEX.LIG.66.0F38.W{0,1} op /r: reg = xmm0 (a), vvvv = xb, rm = xc
         let r = 0u8;
         self.a.byte(0xc4);
-        self.a.byte(((!(r >> 3) & 1) << 7) | (1 << 6) | ((!(xb >> 3) & 1) << 5) | 0b00010);
-        self.a.byte(((w as u8) << 7) | ((!xa & 15) << 3) | 0b01);
+        self.a.byte(((!(r >> 3) & 1) << 7) | (1 << 6) | ((!(xc >> 3) & 1) << 5) | 0b00010);
+        self.a.byte(((w as u8) << 7) | ((!xb & 15) << 3) | 0b01);
         self.a.byte(op);
-        self.a.modrm_rr(r, xb);
+        self.a.modrm_rr(r, xc);
         let xd = self.def_f(d, XS);
         self.a.movf_rr(true, xd, 0);
         self.fin_f(d, xd);

@@ -600,7 +600,44 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
 }
 
 
+/// The caller's by-value argument copies (`Slot::arg`) handed to a call that is being inlined stop
+/// being a call's copy: they become the inlined body's parameter memory, which the body may keep
+/// pointers to past what was the call (`format!("{:?}", a)` stores `&a` in an `fmt::Argument` that
+/// a later call reads). frame::slot_sets would otherwise read the one call the address now goes to
+/// as the copy's owner and colour the copy onto a slot live while the pointer is still read.
+fn release_arg_copies(f: &mut Func, args: &[VReg]) {
+    if !f.slots.iter().any(|s| s.arg) {
+        return;
+    }
+    // vreg -> the argument copy it addresses: SlotAddr, moves and address arithmetic
+    let mut of: Vec<u32> = vec![u32::MAX; f.vregs.len()];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, s) = match i {
+                    Inst::SlotAddr(d, s) if f.slots[*s as usize].arg => (*d, *s),
+                    Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) if of[a.0 as usize] != u32::MAX => (*d, of[a.0 as usize]),
+                    _ => continue,
+                };
+                if of[d.0 as usize] != s {
+                    of[d.0 as usize] = s;
+                    changed = true;
+                }
+            }
+        }
+    }
+    for a in args {
+        let s = of[a.0 as usize];
+        if s != u32::MAX {
+            f.slots[s as usize].arg = false;
+        }
+    }
+}
+
 fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg], rets: &[VReg], nounwind: &dyn Fn(u32) -> bool) {
+    release_arg_copies(f, args);
     for c in &callee.sret_callees {
         if !f.sret_callees.contains(c) {
             f.sret_callees.push(*c);
@@ -5207,6 +5244,42 @@ mod slot_layout_tests {
         let (at, end) = loop_layout(false, &[(128, false, false), (128, false, false)], &body);
         assert_ne!(at[0], at[1]);
         assert_eq!(end, 256);
+    }
+
+    #[test]
+    fn slot_layout_keeps_an_inlined_argument_copy_live_while_the_body_reads_it() {
+        // `dbg_arr([1, 2])` inlined: the argument copy becomes the body's `a`, whose address the body
+        // hands to a call that keeps it (`fmt::Argument::new_debug(&a)`) and reads it later, after
+        // writing a result buffer (t15.rs const_generics read the String's bytes as the array)
+        let mut callee = Func::new("callee".into(), 0);
+        let rs = callee.slot(24, 8);
+        let (p, q, r) = (callee.vreg(Cls::I), callee.vreg(Cls::I), callee.vreg(Cls::I));
+        callee.params.push(p);
+        callee.block();
+        callee.blocks[0].insts = vec![
+            Inst::Call(Callee::Fn(3), vec![p], vec![q]),
+            Inst::SlotAddr(r, rs), Inst::Call(Callee::Fn(4), vec![r], vec![]),
+            Inst::Call(Callee::Fn(5), vec![q], vec![]),
+        ];
+        callee.blocks[0].pos = vec![0; 4];
+        callee.blocks[0].term = Term::Ret(vec![]);
+        let mut f = Func::new("caller".into(), 0);
+        let s = f.slot(16, 8);
+        f.slots[s as usize].arg = true;
+        f.slots[s as usize].born = true;
+        let (a, k) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.block();
+        f.blocks[0].insts = vec![
+            Inst::Iconst(k, 1), Inst::SlotAddr(a, s), Inst::Store(Mem::Int(8, false), a, 0, k),
+            Inst::Call(Callee::Fn(1), vec![a], vec![]),
+        ];
+        f.blocks[0].pos = vec![0; 4];
+        f.blocks[0].term = Term::Ret(vec![]);
+        inline_site(&mut f, 0, 3, &callee, &[a], &[], &|_| false);
+        f.verify().unwrap();
+        assert!(!f.slots[s as usize].arg);
+        let (at, _) = slot_layout(&f, 0, true);
+        assert_ne!(at[0], at[1]);
     }
 
     #[test]

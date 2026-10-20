@@ -83,6 +83,17 @@ impl Acc {
         Acc { counts: Vec::new(), cur: 0 }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Acc {
+        Acc::new()
+    }
+
+    /// Pointers into the compiler arena counted so far.
+    #[cfg(test)]
+    pub(crate) fn total(&self) -> usize {
+        self.counts.iter().map(|c| c.1).sum()
+    }
+
     /// The following pointers are counted under `name`.
     pub(crate) fn field(&mut self, name: &'static str) {
         self.cur = match self.counts.iter().position(|c| c.0 == name) {
@@ -317,6 +328,8 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     a.vec(&u.stats.timeline);
     a.field("stats.tier1_drop_why");
     a.btree(&u.stats.tier1_drop_why, |_, _, _| {});
+    // makepad inspect's records that installed code calls into (sites, probe groups, edits)
+    crate::inspect::scan_kept(&mut a);
     a.counts.retain(|c| c.1 > 0);
     a.counts
 }

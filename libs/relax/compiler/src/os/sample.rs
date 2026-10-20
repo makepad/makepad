@@ -24,8 +24,9 @@ pub struct Sample {
 #[cfg(target_os = "macos")]
 mod imp {
     use crate::jit::SAMPLE_CALLERS;
-    /// the thread's Mach port and its stack bounds (for the frame-pointer walk)
-    pub type Handle = (u32, u64, u64);
+    /// the thread's Mach port, its stack bounds (for the frame-pointer walk) and its CPU time at
+    /// the last read (µs)
+    pub type Handle = (u32, u64, u64, std::cell::Cell<u64>);
     extern "C" {
         fn pthread_get_stackaddr_np(t: usize) -> *mut u8;
         fn pthread_get_stacksize_np(t: usize) -> usize;
@@ -33,20 +34,37 @@ mod imp {
         fn thread_suspend(t: u32) -> i32;
         fn thread_resume(t: u32) -> i32;
         fn thread_get_state(t: u32, flavor: i32, state: *mut u32, count: *mut u32) -> i32;
+        fn thread_info(t: u32, flavor: u32, out: *mut u32, count: *mut u32) -> i32;
     }
     pub fn open_this_thread(me: u64) -> Option<Handle> {
         let me = me as usize;
         unsafe {
             let hi = pthread_get_stackaddr_np(me) as u64;
             let lo = hi - pthread_get_stacksize_np(me) as u64;
-            Some((pthread_mach_thread_np(me), lo, hi))
+            Some((pthread_mach_thread_np(me), lo, hi, std::cell::Cell::new(0)))
         }
     }
     pub fn close(_h: Handle) {}
-    /// suspend, read the pc and the return addresses of the next CALLERS frames (the frame
-    /// record chain, within the thread's stack), resume. No allocation while the thread is
-    /// stopped (it may hold the allocator's lock): pcs go to a fixed array first.
-    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, weight: u32) {
+    /// A thread on a CPU now: suspend, read the pc and the return addresses of the next CALLERS
+    /// frames (the frame record chain, within the thread's stack), resume. No allocation while
+    /// the thread is stopped (it may hold the allocator's lock): pcs go to a fixed array first.
+    /// A thread that is not on a CPU is not suspended and gives no sample (CPU samples only, as
+    /// Linux's task clock); a sample weighs at most the CPU time the thread used since the last
+    /// read (`weight` is the wall time since then). Returns whether the thread was on a CPU.
+    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, weight: u32) -> bool {
+        // thread_basic_info: user_time (s, µs), system_time (s, µs), cpu_usage, policy, run_state, ...
+        let mut info = [0u32; 10];
+        let mut icount = 10u32;
+        if unsafe { thread_info(h.0, 3, info.as_mut_ptr(), &mut icount) } != 0 {
+            return false;
+        }
+        let cpu_us = (info[0] as u64 + info[2] as u64) * 1_000_000 + info[1] as u64 + info[3] as u64;
+        let used_us = cpu_us.saturating_sub(h.3.replace(cpu_us));
+        if info[6] != 1 {
+            return false;
+        }
+        let unit_us = crate::jit::SAMPLE_MS * 1000;
+        let weight = (((used_us + unit_us / 2) / unit_us) as u32).clamp(1, weight.max(1));
         // ARM_THREAD_STATE64 (flavor 6): x0..x28, fp, lr, sp, pc, cpsr, pad = 68 words
         let mut st = [0u32; 68];
         let mut count = 68u32;
@@ -54,7 +72,7 @@ mod imp {
         let mut n = 0;
         unsafe {
             if thread_suspend(h.0) != 0 {
-                return;
+                return false;
             }
             let r = thread_get_state(h.0, 6, st.as_mut_ptr(), &mut count);
             if r == 0 {
@@ -82,6 +100,7 @@ mod imp {
                 out.push(super::Sample { pc, weight });
             }
         }
+        true
     }
 }
 
@@ -162,7 +181,8 @@ mod imp {
         out
     }
     /// drains PERF_RECORD_SAMPLE records (header, ip) from the ring
-    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, _weight: u32) {
+    /// Returns true (the ring holds CPU samples only: the sampler does not back off on Linux).
+    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, _weight: u32) -> bool {
         use std::sync::atomic::{AtomicU64, Ordering};
         unsafe {
             let base = h.1;
@@ -219,6 +239,7 @@ mod imp {
             }
             (*tail_p).store(tail, Ordering::Release);
         }
+        true
     }
 }
 
@@ -252,12 +273,13 @@ mod imp {
         }
     }
 
-    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, weight: u32) {
+    /// Returns true (the thread is sampled whatever its state: no back-off on Windows).
+    pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, weight: u32) -> bool {
         let mut got = [0u64; 1 + SAMPLE_CALLERS];
         let mut n = 0;
         unsafe {
             if SuspendThread(h.0) == u32::MAX {
-                return;
+                return true;
             }
             let ctx = h.3.get();
             if GetThreadContext(h.0, ctx) != 0 {
@@ -296,6 +318,7 @@ mod imp {
                 out.push(super::Sample { pc, weight });
             }
         }
+        true
     }
 }
 
@@ -356,5 +379,7 @@ mod imp {
     /// Perf sampling is unsupported in the Android app sandbox.
     pub fn open_this_thread(_me: u64) -> Option<Handle> { None }
     pub fn close(_h: Handle) {}
-    pub fn read(_h: &Handle, _out: &mut Vec<super::Sample>, _selfs: &mut Vec<super::Sample>, _lo: u64, _hi: u64, _weight: u32) {}
+    pub fn read(_h: &Handle, _out: &mut Vec<super::Sample>, _selfs: &mut Vec<super::Sample>, _lo: u64, _hi: u64, _weight: u32) -> bool {
+        false
+    }
 }

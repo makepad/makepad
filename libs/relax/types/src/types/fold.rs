@@ -71,6 +71,12 @@ pub fn super_fold_ty<F: TypeFolder + ?Sized>(tys: &Types, t: TyId, f: &mut F, de
     if let Some(needs) = f.fold_flags() {
         if tys.flags(t).bits() & needs.bits() == 0 { return t; }
     }
+    // a type nested 1000 deep folds 1000 levels down (rustc: ensure_sufficient_stack in the
+    // folders that recurse structurally, e.g. the canonicalizer's super_fold_with)
+    crate::stack::ensure_sufficient_stack(|| super_fold_ty_kind(tys, t, f, depth))
+}
+
+fn super_fold_ty_kind<F: TypeFolder + ?Sized>(tys: &Types, t: TyId, f: &mut F, depth: DebruijnIndex) -> TyId {
     let k = match tys.kind(t) {
         TyKind::Tuple(v) => TyKind::Tuple(fold_ty_list(tys, *v, f, depth)),
         TyKind::Const(ct) => TyKind::Const(f.fold_const(tys, *ct, depth)),
