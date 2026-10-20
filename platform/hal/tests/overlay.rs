@@ -41,7 +41,7 @@ fn frame(hal: &Hal, sid: u32, window: Id, serial: u64, kind: u32) {
 
 fn overlay(hal: &Hal, sid: u32, on: bool) {
     let mut cmd = CmdWriter::new(sid);
-    cmd.window_overlay(HOST_WINDOW, on, PANEL);
+    cmd.window_overlay(HOST_WINDOW, on, PANEL, Id::NONE);
     hal.submit(&cmd.buf());
 }
 
@@ -195,9 +195,9 @@ fn releasing_the_borrower_clears_overlay_ownership_before_readoption() {
 fn invalid_overlay_rectangles_leave_app_input_and_composition_intact() {
     let (hal, sid) = setup();
     let mut cmd = CmdWriter::new(HOST);
-    cmd.window_overlay(HOST_WINDOW, true, [0.0, 0.0, 0.0, 40.0]);
-    cmd.window_overlay(HOST_WINDOW, true, [f32::NAN, 0.0, 40.0, 40.0]);
-    cmd.window_overlay(Id::new(HOST_WINDOW.index, 2), true, PANEL);
+    cmd.window_overlay(HOST_WINDOW, true, [0.0, 0.0, 0.0, 40.0], Id::NONE);
+    cmd.window_overlay(HOST_WINDOW, true, [f32::NAN, 0.0, 40.0, 40.0], Id::NONE);
+    cmd.window_overlay(Id::new(HOST_WINDOW.index, 2), true, PANEL, Id::NONE);
     hal.submit(&cmd.buf());
     hal.with_world(|w| {
         let host = w.session(HOST).unwrap();
@@ -210,4 +210,28 @@ fn invalid_overlay_rectangles_leave_app_input_and_composition_intact() {
     assert_eq!(take(&hal, sid)[0].0.tag, tag::KeyUp);
     frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);
     assert_eq!(last(&hal).layers, [(sid, APP_WINDOW, 12)]);
+}
+
+#[test]
+fn a_window_layer_leaves_input_with_the_app_and_needs_its_texture() {
+    let (hal, sid) = setup();
+    const LAYER: Id = Id::new(20, 1);
+    let mut cmd = CmdWriter::new(HOST);
+    // no such texture yet: refused
+    cmd.window_overlay(HOST_WINDOW, true, [0.0; 4], LAYER);
+    cmd.texture_create(LAYER, usage::RENDER_TARGET | usage::SAMPLED, format::BGRA8, 2000, 1400, [1, 1], Attr::default());
+    cmd.window_overlay(HOST_WINDOW, true, [0.0; 4], LAYER);
+    hal.submit(&cmd.buf());
+    hal.with_world(|w| {
+        let host = w.session(HOST).unwrap();
+        assert_eq!(host.stats.bad_args, 1);
+        assert_eq!(host.windows.get(HOST, HOST_WINDOW).unwrap().val.overlay.as_ref().map(|o| o.layer), Some(LAYER));
+        w.window_event(sid, RawEvent::key_up(APP_WINDOW, 1, 0), &[]);
+    });
+    assert!(take(&hal, HOST).is_empty(), "under a window layer input stays with the app");
+    assert_eq!(take(&hal, sid)[0].0.tag, tag::KeyUp);
+    // session 0's frames go on while the app keeps drawing; neither replaces the other's record
+    frame(&hal, HOST, HOST_WINDOW, 101, target::WINDOW);
+    frame(&hal, sid, APP_WINDOW, 12, target::WINDOW);
+    assert_eq!(last(&hal).layers, [(sid, APP_WINDOW, 12), (HOST, HOST_WINDOW, 101)]);
 }

@@ -4,7 +4,9 @@
 use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
-use relax_boot::{Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon};
+use relax_boot::{
+    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
+};
 use relax_compiler::{
     diag::Diagnostic,
     domain::{AppSpec, DomainState},
@@ -66,6 +68,33 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
+/// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
+/// wakes, and shows the wait's activity once it lasts ACTIVITY_AFTER.
+static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
+/// A UI-thread JIT wait this long shows the activity galaxy (shorter ones never flicker it in).
+const ACTIVITY_AFTER: Duration = Duration::from_millis(120);
+/// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
+/// the warm-up is over.
+const READY_QUIET_NS: u64 = 300_000_000;
+
+fn ui_wait_began() {
+    if !UI_WAIT_ARMED.swap(true, Ordering::AcqRel) {
+        Hal::global().wake_session(HOST);
+    }
+}
+
+/// Where the window layer over the app is in its sequence.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Stage {
+    /// no layer, or a JIT wait's activity
+    Running,
+    /// the boot field, the app's first frames going under it
+    Boot,
+    /// after the first present, until the app is ready
+    WarmUp,
+    /// ready: the sharp app comes in, the galaxy goes
+    Lift,
+}
 
 pub fn set_environment(environment: Environment) {
     *ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(environment);
@@ -705,6 +734,10 @@ fn pump(
     let mut next_frame = Instant::now();
     let mut next_status = Instant::now();
     let mut dirty = true;
+    let mut stage = Stage::Running;
+    let mut activity = false;
+    let mut warm_up_at: Option<Instant> = None;
+    relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
         let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
             let mut guard = state();
@@ -728,7 +761,7 @@ fn pump(
         if pending {
             let mut cmd = CmdWriter::new(HOST);
             if !window.is_none() {
-                cmd.window_overlay(window, false, [0.0; 4]);
+                cmd.window_overlay(window, false, [0.0; 4], Id::NONE);
             }
             cmd.domain_relaunch(domain);
             hal.submit(&cmd.buf());
@@ -738,6 +771,8 @@ fn pump(
             dirty = true;
             match update {
                 Update::Begin { warm } => {
+                    stage = Stage::Running;
+                    activity = false;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -930,7 +965,12 @@ fn pump(
         });
         let mut may_present = true;
         let mut app_frame = false;
+        let mut app_frames = 0;
+        let mut lent_to_app = false;
+        let first_present = active;
         if let Some((geom, borrower_frame, presentations, presenter, lent)) = physical {
+            app_frames = presentations;
+            lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
             app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
             may_present = !borrower_frame || lent == 0;
             if saved_geometry != Some(geom)
@@ -1000,6 +1040,76 @@ fn pump(
                     || data.parked.is_some()
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
+        // the window layer (Metal): the boot field the app's first frames go under, the warm-up
+        // after its first present (until the JIT's readiness signal), then a later UI-thread JIT
+        // wait's activity. An opaque overlay, a failure or a stop takes it away.
+        // the boot stage begins before the app has the window, once the field has presented
+        // (its first frame then never reaches the window before the layer)
+        let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
+        if !layers || (stage != Stage::Boot && !lent_to_app) {
+            stage = Stage::Running;
+        }
+        stage = match stage {
+            Stage::Running if layers && active && visible && host.field_mode() && app_frames > 0 => {
+                Stage::Boot
+            }
+            // compile errors in the boot window show its halted view, not the field
+            Stage::Boot if active && !host.field_mode() => Stage::Running,
+            Stage::Boot if !active && first_present => {
+                warm_up_at = Some(Instant::now());
+                Stage::WarmUp
+            }
+            Stage::WarmUp
+                if relax_compiler::postframe::ui_idle_ns() != u64::MAX
+                    && relax_compiler::postframe::ready(READY_QUIET_NS) =>
+            {
+                if let Some(at) = warm_up_at.take() {
+                    eprintln!(
+                        "makepad-run: warm-up {:.0} ms after the first present ({})",
+                        at.elapsed().as_secs_f64() * 1000.0,
+                        if data.warm { "warm" } else { "cold" }
+                    );
+                }
+                Stage::Lift
+            }
+            Stage::Lift if host.layer_done() => Stage::Running,
+            stage => stage,
+        };
+        let mut wake_in = None;
+        let want = match stage {
+            Stage::Boot => Some(LayerWant::Boot),
+            Stage::WarmUp => {
+                let (done, queued) = relax_compiler::postframe::ahead_progress();
+                Some(LayerWant::WarmUp { done, queued })
+            }
+            Stage::Lift => Some(LayerWant::Ready),
+            Stage::Running if layers && lent_to_app && !active => {
+                let wait = Duration::from_nanos(relax_compiler::postframe::ui_wait_ns());
+                if wait >= ACTIVITY_AFTER {
+                    activity = true;
+                } else if UI_WAIT_ARMED.load(Ordering::Acquire) {
+                    // look again when this wait would show; a wait that is already over keeps
+                    // the window armed one interval (bursts of short waits wake it rarely)
+                    wake_in = Some(ACTIVITY_AFTER.saturating_sub(wait));
+                    if wait.is_zero() && !activity {
+                        UI_WAIT_ARMED.store(false, Ordering::Release);
+                        wake_in = Some(ACTIVITY_AFTER);
+                    }
+                }
+                if activity && wait.is_zero() && host.layer_done() {
+                    activity = false;
+                }
+                activity.then_some(LayerWant::Activity {
+                    waiting: !wait.is_zero(),
+                })
+            }
+            Stage::Running => {
+                activity = false;
+                None
+            }
+        };
+        host.layer(want, app_frames);
+        let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
             progress.tick(&mut data);
             if matches!(data.phase, Phase::Codegen | Phase::FirstFrame) {
@@ -1033,13 +1143,15 @@ fn pump(
             host.update(data.clone());
             dirty = false;
         }
-        let hold = !visible && host.hold();
+        let hold = !visible && !layered && host.hold();
         host.offscreen(hold);
-        let draw = (visible || hold) && Instant::now() >= next_frame;
-        let timeout = if visible || hold {
+        let draw = (visible || hold || layered) && Instant::now() >= next_frame;
+        let timeout = if visible || hold || layered {
             next_frame
                 .saturating_duration_since(Instant::now())
                 .as_nanos() as u64
+        } else if let Some(wake_in) = wake_in {
+            wake_in.as_nanos() as u64
         } else if (has_window && active)
             || !work_pending.is_empty()
             || PANICS_CHANGED.load(Ordering::Acquire)

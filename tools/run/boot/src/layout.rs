@@ -105,31 +105,19 @@ impl Renderer {
         let follow_label = program.label(id!(follow_on));
         let resume_label = program.label(id!(tap_resume));
         let input_label = program.label(id!(input_label));
-        let has_icon = self.icon_aspect.is_some() && program.pipes.len() > crate::document::ICON;
+        let has_icon = self.icon_aspect.is_some() && program.icon;
         let overlay = state.mode == Mode::Overlay;
 
-        // ---- the frame: the window (inside the system's insets), or a panel over the app
+        // ---- the frame: the whole window, over the app too (Overlay), the HUD inside the
+        // system's insets
         let safe = [
             left.min(size[0]),
             top.min(size[1]),
             (size[0] - left - right).max(1.0),
             (size[1] - top - bottom).max(1.0),
         ];
-        let frame = if overlay {
-            let margin = sizes.margin.min((safe[2].min(safe[3]) * 0.5 - 1.0).max(0.0));
-            let mut w = (safe[2] - 2.0 * margin).max(1.0);
-            let mut h = (safe[3] - 2.0 * margin).max(1.0);
-            if sizes.max_width > 0.0 {
-                w = w.min(sizes.max_width);
-            }
-            if sizes.max_height > 0.0 {
-                h = h.min(sizes.max_height);
-            }
-            [safe[0] + (safe[2] - w) * 0.5, safe[1] + (safe[3] - h) * 0.5, w, h]
-        } else {
-            [0.0, 0.0, size[0], size[1]]
-        };
-        let inner_box = if overlay { frame } else { safe };
+        let frame = [0.0, 0.0, size[0], size[1]];
+        let inner_box = safe;
         let m = MARGIN.min((inner_box[2].min(inner_box[3]) * 0.25).max(4.0));
         let x0 = inner_box[0] + m;
         let width = (inner_box[2] - 2.0 * m).max(1.0);
@@ -138,7 +126,6 @@ impl Renderer {
         let mut layout = Layout {
             panel: frame,
             frame,
-            corner: if overlay { sizes.corner } else { 0.0 },
             ..Layout::default()
         };
         self.text.begin_layout();

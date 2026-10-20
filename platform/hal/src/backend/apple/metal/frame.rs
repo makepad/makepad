@@ -53,6 +53,11 @@ pub(super) struct Overlay {
     pub(super) base: Option<super::Win>,
     image: Option<super::Win>,
     ready: bool,
+    /// a window layer (`window_overlay` with a layer texture): the borrower's frames render into
+    /// `base`, session 0's frames into the window, after `base` was copied into this texture
+    layer: Id,
+    /// the layer texture holds the current `base` (a borrower frame clears it)
+    copied: bool,
 }
 
 /// The command buffer the batch's frames encode into.
@@ -195,14 +200,18 @@ impl Metal {
         }
     }
 
-    pub(super) fn set_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, now: u64) {
+    pub(super) fn set_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
         if let Some(rect) = rect {
             if let Some(overlay) = self.overlays.get_mut(&id) {
                 overlay.rect = rect;
                 overlay.ready = false;
+                overlay.copied &= overlay.layer == layer;
+                overlay.layer = layer;
             } else {
+                // the app image so far: a pending restore, or the window's retained frame (none
+                // yet when a layer begins before the borrower's first frame)
                 let base = self.restores.remove(&id).or_else(|| self.win.remove(&(HOST, id.index)));
-                self.overlays.insert(id, Overlay { rect, base, image: None, ready: false });
+                self.overlays.insert(id, Overlay { rect, base, image: None, ready: false, layer, copied: false });
             }
         } else if let Some(overlay) = self.overlays.remove(&id) {
             if let Some(base) = overlay.base {
@@ -281,6 +290,8 @@ impl Metal {
         if owner != HOST { return true; }
         // A new base frame supersedes a dismissal waiting for a drawable.
         if let Some(base) = self.restores.remove(&physical) { self.dev.retire(Box::new(base.tex)); }
+        // a window layer: the borrower drew into the app image, session 0 into the window
+        if self.overlays.get(&physical).is_some_and(|o| !o.layer.is_none()) { return true; }
         let Some(mut overlay) = self.overlays.remove(&physical) else { return true };
         let result = (|| {
             let (w, h) = if sid == HOST {
@@ -320,6 +331,21 @@ impl Metal {
         })().is_some();
         self.overlays.insert(physical, overlay);
         result
+    }
+
+    /// A frame of session 0 under a window layer starts with the app image copied into the
+    /// layer's texture (the part both have; the rest keeps its last content), to be sampled.
+    fn copy_layer_image(&mut self, s: &mut Session, window: Id, seq: u64) {
+        // only a new app image is copied (the window layer's frames between app frames reuse it)
+        let Some(overlay) = self.overlays.get(&window).filter(|o| !o.layer.is_none() && !o.copied) else { return };
+        let layer = overlay.layer;
+        let Some((src, bw, bh)) = overlay.base.as_ref().map(|b| (b.tex.obj.as_id(), b.w, b.h)) else { return };
+        let Some((tw, th)) = s.textures.get(HOST, layer).ok().map(|t| (t.val.w, t.val.h)) else { return };
+        let Some(dst) = texture_obj(&mut self.tex, self.dev.device, s, layer, seq) else { return };
+        self.copy_layer(src, dst, [0, 0, bw.min(tw), bh.min(th)]);
+        if let Some(overlay) = self.overlays.get_mut(&window) {
+            overlay.copied = true;
+        }
     }
 
     fn clear_layer(&mut self, texture: ObjcId) {
@@ -419,9 +445,25 @@ impl Metal {
     fn window_target(&mut self, s: &mut Session, sid: u32, window: Id, w: u32, h: u32, now: u64) -> Option<ObjcId> {
         if sid == HOST {
             if let Some(mut overlay) = self.overlays.remove(&window) {
-                let image = self.overlay_storage(&mut overlay.image, window, w, h);
+                if overlay.layer.is_none() {
+                    let image = self.overlay_storage(&mut overlay.image, window, w, h);
+                    self.overlays.insert(window, overlay);
+                    return image;
+                }
                 self.overlays.insert(window, overlay);
-                return image;
+            }
+        } else {
+            // under a window layer the borrower's frame is the app image, not the window's
+            let (owner, physical) = self.window_key(sid, window);
+            if owner == HOST {
+                if let Some(mut overlay) = self.overlays.remove(&physical) {
+                    let base = (!overlay.layer.is_none()).then(|| self.overlay_storage(&mut overlay.base, physical, w, h));
+                    overlay.copied = false;
+                    self.overlays.insert(physical, overlay);
+                    if let Some(base) = base {
+                        return base;
+                    }
+                }
             }
         }
         let Some(shell) = self.shell else {
@@ -596,6 +638,9 @@ impl Metal {
         let hosted = is_window && s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
         let pick = kind & target::PICK != 0;
         let mut window_encoded = false;
+        if sid == HOST && is_window && !pick {
+            self.copy_layer_image(s, target, seq);
+        }
         for pass in &view.passes[passes] {
             let Some(dr) = slice(pass.draws, view.draws.len()) else {
                 s.stats.bad_args += 1;

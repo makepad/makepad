@@ -13,15 +13,12 @@ pub const ERROR_BAND: usize = 0;
 pub const GLYPH: usize = 1;
 pub const FIELD: usize = 2;
 pub const ICON: usize = 3;
+/// the layer pipe's Id in its bank (its index in `pipes` is `Program::layer`)
+const LAYER_SLOT: u32 = 4;
 pub const PIPE_BANK_SIZE: u32 = 8;
 
 #[derive(Clone, Copy)]
 pub struct Layout {
-    pub margin: f32,
-    pub max_width: f32,
-    pub max_height: f32,
-    /// the corner radius of the frame (the overlay panel over the app)
-    pub corner: f32,
     pub card_padding: f32,
     pub action_height: f32,
     pub action_gap: f32,
@@ -52,6 +49,11 @@ pub struct Line {
 
 pub struct Program {
     pub pipes: Vec<Pipeline>,
+    /// the index of the `layer` pipe in `pipes` (the running app's frame under the window
+    /// layer); a document without it draws no layer
+    pub layer: Option<usize>,
+    /// the document has the `icon` pipe (at ICON)
+    pub icon: bool,
     pub lines: Vec<Line>,
     boot: Layout,
     overlay: Layout,
@@ -91,10 +93,6 @@ fn positive(
 fn layout(heap: &ScriptHeap, root: ScriptObject, name: LiveId) -> Result<Layout, String> {
     let obj = object(heap, root, name)?;
     Ok(Layout {
-        margin: positive(heap, obj, id!(margin), true)?,
-        max_width: positive(heap, obj, id!(max_width), true)?,
-        max_height: positive(heap, obj, id!(max_height), true)?,
-        corner: optional_number(heap, obj, id!(corner), 0.0)?,
         card_padding: optional_number(heap, obj, id!(card_padding), 12.0)?,
         action_height: optional_number(heap, obj, id!(action_height), 48.0)?.max(44.0),
         action_gap: optional_number(heap, obj, id!(action_gap), 8.0)?,
@@ -284,16 +282,30 @@ impl Program {
                     Id::new(bank + ICON as u32, generation),
                 )?);
             }
+            let icon = pipes.len() > ICON;
+            let mut layer = None;
+            if !get(vm.heap(), root, id!(layer)).is_nil() {
+                let shader = object(vm.heap(), root, id!(layer))?;
+                layer = Some(pipes.len());
+                pipes.push(Pipeline::compile(
+                    &mut vm,
+                    shader,
+                    dialect,
+                    Id::new(bank + LAYER_SLOT, generation),
+                )?);
+            }
             Ok((
                 boot,
                 overlay,
                 lines,
                 hints,
                 pipes,
+                layer,
+                icon,
             ))
         })();
         diagnostics.extend(errors(&mut vm, "codegen"));
-        let (boot, overlay, lines, hints, pipes) =
+        let (boot, overlay, lines, hints, pipes, layer, icon) =
             match parsed {
                 Ok(parsed) if diagnostics.is_empty() => parsed,
                 Ok(_) => return Err(diagnostics),
@@ -310,6 +322,8 @@ impl Program {
             };
         Ok(Self {
             pipes,
+            layer,
+            icon,
             lines,
             boot,
             overlay,
@@ -387,5 +401,18 @@ impl Program {
 
     pub fn ready(&self) -> bool {
         self.pipes.iter().all(|pipe| pipe.ready)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The bundled document compiles for every dialect, with the window layer's pipe.
+    #[test]
+    fn bundled_document_compiles_with_its_layer() {
+        for dialect in [makepad_hal::dialect::MSL, makepad_hal::dialect::SPIRV, makepad_hal::dialect::HLSL] {
+            let program = super::Program::compile(&crate::Document::bundled(), dialect, 0, 1)
+                .unwrap_or_else(|e| panic!("{:?}", e.iter().map(|d| d.message.clone()).collect::<Vec<_>>()));
+            assert!(program.layer.is_some() && program.icon);
+        }
     }
 }

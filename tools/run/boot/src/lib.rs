@@ -5,16 +5,18 @@ mod field;
 mod gpu;
 mod groups;
 mod icon;
+mod layer;
 mod layout;
 mod text;
 
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
+pub use layer::Want as LayerWant;
 use makepad_hal::{
-    backend_id, buffer_kind, clock_ns, dialect, event_tag, input, lifecycle, pass_load,
-    session::HOST, target, window_kind, Attr, CmdWriter, EventBuf, EventQueue, FrameMeta, Hal,
-    HalEvent, HalInfo, Id, Pass, RawEvent,
+    backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
+    pass_load, session::HOST, target, usage, window_kind, Attr, CmdWriter, EventBuf, EventQueue,
+    FrameMeta, Hal, HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
 pub use relax_base::{
@@ -134,10 +136,9 @@ struct Card {
 #[derive(Default)]
 struct Layout {
     panel: [f32; 4],
-    /// the halted view's frame (the window, or the overlay panel), its corner radius, and the
-    /// region its galaxy is drawn in
+    /// the halted view's frame (the whole window, over the app too) and the region its galaxy
+    /// is drawn in
     frame: [f32; 4],
-    corner: f32,
     galaxy: [f32; 4],
     clip: [f32; 4],
     text: Vec<TextLine>,
@@ -171,6 +172,7 @@ struct Renderer {
     presented_revision: u64,
     presented_scroll: f32,
     field: field::Field,
+    layer: layer::Layer,
 }
 
 pub struct Boot {
@@ -194,6 +196,8 @@ pub struct Boot {
     offscreen: bool,
     /// `MAKEPAD_RUN_BOOT_STATS=1`: the HAL's GPU time of the boot session's frames, printed as it goes
     gpu: bool,
+    /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
+    layers: bool,
 }
 
 impl Boot {
@@ -223,6 +227,7 @@ impl Boot {
             dump: dump::Dump::from_env(),
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
+            layers: info.flags & info_flags::WINDOW_LAYERS != 0,
         };
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
@@ -303,6 +308,7 @@ impl Boot {
             presented_revision: 0,
             presented_scroll: 0.0,
             field: field::Field::new(),
+            layer: layer::Layer::new(),
         });
         Ok(boot)
     }
@@ -540,9 +546,18 @@ impl Boot {
             return;
         }
         self.overlay = rect;
+        if rect.is_some() {
+            // a panel replaces the window layer (the HAL keeps one overlay per window)
+            if let Some(renderer) = &mut self.renderer {
+                if renderer.layer.on {
+                    renderer.layer.on = false;
+                    renderer.layer.set(None);
+                }
+            }
+        }
         if let Some(window) = self.window {
             let mut writer = CmdWriter::new(HOST);
-            writer.window_overlay(window, rect.is_some(), rect.unwrap_or_default());
+            writer.window_overlay(window, rect.is_some(), rect.unwrap_or_default(), Id::NONE);
             if rect.is_some()
                 && self
                     .renderer
@@ -798,6 +813,10 @@ impl Boot {
         if renderer.active.is_none() {
             return;
         }
+        if renderer.layer.on {
+            self.present_field();
+            return;
+        }
         if self.state.mode == Mode::Boot
             && self.state.diagnostics.is_empty()
             && self.state.parked.is_none()
@@ -834,6 +853,8 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
+            false,
+            -1.0,
         );
         let max_scroll = (renderer.layout.content_height - renderer.layout.clip[3]).max(0.0);
         renderer.scroll = renderer.scroll.min(max_scroll);
@@ -841,7 +862,7 @@ impl Boot {
         let clip = renderer.layout.clip;
         let frame = renderer.layout.frame;
         let mut data = vec![Vec::new(); program.pipes.len()];
-        if let Some(mut rect) = renderer.layout.icon.filter(|_| program.pipes.len() > ICON) {
+        if let Some(mut rect) = renderer.layout.icon.filter(|_| program.icon) {
             if !renderer.layout.icon_fixed {
                 rect[1] -= scroll;
             }
@@ -901,7 +922,7 @@ impl Boot {
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_frame = frame;
-        let fault = [1.0, renderer.layout.corner, 0.0, 0.0];
+        let fault = [1.0, 0.0, 0.0, 0.0];
         let mut uniforms = vec![Vec::new(); program.pipes.len()];
         for (i, pipe) in program.pipes.iter().enumerate() {
             pipe.uniforms.write(
@@ -948,7 +969,7 @@ impl Boot {
             scissor,
         );
         for i in [ERROR_BAND, ICON, GLYPH] {
-            if i >= program.pipes.len() {
+            if i == ICON && !program.icon {
                 continue;
             }
             program.pipes[i].draw(
@@ -999,13 +1020,86 @@ impl Boot {
 
     /// The time between the window's frames: the field animates at 30 fps at most.
     pub fn frame_period_ns(&self) -> u64 {
-        if self.field_mode() {
+        let over_app = self.renderer.as_ref().is_some_and(|r| {
+            r.layer.on && !matches!(r.layer.want(), None | Some(LayerWant::Boot))
+        });
+        if over_app {
+            // the fades over the app, and the app's own frames shown through us
+            16_666_667
+        } else if self.field_mode() {
             33_333_333
         } else {
             16_666_667
         }
     }
 
+    /// Whether the window layer is on (the field over the running app).
+    pub fn layer_on(&self) -> bool {
+        self.renderer.as_ref().is_some_and(|r| r.layer.on)
+    }
+
+    /// Whether this window can draw a window layer (backend and document).
+    pub fn layers(&self) -> bool {
+        self.layers
+            && self.window.is_some()
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.active.as_ref().is_some_and(|p| p.layer.is_some()))
+    }
+
+    /// The run's wish for the window layer this turn, and the app's presented frames so far (a
+    /// new one is blurred again). `None` takes the layer away at once.
+    pub fn layer(&mut self, want: Option<LayerWant>, app_frames: u64) {
+        let want = want.filter(|_| self.layers() && self.overlay.is_none());
+        let size = [
+            (self.geometry[2] * self.dpi).round().max(1.0) as u32,
+            (self.geometry[3] * self.dpi).round().max(1.0) as u32,
+        ];
+        let Some(window) = self.window else { return };
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        renderer.layer.set(want);
+        renderer.layer.app_frames = app_frames;
+        let mut writer = CmdWriter::new(HOST);
+        match want {
+            None if renderer.layer.on => {
+                writer.window_overlay(window, false, [0.0; 4], Id::NONE);
+                layer_textures(&mut writer, &renderer.layer, None);
+                renderer.layer.on = false;
+                renderer.layer.size = [0; 2];
+                renderer.dirty = true;
+            }
+            Some(_) if !renderer.layer.on || renderer.layer.size != size => {
+                if renderer.layer.size != [0; 2] {
+                    layer_textures(&mut writer, &renderer.layer, None);
+                }
+                renderer.layer.gen = renderer.layer.gen.wrapping_add(1).max(1);
+                renderer.layer.size = size;
+                layer_textures(&mut writer, &renderer.layer, Some(size));
+                writer.window_overlay(
+                    window,
+                    true,
+                    [0.0, 0.0, self.geometry[2], self.geometry[3]],
+                    renderer.layer.texture(layer::APP),
+                );
+                renderer.layer.on = true;
+                renderer.layer.blurred = None;
+            }
+            _ => return,
+        }
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The layer has faded out (the ready lift, an activity's fade): the run may take it away.
+    pub fn layer_done(&mut self) -> bool {
+        self.renderer
+            .as_mut()
+            .is_some_and(|r| r.layer.on && r.layer.peek_done())
+    }
+
+    /// The Ignition Field: the boot window, or the window layer over the running app.
     fn present_field(&mut self) {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
@@ -1017,39 +1111,70 @@ impl Boot {
         let program = renderer.active.as_ref().unwrap();
         let mut writer = CmdWriter::new(HOST);
         let time = renderer.began.elapsed().as_secs_f32();
+        let layered = renderer.layer.on && program.layer.is_some();
+        let look = layered.then(|| renderer.layer.look(reduce_motion));
+        let corner = look.is_some_and(|l| l.corner);
+        // a JIT wait's galaxy: small, in the bottom right corner
+        let region = if corner {
+            let side = (viewport[0].min(viewport[1]) * 0.22).clamp(72.0, 150.0);
+            [viewport[0] - side - 12.0, viewport[1] - side - 12.0, side, side]
+        } else {
+            [0.0, 0.0, viewport[0], viewport[1]]
+        };
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
             &program.pipes[FIELD],
             &self.state,
             time,
-            [0.0, 0.0, viewport[0], viewport[1]],
+            region,
             reduce_motion,
             false,
+            corner,
+            look.map_or(-1.0, |l| l.resolve),
         );
-        let hint = program.label(layout::phase_key(self.state.phase));
-        renderer.field.hud(
-            &mut renderer.text,
-            &self.state,
-            &hint,
-            viewport,
-            frame.view,
-            frame.params[0],
-            time,
-            !touch,
-            self.offscreen,
-            &mut renderer.layout,
-        );
+        if corner {
+            renderer.layout.fixed_text.clear();
+            renderer.layout.cards.clear();
+        } else {
+            let mut hint = program.label(layout::phase_key(self.state.phase));
+            let mut status = None;
+            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+                hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
+                status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
+            }
+            renderer.field.hud(
+                &mut renderer.text,
+                &self.state,
+                &hint,
+                status,
+                viewport,
+                frame.view,
+                frame.params[0],
+                time,
+                !touch && look.is_none(),
+                self.offscreen,
+                &mut renderer.layout,
+            );
+        }
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
         let mut glyphs = Vec::new();
         let bounds = [0.0, 0.0, viewport[0], viewport[1]];
-        for line in &renderer.layout.fixed_text {
+        let fade = look.map_or(1.0, |l| l.galaxy);
+        for line in &mut renderer.layout.fixed_text {
             let y = line.position[1];
+            let mut line = TextLine {
+                run: line.run.clone(),
+                position: line.position,
+                style: line.style,
+                fixed: line.fixed,
+            };
+            line.style.color[3] *= fade;
             renderer.text.glyph_instances(
                 program,
-                line,
+                &line,
                 y,
                 bounds,
                 dpi,
@@ -1064,6 +1189,7 @@ impl Boot {
             return;
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
+        let field_layer = look.map_or([0.0; 4], |l| [if l.corner { 2.0 } else { 1.0 }, l.galaxy, l.backdrop, l.progress]);
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
@@ -1075,6 +1201,7 @@ impl Boot {
                     (id!(view), &frame.view),
                     (id!(field_params), &frame.params),
                     (id!(field_fall), &frame.fall),
+                    (id!(field_layer), &field_layer),
                     (id!(radius), &[sdf.radius]),
                     (id!(cutoff), &[sdf.cutoff]),
                 ],
@@ -1086,7 +1213,7 @@ impl Boot {
         let mut glyph_uniforms = Vec::new();
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         self.frame += 1;
-        let offscreen = if self.offscreen {
+        let offscreen = if self.offscreen && !layered {
             let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
             Some((self.dump.as_mut().unwrap().target(&mut writer, size), size))
         } else {
@@ -1099,6 +1226,53 @@ impl Boot {
                 ..Default::default()
             },
         );
+        // the blurred app: made again from a new app frame (the HAL copied the app's image into
+        // APP at this frame's start): full -> half (a box), half -> quarter across, then down
+        let layer_pipe = program.layer.map(|i| &program.pipes[i]);
+        // the draws borrow their instance and uniform memory until the submit below
+        let mut kept: Vec<Vec<f32>> = Vec::new();
+        if let (Some(look), Some(pipe)) = (look, layer_pipe) {
+            let layer = &mut renderer.layer;
+            if look.blur && layer.blurred != Some(layer.app_frames) {
+                layer.blurred = Some(layer.app_frames);
+                let [w, h] = layer.size;
+                let half = [w.div_ceil(2).max(1), h.div_ceil(2).max(1)];
+                let quarter = [w.div_ceil(4).max(1), h.div_ceil(4).max(1)];
+                for (source, target, size, mode, dir) in [
+                    (layer::APP, layer::HALF, half, 0.0, [0.0, 0.0]),
+                    (layer::HALF, layer::QUARTER_X, quarter, 1.0, [2.0 / half[0] as f32, 0.0]),
+                    (layer::QUARTER_X, layer::QUARTER, quarter, 1.0, [0.0, 1.0 / quarter[1] as f32]),
+                ] {
+                    let size = [size[0] as f32, size[1] as f32];
+                    let mut color = [Id::NONE; 4];
+                    color[0] = layer.texture(target);
+                    writer.pass(Pass {
+                        color,
+                        load: [pass_load::CLEAR; 5],
+                        clear: [[0.0; 4]; 4],
+                        viewport: [0.0, 0.0, size[0], size[1]],
+                        dpi: 1.0,
+                        ..Default::default()
+                    });
+                    let mut uniforms = Vec::new();
+                    pipe.uniforms
+                        .write(&[(id!(viewport), &size), (id!(dpi), &[1.0])], &mut uniforms);
+                    let mut data = Vec::new();
+                    pipe.instances.write(
+                        &[
+                            (id!(rect), &[0.0, 0.0, size[0], size[1]]),
+                            (id!(mode), &[mode]),
+                            (id!(dir), &dir),
+                            (id!(sigma), &[layer::SIGMA]),
+                        ],
+                        &mut data,
+                    );
+                    pipe.draw(&mut writer, &data, &uniforms, layer.texture(source), [0.0, 0.0, size[0], size[1]]);
+                    kept.push(data);
+                    kept.push(uniforms);
+                }
+            }
+        }
         let mut color = [Id::NONE; 4];
         if let Some((target, _)) = offscreen {
             color[0] = target;
@@ -1112,13 +1286,42 @@ impl Boot {
             ..Default::default()
         });
         let scissor = [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi];
-        program.pipes[FIELD].draw_buffer(
-            &mut writer,
-            field::INSTANCES,
-            frame.count,
-            &field_uniforms,
-            scissor,
-        );
+        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32| {
+            if let Some(pipe) = layer_pipe.filter(|_| opacity > 0.0) {
+                let mut uniforms = Vec::new();
+                pipe.uniforms
+                    .write(&[(id!(viewport), &viewport), (id!(dpi), &[dpi])], &mut uniforms);
+                let mut data = Vec::new();
+                pipe.instances.write(
+                    &[
+                        (id!(rect), &[0.0, 0.0, viewport[0], viewport[1]]),
+                        (id!(opacity), &[opacity]),
+                        (id!(dim), &[dim]),
+                    ],
+                    &mut data,
+                );
+                pipe.draw(writer, &data, &uniforms, renderer.layer.texture(texture), scissor);
+                kept.push(data);
+                kept.push(uniforms);
+            }
+        };
+        if let Some(look) = look {
+            if look.sharp_under {
+                app(&mut writer, layer::APP, look.sharp, 0.0);
+            }
+            if look.blur {
+                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
+            }
+        }
+        if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
+            program.pipes[FIELD].draw_buffer(
+                &mut writer,
+                field::INSTANCES,
+                frame.count,
+                &field_uniforms,
+                scissor,
+            );
+        }
         program.pipes[GLYPH].draw(
             &mut writer,
             &glyphs,
@@ -1126,6 +1329,9 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
+        if let Some(look) = look.filter(|l| !l.sharp_under) {
+            app(&mut writer, layer::APP, look.sharp, 0.0);
+        }
         writer.frame_set_build_end(makepad_hal::clock_ns());
         let snapshot = self.dump.as_mut().and_then(|d| d.due());
         if let Some((target, size)) = offscreen {
@@ -1148,6 +1354,7 @@ impl Boot {
             }
         }
         Hal::global().submit(&writer.buf());
+        drop(kept);
         if self.gpu && self.frame % 60 == 0 {
             let stats = Hal::global().with_world(|w| {
                 w.session(HOST)
@@ -1166,6 +1373,30 @@ impl Boot {
         renderer.redraw = false;
         renderer.presented_revision = renderer.layout_revision;
         renderer.presented_scroll = renderer.scroll;
+    }
+}
+
+/// The window layer's textures: made at `size` (window pixels), or destroyed (`None`).
+fn layer_textures(writer: &mut CmdWriter, layer: &layer::Layer, size: Option<[u32; 2]>) {
+    for (index, divide) in [
+        (layer::APP, 1),
+        (layer::HALF, 2),
+        (layer::QUARTER_X, 4),
+        (layer::QUARTER, 4),
+    ] {
+        let id = layer.texture(index);
+        match size {
+            Some([w, h]) => writer.texture_create(
+                id,
+                usage::RENDER_TARGET | usage::SAMPLED,
+                format::BGRA8,
+                w.div_ceil(divide).max(1),
+                h.div_ceil(divide).max(1),
+                [1, 1],
+                Attr::default(),
+            ),
+            None => writer.texture_destroy(id),
+        }
     }
 }
 

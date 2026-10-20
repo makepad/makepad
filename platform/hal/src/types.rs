@@ -225,10 +225,13 @@ pub mod info_flags {
     pub const CLIENT_CHROME: u32 = 4;
     /// One full desktop target owns scanout; widgets compose the direct-display cursor.
     pub const DIRECT_DISPLAY: u32 = 32;
+    /// The backend composes session 0's window layer over a lent window (`window_overlay`
+    /// with a layer texture).
+    pub const WINDOW_LAYERS: u32 = 64;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");

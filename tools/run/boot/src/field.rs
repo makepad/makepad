@@ -2,7 +2,9 @@
 //! outward from main(): one arm per crate, one star per four functions installed, the arm being
 //! compiled brightest and a star flashing white as it is born; source files orbit as dust until
 //! their crate is parsed; O3 installs ignite gold stars with a cross flare; the compiler-zone
-//! swap clears the dust with an expanding ring.
+//! swap clears the dust with an expanding ring. Every function compiled glints its star (a short
+//! white sparkle), in the boot window and over the running app (the window layer: the warm-up
+//! after the first present, the JIT activity of a later wait).
 //!
 //! Every number is the loader's own (`relax_base::boot_stats`, read once per frame). The picture
 //! is ONE draw of ONE retained instance buffer that only ever grows: the frame appends the
@@ -27,8 +29,10 @@ pub const INSTANCES: Id = Id::new(2, 1);
 const DUST: usize = 1200;
 const STAR_CAP: usize = 8192;
 const O3_CAP: usize = 2048;
-/// backdrop, main() glow, swap ring, corner brackets
-const FIXED: usize = 4;
+/// backdrop, main() glow, swap ring, corner brackets, warm-up arc
+const FIXED: usize = 5;
+/// stars glinted in one frame at most (one buffer write each, contiguous ones merged)
+const TWINKLES: usize = 1024;
 const CAPACITY: usize = FIXED + DUST + STAR_CAP + O3_CAP;
 const FNS_PER_STAR: u32 = 4;
 /// arms drawn on the spiral; the last arm (REST) is a scatter
@@ -42,6 +46,7 @@ const KIND_GLOW: f32 = 3.0;
 const KIND_RING: f32 = 4.0;
 const KIND_BRACKETS: f32 = 5.0;
 const KIND_BACKDROP: f32 = 6.0;
+const KIND_ARC: f32 = 7.0;
 
 // the concept's tokens
 const INK: [f32; 4] = [0.925, 0.902, 1.0, 1.0];
@@ -55,6 +60,8 @@ struct Born {
     arm: u8,
     rank: u32,
     at: f32,
+    /// the last glint of the star (window time; 0: none)
+    twinkle: f32,
 }
 
 pub struct Field {
@@ -71,6 +78,11 @@ pub struct Field {
     time: f32,
     base_fns: [u32; ARMS],
     emitted: [u32; ARMS],
+    /// functions of each arm glinted so far (counted from `base_fns`)
+    glinted: [u32; ARMS],
+    /// the log entries of each arm's stars, by rank (a star's instance is FIXED + DUST + entry)
+    stars_of: [Vec<u32>; ARMS],
+    touched: Vec<u32>,
     recent: [f32; ARMS],
     o3_base: u32,
     o3_seen: u32,
@@ -143,6 +155,9 @@ impl Field {
             time: 0.0,
             base_fns: [0; ARMS],
             emitted: [0; ARMS],
+            glinted: [0; ARMS],
+            stars_of: Default::default(),
+            touched: Vec::new(),
             recent: [0.0; ARMS],
             o3_base: 0,
             o3_seen: 0,
@@ -165,6 +180,8 @@ impl Field {
         for arm in 0..ARMS {
             self.base_fns[arm] = stats::fns(arm);
             self.emitted[arm] = 0;
+            self.glinted[arm] = 0;
+            self.stars_of[arm].clear();
             self.recent[arm] = 0.0;
         }
         self.o3_base = stats::O3_INSTALLED.load(std::sync::atomic::Ordering::Relaxed);
@@ -200,7 +217,8 @@ impl Field {
         if b.kind == KIND_O3 {
             self.push(pipe, [a, r, size, b.at], [KIND_O3, b.arm as f32, 0.0, 0.0]);
         } else {
-            self.push(pipe, [a, r, size, b.at], [KIND_STAR, b.arm as f32, 0.0, 0.0]);
+            let twinkle = if b.twinkle > 0.0 { b.twinkle + 1.0 } else { 0.0 };
+            self.push(pipe, [a, r, size, b.at], [KIND_STAR, b.arm as f32, twinkle, 0.0]);
         }
     }
 
@@ -209,7 +227,7 @@ impl Field {
         self.stride = pipe.instances.defaults.len();
         self.floats.clear();
         self.floats.reserve(512 * self.stride);
-        for kind in [KIND_BACKDROP, KIND_GLOW, KIND_RING, KIND_BRACKETS] {
+        for kind in [KIND_BACKDROP, KIND_GLOW, KIND_RING, KIND_BRACKETS, KIND_ARC] {
             self.push(pipe, [0.0; 4], [kind, 0.0, 0.0, 0.0]);
         }
         for i in 0..DUST {
@@ -253,6 +271,8 @@ impl Field {
         region: [f32; 4],
         reduce_motion: bool,
         halted: bool,
+        fit: bool,
+        resolve: f32,
     ) -> Frame {
         use std::sync::atomic::Ordering::Relaxed;
         if self.pipe != Some(pipe.id) {
@@ -293,7 +313,9 @@ impl Field {
                     arm: arm as u8,
                     rank: self.emitted[arm] + i,
                     at,
+                    twinkle: 0.0,
                 };
+                self.stars_of[arm].push(self.log.len() as u32);
                 self.log.push(b);
                 self.born(pipe, b);
             }
@@ -323,6 +345,7 @@ impl Field {
                 arm: arm as u8,
                 rank,
                 at: time,
+                twinkle: 0.0,
             };
             self.log.push(b);
             self.born(pipe, b);
@@ -330,6 +353,7 @@ impl Field {
         let added = self.floats.len() / self.stride;
         self.count += added;
         self.upload(writer, first);
+        self.glint(writer, pipe, time);
         self.hud.fns = total;
         self.hud.hot = best.1;
         self.hud.o3 = installed;
@@ -341,7 +365,7 @@ impl Field {
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let (radius, cy) = if halted {
+        let (radius, cy) = if halted || fit {
             // the whole galaxy, scatter included, inside the region
             ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
         } else {
@@ -390,8 +414,57 @@ impl Field {
             count: self.count as u32,
             view,
             params: [spin, scale, main_age, swap_age.max(-1.0)],
-            fall: [self.p_smooth, dust_fade, best.1, 0.0],
+            fall: [self.p_smooth, dust_fade, best.1, resolve],
         }
+    }
+
+    /// Every function installed since the last frame glints its star: function `i` of an arm
+    /// belongs to its star `i / FNS_PER_STAR` (the newest star while that one is not born yet).
+    /// The stars' records are written again with the glint's time.
+    fn glint(&mut self, writer: &mut CmdWriter, pipe: &Pipeline, time: f32) {
+        self.touched.clear();
+        for arm in 0..ARMS {
+            let fns = stats::fns(arm).saturating_sub(self.base_fns[arm]);
+            let stars = self.stars_of[arm].len() as u32;
+            if stars == 0 {
+                self.glinted[arm] = fns;
+                continue;
+            }
+            // a burst larger than a frame can show glints its newest functions
+            let from = self.glinted[arm].max(fns.saturating_sub(TWINKLES as u32 * FNS_PER_STAR));
+            let mut last = u32::MAX;
+            for i in from..fns {
+                let rank = (i / FNS_PER_STAR).min(stars - 1);
+                if rank != last {
+                    self.touched.push(self.stars_of[arm][rank as usize]);
+                    last = rank;
+                }
+            }
+            self.glinted[arm] = fns;
+        }
+        if self.touched.is_empty() {
+            return;
+        }
+        let mut touched = std::mem::take(&mut self.touched);
+        touched.sort_unstable();
+        touched.dedup();
+        touched.truncate(TWINKLES);
+        let mut run_start = 0;
+        while run_start < touched.len() {
+            let mut end = run_start + 1;
+            while end < touched.len() && touched[end] == touched[end - 1] + 1 {
+                end += 1;
+            }
+            for &entry in &touched[run_start..end] {
+                let b = &mut self.log[entry as usize];
+                b.twinkle = time.max(1e-3);
+                let b = *b;
+                self.born(pipe, b);
+            }
+            self.upload(writer, FIXED + DUST + touched[run_start] as usize);
+            run_start = end;
+        }
+        self.touched = touched;
     }
 
     /// Keeps the glyphs of the numbers that change every frame in the atlas, so no frame waits
@@ -416,6 +489,7 @@ impl Field {
         text: &mut Text,
         state: &State,
         hint: &str,
+        status: Option<&str>,
         viewport: [f32; 2],
         view: [f32; 4],
         spin: f32,
@@ -506,7 +580,8 @@ impl Field {
             let present = state.phase == Phase::FirstFrame;
             let right = w - margin;
             fixed.push(line(text, &hint.to_uppercase(), 10.0, right, h - if narrow { 52.0 } else { 50.0 }, 1.0, if present { GOLD } else { BASE }));
-            fixed.push(line(text, &state.phase.name().replace('_', " "), 11.0, right, h - 38.0, 1.0, INK));
+            let phase = status.map_or_else(|| state.phase.name().replace('_', " "), str::to_string);
+            fixed.push(line(text, &phase, 11.0, right, h - 38.0, 1.0, INK));
             let (s, c) = if self.hud.o3 > 0 {
                 (
                     format!("O3 {} ignited · {} superseded", self.hud.o3, self.hud.superseded),
@@ -592,7 +667,7 @@ impl Field {
 }
 
 /// 12345 -> "12,345"
-fn group(n: u64) -> String {
+pub(crate) fn group(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

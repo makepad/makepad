@@ -2829,6 +2829,7 @@ fn summary_inner(why: &str) {
         if why != "stats" {
             let (ms, site) = jit::main_post_present_wait();
             verbose!("makepad-run: main thread's longest unit-call wait after first present: {:.1} ms ({})", ms, site);
+            verbose!("{}", crate::postframe::summary());
         }
         verbose!("makepad-run: startup seeds skipped: {} initializers (demand evaluation required), {} recursive builds", jit::SEED_INITIALIZERS_SKIPPED.load(Ordering::Relaxed), jit::SEED_RECURSIVE_SKIPPED.load(Ordering::Relaxed));
         // borrowck lane: the background checker's summary, with or without the disk cache; checker

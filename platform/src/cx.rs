@@ -1428,3 +1428,18 @@ pub(crate) fn relax_first_present() {
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn relax_first_present() {}
+
+/// Each frame the HAL finished, under Relax: the loader logs the frame gaps after the first
+/// present (its post-present responsiveness report). The symbol is looked up once.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_frame_done() {
+    static HOOK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let hook = *HOOK.get_or_init(|| relax_host_symbol(c"relax_frame_done") as usize);
+    if hook != 0 {
+        let hook = unsafe { std::mem::transmute::<usize, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn relax_frame_done() {}

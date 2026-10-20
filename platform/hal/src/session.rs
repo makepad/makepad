@@ -187,6 +187,8 @@ pub struct PipelineObj {
 pub struct WindowOverlay {
     pub rect: [f32; 4],
     pub frame: Option<u64>,
+    /// the window layer's texture (NONE: an opaque panel)
+    pub layer: Id,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1201,7 +1203,7 @@ impl World {
             | tag::DragQuery | tag::DragOver | tag::DragDrop);
         let host = alias.filter(|_| input).filter(|id| self.session(HOST)
                 .and_then(|s| s.windows.get(HOST, *id).ok()).is_some_and(|w|
-                    !w.val.borrower_presented || w.val.overlay.is_some()));
+                    !w.val.borrower_presented || w.val.overlay.as_ref().is_some_and(|o| o.layer.is_none())));
         let recipient = if let Some(id) = host { event.window = id; HOST } else { sid };
         self.to_session(recipient, |q| {
             event.data = q.put_bytes(payload);

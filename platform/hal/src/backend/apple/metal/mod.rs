@@ -141,7 +141,7 @@ impl Metal {
             session: 0,
             backend: backend_id::METAL,
             dialect: dialect::MSL,
-            flags: if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 },
+            flags: info_flags::WINDOW_LAYERS | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 },
             formats,
             msaa: 1,
             dpi: shell.map_or(1.0, |s| s.dpi()),
@@ -413,7 +413,7 @@ impl Backend for Metal {
         let lent: Vec<_> = self.window_aliases.iter().filter(|((s, _), _)| *s == sid).map(|((_, id), host)| (*id, *host)).collect();
         let now = world.now();
         for (id, host) in lent {
-            if let Some(s) = world.session_mut(HOST) { self.set_overlay(s, host, None, now); }
+            if let Some(s) = world.session_mut(HOST) { self.set_overlay(s, host, None, Id::NONE, now); }
             self.window_lent(sid, id, host, false);
         }
         if sid == HOST {
@@ -602,8 +602,8 @@ impl Gpu for Metal {
         self.layer_sizes.remove(&(sid, id.index));
     }
 
-    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, now: u64) {
-        self.set_overlay(s, id, rect, now);
+    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
+        self.set_overlay(s, id, rect, layer, now);
     }
 
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

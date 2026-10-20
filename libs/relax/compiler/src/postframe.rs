@@ -1,0 +1,296 @@
+//! Responsiveness after the first present: what the program's main (UI) thread waited for in the
+//! WINDOW_NS after it -- its lazy compiles (split by where the wall time went and what the owner
+//! thread was serving meanwhile), its other owner requests, real-time threads' lazy compiles -- and
+//! the gaps between presented frames. A main-thread compile of STALL_LOG_NS or more and a frame
+//! gap of FRAME_GAP_NS or more are logged when they happen; the window's sums once it has passed
+//! (and in the run summary). Counters only: nothing here waits or takes a lock.
+
+use crate::jit::{wall_ns, MainCompile, FIRST_PRESENT_NS};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+pub const WINDOW_NS: u64 = 10_000_000_000;
+const STALL_LOG_NS: u64 = 5_000_000;
+const FRAME_GAP_NS: u64 = 50_000_000;
+/// log lines at most (stalls and gaps; the sums count every one)
+const LOG_MAX: u64 = 300;
+
+/// the main thread's compiles that began in the window: [count, wall, typeck ahead, owner queue,
+/// front, back, finish, in-flight wait, count of STALL_LOG_NS or more] (ns)
+static COMPILES: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+/// the main thread's owner requests in the window, its compiles' included: [count, wait ns]
+static OWNER: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// real-time threads' lazy compiles in the window: [count, stall ns]
+static RT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// frames presented in the window, and its gaps of FRAME_GAP_NS or more: [frames, gaps, gap ns, longest gap ns]
+static GAPS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// wall ns of the main thread's compiles after the present (a frame gap's compile share)
+static MAIN_COMPILE_NS: AtomicU64 = AtomicU64::new(0);
+static LAST_FRAME: AtomicU64 = AtomicU64::new(0);
+static LOGGED: AtomicU64 = AtomicU64::new(0);
+/// the window's main-thread compiles by how they were satisfied (jit::MAIN_HOW_NAMES): count, wall ns
+static HOW: [[AtomicU64; 2]; 6] = [const { [const { AtomicU64::new(0) }; 2] }; 6];
+static SUMMARY_DONE: AtomicBool = AtomicBool::new(false);
+/// the owner's service in the window by class (ns), and of it the requests a program thread's
+/// request was queued behind when they ended (ns)
+static SERVED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static SERVED_BLOCKING: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+// ------------------------------------------------------------ readiness (the warm-up veil)
+
+/// UI-thread JIT waits open now (a lazy compile, an owner request; nested ones count once each)
+static UI_WAITING: AtomicU64 = AtomicU64::new(0);
+/// wall ns the UI thread's current outermost JIT wait began
+static UI_WAIT_START: AtomicU64 = AtomicU64::new(0);
+/// wall ns the last UI-thread JIT wait ended
+static UI_WAIT_END: AtomicU64 = AtomicU64::new(0);
+/// builds ahead (speculative / prepared) finished after the first present, and running now
+pub(crate) static AHEAD_DONE: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AHEAD_RUNNING: AtomicU64 = AtomicU64::new(0);
+
+/// The UI (main) thread begins / ends a wait on the JIT (jit.rs lazy compiles, owner.rs requests).
+pub(crate) fn ui_wait_begin() {
+    let outer = UI_WAITING.load(Relaxed) == 0;
+    if outer {
+        UI_WAIT_START.store(wall_ns(), Relaxed);
+    }
+    UI_WAITING.fetch_add(1, Relaxed);
+    if outer && present_ns() != 0 {
+        let hook = UI_WAIT_HOOK.load(Relaxed);
+        if !hook.is_null() {
+            // SAFETY: only `on_ui_wait` stores here, always a `fn()`
+            unsafe { std::mem::transmute::<*mut (), fn()>(hook)() }
+        }
+    }
+}
+
+static UI_WAIT_HOOK: std::sync::atomic::AtomicPtr<()> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// `hook` runs on the UI thread when it begins a JIT wait after the first present (the outermost
+/// one): the host's window wakes to show the wait's activity once it lasts. It must not wait.
+pub fn on_ui_wait(hook: fn()) {
+    UI_WAIT_HOOK.store(hook as *mut (), Relaxed);
+}
+pub(crate) fn ui_wait_end() {
+    UI_WAIT_END.store(wall_ns(), Relaxed);
+    UI_WAITING.fetch_sub(1, Relaxed);
+}
+
+/// ns since the UI thread last waited on the JIT: 0 while it waits, u64::MAX before the first
+/// present. Atomics only.
+pub fn ui_idle_ns() -> u64 {
+    let fp = present_ns();
+    if fp == 0 {
+        return u64::MAX;
+    }
+    if UI_WAITING.load(Relaxed) > 0 {
+        return 0;
+    }
+    wall_ns().saturating_sub(UI_WAIT_END.load(Relaxed).max(fp))
+}
+
+/// How long the UI thread's current JIT wait (a lazy compile, an owner request) has lasted; 0
+/// while it does not wait. Atomics only.
+pub fn ui_wait_ns() -> u64 {
+    if UI_WAITING.load(Relaxed) == 0 {
+        return 0;
+    }
+    wall_ns().saturating_sub(UI_WAIT_START.load(Relaxed))
+}
+
+/// Functions built ahead since the first present, and those still queued or building (the
+/// speculative / prepare queue; a queue being changed right now reads as 1 more).
+pub fn ahead_progress() -> (u64, u64) {
+    (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + AHEAD_RUNNING.load(Relaxed))
+}
+
+/// The app is ready after its first present: the UI thread has not waited on the JIT for
+/// `quiet_ns` and nothing is left to build ahead.
+pub fn ready(quiet_ns: u64) -> bool {
+    ui_idle_ns() >= quiet_ns && ahead_progress().1 == 0
+}
+
+fn present_ns() -> u64 {
+    FIRST_PRESENT_NS.load(Relaxed)
+}
+
+fn in_window(t: u64) -> bool {
+    let fp = present_ns();
+    fp != 0 && t >= fp && t < fp + WINDOW_NS
+}
+
+fn may_log() -> bool {
+    LOGGED.fetch_add(1, Relaxed) < LOG_MAX
+}
+
+fn ms(ns: u64) -> f64 {
+    ns as f64 / 1e6
+}
+
+/// A main-thread lazy compile ended (jit::compile_slot_on_stack_rt): `name` is its fn.
+pub(crate) fn main_compile(name: &str, r: &MainCompile) {
+    let fp = present_ns();
+    if fp == 0 || r.start < fp || crate::jit::QUIT_SEEN.load(Relaxed) {
+        return;
+    }
+    let dt = r.end.saturating_sub(r.start);
+    MAIN_COMPILE_NS.fetch_add(dt, Relaxed);
+    if in_window(r.start) {
+        COMPILES[0].fetch_add(1, Relaxed);
+        COMPILES[1].fetch_add(dt, Relaxed);
+        for (a, &ns) in r.ns.iter().enumerate() {
+            COMPILES[a + 2].fetch_add(ns, Relaxed);
+        }
+        if dt >= STALL_LOG_NS {
+            COMPILES[8].fetch_add(1, Relaxed);
+        }
+        if let Some(h) = HOW.get(r.how as usize) {
+            h[0].fetch_add(1, Relaxed);
+            h[1].fetch_add(dt, Relaxed);
+        }
+    }
+    if dt >= STALL_LOG_NS && may_log() {
+        let behind = match r.behind {
+            0 => "-".to_string(),
+            c => format!("{} for `{}`", crate::owner::CLASS_NAMES[(c - 1) as usize], crate::os::thread::name(r.behind_from)),
+        };
+        eprintln!(
+            "makepad-run main stall: `{}` {:.1} ms at +{:.2} s after the first present (owner queue {:.1} ms, longest behind {} {:.1} ms; typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; at its start {} compile jobs ran, queued: speculative {}, O2 {}, O3 {})",
+            name,
+            ms(dt),
+            (r.start - fp) as f64 / 1e9,
+            ms(r.ns[1]),
+            behind,
+            ms(r.behind_ns),
+            ms(r.ns[0]),
+            ms(r.ns[2]),
+            ms(r.ns[3]),
+            ms(r.ns[4]),
+            ms(r.ns[5]),
+            r.jobs,
+            r.queued[0],
+            r.queued[1],
+            r.queued[2]
+        );
+    }
+    summary_due(r.end);
+}
+
+/// A main-thread owner request ended after the present (owner::request): waited `w` ns from `t0`.
+pub(crate) fn main_owner_wait(t0: u64, w: u64) {
+    if in_window(t0) {
+        OWNER[0].fetch_add(1, Relaxed);
+        OWNER[1].fetch_add(w, Relaxed);
+    }
+}
+
+/// The owner served a request of class `class` asked at `site` by thread `from` from `t0` to `t1`;
+/// `foreground` program-thread requests were queued at its end. Nested requests count in their
+/// outer one too.
+pub(crate) fn owner_served(class: usize, site: &std::panic::Location<'_>, from: u64, t0: u64, t1: u64, foreground: u32) {
+    let fp = present_ns();
+    if fp == 0 || t0 < fp || crate::jit::QUIT_SEEN.load(Relaxed) {
+        return;
+    }
+    let dt = t1.saturating_sub(t0);
+    if in_window(t0) {
+        SERVED[class].fetch_add(dt, Relaxed);
+        if foreground > 0 {
+            SERVED_BLOCKING[class].fetch_add(dt, Relaxed);
+        }
+    }
+    if dt >= STALL_LOG_NS && t0 < fp + 3 * WINDOW_NS && may_log() {
+        eprintln!(
+            "makepad-run owner long: {} request of `{}` from {}:{} served {:.1} ms at +{:.2} s ({} program-thread requests queued at its end)",
+            crate::owner::CLASS_NAMES[class],
+            crate::os::thread::name(from),
+            site.file().rsplit('/').next().unwrap_or(""),
+            site.line(),
+            ms(dt),
+            (t0 - fp) as f64 / 1e9,
+            foreground
+        );
+    }
+}
+
+/// A real-time thread's lazy compile began at `t0` and stalled it `dt` ns.
+pub(crate) fn rt_compile(t0: u64, dt: u64) {
+    if in_window(t0) {
+        RT[0].fetch_add(1, Relaxed);
+        RT[1].fetch_add(dt, Relaxed);
+    }
+}
+
+/// The program presented a frame (makepad-platform calls the loader symbol `relax_frame_done`
+/// after each frame the HAL finished; on the thread that handles the HAL's events).
+pub(crate) extern "C" fn relax_frame_done() {
+    let now = wall_ns();
+    let fp = present_ns();
+    let last = LAST_FRAME.swap(now, Relaxed);
+    let compiled = MAIN_COMPILE_NS.load(Relaxed);
+    static COMPILED_AT_LAST: AtomicU64 = AtomicU64::new(0);
+    let compiled_before = COMPILED_AT_LAST.swap(compiled, Relaxed);
+    if fp == 0 || last < fp || crate::jit::QUIT_SEEN.load(Relaxed) {
+        return;
+    }
+    let gap = now - last;
+    if in_window(now) {
+        GAPS[0].fetch_add(1, Relaxed);
+        if gap >= FRAME_GAP_NS {
+            GAPS[1].fetch_add(1, Relaxed);
+            GAPS[2].fetch_add(gap, Relaxed);
+            GAPS[3].fetch_max(gap, Relaxed);
+        }
+    }
+    if gap >= FRAME_GAP_NS && now < fp + 3 * WINDOW_NS && may_log() {
+        eprintln!(
+            "makepad-run frame gap: {:.0} ms ending at +{:.2} s after the first present ({:.0} ms of it main-thread lazy compiles)",
+            ms(gap),
+            (now - fp) as f64 / 1e9,
+            ms(compiled.saturating_sub(compiled_before))
+        );
+    }
+    summary_due(now);
+}
+
+fn summary_due(now: u64) {
+    let fp = present_ns();
+    if fp != 0 && now >= fp + WINDOW_NS && !SUMMARY_DONE.swap(true, Relaxed) {
+        eprintln!("{}", summary());
+    }
+}
+
+fn served(a: &[AtomicU64; 5]) -> String {
+    (0..5).map(|c| format!("{} {:.0}", crate::owner::CLASS_NAMES[c], ms(a[c].load(Relaxed)))).collect::<Vec<_>>().join(", ")
+}
+
+/// The window's sums (one line).
+pub fn summary() -> String {
+    let c = |i: usize| COMPILES[i].load(Relaxed);
+    let g = |i: usize| GAPS[i].load(Relaxed);
+    format!(
+        "makepad-run post-present {:.0} s: main thread stalled {:.1} ms in {} lazy compiles ({} of {:.0} ms or more; owner queue {:.1}, typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; by how: {}), {} owner requests waited {:.1} ms in all; real-time threads stalled {:.1} ms in {} lazy compiles; {} frames, {} gaps of {:.0} ms or more ({:.0} ms, longest {:.0} ms); owner served ms {} (with program-thread requests queued at the end: {})",
+        WINDOW_NS as f64 / 1e9,
+        ms(c(1)),
+        c(0),
+        c(8),
+        ms(STALL_LOG_NS),
+        ms(c(3)),
+        ms(c(2)),
+        ms(c(4)),
+        ms(c(5)),
+        ms(c(6)),
+        ms(c(7)),
+        (0..6).map(|k| format!("{} {} ({:.0} ms)", crate::jit::MAIN_HOW_NAMES[k], HOW[k][0].load(Relaxed), ms(HOW[k][1].load(Relaxed)))).collect::<Vec<_>>().join(", "),
+        OWNER[0].load(Relaxed),
+        ms(OWNER[1].load(Relaxed)),
+        ms(RT[1].load(Relaxed)),
+        RT[0].load(Relaxed),
+        g(0),
+        g(1),
+        ms(FRAME_GAP_NS),
+        ms(g(2)),
+        ms(g(3)),
+        served(&SERVED),
+        served(&SERVED_BLOCKING)
+    )
+}

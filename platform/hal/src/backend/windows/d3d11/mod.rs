@@ -427,7 +427,7 @@ impl Gpu for D3d11 {
         self.dev.budget()
     }
 
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _now: u64) {
+    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
         if rect.is_some() {
             s.stats.overlay_unsupported += 1;
         }

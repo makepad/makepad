@@ -113,7 +113,7 @@ impl Gpu for Headless {
         s.events.readback(req, readback::NO_RASTER, [0, 0, g[2] as u32, g[3] as u32], &[]);
     }
     fn window_closed(&mut self, _sid: u32, _id: Id) {}
-    fn window_overlay(&mut self, _s: &mut Session, _id: Id, _rect: Option<[f32; 4]>, _now: u64) {}
+    fn window_overlay(&mut self, _s: &mut Session, _id: Id, _rect: Option<[f32; 4]>, _layer: Id, _now: u64) {}
     fn completes_inline(&self) -> bool {
         true
     }
