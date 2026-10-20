@@ -605,12 +605,6 @@ impl Providers<'_> {
         q.const_eval.get(&q.engine, key, &mut |key| {
             q.read_declarations()?;
             let value = crate::const_eval::eval_to_valtree(self.tcx, self.prog, &key);
-            if let Err(ErrorHandled::Reported(error)) = &value {
-                let d = self.prog.def(key.def);
-                self.tcx.dcx.report(crate::next_solver::fulfill::ObligationCause {
-                    body_id: key.def, span: self.prog.files[d.file as usize].ast.item(d.item).lo,
-                }, format!("E0080: constant evaluation failed: {error:?}"));
-            }
             Ok(value)
         }, &|id| self.force(id))
     }
