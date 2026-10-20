@@ -407,7 +407,7 @@ pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
 pub fn term_uses(t: &Term, uses: &mut Vec<VReg>) {
     uses.clear();
     match t {
-        Term::Branch(c, _, _) => uses.push(*c),
+        Term::Branch(c, _, _) | Term::Switch(c, _) => uses.push(*c),
         Term::Ret(v) => uses.extend_from_slice(v),
         _ => {}
     }
@@ -1495,7 +1495,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
         }
         let p = block_end[bi] - 1;
         match &b.term {
-            Term::Branch(c, _, _) => {
+            Term::Branch(c, _, _) | Term::Switch(c, _) => {
                 use_count[c.0 as usize] += 1;
                 touch(&mut start, &mut end, c.0, p);
             }
@@ -1740,7 +1740,7 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
             }
             match &b.term {
                 Term::Ret(vs) => vs.iter().for_each(|v| bad[v.0 as usize] = true),
-                Term::Branch(c, _, _) => nonbase[c.0 as usize] = true,
+                Term::Branch(c, _, _) | Term::Switch(c, _) => nonbase[c.0 as usize] = true,
                 _ => {}
             }
         }
@@ -1852,14 +1852,14 @@ pub fn loop_depths(f: &Func, reach: &[bool]) -> Vec<u32> {
     // iterative DFS: state 0 new, 1 on stack, 2 done; latches per header
     let mut state = vec![0u8; nb];
     let mut latches: Vec<(u32, u32)> = Vec::new();
-    let mut stack: Vec<(u32, u8)> = vec![(0, 0)];
+    let mut stack: Vec<(u32, u32)> = vec![(0, 0)];
     while let Some(&mut (b, ref mut k)) = stack.last_mut() {
         if *k == 0 {
             state[b as usize] = 1;
         }
         let mut it = f.blocks[b as usize].term.succs();
         let mut next = None;
-        let mut idx = 0u8;
+        let mut idx = 0u32;
         while let Some(t) = it.next() {
             if idx == *k {
                 next = Some(t);
@@ -2679,7 +2679,7 @@ fn live_in_sets(f: &Func, reach: &[bool]) -> LiveSets {
 
 pub(crate) fn term_vregs_mut(t: &mut Term, mut fv: impl FnMut(&mut VReg)) {
     match t {
-        Term::Branch(c, _, _) => fv(c),
+        Term::Branch(c, _, _) | Term::Switch(c, _) => fv(c),
         Term::Ret(vs) => vs.iter_mut().for_each(fv),
         _ => {}
     }
@@ -3015,6 +3015,7 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
                     }
                 }
                 Term::Invoke(t, _) => *t = nbk,
+                sw @ Term::Switch(..) => sw.map_succs(|s2| if s2 == to { nbk } else { s2 }),
                 _ => {}
             }
             if let Some(q) = preds[to as usize].iter().position(|p| *p == from) {
@@ -3488,7 +3489,7 @@ pub fn sink_compares(f: &Func) -> Option<Func> {
 /// it is read outside the loops that hold the uses, and not at all on paths that never get there:
 /// html_parse's `process_entity` names an entity table only after it has seen a `&`, and used to
 /// read the base on every call). None: the function names no domain symbol.
-pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool], tables: &std::collections::HashMap<u32, (VReg, i64, Vec<u32>, u32)>) -> Option<usize> {
+pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool]) -> Option<usize> {
     if sym_class == 0 {
         return None;
     }
@@ -3500,9 +3501,7 @@ pub fn domain_base_block(f: &Func, sym_class: u64, reach: &[bool], tables: &std:
         .map(|(bi, _)| bi)
         .collect();
     let first = *uses.first()?;
-    // a table dispatch enters its case blocks straight from the head: those are successors of the head too
-    let extra: std::collections::HashMap<u32, Vec<u32>> = tables.iter().map(|(h, (_, _, t, d))| (*h, t.iter().copied().chain([*d]).collect())).collect();
-    let idom = crate::opt::idoms_with(f, &extra);
+    let idom = crate::opt::idoms(f);
     // the dominator chain of a block, block first, entry last
     let chain = |mut b: usize| {
         let mut c = vec![b];

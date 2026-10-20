@@ -15,6 +15,7 @@ pub mod opt;
 pub mod ranges;
 pub mod regalloc;
 pub mod rir;
+pub mod switch;
 pub mod x64;
 
 /// This crate has no movable compiler statics; opt::T remains a process-wide OnceLock.

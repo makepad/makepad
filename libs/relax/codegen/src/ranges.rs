@@ -650,7 +650,7 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
             });
         }
         match &b.term {
-            Term::Branch(c, _, _) => nuse[c.0 as usize] += 1,
+            Term::Branch(c, _, _) | Term::Switch(c, _) => nuse[c.0 as usize] += 1,
             Term::Ret(vs) => vs.iter().for_each(|v| nuse[v.0 as usize] += 1),
             _ => {}
         }

@@ -2886,6 +2886,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
             }
             Term::Unreachable => l.emit(h_trap, &[0]),
             Term::Resume => l.emit(h_resume, &[]),
+            Term::Switch(..) => unreachable!("Switch is made after the interpreter's lowering"),
         }
     }
     let mut code = l.code.into_boxed_slice();

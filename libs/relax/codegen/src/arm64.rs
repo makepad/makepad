@@ -598,8 +598,6 @@ struct Gen<'a> {
     /// loads to emit before the instruction at a position
     win: std::collections::HashMap<u32, Vec<(u32, u32, u8)>>,
     win_start: std::collections::HashMap<u32, Vec<(u32, u8)>>,
-    /// jump tables: head block -> (x, min, target per value min..=max, default)
-    jt_plan: std::collections::HashMap<u32, (VReg, i64, Vec<u32>, u32)>,
     /// table words to fill once blocks are placed: (word index, table start, target block)
     jt_fix: Vec<(usize, usize, u32)>,
     a: Asm,
@@ -893,7 +891,7 @@ impl<'a> Gen<'a> {
         // the domain base, read once (where regalloc::domain_base_block puts it) when the function
         // names a domain static
         let reach = regalloc::reachable(self.f);
-        let dom_fp = if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach, &self.jt_plan) {
+        let dom_fp = if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
             self.dom_block = b;
             off += 8;
             off
@@ -2570,27 +2568,6 @@ impl<'a> Gen<'a> {
             Term::Jump(target) => self.jump_to(*target, bi),
             Term::Branch(c, tt, ff) => {
                 let next = self.next_block[bi];
-                if let Some((x, min, targets, default)) = self.jt_plan.get(&(bi as u32)).cloned() {
-                    // a chain of compares of x with constants: one table dispatch
-                    // t = x - min; if t > range { default }; br table[t]
-                    let r = self.use_i(x, S0);
-                    self.a.mov_imm(IP0, min);
-                    self.a.rrr(0xCB00_0000, IP0, r, IP0); // sub x16, r, x16
-                    self.a.mov_imm(IP1, targets.len() as i64 - 1);
-                    self.a.cmp(IP0, IP1);
-                    self.cond_branch(CondBr::B(HI), default);
-                    self.a.e(0x1000_0000 | (4 << 5) | IP1 as u32); // adr x17, .+16
-                    self.a.e(0xB8A0_7800 | (IP0 as u32) << 16 | (IP1 as u32) << 5 | IP0 as u32); // ldrsw x16, [x17, x16, lsl #2]
-                    self.a.rrr(0x8B00_0000, IP1, IP1, IP0); // add x17, x17, x16
-                    self.a.e(0xD61F_0000 | (IP1 as u32) << 5); // br x17
-                    let start = self.a.pos();
-                    for t in targets {
-                        let at = self.a.pos();
-                        self.a.e(0);
-                        self.jt_fix.push((at, start, t));
-                    }
-                    return;
-                }
                 match fused {
                     // and with a bitmask immediate, compared with zero: tst + b.cond
                     Some(Inst::ICmpI(cnd @ (Cond::Eq | Cond::Ne), _, _, _, 0)) if self.test_fuse.is_some() => {
@@ -2638,6 +2615,32 @@ impl<'a> Gen<'a> {
                             self.jump_to(*ff, bi);
                         }
                     }
+                }
+            }
+            Term::Switch(x, tab) => {
+                // idx = x - min; if idx >u len - 1 { default }; br table[idx]
+                let r = self.use_i(*x, S0);
+                let idx = if tab.min == 0 {
+                    r
+                } else if (1..4096).contains(&tab.min) {
+                    self.a.sub_imm(IP0, r, tab.min as u32);
+                    IP0
+                } else {
+                    self.a.mov_imm(IP0, tab.min);
+                    self.a.rrr(0xCB00_0000, IP0, r, IP0); // sub x16, r, x16
+                    IP0
+                };
+                self.cmp_imm(idx, tab.targets.len() as i64 - 1);
+                self.cond_branch(CondBr::B(HI), tab.default);
+                self.a.e(0x1000_0000 | (4 << 5) | IP1 as u32); // adr x17, .+16
+                self.a.e(0xB8A0_7800 | (idx as u32) << 16 | (IP1 as u32) << 5 | IP0 as u32); // ldrsw x16, [x17, idx, lsl #2]
+                self.a.rrr(0x8B00_0000, IP1, IP1, IP0); // add x17, x17, x16
+                self.a.e(0xD61F_0000 | (IP1 as u32) << 5); // br x17
+                let start = self.a.pos();
+                for &t in &tab.targets {
+                    let at = self.a.pos();
+                    self.a.e(0);
+                    self.jt_fix.push((at, start, t));
                 }
             }
             Term::Ret(vals) => {
@@ -3389,87 +3392,6 @@ fn compile_freq_timed(options: &relax_session::Options, f: &Func, env: &Env, fre
 
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
-/// Chains of blocks testing one value against constants -- `c = x == k (or !=); branch c` with
-/// nothing else in the block after the head, the frontend's form of a `match` on an integer --
-/// with at least 6 distinct cases over a dense range: the head becomes one table dispatch to the
-/// case targets (the chain's blocks stay for any other entries). Interpreter loops dispatch
-/// through such matches (the Splash VM's opcode(): ~90 cases tested one by one).
-pub(crate) fn jump_tables(options: &relax_session::Options, f: &Func, al: &Alloc) -> std::collections::HashMap<u32, (VReg, i64, Vec<u32>, u32)> {
-    let mut out = std::collections::HashMap::new();
-    if options.no_jump_tables {
-        return out;
-    }
-    // (x, k, eq-target, else-target) of a block ending in a fused compare of x with k
-    let shape = |bi: usize| -> Option<(VReg, i64, u32, u32)> {
-        let b = &f.blocks[bi];
-        let (c, t, e) = match b.term {
-            Term::Branch(c, t, e) => (c, t, e),
-            _ => return None,
-        };
-        match b.insts.last() {
-            Some(Inst::ICmpI(cc @ (Cond::Eq | Cond::Ne), _, d, x, k)) if *d == c && al.uses[c.0 as usize] == 1 && *x != c => {
-                if *cc == Cond::Eq {
-                    Some((*x, *k, t, e))
-                } else {
-                    Some((*x, *k, e, t))
-                }
-            }
-            _ => None,
-        }
-    };
-    let nb = f.blocks.len();
-    let shapes: Vec<Option<(VReg, i64, u32, u32)>> = (0..nb).map(shape).collect();
-    // blocks that continue a chain (only the compare in them, reached as a previous link's else)
-    let mut is_link = vec![false; nb];
-    for bi in 0..nb {
-        if let Some((x, _, _, e)) = shapes[bi] {
-            let e = e as usize;
-            if e != bi && f.blocks[e].insts.len() == 1 && matches!(shapes[e], Some((x2, ..)) if x2 == x) {
-                is_link[e] = true;
-            }
-        }
-    }
-    for head in 0..nb {
-        let (x, ..) = match shapes[head] {
-            Some(s) if !is_link[head] => s,
-            _ => continue,
-        };
-        let mut cases: Vec<(i64, u32)> = Vec::new();
-        let mut cur = head;
-        let mut seen = vec![head];
-        let default;
-        loop {
-            let (_, k, t, e) = shapes[cur].unwrap();
-            if !cases.iter().any(|c| c.0 == k) {
-                cases.push((k, t));
-            }
-            let en = e as usize;
-            if en != cur && !seen.contains(&en) && f.blocks[en].insts.len() == 1 && matches!(shapes[en], Some((x2, ..)) if x2 == x) {
-                seen.push(en);
-                cur = en;
-            } else {
-                default = e;
-                break;
-            }
-        }
-        if cases.len() < 6 {
-            continue;
-        }
-        let min = cases.iter().map(|c| c.0).min().unwrap();
-        let max = cases.iter().map(|c| c.0).max().unwrap();
-        let range = (max as i128 - min as i128) as u128;
-        if range > 1024 || range as usize + 1 > 4 * cases.len() {
-            continue;
-        }
-        let mut targets = vec![default; range as usize + 1];
-        for (k, t) in &cases {
-            targets[(k - min) as usize] = *t;
-        }
-        out.insert(head as u32, (x, min, targets, default));
-    }
-    out
-}
-
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
     // the function runs in the threaded interpreter (interp.rs, MAKEPAD_RUN_INTERP /
     // MAKEPAD_RUN_NO_CODEGEN): its "code" is the interpreter's relocatable form (interp/blob.rs)
@@ -3497,6 +3419,13 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
             }
         }
     }
+    // chains of compares of one value against constants: jump tables, bit tests, binary search
+    let switched = crate::switch::lower_switches(options, f);
+    let (f, freq_sw) = match &switched {
+        Some((g, origin)) => (g, freq.map(|fr| origin.iter().map(|b| fr.get(*b as usize).copied().unwrap_or(0.0)).collect::<Vec<f32>>())),
+        None => (f, None),
+    };
+    let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
     let _cost_ra = crate::fncost::phase(9);
     let t_ra = crate::opt::pass_clock();
     // immediates arm64 cannot encode, inside loops: registers set up once
@@ -3520,7 +3449,6 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &Env, fre
     let mut g = Gen {
         a: Asm { w: Vec::with_capacity(128) },
         test_fuse: None,
-        jt_plan: jump_tables(options, f, &al),
         jt_fix: Vec::new(),
         last_spill: None,
         win: {

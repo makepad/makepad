@@ -825,6 +825,39 @@ pub enum Term {
     Invoke(u32, u32),
     /// end of a cleanup pad: continue unwinding into the caller (rustc's `UnwindResume`)
     Resume,
+    /// Jump table: `targets[x - min]` when `x - min` (wrapping) is below `targets.len()` as an
+    /// unsigned number, else `default`. Made by `switch::lower_switches` from a dense integer
+    /// match, just before register allocation; the optimiser passes never see it.
+    Switch(VReg, std::sync::Arc<SwitchTable>),
+}
+
+/// The table of a `Term::Switch`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchTable {
+    pub min: i64,
+    pub targets: Vec<u32>,
+    pub default: u32,
+    /// the distinct targets (table entries and default), default last
+    pub succ: Vec<u32>,
+}
+
+impl SwitchTable {
+    pub fn new(min: i64, targets: Vec<u32>, default: u32) -> SwitchTable {
+        let mut t = SwitchTable { min, targets, default, succ: Vec::new() };
+        t.refresh();
+        t
+    }
+    /// Recomputes `succ` after the targets changed.
+    pub fn refresh(&mut self) {
+        let mut s: Vec<u32> = Vec::new();
+        for &c in &self.targets {
+            if c != self.default && !s.contains(&c) {
+                s.push(c);
+            }
+        }
+        s.push(self.default);
+        self.succ = s;
+    }
 }
 
 /// A terminator's distinct successor blocks (in order: taken first)
@@ -832,12 +865,18 @@ pub struct Succs {
     a: [u32; 2],
     n: u8,
     i: u8,
+    sw: Option<std::sync::Arc<SwitchTable>>,
 }
 
 impl Iterator for Succs {
     type Item = u32;
     #[inline]
     fn next(&mut self) -> Option<u32> {
+        if let Some(t) = &self.sw {
+            let r = t.succ.get(self.i as usize).copied();
+            self.i += 1;
+            return r;
+        }
         if self.i < self.n {
             self.i += 1;
             Some(self.a[self.i as usize - 1])
@@ -919,9 +958,10 @@ impl Term {
     #[inline]
     pub fn succs(&self) -> Succs {
         match *self {
-            Term::Jump(t) => Succs { a: [t, 0], n: 1, i: 0 },
-            Term::Branch(_, t, e) | Term::Invoke(t, e) => Succs { a: [t, e], n: if t == e { 1 } else { 2 }, i: 0 },
-            Term::Ret(_) | Term::Unreachable | Term::Resume => Succs { a: [0, 0], n: 0, i: 0 },
+            Term::Jump(t) => Succs { a: [t, 0], n: 1, i: 0, sw: None },
+            Term::Branch(_, t, e) | Term::Invoke(t, e) => Succs { a: [t, e], n: if t == e { 1 } else { 2 }, i: 0, sw: None },
+            Term::Ret(_) | Term::Unreachable | Term::Resume => Succs { a: [0, 0], n: 0, i: 0, sw: None },
+            Term::Switch(_, ref t) => Succs { a: [0, 0], n: 0, i: 0, sw: Some(t.clone()) },
         }
     }
     /// Rewrites every successor block index.
@@ -934,6 +974,14 @@ impl Term {
                 *e = f(*e);
             }
             Term::Ret(_) | Term::Unreachable | Term::Resume => {}
+            Term::Switch(_, t) => {
+                let t = std::sync::Arc::make_mut(t);
+                for c in &mut t.targets {
+                    *c = f(*c);
+                }
+                t.default = f(t.default);
+                t.refresh();
+            }
         }
     }
 }
@@ -1254,6 +1302,12 @@ impl Func {
                     }
                 }
                 Term::Unreachable | Term::Resume => {}
+                Term::Switch(c, t) => {
+                    chk(*c)?;
+                    if t.succ.iter().any(|s| *s >= nb) {
+                        return Err(format!("{}: bad switch target", self.name));
+                    }
+                }
                 Term::Invoke(t, u) => {
                     if *t >= nb || *u >= nb {
                         return Err(format!("{}: bad invoke target", self.name));

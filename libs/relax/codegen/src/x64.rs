@@ -698,8 +698,6 @@ struct Gen<'a> {
     /// (register, code position right after it): the last instruction emitted was an integer ALU op
     /// (add/sub/and/or/xor, not lea) writing that register; its ZF says whether the result is 0
     last_alu: Option<(u8, usize)>,
-    /// jump tables (arm64::jump_tables): head block -> (x, min, targets, default)
-    jt_plan: std::collections::HashMap<u32, (VReg, i64, Vec<u32>, u32)>,
     /// table entries to fill once blocks are placed: (byte position, table start, target)
     jt_fix: Vec<(usize, usize, u32)>,
     /// single-def float constants: vreg -> (bits, f64?)
@@ -978,7 +976,7 @@ impl<'a> Gen<'a> {
         self.stage = -(self.saved + off);
         // the domain base, read once (where regalloc::domain_base_block puts it) when the function
         // names a domain static
-        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach, &self.jt_plan) {
+        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
             off += 8;
             self.dom_slot = -(self.saved + off);
             self.dom_block = b;
@@ -2049,41 +2047,6 @@ impl<'a> Gen<'a> {
         match t {
             Term::Jump(target) => self.jump_to(*target, bi),
             Term::Branch(c, tt, ff) => {
-                if let Some((x, min, targets, default)) = self.jt_plan.get(&(bi as u32)).cloned() {
-                    // a chain of compares of x with constants (an integer match): one table dispatch
-                    let r = self.use_i(options, x, R10);
-                    self.a.mov_rr(RAX, r);
-                    self.a.mov_ri(R11, min);
-                    self.a.alu_rr(0x29, RAX, R11); // sub rax, r11
-                    self.a.mov_ri(R11, targets.len() as i64 - 1);
-                    self.a.alu_rr(0x39, RAX, R11); // cmp rax, r11
-                    self.jcc_to(CC_A, default);
-                    // lea r11, [rip + table]
-                    self.a.byte(0x4c);
-                    self.a.byte(0x8d);
-                    self.a.byte(0x1d);
-                    let at = self.a.pos();
-                    self.a.u32(0);
-                    // movsxd rax, dword [r11 + rax * 4]; add rax, r11; jmp rax
-                    self.a.byte(0x49);
-                    self.a.byte(0x63);
-                    self.a.byte(0x04);
-                    self.a.byte(0x83);
-                    self.a.byte(0x4c);
-                    self.a.byte(0x01);
-                    self.a.byte(0xd8);
-                    self.a.byte(0xff);
-                    self.a.byte(0xe0);
-                    let start = self.a.pos();
-                    self.a.patch(at, start);
-                    for t in targets {
-                        let p = self.a.pos();
-                        self.a.u32(0);
-                        self.jt_fix.push((p, start, t));
-                    }
-                    let _ = (c, tt, ff, fused);
-                    return;
-                }
                 let next = self.next_block[bi];
                 // integer condition code for `c` true
                 let icond: Option<u8> = match &fused {
@@ -2161,6 +2124,43 @@ impl<'a> Gen<'a> {
                 } else {
                     self.jcc_to(cc, *tt);
                     self.jump_to(*ff, bi);
+                }
+            }
+            Term::Switch(x, tab) => {
+                // rax = x - min; if rax >u len - 1 { default }; jump through the table
+                let r = self.use_i(options, *x, R10);
+                self.a.mov_rr(RAX, r);
+                if tab.min == 0 {
+                } else if tab.min as i32 as i64 == tab.min {
+                    // sub rax, imm32
+                    self.a.byte(0x48);
+                    self.a.byte(0x2d);
+                    self.a.u32(tab.min as i32 as u32);
+                } else {
+                    self.a.mov_ri(R11, tab.min);
+                    self.a.alu_rr(0x29, RAX, R11);
+                }
+                // cmp rax, imm32 (len - 1 < 4096)
+                self.a.byte(0x48);
+                self.a.byte(0x3d);
+                self.a.u32(tab.targets.len() as u32 - 1);
+                self.jcc_to(CC_A, tab.default);
+                // lea r11, [rip + table]
+                self.a.byte(0x4c);
+                self.a.byte(0x8d);
+                self.a.byte(0x1d);
+                let at = self.a.pos();
+                self.a.u32(0);
+                // movsxd rax, dword [r11 + rax * 4]; add rax, r11; jmp rax
+                for b in [0x49, 0x63, 0x04, 0x83, 0x4c, 0x01, 0xd8, 0xff, 0xe0] {
+                    self.a.byte(b);
+                }
+                let start = self.a.pos();
+                self.a.patch(at, start);
+                for &t in &tab.targets {
+                    let p = self.a.pos();
+                    self.a.u32(0);
+                    self.jt_fix.push((p, start, t));
                 }
             }
             Term::Ret(vals) => {
@@ -4280,6 +4280,13 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     } else {
         f
     };
+    // chains of compares of one value against constants: jump tables, bit tests, binary search
+    let switched = crate::switch::lower_switches(options, f);
+    let (f, freq_sw) = match &switched {
+        Some((g, origin)) => (g, freq.map(|fr| origin.iter().map(|b| fr.get(*b as usize).copied().unwrap_or(0.0)).collect::<Vec<f32>>())),
+        None => (f, None),
+    };
+    let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
     // constants used in loops defined once at the entry (the allocator keeps them in registers
     // or recomputes them); constant operands that fit an imm32 become immediates
     // (hot code only: the rewrite copies the function, +15% back-end time at O1)
@@ -4299,7 +4306,6 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let alloc_sig = regalloc::alloc_sig(&al);
     let _cost_emit = crate::fncost::phase(10);
     let t_emit = crate::opt::pass_clock();
-    let jt_plan = crate::arm64::jump_tables(options, f, &al);
     let (win, win_start) = {
         let mut w: std::collections::HashMap<u32, Vec<(u32, u32, u8)>> = std::collections::HashMap::new();
         let mut ws: std::collections::HashMap<u32, Vec<(u32, u8)>> = std::collections::HashMap::new();
@@ -4330,7 +4336,6 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         mem_const: None,
         test_fuse: None,
         load_fuse: None,
-        jt_plan,
         jt_fix: Vec::new(),
         last_spill: None,
         win,
