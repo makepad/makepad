@@ -76,7 +76,7 @@ fn gandalf_live_edit_guard_and_reporting() {
     // fresh runtime, and the parent observes the actual console and JSON streams.
     const CHILD: &str = "MAKEPAD_RUN_GANDALF_GATE_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["app", "framework", "all", "std", "std_all"] {
+        for case in ["app", "framework", "all", "std", "std_all", "lazy"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::gandalf_live_edit_guard_and_reporting", "--nocapture", "--test-threads=1", "--format=terse"])
                 .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", if case.ends_with("all") { "1" } else { "0" })
@@ -84,6 +84,12 @@ fn gandalf_live_edit_guard_and_reporting() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
+            if case == "lazy" {
+                // D3: without --check-first the patch is installed and the verdict is reported as soon as the
+                // background check has it (Gandalf's console line), never as a refusal
+                assert!(stderr.lines().any(|l| l.contains("borrow check failed: ") && l.contains("::value at ") && !l.ends_with("(live edit refused)")), "{case}: {stderr}");
+                continue;
+            }
             let reported = stderr.lines().any(|l| l.starts_with("borrow check failed: ") && l.contains("::value at ") && l.ends_with("(live edit refused)"));
             assert_eq!(reported, !matches!(case, "framework" | "std"), "{case}: {stderr}");
             let diagnostics: Vec<_> = stdout.lines().filter_map(|l| crate::json::parse(l.as_bytes()).ok())
@@ -100,7 +106,9 @@ fn gandalf_live_edit_guard_and_reporting() {
         }
         return;
     };
-    crate::borrowck::lazy::disable_gandalf();
+    if case != "lazy" { crate::borrowck::lazy::disable_gandalf(); }
+    // `makepad run --check-first` refuses a bad live edit synchronously; the default never blocks the patch
+    crate::jit::CHECK_FIRST.store(case != "lazy", std::sync::atomic::Ordering::Relaxed);
     crate::diag::enable();
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-gandalf-gate-{}", std::process::id()));
@@ -124,12 +132,12 @@ fn gandalf_live_edit_guard_and_reporting() {
         dir.display(), crate::diag::quote(&app), dir.display(), crate::diag::quote(&framework));
     let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
     assert_eq!(roots, vec![crate::vfs::normalize_path(&app)]);
-    let target = if case == "app" { app_crate } else { framework_crate };
+    let target = if case == "app" || case == "lazy" { app_crate } else { framework_crate };
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);
         (d.krate == target && prog.name(id) == "value").then_some(id)
     }).unwrap();
-    let path = if case == "app" { app } else { framework };
+    let path = if case == "app" || case == "lazy" { app } else { framework };
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     crate::borrowck::event::set_app_scope(roots);
@@ -149,8 +157,16 @@ fn gandalf_live_edit_guard_and_reporting() {
     run(11);
     let old_file = u.prog.def(def).file;
     let bad = b"pub fn value(out: &mut u32) { let mut x = 1u32; let r = &x; x = 2; *out = *r; }\n";
+    let console = (case == "lazy").then(|| crate::gandalf_out::Console::start(false, false));
     let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: old_file, path: path.clone(), src: bad.to_vec() }]) };
-    if matches!(case.as_str(), "framework" | "std") {
+    if case == "lazy" {
+        assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+        assert!(!outcome.lines.iter().any(|l| l.starts_with("refused by the borrow checker")));
+        // the worker acknowledges a settle request between checks: the second one is answered after the queued check ran
+        crate::borrowck::settle().recv().unwrap();
+        crate::borrowck::settle().recv().unwrap();
+        assert!(console.unwrap().finish() >= 1, "the background check reported the borrow error");
+    } else if matches!(case.as_str(), "framework" | "std") {
         assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
         assert_ne!(u.prog.def(def).file, old_file);
         assert!(!log.exists(), "guarded-out bodies must not emit Gandalf events");
