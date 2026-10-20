@@ -120,7 +120,13 @@ impl LifetimeResolver<'_> {
         id
     }
 
+    /// The where-predicate whose binder encloses the current position.
+    fn pred(&self) -> Option<u32> {
+        self.ribs.iter().rev().find_map(|rib| match rib.kind { LifetimeRibKind::Generics { binder: Some(BinderId::Where(n)), .. } => Some(n), _ => None })
+    }
+
     fn record_lifetime_use(&mut self, key: LifetimeKey, res: LifetimeRes) {
+        if let Some(pred) = self.pred() { self.resolution.uses.insert(key.scoped(Some(pred)), res); }
         self.resolution.uses.insert(key, res);
         if matches!(res, LifetimeRes::Param(_) | LifetimeRes::Static) {
             if let Some(candidates) = &mut self.candidates { candidates.push(res); }
@@ -202,6 +208,7 @@ impl LifetimeResolver<'_> {
             }
             let id = self.declare(binder, Some(p.name), p.name.lo);
             self.resolution.uses.insert(LifetimeKey::Named(p.name.lo, p.name.hi), LifetimeRes::Param(id));
+            if let BinderId::Where(n) = binder { self.resolution.uses.insert(LifetimeKey::Named(p.name.lo, p.name.hi).scoped(Some(n)), LifetimeRes::Param(id)); }
             bindings.push((name, id));
         }
         self.ribs.push(LifetimeRib { kind: LifetimeRibKind::Generics { binder: Some(binder), poly_trait: matches!(binder, BinderId::Trait(_)) }, bindings });

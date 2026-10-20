@@ -197,7 +197,7 @@ fn bindings_with_subpatterns_and_modes() {
 
 #[test]
 fn literals_ranges_and_consts() {
-    let r = lower("pub const K: u8 = 7; pub fn f(x: u8, c: char, s: &str, b: &[u8]) { match x { 0 => {} 1..=5 => {} 6..K => {} K => {} 100.. => {} _ => {} } match c { 'a'..='z' => {} _ => {} } match s { \"hi\" => {} _ => {} } match b { b\"ab\" => {} _ => {} } }", "f");
+    let r = lower("#[lang = \"sized\"] trait Sized {} #[lang = \"unsize\"] trait Unsize<T: ?Sized> {} #[lang = \"coerce_unsized\"] trait CoerceUnsized<T: ?Sized> {} impl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b T {} pub const K: u8 = 7; pub fn f(x: u8, c: char, s: &str, b: &[u8]) { match x { 0 => {} 1..=5 => {} 6..K => {} K => {} 100.. => {} _ => {} } match c { 'a'..='z' => {} _ => {} } match s { \"hi\" => {} _ => {} } match b { b\"ab\" => {} _ => {} } }", "f");
     assert_eq!(&r[..6], ["0", "1..=5", "6..7", "7", "100..=+inf", "_"]);
     assert_eq!(r[6], "97..=122");
     assert_eq!(r[8], "*const<str>");

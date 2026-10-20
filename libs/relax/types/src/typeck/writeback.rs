@@ -53,6 +53,7 @@ impl Fcx<'_> {
         for i in 0..body.pat_ty.len() { if body.pat_typed.get(i) { wbcx.resolve(&mut body.pat_ty[i]); } }
         wbcx.resolve(&mut body.ret);
         for ty in body.hidden_types.values_mut() { wbcx.resolve(ty); }
+        for (_, ty, _) in body.awaits.iter_mut() { wbcx.resolve(ty); }
         for local in &mut body.locals { wbcx.resolve(&mut local.ty); }
         for args in body.res_args.values_mut() { wbcx.resolve_list(args); }
         for method in body.methods.values_mut().chain(body.binops.values_mut()) { wbcx.resolve_list(&mut method.args); }

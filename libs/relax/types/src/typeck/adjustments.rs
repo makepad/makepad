@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use crate::typeck::solve::program;
 
-    const PRELUDE: &str = "#![no_std]\n#[lang = \"sized\"] trait Sized {}\n#[lang = \"deref\"] trait Deref { type Target: ?Sized; fn deref(&self) -> &Self::Target; }\n";
+    const PRELUDE: &str = "#![no_std]\n#[lang = \"sized\"] trait Sized {}\n#[lang = \"deref\"] trait Deref { type Target: ?Sized; fn deref(&self) -> &Self::Target; }\n#[lang = \"unsize\"] trait Unsize<T: ?Sized> {}\n#[lang = \"coerce_unsized\"] trait CoerceUnsized<T: ?Sized> {}\nimpl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b T {}\nimpl<'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a mut U> for &'a mut T {}\n";
 
     fn body_of(src: &str, name: &str) -> (Program, std::sync::Arc<Body>) {
         let (prog, tcx) = program(&format!("{PRELUDE}{src}"));

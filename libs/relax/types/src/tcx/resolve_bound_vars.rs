@@ -17,6 +17,24 @@ pub(super) enum LifetimeKey {
     SelfReference,
     Path(u32, u32),
     ObjectDefault(u32),
+    /// A use inside the where-predicate with binder `Where(pred)`. The derives reuse one type
+    /// node under several predicates with different binders, so a use is keyed by the
+    /// predicate it is resolved in as well as by its node (the unscoped key stays: last wins).
+    Scoped(u32, u32, u32, u32),
+}
+
+impl LifetimeKey {
+    pub(super) fn scoped(self, pred: Option<u32>) -> LifetimeKey {
+        let Some(pred) = pred else { return self };
+        match self {
+            LifetimeKey::Named(a, b) => LifetimeKey::Scoped(pred, 0, a, b),
+            LifetimeKey::Reference(a) => LifetimeKey::Scoped(pred, 1, a, 0),
+            LifetimeKey::SelfReference => LifetimeKey::Scoped(pred, 2, 0, 0),
+            LifetimeKey::Path(a, b) => LifetimeKey::Scoped(pred, 3, a, b),
+            LifetimeKey::ObjectDefault(a) => LifetimeKey::Scoped(pred, 4, a, 0),
+            scoped @ LifetimeKey::Scoped(..) => scoped,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -113,6 +131,19 @@ impl BoundVarContext<'_> {
         crate::next_solver::fulfill::ObligationCause { body_id: self.owner, span }
     }
 
+    /// The where-predicate whose binder encloses the current position.
+    fn pred(&self) -> Option<u32> {
+        self.scopes.iter().rev().find_map(|scope| match scope { Scope::Binder { id: BinderId::Where(n), .. } => Some(*n), _ => None })
+    }
+    /// The recorded mapping of a use: the one made in the current predicate, else the plain one.
+    fn mapped(&self, key: LifetimeKey) -> Option<ResolvedArg> {
+        self.rbv.named_variable_map.get(&key.scoped(self.pred())).or_else(|| self.rbv.named_variable_map.get(&key)).copied()
+    }
+    fn map_use(&mut self, key: LifetimeKey, arg: ResolvedArg) {
+        if let Some(pred) = self.pred() { self.rbv.named_variable_map.insert(key.scoped(Some(pred)), arg); }
+        self.rbv.named_variable_map.insert(key, arg);
+    }
+
     fn declaration(&self, id: LifetimeId) -> &LifetimeDecl {
         if id.owner == self.owner { &self.rbv.names.declarations[id.local as usize] }
         else { self.rbv.names.inherited.iter().find(|d| d.id == id).expect("inherited lifetime declaration") }
@@ -155,9 +186,10 @@ impl BoundVarContext<'_> {
     }
 
     fn visit_lifetime(&mut self, key: LifetimeKey, span: u32) {
-        match self.rbv.names.uses.get(&key).copied().expect("lifetime resolved before bound-variable collection") {
-            LifetimeRes::Static => { self.rbv.named_variable_map.insert(key, ResolvedArg::StaticLifetime); }
-            LifetimeRes::Error => { self.rbv.named_variable_map.insert(key, ResolvedArg::Error); }
+        let res = self.rbv.names.uses.get(&key.scoped(self.pred())).or_else(|| self.rbv.names.uses.get(&key)).copied().expect("lifetime resolved before bound-variable collection");
+        match res {
+            LifetimeRes::Static => self.map_use(key, ResolvedArg::StaticLifetime),
+            LifetimeRes::Error => self.map_use(key, ResolvedArg::Error),
             LifetimeRes::Infer => {}
             LifetimeRes::Param(id) => self.resolve_lifetime_ref(id, key, span),
         }
@@ -209,7 +241,7 @@ impl BoundVarContext<'_> {
                     arg = ResolvedArg::Error;
                 } else if let Some(body) = body { arg = ResolvedArg::Free(body, id); }
             }
-            self.rbv.named_variable_map.insert(key, arg);
+            self.map_use(key, arg);
         } else if self.scopes.iter().any(|scope| matches!(scope, Scope::Binder { apit: true, .. })) {
             self.tcx.dcx.report(self.cause(span), "lifetime is not accessible in this impl Trait bound".into());
         } else {
@@ -268,7 +300,7 @@ impl BoundVarContext<'_> {
             }
         }
         let result = self.remap_opaque_captures(&captures, result, 0);
-        self.rbv.named_variable_map.insert(key, result);
+        self.map_use(key, result);
     }
 
     /// rustc_hir_analysis check_opaque_precise_captures: the `use<..>` list names each parameter once, lifetimes
@@ -804,7 +836,7 @@ impl BoundVarContext<'_> {
             ast::Ty::Ref(name, _, inner) => {
                 let key = name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
                 self.visit_lifetime(key, name.map_or(0, |lt| lt.lo));
-                self.scopes.push(Scope::ObjectLifetimeDefault(self.rbv.named_variable_map.get(&key).copied()));
+                self.scopes.push(Scope::ObjectLifetimeDefault(self.mapped(key)));
                 self.visit_ty(inner);
                 self.scopes.pop();
             }
@@ -1019,14 +1051,14 @@ impl BoundVarContext<'_> {
             for argument in arguments {
                 if let GenericArg::Lifetime(name) = *argument {
                     self.named_lifetime(name);
-                    lifetimes.push(self.rbv.named_variable_map.get(&LifetimeKey::Named(name.lo, name.hi)).copied());
+                    lifetimes.push(self.mapped(LifetimeKey::Named(name.lo, name.hi)));
                 }
             }
             let mut j = 0;
             while self.rbv.names.uses.contains_key(&LifetimeKey::Path(segment_id, j)) {
                 let key = LifetimeKey::Path(segment_id, j);
                 self.visit_lifetime(key, segment.name.lo);
-                lifetimes.push(self.rbv.named_variable_map.get(&key).copied());
+                lifetimes.push(self.mapped(key));
                 j += 1;
             }
             let prefix = ast::Path { segs: path.segs.prefix(i + 1), ..*path };
@@ -1188,12 +1220,12 @@ impl BoundVarContext<'_> {
                         let mut ordinal = 0;
                         for arg in ast.list(*args) {
                             if let GenericArg::Lifetime(lt) = arg {
-                                if ordinal == lifetime_index { return self.rbv.named_variable_map.get(&LifetimeKey::Named(lt.lo, lt.hi)).copied(); }
+                                if ordinal == lifetime_index { return self.mapped(LifetimeKey::Named(lt.lo, lt.hi)); }
                                 ordinal += 1;
                             }
                         }
                     }
-                    return self.rbv.named_variable_map.get(&LifetimeKey::Path(segments.lo + index as u32, lifetime_index)).copied();
+                    return self.mapped(LifetimeKey::Path(segments.lo + index as u32, lifetime_index));
                 }
                 lifetime_index += 1;
             }
@@ -1645,8 +1677,8 @@ impl ResolveBoundVars {
         let index = vars.iter().position(|var| *var == BoundVariableKind::Region(BoundRegionKind::Named(id))).expect("late lifetime declaration");
         RegionKind::ReBound(0, BoundVar(index as u32))
     }
-    pub(super) fn region_for_use(&self, key: LifetimeKey) -> Option<RegionKind> {
-        let arg = match self.named_variable_map.get(&key).copied() {
+    pub(super) fn region_for_use(&self, key: LifetimeKey, pred: Option<u32>) -> Option<RegionKind> {
+        let arg = match self.named_variable_map.get(&key.scoped(pred)).or_else(|| self.named_variable_map.get(&key)).copied() {
             Some(arg) => arg,
             None => {
                 if let LifetimeKey::Named(lo, hi) = key {
@@ -1695,7 +1727,7 @@ impl ResolveBoundVars {
 }
 
 crate::collected_enum!(BinderId; 0 => Item, 1 => FnPointer(n), 2 => Trait(n), 3 => Where(n), 4 => Closure(n), 5 => GenericBound(n), 6 => ArgumentImplTrait(n), 7 => Opaque(d));
-crate::collected_enum!(LifetimeKey; 0 => Named(a,b), 1 => Reference(n), 2 => SelfReference, 3 => Path(a,b), 4 => ObjectDefault(n));
+crate::collected_enum!(LifetimeKey; 0 => Named(a,b), 1 => Reference(n), 2 => SelfReference, 3 => Path(a,b), 4 => ObjectDefault(n), 5 => Scoped(p,t,a,b));
 crate::collected_enum!(ResolvedArg; 0 => StaticLifetime, 1 => EarlyBound(id), 2 => LateBound(d,v,id), 3 => Free(d,id), 4 => Error);
 crate::collected_fields!(ResolveBoundVars, names, named_variable_map, late_bound_vars_map, opaque_captured_lifetimes, early_indices, generic_indices);
 crate::collected_enum!(BoundVariableKind; 0 => Ty, 1 => Region(r), 2 => Const);

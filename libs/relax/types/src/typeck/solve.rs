@@ -87,6 +87,7 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
         scopes: Vec::new(),
         local_hyg: Vec::new(),
         fulfillment_cx: crate::next_solver::fulfill::FulfillmentCtxt::new(&infcx),
+        suspended_fulfillment: Vec::new(),
         infcx,
         param_env: Default::default(),
         loops: Vec::new(),

@@ -595,6 +595,7 @@ pub mod obligations {
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
                 let mut errors = with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item));
                 if def.kind != DefKind::ForeignFn { errors.extend(check_opaque_cycles(prog, tcx, did, item.lo)); }
+                if matches!(item.kind, ItemKind::Fn(sig, _, _) if ast.fn_sig(sig).asyncness) { errors.extend(check_async_recursion(prog, tcx, did, item.lo)); }
                 errors
             }
             DefKind::Impl => {
@@ -1062,6 +1063,60 @@ pub mod obligations {
     /// rustc_hir_analysis/src/check/check.rs check_opaque_for_cycles + rustc_middle/src/ty/util.rs
     /// OpaqueTypeExpander: expanding the hidden type of an opaque the fn defines must not reach the
     /// opaque again (E0720).
+    /// rustc_query_impl handle_cycle_error.rs layout_of: the layout of a coroutine that holds the
+    /// future it awaits (a recursive `async fn` call not behind a pointer) needs itself: E0733.
+    /// The edges are the awaited operands, which are live across their suspension point.
+    fn check_async_recursion(prog: &Program, tcx: &Tcx, owner: DefId, pos: u32) -> Vec<String> {
+        fn coroutines_in(prog: &Program, tcx: &Tcx, t: TyId, depth: u32, out: &mut Vec<(u32, u32, DefId)>) {
+            if depth > 24 { return; }
+            match tcx.tys.kind(t).clone() {
+                TyKind::Closure(file, ce, args) if tcx.coroutines.contains(&(file, ce)) => {
+                    if let TyKind::FnDef(owner, ..) = tcx.tys.kind(args.parent_args) { if !out.contains(&(file, ce, *owner)) { out.push((file, ce, *owner)); } }
+                }
+                TyKind::Alias(_, a) => if let crate::types::AliasTyKind::Opaque { def_id } = a.kind {
+                    let Ok(hidden) = tcx.type_of(prog, def_id) else { return };
+                    let targs: Vec<TyId> = tcx.tys.list(a.args).to_vec();
+                    let args = tcx.complete_args(prog, def_id, &targs, a.regions);
+                    coroutines_in(prog, tcx, tcx.instantiate_ty(prog, def_id, &args, hidden), depth + 1, out);
+                },
+                TyKind::Tuple(v) => for &x in tcx.tys.list(v) { coroutines_in(prog, tcx, x, depth + 1, out); },
+                TyKind::Array(e, _) => coroutines_in(prog, tcx, e, depth + 1, out),
+                TyKind::Adt(d, a, r) => if let Some(adt) = tcx.adts.get(&d) {
+                    if prog.def(d).kind != DefKind::Struct && !adt.is_enum { return; }
+                    let args = tcx.complete_args(prog, d, tcx.tys.list(a), r);
+                    for v in &adt.variants { for f in &v.fields { coroutines_in(prog, tcx, tcx.instantiate_ty(prog, d, &args, f.ty), depth + 1, out); } }
+                },
+                _ => {}
+            }
+        }
+        let body = tcx.typeck(prog, owner);
+        if !body.errors.is_empty() { return Vec::new(); }
+        let file = prog.def(owner).file;
+        let starts: Vec<u32> = body.closures.iter().copied().filter(|ce| tcx.coroutines.contains(&(file, *ce))).collect();
+        for start in starts {
+            // depth-first over "awaits a future holding coroutine"
+            let mut seen: Vec<(u32, u32)> = Vec::new();
+            let mut stack = vec![(file, start, owner)];
+            while let Some((f, ce, o)) = stack.pop() {
+                let b = tcx.typeck(prog, o);
+                if !b.errors.is_empty() { continue; }
+                for &(c, t, _) in b.awaits.iter() {
+                    if c != ce { continue; }
+                    let mut found = Vec::new();
+                    coroutines_in(prog, tcx, t, 0, &mut found);
+                    for (nf, nce, no) in found {
+                        if nf == file && nce == start && no == owner {
+                            return vec![prog.record_error(file, pos, "typeck", "E0733: recursion in an async fn requires boxing".to_string())];
+                        }
+                        if !seen.contains(&(nf, nce)) { seen.push((nf, nce)); stack.push((nf, nce, no)); }
+                    }
+                }
+                let _ = f;
+            }
+        }
+        Vec::new()
+    }
+
     fn check_opaque_cycles(prog: &Program, tcx: &Tcx, owner: DefId, pos: u32) -> Vec<String> {
         use crate::types::fold::{TypeFolder, super_fold_ty};
         use crate::types::{AliasTyKind, Types};

@@ -13,6 +13,8 @@ pub struct RegionEnv {
     pub(crate) anonymous_params: Vec<u32>,
     table: Option<Arc<ResolveBoundVars>>,
     binder: Option<BinderId>,
+    /// the where-predicate being lowered (its binder stays known inside nested binders)
+    pred: Option<u32>,
     pub(super) infer_fresh: bool,
 }
 impl RegionEnv {
@@ -26,7 +28,9 @@ impl RegionEnv {
         tys.intern_region_args(&args)
     }
     pub(crate) fn with_binder(&self, binder: Option<BinderId>) -> Self {
-        let mut env = self.clone(); env.binder = binder; env
+        let mut env = self.clone(); env.binder = binder;
+        if let Some(BinderId::Where(n)) = binder { env.pred = Some(n); }
+        env
     }
     pub(crate) fn bound_vars(&self) -> Vec<BoundVariableKind> {
         if !self.enabled { return Vec::new(); }
@@ -43,7 +47,7 @@ impl RegionEnv {
     pub(super) fn resolve_key(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, tys: &Types, key: LifetimeKey) -> RegionId {
         if !self.enabled { return RegionId::ERASED; }
         let table = self.table.as_ref().expect("written lifetime lowering requires owner resolution");
-        match table.region_for_use(key) {
+        match table.region_for_use(key, self.pred) {
             Some(region) => tys.intern_region(region),
             None => infcx.map_or_else(|| tys.intern_region(RegionKind::ReError), |infcx| infcx.next_region_var()),
         }
@@ -51,7 +55,7 @@ impl RegionEnv {
     /// The object type `ty` has no resolved lifetime default (Scope::ObjectLifetimeDefault
     /// with `None`, resolve_bound_vars.rs:927-944 and :2290).
     pub(super) fn object_default_indeterminate(&self, ty: Option<ast::TyId>) -> bool {
-        self.enabled && ty.is_some_and(|ty| self.table.as_ref().is_some_and(|table| table.region_for_use(LifetimeKey::ObjectDefault(ty.0)).is_none()))
+        self.enabled && ty.is_some_and(|ty| self.table.as_ref().is_some_and(|table| table.region_for_use(LifetimeKey::ObjectDefault(ty.0), self.pred).is_none()))
     }
     pub(super) fn object_region(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, tys: &Types, ty: Option<ast::TyId>) -> RegionId {
         if !self.enabled { return RegionId::ERASED; }
@@ -266,6 +270,8 @@ mod tests {
             #![no_std]
             #[lang = "sized"] trait Sized {}
             #[lang = "unsize"] trait Unsize<T: ?Sized> {}
+            #[lang = "coerce_unsized"] trait CoerceUnsized<T: ?Sized> {}
+            impl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b T {}
             struct S<'a, T>(&'a T);
             type A<'a> = &'a u32;
             type F<T> = fn(T);
@@ -465,4 +471,4 @@ mod tests {
     }
 }
 
-crate::collected_fields!(RegionEnv, owner, enabled, names, next_param, anonymous_params, table, binder, infer_fresh);
+crate::collected_fields!(RegionEnv, owner, enabled, names, next_param, anonymous_params, table, binder, pred, infer_fresh);
