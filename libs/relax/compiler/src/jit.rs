@@ -8866,11 +8866,8 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut crate::rir::Func
     // later wider loads of narrower stores otherwise fail store forwarding (layout_widgets)
     if cfg.sroa && !crate::opt::opt_off(options, "-postinline") {
         for _ in 0..3 {
-            // forward_slot_dests_x(options, func, 32) is off here: it merged a by-value parameter
-            // copy into the result buffer while that copy was still read after the first payload
-            // write (O3 Result<&T,E>::cloned; tweaker build.rs crashed, coord.md 2026-10-08
-            // 08:10). backend2 re-enables it with a fixed interference check.
-            let ch = crate::opt::forward_slot_dests(func);
+            let ch = crate::opt::forward_slot_dests(func) | crate::opt::forward_slot_dests_x(options, func, 32);
+            let ch = ch | crate::opt::split_wide_slot_accesses(func);
             let ch = ch | crate::opt::sroa_post_inline(func);
             if !ch {
                 break;

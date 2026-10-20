@@ -8456,6 +8456,106 @@ fn slot_scan_inner(f: &Func, terminal_calls: bool) -> SlotScan {
     SlotScan { vs, esc, writes, reads, rd_end, whole, ret_call }
 }
 
+/// Wide integer accesses of a stack slot that other accesses of the slot cut: a pair of
+/// `u32` fields stored one by one and moved as one `u64` (or `u16` halves of a `u32`) makes
+/// the slot's overlapping cells unpromotable (sroa: one cell per offset and size) and, left in
+/// memory, the wide load fails store forwarding behind the narrow stores. A load of `S` bytes
+/// becomes two loads of `S/2` joined with a shift and an or, a store becomes two stores of the
+/// value and of the value shifted down, when an access of the same non-escaping slot lies
+/// inside one half. Repeats on the halves. Returns whether anything was split.
+pub fn split_wide_slot_accesses(f: &mut Func) -> bool {
+    const NONE: u32 = u32::MAX;
+    let mut any = false;
+    for _round in 0..3 {
+        let sc = slot_scan(f);
+        let ns = f.slots.len();
+        // per slot: the (offset, size) of every direct access; slots touched any other way
+        // (vector or indexed accesses) are left alone
+        let mut acc: Vec<Vec<(i64, i64)>> = vec![Vec::new(); ns];
+        let mut odd = vec![false; ns];
+        let at = |v: VReg| sc.vs[v.0 as usize];
+        for b in &f.blocks {
+            for i in &b.insts {
+                match i {
+                    Inst::Load(m, _, base, off) | Inst::Store(m, base, off, _) => {
+                        let (sl, o) = at(*base);
+                        if sl != NONE {
+                            acc[sl as usize].push((o + *off as i64, mem_size(*m) as i64));
+                        }
+                    }
+                    Inst::VLoad(_, base, _) | Inst::VStore(base, ..) | Inst::LoadX(_, _, base, ..) | Inst::StoreX(_, base, ..) => {
+                        let (sl, _) = at(*base);
+                        if sl != NONE {
+                            odd[sl as usize] = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // is a wide access (offset, size) of this slot cut by another access inside one half?
+        let cut = |sl: usize, o: i64, n: i64| -> bool {
+            let h = n / 2;
+            acc[sl].iter().any(|&(ao, an)| an < n && ao >= o && ao + an <= o + n && (ao + an <= o + h || ao >= o + h))
+        };
+        let mut changed = false;
+        for bi in 0..f.blocks.len() {
+            let wide = |i: &Inst| -> bool {
+                let (m, base, off) = match i {
+                    Inst::Load(m @ Mem::Int(4 | 8, false), _, base, off) | Inst::Store(m @ Mem::Int(4 | 8, _), base, off, _) => (*m, *base, *off),
+                    _ => return false,
+                };
+                let (sl, o) = at(base);
+                sl != NONE && !sc.esc[sl as usize] && !odd[sl as usize] && cut(sl as usize, o + off as i64, mem_size(m) as i64)
+            };
+            if !f.blocks[bi].insts.iter().any(|i| wide(i)) {
+                continue;
+            }
+            let old = std::mem::take(&mut f.blocks[bi].insts);
+            let oldp = std::mem::take(&mut f.blocks[bi].pos);
+            let keep_pos = oldp.len() == old.len();
+            let mut ins = Vec::with_capacity(old.len() + 8);
+            let mut pos = Vec::with_capacity(old.len() + 8);
+            for (k, i) in old.into_iter().enumerate() {
+                let p = if keep_pos { oldp[k] } else { 0 };
+                if !wide(&i) {
+                    ins.push(i);
+                    pos.push(p);
+                    continue;
+                }
+                match i {
+                    Inst::Load(Mem::Int(n, _), d, base, off) => {
+                        let h = n / 2;
+                        let (lo, hi, up) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+                        ins.push(Inst::Load(Mem::Int(h, false), lo, base, off));
+                        ins.push(Inst::Load(Mem::Int(h, false), hi, base, off + h as i32));
+                        ins.push(Inst::IBinI(IOp::Shl, U64, up, hi, h as i64 * 8));
+                        ins.push(Inst::IBin(IOp::Or, U64, d, lo, up));
+                        pos.extend([p; 4]);
+                    }
+                    Inst::Store(Mem::Int(n, _), base, off, v) => {
+                        let h = n / 2;
+                        let up = f.vreg(Cls::I);
+                        ins.push(Inst::Store(Mem::Int(h, false), base, off, v));
+                        ins.push(Inst::IBinI(IOp::Shr, U64, up, v, h as i64 * 8));
+                        ins.push(Inst::Store(Mem::Int(h, false), base, off + h as i32, up));
+                        pos.extend([p; 3]);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            f.blocks[bi].insts = ins;
+            f.blocks[bi].pos = if keep_pos { pos } else { Vec::new() };
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+        any = true;
+    }
+    any
+}
+
 /// Replace a private, read-only stack copy of immutable data with the data's address.
 /// Follow arbitrary indexed address arithmetic, not just constant field offsets. Only a
 /// single whole-slot initializer is allowed; it must dominate every memory read. All other
@@ -10810,6 +10910,33 @@ mod tests {
         for b in &mut f.blocks { b.pos = vec![0; b.insts.len()]; }
         f.verify().unwrap();
         assert!(!forward_slot_dests_x(&relax_session::Options::default(), &mut f, 32), "B was built over the returned result");
+    }
+
+    #[test]
+    fn split_wide_access_cut_by_narrow_stores_lets_sroa_promote() {
+        // a pair of u32 stored one by one and moved as one u64
+        let mut f = Func::new("pair".into(), 0);
+        let (a, b) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([a, b]);
+        let s = f.slot(8, 8);
+        let (p, w, d) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.block();
+        f.blocks[0].insts = vec![
+            Inst::SlotAddr(p, s),
+            Inst::Store(Mem::Int(4, false), p, 0, a),
+            Inst::Store(Mem::Int(4, false), p, 4, b),
+            Inst::Load(Mem::Int(8, false), w, p, 0),
+            Inst::IBinI(IOp::Add, U64, d, w, 1),
+        ];
+        f.blocks[0].term = Term::Ret(vec![d]);
+        f.rets = vec![Cls::I];
+        f.blocks[0].pos = vec![0; f.blocks[0].insts.len()];
+        assert!(split_wide_slot_accesses(&mut f));
+        f.verify().unwrap();
+        assert!(!f.blocks[0].insts.iter().any(|i| matches!(i, Inst::Load(Mem::Int(8, _), ..))));
+        assert_eq!(f.blocks[0].insts.len(), f.blocks[0].pos.len());
+        assert!(sroa(&mut f));
+        assert!(!f.blocks[0].insts.iter().any(|i| matches!(i, Inst::Load(..) | Inst::Store(..))), "pair stayed in memory");
     }
 
     fn sroa_fixture(size: u32) -> (Func, VReg) {
