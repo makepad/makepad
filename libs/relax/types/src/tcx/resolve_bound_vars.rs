@@ -271,7 +271,37 @@ impl BoundVarContext<'_> {
         self.rbv.named_variable_map.insert(key, result);
     }
 
+    /// rustc_hir_analysis check_opaque_precise_captures: the `use<..>` list names each parameter once, lifetimes
+    /// first, and every type and const parameter in scope of the opaque.
+    fn check_precise_captures(&mut self, bounds: ast::List<ast::Bound>) {
+        let ast = &self.prog.files[self.file as usize].ast;
+        let Some(args) = ast.list(bounds).iter().find_map(|b| if let ast::Bound::Use(a) = b { Some(*a) } else { None }) else { return };
+        let Some(GenericArgs::Angle(list)) = ast.gargs(args) else { return };
+        let text = |i: ast::Ident| self.prog.files[self.file as usize].text(i).to_string();
+        let mut seen: Vec<String> = Vec::new();
+        let mut first_non_lifetime = false;
+        for arg in ast.list(*list) {
+            let (name, pos, lifetime) = match *arg {
+                GenericArg::Lifetime(lt) => (text(lt), lt.lo, true),
+                GenericArg::Type(t) => match ast.ty(t) {
+                    ast::Ty::Path(p) if p.no_qself() && ast.segs(p.segs).len() == 1 => { let seg = ast.segs(p.segs)[0]; (text(seg.name), seg.name.lo, false) }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if lifetime && first_non_lifetime {
+                self.tcx.dcx.report(self.cause(pos), format!("lifetime parameter `{}` must be listed before non-lifetime parameters", name));
+            }
+            if !lifetime { first_non_lifetime = true; }
+            if seen.contains(&name) {
+                self.tcx.dcx.report(self.cause(pos), format!("cannot capture parameter `{}` twice", name));
+            }
+            seen.push(name);
+        }
+    }
+
     fn visit_opaque_ty(&mut self, opaque: DefId, bounds: ast::List<ast::Bound>, async_output: Option<ast::TyId>) {
+        if self.tcx.validates(self.prog, self.file) { self.check_precise_captures(bounds); }
         self.rbv.opaque_captured_lifetimes.entry(opaque).or_default();
         let ast = &self.prog.files[self.file as usize].ast;
         let span = ast.item(self.prog.def(self.owner).item).lo;

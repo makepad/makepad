@@ -1982,7 +1982,13 @@ fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
             let n = &toks[i + 1];
             if n.kind == T::OpenParen {
                 let (lo, hi, sep, op, next) = rep_at(toks, i).ok_or("bad repetition in macro matcher")?;
-                out.push(MNode::Rep(parse_matcher(&toks[lo..hi], edition)?, sep, op));
+                let inner = parse_matcher(&toks[lo..hi], edition)?;
+                // mbe/macro_rules.rs check_lhs_no_empty_seq: a repetition without separator must not match nothing
+                if sep.is_none() && crate::lexer::validation_enabled()
+                    && inner.iter().all(|n| matches!(n, MNode::Var(_, Frag::Vis) | MNode::Rep(_, _, b'*' | b'?'))) {
+                    return Err("repetition matches empty token tree".to_string());
+                }
+                out.push(MNode::Rep(inner, sep, op));
                 i = next;
                 continue;
             }

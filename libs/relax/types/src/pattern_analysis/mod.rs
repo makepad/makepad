@@ -945,7 +945,18 @@ impl<'a> Cx<'a> {
                     None => (Some(MaybeInfiniteInt::PosInfinity), RangeEnd::Excluded),
                 };
                 match (lo, hi) {
-                    (Some(lo), Some(hi)) => IntRange::from_range(lo, hi, end).map(Ctor::IntRange),
+                    (Some(lo), Some(hi)) => {
+                        let r = IntRange::from_range(lo, hi, end);
+                        // rustc_mir_build lower_pattern_range: an empty range is an error (E0030 / E0579)
+                        if r.is_none() && a.is_some() && b.is_some() {
+                            if let Some(p) = pos {
+                                let msg = if incl { "E0030: lower bound for range pattern must be less than or equal to upper bound" } else { "E0579: lower bound for range pattern must be less than upper bound" };
+                                let e = self.prog.record_error(self.body.file, p, "typeck", msg.to_string());
+                                self.const_errors.push(e);
+                            }
+                        }
+                        r.map(Ctor::IntRange)
+                    }
                     _ => None,
                 }
             }

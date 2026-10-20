@@ -2478,7 +2478,7 @@ fn parse_meta_items(pf: &crate::parser::ParsedFile, lo: usize, hi: usize) -> Vec
 }
 
 /// A string literal token's value; None when the token is no string.
-fn string_value(t: &[u8]) -> Option<String> {
+pub(crate) fn string_value(t: &[u8]) -> Option<String> {
     let (body, raw) = match t {
         [b'"', rest @ .., b'"'] => (rest, false),
         [b'r', rest @ ..] => {
@@ -2709,6 +2709,8 @@ fn doc_attr(prog: &Program, n: &AttrNode, file: u32, apos: u32, args: &Args, emi
                 }
                 if alias.starts_with(' ') || alias.ends_with(' ') { hard(pos, "`#[doc(alias = \"...\")]` cannot start or end with ' '"); return; }
                 if n.is_crate { hard(pos, "`#![doc(alias = \"...\")]` isn't allowed as a crate-level attribute"); return; }
+                // check_attr.rs check_doc_alias_value: an alias is not the item's own name
+                if n.inner.is_empty() && prog.syms.str(prog.def(n.d).name) == alias { hard(pos, &format!("`#[doc(alias = \"{}\"]` is the same as the item's name", alias)); return; }
                 if aliases.contains(&alias) { emit(&UNUSED_ATTRIBUTES, pos, "doc alias is duplicated"); }
                 aliases.push(alias);
             };

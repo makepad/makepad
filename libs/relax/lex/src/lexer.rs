@@ -672,10 +672,23 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     } else if is_ident_start(src[i + 1]) {
                         let mut j = i + 1;
                         // raw lifetime 'r#a
+                        let mut raw_from = None;
                         if j + 2 < n && src[j] == b'r' && src[j + 1] == b'#' && is_ident_start(src[j + 2]) {
                             j += 2;
+                            raw_from = Some(j);
                         }
                         j = ident_run_end(src, j);
+                        // rustc_parse lexer: the name of a raw lifetime is a valid raw identifier
+                        if let (true, Some(from)) = (VALIDATE, raw_from) {
+                            match &src[from..j] {
+                                b"_" => return Err(err(lo, "`_` cannot be a raw lifetime")),
+                                b"self" => return Err(err(lo, "`self` cannot be a raw lifetime")),
+                                b"super" => return Err(err(lo, "`super` cannot be a raw lifetime")),
+                                b"Self" => return Err(err(lo, "`Self` cannot be a raw lifetime")),
+                                b"crate" => return Err(err(lo, "`crate` cannot be a raw lifetime")),
+                                _ => {}
+                            }
+                        }
                         // rustc_lexer `UnknownPrefixLifetime`: `'foo#` (an error from edition 2021)
                         if VALIDATE && edition >= 2021 && j < n && src[j] == b'#' {
                             return Err(err(lo, "prefix is unknown"));

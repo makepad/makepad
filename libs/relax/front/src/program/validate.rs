@@ -39,6 +39,38 @@ impl Program {
             for (v, pos) in fvs {
                 self.check_vis_path(&mut err, ast, def, &v, pos);
             }
+            // check_attr: attributes with a fixed list of targets (rustc_attr_parsing AllowedTargets) are not for generic parameters
+            if let Some(g) = ast.kind_generics(&it.kind) {
+                for gp in ast.list(g.params) {
+                    for a in ast.list(gp.attrs) {
+                        if a.toks.hi <= a.toks.lo || f.tok(a.toks.lo).lo >= f.src_len { continue; }
+                        let name = f.tok_text(a.toks.lo);
+                        let what = match gp.kind { GenericParamKind::Lifetime(_) => "lifetime parameters", GenericParamKind::Type(..) => "type parameters", GenericParamKind::Const(..) => "const parameters" };
+                        match name {
+                            "inline" | "cold" | "track_caller" | "no_mangle" | "export_name" | "used" | "target_feature" | "link_name" | "link_section" | "naked" | "non_exhaustive" =>
+                                err(f.tok(a.toks.lo).lo, format!("`#[{}]` attribute cannot be used on {}", name, what)),
+                            "repr" => err(f.tok(a.toks.lo).lo, "E0517: attribute should be applied to a struct, enum, or union".into()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // ast_validation: a where-clause bound may quantify lifetimes in the bounded type or in the bound, not both
+            if let Some(g) = ast.kind_generics(&it.kind) {
+                for w in ast.list(g.where_) {
+                    let WherePred::Bound { hrtb, bounds, .. } = w else { continue };
+                    if ast.list(*hrtb).is_empty() { continue; }
+                    if ast.list(*bounds).iter().any(|b| matches!(b, Bound::Trait { hrtb, .. } if !ast.list(*hrtb).is_empty())) {
+                        err(it.lo, "E0316: nested quantification of lifetimes".into());
+                    }
+                }
+            }
+            // ast_validation check_fn_decl / the limit on parameters of a function
+            if let ItemKind::Fn(sig, ..) = it.kind {
+                if ast.list(ast.fn_sig(sig).params).len() > 65535 {
+                    err(it.lo, "function can not have more than 65535 arguments".into());
+                }
+            }
             // `impl Trait` nested in another (E0666) and in the output of `Fn` sugar (E0562), in a fn's signature
             if let ItemKind::Fn(sig, ..) = it.kind {
                 let sig = ast.fn_sig(sig);
@@ -51,6 +83,10 @@ impl Program {
             match def.kind {
                 DefKind::Impl => {
                     let Some(imp) = ast.as_impl(&it.kind) else { continue };
+                    // type_of: `Self` is no type of the impl's own header
+                    if self.ty_has_self(ast, imp.self_ty, 0) {
+                        err(it.lo, "`Self` is not valid in the self type of an impl block".into());
+                    }
                     if not_permitted(&it.vis) {
                         err(it.lo, "E0449: visibility qualifiers are not permitted here -- note: place qualifiers on individual impl items instead".into());
                     }
@@ -68,6 +104,7 @@ impl Program {
                     let Some(tr) = ast.as_trait(&it.kind) else { continue };
                     for &c in ast.list(tr.items) {
                         let ci = ast.item(c);
+                        self.patterns_in_bodiless(ast, &mut err, ci);
                         if not_permitted(&ci.vis) {
                             err(ci.lo, "E0449: visibility qualifiers are not permitted here -- note: trait items always share the visibility of their trait".into());
                         }
@@ -82,6 +119,7 @@ impl Program {
                 }
                 DefKind::Union => {
                     if let Some(u) = ast.as_union(&it.kind) {
+                        if ast.list(u.fields).is_empty() { err(it.lo, "unions cannot have zero fields".into()); }
                         self.duplicate_fields(&mut err, ast, f, VariantData::Struct(u.fields));
                     }
                 }
@@ -149,6 +187,7 @@ impl Program {
             Ty::Path(p) => self.check_nested_in_segs(err, ast, ast.segs(p.segs), in_impl, fn_ret_ok, pos),
             Ty::ImplTrait(bs) => {
                 if in_impl { err(pos, "E0666: nested `impl Trait` is not allowed".into()); }
+                if !ast.list(*bs).iter().any(|b| matches!(b, Bound::Trait { .. })) { err(pos, "at least one trait must be specified".into()); }
                 self.check_nested_in_bounds(err, ast, *bs, true, fn_ret_ok, pos);
             }
             Ty::DynTrait(bs, _) => self.check_nested_in_bounds(err, ast, *bs, in_impl, fn_ret_ok, pos),
@@ -240,6 +279,58 @@ impl Program {
             return;
         }
         err(it.lo, format!("cannot find macro `{name}` in this scope"));
+    }
+
+    /// ast_validation check_decl_no_pat: a trait method without a body takes only plain identifier and `_`
+    /// patterns (a `mut` identifier is the lint `patterns_in_fns_without_body`).
+    fn patterns_in_bodiless(&self, ast: &Ast, err: &mut impl FnMut(u32, String), it: &Item) {
+        let ItemKind::Fn(sig, None, _) = it.kind else { return };
+        let sig = ast.fn_sig(sig);
+        if sig.lazy_body.is_some() { return; }
+        for prm in ast.list(sig.params) {
+            match ast.pat(prm.pat) {
+                Pat::Wild | Pat::Ident { by_ref: false, sub: None, .. } => {}
+                _ => err(it.lo, "E0642: patterns aren't allowed in functions without bodies".into()),
+            }
+        }
+    }
+
+    /// Does a type name `Self` anywhere (rustc_hir `find_self_aliases`)?
+    fn ty_has_self(&self, ast: &Ast, t: TyId, depth: u32) -> bool {
+        if depth > 32 { return false; }
+        let segs = |segs: SegList, depth: u32| -> bool {
+            ast.segs(segs).iter().any(|s| match ast.gargs(s.args()) {
+                Some(GenericArgs::Angle(v)) => ast.list(*v).iter().any(|a| match a {
+                    GenericArg::Type(x) | GenericArg::Binding(_, _, x) => self.ty_has_self(ast, *x, depth + 1),
+                    GenericArg::Constraint(_, _, bs) => self.bounds_have_self(ast, *bs, depth + 1),
+                    _ => false,
+                }),
+                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
+                None => false,
+            })
+        };
+        match ast.ty(t) {
+            Ty::Path(p) => {
+                if let Some(q) = ast.qself(p) { if self.ty_has_self(ast, q.ty, depth + 1) { return true; } }
+                ast.segs(p.segs).first().is_some_and(|s| s.kind() == SegKind::SelfType) || segs(p.segs, depth)
+            }
+            Ty::Ref(_, _, x) | Ty::Ptr(_, x) | Ty::Slice(x) | Ty::Array(x, _) | Ty::Paren(x) => self.ty_has_self(ast, *x, depth + 1),
+            Ty::Tuple(l) => ast.list(*l).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)),
+            Ty::Fn(f) => { let f = ast.fn_ptr(*f); ast.list(f.params).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || f.ret.is_some_and(|r| self.ty_has_self(ast, r, depth + 1)) }
+            Ty::ImplTrait(bs) | Ty::DynTrait(bs, _) => self.bounds_have_self(ast, *bs, depth + 1),
+            _ => false,
+        }
+    }
+
+    fn bounds_have_self(&self, ast: &Ast, bs: List<Bound>, depth: u32) -> bool {
+        ast.list(bs).iter().any(|b| match b {
+            Bound::Trait { path, .. } => ast.segs(path.segs).iter().any(|s| match ast.gargs(s.args()) {
+                Some(GenericArgs::Angle(v)) => ast.list(*v).iter().any(|a| matches!(a, GenericArg::Type(x) | GenericArg::Binding(_, _, x) if self.ty_has_self(ast, *x, depth + 1))),
+                Some(GenericArgs::Paren(ins, out)) => ast.list(*ins).iter().any(|x| self.ty_has_self(ast, *x, depth + 1)) || out.is_some_and(|o| self.ty_has_self(ast, o, depth + 1)),
+                None => false,
+            }),
+            _ => false,
+        })
     }
 
     /// `const _` is only an item of a module or block (ast_validation `check_item_named`).

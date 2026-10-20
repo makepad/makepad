@@ -186,6 +186,11 @@ impl Program {
                         out.push(self.record_error(fi as u32, f.tok(i + 1).lo, "parse", m));
                     }
                 }
+                // rustc_attr_parsing crate_level.rs: `#![crate_name = ""]`
+                if ai < n_root && segs.len() == 1 && !global && segs[0] == "crate_name" && f.tok(i).kind == T::Eq && f.tok(i).lo < f.src_len
+                    && matches!(f.tok(i + 1).kind, T::Str | T::RawStr) && matches!(f.tok_text(i + 1), "\"\"" | "r\"\"") {
+                    out.push(self.record_error(fi as u32, f.tok(i + 1).lo, "parse", "crate name must not be empty".into()));
+                }
                 let tool = |n: &str| BUILTIN_TOOLS.contains(&n) || tools.contains(&n);
                 let msg = if segs.len() == 1 && !global {
                     let n = segs[0];

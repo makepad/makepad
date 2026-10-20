@@ -97,6 +97,8 @@ pub struct Parser<'a> {
     pub token_input: bool,
     pub sources: Option<std::sync::Arc<SourceRegistry>>,
     exp_depth: u32,
+    /// the file's written `#![recursion_limit]`, read on the first macro call
+    rec_limit: std::cell::Cell<Option<Option<u32>>>,
     /// macro_rules expansions: (text lo, text hi, the macro's definition position in this
     /// file; 0 when defined elsewhere) -- the hygiene marks (ParsedFile::hyg_ctxt)
     pub rules_exp: OSeg<'a, Regions>,
@@ -169,6 +171,7 @@ impl<'a> Parser<'a> {
             token_input: false,
             sources: None,
             exp_depth: 0,
+            rec_limit: std::cell::Cell::new(None),
             rules_exp: Default::default(),
             body_origin: Default::default(),
             tok_undo: Vec::new(),
@@ -1308,8 +1311,30 @@ impl<'a> Parser<'a> {
         self.expand_call_inner(def, toks, call_lo)
     }
 
+    /// The `#![recursion_limit = ".."]` of this file's inner attributes.
+    fn written_recursion_limit(&self) -> Option<u32> {
+        if let Some(v) = self.rec_limit.get() { return v; }
+        let v = self.read_recursion_limit();
+        self.rec_limit.set(Some(v));
+        v
+    }
+
+    fn read_recursion_limit(&self) -> Option<u32> {
+        self.ast.root_attrs.iter().find_map(|a| {
+            if a.toks.hi == a.toks.lo + 3 && self.tok_text(self.toks.at(a.toks.lo as usize)) == b"recursion_limit" && self.tok_text(self.toks.at(a.toks.lo as usize + 1)) == b"=" {
+                std::str::from_utf8(self.tok_text(self.toks.at(a.toks.lo as usize + 2))).ok()?.trim_matches('"').parse().ok()
+            } else { None }
+        })
+    }
+
     fn expand_call_inner(&mut self, def: &crate::macros::MacroDef, toks: TokRange, call_lo: u32) -> PResult<usize> {
-        if self.exp_depth > 256 {
+        // rustc_expand expand_invoc: the crate's `#![recursion_limit = ".."]` bounds the expansion depth (a top-level call
+        // is at depth 1); the written limit is the root file's, other files keep the built-in bound
+        if let Some(limit) = self.written_recursion_limit() {
+            if self.exp_depth + 1 > limit {
+                return Err(PErr { pos: call_lo, msg: format!("recursion limit reached while expanding `{}!`", def.name) });
+            }
+        } else if self.exp_depth > 256 {
             return Err(PErr { pos: call_lo, msg: format!("`{}!` expands more than 256 levels deep -- add a base case", def.name) });
         }
         let trace = crate::preload::relax_trace().map_or(false, |t| t.split(',').any(|p| p.strip_prefix("expand:").map_or(false, |n| def.name.contains(n))));
@@ -2785,6 +2810,10 @@ impl<'a> Parser<'a> {
             return Ok(Bound::Use(args));
         }
         let paren = self.eat(T::OpenParen);
+        // rustc_parse parse_trait_bound: the binder, then the modifiers (`for<'a> ?Tr` is an error, as is a
+        // binder after the modifiers)
+        let binder = self.kind() == T::KwFor && self.nth(1) == T::Lt;
+        let hrtb = self.hrtb()?;
         let mut konst = false;
         if self.kind() == T::Tilde && self.nth(1) == T::KwConst {
             self.pos += 2;
@@ -2797,7 +2826,13 @@ impl<'a> Parser<'a> {
         let async_ = self.eat(T::KwAsync);
         if async_ { self.ast.gated_syntax.push(("async_trait_bounds", async_pos)); }
         let maybe = self.eat(T::Question);
-        let hrtb = self.hrtb()?;
+        if binder && maybe {
+            return self.err("`for<...>` binder not allowed with `?` trait polarity modifier");
+        }
+        if self.kind() == T::KwFor && self.nth(1) == T::Lt {
+            let _ = self.hrtb()?;
+            return self.err("`for<...>` binder should be placed before trait bound modifiers");
+        }
         if !self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.tok().lo }) {
             return self.err("expected a trait, found type");
         }
@@ -3258,6 +3293,10 @@ impl<'a> Parser<'a> {
     fn maybe_range_pat(&mut self, start: ExprId) -> PResult<Option<Pat>> {
         match self.kind() {
             T::DotDotEq | T::DotDotDot => {
+                // rustc_parse: `...` is a hard error in range patterns from edition 2021 (the edition of the written token)
+                if self.kind() == T::DotDotDot && self.edition >= 2021 && (self.toks.at(self.pos).lo as usize) < self.src.len() {
+                    return self.err("E0783: `...` range patterns are deprecated");
+                }
                 self.pos += 1;
                 let end = self.pat_range_end()?;
                 Ok(Some(Pat::Range(Some(start), Some(end), true)))
@@ -3533,6 +3572,12 @@ impl<'a> Parser<'a> {
                 // rustc_parse `parse_local_mk`: the initializer of a `let .. else` does not end in `}`
                 if self.kind() == T::KwElse && self.pos > 0 && self.toks.at(self.pos - 1).kind == T::CloseBrace {
                     return self.err("right curly brace `}` before `else` in a `let...else` statement not allowed");
+                }
+                // check_let_else_init_bool_expr: a lazy boolean operator is not the whole initializer
+                if self.kind() == T::KwElse {
+                    if let ExprKind::Binary(op @ (BinOp::And | BinOp::Or), ..) = self.ast.expr(e).kind {
+                        return self.err(if op == BinOp::And { "a `&&` expression cannot be directly assigned in `let...else`" } else { "a `||` expression cannot be directly assigned in `let...else`" });
+                    }
                 }
                 let el = if self.eat(T::KwElse) { Some(self.block()?) } else { None };
                 (Some(e), el)
@@ -4383,16 +4428,14 @@ fn is_str(k: T) -> bool {
     matches!(k, T::Str | T::RawStr)
 }
 
+/// A tuple field index: only the canonical decimal spelling names a field (`.00`, `.001`, `.0_1`
+/// name none, rustc_hir_typeck check_expr_field compares the symbol with `sym::integer(index)`);
+/// any other spelling is `u32::MAX`, which no tuple or struct has.
 fn parse_index(s: &[u8]) -> u32 {
-    let mut n = 0u32;
-    for &c in s {
-        if c.is_ascii_digit() {
-            n = n * 10 + (c - b'0') as u32;
-        } else if c != b'_' {
-            break;
-        }
+    match std::str::from_utf8(s).ok().and_then(crate::ast::tuple_index) {
+        Some(n) => n,
+        None => u32::MAX,
     }
-    n
 }
 
 /// Lex + parse one file.

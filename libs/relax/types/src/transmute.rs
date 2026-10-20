@@ -118,7 +118,9 @@ impl Cx<'_> {
                 let args = self.tcx.tys.list(args).to_vec();
                 a.variants.iter().all(|v| v.fields.iter().all(|f| {
                     let ft = self.tcx.tys.subst(f.ty, &args);
-                    !self.tcx.tys.flags(ft).intersects(crate::types::TypeFlags::HAS_ALIAS) && self.fields_clean(ft, depth + 1)
+                    // (an ADT without fields, `PhantomData<<U as Tr>::Assoc>`, has the same layout whatever its arguments)
+                    let no_data = matches!(self.tcx.tys.kind(ft), TyKind::Adt(fd, ..) if self.tcx.adts.get(fd).is_some_and(|fa| fa.variants.iter().all(|fv| fv.fields.is_empty())));
+                    (no_data || !self.tcx.tys.flags(ft).intersects(crate::types::TypeFlags::HAS_ALIAS)) && self.fields_clean(ft, depth + 1)
                 }))
             }
             TyKind::Tuple(l) => self.tcx.tys.list(l).iter().all(|&x| self.fields_clean(x, depth + 1)),

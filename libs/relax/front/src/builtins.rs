@@ -823,7 +823,20 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
             return Ok(one_str(&stringify_o(buf, toks, lo, hi, p.tok_origin.view(), p.src.len() as u32)));
         }
         Builtin::Env | Builtin::OptionEnv => {
-            let args = lit_args(p, lo, hi)?;
+            // rustc_builtin_macros env.rs: `option_env!` takes one string literal, `env!` one or two
+            let mut args = Vec::new();
+            let runs = split_commas(&p.toks, lo, hi);
+            if b == Builtin::OptionEnv && runs.len() > 1 {
+                return Err("option_env! takes 1 argument".to_string());
+            }
+            if b == Builtin::Env && runs.len() > 2 {
+                return Err("env! takes 1 or 2 arguments".to_string());
+            }
+            for (a, z) in runs {
+                let (v, is_str) = eval_lit(p, a, z)?;
+                if !is_str { return Err("argument must be a string literal".to_string()); }
+                args.push(v);
+            }
             let name = args.first().cloned().ok_or_else(|| "env! takes a variable name -- env!(\"NAME\")".to_string())?;
             let v = env_value(ctx, &name);
             return if b == Builtin::OptionEnv {

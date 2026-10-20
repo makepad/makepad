@@ -113,7 +113,7 @@ fn fnhdr_unsupported_abi() {
     for source in ["fn probe(f: extern \"not-an-abi\" fn()) {}", "extern \"not-an-abi\" fn probe() {}", "extern \"not-an-abi\" { fn probe(); }"] {
         let (prog, tcx) = collect(source);
         let errors = tcx.signature_errors(&prog, named(&prog, "probe"));
-        assert!(errors.iter().any(|e| e.contains("unsupported function ABI")), "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("E0703: invalid ABI")), "{errors:?}");
     }
 }
 
@@ -145,7 +145,7 @@ fn fnhdr_x86_64_abis_follow_the_target() {
                 let errors = tcx.signature_errors(&prog, named(&prog, "probe"));
                 let expected = format!("E0570: \"{abi}\" is not a supported ABI for the current target");
                 assert!(errors.iter().any(|e| e.contains(&expected)), "{target}: {errors:?}");
-                assert!(!errors.iter().any(|e| e.contains("unsupported function ABI")), "{errors:?}");
+                assert!(!errors.iter().any(|e| e.contains("E0703: invalid ABI")), "{errors:?}");
             }
         }
     }

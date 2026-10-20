@@ -172,6 +172,16 @@ impl Abi {
         }
     }
 
+    /// rustc_abi ExternAbi::as_str: every ABI name rustc knows (ours: `relax-intrinsic`).
+    pub fn is_rustc_name(name: &str) -> bool {
+        matches!(name, "C" | "C-unwind" | "Rust" | "Swift" | "aapcs" | "aapcs-unwind" | "avr-interrupt" | "avr-non-blocking-interrupt"
+            | "cdecl" | "cdecl-unwind" | "cmse-nonsecure-call" | "cmse-nonsecure-entry" | "custom" | "efiapi" | "fastcall" | "fastcall-unwind"
+            | "gpu-kernel" | "msp430-interrupt" | "ptx-kernel" | "riscv-interrupt-m" | "riscv-interrupt-s" | "rust-call" | "rust-cold"
+            | "rust-invalid" | "rust-preserve-none" | "stdcall" | "stdcall-unwind" | "system" | "system-unwind" | "sysv64" | "sysv64-unwind"
+            | "thiscall" | "thiscall-unwind" | "unadjusted" | "vectorcall" | "vectorcall-unwind" | "win64" | "win64-unwind" | "x86-interrupt"
+            | "relax-intrinsic")
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "Rust" => Some(Self::Rust), "rust-call" => Some(Self::RustCall), "C" => Some(Self::C),
