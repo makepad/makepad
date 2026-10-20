@@ -1262,3 +1262,63 @@ fn entry_main(prog: &Program, root: u32) -> Option<DefId> {
     let d = prog.lookup_in_module(prog.crates[root as usize].root_mod, sym, false, &mut Vec::new())?;
     (prog.def(d).kind == DefKind::Fn).then_some(d)
 }
+
+/// rustc_ast_passes feature_gate `gate_all`: syntax the parser recorded (ParseSess::gated_spans)
+/// whose feature the crate does not enable is E0658. Text a macro expanded is not judged.
+pub fn gated_syntax(prog: &Program, own: &[bool]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (f, pf) in prog.files.iter().enumerate() {
+        if pf.ast.gated_syntax.is_empty() { continue; }
+        let krate = prog.file_crate.get(f).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        let features = prog.crates[krate as usize].features(prog);
+        for &(feature, pos) in &pf.ast.gated_syntax {
+            if pos >= pf.src_len || features.has(feature) { continue; }
+            let msg = match feature {
+                "stmt_expr_attributes" => "attributes on expressions are experimental",
+                "coroutines" => "coroutine syntax is experimental",
+                "async_trait_bounds" => "`async` trait bounds are unstable",
+                _ => continue,
+            };
+            errors.push(prog.record_error(f as u32, pos, "typeck", format!("E0658: {msg}")));
+        }
+    }
+    errors
+}
+
+/// rustc_attr_parsing `AllowedTargets` for the attributes of nodes that have no definition of
+/// their own: the targets of `#[inline]`, `#[track_caller]`, `#[target_feature]`, `#[used]`,
+/// `#[export_name]` and `#[link_ordinal]` never include enum variants or the crate.
+pub fn node_attribute_targets(prog: &Program, own: &[bool]) -> Vec<String> {
+    use crate::ast::ItemKind;
+    const NAMES: &[&[u8]] = &[b"inline", b"track_caller", b"target_feature", b"used", b"export_name", b"link_ordinal"];
+    let mut errors = Vec::new();
+    for (f, pf) in prog.files.iter().enumerate() {
+        let krate = prog.file_crate.get(f).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
+        let ast = &pf.ast;
+        let p = prog.src(f as u32);
+        let mut check = |attrs: &[crate::ast::Attr], what: &str| {
+            for a in attrs {
+                let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+                if hi <= lo || (p.tok(lo).lo as usize) >= pf.src_len as usize { continue; }
+                let name = crate::cfg::tok_str(p, lo);
+                if NAMES.contains(&name) {
+                    errors.push(prog.record_uncoded_error(f as u32, p.tok(lo).lo, "typeck", format!("`#[{}]` attribute cannot be used on {}", String::from_utf8_lossy(name), what)));
+                }
+            }
+        };
+        if ast.root_attrs.len() > 0 && prog.mods[prog.crates[krate as usize].root_mod as usize].file == f as u32 {
+            let attrs: Vec<crate::ast::Attr> = ast.root_attrs.iter().copied().collect();
+            check(&attrs, "crates");
+        }
+        for (i, item) in ast.items.iter().enumerate() {
+            let ItemKind::Enum(r) = item.kind else { continue };
+            if !prog.item_defs.contains_key(&(f as u32, i as u32)) { continue; }
+            for v in ast.list(ast.row(r).variants) {
+                check(ast.list(v.attrs), "enum variants");
+            }
+        }
+    }
+    errors
+}

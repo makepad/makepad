@@ -300,6 +300,12 @@ impl<'a> Parser<'a> {
         match self.kind() {
             T::Ident | T::RawIdent => {
                 let t = self.tok();
+                // `fn /// doc` ... a doc comment between an item keyword and its name
+                if self.pos > 0 && matches!(self.toks.at(self.pos - 1).kind, T::KwFn | T::KwStruct | T::KwEnum | T::KwTrait | T::KwMod | T::KwType | T::KwStatic | T::KwConst) {
+                    if let Some(pos) = self.doc_before_pos() {
+                        return Err(PErr { pos, msg: "expected identifier, found doc comment".into() });
+                    }
+                }
                 if let Some(m) = self.reserved_ident(t) {
                     return Err(PErr { pos: t.lo, msg: m });
                 }
@@ -317,14 +323,19 @@ impl<'a> Parser<'a> {
     /// current one? Such a comment documents the next item, field or statement; before a closing
     /// brace, a `;`, a `,` or the end of the file it documents nothing (E0584 / E0585).
     fn doc_before(&self) -> bool {
+        self.doc_before_pos().is_some()
+    }
+
+    /// The start of the doc comment `doc_before` found.
+    fn doc_before_pos(&self) -> Option<u32> {
         let cur = self.tok();
         let lo = cur.lo as usize;
         if lo > self.src.len() {
-            return false;
+            return None;
         }
         let prev_hi = if self.pos == 0 { 0 } else { self.toks.at(self.pos - 1).hi as usize };
         if prev_hi > lo {
-            return false;
+            return None;
         }
         let g = &self.src[prev_hi..lo];
         let mut i = 0;
@@ -333,7 +344,7 @@ impl<'a> Parser<'a> {
                 b' ' | b'\t' | b'\n' | b'\r' => i += 1,
                 b'/' if g.get(i + 1) == Some(&b'/') => {
                     if g.get(i + 2) == Some(&b'/') && g.get(i + 3) != Some(&b'/') {
-                        return true;
+                        return Some((prev_hi + i) as u32);
                     }
                     while i < g.len() && g[i] != b'\n' {
                         i += 1;
@@ -341,7 +352,7 @@ impl<'a> Parser<'a> {
                 }
                 b'/' if g.get(i + 1) == Some(&b'*') => {
                     if g.get(i + 2) == Some(&b'*') && !matches!(g.get(i + 3), Some(b'*') | Some(b'/')) {
-                        return true;
+                        return Some((prev_hi + i) as u32);
                     }
                     let mut depth = 0;
                     while i < g.len() {
@@ -359,10 +370,10 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                _ => return false,
+                _ => return None,
             }
         }
-        false
+        None
     }
 
     fn is_ident(&self) -> bool {
@@ -2765,7 +2776,9 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             konst = true;
         }
+        let async_pos = self.tok().lo;
         let async_ = self.eat(T::KwAsync);
+        if async_ { self.ast.gated_syntax.push(("async_trait_bounds", async_pos)); }
         let maybe = self.eat(T::Question);
         let hrtb = self.hrtb()?;
         if !self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.tok().lo }) {
@@ -3014,6 +3027,8 @@ impl<'a> Parser<'a> {
                 if self.eat(T::CloseParen) {
                     Ty::Tuple(List::EMPTY)
                 } else {
+                    // a type takes no attributes: a doc comment before a tuple element
+                    if let Some(pos) = self.doc_before_pos() { return Err(PErr { pos, msg: "expected type, found doc comment".into() }); }
                     let first = self.ty_plus()?;
                     if self.eat(T::CloseParen) {
                         Ty::Paren(first)
@@ -3023,6 +3038,7 @@ impl<'a> Parser<'a> {
                             if self.kind() == T::CloseParen {
                                 break;
                             }
+                            if let Some(pos) = self.doc_before_pos() { return Err(PErr { pos, msg: "expected type, found doc comment".into() }); }
                             v.push(self.ty_plus()?);
                         }
                         self.expect(T::CloseParen)?;
@@ -3620,7 +3636,10 @@ impl<'a> Parser<'a> {
         let lo = self.lo();
         // attributes on expressions
         if self.kind() == T::Pound {
-            let _ = self.outer_attrs()?;
+            let at = self.tok().lo;
+            // (rustc gates these when the expression is configured, not while a macro fragment is matched)
+            let real = self.macros.is_some();
+            if !self.outer_attrs()?.is_empty() && real { self.ast.gated_syntax.push(("stmt_expr_attributes", at)); }
         }
         let lhs = self.unary(r)?;
         self.expr_continue(lhs, min, r, lo)
@@ -4131,6 +4150,7 @@ impl<'a> Parser<'a> {
             }
             T::Or | T::OrOr | T::KwMove => self.closure(false, false, r, lo),
             T::KwStatic if matches!(self.nth(1), T::Or | T::OrOr | T::KwMove) => {
+                self.ast.gated_syntax.push(("coroutines", self.tok().lo));
                 self.pos += 1;
                 self.closure(false, true, r, lo)
             }
