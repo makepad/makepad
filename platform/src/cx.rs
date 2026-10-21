@@ -1441,5 +1441,5 @@ pub(crate) fn relax_frame_done() {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(unix, windows, target_arch = "wasm32")))]
 pub(crate) fn relax_frame_done() {}

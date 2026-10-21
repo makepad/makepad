@@ -253,6 +253,8 @@ struct XrNetUdpWorker {
     discovery_targets: Vec<SocketAddr>,
     discovery_interval: Duration,
     peer_timeout: Duration,
+    // (the browser never reaches the socket loops that read it)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     poll_interval: Duration,
     bound_data_port: u16,
     bound_sync_port: u16,
@@ -647,6 +649,7 @@ impl XrNetUdpWorker {
 
 struct XrNetSyncWorker {
     node_id: XrNetPeerId,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     poll_interval: Duration,
     sync_listener: TcpListener,
     incoming_sender: mpsc::Sender<XrNetIncoming>,

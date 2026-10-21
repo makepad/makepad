@@ -462,8 +462,8 @@ impl AudioShaderBody {
         }
         #[cfg(target_arch = "wasm32")]
         if let Some(slot) = wasm::slot(self.program_key()) {
-            assert!(scratch.len() >= wasm::frame_words(self));
-            wasm::run_slot(self, slot, ctx, state, scratch, ins, outs, n);
+            assert!(scratch.len() >= wasm::frame_words(&self.head));
+            wasm::run_slot(&self.head, slot, ctx, state, scratch, ins, outs, n);
             return;
         }
         let [out_l, out_r] = outs;
