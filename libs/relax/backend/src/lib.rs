@@ -6,6 +6,7 @@
 //! it first) and Splash kernels. [`probe`] lets a front end observe compile phases.
 
 pub mod arm64;
+pub mod asm;
 pub mod bitops;
 pub mod cabi;
 pub mod dom;

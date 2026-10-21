@@ -22,6 +22,7 @@ use crate::typeck::{Body, Coerce, Res};
 use crate::types::{TyId, TyKind};
 use crate::fxhash::HashMap;
 
+mod asm;
 mod match_tree;
 mod simd;
 
@@ -1683,6 +1684,14 @@ impl<'a> Lcx<'a> {
             }
             let cs = crate::cabi::c_sig(self.u, &ptys, ret, None, abi);
             self.f.cabi = Some(Box::new(cs));
+        }
+        // `#[unsafe(naked)]`: the body is its naked_asm! and nothing else (lower/asm.rs)
+        if self.is_naked(prog_def_item) {
+            if !c_abi {
+                self.err(ast.item(prog_def_item).lo, "naked functions with the Rust ABI are not supported by Relax (give it an explicit ABI such as `extern \"C\"`)".to_string());
+            }
+            self.lower_naked(body);
+            return;
         }
         let c_agg_ret = match &self.f.cabi {
             Some(cs) => Some(cs.ret.is_some()),
@@ -10915,11 +10924,8 @@ impl<'a> Lcx<'a> {
         let margs = ast.mac_arg(m.args);
         let mexprs = ast.list(margs.exprs);
         match name {
-            "asm" => {
-                // rejected by typeck (no assembler in Relax)
-                self.err(self.pos, "inline assembly is not supported; use core::arch intrinsics".to_string());
-                self.unit()
-            }
+            // assembled unless `--no-asm` (typeck reports the block then)
+            "asm" => self.lower_asm(margs),
             "assert" => {
                 let c = mexprs[0];
                 let ok = self.f.block();
@@ -14078,6 +14084,8 @@ pub(crate) fn abort_unwinding_calls(f: &mut relax_backend::rir::Func, terminate:
     let may_unwind = |i: &Inst| match i {
         Inst::Call(Callee::Host(s), _, _) => *s != terminate,
         Inst::Call(Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig), _, _) => sig.unwinds,
+        // asm! without may_unwind never unwinds (Relax rejects may_unwind)
+        Inst::Call(Callee::Asm(_), _, _) => false,
         Inst::Call(..) => true,
         _ => false,
     };

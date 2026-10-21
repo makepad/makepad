@@ -221,7 +221,8 @@ impl InlineLimits {
 
 pub fn inline_rule(f: &Func, callee_id: u32, nargs: usize, nrets: usize, attrs: u8, lim: &InlineLimits) -> Option<usize> {
     let (n, leaf, rec) = callee_shape(f, callee_id);
-    if rec {
+    // a naked fn is its asm only: never inlined (rustc: naked implies inline(never))
+    if rec || f.naked {
         return None;
     }
     // a callee that never returns (panic helpers) only runs on cold paths: keep it a call

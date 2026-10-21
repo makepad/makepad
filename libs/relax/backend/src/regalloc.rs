@@ -788,6 +788,25 @@ pub fn solve_liveness(f: &Func, reach: &[bool], words: usize, gen: &[u64], kill:
     (live_in, live_out)
 }
 
+/// The callee-saved registers asm! blocks write (outputs, clobbers): the prologue saves them as
+/// it saves the ones values were given.
+fn asm_callee_writes(f: &Func, cfg: &RegConfig, int: &mut Vec<u8>, flt: &mut Vec<u8>) {
+    for b in &f.blocks {
+        for i in &b.insts {
+            let Inst::Call(Callee::Asm(a), _, _) = i else { continue };
+            let mut m = a.writes;
+            while m != 0 {
+                let bit = m.trailing_zeros() as u8;
+                m &= m - 1;
+                let (r, set, used) = if bit < 32 { (bit, &cfg.int_callee, &mut *int) } else { (bit - 32, &cfg.flt_callee, &mut *flt) };
+                if set.contains(&r) && !used.contains(&r) {
+                    used.push(r);
+                }
+            }
+        }
+    }
+}
+
 pub fn allocate(options: &relax_session::Options, f: &Func, cfg: &RegConfig) -> Alloc {
     allocate_with(options, f, cfg, true, None)
 }
@@ -1081,13 +1100,16 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                     continue;
                 }
                 let p = block_start[bi] + 2 * ii as u32 + 1;
+                // an asm! block's registers also hold its results until they are moved out: no
+                // result of it lives in another one's register (positions p..=p+1)
+                let w = if matches!(i, Inst::Call(Callee::Asm(_), _, _)) { 2 } else { 1 };
                 while m != 0 {
                     let r = m.trailing_zeros() as usize;
                     m &= m - 1;
                     if occ[r].is_empty() {
                         occ[r].resize(pos_words, 0);
                     }
-                    bits_fill(&mut occ[r], p, p + 1);
+                    bits_fill(&mut occ[r], p, p + w);
                 }
             }
         }
@@ -1499,6 +1521,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
         }
     }
     windows.extend(region_windows);
+    asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
     Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows, chained, save_skip, restore_skip }
 }
 
@@ -2148,6 +2171,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
             remat[v] = Remat::No;
         }
     }
+    asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
     Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows: Vec::new(), chained: Vec::new(), save_skip: Default::default(), restore_skip: Default::default() }
 }
 

@@ -184,9 +184,11 @@ fn domain_tls() -> &'static DomainTls {
 /// compiled `try_with` is the general-dynamic model: a `__tls_get_addr` call that the linker
 /// relaxes to fs:0 + offset, but the argument registers it would clobber stay saved around it;
 /// the program allocator's fast paths read fs:0 + this offset instead and save nothing.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+/// Not under Relax: its thread-local blocks are allocated per thread, at no fixed offset from
+/// the thread pointer.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
 static DOMAIN_OFFSET: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
 #[inline(always)]
 fn thread_pointer() -> usize {
     let tp: usize;
@@ -236,7 +238,7 @@ fn tsd_slot(key: usize) -> usize {
 }
 /// Called before the program allocator's entries are handed out (domain.rs `symbol`).
 pub fn bind_program_tls() {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
     DOMAIN_OFFSET.store((domain_tls() as *const DomainTls as usize).wrapping_sub(thread_pointer()), Ordering::Relaxed);
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -260,7 +262,7 @@ pub fn bind_program_tls() {
 /// arm64): the slot is not filled, the caller tail-calls its cold path (`program_tls_fill`).
 #[inline(always)]
 fn program_tls() -> Option<&'static DomainTls> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
     unsafe {
         Some(&*(thread_pointer().wrapping_add(DOMAIN_OFFSET.load(Ordering::Relaxed)) as *const DomainTls))
     }
@@ -269,7 +271,7 @@ fn program_tls() -> Option<&'static DomainTls> {
         let p = tsd_slot(DOMAIN_KEY.load(Ordering::Relaxed));
         if p == 0 { None } else { Some(unsafe { &*(p as *const DomainTls) }) }
     }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", not(relax)), all(target_os = "macos", target_arch = "aarch64"))))]
     Some(domain_tls())
 }
 /// The thread's `DomainTls`, read the ordinary way; fills the fast paths' TSD slot (macOS arm64)

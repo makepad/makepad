@@ -154,6 +154,10 @@ fn run(raw_args: Vec<Vec<u8>>) {
     if relax_compiler::relax_as_rustc() {
         return;
     }
+    // cargo's RUSTC_WRAPPER of an --allow-c native build, or a stubbed build script of it
+    if let Some(code) = relax_compiler::native::wrapper() {
+        std::process::exit(code);
+    }
     // a child started in a virtual folder of a git repository run gets the mount table
     if let Err(e) = relax_compiler::vfs::mount_from_env() {
         eprintln!("makepad: MAKEPAD_RUN_VFS: {e}");

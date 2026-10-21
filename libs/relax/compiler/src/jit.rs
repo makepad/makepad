@@ -470,6 +470,9 @@ pub struct Unit {
     pub tls_next: u32,
     /// panicking stand-ins for foreign fns this host lacks, by symbol
     missing_stubs: relax_session::sync::Mutex<HashMap<String, u64>>,
+    /// the symbols the program's global_asm! defines, placed on the first foreign lookup
+    /// (global_asm.rs)
+    pub(crate) global_asm: std::sync::OnceLock<HashMap<String, u64>>,
     /// tier-up policy (None: O1 only) and its per-slot records / hot glue
     pub tier1: Option<Tier1Cfg>,
     /// O3 left calls to callees that had never run (ATTR_COLD): callee -> those O3
@@ -2537,6 +2540,7 @@ impl Unit {
             // slot 0 of the block: the thread's domain static block (domain.rs)
             tls_next: TLS_FIRST_FREE,
             missing_stubs: Default::default(),
+            global_asm: std::sync::OnceLock::new(),
             tier1: {
                 let t = Tier1Cfg::from_options(options);
                 TIER1_ENABLED.store(t.is_some(), Ordering::Relaxed);
@@ -2821,6 +2825,15 @@ impl Unit {
         // filled whole right away (the startup image's code)
         os::mem::prefault(at, len as usize);
         at
+    }
+
+    /// `len` bytes of code memory (global_asm.rs places a block whose fields need its address
+    /// before it is written: write_reserved_code).
+    pub(crate) fn reserve_asm_code(&self, len: u64, align: u64) -> u64 {
+        bump(&self.code_next, len.max(1), align.max(16), self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory")
+    }
+    pub(crate) fn write_reserved_code(&self, at: u64, b: &[u8]) {
+        unsafe { os::mem::write_code(at, b) };
     }
 
     fn emit_code(&self, b: &[u8]) -> u64 {
@@ -4074,6 +4087,9 @@ impl Unit {
         if let Some(a) = lookup_interposer(&link) {
             return Some(a);
         }
+        if let Some(&a) = self.global_asm.get().and_then(|m| m.get(&link)) {
+            return Some(a);
+        }
         if let Some(a) = loader_symbol(link.as_bytes()) {
             return Some(a as u64);
         }
@@ -4092,6 +4108,12 @@ impl Unit {
         // dlsym / GetProcAddress answer the symbols the loader provides to programs (loader_symbol) first
         if let Some(a) = lookup_interposer(&link) {
             return Some(a);
+        }
+        // the program's own global_asm! labels
+        if !self.prog.global_asms.is_empty() {
+            if let Some(&a) = crate::global_asm::symbols(self).get(&link) {
+                return Some(a);
+            }
         }
         if let Some(a) = loader_symbol(link.as_bytes()) {
             return Some(a as u64);
@@ -13681,29 +13703,9 @@ extern "C" fn recorded_exit(code: i32) -> ! {
     os::proc::exit(code)
 }
 
-/// std::relax::fpcr_read / fpcr_write: the calling thread's FP control register (AArch64 FPCR).
-/// Relax compiles no inline assembly; JIT code reaches these two instructions here.
-#[cfg(target_arch = "aarch64")]
-extern "C" fn relax_fpcr_read() -> u64 {
-    let v: u64;
-    // SAFETY: reads this thread's FP control bits.
-    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-#[cfg(target_arch = "aarch64")]
-extern "C" fn relax_fpcr_write(v: u64) {
-    // SAFETY: writes this thread's FP control bits; callers restore what they read.
-    unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
-}
-
 /// Symbols the loader provides to the programs it runs (found through dlsym).
-fn loader_symbol(name: &[u8]) -> Option<usize> {
+pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
     match name {
-        #[cfg(target_arch = "aarch64")]
-        b"__relax_fpcr_read" => Some(relax_fpcr_read as *const () as usize),
-        #[cfg(target_arch = "aarch64")]
-        b"__relax_fpcr_write" => Some(relax_fpcr_write as *const () as usize),
         #[cfg(unix)]
         b"exit" => Some(recorded_exit as *const () as usize),
         #[cfg(unix)]

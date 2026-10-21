@@ -678,6 +678,8 @@ fn x64_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
         Inst::Conv(Conv::IntToF(from, _), _, _) if from.bits == 64 && !from.signed => (1 << RCX) | (1 << RDX),
         Inst::Conv(..) => 0,
         Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr | IOp::Rotl | IOp::MulHi, _, _, _, _) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) => (1 << RCX) | (1 << RDX),
+        // an asm! block: every register it names (regalloc also keeps its results out of them)
+        Inst::Call(Callee::Asm(b), _, _) => b.regs,
         _ => 0,
     }
 }
@@ -730,6 +732,8 @@ struct Gen<'a> {
     vpool: Vec<(usize, u128)>,
     /// address pool: (disp32 patch offset, relocated value), 8-byte entries
     apool: Vec<(usize, Reloc)>,
+    /// asm! rel32 branches to symbols: (field, symbol), sent through veneers after the text
+    asm_veneers: Vec<(usize, Sym)>,
     /// `Env::sym_class`: how each symbol is encoded (SymClass::Domain: an offset in the domain block)
     sym_class: u64,
     /// rbp offset of the frame word holding the domain base (0: the function names no domain symbol)
@@ -1088,6 +1092,11 @@ impl<'a> Gen<'a> {
 
     fn gen(&mut self, options: &relax_session::Options) {
         let reach = regalloc::reachable(self.f);
+        // a naked fn is its asm block only
+        if self.f.naked {
+            self.blocks_and_pool(options, reach);
+            return;
+        }
         // prologue (emitted once the frame is known: a frameless leaf has none)
         self.saved = 8 * self.al.used_callee_int.len() as i32;
         // only slots something addresses take space; slots whose lifetimes cannot overlap share
@@ -1426,6 +1435,24 @@ impl<'a> Gen<'a> {
         for (at, start, t) in std::mem::take(&mut self.jt_fix) {
             let rel = self.block_pos[t as usize] as i64 - start as i64;
             self.a.b[at..at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
+        // asm! branches to symbols: one veneer per distinct symbol, jmp qword ptr [rip + pool]
+        let mut veneers: Vec<(Sym, usize)> = Vec::new();
+        for (at, s) in std::mem::take(&mut self.asm_veneers) {
+            let v = match veneers.iter().find(|x| x.0 == s) {
+                Some(x) => x.1,
+                None => {
+                    let v = self.a.pos();
+                    self.a.byte(0xff);
+                    self.a.byte(0x25);
+                    let p = self.a.pos();
+                    self.a.u32(0);
+                    self.apool.push((p, Reloc::Sym(s)));
+                    veneers.push((s, v));
+                    v
+                }
+            };
+            self.a.patch(at, v);
         }
         self.text_len = self.a.pos() as u32;
         // float constant pool
@@ -4732,6 +4759,9 @@ impl<'a> Gen<'a> {
         if let Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig) = c {
             return self.c_call(options, c, sig, args, rets);
         }
+        if let Callee::Asm(b) = c {
+            return self.asm_block(options, b, args, rets);
+        }
         // values in caller-saved registers that live across this call
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
@@ -4804,7 +4834,7 @@ impl<'a> Gen<'a> {
                 self.a.mov_ri(RAX, nf as i64);
                 self.a.call_r(R11);
             }
-            Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) => {}
+            Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) | Callee::Asm(..) => {}
         }
         self.last_call_ret = self.a.pos();
         if stack_bytes > 0 {
@@ -4840,6 +4870,80 @@ impl<'a> Gen<'a> {
             if !self.al.restore_skip.contains(&(self.cur_pos, v.0)) {
                 self.save_restore(*v, *slot, false);
             }
+        }
+    }
+
+    /// An `asm!` block (Callee::Asm): the inputs into the block's registers, its bytes, the
+    /// outputs out of them. The allocator keeps every other value out of `b.regs` over the block
+    /// (x64_clobbers), so no input's source and no output's home is one of them, and values in
+    /// caller-saved registers that live across it are saved as around a call. Inputs bound for a
+    /// backend scratch register go last (loading another input may use one).
+    fn asm_block(&mut self, options: &relax_session::Options, b: &AsmBlock, args: &[VReg], rets: &[VReg]) {
+        let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
+        for (v, slot) in &saves {
+            if !self.al.save_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, true);
+            }
+        }
+        let scratch = |r: crate::asm::PReg| if r.vec { r.n == XS || r.n == XS2 } else { r.n == R10 || r.n == R11 };
+        let mut order: Vec<usize> = (0..args.len()).collect();
+        order.sort_by_key(|&k| scratch(b.ins[k]));
+        for k in order {
+            let (v, r) = (args[k], b.ins[k]);
+            if r.vec {
+                let x = self.use_f(v, r.n);
+                self.vec_copy(v, r.n, x);
+            } else {
+                let x = self.use_i(options, v, r.n);
+                self.a.mov_rr(r.n, x);
+            }
+        }
+        let base = self.a.pos();
+        self.a.b.extend_from_slice(&b.code);
+        for &(at, kind, s) in &b.fixups {
+            let at = base + at as usize;
+            match kind {
+                // a branch to a symbol goes through a veneer after the text (the target may be
+                // anywhere): jmp [rip + pool]
+                crate::asm::FixKind::X64Branch32 => self.asm_veneers.push((at, s)),
+                // the field ends `tail` bytes before the instruction: the symbol's offset absorbs it
+                crate::asm::FixKind::X64Rel32 { tail } => self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::X64Rel32, target: Reloc::Sym(s.plus(-(tail as i64))) }),
+                crate::asm::FixKind::Abs64 => self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::Pool64, target: Reloc::Sym(s) }),
+                crate::asm::FixKind::Abs32 => self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::Imm32, target: Reloc::Sym(s) }),
+                other => unreachable!("x64 asm! fixup {:?} (the assembler makes none)", other),
+            }
+        }
+        if b.opts & ASM_NORETURN != 0 {
+            return;
+        }
+        for (k, &v) in rets.iter().enumerate() {
+            let r = b.outs[k];
+            if r.vec {
+                let x = self.def_f(v, r.n);
+                self.vec_copy(v, x, r.n);
+                self.fin_f(v, x);
+            } else {
+                let x = self.def_i(v, r.n);
+                self.a.mov_rr(x, r.n);
+                self.fin_i(v, x);
+            }
+        }
+        for (v, slot) in &saves {
+            if !self.al.restore_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, false);
+            }
+        }
+    }
+
+    /// xmm/ymm dst = src, the whole register of v's class.
+    fn vec_copy(&mut self, v: VReg, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
+        if self.f.vregs[v.0 as usize] == Cls::V256 {
+            self.a.vex_l(0, 1, false, true, 0x28, dst, 0, src); // vmovaps ymm
+        } else {
+            self.a.movf_rr(true, dst, src);
         }
     }
 
@@ -5255,6 +5359,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         sel_flags: None,
         vpool: Vec::new(),
         apool: Vec::new(),
+        asm_veneers: Vec::new(),
         sym_class: env.sym_class,
         dom_slot: 0,
         dom_read: Vec::new(),

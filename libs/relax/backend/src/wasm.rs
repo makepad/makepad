@@ -1327,6 +1327,7 @@ impl<'a> Fx<'a> {
                     Callee::Fn(id) | Callee::CFn(id, _) => self.fn_ix.contains_key(id),
                     Callee::Host(s) | Callee::CHost(s, _) => !matches!(self.link.host(s.id), HostBind::Trap),
                     Callee::Indirect(_) | Callee::CIndirect(..) => true,
+                    Callee::Asm(_) => false,
                 };
                 if !direct {
                     return vec![];
@@ -2506,6 +2507,7 @@ impl<'a> Fx<'a> {
             _ => None,
         };
         match callee {
+            Callee::Asm(_) => return Err("inline assembly (asm!) has no wasm form".to_string()),
             Callee::Fn(id) | Callee::CFn(id, _) => match self.fn_ix.get(id) {
                 Some(&u) => {
                     let want = sig(self)?;

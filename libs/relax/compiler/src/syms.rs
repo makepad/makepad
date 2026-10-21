@@ -33,8 +33,9 @@ pub enum SymKind {
     Foreign(String),
     /// the panicking stand-in for a C symbol this host lacks, by name
     Missing(String),
-    /// an `asm!` stub, by its assembly text
-    Asm(String),
+    /// a static's address in the compile domain (domain 0), absolute: what an `asm!` `sym`
+    /// operand naming a Rust static holds (assembly cannot add a thread's domain base)
+    StaticAddr(DefId),
     /// a panic site (the value is the site's index)
     Site(u32),
     /// a function slot's permanent callable address (fn pointers stored in data)
@@ -143,7 +144,7 @@ impl Syms {
     pub(crate) fn scan(&self, a: &mut crate::jit::zone_scan::Acc) {
         fn kind(a: &mut crate::jit::zone_scan::Acc, k: &SymKind) {
             match k {
-                SymKind::Foreign(s) | SymKind::Missing(s) | SymKind::Asm(s) | SymKind::Provided(s) => a.string(s),
+                SymKind::Foreign(s) | SymKind::Missing(s) | SymKind::Provided(s) => a.string(s),
                 _ => {}
             }
         }
@@ -889,7 +890,7 @@ pub fn describe(u: &Unit, s: Sym) -> String {
         Some(SymKind::Static(d)) => format!("static:{}", u.prog.def_path(d)),
         Some(SymKind::Foreign(n)) => format!("c:{}", n),
         Some(SymKind::Missing(n)) => format!("missing:{}", n),
-        Some(SymKind::Asm(t)) => format!("asm:{:032x}", crate::sip::hash_bytes(t.as_bytes())),
+        Some(SymKind::StaticAddr(d)) => format!("static-addr:{}", u.prog.def_path(d)),
         Some(SymKind::Site(i)) => {
             let sites = u.sites.lock().unwrap_or_else(|e| e.into_inner());
             match sites.get(i as usize) {
@@ -1138,8 +1139,8 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         },
         // storage every domain has its own copy of, at the same offset of its static block
         SymKind::Static(_) | SymKind::Rw(_) => SymClass::Domain,
-        SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Asm(_) | SymKind::Missing(_) => SymClass::Near,
-        SymKind::Foreign(_) | SymKind::Provided(_) => SymClass::Far,
+        SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Missing(_) => SymClass::Near,
+        SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) => SymClass::Far,
         SymKind::Site(_) => SymClass::Imm,
     }
 }

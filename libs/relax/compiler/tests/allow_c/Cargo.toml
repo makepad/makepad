@@ -1,0 +1,12 @@
+[package]
+name = "allow-c-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "makepad run --allow-c fixture: a path crate whose build script compiles C with the system compiler, called from JIT-compiled Rust"
+
+[dependencies]
+cnative = { path = "cnative" }
+
+# its own workspace (no registry dependencies: runs offline anywhere with cargo and cc)
+[workspace]

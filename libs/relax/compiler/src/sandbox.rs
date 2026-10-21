@@ -1485,6 +1485,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                 }
                 Inst::Call(callee, args, rets) => {
                     let callee = match callee {
+                        Callee::Asm(_) => return Err(format!("{}: inline assembly, which sandboxed modules cannot run", f.name)),
                         Callee::Fn(id) => Callee::Fn(call_target(up, id, &sandboxed)?),
                         Callee::CFn(id, sig) => Callee::CFn(call_target(up, id, &sandboxed)?, sig),
                         Callee::Indirect(v) => Callee::Indirect(mask_fn(f, &mut insts, &mut pos, p, v)),

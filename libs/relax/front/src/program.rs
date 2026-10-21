@@ -668,6 +668,9 @@ pub struct Program {
     /// again once the crate is loaded (expand_pending: rustc's resolve/expand fixpoint for
     /// macros an expansion in a later file defines or imports), else errors
     pending_macs: Vec<(u32, ItemId, u32)>,
+    /// `global_asm!` items (unless `--no-asm`): (file, item, module), assembled and placed when
+    /// the program's code is set up (compiler global_asm.rs)
+    pub global_asms: Vec<(u32, ItemId, u32)>,
     /// files whose lazily parsed part has its identifiers interned here (part_idents)
     part_interned: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, u32)>>,
     pub file_paths: Vec<String>,
@@ -822,6 +825,14 @@ impl Drop for Program {
 }
 
 impl Program {
+    /// The name of the crate `file` belongs to ("" before the file is assigned to one).
+    pub fn file_crate_name(&self, file: u32) -> String {
+        match self.file_crate.get(file as usize).and_then(|&k| self.crates.get(k as usize)) {
+            Some(c) => self.syms.str(c.name).to_string(),
+            None => String::new(),
+        }
+    }
+
     pub fn new(sess: &std::sync::Arc<crate::Session>) -> Program {
         let mut p = Program {
             collected_starts: Vec::new(),
@@ -841,6 +852,7 @@ impl Program {
             std_simd: false,
             part_interned: Default::default(),
             pending_macs: Vec::new(),
+            global_asms: Vec::new(),
             file_paths: Vec::new(),
             file_crate: Vec::new(),
             crates: Vec::new(),
@@ -2920,8 +2932,13 @@ impl Program {
                     if let ItemKind::Mac(m) = &it.kind {
                         let m = f.ast.row(*m);
                         let last = f.ast.segs(m.path.segs).last().map(|sg| f.text(sg.name).to_string()).unwrap_or_default();
-                        if last == "global_asm" || last == "naked_asm" {
-                            self.errors.push(self.record_error(file,it.lo,"lower","inline assembly is not supported; use core::arch intrinsics".to_string()));
+                        if last == "global_asm" && !self.session.options.no_asm {
+                            self.global_asms.push((file, iid, module));
+                        } else if last == "naked_asm" && !self.session.options.no_asm {
+                            self.errors.push(self.record_error(file, it.lo, "lower", "`naked_asm!` is allowed only as the body of a `#[unsafe(naked)]` function".to_string()));
+                        } else if last == "global_asm" || last == "naked_asm" {
+                            let e = relax_session::options::asm_blocked(&self.file_crate_name(file));
+                            self.errors.push(self.record_error(file, it.lo, "lower", e));
                         } else if last == "compile_error" && m.toks.hi > m.toks.lo {
                             let lit = f.tok_text(m.toks.lo);
                             let msg = crate::lit::unescape_str(lit);

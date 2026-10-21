@@ -56,6 +56,8 @@ pub struct Graph {
     pub env: Vec<Vec<(String, String)>>,
     /// libraries the build scripts link: (name, framework)
     pub link_libs: Vec<(String, bool)>,
+    /// `--allow-c`: the shared library the native dependencies were linked into (native.rs)
+    pub native: Option<crate::native::NativeLib>,
     pub raw: Vec<RawUnit>,
     /// `makepad check` of a package with several bins (and no --bin): every bin's crate (cargo
     /// check checks all targets); the root is the first. Empty otherwise.
@@ -86,7 +88,7 @@ fn file_url_path(p: &str) -> String {
     }
 }
 
-fn parse_pkg_id(id: &str) -> (String, String, String) {
+pub(crate) fn parse_pkg_id(id: &str) -> (String, String, String) {
     let (url, frag) = match id.rfind('#') {
         Some(i) => (&id[..i], &id[i + 1..]),
         None => (id, ""),
@@ -262,7 +264,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     if bins.is_empty() && test_crates.contains(&root) && crates[root].bin {
         bins.push(root);
     }
-    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), raw, bins })
+    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), native: None, raw, bins })
 }
 
 /// cargo's per-package compile-time environment (CARGO_MANIFEST_DIR, CARGO_PKG_*).
@@ -354,8 +356,46 @@ pub fn script_role(pkg: &str, features: &[String]) -> ScriptRole {
 /// Packages whose build script ran although it is to be removed: (package, script path).
 pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str) -> Result<(), String> {
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>) -> Result<(), String> {
     let results: Mutex<Vec<(usize, Result<String, String>, String)>> = Mutex::new(Vec::new());
+    // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
+    // an error naming the flag without it; Relax runs the other scripts
+    let mut native_seeds: Vec<usize> = Vec::new();
+    for (i, bs) in g.build_scripts.iter().enumerate() {
+        let (_, pname, _) = &g.pkg[bs.krate];
+        if noop::script(bs, &g.raw) || !matches!(script_role(pname, &bs.features), ScriptRole::ToRemove) {
+            continue;
+        }
+        if let Some(why) = crate::native::native_reason(g, bs) {
+            if native.is_none() {
+                // a script that runs a C compiler cannot work without one; `links =` / DEP_
+                // metadata alone run under Relax as before
+                if why.contains("build-dependency") {
+                    return Err(format!("`{}` compiles C ({}): it {}", pname, why, relax_session::options::C_GATE));
+                }
+                continue;
+            }
+            if sess.runtime.profile {
+                eprintln!("makepad-run build-script: {} is native ({})", pname, why);
+            }
+            native_seeds.push(i);
+        }
+    }
+    if let (Some(req), false) = (native, native_seeds.is_empty()) {
+        let built = crate::native::build(g, &native_seeds, req)?;
+        g.native = built.lib;
+        for n in built.scripts {
+            g.cfgs[n.krate].extend(n.cfgs);
+            g.env[n.krate].extend(n.env);
+            g.env[n.krate].push(("OUT_DIR".to_string(), n.out_dir));
+            for l in n.system {
+                if !g.link_libs.contains(&l) {
+                    g.link_libs.push(l);
+                }
+            }
+        }
+    }
+    let native_krates: Vec<usize> = native_seeds.iter().map(|&i| g.build_scripts[i].krate).collect();
     // makepad-platform's script is answered by makepad run itself (`platform_answer`, no process);
     // in no-codegen mode (the platforms that run no generated code, iOS) no other script runs: any
     // other crate with a build script is an error.
@@ -369,6 +409,9 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     }
     crate::pool::scope(|s| {
         for bs in &g.build_scripts {
+            if native_krates.contains(&bs.krate) {
+                continue;
+            }
             let results = &results;
             let (dir, pname, ver) = g.pkg[bs.krate].clone();
             let name = g.crates[bs.krate].name.clone();
@@ -430,6 +473,10 @@ fn apply_script_results(g: &mut Graph, results: Vec<(usize, Result<String, Strin
                     None => ("", l),
                 };
                 let name = name.split(':').next().unwrap_or(name).to_string();
+                // a static library a script built (C, assembly): only `--allow-c` links one
+                if kind == "static" {
+                    return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
+                }
                 let fw = kind == "framework";
                 if !g.link_libs.contains(&(name.clone(), fw)) {
                     g.link_libs.push((name, fw));

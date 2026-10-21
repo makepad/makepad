@@ -2008,9 +2008,10 @@ impl Cache {
                 self.why("missing foreign fn");
                 return None;
             }
-            SymKind::Asm(t) => {
-                e.u8(5);
-                e.str(&t);
+            // a static's domain-0 address (asm! sym): code naming one is not cached
+            SymKind::StaticAddr(_) => {
+                self.why("asm sym of a static");
+                return None;
             }
             SymKind::Site(i) => {
                 let sites = u.sites.lock().unwrap_or_else(|x| x.into_inner());
@@ -6439,7 +6440,7 @@ impl Linker {
                 let def = self.cache().dec_def(u, d)?;
                 u.foreign_sym(def)?
             }
-            // 5 was an asm! stub (no assembler any more): an entry naming one is not used
+            // 5 was an asm! stub of an older loader: an entry naming one is not used
             5 => return None,
             6 => {
                 let file = self.cache().dec_file(u, d)?;

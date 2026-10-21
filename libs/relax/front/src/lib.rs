@@ -67,6 +67,7 @@ pub mod collected;
 pub mod builtins;
 pub mod crates;
 pub mod unitgraph;
+pub mod native;
 pub mod macro_reg;
 pub mod census;
 pub mod surface;

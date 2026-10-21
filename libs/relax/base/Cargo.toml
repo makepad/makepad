@@ -10,3 +10,7 @@ publish = false
 relax-lex = { workspace = true }
 relax-session = { workspace = true }
 relax-backend = { workspace = true }
+
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
