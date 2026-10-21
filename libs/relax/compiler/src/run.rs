@@ -2102,7 +2102,10 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 // second; the collected program's encode makes a unit call only when free.
                 let record = left && jit::FIRST_PRESENT.load(Ordering::Acquire) && since >= 1_000;
                 let due = n != mid_flushed && ((mid_quiet >= 20 && since >= 5_000) || since >= 10_000) || left && mid_quiet >= 20 && since >= 5_000;
-                if start != 0 && (record || main_ms >= 3000 && due) && !mid_busy.swap(true, Ordering::SeqCst) {
+                // not while the UI thread is in a burst of lazy compiles after the present: the
+                // write's unit calls cannot be interrupted once served (one held the owner 620 ms
+                // in front of a tab's first visit); it goes in the next pause
+                if start != 0 && (record || main_ms >= 3000 && due) && !jit::ui_burst() && !mid_busy.swap(true, Ordering::SeqCst) {
                     mid_flushed = n;
                     mid_last = main_ms;
                     let busy = mid_busy.clone();

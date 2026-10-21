@@ -4384,6 +4384,16 @@ impl Program {
         if !q.open.is_empty() {
             return self.lookup_in_module_pass(m, name, ns_type, q);
         }
+        // a converged answer of an earlier query: returned as it is (inserting it again would put
+        // a duplicate node at the head of its chain on every repeated lookup -- MemoMap::insert
+        // does not replace -- and the chains of the fixed bucket table grew without bound)
+        let cacheable = self.imports_done && !q.precise && !self.mods[m as usize].globs.is_empty()
+            && !self.mods[m as usize].values.contains_key(&name) && !self.mods[m as usize].types.contains_key(&name);
+        if cacheable {
+            if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
+                return r;
+            }
+        }
         // first found wins between globs, so an answer can change once more after it is
         // found; the passes are bounded by the cycle (each pass settles at least one more
         // module of it) -- the bound only guards against a non-converging glob graph
@@ -4393,8 +4403,7 @@ impl Program {
             let r = self.lookup_in_module_pass(m, name, ns_type, q);
             let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
             if !stale || pass > q.prev.len() + 1 {
-                if self.imports_done && !q.precise && !self.mods[m as usize].globs.is_empty()
-                    && !self.mods[m as usize].values.contains_key(&name) && !self.mods[m as usize].types.contains_key(&name) {
+                if cacheable {
                     self.glob_cache.insert((m, name, ns_type), r);
                 }
                 return r;

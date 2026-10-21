@@ -3734,8 +3734,17 @@ impl Unit {
             }
         }
         self.front.slot_keys.insert(id, key.clone());
-        if self.front.helpers > 0 && startup_phase() {
-            self.front.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(AheadWork::Slot(id));
+        // after the first present only the slots the program's own builds make (their callees),
+        // not a speculative or tier-up build's, and no cold callee (panics, formatting): what
+        // the UI thread's next calls most likely meet
+        if self.front.helpers > 0 && (startup_phase() || ahead_foreground() && !match key {
+            FnKey::Inst(d, _) => is_cold_def(&self.prog, &self.tcx, *d) || is_cold_name(&self.prog.def_path(*d)),
+            _ => true,
+        }) {
+            let mut q = self.front.queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.push_back(AheadWork::Slot(id));
+            if !startup_phase() { spawn_helpers(&self.front, &q); }
+            drop(q);
             self.front.wake.notify_one();
         }
     }
@@ -5436,6 +5445,14 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
             main_rec(|r| r.ns[1] += wall_ns() - t);
             let w0 = wall_ns();
             COMPILE_LAST.store(w0, Ordering::Relaxed);
+            if crate::postframe::log_on() && FIRST_PRESENT.load(Ordering::Relaxed) {
+                let mut mine = false;
+                main_rec(|_| mine = true);
+                if mine {
+                    let k = crate::zone_alloc::kept_with(|| slot_key(&*up, id));
+                    *crate::postframe::LOG_KEY.lock().unwrap() = k;
+                }
+            }
             let r = compile_slot_locked(up, id, true);
             if let Compiled::Code(_) = r {
                 compile_note(up, id, w0);
@@ -10145,12 +10162,16 @@ pub fn sweep_verdicts() {
         for id in relower { tier_push(id, Q_RETIER, 0); }
         let released: Vec<(u32, Await)> = {
             let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
+            // the list outlives the compiler zone (a swap destroys it): the kept part is allocated
+            // in the kept heap (assigning a Vec made outside kept_with kept its zone buffer, and
+            // the next await_verdict after a swap faulted reading it)
             // an O3 build of unverified code waits only for a live patch's verdict (Unit::o3_allowed)
-            let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *a).into_iter().partition(|(id, w)| match w {
+            let all = std::mem::take(&mut *a);
+            let (go, keep): (Vec<_>, Vec<_>) = crate::zone_alloc::kept_with(|| all.into_iter().partition(|(id, w)| match w {
                 Await::Tier(..) => u.o3_allowed(*id),
                 Await::O2 => !u.fns[*id as usize].unverified.load(Ordering::Relaxed),
-            });
-            crate::zone_alloc::kept_with(|| *a = keep);
+            }));
+            *a = keep;
             go
         };
         for (id, w) in released {
@@ -11802,7 +11823,7 @@ fn startup_phase() -> bool {
 /// The warm-up after the first present: the burst of lazy compiles the first frames make (a cold
 /// Stage: thousands in the first seconds, one at a time on the UI thread). It ends once the UI
 /// thread has gone WARMUP_QUIET_NS without waiting on the JIT, or WARMUP_MAX_NS after the present.
-const WARMUP_QUIET_NS: u64 = 300_000_000;
+const WARMUP_QUIET_NS: u64 = AHEAD_BURST_QUIET_NS;
 const WARMUP_MAX_NS: u64 = 30_000_000_000;
 static WARMUP_OVER: AtomicBool = AtomicBool::new(false);
 
@@ -11816,6 +11837,12 @@ fn warmup() -> bool {
         return false;
     }
     true
+}
+
+/// A build for a program thread (not a speculative or tier-up worker's) after the first present.
+fn ahead_foreground() -> bool {
+    let class = if owner::is_owner() { owner::serving().0 } else { owner::program_class() };
+    FIRST_PRESENT.load(Ordering::Acquire) && matches!(class, owner::Class::Main | owner::Class::App) && !IS_WORKER.try_with(|w| w.get()).unwrap_or(false)
 }
 
 /// A program thread's lazy compile in the warm-up: built as the startup's are (baseline code, no
@@ -12190,7 +12217,10 @@ fn spec_dyn() -> bool {
 
 /// Queues the slots `func` calls (but not `skip`) at depth + 1 (lock held).
 unsafe fn spec_enqueue_calls(up: *mut Unit, func: &relax_backend::rir::Func, skip: &[u32], depth: u8) {
-    if startup_phase() { return; }
+    // nor in a burst of the UI thread's lazy compiles after the present: the ahead helpers check
+    // and lower the callees its builds make (cheaper than whole speculative builds, of which
+    // a burst called few: 119 of 14.9k compiles in a cold Stage's first 10 s after present)
+    if startup_phase() || ui_burst() { return; }
     let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let options = &session.options;
     if !pipelined() || depth >= spec_depth_max(options) {
@@ -13664,8 +13694,15 @@ pub struct FrontShared {
     lowered: relax_session::sync::Mutex<HashMap<u32, Option<LoweredAhead>>>,
     /// Until the first present, `helpers` threads type-check every new slot's body ahead (queue
     /// of slots): a cold start's main thread finds most bodies it calls checked
-    /// (MAKEPAD_RUN_AHEAD_HELPERS=n; default ahead_helpers())
+    /// (MAKEPAD_RUN_AHEAD_HELPERS=n; default ahead_helpers()). After it they serve the UI
+    /// thread's bursts of lazy compiles (ahead_phase): started by a burst's first queued slot,
+    /// ended once the queue is empty and the burst over (no thread stays: a zone swap needs none)
     helpers: u32,
+    /// helper threads running (changed with `queue` locked)
+    live_helpers: std::sync::atomic::AtomicU32,
+    /// bodies checked ahead after the first present: those no build took are dropped when a
+    /// burst ends (ahead_helper), not kept for the rest of the run
+    ahead_post: relax_session::sync::Mutex<Vec<AheadKey>>,
     queue: relax_session::sync::Mutex<std::collections::VecDeque<AheadWork>>,
     wake: relax_session::sync::Condvar,
 }
@@ -13699,6 +13736,8 @@ impl FrontShared {
             built: crate::conc::MemoMap::with_bits(16),
             lowered: Default::default(),
             helpers: if options.tyck_ahead { options.ahead_helpers.unwrap_or_else(ahead_helpers) } else { 0 },
+            live_helpers: std::sync::atomic::AtomicU32::new(0),
+            ahead_post: Default::default(),
             queue: Default::default(),
             wake: Default::default(),
         }
@@ -13792,10 +13831,22 @@ fn set_shared_front(u: &mut Unit, core_crate: u32) {
     f.core_crate.store(core_crate, Ordering::SeqCst);
     f.src_toks.store(inline_src_toks(options, tier1).max(inline_src_toks(options, !tier1)), Ordering::SeqCst);
     f.alive.store(true, Ordering::SeqCst);
-    for i in 0..if startup_phase() { f.helpers } else { 0 } {
-        let f = u.front.clone();
-        { let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name(format!("run-ahead{}", i)).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); ahead_helper(f) });
+    if startup_phase() {
+        let q = f.queue.lock().unwrap_or_else(|e| e.into_inner());
+        spawn_helpers(f, &q);
+    }
+}
+
+/// Starts the ahead helpers unless they run (`q`: the queue's lock, held).
+fn spawn_helpers(f: &std::sync::Arc<FrontShared>, _q: &std::collections::VecDeque<AheadWork>) {
+    if f.live_helpers.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let _k = crate::zone_alloc::kept();
+    for i in 0..f.helpers {
+        let f2 = f.clone();
+        if std::thread::Builder::new().name(format!("run-ahead{}", i)).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); ahead_helper(f2) }).is_ok() {
+            f.live_helpers.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -13806,14 +13857,50 @@ fn ahead_helpers() -> u32 {
     std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(2).clamp(1, 4) as u32
 }
 
-/// A helper thread: checks and lowers queued slots' bodies ahead until the first present (then
-/// speculative workers check what they build ahead) or until the unit is dropped.
+/// The ahead helpers run: the startup, and the warm-up after the first present (its burst of lazy
+/// compiles on the UI thread type-checks each new body there, one at a time, unless a helper has
+/// checked it since the slot was made -- when its caller was lowered).
+fn ahead_phase() -> bool {
+    startup_phase() || FIRST_PRESENT.load(Ordering::Acquire)
+}
+
+/// After the first present the helpers serve bursts: the UI thread waited on the JIT within
+/// AHEAD_BURST_QUIET_NS (a page's first visit compiles thousands of bodies in a row). Between
+/// bursts the lowered bodies no build took are dropped (they are kept only for the next calls).
+const AHEAD_BURST_QUIET_NS: u64 = 2_000_000_000;
+
+fn ahead_burst() -> bool {
+    crate::postframe::ui_idle_ns() < AHEAD_BURST_QUIET_NS
+}
+
+/// After the first present, the UI thread is in a burst of JIT waits (ahead_burst).
+pub fn ui_burst() -> bool {
+    FIRST_PRESENT.load(Ordering::Acquire) && ahead_burst()
+}
+
+/// A helper thread: checks and lowers queued slots' bodies ahead through the startup and the
+/// warm-up after the first present (then speculative workers check what they build ahead) or
+/// until the unit is dropped.
 fn ahead_helper(f: std::sync::Arc<FrontShared>) {
     loop {
         let id = {
             let mut q = f.queue.lock().unwrap_or_else(|e| e.into_inner());
             loop {
-                if !f.alive.load(Ordering::SeqCst) || !startup_phase() {
+                let burst_over = !startup_phase() && FIRST_PRESENT.load(Ordering::Acquire) && q.is_empty() && !ahead_burst();
+                if !f.alive.load(Ordering::SeqCst) || !ahead_phase() || burst_over {
+                    if burst_over {
+                        crate::postframe::ahead_over();
+                        let keys = std::mem::take(&mut *f.ahead_post.lock().unwrap_or_else(|e| e.into_inner()));
+                        let unused: Vec<_> = keys.iter().filter_map(|k| f.ahead.remove(k)).collect();
+                        AHEAD_DROPPED.fetch_add(unused.len() as u64, Ordering::Relaxed);
+                        drop(keys);
+                        drop(q);
+                        drop(unused);
+                        q = f.queue.lock().unwrap_or_else(|e| e.into_inner());
+                        // a slot queued meanwhile: this burst goes on
+                        if !q.is_empty() { continue; }
+                    }
+                    f.live_helpers.fetch_sub(1, Ordering::Relaxed);
                     q.clear();
                     drop(q);
                     // Unused raw RIR is startup work only. Drop it on a helper, outside the
@@ -13935,7 +14022,7 @@ fn lower_ahead(f: &FrontShared, id: u32, own: bool) {
     // guard would end the outer one's temporary callee identities under it
     if LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(true) { return; }
     let _r = front_read("lower_ahead");
-    if !f.alive.load(Ordering::SeqCst) || !own && !startup_phase() { return; }
+    if !f.alive.load(Ordering::SeqCst) || !own && !ahead_phase() { return; }
     let Some(FnKey::Inst(d, args)) = f.slot_keys.get(&id) else { return; };
     let key = (d, args);
     if f.built.contains(&key) { return; }
@@ -14011,7 +14098,7 @@ fn take_lowered_ahead(u: &mut Unit, id: u32) -> Option<relax_backend::rir::Func>
     AHEAD_STATS[6].fetch_add(1, Ordering::Relaxed);
     if let FnKey::Inst(d, args) = &u.fns[id as usize].key {
         let key = (*d, args.clone());
-        u.front.built.insert(key.clone(), ());
+        if !u.front.built.contains(&key) { u.front.built.insert(key.clone(), ()); }
         u.front.ahead.remove(&key);
     }
     if let Some(body) = lowered.body { u.put_body(id, body); }
@@ -14057,6 +14144,9 @@ fn publish_ahead(f: &FrontShared, key: AheadKey, epoch: u64, body: std::sync::Ar
     let before = crate::memstat::live_total();
     let claim = f.inprog.lock().unwrap_or_else(|e| e.into_inner());
     if !f.built.contains(&key) {
+        if f.helpers > 0 && FIRST_PRESENT.load(Ordering::Acquire) {
+            crate::zone_alloc::kept_with(|| f.ahead_post.lock().unwrap_or_else(|e| e.into_inner()).push(key.clone()));
+        }
         f.ahead.insert(key, (epoch, body));
     } else {
         // The build took over. Drop outside the claim lock, including large bodies.
@@ -14070,6 +14160,8 @@ fn publish_ahead(f: &FrontShared, key: AheadKey, epoch: u64, body: std::sync::Ar
 /// checks ahead on callers' threads and on the speculative workers; bodies lowered ahead,
 /// lowered bodies a build took (the other builds lowered their own or never ran), cpu ns lowering
 pub static AHEAD_STATS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// bodies checked ahead after the first present that no build took by the end of their burst
+pub static AHEAD_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// AHEAD_STATS as they stood at the first present (the helpers end there).
 pub static AHEAD_AT_PRESENT: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
@@ -14084,7 +14176,8 @@ fn take_ahead(prog: &Program, f: &FrontShared, tcx: &Tcx, d: DefId, args: &[TyId
     }
     let key = (d, args.to_vec());
     let claim = f.inprog.lock().unwrap_or_else(|e| e.into_inner());
-    f.built.insert(key.clone(), ());
+    // (MemoMap::insert does not replace: a rebuild's insert would add a duplicate node)
+    if !f.built.contains(&key) { f.built.insert(key.clone(), ()); }
     let result = f.ahead.remove(&key).ok_or_else(|| if claim.contains(&key) { "inprog" } else { "absent" });
     drop(claim);
     let (epoch, b) = result?;
@@ -14151,7 +14244,12 @@ pub unsafe fn typeck_ahead_slot(up: *mut Unit, id: u32) {
     // cached callees. The normal build checks a missing body on demand. After a
     // live edit the edited code is not cached: speculation helps again.
     if f.warm_cache.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() { return; }
-    if let Some(FnKey::Inst(d, args)) = f.slot_keys.get(&id) {
+    // an unverified-mode twin (SPEC-V) is built from its base slot's body: that body is checked
+    let key = match f.slot_keys.get(&id) {
+        Some(FnKey::Plain(base)) => f.slot_keys.get(&base),
+        k => k,
+    };
+    if let Some(FnKey::Inst(d, args)) = key {
         let t0 = cpu_ns();
         let key = (d, args.clone());
         typeck_ahead(&f, d, args, 3, false, false);
