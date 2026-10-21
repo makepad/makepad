@@ -502,6 +502,70 @@ impl Cx {
         self.redraw_all();
     }
 
+    fn update_main_window_geom(&mut self) {
+        let window_id = CxWindowPool::id_zero();
+        let window = &mut self.windows[window_id];
+        // Stash the OS-reported scale factor so a later
+        // `set_window_dpi_override(None)` can recover the native scale,
+        // and so `remap_dpi_override` (used by `dpi_override_scale`
+        // on platforms whose touch coords aren't already in
+        // override-points) has a baseline. Android itself converts
+        // touch coords at the source, so the helper is a no-op here.
+        window.os_dpi_factor = Some(self.os.dpi_factor);
+        let old_geom = window.window_geom.clone();
+
+        let dpi_factor = window.effective_dpi_factor();
+        let size = window.physical_vec2d_to_layout(self.os.display_size);
+        window.window_geom = WindowGeom {
+            dpi_factor,
+            can_fullscreen: false,
+            xr_is_presenting: false,
+            is_fullscreen: true,
+            is_topmost: true,
+            position: dvec2(0.0, 0.0),
+            inner_size: size,
+            outer_size: size,
+            safe_area_insets: window
+                .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
+            ..Default::default()
+        };
+        let new_geom = window.window_geom.clone();
+        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id,
+            new_geom,
+            old_geom,
+        }));
+        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+            self.redraw_pass_and_child_passes(main_pass_id);
+        }
+        self.redraw_all();
+        self.os.first_after_resize = true;
+        self.call_event_handler(&Event::ClearAtlasses);
+    }
+
+    fn handle_keyboard_closed(&mut self, time: f64) {
+        // Java says the keyboard is down; forget the last shown
+        // config so the next `ShowTextIME` re-issues the request.
+        self.os.last_ime_config = None;
+        if !self.os.last_ime_visible {
+            return;
+        }
+        self.os.last_ime_visible = false;
+        self.os.last_ime_height = 0.0;
+        // With a physical keyboard attached, Android auto-hides the
+        // soft keyboard while the focused TextInput stays active.
+        // Marking the IME dismissed (and re-issuing HideTextIME) would
+        // stop the IME from composing hardware-key input and freeze the
+        // IME position. Mirror the iOS guard (see ios.rs handling of
+        // VirtualKeyboardEvent::DidHide).
+        if !self.keyboard.has_physical_keyboard() {
+            self.text_ime_was_dismissed();
+        }
+        self.call_event_handler(&Event::VirtualKeyboard(
+            VirtualKeyboardEvent::DidHide { time },
+        ))
+    }
+
     fn hide_android_surface_cover_after_first_present_if_needed(&mut self) {
         if !self.os.hide_surface_cover_after_first_present || self.os.in_xr_mode {
             return;
@@ -548,6 +612,9 @@ impl Cx {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
                 self.os.activity_thread_id = Some(activity_thread_id);
+                // The new activity's keyboard starts out closed, so treat it like the user closing it.
+                let time = self.os.timers.time_now();
+                self.handle_keyboard_closed(time);
                 if self.os.in_xr_mode {
                     if let Err(e) = self.os.openxr.create_instance(activity_handle) {
                         crate::error!("OpenXR init failed: {}", e);
@@ -772,44 +839,7 @@ impl Cx {
                 }
 
                 self.os.display_size = dvec2(width as f64, height as f64);
-                let window_id = CxWindowPool::id_zero();
-                let window = &mut self.windows[window_id];
-                // Stash the OS-reported scale factor so a later
-                // `set_window_dpi_override(None)` can recover the native scale,
-                // and so `remap_dpi_override` (used by `dpi_override_scale`
-                // on platforms whose touch coords aren't already in
-                // override-points) has a baseline. Android itself converts
-                // touch coords at the source, so the helper is a no-op here.
-                window.os_dpi_factor = Some(self.os.dpi_factor);
-                let old_geom = window.window_geom.clone();
-
-                let dpi_factor = window.effective_dpi_factor();
-                let size = window.physical_vec2d_to_layout(self.os.display_size);
-                window.window_geom = WindowGeom {
-                    dpi_factor,
-                    can_fullscreen: false,
-                    xr_is_presenting: false,
-                    is_fullscreen: true,
-                    is_topmost: true,
-                    position: dvec2(0.0, 0.0),
-                    inner_size: size,
-                    outer_size: size,
-                    safe_area_insets: window
-                        .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
-                    ..Default::default()
-                };
-                let new_geom = window.window_geom.clone();
-                self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                    window_id,
-                    new_geom,
-                    old_geom,
-                }));
-                if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
-                    self.redraw_pass_and_child_passes(main_pass_id);
-                }
-                self.redraw_all();
-                self.os.first_after_resize = true;
-                self.call_event_handler(&Event::ClearAtlasses);
+                self.update_main_window_geom();
             }
             FromJavaMessage::LongClick {
                 abs,
@@ -1045,26 +1075,7 @@ impl Cx {
                         },
                     ))
                 } else if !is_open {
-                    // Java says the keyboard is down; forget the last shown
-                    // config so the next `ShowTextIME` re-issues the request.
-                    self.os.last_ime_config = None;
-                    if !self.os.last_ime_visible {
-                        return;
-                    }
-                    self.os.last_ime_visible = false;
-                    self.os.last_ime_height = 0.0;
-                    // With a physical keyboard attached, Android auto-hides the
-                    // soft keyboard while the focused TextInput stays active.
-                    // Marking the IME dismissed (and re-issuing HideTextIME) would
-                    // stop the IME from composing hardware-key input and freeze the
-                    // IME position. Mirror the iOS guard (see ios.rs handling of
-                    // VirtualKeyboardEvent::DidHide).
-                    if !self.keyboard.has_physical_keyboard() {
-                        self.text_ime_was_dismissed();
-                    }
-                    self.call_event_handler(&Event::VirtualKeyboard(
-                        VirtualKeyboardEvent::DidHide { time },
-                    ))
+                    self.handle_keyboard_closed(time);
                 }
             }
             FromJavaMessage::PhysicalKeyboard { connected } => {
@@ -1525,7 +1536,14 @@ impl Cx {
                     }
                 }
             }
-            FromJavaMessage::Init(_) => {}
+            // Config changes and recreated activities send the params again, with the current density.
+            FromJavaMessage::Init(params) => {
+                if params.density > 0.0 && params.density != self.os.dpi_factor {
+                    self.os.dpi_factor = params.density;
+                    self.os_type = OsType::Android(params);
+                    self.update_main_window_geom();
+                }
+            }
         }
     }
 
