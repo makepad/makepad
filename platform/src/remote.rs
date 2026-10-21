@@ -172,6 +172,7 @@ mod imp {
             }
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
+            "uicounts" => reply_to_answer(ask(Cmd::UiCounts, 4)),
             "cap pause" => reply_to_answer(ask(|tx| Cmd::CapPause(true, tx), 4)),
             "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
             "close" => {
@@ -1528,6 +1529,48 @@ mod imp {
     const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
 
     /// `/settled`: why the app would still change if time moved on.
+    /// The calling thread's retired instructions and cycles (macOS: thread_selfcounts THSC_CPI,
+    /// unprivileged); (0, 0) elsewhere (Linux: perf stat -t on the thread).
+    #[cfg(target_os = "macos")]
+    fn thread_counts() -> (u64, u64) {
+        extern "C" {
+            fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+        }
+        let mut b = [0u64; 2];
+        if unsafe { thread_selfcounts(1, b.as_mut_ptr(), 16) } != 0 {
+            return (0, 0);
+        }
+        (b[0], b[1])
+    }
+    #[cfg(not(target_os = "macos"))]
+    fn thread_counts() -> (u64, u64) {
+        (0, 0)
+    }
+    /// The calling thread's CPU time (CLOCK_THREAD_CPUTIME_ID; 0 where there is none).
+    #[cfg(unix)]
+    fn thread_cpu_ns() -> u64 {
+        #[repr(C)]
+        struct Ts {
+            sec: i64,
+            nsec: i64,
+        }
+        extern "C" {
+            fn clock_gettime(id: i32, t: *mut Ts) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const THREAD_CPUTIME: i32 = 16;
+        #[cfg(not(target_os = "macos"))]
+        const THREAD_CPUTIME: i32 = 3;
+        let mut t = Ts { sec: 0, nsec: 0 };
+        if unsafe { clock_gettime(THREAD_CPUTIME, &mut t) } != 0 {
+            return 0;
+        }
+        t.sec as u64 * 1_000_000_000 + t.nsec as u64
+    }
+    #[cfg(not(unix))]
+    fn thread_cpu_ns() -> u64 {
+        0
+    }
     fn settled_json(cx: &Cx) -> String {
         let mut reasons = Vec::new();
         if !cx.new_next_frames.is_empty() {
@@ -2147,6 +2190,10 @@ mod imp {
             }
             Cmd::Settled(tx) => {
                 let _ = tx.send(Reply::Text(settled_json(cx)));
+            }
+            Cmd::UiCounts(tx) => {
+                let (ins, cyc) = thread_counts();
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{}}}", thread_cpu_ns())));
             }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()

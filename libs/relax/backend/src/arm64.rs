@@ -92,6 +92,7 @@ pub fn reg_config() -> RegConfig {
         clobbers: None,
         sym_class: 0,
         store_imm: |k| k == 0,
+        fconst_remat: true,
     }
 }
 
@@ -235,6 +236,14 @@ impl Asm {
             }
             if h == 0xffff {
                 ones += 1;
+            }
+        }
+        // a value movz/movn + movk need 2+ instructions for that is a logical immediate (SWAR masks
+        // 0x8080.., 0x0101.., 0x00ff00ff..): orr d, xzr, #imm (register 31 is sp as orr's destination)
+        if zeros.max(ones) < 3 && d != 31 {
+            if let Some((n, immr, imms)) = bitmask_imm(u) {
+                self.e(0xB200_03E0 | n << 22 | immr << 16 | imms << 10 | d as u32);
+                return;
             }
         }
         if ones > zeros {
@@ -413,13 +422,25 @@ impl Asm {
         self.e(0xB400_0000 | t as u32);
         self.pos() - 1
     }
+    fn tbz(&mut self, nz: bool, t: u8, bit: u32) -> usize {
+        self.e(if nz { 0x3700_0000 } else { 0x3600_0000 } | (bit >> 5) << 31 | (bit & 31) << 19 | t as u32);
+        self.pos() - 1
+    }
     fn patch(&mut self, at: usize, target: usize) {
         let rel = target as i64 - at as i64;
         let w = self.w[at];
+        // tbz / tbnz: imm14 (+-32 KB); out of range flags TBZ_RANGE (emitted again without them)
+        if w & 0x7E00_0000 == 0x3600_0000 {
+            if rel < -(1i64 << 13) || rel >= 1i64 << 13 {
+                TBZ_RANGE.with(|c| c.set(true));
+            }
+            self.w[at] = (w & !(0x3FFF << 5)) | ((rel as u32) & 0x3FFF) << 5;
+            return;
+        }
         // b: imm26 (+-128 MB); b.cond / cbz / cbnz / ldr literal: imm19 (+-1 MB). An offset out
         // of range is never truncated: it flags the emission, which compile() repeats with
-        // relaxed branches (or fails past imm26). Only these encodings are patched here (tbz /
-        // tbnz have imm14 and adr imm21: none is emitted).
+        // relaxed branches (or fails past imm26). tbz / tbnz (imm14) flag TBZ_RANGE instead
+        // (emitted again with tst + b.cond); adr (imm21) is not patched.
         let is_b = w & 0xFC00_0000 == 0x1400_0000;
         let is_imm19 = w & 0xFF00_0010 == 0x5400_0000 || w & 0x7E00_0000 == 0x3400_0000 || w & 0x3B00_0000 == 0x1800_0000;
         assert!(is_b || is_imm19, "arm64 patch of an unknown encoding {:08x}", w);
@@ -535,7 +556,7 @@ fn imm_fits(i: &Inst) -> bool {
         Inst::IBinI(op, it, _, _, v) => match op {
             IOp::Add | IOp::Sub => v.unsigned_abs() < (1 << 24),
             IOp::Shl | IOp::Shr => true,
-            IOp::Mul => v > 0 && (v & (v - 1)) == 0,
+            IOp::Mul => v > 0 && ((v & (v - 1)) == 0 || mul_shift_add(v).is_some()),
             IOp::And | IOp::Or | IOp::Xor => {
                 (op == IOp::And && (v == 0xff || v == 0xffff || v == 0xffff_ffff)) || ((it.bits == 64 || (it == U32 && (0..1i64 << 32).contains(&v))) && bitmask_imm(v as u64).is_some())
             }
@@ -543,6 +564,18 @@ fn imm_fits(i: &Inst) -> bool {
         },
         _ => true,
     }
+}
+
+/// x * v as one shifted add or subtract: v = 2^k + 1 -> (k, true) `add d, x, x, lsl k`;
+/// v = 2^k - 1 -> (k, false) `lsl t, x, k; sub d, t, x` (k >= 2; 1 and powers of two are shifts).
+fn mul_shift_add(v: i64) -> Option<(u32, bool)> {
+    if v > 2 && ((v - 1) & (v - 2)) == 0 {
+        return Some(((v - 1).trailing_zeros(), true));
+    }
+    if v > 2 && v < i64::MAX && ((v + 1) & v) == 0 {
+        return Some(((v + 1).trailing_zeros(), false));
+    }
+    None
 }
 
 /// The (N, immr, imms) fields of a logical-instruction immediate for a 64-bit value: a repeating
@@ -609,9 +642,14 @@ enum CondBr {
     B(u8),
     Z(u8),
     Nz(u8),
+    /// tbz / tbnz register, bit (only when `Gen::tbz`: +-32 KB)
+    Tz(u8, u32),
+    Tnz(u8, u32),
 }
 
 struct Gen<'a> {
+    /// isel_flags(options) & A64_FCONST: float constants by fmov #imm / literal loads
+    fconst_isel: bool,
     /// the block ends `t = x & K; t ==/!= 0; branch`: emitted as tst x, #K (the And skipped)
     test_fuse: Option<(VReg, i64)>,
     /// a compare whose flags the selects right after it read (csel / fcsel on the condition, no
@@ -629,6 +667,10 @@ struct Gen<'a> {
     low_only: Vec<bool>,
     /// passes::zero_above: values whose register is zero above that many bits
     zero_above: Vec<u8>,
+    /// switch::switch_in_range: per block, its Switch needs no range test
+    switch_in_range: Vec<bool>,
+    /// regalloc::copy_reuse: (use position, spilled vreg) -> the register of a copy holding it
+    copy_reg: std::collections::HashMap<(u32, u32), u8>,
     /// table words to fill once blocks are placed: (word index, table start, target block)
     jt_fix: Vec<(usize, usize, u32)>,
     a: Asm,
@@ -675,6 +717,8 @@ struct Gen<'a> {
     /// an inverted short branch over a `b` (+-128 MB), constants are built in registers
     /// instead of loaded from the literal pools after the code
     long: bool,
+    /// single-bit tests branch with tbz / tbnz (off when one of them did not reach: emitted again)
+    tbz: bool,
 }
 
 impl<'a> Gen<'a> {
@@ -697,6 +741,9 @@ impl<'a> Gen<'a> {
                     if let Some(&(_, _, r)) = ws.iter().find(|(a, z, _)| *a <= p && p <= *z) {
                         return r;
                     }
+                }
+                if let Some(&r) = self.copy_reg.get(&(self.cur_pos, v.0)) {
+                    return r;
                 }
                 let off = self.spill_sp(o);
                 // stored from a register by the very last instruction emitted (same block)
@@ -769,7 +816,15 @@ impl<'a> Gen<'a> {
             Remat::FnAddr(id) => self.ldr_reloc(r, Reloc::Thunk(id)),
             Remat::Offset(..) => unreachable!("base + k moves through use_i"),
             Remat::VConst(_) => unreachable!("a vector constant is made by use_f"),
+            Remat::FConst(..) => unreachable!("a float constant is made by use_f / fconst_to"),
             Remat::No => self.a.mov_imm(r, 0),
+        }
+    }
+    /// A recomputed float constant (Remat::FConst) into x.
+    fn fconst_to(&mut self, x: u8, v: VReg) {
+        match self.al.remat[v.0 as usize] {
+            Remat::FConst(bits, f64_) => self.fconst_into(x, bits, f64_),
+            r => unreachable!("float move from {:?}", r),
         }
     }
     /// A stack-slot address without a register (Alloc::remat) as a load/store base: sp + its offset.
@@ -852,8 +907,10 @@ impl<'a> Gen<'a> {
             }
             // recomputed at each use (Alloc::remat)
             Loc::None => {
-                if let Remat::VConst(bits) = self.al.remat[v.0 as usize] {
-                    self.vconst_into(scratch, bits);
+                match self.al.remat[v.0 as usize] {
+                    Remat::VConst(bits) => self.vconst_into(scratch, bits),
+                    Remat::FConst(bits, f64_) => self.fconst_into(scratch, bits, f64_),
+                    _ => {}
                 }
                 scratch
             }
@@ -905,12 +962,17 @@ impl<'a> Gen<'a> {
                 }
                 (MLoc::R(d), MLoc::F(s)) => self.a.fmov_to_gp(true, d, s),
                 (MLoc::F(d), MLoc::R(s)) => self.a.fmov_from_gp(true, d, s),
+                (MLoc::F(d), MLoc::K(v)) => self.fconst_to(d, VReg(v)),
+                (MLoc::M(o), MLoc::K(v)) if self.cls(VReg(v)) != Cls::I => {
+                    self.fconst_to(FS1, VReg(v));
+                    self.a.ldst(STRD, 8, FS1, SP, o as i64);
+                }
                 (MLoc::R(d), MLoc::K(v)) => self.remat_into(d, VReg(v)),
                 (MLoc::M(o), MLoc::K(v)) => {
                     self.remat_into(S1, VReg(v));
                     self.a.ldst(STRX, 8, S1, SP, o as i64);
                 }
-                (d @ (MLoc::F(_) | MLoc::K(_)), s) => unreachable!("move {:?} <- {:?}", d, s),
+                (d @ MLoc::K(_), s) => unreachable!("move {:?} <- {:?}", d, s),
             }
         }
     }
@@ -1100,6 +1162,17 @@ impl<'a> Gen<'a> {
                 // register operand form (`eor d, a, b, lsl #13`)
                 if ii + 1 < n && !(fused && ii + 1 == n - 1) {
                     if let Some(()) = self.shifted_operand(options, inst, &b.insts[ii + 1]) {
+                        skip_next = true;
+                        continue;
+                    }
+                    // a 64-bit byte swap whose only use shifts the low half back down: the 32-bit
+                    // forms (u32 / u16 from_be_bytes: rev w; rev16 w)
+                    if let Some(()) = self.narrow_bswap(options, inst, &b.insts[ii + 1]) {
+                        skip_next = true;
+                        continue;
+                    }
+                    // two accesses of adjacent words off one base: ldp / stp
+                    if let Some(()) = self.pair_access(options, inst, &b.insts[ii + 1], self.al.inst_pos(bi, ii + 1)) {
                         skip_next = true;
                         continue;
                     }
@@ -1861,6 +1934,40 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// q register at [n + (m << sh) + off]
+    fn vldst_x(&mut self, load: bool, t: u8, n: u8, m: u8, sh: u8, off: i64) {
+        if off == 0 && (sh == 0 || sh == 4) {
+            // LDR/STR (register, SIMD&FP) 128-bit, option LSL, S = shift by 4
+            self.a.e(if load { 0x3CE0_6800 } else { 0x3CA0_6800 } | if sh == 4 { 0x1000 } else { 0 } | (m as u32) << 16 | (n as u32) << 5 | t as u32);
+            return;
+        }
+        // add s1, n, m, lsl sh (vldst's large-offset form uses ip1)
+        self.a.e(0x8B00_0000 | (m as u32) << 16 | (sh as u32) << 10 | (n as u32) << 5 | S1 as u32);
+        self.vldst(load, t, S1, off);
+    }
+
+    /// A float constant into x: fmov #0 / #imm8, else one literal load (ldr d / ldr s from the pool
+    /// after the code), else (code past the literal range) through ip0.
+    fn fconst_into(&mut self, x: u8, bits: u64, f64_: bool) {
+        if bits == 0 {
+            self.a.fmov_from_gp(true, x, ZR);
+        } else if !self.fconst_isel {
+            self.a.mov_imm(IP0, bits as i64);
+            self.a.fmov_from_gp(f64_, x, IP0);
+        } else if let Some(imm8) = fp_imm8(bits, f64_) {
+            // fmov dd/sd, #imm
+            self.a.e(0x1E20_1000 | if f64_ { DBL } else { 0 } | imm8 << 13 | x as u32);
+        } else if !self.long {
+            // ldr dd / sd, =bits (an f32 reads the low word of its 8-byte entry)
+            let at = self.a.pos();
+            self.a.e(if f64_ { 0x5C00_0000 } else { 0x1C00_0000 } | x as u32);
+            self.fpool.push((at, if f64_ { bits } else { bits & 0xffff_ffff }));
+        } else {
+            self.a.mov_imm(IP0, bits as i64);
+            self.a.fmov_from_gp(f64_, x, IP0);
+        }
+    }
+
     fn vldst(&mut self, load: bool, t: u8, n: u8, off: i64) {
         if off >= 0 && off % 16 == 0 && off / 16 < 4096 {
             self.a.e(if load { 0x3DC0_0000 } else { 0x3D80_0000 } | ((off / 16) as u32) << 10 | (n as u32) << 5 | t as u32);
@@ -1996,6 +2103,8 @@ impl<'a> Gen<'a> {
                 match op {
                     VX::FAdd(_, NanBits::Host | NanBits::Neon) => self.v3(FADD | f, xd, xa, xb),
                     VX::FSub(_, NanBits::Host | NanBits::Neon) => self.v3(FSUB | f, xd, xa, xb),
+                    // by element (fold_lane_splats): fmul vd.4s, va.4s, vb.s[0]
+                    VX::FMul(_, NanBits::Host | NanBits::Neon) if self.cls(b) == Cls::F32 => self.v3(0x4F80_9000, xd, xa, xb),
                     VX::FMul(_, NanBits::Host | NanBits::Neon) => self.v3(FMUL | f, xd, xa, xb),
                     VX::FDiv(_, NanBits::Host | NanBits::Neon) => self.v3(FDIV | f, xd, xa, xb),
                     VX::FMinNeon(_) => self.v3(0x4EA0_F400 | f, xd, xa, xb),
@@ -2132,6 +2241,16 @@ impl<'a> Gen<'a> {
                 let xd = self.def_f(d, FS0);
                 self.v2(0x0E61_7800, xd, xa); // fcvtl .2d, .2s
                 self.fin_f(d, xd);
+            }
+            VX::MoveMask(VW::D) => {
+                // two lanes: ushr #63; lane 0 | lane 1 << 1 (fmov x, d; umov x, v.d[1]; orr .., lsl #1)
+                let xa = self.use_f(a, FS0);
+                self.v2(0x6F00_0400 | 65 << 16, T0, xa); // ushr v.2d, #63 (immh:immb = 128 - 63)
+                let rd = self.def_i(d, S0);
+                self.v2(0x9E66_0000, rd, T0); // fmov x, d (lane 0)
+                self.a.e(0x4E18_3C00 | (T0 as u32) << 5 | IP0 as u32); // umov x16, v.d[1]
+                self.a.e(0xAA00_0000 | (IP0 as u32) << 16 | 1 << 10 | (rd as u32) << 5 | rd as u32); // orr rd, rd, x16, lsl #1
+                self.fin_i(d, rd);
             }
             VX::MoveMask(w) if w != VW::B => {
                 // top bits to 0/1 lanes, each shifted to its lane index, summed across
@@ -2557,7 +2676,12 @@ impl<'a> Gen<'a> {
                 }
                 let xa = self.use_f(a, FS0);
                 let xb = self.use_f(b, FS1);
-                self.v3(if np { 0x4EA0_CC00 } else { 0x4E20_CC00 }, t, xa, xb);
+                if self.cls(b) == Cls::F32 {
+                    // by element (fold_lane_splats): fmla / fmls t.4s, a.4s, b.s[0]
+                    self.v3(if np { 0x4F80_5000 } else { 0x4F80_1000 }, t, xa, xb);
+                } else {
+                    self.v3(if np { 0x4EA0_CC00 } else { 0x4E20_CC00 }, t, xa, xb);
+                }
                 let xd = self.def_f(d, FS2);
                 self.vmov(xd, t);
                 self.fin_f(d, xd);
@@ -2614,21 +2738,20 @@ impl<'a> Gen<'a> {
                 let xv = self.use_f(v, FS0);
                 self.vldst(false, xv, rb, off as i64);
             }
-            // (addr_modes makes these on x86-64 only; the address is computed into s1)
+            // [base + (idx << sh) + off]: ldr/str q [rb, ri{, lsl #4}] when nothing is added and the
+            // shift is 0 or 4; else the address into s1 by one shifted add
             Inst::VLoadX(d, base, idx, sh, off) => {
                 let rb = self.use_i(base, S1);
                 let ri = self.use_i(idx, S0);
-                self.a.e(0x8B00_0000 | (ri as u32) << 16 | (sh as u32) << 10 | (rb as u32) << 5 | S1 as u32); // add s1, rb, ri, lsl sh
                 let xd = self.def_f(d, FS0);
-                self.vldst(true, xd, S1, off as i64);
+                self.vldst_x(true, xd, rb, ri, sh, off as i64);
                 self.fin_f(d, xd);
             }
             Inst::VStoreX(base, idx, sh, off, v) => {
                 let rb = self.use_i(base, S1);
                 let ri = self.use_i(idx, S0);
-                self.a.e(0x8B00_0000 | (ri as u32) << 16 | (sh as u32) << 10 | (rb as u32) << 5 | S1 as u32);
                 let xv = self.use_f(v, FS0);
-                self.vldst(false, xv, S1, off as i64);
+                self.vldst_x(false, xv, rb, ri, sh, off as i64);
             }
             // a constant without a register is made at its uses (Alloc::remat)
             Inst::VConst(d, _) if self.al.loc[d.0 as usize] == Loc::None => {}
@@ -2716,6 +2839,101 @@ impl<'a> Gen<'a> {
         Some(())
     }
 
+    /// `t = bswap64(a); d = t >> 32` is `rev wd, wa` (the byte-reversed low word, zero-extended);
+    /// `d = t >> 48` with a zero above 16 bits is `rev16 wd, wa`; `t = bitrev64(a); d = t >> 32`
+    /// is `rbit wd, wa` (t used once). None: no match.
+    fn narrow_bswap(&mut self, options: &relax_session::Options, sw: &Inst, next: &Inst) -> Option<()> {
+        let (t, a, bits) = match sw {
+            Inst::IBit(BitOp::Bswap, t, a) => (*t, *a, true),
+            Inst::IBit(BitOp::Rev, t, a) => (*t, *a, false),
+            _ => return None,
+        };
+        if self.al.uses[t.0 as usize] != 1 || isel_flags(options) & A64_FUSE == 0 {
+            return None;
+        }
+        let (d, op) = match next {
+            // rbit w (bit reverse of the low word)
+            Inst::IBinI(IOp::Shr, it, d, x, 32) if !bits && *x == t && it.bits == 64 && !it.signed => (*d, 0x5AC0_0000u32),
+            Inst::IBinI(IOp::Shr, it, d, x, 32) if bits && *x == t && it.bits == 64 && !it.signed => (*d, 0x5AC0_0800u32),
+            Inst::IBinI(IOp::Shr, it, d, x, 48) if bits && *x == t && it.bits == 64 && !it.signed && self.zero_above.get(a.0 as usize).is_some_and(|z| (1..=16).contains(z)) => (*d, 0x5AC0_0400),
+            _ => return None,
+        };
+        let ra = self.use_i(a, S0);
+        let rd = self.def_i(d, S0);
+        self.a.e(op | (ra as u32) << 5 | rd as u32);
+        self.fin_i(d, rd);
+        Some(())
+    }
+
+    /// `Load a, [p + o]; Load b, [p + o +- w]` (or two stores) of the same width w (8/4-byte ints,
+    /// f64/f32; 4-byte loads zero-extending) as one ldp / stp: both values in registers (no spill
+    /// windows), distinct, the loads' destinations not the base, the lower offset a multiple of w
+    /// within the signed 7-bit scaled range. None: no match.
+    fn pair_access(&mut self, options: &relax_session::Options, i1: &Inst, i2: &Inst, pos2: u32) -> Option<()> {
+        if isel_flags(options) & A64_FUSE == 0 || self.win_start.contains_key(&pos2) {
+            return None;
+        }
+        let (load, m1, v1, b1, o1, m2, v2, b2, o2) = match (i1, i2) {
+            (Inst::Load(m1, d1, b1, o1), Inst::Load(m2, d2, b2, o2)) => (true, *m1, *d1, *b1, *o1, *m2, *d2, *b2, *o2),
+            (Inst::Store(m1, b1, o1, s1), Inst::Store(m2, b2, o2, s2)) => (false, *m1, *s1, *b1, *o1, *m2, *s2, *b2, *o2),
+            _ => return None,
+        };
+        if m1 != m2 || b1 != b2 || v1 == v2 {
+            return None;
+        }
+        // (pair opcode, width, float?)
+        let (op, w, fp) = match (m1, load) {
+            (Mem::Int(8, _), true) => (0xA940_0000u32, 8i64, false),
+            (Mem::Int(8, _), false) => (0xA900_0000, 8, false),
+            (Mem::Int(4, false), true) => (0x2940_0000, 4, false),
+            (Mem::Int(4, _), false) => (0x2900_0000, 4, false),
+            (Mem::F64, true) => (0x6D40_0000, 8, true),
+            (Mem::F64, false) => (0x6D00_0000, 8, true),
+            (Mem::F32, true) => (0x2D40_0000, 4, true),
+            (Mem::F32, false) => (0x2D00_0000, 4, true),
+            _ => return None,
+        };
+        if load && (v1 == b1 || v2 == b1) {
+            return None;
+        }
+        let (base, off1) = self.resolve_off(b1, o1 as i64);
+        let (base2, off2) = self.resolve_off(b2, o2 as i64);
+        if base != base2 {
+            return None;
+        }
+        let (lo_v, hi_v, lo) = if off2 == off1 + w {
+            (v1, v2, off1)
+        } else if off1 == off2 + w {
+            (v2, v1, off2)
+        } else {
+            return None;
+        };
+        let rb = match self.slot_base(base) {
+            Some(so) => {
+                let o = so + lo;
+                if o % w != 0 || !(-64 * w..=63 * w).contains(&o) {
+                    return None;
+                }
+                (SP, o)
+            }
+            None => match self.al.loc[base.0 as usize] {
+                Loc::Reg(r) if lo % w == 0 && (-64 * w..=63 * w).contains(&lo) => (r, lo),
+                _ => return None,
+            },
+        };
+        let reg_of = |s: &Self, v: VReg| match (s.al.loc[v.0 as usize], fp) {
+            (Loc::Reg(r), false) | (Loc::Flt(r), true) => Some(r),
+            _ => None,
+        };
+        let (t1, t2) = (reg_of(self, lo_v)?, reg_of(self, hi_v)?);
+        if t1 == t2 {
+            return None;
+        }
+        let imm = ((rb.1 / w) as u32) & 0x7f;
+        self.a.e(op | imm << 15 | (t2 as u32) << 10 | (rb.0 as u32) << 5 | t1 as u32);
+        Some(())
+    }
+
     /// Sets the flags for a fused compare and returns the condition for "true".
     fn cmp_flags(&mut self, i: &Inst) -> u8 {
         match i {
@@ -2761,6 +2979,8 @@ impl<'a> Gen<'a> {
                 CondBr::B(cc) => self.a.bcond(cc),
                 CondBr::Z(r) => self.a.cbz(r),
                 CondBr::Nz(r) => self.a.cbnz(r),
+                CondBr::Tz(r, bit) => self.a.tbz(false, r, bit),
+                CondBr::Tnz(r, bit) => self.a.tbz(true, r, bit),
             };
             self.fixups.push((p, target));
             return;
@@ -2769,6 +2989,7 @@ impl<'a> Gen<'a> {
             CondBr::B(cc) => self.a.bcond(cc ^ 1),
             CondBr::Z(r) => self.a.cbnz(r),
             CondBr::Nz(r) => self.a.cbz(r),
+            CondBr::Tz(..) | CondBr::Tnz(..) => unreachable!("tbz is not used in long mode"),
         };
         let p = self.a.b();
         self.fixups.push((p, target));
@@ -2830,6 +3051,18 @@ impl<'a> Gen<'a> {
                     Some(Inst::ICmpI(cnd @ (Cond::Eq | Cond::Ne), _, _, _, 0)) if self.test_fuse.is_some() => {
                         let (src, mask) = self.test_fuse.take().unwrap();
                         let rs = self.use_i(src, S0);
+                        if self.tbz && (mask as u64).is_power_of_two() {
+                            // one bit: tbz / tbnz (branch to tt when the bit is zero == Eq)
+                            let bit = (mask as u64).trailing_zeros();
+                            let zero_to_tt = cnd == Cond::Eq;
+                            if *tt == next {
+                                self.cond_branch(if zero_to_tt { CondBr::Tnz(rs, bit) } else { CondBr::Tz(rs, bit) }, *ff);
+                            } else {
+                                self.cond_branch(if zero_to_tt { CondBr::Tz(rs, bit) } else { CondBr::Tnz(rs, bit) }, *tt);
+                                self.jump_to(*ff, bi);
+                            }
+                            return;
+                        }
                         let (nn, immr, imms) = bitmask_imm(mask as u64).unwrap();
                         // ANDS xzr, xs, #mask
                         self.a.e(0xF200_001F | nn << 22 | immr << 16 | imms << 10 | (rs as u32) << 5);
@@ -2887,8 +3120,11 @@ impl<'a> Gen<'a> {
                     self.a.rrr(0xCB00_0000, IP0, r, IP0); // sub x16, r, x16
                     IP0
                 };
-                self.cmp_imm(idx, tab.targets.len() as i64 - 1);
-                self.cond_branch(CondBr::B(HI), tab.default);
+                // unless every way in bounds it (switch_in_range)
+                if !self.switch_in_range.get(bi).copied().unwrap_or(false) {
+                    self.cmp_imm(idx, tab.targets.len() as i64 - 1);
+                    self.cond_branch(CondBr::B(HI), tab.default);
+                }
                 self.a.e(0x1000_0000 | (4 << 5) | IP1 as u32); // adr x17, .+16
                 self.a.e(0xB8A0_7800 | (idx as u32) << 16 | (IP1 as u32) << 5 | IP0 as u32); // ldrsw x16, [x17, idx, lsl #2]
                 self.a.rrr(0x8B00_0000, IP1, IP1, IP0); // add x17, x17, x16
@@ -2933,10 +3169,14 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn inst(&mut self, options: &relax_session::Options, i: &Inst) {
+    fn inst(&mut self, _options: &relax_session::Options, i: &Inst) {
         match i {
             // recomputed at each use (Alloc::remat)
-            Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(IOp::Add, _, d, _, _) if self.al.remat[d.0 as usize].is_some() => {}
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(IOp::Add, _, d, _, _) if self.al.remat[d.0 as usize].is_some() => {}
+            // pure values nothing reads (a constant whose only use became an immediate form, a
+            // copy into a dead variable): not built (a hoisted 64-bit mask was 4 instructions)
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::VConst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(_, _, d, _, _) | Inst::Conv(Conv::IntToInt(_), d, _)
+                if self.al.uses[d.0 as usize] == 0 => {}
             Inst::Iconst(d, v) => {
                 let r = self.def_i(*d, S0);
                 self.a.mov_imm(r, *v);
@@ -2944,29 +3184,14 @@ impl<'a> Gen<'a> {
             }
             Inst::Fconst(d, bits, f64_) => {
                 let x = self.def_f(*d, FS0);
-                if *bits == 0 {
-                    self.a.fmov_from_gp(true, x, ZR);
-                } else if isel_flags(options) & A64_FCONST == 0 {
-                    self.a.mov_imm(IP0, *bits as i64);
-                    self.a.fmov_from_gp(*f64_, x, IP0);
-                } else if let Some(imm8) = fp_imm8(*bits, *f64_) {
-                    // fmov dd/sd, #imm
-                    self.a.e(0x1E20_1000 | if *f64_ { DBL } else { 0 } | imm8 << 13 | x as u32);
-                } else if *f64_ && !self.long {
-                    // ldr dd, =bits (literal pool after the code)
-                    let at = self.a.pos();
-                    self.a.e(0x5C00_0000 | x as u32);
-                    self.fpool.push((at, *bits));
-                } else {
-                    self.a.mov_imm(IP0, *bits as i64);
-                    self.a.fmov_from_gp(*f64_, x, IP0);
-                }
+                self.fconst_into(x, *bits, *f64_);
                 self.fin_f(*d, x);
             }
             // pieces of one split value sharing a slot
             Inst::Mov(d, s) if matches!(self.al.loc[d.0 as usize], Loc::Stack(_)) && self.al.loc[d.0 as usize] == self.al.loc[s.0 as usize] => {}
             Inst::Mov(d, s) => {
-                if self.cls(*d) == Cls::I && matches!((self.al.loc[d.0 as usize], self.al.loc[s.0 as usize]), (Loc::Stack(_), Loc::Reg(_)) | (Loc::Reg(_), Loc::Stack(_))) {
+                // (a spilled source a window holds here is read from the window's register: use_i)
+                if self.cls(*d) == Cls::I && self.win_reg(*s).is_none() && !self.copy_reg.contains_key(&(self.cur_pos, s.0)) && matches!((self.al.loc[d.0 as usize], self.al.loc[s.0 as usize]), (Loc::Stack(_), Loc::Reg(_)) | (Loc::Reg(_), Loc::Stack(_))) {
                     // straight between a register and a spill slot
                     match (self.al.loc[d.0 as usize], self.al.loc[s.0 as usize]) {
                         (Loc::Stack(o), Loc::Reg(r)) => {
@@ -3428,6 +3653,15 @@ impl<'a> Gen<'a> {
                 let s = imm.trailing_zeros();
                 self.a.ubfm(rd, ra, (64 - s) & 63, 63 - s);
             }
+            IOp::Mul if mul_shift_add(imm).is_some() => match mul_shift_add(imm).unwrap() {
+                // add rd, ra, ra, lsl #k
+                (k, true) => self.a.e(0x8B00_0000 | (ra as u32) << 16 | k << 10 | (ra as u32) << 5 | rd as u32),
+                // lsl ip0, ra, #k; sub rd, ip0, ra
+                (k, false) => {
+                    self.a.ubfm(IP0, ra, (64 - k) & 63, 63 - k);
+                    self.a.rrr(0xCB00_0000, rd, IP0, ra);
+                }
+            },
             IOp::Shl => {
                 let s = (imm & 63) as u32;
                 self.a.ubfm(rd, ra, (64 - s) & 63, 63 - s);
@@ -3480,7 +3714,7 @@ impl<'a> Gen<'a> {
                 let rd = self.def_i(d, S0);
                 // zero above fewer bits than the target: the extension is the value itself
                 let z = self.zero_above[s.0 as usize];
-                if self.low_only[d.0 as usize] || (z > 0 && z < it.bits) {
+                if self.low_only[d.0 as usize] || crate::passes::cast_is_move(z, it) {
                     self.a.mov(rd, rs);
                 } else {
                     self.a.extend(rd, rs, it.bits, it.signed);
@@ -3600,6 +3834,10 @@ impl<'a> Gen<'a> {
                         self.a.ldst(LDRX, 8, S1, SP, o as i64);
                         self.a.ldst(STRX, 8, S1, SP, 8 * k);
                     }
+                    MLoc::K(v) if self.cls(VReg(v)) != Cls::I => {
+                        self.fconst_to(FS1, VReg(v));
+                        self.a.ldst(STRD, 8, FS1, SP, 8 * k);
+                    }
                     MLoc::K(v) => {
                         self.remat_into(S1, VReg(v));
                         self.a.ldst(STRX, 8, S1, SP, 8 * k);
@@ -3674,6 +3912,99 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
     compile_freq(options, f, env, None)
 }
 
+/// A multiplicand that is a splat of an f32 vreg (`VSplat` of an F32 value, single def) is read as
+/// that scalar: `VFma(.., a, s, c)` / `VX(FMul(S, _), d, a, s)` with `s` of class F32 (backend-only
+/// form, made here just before register allocation) mean every lane times `s`, which the emitter
+/// encodes by element (`fmla vd.4s, vn.4s, vm.s[0]`). A splat whose every use is folded goes. The
+/// product of `VFma` commutes, so a splat first operand is swapped in; `FMul`'s operand order
+/// picks the NaN for the Neon flavour, so only its second operand is folded unless the NaN is the host's.
+fn fold_lane_splats(f: &Func) -> Option<Func> {
+    let n = f.vregs.len();
+    let mut splat: Vec<Option<VReg>> = vec![None; n];
+    let mut ndef = vec![0u32; n];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut any = false;
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            if let Inst::VSplat(d, s) = i {
+                if f.vregs[s.0 as usize] == Cls::F32 {
+                    splat[d.0 as usize] = Some(*s);
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    // both single-def: the scalar holds the splatted value wherever the splat is read
+    let of = |v: VReg| if ndef[v.0 as usize] == 1 { splat[v.0 as usize].filter(|s| ndef[s.0 as usize] == 1) } else { None };
+    let mut g = f.clone();
+    let mut changed = false;
+    for b in &mut g.blocks {
+        for i in &mut b.insts {
+            match i {
+                Inst::VFma(_, _, _, a, bb, _) => {
+                    if let Some(s) = of(*bb) {
+                        *bb = s;
+                        changed = true;
+                    } else if let Some(s) = of(*a) {
+                        *a = *bb;
+                        *bb = s;
+                        changed = true;
+                    }
+                }
+                Inst::VX(VX::FMul(VW::S, nb), _, a, bb) if *a != *bb => {
+                    if let Some(s) = of(*bb) {
+                        *bb = s;
+                        changed = true;
+                    } else if let (Some(s), NanBits::Host) = (of(*a), *nb) {
+                        *a = *bb;
+                        *bb = s;
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    // splats left without uses go (they are pure)
+    let mut used = vec![false; n];
+    for b in &g.blocks {
+        for i in &b.insts {
+            regalloc::for_uses(i, |u| used[u.0 as usize] = true);
+        }
+        let mut t = Vec::new();
+        regalloc::term_uses(&b.term, &mut t);
+        for u in t {
+            used[u.0 as usize] = true;
+        }
+    }
+    for b in &mut g.blocks {
+        let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::VSplat(d, _) if splat[d.0 as usize].is_some() && !used[d.0 as usize])).collect();
+        if keep.iter().all(|k| *k) {
+            continue;
+        }
+        let mut k = 0;
+        b.insts.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        let mut k = 0;
+        b.pos.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+    }
+    Some(g)
+}
+
 /// Whether the emitter encodes `op` (the legaliser expands the lane-wise ops it does not).
 pub fn vx_native(op: VX) -> bool {
     use VW::*;
@@ -3734,8 +4065,11 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let freq = if switched.is_some() { freq_sw.as_deref() } else { freq };
     let _cost_ra = crate::probe::phase(9);
     let t_ra = crate::stats::pass_clock();
+    // f32 splats read only by multiplies: the by-element forms (fmla / fmls / fmul v, v, v.s[0])
+    let lanes = fold_lane_splats(f);
+    let f = lanes.as_ref().unwrap_or(f);
     // immediates arm64 cannot encode and float constants, inside loops: registers set up once
-    let hoisted = regalloc::hoist_loop_consts(f, &imm_fits, true);
+    let hoisted = regalloc::hoist_loop_consts(f, &imm_fits, true, true, freq);
     let f = hoisted.as_ref().unwrap_or(f);
     // indexed accesses with displacements on one base and index: one address register
     let shared = regalloc::share_index_bases(f);
@@ -3743,8 +4077,21 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // a function that calls nothing and returns no float may keep values in v0-v3 too (they
     // carry float arguments and results, and calls' aggregate results, only around calls)
     let mut cfg = RegConfig { sym_class: env.sym_class, ..reg_config() };
-    if f.rets.iter().all(|c| *c == Cls::I) && f.blocks.iter().all(|b| !b.insts.iter().any(|i| matches!(i, Inst::Call(..)))) {
+    let leaf = f.blocks.iter().all(|b| !b.insts.iter().any(|i| matches!(i, Inst::Call(..))));
+    if f.rets.iter().all(|c| *c == Cls::I) && leaf {
         cfg.flt_caller.extend_from_slice(&[0, 1, 2, 3]);
+    }
+    // likewise x0 / x1 (integer results: the return's moves place them) and x8 (the large-copy and
+    // atomic loops' scratch) in a function that calls nothing: small leaf fns kept values in
+    // callee-saved registers and saved / restored them on every return path
+    if leaf {
+        cfg.int_caller.extend_from_slice(&[0, 1]);
+        let x8_free = f.blocks.iter().all(|b| {
+            !b.insts.iter().any(|i| matches!(i, Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..)) || matches!(i, Inst::Copy(_, _, n) if *n > 256))
+        });
+        if x8_free {
+            cfg.int_caller.push(X8);
+        }
     }
     let (split, mut al0) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
@@ -3754,6 +4101,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // a function past the branch ranges is emitted again in long mode: from the same
     // allocation (allocating twice doubled a 3.7 s allocation)
     let mut long = false;
+    let mut tbz = true;
     loop {
     let al = al0;
     let _cost_emit = crate::probe::phase(10);
@@ -3774,6 +4122,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         },
         low_only: crate::passes::low_bits_only(options, f),
         zero_above: Vec::new(),
+        switch_in_range: Vec::new(),
+        copy_reg: std::collections::HashMap::new(),
         win_start: {
             let mut ws: std::collections::HashMap<u32, Vec<(u32, u8)>> = std::collections::HashMap::new();
             for &(v, a, _, r) in &al.windows {
@@ -3790,6 +4140,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         block_pos: Vec::new(),
         next_block: Vec::new(),
         fixups: Vec::new(),
+        fconst_isel: isel_flags(options) & A64_FCONST != 0,
         fpool: Vec::new(),
         vpool: Vec::new(),
         apool: Vec::new(),
@@ -3807,10 +4158,24 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         last_call_ret: 0,
         pads: Vec::new(),
         long,
+        tbz: tbz && !long,
     };
     g.zero_above = crate::passes::zero_above(options, g.f, &g.low_only);
+    if env.opt_regs || g.f.full {
+        g.copy_reg = regalloc::copy_reuse(options, g.f, &g.al);
+    }
+    if !crate::stats::opt_off(options, "-swrange") {
+        g.switch_in_range = crate::switch::switch_in_range(g.f);
+    }
     BRANCH_RANGE.with(|c| c.set(false));
+    TBZ_RANGE.with(|c| c.set(false));
     g.gen(options);
+    if TBZ_RANGE.with(|c| c.replace(false)) && g.tbz && !BRANCH_RANGE.with(|c| c.get()) {
+        // a tbz past +-32 KB: emit again with tst + b.cond (from the same allocation)
+        tbz = false;
+        al0 = g.al;
+        continue;
+    }
     if BRANCH_RANGE.with(|c| c.replace(false)) {
         if !long {
             // past +-1 MB: emit again with relaxed branches and no literal pools (emission
@@ -3833,6 +4198,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
 thread_local! {
     /// a branch or literal load of the function being emitted did not reach its target
     static BRANCH_RANGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// a tbz / tbnz of the function being emitted did not reach its target (+-32 KB)
+    static TBZ_RANGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // ------------------------------------------------------------ runtime glue
@@ -4130,6 +4497,49 @@ mod tests {
         };
         f.blocks[b1 as usize].term = Term::Ret(vec![last]);
         assert!(compile(options, &f, &env).is_ok());
+    }
+
+    /// A branch on one bit (`x & 1 << k` against zero) is tbz / tbnz, for bits in either word;
+    /// past their +-32 KB range the function is emitted again with tst + b.cond, and both
+    /// versions take the right side.
+    #[test]
+    fn single_bit_branches_use_tbz_and_fall_back_past_its_range() {
+        let options = &relax_session::Options::default();
+        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        for (bit, filler) in [(0u32, 0usize), (13, 0), (31, 0), (32, 0), (63, 0), (5, 12_000), (40, 12_000)] {
+            let mut f = Func::new("tbz".to_string(), 0);
+            let p = f.vreg(Cls::I);
+            f.params.push(p);
+            f.rets.push(Cls::I);
+            let (b0, b1, b2) = (f.block(), f.block(), f.block());
+            let (t, c) = (f.vreg(Cls::I), f.vreg(Cls::I));
+            let u = IntTy { bits: 64, signed: false };
+            f.blocks[b0 as usize].insts = vec![Inst::IBinI(IOp::And, u, t, p, 1i64 << bit), Inst::ICmpI(Cond::Ne, false, c, t, 0)];
+            f.blocks[b0 as usize].pos = vec![0, 0];
+            f.blocks[b0 as usize].term = Term::Branch(c, b2, b1);
+            // b1 (bit clear): p + 1 + filler adds, laid out between the branch and b2
+            let mut acc = p;
+            for k in 0..filler + 1 {
+                let d = f.vreg(Cls::I);
+                f.blocks[b1 as usize].insts.push(Inst::IBinI(IOp::Add, u, d, acc, if k == 0 { 1 } else { 0x1000 }));
+                f.blocks[b1 as usize].pos.push(0);
+                acc = d;
+            }
+            f.blocks[b1 as usize].term = Term::Ret(vec![acc]);
+            let k2 = f.vreg(Cls::I);
+            f.blocks[b2 as usize].insts = vec![Inst::Iconst(k2, 7)];
+            f.blocks[b2 as usize].pos = vec![0];
+            f.blocks[b2 as usize].term = Term::Ret(vec![k2]);
+            let r = compile(options, &f, &env).unwrap();
+            let w: Vec<u32> = r.code[..r.text_len as usize].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let has_tbz = w.iter().any(|x| x & 0x7E00_0000 == 0x3600_0000);
+            assert_eq!(has_tbz, filler == 0, "bit {bit} filler {filler}: tbz {has_tbz}");
+            let code = crate::exec::Code::new(&r.code).unwrap();
+            let run: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+            let x = 0x5a5a_0000_0000_1234u64 & !(1u64 << bit);
+            assert_eq!(run(x | 1 << bit), 7, "bit {bit} set");
+            assert_eq!(run(x), x + 1 + 0x1000 * filler as u64, "bit {bit} clear");
+        }
     }
 
     /// A select chain reads the flags of the compare right before it, never stale ones: here

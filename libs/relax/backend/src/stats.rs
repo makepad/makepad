@@ -16,6 +16,12 @@ pub fn opt_off(options: &relax_session::Options, tok: &str) -> bool {
     options.opt.iter().any(|t| t.trim() == tok)
 }
 
+/// `opt_off` for passes called without the options: the same MAKEPAD_RUN_OPT tokens, read once.
+pub fn opt_env_off(tok: &str) -> bool {
+    static T: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    T.get_or_init(|| std::env::var("MAKEPAD_RUN_OPT").map(|v| v.split(',').map(|t| t.trim().to_string()).collect()).unwrap_or_default()).iter().any(|t| t == tok)
+}
+
 pub fn pass_clock() -> u64 {
     if PASS_ON.with(|c| c.get()) {
         if fast_clock() && !crate::probe::cost_enabled() {

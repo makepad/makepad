@@ -823,7 +823,7 @@ pub enum Inst {
     /// 16 bytes at [base + off] (no alignment needed)
     VLoad(VReg, VReg, i32),
     VStore(VReg, i32, VReg), // base, off, src
-    /// 16 bytes at [base + (idx << sh) + off] (sh <= 3; made by `passes::addr_modes` on x86-64)
+    /// 16 bytes at [base + (idx << sh) + off] (made by `passes::addr_modes`; sh <= 3, arm64 <= 4)
     VLoadX(VReg, VReg, VReg, u8, i32), // d, base, idx, sh, off
     VStoreX(VReg, VReg, u8, i32, VReg), // base, idx, sh, off, src
     /// d (I) = 1 if any lane of v is nonzero, else 0
@@ -1093,6 +1093,11 @@ pub struct Func {
     /// register allocation): code marked `// relax: hot`, whose first code is its only code
     /// until O3 replaces it
     pub full: bool,
+    /// by-pointer aggregate params (each also in `noalias`): the private copy of a by-value
+    /// argument that the callee owns (Relax ABI). Nobody reads it after the call returns or unwinds
+    /// out of it (the caller moved it; a cleanup that drops it runs in this function, behind an
+    /// Invoke), so a value promoted to a register needs no store before a plain call
+    pub owned: Vec<VReg>,
     /// values loaded from a field whose type cannot be null (references, Box, NonNull: the
     /// layout's niche excludes 0) -- the Load that defines each is non-null; other definitions
     /// of the same vreg prove nothing (fold_nonnull checks every definition)
@@ -1109,7 +1114,7 @@ pub struct Func {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);

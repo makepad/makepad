@@ -29,6 +29,8 @@ pub struct RegConfig {
     /// which recomputed constants a store writes straight from the instruction (x64: imm32,
     /// sign-extended for 8 bytes; arm64: 0 from xzr): such stores need no register for them
     pub store_imm: fn(i64) -> bool,
+    /// scalar float constants are recomputed at their uses instead of spilled (Remat::FConst)
+    pub fconst_remat: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,6 +120,9 @@ pub enum Remat {
     /// a V128 constant: every lane `bits` (`Inst::VConst`): one movi / literal load at a use beats a
     /// spill store at the definition and a reload at each use
     VConst(u32),
+    /// a scalar float constant (`Inst::Fconst`: bits, f64?) where the target loads one in a single
+    /// instruction at a use (`RegConfig::fconst_remat`; arm64: fmov #imm or a literal load)
+    FConst(u64, bool),
     /// a symbol's value (relocated: loaded from the address pool)
     Addr(Sym),
     /// a function's table thunk
@@ -2188,6 +2193,7 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
                     Inst::Addr(d, a) if crate::rir::SymClass::of(cfg.sym_class, a.id) != crate::rir::SymClass::Domain => cand.push((d.0, Remat::Addr(*a))),
                     Inst::FnAddr(d, n) => cand.push((d.0, Remat::FnAddr(*n))),
                     Inst::VConst(d, bits) => cand.push((d.0, Remat::VConst(*bits))),
+                    Inst::Fconst(d, bits, w) if cfg.fconst_remat => cand.push((d.0, Remat::FConst(*bits, *w))),
                     Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, b2, k) if *k == *k as i32 as i64 => cand.push((d.0, Remat::Offset(*b2, *k as i32))),
                     Inst::Mov(d, s2) => movs.push((d.0, s2.0)),
                     Inst::Call(c, a, _) => {
@@ -2260,6 +2266,7 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
             let same_const = matches!(i, Remat::Const(_)) && kdefs[d].2 && kdefs[d].1 == ndef[d];
             let cls_ok = match i {
                 Remat::VConst(_) => f.vregs[d] == Cls::V128,
+                Remat::FConst(_, w) => f.vregs[d] == if w { Cls::F64 } else { Cls::F32 },
                 _ => f.vregs[d] == Cls::I,
             };
             if (ndef[d] == 1 || same_const) && !bad[d] && cls_ok {
@@ -2564,7 +2571,8 @@ fn equal_copies(options: &relax_session::Options, f: &Func, reach: &[bool], tab:
         for i in &b.insts {
             let (d, s2, cast) = match *i {
                 Inst::Mov(d, s2) => (d, s2, 0),
-                Inst::Conv(Conv::IntToInt(it), d, s2) => (d, s2, it.bits),
+                // (bits | 0x80 for a signed target)
+                Inst::Conv(Conv::IntToInt(it), d, s2) => (d, s2, it.bits | if it.signed { 0x80 } else { 0 }),
                 _ => continue,
             };
             if d == s2 || f.vregs[d.0 as usize] != f.vregs[s2.0 as usize] || f.vregs[d.0 as usize].is_vec() || remat[d.0 as usize].is_some() || remat[s2.0 as usize].is_some() {
@@ -2609,7 +2617,7 @@ fn equal_copies(options: &relax_session::Options, f: &Func, reach: &[bool], tab:
             continue;
         }
         // a cast is a plain move: its upper bits nobody reads, or its source zero above fewer bits
-        if cast != 0 && !(low[d as usize] || (zero[s2 as usize] > 0 && zero[s2 as usize] < cast)) {
+        if cast != 0 && !(low[d as usize] || crate::passes::cast_is_move(zero[s2 as usize], IntTy { bits: cast & 0x7f, signed: cast & 0x80 != 0 })) {
             continue;
         }
         let rd = ranges.of(d);
@@ -3833,15 +3841,21 @@ fn remat_on(options: &relax_session::Options) -> bool {
 ///   (`IBin` / `ICmp` with a single-def `Iconst` operand -> `IBinI` / `ICmpI`);
 /// - immediates it cannot encode, inside loops, become registers: `IBinI` / `ICmpI` there turn
 ///   into `IBin` / `ICmp` on a constant vreg;
-/// - constants used inside loops are defined once at the entry, one vreg per value.
+/// - constants used inside loops are defined once outside them, one vreg per value and place:
+///   at the entry, or with `near` at the nearest dominator of the loop that is in no loop (the
+///   block before the loop nest; a function whose loops sit in rarely taken arms, such as a
+///   tokenizer's `next`, then builds none of them on the common path).
 /// The allocator then keeps such a constant in a register across the loop, or recomputes it at
 /// the use when none is free (what the backend did at every use before).
-/// - with `floats`, float constants defined inside loops move to the entry too (one vreg per
-///   value and width): for targets that build them with instructions or a literal-pool load at
-///   each definition (arm64 `fmov #imm`, `mov + fmov`, `ldr d, =lit`), not for those that fold
-///   them into the using instruction's memory operand (x64).
+/// - with `floats`, float constants defined inside loops move out too (one vreg per value and
+///   width): for targets that build them with instructions or a literal-pool load at each
+///   definition (arm64 `fmov #imm`, `ldr s / d, =lit`), not for those that fold them into the
+///   using instruction's memory operand (x64).
+/// With measured block frequencies (`freq`, O3) a constant stays where it is when its block runs
+/// no more often than the home block (a loop that rarely goes round: a state machine's `loop`
+/// around its whole body would otherwise build every constant of every arm per call).
 /// Returns the rewritten copy, or None when there is nothing to do.
-pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -> Option<Func> {
+pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool, near: bool, freq: Option<&[f32]>) -> Option<Func> {
     let reach = reachable(f);
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
@@ -3865,17 +3879,37 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -
     }
     let depth = loop_depths(f, &reach);
     let has_loop = depth.iter().any(|d| *d > 0);
+    // where a constant of a block in a loop is defined: the entry, or (near) its nearest
+    // dominator in no loop (it dominates every use of a value defined in that block)
+    let idom = if near && has_loop { crate::dom::idoms(f) } else { Vec::new() };
+    let home = |bi: usize| -> u32 {
+        if idom.is_empty() {
+            return 0;
+        }
+        let mut t = bi as u32;
+        while depth[t as usize] > 0 && t != 0 {
+            t = idom[t as usize];
+        }
+        t
+    };
     let mut changed = false;
     let mut g = f.clone();
-    let mut consts: Vec<(i64, VReg)> = Vec::new();
+    // (value, home block) -> vreg
+    let mut consts: Vec<(i64, u32, VReg)> = Vec::new();
     // float constants by (bits, f64?)
-    let mut fconsts: Vec<((u64, bool), VReg)> = Vec::new();
+    let mut fconsts: Vec<((u64, bool), u32, VReg)> = Vec::new();
     let mut moved = vec![false; nv];
+    let mut moved_home = vec![0u32; nv];
     for bi in 0..g.blocks.len() {
         if !reach[bi] {
             continue;
         }
-        let in_loop = depth[bi] > 0;
+        let h = if depth[bi] > 0 { home(bi) } else { 0 };
+        let iterates = match freq {
+            Some(fr) if fr.len() == f.blocks.len() => fr[bi] > 1.5 * fr[h as usize],
+            _ => true,
+        };
+        let in_loop = depth[bi] > 0 && iterates;
         for k in 0..g.blocks[bi].insts.len() {
             let i = g.blocks[bi].insts[k].clone();
             // immediate forms the target encodes
@@ -3896,28 +3930,30 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -
                 continue;
             }
             match i {
-                // a constant defined in the loop: defined at the entry instead
+                // a constant defined in the loop: defined outside it instead
                 Inst::Iconst(d, v) if ndef[d.0 as usize] == 1 => {
                     moved[d.0 as usize] = true;
-                    if !consts.iter().any(|x| x.0 == v) {
-                        consts.push((v, d));
+                    moved_home[d.0 as usize] = h;
+                    if !consts.iter().any(|x| x.0 == v && x.1 == h) {
+                        consts.push((v, h, d));
                     }
                     changed = true;
                 }
                 Inst::Fconst(d, bits, w) if floats && ndef[d.0 as usize] == 1 => {
                     moved[d.0 as usize] = true;
-                    if !fconsts.iter().any(|x| x.0 == (bits, w)) {
-                        fconsts.push(((bits, w), d));
+                    moved_home[d.0 as usize] = h;
+                    if !fconsts.iter().any(|x| x.0 == (bits, w) && x.1 == h) {
+                        fconsts.push(((bits, w), h, d));
                     }
                     changed = true;
                 }
                 Inst::IBinI(op, it, d, a, v) if !fits(&i) => {
-                    let c = const_vreg(&mut g, &mut consts, v);
+                    let c = const_vreg(&mut g, &mut consts, v, h);
                     g.blocks[bi].insts[k] = Inst::IBin(op, it, d, a, c);
                     changed = true;
                 }
                 Inst::ICmpI(cc, sg, d, a, v) if !fits(&i) => {
-                    let c = const_vreg(&mut g, &mut consts, v);
+                    let c = const_vreg(&mut g, &mut consts, v, h);
                     g.blocks[bi].insts[k] = Inst::ICmp(cc, sg, d, a, c);
                     changed = true;
                 }
@@ -3929,18 +3965,20 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -
         return None;
     }
     if has_loop && moved.iter().any(|x| *x) {
-        // moved constants: the loop's defs go; other vregs of the same value read the entry's
+        // moved constants: the loop's defs go; other vregs of the same value and home read the one defined there
         let mut map: Vec<u32> = (0..g.vregs.len() as u32).collect();
         for b in &f.blocks {
             for i in &b.insts {
                 if let Inst::Iconst(d, v) = i {
                     if moved[d.0 as usize] {
-                        map[d.0 as usize] = consts.iter().find(|x| x.0 == *v).unwrap().1 .0;
+                        let h = moved_home[d.0 as usize];
+                        map[d.0 as usize] = consts.iter().find(|x| x.0 == *v && x.1 == h).unwrap().2 .0;
                     }
                 }
                 if let Inst::Fconst(d, bits, w) = i {
                     if moved[d.0 as usize] {
-                        map[d.0 as usize] = fconsts.iter().find(|x| x.0 == (*bits, *w)).unwrap().1 .0;
+                        let h = moved_home[d.0 as usize];
+                        map[d.0 as usize] = fconsts.iter().find(|x| x.0 == (*bits, *w) && x.1 == h).unwrap().2 .0;
                     }
                 }
             }
@@ -3963,19 +4001,27 @@ pub fn hoist_loop_consts(f: &Func, fits: &dyn Fn(&Inst) -> bool, floats: bool) -
             term_vregs_mut(&mut b.term, |r| r.0 = map[r.0 as usize]);
         }
     }
-    let p0 = g.blocks[0].pos.first().copied().unwrap_or(g.blocks[0].term_pos);
-    let n = consts.len() + fconsts.len();
-    g.blocks[0].insts.splice(0..0, consts.iter().map(|(v, c)| Inst::Iconst(*c, *v)).chain(fconsts.iter().map(|((bits, w), c)| Inst::Fconst(*c, *bits, *w))));
-    g.blocks[0].pos.splice(0..0, std::iter::repeat(p0).take(n));
+    // the definitions at the start of their home blocks (in first-seen order)
+    let mut homes: Vec<u32> = consts.iter().map(|x| x.1).chain(fconsts.iter().map(|x| x.1)).collect();
+    homes.sort_unstable();
+    homes.dedup();
+    for hb in homes {
+        let b = &mut g.blocks[hb as usize];
+        let p0 = b.pos.first().copied().unwrap_or(b.term_pos);
+        let defs: Vec<Inst> = consts.iter().filter(|x| x.1 == hb).map(|(v, _, c)| Inst::Iconst(*c, *v)).chain(fconsts.iter().filter(|x| x.1 == hb).map(|((bits, w), _, c)| Inst::Fconst(*c, *bits, *w))).collect();
+        let n = defs.len();
+        b.insts.splice(0..0, defs);
+        b.pos.splice(0..0, std::iter::repeat(p0).take(n));
+    }
     Some(g)
 }
 
-fn const_vreg(g: &mut Func, consts: &mut Vec<(i64, VReg)>, v: i64) -> VReg {
-    match consts.iter().find(|x| x.0 == v) {
-        Some(x) => x.1,
+fn const_vreg(g: &mut Func, consts: &mut Vec<(i64, u32, VReg)>, v: i64, home: u32) -> VReg {
+    match consts.iter().find(|x| x.0 == v && x.1 == home) {
+        Some(x) => x.2,
         None => {
             let c = g.vreg(Cls::I);
-            consts.push((v, c));
+            consts.push((v, home, c));
             c
         }
     }
@@ -4027,9 +4073,12 @@ pub fn share_index_bases(f: &Func) -> Option<Func> {
             continue;
         }
         let gf = g.get_or_insert_with(|| f.clone());
-        // rewrite back to front so earlier indices stay valid
+        // the accesses are rewritten in place first, the address definitions spliced in after,
+        // back to front (groups interleave: a load and a store run of one copy loop; splicing a
+        // group's definition first moved the other group's later accesses off their indices)
         let mut plan: Vec<(usize, (VReg, VReg, u8), Vec<usize>)> = worth.iter().map(|(key, ks)| (ks[0], *key, ks.clone())).collect();
         plan.sort_by(|a, b2| b2.0.cmp(&a.0));
+        let mut splices: Vec<(usize, Vec<Inst>)> = Vec::new();
         for (first, (base, x, sh), ks) in plan {
             let p = gf.vreg(Cls::I);
             let mut ins: Vec<Inst> = Vec::new();
@@ -4048,6 +4097,11 @@ pub fn share_index_bases(f: &Func) -> Option<Func> {
                     ref other => other.clone(),
                 };
             }
+            splices.push((first, ins));
+        }
+        // plan is sorted by first index, descending
+        let blk = &mut gf.blocks[bi];
+        for (first, ins) in splices {
             let ps = blk.pos[first];
             let n = ins.len();
             blk.insts.splice(first..first, ins);
@@ -4063,6 +4117,67 @@ pub fn share_index_bases(f: &Func) -> Option<Func> {
 /// right after cmp + setcc) instead of testing the materialised bool again after other
 /// arithmetic clobbered the flags (stable partition: `c = a < b; p = end - 8; d = c ? x : p`).
 /// Returns the rewritten copy, or None.
+/// Reads of a spilled integer value that a register copy of it can serve: after `u = v` (one of
+/// them in a stack slot, the other in a register) a later read of the spilled one in the same
+/// block -- neither redefined since, no call between, and the register one still read later in the
+/// block (so its register holds it there) -- reads the register instead of loading the slot.
+/// `mov r14, [rbp-0x70]` then `cmp r10, [rbp-0x70]` (html's position after its copy) becomes
+/// `cmp r14, ...`. Keyed by (use position, vreg). MAKEPAD_RUN_OPT=-copyreuse: none (bisection).
+pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> HashMap<(u32, u32), u8> {
+    let mut out = HashMap::new();
+    if crate::stats::opt_off(options, "-copyreuse") {
+        return out;
+    }
+    let reach = reachable(f);
+    let (mut us, mut ds) = (Vec::new(), Vec::new());
+    let mut tu = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if !reach[bi] || !b.insts.iter().any(|i| matches!(i, Inst::Mov(..))) {
+            continue;
+        }
+        // last read of each vreg in the block (the terminator reads at index n)
+        let mut last: HashMap<u32, usize> = HashMap::new();
+        for (ii, i) in b.insts.iter().enumerate() {
+            uses_defs(i, &mut us, &mut ds);
+            for u in &us {
+                last.insert(u.0, ii);
+            }
+        }
+        term_uses(&b.term, &mut tu);
+        for u in &tu {
+            last.insert(u.0, b.insts.len());
+        }
+        // spilled vreg -> (its register copy, that register)
+        let mut have: Vec<(u32, u32, u8)> = Vec::new();
+        for (ii, i) in b.insts.iter().enumerate() {
+            uses_defs(i, &mut us, &mut ds);
+            if !have.is_empty() {
+                for u in &us {
+                    if let Some(&(_, c, r)) = have.iter().find(|h| h.0 == u.0) {
+                        if last.get(&c).map_or(false, |&l| l >= ii) {
+                            out.insert((al.inst_pos(bi, ii), u.0), r);
+                        }
+                    }
+                }
+                if matches!(i, Inst::Call(..)) {
+                    have.clear();
+                }
+                have.retain(|h| !ds.iter().any(|d| d.0 == h.0 || d.0 == h.1));
+            }
+            if let Inst::Mov(d, s2) = *i {
+                if d != s2 && f.vregs[d.0 as usize] == Cls::I && f.vregs[s2.0 as usize] == Cls::I {
+                    match (al.loc[d.0 as usize], al.loc[s2.0 as usize]) {
+                        (Loc::Reg(r), Loc::Stack(_)) => have.push((s2.0, d.0, r)),
+                        (Loc::Stack(_), Loc::Reg(r)) => have.push((d.0, s2.0, r)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn sink_compares(f: &Func) -> Option<Func> {
     let mut g: Option<Func> = None;
     for bi in 0..f.blocks.len() {

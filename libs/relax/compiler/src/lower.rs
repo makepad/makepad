@@ -2496,8 +2496,10 @@ impl<'a> Lcx<'a> {
             None => {
                 let p = self.f.vreg(Cls::I);
                 self.f.params.push(p);
-                // by-pointer aggregate params point to the caller's private copy
+                // by-pointer aggregate params point to the caller's private copy, which this
+                // function owns (Func::owned)
                 self.f.noalias.push(p);
+                self.f.owned.push(p);
                 if l.size > 0 {
                     self.f.deref.push((p, l.size));
                 }

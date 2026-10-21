@@ -554,3 +554,76 @@ fn swap(c: Cond) -> Cond {
         Cond::Ge => Cond::Le,
     }
 }
+
+/// Per block: its `Term::Switch` (min 0) needs no range test -- every predecessor reaches it on
+/// the edge of an unsigned `x < k` / `x <= k` test of the switch value that fits the table (an
+/// enum match whose arms past the table were split off first: rustc's `otherwise: unreachable`).
+/// The emitters then index the table straight away.
+pub fn switch_in_range(f: &Func) -> Vec<bool> {
+    let n = f.blocks.len();
+    let mut out = vec![false; n];
+    if !f.blocks.iter().any(|b| matches!(b.term, Term::Switch(..))) {
+        return out;
+    }
+    let reach = crate::regalloc::reachable(f);
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if reach[bi] {
+            for t in b.term.succs() {
+                preds[t as usize].push(bi as u32);
+            }
+        }
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let Term::Switch(x, tab) = &b.term else { continue };
+        if !reach[bi] || tab.min != 0 || preds[bi].is_empty() {
+            continue;
+        }
+        let mut redefined = false;
+        for i in &b.insts {
+            for_defs(i, |d| redefined |= d == *x);
+        }
+        if redefined {
+            continue;
+        }
+        let len = tab.targets.len() as i64;
+        let ok = preds[bi].iter().all(|&p| {
+            let pb = &f.blocks[p as usize];
+            let Term::Branch(c, t, e) = pb.term else { return false };
+            if t == e {
+                return false;
+            }
+            // the compare that last defines c, and x not redefined after it
+            let mut fact = None;
+            for i in pb.insts.iter().rev() {
+                let mut dc = false;
+                let mut dx = false;
+                for_defs(i, |d| {
+                    dc |= d == c;
+                    dx |= d == *x;
+                });
+                if dc {
+                    if let Inst::ICmpI(cond, false, _, a, k) = *i {
+                        if a == *x {
+                            fact = Some((cond, k));
+                        }
+                    }
+                    break;
+                }
+                if dx {
+                    break;
+                }
+            }
+            let Some((cond, k)) = fact else { return false };
+            // the largest x on the edge into the switch block
+            let hi = match (cond, t as usize == bi) {
+                (Cond::Lt, true) | (Cond::Ge, false) => k.checked_sub(1),
+                (Cond::Le, true) | (Cond::Gt, false) => Some(k),
+                _ => None,
+            };
+            matches!(hi, Some(h) if h >= 0 && h < len)
+        });
+        out[bi] = ok;
+    }
+    out
+}

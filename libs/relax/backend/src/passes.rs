@@ -450,7 +450,14 @@ pub fn low_bits_only(options: &relax_session::Options, f: &Func) -> Vec<bool> {
     ok
 }
 
-/// Values whose register is known zero above some bit: per vreg (one definition), that bit count
+/// A cast to `it` of a value whose register is zero above `z` bits (zero_above; 0 unknown) is the
+/// value itself: a zero-extension from `it.bits` when z <= bits, a sign-extension only when z < bits
+/// (bit bits - 1 is then zero too).
+pub fn cast_is_move(z: u8, it: IntTy) -> bool {
+    z > 0 && (z < it.bits || (!it.signed && z == it.bits))
+}
+
+/// Values whose register is known zero above some bit: per vreg (over all its definitions and copies), that bit count
 /// (0: unknown): an unsigned narrow load (`ldrb` / movzx), an And with a non-negative mask, an
 /// unsigned cast that keeps its extension (`low`: passes::low_bits_only, whose casts leave the
 /// upper bits as they were). A cast of such a value to a wider type is a plain move: zero- and
@@ -462,24 +469,70 @@ pub fn zero_above(options: &relax_session::Options, f: &Func, low: &[bool]) -> V
     if crate::stats::opt_off(options, "-zeroabove") {
         return vec![0; nv];
     }
-    let mut ndef = vec![0u32; nv];
+    // per vreg the widest of its definitions (0: some definition unknown, absorbing); copies take
+    // their source's, to a fixed point (a loop variable copied around its loop: optimistic, as
+    // every value enters the cycle from a definition outside it)
+    const NONE: u8 = 255;
+    let mut z = vec![NONE; nv];
     for p in &f.params {
-        ndef[p.0 as usize] += 2;
+        z[p.0 as usize] = 0;
     }
-    let mut z = vec![0u8; nv];
+    let mut copies: Vec<(u32, u32)> = Vec::new();
+    let merge = |z: &mut [u8], d: usize, k: u8| {
+        z[d] = if z[d] == NONE { k } else if z[d] == 0 || k == 0 { 0 } else { z[d].max(k) };
+    };
     for b in &f.blocks {
         for i in &b.insts {
-            crate::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
             match *i {
-                Inst::Load(Mem::Int(n, false), d, _, _) | Inst::LoadX(Mem::Int(n, false), d, _, _, _, _) if n < 8 => z[d.0 as usize] = 8 * n,
-                Inst::IBinI(IOp::And, _, d, _, m) if m >= 0 => z[d.0 as usize] = (64 - (m as u64).leading_zeros()) as u8,
-                Inst::Conv(Conv::IntToInt(IntTy { bits, signed: false }), d, _) if bits < 64 && !low[d.0 as usize] => z[d.0 as usize] = bits,
-                _ => {}
+                Inst::Load(Mem::Int(n, false), d, _, _) | Inst::LoadX(Mem::Int(n, false), d, _, _, _, _) if n < 8 => merge(&mut z, d.0 as usize, 8 * n),
+                Inst::IBinI(IOp::And, _, d, _, m) if m >= 0 => merge(&mut z, d.0 as usize, (64 - (m as u64).leading_zeros()).max(1) as u8),
+                Inst::Conv(Conv::IntToInt(IntTy { bits, signed: false }), d, _) if bits < 64 && !low[d.0 as usize] => merge(&mut z, d.0 as usize, bits),
+                Inst::Iconst(d, k) if k >= 0 && f.vregs[d.0 as usize] == Cls::I => merge(&mut z, d.0 as usize, (64 - (k as u64).leading_zeros()).max(1) as u8),
+                Inst::Mov(d, s) if f.vregs[d.0 as usize] == Cls::I => copies.push((d.0, s.0)),
+                _ => crate::regalloc::for_defs(i, |d| z[d.0 as usize] = 0),
+            }
+        }
+    }
+    // a worklist over the copies by source: each change re-merges the copies of that value only
+    // (linear-ish; a sweep to a fixed point was quadratic in long copy chains)
+    let mut by_src: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for &(d, s) in &copies {
+        by_src.entry(s).or_default().push(d);
+    }
+    let mut work: Vec<u32> = copies.iter().map(|c| c.1).collect();
+    while let Some(s) = work.pop() {
+        let k = z[s as usize];
+        if k == NONE {
+            continue;
+        }
+        if let Some(ds) = by_src.get(&s) {
+            for &d in ds {
+                let old = z[d as usize];
+                merge(&mut z, d as usize, k);
+                if z[d as usize] != old {
+                    work.push(d);
+                }
+            }
+        }
+    }
+    // MAKEPAD_RUN_OPT=-zeromulti: single-definition values only, no copies (bisection)
+    let single = crate::stats::opt_off(options, "-zeromulti");
+    let mut ndef = vec![0u32; if single { nv } else { 0 }];
+    if single {
+        for p in &f.params {
+            ndef[p.0 as usize] += 2;
+        }
+        for b in &f.blocks {
+            for i in &b.insts {
+                crate::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+                if let Inst::Mov(d, _) | Inst::Iconst(d, _) = *i {
+                    ndef[d.0 as usize] += 2;
+                }
             }
         }
     }
     for v in 0..nv {
-        if ndef[v] != 1 || f.vregs[v] != Cls::I {
+        if z[v] == NONE || z[v] >= 64 || f.vregs[v] != Cls::I || (single && ndef[v] != 1) {
             z[v] = 0;
         }
     }
@@ -518,7 +571,7 @@ pub fn compact_vregs(f: &mut Func) {
             note(*v, &mut map, &mut cls, &f.vregs);
         }
     }
-    for v in f.noalias.iter().chain(&f.withheld_noalias) {
+    for v in f.noalias.iter().chain(&f.withheld_noalias).chain(&f.owned) {
         note(*v, &mut map, &mut cls, &f.vregs);
     }
     for (v, _) in &f.deref {
@@ -544,7 +597,7 @@ pub fn compact_vregs(f: &mut Func) {
     if let Some(p) = f.sret {
         f.sret = Some(m(p));
     }
-    for p in f.noalias.iter_mut().chain(f.withheld_noalias.iter_mut()) {
+    for p in f.noalias.iter_mut().chain(f.withheld_noalias.iter_mut()).chain(f.owned.iter_mut()) {
         *p = m(*p);
     }
     for p in f.deref.iter_mut() {
@@ -1525,6 +1578,9 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
         }
         // unsigned division / remainder by a constant: multiply-high and shifts
         changed |= div_by_const(f, &kn, nv);
+        if !crate::stats::opt_off(options, "-divrem") {
+            changed |= div_rem_pairs(f);
+        }
         pass_time(0, tf);
         let t = pass_clock();
         trace_opt(f, "fold");
@@ -2331,7 +2387,8 @@ pub fn thread_known(f: &mut Func) -> bool {
     // loop headers (blocks with a predecessor they dominate): a path may not pass through
     // one, or P would enter its loop past the header (irreducible flow, which the dominator-
     // based passes -- CSE's join rules, LICM -- assume away)
-    let mut header: Option<Vec<bool>> = None;
+    let mut header: Option<(Vec<Vec<u32>>, Vec<Vec<u32>>)> = None;
+    let mut loop_body: std::collections::HashMap<usize, Vec<bool>> = std::collections::HashMap::new();
     let mut kn: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
     let (mut uses, mut defs) = (Vec::new(), Vec::new());
     let mut changed = false;
@@ -2399,17 +2456,52 @@ pub fn thread_known(f: &mut Func) -> bool {
             let idom = idoms(f);
             let (pre, post, _) = dom_numbers(&idom);
             let dominates = |a: usize, b: usize| pre[a] != u32::MAX && pre[b] != u32::MAX && pre[a] <= pre[b] && post[b] <= post[a];
-            let mut h = vec![false; n];
+            // per header its back-edge sources; per block its predecessors
+            let mut h: Vec<Vec<u32>> = vec![Vec::new(); n];
+            let mut pr: Vec<Vec<u32>> = vec![Vec::new(); n];
             for (bi, b) in f.blocks.iter().enumerate() {
                 for t in b.term.succs() {
+                    pr[t as usize].push(bi as u32);
                     if dominates(t as usize, bi) {
-                        h[t as usize] = true;
+                        h[t as usize].push(bi as u32);
                     }
                 }
             }
-            h
+            (h, pr)
         });
-        if path.iter().any(|&x| hd[x]) {
+        let (hd, pr) = (&hd.0, &hd.1);
+        // a path through a loop header is fine when it leaves that loop (the target is outside the
+        // header's natural loop: a latch whose flag says "done" exits straight away, as rotation
+        // leaves it); anything else would enter the loop past its header
+        let mut through_header = false;
+        for &x in &path {
+            if hd[x].is_empty() {
+                continue;
+            }
+            if crate::stats::opt_env_off("-threadhdr") {
+                through_header = true;
+                break;
+            }
+            // the header's natural loop, once per header
+            let inl = loop_body.entry(x).or_insert_with(|| {
+                let mut inl = vec![false; n];
+                inl[x] = true;
+                let mut work: Vec<u32> = hd[x].clone();
+                while let Some(y) = work.pop() {
+                    if inl[y as usize] {
+                        continue;
+                    }
+                    inl[y as usize] = true;
+                    work.extend(pr[y as usize].iter().copied());
+                }
+                inl
+            });
+            if inl[target as usize] {
+                through_header = true;
+                break;
+            }
+        }
+        if through_header {
             continue;
         }
         {
@@ -2682,6 +2774,106 @@ pub fn renumber_rpo(f: &mut Func) {
 /// inlining and branch folding), so compares end up next to their branches.
 #[inline(never)]
 /// libdivide's unsigned 64-bit magic for d > 1 not a power of two: (magic, shift, add)
+/// A remainder of operands a block also divides (`x / n` and `x % n`: an index split into row
+/// and column) is `a - (a / b) * b` from that quotient: one division instead of two (LLVM's
+/// DivRemPairs; x64 `div` and arm64 `udiv` are tens of cycles, the multiply and subtract a few).
+/// The division moves up to the remainder when it comes later and nothing between needs it moved.
+pub fn div_rem_pairs(f: &mut Func) -> bool {
+    let mut changed = false;
+    let (mut us, mut ds) = (Vec::new(), Vec::new());
+    for bi in 0..f.blocks.len() {
+        if !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::IBin(IOp::Rem, ..))) {
+            continue;
+        }
+        let mut k = 0;
+        while k < f.blocks[bi].insts.len() {
+            let Inst::IBin(IOp::Rem, it, r, a, b) = f.blocks[bi].insts[k] else {
+                k += 1;
+                continue;
+            };
+            let insts = &f.blocks[bi].insts;
+            // touches(i, v): i defines v; reads(i, v): i reads v
+            let mut defines = |i: &Inst, v: VReg| {
+                crate::regalloc::uses_defs(i, &mut us, &mut ds);
+                ds.contains(&v)
+            };
+            // an earlier division of the same operands, its quotient still there
+            let mut q = None;
+            for j in (0..k).rev() {
+                if let Inst::IBin(IOp::Div, it2, q2, a2, b2) = insts[j] {
+                    if it2 == it && a2 == a && b2 == b && q2 != a && q2 != b {
+                        q = Some((j, q2));
+                        break;
+                    }
+                }
+                if defines(&insts[j], a) || defines(&insts[j], b) {
+                    break;
+                }
+            }
+            let mut hoist = None;
+            if let Some((j, q2)) = q {
+                if insts[j + 1..k].iter().any(|i| {
+                    crate::regalloc::uses_defs(i, &mut us, &mut ds);
+                    ds.contains(&q2)
+                }) {
+                    q = None;
+                }
+            } else if r != a && r != b {
+                // a later one: it moves up to just before the remainder when its quotient is
+                // neither read nor written in between (nor is a or b written)
+                for m in k + 1..insts.len() {
+                    if let Inst::IBin(IOp::Div, it2, q2, a2, b2) = insts[m] {
+                        if it2 == it && a2 == a && b2 == b && q2 != a && q2 != b && q2 != r {
+                            let clear = insts[k + 1..m].iter().all(|i| {
+                                crate::regalloc::uses_defs(i, &mut us, &mut ds);
+                                !us.contains(&q2) && !ds.contains(&q2)
+                            });
+                            if clear {
+                                hoist = Some((m, q2));
+                            }
+                            break;
+                        }
+                    }
+                    crate::regalloc::uses_defs(&insts[m], &mut us, &mut ds);
+                    if ds.contains(&a) || ds.contains(&b) {
+                        break;
+                    }
+                }
+            }
+            let qv = match (q, hoist) {
+                (Some((_, q2)), _) => q2,
+                (None, Some((m, q2))) => {
+                    let blk = &mut f.blocks[bi];
+                    let div = blk.insts.remove(m);
+                    blk.insts.insert(k, div);
+                    // (positions are kept per instruction only when the block has them all)
+                    if blk.pos.len() == blk.insts.len() {
+                        let p = blk.pos.remove(m);
+                        blk.pos.insert(k, p);
+                    }
+                    k += 1;
+                    q2
+                }
+                _ => {
+                    k += 1;
+                    continue;
+                }
+            };
+            let t = f.vreg(Cls::I);
+            let blk = &mut f.blocks[bi];
+            if blk.pos.len() == blk.insts.len() {
+                let p = blk.pos[k];
+                blk.pos.insert(k + 1, p);
+            }
+            blk.insts[k] = Inst::IBin(IOp::Mul, it, t, qv, b);
+            blk.insts.insert(k + 1, Inst::IBin(IOp::Sub, it, r, a, t));
+            changed = true;
+            k += 2;
+        }
+    }
+    changed
+}
+
 pub fn udiv_magic(d: u64) -> (u64, u32, bool) {
     let l = 63 - d.leading_zeros();
     let num: u128 = 1u128 << (64 + l);
@@ -3899,10 +4091,15 @@ pub fn noalias_roots(f: &Func, ndef: &[u32]) -> (Vec<u64>, Vec<u32>, Vec<u32>) {
     (root, captured, taint)
 }
 
+/// Expressions local_cse keeps available along a dominator path (oldest forgotten first).
+const CSE_AVAIL: usize = 48;
+
 pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
     if !cse_can_change(f) {
         return false;
     }
+    // MAKEPAD_RUN_OPT=-cseevict: a full table takes nothing new (bisection)
+    let keep_full = crate::stats::opt_off(options, "-cseevict");
     let n = f.blocks.len();
     let nv = f.vregs.len();
     let mut uses = Vec::new();
@@ -4286,8 +4483,12 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
                         }
                         false
                     });
-                    // forward the stored value to later loads of the same cell
-                    if st.avail.len() < 48 {
+                    // forward the stored value to later loads of the same cell (a full table
+                    // forgets its oldest entry: the nearest expressions are the likely repeats)
+                    if st.avail.len() < CSE_AVAIL || !keep_full {
+                        if st.avail.len() >= CSE_AVAIL {
+                            st.avail.remove(0);
+                        }
                         let key = cse_key(&Inst::Load(m, VReg(0), base, off as i32)).unwrap();
                         st.avail.push((key, v, [base, v], true));
                         mentioned[v.0 as usize] = true;
@@ -4334,7 +4535,10 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
                 }
             }
             if let (Some(d), false, Some(key)) = (cand, replaced, key) {
-                if st.avail.len() < 48 {
+                if st.avail.len() < CSE_AVAIL || !keep_full {
+                    if st.avail.len() >= CSE_AVAIL {
+                        st.avail.remove(0);
+                    }
                     let o0 = if !ops.is_empty() { ops[0] } else { VReg(u32::MAX) };
                     let o1 = if ops.len() > 1 { ops[1] } else { VReg(u32::MAX) };
                     st.avail.push((key, d, [o0, o1], is_load));
@@ -5555,10 +5759,112 @@ pub fn natural_loops(f: &Func) -> (Vec<Vec<u32>>, Vec<(u32, Vec<bool>)>) {
     (preds, loops)
 }
 
+/// Loop-invariant reassociation (C2's `reassociate_invariants`): in a loop, `t1 = a + b; t2 = t1 + c`
+/// with a and c invariant, b not, and t1 read only by t2 becomes `t1 = a + c; t2 = t1 + b`, so the
+/// invariant half hoists (a 2-D index `row + x + k`: `row + k` once per row). Integer adds wrap in
+/// their type, so the regrouping is exact. Runs at the start of licm. Returns whether any changed.
+/// MAKEPAD_RUN_OPT=-reassoc: off (bisection).
+pub fn reassociate_invariants(options: &relax_session::Options, f: &mut Func) -> bool {
+    if crate::stats::opt_off(options, "-reassoc") {
+        return false;
+    }
+    let (_, loops) = natural_loops(f);
+    if loops.is_empty() {
+        return false;
+    }
+    let nv = f.vregs.len();
+    let (mut us, mut ds) = (Vec::new(), Vec::new());
+    let mut ndef = vec![0u32; nv];
+    let mut nuse = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            uses_defs(i, &mut us, &mut ds);
+            for d in &ds {
+                ndef[d.0 as usize] += 1;
+            }
+            for u in &us {
+                nuse[u.0 as usize] += 1;
+            }
+        }
+        crate::regalloc::term_uses(&b.term, &mut tu);
+        for u in &tu {
+            nuse[u.0 as usize] += 1;
+        }
+    }
+    let mut changed = false;
+    for (_, body) in &loops {
+        // defined in the loop (not invariant)
+        let mut inl = vec![false; nv];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if body[bi] {
+                for i in &b.insts {
+                    for_defs(i, |d| inl[d.0 as usize] = true);
+                }
+            }
+        }
+        for bi in 0..f.blocks.len() {
+            if !body[bi] {
+                continue;
+            }
+            for k in 0..f.blocks[bi].insts.len() {
+                // t2 = t1 + c (c invariant or a constant)
+                let (it2, t2, t1, c) = match f.blocks[bi].insts[k] {
+                    Inst::IBin(IOp::Add, it, t2, x, y) if !inl[y.0 as usize] && inl[x.0 as usize] => (it, t2, x, Some(y)),
+                    Inst::IBin(IOp::Add, it, t2, x, y) if !inl[x.0 as usize] && inl[y.0 as usize] => (it, t2, y, Some(x)),
+                    Inst::IBinI(IOp::Add, it, t2, x, _) if inl[x.0 as usize] => (it, t2, x, None),
+                    _ => continue,
+                };
+                if t1 == t2 || ndef[t1.0 as usize] != 1 || nuse[t1.0 as usize] != 1 {
+                    continue;
+                }
+                // t1 = a + b in this block before, a invariant, b not; b unchanged up to t2
+                let Some(j) = (0..k).rev().find(|&j| {
+                    let mut d = false;
+                    for_defs(&f.blocks[bi].insts[j], |x| d |= x == t1);
+                    d
+                }) else { continue };
+                let Inst::IBin(IOp::Add, it1, _, a0, b0) = f.blocks[bi].insts[j] else { continue };
+                if it1 != it2 {
+                    continue;
+                }
+                let (a, b) = if !inl[a0.0 as usize] && inl[b0.0 as usize] {
+                    (a0, b0)
+                } else if !inl[b0.0 as usize] && inl[a0.0 as usize] {
+                    (b0, a0)
+                } else {
+                    continue;
+                };
+                if b == t2 || f.blocks[bi].insts[j + 1..k].iter().any(|i| {
+                    let mut d = false;
+                    for_defs(i, |x| d |= x == b);
+                    d
+                }) {
+                    continue;
+                }
+                let (new1, new2) = match (&f.blocks[bi].insts[k], c) {
+                    (Inst::IBin(..), Some(c)) => (Inst::IBin(IOp::Add, it1, t1, a, c), Inst::IBin(IOp::Add, it2, t2, t1, b)),
+                    (Inst::IBinI(_, _, _, _, kk), None) => (Inst::IBinI(IOp::Add, it1, t1, a, *kk), Inst::IBin(IOp::Add, it2, t2, t1, b)),
+                    _ => continue,
+                };
+                f.blocks[bi].insts[j] = new1;
+                f.blocks[bi].insts[k] = new2;
+                // t1 is invariant now (licm hoists it); t2 still is not
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
     if forward_only(f) {
         return false;
     }
+    let reassoc = reassociate_invariants(options, f);
     let n = f.blocks.len();
     let (preds, loops) = natural_loops(f);
     let nv = f.vregs.len();
@@ -5766,7 +6072,7 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
             f.blocks[pre as usize].pos.push(p);
         }
     }
-    changed
+    changed || reassoc
 }
 
 /// 64-bit shifts by a register take the count mod 64 on both backends (x64 shl/shr/sar/shlx,
@@ -6029,9 +6335,9 @@ pub fn addr_modes(f: &mut Func) {
             let (m, base, off) = match &b.insts[k] {
                 Inst::Load(m, _, base, off) => (*m, *base, *off),
                 Inst::Store(m, base, off, _) => (*m, *base, *off),
-                // vectors too on x86-64 (movups takes any SIB form; arm64's ldr q only an
-                // unscaled or x16-scaled register)
-                Inst::VLoad(_, base, off) | Inst::VStore(base, off, _) if cfg!(target_arch = "x86_64") => (Mem::Int(8, false), *base, *off),
+                // vectors too: movups takes any SIB form; arm64's ldr q an unscaled or x16-scaled
+                // register (other shifts: one shifted add instead of a shift and an add)
+                Inst::VLoad(_, base, off) | Inst::VStore(base, off, _) => (Mem::Int(8, false), *base, *off),
                 i => {
                     for_defs(i, |d| {
                         if ndef[d.0 as usize] == 1 {
@@ -6041,22 +6347,41 @@ pub fn addr_modes(f: &mut Func) {
                     continue;
                 }
             };
-            let _ = m;
+            // arm64: an address read by several accesses (a load and a store of one element) is
+            // folded into each one that needs no displacement ([x, x{, lsl #size}] is free); the
+            // add stays for the others and goes with its last use
             let ai = match def_at.get(&base.0) {
-                Some(&ai) if nuse[base.0 as usize] == 1 && !dead[ai] => ai,
+                Some(&ai) if (nuse[base.0 as usize] == 1 || cfg!(target_arch = "aarch64")) && !dead[ai] => ai,
                 _ => continue,
             };
+            let shared_add = nuse[base.0 as usize] > 1;
             let (p, q) = match b.insts[ai] {
                 Inst::IBin(IOp::Add, it, _, p, q) if it.bits == 64 => (p, q),
                 _ => continue,
             };
             // which operand is the scaled index
+            // arm64: the access's own scale (q: 16, else its size) is free in the register-offset
+            // form, so a shift shared by several accesses (a load and a store of one element) is
+            // folded into each; it goes when its last use does
+            let vector = matches!(b.insts[k], Inst::VLoad(..) | Inst::VStore(..));
+            let natural = if vector {
+                4
+            } else {
+                match m {
+                    Mem::Int(n, _) => n.trailing_zeros() as i64,
+                    Mem::F32 => 2,
+                    Mem::F64 => 3,
+                }
+            };
             let mut found: Option<(VReg, VReg, u8, Option<usize>)> = None;
             for (pp, qq) in [(p, q), (q, p)] {
                 if let Some(&si) = def_at.get(&qq.0) {
-                    if nuse[qq.0 as usize] == 1 && !dead[si] {
-                        if let Inst::IBinI(IOp::Shl, it, _, idx, sh) = b.insts[si] {
-                            if it.bits == 64 && sh <= 3 {
+                    if let Inst::IBinI(IOp::Shl, it, _, idx, sh) = b.insts[si] {
+                        let shared_ok = cfg!(target_arch = "aarch64") && sh == natural;
+                        if (nuse[qq.0 as usize] == 1 || shared_ok) && !dead[si] {
+                            // scaled index: x86-64 scales 1..8; arm64 vector accesses also 16
+                            let max_sh = if cfg!(target_arch = "aarch64") && vector { 4 } else { 3 };
+                            if it.bits == 64 && sh <= max_sh {
                                 found = Some((pp, idx, sh as u8, Some(si)));
                                 break;
                             }
@@ -6075,7 +6400,12 @@ pub fn addr_modes(f: &mut Func) {
             let mut idx = idx;
             let mut extra: i64 = 0;
             let mut fold_at: Option<usize> = None;
-            if let Some(&ii) = def_at.get(&idx.0) {
+            // a shift that stays for other uses keeps reading idx: no folding through it
+            let shift_stays = shared_add || si.is_some_and(|si| matches!(b.insts[si], Inst::IBinI(_, _, sv, _, _) if nuse[sv.0 as usize] > 1));
+            if shared_add && (off != 0 || !(sh == 0 || sh as i64 == natural)) {
+                continue;
+            }
+            if let Some(&ii) = def_at.get(&idx.0).filter(|_| !shift_stays) {
                 // x64: the displacement is free in every form, so an index used elsewhere too is
                 // still replaced by its operand here (`a[j - 1]` reads [b + j*4 - 4]; the subtract
                 // stays for its other uses and can then sink to them); arm64 keeps the
@@ -6129,13 +6459,31 @@ pub fn addr_modes(f: &mut Func) {
                 Inst::VStore(_, off2, v) => Inst::VStoreX(pp, idx, sh, off2 + extra as i32, v),
                 ref other => other.clone(),
             };
-            let _ = off;
+            if shared_add {
+                nuse[base.0 as usize] -= 1;
+                if nuse[base.0 as usize] > 0 {
+                    // the add stays (with its shift): the access reads its operands too
+                    nuse[pp.0 as usize] += 1;
+                    nuse[idx.0 as usize] += 1;
+                    continue;
+                }
+            }
             dead[ai] = true;
             if let Some(ii) = fold_at {
                 dead[ii] = true;
             }
             if let Some(si) = si {
-                dead[si] = true;
+                // a shared shift (arm64) stays for its other uses; the access reads its operand
+                let sv = match b.insts[si] {
+                    Inst::IBinI(_, _, sv, _, _) => sv,
+                    _ => unreachable!(),
+                };
+                nuse[sv.0 as usize] -= 1;
+                if nuse[sv.0 as usize] == 0 {
+                    dead[si] = true;
+                } else {
+                    nuse[idx.0 as usize] += 1;
+                }
             }
         }
         if dead.iter().any(|x| *x) {

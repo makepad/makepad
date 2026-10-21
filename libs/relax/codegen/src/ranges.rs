@@ -549,20 +549,23 @@ pub fn fold_ranges(options: &relax_session::Options, f: &mut Func) -> bool {
     }
     let mut res = Vec::new();
     if !any_iv || iv_off(options) {
-        return run(f, &HashMap::default(), false, &mut res);
+        let mut ed = Edges::default();
+        let ch = run(f, &HashMap::default(), false, &mut res, Some(&mut ed));
+        return thread_decided(f, &ed) | ch;
     }
     // hypotheses found not to hold, per (header, vreg): left out of the next round
     let mut off: HashMap<(u32, u32), u8> = HashMap::default();
     for round in 0..3 {
         let mut g = f.clone();
         res.clear();
-        let ch = run(&mut g, &off, true, &mut res);
+        let mut ed = Edges::default();
+        let ch = run(&mut g, &off, true, &mut res, Some(&mut ed));
         if iv_trace() {
             eprintln!("iv: round {} hyps {} failed {}", round, res.len(), res.iter().filter(|r| !r.1).count());
         }
         if res.iter().all(|r| r.1) {
             *f = g;
-            return ch;
+            return thread_decided(f, &ed) | ch;
         }
         for (key, ok) in &res {
             if !ok {
@@ -574,7 +577,9 @@ pub fn fold_ranges(options: &relax_session::Options, f: &mut Func) -> bool {
         }
     }
     res.clear();
-    run(f, &HashMap::default(), false, &mut res)
+    let mut ed = Edges::default();
+    let ch = run(f, &HashMap::default(), false, &mut res, Some(&mut ed));
+    thread_decided(f, &ed) | ch
 }
 
 fn iv_trace() -> bool {
@@ -588,7 +593,8 @@ fn iv_off(options: &relax_session::Options) -> bool {
 
 /// One forward pass. `spec`: loop variables get the hypotheses `lv` allows; each one used is
 /// reported in `res` as ((header, vreg), holds on every back edge).
-fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u32, u32), bool)>) -> bool {
+/// `out`: the states on the edges and the blocks' reverse-postorder numbers (thread_decided).
+fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u32, u32), bool)>, out: Option<&mut Edges>) -> bool {
     let n = f.blocks.len();
     let reach = reachable(f);
     let idom = relax_backend::dom::idoms(f);
@@ -791,117 +797,7 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
         let blk = &mut f.blocks[bi];
         for k in 0..blk.insts.len() {
             nonneg_div(&mut blk.insts, k, &st, &nuse);
-            let i = &mut blk.insts[k];
-            // decide compares first (the state before the instruction)
-            let fold = match &*i {
-                Inst::ICmpI(c, s, d, x, k) => {
-                    let by_rng = st.get(x.0).and_then(|rx| if *s && *k < 0 { if rx.hi <= i64::MAX as u64 { decide_neg(*c) } else { None } } else { decide(*c, *s, rx, konst(*k)) });
-                    by_rng.or_else(|| decide_rel(&st, *c, *s, x.0, Opnd::K(*k))).map(|t| (*d, t))
-                }
-                Inst::ICmp(c, s, d, x, y) => {
-                    let by_rng = match (st.get(x.0), st.get(y.0)) {
-                        (Some(a), Some(b)) => decide(*c, *s, a, b),
-                        _ => None,
-                    };
-                    by_rng.or_else(|| decide_rel(&st, *c, *s, x.0, Opnd::V(y.0))).map(|t| (*d, t))
-                }
-                _ => None,
-            };
-            // (b + k) - b
-            let sub_k = match &*i {
-                Inst::IBin(IOp::Sub, it, d, p, q) => st.lin.iter().find(|l| l.0 == p.0 && l.1 == q.0 && (l.3 as u32) == bits(*it)).map(|l| (*d, extend_const(l.2, *it))),
-                _ => None,
-            };
-            let mut r = def_range(&st, i);
-            if let Inst::Load(Mem::Int(w, false), d, ..) | Inst::LoadX(Mem::Int(w, false), d, ..) = &*i {
-                if let Some(&(mw, m)) = marks.get(&d.0) {
-                    if mw == *w {
-                        r = Some(match r {
-                            Some(x) if x.lo.max(m.lo) <= x.hi.min(m.hi) => R { lo: x.lo.max(m.lo), hi: x.hi.min(m.hi) },
-                            _ => m,
-                        });
-                    }
-                }
-            }
-            let cmpf = match &*i {
-                Inst::ICmpI(c, s, d, x, k) if d != x => Some((d.0, *c, *s, x.0, Opnd::K(*k))),
-                Inst::ICmp(c, s, d, x, y) if d != x && d != y => Some((d.0, *c, *s, x.0, Opnd::V(y.0))),
-                _ => None,
-            };
-            // d = c ? x : y with c = (x < y): d = min(x, y), d <= x and d <= y
-            let sel_min = match &*i {
-                Inst::Sel(d, c, a, b2) if d != a && d != b2 => st.cmp.iter().find(|f| f.0 == c.0).and_then(|&(_, cond, sg, x, y)| {
-                    if matches!(cond, Cond::Lt | Cond::Le) && x == a.0 && y == Opnd::V(b2.0) {
-                        Some((sg, a.0, b2.0))
-                    } else {
-                        None
-                    }
-                }),
-                _ => None,
-            };
-            let linf = match &*i {
-                // exact as u64 intervals only for 64-bit or unsigned types (a narrow signed
-                // value is sign-extended)
-                Inst::IBinI(IOp::Add, it, d, x, k) if d != x && (bits(*it) == 64 || !it.signed) => Some((d.0, x.0, *k, bits(*it) as u8)),
-                Inst::IBinI(IOp::Sub, it, d, x, k) if d != x && *k != i64::MIN && (bits(*it) == 64 || !it.signed) => Some((d.0, x.0, -*k, bits(*it) as u8)),
-                Inst::Mov(d, x) if d != x => Some((d.0, x.0, 0, 64)),
-                _ => None,
-            };
-            if let Some((d, t)) = fold {
-                *i = Inst::Iconst(d, t as i64);
-                changed = true;
-            } else if let Some((d, k)) = sub_k {
-                *i = Inst::Iconst(d, k);
-                changed = true;
-            }
-            let mut ds: Vec<u32> = Vec::new();
-            for_defs(i, |d| ds.push(d.0));
-            // a copy `d = s` holds what is known of s's order against other values: a later
-            // redefinition of s (the counter's increment) leaves the facts about the copy, which
-            // is the value the bounds check after the step reads
-            let copied: Vec<(Cond, bool, u32, Opnd)> = match &*i {
-                Inst::Mov(d, x) if d != x => st
-                    .rel
-                    .iter()
-                    .filter_map(|&(c, sg, a, b)| {
-                        if a == x.0 && b != Opnd::V(d.0) {
-                            Some((c, sg, d.0, b))
-                        } else if b == Opnd::V(x.0) && a != d.0 {
-                            Some((c, sg, a, Opnd::V(d.0)))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            for d in &ds {
-                st.kill(*d);
-            }
-            for c in copied {
-                push_capped(&mut st.rel, c);
-            }
-            if let [d] = ds[..] {
-                if let Some(l) = sel_min {
-                    push_capped(&mut st.le, (l.0, d, l.1));
-                    push_capped(&mut st.le, (l.0, d, l.2));
-                }
-                let r = match &*i {
-                    Inst::Iconst(_, k) => Some(konst(*k)),
-                    _ => r,
-                };
-                if let Some(r) = r {
-                    st.rng.insert(d, r);
-                }
-                if !matches!(i, Inst::Iconst(..)) {
-                    if let Some(c) = cmpf {
-                        push_capped(&mut st.cmp, c);
-                    }
-                    if let Some(l) = linf {
-                        push_capped(&mut st.lin, l);
-                    }
-                }
-            }
+            changed |= step(&mut st, &mut blk.insts[k], &marks);
         }
         // out-edges
         match blk.term {
@@ -927,6 +823,211 @@ fn run(f: &mut Func, lv: &HashMap<(u32, u32), u8>, spec: bool, res: &mut Vec<((u
             None => false,
         });
         res.push(((*h, *v), ok));
+    }
+    if let Some(o) = out {
+        o.edge = edge;
+        o.order = order;
+        o.marks = marks;
+    }
+    changed
+}
+
+/// What `run` knew on each edge, for threading.
+#[derive(Default)]
+struct Edges {
+    edge: HashMap<(u32, u32), State>,
+    order: Vec<u32>,
+    marks: HashMap<u32, (u8, R)>,
+}
+
+/// Blocks this small are copied onto the edges that decide their branch (thread_decided).
+const THREAD_INSTS: usize = 8;
+
+/// Jump threading by the facts on each edge (LLVM's JumpThreading over LazyValueInfo): a small
+/// block B ending in a branch whose condition the state on an incoming edge P -> B decides --
+/// while the meet of all of B's edges does not -- gets a copy B' (B's instructions, then a jump to
+/// the decided successor) that P enters instead. Every path still runs B's instructions once
+/// (the copy defines the same vregs), only the branch is gone. `for c in s.chars()` after
+/// inlining is the case: the iterator's `Option<char>` is tested twice per character (the
+/// decoder's `next`, then the loop's match), once against a constant None on the end path and
+/// once against a byte the decoder just loaded -- both decided on their edges, joined at the test.
+/// B is never a loop header (nor entered by irreducible flow): a copy of a header would enter its
+/// loop past it.
+fn thread_decided(f: &mut Func, ed: &Edges) -> bool {
+    // MAKEPAD_RUN_OPT=-threadedge: off (bisection)
+    if relax_backend::stats::opt_env_off("-threadedge") {
+        return false;
+    }
+    let n = f.blocks.len();
+    let reach = reachable(f);
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (b, blk) in f.blocks.iter().enumerate() {
+        if reach[b] {
+            for s in blk.term.succs() {
+                if !preds[s as usize].contains(&(b as u32)) {
+                    preds[s as usize].push(b as u32);
+                }
+            }
+        }
+    }
+    let mut plan: Vec<(u32, u32, u32)> = Vec::new();
+    for b in 1..n {
+        let blk = &f.blocks[b];
+        let Term::Branch(c, t, e) = blk.term else { continue };
+        if !reach[b] || t == e || preds[b].len() < 2 || blk.insts.len() > THREAD_INSTS || blk.insts.iter().any(|i| matches!(i, Inst::Call(..))) {
+            continue;
+        }
+        let ob = ed.order.get(b).copied().unwrap_or(u32::MAX);
+        // (nor a landing pad: an invoke's unwind edge cannot be retargeted to a copy)
+        if ob == u32::MAX || preds[b].iter().any(|&p| ed.order.get(p as usize).map_or(true, |&o| o >= ob) || matches!(f.blocks[p as usize].term, Term::Invoke(..))) {
+            continue;
+        }
+        for &p in &preds[b] {
+            if !matches!(f.blocks[p as usize].term, Term::Jump(_) | Term::Branch(..)) {
+                continue;
+            }
+            let Some(st0) = ed.edge.get(&(p, b as u32)) else { continue };
+            let mut st = st0.clone();
+            for i in &blk.insts {
+                let mut j = i.clone();
+                step(&mut st, &mut j, &ed.marks);
+            }
+            if let Some(R { lo, hi }) = st.get(c.0) {
+                if lo == hi {
+                    let to = if lo != 0 { t } else { e };
+                    if to as usize != b {
+                        plan.push((p, b as u32, to));
+                    }
+                }
+            }
+        }
+    }
+    if plan.is_empty() {
+        return false;
+    }
+    for (p, b, to) in plan {
+        let src = &f.blocks[b as usize];
+        let nb = Block { insts: src.insts.clone(), pos: src.pos.clone(), term: Term::Jump(to), term_pos: src.term_pos };
+        let id = f.blocks.len() as u32;
+        f.blocks.push(nb);
+        f.blocks[p as usize].term.map_succs(|s| if s == b { id } else { s });
+    }
+    true
+}
+
+/// One instruction's transfer: decides the compares (and `(b + k) - b`) the state fixes, rewriting
+/// `i` into a constant, then applies its definitions to the state. Returns whether `i` changed.
+fn step(st: &mut State, i: &mut Inst, marks: &HashMap<u32, (u8, R)>) -> bool {
+    let mut changed = false;
+    // decide compares first (the state before the instruction)
+    let fold = match &*i {
+        Inst::ICmpI(c, s, d, x, k) => {
+            let by_rng = st.get(x.0).and_then(|rx| if *s && *k < 0 { if rx.hi <= i64::MAX as u64 { decide_neg(*c) } else { None } } else { decide(*c, *s, rx, konst(*k)) });
+            by_rng.or_else(|| decide_rel(st, *c, *s, x.0, Opnd::K(*k))).map(|t| (*d, t))
+        }
+        Inst::ICmp(c, s, d, x, y) => {
+            let by_rng = match (st.get(x.0), st.get(y.0)) {
+                (Some(a), Some(b)) => decide(*c, *s, a, b),
+                _ => None,
+            };
+            by_rng.or_else(|| decide_rel(st, *c, *s, x.0, Opnd::V(y.0))).map(|t| (*d, t))
+        }
+        _ => None,
+    };
+    // (b + k) - b
+    let sub_k = match &*i {
+        Inst::IBin(IOp::Sub, it, d, p, q) => st.lin.iter().find(|l| l.0 == p.0 && l.1 == q.0 && (l.3 as u32) == bits(*it)).map(|l| (*d, extend_const(l.2, *it))),
+        _ => None,
+    };
+    let mut r = def_range(&st, i);
+    if let Inst::Load(Mem::Int(w, false), d, ..) | Inst::LoadX(Mem::Int(w, false), d, ..) = &*i {
+        if let Some(&(mw, m)) = marks.get(&d.0) {
+            if mw == *w {
+                r = Some(match r {
+                    Some(x) if x.lo.max(m.lo) <= x.hi.min(m.hi) => R { lo: x.lo.max(m.lo), hi: x.hi.min(m.hi) },
+                    _ => m,
+                });
+            }
+        }
+    }
+    let cmpf = match &*i {
+        Inst::ICmpI(c, s, d, x, k) if d != x => Some((d.0, *c, *s, x.0, Opnd::K(*k))),
+        Inst::ICmp(c, s, d, x, y) if d != x && d != y => Some((d.0, *c, *s, x.0, Opnd::V(y.0))),
+        _ => None,
+    };
+    // d = c ? x : y with c = (x < y): d = min(x, y), d <= x and d <= y
+    let sel_min = match &*i {
+        Inst::Sel(d, c, a, b2) if d != a && d != b2 => st.cmp.iter().find(|f| f.0 == c.0).and_then(|&(_, cond, sg, x, y)| {
+            if matches!(cond, Cond::Lt | Cond::Le) && x == a.0 && y == Opnd::V(b2.0) {
+                Some((sg, a.0, b2.0))
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    };
+    let linf = match &*i {
+        // exact as u64 intervals only for 64-bit or unsigned types (a narrow signed
+        // value is sign-extended)
+        Inst::IBinI(IOp::Add, it, d, x, k) if d != x && (bits(*it) == 64 || !it.signed) => Some((d.0, x.0, *k, bits(*it) as u8)),
+        Inst::IBinI(IOp::Sub, it, d, x, k) if d != x && *k != i64::MIN && (bits(*it) == 64 || !it.signed) => Some((d.0, x.0, -*k, bits(*it) as u8)),
+        Inst::Mov(d, x) if d != x => Some((d.0, x.0, 0, 64)),
+        _ => None,
+    };
+    if let Some((d, t)) = fold {
+        *i = Inst::Iconst(d, t as i64);
+        changed = true;
+    } else if let Some((d, k)) = sub_k {
+        *i = Inst::Iconst(d, k);
+        changed = true;
+    }
+    let mut ds: Vec<u32> = Vec::new();
+    for_defs(i, |d| ds.push(d.0));
+    // a copy `d = s` holds what is known of s's order against other values: a later
+    // redefinition of s (the counter's increment) leaves the facts about the copy, which
+    // is the value the bounds check after the step reads
+    let copied: Vec<(Cond, bool, u32, Opnd)> = match &*i {
+        Inst::Mov(d, x) if d != x => st
+            .rel
+            .iter()
+            .filter_map(|&(c, sg, a, b)| {
+                if a == x.0 && b != Opnd::V(d.0) {
+                    Some((c, sg, d.0, b))
+                } else if b == Opnd::V(x.0) && a != d.0 {
+                    Some((c, sg, a, Opnd::V(d.0)))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for d in &ds {
+        st.kill(*d);
+    }
+    for c in copied {
+        push_capped(&mut st.rel, c);
+    }
+    if let [d] = ds[..] {
+        if let Some(l) = sel_min {
+            push_capped(&mut st.le, (l.0, d, l.1));
+            push_capped(&mut st.le, (l.0, d, l.2));
+        }
+        let r = match &*i {
+            Inst::Iconst(_, k) => Some(konst(*k)),
+            _ => r,
+        };
+        if let Some(r) = r {
+            st.rng.insert(d, r);
+        }
+        if !matches!(i, Inst::Iconst(..)) {
+            if let Some(c) = cmpf {
+                push_capped(&mut st.cmp, c);
+            }
+            if let Some(l) = linf {
+                push_capped(&mut st.lin, l);
+            }
+        }
     }
     changed
 }

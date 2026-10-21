@@ -368,6 +368,8 @@ pub enum Cmd {
     /// Is anything still moving: a pending NextFrame, redraw, repaint or
     /// virtual timer due within the next frame?
     Settled(Sender<Reply>),
+    /// The UI thread's own counters (`uicounts`): read on the thread that runs the event loop.
+    UiCounts(Sender<Reply>),
     CapStop(Sender<Reply>),
     /// `/cap/pause` (true) and `/cap/resume` (false).
     CapPause(bool, Sender<Reply>),
@@ -728,6 +730,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "dump", args: "[paths=1]", answers: "the widget tree as indented text (id, type, x y w h); paths=1 one line per widget", service: "ui", risk: CmdRisk::Read, params: "\"paths\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{kind:n}}", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: macOS thread_selfcounts, else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "cap pause", args: "", answers: "stop writing without stopping the clock", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
@@ -1839,6 +1842,7 @@ mod tests {
             ("snap", 1),
             ("step", 1),
             ("settled", 1),
+            ("uicounts", 1),
             ("cap pause", 2),
             ("cap resume", 2),
             ("cap start", 2),
