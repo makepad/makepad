@@ -4273,7 +4273,7 @@ impl Unit {
                     return a;
                 }
                 let sym = self.syms.intern(crate::syms::SymKind::Static(d), a);
-                crate::sandbox::capture_initial_data(self, sym);
+                crate::domain::capture_static(self, sym);
                 crate::domain::materialize(self, sym);
             }
             return a;
@@ -4321,7 +4321,7 @@ impl Unit {
             self.validate_final(d, t, buf);
         }
         let sym = self.syms.intern(crate::syms::SymKind::Static(d), buf);
-        crate::sandbox::capture_initial_data(self, sym);
+        crate::domain::capture_static(self, sym);
         // every other live domain gets its own copy of the new static (none: nothing to do)
         crate::domain::materialize(self, sym);
         buf
