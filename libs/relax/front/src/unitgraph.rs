@@ -272,11 +272,21 @@ fn pkg_env(dir: &str, name: &str, ver: &str) -> Vec<(String, String)> {
         ("CARGO_PKG_NAME".to_string(), name.to_string()),
         ("CARGO_PKG_VERSION".to_string(), ver.to_string()),
     ];
-    let parts: Vec<&str> = ver.split(['.', '-']).collect();
+    let (core, pre) = version_parts(ver);
+    let parts: Vec<&str> = core.split('.').collect();
     for (k, key) in ["CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_MINOR", "CARGO_PKG_VERSION_PATCH"].iter().enumerate() {
         e.push((key.to_string(), parts.get(k).unwrap_or(&"0").to_string()));
     }
+    e.push(("CARGO_PKG_VERSION_PRE".to_string(), pre.to_string()));
+    e.extend(crate::resolve::package_meta_env(dir));
     e
+}
+
+/// A version's numeric core and its pre-release part (`1.2.3-rc.1+build` -> `1.2.3`, `rc.1`; the
+/// pre-release empty when none): cargo's CARGO_PKG_VERSION_{MAJOR,MINOR,PATCH,PRE} come from these.
+fn version_parts(ver: &str) -> (&str, &str) {
+    let core = ver.split('+').next().unwrap_or(ver);
+    core.split_once('-').unwrap_or((core, ""))
 }
 
 fn fnv(data: &[u8], mut h: u64) -> u64 {
@@ -622,8 +632,12 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("CARGO_MANIFEST_DIR", dir)
         .env("CARGO_PKG_NAME", pname)
         .env("CARGO_PKG_VERSION", ver)
-        // cargo gives scripts RUSTC; theirs is Relax itself, answering `--version` (relax_as_rustc)
+        .env("CARGO_PKG_VERSION_PRE", version_parts(ver).1)
+        .envs(crate::resolve::package_meta_env(dir))
+        // cargo gives scripts RUSTC; theirs is Relax itself, answering `--version` (relax_as_rustc).
+        // RUSTDOC too (the `built` crate requires it); nothing documents here
         .env("RUSTC", &exe)
+        .env("RUSTDOC", "rustdoc")
         .env("MAKEPAD_RUN_AS_RUSTC", "1")
         .env("MAKEPAD_RUN_SCRIPT_DEPTH", depth.to_string())
         .env_remove("MAKEPAD_RUN_SELF_EXEC")

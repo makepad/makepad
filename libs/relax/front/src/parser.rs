@@ -1734,7 +1734,15 @@ impl<'a> Parser<'a> {
             x
         };
         if trace {
-            eprintln!("expand {}! => {}", def.name, text);
+            // MAKEPAD_RUN_TRACE=expand:<macro name>: the expansion, where it was called, at what depth and
+            // on which thread; `bt` among the trace words adds a backtrace (which pass expands it)
+            let thr = std::thread::current();
+            eprintln!("expand {}! @{} base={} depth={} thr={} => {}", def.name, call_lo, self.src.len() + self.ext.len(), self.exp_depth, thr.name().unwrap_or("?"), text);
+            if crate::preload::relax_trace().map_or(false, |t| t.split(',').any(|x| x == "bt")) {
+                let bt = std::backtrace::Backtrace::force_capture().to_string();
+                let frames: Vec<String> = bt.lines().filter(|l| l.contains("relax_") || l.contains("makepad")).filter(|l| !l.trim_start().starts_with("at ")).take(40).map(|l| l.trim().to_string()).collect();
+                eprintln!("expand-bt {}! @{}: {}", def.name, call_lo, frames.join(" | "));
+            }
         }
         let base = (self.src.len() + self.ext.len()) as u32;
         if crate::macros::uses::recording() {
@@ -1856,7 +1864,14 @@ impl<'a> Parser<'a> {
             // `is_trailing_mac`): its expansion's `;` after the one expression is linted
             let save = self.pos;
             self.pos = start;
+            // the shape of the expansion only, without expanding the calls in it (rustc's
+            // is_trailing_mac parse does not either): with macros on, every nested call of the
+            // expansion was expanded here and again by the statement parse below, 3^depth
+            // expansions for statement macros nested through blocks (nom's alt_trait_inner! /
+            // succ! chains of depth 21 took every byte of memory under `makepad check`)
+            let macros = self.macros.take();
             let one_expr = self.outer_attrs().is_ok() && self.expr().is_ok() && self.kind() == T::Semi && self.nth(1) == T::Eof;
+            self.macros = macros;
             let semi = self.lo();
             self.pos = save;
             if one_expr {
