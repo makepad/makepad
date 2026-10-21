@@ -161,7 +161,13 @@ impl SolverDelegate<'_> {
         let certainty = match kind {
             PathKind::Coinductive => Certainty::Yes,
             PathKind::Unknown | PathKind::ForcedAmbiguity => Certainty::overflow(false),
-            PathKind::Inductive => unreachable!(),
+            // An unproductive cycle is no solution; coherence keeps it ambiguous (the
+            // implementation is not trusted for negative reasoning there yet).
+            PathKind::Inductive => if matches!(self.query_input(input).typing_mode.0, crate::tcx::TypingMode::Coherence) {
+                Certainty::overflow(false)
+            } else {
+                return self.result_id((Err(NoSolution), Default::default()));
+            },
         };
         self.unconstrained(input, certainty)
     }
@@ -190,7 +196,8 @@ impl SolverDelegate<'_> {
         let input = self.query_input(input);
         // Append-only publication preserves this cache only when no existing impl set
         // changes. Entries with deferred misses (including nested hits) are evicted.
-        let result = EvalCtxt::enter_canonical(self, graph, &input, inspect);
+        // rustc search_graph.rs compute_goal: nested goals recurse once per level
+        let result = crate::stack::ensure_sufficient_stack(|| EvalCtxt::enter_canonical(self, graph, &input, inspect));
         self.result_id(result)
     }
 }

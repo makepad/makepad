@@ -17,7 +17,8 @@ impl InferCtxt<'_> {
         loop {
             let obligations = std::mem::take(&mut self.inner.borrow_mut().region_obligations);
             if obligations.is_empty() { break; }
-            for (ty, region) in obligations {
+            for (ty, region, span) in obligations {
+                self.origin_span.set(span);
                 let mut resolver = super::resolve::DeepVariableResolver::new(self);
                 let ty = resolver.fold_ty(&self.tcx.tys, ty, 0);
                 let region = resolver.fold_region(&self.tcx.tys, region, 0);

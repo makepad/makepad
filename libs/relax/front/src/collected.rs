@@ -456,7 +456,11 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
         &mut self.owned
     }
     pub fn insert(&mut self, k: K, v: V) -> Option<V> { self.owned().insert(k, v) }
-    pub fn remove(&mut self, k: &K) -> Option<V> { self.owned().remove(k) }
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        // (an absent key changes nothing: a mapped table stays mapped)
+        if !self.contains_key(k) { return None; }
+        self.owned().remove(k)
+    }
     pub fn get_mut(&mut self, k: &K) -> Option<&mut V> { self.owned().get_mut(k) }
     pub fn entry(&mut self, k: K) -> std::collections::hash_map::Entry<'_, K, V> { self.owned().entry(k) }
     pub fn retain(&mut self, f: impl FnMut(&K, &mut V) -> bool) { self.owned().retain(f) }

@@ -1290,6 +1290,7 @@ impl Cx {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] Cx::quit queued at {}", std::panic::Location::caller());
         }
+        crate::cx::relax_quit_started();
         self.platform_ops.push_back(CxOsOp::Quit);
     }
 
@@ -3129,6 +3130,15 @@ impl Cx {
     /// knows them. Zero (unknown) refuses nothing.
     pub fn set_publication_envelope(&self, bytes: usize) {
         self.publications.set_envelope(bytes);
+    }
+
+    /// Whether a pass submitted with a serial in `first..=last` completed with draws left out:
+    /// a pipeline they use was still being built for its target's layout (the HAL's
+    /// `FramePartial`; they come with a later paint). A pass's owner sees it painted when it was
+    /// built, so an offscreen render that takes its pictures checks this once the frame's passes
+    /// completed (`Texture::gpu_drawn`) and draws the frame again. The latest 256 are kept.
+    pub fn frames_partial(&self, first: u64, last: u64) -> bool {
+        self.textures.1.partial.iter().any(|serial| (first..=last).contains(serial))
     }
 
     /// Last observed completed prefix, without polling the backend. Progress

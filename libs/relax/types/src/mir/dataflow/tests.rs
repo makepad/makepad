@@ -25,7 +25,7 @@ fn body(locals: u32, blocks: Vec<BasicBlockData>) -> Body {
         phase: MirPhase::Built, source: MirSource { owner: DefId(0), kind: BodyKind::Fn },
         basic_blocks: blocks, local_decls: decls,
         source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }],
-        user_type_annotations: Vec::new(), var_debug_info: Vec::new(), arg_count: 0,
+        user_type_annotations: Vec::new(), span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(), var_debug_info: Vec::new(), arg_count: 0,
         spread_arg: None, promoted: Vec::new(), coroutine: None,
     }
 }
@@ -334,7 +334,7 @@ fn liveness_projected_writes_indices_self_assign_and_nonuses() {
         StatementKind::Assign(indirect, Rvalue::Use(constant())),
         StatementKind::SetDiscriminant { place: place(5), variant_index: VariantIdx(0) },
         StatementKind::StorageDead(Local(2)),
-        StatementKind::AscribeUserType(place(5), UserTypeProjection { base: UserTypeAnnotationIndex(0), projection: vec![PlaceElem::Index(Local(5))] }, Variance::Invariant),
+        StatementKind::AscribeUserType(place(5), UserTypeProjection { base: UserTypeAnnotationIndex(0), projection: vec![UserTypeProjectionElem::Index] }, Variance::Invariant),
     ], TerminatorKind::Unreachable)]);
     let r = iterate_to_fixpoint(&b, &MaybeLiveLocals);
     let mut c = r.cursor(); c.seek_to_block_start(BasicBlock(0)); set(c.get(), &[2, 3, 4]);

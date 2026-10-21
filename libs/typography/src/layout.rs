@@ -177,6 +177,9 @@ pub fn layout(font: &OutlineFont, text: &str, style: &TextStyle) -> TextLayout {
             line_start += line_text.len() + 1;
         }
     });
+    if super::record::recording() {
+        super::record::note(font.data(), glyphs.iter().map(|g| g.glyph));
+    }
     TextLayout { glyphs, metrics, size: style.size, line_widths, line_height, chars: chars.len(), words }
 }
 

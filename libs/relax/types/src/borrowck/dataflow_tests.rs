@@ -25,7 +25,7 @@ fn body(types: &[TyId], basic_blocks: Vec<BasicBlockData>) -> Body {
             kind: if i == 0 { LocalKind::Return } else { LocalKind::Temp }, local_info: LocalInfo::Boring,
         }).collect(),
         basic_blocks, source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }],
-        user_type_annotations: Vec::new(), var_debug_info: Vec::new(), arg_count: 0,
+        user_type_annotations: Vec::new(), span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(), var_debug_info: Vec::new(), arg_count: 0,
         spread_arg: None, promoted: Vec::new(), coroutine: None,
     }
 }

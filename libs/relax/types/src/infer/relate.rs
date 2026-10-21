@@ -78,7 +78,7 @@ fn relate_ty_args(r: &mut dyn TypeRelation<'_>, def: DefId, a_ty: TyId, b_ty: Ty
     } else {
         let indices = if let Some(adt) = tcx.adts.get(&def) { adt.generic_indices.clone() }
             else { tcx.fn_item_sig(r.prog(), def).expect("variance declaration").generic_indices.clone() };
-        let variances = tcx.variances_of(r.prog(), def).to_vec();
+        let variances = if matches!(tcx.tys.kind(a_ty), TyKind::FnDef(..)) { tcx.fn_def_variances(r.prog(), def) } else { tcx.variances_of(r.prog(), def).to_vec() };
         for i in 0..a.len() {
             let variance = variances[indices.types_consts[i] as usize];
             if variance == V::Bi && (r.has_unresolved_infer(a[i]) || r.has_unresolved_infer(b[i])) { bivariant_infer = true; }
@@ -92,7 +92,14 @@ fn relate_ty_args(r: &mut dyn TypeRelation<'_>, def: DefId, a_ty: TyId, b_ty: Ty
     Ok((args, tcx.tys.intern_region_args(&regions)))
 }
 
+/// Recursive relation can overflow the stack: a type nested 1000 deep (rustc: the generalizer's
+/// relate_with_variance runs under ensure_sufficient_stack, for a deeper
+/// `ui/associated-consts/issue-93775.rs`)
 pub fn structurally_relate_tys(r: &mut dyn TypeRelation<'_>, a: TyId, b: TyId) -> Result<TyId, TypeError> {
+    crate::stack::ensure_sufficient_stack(|| structurally_relate_tys_inner(r, a, b))
+}
+
+fn structurally_relate_tys_inner(r: &mut dyn TypeRelation<'_>, a: TyId, b: TyId) -> Result<TyId, TypeError> {
     let tys = &r.tcx().tys;
     let ak = tys.kind(a).clone();
     let bk = tys.kind(b).clone();

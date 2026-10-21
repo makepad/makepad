@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // Demand certificates belong to the graph; crate records keep only their own selection.
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 
 pub(crate) mod strings;
 
@@ -203,14 +203,15 @@ fields!(MTok, kind, text, pos);
 impl Codec for MacroDef {
     fn put(&self, w: &mut Vec<u8>) {
         self.name.put(w); self.krate.put(w); self.exported.put(w); self.arms.put(w);
-        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w);
+        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w); self.def_mod.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         Some(Self { name: Codec::get(r)?, krate: Codec::get(r)?, exported: Codec::get(r)?, arms: Codec::get(r)?,
-            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, input: None })
+            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, def_mod: Codec::get(r)?, input: None })
     }
 }
 fields!(UseItem, module, path, bind, is_pub);
+fields!(ModItem, pos, end, macro_use);
 fields!(LazyCtx, krate, path, module_path, mods, s2_fmt);
 /// Option<Box<LazyCtx>>'s encoding
 impl Codec for crate::parser::FileLazy {
@@ -364,12 +365,13 @@ impl Codec for CrateMods {
         self.root.put(w);
         self.src.put(w);
         self.mods.put(w);
+        self.items.put(w);
         self.uses.put(w);
         self.externs.put(w);
         self.renames.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
-        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, ..Default::default() })
+        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, ..Default::default() })
     }
 }
 impl Codec for MacroUse {
@@ -556,8 +558,20 @@ fields!(DemandSlice, image, start, len, hash);
 
 pub fn demand_token_hash(toks: &[crate::lexer::Tok]) -> u128 {
     let mut h = crate::sip::Sip128::new();
-    h.str("demand-tokens-v1");
-    for t in toks { h.u8(t.kind as u8); h.u32(t.lo); h.u32(t.hi); }
+    h.str("demand-tokens-v2");
+    // 9 bytes a token, written in blocks (one `write` per token field made the hash a
+    // per-byte tail loop)
+    let mut block = [0u8; 9 * 256];
+    for chunk in toks.chunks(256) {
+        for (i, t) in chunk.iter().enumerate() {
+            let (kind, lo, hi) = (t.kind as u8, t.lo, t.hi);
+            let at = i * 9;
+            block[at] = kind;
+            block[at + 1..at + 5].copy_from_slice(&lo.to_le_bytes());
+            block[at + 5..at + 9].copy_from_slice(&hi.to_le_bytes());
+        }
+        h.write(&block[..chunk.len() * 9]);
+    }
     h.finish128()
 }
 

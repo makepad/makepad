@@ -276,6 +276,13 @@ extern "C" {
     pub static AVVideoAverageBitRateKey: ObjcId;
     pub static AVVideoExpectedSourceFrameRateKey: ObjcId;
     pub static AVVideoMaxKeyFrameIntervalKey: ObjcId;
+    /// The colour a writer tags (and converts to): a dictionary of the
+    /// primaries, transfer function and YCbCr matrix keys below, whose values
+    /// are the CoreVideo colour strings (`CV*GetStringForIntegerCodePoint`).
+    pub static AVVideoColorPropertiesKey: ObjcId;
+    pub static AVVideoColorPrimariesKey: ObjcId;
+    pub static AVVideoTransferFunctionKey: ObjcId;
+    pub static AVVideoYCbCrMatrixKey: ObjcId;
     pub static AVVideoCodecTypeHEVC: ObjcId;
     pub static AVVideoCodecTypeH264: ObjcId;
     pub static AVFormatIDKey: ObjcId;
@@ -564,6 +571,22 @@ extern "C" {
     pub static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
     pub static kCVPixelBufferOpenGLESCompatibilityKey: CFStringRef;
     pub static kCVPixelBufferMetalCompatibilityKey: CFStringRef;
+    /// Colour attachments of an image buffer (and, under the same names, the
+    /// extensions of a video format description).
+    pub static kCVImageBufferColorPrimariesKey: CFStringRef;
+    pub static kCVImageBufferTransferFunctionKey: CFStringRef;
+    pub static kCVImageBufferYCbCrMatrixKey: CFStringRef;
+    /// H.273 code points of the CoreVideo colour strings, both ways
+    /// (0 / null for one CoreVideo does not name).
+    pub fn CVColorPrimariesGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVTransferFunctionGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVYCbCrMatrixGetIntegerCodePointForString(s: CFStringRef) -> i32;
+    pub fn CVColorPrimariesGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVTransferFunctionGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVYCbCrMatrixGetStringForIntegerCodePoint(code: i32) -> CFStringRef;
+    pub fn CVBufferCopyAttachment(buffer: CVPixelBufferRef, key: CFStringRef, mode: *mut u32) -> *const c_void;
+    /// `mode`: 1 = kCVAttachmentMode_ShouldPropagate.
+    pub fn CVBufferSetAttachment(buffer: CVPixelBufferRef, key: CFStringRef, value: *const c_void, mode: u32);
     pub fn CVPixelBufferCreate(
         allocator: *const c_void,
         width: usize,
@@ -695,6 +718,8 @@ extern "C" {
     /// The dictionary of codec atoms hung off a format description, keyed by
     /// atom name (`hvcC` for HEVC).
     pub static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
+    /// A CFBoolean: the stream's samples are full range.
+    pub static kCMFormatDescriptionExtension_FullRangeVideo: CFStringRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
 
     pub fn VTCompressionSessionCreate(

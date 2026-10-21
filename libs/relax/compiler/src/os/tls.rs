@@ -53,7 +53,7 @@ mod imp {
     /// Linux x86-64: the block pointer lives in a static-TLS cell of this (executable)
     /// runtime, at a fixed offset from the thread pointer that JIT code reads via fs.
     pub fn jit_offset(_key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
-        let reader = emit(&crate::x64::fs_reader());
+        let reader = emit(&relax_backend::x64::fs_reader());
         let fs_base: rt_fn_ty!(fn() -> u64) = unsafe { std::mem::transmute(reader as usize) };
         let cell = TLS_BLOCK.with(|c| c as *const std::cell::Cell<u64> as u64);
         let off = cell.wrapping_sub(fs_base()) as i64;
@@ -89,7 +89,7 @@ mod imp {
 
     /// The slot index JIT code reads (`Env::tls_key`), checked through the emitted reader.
     pub fn jit_offset(key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
-        let reader = emit(&crate::arm64::tsd_reader());
+        let reader = emit(&relax_backend::arm64::tsd_reader());
         let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
         set(key, 0x5a5a_0000 as *mut u8);
@@ -115,7 +115,7 @@ mod imp {
 
     /// The inline fast path reads the TSD slot directly: check it sees pthread's value.
     pub fn jit_offset(key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
-        let reader = emit(&crate::arm64::tsd_reader());
+        let reader = emit(&relax_backend::arm64::tsd_reader());
         let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
         set(key, 0x5a5a_0000 as *mut u8);
@@ -180,7 +180,7 @@ mod imp {
             panic!("thread-local fast path: TlsAlloc index {} is not one of the TEB's 64 direct slots", key);
         }
         let off = TLS_SLOTS + 8 * key;
-        let reader = emit(&crate::x64::gs_reader());
+        let reader = emit(&relax_backend::x64::gs_reader());
         let read: rt_fn_ty!(fn(u64) -> u64) = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
         unsafe { TlsSetValue(key as u32, 0x5a5a_0000 as *mut u8) };

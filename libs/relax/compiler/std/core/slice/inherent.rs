@@ -55,21 +55,21 @@ impl<T> [T] {
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn first(&self) -> Option<&T> {
+    pub const fn first(&self) -> Option<&T> {
         if self.is_empty() {
             None
         } else {
             Some(&self[0])
         }
     }
-    pub fn first_mut(&mut self) -> Option<&mut T> {
+    pub const fn first_mut(&mut self) -> Option<&mut T> {
         if self.is_empty() {
             None
         } else {
             Some(&mut self[0])
         }
     }
-    pub fn last(&self) -> Option<&T> {
+    pub const fn last(&self) -> Option<&T> {
         let n = self.len();
         if n == 0 {
             None
@@ -77,7 +77,7 @@ impl<T> [T] {
             Some(&self[n - 1])
         }
     }
-    pub fn last_mut(&mut self) -> Option<&mut T> {
+    pub const fn last_mut(&mut self) -> Option<&mut T> {
         let n = self.len();
         if n == 0 {
             None
@@ -85,14 +85,14 @@ impl<T> [T] {
             Some(&mut self[n - 1])
         }
     }
-    pub fn split_first(&self) -> Option<(&T, &[T])> {
+    pub const fn split_first(&self) -> Option<(&T, &[T])> {
         if self.is_empty() {
             None
         } else {
             Some((&self[0], &self[1..]))
         }
     }
-    pub fn split_first_mut(&mut self) -> Option<(&mut T, &mut [T])> {
+    pub const fn split_first_mut(&mut self) -> Option<(&mut T, &mut [T])> {
         if self.is_empty() {
             None
         } else {
@@ -100,7 +100,7 @@ impl<T> [T] {
             Some((&mut a[0], b))
         }
     }
-    pub fn split_last(&self) -> Option<(&T, &[T])> {
+    pub const fn split_last(&self) -> Option<(&T, &[T])> {
         let n = self.len();
         if n == 0 {
             None
@@ -108,7 +108,7 @@ impl<T> [T] {
             Some((&self[n - 1], &self[..n - 1]))
         }
     }
-    pub fn split_last_mut(&mut self) -> Option<(&mut T, &mut [T])> {
+    pub const fn split_last_mut(&mut self) -> Option<(&mut T, &mut [T])> {
         let n = self.len();
         if n == 0 {
             None
@@ -117,25 +117,42 @@ impl<T> [T] {
             Some((&mut b[0], a))
         }
     }
-    pub fn get<I: SliceIndex<[T]>>(&self, index: I) -> Option<&I::Output> {
+    pub const fn get<I: SliceIndex<[T]>>(&self, index: I) -> Option<&I::Output> {
         index.get(self)
+    }
+    pub fn get_disjoint_mut<I, const N: usize>(&mut self, indices: [I; N]) -> Result<[&mut I::Output; N], super::GetDisjointMutError>
+    where
+        I: super::GetDisjointMutIndex + SliceIndex<[T]>,
+    {
+        super::get_disjoint_mut(self, indices)
+    }
+    #[track_caller]
+    pub unsafe fn get_disjoint_unchecked_mut<I, const N: usize>(&mut self, indices: [I; N]) -> [&mut I::Output; N]
+    where
+        I: super::GetDisjointMutIndex + SliceIndex<[T]>,
+    {
+        super::get_disjoint_unchecked_mut(self, indices)
     }
     pub fn get_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> Option<&mut I::Output> {
         index.get_mut(self)
     }
-    pub unsafe fn get_unchecked<I: SliceIndex<[T]>>(&self, index: I) -> &I::Output {
+    pub const unsafe fn get_unchecked<I: SliceIndex<[T]>>(&self, index: I) -> &I::Output {
         &*index.get_unchecked(self)
     }
-    pub unsafe fn get_unchecked_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> &mut I::Output {
+    pub const unsafe fn get_unchecked_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> &mut I::Output {
         &mut *index.get_unchecked_mut(self)
     }
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
     pub const fn as_ptr(&self) -> *const T {
         self as *const [T] as *const T
     }
-    pub fn as_mut_ptr(&mut self) -> *mut T {
+    #[rustc_as_ptr]
+    #[rustc_never_returns_null_ptr]
+    pub const fn as_mut_ptr(&mut self) -> *mut T {
         self as *mut [T] as *mut T
     }
-    pub fn as_ptr_range(&self) -> crate::ops::Range<*const T> {
+    pub const fn as_ptr_range(&self) -> crate::ops::Range<*const T> {
         let start = self.as_ptr();
         let end = unsafe { im::ptr_add(start, self.len()) };
         start..end
@@ -144,55 +161,55 @@ impl<T> [T] {
     pub fn swap(&mut self, a: usize, b: usize) {
         super::swap(self, a, b)
     }
-    pub fn reverse(&mut self) {
+    pub const fn reverse(&mut self) {
         super::reverse(self)
     }
-    pub fn iter(&self) -> Iter<'_, T> {
+    pub const fn iter(&self) -> Iter<'_, T> {
         Iter::new(self)
     }
-    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+    pub const fn iter_mut(&mut self) -> IterMut<'_, T> {
         IterMut::new(self)
     }
     #[track_caller]
-    pub fn windows(&self, size: usize) -> Windows<'_, T> {
+    pub const fn windows(&self, size: usize) -> Windows<'_, T> {
         it::windows(self, size)
     }
     #[track_caller]
-    pub fn chunks(&self, chunk_size: usize) -> Chunks<'_, T> {
+    pub const fn chunks(&self, chunk_size: usize) -> Chunks<'_, T> {
         it::chunks(self, chunk_size)
     }
     #[track_caller]
-    pub fn chunks_mut(&mut self, chunk_size: usize) -> ChunksMut<'_, T> {
+    pub const fn chunks_mut(&mut self, chunk_size: usize) -> ChunksMut<'_, T> {
         it::chunks_mut(self, chunk_size)
     }
     #[track_caller]
-    pub fn chunks_exact(&self, chunk_size: usize) -> ChunksExact<'_, T> {
+    pub const fn chunks_exact(&self, chunk_size: usize) -> ChunksExact<'_, T> {
         it::chunks_exact(self, chunk_size)
     }
     #[track_caller]
-    pub fn chunks_exact_mut(&mut self, chunk_size: usize) -> ChunksExactMut<'_, T> {
+    pub const fn chunks_exact_mut(&mut self, chunk_size: usize) -> ChunksExactMut<'_, T> {
         it::chunks_exact_mut(self, chunk_size)
     }
     #[track_caller]
-    pub fn rchunks(&self, chunk_size: usize) -> RChunks<'_, T> {
+    pub const fn rchunks(&self, chunk_size: usize) -> RChunks<'_, T> {
         it::rchunks(self, chunk_size)
     }
     #[track_caller]
-    pub fn rchunks_mut(&mut self, chunk_size: usize) -> RChunksMut<'_, T> {
+    pub const fn rchunks_mut(&mut self, chunk_size: usize) -> RChunksMut<'_, T> {
         it::rchunks_mut(self, chunk_size)
     }
     #[track_caller]
-    pub fn rchunks_exact(&self, chunk_size: usize) -> RChunksExact<'_, T> {
+    pub const fn rchunks_exact(&self, chunk_size: usize) -> RChunksExact<'_, T> {
         it::rchunks_exact(self, chunk_size)
     }
     #[track_caller]
-    pub fn rchunks_exact_mut(&mut self, chunk_size: usize) -> RChunksExactMut<'_, T> {
+    pub const fn rchunks_exact_mut(&mut self, chunk_size: usize) -> RChunksExactMut<'_, T> {
         it::rchunks_exact_mut(self, chunk_size)
     }
-    pub fn chunk_by<P: FnMut(&T, &T) -> bool>(&self, pred: P) -> ChunkBy<'_, T, P> {
+    pub const fn chunk_by<P: FnMut(&T, &T) -> bool>(&self, pred: P) -> ChunkBy<'_, T, P> {
         it::chunk_by(self, pred)
     }
-    pub fn chunk_by_mut<P: FnMut(&T, &T) -> bool>(&mut self, pred: P) -> ChunkByMut<'_, T, P> {
+    pub const fn chunk_by_mut<P: FnMut(&T, &T) -> bool>(&mut self, pred: P) -> ChunkByMut<'_, T, P> {
         it::chunk_by_mut(self, pred)
     }
     pub fn split_inclusive_mut<P: FnMut(&T) -> bool>(
@@ -211,17 +228,17 @@ impl<T> [T] {
         it::rsplitn_mut(self, n, pred)
     }
     #[track_caller]
-    pub fn split_at(&self, mid: usize) -> (&[T], &[T]) {
+    pub const fn split_at(&self, mid: usize) -> (&[T], &[T]) {
         if mid > self.len() {
             crate::panicking::panic_str("mid > len");
         }
         (&self[..mid], &self[mid..])
     }
     #[track_caller]
-    pub fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
+    pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         super::split_at_mut(self, mid)
     }
-    pub fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
+    pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
         if mid > self.len() {
             None
         } else {
@@ -378,11 +395,11 @@ impl<T> [T] {
         true
     }
     #[track_caller]
-    pub fn rotate_left(&mut self, mid: usize) {
+    pub const fn rotate_left(&mut self, mid: usize) {
         super::rotate_left(self, mid)
     }
     #[track_caller]
-    pub fn rotate_right(&mut self, k: usize) {
+    pub const fn rotate_right(&mut self, k: usize) {
         super::rotate_right(self, k)
     }
     pub fn fill(&mut self, value: T)
@@ -400,14 +417,14 @@ impl<T> [T] {
         }
     }
     #[track_caller]
-    pub fn copy_from_slice(&mut self, src: &[T])
+    pub const fn copy_from_slice(&mut self, src: &[T])
     where
         T: Copy,
     {
         super::copy_from_slice(self, src)
     }
     #[track_caller]
-    pub fn clone_from_slice(&mut self, src: &[T])
+    pub const fn clone_from_slice(&mut self, src: &[T])
     where
         T: Clone,
     {
@@ -421,7 +438,7 @@ impl<T> [T] {
         super::copy_within(self, src, dest)
     }
     #[track_caller]
-    pub fn swap_with_slice(&mut self, other: &mut [T]) {
+    pub const fn swap_with_slice(&mut self, other: &mut [T]) {
         if self.len() != other.len() {
             crate::panicking::panic_str("destination and source slices have different lengths");
         }
@@ -460,28 +477,35 @@ impl<T> [T] {
     {
         Join::join(self, sep)
     }
-    pub fn first_chunk<const N: usize>(&self) -> Option<&[T; N]> {
+    #[deprecated(since = "1.3.0", note = "renamed to join")]
+    pub fn connect<Separator>(&self, sep: Separator) -> <[T] as Join<Separator>>::Output
+    where
+        [T]: Join<Separator>,
+    {
+        Join::join(self, sep)
+    }
+    pub const fn first_chunk<const N: usize>(&self) -> Option<&[T; N]> {
         if self.len() < N {
             None
         } else {
             Some(unsafe { &*(self.as_ptr() as *const [T; N]) })
         }
     }
-    pub fn first_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
+    pub const fn first_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
         if self.len() < N {
             None
         } else {
             Some(unsafe { &mut *(self.as_mut_ptr() as *mut [T; N]) })
         }
     }
-    pub fn last_chunk<const N: usize>(&self) -> Option<&[T; N]> {
+    pub const fn last_chunk<const N: usize>(&self) -> Option<&[T; N]> {
         if self.len() < N {
             None
         } else {
             Some(unsafe { &*(self.as_ptr().add(self.len() - N) as *const [T; N]) })
         }
     }
-    pub fn last_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
+    pub const fn last_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
         let len = self.len();
         if len < N {
             None
@@ -489,7 +513,7 @@ impl<T> [T] {
             Some(unsafe { &mut *(self.as_mut_ptr().add(len - N) as *mut [T; N]) })
         }
     }
-    pub fn split_first_chunk<const N: usize>(&self) -> Option<(&[T; N], &[T])> {
+    pub const fn split_first_chunk<const N: usize>(&self) -> Option<(&[T; N], &[T])> {
         if self.len() < N {
             None
         } else {
@@ -497,7 +521,7 @@ impl<T> [T] {
             Some((unsafe { &*(a.as_ptr() as *const [T; N]) }, b))
         }
     }
-    pub fn split_last_chunk<const N: usize>(&self) -> Option<(&[T], &[T; N])> {
+    pub const fn split_last_chunk<const N: usize>(&self) -> Option<(&[T], &[T; N])> {
         if self.len() < N {
             None
         } else {
@@ -507,32 +531,32 @@ impl<T> [T] {
     }
 
     #[track_caller]
-    pub fn as_chunks<const N: usize>(&self) -> (&[[T; N]], &[T]) {
+    pub const fn as_chunks<const N: usize>(&self) -> (&[[T; N]], &[T]) {
         it::as_chunks(self)
     }
 
     #[track_caller]
-    pub fn as_chunks_mut<const N: usize>(&mut self) -> (&mut [[T; N]], &mut [T]) {
+    pub const fn as_chunks_mut<const N: usize>(&mut self) -> (&mut [[T; N]], &mut [T]) {
         it::as_chunks_mut(self)
     }
 
     #[track_caller]
-    pub fn as_rchunks<const N: usize>(&self) -> (&[T], &[[T; N]]) {
+    pub const fn as_rchunks<const N: usize>(&self) -> (&[T], &[[T; N]]) {
         it::as_rchunks(self)
     }
 
     #[track_caller]
-    pub fn as_rchunks_mut<const N: usize>(&mut self) -> (&mut [T], &mut [[T; N]]) {
+    pub const fn as_rchunks_mut<const N: usize>(&mut self) -> (&mut [T], &mut [[T; N]]) {
         it::as_rchunks_mut(self)
     }
 
     #[track_caller]
-    pub fn split_first_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [T; N], &mut [T])> {
+    pub const fn split_first_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [T; N], &mut [T])> {
         it::split_first_chunk_mut(self)
     }
 
     #[track_caller]
-    pub fn split_last_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [T], &mut [T; N])> {
+    pub const fn split_last_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [T], &mut [T; N])> {
         it::split_last_chunk_mut(self)
     }
 }
@@ -541,16 +565,16 @@ impl [u8] {
     pub fn utf8_chunks(&self) -> crate::str::Utf8Chunks<'_> {
         crate::str::utf8_chunks(self)
     }
-    pub fn is_ascii(&self) -> bool {
+    pub const fn is_ascii(&self) -> bool {
         super::is_ascii(self)
     }
-    pub fn eq_ignore_ascii_case(&self, other: &[u8]) -> bool {
+    pub const fn eq_ignore_ascii_case(&self, other: &[u8]) -> bool {
         super::eq_ignore_ascii_case(self, other)
     }
-    pub fn make_ascii_uppercase(&mut self) {
+    pub const fn make_ascii_uppercase(&mut self) {
         super::make_ascii_uppercase(self)
     }
-    pub fn make_ascii_lowercase(&mut self) {
+    pub const fn make_ascii_lowercase(&mut self) {
         super::make_ascii_lowercase(self)
     }
     pub fn to_ascii_uppercase(&self) -> Vec<u8> {
@@ -563,13 +587,13 @@ impl [u8] {
         super::make_ascii_lowercase(&mut v);
         v
     }
-    pub fn trim_ascii_start(&self) -> &[u8] {
+    pub const fn trim_ascii_start(&self) -> &[u8] {
         super::trim_ascii_start(self)
     }
-    pub fn trim_ascii_end(&self) -> &[u8] {
+    pub const fn trim_ascii_end(&self) -> &[u8] {
         super::trim_ascii_end(self)
     }
-    pub fn trim_ascii(&self) -> &[u8] {
+    pub const fn trim_ascii(&self) -> &[u8] {
         super::trim_ascii(self)
     }
 }
@@ -602,7 +626,7 @@ impl<T, const N: usize> [[T; N]] {
         };
         unsafe { crate::slice::from_raw_parts(self.as_ptr() as *const T, len) }
     }
-    pub fn as_flattened_mut(&mut self) -> &mut [T] {
+    pub const fn as_flattened_mut(&mut self) -> &mut [T] {
         let len = if crate::mem::size_of::<T>() == 0 {
             match self.len().checked_mul(N) {
                 Some(l) => l,

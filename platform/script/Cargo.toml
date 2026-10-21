@@ -14,6 +14,7 @@ host-shims = []
 
 [dependencies]
 makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
+makepad-relax = { workspace = true }
 makepad-shader = { path = "../shader", version = "1.0.0" }
 makepad-error-log = {path = "../../libs/error_log", version = "1.0.0" }
 makepad-math = {path = "../../libs/math", version = "1.0.0" }

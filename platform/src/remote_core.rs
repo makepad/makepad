@@ -955,6 +955,26 @@ pub fn route_mouse(p: &Params, force_kind: Option<&str>) -> Answer {
             mouse(MouseKind::Down),
             mouse(MouseKind::Up),
         ],
+        // a whole drag in one request: down at x,y, `steps` moves to x1,y1 (and back with
+        // back=1), up; a burst like a fast pointer, so agents reproduce drag hitches alone
+        "drag" => {
+            let x1 = p.f64(&["x1"], x);
+            let y1 = p.f64(&["y1"], y);
+            let steps = (p.f64(&["steps"], 60.0).max(1.0)) as usize;
+            let back = p.flag(&["back"]);
+            let at = |px: f64, py: f64, kind| Input::Mouse { kind, x: px, y: py, button, dx: 0.0, dy: 0.0, mods, hw, time };
+            let mut inputs = vec![at(x, y, MouseKind::Move), at(x, y, MouseKind::Down)];
+            let legs: &[(f64, f64, f64, f64)] = if back { &[(x, y, x1, y1), (x1, y1, x, y)] } else { &[(x, y, x1, y1)] };
+            for &(ax, ay, bx, by) in legs {
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    inputs.push(at(ax + (bx - ax) * t, ay + (by - ay) * t, MouseKind::Move));
+                }
+            }
+            let (ex, ey) = if back { (x, y) } else { (x1, y1) };
+            inputs.push(at(ex, ey, MouseKind::Up));
+            inputs
+        }
         "scroll" | "wheel" => match p.get(&["phase"]) {
             None => vec![mouse(MouseKind::Scroll)],
             Some(name) => {
@@ -1054,6 +1074,31 @@ pub fn route_text(p: &Params) -> Answer {
         vec![Input::Text(text.to_string())],
         p.flag(&["wait"]),
     )
+}
+
+/// Injected pointer moves follow the hardware rule (HAL intake): a move directly followed by
+/// another move with the same buttons and modifiers is dropped and its delta carried on.
+pub fn coalesce_moves(inputs: Vec<Input>) -> Vec<Input> {
+    let mut out: Vec<Input> = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if let Input::Mouse { kind: MouseKind::Move, button, mods, hw, dx, dy, .. } = &input {
+            if let Some(Input::Mouse { kind: MouseKind::Move, button: b, mods: m, hw: h, dx: pdx, dy: pdy, .. }) = out.last() {
+                if b == button && m == mods && h == hw {
+                    let (cx, cy) = (pdx + dx, pdy + dy);
+                    out.pop();
+                    let mut input = input;
+                    if let Input::Mouse { dx, dy, .. } = &mut input {
+                        *dx = cx;
+                        *dy = cy;
+                    }
+                    out.push(input);
+                    continue;
+                }
+            }
+        }
+        out.push(input);
+    }
+    out
 }
 
 pub fn send_input(window: Option<usize>, inputs: Vec<Input>, wait: bool) -> Answer {

@@ -38,11 +38,11 @@ pub fn from_fn<T, const N: usize, F: FnMut(usize) -> T>(f: F) -> [T; N] {
     unsafe { out.assume_init() }
 }
 
-pub fn from_ref<T>(s: &T) -> &[T; 1] {
+pub const fn from_ref<T>(s: &T) -> &[T; 1] {
     unsafe { &*(s as *const T as *const [T; 1]) }
 }
 
-pub fn from_mut<T>(s: &mut T) -> &mut [T; 1] {
+pub const fn from_mut<T>(s: &mut T) -> &mut [T; 1] {
     unsafe { &mut *(s as *mut T as *mut [T; 1]) }
 }
 
@@ -66,7 +66,7 @@ impl crate::error::Error for TryFromSliceError {}
 
 #[cfg(not(relax_check))]
 impl<T, const N: usize> [T; N] {
-    pub fn map<U, F: FnMut(T) -> U>(self, f: F) -> [U; N] {
+    pub const fn map<U, F: FnMut(T) -> U>(self, f: F) -> [U; N] {
         let mut f = f;
         let src = ManuallyDrop::new(self);
         let sp = &*src as *const [T; N] as *const T;
@@ -75,10 +75,10 @@ impl<T, const N: usize> [T; N] {
     pub const fn as_slice(&self) -> &[T] {
         self
     }
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
-    pub fn each_ref(&self) -> [&T; N] {
+    pub const fn each_ref(&self) -> [&T; N] {
         from_fn(|i| &self[i])
     }
 }
@@ -235,6 +235,7 @@ impl<T, const N: usize> IntoIterator for [T; N] {
 }
 
 /// By-value array iterator.
+#[rustc_insignificant_dtor]
 pub struct IntoIter<T, const N: usize> {
     data: ManuallyDrop<[T; N]>,
     start: usize,

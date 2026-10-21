@@ -229,15 +229,15 @@ fn lazy_signature_diagnostics_survive_first_reader_and_reload() {
     let bad = named(&p, "bad");
     assert_eq!(t.signature_count(), 0);
     t.fn_sig(&p, bad).unwrap();
-    assert!(t.signature_errors(&p, bad).iter().any(|e| e.contains("unsupported function ABI")));
+    assert!(t.signature_errors(&p, bad).iter().any(|e| e.contains("E0703: invalid ABI")));
     let state = crate::tcx::EvalState::new();
     let cx = crate::tcx::EvalCx::new(&p, &t, crate::tcx::TypingEnv::fully_monomorphized(&p), &state);
     let body = crate::typeck::instantiate_body(&cx, &p, &t, bad, &[]);
-    assert!(body.errors.iter().any(|e| e.contains("unsupported function ABI")));
+    assert!(body.errors.iter().any(|e| e.contains("E0703: invalid ABI")));
     assert_eq!(t.signature_count(), 1);
     t.collect_added(&p, &[bad], false);
     assert_eq!(t.signature_count(), 0);
-    assert!(t.signature_errors(&p, bad).iter().any(|e| e.contains("unsupported function ABI")));
+    assert!(t.signature_errors(&p, bad).iter().any(|e| e.contains("E0703: invalid ABI")));
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn lazy_foreign_signature_errors_reach_every_caller() {
     let cx = crate::tcx::EvalCx::new(&p, &t, crate::tcx::TypingEnv::fully_monomorphized(&p), &state);
     for name in ["first", "second"] {
         let body = crate::typeck::instantiate_body(&cx, &p, &t, named(&p, name), &[]);
-        assert!(body.errors.iter().any(|e| e.contains("unsupported function ABI")), "{:?}", body.errors);
+        assert!(body.errors.iter().any(|e| e.contains("E0703: invalid ABI")), "{:?}", body.errors);
     }
     assert_eq!(t.signature_count(), 3);
 }

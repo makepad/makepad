@@ -5,6 +5,7 @@
 //! name, through its impl's self type and trait, or (inherent methods and
 //! trait members) through a member name used by reached code.
 use super::*;
+use demand::NameSym as Sym;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind { Fn, Decl, Value, Trait, Impl, Use, Macro, Mod, Opaque }
@@ -343,17 +344,18 @@ fn qualify_head(names: &demand::Names, ci: usize, module: &str, head: &mut Head)
 /// Names reached code can call as members: an identifier after `.` (method
 /// call or field), or the last segment of a path that is called (`T::f(`,
 /// `T::f::<..>(`). Module segments of a path are not members.
-pub fn member_names(src: &[u8], toks: &[Tok], out: &mut BTreeSet<String>) {
+pub fn member_names(names: &demand::Names, src: &[u8], toks: &[Tok], out: &mut Vec<Sym>, cache: &mut demand::SymCache) {
+    let text = |t: &Tok| std::str::from_utf8(&src[t.lo as usize..t.hi as usize]).map_or("\u{fffd}", |s| s.trim_start_matches("r#"));
     for (i, t) in toks.iter().enumerate() {
         // `dyn Trait`: a vtable needs every method of each implementation.
         if t.kind == T::KwDyn {
             let mut at = i + 1;
             let mut last = None;
             while at < toks.len() && matches!(toks[at].kind, T::Ident | T::RawIdent | T::PathSep | T::KwCrate | T::KwSuper | T::KwSelfValue) {
-                if matches!(toks[at].kind, T::Ident | T::RawIdent) { last = Some(word(src, &toks[at])); }
+                if matches!(toks[at].kind, T::Ident | T::RawIdent) { last = Some(text(&toks[at])); }
                 at += 1;
             }
-            if let Some(last) = last { out.insert(format!("dyn {last}")); }
+            if let Some(last) = last { out.push(names.sym(cache, &format!("dyn {last}"))); }
             continue;
         }
         if !matches!(t.kind, T::Ident | T::RawIdent) || i == 0 { continue; }
@@ -366,10 +368,7 @@ pub fn member_names(src: &[u8], toks: &[Tok], out: &mut BTreeSet<String>) {
             },
             _ => false,
         };
-        if member {
-            let name = word(src, t);
-            if !out.contains(&name) { out.insert(name); }
-        }
+        if member { out.push(names.sym(cache, text(t))); }
     }
 }
 
@@ -423,136 +422,60 @@ pub struct Closure {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Strength { Declared, Used }
 
+/// A set of symbols as a bitmap (a symbol is a dense id).
+#[derive(Default)]
+struct Bits(Vec<u64>);
+impl Bits {
+    fn insert(&mut self, s: Sym) -> bool {
+        let (word, bit) = (s as usize / 64, s % 64);
+        if word >= self.0.len() { self.0.resize(word + 1, 0); }
+        let new = self.0[word] >> bit & 1 == 0;
+        self.0[word] |= 1 << bit;
+        new
+    }
+    fn contains(&self, s: Sym) -> bool {
+        self.0.get(s as usize / 64).is_some_and(|w| w >> (s % 64) & 1 != 0)
+    }
+}
+
 /// A crate's boundary names while its closure runs: each evaluation's references are folded in as they
 /// are produced (a name repeats across thousands of evaluations; the sets keep it once).
 #[derive(Default)]
-struct Accumulated { declared: BTreeSet<String>, used: BTreeSet<String>, members: BTreeSet<String> }
+struct Accumulated { declared: HashSet<Sym>, used: HashSet<Sym>, members: HashSet<Sym> }
 
-struct Work { file: usize, module: String, ranges: Vec<(usize, usize)>, strength: Strength, exclude: Vec<String> }
+/// What an evaluation's own names are removed from its references: nothing, one module, or an item's names.
+#[derive(Clone, Copy)]
+enum Exclude { Module(Sym), Names(Span) }
 
-pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BTreeSet<String>, implicit: &BTreeSet<String>, jobs: usize,
-    profile: bool, parts: &mut [DemandPart], incoming: Option<&part::Boundary>,
-) -> Closure {
-    let entry = std::time::Instant::now();
-    for file in files.iter() {
-        parts[file.ci].boundary = part::Boundary::default();
-    }
-    // per crate (parts index), merged from the workers as each finishes
-    let accumulated: Vec<relax_session::sync::Mutex<Accumulated>> = (0..parts.len()).map(|_| Default::default()).collect();
-    let n = files.len();
-    // Splits/raw heads were built by outline workers and qualified as each
-    // crate's namespace was prepared; each item list is moved, never cloned.
-    let parsed: Vec<Arc<Vec<Item>>> = files.iter_mut().map(|f| std::mem::take(&mut f.items)).collect();
-    let mut trait_members: HashMap<String, BTreeSet<String>> = incoming.map(|b| b.traits.iter().map(|(n, m)| (n.clone(), m.clone())).collect()).unwrap_or_default();
-    for (f, items) in parsed.iter().enumerate() {
-        for item in items.iter() {
-            if item.kind == Kind::Trait {
-                if let Some(name) = item.names.first() {
-                    trait_members.entry(name.clone()).or_default().extend(item.members.iter().map(|m| m.name.clone()));
-                    parts[files[f].ci].boundary.traits.entry(name.clone()).or_default().extend(item.members.iter().map(|m| m.name.clone()));
-                }
-            }
-        }
-    }
-    // Reverse dependency indexes. A new name schedules only the files/items
-    // it can affect, including impl conjunctions and dynamic dispatch markers.
-    let mut declarations: HashMap<String, Vec<usize>> = HashMap::default();
-    // Impl headers are globally visible through the self-type/trait index,
-    // even when no body reaches the module containing the impl. Concrete
-    // candidates are keyed by self type; blanket/structural ones by trait.
-    // Loading their declarations does not demand their method bodies.
-    let mut impl_files: HashMap<String, Vec<usize>> = HashMap::default();
-    let mut modules: HashMap<String, Vec<usize>> = HashMap::default();
-    let mut users: HashMap<String, Vec<(usize, usize)>> = HashMap::default();
-    let mut member_users: HashMap<String, Vec<(usize, usize)>> = HashMap::default();
-    let mut queue = BTreeSet::new();
-    let mut reach_queue = BTreeMap::new();
-    for (f, items) in parsed.iter().enumerate() {
-        modules.entry(files[f].module.to_owned()).or_default().push(f);
-        declarations.entry(files[f].module.to_owned()).or_default().push(f);
-        for name in files[f].index.impls.iter().map(|(_, ty)| ty).chain(&files[f].index.blankets) {
-            impl_files.entry(name.clone()).or_default().push(f);
-        }
-        if files[f].root || files[f].force || files[f].surface.is_none() {
-            let cause = if files[f].root { "crate-root" } else if files[f].force { "forced-file" } else { "no-surface" };
-            reach_queue.insert(f, (cause.to_owned(), String::new()));
-        }
-        for (i, item) in items.iter().enumerate() {
-            for name in &item.names {
-                declarations.entry(name.clone()).or_default().push(f);
-                users.entry(name.clone()).or_default().push((f, i));
-            }
-            for member in &item.members { member_users.entry(member.name.clone()).or_default().push((f, i)); }
-            if files[f].force || item.global || item.head.is_some() { queue.insert((f, i)); }
-            if let Some(head) = &item.head {
-                for name in head.selves.iter().chain(&head.traits) { users.entry(name.clone()).or_default().push((f, i)); }
-                for name in &head.traits {
-                    member_users.entry(format!("dyn {}", name.rsplit("::").next().unwrap_or(name))).or_default().push((f, i));
-                    if let Some(members) = trait_members.get(name.as_str()) {
-                        for member in members { member_users.entry(member.clone()).or_default().push((f, i)); }
-                    }
-                }
-            }
-        }
-    }
-    for files in declarations.values_mut().chain(impl_files.values_mut()) { files.sort_unstable(); files.dedup(); }
-    for items in users.values_mut().chain(member_users.values_mut()) { items.sort_unstable(); items.dedup(); }
-    let mut used: HashSet<String> = HashSet::default();
-    let mut declared: HashSet<String> = HashSet::default();
-    let mut members: HashSet<String> = HashSet::default();
-    let mut reached = vec![false; n];
-    let mut reasons = vec![(String::new(), String::new()); n];
-    let mut item_used: Vec<Vec<bool>> = parsed.iter().map(|items| vec![false; items.len()]).collect();
-    let mut member_used: Vec<Vec<Vec<bool>>> = parsed.iter().map(|items| items.iter().map(|i| vec![false; i.members.len()]).collect()).collect();
-    let trace = std::env::var_os("MAKEPAD_RUN_ITEMS_TRACE").is_some();
-    let started = std::time::Instant::now();
-    if trace { eprintln!("rs-items-prep: {:?}", entry.elapsed()); }
-    let mut causes = BTreeMap::<String, usize>::new();
-    // Provenance (trace only): name/member -> first file whose reference produced it.
-    let mut origin: HashMap<String, usize> = HashMap::default();
-    let mut member_origin: HashMap<String, usize> = HashMap::default();
-    let mut trigger: Vec<Option<String>> = vec![None; n];
-    let mut pending: Vec<_> = seeds.into_iter().map(|name| (Strength::Used, name)).collect();
-    let mut pending_members: BTreeSet<String> = BTreeSet::new();
-    if let Some(incoming) = incoming {
-        pending.extend(incoming.declared.iter().cloned().map(|n| (Strength::Declared, n)));
-        pending.extend(incoming.used.iter().cloned().map(|n| (Strength::Used, n)));
-        pending_members.extend(incoming.members.iter().cloned());
-    }
-    let mut visits = 0usize;
-    let mut spent = [std::time::Duration::ZERO; 4];
-    loop {
-        let mut work: Vec<Work> = Vec::new();
-        let t0 = std::time::Instant::now();
-        for (strength, name) in pending.drain(..) {
-            if declared.insert(name.clone()) {
-                for &f in declarations.get(name.as_str()).into_iter().flatten() {
-                    if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(name.clone()); } ("name".to_owned(), name.clone()) }); }
-                }
-                for &f in impl_files.get(name.as_str()).into_iter().flatten() {
-                    if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(name.clone()); } ("impl-index".to_owned(), name.clone()) }); }
-                }
-                // Forwarding scopes matter even when a glob has no local item.
-                if let Some((scope, _)) = name.rsplit_once("::") {
-                    for &f in modules.get(scope).into_iter().flatten() {
-                        if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(name.clone()); } ("scope".to_owned(), scope.to_owned()) }); }
-                    }
-                }
-            }
-            if strength == Strength::Used && used.insert(name.clone()) {
-                queue.extend(users.get(name.as_str()).into_iter().flatten().copied());
-            }
-        }
-        for name in std::mem::take(&mut pending_members) {
-            if members.insert(name.clone()) { queue.extend(member_users.get(&name).into_iter().flatten().copied()); }
-        }
-        let reach = |f: usize, why: (&str, &str), reached: &mut Vec<bool>, reasons: &mut Vec<(String, String)>, work: &mut Vec<Work>, queue: &mut BTreeSet<(usize, usize)>| {
+struct Work<'a> { file: usize, module: &'a str, module_sym: Sym, ranges: Vec<(usize, usize)>, strength: Strength, exclude: Exclude }
+
+/// A run of `Syms::flat`.
+#[derive(Clone, Copy, Default)]
+struct Span(u32, u32);
+
+/// The symbols of one item's strings.
+#[derive(Clone, Copy, Default)]
+struct ItemSyms { module: Sym, names: Span, selves: Span, traits: Span, dyns: Span, members: Span }
+
+struct Syms { flat: Vec<Sym> }
+impl Syms {
+    fn get(&self, span: Span) -> &[Sym] { &self.flat[span.0 as usize..(span.0 + span.1) as usize] }
+}
+
+fn insert_sorted(set: &mut Vec<Sym>, s: Sym) {
+    if let Err(at) = set.binary_search(&s) { set.insert(at, s); }
+}
+
+struct ReachCx<'p, 'a: 'p> { files: &'p [FileInput<'a>], parsed: &'p [Arc<Vec<Item>>], item_syms: &'p [Vec<ItemSyms>], file_module: &'p [Sym] }
+
+/// Reach file `f`: it declares its items, and its `use`/eager-body ranges are evaluated.
+fn reach<'p, 'a: 'p>(cx: &ReachCx<'p, 'a>, f: usize, why: (&str, &str), reached: &mut Vec<bool>, reasons: &mut Vec<(String, String)>, work: &mut Vec<Work<'p>>, queue: &mut BTreeSet<(usize, usize)>) {
             if reached[f] { return; }
             reached[f] = true;
             reasons[f] = (why.0.to_owned(), why.1.to_owned());
-            work.push(Work { file: f, module: files[f].module.to_owned(), ranges: Vec::new(), strength: Strength::Declared, exclude: vec![files[f].module.to_owned()] });
+            work.push(Work { file: f, module: cx.files[f].module, module_sym: cx.file_module[f], ranges: Vec::new(), strength: Strength::Declared, exclude: Exclude::Module(cx.file_module[f]) });
             // The loader resolves every loaded item's declaration.
-            for (i, item) in parsed[f].iter().enumerate() {
+            for (i, item) in cx.parsed[f].iter().enumerate() {
                 if item.kind == Kind::Opaque { queue.insert((f, i)); }
                 let mut declarations = Vec::new();
                 let mut uses = Vec::new();
@@ -573,42 +496,200 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                     Kind::Use | Kind::Opaque => uses.push(item.range),
                     Kind::Fn | Kind::Mod | Kind::Macro => {}
                 }
-                let eager = |range: (usize, usize)| files[f].tokens().is_some_and(|(_, toks)|
-                    files[f].eager().is_some_and(|bodies| toks[range.0..range.1].iter()
+                let eager = |range: (usize, usize)| cx.files[f].tokens().is_some_and(|(_, toks)|
+                    cx.files[f].eager().is_some_and(|bodies| toks[range.0..range.1].iter()
                         .any(|t| { let lo = t.lo; t.kind == T::OpenBrace && bodies.contains(&lo) })));
                 if item.kind == Kind::Fn && eager(item.range) { uses.push(item.range); }
                 uses.extend(item.members.iter().filter(|m| m.is_fn && eager(m.range)).map(|m| m.range));
                 for nested in item.nested.iter().chain(item.members.iter().flat_map(|m| &m.nested)) {
                     if nested.evaluated { uses.push(nested.range); } else { declarations.push(nested.range); }
                 }
-                if !declarations.is_empty() { work.push(Work { file: f, module: item.module.clone(), ranges: declarations, strength: Strength::Declared, exclude: item.names.clone() }); }
-                if !uses.is_empty() { work.push(Work { file: f, module: item.module.clone(), ranges: uses, strength: Strength::Used, exclude: Vec::new() }); }
+                let s = cx.item_syms[f][i];
+                if !declarations.is_empty() { work.push(Work { file: f, module: &item.module, module_sym: s.module, ranges: declarations, strength: Strength::Declared, exclude: Exclude::Names(s.names) }); }
+                if !uses.is_empty() { work.push(Work { file: f, module: &item.module, module_sym: s.module, ranges: uses, strength: Strength::Used, exclude: Exclude::Names(Span::default()) }); }
             }
-        };
+        }
+
+pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BTreeSet<String>, implicit: &BTreeSet<String>, jobs: usize,
+    profile: bool, parts: &mut [DemandPart], incoming: Option<&part::Boundary>,
+) -> Closure {
+    let entry = std::time::Instant::now();
+    for file in files.iter() {
+        parts[file.ci].boundary = part::Boundary::default();
+    }
+    let names: &demand::Names = &*names;
+    let mut cache = demand::SymCache::default();
+    // per crate (parts index), merged from the workers as each finishes
+    let accumulated: Vec<relax_session::sync::Mutex<Accumulated>> = (0..parts.len()).map(|_| Default::default()).collect();
+    let n = files.len();
+    // Splits/raw heads were built by outline workers and qualified as each
+    // crate's namespace was prepared; each item list is moved, never cloned.
+    let parsed: Vec<Arc<Vec<Item>>> = files.iter_mut().map(|f| std::mem::take(&mut f.items)).collect();
+    let files: &[FileInput<'_>] = files;
+    // Every string the closure compares is a symbol: a name is one `u32`, equal names equal symbols.
+    let mut syms = Syms { flat: Vec::new() };
+    let file_module: Vec<Sym> = files.iter().map(|f| names.sym(&mut cache, f.module)).collect();
+    let mut item_syms: Vec<Vec<ItemSyms>> = Vec::with_capacity(n);
+    for items in parsed.iter() {
+        let mut list = Vec::with_capacity(items.len());
+        let mut last: Option<(&str, Sym)> = None;
+        for item in items.iter() {
+            let module = match last { Some((m, s)) if m == item.module => s, _ => { let s = names.sym(&mut cache, &item.module); last = Some((&item.module, s)); s } };
+            let span = |flat: &mut Vec<Sym>, it: &mut dyn Iterator<Item = Sym>| { let a = flat.len(); flat.extend(it); Span(a as u32, (flat.len() - a) as u32) };
+            let names_span = span(&mut syms.flat, &mut item.names.iter().map(|n| names.sym(&mut cache, n)));
+            let (selves, traits, dyns) = match &item.head {
+                Some(h) => (
+                    span(&mut syms.flat, &mut h.selves.iter().map(|n| names.sym(&mut cache, n))),
+                    span(&mut syms.flat, &mut h.traits.iter().map(|n| names.sym(&mut cache, n))),
+                    span(&mut syms.flat, &mut h.traits.iter().map(|t| names.sym(&mut cache, &format!("dyn {}", t.rsplit("::").next().unwrap_or(t))))),
+                ),
+                None => Default::default(),
+            };
+            let members = span(&mut syms.flat, &mut item.members.iter().map(|m| names.sym(&mut cache, &m.name)));
+            list.push(ItemSyms { module, names: names_span, selves, traits, dyns, members });
+        }
+        item_syms.push(list);
+    }
+
+
+    let mut trait_members: HashMap<Sym, Vec<Sym>> = HashMap::default();
+    if let Some(b) = incoming {
+        for (n, m) in &b.traits { trait_members.entry(names.sym(&mut cache, n)).or_default().extend(m.iter().map(|m| names.sym(&mut cache, m))); }
+    }
+    for (f, items) in parsed.iter().enumerate() {
+        for (i, item) in items.iter().enumerate() {
+            if item.kind == Kind::Trait {
+                if let Some(name) = item.names.first() {
+                    let s = item_syms[f][i];
+                    trait_members.entry(syms.get(s.names)[0]).or_default().extend_from_slice(syms.get(s.members));
+                    parts[files[f].ci].boundary.traits.entry(name.clone()).or_default().extend(item.members.iter().map(|m| m.name.clone()));
+                }
+            }
+        }
+    }
+    let implicit: Bits = { let mut bits = Bits::default(); for n in implicit { bits.insert(names.sym(&mut cache, n)); } bits };
+    // Reverse dependency indexes. A new name schedules only the files/items
+    // it can affect, including impl conjunctions and dynamic dispatch markers.
+    let mut declarations: HashMap<Sym, Vec<usize>> = HashMap::default();
+    // Impl headers are globally visible through the self-type/trait index,
+    // even when no body reaches the module containing the impl. Concrete
+    // candidates are keyed by self type; blanket/structural ones by trait.
+    // Loading their declarations does not demand their method bodies.
+    let mut impl_files: HashMap<Sym, Vec<usize>> = HashMap::default();
+    let mut modules: HashMap<Sym, Vec<usize>> = HashMap::default();
+    let mut users: HashMap<Sym, Vec<(usize, usize)>> = HashMap::default();
+    let mut member_users: HashMap<Sym, Vec<(usize, usize)>> = HashMap::default();
+    let mut queue = BTreeSet::new();
+    let mut reach_queue = BTreeMap::new();
+    for (f, items) in parsed.iter().enumerate() {
+        modules.entry(file_module[f]).or_default().push(f);
+        declarations.entry(file_module[f]).or_default().push(f);
+        for name in files[f].index.impls.iter().map(|(_, ty)| ty).chain(&files[f].index.blankets) {
+            impl_files.entry(names.sym(&mut cache, name)).or_default().push(f);
+        }
+        if files[f].root || files[f].force || files[f].surface.is_none() {
+            let cause = if files[f].root { "crate-root" } else if files[f].force { "forced-file" } else { "no-surface" };
+            reach_queue.insert(f, (cause.to_owned(), String::new()));
+        }
+        for (i, item) in items.iter().enumerate() {
+            let s = item_syms[f][i];
+            for &name in syms.get(s.names) {
+                declarations.entry(name).or_default().push(f);
+                users.entry(name).or_default().push((f, i));
+            }
+            for &member in syms.get(s.members) { member_users.entry(member).or_default().push((f, i)); }
+            if files[f].force || item.global || item.head.is_some() { queue.insert((f, i)); }
+            if item.head.is_some() {
+                for &name in syms.get(s.selves).iter().chain(syms.get(s.traits)) { users.entry(name).or_default().push((f, i)); }
+                for (&name, &dyn_member) in syms.get(s.traits).iter().zip(syms.get(s.dyns)) {
+                    member_users.entry(dyn_member).or_default().push((f, i));
+                    if let Some(members) = trait_members.get(&name) {
+                        for &member in members { member_users.entry(member).or_default().push((f, i)); }
+                    }
+                }
+            }
+        }
+    }
+    for files in declarations.values_mut().chain(impl_files.values_mut()) { files.sort_unstable(); files.dedup(); }
+    for items in users.values_mut().chain(member_users.values_mut()) { items.sort_unstable(); items.dedup(); }
+    let mut used = Bits::default();
+    let mut declared = Bits::default();
+    let mut members = Bits::default();
+    let mut reached = vec![false; n];
+    let mut reasons = vec![(String::new(), String::new()); n];
+    let mut item_used: Vec<Vec<bool>> = parsed.iter().map(|items| vec![false; items.len()]).collect();
+    // a member's flag sits at its item's offset plus its index, one vector per file
+    let member_start: Vec<Vec<u32>> = parsed.iter().map(|items| { let mut at = 0u32; items.iter().map(|i| { let s = at; at += i.members.len() as u32; s }).collect() }).collect();
+    let mut member_used: Vec<Vec<bool>> = parsed.iter().map(|items| vec![false; items.iter().map(|i| i.members.len()).sum()]).collect();
+    let cx = ReachCx { files, parsed: &parsed, item_syms: &item_syms, file_module: &file_module };
+    let trace = std::env::var_os("MAKEPAD_RUN_ITEMS_TRACE").is_some();
+    let started = std::time::Instant::now();
+    if trace { eprintln!("rs-items-prep: {:?}", entry.elapsed()); }
+    let mut causes = BTreeMap::<String, usize>::new();
+    // Provenance (trace only): name/member -> first file whose reference produced it.
+    let mut origin: HashMap<String, usize> = HashMap::default();
+    let mut member_origin: HashMap<String, usize> = HashMap::default();
+    let mut trigger: Vec<Option<String>> = vec![None; n];
+    let mut pending: Vec<_> = seeds.into_iter().map(|name| (Strength::Used, names.sym(&mut cache, &name))).collect();
+    let mut pending_members: Vec<Sym> = Vec::new();
+    if let Some(incoming) = incoming {
+        pending.extend(incoming.declared.iter().map(|n| (Strength::Declared, names.sym(&mut cache, n))));
+        pending.extend(incoming.used.iter().map(|n| (Strength::Used, names.sym(&mut cache, n))));
+        pending_members.extend(incoming.members.iter().map(|n| names.sym(&mut cache, n)));
+    }
+    let mut visits = 0usize;
+    let mut spent = [std::time::Duration::ZERO; 4];
+    loop {
+        let mut work: Vec<Work<'_>> = Vec::new();
+        let t0 = std::time::Instant::now();
+        for (strength, name) in pending.drain(..) {
+            if declared.insert(name) {
+                for &f in declarations.get(&name).into_iter().flatten() {
+                    if !reached[f] { reach_queue.entry(f).or_insert_with(|| { let text = names.spelling_of(name); if trace { trigger[f] = Some(text.clone()); } ("name".to_owned(), text) }); }
+                }
+                for &f in impl_files.get(&name).into_iter().flatten() {
+                    if !reached[f] { reach_queue.entry(f).or_insert_with(|| { let text = names.spelling_of(name); if trace { trigger[f] = Some(text.clone()); } ("impl-index".to_owned(), text) }); }
+                }
+                // Forwarding scopes matter even when a glob has no local item.
+                if let Some(scope) = names.scope_of(name) {
+                    for &f in modules.get(&scope).into_iter().flatten() {
+                        if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(names.spelling_of(name)); } ("scope".to_owned(), names.spelling_of(scope)) }); }
+                    }
+                }
+            }
+            if strength == Strength::Used && used.insert(name) {
+                queue.extend(users.get(&name).into_iter().flatten().copied());
+            }
+        }
+        for name in std::mem::take(&mut pending_members) {
+            if members.insert(name) { queue.extend(member_users.get(&name).into_iter().flatten().copied()); }
+        }
         let t1 = std::time::Instant::now();
         spent[0] += t1 - t0;
         for (f, why) in std::mem::take(&mut reach_queue) {
-            reach(f, (&why.0, &why.1), &mut reached, &mut reasons, &mut work, &mut queue);
+            reach(&cx, f, (&why.0, &why.1), &mut reached, &mut reasons, &mut work, &mut queue);
         }
         let t2 = std::time::Instant::now();
         spent[1] += t2 - t1;
         while let Some((f, i)) = queue.pop_first() {
             visits += 1;
             let item = &parsed[f][i];
+            let s = item_syms[f][i];
             if !item_used[f][i] {
                 let cause = if files[f].force { Some("forced") } else if item.global { Some("global") }
                     else if item.kind == Kind::Opaque && reached[f] { Some("opaque") }
-                    else if item.names.iter().any(|n| used.contains(n.as_str())) { Some("name") }
+                    else if syms.get(s.names).iter().any(|&n| used.contains(n)) { Some("name") }
                     else if let Some(h) = &item.head {
-                        let selected = if h.selves.is_empty() { true } else { h.selves.iter().any(|s| used.contains(s.as_str())) };
+                        let (selves, traits) = (syms.get(s.selves), syms.get(s.traits));
+                        let selected = if selves.is_empty() { true } else { selves.iter().any(|&x| used.contains(x)) };
                         if !selected { None }
-                        else if h.inherent { Some(if h.selves.is_empty() { "impl-inherent-structural" } else { "impl-inherent" }) }
-                        else if h.traits.is_empty() { Some("impl-unresolved-trait") }
-                        else if h.traits.iter().any(|t| used.contains(t.as_str())) { Some(if h.selves.is_empty() { "impl-unkeyed-trait-used" } else { "impl-trait-used" }) }
+                        else if h.inherent { Some(if selves.is_empty() { "impl-inherent-structural" } else { "impl-inherent" }) }
+                        else if traits.is_empty() { Some("impl-unresolved-trait") }
+                        else if traits.iter().any(|&t| used.contains(t)) { Some(if selves.is_empty() { "impl-unkeyed-trait-used" } else { "impl-trait-used" }) }
                         // An absent member index is not evidence of a call.
                         // In-scope/implicit traits are demanded by name above;
                         // otherwise only a known called member selects an impl.
-                        else if h.traits.iter().any(|t| trait_members.get(t.as_str()).is_some_and(|ms| ms.iter().any(|m| members.contains(m.as_str())))) { Some("impl-member") }
+                        else if traits.iter().any(|t| trait_members.get(t).is_some_and(|ms| ms.iter().any(|&m| members.contains(m)))) { Some("impl-member") }
                         else { None }
                     } else { None };
                 if let Some(cause) = cause.filter(|_| trace) { *causes.entry(format!("{cause} {:?}", item.kind)).or_insert(0) += 1; }
@@ -617,19 +698,19 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                     if !reached[f] {
                         if trace {
                             trigger[f] = match cause {
-                                Some("name") => item.names.iter().find(|n| used.contains(n.as_str())).cloned(),
-                                _ => item.head.as_ref().and_then(|h| h.selves.iter().find(|s| used.contains(s.as_str()))
-                                    .or_else(|| h.traits.iter().find(|t| used.contains(t.as_str()))).cloned()
-                                    .or_else(|| h.traits.iter().flat_map(|t| trait_members.get(t.as_str()).into_iter().flatten())
-                                        .find(|m| members.contains(m.as_str())).map(|m| format!(".{m}")))),
+                                Some("name") => syms.get(s.names).iter().find(|&&n| used.contains(n)).map(|&n| names.spelling_of(n)),
+                                _ => item.head.as_ref().and_then(|_| syms.get(s.selves).iter().find(|&&x| used.contains(x))
+                                    .or_else(|| syms.get(s.traits).iter().find(|&&t| used.contains(t))).map(|&n| names.spelling_of(n))
+                                    .or_else(|| syms.get(s.traits).iter().flat_map(|t| trait_members.get(t).into_iter().flatten())
+                                        .find(|&&m| members.contains(m)).map(|&m| format!(".{}", names.spelling_of(m))))),
                             };
                         }
                         let why = match &item.head {
                             Some(h) => format!("impl {:?} for {:?}{}", h.traits, h.selves,
-                                if h.inherent { " inherent" } else if h.traits.iter().any(|t| used.contains(t.as_str())) { " trait-used" } else { " member-or-unknown" }),
+                                if h.inherent { " inherent" } else if syms.get(s.traits).iter().any(|&t| used.contains(t)) { " trait-used" } else { " member-or-unknown" }),
                             None => format!("{:?} {:?}", item.kind, item.names.first()),
                         };
-                        reach(f, ("item", &why), &mut reached, &mut reasons, &mut work, &mut queue);
+                        reach(&cx, f, ("item", &why), &mut reached, &mut reasons, &mut work, &mut queue);
                     }
                     let ranges = match item.kind {
                         Kind::Mod => Vec::new(),
@@ -639,7 +720,7 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                         Kind::Fn if item.cold && !files[f].force => vec![item.header],
                         _ => vec![item.range],
                     };
-                    if !ranges.is_empty() { work.push(Work { file: f, module: item.module.clone(), ranges, strength: Strength::Used, exclude: Vec::new() }); }
+                    if !ranges.is_empty() { work.push(Work { file: f, module: &item.module, module_sym: s.module, ranges, strength: Strength::Used, exclude: Exclude::Names(Span::default()) }); }
                 }
             }
             if item_used[f][i] && matches!(item.kind, Kind::Impl | Kind::Trait) {
@@ -647,20 +728,20 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                 // except through syntax/builtin expansion (the implicit std
                 // traits) or a vtable (`dyn Trait` anywhere in used code).
                 let whole_impl = item.kind == Kind::Impl && item.head.as_ref().is_some_and(|h| !h.inherent
-                    && (h.traits.is_empty() || h.traits.iter().any(|t| implicit.contains(t.as_str())
-                        || members.contains(&format!("dyn {}", t.rsplit("::").next().unwrap_or(t))))));
+                    && (h.traits.is_empty() || syms.get(s.traits).iter().zip(syms.get(s.dyns)).any(|(&t, &d)| implicit.contains(t) || members.contains(d))));
                 let mut ranges = Vec::new();
                 for (m, member) in item.members.iter().enumerate() {
-                    if member_used[f][i][m] || !member.is_fn { continue; }
+                    let flag = member_start[f][i] as usize + m;
+                    if member_used[f][flag] || !member.is_fn { continue; }
                     let on = files[f].force || whole_impl
-                        || (item.kind == Kind::Trait && !member.has_body) || members.contains(&member.name);
+                        || (item.kind == Kind::Trait && !member.has_body) || members.contains(syms.get(s.members)[m]);
                     if on {
                         if trace { *causes.entry(if whole_impl { "member-of-trait-impl".into() } else if files[f].force { "member-forced".into() } else { format!("member-by-name {:?}", item.kind) }).or_insert(0) += 1; }
-                        member_used[f][i][m] = true;
+                        member_used[f][flag] = true;
                         if item.kind == Kind::Impl || member.has_body { ranges.push(member.range); }
                     }
                 }
-                if !ranges.is_empty() { work.push(Work { file: f, module: item.module.clone(), ranges, strength: Strength::Used, exclude: Vec::new() }); }
+                if !ranges.is_empty() { work.push(Work { file: f, module: &item.module, module_sym: s.module, ranges, strength: Strength::Used, exclude: Exclude::Names(Span::default()) }); }
             }
         }
         spent[2] += t2.elapsed();
@@ -669,7 +750,7 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
             if reach_queue.is_empty() && queue.is_empty() { break; }
             continue;
         }
-        work.sort_by(|a, b| (files[a.file].ci, &a.module).cmp(&(files[b.file].ci, &b.module)));
+        work.sort_by(|a, b| (files[a.file].ci, a.module).cmp(&(files[b.file].ci, b.module)));
         // Reaching a declaration and then using it often schedules exactly the
         // same ranges twice. Evaluate that source once, retaining every original
         // contribution (including its strength, exclusions and position).
@@ -683,7 +764,7 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                 .map(|&(lo, hi)| hi.min(toks.len()) - lo.min(toks.len())).sum::<usize>());
             input_ranges += w.ranges.len();
             input_tokens += cost;
-            let key = (w.file, w.module.as_str(), w.ranges.as_slice());
+            let key = (w.file, w.module, w.ranges.as_slice());
             if let Some(&evaluation) = unique.get(&key) {
                 evaluations[evaluation].push(at);
             } else {
@@ -723,59 +804,63 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
         // only moves sets and queues those names.
         let (seen_declared, seen_used, seen_members) = (&declared, &used, &members);
         let accumulated = &accumulated;
-        let (files, names) = (&*files, &*names);
+        let syms = &syms;
         let evaluation = crate::load_profile::span(profile, "rust-demand-reference-eval", "load");
-        let evaluated = std::thread::scope(|scope| {
+        let evaluated = crate::pool::scope(|scope| {
             let handles: Vec<_> = (0..jobs.max(1).min(batches.len())).map(|_| {
                 let (work, next, batches, evaluations) = (&work, &next, &batches, &evaluations);
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                scope.spawn(move || {
                     let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
                     let cpu = std::time::Instant::now();
                     let mut out = Vec::new();
                     let mut local: HashMap<usize, Accumulated> = HashMap::default();
                     let mut counts = [0usize; 4];
+                    let mut lookups = demand::Lookups::default();
+                    let (mut refs, mut found, mut mine) = (Vec::<Sym>::new(), Vec::<Sym>::new(), Vec::<Sym>::new());
                     let _profile = crate::load_profile::span(profile, "rust-demand-reference-worker", "load");
                     loop {
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some((batch, _)) = batches.get(at) else { break; };
-                        let mut lookups = demand::Lookups::default();
                         for group in &evaluations[batch.clone()] {
                             let w = &work[group[0]];
                             let needs_members = group.iter().any(|&at| work[at].strength == Strength::Used);
-                            let mut refs = BTreeSet::new();
-                            let mut found = BTreeSet::new();
+                            refs.clear();
+                            found.clear();
                             if let Some((src, toks)) = files[w.file].tokens() {
                                 for &(lo, hi) in &w.ranges {
                                     let slice = &toks[lo.min(toks.len())..hi.min(toks.len())];
-                                    refs.extend(names.references_shared(files[w.file].ci, &w.module, src, slice, &mut lookups));
-                                    if needs_members { member_names(src, slice, &mut found); }
+                                    names.references_shared(files[w.file].ci, w.module, src, slice, &mut lookups, &mut refs);
+                                    if needs_members { member_names(names, src, slice, &mut found, lookups.cache()); }
                                 }
                             }
-                            if w.ranges.is_empty() { refs.insert(w.module.clone()); }
-                            for (index, &at) in group.iter().enumerate() {
+                            if w.ranges.is_empty() { refs.push(w.module_sym); }
+                            refs.sort_unstable(); refs.dedup();
+                            found.sort_unstable(); found.dedup();
+                            for &at in group.iter() {
                                 let w = &work[at];
-                                let last = index + 1 == group.len();
-                                let mut refs = if last { std::mem::take(&mut refs) } else { refs.clone() };
-                                let found = if w.strength != Strength::Used { BTreeSet::new() }
-                                    else if last { std::mem::take(&mut found) } else { found.clone() };
-                                for name in &w.exclude {
+                                mine.clear();
+                                mine.extend_from_slice(&refs);
+                                let found: &[Sym] = if w.strength != Strength::Used { &[] } else { &found };
+                                let module_exclude = [match w.exclude { Exclude::Module(s) => s, _ => 0 }];
+                                let excluded: &[Sym] = match w.exclude { Exclude::Module(_) => &module_exclude, Exclude::Names(span) => &syms.flat[span.0 as usize..(span.0 + span.1) as usize] };
+                                for &name in excluded {
                                     // A loaded type/trait needs its indexed impl
                                     // declarations even without a body-use edge.
                                     // Record this in the crate boundary as well.
-                                    if w.strength == Strength::Declared && names.is_type(name) { refs.insert(name.clone()); }
-                                    else if !w.ranges.is_empty() { refs.remove(name); }
+                                    if w.strength == Strength::Declared && names.is_type_sym(name) { insert_sorted(&mut mine, name); }
+                                    else if !w.ranges.is_empty() { if let Ok(p) = mine.binary_search(&name) { mine.remove(p); } }
                                 }
-                                let fresh: Vec<_> = refs.iter().filter(|name| !seen_declared.contains(name.as_str())
-                                    || w.strength == Strength::Used && !seen_used.contains(name.as_str())).map(|name| (w.strength, name.clone())).collect();
-                                let fresh_members: Vec<_> = found.iter().filter(|name| !seen_members.contains(name.as_str())).cloned().collect();
-                                let used = w.strength == Strength::Used;
+                                let fresh: Vec<_> = mine.iter().filter(|&&name| !seen_declared.contains(name)
+                                    || w.strength == Strength::Used && !seen_used.contains(name)).map(|&name| (w.strength, name)).collect();
+                                let fresh_members: Vec<_> = found.iter().filter(|&&name| !seen_members.contains(name)).copied().collect();
                                 let acc = local.entry(files[w.file].ci).or_default();
-                                if used { acc.used.extend(refs); } else { acc.declared.extend(refs); }
-                                acc.members.extend(found);
+                                if w.strength == Strength::Used { acc.used.extend(mine.iter().copied()); } else { acc.declared.extend(mine.iter().copied()); }
+                                acc.members.extend(found.iter().copied());
                                 out.push((at, (w.file, fresh, fresh_members)));
                             }
                         }
                         for (total, count) in counts.iter_mut().zip([lookups.hits, lookups.misses, lookups.glob_queries, lookups.glob_bindings]) { *total += count; }
+                        (lookups.hits, lookups.misses, lookups.glob_queries, lookups.glob_bindings) = (0, 0, 0, 0);
                     }
                     for (ci, acc) in local {
                         let mut total = accumulated[ci].lock().unwrap();
@@ -805,8 +890,8 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
         let t3 = std::time::Instant::now();
         for (_, (f, fresh, found)) in results {
             if trace {
-                for (_, name) in &fresh { origin.entry(name.clone()).or_insert(f); }
-                for name in &found { member_origin.entry(name.clone()).or_insert(f); }
+                for (_, name) in &fresh { origin.entry(names.spelling_of(*name)).or_insert(f); }
+                for &name in &found { member_origin.entry(names.spelling_of(name)).or_insert(f); }
             }
             pending.extend(fresh);
             pending_members.extend(found);
@@ -827,13 +912,43 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
             (from.copied(), key)
         })).collect()
     } else { Vec::new() };
+    // The persisted boundary is spellings, sorted.
+    let render = |set: HashSet<Sym>| -> BTreeSet<String> {
+        let mut text: Vec<String> = set.into_iter().map(|s| names.spelling_of(s)).collect();
+        text.sort_unstable();
+        text.into_iter().collect()
+    };
+    // MAKEPAD_RUN_PLAN_DUMP=<file>: the selection itself (reached files, used items and members, and every
+    // crate's folded boundary names), sorted, to diff one planner implementation against another.
+    let dump = std::env::var_os("MAKEPAD_RUN_PLAN_DUMP");
+    let mut dump_lines = Vec::<String>::new();
+    if dump.is_some() {
+        for (f, file) in files.iter().enumerate() {
+            let used: Vec<String> = parsed[f].iter().enumerate().filter(|(i, _)| item_used[f][*i])
+                .map(|(i, item)| format!("{i}:{:?}:{:?}:{}", item.kind, item.names, (0..item.members.len()).map(|m| if member_used[f][member_start[f][i] as usize + m] { '1' } else { '0' }).collect::<String>())).collect();
+            dump_lines.push(format!("file ci={} {} module={} reached={} items={} used={used:?}", file.ci, file.path, file.module, reached[f], parsed[f].len()));
+        }
+    }
     // Each crate's boundary: its folded names, a declaration only where nothing used it.
     for (ci, acc) in accumulated.into_iter().enumerate() {
         let Accumulated { mut declared, used, members } = acc.into_inner().unwrap();
         if declared.is_empty() && used.is_empty() && members.is_empty() { continue; }
+        if dump.is_some() {
+            let mut text = String::new();
+            for (tag, set) in [("declared", &declared), ("used", &used), ("members", &members)] {
+                for name in set { use std::fmt::Write as _; let _ = writeln!(text, "boundary ci={ci} {tag} {}", names.spelling_of(*name)); }
+            }
+            dump_lines.push(text);
+        }
         declared.retain(|name| !used.contains(name));
         let boundary = &mut parts[ci].boundary;
-        boundary.declared = declared; boundary.used = used; boundary.members = members;
+        boundary.declared = render(declared); boundary.used = render(used); boundary.members = render(members);
+    }
+    if let Some(path) = dump {
+        dump_lines.sort();
+        let mut out = dump_lines.join("\n");
+        out.push('\n');
+        let _ = std::fs::write(path, out);
     }
     for file in files.iter() { parts[file.ci].key = 0; parts[file.ci].reached.clear(); parts[file.ci].counts = (0, 0); }
     for (f, (file, reached)) in files.iter().zip(&reached).enumerate() {

@@ -13,6 +13,7 @@
 //! Natively each is `#[inline]` and the mode is a constant at every call, so a call costs what
 //! the method it replaces did.
 use makepad_relax_api::relax_api;
+use makepad_relax::relax;
 
 use crate::function::NativeId;
 use crate::heap::*;
@@ -532,6 +533,7 @@ impl ScriptVmBase {
     }
 
     #[inline(never)]
+    #[relax(keep_reachable)]
     fn gc_now(&mut self) {
         self.heap.mark(&self.threads, &self.code);
         self.heap.sweep(false);

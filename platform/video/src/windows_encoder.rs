@@ -9,7 +9,7 @@
 
 use {
     crate::{
-        nv12, PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoderOptions, VideoFileError,
+        nv12, PcmAudioTrackOptions, VideoColor, VideoFileCodec, VideoFileEncoderOptions, VideoFileError,
         VideoTransformInfo,
     },
     std::sync::atomic::{AtomicI32, Ordering},
@@ -35,7 +35,13 @@ use {
             MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
             MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
             MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-            MF_MT_SUBTYPE, MF_MT_VIDEO_PROFILE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+            MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+            MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MFNominalRange_0_255,
+            MFNominalRange_16_235, MFVideoPrimaries_BT2020, MFVideoPrimaries_BT470_2_SysBG,
+            MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_2020,
+            MFVideoTransFunc_2084, MFVideoTransFunc_709, MFVideoTransFunc_HLG,
+            MFVideoTransferMatrix_BT2020_10, MFVideoTransferMatrix_BT601,
+            MFVideoTransferMatrix_BT709, MF_MT_VIDEO_PROFILE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
             MF_SINK_WRITER_DISABLE_THROTTLING, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
         },
         Win32::Media::MediaFoundation::{IMFDXGIDeviceManager, MFCreateDXGIDeviceManager},
@@ -87,6 +93,49 @@ pub(crate) fn ensure_media_foundation() -> Result<(), VideoFileError> {
     let code = STARTUP_CODE.load(Ordering::SeqCst);
     if code != 0 {
         return Err(VideoFileError::with_code("MFStartup failed", code));
+    }
+    Ok(())
+}
+
+/// The MF attribute values (matrix, range, primaries, transfer) that tag a
+/// stream of this colour. BT.601 content is tagged with the BT.709 transfer
+/// curve (Media Foundation has no separate one); HDR transfers are tagged as
+/// PQ / HLG.
+fn mf_color_values(color: VideoColor) -> [(&'static GUID, u32); 4] {
+    use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
+    let matrix = match color.matrix {
+        VideoMatrix::Bt709 => MFVideoTransferMatrix_BT709.0,
+        VideoMatrix::Bt601 => MFVideoTransferMatrix_BT601.0,
+        VideoMatrix::Bt2020 => MFVideoTransferMatrix_BT2020_10.0,
+    };
+    let range = match color.range {
+        VideoRange::Limited => MFNominalRange_16_235.0,
+        VideoRange::Full => MFNominalRange_0_255.0,
+    };
+    let primaries = match color.primaries {
+        VideoPrimaries::Bt709 => MFVideoPrimaries_BT709.0,
+        VideoPrimaries::Smpte170m => MFVideoPrimaries_SMPTE170M.0,
+        VideoPrimaries::Bt470bg => MFVideoPrimaries_BT470_2_SysBG.0,
+        VideoPrimaries::Bt2020 => MFVideoPrimaries_BT2020.0,
+    };
+    let transfer = match (color.transfer, color.primaries) {
+        (VideoTransfer::Sdr, VideoPrimaries::Bt2020) => MFVideoTransFunc_2020.0,
+        (VideoTransfer::Sdr, _) => MFVideoTransFunc_709.0,
+        (VideoTransfer::Pq, _) => MFVideoTransFunc_2084.0,
+        (VideoTransfer::Hlg, _) => MFVideoTransFunc_HLG.0,
+    };
+    [
+        (&MF_MT_YUV_MATRIX, matrix as u32),
+        (&MF_MT_VIDEO_NOMINAL_RANGE, range as u32),
+        (&MF_MT_VIDEO_PRIMARIES, primaries as u32),
+        (&MF_MT_TRANSFER_FUNCTION, transfer as u32),
+    ]
+}
+
+/// Tag a video media type with the colour (bitstream VUI and container).
+fn tag_color(media_type: &windows::Win32::Media::MediaFoundation::IMFMediaType, color: VideoColor) -> Result<(), VideoFileError> {
+    for (key, value) in mf_color_values(color) {
+        unsafe { media_type.as_IMFAttributes().SetUINT32(key, value) }.map_err(|e| hr_err("set video colour attribute", e))?;
     }
     Ok(())
 }
@@ -297,7 +346,7 @@ impl WindowsVideoFileEncoder {
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| hr_err("set video major type", e))?;
             let (subtype, profile) = match options.codec {
-                VideoFileCodec::H265 => (&MFVideoFormat_HEVC, eAVEncH265VProfile_Main_420_8.0),
+                VideoFileCodec::H265 | VideoFileCodec::H265Alpha => (&MFVideoFormat_HEVC, eAVEncH265VProfile_Main_420_8.0),
                 VideoFileCodec::H264 => (&MFVideoFormat_H264, eAVEncH264VProfile_Main.0),
             };
             out_type
@@ -338,6 +387,7 @@ impl WindowsVideoFileEncoder {
                     .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
                     .map_err(|e| hr_err("set keyframe spacing", e))?;
             }
+            tag_color(&out_type, options.color)?;
             let video_stream = sink
                 .AddStream(&out_type)
                 .map_err(|e| hr_err("IMFSinkWriter::AddStream(video)", e))?;
@@ -374,6 +424,11 @@ impl WindowsVideoFileEncoder {
                 .as_IMFAttributes()
                 .SetUINT32(&MF_MT_DEFAULT_STRIDE, in_stride)
                 .map_err(|e| hr_err("set input stride", e))?;
+            // The NV12 bytes are in this colour. A BGRA texture is converted by the
+            // sink writer's video processor into the output type's colour.
+            if in_subtype == &MFVideoFormat_NV12 {
+                tag_color(&in_type, options.color)?;
+            }
             if options.keyframe_only {
                 // MEASURED on this MFT: every route that pokes ICodecAPI from
                 // outside — GetServiceForStream before SetInputMediaType,
@@ -420,7 +475,7 @@ impl WindowsVideoFileEncoder {
                 Some(info) => eprintln!(
                     "video file encoder: {} video transform '{}' (hardware: {})",
                     match options.codec {
-                        VideoFileCodec::H265 => "H.265",
+                        VideoFileCodec::H265 | VideoFileCodec::H265Alpha => "H.265",
                         VideoFileCodec::H264 => "H.264",
                     },
                     info.name,
@@ -594,8 +649,11 @@ impl WindowsVideoFileEncoder {
         pixel_stride: usize,
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
+        if self.options.color.is_hdr() {
+            return Err(VideoFileError::new("RGB frames cannot be converted to HDR; push NV12 already in the stream's colour"));
+        }
         let mut scratch = std::mem::take(&mut self.nv12_scratch);
-        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, &mut scratch);
+        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, self.options.color, &mut scratch);
         let result = self.push_frame_nv12(&scratch, pts_100ns);
         self.nv12_scratch = scratch;
         result
@@ -634,6 +692,9 @@ impl WindowsVideoFileEncoder {
                 "encoder was not opened for D3D11 textures",
             ));
         };
+        if !input.nv12 && self.options.color.is_hdr() {
+            return Err(VideoFileError::new("RGB frames cannot be converted to HDR; push NV12 already in the stream's colour"));
+        }
         let length = if input.nv12 { input.width * input.height * 3 / 2 } else { input.width * input.height * 4 };
         let auto_pts = self.frame_pts(self.frame_index);
         let duration = self.frame_pts(self.frame_index + 1) - auto_pts;

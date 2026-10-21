@@ -76,7 +76,7 @@ impl NetworkRuntime {
     pub fn start_http_server(
         &self,
         http_server: HttpServer,
-    ) -> Option<std::thread::JoinHandle<()>> {
+    ) -> Option<crate::http_server::HttpServerThread> {
         crate::http_server::start_http_server(http_server)
     }
 

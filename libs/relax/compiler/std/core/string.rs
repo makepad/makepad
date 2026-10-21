@@ -94,7 +94,7 @@ fn slice_range<R: RangeBounds<usize>>(range: &R, len: usize) -> (usize, usize) {
 
 #[track_caller]
 #[cold]
-fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {
+const fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {
     if start > len {
         panic!("range start index {} out of range for slice of length {}", start, len);
     }
@@ -120,6 +120,11 @@ impl String {
 
     pub fn with_capacity(capacity: usize) -> String {
         String { vec: Vec::with_capacity(capacity) }
+    }
+
+    /// # Safety: `buf` holds `length` bytes of valid UTF-8 in an allocation of `capacity` bytes made by the global allocator.
+    pub unsafe fn from_raw_parts(buf: *mut u8, length: usize, capacity: usize) -> String {
+        String { vec: Vec::from_raw_parts(buf, length, capacity) }
     }
 
     pub fn from_utf8(vec: Vec<u8>) -> Result<String, FromUtf8Error> {
@@ -157,15 +162,15 @@ impl String {
         ret
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
+    pub const fn into_bytes(self) -> Vec<u8> {
         self.vec
     }
 
-    pub fn as_str(&self) -> &str {
+    pub const fn as_str(&self) -> &str {
         unsafe { crate::str::from_utf8_unchecked(&self.vec[..]) }
     }
 
-    pub fn as_mut_str(&mut self) -> &mut str {
+    pub const fn as_mut_str(&mut self) -> &mut str {
         unsafe { crate::str::from_utf8_unchecked_mut(&mut self.vec[..]) }
     }
 
@@ -192,7 +197,7 @@ impl String {
         }
     }
 
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         self.vec.capacity()
     }
 
@@ -231,7 +236,7 @@ impl String {
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         &self.vec[..]
     }
 
@@ -334,15 +339,15 @@ impl String {
         }
     }
 
-    pub unsafe fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+    pub const unsafe fn as_mut_vec(&mut self) -> &mut Vec<u8> {
         &mut self.vec
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.vec.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -408,6 +413,9 @@ impl String {
 
 // ---------------------------------------------------------------- Drain
 
+// library/alloc/src/string.rs
+unsafe impl Sync for Drain<'_> {}
+unsafe impl Send for Drain<'_> {}
 pub struct Drain<'a> {
     string: *mut String,
     start: usize,

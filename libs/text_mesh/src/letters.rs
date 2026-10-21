@@ -337,6 +337,33 @@ pub fn take_recorded_glyphs() -> Vec<(u64, std::collections::BTreeSet<u16>)> {
     rx.try_iter().collect()
 }
 
+/// The trace host's switch (`makepad-web-trace`) for 3D type's record.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_record_text3d_glyphs(on: u32) {
+    record_glyphs(on != 0);
+}
+
+/// The trace host's read of 3D type's record, as draw's
+/// `wasm_take_recorded_glyphs` lays it out: `[words, fonts, (file hash,
+/// glyph count, glyph id...)...]`.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_text3d_glyphs() -> u32 {
+    let mut fonts: std::collections::BTreeMap<u64, std::collections::BTreeSet<u16>> = Default::default();
+    for (hash, glyphs) in take_recorded_glyphs() {
+        fonts.entry(hash).or_default().extend(glyphs);
+    }
+    let mut words = vec![0u64, fonts.len() as u64];
+    for (hash, glyphs) in fonts {
+        words.push(hash);
+        words.push(glyphs.len() as u64);
+        words.extend(glyphs.iter().map(|&id| id as u64));
+    }
+    words[0] = words.len() as u64;
+    Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
+}
+
 fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }

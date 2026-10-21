@@ -60,6 +60,9 @@ impl crate::tcx::Tcx {
 /// their position in the complete declaration argument list.
 pub struct ArgFolder<'a> { pub indices: &'a GenericIndices, pub args: &'a [GenericArg] }
 impl TypeFolder for ArgFolder<'_> {
+    /// Rewrites type and const parameters (F_PARAM: set for both) and early-bound regions;
+    /// a type without them is unchanged (rustc: GenericArgs::HAS_PARAM flags of ArgFolder).
+    fn fold_flags(&self) -> Option<crate::types::TypeFlags> { Some(crate::types::TypeFlags::HAS_TY_PARAM | crate::types::TypeFlags::HAS_RE_PARAM) }
     fn fold_ty(&mut self, tys: &Types, ty: TyId, depth: u32) -> TyId {
         if let TyKind::Param(index) = tys.kind(ty) {
             let full = self.indices.types_consts[*index as usize];
@@ -71,7 +74,7 @@ impl TypeFolder for ArgFolder<'_> {
     fn fold_const(&mut self, tys: &Types, ct: Const, depth: u32) -> Const {
         if let ConstKind::Param(param) = tys.const_kind(ct) {
             let full = self.indices.types_consts[param.index as usize];
-            let GenericArg::Const(ct) = self.args[full as usize] else { panic!("wrong generic argument kind") };
+            let GenericArg::Const(ct) = self.args[full as usize] else { panic!("wrong generic argument kind: const param {} (slot {}) of {} args: {:?}", param.index, full, self.args.len(), self.args) };
             return tys.shift_const(ct, depth, false);
         }
         super_fold_const(tys, ct, self, depth)

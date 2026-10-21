@@ -13,6 +13,8 @@ pub struct RegionEnv {
     pub(crate) anonymous_params: Vec<u32>,
     table: Option<Arc<ResolveBoundVars>>,
     binder: Option<BinderId>,
+    /// the where-predicate being lowered (its binder stays known inside nested binders)
+    pred: Option<u32>,
     pub(super) infer_fresh: bool,
 }
 impl RegionEnv {
@@ -26,7 +28,9 @@ impl RegionEnv {
         tys.intern_region_args(&args)
     }
     pub(crate) fn with_binder(&self, binder: Option<BinderId>) -> Self {
-        let mut env = self.clone(); env.binder = binder; env
+        let mut env = self.clone(); env.binder = binder;
+        if let Some(BinderId::Where(n)) = binder { env.pred = Some(n); }
+        env
     }
     pub(crate) fn bound_vars(&self) -> Vec<BoundVariableKind> {
         if !self.enabled { return Vec::new(); }
@@ -43,7 +47,7 @@ impl RegionEnv {
     pub(super) fn resolve_key(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, tys: &Types, key: LifetimeKey) -> RegionId {
         if !self.enabled { return RegionId::ERASED; }
         let table = self.table.as_ref().expect("written lifetime lowering requires owner resolution");
-        match table.region_for_use(key) {
+        match table.region_for_use(key, self.pred) {
             Some(region) => tys.intern_region(region),
             None => infcx.map_or_else(|| tys.intern_region(RegionKind::ReError), |infcx| infcx.next_region_var()),
         }
@@ -51,7 +55,7 @@ impl RegionEnv {
     /// The object type `ty` has no resolved lifetime default (Scope::ObjectLifetimeDefault
     /// with `None`, resolve_bound_vars.rs:927-944 and :2290).
     pub(super) fn object_default_indeterminate(&self, ty: Option<ast::TyId>) -> bool {
-        self.enabled && ty.is_some_and(|ty| self.table.as_ref().is_some_and(|table| table.region_for_use(LifetimeKey::ObjectDefault(ty.0)).is_none()))
+        self.enabled && ty.is_some_and(|ty| self.table.as_ref().is_some_and(|table| table.region_for_use(LifetimeKey::ObjectDefault(ty.0), self.pred).is_none()))
     }
     pub(super) fn object_region(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, tys: &Types, ty: Option<ast::TyId>) -> RegionId {
         if !self.enabled { return RegionId::ERASED; }
@@ -141,14 +145,26 @@ impl Tcx {
         }, 0)
     }
 
-    pub(crate) fn lower_region_args(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, module: u32, env: &GenEnv, p: &ast::Path) -> RegionArgsId {
-        if !env.regions.enabled { return RegionArgsId::EMPTY; }
+    /// The lifetime arguments written on the path's last segment.
+    pub(crate) fn written_lifetimes(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, p: &ast::Path) -> Vec<RegionId> {
         let ast = &prog.files[file as usize].ast;
         let mut out = Vec::new();
+        if !env.regions.enabled { return out; }
         if let Some(GenericArgs::Angle(v)) = ast.segs(p.segs).last().and_then(|s| ast.gargs(s.args())) {
             for a in ast.list(*v) {
                 if let GenericArg::Lifetime(lt) = a { out.push(env.regions.resolve(infcx, &self.tys, prog, file, Some(*lt))); }
             }
+        }
+        out
+    }
+
+    pub(crate) fn lower_region_args(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, module: u32, env: &GenEnv, p: &ast::Path) -> RegionArgsId {
+        if !env.regions.enabled { return RegionArgsId::EMPTY; }
+        let mut out = self.written_lifetimes(infcx, prog, file, env, p);
+        if let Some((_, count)) = self.resolve_type_path_def(prog, file, module, p).and_then(|d| self.own_param_counts(prog, d)) {
+            // rustc lowers only the declared lifetime parameters; an incomplete list takes
+            // error regions for the rest (E0107 reports the count).
+            if !out.is_empty() { out.resize(count, self.tys.intern_region(RegionKind::ReError)); }
         }
         if out.is_empty() {
             if let Some(d) = self.resolve_type_path_def(prog, file, module, p) {
@@ -224,7 +240,7 @@ impl Tcx {
         seen.pop();
     }
 
-    pub(super) fn object_region_with_bounds(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, bounds: &[ast::Bound], td: DefId, rs: RegionArgsId, source_ty: Option<ast::TyId>) -> RegionId {
+    pub(super) fn object_region_with_bounds(&self, infcx: Option<&crate::infer::InferCtxt<'_>>, prog: &Program, file: u32, env: &GenEnv, bounds: &[ast::Bound], td: DefId, rs: RegionArgsId, source_ty: Option<ast::TyId>, ambiguous: &mut bool) -> RegionId {
         if !env.regions.enabled { return RegionId::ERASED; }
         let explicit = bounds.iter().find_map(|b| match b { ast::Bound::Lifetime(n) => Some(*n), _ => None });
         if let Some(n) = explicit {
@@ -236,7 +252,11 @@ impl Tcx {
         // escaping the existential predicate binder is not an object bound.
         derived.retain(|r| !matches!(self.tys.region_kind(*r), RegionKind::ReBound(..)));
         if let Some(r) = derived.iter().find(|r| self.tys.region_kind(**r) == RegionKind::ReStatic) { return *r; }
-        if let Some(r) = derived.first() { return *r; }
+        if let Some(r) = derived.first() {
+            // compute_object_lifetime_bound: more than one distinct bound and no `'static` (E0227)
+            *ambiguous = derived[1..].iter().any(|r1| r1 != r);
+            return *r;
+        }
         self.object_region(infcx, prog, file, env, bounds, source_ty)
     }
 }
@@ -254,6 +274,8 @@ mod tests {
             #![no_std]
             #[lang = "sized"] trait Sized {}
             #[lang = "unsize"] trait Unsize<T: ?Sized> {}
+            #[lang = "coerce_unsized"] trait CoerceUnsized<T: ?Sized> {}
+            impl<'a, 'b: 'a, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<&'a U> for &'b T {}
             struct S<'a, T>(&'a T);
             type A<'a> = &'a u32;
             type F<T> = fn(T);
@@ -319,7 +341,7 @@ mod tests {
                 fn parent<'b>(&'b self) -> &'b T where 'b: 'a { self.0 }
             }
         "#;
-        let dir = std::env::temp_dir().join(format!("relax-written-regions-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("relax-written-regions-{}-{}", std::process::id(), crate::unique_test_suffix()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("lib.rs");
         std::fs::write(&path, source).unwrap();
@@ -429,10 +451,10 @@ mod tests {
         let TyKind::FnPtr(ps, r, _, n) = tcx.tys.kind(explicit_output.bound) else { panic!("fn") };
         assert_eq!(*n, 1);
         assert_eq!(region(tcx.tys.list(*ps)[0]), RegionKind::ReBound(0, BoundVar(0)));
-        assert!(matches!(region(*r), RegionKind::ReVar(_)));
+        assert!(matches!(region(*r), RegionKind::ReErased)); // (writeback erases the typeck's region variables)
         // rustc rejects this deferred closure as not general enough; it does
         // not acquire a higher-ranked signature from a previous use of `g`.
-        assert!(check("deferred_closure_rejected").errors.iter().any(|error| error.contains("E0277")));
+        assert!(check("deferred_closure_rejected").errors.iter().any(|error| error.contains("E0277") || error.contains("E0271")));
         for (name, count) in [("closure_expected", 8), ("closure_routes", 6)] {
             let body = check(name);
             assert!(body.errors.is_empty(), "{name}: {:?}", body.errors);
@@ -446,11 +468,11 @@ mod tests {
                 assert!(!tcx.tys.has_infer(sig.bound));
                 let (supplied, expected) = sig.annotation_eq.unwrap();
                 let TyKind::FnPtr(ps, _, _, _) = tcx.tys.kind(supplied) else { panic!("fn") };
-                assert!(matches!(region(tcx.tys.list(*ps)[0]), RegionKind::ReVar(_) | RegionKind::ReLateParam(..)));
+                assert!(matches!(region(tcx.tys.list(*ps)[0]), RegionKind::ReErased | RegionKind::ReLateParam(..)));
                 assert!(tcx.tys.eq_mod_regions(supplied, expected));
             }
         }
     }
 }
 
-crate::collected_fields!(RegionEnv, owner, enabled, names, next_param, anonymous_params, table, binder, infer_fresh);
+crate::collected_fields!(RegionEnv, owner, enabled, names, next_param, anonymous_params, table, binder, pred, infer_fresh);

@@ -31,7 +31,7 @@
 //! static. A scalar pointer constant needs nothing: lowering emits its target's symbol.
 
 use crate::jit::Unit;
-use crate::rir::Sym;
+use relax_backend::rir::Sym;
 use crate::sandbox::{initial_bytes, provenance_words};
 use crate::syms::SymKind;
 use std::collections::HashSet;
@@ -55,6 +55,24 @@ pub(crate) fn rehome_const(u: &Unit, addr: u64) -> u64 {
 pub(crate) fn const_copy(u: &Unit, addr: u64) -> u64 {
     let mut seen = std::collections::HashMap::new();
     rehome(u, addr, &mut seen, true)
+}
+
+/// Captures static `sym`'s initial image (just evaluated into its storage) and the image of
+/// every anonymous mutable block its words point into, then (the caller) materializes it. A
+/// static initializer that runs as code fills its promoted temporaries (`&CONST` /
+/// `&[..]` borrows lowered as a per-domain block written by the initializer, lower.rs
+/// promote_rvalue) in the compile domain only; without their images every other domain's copy
+/// of the static pointed at zeroed blocks (Sandbox's race kit read each event payload's
+/// FieldDefs as zeros: no names). `rehome` does the same for constants.
+pub(crate) fn capture_static(u: &Unit, sym: Sym) {
+    crate::sandbox::capture_initial_data(u, sym);
+    let Ok(bytes) = initial_bytes(u, sym.id) else { return };
+    let mut seen = HashSet::new();
+    for w in bytes.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+        if let Some(rw) = u.syms.rw_sym_at(w) {
+            capture_rw(u, rw.id, &mut seen);
+        }
+    }
 }
 
 /// Gives anonymous mutable block `id` (made by constant evaluation: a promoted temporary) and
@@ -430,6 +448,8 @@ pub struct DomainInfo {
     pub thread_names: Vec<String>,
     pub arena_in_use: usize,
     pub arena_committed: usize,
+    /// bytes touched in small chunks / in live slots / in large blocks (the arena's detail)
+    pub arena_detail: (usize, usize, usize),
     pub static_committed: u64,
 }
 
@@ -508,7 +528,7 @@ fn set_state(id: DomainId, st: DomainState) {
 /// A non-HAL `makepad run` booted `package` in the unit's own domain: domain 0.
 pub(crate) fn register_boot(package: &str, base: u64) {
     domains().push(Domain {
-        info: DomainInfo { id: 0, package: package.to_string(), parent: None, state: DomainState::Running, base, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, static_committed: 0 },
+        info: DomainInfo { id: 0, package: package.to_string(), parent: None, state: DomainState::Running, base, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
         started: std::time::Instant::now(),
         args: Vec::new(),
         thread_done: false,
@@ -536,6 +556,7 @@ fn snapshot(d: &Domain) -> DomainInfo {
     i.threads = d.threads.len();
     i.thread_names = d.threads.iter().map(|t| t.1.clone()).collect();
     (i.arena_in_use, i.arena_committed) = d.heap.as_ref().map_or((0, 0), |h| h.stats());
+    i.arena_detail = d.heap.as_ref().map_or((0, 0, 0), |h| { let x = h.detail(); (x.0, x.1, x.2) });
     i
 }
 fn with_block_memory(mut i: DomainInfo) -> DomainInfo {
@@ -708,8 +729,9 @@ pub(crate) fn compile_phase(id: DomainId, phase: &str) -> Result<(), String> {
 
 // Keys are domain-local records, not OS keys that survive each restart. Domain 0 also owns
 // keys for native callback threads; every ThreadData holds only its own values.
-static TLS_KEYS: Mutex<Vec<(u64, Vec<Option<usize>>)>> = Mutex::new(Vec::new());
-pub(crate) fn tls_key_create(base: u64, dtor: usize) -> u32 {
+/// Per key: its destructor and whether it is late (domain_threads::key_create).
+static TLS_KEYS: Mutex<Vec<(u64, Vec<Option<(usize, bool)>>)>> = Mutex::new(Vec::new());
+pub(crate) fn tls_key_create(base: u64, dtor: usize, late: bool) -> u32 {
     let _kept = crate::zone_alloc::kept();
     let mut keys = TLS_KEYS.lock().unwrap_or_else(|e| e.into_inner());
     let i = match keys.iter().position(|k| k.0 == base) {
@@ -718,7 +740,7 @@ pub(crate) fn tls_key_create(base: u64, dtor: usize) -> u32 {
     };
     let values = &mut keys[i].1;
     let key = values.len() as u32;
-    values.push(Some(dtor));
+    values.push(Some((dtor, late)));
     key
 }
 pub(crate) fn tls_key_delete(base: u64, key: u32) {
@@ -727,7 +749,7 @@ pub(crate) fn tls_key_delete(base: u64, key: u32) {
         if let Some(k) = values.get_mut(key as usize) { *k = None; }
     }
 }
-pub(crate) fn tls_destructor(base: u64, key: u32) -> Option<usize> {
+pub(crate) fn tls_destructor(base: u64, key: u32) -> Option<(usize, bool)> {
     TLS_KEYS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|k| k.0 == base)?.1.get(key as usize).copied().flatten()
 }
 pub(crate) fn forget_tls_keys(base: u64) {
@@ -957,7 +979,7 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
             d.remove(k);
         }
         d.push(Domain {
-            info: DomainInfo { id, package: spec.package.clone(), parent: spec.parent, state: DomainState::Compiling("package graph".into()), base: 0, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, static_committed: 0 },
+            info: DomainInfo { id, package: spec.package.clone(), parent: spec.parent, state: DomainState::Compiling("package graph".into()), base: 0, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
             started: t0,
             args: spec.argv.clone().unwrap_or_else(|| std::iter::once(spec.package.clone().into_bytes()).chain(spec.args.iter().map(|a| a.clone().into_bytes())).collect()),
             thread_done: false,
@@ -986,32 +1008,43 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     // entry path registers active loaders so the swap waits for their compile state.
     let _job = crate::jit::compile_job();
     let _z = crate::zone_alloc::compiler_thread();
+    if crate::preload::trace() { eprintln!("boot-trace: domain {id} start_prepared at t={:.1} ms", crate::clock::ms_since_start()); }
     let _loading = Loading(id);
     let t0 = std::time::Instant::now();
+    // The app's first start takes the boot's resolved package (same process, same instant). Taken
+    // before anything can end this start: the slot never outlives it (its memory is the compiler
+    // generation's, which the settle swap destroys), so a relaunch always resolves its own.
+    let boot_resolved = if crate::run::app_domain() == Some(id) { crate::run::take_boot_resolved() } else { None };
     if cancelled(id) { return Ok(id); }
     set_state(id, DomainState::Compiling("package graph".into()));
     let sess = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let workspace = crate::run::workspace_dir();
     let target_dir = crate::dirs::relax_dir().display().to_string();
     let std_dir = crate::std_dir();
-    let resolved = match crate::run::resolve_package(&sess, &workspace, &spec.package, &spec.cargo_flags, &spec.units_json, &target_dir, &std_dir, crate::run::ResolveFor::Domain(id), false) {
-        Ok(r) => r,
-        Err(e) => return fail(id, vec![e]),
+    let from_boot = boot_resolved.is_some();
+    let resolved = match boot_resolved {
+        Some(r) => r,
+        None => match crate::run::resolve_package(&sess, &workspace, &spec.package, &spec.cargo_flags, &spec.units_json, &target_dir, &std_dir, crate::run::ResolveFor::Domain(id), false) {
+            Ok(r) => r,
+            Err(e) => return fail(id, vec![e]),
+        },
     };
     let resolve_ms = t0.elapsed().as_secs_f64() * 1e3;
+    if crate::preload::trace() { eprintln!("boot-trace: domain {id} resolved at t={:.1} ms ({resolve_ms:.1} ms)", crate::clock::ms_since_start()); }
     if compile_phase(id, "loading crates").is_err() { return Ok(id); }
     let crate::run::Resolved { g, order, cfgs, live_inputs, .. } = resolved;
     let idents = identities(&g, &cfgs, &order);
     let t1 = std::time::Instant::now();
     let upn = up as usize;
     // the owner thread: the program's tables change there
-    let loaded = crate::owner::call(crate::owner::Class::App, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id) });
+    let loaded = crate::owner::call(crate::owner::Class::App, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id, !from_boot) });
     let (root, n_reused, new_names, first_file) = match loaded {
         Ok(x) => x,
         Err(e) => return fail(id, e),
     };
     crate::run_state::emit(crate::run_state::Event::Warm { domain: Some(id), warm: new_names.is_empty() });
     let load_ms = t1.elapsed().as_secs_f64() * 1e3;
+    if crate::preload::trace() { eprintln!("boot-trace: domain {id} loaded ({load_ms:.1} ms) at t={:.1} ms", crate::clock::ms_since_start()); }
     if compile_phase(id, "link").is_err() { return Ok(id); }
     let t2 = std::time::Instant::now();
     // the libraries the new crates link
@@ -1034,6 +1067,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         let (target, arg) = crate::run::main_call(u, main_def, entry)?;
         Ok::<_, String>((target, arg, create(u)))
     });
+    if crate::preload::trace() { eprintln!("boot-trace: domain {id} main prepared at t={:.1} ms", crate::clock::ms_since_start()); }
     let (target, arg, base) = match prepared {
         Ok(x) => x,
         Err(e) => return fail(id, vec![e]),
@@ -1063,6 +1097,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         crate::reload::domain_loaded(live_inputs);
     }
     // the domain's main thread (its name, its handle) outlives any compiler generation
+    if crate::preload::trace() { eprintln!("boot-trace: domain {id} launching at t={:.1} ms", crate::clock::ms_since_start()); }
     let launched = crate::zone_alloc::kept_with(|| launch_main(upn, id, base, target, arg, &spec.package, spec.around.clone()));
     if let Err(e) = launched {
         return fail(id, vec![e]);
@@ -1186,10 +1221,10 @@ pub fn start_in_run(spec: AppSpec) -> Result<DomainId, Vec<String>> {
 
 /// On the owner thread: gets the crates of `g` into the program (shared ones are reused) and
 /// returns (root crate, crates reused, names of the crates loaded, first file index of the load).
-unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize], cfgs: &[crate::cfg::CfgSet], idents: &[u64], id: DomainId) -> Result<(u32, usize, Vec<String>, usize), Vec<String>> {
+unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize], cfgs: &[crate::cfg::CfgSet], idents: &[u64], id: DomainId, reread: bool) -> Result<(u32, usize, Vec<String>, usize), Vec<String>> {
     use crate::modules::{Dep, NewCrate};
     let u = &mut *up;
-    let std_count = crate::std_pre_crates(&u.prog.session.clone()).len();
+    let std_count = crate::std_pre_crates(&u.prog.session.clone(), u.prog.std_simd).len();
     let std_deps: Vec<(String, Dep)> = (0..std_count).map(|k| (u.prog.syms.str(u.prog.crates[k].name).to_string(), Dep::Existing(k as u32))).collect();
     let mut crate_of = vec![u32::MAX; g.crates.len()];
     let mut batch_of = vec![usize::MAX; g.crates.len()];
@@ -1200,21 +1235,40 @@ unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize]
     // A layout/signature edit cannot reuse the old compiled crate just because its package
     // identity stayed the same. Keep unchanged code shared; load changed crates and their
     // dependants as a new revision. Other domains can still finish using their old revision.
-    let candidates: HashSet<_> = idents.iter().filter_map(|i| lookup_loaded(*i)).collect();
-    let mut current = std::collections::BTreeMap::new();
-    for module in &u.prog.mods {
-        let file = module.file as usize;
-        let Some(&krate) = u.prog.file_crate.get(file) else { continue };
-        if candidates.contains(&krate) {
-            if let Some(path) = u.prog.file_paths.get(file) { current.insert((krate, path), file); }
-        }
-    }
+    // A domain that resolved its own package compares every loaded file of a shared crate with the
+    // disk. The app's first start takes the boot's graph, whose files this process read a moment
+    // ago: nothing to compare (a save after that is the live watcher's, which stamped them before
+    // the load).
     let mut changed = HashSet::new();
-    for ((krate, path), file) in current {
-        if path.is_empty() || changed.contains(&krate) { continue; }
-        let pf = &u.prog.files[file];
-        if !crate::vfs::read(path).is_ok_and(|src| src.as_slice() == &pf.src[..pf.src_len as usize]) {
-            changed.insert(krate);
+    if reread {
+        let candidates: HashSet<_> = idents.iter().filter_map(|i| lookup_loaded(*i)).collect();
+        let mut current = std::collections::BTreeMap::new();
+        for module in &u.prog.mods {
+            let file = module.file as usize;
+            let Some(&krate) = u.prog.file_crate.get(file) else { continue };
+            if candidates.contains(&krate) {
+                if let Some(path) = u.prog.file_paths.get(file) { current.insert((krate, path), file); }
+            }
+        }
+        // every changed file, with the bytes on disk now: the program's source registry keeps the
+        // first snapshot of a path for good (source ids name paths across revisions), so the new
+        // revision reads these through an overlay -- without it a second relaunch after an edit
+        // loaded the first relaunch's text again
+        let mut fresh: Vec<(String, Vec<u8>)> = Vec::new();
+        for ((krate, path), file) in current {
+            if path.is_empty() { continue; }
+            let pf = &u.prog.files[file];
+            match crate::vfs::read(path) {
+                Ok(src) if src.as_slice() == &pf.src[..pf.src_len as usize] => {}
+                Ok(src) => {
+                    changed.insert(krate);
+                    if !fresh.iter().any(|f| &f.0 == path) { fresh.push((path.clone(), src)); }
+                }
+                Err(_) => { changed.insert(krate); }
+            }
+        }
+        for (path, src) in fresh {
+            u.prog.sources = std::sync::Arc::new(u.prog.sources.overlay(&path, src.into()));
         }
     }
     for &ci in order {
@@ -1403,6 +1457,41 @@ mod tests {
         assert_eq!(enter(dom0), b);
         destroy(b);
         assert!(!blocks().contains(&b));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A static whose array length is a named constant (`[u8; N]`) is laid out and captured at its
+    /// full size: a domain created afterwards starts from all N bytes of the initial image (the
+    /// image was once sized by an unnormalized type, so a domain saw the first byte only).
+    #[test]
+    fn static_array_with_const_length_keeps_its_image_in_a_domain() {
+        isolated_test!(static_array_with_const_length_keeps_its_image_in_a_domain);
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-domains-arr-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("fixture.rs");
+        std::fs::write(&source, r#"
+            const N: usize = 5;
+            static TABLE: [u8; N] = [3, 1, 4, 1, 5];
+            fn sum(out: *mut u64) { let mut s = 0u64; let mut i = 0; while i < N { s = s * 10 + TABLE[i] as u64; i += 1; } unsafe { *out = s; } }
+        "#).unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, name: &str| DefId(u.prog.defs.iter().position(|d| u.prog.syms.str(d.name) == name).unwrap() as u32);
+        let (sum, table) = (def(&u, "sum"), def(&u, "TABLE"));
+        let up = &mut *u as *mut Unit;
+        let _ = u.static_sym(table);
+        let id = u.fn_id(FnKey::Inst(sum, Vec::new()));
+        let entry = u.entry(id);
+        let b = create(&u);
+        let mut out = 0u64;
+        unsafe { crate::jit::call_jit_in(up, b, entry, &mut out as *mut u64 as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
+        assert_eq!(out, 31415);
+        destroy(b);
         std::fs::remove_dir_all(root).unwrap();
     }
 

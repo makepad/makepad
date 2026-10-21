@@ -10,7 +10,7 @@ crate::collected_fields!(Def, kind, name, parent, file, item, sub, is_pub, krate
 crate::collected_fields!(Module, def, lexical_parent, normal, parent_mod, krate, file,
     types, values, macros, globs, anon_traits, import_pub);
 crate::collected_fields!(ImplData, def, file, item, module, items);
-crate::collected_fields!(Import, module, global, segs, bind, glob, is_pub, done, file, pos);
+crate::collected_fields!(Import, module, global, segs, bind, glob, is_pub, done, file, pos, ext, bound);
 
 /// Binding tables read in place from the image (ImageMap).
 macro_rules! tables { ($op:ident) => { $op!(block_mods, block_owner, item_defs, node_id_to_def_id, legacy_const_args, def_id_to_node_id, impl_trait_in_trait_data, associated_types_for_impl_traits, opaque_to_rpitit, opaque_types_defined_by, trait_item_def_id, def_disambiguators, child_definitions); }; }
@@ -346,7 +346,7 @@ impl Program {
             context.restore_fingerprint(selection_hash);
             p.crates.push(CrateInfo {
                 name, root_mod, edition, recursion_limit: 128, deps, cfg: CfgSet { set, session: session.clone() },
-                proc_macro, relaxed: OnceLock::new(), root_path, context,
+                proc_macro, is_bin: false, validate: false, relaxed: OnceLock::new(), features: OnceLock::new(), root_path, context,
             });
         }
         macro_rules! get { ($($f:ident),+) => { $(p.$f = Codec::get(&mut r)?;)+ }; }

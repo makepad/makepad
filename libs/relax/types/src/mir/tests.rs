@@ -44,7 +44,10 @@ fn body(tcx: &Tcx) -> Body {
         basic_blocks: vec![block(TerminatorKind::Return, false), block(TerminatorKind::Return, false)],
         local_decls: locals,
         source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }],
-        user_type_annotations: vec![UserTypeId(0)],
+        user_type_annotations: vec![CanonicalUserTypeAnnotation::for_test(TyId(0), Span::default())],
+        span: Span::default(),
+        upvars: Vec::new(),
+        allocs: AllocMap::default(),
         var_debug_info: Vec::new(),
         arg_count: 1,
         spread_arg: None,
@@ -317,7 +320,7 @@ fn yield_and_coroutine_drop_phase_rules() {
         let mut b = body(&tcx);
         term(&mut b, kind);
         bad(&b, &tcx, "outside coroutine");
-        b.coroutine = Some(CoroutineInfo { yield_ty: tcx.tys.i32_, resume_ty: tcx.tys.i32_, kind: CoroutineKind::Coroutine });
+        b.coroutine = Some(CoroutineInfo { yield_ty: tcx.tys.i32_, resume_ty: tcx.tys.i32_, kind: CoroutineKind::Coroutine(Movability::Movable) });
         good(&b, &tcx);
         for phase in [RuntimePhase::Initial, RuntimePhase::PostCleanup, RuntimePhase::Optimized] {
             b.phase = MirPhase::Runtime(phase);
@@ -369,6 +372,7 @@ fn constants_and_allocation_provenance() {
         (ConstValue::Indirect { alloc: id, offset: 4 }, tcx.tys.i32_),
     ];
     let mut b = body(&tcx);
+    b.allocs = allocations;
     for (value, ty) in values {
         let target = Local(b.local_decls.len() as u32);
         let mut decl = b.local_decls[2].clone();
@@ -398,7 +402,7 @@ fn promoted_body_has_independent_indices() {
         Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
             span: Span::default(),
             user_ty: Some(UserTypeAnnotationIndex(0)),
-            const_: Const::Unevaluated { def: DefId(0), args: vec![crate::consts::GenericArg::Type(tcx.tys.i32_)], promoted: Some(PromotedId(0)) },
+            const_: Const::Unevaluated { def: DefId(0), args: vec![crate::consts::GenericArg::Type(tcx.tys.i32_)], promoted: Some(PromotedId(0)), ty: tcx.tys.i32_ },
         }))),
     )));
     good(&b, &tcx);
@@ -481,6 +485,7 @@ fn printer_golden() {
     let mut b = body(&tcx);
     b.local_decls.truncate(3);
     b.basic_blocks.truncate(1);
+    b.user_type_annotations.clear();
     b.basic_blocks[0].statements = vec![
         stmt(StatementKind::StorageLive(Local(2))),
         stmt(StatementKind::Assign(local(2), Rvalue::BinaryOp(BinOp::Add, Box::new((copy(1), integer(tcx.tys.i32_)))))),
@@ -585,7 +590,7 @@ fn visitor_finds_assert_payload_and_repeat_constant() {
     term(&mut b, TerminatorKind::Return);
     b.basic_blocks[0].statements.push(stmt(StatementKind::Assign(
         local(2),
-        Rvalue::Repeat(copy(1), Const::Unevaluated { def: DefId(1), args: vec![crate::consts::GenericArg::Type(TyId(u32::MAX))], promoted: None }),
+        Rvalue::Repeat(copy(1), Const::Unevaluated { def: DefId(1), args: vec![crate::consts::GenericArg::Type(TyId(u32::MAX))], promoted: None, ty: tcx.tys.usize_ }),
     )));
     bad(&b, &tcx, "type is out of range");
 }
@@ -611,4 +616,77 @@ fn mutable_visitor_cannot_rename_return() {
     }
     let tcx = Tcx::new();
     RenameReturn.visit_body(&mut body(&tcx));
+}
+
+#[test]
+fn global_allocs_name_statics_and_functions() {
+    let tcx = Tcx::new();
+    let mut allocs = AllocMap::default();
+    let a = allocs.static_alloc(DefId(7));
+    assert_eq!(allocs.static_alloc(DefId(7)), a);
+    let f = allocs.insert_function(DefId(8), vec![]);
+    assert_ne!(a, f);
+    assert!(allocs.get(a).is_none() && allocs.get(f).is_none());
+    let ptr = |alloc, offset| Const::Val(ConstValue::Scalar(Scalar::Ptr { provenance: CtfeProvenance::new(alloc), offset }), tcx.tys.u8_);
+    assert_eq!(ptr(a, 0).check_static_ptr(&allocs), Some(DefId(7)));
+    assert_eq!(ptr(a, 1).check_static_ptr(&allocs), None);
+    assert_eq!(ptr(f, 0).check_static_ptr(&allocs), None);
+    assert_eq!(Const::Ty(tcx.tys.u8_, crate::consts::Const(0)).check_static_ptr(&allocs), None);
+}
+
+#[test]
+fn contract_extensions_validate_and_visit() {
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let tcx = Tcx::new();
+    let mut b = body(&tcx);
+    b.local_decls[2].local_info = LocalInfo::user_var(BindingMode(ByRef::No, Mutability::Not), None, Span::default());
+    assert!(b.local_decls[2].can_be_made_mutable() && b.local_decls[2].is_nonref_binding() && b.local_decls[2].is_user_variable());
+    b.local_decls[2].local_info = LocalInfo::user_var(BindingMode(ByRef::Yes(Mutability::Not), Mutability::Not), None, Span::default());
+    assert!(!b.local_decls[2].can_be_made_mutable() && !b.local_decls[2].is_nonref_binding());
+    b.local_decls[2].local_info = LocalInfo::User(BindingForm::RefForGuard(Local(1)));
+    assert!(b.local_decls[2].is_ref_for_guard());
+    b.local_decls[2].local_info = LocalInfo::StaticRef { def_id: DefId(1), is_thread_local: true };
+    assert!(b.local_decls[2].is_ref_to_static() && b.local_decls[2].is_ref_to_thread_local());
+    b.local_decls[2].local_info = LocalInfo::Boring;
+    // The hint is a lint-only statement and visits its place as a non-use.
+    b.basic_blocks[0].statements = vec![stmt(StatementKind::BackwardIncompatibleDropHint { place: local(2), reason: BackwardIncompatibleDropReason::Edition2024 })];
+    good(&b, &tcx);
+    let dump = pretty::print_body(&Program::new(sess), &tcx, "f", &b);
+    assert!(dump.contains("BackwardIncompatibleDropHint(_2, Edition2024)"), "{dump}");
+    struct Contexts(Vec<PlaceContext>);
+    impl visit::Visitor for Contexts {
+        fn visit_local(&mut self, _: &Local, context: PlaceContext, _: Location) { self.0.push(context); }
+    }
+    let mut contexts = Contexts(Vec::new());
+    visit::Visitor::visit_body(&mut contexts, &b);
+    assert!(contexts.0.contains(&PlaceContext::NonUse(visit::NonUseContext::BackwardIncompatibleDropHint)));
+    // Upvars belong to closure bodies, and name their types.
+    let upvar = CapturedPlace {
+        name: "x".into(), var: 3, root_ty: tcx.tys.i32_, projection: Vec::new(), ty: tcx.tys.i32_,
+        capture: UpvarCapture::ByRef(UpvarBorrowKind::Mutable), mutability: Mutability::Mut, path_span: Span::default(), kind_span: Span::default(),
+    };
+    assert!(upvar.is_by_ref());
+    b.upvars.push(upvar);
+    bad(&b, &tcx, "upvars outside a closure body");
+    b.source.kind = BodyKind::Closure(0);
+    good(&b, &tcx);
+    let dump = pretty::print_body(&Program::new(sess), &tcx, "f", &b);
+    assert!(dump.contains("upvar#0: x ByRef(Mutable)"), "{dump}");
+    // Unevaluated constants carry their type; a type-system constant takes the valtree's own.
+    let unevaluated = Const::Unevaluated { def: DefId(1), args: Vec::new(), promoted: None, ty: tcx.tys.bool_ };
+    assert_eq!(unevaluated.ty(&tcx.tys), tcx.tys.bool_);
+    assert_eq!(Const::Ty(tcx.tys.u8_, tcx.tys.const_usize(3)).ty(&tcx.tys), tcx.tys.usize_);
+}
+
+#[test]
+fn canonical_user_type_identity() {
+    use crate::types::user_type::{UserArgs, UserType, UserTypeKind};
+    let tcx = Tcx::new();
+    let canon = |kind| crate::next_solver::canonical::Canonical { value: UserType::new(kind), max_universe: crate::types::UniverseIndex::ROOT, var_kinds: Vec::new() };
+    let bound = |i| tcx.tys.intern(TyKind::Bound(0, crate::types::BoundTy { var: crate::types::BoundVar(i), kind: crate::types::BoundTyKind::Anon }));
+    let identity = canon(UserTypeKind::TypeOf(DefId(1), UserArgs { args: vec![crate::consts::GenericArg::Type(bound(0)), crate::consts::GenericArg::Type(bound(1))], user_self_ty: None }));
+    assert!(identity.is_identity(&tcx.tys));
+    let swapped = canon(UserTypeKind::TypeOf(DefId(1), UserArgs { args: vec![crate::consts::GenericArg::Type(bound(1)), crate::consts::GenericArg::Type(bound(0))], user_self_ty: None }));
+    assert!(!swapped.is_identity(&tcx.tys));
+    assert!(!canon(UserTypeKind::Ty(tcx.tys.i32_)).is_identity(&tcx.tys));
 }

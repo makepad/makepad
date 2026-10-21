@@ -94,29 +94,29 @@ pub(crate) fn write_dec(v: usize, w: &mut dyn fmt::Write) -> fmt::Result {
 
 // ---------------------------------------------------------------- conversions
 
-pub fn from_utf8(v: &[u8]) -> Result<&str, Utf8Error> {
+pub const fn from_utf8(v: &[u8]) -> Result<&str, Utf8Error> {
     match validations::run_utf8_validation(v) {
         Ok(()) => Ok(unsafe { from_utf8_unchecked(v) }),
         Err(e) => Err(e),
     }
 }
 
-pub fn from_utf8_mut(v: &mut [u8]) -> Result<&mut str, Utf8Error> {
+pub const fn from_utf8_mut(v: &mut [u8]) -> Result<&mut str, Utf8Error> {
     match validations::run_utf8_validation(v) {
         Ok(()) => Ok(unsafe { from_utf8_unchecked_mut(v) }),
         Err(e) => Err(e),
     }
 }
 
-pub unsafe fn from_utf8_unchecked(v: &[u8]) -> &str {
+pub const unsafe fn from_utf8_unchecked(v: &[u8]) -> &str {
     crate::intrinsics_mem::str_from_raw(crate::intrinsics_mem::slice_ptr(v), v.len())
 }
 
-pub unsafe fn from_utf8_unchecked_mut(v: &mut [u8]) -> &mut str {
+pub const unsafe fn from_utf8_unchecked_mut(v: &mut [u8]) -> &mut str {
     crate::intrinsics_mem::transmute::<&mut [u8], &mut str>(v)
 }
 
-pub unsafe fn from_raw_parts<'a>(ptr: *const u8, len: usize) -> &'a str {
+pub const unsafe fn from_raw_parts<'a>(ptr: *const u8, len: usize) -> &'a str {
     crate::intrinsics_mem::str_from_raw(ptr, len)
 }
 

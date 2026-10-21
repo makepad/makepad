@@ -1,8 +1,9 @@
 //! Volatile accesses (AtomicLoad / AtomicStore with AtomOrd::Volatile) through every optimiser pass
 //! family: never removed (DCE, dead stores), merged (CSE), forwarded (slot store/load/copy forwarding,
 //! SROA), hoisted or speculated (LICM, if-conversion, layout) or reordered with each other.
+use relax_backend::passes;
 use relax_codegen::opt;
-use relax_codegen::rir::*;
+use relax_backend::rir::*;
 
 const U64: IntTy = IntTy { bits: 64, signed: false };
 
@@ -14,19 +15,19 @@ fn push(f: &mut Func, b: u32, i: Inst) {
 /// Every pass the JIT runs, in pipeline order, twice over (a later pass can undo an earlier one's care).
 fn all_passes(f: &mut Func) {
     for _ in 0..2 {
-        opt::simplify(&relax_session::Options::default(), f, None, true, true);
+        passes::simplify(&relax_session::Options::default(), f, None, true, true);
         opt::forward_slot_copies(f);
         opt::forward_slot_dests(f);
         opt::forward_slot_loads(f);
-        opt::sroa(f);
-        opt::simplify(&relax_session::Options::default(), f, None, true, true);
-        opt::licm(f);
-        opt::live_dce(f);
-        opt::sink_consts(f);
-        opt::relayout(f);
+        passes::sroa(f);
+        passes::simplify(&relax_session::Options::default(), f, None, true, true);
+        passes::licm(&relax_session::Options::default(), f);
+        passes::live_dce(f);
+        passes::sink_consts(f);
+        passes::relayout(f);
     }
-    opt::addr_modes(f);
-    opt::rotate_loops(f);
+    passes::addr_modes(f);
+    passes::rotate_loops(f);
     f.verify().unwrap();
 }
 

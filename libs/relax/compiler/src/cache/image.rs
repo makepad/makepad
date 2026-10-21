@@ -515,7 +515,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     e.u32(blob.len() as u32);
     e.u32(code.len() as u32);
     // the code without its unwind trailer (the trailer stays in the image: Unit::unwind_at)
-    e.u32(crate::rir::split_unwind_info(code).0 as u32);
+    e.u32(relax_backend::rir::split_unwind_info(code).0 as u32);
     e.u32(rel.len() as u32);
     for (at, kind, t, ix) in rel {
         e.u32(at);
@@ -735,6 +735,8 @@ pub(super) fn skip_fnkey(d: &mut D, depth: u32) -> Option<()> {
             }
             skip_tys(d, 0)
         }
+        // an unverified-mode twin: its base's key
+        4 => skip_fnkey(d, depth + 1),
         _ => None,
     }
 }
@@ -799,7 +801,7 @@ struct Img {
     /// per key: its slot in this run (NO_SLOT: none)
     slot: Vec<u32>,
     /// per symbol: what it resolved to (img_sym, place_data)
-    sym_sym: Vec<Option<Option<crate::rir::Sym>>>,
+    sym_sym: Vec<Option<Option<relax_backend::rir::Sym>>>,
     /// the data objects (place_data), and the object each symbol names (NO_SLOT: none)
     data: Vec<ImgData>,
     sym_obj: Vec<u32>,
@@ -810,7 +812,7 @@ struct Img {
     pc_files: Option<std::sync::Arc<crate::jit::PcFiles>>,
     store: std::sync::Arc<Store>,
     /// per relocation (its record's position in the image): the writable block made for it (`img_sym`)
-    fresh: HashMap<usize, crate::rir::Sym>,
+    fresh: HashMap<usize, relax_backend::rir::Sym>,
     /// slots placed (or found with code) so far
     seen: HashSet<u32>,
     changed: u64,
@@ -1071,7 +1073,7 @@ impl Linker {
     /// Resolves image symbol `ix` for relocation `ri` (memo; a promoted temporary's writable block
     /// -- tag 8 -- is made once per ordinal of `rw`, the blocks of the slot (or data object) being
     /// resolved, as link_entry does: never shared between slots).
-    fn img_sym(&mut self, u: &mut Unit, im: &mut Img, ix: u32, ri: usize, rw: &mut Vec<crate::rir::Sym>) -> Option<crate::rir::Sym> {
+    fn img_sym(&mut self, u: &mut Unit, im: &mut Img, ix: u32, ri: usize, rw: &mut Vec<relax_backend::rir::Sym>) -> Option<relax_backend::rir::Sym> {
         let ix = ix as usize;
         let &b = im.syms.get(ix)?;
         if b.first() != Some(&8) {
@@ -1164,7 +1166,7 @@ impl Linker {
         }
         // pointer words: other objects by address now, symbols resolved
         let mut ok = vec![false; n];
-        let mut words: Vec<Vec<(u32, u8, u32, i64, Option<crate::rir::Sym>)>> = Vec::with_capacity(layout.len());
+        let mut words: Vec<Vec<(u32, u8, u32, i64, Option<relax_backend::rir::Sym>)>> = Vec::with_capacity(layout.len());
         for &(o, _) in &layout {
             let mut w = Vec::with_capacity((im.data[o].rel.1 - im.data[o].rel.0) / DREL_SIZE);
             let mut good = true;
@@ -1224,7 +1226,7 @@ impl Linker {
             let d = &im.data[o];
             (addr[o], d.bytes.len() as u64, d.align.max(1), d.name.map(|b| String::from_utf8_lossy(b).into_owned()))
         }).collect();
-        let outside: HashMap<usize, crate::rir::Sym> = placed.iter().flat_map(|&k| words[k].iter()).filter(|w| w.1 == DATA_OBJ && batch_of[w.2 as usize] == u32::MAX)
+        let outside: HashMap<usize, relax_backend::rir::Sym> = placed.iter().flat_map(|&k| words[k].iter()).filter(|w| w.1 == DATA_OBJ && batch_of[w.2 as usize] == u32::MAX)
             .filter_map(|w| Some((w.2 as usize, u.syms.data_at(addr[w.2 as usize])?))).collect();
         let syms = u.syms.add_data_batch(&objs, |i, syms| {
             let k = placed[i];
@@ -1233,7 +1235,7 @@ impl Linker {
                 let s = if t == DATA_OBJ {
                     let b = batch_of[x as usize];
                     let base = if b != u32::MAX { syms[b as usize] } else { *outside.get(&(x as usize))? };
-                    crate::rir::Sym { id: base.id, off: add }
+                    relax_backend::rir::Sym { id: base.id, off: add }
                 } else {
                     s?
                 };
@@ -1261,7 +1263,7 @@ impl Linker {
                 i => Some(syms[i as usize]),
             };
             if let Some(sym) = sym {
-                im.sym_sym[s] = Some(Some(crate::rir::Sym { id: sym.id, off }));
+                im.sym_sym[s] = Some(Some(relax_backend::rir::Sym { id: sym.id, off }));
             }
         }
         self.cache().stats.prelink_data += placed.len() as u64;
@@ -1410,7 +1412,7 @@ impl Linker {
                                 }
                             }
                         }
-                        linked[k] = ok && crate::rir::link(&mut buf[off..off + n], at + off as u64, &rl, &|r| env.reloc_value(r)).is_ok();
+                        linked[k] = ok && relax_backend::rir::link(&mut buf[off..off + n], at + off as u64, &rl, &|r| env.reloc_value(r)).is_ok();
                     }
                 });
             }
@@ -1648,7 +1650,7 @@ impl Linker {
     fn image_slot_by_key(&mut self, u: &mut Unit, key: &crate::jit::FnKey) -> Option<u32> {
         // a closure's key encodes its parents' keys: those named first
         let parent = |u: &Unit, k: &crate::jit::FnKey| match k {
-            crate::jit::FnKey::Closure(_, _, p) if (*p as usize) < u.fns.len() => Some(*p),
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) if (*p as usize) < u.fns.len() => Some(*p),
             _ => None,
         };
         let mut p = parent(u, key);

@@ -58,7 +58,7 @@ pub struct ServiceConfig {
 pub struct ServiceHandle {
     pub activity_monitor: crate::activity::Monitor,
     pub addr: SocketAddr,
-    pub http_thread: JoinHandle<()>,
+    pub http_thread: makepad_network::HttpServerThread,
     pub route_thread: JoinHandle<()>,
     pub worker_thread: JoinHandle<()>,
     /// One per chat lane. They take from the chat admission class only, so a

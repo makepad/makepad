@@ -100,12 +100,40 @@ static MATCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Compares every registered crate present in the program against its embedded library
 /// closure. Any mismatch fails with file and feature/version differences; absent crates skip.
+const IDENTITY_THREADS: usize = 4;
+
 pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
     let reg: Vec<_> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| (p.name.clone(), p.source, p.manifest)).collect();
     let mut verified = Vec::new();
+    let mut files = std::collections::HashMap::new();
+    // the identity files of every package folder the registered crates reach, read and hashed
+    // by a few threads (a folder is hashed once whatever number of closures reach it)
+    let mut dirs: Vec<String> = Vec::new();
+    for (name, _, _) in &reg {
+        for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == *name) {
+            for d in crate::srchash::closure_dirs(pkgs, root) { if !dirs.contains(&d) { dirs.push(d); } }
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Vec<Mutex<Option<Vec<(String, u64)>>>> = dirs.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..dirs.len().min(IDENTITY_THREADS) {
+            scope.spawn(|| {
+                let _z = crate::zone_alloc::compiler_thread();
+                loop {
+                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(dir) = dirs.get(k) else { break };
+                    *done[k].lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::srchash::identity_files(std::path::Path::new(dir)));
+                }
+            });
+        }
+    });
+    for (dir, list) in dirs.iter().zip(done) {
+        if let Some(list) = list.into_inner().unwrap_or_else(|e| e.into_inner()) { files.insert(dir.clone(), list); }
+    }
     for (name, source, manifest) in &reg {
         for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == *name) {
-            let current = crate::srchash::closure_manifest(pkgs, root);
+            let current = crate::srchash::closure_manifest_with(pkgs, root, &mut files);
             if crate::srchash::manifest_hash(&current) != *source {
                 let built = crate::srchash::decode_manifest(manifest)?;
                 return Err(crate::srchash::diff_message(name, &built, &current));
@@ -120,6 +148,42 @@ pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The boot's source check, running beside the load (`check_sources_later`).
+static PENDING: Mutex<Option<std::thread::JoinHandle<Result<(), String>>>> = Mutex::new(None);
+
+/// `check_sources`, on a thread of its own. The boot starts it as early as `check_sources` could
+/// run and goes on loading; nothing may bind a provided crate before `finish_sources` has
+/// returned Ok (`take_for`, `take_for_crates` and the boot's own join before the unit is built
+/// call it). The hashes, the manifests and the error are those of `check_sources`.
+pub fn check_sources_later(pkgs: std::sync::Arc<Vec<crate::srchash::SrcPkg>>) {
+    let _k = crate::zone_alloc::kept();
+    let spawned = std::thread::Builder::new().name("run-provided-sources".into()).spawn(move || {
+        let _z = crate::zone_alloc::compiler_thread();
+        let t = std::time::Instant::now();
+        let verdict = check_sources(&pkgs);
+        if crate::preload::trace() { eprintln!("boot-trace: provided sources checked in {:.1} ms (beside the load)", t.elapsed().as_secs_f64() * 1e3); }
+        verdict
+    });
+    match spawned {
+        Ok(h) => *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
+        Err(e) => *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::spawn(move || Err(format!("provided source check: {e}")))),
+    }
+}
+
+/// The verdict of the check `check_sources_later` started, once it has ended.
+static VERDICT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+
+/// Waits for the check `check_sources_later` started, if one is running: its verdict (every
+/// caller gets it, the proc-macro world's unit as well as the program's). Ok when none started.
+pub fn finish_sources() -> Result<(), String> {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = pending.take() {
+        let verdict = h.join().unwrap_or_else(|_| Err("provided source check: the thread panicked".into()));
+        *VERDICT.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_clone(&verdict));
+    }
+    VERDICT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or(Ok(()))
 }
 
 /// Reads what `check_sources` reads, for the identity of every registered crate in the program,
@@ -138,6 +202,8 @@ pub fn read_identity_files(pkgs: &[crate::srchash::SrcPkg]) {
 /// The registered crates as (crate index in `prog`, entry) whose source matched (check_sources);
 /// crates not in the program are left out. Taken once per unit (Unit::new).
 pub fn take_for(prog: &Program) -> Vec<(u32, ProvidedCrate)> {
+    // nothing binds before the source check has passed (a failed one binds nothing)
+    if finish_sources().is_err() { return Vec::new(); }
     let matched = MATCHED.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
     for p in REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter() {
@@ -154,6 +220,7 @@ pub fn take_for(prog: &Program) -> Vec<(u32, ProvidedCrate)> {
 /// As [`take_for`], for the crates of `prog` named by `only` (indices a run-time load added) that
 /// are not bound yet.
 pub fn take_for_crates(prog: &Program, only: &[u32]) -> Vec<(u32, ProvidedCrate)> {
+    if finish_sources().is_err() { return Vec::new(); }
     let matched = MATCHED.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
     for p in REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter() {
@@ -473,7 +540,7 @@ pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &
     if s.header.abi.is_c_like() || s.header.c_variadic || s.track_caller {
         return Some("abi");
     }
-    if crate::jit::inline_attrs(prog, d) & crate::opt::ATTR_ALWAYS != 0 {
+    if crate::jit::inline_attrs(prog, d) & relax_codegen::opt::ATTR_ALWAYS != 0 {
         return Some("#[inline(always)]: compiled on the caller's side");
     }
     let parent = prog.def(def.parent);

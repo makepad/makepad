@@ -1064,7 +1064,7 @@ pub fn rchunks_exact<T>(v: &[T], chunk_size: usize) -> RChunksExact<'_, T> {
     }
 }
 impl<'a, T> RChunksExact<'a, T> {
-    pub fn remainder(&self) -> &'a [T] {
+    pub const fn remainder(&self) -> &'a [T] {
         self.rem
     }
 }
@@ -1178,7 +1178,7 @@ pub fn rchunks_exact_mut<T>(v: &mut [T], chunk_size: usize) -> RChunksExactMut<'
     }
 }
 impl<'a, T> RChunksExactMut<'a, T> {
-    pub fn into_remainder(self) -> &'a mut [T] {
+    pub const fn into_remainder(self) -> &'a mut [T] {
         self.rem
     }
 }

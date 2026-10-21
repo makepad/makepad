@@ -150,8 +150,8 @@ pub fn instantiate_and_apply_query_response(infcx: &InferCtxt<'_>, prog: &crate:
     for (key, ty) in response.external_constraints.opaque_types {
         let mut inner = infcx.inner.borrow_mut();
         let mut table = inner.opaque_types();
-        if let Some(previous) = table.register(key.clone(), ProvisionalHiddenType { ty }) {
-            table.add_duplicate(key, ProvisionalHiddenType { ty: previous });
+        if let Some(previous) = table.register(key.clone(), ProvisionalHiddenType::new(ty)) {
+            table.add_duplicate(key, ProvisionalHiddenType::new(previous));
         }
     }
     (response.external_constraints.normalization_nested_goals, response.certainty)

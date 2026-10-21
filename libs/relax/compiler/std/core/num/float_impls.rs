@@ -20,6 +20,7 @@ impl f64 {
     pub const MAX_EXP: i32 = 1024;
     pub const MIN_10_EXP: i32 = -307;
     pub const MAX_10_EXP: i32 = 308;
+    #[rustc_diagnostic_item = "f64_nan"]
     pub const NAN: f64 = f64::from_bits(0x7ff8_0000_0000_0000);
     pub const INFINITY: f64 = f64::from_bits(0x7ff0_0000_0000_0000);
     pub const NEG_INFINITY: f64 = f64::from_bits(0xfff0_0000_0000_0000);
@@ -40,22 +41,22 @@ impl f64 {
     pub const fn copysign(self, sign: f64) -> f64 { f64::from_bits((self.to_bits() & !0x8000_0000_0000_0000) | (sign.to_bits() & 0x8000_0000_0000_0000)) }
     pub const fn signum(self) -> f64 { if self.is_nan() { f64::NAN } else { (1.0 as f64).copysign(self) } }
     pub fn sqrt(self) -> f64 { unsafe { intrinsics::sqrt_f64(self) } }
-    pub fn floor(self) -> f64 { unsafe { intrinsics::floor_f64(self) } }
-    pub fn ceil(self) -> f64 { unsafe { intrinsics::ceil_f64(self) } }
-    pub fn trunc(self) -> f64 { unsafe { intrinsics::trunc_f64(self) } }
-    pub fn round_ties_even(self) -> f64 { unsafe { intrinsics::rint_f64(self) } }
-    pub fn round(self) -> f64 { unsafe { libm::round(self) } }
-    pub fn fract(self) -> f64 { self - self.trunc() }
-    pub fn min(self, other: f64) -> f64 { unsafe { intrinsics::fmin_f64(self, other) } }
-    pub fn max(self, other: f64) -> f64 { unsafe { intrinsics::fmax_f64(self, other) } }
-    pub fn minimum(self, other: f64) -> f64 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }
-    pub fn maximum(self, other: f64) -> f64 { if self > other { self } else if other > self { other } else if self == other { if self.is_sign_positive() && other.is_sign_negative() { self } else { other } } else { self + other } }
+    pub const fn floor(self) -> f64 { unsafe { intrinsics::floor_f64(self) } }
+    pub const fn ceil(self) -> f64 { unsafe { intrinsics::ceil_f64(self) } }
+    pub const fn trunc(self) -> f64 { unsafe { intrinsics::trunc_f64(self) } }
+    pub const fn round_ties_even(self) -> f64 { unsafe { intrinsics::rint_f64(self) } }
+    pub const fn round(self) -> f64 { unsafe { libm::round(self) } }
+    pub const fn fract(self) -> f64 { self - self.trunc() }
+    pub const fn min(self, other: f64) -> f64 { unsafe { intrinsics::fmin_f64(self, other) } }
+    pub const fn max(self, other: f64) -> f64 { unsafe { intrinsics::fmax_f64(self, other) } }
+    pub const fn minimum(self, other: f64) -> f64 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }
+    pub const fn maximum(self, other: f64) -> f64 { if self > other { self } else if other > self { other } else if self == other { if self.is_sign_positive() && other.is_sign_negative() { self } else { other } } else { self + other } }
     #[track_caller]
-    pub fn clamp(self, min: f64, max: f64) -> f64 { if !(min <= max) { crate::panicking::panic_fmt(format_args!("min > max, or either was NaN. min = {min:?}, max = {max:?}")); } let mut x = self; if x < min { x = min; } if x > max { x = max; } x }
-    pub fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f64(self, a, b) } else { libm::fma(self, a, b) } } }
+    pub const fn clamp(self, min: f64, max: f64) -> f64 { if !(min <= max) { crate::panicking::panic_fmt(format_args!("min > max, or either was NaN. min = {min:?}, max = {max:?}")); } let mut x = self; if x < min { x = min; } if x > max { x = max; } x }
+    pub const fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f64(self, a, b) } else { libm::fma(self, a, b) } } }
     pub fn div_euclid(self, rhs: f64) -> f64 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f64) -> f64 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f64 { let recip = n < 0; let mut b = n; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f64 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f64) -> f64 { unsafe { libm::pow(self, n) } }
     pub fn exp(self) -> f64 { unsafe { libm::exp(self) } }
     pub fn exp2(self) -> f64 { unsafe { libm::exp2(self) } }
@@ -81,17 +82,17 @@ impl f64 {
     pub fn asinh(self) -> f64 { let ax = self.abs(); let ix = 1.0 / ax; (ax + (ax / ((1.0 as f64).hypot(ix) + ix))).ln_1p().copysign(self) }
     pub fn acosh(self) -> f64 { if self < 1.0 { f64::NAN } else { (self + ((self - 1.0).sqrt() * (self + 1.0).sqrt())).ln() } }
     pub fn atanh(self) -> f64 { 0.5 * ((2.0 * self) / (1.0 - self)).ln_1p() }
-    pub fn to_degrees(self) -> f64 { self * (180.0f64 / crate::f64::consts::PI) }
-    pub fn to_radians(self) -> f64 { self * (crate::f64::consts::PI / 180.0) }
-    pub fn recip(self) -> f64 { 1.0 / self }
-    pub fn total_cmp(&self, other: &f64) -> Ordering { let mut l = self.to_bits() as i64; let mut r = other.to_bits() as i64; l ^= (((l >> 63) as u64) >> 1) as i64; r ^= (((r >> 63) as u64) >> 1) as i64; l.cmp(&r) }
-    pub fn to_le_bytes(self) -> [u8; 8] { self.to_bits().to_le_bytes() }
-    pub fn to_be_bytes(self) -> [u8; 8] { self.to_bits().to_be_bytes() }
-    pub fn to_ne_bytes(self) -> [u8; 8] { self.to_bits().to_ne_bytes() }
-    pub fn from_le_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_le_bytes(b)) }
-    pub fn from_be_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_be_bytes(b)) }
-    pub fn from_ne_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_ne_bytes(b)) }
-    pub fn midpoint(self, other: f64) -> f64 { ((self as f64 + other as f64) / 2.0) as f64 }
+    pub const fn to_degrees(self) -> f64 { self * (180.0f64 / crate::f64::consts::PI) }
+    pub const fn to_radians(self) -> f64 { self * (crate::f64::consts::PI / 180.0) }
+    pub const fn recip(self) -> f64 { 1.0 / self }
+    pub const fn total_cmp(&self, other: &f64) -> Ordering { let mut l = self.to_bits() as i64; let mut r = other.to_bits() as i64; l ^= (((l >> 63) as u64) >> 1) as i64; r ^= (((r >> 63) as u64) >> 1) as i64; l.cmp(&r) }
+    pub const fn to_le_bytes(self) -> [u8; 8] { self.to_bits().to_le_bytes() }
+    pub const fn to_be_bytes(self) -> [u8; 8] { self.to_bits().to_be_bytes() }
+    pub const fn to_ne_bytes(self) -> [u8; 8] { self.to_bits().to_ne_bytes() }
+    pub const fn from_le_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_le_bytes(b)) }
+    pub const fn from_be_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_be_bytes(b)) }
+    pub const fn from_ne_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_ne_bytes(b)) }
+    pub const fn midpoint(self, other: f64) -> f64 { ((self as f64 + other as f64) / 2.0) as f64 }
 }
 
 #[cfg(not(relax_check))]
@@ -107,6 +108,7 @@ impl f32 {
     pub const MAX_EXP: i32 = 128;
     pub const MIN_10_EXP: i32 = -37;
     pub const MAX_10_EXP: i32 = 38;
+    #[rustc_diagnostic_item = "f32_nan"]
     pub const NAN: f32 = f32::from_bits(0x7fc0_0000);
     pub const INFINITY: f32 = f32::from_bits(0x7f80_0000);
     pub const NEG_INFINITY: f32 = f32::from_bits(0xff80_0000);
@@ -127,22 +129,22 @@ impl f32 {
     pub const fn copysign(self, sign: f32) -> f32 { f32::from_bits((self.to_bits() & !0x8000_0000) | (sign.to_bits() & 0x8000_0000)) }
     pub const fn signum(self) -> f32 { if self.is_nan() { f32::NAN } else { (1.0 as f32).copysign(self) } }
     pub fn sqrt(self) -> f32 { unsafe { intrinsics::sqrt_f32(self) } }
-    pub fn floor(self) -> f32 { unsafe { intrinsics::floor_f32(self) } }
-    pub fn ceil(self) -> f32 { unsafe { intrinsics::ceil_f32(self) } }
-    pub fn trunc(self) -> f32 { unsafe { intrinsics::trunc_f32(self) } }
-    pub fn round_ties_even(self) -> f32 { unsafe { intrinsics::rint_f32(self) } }
-    pub fn round(self) -> f32 { unsafe { libm::roundf(self) } }
-    pub fn fract(self) -> f32 { self - self.trunc() }
-    pub fn min(self, other: f32) -> f32 { unsafe { intrinsics::fmin_f32(self, other) } }
-    pub fn max(self, other: f32) -> f32 { unsafe { intrinsics::fmax_f32(self, other) } }
-    pub fn minimum(self, other: f32) -> f32 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }
-    pub fn maximum(self, other: f32) -> f32 { if self > other { self } else if other > self { other } else if self == other { if self.is_sign_positive() && other.is_sign_negative() { self } else { other } } else { self + other } }
+    pub const fn floor(self) -> f32 { unsafe { intrinsics::floor_f32(self) } }
+    pub const fn ceil(self) -> f32 { unsafe { intrinsics::ceil_f32(self) } }
+    pub const fn trunc(self) -> f32 { unsafe { intrinsics::trunc_f32(self) } }
+    pub const fn round_ties_even(self) -> f32 { unsafe { intrinsics::rint_f32(self) } }
+    pub const fn round(self) -> f32 { unsafe { libm::roundf(self) } }
+    pub const fn fract(self) -> f32 { self - self.trunc() }
+    pub const fn min(self, other: f32) -> f32 { unsafe { intrinsics::fmin_f32(self, other) } }
+    pub const fn max(self, other: f32) -> f32 { unsafe { intrinsics::fmax_f32(self, other) } }
+    pub const fn minimum(self, other: f32) -> f32 { if self < other { self } else if other < self { other } else if self == other { if self.is_sign_negative() && other.is_sign_positive() { self } else { other } } else { self + other } }
+    pub const fn maximum(self, other: f32) -> f32 { if self > other { self } else if other > self { other } else if self == other { if self.is_sign_positive() && other.is_sign_negative() { self } else { other } } else { self + other } }
     #[track_caller]
-    pub fn clamp(self, min: f32, max: f32) -> f32 { if !(min <= max) { crate::panicking::panic_fmt(format_args!("min > max, or either was NaN. min = {min:?}, max = {max:?}")); } let mut x = self; if x < min { x = min; } if x > max { x = max; } x }
-    pub fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f32(self, a, b) } else { libm::fmaf(self, a, b) } } }
+    pub const fn clamp(self, min: f32, max: f32) -> f32 { if !(min <= max) { crate::panicking::panic_fmt(format_args!("min > max, or either was NaN. min = {min:?}, max = {max:?}")); } let mut x = self; if x < min { x = min; } if x > max { x = max; } x }
+    pub const fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f32(self, a, b) } else { libm::fmaf(self, a, b) } } }
     pub fn div_euclid(self, rhs: f32) -> f32 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f32) -> f32 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f32 { let recip = n < 0; let mut b = n; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f32 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f32) -> f32 { unsafe { libm::powf(self, n) } }
     pub fn exp(self) -> f32 { unsafe { libm::expf(self) } }
     pub fn exp2(self) -> f32 { unsafe { libm::exp2f(self) } }
@@ -168,16 +170,16 @@ impl f32 {
     pub fn asinh(self) -> f32 { let ax = self.abs(); let ix = 1.0 / ax; (ax + (ax / ((1.0 as f32).hypot(ix) + ix))).ln_1p().copysign(self) }
     pub fn acosh(self) -> f32 { if self < 1.0 { f32::NAN } else { (self + ((self - 1.0).sqrt() * (self + 1.0).sqrt())).ln() } }
     pub fn atanh(self) -> f32 { 0.5 * ((2.0 * self) / (1.0 - self)).ln_1p() }
-    pub fn to_degrees(self) -> f32 { const PIS_IN_180: f32 = 57.2957795130823208767981548141051703_f32; self * PIS_IN_180 }
-    pub fn to_radians(self) -> f32 { self * (crate::f32::consts::PI / 180.0f32) }
-    pub fn recip(self) -> f32 { 1.0 / self }
-    pub fn total_cmp(&self, other: &f32) -> Ordering { let mut l = self.to_bits() as i32; let mut r = other.to_bits() as i32; l ^= (((l >> 31) as u32) >> 1) as i32; r ^= (((r >> 31) as u32) >> 1) as i32; l.cmp(&r) }
-    pub fn to_le_bytes(self) -> [u8; 4] { self.to_bits().to_le_bytes() }
-    pub fn to_be_bytes(self) -> [u8; 4] { self.to_bits().to_be_bytes() }
-    pub fn to_ne_bytes(self) -> [u8; 4] { self.to_bits().to_ne_bytes() }
-    pub fn from_le_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_le_bytes(b)) }
-    pub fn from_be_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_be_bytes(b)) }
-    pub fn from_ne_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_ne_bytes(b)) }
-    pub fn midpoint(self, other: f32) -> f32 { ((self as f64 + other as f64) / 2.0) as f32 }
+    pub const fn to_degrees(self) -> f32 { const PIS_IN_180: f32 = 57.2957795130823208767981548141051703_f32; self * PIS_IN_180 }
+    pub const fn to_radians(self) -> f32 { self * (crate::f32::consts::PI / 180.0f32) }
+    pub const fn recip(self) -> f32 { 1.0 / self }
+    pub const fn total_cmp(&self, other: &f32) -> Ordering { let mut l = self.to_bits() as i32; let mut r = other.to_bits() as i32; l ^= (((l >> 31) as u32) >> 1) as i32; r ^= (((r >> 31) as u32) >> 1) as i32; l.cmp(&r) }
+    pub const fn to_le_bytes(self) -> [u8; 4] { self.to_bits().to_le_bytes() }
+    pub const fn to_be_bytes(self) -> [u8; 4] { self.to_bits().to_be_bytes() }
+    pub const fn to_ne_bytes(self) -> [u8; 4] { self.to_bits().to_ne_bytes() }
+    pub const fn from_le_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_le_bytes(b)) }
+    pub const fn from_be_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_be_bytes(b)) }
+    pub const fn from_ne_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_ne_bytes(b)) }
+    pub const fn midpoint(self, other: f32) -> f32 { ((self as f64 + other as f64) / 2.0) as f32 }
 }
 

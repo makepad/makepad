@@ -33,15 +33,7 @@ impl Tcx {
             if !matches!(def.kind, DefKind::Trait | DefKind::AssocTy | DefKind::TypeAlias) { continue; }
             let mark = crate::program::missing_mark();
             let mut env = self.item_env(prog,d);
-            if def.kind == DefKind::Trait {
-                env.names.insert(0,prog.syms.get("Self").unwrap_or(u32::MAX));
-                env.regions.next_param = 1;
-                env.self_ty = Some(self.tys.intern(TyKind::Param(0)));
-                env.trait_def = Some(d);
-                if let Some(crate::ast::TraitItem { generics, .. }) = { let a = &prog.files[def.file as usize].ast; a.as_trait(&a.item(def.item).kind) } {
-                    push_generics(prog,def.file,generics,&mut env);
-                }
-            }
+            // (item_env of a trait already holds `Self` first, then its parameters)
             env.regions.enabled = true;
             let mut contract = self.region_contract(cx,prog,d,&env);
             if let Some(crate::ast::TraitItem { supers, .. }) = { let a = &prog.files[def.file as usize].ast; a.as_trait(&a.item(def.item).kind) } {

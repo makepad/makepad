@@ -60,6 +60,13 @@ pub fn run(core: &str) {
     for tr in ["Pointer", "Debug"] {
         let _ = writeln!(f, "impl<F: FnPtr> fmt::{tr} for F {{ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{ fmt::Pointer::fmt(&(FnPtr::addr(*self) as *const ()), f) }} }}");
     }
+    // library/core/src/ptr/mod.rs: comparison and hashing of fn pointers go by address
+    f.push_str("use crate::cmp::{Ordering, PartialOrd, Ord};\nuse crate::hash::{Hash, Hasher};\n\n");
+    f.push_str("impl<F: FnPtr> PartialEq for F { fn eq(&self, other: &Self) -> bool { self.addr() == other.addr() } }\n");
+    f.push_str("impl<F: FnPtr> Eq for F {}\n");
+    f.push_str("impl<F: FnPtr> PartialOrd for F { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { self.addr().partial_cmp(&other.addr()) } }\n");
+    f.push_str("impl<F: FnPtr> Ord for F { fn cmp(&self, other: &Self) -> Ordering { self.addr().cmp(&other.addr()) } }\n");
+    f.push_str("impl<F: FnPtr> Hash for F { fn hash<HH: Hasher>(&self, state: &mut HH) { state.write_usize(self.addr()) } }\n");
     std::fs::write(format!("{}/fn_ptr.rs", core), f).expect("write fn_ptr.rs");
     eprintln!("gen_tuple: wrote tuple.rs");
 }

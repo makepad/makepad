@@ -4198,7 +4198,7 @@ fn session_attention_key_count(spec: &HybridDecodeSpec) -> Result<usize> {
 /// decode step on a 5090, and the speculative path pays it once per verify
 /// row. A plain loop over `f32` with a NaN guard is ~20x faster and picks the
 /// same token.
-fn argmax_token_id(logits: &[f32]) -> Result<i32> {
+pub(crate) fn argmax_token_id(logits: &[f32]) -> Result<i32> {
     if logits.is_empty() {
         return Err(LlamaError::format("logit vector was empty"));
     }
@@ -4249,7 +4249,7 @@ fn split_run_logits(run: HybridDecodeRun, rows: usize) -> Result<Vec<Vec<f32>>> 
         .collect())
 }
 
-fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
+pub(crate) fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
     if run.n_tokens <= 1 {
         return Ok(run);
     }

@@ -194,6 +194,8 @@ fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
     // rustc_hir_analysis/src/coherence/orphan.rs:20-50,305-385 + rustc_next_trait_solver
     // coherence.rs (Alias arm): an uncovered type parameter inside a rigid projection fails in
     // Proper mode and passes in Compat mode (future-compat lint); a bare `T` fails in both.
+    // (the future-compat lint goes to the lint sink, which only collects while lints are on)
+    crate::lint::enable();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let mut prog = Program::new(sess);
     let dir = std::env::temp_dir().join(format!("relax-r33-orphan-{}", std::process::id()));
@@ -221,8 +223,8 @@ fn round33_orphan_check_compat_mode_accepts_uncovered_projection() {
     // The collection-time check reports E0210 for the bare parameter only and warns for the projection.
     assert_eq!(t.errors.iter().filter(|e| e.contains("E0210")).count(), 1, "{:?}", t.errors);
     assert_eq!(t.errors.iter().filter(|e| e.contains("E0117")).count(), 1, "{:?}", t.errors);
-    let (_, warnings) = t.dcx.drain_reported();
-    assert!(warnings.iter().any(|w| w.message.contains("uncovered_param_in_projection")));
+    let (_, warnings) = crate::lint::take();
+    assert!(warnings.iter().any(|w| w.contains("uncovered_param_in_projection")), "{warnings:?}");
 }
 #[test]
 fn round33_elaboration_dedups_alpha_equivalent_supertraits() {
@@ -665,7 +667,7 @@ fn round19_body(t: &Tcx, p: &Program) -> crate::mir::Body {
         basic_blocks: vec![BasicBlockData { statements: vec![Statement { kind: StatementKind::Nop, source_info }],
             terminator: Some(Terminator { kind: TerminatorKind::Return, source_info }), is_cleanup: false }],
         local_decls: vec![LocalDecl { ty: t.tys.unit, mutability: Mutability::Mut, source_info, user_ty: vec![], local_info: LocalInfo::Boring, kind: LocalKind::Return }],
-        source_scopes: vec![SourceScopeData { span: source_info.span, parent_scope: None }], user_type_annotations: vec![],
+        source_scopes: vec![SourceScopeData { span: source_info.span, parent_scope: None }], user_type_annotations: vec![], span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(),
         var_debug_info: vec![], arg_count: 0, spread_arg: None, promoted: vec![], coroutine: None }
 }
 fn round19_owner<'a>(p: &'a Program, t: &'a Tcx, body: &'a crate::mir::Body) -> crate::borrowck::infer_ctxt::BorrowckInferCtxt<'a> {
@@ -755,7 +757,7 @@ fn round19_borrowck_type_ops_opaque_storage_and_failure_rollback() {
     let opaque = p.defs.iter().position(|d| d.kind == crate::program::DefKind::OpaqueTy).map(|i| DefId(i as u32)).unwrap();
     let alias = t.alias_ty_with_args(AliasTyKind::Opaque { def_id:opaque },&[]);
     let body = round19_body(&t, &p); let mut cx = round19_owner(&p,&t,&body);
-    cx.infcx.typing_mode = TypingMode::borrowck(&t,&p,def);
+    cx.infcx.typing_mode.set(TypingMode::borrowck(&t,&p,def));
     let mut out = MirTypeckRegionConstraints::new(2); let loc = Locations::All(crate::mir::Span::default());
     cx.relate_opaque(&mut out,alias,crate::types::variance::V::Inv,t.tys.bool_,loc,ConstraintCategory::Assignment).unwrap();
     assert!(!cx.infcx.inner.borrow_mut().opaque_types().is_empty());
@@ -931,22 +933,10 @@ fn round26_borrowck_const_param_env_copy() {
     assert!(body.errors.is_empty(), "{:?}", body.errors);
     let env = crate::tcx::TypingEnv { limit: Default::default(), param_env: body.param_env.unwrap(), mode: TypingMode::borrowck(&t, &p, d) };
     let state = crate::tcx::EvalState::new();
-    let tx = crate::borrowck::tyx::Tx::new(&p, &t, env, &state);
+    let cx = crate::tcx::EvalCx::new(&p, &t, env, &state);
     let n = t.tys.intern_const(crate::consts::ConstKind::Param(crate::consts::ParamConst { index: 0 }));
-    assert!(tx.is_copy(t.tys.mk_array(t.tys.u8_, n)));
-    assert!(!tx.is_copy(t.tys.mk_array(t.tys.str_, n)));
-}
-
-#[test]
-fn round26_callee_signature_uses_its_const_param_env() {
-    let (p, t) = program("struct Buf<const N: usize>; trait Array { type A; } impl<const N: usize> Array for Buf<N> { type A = [u8; N]; } fn callee<const N: usize>(x: &<Buf<N> as Array>::A) {} fn caller() {}", "callee_const_env");
-    let def = named(&p, "callee");
-    let state = crate::tcx::EvalState::new();
-    let env = crate::tcx::TypingEnv { limit: Default::default(), param_env: Default::default(), mode: crate::tcx::TypingMode::borrowck(&t, &p, named(&p, "caller")) };
-    let tx = crate::borrowck::tyx::Tx::new(&p, &t, env, &state);
-    let rty = crate::borrowck::rty::Rty::new(&tx);
-    let sig = crate::borrowck::rty::signature::signature_template(&rty, def, &[t.tys.intern(TyKind::Const(t.tys.const_usize(3)))]);
-    assert_eq!(sig.inputs.len(), 1);
+    assert!(t.type_is_copy_modulo_regions(&p, &cx, d, t.tys.mk_array(t.tys.u8_, n)));
+    assert!(!t.type_is_copy_modulo_regions(&p, &cx, d, t.tys.mk_array(t.tys.str_, n)));
 }
 
 #[test]
@@ -1109,7 +1099,7 @@ fn round28_coherence_unknowable_candidate_proves_supertraits() {
 }
 
 #[test]
-fn round29_param_env_query_normalizes_and_reports_once() {
+fn round29_param_env_query_normalizes_and_keeps_failures_unnormalized() {
     let (p, t) = program("#![no_std] trait P { type A; } impl P for u8 { type A = u32; } trait Q<T> {} fn good<T>() where T: Q<<u8 as P>::A>, <u8 as P>::A: 'static {} fn bad<T>() where T: Q<<bool as P>::A> {} fn const_only<const N: usize>() {}", "r29_env");
     let good = named(&p, "good");
     let result = t.param_env(&p, good);
@@ -1119,10 +1109,12 @@ fn round29_param_env_query_normalizes_and_reports_once() {
     assert_eq!(bcx.param_env, result);
     let const_env = t.param_env(&p, named(&p, "const_only"));
     assert!(const_env.clauses.iter().any(|p| matches!(p.kind, PredicateKind::Clause(ClauseKind::ConstArgHasType(..)))));
-    for i in 0..2 {
-        let _bad = t.param_env(&p, named(&p, "bad"));
-        let errors = t.dcx.drain_reported().0;
-        assert_eq!(errors.is_empty(), i != 0);
+    // an environment that does not normalize keeps its clauses as written (lazy normalization of the
+    // next solver); the unmet `bool: P` is the well-formedness check's to report
+    for _ in 0..2 {
+        let bad = t.param_env(&p, named(&p, "bad"));
+        assert!(t.dcx.drain_reported().0.is_empty());
+        assert!(!bad.clauses.is_empty());
     }
 }
 
@@ -1365,7 +1357,7 @@ fn round41_preempted_typeck_can_be_checked_later() {
 
 #[test]
 fn round42_borrowck_forwards_preemption_after_typeck() {
-    let (prog, mut tcx) = program("#[lang = \"copy\"] trait Copy {} fn target<T>(x: T) { let y = x; }", "borrowck_preempt");
+    let (prog, mut tcx) = program("#[lang = \"sized\"] trait Sized {} #[lang = \"copy\"] trait Copy {} fn target<T>(x: T) { let y = x; }", "borrowck_preempt");
     tcx.copy_trait = Some(named(&prog, "Copy"));
     let def = named(&prog, "target");
     let body = tcx.typeck(&prog, def);
@@ -1433,4 +1425,228 @@ fn drop_glue_of_a_type_parameter_is_too_generic_not_unmet() {
     assert_eq!(t.resolve_instance_raw(&p, env, glue, &[param]), Err(CodegenObligationError::Ambiguity));
     // a type without drop glue still resolves (the trivial glue)
     assert!(t.resolve_instance_raw(&p, crate::tcx::TypingEnv::fully_monomorphized(&p), glue, &[t.tys.u8_]).is_ok());
+}
+
+// ---- S6: the N01 borrowck seam with real annotations, dropck and liveness ----
+fn s6_vid(t: &Tcx, r: crate::types::RegionId) -> usize { match t.tys.region_kind(r) { RegionKind::ReVar(v) => v as usize, _ => unreachable!() } }
+
+#[test]
+fn s6_ascribe_user_type_relates_a_canonical_annotation_to_the_mir_type() {
+    use crate::borrowck::type_check::{BorrowckTypeOps, MirTypeckRegionConstraints};
+    use crate::next_solver::canonical::user_type::canonicalize_user_type;
+    use crate::types::user_type::{UserType, UserTypeKind};
+    let (p, t) = round19_program("", "s6_ascribe");
+    let body = round19_body(&t, &p); let mut cx = round19_owner(&p, &t, &body);
+    // `let x: &'_ u32`: the annotation's hole is a canonical region variable
+    let hole = cx.infcx.next_region_var();
+    let written = t.tys.intern(TyKind::Ref(false, t.tys.u32_, hole));
+    let canonical = canonicalize_user_type(&cx.infcx, &UserType::new(UserTypeKind::Ty(written)));
+    assert_eq!(canonical.var_kinds.len(), 1);
+    let user = cx.instantiate_canonical_user_type(crate::mir::Span::default(), &canonical);
+    let UserTypeKind::Ty(instantiated) = user.kind else { unreachable!() };
+    assert_ne!(instantiated, written, "fresh variables per ascription");
+    let mir_region = cx.infcx.next_region_var();
+    let mir_ty = t.tys.intern(TyKind::Ref(false, t.tys.u32_, mir_region));
+    let mut out = MirTypeckRegionConstraints::new(2);
+    cx.ascribe_user_type(&mut out, mir_ty, user.clone(), crate::mir::Span::default());
+    assert!(!cx.tainted_by_errors.get());
+    let TyKind::Ref(_, _, fresh) = *t.tys.kind(instantiated) else { unreachable!() };
+    let (a, b) = (s6_vid(&t, mir_region), s6_vid(&t, fresh));
+    // the MIR type equals the annotation: outlives both ways at every point
+    assert!(out.outlives_constraints.outlives.iter().any(|c| c.sup == a && c.sub == b), "{:?}", out.outlives_constraints.outlives);
+    assert!(out.outlives_constraints.outlives.iter().any(|c| c.sup == b && c.sub == a), "{:?}", out.outlives_constraints.outlives);
+    // a different type is an error
+    cx.ascribe_user_type(&mut out, t.tys.bool_, user, crate::mir::Span::default());
+    assert!(cx.tainted_by_errors.get());
+}
+
+#[test]
+fn s6_ascribe_user_type_of_proves_the_path_predicates() {
+    use crate::borrowck::type_check::{BorrowckTypeOps, MirTypeckRegionConstraints};
+    use crate::types::user_type::{UserArgs, UserType, UserTypeKind};
+    let (p, t) = round19_program("trait Tr {} impl Tr for u8 {} fn f<T: Tr>(_: T) {}", "s6_typeof");
+    let body = round19_body(&t, &p);
+    let f = named(&p, "f");
+    let fn_def = |arg: crate::types::TyId| t.tys.intern(TyKind::FnDef(f, t.tys.mk_list(&[arg]), crate::types::RegionArgsId::EMPTY));
+    let annotation = |arg| UserType::new(UserTypeKind::TypeOf(f, UserArgs { args: vec![GenericArg::Type(arg)], user_self_ty: None }));
+    let mut cx = round19_owner(&p, &t, &body);
+    let mut out = MirTypeckRegionConstraints::new(2);
+    cx.ascribe_user_type(&mut out, fn_def(t.tys.u8_), annotation(t.tys.u8_), crate::mir::Span::default());
+    assert!(!cx.tainted_by_errors.get(), "f::<u8> is f::<u8>, and u8: Tr");
+    // f::<bool>: the bound `bool: Tr` fails
+    cx.ascribe_user_type(&mut out, fn_def(t.tys.bool_), annotation(t.tys.bool_), crate::mir::Span::default());
+    assert!(cx.tainted_by_errors.get());
+    // a MIR type that is another instantiation: the type relation fails
+    let mut cx = round19_owner(&p, &t, &body);
+    cx.ascribe_user_type(&mut out, fn_def(t.tys.u8_), annotation(t.tys.intern(TyKind::Int(crate::program::Prim::U16))), crate::mir::Span::default());
+    assert!(cx.tainted_by_errors.get());
+}
+
+#[test]
+fn s6_type_op_universes_keep_their_error_info() {
+    use crate::borrowck::type_check::{BorrowckTypeOps, MirTypeckRegionConstraints, UniverseInfo};
+    use crate::next_solver::type_op::TypeOpInput;
+    let (p, t) = round19_program("trait Tr<'a> {} fn id<'a>(_: &'a u8) {}", "s6_universe");
+    let body = round19_body(&t, &p); let mut cx = round19_owner(&p, &t, &body);
+    let mut out = MirTypeckRegionConstraints::new(2);
+    // `for<'a> &'a u8: 'a` proven by a type op creates a placeholder universe
+    let ty = t.tys.intern(TyKind::Ref(false, t.tys.u8_, t.tys.intern_region(RegionKind::ReBound(0, crate::types::BoundVar(0)))));
+    let _ = ty;
+    let before = out.universe_causes.len();
+    cx.prove_wf(&mut out, t.tys.u8_, crate::borrowck::type_check::Locations::All(crate::mir::Span::default()), crate::borrowck::constraints::ConstraintCategory::Boring);
+    // no universe was created by a plain WF proof, so nothing is recorded; the input accessor works
+    assert_eq!(out.universe_causes.len(), before);
+    let op = type_op::ParamEnvAnd { param_env: ParamEnvId::EMPTY, value: type_op::Normalize { value: t.tys.u8_ } };
+    assert_eq!(type_op::TypeOp::input(&op), TypeOpInput::Normalize(ParamEnvId::EMPTY, t.tys.u8_));
+    let _ = UniverseInfo::Other;
+}
+
+#[test]
+fn s6_dropck_outlives_respects_may_dangle_and_destructors() {
+    use crate::borrowck::type_check::liveness::LivenessOps;
+    let (p, t) = round19_program("#![feature(dropck_eyepatch)] #[lang = \"drop\"] trait Drop { fn drop(&mut self); } #[lang = \"phantom_data\"] struct PhantomData<T>;
+        struct Plain<'a>(&'a u32); impl<'a> Drop for Plain<'a> { fn drop(&mut self) {} }
+        struct Eyepatch<T>(T); unsafe impl<#[may_dangle] T> Drop for Eyepatch<T> { fn drop(&mut self) {} }
+        struct Strict<T>(T); impl<T> Drop for Strict<T> { fn drop(&mut self) {} }
+        struct Holder<'a>(Plain<'a>); struct Owns<T>(PhantomData<T>);", "s6_dropck");
+    let body = round19_body(&t, &p); let mut cx = round19_owner(&p, &t, &body);
+    let a = cx.infcx.next_region_var();
+    let reference = t.tys.intern(TyKind::Ref(false, t.tys.u32_, a));
+    let adt = |name: &str, args: &[crate::types::TyId], regions: &[crate::types::RegionId]| t.tys.intern(TyKind::Adt(named(&p, name), t.tys.mk_list(args), t.tys.intern_region_args(regions)));
+    let kinds = |cx: &mut crate::borrowck::infer_ctxt::BorrowckInferCtxt<'_>, ty| cx.dropck_outlives(ty, crate::mir::Span::default());
+    // a destructor over `'a` needs `'a` live
+    let plain = kinds(&mut cx, adt("Plain", &[], &[a]));
+    assert_eq!(plain.kinds, vec![GenericArg::Lifetime(a)], "{plain:?}");
+    // through a field
+    assert_eq!(kinds(&mut cx, adt("Holder", &[], &[a])).kinds, vec![GenericArg::Lifetime(a)]);
+    // #[may_dangle] T: only what dropping the &'a u32 itself needs (nothing)
+    assert!(kinds(&mut cx, adt("Eyepatch", &[reference], &[])).kinds.is_empty());
+    // without it, T is touched by the destructor
+    assert_eq!(kinds(&mut cx, adt("Strict", &[reference], &[])).kinds, vec![GenericArg::Type(reference)]);
+    // PhantomData<T> owns T
+    assert!(kinds(&mut cx, adt("Owns", &[reference], &[])).kinds.is_empty());
+    // a reference never has a destructor
+    assert!(kinds(&mut cx, reference).kinds.is_empty());
+}
+
+#[test]
+fn s6_liveness_regions_skip_what_the_environment_implies() {
+    use crate::borrowck::type_check::liveness::LivenessOps;
+    let (p, t) = round19_program("trait Tr { type A; } impl<'x> Tr for &'x u8 { type A = &'x u8; } fn f<'a, T: Tr + 'static>(_: &'a u8) {}", "s6_free_regions");
+    let body = round19_body(&t, &p); let mut cx = round19_owner(&p, &t, &body);
+    let a = cx.infcx.next_region_var();
+    let reference = t.tys.intern(TyKind::Ref(false, t.tys.u32_, a));
+    assert_eq!(cx.free_regions_for_liveness(GenericArg::Type(reference)), vec![a]);
+    assert_eq!(cx.free_regions_for_liveness(GenericArg::Lifetime(a)), vec![a]);
+    // an alias with no outlives bound keeps its non-bivariant components live
+    let alias = t.alias_ty_with_args(AliasTyKind::Projection { def_id: named(&p, "A") }, &[GenericArg::Type(t.tys.intern(TyKind::Ref(false, t.tys.u8_, a)))]);
+    assert_eq!(cx.free_regions_for_liveness(GenericArg::Type(alias)), vec![a]);
+}
+
+#[test]
+fn s6_unevaluated_constants_use_their_own_type_and_statics_their_alloc_identity() {
+    use crate::borrowck::type_check::BorrowckTypeOps;
+    use crate::mir::*;
+    let (p, t) = round19_program("static S: u32 = 1; const C: u8 = 2;", "s6_consts");
+    let mut body = round19_body(&t, &p);
+    let alloc = body.allocs.static_alloc(named(&p, "S"));
+    let cx = round19_owner(&p, &t, &body);
+    let ptr = ConstOperand { span: Span::default(), user_ty: None, const_: Const::Val(ConstValue::Scalar(Scalar::Ptr { provenance: CtfeProvenance::new(alloc), offset: 0 }), t.tys.intern(TyKind::Ptr(false, t.tys.u32_))) };
+    assert_eq!(cx.static_ptr(&ptr), Some(named(&p, "S")));
+    let int = ConstOperand { span: Span::default(), user_ty: None, const_: Const::Val(ConstValue::Scalar(Scalar::Int { bits: 1, size: 4 }), t.tys.u32_) };
+    assert_eq!(cx.static_ptr(&int), None);
+    let unevaluated = Operand::Constant(Box::new(ConstOperand { span: Span::default(), user_ty: None,
+        const_: Const::Unevaluated { def: named(&p, "C"), args: vec![], promoted: None, ty: t.tys.intern(TyKind::Int(crate::program::Prim::U16)) } }));
+    assert_eq!(cx.operand_ty(&body, &unevaluated), t.tys.intern(TyKind::Int(crate::program::Prim::U16)), "the constant carries its type; the declaration's u8 is not asked");
+}
+
+#[test]
+fn s6_shared_reference_to_a_projection_is_copy_in_a_generic_body() {
+    use crate::borrowck::type_check::{BorrowckTypeOps, Locations, MirTypeckRegionConstraints};
+    use crate::borrowck::constraints::ConstraintCategory as Cat;
+    // bytemuck checked.rs: `&<T as CheckedBitPattern>::Bits` is Copy whatever `Bits` is
+    let (p, t) = round19_program("#[lang = \"copy\"] trait Copy {} impl<'a, T: ?Sized> Copy for &'a T {} trait CheckedBitPattern { type Bits; } fn seam_generic<T: CheckedBitPattern>() {}", "s6_bytemuck");
+    let mut body = round19_body(&t, &p);
+    body.source.owner = named(&p, "seam_generic");
+    let args = [t.tys.intern(TyKind::Param(0))];
+    let mut cx = crate::borrowck::infer_ctxt::BorrowckInferCtxt::new(&t, &p, body.source.owner, body.source.owner, &args);
+    let r = cx.next_nll_region_var(crate::borrowck::region_infer::NllRegionVariableOrigin::FreeRegion, || crate::borrowck::renumber::RegionCtxt::Unknown);
+    let v = s6_vid(&t, r);
+    let mut universals = crate::borrowck::universal_regions::UniversalRegions::new(v, None, vec![(v, crate::borrowck::universal_regions::RegionClassification::Global)]);
+    universals.indices.push((t.tys.intern_region(RegionKind::ReStatic), v));
+    cx.configure_mir(&body, universals, vec![]);
+    let bits = t.alias_ty_with_args(AliasTyKind::Projection { def_id: named(&p, "Bits") }, &[GenericArg::Type(args[0])]);
+    let a = cx.infcx.next_region_var();
+    let reference = t.tys.intern(TyKind::Ref(false, bits, a));
+    let mut out = MirTypeckRegionConstraints::new(2);
+    let at = crate::mir::Location { block: crate::mir::BasicBlock(0), statement_index: 0 };
+    cx.prove_trait_ref(&mut out, crate::lang_items::LangItem::Copy, &[GenericArg::Type(reference)], Locations::Single(at), Cat::CopyBound);
+    assert!(!cx.tainted_by_errors.get());
+}
+
+// ---- S12: solver region obligations in constraint conversion ----
+fn s12_setup<'a>(p: &'a Program, t: &'a Tcx, body: &'a crate::mir::Body, extra: usize)
+    -> (crate::borrowck::infer_ctxt::BorrowckInferCtxt<'a>, crate::borrowck::universal_regions::UniversalRegions, Vec<crate::types::RegionId>) {
+    use crate::borrowck::{region_infer::NllRegionVariableOrigin as Origin, renumber::RegionCtxt, universal_regions::{UniversalRegions, RegionClassification}};
+    let cx = crate::borrowck::infer_ctxt::BorrowckInferCtxt::new(t, p, body.source.owner, body.source.owner, &[t.tys.intern(TyKind::Param(0))]);
+    let fr_static = cx.next_nll_region_var(Origin::FreeRegion, || RegionCtxt::Unknown);
+    let mut regions = vec![fr_static];
+    for _ in 0..extra { regions.push(cx.next_nll_region_var(Origin::FreeRegion, || RegionCtxt::Unknown)); }
+    let vids: Vec<_> = regions.iter().enumerate().map(|(i, &r)| (s6_vid(t, r), if i == 0 { RegionClassification::Global } else { RegionClassification::Local })).collect();
+    let mut universals = UniversalRegions::new(vids[0].0, Some(vids[vids.len() - 1].0), vids);
+    universals.indices.push((t.tys.intern_region(RegionKind::ReStatic), s6_vid(t, fr_static)));
+    (cx, universals, regions)
+}
+
+#[test]
+fn s12_alias_outlives_uses_the_environment_bound_as_a_verify() {
+    use crate::borrowck::type_check::{Locations, MirTypeckRegionConstraints, constraint_conversion::ConstraintConversion};
+    use crate::borrowck::{constraints::ConstraintCategory, region_infer::VerifyBound};
+    use crate::next_solver::type_op::{QueryRegionConstraint, QueryRegionConstraints, RegionConstraint};
+    use crate::tcx::outlives::OutlivesPredicate;
+    // generic1 of projection-implied-bounds.rs: `<T as Iterator>::Item: 'x` with `Item: 'r` known from the signature's WF
+    let (p, t) = round19_program("trait It { type Item; } fn seam_generic<T: It>() {}", "s12_env");
+    let mut body = round19_body(&t, &p); body.source.owner = named(&p, "seam_generic");
+    let (cx, universals, regions) = s12_setup(&p, &t, &body, 2);
+    let (r, x) = (regions[1], regions[2]);
+    let item = t.alias_ty_with_args(AliasTyKind::Projection { def_id: named(&p, "Item") }, &[GenericArg::Type(t.tys.intern(TyKind::Param(0)))]);
+    let mut out = MirTypeckRegionConstraints::new(2);
+    let span = crate::mir::Span { file: 0, lo: 1, hi: 2 };
+    // the implied bounds are normalized: the pair holds the rigid form of the alias
+    let rigid = type_op::TypeOp::fully_perform(type_op::ParamEnvAnd { param_env: cx.param_env_id(), value: type_op::Normalize { value: item } }, &cx.infcx, &p).unwrap().output;
+    let bound_pairs = [(rigid, r)];
+    let data = QueryRegionConstraints { constraints: vec![QueryRegionConstraint { constraint: RegionConstraint::Outlives(OutlivesPredicate::Type(item, x)),
+        category: ConstraintCategory::Boring, visible_for_leak_check: false }] };
+    ConstraintConversion::new(&cx, &universals, &bound_pairs, &[], Locations::All(span), span, ConstraintCategory::Boring, &mut out).convert_all(&data);
+    assert_eq!(out.type_tests.len(), 1, "an alias with an environment bound is verified, not decomposed: {:?}", out.outlives_constraints.outlives);
+    assert!(out.outlives_constraints.outlives.is_empty());
+    let test = &out.type_tests[0];
+    assert_eq!(test.lower_bound, s6_vid(&t, x));
+    fn mentions(b: &VerifyBound, vid: usize) -> bool { match b {
+        VerifyBound::OutlivedBy(v) => *v == vid,
+        VerifyBound::AnyBound(bs) | VerifyBound::AllBounds(bs) => bs.iter().any(|b| mentions(b, vid)),
+        _ => false } }
+    assert!(mentions(&test.verify_bound, s6_vid(&t, r)), "{:?} for {:?} (item {:?}) param={:?} vids r={} x={}", test.verify_bound, test.generic_kind, item, t.tys.intern(TyKind::Param(0)), s6_vid(&t, r), s6_vid(&t, x));
+}
+
+#[test]
+fn s12_type_outlives_obligations_are_normalized_before_decomposition() {
+    use crate::borrowck::type_check::{Locations, MirTypeckRegionConstraints, constraint_conversion::ConstraintConversion};
+    use crate::borrowck::constraints::ConstraintCategory;
+    use crate::next_solver::type_op::{QueryRegionConstraint, QueryRegionConstraints, RegionConstraint};
+    use crate::tcx::outlives::OutlivesPredicate;
+    let (p, t) = round19_program("trait Get { type Out; } impl<'a> Get for &'a u32 { type Out = &'a u8; } fn seam_generic<T>() {}", "s12_norm");
+    let mut body = round19_body(&t, &p); body.source.owner = named(&p, "seam_generic");
+    let (cx, universals, regions) = s12_setup(&p, &t, &body, 2);
+    let (a, c) = (regions[1], regions[2]);
+    // `<&'a u32 as Get>::Out: 'c` normalizes to `&'a u8: 'c`, which is `'a: 'c`
+    let input = t.tys.intern(TyKind::Ref(false, t.tys.u32_, a));
+    let projection = t.alias_ty_with_args(AliasTyKind::Projection { def_id: named(&p, "Out") }, &[GenericArg::Type(input)]);
+    let mut out = MirTypeckRegionConstraints::new(2);
+    let span = crate::mir::Span { file: 0, lo: 1, hi: 2 };
+    let data = QueryRegionConstraints { constraints: vec![QueryRegionConstraint { constraint: RegionConstraint::Outlives(OutlivesPredicate::Type(projection, c)),
+        category: ConstraintCategory::Boring, visible_for_leak_check: false }] };
+    ConstraintConversion::new(&cx, &universals, &[], &[], Locations::All(span), span, ConstraintCategory::Boring, &mut out).convert_all(&data);
+    assert!(out.type_tests.is_empty(), "{:?}", out.type_tests);
+    assert!(out.outlives_constraints.outlives.iter().any(|e| e.sup == s6_vid(&t, a) && e.sub == s6_vid(&t, c)), "{:?}", out.outlives_constraints.outlives);
 }

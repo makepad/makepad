@@ -77,7 +77,7 @@ impl FrontImages {
         // clean ones load from their crate images (proc-macro and build crates load after the
         // app's, so an app edit leaves clean crates behind it). The std crates may depend on
         // one another despite their load order: a change there uses the ordinary path.
-        (first >= crate::std_pre_crates(&pre[0].cfg.session).len()).then_some(first)
+        (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some(first)
     }
 
     pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate], swap: Option<&CollectedWritten>) -> Option<(Program, Tcx, Option<CollectedCache>)> {
@@ -340,8 +340,8 @@ impl Cache {
         let definitions = Arc::new(self.collected_definitions(prog, tcx, stop)?);
         if stop() { return None; }
         *why = "interfaces";
-        if self.iface.len() != recipe.crates.len() { return None; }
-        let interfaces = self.iface.iter().map(|&k| MappedKey::new(k)).collect();
+        if self.iface_plain.len() != recipe.crates.len() { return None; }
+        let interfaces = self.iface_plain.iter().map(|&k| MappedKey::new(k)).collect();
         let files = prog.files.iter().enumerate().map(|(f, file)| {
             let path = prog.file_paths.get(f)?;
             Some((*prog.file_crate.get(f)?, path.clone(), file.source_hash(path)))
@@ -430,7 +430,7 @@ impl Cache {
             let recipe = GraphRecipe::new(&crates);
             if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
                 .any(|((name, root), c)| prog.syms.str(c.name) != name || c.root_path() != root)
-                || self.fps.len() != pre.len() || self.iface.len() != pre.len() { return None; }
+                || self.fps.len() != pre.len() || self.iface_plain.len() != pre.len() { return None; }
             let mut image = crate::image::Writer::default();
             image.add_bytes(0, recipe.identity.to_le_bytes().to_vec());
             why = "Program";
@@ -444,7 +444,7 @@ impl Cache {
             if stop() { return None; }
             why = "index snapshot";
             image.add_bytes(4, MappedIndexes::record(&self.crate_path, &[])?);
-            image.add_owned(5, &self.iface.iter().map(|&k| MappedKey::new(k)).collect::<Vec<_>>());
+            image.add_owned(5, &self.iface_plain.iter().map(|&k| MappedKey::new(k)).collect::<Vec<_>>());
             why = "file images";
             let files = prog.files.iter().map(|f| {
                 if stop() { return None; }

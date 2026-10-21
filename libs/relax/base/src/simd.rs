@@ -8,7 +8,7 @@
 //! 64-bit NEON vectors (uint8x8_t ...) live in the low half of a V128; 256-bit AVX vectors
 //! are two V128 halves (every AVX2 intrinsic here works per 128-bit lane or per half).
 
-use crate::rir::{Block, Cls, Func, Inst, IntTy, Mem, Term, VReg, VW, VX};
+use relax_backend::rir::{Block, Cls, Func, Inst, IntTy, Mem, Term, VReg, VW, VX};
 
 #[derive(Clone, Copy, PartialEq)]
 enum K {
@@ -61,7 +61,7 @@ impl<'a> Bd<'a> {
     }
     fn sext32(&mut self, v: VReg) -> VReg {
         let d = self.vreg(Cls::I);
-        self.insts.push(Inst::Conv(crate::rir::Conv::IntToInt(IntTy { bits: 32, signed: true }), d, v));
+        self.insts.push(Inst::Conv(relax_backend::rir::Conv::IntToInt(IntTy { bits: 32, signed: true }), d, v));
         d
     }
     /// build a vector from 64-bit halves (scalars)
@@ -274,7 +274,7 @@ fn table(name: &str) -> Option<(&'static [K], Option<K>, Gen)> {
         "_mm_cvtsi32_si128" => (&[I], Some(V), |b, x, _| {
             let m = b.iconst(0xffff_ffff);
             let t = b.vreg(Cls::I);
-            b.insts.push(Inst::IBin(crate::rir::IOp::And, IntTy { bits: 64, signed: false }, t, v(x[0]), m));
+            b.insts.push(Inst::IBin(relax_backend::rir::IOp::And, IntTy { bits: 64, signed: false }, t, v(x[0]), m));
             Some(Val::V(b.vx1(VX::FromLo64, t)))
         }),
         "_mm_cvtsi128_si32" => (&[V], Some(I), |b, x, _| {
@@ -406,7 +406,7 @@ pub fn covered(options: &crate::options::Options, name: &str) -> bool {
 /// arguments. Returns the function unchanged when the intrinsic (or this instance) is not
 /// covered or its lowered signature is not the expected one.
 pub fn lower_intrinsic(options: &crate::options::Options, name: &str, consts: &[i64], mut f: Func) -> Func {
-    if off(options) || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(..) | Inst::VBin(..) | Inst::VLoad(..) | Inst::VStore(..)))) {
+    if off(options) || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(..) | Inst::VLoad(..) | Inst::VStore(..)))) {
         // Explicit relax-intrinsic bridges already supplied vector RIR. Retain the
         // legacy table only for std wrappers that still have scalar bodies.
         return f;

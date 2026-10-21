@@ -24,6 +24,7 @@ impl CfgSet {
             crate::options::CheckTarget::MacosArm64 => CfgSet::macos_arm64(sess, features),
             crate::options::CheckTarget::LinuxX64 => CfgSet::linux_x64(sess, features),
             crate::options::CheckTarget::AndroidArm64 => CfgSet::android_arm64(sess, features),
+            crate::options::CheckTarget::Web => CfgSet::web(sess, features),
             // machine() adds the extra cfgs itself
             crate::options::CheckTarget::Host => return CfgSet::machine(sess, features),
         };
@@ -192,9 +193,31 @@ impl CfgSet {
         }
         CfgSet { session: sess.clone(), set }
     }
+    /// The web target as the trace host runs it: `rustc --print cfg --target
+    /// wasm32-unknown-unknown` (1.98), plus `atomics` of makepad's threaded web build (cargo
+    /// makepad wasm's default: `+atomics,+bulk-memory,+mutable-globals`). Two differences, both because this machine's JIT runs the code:
+    /// `target_pointer_width` is 64 (usize is the machine's word), and std/core/alloc are read
+    /// with the machine's cfg (`std_cfg`): only the program's own crates take this set.
+    pub fn web(sess: &std::sync::Arc<crate::Session>, features: &[String]) -> CfgSet {
+        let mut set: Vec<String> = [
+            "target_arch=wasm32", "target_os=unknown", "target_family=wasm", "target_env=", "target_abi=",
+            "target_vendor=unknown", "target_pointer_width=64", "target_endian=little", "panic=abort",
+            "target_feature=bulk-memory", "target_feature=multivalue", "target_feature=mutable-globals",
+            "target_feature=nontrapping-fptoint", "target_feature=reference-types", "target_feature=sign-ext",
+            "target_has_atomic=8", "target_has_atomic=16", "target_has_atomic=32", "target_has_atomic=64",
+            "target_has_atomic=ptr", "target_feature=atomics",
+        ].iter().map(|s| s.to_string()).collect();
+        for f in features {
+            set.push(format!("feature={}", f));
+        }
+        CfgSet { session: sess.clone(), set }
+    }
+
     /// The target triple of this cfg set (build scripts' TARGET / HOST).
     pub fn triple(&self) -> &'static str {
-        if self.has("target_os=windows") {
+        if self.has("target_arch=wasm32") {
+            crate::options::CheckTarget::WEB_TRIPLE
+        } else if self.has("target_os=windows") {
             "x86_64-pc-windows-gnu"
         } else if self.has("target_os=android") {
             "aarch64-linux-android"
@@ -312,6 +335,15 @@ pub fn tok_str<'a>(p: Src<'a>, i: usize) -> &'a [u8] {
 fn pred(p: Src, i: &mut usize, end: usize, cfg: &CfgSet) -> bool {
     if *i >= end {
         return false;
+    }
+    // a macro's `$e:expr` argument arrives parenthesized (macros.rs transcribe): `(any(..))`
+    if p.tok(*i).kind == T::OpenParen {
+        *i += 1;
+        let r = pred(p, i, end, cfg);
+        if *i < end && p.tok(*i).kind == T::CloseParen {
+            *i += 1;
+        }
+        return r;
     }
     let name = tok_str(p, *i);
     *i += 1;
@@ -481,28 +513,55 @@ pub fn expand_cfg_attr_list(p: Src, attrs: &[Attr], cfg: &CfgSet) -> Vec<Attr> {
         if !pred(p, &mut i, end, cfg) {
             continue;
         }
-        let mut parts = Vec::new();
-        while i < end {
-            if p.tok(i).kind == T::Comma {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            let mut depth = 0i32;
-            while i < end {
-                match p.tok(i).kind {
-                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
-                    T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
-                    T::Comma if depth == 0 => break,
-                    _ => {}
-                }
-                i += 1;
-            }
-            if i > start {
-                parts.push(Attr { inner: a.inner, toks: TokRange { lo: start as u32, hi: i as u32 } });
-            }
-        }
+        let parts = cfg_attr_parts(p, a, i);
         out.extend(expand_cfg_attr_list(p, &parts, cfg));
     }
     out
+}
+
+/// The attributes of `cfg_attr(pred, a1, a2(..))` whose predicate ends before token `from`
+/// (the first token after it): `[a1, a2(..)]`, sub-ranges of the original tokens.
+pub fn cfg_attr_parts(p: Src, a: &Attr, from: usize) -> Vec<Attr> {
+    let end = a.toks.hi as usize - 1; // the closing paren
+    let mut i = from;
+    let mut parts = Vec::new();
+    while i < end {
+        if p.tok(i).kind == T::Comma {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut depth = 0i32;
+        while i < end {
+            match p.tok(i).kind {
+                T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                T::Comma if depth == 0 => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        if i > start {
+            parts.push(Attr { inner: a.inner, toks: TokRange { lo: start as u32, hi: i as u32 } });
+        }
+    }
+    parts
+}
+
+/// The token after the predicate of `cfg_attr(pred, ...)` (the predicate starts after the
+/// opening paren at `a.toks.lo + 2`).
+pub fn cfg_attr_pred_end(p: Src, a: &Attr) -> usize {
+    let end = a.toks.hi as usize - 1;
+    let mut i = a.toks.lo as usize + 2;
+    let mut depth = 0i32;
+    while i < end {
+        match p.tok(i).kind {
+            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+            T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+            T::Comma if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }

@@ -1,7 +1,9 @@
 //! Source identity of a provided crate and its library dependency closure (proc macros
 //! included, build dependencies excluded). Path packages read Cargo.toml, optional build.rs,
-//! every file under src/, and literal include_str!/include_bytes!/include! targets named by
-//! src/ Rust sources, following included .rs files transitively. Unreferenced scripts, tests,
+//! the Rust files under src/, and literal include_str!/include_bytes!/include! targets named by
+//! src/ Rust sources, following included .rs files transitively. Only the Rust files of src/ count
+//! (never hidden entries, `target`, nested packages such as a fuzz folder, or other files there unless
+//! a literal include names them). Unreferenced scripts, tests,
 //! examples and documentation do not count. Registry/git packages use name@version.
 //! Features retain Cargo host-side and host-shims normalization. The loader embeds the hash
 //! and a per-file manifest; any registered crate mismatch is a rebuild error naming inputs.
@@ -202,13 +204,21 @@ fn relative(root: &std::path::Path, path: &std::path::Path) -> String {
 
 /// Library identity inputs and hashes, including transitive includes. Retain hashes, not
 /// asset contents; only the current file needs to stay in memory.
-fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
+pub fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
     use std::collections::{BTreeMap, BTreeSet};
+    // The Rust sources of the crate's src/ tree. Not what cargo does not compile: hidden entries,
+    // `target`, a nested package (a folder with its own Cargo.toml: a fuzz or example package),
+    // and files that are not Rust (a stale Cargo.lock, artifacts, notes): a non-Rust file the
+    // crate reads is named by an include and followed below.
     fn walk(dir: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
         if let Ok(entries) = crate::vfs::read_dir(dir) {
             for (name, is_dir) in entries {
-                let p = dir.join(name);
-                if is_dir { walk(&p, paths); } else if crate::vfs::is_file(&p) { paths.push(p); }
+                if name.starts_with('.') { continue; }
+                let p = dir.join(&name);
+                if is_dir {
+                    if name == "target" || crate::vfs::is_file(p.join("Cargo.toml")) { continue; }
+                    walk(&p, paths);
+                } else if name.ends_with(".rs") && crate::vfs::is_file(&p) { paths.push(p); }
             }
         }
     }
@@ -228,6 +238,9 @@ fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
         let bytes = crate::vfs::read(&path).unwrap_or_else(|e| panic!("source identity {}: {e}", path.display()));
         contents.entry(path.clone()).or_insert_with(|| { let mut h = H(0x5eed); h.bytes(&bytes); h.0 });
         if rust && scanned.insert(path.clone()) {
+            // `include!`, `include_str!` and `include_bytes!` are identifier tokens: a file that
+            // does not contain the bytes has none (invalid UTF-8 takes the lexer as before)
+            if std::str::from_utf8(&bytes).is_ok_and(|s| !s.contains("include")) { continue; }
             for (name, recurse) in includes(&String::from_utf8_lossy(&bytes)) {
                 let target = normalize(&path.parent().unwrap().join(name));
                 let rust = recurse && target.extension().is_some_and(|x| x == "rs");
@@ -243,6 +256,13 @@ fn identity_files(dir: &std::path::Path) -> Vec<(String, u64)> {
 pub type Manifest = std::collections::BTreeMap<(String, String), String>;
 
 pub fn closure_manifest(pkgs: &[SrcPkg], root: usize) -> Manifest {
+    closure_manifest_with(pkgs, root, &mut std::collections::HashMap::new())
+}
+
+/// As `closure_manifest`; `files` holds the identity files read per package folder, so a
+/// package that several closures reach is read and hashed once (the caller's scope: sources
+/// that change between calls are not seen through it).
+pub fn closure_manifest_with(pkgs: &[SrcPkg], root: usize, files: &mut std::collections::HashMap<String, Vec<(String, u64)>>) -> Manifest {
     let mut seen = vec![[false; 2]; pkgs.len()];
     let mut stack = vec![(root, false)];
     let mut out = Manifest::new();
@@ -260,10 +280,29 @@ pub fn closure_manifest(pkgs: &[SrcPkg], root: usize) -> Manifest {
         out.insert((key.clone(), "\0version".into()), p.version.clone());
         out.insert((key.clone(), "\0features".into()), feats.join(", "));
         if !immutable(&p.dir) {
-            for (rel, hash) in identity_files(std::path::Path::new(&p.dir)) {
-                out.insert((key.clone(), rel), format!("{hash:016x}"));
+            let list = files.entry(p.dir.clone()).or_insert_with(|| identity_files(std::path::Path::new(&p.dir)));
+            for (rel, hash) in list.iter() {
+                out.insert((key.clone(), rel.clone()), format!("{hash:016x}"));
             }
         }
+        stack.extend(p.deps.iter().map(|d| (*d, host)));
+    }
+    out
+}
+
+/// The package folders `closure_manifest_with(pkgs, root, ..)` reads identity files from (the
+/// same walk), in the order it first reaches them.
+pub fn closure_dirs(pkgs: &[SrcPkg], root: usize) -> Vec<String> {
+    let mut seen = vec![[false; 2]; pkgs.len()];
+    let mut stack = vec![(root, false)];
+    let mut out: Vec<String> = Vec::new();
+    while let Some((i, host)) = stack.pop() {
+        if i >= pkgs.len() { continue; }
+        let p = &pkgs[i];
+        let host = host || p.proc_macro;
+        if host && p.name == "relax-lex" { continue; }
+        if std::mem::replace(&mut seen[i][host as usize], true) { continue; }
+        if !immutable(&p.dir) && !out.contains(&p.dir) { out.push(p.dir.clone()); }
         stack.extend(p.deps.iter().map(|d| (*d, host)));
     }
     out
@@ -397,17 +436,23 @@ mod tests {
             include!(concat!(env!("OUT_DIR"), "/generated.rs"));
         "####);
         dir.write("src/nested/mod.rs", "const X: &str = include_str!(\"../../assets/te\\x78t.txt\");");
-        dir.write("src/.hidden", "all src files count");
-        dir.write("src/nested/Cargo.toml", "also counts");
+        // not part of the crate's build: hidden entries, nested packages (a fuzz folder), other files of src/
+        dir.write("src/.hidden", "ignored");
+        dir.write("src/.cache/skipped.rs", "ignored");
+        dir.write("src/fuzz/Cargo.toml", "[package]\nname = 'fuzz'\n");
+        dir.write("src/fuzz/Cargo.lock", "old lock");
+        dir.write("src/fuzz/fuzz_targets/one.rs", "fn main() {}");
+        dir.write("src/notes.txt", "ignored");
+        dir.write("src/artifacts/crash-1", "ignored");
         dir.write("generated/one.rs", "include!(\"two.rs\");");
         dir.write("generated/two.rs", "include!(\"one.rs\"); const X: &str = include_str!(\"../assets/more.txt\");");
         for name in ["assets/text.txt", "assets/blob", "assets/more.txt", "scripts/ignored.hal", "tests/ignored.rs", "docs/ignored.md", "examples/ignored.rs", "benches/ignored.rs", "target/ignored", "README.md"] { dir.write(name, "initial"); }
         let files = identity_files(&dir.0);
         let names: Vec<_> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["Cargo.toml", "assets/blob", "assets/more.txt", "assets/text.txt", "build.rs", "generated/one.rs", "generated/two.rs", "src/.hidden", "src/lib.rs", "src/nested/Cargo.toml", "src/nested/mod.rs"]);
+        assert_eq!(names, ["Cargo.toml", "assets/blob", "assets/more.txt", "assets/text.txt", "build.rs", "generated/one.rs", "generated/two.rs", "src/lib.rs", "src/nested/mod.rs"]);
         let pkgs = [dir.package()];
         let before = closure_hash(&pkgs, 0);
-        for name in ["scripts/ignored.hal", "tests/ignored.rs", "docs/ignored.md", "examples/ignored.rs", "benches/ignored.rs", "README.md"] { dir.write(name, "changed"); }
+        for name in ["scripts/ignored.hal", "tests/ignored.rs", "docs/ignored.md", "examples/ignored.rs", "benches/ignored.rs", "README.md", "src/fuzz/Cargo.lock", "src/notes.txt", "src/.hidden", "src/fuzz/fuzz_targets/one.rs"] { dir.write(name, "changed"); }
         assert_eq!(before, closure_hash(&pkgs, 0));
         dir.write("assets/text.txt", "changed");
         assert_ne!(before, closure_hash(&pkgs, 0));

@@ -124,6 +124,8 @@ struct PoolState {
     scans: std::collections::BTreeMap<ScanPriority, ScanKey>,
     scan_seq: u64,
     seen: HashSet<ScanKey>,
+    /// the scan that found each scanned module file (a `mod` cycle ends at a file already on its chain)
+    found_by: HashMap<ScanKey, ScanKey>,
     /// per crate: scans queued or running
     scan_left: Vec<usize>,
     scanned: Vec<HashMap<ScanKey, Option<Scanned>>>,
@@ -300,7 +302,14 @@ impl Pool {
         if let Some(s) = &r {
             for (p, d, m) in &s.children {
                 let k = (key.0, p.clone(), d.clone(), m.clone());
+                // rustc_expand: a file that includes itself through `mod` items is an error the
+                // loader reports; the prescan stops at the repeat
+                let mut on_chain = key.1 == *p;
+                let mut up = st.found_by.get(&key);
+                while let (false, Some(parent)) = (on_chain, up) { on_chain = parent.1 == *p; up = st.found_by.get(parent); }
+                if on_chain { continue; }
                 if st.seen.insert(k.clone()) {
+                    st.found_by.insert(k.clone(), key.clone());
                     st.scan_seq += 1;
                     let seq = st.scan_seq;
                     st.scans.insert((key.0, seq), k);
@@ -474,6 +483,7 @@ impl Pool {
             for m in s.mods {
                 cmods.mods.insert(m);
             }
+            cmods.items.extend(s.mod_items);
             for u in s.uses {
                 if let Some(b) = &u.bind {
                     if u.path.last() != Some(b) {
@@ -752,6 +762,8 @@ struct Scanned {
     uses: Vec<crate::macros::UseItem>,
     /// module paths of the file (its own and inline / declared children)
     mods: Vec<String>,
+    /// the `mod` item of each module declared in the file
+    mod_items: Vec<(String, crate::macros::ModItem)>,
 }
 
 /// The bindings of a `use` tree in tokens `lo..hi` (after `use`, before `;`) under `prefix`.
@@ -924,10 +936,10 @@ fn scan_text_mode(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16,
     if declarations_only && !cfg.session.options.rs_lazy {
         toks = lazy::demand::active_tokens(&src, &toks, cfg);
     }
-    scan_tokens(path, dir, mpath, krate, cfg, src_len, src, toks, context, macro_surface)
+    scan_tokens(path, dir, mpath, krate, edition, cfg, src_len, src, toks, context, macro_surface)
 }
 
-fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, src_len: usize,
+fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, src_len: usize,
     src: ScanBytes, toks: Vec<Tok>, context: &crate::source_context::Context, macro_surface: bool,
 ) -> Option<Scanned> {
     let mut defs = Vec::new();
@@ -937,9 +949,10 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
     let mut macro_use = Vec::new();
     let mut uses: Vec<crate::macros::UseItem> = Vec::new();
     let mut mods: Vec<String> = vec![mpath.to_string()];
+    let mut mod_items: Vec<(String, crate::macros::ModItem)> = Vec::new();
     if !file_cfg_active(&src, &toks, cfg) {
         // `#![cfg(false)]` file: removed with its module; nothing in it counts
-        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new() });
+        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new() });
     }
     {
         let text = |i: usize| -> &[u8] { &src[toks[i].lo as usize..toks[i].hi as usize] };
@@ -954,7 +967,8 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
                 T::OpenBrace => depth += 1,
                 T::CloseBrace => {
                     if dirs.len() > 1 && dirs.last().unwrap().0 == depth {
-                        dirs.pop();
+                        let closed = dirs.pop().unwrap();
+                        if let Some(it) = mod_items.iter_mut().rev().find(|(p, _)| *p == closed.2) { it.1.end = toks[i].hi; }
                     }
                     depth = depth.saturating_sub(1);
                 }
@@ -1052,6 +1066,9 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
                     let attrs = decl_attrs(&src, &toks, i, cfg);
                     let active = attrs.active;
                     let pa = attrs.path;
+                    if cur_active && active {
+                        mod_items.push((child_path.clone(), crate::macros::ModItem { pos: toks[i].lo, end: toks[i + 2].hi, macro_use: attrs.macro_use }));
+                    }
                     if toks[i + 2].kind == T::Semi {
                         if cur_active && active {
                             let explicit_path = pa.is_some();
@@ -1138,7 +1155,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
                         .iter()
                         .map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo })
                         .collect();
-                    if let Ok(mut def) = crate::macros::parse_def(&name, krate, &mt) {
+                    if let Ok(mut def) = crate::macros::parse_def(&name, krate, edition, &mt) {
                         def.exported = attrs.exported;
                         if attrs.local_inner {
                             crate::macros::local_inner_macros(&mut def);
@@ -1147,6 +1164,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
                         // it: lookups made ahead of load order then replay)
                         def.def_file = path.to_string();
                         def.def_pos = toks[i + 2].lo;
+                        def.def_mod = dirs.last().unwrap().2.clone();
                         defs.push(def);
                     }
                     i = close;
@@ -1156,7 +1174,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, cfg: &CfgSet, sr
             i += 1;
         }
     }
-    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods })
+    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items })
 }
 
 /// Starts the pipeline for `crates` (load order): scans (all crates at once, earliest crate
@@ -1238,6 +1256,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         scans: Default::default(),
         scan_seq: 0,
         seen: HashSet::default(),
+        found_by: HashMap::default(),
         scan_left: vec![1; n],
         scanned: (0..n).map(|_| HashMap::default()).collect(),
         publishing: false,
@@ -1334,6 +1353,7 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
             for (alias, qual, target) in scan.aliases { table.add_alias(name.clone(), alias, (qual, target)); }
             table.macro_use.entry(name.clone()).or_default().extend(scan.macro_use);
             mods.mods.extend(scan.mods);
+            mods.items.extend(scan.mod_items);
             for u in scan.uses {
                 if let Some(b) = &u.bind {
                     if u.path.last() != Some(b) { mods.renames.insert(b.clone()); }
@@ -1396,6 +1416,7 @@ mod cold_tests {
             let mut mods = crate::macros::CrateMods { root: name.into(), src: path.clone(), ..Default::default() };
             mods.externs.extend(deps.iter().map(|dep| (dep.to_string(), dep.to_string())));
             mods.mods.extend(scan.mods);
+            mods.items.extend(scan.mod_items);
             for u in scan.uses {
                 if let Some(bind) = &u.bind {
                     if u.path.last() != Some(bind) { mods.renames.insert(bind.clone()); }
@@ -1537,6 +1558,7 @@ mod cold_tests {
             let mut mods = crate::macros::CrateMods { root: name.into(), src: path, ..Default::default() };
             mods.externs.extend(deps.into_iter().map(|dep| (dep.into(), dep.into())));
             mods.mods.extend(scan.mods);
+            mods.items.extend(scan.mod_items);
             for u in scan.uses {
                 if let Some(bind) = &u.bind {
                     if u.path.last() != Some(bind) { mods.renames.insert(bind.clone()); }

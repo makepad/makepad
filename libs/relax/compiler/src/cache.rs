@@ -7,7 +7,11 @@
 //! content hashes: the Relax build, the codegen configuration, the function instance, the
 //! interface fingerprints of every crate the instance can depend on (its definition's crate and
 //! the crates of its type arguments, with their dependencies; cache/items.rs), and its own
-//! body and position. Never timestamps. An entry also names the slots whose RIR its code took
+//! body and position. The interface fingerprints carry the bound crates that crate can reach and
+//! the bound crates depending on those (items::apply_bound): code that cannot reach a bound crate
+//! (std ...) is shared by programs binding other sets; whatever can reach one is shared only by
+//! programs with the same view.
+//! Never timestamps. An entry also names the slots whose RIR its code took
 //! in (inlined bodies, nounwind answers, transitively) with their keys: it links only while
 //! those keys are unchanged. So an edit of one fn body recompiles that fn and the code that
 //! inlined it, not its crate and every crate above it. Code entries live in per-crate code
@@ -26,7 +30,7 @@ use crate::jit::{FnKey, Unit};
 use crate::pack::{self, NewEntry};
 use crate::store::Store;
 use crate::program::{DefId, DefKind, NO_DEF};
-use crate::rir::{Reloc, RelocAt, RelocKind, Sym};
+use relax_backend::rir::{Reloc, RelocAt, RelocKind, Sym};
 use crate::sip::Sip128;
 use crate::syms::{DataKind, SymKind};
 use crate::types::{TyId, TyKind};
@@ -53,7 +57,7 @@ const STORE_FORMAT: u32 = 5;
 /// borrowck lane: a clean borrow-check verdict (empty payload)
 const KIND_BORROWCK: u32 = 4;
 /// the checker's own version: bump when its rules change (old verdicts are then ignored)
-pub const BORROWCK_VERSION: u32 = 1;
+pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
 const COHERENCE_VERSION: u32 = 1;
 
@@ -65,13 +69,15 @@ const COHERENCE_VERSION: u32 = 1;
 pub struct OwnerVerdicts {
     cfg: u128,
     fps: Vec<u128>,
+    /// interface fingerprints: they carry which crates the loader binds (items::crate_ifaces)
+    ifaces: Vec<u128>,
     epoch: u64,
     store: Option<std::sync::Arc<Store>>,
 }
 
 impl OwnerVerdicts {
-    fn new(cfg: u128, fps: Vec<u128>, epoch: u64, store: Option<std::sync::Arc<Store>>) -> Self {
-        Self { cfg, fps, epoch, store }
+    fn new(cfg: u128, fps: Vec<u128>, ifaces: Vec<u128>, epoch: u64, store: Option<std::sync::Arc<Store>>) -> Self {
+        Self { cfg, fps, ifaces, epoch, store }
     }
     pub fn lookup(&self, prog: &crate::program::Program, def: DefId, epoch: u64) -> (Option<u128>, Option<StoredVerdict>) {
         // Startup fingerprints cannot validate live edits or subsequently loaded modules: a
@@ -81,12 +87,13 @@ impl OwnerVerdicts {
         let krate = prog.def(def).krate;
         let edited = crate::reload::edited_crates();
         if !edited.is_empty() && reaches_edited(prog, krate, &edited) { return (None, None); }
-        let Some(fp) = self.fps.get(krate as usize) else { return (None, None) };
+        let (Some(fp), Some(iface)) = (self.fps.get(krate as usize), self.ifaces.get(krate as usize)) else { return (None, None) };
         let mut h = Sip128::new();
         h.str("borrowck-owner");
         h.u32(BORROWCK_VERSION);
         h.u128(self.cfg);
         h.u128(*fp); // includes the crate's transitive dependencies
+        h.u128(*iface); // ... and which of them the loader binds
         crate::stable::def_ident(prog, def, &mut h);
         let key = h.finish128();
         let stored = match self.store.as_ref().and_then(|st| st.get(key)) {
@@ -235,6 +242,10 @@ pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
         }
         return None;
     }
+    // coverage stores name this process's table (coverage.rs): such code is never cached
+    if crate::coverage::on() {
+        return None;
+    }
     match std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref() {
         Some("off") | Some("0") => None,
         Some("verify") => Some(Mode::Verify),
@@ -318,6 +329,41 @@ impl std::ops::DerefMut for CacheCell {
     fn deref_mut(&mut self) -> &mut Cache { unsafe { &mut *self.get() } }
 }
 
+/// The install-time inputs of a code entry that cannot be recovered later (`Cache::defer_record`).
+pub(crate) struct PendingRecord {
+    id: u32,
+    code: Vec<u8>,
+    relocs: Vec<RelocAt>,
+    pc_map: Vec<(u32, u64)>,
+    nounwind: Vec<(u32, bool)>,
+    baseline: bool,
+    deps: Vec<u32>,
+    /// jit::patch_epoch() at the install: a record is encoded only against the sources it was built from
+    epoch: u64,
+}
+
+/// Is a deferred record still describing the sources its code was built from?
+fn pending_current(u: &Unit, p: &PendingRecord) -> bool {
+    let f = &u.fns[p.id as usize];
+    p.epoch == crate::jit::patch_epoch() && f.patch_gen == 0 && !u.prog.is_edit_version(f.file)
+}
+
+/// The slots whose RIR the code of `id` took in (`Unit::body_deps` from `id` and `extra`,
+/// transitively), without `id` itself.
+fn record_deps(u: &Unit, id: u32, extra: &[u32]) -> Vec<u32> {
+    let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&id).into_iter().flatten().copied()).collect();
+    let mut deps = Vec::new();
+    if stack.is_empty() { return deps; }
+    let mut seen = HashSet::new();
+    seen.insert(id);
+    while let Some(c) = stack.pop() {
+        if !seen.insert(c) || c as usize >= u.fns.len() { continue; }
+        if let Some(v) = u.body_deps.get(&c) { stack.extend(v.iter().copied()); }
+        deps.push(c);
+    }
+    deps
+}
+
 pub struct Cache {
     pub mode: Mode,
     verbose: bool,
@@ -340,8 +386,12 @@ pub struct Cache {
     mapped_index: Option<collected::MappedIndexes>,
     /// crate fingerprints (stable.rs), per crate index
     fps: Vec<u128>,
-    /// interface fingerprints (cache/items.rs), per crate index: what code keys name
+    /// interface fingerprints (cache/items.rs), per crate index: what code keys name; the bound
+    /// crates of this program folded in (items::apply_bound)
     iface: Vec<u128>,
+    /// the same without the bound crates: what a collected image stores (run, check and
+    /// check --boundary of one program bind different sets, the image is shared by all)
+    iface_plain: Vec<u128>,
     /// per file: its interface hash and the fn bodies outside it
     digests: Vec<Option<std::sync::Arc<items::FileDigest>>>,
     /// per definition: its body (when a hole) and position digest, hashed (code keys)
@@ -365,6 +415,9 @@ pub struct Cache {
     /// payload bytes in `pending` (spill_take: written out during the run past a threshold)
     pending_bytes: usize,
     pending_keys: HashSet<u128>,
+    /// Exit refuses new key queries (slot_key); a deferred record's keys are still wanted while
+    /// the exit drains them (record_pending sets this for its own encoding)
+    recording_pending: bool,
     /// front images (crate, key) reserved this run: an image is local to its crate's store
     front_reserved: HashSet<(u32, u128)>,
     /// link name -> canonical foreign declaration (canon_foreign; built on first use)
@@ -591,12 +644,8 @@ impl Cache {
             cfgh.u8(b as u8);
         }
         cfgh.u8(u.tier1.is_some() as u8);
-        // which crates are bound to the loader's rustc build (provided.rs): their callers'
-        // code differs (bridge calls) from a run that compiles them (off switch, source differs)
-        for (_, pc) in &u.provided {
-            cfgh.str(&pc.name);
-            cfgh.u64(pc.source);
-        }
+        // which crates are bound to the loader's rustc build (provided.rs) is in the interface
+        // fingerprints (items::apply_bound), so only the code that can reach a bound crate is keyed by it
         cfgh.u128(u.prog.session.options.fingerprint());
         let mut c = Cache {
             verbose,
@@ -612,6 +661,7 @@ impl Cache {
             mapped_index: None,
             fps,
             iface: Vec::new(),
+            iface_plain: Vec::new(),
             digests: Vec::new(),
             def_bodies: HashMap::new(),
             code_path: Vec::new(),
@@ -625,6 +675,7 @@ impl Cache {
             pending: Vec::new(),
             pending_bytes: 0,
             pending_keys: HashSet::new(),
+            recording_pending: false,
             front_reserved: HashSet::new(),
             foreign_canon: None,
             def_maps: HashMap::new(),
@@ -690,14 +741,16 @@ impl Cache {
         match collected.filter(|c| c.ifaces.len() == ncr && std::env::var_os("MAKEPAD_RUN_CACHE_IFACE").is_none()) {
             Some(cc) => {
                 c.digests = vec![None; prog.files.len()];
-                c.iface = cc.ifaces.clone();
+                c.iface_plain = cc.ifaces.clone();
             }
             None => {
                 c.digests = items::file_digests(prog);
-                c.iface = items::crate_ifaces(prog, &c.fps, &c.digests);
-                c.iface.truncate(ncr);
+                c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
+                c.iface_plain.truncate(ncr);
             }
         }
+        let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.source)).collect();
+        c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
         // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface
         // fingerprint (which file made an edit's crate recompile)
@@ -734,11 +787,11 @@ impl Cache {
             let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
             let next = std::sync::atomic::AtomicUsize::new(0);
             let mut out: Vec<Option<std::sync::Arc<Store>>> = (0..paths.len()).map(|_| None).collect();
-            let parts: Vec<Vec<(usize, Option<std::sync::Arc<Store>>)>> = std::thread::scope(|sc| {
+            let parts: Vec<Vec<(usize, Option<std::sync::Arc<Store>>)>> = crate::pool::scope(|sc| {
                 let hs: Vec<_> = (0..n)
                     .map(|_| {
                         let next = &next;
-                        sc.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                        sc.spawn(move || {
                             let mut v = Vec::new();
                             loop {
                                 let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1012,11 +1065,11 @@ impl Cache {
         unsafe impl Sync for Shared<'_> {}
         let sh = Shared(u);
         let ci = &self.crate_ident;
-        let results: Vec<Vec<(u32, HashMap<u128, DefId>, u64, HashMap<DefId, u128>)>> = std::thread::scope(|sc| {
+        let results: Vec<Vec<(u32, HashMap<u128, DefId>, u64, HashMap<DefId, u128>)>> = crate::pool::scope(|sc| {
             let hs: Vec<_> = (0..n)
                 .map(|_| {
                     let (sh, by, order, next) = (&sh, &by, &order, &next);
-                    sc.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                    sc.spawn(move || {
                         let u = sh.0;
                         let mut out = Vec::new();
                         let mut files = HashMap::new();
@@ -1152,7 +1205,7 @@ impl Cache {
             return mapped.definition(c, k);
         }
         if !self.def_maps.contains_key(&c) {
-            let t0 = crate::jit::cpu_ns();
+            let t0 = relax_backend::cpu_ns();
             if self.crate_defs.is_empty() {
                 let mut by = vec![Vec::new(); u.prog.crates.len()];
                 for i in 0..u.prog.defs.len() {
@@ -1178,7 +1231,7 @@ impl Cache {
                 self.stats.def_collisions += 1;
             }
             if self.verbose && trace_on() {
-                eprintln!("makepad-run cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (crate::jit::cpu_ns() - t0) as f64 / 1e6);
+                eprintln!("makepad-run cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_backend::cpu_ns() - t0) as f64 / 1e6);
             }
             self.def_maps.insert(c, m);
         }
@@ -1564,6 +1617,16 @@ impl Cache {
                 self.enc_tys(u, &shim.args, e, crates, 0)
             }
             FnKey::Sandbox(_) => None,
+            // SPEC-V: an unverified-mode twin is its base's body lowered as unverified code: keyed
+            // by the base (the code that ran before its verdict, and the calls to it, are cached)
+            FnKey::Plain(base) => {
+                if base as usize >= u.fns.len() {
+                    return None;
+                }
+                e.u8(4);
+                let bk = u.fns[base as usize].key.clone();
+                self.enc_fnkey(u, &bk, e, crates, depth + 1)
+            }
             FnKey::Inst(d, args) => {
                 e.u8(0);
                 self.enc_def(u, d, e, crates);
@@ -1687,7 +1750,7 @@ impl Cache {
         // The exit manifest uses only identities already encoded by a lookup/record.
         // enc_fnkey -> enc_ty -> capture_query can type-check a closure's owner and
         // lazily parse/lower its body, after the exiting thread's TLS is gone.
-        if crate::preempt::is_stopped() { return None; }
+        if crate::preempt::is_stopped() && !self.recording_pending { return None; }
         let key = u.fns[id as usize].key.clone();
         let mut e = E::default();
         let mut cr = Vec::new();
@@ -1721,7 +1784,7 @@ impl Cache {
         }
         // build_image also comes here: no capture queries or body digests at exit.
         // Leave an unknown key for the next run's ordinary lookup / mid-run write.
-        if crate::preempt::is_stopped() { return None; }
+        if crate::preempt::is_stopped() && !self.recording_pending { return None; }
         let outer = std::mem::replace(&mut self.key_waits, false);
         let k = self.slot_key_uncached(u, id);
         if !self.key_waits {
@@ -1811,7 +1874,7 @@ impl Cache {
         if let Some(&k) = self.def_bodies.get(&d) {
             return k;
         }
-        let t0 = crate::jit::cpu_ns();
+        let t0 = relax_backend::cpu_ns();
         let def = u.prog.def(d);
         let f = def.file as usize;
         let mut h = Sip128::new();
@@ -1830,7 +1893,7 @@ impl Cache {
         }
         let k = h.finish128();
         self.def_bodies.insert(d, k);
-        self.stats.body_ns += crate::jit::cpu_ns() - t0;
+        self.stats.body_ns += relax_backend::cpu_ns() - t0;
         k
     }
 
@@ -1884,7 +1947,7 @@ impl Cache {
 
     pub fn owner_verdicts(&self, epoch: u64) -> OwnerVerdicts {
         let store = self.code_path.first().and_then(|p| self.stores.iter().find(|st| st.path == *p)).cloned();
-        OwnerVerdicts::new(self.cfg, self.fps.clone(), epoch, store)
+        OwnerVerdicts::new(self.cfg, self.fps.clone(), self.iface.clone(), epoch, store)
     }
 
     /// Records a completed verdict (written with the next flush).
@@ -2094,7 +2157,41 @@ impl Cache {
     /// Records slot `id`'s freshly compiled O1 code (on the owner thread).
     /// `code` is the backend's output (relocated fields zeroed), `relocs` its relocations.
     pub fn record(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)]) {
-        self.record_entry(u, id, code, relocs, pc_map, None, false)
+        self.record_entry(u, id, code, relocs, pc_map, None, false, None)
+    }
+
+    /// What the install of slot `id` leaves for its entry's encoding later (the main thread's
+    /// installs before the first present: key and certificate encoding is the cost). The code is
+    /// the backend's unrelocated output, which installing patches in place; the nounwind inputs,
+    /// the tier and the dependency slots can change or be reclaimed before the encoding runs.
+    /// None: `record` would store nothing.
+    pub(crate) fn defer_record(&self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)]) -> Option<PendingRecord> {
+        if self.mode == Mode::ReadOnly || u.fns[id as usize].patch_gen != 0 || self.linked.contains(&id) {
+            return None;
+        }
+        let rir = u.fns[id as usize].rir.as_ref();
+        Some(PendingRecord {
+            id,
+            code: code.to_vec(),
+            relocs: relocs.to_vec(),
+            pc_map: pc_map.to_vec(),
+            nounwind: rir.map_or_else(Vec::new, |r| r.nounwind_inputs.clone()),
+            baseline: rir.is_some_and(|r| r.baseline),
+            deps: record_deps(u, id, &[]),
+            epoch: crate::jit::patch_epoch(),
+        })
+    }
+
+    /// Encodes a deferred record: `record`, from the install-time inputs.
+    pub(crate) fn record_pending(&mut self, u: &Unit, p: &PendingRecord) {
+        if !pending_current(u, p) {
+            // a source changed (or the slot was patched) since the install: its key would name
+            // the new text for old code. A lost entry is harmless; a stale one is not.
+            return;
+        }
+        let previous = std::mem::replace(&mut self.recording_pending, true);
+        self.record_entry(u, p.id, &p.code, &p.relocs, &p.pc_map, None, false, Some(p));
+        self.recording_pending = previous;
     }
 
     /// Records the O2 code of slot `id` (the O2 worker's full build: a `#[relax(O2)]` slot, or a
@@ -2105,7 +2202,7 @@ impl Cache {
         // The O2 worker can finish after O3 installed (or linked from the cache). Never
         // downgrade its entry, even when that O3 build itself was too large to cache.
         if u.fns[id as usize].o3.load(std::sync::atomic::Ordering::Relaxed) { return; }
-        self.record_entry(u, id, code, relocs, pc_map, None, true)
+        self.record_entry(u, id, code, relocs, pc_map, None, true, None)
     }
 
     /// Records installed O3 code (marked or hot) as the slot's ordinary entry (its O1 key,
@@ -2114,11 +2211,11 @@ impl Cache {
     /// from the first call (jit.rs keeps it out). Like O2, it rewrites the startup image and
     /// buffers the entry for the monitor's spill / exit flush; no store write on this thread.
     pub fn record_o3(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], inlined: &[u32], nounwind: &[(u32, bool)]) {
-        self.record_entry(u, id, code, relocs, pc_map, Some((inlined, nounwind)), false)
+        self.record_entry(u, id, code, relocs, pc_map, Some((inlined, nounwind)), false, None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool) {
+    fn record_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool, pending: Option<&PendingRecord>) {
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
         // O3 and O2 code replace the slot's entry; O1 code is recorded once
         let replace = o3.is_some() || o2;
@@ -2135,7 +2232,7 @@ impl Cache {
             self.stats.unencodable += 1;
             self.why("fn key");
             trace_lookup(u, id, "unstorable:fn key");
-            crate::warm::reason(id, "unstorable:fn key");
+            relax_codegen::warm::reason(id, "unstorable:fn key");
             self.remember_outcome(u, id, None, "cold record-rejected:fn key");
             return;
         };
@@ -2148,11 +2245,11 @@ impl Cache {
             trace_lookup(u, id, "norecord:exists");
             return;
         }
-        let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, o2) else {
+        let Some(payload) = self.encode_entry(u, id, code, relocs, pc_map, o3, o2, pending) else {
             let w = self.last_why;
             trace_lookup(u, id, &format!("norecord:encode:{}", w));
             if o3.is_none() {
-                crate::warm::reason(id, &format!("unstorable:{}", w));
+                relax_codegen::warm::reason(id, &format!("unstorable:{}", w));
                 self.remember_outcome(u, id, Some(key), &format!("cold record-rejected:{}", w));
             }
             return;
@@ -2189,34 +2286,25 @@ impl Cache {
         Some(e.0)
     }
 
-    /// The dependency certificate of slot `id`'s code: every slot whose RIR it took in
-    /// (Unit::body_deps from `id` and `extra`, transitively), by its key encoding with its key
+    /// The dependency certificate of a code: every slot of `deps` (`record_deps`: the slots whose
+    /// RIR it took in), by its key encoding with its key
     /// now. The entry links only while each still has that key (its body, position and
     /// interface unchanged). None: one has no key (the entry cannot be stored).
-    fn cert_bytes(&mut self, u: &Unit, id: u32, extra: &[u32]) -> Option<Vec<u8>> {
-        let t0 = crate::jit::cpu_ns();
-        let r = self.cert_bytes_inner(u, id, extra);
-        self.stats.cert_write_ns += crate::jit::cpu_ns() - t0;
+    fn cert_bytes(&mut self, u: &Unit, deps: &[u32]) -> Option<Vec<u8>> {
+        let t0 = relax_backend::cpu_ns();
+        let r = self.cert_bytes_inner(u, deps);
+        self.stats.cert_write_ns += relax_backend::cpu_ns() - t0;
         r
     }
 
-    fn cert_bytes_inner(&mut self, u: &Unit, id: u32, extra: &[u32]) -> Option<Vec<u8>> {
-        let mut seen: HashSet<u32> = HashSet::new();
-        seen.insert(id);
-        let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&id).into_iter().flatten().copied()).collect();
+    fn cert_bytes_inner(&mut self, u: &Unit, deps: &[u32]) -> Option<Vec<u8>> {
         let mut items: Vec<(Vec<u8>, u128)> = Vec::new();
         let mut crates: Vec<u32> = Vec::new();
-        while let Some(c) = stack.pop() {
-            if !seen.insert(c) || c as usize >= u.fns.len() {
-                continue;
-            }
+        for &c in deps {
             // A new caller can inline an edited body without itself being a patch. Its
             // cached/memoized key must not certify code built from that live file version.
             let f = &u.fns[c as usize];
             if f.patch_gen != 0 || u.prog.is_edit_version(f.file) { return None; }
-            if let Some(v) = u.body_deps.get(&c) {
-                stack.extend(v.iter().copied());
-            }
             let b = self.slot_bytes(u, c)?;
             let k = self.slot_key(u, c)?;
             crates.extend(self.slot_crates.get(&c).into_iter().flatten().copied());
@@ -2258,7 +2346,7 @@ impl Cache {
     /// The payload of a code entry (O1, or O3 with its inlined slots);
     /// None: it cannot be stored (`last_why` says why).
     #[allow(clippy::too_many_arguments)]
-    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool) -> Option<Vec<u8>> {
+    fn encode_entry(&mut self, u: &Unit, id: u32, code: &[u8], relocs: &[RelocAt], pc_map: &[(u32, u64)], o3: Option<(&[u32], &[(u32, bool)])>, o2: bool, pending: Option<&PendingRecord>) -> Option<Vec<u8>> {
         // unlinked code only: a pool word must still be zero (linked code holds this run's values)
         for rl in relocs {
             let o = rl.at as usize;
@@ -2286,7 +2374,10 @@ impl Cache {
         e.u32(ENTRY_VERSION);
         e.str(&u.fns[id as usize].name);
         // the code's level (TIER_O1 / TIER_O3 / TIER_O2 / TIER_BASE); O3: the inlined slots (by key)
-        let base = o3.is_none() && !o2 && u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline);
+        let base = o3.is_none() && !o2 && match pending {
+            Some(p) => p.baseline,
+            None => u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline),
+        };
         e.u8(if o3.is_some() { TIER_O3 } else if o2 { TIER_O2 } else if base { TIER_BASE } else { TIER_O1 });
         let inl = o3.map_or(&[][..], |t| t.0);
         e.u32(inl.len() as u32);
@@ -2302,9 +2393,10 @@ impl Cache {
         }
         // its nounwind inputs: stable keys replace session slots; false answers are included
         // so absence/recursion cannot become an implicit input
-        let facts = match o3 {
-            Some(t) => t.1,
-            None => u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.nounwind_inputs.as_slice()),
+        let facts = match (pending, o3) {
+            (Some(p), _) => p.nounwind.as_slice(),
+            (_, Some(t)) => t.1,
+            _ => u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.nounwind_inputs.as_slice()),
         };
         e.0.extend_from_slice(&self.nounwind_bytes(u, facts)?);
         // the slots whose RIR this code took in, with their keys (link_entry checks them)
@@ -2313,7 +2405,15 @@ impl Cache {
             None => Vec::new(),
         };
         // the slots whose RIR this code took in, with their keys (link_entry checks them)
-        let Some(cert) = self.cert_bytes(u, id, &extra) else {
+        let deps;
+        let deps = match pending {
+            Some(p) => &p.deps,
+            None => {
+                deps = record_deps(u, id, &extra);
+                &deps
+            }
+        };
+        let Some(cert) = self.cert_bytes(u, deps) else {
             self.stats.unencodable += 1;
             self.why("dependency key");
             return None;
@@ -2543,7 +2643,7 @@ impl Cache {
     /// `stop` (a mid-run write: the main thread waits for the owner thread) is asked every 256
     /// slots; yes drops this record (false comes back) and a later write makes it again.
     pub fn record_manifest(&mut self, u: &Unit, root: u32, order: &[u32], present: usize, stop: &dyn Fn() -> bool) -> bool {
-        if !crate::preempt::is_stopped() && crate::warm::enabled() {
+        if !crate::preempt::is_stopped() && relax_codegen::warm::enabled() {
             for (id, f) in u.fns.iter().enumerate() {
                 if !f.compiled && !f.history().inlined_into.is_empty() {
                     self.remember_outcome(u, id as u32, None, "cold inlined-only; no standalone code entry");
@@ -2817,7 +2917,7 @@ fn key_defs(u: &Unit, key: &FnKey) -> Vec<DefId> {
     for _ in 0..32 {
         match k {
             FnKey::Inst(d, _) => { out.push(d); break; }
-            FnKey::Closure(_, _, parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
+            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
             _ => break,
         }
     }
@@ -3150,10 +3250,13 @@ pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
     let krate = match &u.fns[id as usize].key {
         FnKey::Inst(d, _) => u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name).to_string(),
         FnKey::Closure(f, _, _) => u.prog.file_crate.get(*f as usize).map_or("-".to_string(), |c| u.prog.syms.str(u.prog.crates[*c as usize].name).to_string()),
-        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) => "-".to_string(),
+        FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Sandbox(_) | FnKey::Plain(_) => "-".to_string(),
     };
     let on_main = crate::owner::for_main();
-    let line = format!("{:.1}\t{}\t{}\t{}\t{}\t{}\n", crate::jit::wall_ns() as f64 / 1e6, what, if on_main { "main" } else { "worker" }, krate, u.fns[id as usize].name, crate::syms::stable_fn_name(u, id));
+    // the code key and the identity of the fn (its key bytes without interfaces and bodies): the same
+    // identity under another key in two runs is a function the cache failed to share
+    let (key, ident) = u.cache.as_ref().map_or((0, 0), |c| (c.slot_keys.get(&id).copied().flatten().unwrap_or(0), c.fnkey_bytes.get(&id).and_then(|b| b.as_ref()).map_or(0, |b| identity_hash(b))));
+    let line = format!("{:.1}\t{}\t{}\t{}\t{}\t{}\t{:032x}\t{:032x}\n", crate::jit::wall_ns() as f64 / 1e6, what, if on_main { "main" } else { "worker" }, krate, u.fns[id as usize].name, crate::syms::stable_fn_name(u, id), key, ident);
     crate::zone_alloc::kept_with(|| TRACE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(String::new).push_str(&line));
 }
 
@@ -3483,6 +3586,30 @@ impl FrontGraphWrite {
     }
 }
 
+/// A boot's crate records and its graph, written after the first present (`flush_front_graphs`, from
+/// the first-present hook, the mid-run writer and the exit): the records first (each store is
+/// complete before the graph certifies it), then the graph.
+struct DeferredFront {
+    writers: Option<FrontWriters>,
+    graph: Option<FrontGraphWrite>,
+}
+static DEFERRED_FRONT: relax_session::sync::Mutex<Vec<DeferredFront>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// Starts the writer of the boot's deferred records and graph on its own thread (low priority). Called
+/// at the first present; anything not started by then is written by the mid-run writer or the exit.
+pub fn start_deferred_front() {
+    if DEFERRED_FRONT.lock().unwrap().is_empty() { return; }
+    let _k = crate::zone_alloc::kept();
+    let _ = std::thread::Builder::new().name("run-front-graph".into()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
+        crate::os::thread::lower_priority(true);
+        let t = std::time::Instant::now();
+        let r = flush_front_graphs();
+        if crate::preload::trace() {
+            eprintln!("makepad-run front: records and graph written after the first present: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
+        }
+    });
+}
+
 /// One graph writer at a time, for the whole write: a second caller (the exit while the quit
 /// or mid-run writer is writing) waits for that write instead of finding no pending job,
 /// recording the collected program against a graph not yet written ("graph certificate")
@@ -3495,6 +3622,10 @@ fn flush_front_graphs() -> Result<(), String> {
     // has finished the jobs it took. Exit must wait for their demand parts
     // and graph commit before publishing the collected image or terminating.
     let _writer = FRONT_GRAPH_WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    for mut d in std::mem::take(&mut *DEFERRED_FRONT.lock().unwrap()) {
+        if let Some(w) = d.writers.as_mut() { w.finish(); }
+        if let Some(job) = d.graph.take() { FRONT_GRAPH_WRITES.lock().unwrap().push(job); }
+    }
     let writes = std::mem::take(&mut *FRONT_GRAPH_WRITES.lock().unwrap());
     let mut writes = writes.into_iter();
     while let Some(job) = writes.next() {
@@ -3516,9 +3647,9 @@ fn flush_front_graphs() -> Result<(), String> {
 fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: Vec<relax_session::sync::Mutex<Option<R>>> = items.iter().map(|_| relax_session::sync::Mutex::new(None)).collect();
-    std::thread::scope(|scope| {
+    crate::pool::scope(|scope| {
         for _ in 0..crate::preload::jobs().min(items.len()).max(1) {
-            scope.spawn(|| { let _z = crate::zone_alloc::compiler_thread(); loop {
+            scope.spawn(|| { loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(item) = items.get(i) else { break };
                 *out[i].lock().unwrap() = Some(f(item));
@@ -3635,7 +3766,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
 }
 
 pub fn front_graph_pending() -> bool {
-    !FRONT_GRAPH_WRITES.lock().unwrap().is_empty()
+    !FRONT_GRAPH_WRITES.lock().unwrap().is_empty() || !DEFERRED_FRONT.lock().unwrap().is_empty()
 }
 
 #[derive(Default)]
@@ -3705,8 +3836,8 @@ impl FrontImages {
         });
         cached.unwrap_or_else(|| {
             let chunk = inputs.len().div_ceil(crate::preload::jobs().clamp(1, 8)).max(1);
-            std::thread::scope(|scope| {
-                let workers: Vec<_> = inputs.chunks(chunk).map(|v| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); v.iter().all(|(p, h)| self.input_current(p, *h)) })).collect();
+            crate::pool::scope(|scope| {
+                let workers: Vec<_> = inputs.chunks(chunk).map(|v| scope.spawn(move || { v.iter().all(|(p, h)| self.input_current(p, *h)) })).collect();
                 workers.into_iter().all(|w| w.join().unwrap_or(false))
             })
         })
@@ -3939,8 +4070,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         let chunk = graph.probes.len().max(graph.inputs.len()).div_ceil(jobs).max(1);
         if graph.stamps.len() != graph.inputs.len() { rejected("input stamps"); return; }
         let g = &graph;
-        let probes_ok = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..jobs).map(|k| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+        let probes_ok = crate::pool::scope(|scope| {
+            let workers: Vec<_> = (0..jobs).map(|k| scope.spawn(move || {
                 let range = |n: usize| (k * chunk).min(n)..((k + 1) * chunk).min(n);
                 let ok = g.probes[range(g.probes.len())].iter().all(|(p, exists)| self.probe_current(p, *exists));
                 // An input whose stat is the recorded one is unchanged: its recorded hash goes in
@@ -4077,11 +4208,11 @@ impl crate::crate_image::CrateImages for FrontImages {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
             let chunk = keys.len().div_ceil(crate::preload::jobs().max(1)).max(1);
-            std::thread::scope(|scope| {
+            crate::pool::scope(|scope| {
                 let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).map(|(keys, names)| {
                     let store = &store;
                     let image_dir = &image_dir;
-                    scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); keys.iter().zip(names).map(|(key, name)| {
+                    scope.spawn(move || { keys.iter().zip(names).map(|(key, name)| {
                         let key = (*key)?;
                         let (kind, bytes) = store.as_ref()?.get(key)?;
                         if kind != KIND_DEMAND_PART { return None; }
@@ -4341,6 +4472,9 @@ pub struct ColdFront {
     writers: Option<FrontWriters>,
     /// crates whose record was written
     records: usize,
+    /// boot: the crate records are written after the first present, not while the load runs
+    /// (`finish_mode` hands them over, see `DeferredFront`)
+    hold: bool,
 }
 impl ColdFront {
     pub fn enabled(options: &crate::options::Options) -> bool {
@@ -4349,6 +4483,7 @@ impl ColdFront {
 
     pub fn loaded(&mut self, prog: &crate::program::Program, krate: u32) {
         if !Self::enabled(&prog.session.options) || !prog.record_front { return; }
+        self.hold = true;
         self.loaded_in(prog, krate, crate::dirs::cache_dir());
     }
 
@@ -4419,7 +4554,18 @@ impl ColdFront {
             self.pending.clear();
             for ci in remaining { self.enqueue(prog, ci, &dir); }
         }
-        let written = {
+        // The boot hands its crate records and the graph over to the writer that runs after the first
+        // present (or at a quit): a record is a function of the parse, so a crate is restored for this
+        // run's cache open as soon as its record is queued; a run killed before the writer ran leaves
+        // no record, which the next run sees as absent (a cold load, never a stale one).
+        let mut deferred_writers = None;
+        let written = if deferred {
+            if let Some(w) = self.writers.take() {
+                let queued = w.queued.clone();
+                deferred_writers = Some(w);
+                queued
+            } else { Vec::new() }
+        } else {
             let _wait = crate::load_profile::span(prog.session.runtime.profile, "front-record-wait", "main");
             self.writers.take().map_or_else(Vec::new, |mut writers| writers.finish())
         };
@@ -4445,18 +4591,11 @@ impl ColdFront {
             // certificate re-parsed every file although each crate's images were on disk.
             // A write that cannot record yet stays queued for the post-present or exit writer.
             if deferred {
-                FRONT_GRAPH_WRITES.lock().unwrap().push(job);
-                { let _k = crate::zone_alloc::kept();
-                let _ = std::thread::Builder::new().name("run-front-graph".into()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
-                    let t = std::time::Instant::now();
-                    let r = flush_front_graphs();
-                    if crate::preload::trace() {
-                        eprintln!("makepad-run front: graph written after load: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
-                    }
-                });
-                }
+                DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: deferred_writers.take(), graph: Some(job) });
             }
             else { write_front_graph(&job); }
+        } else if let Some(w) = deferred_writers.take() {
+            DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: Some(w), graph: None });
         }
     }
 
@@ -4469,7 +4608,8 @@ impl ColdFront {
         let path = dir.join(front_store_name(&prog.session.options, &view.name, self.fps[ci].unwrap()));
         let late = crate::sip::late_inputs();
         let marks = front_run::run_marks();
-        self.writers.get_or_insert_with(FrontWriters::new).enqueue(FrontWrite { ci, view, dir: dir.to_owned(), path, late, marks });
+        let hold = self.hold;
+        self.writers.get_or_insert_with(|| FrontWriters::new(hold)).enqueue(FrontWrite { ci, view, dir: dir.to_owned(), path, late, marks });
     }
 
     pub fn report(&self, prog: &crate::program::Program) {
@@ -4504,14 +4644,27 @@ struct FrontWriteQueue {
 struct FrontWriters {
     queue: std::sync::Arc<(relax_session::sync::Mutex<FrontWriteQueue>, relax_session::sync::Condvar)>,
     workers: Vec<std::thread::JoinHandle<Vec<usize>>>,
+    /// held: no worker runs until `start` (the boot's records are written after the first present)
+    held: bool,
+    /// the crates enqueued (a record is written for each unless its snapshot cannot be recorded)
+    queued: Vec<usize>,
 }
 
 impl FrontWriters {
-    fn new() -> Self {
-        let mut writers = Self { queue: std::sync::Arc::new(Default::default()), workers: Vec::new() };
+    fn new(hold: bool) -> Self {
+        let mut writers = Self { queue: std::sync::Arc::new(Default::default()), workers: Vec::new(), held: hold, queued: Vec::new() };
+        if !hold { writers.start(); }
+        writers
+    }
+
+    fn start(&mut self) {
+        let low = self.held;
+        self.held = false;
         for _ in 0..crate::preload::jobs() {
-            let queue = writers.queue.clone();
-            writers.workers.push(std::thread::Builder::new().name("run-front-writer".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+            let queue = self.queue.clone();
+            self.workers.push(std::thread::Builder::new().name("run-front-writer".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                // the records written after the first present must not slow the first frames
+                if low { crate::os::thread::lower_priority(true); }
                 let (queue, wake) = &*queue;
                 let mut recorded = Vec::new();
                 loop {
@@ -4540,16 +4693,17 @@ impl FrontWriters {
                 }
             }).expect("front record writer"));
         }
-        writers
     }
 
     fn enqueue(&mut self, job: FrontWrite) {
+        self.queued.push(job.ci);
         self.queue.0.lock().unwrap_or_else(|e| e.into_inner()).pending.push_back(job);
         self.queue.1.notify_one();
     }
 
     /// The crates whose record was written.
     fn finish(&mut self) -> Vec<usize> {
+        if self.held { self.start(); }
         self.queue.0.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         self.queue.1.notify_all();
         let mut recorded = Vec::new();
@@ -4770,7 +4924,13 @@ mod cold_tests {
         assert_eq!(saved.boot_files, boot_files.len());
         assert!(saved.skipped_files.contains_key(&deferred));
         let proof = proof.expect("complete boot certificate");
-        assert_eq!(proof.ifaces, cache.iface);
+        assert_eq!(proof.ifaces, cache.iface_plain);
+        // the stored interfaces are bound-set free: run, check and check --boundary of one program bind
+        // different sets and take the same image, folding their own set in (apply_bound)
+        let bound = [(0u32, 7u64)];
+        assert_ne!(items::apply_bound(&saved, &proof.ifaces, &bound), proof.ifaces);
+        assert_eq!(items::apply_bound(&saved, &proof.ifaces, &bound), items::apply_bound(&unit.prog, &cache.iface_plain, &bound));
+        assert_eq!(items::apply_bound(&saved, &proof.ifaces, &[]), proof.ifaces);
         assert_eq!(proof.indexes.as_ref().unwrap().stores.len(), pre.len());
         assert!(cache.restore_collected_definitions(&saved, proof.definitions));
         let definitions = cache.mapped_definitions.as_ref().unwrap();
@@ -5582,7 +5742,7 @@ mod data_tests {
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, mut prog, _) = front_fixture(sess, "owner-verdict");
         let owner = DefId(prog.defs.iter().position(|d| d.krate == 2 && d.kind == DefKind::Fn).unwrap() as u32);
-        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), 0, None);
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, None);
         let (key, stored) = snapshot.lookup(&prog, owner, 0);
         assert_eq!(stored, None);
         let key = key.unwrap();
@@ -5592,31 +5752,73 @@ mod data_tests {
         let upath = root.join("unchecked.rcs");
         crate::store::append(&upath, vec![NewEntry { key, kind: KIND_BORROWCK, payload: enc_verdict(&unchecked) }], true).unwrap();
         let ustores = vec![std::sync::Arc::new(Store::open(&upath).unwrap())];
-        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), 0, ustores.first().cloned());
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, ustores.first().cloned());
         assert_eq!(snapshot.lookup(&prog, owner, 0), (Some(key), Some(unchecked)));
         drop(ustores);
         crate::store::append(&path, vec![NewEntry { key, kind: KIND_BORROWCK, payload: enc_verdict(&StoredVerdict::Clean) }], true).unwrap();
         let stores = vec![std::sync::Arc::new(Store::open(&path).unwrap())];
-        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), 0, stores.first().cloned());
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, stores.first().cloned());
         assert_eq!(snapshot.lookup(&prog, owner, 0), (Some(key), Some(StoredVerdict::Clean)));
+        // a changed interface fingerprint (e.g. another set of bound crates under the owner's crate) never reuses it
+        let mut other = vec![0u128; prog.crates.len()];
+        other[2] = 1;
+        let (k2, v2) = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), other, 0, stores.first().cloned()).lookup(&prog, owner, 0);
+        assert_ne!(k2, Some(key));
+        assert_eq!(v2, None);
         // another epoch (the program was collected again) or another compiler build never reuses it
         assert_eq!(snapshot.lookup(&prog, owner, 1), (None, None));
-        assert_eq!(OwnerVerdicts::new(43, crate::stable::crate_fingerprints(&prog), 0, stores.first().cloned()).lookup(&prog, owner, 0).1, None);
+        assert_eq!(OwnerVerdicts::new(43, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, stores.first().cloned()).lookup(&prog, owner, 0).1, None);
         // Change a dependency body while preserving all paths and definition ids.
         let file = prog.defs.iter().find(|d| d.krate == 0 && d.kind == DefKind::Fn).unwrap().file as usize;
         prog.files[file] = std::sync::Arc::new(crate::parser::parse_owned(sess, b"pub fn value() -> u32 { 9 }".to_vec(), 2021).unwrap());
-        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), 0, stores.first().cloned());
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, stores.first().cloned());
         let (changed, stored) = snapshot.lookup(&prog, owner, 0);
         assert_ne!(changed, Some(key));
         assert_eq!(stored, None);
         // An edit to the owner itself also invalidates the verdict.
         let file = prog.def(owner).file as usize;
         prog.files[file] = std::sync::Arc::new(crate::parser::parse_owned(sess, b"pub fn value() -> u32 { 11 }".to_vec(), 2021).unwrap());
-        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), 0, stores.first().cloned());
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, stores.first().cloned());
         let (edited, stored) = snapshot.lookup(&prog, owner, 0);
         assert_ne!(edited, changed);
         assert_eq!(stored, None);
         drop(stores);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bound_crates_mark_only_the_interfaces_that_reach_them() {
+        isolated_test!(bound_crates_mark_only_the_interfaces_that_reach_them);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        // crates: 0 macro_impl <- 1 mac <- 2 dependent (each depends on the one before)
+        let (root, prog, _) = front_fixture(sess, "bound-ifaces");
+        let digests = items::file_digests(&prog);
+        let fps = crate::stable::crate_fingerprints(&prog);
+        let plain = items::crate_ifaces(&prog, &fps, &digests);
+        let with = |b: &[(u32, u64)]| items::apply_bound(&prog, &plain, b);
+        assert_eq!(with(&[]), plain);
+        // crate 1 bound: it and what depends on it (crate 2) change; crate 0, below it, does not
+        let b1 = with(&[(1, 99)]);
+        assert_eq!(b1[0], plain[0]);
+        assert_ne!(b1[1], plain[1]);
+        assert_ne!(b1[2], plain[2]);
+        // crate 2 bound: only itself
+        let b2 = with(&[(2, 99)]);
+        assert_eq!((b2[0], b2[1]), (plain[0], plain[1]));
+        assert_ne!(b2[2], plain[2]);
+        // another source identity of the bound crate differs
+        assert_ne!(with(&[(1, 100)])[2], b1[2]);
+        // the boundary-crossing set is global: crate 1 bound in two programs, crate 2 (which depends on
+        // it) bound in only one of them -- crate 1's types cross or not depending on crate 2's fns, so
+        // crate 1's fingerprint (and everything above it) must differ, while crate 0 below stays shared
+        let (only1, both) = (with(&[(1, 99)]), with(&[(1, 99), (2, 5)]));
+        assert_eq!(only1[0], both[0]);
+        assert_ne!(only1[1], both[1], "a bound crate depending on another changes that one's view");
+        assert_ne!(only1[2], both[2]);
+        // order of the list does not matter
+        assert_eq!(with(&[(1, 99), (2, 5)]), with(&[(2, 5), (1, 99)]));
+        // a bound crate that nothing reaches does not touch an unrelated crate: crate 0 is below all
+        assert_eq!(with(&[(2, 5)])[0], plain[0]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5867,16 +6069,16 @@ mod data_tests {
         let fat = a.data(&words, 8, DataKind::Relocs(vec![(0, a.data_sym(table))]));
         let fat_sym = a.data_sym(fat);
         let reader = a.ro_reader().unwrap();
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         // a second unit (the proc-macro world), whose same symbol ids name zeroed objects
         let b = unit();
         for _ in 0..4 {
             b.data(&[0u8; 16], 8, DataKind::Bytes);
         }
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
-        assert!(matches!(a.ro_reader().unwrap().read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
+        assert!(matches!(a.ro_reader().unwrap().read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         drop(b);
-        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), relax_backend::passes::RoRead::Bytes(1085)));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6075,7 +6277,7 @@ mod data_tests {
         assert_eq!(linked_ptrs[0].0, 1);
         assert_eq!(linked_ptrs[0].1.off, 2);
         assert_eq!(&linked_ptrs[1..], &[(9, rt), (17, static_sym), (25, thunk), (33, foreign)]);
-        assert!(matches!(crate::syms::read_obj(&u, Sym { id: u.data_sym(linked).id, off: 1 }, 8), crate::opt::RoRead::Ptr(s) if s == linked_ptrs[0].1));
+        assert!(matches!(crate::syms::read_obj(&u, Sym { id: u.data_sym(linked).id, off: 1 }, 8), relax_backend::passes::RoRead::Ptr(s) if s == linked_ptrs[0].1));
         // Force recording instead of returning a memoized key / existing disk entry.
         c.index.clear();
         c.pending_keys.clear();
@@ -6171,6 +6373,17 @@ impl Linker {
                     _ => return None,
                 };
                 FnKey::Shim(crate::jit::ShimInstance { kind, args: self.cache().dec_tys(u, d, 0)? })
+            }
+            // SPEC-V: an unverified-mode twin, keyed by its base (a base the startup image names: its slot)
+            4 => {
+                let base = match self.image_slot_at(d) {
+                    Some(b) => b,
+                    None => {
+                        let bk = self.dec_fnkey(u, d, depth + 1)?;
+                        u.fn_id(bk)
+                    }
+                };
+                FnKey::Plain(base)
             }
             _ => return None,
         })
@@ -6336,7 +6549,7 @@ impl Linker {
 
     pub fn lookup(&mut self, u: &mut Unit, id: u32) -> Option<LinkedCode> {
         if !self.cache().linking.insert(id) {
-            crate::warm::reason(id, "cache lookup already in progress");
+            relax_codegen::warm::reason(id, "cache lookup already in progress");
             return None;
         }
         let _link = LinkGuard { cache: self.cache, key: id as u128, data: false };
@@ -6345,7 +6558,7 @@ impl Linker {
         }
         let t0 = crate::jit::wall_ns();
         let Some(key0) = self.cache().slot_key(u, id) else {
-            crate::warm::reason(id, "unstorable:fn key");
+            relax_codegen::warm::reason(id, "unstorable:fn key");
             return None;
         };
         let key = key0;
@@ -6368,9 +6581,9 @@ impl Linker {
             }
         }
         if !found {
-            if crate::warm::enabled() {
+            if relax_codegen::warm::enabled() {
                 let reason = self.cache().miss_reason(u, id, key0);
-                crate::warm::reason(id, &reason);
+                relax_codegen::warm::reason(id, &reason);
             }
             self.cache().missed.insert(id);
             self.cache().stats.misses += 1;
@@ -6392,7 +6605,7 @@ impl Linker {
                 self.cache().missed.insert(id);
                 self.cache().stats.link_fail += 1;
                 trace_lookup(u, id, "linkfail");
-                crate::warm::reason(id, "cached entry could not decode/link");
+                relax_codegen::warm::reason(id, "cached entry could not decode/link");
                 None
             }
         }
@@ -6401,9 +6614,9 @@ impl Linker {
     /// Whether every slot a code entry's certificate names still has the recorded key. None:
     /// the payload does not decode.
     fn cert_valid(&mut self, u: &mut Unit, payload: &[u8]) -> Option<bool> {
-        let t0 = crate::jit::cpu_ns();
+        let t0 = relax_backend::cpu_ns();
         let r = self.cert_valid_inner(u, payload);
-        self.cache().stats.cert_check_ns += crate::jit::cpu_ns() - t0;
+        self.cache().stats.cert_check_ns += relax_backend::cpu_ns() - t0;
         r
     }
 
@@ -6576,7 +6789,7 @@ impl Cache {
         h.str("const-value");
         h.u128(self.cfg);
         h.write(&e.0);
-        for &c in &crates { h.u128(*self.fps.get(c as usize)?); }
+        for &c in &crates { h.u128(*self.fps.get(c as usize)?); h.u128(*self.iface.get(c as usize)?); }
         Some((h.finish128(), self.dominant(&crates)))
     }
 
@@ -6624,7 +6837,7 @@ impl Cache {
     /// Optional diagnostic ledger: retain cold evidence for the strict run's
     /// taxonomy. An ordinary cache without this evidence reports uncertainty.
     fn remember_outcome(&mut self, u: &Unit, id: u32, code_key: Option<u128>, reason: &str) {
-        if !crate::warm::enabled() || self.mode == Mode::ReadOnly { return; }
+        if !relax_codegen::warm::enabled() || self.mode == Mode::ReadOnly { return; }
         let key = self.outcome_key(u, id);
         if !self.pending_keys.insert(key) { return; }
         let krate = match u.fns[id as usize].key {

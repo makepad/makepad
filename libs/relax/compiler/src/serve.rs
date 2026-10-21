@@ -100,7 +100,7 @@ impl Session {
                 if let Ok(plan) = crate::reload::classify(&unit.prog, file, &v.pf, &path) {
                     if plan.changes.is_empty() && plan.added.is_empty() && plan.removed.is_empty() && plan.removed_uses.is_empty() && !plan.attributes_changed {
                         if let Ok(f) = unit.prog.commit_body_version(v, &plan.pairs) {
-                            unit.prog.lower_body_declarations(&[]);
+                            unit.prog.lower_body_declarations(&[], &[f]);
                             primed.push(file);
                             primed.push(f);
                             files.insert(path, f);
@@ -181,7 +181,7 @@ impl Session {
                     if let crate::typeck::Res::Def(d) = r { edges.push(*d); }
                 }
                 for m in body.methods.values().chain(body.binops.values()) { edges.push(m.def); }
-                for (d, _) in body.ov_derefs.values().chain(body.ov_index.values()).chain(body.for_next.values()) { edges.push(*d); }
+                for (d, _) in body.overloaded_derefs().map(|(_, _, ov)| ov).collect::<Vec<_>>().iter().chain(body.ov_index.values()).chain(body.for_next.values()) { edges.push(*d); }
                 for (d, _, _) in body.for_into.values() { edges.push(*d); }
                 for (d, _, _) in body.try_branch.values() { edges.push(*d); }
                 for (d, _) in body.try_from_residual.values() { edges.push(*d); }
@@ -189,7 +189,7 @@ impl Session {
                 // Check concrete instances reached in the package, with diagnostics owned by
                 // the caller. Closure bodies are already checked in their enclosing Body.
                 let cx = crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &state);
-                for (callee, args) in u.tcx.with_errors(&cx, || crate::jit::body_callees(&u.prog, &u.tcx, &body, false)).0 {
+                for (callee, args) in u.tcx.with_errors(&cx, || crate::jit::body_callees(&u.prog, &u.tcx, &body, false, None)).0 {
                     edges.push(callee);
                     if self.own_crates.contains(&u.prog.def(callee).krate) && !args.is_empty() { queue.push((callee, args)); }
                 }
@@ -372,7 +372,7 @@ impl Session {
         }
         let parsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         if rebuild.is_empty() {
-            self.unit.prog.lower_body_declarations(&legacy_owners);
+            self.unit.prog.lower_body_declarations(&legacy_owners, &body_files);
             // The edited versions' body inputs, as reload.rs publish_reload.
             self.unit.tcx.queries.register_files(self.unit.prog.files.len());
             self.unit.tcx.publish_file_bodies(&body_files);

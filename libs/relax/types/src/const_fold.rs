@@ -158,6 +158,25 @@ pub(crate) fn eval_query_expr(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: 
             };
             if fits(value) { Some(value) } else { None }
         }
+        // `Enum::Variant as int` of a fieldless variant is its discriminant (rustc's cast of an
+        // enum value reads the discriminant): the value of that variant alone, so an enum may
+        // name the discriminants of its own variants (`Y = Foo::X as isize - 3`)
+        ExprKind::Cast(x, _) if integral => {
+            let mut inner = *x;
+            while let ExprKind::Paren(i) = f.ast.expr(inner).kind { inner = i; }
+            let ExprKind::Path(path) = &f.ast.expr(inner).kind else { return None };
+            if !path.no_qself() { return None; }
+            let segments = crate::program::path_segs(prog, file, path);
+            if segments.len() < 2 { return None; }
+            let container = prog.resolve_mod_path(module, path.global(), &segments[..segments.len() - 1], false, false)?;
+            let variant = prog.lookup_in_container(container, segments[segments.len() - 1].1, false)?;
+            let vd = prog.def(variant);
+            if vd.kind != DefKind::Variant { return None; }
+            let adt = tcx.adts.get(&vd.parent)?;
+            if !adt.is_enum() || adt.variants.get(vd.sub as usize)?.shape != 0 { return None; }
+            let discr = adt.discriminant_for_variant(tcx, prog, vd.sub)?;
+            Some(wrap_int(discr.signed_value(), bytes, signed))
+        }
         ExprKind::Path(path) if path.no_qself() => {
             let segments = crate::program::path_segs(prog, file, path);
             if segments.is_empty() { return None; }

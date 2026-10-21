@@ -27,3 +27,9 @@ pulldown-cmark = { workspace = true }
 makepad-ai-llm = { workspace = true }
 makepad-widgets-core = { workspace = true }
 makepad-mbtile-reader = { workspace = true }
+makepad-piano-model = { workspace = true }
+makepad-audio-decode = { workspace = true }
+makepad-audio-synth = { workspace = true }
+makepad-script = { workspace = true }
+makepad-csg = { workspace = true }
+makepad-box3d = { path = "../../../box3d" }

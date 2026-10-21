@@ -99,7 +99,7 @@ fn combined_nested_commit_rolls_back_with_outer_snapshot() {
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     let a = infcx.inner.borrow_mut().type_variables().new_var(UniverseIndex(2));
     let key = OpaqueTypeKey { def_id: DefId(0), args: [].into() };
-    let original = ProvisionalHiddenType { ty: tcx.tys.bool_ };
+    let original = ProvisionalHiddenType::new(tcx.tys.bool_);
     infcx.inner.borrow_mut().opaque_types().register(key.clone(), original);
     infcx.probe(|outer| {
         let b = infcx.inner.borrow_mut().type_variables().new_var(UniverseIndex::ROOT);
@@ -111,7 +111,7 @@ fn combined_nested_commit_rolls_back_with_outer_snapshot() {
             let universe = infcx.create_next_universe();
             let p = tcx.tys.intern_region(RegionKind::RePlaceholder { universe, var: BoundVar(0) });
             infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&tcx.tys, region, p, true);
-            assert_eq!(infcx.inner.borrow_mut().opaque_types().register(key.clone(), ProvisionalHiddenType { ty: tcx.tys.char_ }), Some(tcx.tys.bool_));
+            assert_eq!(infcx.inner.borrow_mut().opaque_types().register(key.clone(), ProvisionalHiddenType::new(tcx.tys.char_)), Some(tcx.tys.bool_));
             infcx.inner.borrow_mut().opaque_types().add_duplicate(key.clone(), original);
             Ok(())
         });
@@ -140,7 +140,7 @@ fn failed_commit_restores_new_variables_and_opaque_keys() {
         infcx.next_ty_var();
         infcx.next_region_var();
         infcx.create_next_universe();
-        infcx.inner.borrow_mut().opaque_types().register(OpaqueTypeKey { def_id: DefId(1), args: [].into() }, ProvisionalHiddenType { ty: tcx.tys.bool_ });
+        infcx.inner.borrow_mut().opaque_types().register(OpaqueTypeKey { def_id: DefId(1), args: [].into() }, ProvisionalHiddenType::new(tcx.tys.bool_));
         Err::<(), _>(7)
     });
     assert_eq!(result, Err(7));
@@ -507,7 +507,7 @@ fn round10_leak_check_does_not_resolve_free_region_obligations() {
     // compare_impl_item.rs:697 needs resolve_regions_and_report_errors here.
     // A leak check only checks universe escape; these are ordinary free regions.
     assert!(infcx.leak_check(UniverseIndex::ROOT, None).is_ok());
-    assert_eq!(infcx.inner.borrow().region_obligations(), &[(ty, a)]);
+    assert_eq!(infcx.inner.borrow().region_obligations(), &[(ty, a, 0)]);
     assert_eq!(infcx.inner.borrow_mut().unwrap_region_constraints().constraints().len(), 1);
 }
 

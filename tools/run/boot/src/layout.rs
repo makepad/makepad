@@ -1,13 +1,61 @@
-//! A small text/pass layout, in HAL logical points (dp on Android).
+//! The halted view: compile errors, a parked panic or a failed run, in the Ignition Field's own
+//! world. The field stops turning and cools (ember core and frame); a HUD header names what
+//! halted; the errors list beside (wide) or below (narrow) the galaxy, root causes first with
+//! repeated errors folded into groups. Logical points (dp on Android).
 use crate::{
     document::{Line, Role},
-    Action, Card, Environment, Layout, Mode, Renderer, State, TextLine,
+    groups, Action, Card, Environment, Layout, Mode, Renderer, State, TextLine,
 };
 
 use makepad_script::{id, LiveId};
 
 /// The close button's side, in points.
 const CLOSE_SIZE: f32 = 28.0;
+/// The HUD's margin inside the frame (the field's corner brackets sit at 10).
+const MARGIN: f32 = 22.0;
+/// Member rows of a group shown before "+N more".
+const ROWS: usize = 4;
+
+const EMBER: [f32; 4] = [1.0, 0.478, 0.361, 1.0];
+const DIM: [f32; 4] = [0.431, 0.396, 0.576, 1.0];
+const SOFT: [f32; 4] = [0.706, 0.671, 0.839, 1.0];
+
+/// The document's label of a phase.
+pub(super) fn phase_key(phase: relax_base::run_state::Phase) -> LiveId {
+    match phase {
+        relax_base::run_state::Phase::Resolve => id!(resolve),
+        relax_base::run_state::Phase::Parse => id!(parse),
+        relax_base::run_state::Phase::Typecheck => id!(typecheck),
+        relax_base::run_state::Phase::Codegen => id!(codegen),
+        relax_base::run_state::Phase::Link => id!(link),
+        relax_base::run_state::Phase::FirstFrame => id!(first_frame),
+    }
+}
+
+fn style(base: Line, size: f32, color: [f32; 4]) -> Line {
+    Line {
+        size,
+        height: (size * 1.4).round(),
+        color,
+        ..base
+    }
+}
+
+/// The last two parts of a path (`src/main.rs`).
+fn short_path(file: &str) -> &str {
+    let mut cut = file.len();
+    for _ in 0..2 {
+        match file[..cut].rfind('/') {
+            Some(i) => cut = i,
+            None => return file,
+        }
+    }
+    &file[cut + 1..]
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
 
 impl Renderer {
     fn label(&mut self, value: &str, style: Line, rect: [f32; 4], fixed: bool) -> TextLine {
@@ -21,26 +69,26 @@ impl Renderer {
         }
     }
 
+    /// Lays out `value` at `y` in the scrolled list and answers its height.
+    fn flow(&mut self, layout: &mut Layout, value: &str, style: Line, x: f32, y: f32, width: f32) -> f32 {
+        let line = self.label(value, style, [x, y, width.max(1.0), 0.0], false);
+        let height = line.run.rows as f32 * style.height;
+        layout.text.push(line);
+        height
+    }
+
     pub(super) fn layout(&mut self, state: &State, size: [f32; 2], env: Environment) {
-        let dark = env.dark.unwrap_or(false);
         let [left, top, right, bottom] = env.insets;
-        let safe = [
-            left.min(size[0]),
-            top.min(size[1]),
-            (size[0] - left - right).max(1.0),
-            (size[1] - top - bottom).max(1.0),
-        ];
         let program = self.active.as_ref().unwrap();
-        let style = program.layout(state.mode, [safe[2], safe[3]]);
-        let app_style = program.line(Role::App, dark);
-        let status_style = program.line(Role::Status, dark);
-        let current_style = program.line(Role::Current, dark);
-        let location_style = program.line(Role::Location, dark);
-        let error_style = program.line(Role::Errors, dark);
-        let domain_style = program.line(Role::Domain, dark);
-        let hint_style = program.line(Role::Hints, dark);
-        let panic_style = program.line(Role::Panic, dark);
-        let progress_style = program.line(Role::Progress, dark);
+        let sizes = program.layout(state.mode);
+        let app_style = program.line(Role::App);
+        let status_style = program.line(Role::Status);
+        let button_base = program.line(Role::Current);
+        let headline_style = program.line(Role::Domain);
+        let location_style = program.line(Role::Location);
+        let error_style = program.line(Role::Errors);
+        let panic_style = program.line(Role::Panic);
+        let hint_style = program.line(Role::Hints);
         let hints = program.hints(state, self.input.as_deref());
         let labels = [
             id!(tap_restart),
@@ -52,52 +100,109 @@ impl Renderer {
         ]
         .map(|key| program.label(key));
         let paused_label = program.label(id!(paused));
+        let halted_label = program.label(id!(halted));
+        let root_label = program.label(id!(root_cause));
+        let follow_label = program.label(id!(follow_on));
         let resume_label = program.label(id!(tap_resume));
         let input_label = program.label(id!(input_label));
-        let phase_label = program.label(match state.phase {
-            relax_base::run_state::Phase::Resolve => id!(resolve),
-            relax_base::run_state::Phase::Parse => id!(parse),
-            relax_base::run_state::Phase::Typecheck => id!(typecheck),
-            relax_base::run_state::Phase::Codegen => id!(codegen),
-            relax_base::run_state::Phase::Link => id!(link),
-            relax_base::run_state::Phase::FirstFrame => id!(first_frame),
-        });
-        let has_icon = self.icon_aspect.is_some() && program.pipes.len() > crate::document::ICON;
+        let has_icon = self.icon_aspect.is_some() && program.icon;
         let overlay = state.mode == Mode::Overlay;
-        let detail = overlay || !state.diagnostics.is_empty() || state.parked.is_some();
-        let margin = style
-            .margin
-            .min((safe[2].min(safe[3]) * 0.5 - 1.0).max(0.0));
-        let mut panel = [
-            safe[0] + margin,
-            safe[1] + margin,
-            (safe[2] - 2.0 * margin).max(1.0),
-            (safe[3] - 2.0 * margin).max(1.0),
+
+        // ---- the frame: the whole window, over the app too (Overlay), the HUD inside the
+        // system's insets
+        let safe = [
+            left.min(size[0]),
+            top.min(size[1]),
+            (size[0] - left - right).max(1.0),
+            (size[1] - top - bottom).max(1.0),
         ];
-        if style.max_width > 0.0 {
-            panel[2] = panel[2].min(style.max_width);
-        }
-        if style.max_height > 0.0 {
-            panel[3] = panel[3].min(style.max_height);
-        }
-        panel[0] = safe[0] + (safe[2] - panel[2]) * 0.5;
-        let padding = style
-            .padding
-            .min((panel[2].min(panel[3]) * 0.5 - 1.0).max(0.0));
-        let x = panel[0] + padding;
-        let width = (panel[2] - padding * 2.0).max(1.0);
-        let mut y = panel[1] + padding + style.top;
-        let end = panel[1] + panel[3] - padding;
+        let frame = [0.0, 0.0, size[0], size[1]];
+        let inner_box = safe;
+        let m = MARGIN.min((inner_box[2].min(inner_box[3]) * 0.25).max(4.0));
+        let x0 = inner_box[0] + m;
+        let width = (inner_box[2] - 2.0 * m).max(1.0);
+        let y_top = inner_box[1] + m - 2.0;
+        let y_end = inner_box[1] + inner_box[3] - m;
         let mut layout = Layout {
-            panel,
+            panel: frame,
+            frame,
             ..Layout::default()
         };
         self.text.begin_layout();
+        let tiny = width < 260.0 || inner_box[3] < 240.0;
 
-        // A fixed footer on touch; panic choices stay with the scrollable panic.
-        // Desktop keeps the original key bindings and their document-owned hints.
+        // ---- header (fixed): app, what halted, the headline, the count line
+        let close_reserve = if env.touch { 0.0 } else { CLOSE_SIZE + 6.0 };
+        let mut y = y_top;
+        let icon_w = if has_icon && !tiny { 22.0 } else { 0.0 };
+        if icon_w > 0.0 {
+            layout.icon = Some([x0, y, icon_w, icon_w]);
+            layout.icon_fixed = true;
+        }
+        let tx = x0 + if icon_w > 0.0 { icon_w + 8.0 } else { 0.0 };
+        let tw = (width - (tx - x0) - close_reserve).max(1.0);
+        let app = self.label(&state.app.to_uppercase(), app_style, [tx, y, tw, 0.0], true);
+        y += app.run.rows as f32 * app_style.height;
+        layout.fixed_text.push(app);
+        let errors = state.diagnostics.len();
+        let groups = groups::groups(&state.diagnostics);
+        let status = if state.parked.is_some() {
+            paused_label.to_uppercase()
+        } else if errors > 0 {
+            halted_label.to_uppercase()
+        } else {
+            state.domain.to_uppercase()
+        };
+        let line = self.label(&status, status_style, [tx, y, tw, 0.0], true);
+        y = y.max(y_top + icon_w) + line.run.rows as f32 * status_style.height + status_style.gap;
+        layout.fixed_text.push(line);
+        let headline = if let Some(panic) = &state.parked {
+            format!("Panicked at {}", short_path(&panic.location))
+        } else if errors > 0 {
+            plural(errors, "error", "errors")
+        } else {
+            state.app.clone()
+        };
+        let mut headline_style = headline_style;
+        if tiny {
+            headline_style = style_size(headline_style, 16.0);
+        }
+        let line = self.label(&headline, headline_style, [x0, y, width - close_reserve * 0.5, 0.0], true);
+        let rows = line.run.rows.min(2);
+        y += rows as f32 * headline_style.height;
+        layout.fixed_text.push(line);
+        let sub = if state.parked.is_some() {
+            String::new()
+        } else if errors > 0 {
+            let roots: usize = groups.iter().filter(|g| g.root).map(|g| g.members.len()).sum();
+            let mut files: Vec<&str> = state.diagnostics.iter().map(|d| d.file.as_str()).filter(|f| !f.is_empty()).collect();
+            files.sort_unstable();
+            files.dedup();
+            let mut parts = vec![format!("{roots} {root_label}{}", if roots == 1 { "" } else { "s" })];
+            if errors > roots {
+                parts.push(format!("{} {follow_label}", errors - roots));
+            }
+            if groups.len() < errors {
+                parts.push(plural(groups.len(), "group", "groups"));
+            }
+            if !files.is_empty() {
+                parts.push(plural(files.len(), "file", "files"));
+            }
+            parts.join(" · ")
+        } else {
+            String::new()
+        };
+        if !sub.is_empty() && !tiny {
+            let s = style(location_style, 11.0, if state.parked.is_some() { location_style.color } else { SOFT });
+            let line = self.label(&sub, s, [x0, y + 2.0, width, 0.0], true);
+            y += 2.0 + line.run.rows.min(2) as f32 * s.height;
+            layout.fixed_text.push(line);
+        }
+        let header_end = y + 14.0;
+
+        // ---- footer (fixed): key hints on desktop, buttons on touch
         let mut buttons = Vec::new();
-        if env.touch && detail {
+        if env.touch {
             if self.input.is_some() {
                 buttons.push((Action::Submit, labels[4].clone()));
                 buttons.push((Action::Cancel, labels[5].clone()));
@@ -105,14 +210,10 @@ impl Renderer {
                 if state.can_retry || state.can_restart {
                     buttons.push((Action::Restart, labels[0].clone()));
                 }
-                if !state.diagnostics.is_empty() || state.parked.is_some() {
+                if errors > 0 || state.parked.is_some() {
                     buttons.push((Action::Copy, labels[1].clone()));
                 }
-                if state
-                    .diagnostics
-                    .get(self.selected)
-                    .is_some_and(|d| !d.file.is_empty())
-                {
+                if state.diagnostics.get(self.selected).is_some_and(|d| !d.file.is_empty()) {
                     buttons.push((Action::Open, labels[2].clone()));
                 }
                 if overlay {
@@ -120,235 +221,197 @@ impl Renderer {
                 }
             }
         }
-        let gap = style.action_gap;
-        let action_height = style.action_height;
-        let columns = (((width + gap) / (style.action_width + gap)).floor() as usize).max(1);
+        let gap = sizes.action_gap;
+        let columns = (((width + gap) / (sizes.action_width + gap)).floor() as usize).max(1);
         let button_width = ((width - gap * (columns - 1) as f32) / columns as f32).max(1.0);
-        let mut button_style = current_style;
+        let mut button_style = style(button_base, 12.0, button_base.color);
         button_style.align = 0.5;
-        let mut button_runs = Vec::new();
-        let mut row_heights = Vec::<f32>::new();
-        for (i, (action, label)) in buttons.iter().enumerate() {
-            let text = self.label(
-                label,
-                button_style,
-                [0.0, 0.0, (button_width - 24.0).max(1.0), 0.0],
-                true,
-            );
-            let row = i / columns;
-            if row == row_heights.len() {
-                row_heights.push(style.action_height);
-            }
-            row_heights[row] =
-                row_heights[row].max(text.run.rows as f32 * button_style.height + 16.0);
-            button_runs.push((*action, text));
-        }
-        let footer_height = if !row_heights.is_empty() {
-            row_heights.iter().sum::<f32>() + gap * row_heights.len() as f32
-        } else if !env.touch && detail {
-            let text = self.label(&hints, hint_style, [x, 0.0, width, 0.0], true);
-            let height = text.run.rows as f32 * hint_style.height + 16.0;
-            layout.fixed_text.push(text);
-            height
+        let button_rows = buttons.len().div_ceil(columns);
+        let footer_height = if !buttons.is_empty() {
+            button_rows as f32 * (sizes.action_height + gap)
+        } else if !env.touch {
+            let hint = self.label(&hints.to_uppercase(), hint_style, [x0, 0.0, width, 0.0], true);
+            let h = hint.run.rows as f32 * hint_style.height + 10.0;
+            let mut hint = hint;
+            hint.position[1] = y_end - h + 6.0;
+            layout.fixed_text.push(hint);
+            h
         } else {
             0.0
         };
-        // If the keyboard or a very short window leaves too little space, move
-        // the footer into the scroll flow, retaining every action and every line.
-        let fixed_footer = footer_height + 120.0 <= end - y;
-        let content_end = if fixed_footer {
-            end - footer_height
-        } else {
-            end
-        };
-
-        let mut title_style = app_style;
-        if detail {
-            title_style.size = title_style.size.min(24.0);
-            title_style.height = title_style.height.min(32.0);
-            title_style.align = 0.0;
-        }
-        let title_x = if detail && has_icon { x + 44.0 } else { x };
-        // the close button's corner stays clear of a left-aligned title
-        let title_width = (width - (title_x - x) - if detail && !env.touch { CLOSE_SIZE } else { 0.0 }).max(1.0);
-        let title = self.label(
-            &state.app,
-            title_style,
-            [title_x, y, title_width, 0.0],
-            detail,
-        );
-        let title_height = title.run.rows as f32 * title_style.height;
-        // A long name also remains reachable on very small windows.
-        let fixed_header = detail && title_height + 96.0 < content_end - y;
-        let mut title = title;
-        title.fixed = fixed_header;
-        if detail {
-            if has_icon {
-                layout.icon = Some([x, y, 32.0, 32.0]);
-                layout.icon_fixed = fixed_header;
-            }
-            if fixed_header {
-                layout.fixed_text.push(title);
-            } else {
-                layout.text.push(title);
-            }
-            y += title_height.max(if has_icon { 32.0 } else { 0.0 }) + 12.0;
-            let value = if state.parked.is_some() {
-                &paused_label
-            } else {
-                &state.domain
-            };
-            let mut style = domain_style;
-            style.align = 0.0;
-            let line = self.label(value, style, [x, y, width, 0.0], fixed_header);
-            y += line.run.rows as f32 * style.height + 16.0;
-            if fixed_header {
-                layout.fixed_text.push(line);
-            } else {
-                layout.text.push(line);
-            }
-        } else {
-            // Portrait/desktop: one centred group. Short landscape: identity
-            // on the left, progress and current work on the right.
-            let split = style.columns.clamp(0.0, 0.8);
-            let hero_width = if split > 0.0 { width * split } else { width };
-            let group_top = y;
-            if has_icon {
-                let icon_size = style.icon_size.min(hero_width);
-                let aspect = self.icon_aspect.unwrap();
-                let w = icon_size.min(icon_size * aspect);
-                let h = icon_size.min(icon_size / aspect);
-                layout.icon = Some([x + (hero_width - w) * 0.5, y, w, h]);
-                y += h + app_style.gap;
-            }
-            let line = self.label(&state.app, title_style, [x, y, hero_width, 0.0], false);
-            let hero_end = y + line.run.rows as f32 * title_style.height + title_style.gap;
-            layout.text.push(line);
-            let (flow_x, flow_width) = if split > 0.0 {
-                y = group_top + 16.0;
-                (x + hero_width + 32.0, (width - hero_width - 32.0).max(1.0))
-            } else {
-                y = hero_end;
-                (x, width)
-            };
-            layout.progress = Some([flow_x, y, flow_width, progress_style.height]);
-            y += progress_style.height + progress_style.gap;
-            let line = self.label(
-                &phase_label,
-                status_style,
-                [flow_x, y, flow_width, 0.0],
-                false,
-            );
-            y += line.run.rows as f32 * status_style.height + status_style.gap;
-            layout.text.push(line);
-            if !state.current.is_empty() {
-                let line = self.label(
-                    &state.current,
-                    current_style,
-                    [flow_x, y, flow_width, 0.0],
-                    false,
-                );
-                y += line.run.rows.max(2) as f32 * current_style.height + current_style.gap;
-                layout.text.push(line);
-            } else {
-                y += 2.0 * current_style.height + current_style.gap;
-            }
-            y = y.max(hero_end);
-            let offset =
-                ((content_end - group_top) - (y - group_top)).max(0.0) * style.center.min(1.0);
-            for line in &mut layout.text {
-                line.position[1] += offset;
-            }
-            if let Some(rect) = &mut layout.icon {
-                rect[1] += offset;
-            }
-            if let Some(rect) = &mut layout.progress {
-                rect[1] += offset;
-            }
-            y += offset;
-        }
-        let content_top = if fixed_header {
-            y
-        } else {
-            panel[1] + padding + style.top
-        };
-        let card_padding = style.card_padding.min((width * 0.5 - 1.0).max(0.0));
-        for (i, diagnostic) in state.diagnostics.iter().enumerate() {
-            let start = y;
-            y += card_padding;
-            if !diagnostic.file.is_empty() {
-                let location =
-                    format!("{}:{}:{}", diagnostic.file, diagnostic.line, diagnostic.col);
-                let mut style = location_style;
-                style.align = 0.0;
-                let line = self.label(
-                    &location,
-                    style,
-                    [x + card_padding, y, width - 2.0 * card_padding, 0.0],
-                    false,
-                );
-                y += line.run.rows as f32 * style.height + style.gap;
-                layout.text.push(line);
-            }
-            let mut diagnostic = diagnostic.clone();
-            diagnostic.file.clear();
-            let mut style = error_style;
-            style.align = 0.0;
-            let line = self.label(
-                &crate::diagnostic_text(&diagnostic),
-                style,
-                [x + card_padding, y, width - 2.0 * card_padding, 0.0],
-                false,
-            );
-            y += line.run.rows as f32 * style.height + card_padding;
-            layout.text.push(line);
+        let footer_top = y_end - footer_height;
+        for (i, (action, label)) in buttons.iter().enumerate() {
+            let row = i / columns;
+            let at = x0 + (i % columns) as f32 * (button_width + gap);
+            let by = footer_top + gap + row as f32 * (sizes.action_height + gap);
+            let mut line = self.label(&label.to_uppercase(), button_style, [at, by, button_width, 0.0], true);
+            line.position[1] = by + (sizes.action_height - line.run.rows as f32 * button_style.height) * 0.5;
+            layout.fixed_text.push(line);
             layout.cards.push(Card {
-                rect: [x, start, width, y - start],
-                action: Action::Select(i),
-                button: false,
+                rect: [at, by, button_width, sizes.action_height],
+                action: *action,
+                accent: 3.0,
+                members: 0..0,
+                fixed: true,
+            });
+        }
+
+        // ---- the galaxy's region and the list's column
+        let body = (footer_top - header_end).max(1.0);
+        let wide = width >= 700.0;
+        let (galaxy, list_x, list_w, list_top) = if wide {
+            let gw = (width * 0.36).min(360.0);
+            (
+                [frame[0], header_end, x0 - frame[0] + gw, body],
+                x0 + gw + 20.0,
+                width - gw - 20.0,
+                header_end,
+            )
+        } else if body >= 320.0 {
+            let gh = (body * 0.28).min(170.0);
+            ([frame[0], header_end, frame[2], gh], x0, width, header_end + gh + 6.0)
+        } else {
+            // no room for both: the galaxy stays behind the list
+            ([frame[0], header_end, frame[2], body], x0, width, header_end)
+        };
+        layout.galaxy = galaxy;
+        let clip = [list_x, list_top, list_w.max(1.0), (footer_top - list_top - 4.0).max(1.0)];
+
+        // ---- the list
+        let pad = sizes.card_padding.min((list_w * 0.25).max(4.0));
+        let text_x = list_x + pad + 4.0;
+        let text_w = (list_w - 2.0 * pad - 4.0).max(1.0);
+        let mut y = list_top;
+        for group in &groups {
+            let start = y;
+            let n = group.members.len();
+            let selected = group.members.contains(&self.selected);
+            let shown = if selected { self.selected } else { group.members.start };
+            let d = &state.diagnostics[shown];
+            y += pad - 2.0;
+            // kind line: ROOT CAUSE · RR0001 UNRESOLVED IMPORT ×4
+            let kind = format!(
+                "{} · {}{}{}",
+                if group.root { &root_label } else { &follow_label }.to_uppercase(),
+                group.code,
+                if group.title.is_empty() { String::new() } else { format!(" {}", group.title.to_uppercase()) },
+                if n > 1 { format!("  ×{n}") } else { String::new() },
+            );
+            let s = style(status_style, 9.5, if group.root { EMBER } else { DIM });
+            y += self.flow(&mut layout, &kind, s, text_x, y, text_w) + 3.0;
+            y += self.flow(&mut layout, &group.summary, error_style, text_x, y, text_w) + error_style.gap;
+            if !d.file.is_empty() {
+                let at = format!("{}:{}:{}", d.file, d.line, d.col);
+                y += self.flow(&mut layout, &at, location_style, text_x, y, text_w) + location_style.gap;
+            }
+            let mut detail = Vec::new();
+            if let Some(item) = &d.item {
+                detail.push(item.clone());
+            }
+            for note in &d.notes {
+                detail.push(format!("note: {note}"));
+            }
+            if let Some(help) = &d.suggestion {
+                detail.push(format!("help: {}", help.message));
+            }
+            if !detail.is_empty() {
+                let s = style(location_style, 11.0, SOFT);
+                y += self.flow(&mut layout, &detail.join("\n"), s, text_x, y, text_w) + 4.0;
+            }
+            // the members of a folded group, one row each: the first ROWS and the selected one
+            let mut rows = Vec::new();
+            if n > 1 {
+                y += 4.0;
+                let row_style = style(location_style, 10.5, SOFT);
+                let mut listed = 0;
+                for i in group.members.clone() {
+                    let first = i - group.members.start < ROWS || n <= ROWS + 1;
+                    if !first && i != self.selected {
+                        continue;
+                    }
+                    listed += 1;
+                    let m = &state.diagnostics[i];
+                    let what = if m.code == "RR0001" {
+                        m.message.trim_start_matches("unresolved import ").trim_matches('`').to_string()
+                    } else {
+                        m.message.lines().next().unwrap_or("").to_string()
+                    };
+                    let text = if m.file.is_empty() {
+                        what
+                    } else {
+                        format!("{}:{}   {what}", short_path(&m.file), m.line)
+                    };
+                    let mut s = row_style;
+                    if i == self.selected {
+                        s.color = error_style.color;
+                    }
+                    let h = self.flow(&mut layout, &text, s, text_x + 8.0, y + 2.0, text_w - 8.0) + 4.0;
+                    rows.push(Card {
+                        rect: [text_x - 2.0, y, text_w + 2.0, h],
+                        action: Action::Select(i),
+                        accent: 2.0,
+                        members: i..i + 1,
+                        fixed: false,
+                    });
+                    y += h;
+                }
+                if listed < n {
+                    let s = style(location_style, 10.0, DIM);
+                    let more = format!("+{} more · ↑/↓ steps through them", n - listed);
+                    y += self.flow(&mut layout, &more, s, text_x + 8.0, y + 2.0, text_w - 8.0) + 2.0;
+                }
+            }
+            y += pad - 2.0;
+            layout.cards.push(Card {
+                rect: [list_x, start, list_w, y - start],
+                action: Action::Select(group.members.start),
+                accent: if group.root { 1.0 } else { 0.0 },
+                members: group.members.clone(),
                 fixed: false,
             });
-            y += error_style.gap;
+            layout.cards.extend(rows);
+            y += 8.0;
         }
         if let Some(panic) = &state.parked {
-            let mut style = panic_style;
-            style.align = 0.0;
             let start = y;
-            y += card_padding;
-            let line = self.label(
-                &format!("{}\n{}", panic.location, panic.message),
-                style,
-                [x + card_padding, y, width - card_padding * 2.0, 0.0],
-                false,
-            );
-            y += line.run.rows as f32 * style.height + card_padding;
-            layout.text.push(line);
-            // The panic is selectable after the diagnostics; Copy then uses it.
+            y += pad - 2.0;
+            let s = style(status_style, 9.5, EMBER);
+            y += self.flow(&mut layout, "PANIC", s, text_x, y, text_w) + 3.0;
+            y += self.flow(&mut layout, &panic.location, location_style, text_x, y, text_w) + location_style.gap;
+            y += self.flow(&mut layout, &panic.message, panic_style, text_x, y, text_w) + panic_style.gap;
+            if !env.touch && !panic.choices.is_empty() {
+                let choices: Vec<String> = panic
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{}  {}", i + 1, c.to_uppercase()))
+                    .collect();
+                let s = style(status_style, 10.0, error_style.color);
+                let text = format!("{}   {}", resume_label.to_uppercase(), choices.join("     "));
+                y += 4.0 + self.flow(&mut layout, &text, s, text_x, y + 4.0, text_w);
+            }
+            y += pad - 2.0;
+            let index = state.diagnostics.len();
             layout.cards.push(Card {
-                rect: [x, start, width, y - start],
-                action: Action::Select(state.diagnostics.len()),
-                button: false,
+                rect: [list_x, start, list_w, y - start],
+                action: Action::Select(index),
+                accent: 1.0,
+                members: index..index + 1,
                 fixed: false,
             });
-            y += style.gap;
+            y += 8.0;
             if env.touch && self.input.is_none() {
                 for (i, choice) in panic.choices.iter().enumerate() {
-                    let label = format!("{resume_label} · {choice}");
-                    let mut line = self.label(
-                        &label,
-                        button_style,
-                        [x + 12.0, y + 8.0, (width - 24.0).max(1.0), 0.0],
-                        false,
-                    );
-                    let height =
-                        (line.run.rows as f32 * button_style.height + 16.0).max(action_height);
-                    line.position[1] =
-                        y + (height - line.run.rows as f32 * button_style.height) * 0.5;
+                    let label = format!("{resume_label} · {choice}").to_uppercase();
+                    let height = sizes.action_height;
+                    let mut line = self.label(&label, button_style, [list_x, y, list_w, 0.0], false);
+                    line.position[1] = y + (height - line.run.rows as f32 * button_style.height) * 0.5;
                     layout.text.push(line);
                     layout.cards.push(Card {
-                        rect: [x, y, width, height],
+                        rect: [list_x, y, list_w, height],
                         action: Action::Resume(i),
-                        button: true,
+                        accent: 3.0,
+                        members: 0..0,
                         fixed: false,
                     });
                     y += height + gap;
@@ -356,82 +419,24 @@ impl Renderer {
             }
         }
         if let Some(input) = self.input.clone() {
-            let mut style = error_style;
-            style.align = 0.0;
-            let line = self.label(
-                &format!("{input_label}\n{input}│"),
-                style,
-                [x, y, width, 0.0],
-                false,
-            );
-            y += line.run.rows as f32 * style.height + 16.0;
-            layout.text.push(line);
-        }
-        let mut footer_y = if fixed_footer {
-            end - footer_height + gap
-        } else {
-            y + gap
-        };
-        for (i, (action, mut line)) in button_runs.into_iter().enumerate() {
-            let row = i / columns;
-            if i > 0 && i % columns == 0 {
-                footer_y += row_heights[row - 1] + gap;
-            }
-            let at = x + (i % columns) as f32 * (button_width + gap);
-            let height = row_heights[row];
-            line.position = [
-                at + (button_width - line.run.width).max(0.0) * 0.5,
-                footer_y + (height - line.run.rows as f32 * button_style.height) * 0.5,
-            ];
-            line.fixed = fixed_footer;
-            if fixed_footer {
-                layout.fixed_text.push(line);
-            } else {
-                layout.text.push(line);
-            }
-            layout.cards.push(Card {
-                rect: [at, footer_y, button_width, height],
-                action,
-                button: true,
-                fixed: fixed_footer,
-            });
-        }
-        if !buttons.is_empty() && !fixed_footer {
-            y = footer_y + row_heights.last().copied().unwrap_or(0.0);
-        }
-        if !env.touch && detail {
-            // The hint was shaped before the header to reserve its space.
-            let mut hint = layout.fixed_text.remove(0);
-            hint.position[1] = if fixed_footer {
-                end - footer_height + 8.0
-            } else {
-                y + 8.0
-            };
-            hint.fixed = fixed_footer;
-            if fixed_footer {
-                layout.fixed_text.push(hint);
-            } else {
-                y = hint.position[1] + hint.run.rows as f32 * hint.style.height;
-                layout.text.push(hint);
-            }
+            let text = format!("{input_label}\n{input}│");
+            y += self.flow(&mut layout, &text, error_style, text_x, y, text_w) + 16.0;
         }
         if !env.touch {
-            // The close button in the panel's top right corner: the window has no caption of
-            // its own (it drags from anywhere else, `Boot::drag_answer`). Fixed cards come last.
-            let rect = [panel[0] + panel[2] - CLOSE_SIZE - 8.0, panel[1] + 8.0, CLOSE_SIZE, CLOSE_SIZE];
-            let mut style = current_style;
-            style.align = 0.5;
-            style.size = style.size.max(16.0);
-            style.height = CLOSE_SIZE;
-            let mut line = self.label("\u{00d7}", style, [rect[0], rect[1], rect[2], 0.0], true);
-            line.position[1] = rect[1];
+            // the close button in the frame's top right corner: the window has no caption of its
+            // own (it drags from anywhere else, `Boot::drag_answer`)
+            let rect = [frame[0] + frame[2] - CLOSE_SIZE - 14.0, frame[1] + 14.0, CLOSE_SIZE, CLOSE_SIZE];
+            let mut s = style(button_base, 16.0, DIM);
+            s.height = CLOSE_SIZE;
+            s.align = 0.5;
+            let line = self.label("\u{00d7}", s, [rect[0], rect[1], rect[2], 0.0], true);
             layout.fixed_text.push(line);
-            layout.cards.push(Card { rect, action: Action::Close, button: true, fixed: true });
+            layout.cards.push(Card { rect, action: Action::Close, accent: 4.0, members: 0..0, fixed: true });
         }
-        layout.clip = [x, content_top, width, (content_end - content_top).max(1.0)];
-        layout.content_height = (y - content_top).max(0.0);
-        // Landscape has two independent columns. Sort once when laying out so
-        // the frame's visible-line binary search remains valid.
+        layout.clip = clip;
+        layout.content_height = (y - list_top).max(0.0);
+        // fixed cards last; the list's cards in order of their tops (the frame's binary search)
+        layout.cards.sort_by(|a, b| a.fixed.cmp(&b.fixed).then(a.rect[1].total_cmp(&b.rect[1])));
         layout
             .text
             .sort_by(|a, b| a.position[1].total_cmp(&b.position[1]));
@@ -448,9 +453,10 @@ impl Renderer {
             if let Some(card) = layout
                 .cards
                 .iter()
-                .find(|c| c.action == Action::Select(self.selected))
+                .rev()
+                .find(|c| !c.fixed && c.members.contains(&self.selected))
             {
-                self.scroll = (card.rect[1] - content_top).max(0.0);
+                self.scroll = (card.rect[1] - list_top - 8.0).max(0.0);
             }
             self.reveal_selection = false;
         }
@@ -462,4 +468,8 @@ impl Renderer {
         self.pressed = None;
         self.layout = layout;
     }
+}
+
+fn style_size(base: Line, size: f32) -> Line {
+    style(base, size, base.color)
 }

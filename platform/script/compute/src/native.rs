@@ -1,6 +1,6 @@
-//! Native code through the shared back end (makepad-codegen): AIR is lowered to RIR, run
-//! through the tier-0 optimiser and emitted by the shared x64 (or arm64) code generator --
-//! the same middle and back end as Rapid's Rust dialect (local/plans/loader-core.md step 6).
+//! Native code through the shared back end (relax-backend): AIR is lowered to RIR, run
+//! through the tier-0 passes and emitted by the shared x64 (or arm64) code generator --
+//! the same back end as Relax's Rust JIT (one vector IR for kernels, std::simd and core::arch).
 //!
 //! AIR's total semantics are spelled out in RIR, op by op, so the result is bit-identical
 //! to [`crate::ir::run`]:
@@ -21,13 +21,13 @@
 use makepad_relax_api::relax_api;
 
 use crate::ir::{Bin, Block, Cmp, Fma, Op, Program, Region, SliceArg, Stmt, Ty, Un, Val};
-use makepad_codegen::exec;
-use makepad_codegen::rir::{self, Cls, Cond, Conv, FOp, FUn, Func, IOp, Inst, IntTy, Mem, Term, VReg};
+use relax_backend::exec;
+use relax_backend::rir::{self, Cls, Cond, Conv, FOp, FUn, Func, IOp, Inst, IntTy, Mem, Term, VReg};
 
 #[cfg(target_arch = "x86_64")]
-use makepad_codegen::x64 as target;
+use relax_backend::x64 as target;
 #[cfg(target_arch = "aarch64")]
-use makepad_codegen::arm64 as target;
+use relax_backend::arm64 as target;
 
 const I32: IntTy = IntTy { bits: 32, signed: true };
 const U32: IntTy = IntTy { bits: 32, signed: false };
@@ -37,7 +37,7 @@ const U64: IntTy = rir::U64;
 const W32: Mem = Mem::Int(4, false);
 const PTR: Mem = Mem::Int(8, false);
 
-/// The emitted code's entry: the System V ABI on x86-64 on every OS (makepad_codegen::x64
+/// The emitted code's entry: the System V ABI on x86-64 on every OS (relax_backend::x64
 /// emits it; Windows' "C" ABI passes in rcx/rdx/r8/r9 and the kernel read garbage), the
 /// platform C ABI on arm64.
 #[cfg(target_arch = "x86_64")]
@@ -150,6 +150,19 @@ pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     if !cpu_ok(p) {
         return None;
     }
+    let key = crate::kcache::key("scalar", p, writable);
+    if let Some(code) = key.and_then(load) {
+        if crate::kcache::verify() {
+            // verify mode: the stored code must be what a compile makes now
+            let fresh = compile_fresh(p, writable, None).expect("a stored kernel compiles");
+            crate::kcache::same("scalar", code.bytes(), fresh.bytes());
+        }
+        return Some(code);
+    }
+    compile_fresh(p, writable, key)
+}
+
+fn compile_fresh(p: &Program, writable: u64, key: Option<u128>) -> Option<Code> {
     let mut f = lower(p, writable);
     if f.verify().is_err() {
         return None;
@@ -158,15 +171,86 @@ pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     if f.verify().is_err() {
         return None;
     }
-    emit(&f)
+    emit_keyed(&f, key, true)
+}
+
+/// The stored machine code under `key`, re-targeted at this process's host trampoline (the
+/// pool words `decode` checked lie inside the code).
+pub(crate) fn load(key: u128) -> Option<Code> {
+    if options().no_codegen {
+        return None;
+    }
+    let (mut code, refs) = crate::kcache::decode(&(crate::kcache::hook()?.get)(key)?)?;
+    let addr = crate::kcache::host_addr().to_le_bytes();
+    for r in refs {
+        code[r as usize..r as usize + 8].copy_from_slice(&addr);
+    }
+    Some(Code { code: exec::Code::new(&code)? })
 }
 
 static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Machine code for optimised RIR, in its own executable mapping.
-pub(crate) fn emit(f: &Func) -> Option<Code> {
-    let env = target::Env { table_base: 0, thunk_base: 0, thunk_size: 0, tls_key: 0, tls_slow: 0 };
-    let c = target::compile(f, &env).ok()?;
+/// The back end's options, read once per process from the environment (`MAKEPAD_RUN_OPT`,
+/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features. Kernels allocate registers by
+/// weighted references over the square root of the live range's length (unless
+/// MAKEPAD_RUN_RA_PRIO says otherwise): by references alone (Relax's default) a kernel's
+/// long-lived values took every register and its short temporaries -- a noise hash, x64's 12
+/// vector registers -- went through spill slots (x64 cycles per element: one-pass heightfield
+/// x4 -23%, instances scalar -12%, x4 -13%; no kernel slower).
+pub(crate) fn options() -> &'static relax_session::Options {
+    static O: std::sync::OnceLock<relax_session::Options> = std::sync::OnceLock::new();
+    O.get_or_init(|| {
+        let mut o = relax_session::Options::from_env();
+        if std::env::var_os("MAKEPAD_RUN_RA_PRIO").is_none() {
+            o.ra_prio = relax_session::options::Priority::Sqrt;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            o.cpu = relax_backend::x64::detect_cpu(&o);
+        }
+        o
+    })
+}
+
+/// The symbol table host calls are linked through: `Callee::Host(Sym(HOST_TRAMPOLINE))`.
+const HOST_TRAMPOLINE: u32 = 0;
+
+/// The value of a relocated field of kernel code: only the host trampoline's address.
+pub(crate) fn reloc_value(r: rir::Reloc) -> u64 {
+    match r {
+        rir::Reloc::Sym(s) if s.id == HOST_TRAMPOLINE => (crate::host::trampoline as *const () as usize as u64).wrapping_add(s.off as u64),
+        rir::Reloc::Value(v) => v,
+        _ => 0,
+    }
+}
+
+/// Machine code for optimised RIR, in its own executable mapping, kept in the store under `key`
+/// when there is one. `thorough`: the back end's thorough register allocation (coalescing, spill
+/// windows, live-range splitting at loops: three allocation rounds); off, one quick round.
+/// Scalar kernels take it (Stage-like kernels 2-9% faster on arm64). The four-wide kernels do not:
+/// they are the large ones (Stage's largest: 66k instructions in 14k blocks), there it cost 27% of
+/// Stage's cold-start instructions (x64: 732 -> 536 G, CPU at present -6%), and their throughput
+/// is the same with the quick round (bench_kernels, arm64 mini and x64).
+pub(crate) fn emit_keyed(f: &Func, key: Option<u128>, thorough: bool) -> Option<Code> {
+    if options().no_codegen {
+        // MAKEPAD_RUN_NO_CODEGEN: no executable memory; the interpreter runs the program
+        return None;
+    }
+    let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0 };
+    let mut c = target::compile(options(), f, &env).ok()?;
+    if c.relocs.iter().any(|r| !matches!(r.target, rir::Reloc::Sym(rir::Sym { id: HOST_TRAMPOLINE, .. }) | rir::Reloc::Value(_))) {
+        return None;
+    }
+    // the code is linked before it is mapped: a pool word (Far symbol) needs no base address,
+    // and the kernel code has no other relocations
+    rir::link(&mut c.code, 0, &c.relocs, &reloc_value).ok()?;
+    // the store keeps code whose only relocations are the trampoline's pool words (the code is
+    // otherwise position independent): `load` writes this process's address into them
+    let host_refs: Option<Vec<u32>> = c
+        .relocs
+        .iter()
+        .map(|r| matches!((r.kind, r.target), (rir::RelocKind::Pool64, rir::Reloc::Sym(rir::Sym { id: HOST_TRAMPOLINE, off: 0 }))).then_some(r.at))
+        .collect();
     if let Ok(dir) = std::env::var("COMPUTE_NATIVE_DUMP") {
         // RIR and machine code of every compiled program (bring-up and perf work)
         let k = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -174,6 +258,9 @@ pub(crate) fn emit(f: &Func) -> Option<Code> {
         let _ = std::fs::write(format!("{}/kernel{}.bin", dir, k), &c.code[..c.text_len as usize]);
     }
     let code = exec::Code::new(&c.code)?;
+    if let (Some(key), Some(hook), Some(refs)) = (key, crate::kcache::hook(), host_refs) {
+        (hook.put)(key, crate::kcache::encode(&c.code, &refs));
+    }
     if let Ok(dir) = std::env::var("COMPUTE_NATIVE_DUMP") {
         let _ = std::fs::write(format!("{}/kernel{}.addr", dir, SEQ.load(std::sync::atomic::Ordering::Relaxed).wrapping_sub(1)), format!("{:#x}\n", code.ptr() as usize));
     }
@@ -188,29 +275,40 @@ pub fn rir_of(p: &Program, writable: u64) -> Func {
     f
 }
 
-/// Tier 0 as Rapid runs it: folding, copy propagation, CSE, DCE, SROA of the frame,
-/// LICM, block layout, address modes, loop rotation. No fusion, no float reassociation.
+/// The tier-0 passes as Relax's baseline runs them: folding, copy propagation, CSE, DCE, SROA
+/// of the frame, LICM, block layout, address modes, loop rotation; after LICM, value numbering
+/// of pure values (passes::gvn_pure). No fusion, no float reassociation. `MAKEPAD_RUN_OPT=none` (or `-fold`, `-cse`, `-sroa`, `-licm`, `-imm`,
+/// `-layout`) turns passes off.
 pub(crate) fn optimise_for_codegen(f: &mut Func) {
-    let cfg = makepad_codegen::opt::OptCfg::from_env();
-    let ro = (0, 0);
-    if cfg.fold {
-        makepad_codegen::opt::simplify(f, ro, cfg.imm, cfg.cse);
-        if cfg.sroa && makepad_codegen::opt::sroa(f) {
-            makepad_codegen::opt::simplify(f, ro, cfg.imm, cfg.cse);
+    use relax_backend::passes;
+    let o = options();
+    let none = o.opt.len() == 1 && o.opt[0] == "none";
+    let on = |tok: &str| !none && !relax_backend::stats::opt_off(o, tok);
+    let (fold, cse, sroa, licm, imm, layout, gvn) = (on("-fold"), on("-cse"), on("-sroa"), on("-licm"), on("-imm"), on("-layout"), on("-gvn"));
+    if fold {
+        passes::simplify(o, f, None, imm, cse);
+        if sroa && passes::sroa(f) {
+            // the cells' entry zeros that a write always precedes are dead by liveness only
+            passes::live_dce(f);
+            passes::simplify(o, f, None, imm, cse);
         }
-        if cfg.licm && makepad_codegen::opt::licm(f) {
-            makepad_codegen::opt::simplify(f, ro, cfg.imm, cfg.cse);
+        // LICM gathers the loop's invariant lane extracts in its preheader; local CSE's bounded
+        // table leaves most repeats there (kernels have thousands), value numbering merges them
+        let hoisted = licm && passes::licm(o, f);
+        let numbered = cse && gvn && passes::gvn_pure(f);
+        if hoisted || numbered {
+            passes::simplify(o, f, None, imm, cse);
         }
-        makepad_codegen::opt::sink_consts(f);
+        passes::sink_consts(f);
     }
-    if cfg.layout {
-        makepad_codegen::opt::relayout(f);
+    if layout {
+        passes::relayout(f);
     }
-    if cfg.fold {
-        makepad_codegen::opt::addr_modes(f);
+    if fold {
+        passes::addr_modes(f);
     }
-    if cfg.layout {
-        makepad_codegen::opt::rotate_loops(f);
+    if layout {
+        passes::rotate_loops(f);
     }
 }
 
@@ -638,8 +736,7 @@ impl<'a> Lx<'a> {
             at += 3;
         }
         let w = self.iconst(self.writable as i64);
-        let tramp = crate::host::trampoline as *const () as usize as u64;
-        self.emit(Inst::Call(rir::Callee::Host(tramp), vec![rec, self.regions[3], self.regions[0], w], Vec::new()));
+        self.emit(Inst::Call(rir::Callee::Host(rir::Sym::new(HOST_TRAMPOLINE)), vec![rec, self.regions[3], self.regions[0], w], Vec::new()));
         for v in rets {
             let d = self.v(*v);
             let m = if self.p.vals[v.0 as usize] == Ty::F32 { Mem::F32 } else { W32 };

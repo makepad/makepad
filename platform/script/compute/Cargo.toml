@@ -20,9 +20,14 @@ shared-backend = []
 
 [dependencies]
 makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
-# The shared middle and back end (RIR, optimiser, x64/arm64 emitters): native kernels.
-makepad-codegen = { path = "../../codegen" }
 makepad-script = { path = "..", optional = true }
+
+# The shared back end (Relax's RIR with vectors, tier-0 passes, register allocation, x64/arm64
+# emitters, executable memory): native kernels and audio programs, on the hosts it emits for
+# (a wasm build runs kernels as generated wasm and links neither).
+[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
+relax-backend = { workspace = true }
+relax-session = { workspace = true }
 
 [dev-dependencies]
 makepad-script-compute-sched = { path = "../compute_sched" }

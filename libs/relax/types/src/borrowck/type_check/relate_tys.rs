@@ -160,7 +160,7 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
             return Ok(());
         }
         // Variances are in declaration order. A missing declaration is invariant, as in variance.rs.
-        let variances = tcx.variances_of(self.type_checker.prog, def);
+        let variances = if matches!(tcx.tys.kind(a_ty), TyKind::FnDef(..)) { tcx.fn_def_variances(self.type_checker.prog, def) } else { tcx.variances_of(self.type_checker.prog, def).to_vec() };
         let variance = |full: u32| variances.get(full as usize).copied().unwrap_or(V::Inv);
         let mut has_unconstrained_bivariant_arg = false;
         for &(full, region, i) in &order {
@@ -200,6 +200,15 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
                 let span = self.span();
                 let generalized = self.type_checker.infcx.generalize_ty_var(a_vid, self.ambient_variance, b, span)?;
                 self.relate(generalized, b)
+            }
+            // Two uses of one opaque type relate by their arguments (rustc relate_tys.rs `tys`: a failure to
+            // relate an opaque to itself that way falls back to `relate_opaques`).
+            (TyKind::Alias(_, aa @ crate::types::AliasTy { kind: crate::types::AliasTyKind::Opaque { def_id: ad }, .. }), TyKind::Alias(_, ba @ crate::types::AliasTy { kind: crate::types::AliasTyKind::Opaque { def_id: bd }, .. })) if ad == bd => {
+                let (aa, ba) = (aa.clone(), ba.clone());
+                self.relate_alias_args(aa, ba).or_else(|_| {
+                    let tc = &mut *self.type_checker;
+                    tc.infcx.relate_opaque(&mut tc.constraints, a, self.ambient_variance, b, self.locations, self.category)
+                })
             }
             (TyKind::Alias(_, crate::types::AliasTy { kind: crate::types::AliasTyKind::Opaque { .. }, .. }), _) | (_, TyKind::Alias(_, crate::types::AliasTy { kind: crate::types::AliasTyKind::Opaque { .. }, .. })) => {
                 let tc = &mut *self.type_checker;
@@ -308,6 +317,16 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
         }
     }
 
+    /// The arguments of two aliases of one definition, invariantly.
+    fn relate_alias_args(&mut self, aa: crate::types::AliasTy, ba: crate::types::AliasTy) -> Result<(), NoSolution> {
+        let tys = &self.tcx().tys;
+        let (ats, ars, bts, brs) = (aa.args, aa.regions, ba.args, ba.regions);
+        if tys.list(ats).len() != tys.list(bts).len() || tys.region_args(ars).len() != tys.region_args(brs).len() { return Err(NoSolution); }
+        for (&a, &b) in tys.list(ats).iter().zip(tys.list(bts)) { self.relate_with_variance(V::Inv, a, b)?; }
+        for (&a, &b) in tys.region_args(ars).iter().zip(tys.region_args(brs).iter()) { self.relate_regions_with_variance(V::Inv, a, b); }
+        Ok(())
+    }
+
     fn structurally_relate_tys(&mut self, a: TyId, b: TyId) -> Result<(), NoSolution> {
         let tcx = self.tcx();
         let tys = &tcx.tys;
@@ -365,13 +384,7 @@ impl<'r, 'a> NllTypeRelating<'r, 'a> {
             }
             // Rigid projections (normalization already failed to make progress).
             (TyKind::Const(a), TyKind::Const(b)) => self.consts(a, b),
-            (TyKind::Alias(ar, aa), TyKind::Alias(br, ba)) if ar == br && aa.kind == ba.kind => {
-                let (ats, ars, bts, brs) = (aa.args, aa.regions, ba.args, ba.regions);
-                if tys.list(ats).len() != tys.list(bts).len() || tys.region_args(ars).len() != tys.region_args(brs).len() { return Err(NoSolution); }
-                for (&a, &b) in tys.list(ats).iter().zip(tys.list(bts)) { self.relate_with_variance(V::Inv, a, b)?; }
-                for (&a, &b) in tys.region_args(ars).iter().zip(tys.region_args(brs).iter()) { self.relate_regions_with_variance(V::Inv, a, b); }
-                Ok(())
-            }
+            (TyKind::Alias(ar, aa), TyKind::Alias(br, ba)) if ar == br && aa.kind == ba.kind => self.relate_alias_args(aa, ba),
             _ => Err(NoSolution),
         }
     }

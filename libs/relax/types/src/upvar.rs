@@ -2,7 +2,10 @@
 //! rustc_hir_typeck/src/upvar.rs:629 (processing), :775 (minimum captures),
 //! :1998 (packed), :2176 (raw pointers), :2194 (Drop), :2546 (truncation).
 use crate::ast::{BlockId, ExprId, ExprKind};
-use crate::borrowck::tyx::Tx;
+use crate::tcx::EvalCx;
+
+/// The type queries capture analysis asks: the tables and the body's evaluation context.
+type TyQ<'a, 'b> = (&'a Tcx, &'a EvalCx<'b>);
 use crate::expr_use::{BorrowKind, ConsumeMode, Delegate, ExprUseVisitor, FakeReadCause, Place, Projection, Span};
 use crate::program::Program;
 use crate::tcx::Tcx;
@@ -39,7 +42,8 @@ pub struct Capture { pub place: Place, pub info: CaptureInfo }
 #[derive(Clone, Debug)]
 pub struct ClosureCaptures {
     pub captures: Vec<Capture>,
-    pub fake_reads: Vec<(Place, FakeReadCause)>,
+    /// rustc `closure_fake_reads`: (place, cause, the scrutinee / initializer expression)
+    pub fake_reads: Vec<(Place, FakeReadCause, u32)>,
     pub kind: ClosureKind,
     pub is_copy: bool,
     pub kind_origin: Option<Span>,
@@ -82,10 +86,10 @@ pub struct CoroutineCapture {
 }
 
 struct InferBorrowKind<'a, 'tx> {
-    tx: &'a Tx<'tx>,
+    tx: &'a TyQ<'a, 'tx>,
     roots: &'a [u32],
     uses: Vec<Capture>,
-    fake_reads: Vec<(Place, FakeReadCause)>,
+    fake_reads: Vec<(Place, FakeReadCause, u32)>,
 }
 impl InferBorrowKind<'_, '_> {
     fn record(&mut self, place: Place, kind: CaptureKind) {
@@ -102,41 +106,41 @@ impl Delegate for InferBorrowKind<'_, '_> {
         let span = place.span;
         let mut c = Capture { place, info: CaptureInfo { kind: CaptureKind::ByRef(kind), path_span: span, kind_span: span } };
         restrict_packed(self.tx, &mut c);
-        if (0..c.place.projections.len()).any(|i| c.place.projections[i].0 == Projection::Deref && matches!(self.tx.kind(c.place.before(i)), TyKind::Ptr(..))) {
+        if (0..c.place.projections.len()).any(|i| c.place.projections[i].0 == Projection::Deref && matches!(self.tx.0.resolved_kind(self.tx.1, c.place.before(i)), TyKind::Ptr(..))) {
             c.info.kind = CaptureKind::ByRef(BorrowKind::Imm);
         }
         self.record(c.place, c.info.kind);
     }
     fn mutate(&mut self, place: Place) { self.borrow(place, BorrowKind::Mut); }
-    fn fake_read(&mut self, place: Place, cause: FakeReadCause) {
+    fn fake_read(&mut self, place: Place, cause: FakeReadCause, node: u32) {
         if !self.roots.contains(&place.root) { return; }
         let span = place.span;
         let mut c = Capture { place, info: CaptureInfo { kind: CaptureKind::ByRef(BorrowKind::Imm), path_span: span, kind_span: span } };
         restrict_precision(self.tx, &mut c);
         restrict_packed(self.tx, &mut c);
-        self.fake_reads.push((c.place, cause));
+        self.fake_reads.push((c.place, cause, node));
     }
 }
 
 /// Cutting through &mut changes a mutable borrow into a unique immutable
 /// borrow of the reference; it does not require a mutable reference binding.
-fn truncate(tx: &Tx, c: &mut Capture, len: usize) {
-    if c.info.kind == CaptureKind::ByRef(BorrowKind::Mut) && (len..c.place.projections.len()).any(|i| c.place.projections[i].0 == Projection::Deref && matches!(tx.kind(c.place.before(i)), TyKind::Ref(true, _, _))) {
+fn truncate(tx: &TyQ, c: &mut Capture, len: usize) {
+    if c.info.kind == CaptureKind::ByRef(BorrowKind::Mut) && (len..c.place.projections.len()).any(|i| c.place.projections[i].0 == Projection::Deref && matches!(tx.0.resolved_kind(tx.1, c.place.before(i)), TyKind::Ref(true, _, _))) {
         c.info.kind = CaptureKind::ByRef(BorrowKind::UniqueImm);
     }
     c.place.projections.truncate(len);
 }
-fn restrict_packed(tx: &Tx, c: &mut Capture) {
-    if let Some(i) = (0..c.place.projections.len()).find(|&i| matches!(c.place.projections[i].0, Projection::Field(..)) && tx.is_packed(c.place.before(i))) { truncate(tx, c, i); }
+fn restrict_packed(tx: &TyQ, c: &mut Capture) {
+    if let Some(i) = (0..c.place.projections.len()).find(|&i| matches!(c.place.projections[i].0, Projection::Field(..)) && tx.0.is_packed_ty(c.place.before(i))) { truncate(tx, c, i); }
 }
-fn restrict_precision(tx: &Tx, c: &mut Capture) {
-    if let Some(i) = (0..=c.place.projections.len()).find(|&i| matches!(tx.kind(c.place.before(i)), TyKind::Ptr(..)) || tx.is_union(c.place.before(i))) { truncate(tx, c, i); }
+fn restrict_precision(tx: &TyQ, c: &mut Capture) {
+    if let Some(i) = (0..=c.place.projections.len()).find(|&i| matches!(tx.0.resolved_kind(tx.1, c.place.before(i)), TyKind::Ptr(..)) || tx.0.is_union_ty(c.place.before(i))) { truncate(tx, c, i); }
     if let Some(i) = c.place.projections.iter().position(|p| matches!(p.0, Projection::Index | Projection::Subslice)) { truncate(tx, c, i); }
 }
-fn optimize(tx: &Tx, c: &mut Capture) {
+fn optimize(tx: &TyQ, c: &mut Capture) {
     // rustc :2643: truncate only if the rightmost dereference is shared.
     if let Some(i) = c.place.projections.iter().rposition(|p| p.0 == Projection::Deref) {
-        if matches!(tx.kind(c.place.before(i)), TyKind::Ref(false, _, _)) { truncate(tx, c, i + 1); }
+        if matches!(tx.0.resolved_kind(tx.1, c.place.before(i)), TyKind::Ref(false, _, _)) { truncate(tx, c, i + 1); }
     }
 }
 fn join_info(dst: &mut CaptureInfo, src: &CaptureInfo, preserve_path: bool) {
@@ -146,7 +150,7 @@ fn join_info(dst: &mut CaptureInfo, src: &CaptureInfo, preserve_path: bool) {
         if preserve_path { dst.path_span = path; }
     }
 }
-fn compute_min_captures(tx: &Tx, captures: Vec<Capture>) -> Vec<Capture> {
+fn compute_min_captures(tx: &TyQ, captures: Vec<Capture>) -> Vec<Capture> {
     let mut min: Vec<Capture> = Vec::new();
     for mut c in captures {
         min.retain(|m| {
@@ -171,9 +175,7 @@ fn compute_min_captures(tx: &Tx, captures: Vec<Capture>) -> Vec<Capture> {
 pub(crate) fn analyze(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, body: &mut Body, pending: &PendingCapture) {
     // rustc_hir_typeck/src/expr_use_visitor.rs:210: capture queries use the
     // body's inference context; its unresolved types belong to that table.
-    let mut tx = Tx::new(prog, tcx, cx.typing_env, cx.state);
-    tx.cx.infcx = cx.infcx;
-    tx.obligation_owner.set(body.def);
+    let tx: TyQ = (tcx, cx);
     let pf = &prog.files[body.file as usize];
     let ce = pending.closure;
     let is_move = pending.is_move;
@@ -185,7 +187,8 @@ pub(crate) fn analyze(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, bo
         fake_reads: Vec::new(),
     };
     let mut visitor = ExprUseVisitor {
-        tx: &tx,
+        tcx,
+        cx,
         body,
         delegate,
         errors: Vec::new(),
@@ -256,7 +259,7 @@ pub(crate) fn analyze(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, bo
             match visitor.copy_type(c.place.ty()) {
                 Some(false) => {
                     if let Some(i) = (0..c.place.projections.len())
-                        .find(|&i| tx.has_drop_impl(c.place.before(i)))
+                        .find(|&i| tx.0.has_drop_impl(c.place.before(i)))
                     {
                         truncate(&tx, &mut c, i);
                     }
@@ -521,7 +524,7 @@ mod tests {
     }
     #[test]
     fn minimum_capture_truncates_in_both_encounter_orders() {
-        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state); let tx: TyQ = (&tcx, &cx);
         let t = tcx.tys.bool_; let r = tcx.tys.intern(TyKind::Ref(true, t, crate::types::RegionId::ERASED));
         let ancestor = capture(r, vec![], CaptureKind::ByRef(BorrowKind::Imm), 1);
         let child = capture(r, vec![(Projection::Deref, t)], CaptureKind::ByRef(BorrowKind::Mut), 2);
@@ -535,7 +538,7 @@ mod tests {
     }
     #[test]
     fn disjoint_fields_and_same_place_kind_origin() {
-        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state); let tx: TyQ = (&tcx, &cx);
         let t = tcx.tys.bool_; let tuple = tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[t, t])));
         let a = capture(tuple, vec![(Projection::Field(0, 0), t)], CaptureKind::ByRef(BorrowKind::Imm), 1);
         let b = capture(tuple, vec![(Projection::Field(0, 1), t)], CaptureKind::ByValue, 2);
@@ -548,7 +551,7 @@ mod tests {
     }
     #[test]
     fn optimization_only_truncates_after_last_deref_when_shared() {
-        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state); let tx: TyQ = (&tcx, &cx);
         let t = tcx.tys.bool_; let tuple = tcx.tys.intern(TyKind::Tuple(tcx.tys.mk_list(&[t])));
         let m = tcx.tys.intern(TyKind::Ref(true, tuple, crate::types::RegionId::ERASED)); let r = tcx.tys.intern(TyKind::Ref(false, m, crate::types::RegionId::ERASED));
         let mut c = capture(r, vec![(Projection::Deref, m), (Projection::Deref, tuple), (Projection::Field(0, 0), t)], CaptureKind::ByRef(BorrowKind::Imm), 1);
@@ -561,7 +564,7 @@ mod tests {
     }
     #[test]
     fn opaque_index_restricts_to_array() {
-        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state); let tx: TyQ = (&tcx, &cx);
         let t = tcx.tys.bool_; let array = tcx.tys.intern(TyKind::Array(t, tcx.tys.const_usize(3)));
         let mut c = capture(array, vec![(Projection::Index, t)], CaptureKind::ByValue, 1);
         restrict_precision(&tx, &mut c);

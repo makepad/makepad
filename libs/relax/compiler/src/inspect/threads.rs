@@ -73,7 +73,36 @@ impl Raw {
     }
 }
 
-pub use imp::{capture, list, self_os_id, tid_of_handle};
+pub use imp::{list, tid_of_handle};
+
+thread_local! {
+    static SELF_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The calling thread's OS id (cached per thread: no system call after the first).
+pub fn self_os_id() -> u64 {
+    SELF_ID
+        .try_with(|c| {
+            if c.get() == 0 {
+                c.set(imp::self_os_id());
+            }
+            c.get()
+        })
+        .unwrap_or_else(|_| imp::self_os_id())
+}
+
+/// Captures thread `t`'s stack (see the module comment). Never the calling thread: a thread that
+/// suspends itself (macOS) never runs again, one that signals itself (Linux) waits for itself.
+pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
+    raw.n = 0;
+    if t.os_id == self_os_id() {
+        return Err("the calling thread (not captured)");
+    }
+    crate::inspect::activity::phase("capturing a stack of", t.os_id);
+    let r = imp::capture(t, raw);
+    crate::inspect::activity::phase("running", 0);
+    r
+}
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use imp::{stack_hi_of_self, walk_regs_with, Slot as HoldSlot};
 
@@ -263,7 +292,7 @@ mod imp {
     }
 
     pub fn suspend(t: &Thread) -> bool {
-        t.port != 0 && unsafe { thread_suspend(t.port) } == 0
+        t.port != 0 && t.os_id != super::self_os_id() && unsafe { thread_suspend(t.port) } == 0
     }
 
     pub fn resume(t: &Thread) {
@@ -513,6 +542,9 @@ mod imp {
     /// Asks thread `tid` to stand still in its handler; Some(slot) once its registers are in,
     /// None when it did not answer in time (signals blocked, uninterruptible, ended).
     pub fn hold(tid: u64, paused: bool) -> Result<&'static Slot, &'static str> {
+        if tid == super::self_os_id() {
+            return Err("the calling thread (not held)");
+        }
         let sig = install();
         if sig == 0 {
             return Err("no free real-time signal for stack capture");

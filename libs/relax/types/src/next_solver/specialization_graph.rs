@@ -75,7 +75,16 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
         let tr=tcx.impl_trait_ref(prog,im.def,&tcx.generic_indices_of(prog,im.def).identity_args(&tcx.tys));
         let erroneous=tr.args.iter().any(|a| match a {
             crate::consts::GenericArg::Type(t)=>tcx.tys.has_error(*t),
-            crate::consts::GenericArg::Const(c)=>matches!(tcx.tys.const_kind(*c),crate::consts::ConstKind::Error),
+            crate::consts::GenericArg::Const(c)=>match tcx.tys.const_kind(*c) {
+                crate::consts::ConstKind::Error=>true,
+                // an unevaluated constant of the header that fails to evaluate is a const error as well
+                // (rustc normalizes the header: coherence does not report conflicts over [const error])
+                crate::consts::ConstKind::Alias(_,alias) if alias.args.is_empty() => {
+                    let env=crate::tcx::TypingEnv::fully_monomorphized(prog);
+                    tcx.const_eval_resolve(prog,env,alias.kind.def_id(),&[]).is_err()
+                }
+                _=>false,
+            },
             _=>false,
         });
         let mut failed=false;
@@ -85,6 +94,13 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
                 if let Some(overlap)=overlapping_impls(tcx,prog,sibling,im.def,krate,false,true) {
                     let def=prog.def(im.def);
                     let span=prog.files[def.file as usize].ast.item(def.item).lo;
+                    // rustc coherence: impls of different polarity that overlap are E0751, not E0119
+                    let negative=|d:DefId| { let dd=prog.def(d); let ast=&prog.files[dd.file as usize].ast; ast.as_impl(&ast.item(dd.item).kind).is_some_and(|i| i.negative) };
+                    if negative(sibling)!=negative(im.def) {
+                        let ty=crate::typeck::ty_to_string(false,prog,tcx,tcx.impl_self[&im.def]);
+                        tcx.dcx.report(super::fulfill::ObligationCause { body_id:im.def,span },format!("E0751: found both positive and negative implementation of trait `{}` for type `{}`:",prog.def_path(trait_def),ty));
+                        ok=false; failed=true; break;
+                    }
                     let mut message=format!("E0119: conflicting implementations of trait `{}`",prog.def_path(trait_def));
                     if !overlap.overflowing_predicates.is_empty() { message.push_str(" (overflow evaluating impl requirements)"); }
                     tcx.dcx.report(super::fulfill::ObligationCause { body_id:im.def,span },message);
@@ -93,8 +109,8 @@ pub fn specialization_graph_of(tcx: &Tcx, prog: &Program, krate: u32, trait_def:
                 // specialization_graph.rs:130-152: leak-check-only overlap is a
                 // future-compat lint, not a rejection.
                 let def=prog.def(im.def);
-                tcx.dcx.warn(super::fulfill::ObligationCause { body_id:im.def,span:prog.files[def.file as usize].ast.item(def.item).lo },
-                    "conflicting implementations of trait (coherence_leak_check, future incompatible)".into());
+                crate::lint::emit(prog, im.def, &crate::lint::COHERENCE_LEAK_CHECK, def.file, prog.files[def.file as usize].ast.item(def.item).lo,
+                    &format!("conflicting implementations of trait `{}`", prog.def_path(trait_def)));
             }
         }
         if !failed { children.insert_blindly(key,im.def); }

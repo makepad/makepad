@@ -8,3 +8,7 @@
   MIT or Apache-2.0, The Rust Project Developers.
 - `core/str/` split/pattern state machines and slicing panic messages follow Rust core,
   MIT or Apache-2.0, The Rust Project Developers.
+- `core/core_simd/` is portable-simd's core_simd (https://github.com/rust-lang/portable-simd, as vendored in
+  rustc 1.97's library/portable-simd), and `std/std_float.rs` its std_float, pulled into core/std as rustc's
+  library does; adapted for Relax (no f16 vectors, `simd_swizzle!` as macro_rules, per-lane transcendental
+  functions). MIT or Apache-2.0, The Rust Project Developers.

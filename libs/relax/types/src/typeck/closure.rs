@@ -176,6 +176,12 @@ impl Fcx<'_> {
         let ret = match ret { Some(t) => self.lower_ty(t), None => self.fresh(0) };
         self.env.regions = outer;
         let sig = self.tcx.tys.intern(TyKind::FnPtr(self.tcx.tys.mk_list(&ps), ret, FnHeader::RUST, bound));
+        // rustc_hir_typeck/src/closure.rs:944: retain the supplied signature before it is
+        // normalized and before the expected signature constrains it.
+        if self.keep_user_types {
+            let canonical = crate::next_solver::canonical::user_type::canonicalize_user_signature(&self.infcx, sig);
+            self.b.user_provided_sigs.insert(e.0, std::sync::Arc::new(canonical));
+        }
         self.normalize_signature(sig)
     }
 
@@ -189,7 +195,12 @@ impl Fcx<'_> {
             TyKind::Dyn(principal, ..) => {
                 // closure.rs:305-316: only projection bounds supply the signature;
                 // the principal itself, not its supertraits, supplies the kind.
+                // (rustc lowers the projections the supertraits fix, `trait Foo: Fn(Bar)`'s
+                // `Output = ()`, into the object type itself: dyn_trait.rs:225-285)
                 let mut clauses = self.tcx.object_predicates(self.prog, expected);
+                if let Some(principal) = clauses.first().cloned() {
+                    clauses.extend(self.tcx.supertraits(self.prog, principal));
+                }
                 clauses.retain(|p| matches!(p.kind, PredicateKind::Clause(ClauseKind::Projection(_))));
                 let (sig, _) = self.deduce_closure_signature_from_predicates(expected, is_async, clauses);
                 let kind = match self.tcx.lang_items.by_def.get(&principal) {
@@ -222,33 +233,84 @@ impl Fcx<'_> {
         }
     }
 
-    /// fn_ctxt/inspect_obligations.rs:35-104 (predicate_has_self_ty,
-    /// type_matches_expected_vid with UseSubtyping::No): pending obligations
-    /// whose trait or trait-projection self type is unified with `vid`.
+    /// fn_ctxt/inspect_obligations.rs:76-100 (obligations_for_self_ty_next): the pending obligations
+    /// and the goals nested in them (a unique applicable candidate's, down to depth 5) whose self
+    /// type is the unresolved variable `vid`.
     fn obligations_for_self_ty(&mut self, vid: u32) -> Vec<Predicate> {
         let mut out = Vec::new();
         for obligation in self.fulfillment_cx.pending_obligations() {
-            let self_ty = match &obligation.goal.predicate.kind {
-                PredicateKind::Clause(ClauseKind::Trait(c)) => match c.trait_ref.args.first() { Some(crate::consts::GenericArg::Type(t)) => *t, _ => continue },
-                PredicateKind::Clause(ClauseKind::Projection(p)) => {
-                    let AliasTerm::Ty(alias) = p.projection_term else { continue };
-                    match self.tcx.tys.kind(alias) {
-                        TyKind::Alias(_, crate::types::AliasTy { kind: crate::types::AliasTyKind::Projection { .. }, args, .. }) => match self.tcx.tys.list(*args).first() { Some(t) => *t, None => continue },
-                        _ => continue,
-                    }
-                }
-                _ => continue,
-            };
-            let expected = self.tcx.tys.intern(TyKind::Infer(vid));
-            if !self.same_self_ty(self_ty, expected) { continue; }
-            let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(&self.infcx);
-            out.push(crate::next_solver::fold::fold_predicate(&self.tcx.tys, &obligation.goal.predicate, &mut resolver));
+            // a goal that mentions no variable of `vid`'s class cannot be stalled on it (nor can
+            // anything nested in it; skipping the proof-tree walk keeps this cheap)
+            if !self.predicate_mentions_var_class(&obligation.goal.predicate, vid) { continue; }
+            self.nested_obligations_for_self_ty(obligation.goal.clone(), 0, vid, &mut out);
         }
-        out
+        let flags = crate::types::TypeFlags::HAS_PLACEHOLDER.bits();
+        out.into_iter().filter_map(|p| {
+            let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(&self.infcx);
+            let p = crate::next_solver::fold::fold_predicate(&self.tcx.tys, &p, &mut resolver);
+            (p.flags(&self.tcx.tys) & flags == 0).then_some(p)
+        }).collect()
+    }
+
+    fn predicate_mentions_var_class(&self, predicate: &Predicate, vid: u32) -> bool {
+        let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(&self.infcx);
+        let p = crate::next_solver::fold::fold_predicate(&self.tcx.tys, predicate, &mut resolver);
+        if p.flags(&self.tcx.tys) & crate::types::TypeFlags::HAS_TY_INFER.bits() == 0 { return false; }
+        struct Finder<'a> { fcx: &'a Fcx<'a>, vid: u32, found: bool }
+        impl crate::types::fold::TypeFolder for Finder<'_> {
+            fn fold_ty(&mut self, tys: &crate::types::Types, t: TyId, depth: u32) -> TyId {
+                if self.found { return t; }
+                if let TyKind::Infer(v) = tys.kind(t) {
+                    let mut inner = self.fcx.infcx.inner.borrow_mut();
+                    let mut table = inner.type_variables();
+                    if table.root_var(*v) == table.root_var(self.vid) { self.found = true; }
+                    return t;
+                }
+                crate::types::fold::super_fold_ty(tys, t, self, depth)
+            }
+        }
+        let mut f = Finder { fcx: self, vid, found: false };
+        crate::next_solver::fold::fold_predicate(&self.tcx.tys, &p, &mut f);
+        f.found
+    }
+
+    /// inspect_obligations.rs:155-200 NestedObligationsForSelfTy::visit_goal.
+    fn nested_obligations_for_self_ty(&self, goal: Goal, depth: usize, vid: u32, out: &mut Vec<Predicate>) {
+        const MAX_DEPTH: usize = 5;
+        if depth >= MAX_DEPTH { return; }
+        let root = self.infcx.evaluate_root_goal_for_proof_tree(self.prog, goal);
+        let inspect = crate::next_solver::inspect::InspectGoal::new(&self.infcx, self.prog, root);
+        if inspect.result.is_ok_and(|c| c.is_yes()) { return; }
+        if self.predicate_has_self_ty(&inspect.goal.predicate, vid) { out.push(inspect.goal.predicate.clone()); }
+        // a unique way to prove the goal: look at what it needs (`impl<F: FnOnce(u32)> Trait<F> for ()`
+        // and `(): Trait<?0>` give the nested `?0: FnOnce(u32)`)
+        if let Some(candidate) = inspect.unique_applicable_candidate() {
+            for nested in candidate.instantiate_nested_goals() {
+                self.nested_obligations_for_self_ty(nested, depth + 1, vid, out);
+            }
+        }
+    }
+
+    /// inspect_obligations.rs:35-66 (predicate_has_self_ty, type_matches_expected_vid): a trait or
+    /// trait-projection predicate whose self type is unified with `vid`.
+    fn predicate_has_self_ty(&self, predicate: &Predicate, vid: u32) -> bool {
+        let self_ty = match &predicate.kind {
+            PredicateKind::Clause(ClauseKind::Trait(c)) => match c.trait_ref.args.first() { Some(crate::consts::GenericArg::Type(t)) => *t, _ => return false },
+            PredicateKind::Clause(ClauseKind::Projection(p)) => {
+                let AliasTerm::Ty(alias) = p.projection_term else { return false };
+                match self.tcx.tys.kind(alias) {
+                    TyKind::Alias(_, crate::types::AliasTy { kind: crate::types::AliasTyKind::Projection { .. }, args, .. }) => match self.tcx.tys.list(*args).first() { Some(t) => *t, None => return false },
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        };
+        let expected = self.tcx.tys.intern(TyKind::Infer(vid));
+        self.same_self_ty(self_ty, expected)
     }
 
     /// Equal types, or type variables with the same unification root.
-    fn same_self_ty(&mut self, a: TyId, b: TyId) -> bool {
+    fn same_self_ty(&self, a: TyId, b: TyId) -> bool {
         let (a, b) = (self.infcx.shallow_resolve(a), self.infcx.shallow_resolve(b));
         if a == b { return true; }
         match (self.tcx.tys.kind(a), self.tcx.tys.kind(b)) {
@@ -298,7 +360,14 @@ impl Fcx<'_> {
                                 let sig = self.normalize_signature(sig);
                                 let mut mentions = MentionsTy { expected_ty, found: false };
                                 crate::types::fold::TypeFolder::fold_ty(&mut mentions, &self.tcx.tys, sig, 0);
-                                if !mentions.found { expected_sig = Some(sig); }
+                                if !mentions.found {
+                                    expected_sig = Some(sig);
+                                    if let (Some(crate::lang_items::LangItem::AsyncFnOnceOutput), Term::Ty(inner_ret)) = (projection, p.term) {
+                                        // the coroutine's return type, bound under the same binder
+                                        let inner = self.tcx.tys.intern(TyKind::FnPtr(ps, inner_ret, FnHeader::RUST, bound_regions));
+                                        self.async_expected_inner = Some(self.normalize_signature(inner));
+                                    }
+                                }
                             }
                         }
                     }
@@ -332,6 +401,7 @@ impl Fcx<'_> {
 
     pub(super) fn closure_signatures(&mut self, e: ExprId, params: &[ClosureParam], ret: Option<crate::ast::TyId>, expected: Option<TyId>) -> ClosureSignatures {
         let is_async = matches!(self.ast().expr(e).kind, ExprKind::Closure(row) if self.ast().row(row).is_async);
+        self.async_expected_inner = None;
         let expected = expected.and_then(|t| {
             let (sig, kind) = self.deduce_closure_signature(t, is_async);
             // The same direct Fn-family bound supplies the signature and the
@@ -354,6 +424,20 @@ impl Fcx<'_> {
         let expected = self.tcx.tys.intern(TyKind::FnPtr(ps, r, FnHeader::RUST, n));
         let expected = self.anonymize_signature(expected);
         let mut sigs = self.closure_sigs(e, expected);
+        if let Some(inner) = self.async_expected_inner.take() {
+            // rustc coroutine-closure `return_ty`: the async body's return type is the
+            // deduced `AsyncFnOnce::Output`, with the closure's own late-bound regions.
+            let inner = self.anonymize_signature(inner);
+            let (TyKind::FnPtr(_, _, _, n_inner), TyKind::FnPtr(_, _, _, n)) = (self.tcx.tys.kind(inner).clone(), self.tcx.tys.kind(expected).clone()) else { unreachable!() };
+            if n_inner == n {
+                let scope = RegionScope::Closure { owner: self.b.def, expr: e.0 };
+                let regions: Vec<_> = (0..n).map(|v| self.tcx.tys.intern_region(RegionKind::ReLateParam(scope, LateParamKind::Anon(v)))).collect();
+                let TyKind::FnPtr(ps, ret, _, _) = self.tcx.tys.kind(inner).clone() else { unreachable!() };
+                let (_, ret) = self.instantiate_signature_parts(self.tcx.tys.list(ps), ret, &regions);
+                let ret = self.normalize_signature(ret);
+                self.async_body_expected.insert(e.0, ret);
+            }
+        }
         let TyKind::FnPtr(_, _, _, n) = self.tcx.tys.kind(supplied) else { unreachable!() };
         let vars: Vec<_> = (0..*n).map(|_| self.fresh_region()).collect();
         let instantiated = self.instantiate_signature(supplied, &vars);
@@ -373,6 +457,24 @@ impl Fcx<'_> {
         }
     }
 
+    /// The signature of an async closure whose body return type came from the deduced
+    /// `AsyncFnOnce::Output`: its coroutine mentions the closure's late regions, which
+    /// are the bound signature's own binder (rustc coroutine-closure signature).
+    pub(super) fn async_closure_bound_signature(&mut self, e: ExprId) -> TyId {
+        let sig = self.b.closure_sigs[&e.0].bound;
+        if !self.async_body_expected.contains_key(&e.0) { return sig; }
+        let scope = RegionScope::Closure { owner: self.b.def, expr: e.0 };
+        let TyKind::FnPtr(ps, ret, c, n) = self.tcx.tys.kind(sig).clone() else { return sig; };
+        let ret = self.infcx.shallow_resolve(ret);
+        let ret = self.tcx.tys.map_regions(ret, &|r, depth| match self.tcx.tys.region_kind(r) {
+            RegionKind::ReLateParam(s, LateParamKind::Anon(v)) if s == scope => self.tcx.tys.intern_region(RegionKind::ReBound(depth, BoundVar(v))),
+            _ => r,
+        }, 0);
+        let bound = self.tcx.tys.intern(TyKind::FnPtr(ps, ret, c, n));
+        self.b.closure_sigs.get_mut(&e.0).unwrap().bound = bound;
+        bound
+    }
+
     pub(super) fn finish_closure_signatures(&mut self) {
         for (e, mut sig) in std::mem::take(&mut self.b.closure_sigs) {
             sig.bound = self.normalize_signature(sig.bound);
@@ -381,7 +483,7 @@ impl Fcx<'_> {
             // the body's result type. Its free regions must remain inferred in
             // the parent, not become the closure's input-only late parameters.
             // A declared/expected bound output is still ReBound in `bound`.
-            if sig.annotation_eq.is_none() {
+            if sig.annotation_eq.is_none() && !self.async_body_expected.contains_key(&e) {
                 let scope = RegionScope::Closure { owner:self.b.def, expr:e };
                 let replacements = std::cell::RefCell::new(HashMap::default());
                 if let TyKind::FnPtr(_,ret,_,_) = self.tcx.tys.kind(sig.bound) {

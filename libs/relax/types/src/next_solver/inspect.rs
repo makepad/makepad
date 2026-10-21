@@ -221,6 +221,8 @@ impl<'a, 'tcx> InspectGoal<'a, 'tcx> {
     }
 }
 impl InspectCandidate<'_, '_> {
+    /// A failed candidate's proof tree is pruned to its leaf: nothing to instantiate.
+    pub fn has_final_state(&self) -> bool { self.final_state.is_some() }
     pub fn instantiate_nested_goals(&self) -> Vec<Goal> {
         let mut values = self.goal.orig_values.clone(); let mut goals = Vec::new();
         for step in &self.steps {

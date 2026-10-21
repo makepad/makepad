@@ -12,6 +12,25 @@ pub use core::panic::{AssertUnwindSafe, Location, RefUnwindSafe, UnwindSafe};
 use crate::sync::RwLock;
 use crate::sys;
 
+// library/std/src/panic.rs:263-285 and the per-type impls of std/src/sync, io/stdio.rs: types with
+// interior mutability that poison or lock are unwind safe.
+impl<T: ?Sized> UnwindSafe for crate::sync::Mutex<T> {}
+impl<T: ?Sized> UnwindSafe for RwLock<T> {}
+impl UnwindSafe for crate::sync::Condvar {}
+impl<T: ?Sized> RefUnwindSafe for crate::sync::Mutex<T> {}
+impl<T: ?Sized> RefUnwindSafe for RwLock<T> {}
+impl RefUnwindSafe for crate::sync::Condvar {}
+impl UnwindSafe for crate::sync::Once {}
+impl RefUnwindSafe for crate::sync::Once {}
+impl RefUnwindSafe for crate::sync::Barrier {}
+impl<T: RefUnwindSafe + UnwindSafe> RefUnwindSafe for crate::sync::OnceLock<T> {}
+impl<T: UnwindSafe> UnwindSafe for crate::sync::OnceLock<T> {}
+impl<T: RefUnwindSafe + UnwindSafe, F: UnwindSafe> RefUnwindSafe for crate::sync::LazyLock<T, F> {}
+impl<T: UnwindSafe, F: UnwindSafe> UnwindSafe for crate::sync::LazyLock<T, F> {}
+impl<T: UnwindSafe + ?Sized> UnwindSafe for crate::sync::ReentrantLock<T> {}
+impl<T: RefUnwindSafe + ?Sized> RefUnwindSafe for crate::sync::ReentrantLock<T> {}
+impl<K, V, S> UnwindSafe for crate::collections::HashMap<K, V, S> where K: UnwindSafe, V: UnwindSafe, S: UnwindSafe {}
+
 pub type PanicInfo<'a> = PanicHookInfo<'a>;
 
 pub struct PanicHookInfo<'a> {
@@ -112,8 +131,10 @@ pub fn take_hook() -> Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static> {
 
 thread_local! {
     /// The payload of this thread's last panic, until catch_unwind / the thread's join packet
-    /// takes it. `Some` before core_hook runs means panic_any / resume_unwind set it.
-    static PAYLOAD: core::cell::Cell<Option<Box<dyn Any + Send>>> = const { core::cell::Cell::new(None) };
+    /// takes it. `Some` before core_hook runs means panic_any / resume_unwind set it. A raw box
+    /// (no drop glue): like rustc's payload, which travels in the unwind, it stays usable in the
+    /// thread's TLS destructors (a key without drop glue is never destroyed).
+    static PAYLOAD: core::cell::Cell<Option<core::ptr::NonNull<dyn Any + Send>>> = const { core::cell::Cell::new(None) };
 }
 
 thread_local! {
@@ -138,26 +159,28 @@ pub(crate) fn panic_depth_step(delta: i32) -> u32 {
 /// resume_unwind for this panic is kept.
 pub(crate) fn record_payload(message: fmt::Arguments<'_>) {
     let _ = PAYLOAD.try_with(|c| {
-        let old = c.take();
-        let p: Box<dyn Any + Send> = match old {
-            Some(p) => p,
-            None => match message.as_str() {
+        if c.get().is_none() {
+            let p: Box<dyn Any + Send> = match message.as_str() {
                 Some(s) => Box::new(s),
                 None => Box::new(alloc::fmt::format(message)),
-            },
-        };
-        c.set(Some(p));
+            };
+            c.set(Some(unsafe { core::ptr::NonNull::new_unchecked(Box::into_raw(p)) }));
+        }
     });
 }
 
 fn clear_payload() {
-    let _ = PAYLOAD.try_with(|c| drop(c.take()));
+    let _ = PAYLOAD.try_with(|c| {
+        if let Some(p) = c.take() {
+            drop(unsafe { Box::from_raw(p.as_ptr()) });
+        }
+    });
 }
 
 /// The payload of the panic that just ended this thread's catch point (taken).
 pub(crate) fn take_payload() -> Box<dyn Any + Send> {
     match PAYLOAD.try_with(|c| c.take()) {
-        Ok(Some(p)) => p,
+        Ok(Some(p)) => unsafe { Box::from_raw(p.as_ptr()) },
         _ => Box::new("explicit panic"),
     }
 }
@@ -217,7 +240,11 @@ fn unwind_with(payload: Box<dyn Any + Send>) -> ! {
         String::from("Box<dyn Any>")
     };
     sys::rt::install_core_hook();
-    let _ = PAYLOAD.try_with(|c| c.set(Some(payload)));
+    let _ = PAYLOAD.try_with(|c| {
+        if let Some(old) = c.replace(Some(unsafe { core::ptr::NonNull::new_unchecked(Box::into_raw(payload)) })) {
+            drop(unsafe { Box::from_raw(old.as_ptr()) });
+        }
+    });
     panic!("{}", msg)
 }
 

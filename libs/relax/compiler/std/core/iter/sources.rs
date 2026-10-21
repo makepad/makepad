@@ -5,7 +5,7 @@ use crate::fmt;
 use crate::marker::PhantomData;
 
 pub struct Empty<T> {
-    _m: PhantomData<T>,
+    _m: PhantomData<fn() -> T>,
 }
 
 pub const fn empty<T>() -> Empty<T> {

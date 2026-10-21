@@ -15,10 +15,8 @@ use super::{PErr, PResult, Parser};
 use crate::ast::*;
 use crate::lexer::{Tok, T};
 
-/// Paths in generated code: crates by identity (resolve from any crate, including core itself).
-const CORE: &str = "::__relax_crate_core";
-const STD: &str = "::__relax_crate_std";
-const SPLICE: &str = "__relax_splice_";
+use crate::tg;
+use crate::tokbuf::TokBuf;
 
 pub(super) fn is_builtin(name: &[u8]) -> bool {
     matches!(
@@ -44,16 +42,37 @@ pub(super) fn is_builtin(name: &[u8]) -> bool {
 }
 
 /// A value an argument slot formats: a parsed expression (borrowed with `&`), or generated
-/// text that already is a reference.
-#[derive(Clone)]
+/// tokens that already are a reference.
 enum Src {
     Expr(ExprId),
-    Ref(String),
+    /// the local `name`, borrowed
+    Local(&'static str),
+    /// the call `name!()`, borrowed
+    Call0(&'static str),
+    /// `&&__relax_tmp`: already a reference
+    RefTmp,
     /// an implicit capture `{name}`: `&name`, the name with the format string's position
     /// (hygiene: rustc resolves it in the format string's context)
     Capture(String, u32),
-    /// generated text of a value (borrowed with `&`), e.g. nested `Arguments`
-    Val(String),
+    /// generated tokens of a value (borrowed with `&`), e.g. nested `Arguments`
+    Nested(TokBuf),
+}
+
+/// A width / precision of a placeholder.
+enum Count {
+    Implied,
+    Is(usize),
+    Param(usize),
+}
+
+impl Count {
+    fn emit(&self, g: &mut Gen) {
+        match self {
+            Count::Implied => tg!(g; #core() :: fmt :: rt :: Count :: Implied),
+            Count::Is(n) => tg!(g; #core() :: fmt :: rt :: Count :: Is (#int(*n))),
+            Count::Param(k) => tg!(g; #core() :: fmt :: rt :: Count :: Param (#int(*k))),
+        }
+    }
 }
 
 enum ArgRef {
@@ -93,61 +112,22 @@ struct FmtCall {
     first: Option<ExprId>,
     pos: Vec<ExprId>,
     named: Vec<(String, ExprId)>,
+    named_pos: Vec<u32>,
 }
 
-/// Generated Rust text plus the expressions spliced into it.
-pub(super) struct Gen {
-    s: String,
-    splices: Vec<ExprId>,
-    /// generated text standing for source tokens: (offset, origin position, length)
-    origins: Vec<(u32, u32, u32)>,
-}
+/// Generated tokens plus the expressions spliced into them.
+pub(super) type Gen = TokBuf;
 
-impl Gen {
-    fn new() -> Gen {
-        Gen { s: String::new(), splices: Vec::new(), origins: Vec::new() }
+/// `&value` / the reference itself
+fn borrow(g: &mut Gen, s: &Src) {
+    match s {
+        Src::Expr(e) => tg!(g; & #expr(*e)),
+        Src::RefTmp => tg!(g; && __relax_tmp),
+        Src::Capture(n, at) => tg!(g; & #word_at(n, *at)),
+        Src::Local(t) => tg!(g; & (#word(t))),
+        Src::Call0(t) => tg!(g; & (#word(t) ! ())),
+        Src::Nested(b) => tg!(g; & (#append(b))),
     }
-    pub(super) fn from_text(s: String) -> Gen {
-        Gen { s, splices: Vec::new(), origins: Vec::new() }
-    }
-    fn p(&mut self, x: &str) {
-        self.s.push_str(x);
-    }
-    fn expr(&mut self, e: ExprId) {
-        self.s.push_str(&format!(" {}{} ", SPLICE, self.splices.len()));
-        self.splices.push(e);
-    }
-    /// `&value` / the reference itself
-    fn borrow(&mut self, s: &Src) {
-        match s {
-            Src::Expr(e) => {
-                self.p("&");
-                self.expr(*e);
-            }
-            Src::Ref(t) => self.p(t),
-            Src::Capture(n, at) => {
-                self.p("& ");
-                self.origins.push((self.s.len() as u32, *at, n.len() as u32));
-                self.p(n);
-                self.p(" ");
-            }
-            Src::Val(t) => {
-                self.p("&(");
-                self.p(t);
-                self.p(")");
-            }
-        }
-    }
-}
-
-fn str_lit(s: &str) -> String {
-    format!("{:?}", s)
-}
-
-fn location() -> String {
-    // the caller's location inside a #[track_caller] fn, else this site (rustc panic! uses
-    // Location::caller())
-    format!("{}::panic::Location::caller()", CORE)
 }
 
 impl<'a> Parser<'a> {
@@ -170,12 +150,16 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let name = String::from_utf8_lossy(&name).into_owned();
+        // rustc_resolve: `#[no_implicit_prelude]` (edition 2018 and later) takes the std prelude's macros away
+        if self.no_prelude_hides(path, &name) {
+            return Err(PErr { pos: nlo, msg: format!("cannot find macro `{name}` in this scope") });
+        }
         let save = self.pos;
         self.pos = toks.lo as usize;
         let r = self.builtin_gen(&name, toks.hi as usize, lo);
         self.pos = save;
         let g = r?;
-        let start = self.splice_expansion(&name, &g, lo)?;
+        let start = self.splice_buf(&name, &g, lo)?;
         Ok(Some(self.in_expansion(start, |p| p.expr())?))
     }
 
@@ -184,7 +168,7 @@ impl<'a> Parser<'a> {
     }
 
     fn builtin_gen_inner(&mut self, name: &str, hi: usize, lo: u32) -> PResult<Gen> {
-        let mut g = Gen::new();
+        let mut g = Gen::new(self.edition);
         match name {
             "format_args" => {
                 let c = self.fmt_call(hi, false)?;
@@ -192,16 +176,16 @@ impl<'a> Parser<'a> {
             }
             "format" => {
                 let c = self.fmt_call(hi, false)?;
-                g.p(&format!("{}::fmt::format(", CORE));
+                tg!(&mut g; #core() :: fmt :: format #open());
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), "")?;
-                g.p(")");
+                tg!(&mut g; #close());
             }
             "print" | "println" | "eprint" | "eprintln" => {
                 let c = self.fmt_call(hi, false)?;
                 let f = if name.starts_with('e') { "_eprint" } else { "_print" };
-                g.p(&format!("{}::io::{}(", STD, f));
+                tg!(&mut g; #std() :: io :: #word(f) #open());
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), if name.ends_with("ln") { "\n" } else { "" })?;
-                g.p(")");
+                tg!(&mut g; #close());
             }
             "write" | "writeln" => {
                 if self.pos >= hi {
@@ -212,10 +196,9 @@ impl<'a> Parser<'a> {
                     self.expect(T::Comma)?;
                 }
                 let c = self.fmt_call(hi, false)?;
-                g.expr(dst);
-                g.p(".write_fmt(");
+                tg!(&mut g; #expr(dst) . write_fmt #open());
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), if name == "writeln" { "\n" } else { "" })?;
-                g.p(")");
+                tg!(&mut g; #close());
             }
             "panic" | "unreachable" | "todo" | "unimplemented" => {
                 let c = self.fmt_call(hi, true)?;
@@ -225,25 +208,21 @@ impl<'a> Parser<'a> {
                     "unimplemented" => "not implemented",
                     _ => "",
                 };
-                g.p(&format!("{}::panicking::panic_at(", CORE));
+                tg!(&mut g; #core() :: panicking :: panic_at #open());
                 let empty = c.fmt.is_none() && c.first.is_none();
                 if empty {
                     let msg = if prefix.is_empty() { "explicit panic" } else { prefix };
-                    g.p(&format!("{}::fmt::Arguments::new_const(&[{}])", CORE, str_lit(msg)));
+                    tg!(&mut g; #core() :: fmt :: Arguments :: new_const (& [#str_lit(msg)]));
                 } else if prefix.is_empty() {
                     self.gen_args(&mut g, c, Vec::new(), Vec::new(), "")?;
                 } else {
                     // "<prefix>: <message>"
-                    let mut inner = Gen::new();
-                    std::mem::swap(&mut inner.splices, &mut g.splices);
+                    let mut inner = Gen::new(self.edition);
                     self.gen_args(&mut inner, c, Vec::new(), Vec::new(), "")?;
-                    std::mem::swap(&mut inner.splices, &mut g.splices);
                     let pieces = vec![Piece::Lit(format!("{}: ", prefix)), Piece::Ph(ArgRef::Index(0), default_spec("new_display"))];
-                    self.gen_pieces(&mut g, pieces, vec![Src::Val(inner.s)], lo)?;
+                    self.gen_pieces(&mut g, pieces, vec![Src::Nested(inner)], lo)?;
                 }
-                g.p(", ");
-                g.p(&location());
-                g.p(")");
+                tg!(&mut g; , #caller_location() #close());
             }
             "assert" => {
                 let cond_lo = self.pos;
@@ -254,17 +233,13 @@ impl<'a> Parser<'a> {
                     self.expect(T::Comma)?;
                 }
                 let c = self.fmt_call(hi, false)?;
-                g.p("if !(");
-                g.expr(cond);
-                g.p(&format!(") {{ {}::panicking::panic_at(", CORE));
+                tg!(&mut g; if ! (#expr(cond)) #open_brace() #core() :: panicking :: panic_at #open());
                 if c.fmt.is_none() {
-                    g.p(&format!("{}::fmt::Arguments::new_const(&[{}])", CORE, str_lit(&format!("assertion failed: {}", text))));
+                    tg!(&mut g; #core() :: fmt :: Arguments :: new_const (& [#str_lit(&format!("assertion failed: {}", text))]));
                 } else {
                     self.gen_args(&mut g, c, Vec::new(), Vec::new(), "")?;
                 }
-                g.p(", ");
-                g.p(&location());
-                g.p(") }");
+                tg!(&mut g; , #caller_location() #close() #close_brace());
             }
             "assert_eq" | "assert_ne" => {
                 let a = self.expr()?;
@@ -275,27 +250,29 @@ impl<'a> Parser<'a> {
                 }
                 let c = self.fmt_call(hi, false)?;
                 let eq = name == "assert_eq";
-                g.p("match (&");
-                g.expr(a);
-                g.p(", &");
-                g.expr(b);
-                g.p(") { (__relax_l, __relax_r) => { if ");
-                g.p(if eq { "!(*__relax_l == *__relax_r)" } else { "*__relax_l == *__relax_r" });
-                g.p(&format!(" {{ {}::panicking::panic_at(", CORE));
+                // match (&a, &b) { (l, r) => { if <cond> { panic_at(..) } } }, closed below
+                tg!(&mut g; match (& #expr(a), & #expr(b)) #open_brace() (__relax_l, __relax_r) => #open_brace());
+                if eq {
+                    tg!(&mut g; if ! (* __relax_l == * __relax_r));
+                } else {
+                    tg!(&mut g; if * __relax_l == * __relax_r);
+                }
+                g.punct(T::OpenBrace);
+                tg!(&mut g; #core() :: panicking :: panic_at #open());
                 let op = if eq { "==" } else { "!=" };
-                let l = Src::Ref("__relax_l".to_string());
-                let r = Src::Ref("__relax_r".to_string());
+                // rustc's assert_failed formats `&left` (a `&&T`, `T: ?Sized`): `&T: Debug`
+                // keeps unsized operands (`dyn Tr`, `[T]`) out of the Sized-bounded Argument::new_debug
+                let l = Src::Local("__relax_l");
+                let r = Src::Local("__relax_r");
                 let dbg = || default_spec("new_debug");
                 let mut pieces = vec![Piece::Lit(format!("assertion `left {} right` failed", op))];
                 let mut srcs = Vec::new();
                 if c.fmt.is_some() || c.first.is_some() {
-                    let mut inner = Gen::new();
-                    std::mem::swap(&mut inner.splices, &mut g.splices);
+                    let mut inner = Gen::new(self.edition);
                     self.gen_args(&mut inner, c, Vec::new(), Vec::new(), "")?;
-                    std::mem::swap(&mut inner.splices, &mut g.splices);
                     pieces.push(Piece::Lit(": ".to_string()));
                     pieces.push(Piece::Ph(ArgRef::Index(0), default_spec("new_display")));
-                    srcs.push(Src::Val(inner.s));
+                    srcs.push(Src::Nested(inner));
                 }
                 let n = srcs.len();
                 pieces.push(Piece::Lit("\n  left: ".to_string()));
@@ -305,22 +282,16 @@ impl<'a> Parser<'a> {
                 srcs.push(l);
                 srcs.push(r);
                 self.gen_pieces(&mut g, pieces, srcs, lo)?;
-                g.p(", ");
-                g.p(&location());
-                g.p(") } } }");
+                tg!(&mut g; , #caller_location() #close() #close_brace() #close_brace() #close_brace());
             }
             "vec" => {
                 if self.pos >= hi {
-                    g.p(&format!("{}::vec::Vec::new()", CORE));
+                    tg!(&mut g; #core() :: vec :: Vec :: new ());
                 } else {
                     let first = self.expr()?;
                     if self.eat(T::Semi) {
                         let n = self.expr()?;
-                        g.p(&format!("{}::vec::from_elem(", CORE));
-                        g.expr(first);
-                        g.p(", ");
-                        g.expr(n);
-                        g.p(")");
+                        tg!(&mut g; #core() :: vec :: from_elem (#expr(first), #expr(n)));
                     } else {
                         let mut v = vec![first];
                         while self.eat(T::Comma) {
@@ -332,19 +303,18 @@ impl<'a> Parser<'a> {
                         // rustc: `<[_]>::into_vec(box [a, b, ..])` -- the expected `Vec<T>`
                         // reaches the elements (each coerces to T: `vec![Box::new(|x| ..), ..]`
                         // as `Vec<Box<dyn Fn>>`)
-                        g.p(&format!("<[_]>::into_vec({}::boxed::Box::new([", CORE));
+                        tg!(&mut g; < [_] > :: into_vec #open() #core() :: boxed :: Box :: new #open() #open_bracket());
                         for e in v {
-                            g.expr(e);
-                            g.p(", ");
+                            tg!(&mut g; #expr(e) ,);
                         }
-                        g.p("]))");
+                        tg!(&mut g; #close_bracket() #close() #close());
                     }
                 }
             }
             "dbg" => {
                 // dbg!(e) -> match e { tmp => { eprint!("[file:line:col] text = {:#?}\n", &tmp); tmp } }
                 if self.pos >= hi {
-                    g.p(&format!("{}::io::_eprint(", STD));
+                    tg!(&mut g; #std() :: io :: _eprint #open());
                     let pieces = vec![
                         Piece::Lit("[".to_string()),
                         Piece::Ph(ArgRef::Index(0), default_spec("new_display")),
@@ -354,9 +324,9 @@ impl<'a> Parser<'a> {
                         Piece::Ph(ArgRef::Index(2), default_spec("new_display")),
                         Piece::Lit("]\n".to_string()),
                     ];
-                    let srcs = vec![Src::Val("file!()".to_string()), Src::Val("line!()".to_string()), Src::Val("column!()".to_string())];
+                    let srcs = vec![Src::Call0("file"), Src::Call0("line"), Src::Call0("column")];
                     self.gen_pieces(&mut g, pieces, srcs, lo)?;
-                    g.p(")");
+                    tg!(&mut g; #close());
                 } else {
                     // dbg!(a, b, ..) -> (dbg!(a), dbg!(b), ..,)
                     let mut first = true;
@@ -369,15 +339,14 @@ impl<'a> Parser<'a> {
                     if first {
                         multi = self.pos < hi;
                         if multi {
-                            g.p("(");
+                            g.punct(T::OpenParen);
                         }
                     } else {
-                        g.p(", ");
+                        g.punct(T::Comma);
                     }
                     first = false;
-                    g.p("match ");
-                    g.expr(e);
-                    g.p(&format!(" {{ __relax_tmp => {{ {}::io::_eprint(", STD));
+                    tg!(&mut g; match #expr(e) #open_brace() __relax_tmp => #open_brace());
+                    tg!(&mut g; #std() :: io :: _eprint #open());
                     let mut alt = default_spec("new_debug");
                     alt.flags = 4;
                     let pieces = vec![
@@ -391,20 +360,15 @@ impl<'a> Parser<'a> {
                         Piece::Ph(ArgRef::Index(3), alt),
                         Piece::Lit("\n".to_string()),
                     ];
-                    let srcs = vec![
-                        Src::Val("file!()".to_string()),
-                        Src::Val("line!()".to_string()),
-                        Src::Val("column!()".to_string()),
-                        Src::Ref("&__relax_tmp".to_string()),
-                    ];
+                    let srcs = vec![Src::Call0("file"), Src::Call0("line"), Src::Call0("column"), Src::RefTmp];
                     self.gen_pieces(&mut g, pieces, srcs, lo)?;
-                    g.p("); __relax_tmp } }");
+                    tg!(&mut g; #close() ; __relax_tmp #close_brace() #close_brace());
                     if !multi {
                         break;
                     }
                     }
                     if multi {
-                        g.p(",)");
+                        tg!(&mut g; , #close());
                     }
                 }
             }
@@ -435,7 +399,44 @@ impl<'a> Parser<'a> {
 
     /// `name!(..)` at the cursor, up to the next top-level comma before `hi`, when it is a
     /// built-in that evaluates to a string literal: (its value, the token after it).
-    fn fmt_macro_literal(&self, hi: usize) -> Option<(String, usize)> {
+    /// The format string a macro call at the cursor expands to (rustc_builtin_macros format.rs
+    /// `expr_to_spanned_string`: the argument is expanded eagerly, through `macro_rules!` calls
+    /// that expand to further calls, down to a string literal); None when it is not one.
+    fn fmt_macro_literal(&mut self, hi: usize) -> PResult<Option<(String, usize)>> {
+        if self.macros.is_some() && self.mac_ahead() {
+            let save = self.pos;
+            let lo = self.lo();
+            let path = self.path(true)?;
+            if let Some(def) = self.rules_macro(&path) {
+                self.expect(T::Not)?;
+                let (_, toks) = self.delim_tt()?;
+                let end = self.pos;
+                if end == hi || self.toks.at(end).kind == T::Comma {
+                    let start = self.expand_call(&def, toks, lo)?;
+                    let eof = (start..).find(|&i| self.toks.at(i).kind == T::Eof).unwrap_or(start);
+                    let inner = self.in_expansion(start, |p| {
+                        if matches!(p.kind(), T::Str | T::RawStr) && p.pos + 1 == eof {
+                            let t = p.tok();
+                            let text = String::from_utf8_lossy(p.tok_text(t)).into_owned();
+                            p.pos += 1;
+                            return Ok(Some(crate::lit::unescape_str(&text)));
+                        }
+                        let inner = p.fmt_macro_literal(eof)?;
+                        if let Some((_, end)) = &inner {
+                            p.pos = *end;
+                        }
+                        Ok(inner.map(|(text, _)| text))
+                    })?;
+                    self.pos = end;
+                    return Ok(inner.map(|text| (text, end)));
+                }
+            }
+            self.pos = save;
+        }
+        Ok(self.fmt_builtin_literal(hi))
+    }
+
+    fn fmt_builtin_literal(&self, hi: usize) -> Option<(String, usize)> {
         if !(matches!(self.kind(), T::Ident) && self.nth(1) == T::Not) {
             return None;
         }
@@ -461,7 +462,7 @@ impl<'a> Parser<'a> {
     /// `"fmt", args.., name = arg..` up to token `hi`. `loose`: the first argument may be any
     /// expression (`panic!(x)`, formatted with Display).
     fn fmt_call(&mut self, hi: usize, loose: bool) -> PResult<FmtCall> {
-        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new() };
+        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new(), named_pos: Vec::new() };
         if self.pos >= hi {
             return Ok(c);
         }
@@ -471,7 +472,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let text = String::from_utf8_lossy(self.tok_text(t)).into_owned();
             c.fmt = Some((crate::lit::unescape_str(&text), t.lo));
-        } else if let Some((text, end)) = self.fmt_macro_literal(hi) {
+        } else if let Some((text, end)) = self.fmt_macro_literal(hi)? {
             // a macro that expands to a string literal (`format!(concat!("a", "{}"), x)`):
             // rustc expands it eagerly as the format string (format_args's expr_to_spanned_string)
             c.fmt = Some((text, t.lo));
@@ -495,6 +496,7 @@ impl<'a> Parser<'a> {
                 }
                 let e = self.expr()?;
                 c.named.push((name, e));
+                c.named_pos.push(n.lo);
             } else {
                 if !c.named.is_empty() {
                     return self.err("positional format argument after a named one -- move it before the named ones");
@@ -540,6 +542,8 @@ impl<'a> Parser<'a> {
         // rebase indices and names onto slots; captures become new slots
         let mut next = 0usize;
         let mut captures: Vec<String> = Vec::new();
+        // named arguments reached by position (named_arguments_used_positionally)
+        let mut numeric_named: Vec<usize> = Vec::new();
         let mut resolve = |r: &ArgRef, next: &mut usize, srcs: &mut Vec<Src>| -> Result<usize, String> {
             Ok(match r {
                 ArgRef::Next => {
@@ -548,12 +552,14 @@ impl<'a> Parser<'a> {
                     if i >= npos + names.len() {
                         return Err(format!("format string needs argument {} but there are {} -- add the argument", i + 1, npos + names.len()));
                     }
+                    if i >= npos { numeric_named.push(i - npos); }
                     base + i
                 }
                 ArgRef::Index(i) => {
                     if *i >= npos + names.len() {
                         return Err(format!("format string refers to argument {} but there are {} -- add the argument", i, npos + names.len()));
                     }
+                    if *i >= npos { numeric_named.push(*i - npos); }
                     base + i
                 }
                 ArgRef::Name(n) => match names.iter().position(|x| x == n) {
@@ -606,7 +612,33 @@ impl<'a> Parser<'a> {
             };
             return Err(PErr { pos: e, msg: "format argument never used -- remove it or add a `{}`".to_string() });
         }
+        if crate::macros::uses::recording() {
+            let file = self.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();
+            for k in numeric_named {
+                crate::macros::uses::named_arg_positional(&file, c.named_pos[k], &names[k]);
+            }
+        }
         self.gen_pieces(g, out, srcs, flo)
+    }
+
+    /// Whether the parsed expression `e` has an `.await` or a `yield` in it (a suspension point).
+    fn expr_may_yield(&self, e: ExprId) -> bool {
+        let ex = self.ast.expr(e);
+        let (lo, hi) = (ex.lo, ex.hi);
+        let n = self.toks.len();
+        let (mut a, mut b) = (0, n);
+        while a < b {
+            let mid = (a + b) / 2;
+            if self.toks.at(mid).lo < lo { a = mid + 1 } else { b = mid }
+        }
+        let mut i = a;
+        while i < n {
+            let t = self.toks.at(i);
+            if t.lo >= hi { break; }
+            if matches!(t.kind, T::KwAwait | T::KwYield) { return true; }
+            i += 1;
+        }
+        false
     }
 
     /// Emits `Arguments::new_const / new_v1 / new_v1_formatted` for resolved pieces
@@ -630,22 +662,32 @@ impl<'a> Parser<'a> {
         if !cur.is_empty() {
             lits.push(cur);
         }
-        let mut lit_text = String::from("&[");
-        for (k, l) in lits.iter().enumerate() {
-            if k > 0 {
-                lit_text.push_str(", ");
+        // `&[lit, lit, ..]`
+        let emit_lits = |g: &mut Gen| {
+            tg!(g; & #open_bracket());
+            for (k, l) in lits.iter().enumerate() {
+                if k > 0 {
+                    g.punct(T::Comma);
+                }
+                g.str_lit(l);
             }
-            lit_text.push_str(&str_lit(l));
-        }
-        lit_text.push(']');
+            g.punct(T::CloseBracket);
+        };
         if phs.is_empty() {
-            g.p(&format!("{}::fmt::Arguments::new_const({})", CORE, lit_text));
+            tg!(g; #core() :: fmt :: Arguments :: new_const #open());
+            emit_lits(g);
+            g.close();
             return Ok(());
         }
         let formatted = phs.iter().any(|(_, s)| !is_default(s));
         // each slot evaluated once, in slot order: inline when the placeholders use every slot
         // exactly once in order and nothing else refers to them; otherwise bind them first
         let mut inline = !formatted && phs.len() == srcs.len();
+        // rustc ast_lowering format.rs: the arguments of the later slots are evaluated before any `Argument` is
+        // made (`super let args = (&arg0, &arg1)`), so none of them is held across a suspension point in them
+        if inline && srcs.iter().skip(1).any(|s| matches!(s, Src::Expr(e) if self.expr_may_yield(*e))) {
+            inline = false;
+        }
         if inline {
             for (k, (i, _)) in phs.iter().enumerate() {
                 if *i != k {
@@ -653,34 +695,15 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let slot = |g: &mut Gen, i: usize, inline: bool| {
-            if inline {
-                g.borrow(&srcs[i]);
-            } else {
-                g.p(&format!("__relax_a{}", i));
-            }
-        };
-        if !inline {
-            g.p("match (");
-            for s in srcs.iter() {
-                g.borrow(s);
-                g.p(",");
-            }
-            g.p(") { (");
-            for i in 0..srcs.len() {
-                g.p(&format!("__relax_a{},", i));
-            }
-            g.p(") => ");
-        }
         // args array: one entry per placeholder, then width/precision params
         let mut args: Vec<(usize, &'static str)> = Vec::new();
         for (i, s) in &phs {
             args.push((*i, s.ctor));
         }
-        let count_pos = |cs: &CountSpec, args: &mut Vec<(usize, &'static str)>| -> String {
+        let count_pos = |cs: &CountSpec, args: &mut Vec<(usize, &'static str)>| -> Count {
             match cs {
-                CountSpec::Implied | CountSpec::Star => format!("{}::fmt::rt::Count::Implied", CORE),
-                CountSpec::Is(n) => format!("{}::fmt::rt::Count::Is({})", CORE, n),
+                CountSpec::Implied | CountSpec::Star => Count::Implied,
+                CountSpec::Is(n) => Count::Is(*n),
                 CountSpec::Arg(ArgRef::Index(i)) => {
                     let k = match args.iter().position(|a| a.0 == *i && a.1 == "from_usize") {
                         Some(k) => k,
@@ -689,46 +712,76 @@ impl<'a> Parser<'a> {
                             args.len() - 1
                         }
                     };
-                    format!("{}::fmt::rt::Count::Param({})", CORE, k)
+                    Count::Param(k)
                 }
-                CountSpec::Arg(_) => format!("{}::fmt::rt::Count::Implied", CORE),
+                CountSpec::Arg(_) => Count::Implied,
             }
         };
-        let mut specs = String::new();
+        // (placeholder index, spec, precision, width)
+        let mut specs: Vec<(usize, &Spec, Count, Count)> = Vec::new();
         if formatted {
-            specs.push_str("&[");
             for (k, (_, s)) in phs.iter().enumerate() {
                 let prec = count_pos(&s.precision, &mut args);
                 let width = count_pos(&s.width, &mut args);
-                if k > 0 {
-                    specs.push_str(", ");
-                }
-                specs.push_str(&format!("{}::fmt::rt::Placeholder::new({}, {:?}, {}, {}, {}, {})", CORE, k, s.fill, s.align, s.flags, prec, width));
+                specs.push((k, s, prec, width));
             }
-            specs.push(']');
         }
         if formatted {
-            g.p(&format!("{}::fmt::Arguments::new_v1_formatted({}, &[", CORE, lit_text));
+            tg!(g; #core() :: fmt :: Arguments :: new_v1_formatted #open());
         } else {
-            g.p(&format!("{}::fmt::Arguments::new_v1({}, &[", CORE, lit_text));
+            tg!(g; #core() :: fmt :: Arguments :: new_v1 #open());
+        }
+        emit_lits(g);
+        g.punct(T::Comma);
+        // rustc (pre-`super let`) lowering: the arguments array is `&[..]` when the placeholders use
+        // every slot once in order, else `&match (&a0, &a1) { (a0, a1) => [..] }`; either way the
+        // array temporary belongs to the enclosing expression, not to a match arm.
+        if inline {
+            tg!(g; & #open_bracket());
+        } else {
+            tg!(g; & match #open());
+            for s in srcs.iter() {
+                borrow(g, s);
+                g.punct(T::Comma);
+            }
+            tg!(g; #close() #open_brace() #open());
+            for i in 0..srcs.len() {
+                g.word(&format!("__relax_a{}", i));
+                g.punct(T::Comma);
+            }
+            tg!(g; #close() => #open_bracket());
         }
         for (k, (i, ctor)) in args.iter().enumerate() {
             if k > 0 {
-                g.p(", ");
+                g.punct(T::Comma);
             }
-            g.p(&format!("{}::fmt::rt::Argument::{}(", CORE, ctor));
-            slot(g, *i, inline);
-            g.p(")");
+            tg!(g; #core() :: fmt :: rt :: Argument :: #word(ctor) #open());
+            if inline {
+                borrow(g, &srcs[*i]);
+            } else {
+                g.word(&format!("__relax_a{}", i));
+            }
+            g.close();
         }
-        g.p("]");
-        if formatted {
-            g.p(", ");
-            g.p(&specs);
-        }
-        g.p(")");
+        g.punct(T::CloseBracket);
         if !inline {
-            g.p(" }");
+            g.punct(T::CloseBrace);
         }
+        if formatted {
+            tg!(g; , & #open_bracket());
+            for (n, (k, s, prec, width)) in specs.iter().enumerate() {
+                if n > 0 {
+                    g.punct(T::Comma);
+                }
+                tg!(g; #core() :: fmt :: rt :: Placeholder :: new #open() #int(*k) , #char_lit(s.fill) , #int(s.align) , #int(s.flags) ,);
+                prec.emit(g);
+                g.punct(T::Comma);
+                width.emit(g);
+                g.close();
+            }
+            g.punct(T::CloseBracket);
+        }
+        g.close();
         Ok(())
     }
 
@@ -857,46 +910,40 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Appends generated text as an expansion of `name!` at `call_lo` and returns the index
-    /// of its first token; `__relax_splice_N` idents become `T::Interp` tokens.
-    pub(super) fn splice_expansion(&mut self, name: &str, g: &Gen, call_lo: u32) -> PResult<usize> {
+    /// Appends generated tokens as an expansion of `name!` at `call_lo` and returns the index
+    /// of its first token; a spliced expression becomes a `T::Interp` token.
+    pub(super) fn splice_buf(&mut self, name: &str, g: &Gen, call_lo: u32) -> PResult<usize> {
         if let Some(t) = crate::preload::relax_trace() {
             if t.split(',').any(|p| p.strip_prefix("expand:").map_or(false, |n| name.contains(n))) {
                 eprintln!("expand {}! => {}", name, g.s);
             }
         }
+        if super::verify_tokens() {
+            g.verify(name);
+        }
         let base = (self.src.len() + self.ext.len()) as u32;
         self.ext.extend_from_slice(g.s.as_bytes());
-        let mut nt = Vec::new();
-        crate::lexer::lex(g.s.as_bytes(), self.edition, &mut nt)
-            .map_err(|e| PErr { pos: call_lo, msg: format!("internal error: `{}!` expansion does not lex: {}", name, e.msg) })?;
         let start = self.toks.len();
-        for mut t in nt {
-            if t.kind == T::Ident {
-                let txt = &g.s.as_bytes()[t.lo as usize..t.hi as usize];
-                if let Some(k) = txt.strip_prefix(SPLICE.as_bytes()) {
-                    let k: usize = std::str::from_utf8(k).ok().and_then(|x| x.parse().ok()).unwrap_or(usize::MAX);
-                    if let Some(&e) = g.splices.get(k) {
-                        let x = self.ast.expr(e);
-                        let (lo, hi) = (x.lo, x.hi);
-                        self.interp.insert(self.toks.len() as u32, e);
-                        self.toks.push(Tok { kind: T::Interp, lo, hi });
-                        continue;
-                    }
+        let mut interps = g.interps.iter().peekable();
+        for (i, t) in g.toks.iter().enumerate() {
+            if let Some(&&(at, e)) = interps.peek() {
+                if at as usize == i {
+                    interps.next();
+                    let x = self.ast.expr(e);
+                    let (lo, hi) = (x.lo, x.hi);
+                    self.interp.insert(self.toks.len() as u32, e);
+                    self.toks.push(Tok { kind: T::Interp, lo, hi });
+                    continue;
                 }
             }
-            t.lo += base;
-            t.hi += base;
-            self.toks.push(t);
+            self.toks.push(Tok { kind: t.kind, lo: t.lo + base, hi: t.hi + base });
         }
-        if self.toks.last().map_or(true, |t| t.kind != T::Eof) {
-            let e = base + g.s.len() as u32;
-            self.toks.push(Tok { kind: T::Eof, lo: e, hi: e });
-        }
+        let e = base + g.s.len() as u32;
+        self.toks.push(Tok { kind: T::Eof, lo: e, hi: e });
         for (off, o, n) in &g.origins {
             self.tok_origin.push((base + off, *o, *n));
         }
-        self.exp_map.push((base, base + g.s.len() as u32, call_lo));
+        self.exp_map.push((base, e, call_lo));
         Ok(start)
     }
 }
@@ -935,6 +982,10 @@ fn parse_format(s: &str) -> Result<Vec<Piece>, String> {
                 let mut spec = default_spec("new_display");
                 if j < c.len() && c[j] == ':' {
                     let mut k = j + 1;
+                    // rustc_parse_format `format`: a character followed by an alignment is the fill, even `}`
+                    if matches!(c.get(k + 1), Some('<' | '>' | '^')) {
+                        k += 2;
+                    }
                     while k < c.len() && c[k] != '}' {
                         k += 1;
                     }

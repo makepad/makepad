@@ -160,12 +160,13 @@ pub mod wf;
 pub mod fulfill;
 pub mod param_env;
 pub mod type_op;
+pub mod dropck_outlives;
 
 pub mod implied_outlives_bounds;
 
 mod object;
 
-mod dyn_compatibility;
+pub(crate) mod dyn_compatibility;
 
 mod type_of;
 

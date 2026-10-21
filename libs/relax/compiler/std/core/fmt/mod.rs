@@ -124,35 +124,35 @@ pub mod rt {
                 _m: crate::marker::PhantomData,
             }
         }
-        pub fn new_display<T: super::Display>(x: &'a T) -> Argument<'a> {
+        pub const fn new_display<T: super::Display>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::Display>::fmt)
         }
-        pub fn new_debug<T: super::Debug>(x: &'a T) -> Argument<'a> {
+        pub const fn new_debug<T: super::Debug>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::Debug>::fmt)
         }
-        pub fn new_octal<T: super::Octal>(x: &'a T) -> Argument<'a> {
+        pub const fn new_octal<T: super::Octal>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::Octal>::fmt)
         }
-        pub fn new_lower_hex<T: super::LowerHex>(x: &'a T) -> Argument<'a> {
+        pub const fn new_lower_hex<T: super::LowerHex>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::LowerHex>::fmt)
         }
-        pub fn new_upper_hex<T: super::UpperHex>(x: &'a T) -> Argument<'a> {
+        pub const fn new_upper_hex<T: super::UpperHex>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::UpperHex>::fmt)
         }
-        pub fn new_pointer<T: super::Pointer>(x: &'a T) -> Argument<'a> {
+        pub const fn new_pointer<T: super::Pointer>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::Pointer>::fmt)
         }
-        pub fn new_binary<T: super::Binary>(x: &'a T) -> Argument<'a> {
+        pub const fn new_binary<T: super::Binary>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::Binary>::fmt)
         }
-        pub fn new_lower_exp<T: super::LowerExp>(x: &'a T) -> Argument<'a> {
+        pub const fn new_lower_exp<T: super::LowerExp>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::LowerExp>::fmt)
         }
-        pub fn new_upper_exp<T: super::UpperExp>(x: &'a T) -> Argument<'a> {
+        pub const fn new_upper_exp<T: super::UpperExp>(x: &'a T) -> Argument<'a> {
             Argument::new(x, <T as super::UpperExp>::fmt)
         }
         /// A width/precision parameter (`{:w$}`): must be a usize.
-        pub fn from_usize(x: &'a usize) -> Argument<'a> {
+        pub const fn from_usize(x: &'a usize) -> Argument<'a> {
             Argument::new(x, <usize as super::Display>::fmt)
         }
         pub(crate) fn fmt(&self, f: &mut Formatter<'_>) -> Result {
@@ -174,6 +174,10 @@ pub struct Arguments<'a> {
     args: &'a [rt::Argument<'a>],
 }
 
+// library/core/src/fmt/mod.rs:904-906
+impl !Send for Arguments<'_> {}
+impl !Sync for Arguments<'_> {}
+
 impl<'a> Arguments<'a> {
     pub const fn new_const(pieces: &'a [&'static str]) -> Arguments<'a> {
         Arguments { pieces, fmt: None, args: &[] }
@@ -189,7 +193,7 @@ impl<'a> Arguments<'a> {
         Arguments { pieces, fmt: Some(placeholders), args }
     }
     /// The text if there are no arguments.
-    pub fn as_str(&self) -> Option<&'static str> {
+    pub const fn as_str(&self) -> Option<&'static str> {
         match (self.pieces, self.args) {
             ([], []) => Some(""),
             ([s], []) => Some(s),
@@ -325,7 +329,7 @@ impl PostPadding {
 }
 
 impl<'a> Formatter<'a> {
-    pub fn new(buf: &'a mut (dyn Write + 'a)) -> Formatter<'a> {
+    pub const fn new(buf: &'a mut (dyn Write + 'a)) -> Formatter<'a> {
         Formatter { flags: 0, fill: ' ', align: rt::ALIGN_UNKNOWN, width: None, precision: None, buf }
     }
 
@@ -677,6 +681,38 @@ impl<'a, T: crate::marker::PointeeSized + LowerExp> LowerExp for &'a T {
     }
 }
 impl<'a, T: crate::marker::PointeeSized + UpperExp> UpperExp for &'a T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        UpperExp::fmt(&**self, f)
+    }
+}
+
+// rustc core/src/fmt/mod.rs fmt_refs!: the radix and exp traits also for `&mut T`
+impl<'a, T: crate::marker::PointeeSized + LowerHex> LowerHex for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        LowerHex::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + UpperHex> UpperHex for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        UpperHex::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + Octal> Octal for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        Octal::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + Binary> Binary for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        Binary::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + LowerExp> LowerExp for &'a mut T {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        LowerExp::fmt(&**self, f)
+    }
+}
+impl<'a, T: crate::marker::PointeeSized + UpperExp> UpperExp for &'a mut T {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         UpperExp::fmt(&**self, f)
     }

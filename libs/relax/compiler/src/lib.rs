@@ -55,13 +55,18 @@ pub mod sandbox;
 pub mod domain;
 mod domain_threads;
 pub mod jit;
+pub mod web;
+pub mod coverage;
 pub mod owner;
+pub mod postframe;
 mod nounwind;
 pub mod os;
 pub mod lower;
 pub mod cabi;
 pub use relax_types::*;
 pub mod run;
+mod harness;
+mod test_pkg;
 pub mod tui;
 pub mod check;
 mod gandalf_out;
@@ -76,8 +81,10 @@ mod native_macros;
 pub mod ctfe;
 mod valtrees;
 pub mod syms;
+pub mod wasm_export;
 pub mod pack;
 pub mod store;
+pub mod kernel_store;
 pub mod cache;
 pub mod clean;
 pub mod mainprof;
@@ -96,15 +103,17 @@ pub struct ZoneTaken {
 }
 
 /// Takes this crate's compiler statics while every compiler thread is quiesced.
-pub fn zone_take() -> ZoneTaken {
-    ZoneTaken {
-        owner: owner::zone_take(),
+/// None, taking nothing, when the owner has requests queued.
+pub fn zone_take() -> Option<ZoneTaken> {
+    let owner = owner::zone_take()?;
+    Some(ZoneTaken {
+        owner,
         native_macros: native_macros::zone_take(),
         cache: cache::zone_take(),
         jit: jit::zone_take(),
         run: run::zone_take(),
         tui: tui::zone_take(),
-    }
+    })
 }
 
 /// Restores the statics after an aborted swap, forgetting the new generation's values.
@@ -194,7 +203,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
     if args.get(1).map(String::as_str) == Some("fix") {
         options.relaxed = Some("all".to_string());
     }
-    options.cpu = crate::x64::detect_cpu(&options);
+    options.cpu = relax_backend::x64::detect_cpu(&options);
     options.spec_hot = Some(options.spec_hot.unwrap_or_else(crate::jit::on_battery));
     options.spec_jobs = Some(options.spec_jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6)));
     options.tier1_profile_data = options.tier1_profile.as_ref().and_then(|p| p.to_str()).and_then(|p| std::fs::read_to_string(p).ok());
@@ -204,6 +213,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         crate::options::CheckTarget::MacosArm64 => "aarch64-apple-darwin",
         crate::options::CheckTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
         crate::options::CheckTarget::AndroidArm64 => "aarch64-linux-android",
+        crate::options::CheckTarget::Web => crate::options::CheckTarget::WEB_TRIPLE,
         _ if cfg!(target_os = "android") => "aarch64-linux-android",
         _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => "aarch64-apple-darwin",
         _ if cfg!(windows) => "x86_64-pc-windows-gnu",
@@ -215,7 +225,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
 pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
     registry_net::install();
     if std::env::var_os("MAKEPAD_RUN_CODE_SIG").is_some() {
-        regalloc::SIG_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+        relax_backend::regalloc::SIG_ON.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // a program's own arguments after `--` may be any bytes (`makepad run p -- $'\xff'`): Relax
     // reads its own options lossily, the program gets the bytes (run.rs)
@@ -248,6 +258,7 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
         // nothing; `--watch`: the warm session (type/borrow check only unless --deep), re-checking
         // what each edit invalidates
         "check" => {
+            crate::lexer::set_validation(true);
             os::proc::exit(serve_rpc::check(sess, &args[2..]));
         }
         // `makepad selftest [--root-only] <package>`: a test of Relax itself -- every fn of the
@@ -272,6 +283,12 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
             a.extend_from_slice(&args[3..]);
             let code = run::cmd_run(sess, &a);
             std::process::exit(code);
+        }
+        // `makepad test <file.rs>`: one file's tests; `makepad test <package>`: the package's
+        // lib and integration tests, each a harness program (run.rs `--harness`)
+        "test" if !args[2..].iter().any(|a| a.ends_with(".rs")) => {
+            let code = test_pkg::cmd_test_package(&args[2..]);
+            os::proc::exit(code);
         }
         "test" => {
             let code = cmd_test(sess, &args[2..]);
@@ -564,14 +581,15 @@ pub fn std_dir() -> String {
 /// Loads core, alloc (when present) and std; returns core and the dependency list user crates
 /// get ([core, alloc, std]).
 /// core, alloc (when the std has it) and std, as load_std_crates loads them (for a preload).
-pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::PreCrate> {
+/// `simd`: with core::simd / std::simd (see `std_simd_wanted`).
+pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<preload::PreCrate> {
     let dir = std_dir();
     let mut v = vec![preload::PreCrate {
         
         name: "core".to_string(),
         root: format!("{}/core/lib.rs", dir),
         edition: 2021,
-        cfg: cfg::CfgSet::host(sess, &[]),
+        cfg: std_cfg(sess, simd),
         deps: Vec::new(),
         proc_macro: false,
         image_deps: Vec::new(),
@@ -584,7 +602,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
             name: "alloc".to_string(),
             root: alloc_root,
             edition: 2021,
-            cfg: cfg::CfgSet::host(sess, &[]),
+            cfg: std_cfg(sess, simd),
             deps: Vec::new(),
             proc_macro: false,
             image_deps: Vec::new(),
@@ -596,7 +614,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
         name: "std".to_string(),
         root: format!("{}/std/lib.rs", dir),
         edition: 2021,
-        cfg: cfg::CfgSet::host(sess, &[]),
+        cfg: std_cfg(sess, simd),
         deps: Vec::new(),
         proc_macro: false,
         image_deps: Vec::new(),
@@ -607,6 +625,33 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>) -> Vec<preload::Pre
         v[i].image_deps = (0..i).collect();
     }
     v
+}
+
+/// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
+/// core::simd.
+pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
+    // the web target runs on this machine's std (cfg.rs `web`)
+    let web = sess.options.check_target == crate::options::CheckTarget::Web;
+    let mut c = if web { cfg::CfgSet::machine(sess, &[]) } else { cfg::CfgSet::host(sess, &[]) };
+    if web {
+        // core::arch::wasm32 (std/core/arch/wasm32.rs)
+        c.set.push("relax_web".to_string());
+    }
+    if simd {
+        c.set.push("relax_portable_simd".to_string());
+    }
+    c
+}
+
+/// Whether a program with these crate roots can use core::simd / std::simd: only a crate whose
+/// root enables `#![feature(portable_simd)]` can name them (rustc: E0658 otherwise), so std
+/// leaves portable-simd out of every other program. A root that cannot be read counts as
+/// wanting it.
+pub fn std_simd_wanted<'a>(roots: impl IntoIterator<Item = &'a str>) -> bool {
+    roots.into_iter().any(|r| match crate::vfs::read_shared(r) {
+        Ok(src) => src.windows(13).any(|w| w == b"portable_simd"),
+        Err(_) => true,
+    })
 }
 
 pub fn load_std_crates(sess: &std::sync::Arc<crate::Session>, prog: &mut program::Program) -> Result<(u32, Vec<(program::Sym, u32)>), String> {
@@ -624,17 +669,18 @@ pub(crate) fn load_std_crates_with(sess: &std::sync::Arc<crate::Session>, prog: 
 }
 
 fn load_std_crates_inner(sess: &std::sync::Arc<crate::Session>, prog: &mut program::Program, loaded: &mut impl FnMut(&mut program::Program, u32)) -> Result<(u32, Vec<(program::Sym, u32)>), String> {
-    let pre = std_pre_crates(sess);
-    let core = prog.load_crate_deferred("core", &pre[0].root, 2021, cfg::CfgSet::host(sess, &[]), Vec::new())?;
+    let simd = prog.std_simd;
+    let pre = std_pre_crates(sess, simd);
+    let core = prog.load_crate_deferred("core", &pre[0].root, 2021, std_cfg(sess, simd), Vec::new())?;
     loaded(prog, core);
     let core_sym = prog.syms.intern("core");
     let mut deps = vec![(core_sym, core)];
     if pre.len() == 3 {
-        let alloc = prog.load_crate_deferred("alloc", &pre[1].root, 2021, cfg::CfgSet::host(sess, &[]), deps.clone())?;
+        let alloc = prog.load_crate_deferred("alloc", &pre[1].root, 2021, std_cfg(sess, simd), deps.clone())?;
         loaded(prog, alloc);
         deps.push((prog.syms.intern("alloc"), alloc));
     }
-    let std = prog.load_crate_deferred("std", &pre[pre.len() - 1].root, 2021, cfg::CfgSet::host(sess, &[]), deps.clone())?;
+    let std = prog.load_crate_deferred("std", &pre[pre.len() - 1].root, 2021, std_cfg(sess, simd), deps.clone())?;
     loaded(prog, std);
     deps.push((prog.syms.intern("std"), std));
     Ok((core, deps))
@@ -643,6 +689,7 @@ fn load_std_crates_inner(sess: &std::sync::Arc<crate::Session>, prog: &mut progr
 pub fn load_with_std(sess: &std::sync::Arc<crate::Session>, root: &str, name: &str, test: bool) -> Result<(program::Program, u32, u32), Vec<String>> {
     pmhost::install();
     let mut prog = program::Program::new(sess);
+    prog.std_simd = std_simd_wanted([root]);
     let (core, deps) = load_std_crates(sess, &mut prog).map_err(|e| vec![e])?;
     let mut cfgset = cfg::CfgSet::host(sess, &[]);
     if test {
@@ -687,6 +734,9 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             return 1;
         }
     };
+    // the crate under test is the program's own crate (run.rs): its #![recursion_limit] and
+    // #![type_length_limit] govern monomorphization (TypingEnv::fully_monomorphized)
+    crate::layout::set_root_crate(krate);
     let t1 = Instant::now();
     let mut tcx = tcx::Tcx::new();
     tcx.collect(&prog);
@@ -730,6 +780,7 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         // speculative workers compile concurrently: unit access under the lock
         let entry = crate::owner::call(crate::owner::Class::App, || {
             let id = u.fn_id(jit::FnKey::Inst(d, Vec::new()));
+            crate::wasm_export::root(id, &name);
             u.entry(id)
         });
         let ts = Instant::now();
@@ -773,7 +824,7 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             }
         });
     }
-    crate::owner::call(crate::owner::Class::App, || {
+    let code = crate::owner::call(crate::owner::Class::App, || {
         println!(
             "test result: {} passed; {} failed. compiled {} fns ({} bytes, {} RIR insts): typeck {:.2} ms, lower {:.2} ms, opt {:.2} ms, codegen {:.2} ms",
             passed,
@@ -787,14 +838,14 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             u.stats.codegen_ns as f64 / 1e6
         );
         let mut rules = String::new();
-        for (i, n) in opt::RULE_NAMES.iter().enumerate() {
+        for (i, n) in relax_codegen::opt::RULE_NAMES.iter().enumerate() {
             rules.push_str(&format!("{} {}  ", n, u.stats.inline_rules[i]));
         }
         println!("inlined call sites by rule: {}", rules);
         if std::env::var("MAKEPAD_RUN_PASS_TIMES").is_ok() {
             let mut passes = String::new();
-            for i in 0..crate::opt::PASS_NAMES.len() {
-                passes.push_str(&format!("{} {:.2}  ", opt::PASS_NAMES[i], opt::PASS_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6));
+            for i in 0..relax_backend::stats::PASS_NAMES.len() {
+                passes.push_str(&format!("{} {:.2}  ", relax_backend::stats::PASS_NAMES[i], relax_backend::stats::PASS_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6));
             }
             println!("opt passes (ms): {}", passes);
         }
@@ -808,7 +859,11 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         } else {
             0
         }
-    })
+    });
+    // the caller ends the process: tearing the unit down would wait on state a contained fault
+    // (a stack overflow in the compiler) left locked
+    std::mem::forget(u);
+    code
 }
 
 /// M2: loads every crate of the unit graph with Relax's core/std and resolves all imports.
@@ -825,6 +880,7 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
     };
     let t0 = Instant::now();
     let mut prog = program::Program::new(sess);
+    prog.std_simd = std_simd_wanted(crates.iter().map(|c| c.src_path.as_str()));
     let (core, std_deps) = load_std_crates(sess, &mut prog).unwrap();
     let mut load_errors = 0;
     // dependencies first: a crate's `macro_rules!` must be known when its users parse
@@ -842,6 +898,7 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
         match prog.load_crate_deferred(&c.name, &c.src_path, c.edition, cs, deps) {
             Ok(k) => {
                 prog.crates[k as usize].proc_macro = c.proc_macro;
+                prog.crates[k as usize].is_bin = c.bin;
                 crate_of[ci] = k;
             }
             Err(e) => {

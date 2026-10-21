@@ -125,8 +125,61 @@ fn lang_item_relax_std() {
     assert!(tcx.adt_destructor(named(&prog, "Vec")).is_some());
     assert!(tcx.adt_destructor(phantom).is_none());
     assert!(tcx.adt_destructor(cell).is_none());
-    // Relax's union cannot carry rustc's struct-only lang item; keep the mismatch visible.
-    assert!(tcx.lang_items.get(LangItem::ManuallyDrop).is_none());
-    assert!(tcx.adts[&named(&prog, "ManuallyDrop")].is_union());
+    // ManuallyDrop is a struct carrying the lang item, as in rustc.
+    let manually_drop = tcx.lang_items.require(LangItem::ManuallyDrop).unwrap();
+    assert!(tcx.adts[&manually_drop].is_manually_drop());
+    assert!(!tcx.adts[&manually_drop].is_union());
     assert!(tcx.lang_items.get(LangItem::UnsafePinned).is_none());
+}
+
+#[test]
+fn relax_std_provides_coerce_unsized_for_pointers_and_smart_pointers() {
+    use crate::next_solver::{Goal, collect};
+    use crate::consts::GenericArg;
+    use crate::types::TyKind;
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(sess);
+    prog.load_crate("core", concat!(env!("CARGO_MANIFEST_DIR"), "/../compiler/std/core/lib.rs"), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+    let core = prog.syms.intern("core");
+    prog.load_crate("alloc", concat!(env!("CARGO_MANIFEST_DIR"), "/../compiler/std/alloc/lib.rs"), 2021, crate::cfg::CfgSet::host(sess, &[]), vec![(core, 0)]).unwrap();
+    prog.prelude_crate = Some(0);
+    prog.resolve_imports();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let lang_errors: Vec<_> = tcx.errors.iter().filter(|e| e.contains("E0152") || e.contains("E0718") || e.contains("E0522")).collect();
+    assert!(lang_errors.is_empty(), "{lang_errors:?}");
+    let coerce = tcx.lang_items.require(LangItem::CoerceUnsized).unwrap();
+    let tys = &tcx.tys;
+    let array = tys.intern(TyKind::Array(tys.i32_, tys.const_usize(3)));
+    let slice = tys.intern(TyKind::Slice(tys.i32_));
+    let r = tys.intern_region(crate::types::RegionKind::ReStatic);
+    let boxed = tcx.lang_items.require(LangItem::OwnedBox).unwrap();
+    let adt = |d, t| tys.intern(TyKind::Adt(d, tys.mk_list(&[t]), crate::types::RegionArgsId::EMPTY));
+    let infcx = crate::infer::InferCtxt::new(&tcx, crate::tcx::TypingMode::PostAnalysis, Default::default());
+    let holds = |from, to| infcx.evaluate_obligation(&prog, Goal { param_env: crate::tcx::ParamEnvId::EMPTY,
+        predicate: collect::trait_predicate(coerce, vec![GenericArg::Type(from), GenericArg::Type(to)]) }).must_apply_modulo_regions();
+    let reference = |m, t| tys.intern(TyKind::Ref(m, t, r));
+    assert!(holds(reference(false, array), reference(false, slice)));
+    assert!(holds(reference(true, array), reference(false, slice)));
+    assert!(holds(reference(true, array), reference(true, slice)));
+    assert!(!holds(reference(false, array), reference(true, slice)));
+    assert!(holds(reference(false, array), tys.intern(TyKind::Ptr(false, slice))));
+    assert!(holds(adt(boxed, array), adt(boxed, slice)));
+    assert!(!holds(adt(boxed, slice), adt(boxed, array)));
+}
+
+#[test]
+fn relax_std_marks_container_drops_may_dangle() {
+    use crate::next_solver::dropck_outlives::adt_dtorck_constraint;
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(sess);
+    prog.load_crate("core", concat!(env!("CARGO_MANIFEST_DIR"), "/../compiler/std/core/lib.rs"), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+    prog.prelude_crate = Some(0);
+    prog.resolve_imports();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    // `Vec<&T>` may be dropped while `T` is borrowed: the element type is not among what the destructor touches.
+    let vec = named(&prog, "Vec");
+    let constraint = adt_dtorck_constraint(&tcx, &prog, vec, 256);
+    assert!(constraint.outlives.is_empty(), "{constraint:?}");
 }

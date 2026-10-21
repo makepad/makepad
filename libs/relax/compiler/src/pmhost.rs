@@ -179,9 +179,16 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
         return Some(w);
     }
     tl_set_once(0, crate::clock::ms_since_start());
-    set_in_world(true);
-    let w = std::sync::Arc::new(build_world(sess));
-    set_in_world(false);
+    // restored also when build_world panics (the thread may be a pool worker that goes on)
+    struct InWorld;
+    impl Drop for InWorld {
+        fn drop(&mut self) { set_in_world(false); }
+    }
+    let w = {
+        set_in_world(true);
+        let _in_world = InWorld;
+        std::sync::Arc::new(build_world(sess))
+    };
     tl_set_once(1, crate::clock::ms_since_start());
     *WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.clone());
     tl_add(4, 1.0);
@@ -639,6 +646,7 @@ pub fn flush_cache() {
     if let Some(Ok(w)) = world_now().as_deref() {
         crate::owner::call(crate::owner::Class::App, || {
             let u = unsafe { &mut *w.u };
+            u.flush_cache_records();
             if let Some(c) = u.cache.as_mut() {
                 let _ = c.flush();
             }

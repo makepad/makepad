@@ -16,23 +16,28 @@ use crate::pin::PinSafePointer;
 // library/alloc/src/boxed.rs:2384,2390 @8d1a764
 unsafe impl<T: ?Sized> PinSafePointer for Box<T> {}
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Box<U>> for Box<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> crate::ops::CoerceUnsized<Box<U>> for Box<T> {}
 use crate::string::String;
 use crate::vec::Vec;
 
 #[fundamental]
+#[rustc_diagnostic_item = "Box"]
 #[cfg_attr(not(relax_check), lang = "owned_box")]
+#[rustc_insignificant_dtor]
 pub struct Box<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
+    _marker: crate::marker::PhantomData<T>,
 }
 
 unsafe impl<T: ?Sized + Send> Send for Box<T> {}
 unsafe impl<T: ?Sized + Sync> Sync for Box<T> {}
 
 impl<T> Box<T> {
+    #[rustc_diagnostic_item = "box_new"]
     pub fn new(x: T) -> Box<T> {
         let p = heap::alloc_or_abort(Layout::new::<T>()) as *mut T;
         unsafe { im::ptr_write(p, x) };
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
     pub fn pin(x: T) -> crate::pin::Pin<Box<T>> {
         unsafe { crate::pin::Pin::new_unchecked(Box::new(x)) }
@@ -46,7 +51,7 @@ impl<T> Box<T> {
     }
     pub fn new_uninit() -> Box<crate::mem::MaybeUninit<T>> {
         let p = heap::alloc_or_abort(Layout::new::<T>()) as *mut crate::mem::MaybeUninit<T>;
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
     pub fn new_zeroed() -> Box<crate::mem::MaybeUninit<T>> {
         let b = Box::<T>::new_uninit();
@@ -56,8 +61,9 @@ impl<T> Box<T> {
 }
 
 impl<T: ?Sized> Box<T> {
+    #[must_use = "call `drop(Box::from_raw(ptr))` if you intend to drop the `Box`"]
     pub unsafe fn from_raw(raw: *mut T) -> Box<T> {
-        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(raw) } }
+        Box { ptr: unsafe { crate::ptr::NonNull::new_unchecked(raw) }, _marker: crate::marker::PhantomData }
     }
     pub fn into_raw(b: Box<T>) -> *mut T {
         let p = b.ptr.as_ptr();
@@ -67,9 +73,11 @@ impl<T: ?Sized> Box<T> {
     pub fn leak<'a>(b: Box<T>) -> &'a mut T {
         unsafe { &mut *Box::into_raw(b) }
     }
+    #[rustc_never_returns_null_ptr]
     pub fn as_ptr(b: &Box<T>) -> *const T {
         b.ptr.as_ptr() as *const T
     }
+    #[rustc_never_returns_null_ptr]
     pub fn as_mut_ptr(b: &mut Box<T>) -> *mut T {
         b.ptr.as_ptr()
     }
@@ -121,7 +129,7 @@ impl<T, const N: usize> crate::convert::TryFrom<Box<[T]>> for Box<[T; N]> {
     }
 }
 
-impl<T: ?Sized> Drop for Box<T> {
+unsafe impl<#[may_dangle] T: ?Sized> Drop for Box<T> {
     fn drop(&mut self) {
         unsafe {
             let layout = Layout::for_value(&*self.ptr.as_ptr());
@@ -138,6 +146,7 @@ pub unsafe fn box_free_after_move<T>(p: *mut T) {
     heap::free(p as *mut u8, Layout::new::<T>());
 }
 
+impl<T: ?Sized> crate::ops::LegacyReceiver for Box<T> {}
 impl<T: ?Sized> Deref for Box<T> {
     type Target = T;
     fn deref(&self) -> &T {

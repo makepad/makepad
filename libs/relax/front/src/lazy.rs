@@ -180,12 +180,12 @@ impl Plan {
         // results in crate/DFS order, preserving lexical macro precedence.
         let next_crate = std::sync::atomic::AtomicUsize::new(0);
         let workers_profile = crate::load_profile::span(profile, "rust-demand-discovery-workers", "load");
-        let mut discovered = std::thread::scope(|scope| {
+        let mut discovered = crate::pool::scope(|scope| {
             let handles = (0..jobs().min(crates.len())).map(|_| {
                 let contexts = &contexts;
                 let template = &names;
                 let next_crate = &next_crate;
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                scope.spawn(move || {
                     let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
                     let mut output = Vec::new();
                     loop {
@@ -273,6 +273,7 @@ impl Plan {
                     for (alias, qual, target) in &scan.aliases { Arc::make_mut(&mut table).add_alias(c.name.clone(), alias.clone(), (qual.clone(), target.clone())); }
                     for name in &scan.macro_use { Arc::make_mut(&mut table).macro_use.entry(c.name.clone()).or_default().push(name.clone()); }
                     modules.mods.extend(scan.mods.iter().cloned());
+                    modules.items.extend(scan.mod_items.iter().cloned());
                     for u in &scan.uses {
                         if let Some(bind) = &u.bind {
                             if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
@@ -294,10 +295,10 @@ impl Plan {
                 let expected = scans.iter().filter(|entry| entry.3.is_some()).map(|(path, module, ..)| (path.clone(), module.clone())).collect::<BTreeSet<_>>();
                 let ready = (relax_session::sync::Mutex::new(BTreeMap::new()), relax_session::sync::Condvar::new());
                 let next_input = std::sync::atomic::AtomicUsize::new(0);
-                std::thread::scope(|scope| {
+                crate::pool::scope(|scope| {
                     for _ in 0..jobs().min(inputs.len()) {
                         let (inputs, ready, next_input, base, context) = (&inputs, &ready, &next_input, &base, &contexts[*ci]);
-                        scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                        scope.spawn(move || {
                             let _reads = context.bind_source_reads();
                             while let Some(input) = inputs.get(next_input.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
                                 let (path, module, scan) = input.lock().unwrap().take().expect("each input is expanded once");
@@ -335,6 +336,9 @@ impl Plan {
                         if let Some(scan) = scan { for (path, dir, _) in &scan.children { directories.insert(path.clone(), dir.clone()); } }
                     }
                     let mut seen = scans.iter().map(|(path, module, ..)| (path.clone(), module.clone())).collect::<BTreeSet<_>>();
+                    // the module files each scanned file was reached through (rustc_expand: a file
+                    // that includes itself through `mod` items is the loader's circular-modules error)
+                    let mut chains: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
                     let mut pending = std::collections::VecDeque::from(std::mem::take(scans));
                     while let Some(mut entry) = pending.pop_front() {
                         let (path, module, _, scan, parameters, _) = &mut entry;
@@ -378,12 +382,16 @@ impl Plan {
                             if !surface.used.uses.is_empty() { Arc::make_mut(&mut table).add_exp_uses(&c.name, surface.used.uses); }
                             let dir = directories.get(path).cloned().unwrap_or_else(|| crate::program::dir_of(path).into());
                             let _profile = crate::load_profile::span(profile, "rust-demand-outline-scan", path);
-                            if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, &c.cfg, scan.src_len,
+                            if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, c.edition, &c.cfg, scan.src_len,
                                 expanded_src, surface.toks, &contexts[*ci], false) { *scan = expanded; }
                         }
+                        let mut chain = chains.get(&(path.clone(), module.clone())).cloned().unwrap_or_default();
+                        chain.push(path.clone());
                         for (child, dir, child_module) in &scan.children {
                             directories.insert(child.clone(), dir.clone());
+                            if chain.contains(child) { continue; }
                             if !seen.insert((child.clone(), child_module.clone())) { continue; }
+                            chains.insert((child.clone(), child_module.clone()), chain.clone());
                             let source = contexts[*ci].read_source(child).ok();
                             let hash = source.as_ref().map(|s| crate::crate_image::file_hash(child, &s.src));
                             let child_scan = source.and_then(|s| scan_text_mode(child, dir, child_module, &c.name, c.edition, &c.cfg, (&s.src).into(), &contexts[*ci], true)).map(Arc::new);
@@ -442,8 +450,8 @@ impl Plan {
                     let files = &mut prepared_files[start..];
                     let chunk = files.len().div_ceil(jobs().max(1)).max(1);
                     let (names, contexts, expanded_indexes, sources) = (&names, &contexts, &expanded_indexes, &sources);
-                    let mut flags = std::thread::scope(|scope| {
-                        let workers = files.chunks_mut(chunk).map(|files| scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter_mut().map(|file| {
+                    let mut flags = crate::pool::scope(|scope| {
+                        let workers = files.chunks_mut(chunk).map(|files| scope.spawn(move || { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter_mut().map(|file| {
                             let source = sources.get(&(file.path.as_str(), file.module.as_str())).copied();
                             macro_surface(names, crates, contexts, expanded_indexes, profile, file, source.map(|(src, toks, _)| (src, toks)), source.map(|(_, _, parameters)| parameters))
                         }).collect::<Vec<_>>() })).collect::<Vec<_>>();
@@ -563,6 +571,14 @@ impl Plan {
                 demands.insert(name);
             }
         }
+        for c in crates.iter() {
+            // A crate built with `--test` (cfg(test): `makepad test`) is entered at its `#[test]`
+            // fns, wherever they are: all of its own items are demanded, its dependencies' only
+            // as they reach them.
+            if c.cfg.set.iter().any(|x| x == "test") && forced.insert(c.name.clone()) {
+                force_origin.entry(c.name.clone()).or_insert((c.root.clone(), "test harness".into()));
+            }
+        }
         for (ci, c) in crates.iter().enumerate() {
             // The runtime looks up main even when the root only glob-reexports
             // it. No authored identifier at that root seeds this demand.
@@ -572,12 +588,12 @@ impl Plan {
             }
         }
         let references_profile = crate::load_profile::span(profile, "rust-demand-rust-refs", "load");
-        let references = std::thread::scope(|scope| {
+        let references = crate::pool::scope(|scope| {
             let chunk = rust.len().div_ceil(jobs().max(1)).max(1);
             let handles = rust.chunks(chunk).map(|files| {
                 let names = &names;
                 let relevant = &relevant;
-                scope.spawn(move || { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter().filter(|(ci, ..)| relevant.contains(ci)).map(|(ci, path, module, scan)| {
+                scope.spawn(move || { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); files.iter().filter(|(ci, ..)| relevant.contains(ci)).map(|(ci, path, module, scan)| {
                     let (src, toks) = (&scan.src, &scan.toks);
                     let opaque = names.opaque_scopes(*ci, src, toks, module);
                     let references = BTreeSet::<String>::new();
@@ -818,6 +834,15 @@ impl Plan {
             hash.u8(self.reached.contains(key) as u8);
         }
         self.selection = hashes.into_iter().map(|h| h.map_or(0, |h| h.finish128())).collect();
+        // A crate whose indexed files are all reached loads exactly what an eager crate loads: its
+        // identity is the eager one. Otherwise the same crate would carry an identity that depends
+        // on whether the early prefix had reached it when its image was recorded or looked up (a
+        // timing accident), and no two programs could share its image or its fingerprint.
+        for ci in 0..self.selection.len() {
+            if self.selection[ci] != 0 && self.indexed.range((ci, String::new())..(ci + 1, String::new())).all(|k| self.reached.contains(k)) {
+                self.selection[ci] = 0;
+            }
+        }
         for (context, &identity) in self.contexts.iter().zip(&self.selection) {
             if identity != 0 { context.set_demand_identity(identity); }
         }

@@ -21,8 +21,37 @@ fn edge(i: &mut RegionInput, b: &Body, sup: usize, sub: usize, at: Option<Locati
     i.outlives.push(OutlivesConstraint { sup, sub, location: at.map(|p| LocationMap::new(b).point(p)),
         span: Default::default(), category: ConstraintCategory::Assignment, from_closure: false });
 }
+/// Dropck answers by dropped type: the kinds are the given region vids (the fixtures' normalized
+/// `dropck_outlives` results). Region constraints and overflows are not exercised here.
+struct DropOps<'a> { tcx: &'a Tcx, dropck: std::collections::HashMap<TyId, Vec<usize>> }
+impl crate::borrowck::type_check::liveness::LivenessOps for DropOps<'_> {
+    fn dropck_outlives(&mut self, ty: TyId, _: Span) -> crate::borrowck::type_check::liveness::DropckData {
+        let kinds = self.dropck.get(&ty).into_iter().flatten()
+            .map(|&v| crate::consts::GenericArg::Lifetime(self.tcx.tys.intern_region(RegionKind::ReVar(v as u32)))).collect();
+        crate::borrowck::type_check::liveness::DropckData { kinds, ..Default::default() }
+    }
+    fn free_regions_for_liveness(&mut self, value: crate::consts::GenericArg) -> Vec<crate::types::RegionId> {
+        let found = std::cell::RefCell::new(vec![]);
+        let ty = match value { crate::consts::GenericArg::Lifetime(r) => return vec![r], crate::consts::GenericArg::Type(t) => t, _ => return vec![] };
+        self.tcx.tys.map_regions(ty, &|r, _| { found.borrow_mut().push(r); r }, 0);
+        found.into_inner()
+    }
+    fn push_region_constraints(&mut self, _: &mut crate::borrowck::type_check::MirTypeckRegionConstraints, _: crate::borrowck::type_check::Locations, _: Span,
+        _: ConstraintCategory, _: &crate::next_solver::type_op::QueryRegionConstraints) { unreachable!("no dropck constraints in these fixtures") }
+}
 fn generate(tcx: &Tcx, b: &Body, moves: &MoveData, i: &mut RegionInput, drops: &[Vec<usize>]) {
-    crate::borrowck::type_check::liveness::generate(tcx, &test_prog(), b, moves, i, drops);
+    use crate::borrowck::type_check::{liveness, MirTypeckRegionConstraints};
+    let locations = LocationMap::new(b);
+    let mut ops = DropOps { tcx, dropck: b.local_decls.iter().zip(drops).map(|(d, v)| (d.ty, v.clone())).collect() };
+    let mut constraints = MirTypeckRegionConstraints::new(locations.num_points());
+    constraints.outlives_constraints = std::mem::take(&mut i.outlives);
+    constraints.liveness_constraints = std::mem::replace(&mut i.liveness, LivenessValues::new(0, locations.num_points()));
+    let mut polonius = std::mem::take(&mut i.polonius);
+    let mut overflows = vec![];
+    liveness::generate(liveness::LivenessCx { tcx, prog: &test_prog(), infcx: &mut ops, body: b, moves, universals: &i.relations.universal_regions,
+        locations: &locations, has_loans: true, constraints: &mut constraints, polonius: &mut polonius, overflows: &mut overflows });
+    assert!(overflows.is_empty());
+    i.outlives = constraints.outlives_constraints; i.liveness = constraints.liveness_constraints; i.polonius = polonius;
 }
 
 // #21906, from_the_rfc/get_default: returning a borrow on Some must not
@@ -49,17 +78,54 @@ fn get_default_and_filtering_lending_iterator_use_final_polonius_verdict() {
     // #92985 / #51526 reduce to the same return-or-loop graph. GAT/type
     // normalization is intentionally outside these MIR tests.
     for filtering in [false, true] {
-        let tcx = Tcx::new(); let (b, mut i) = conditional_return(&tcx, filtering);
-        let moves = gather(&tcx, &b);
-        generate(&tcx, &b, &moves, &mut i, &vec![vec![]; b.local_decls.len()]);
-        let mut regions = compute_regions(&tcx, &test_prog(), &b, i, false);
-        let nll = check_with_scopes(&test_prog(), &tcx, &b, &regions, &moves);
+        let tcx = Tcx::new();
+        // (owner, prog): strict (no crate), relaxed without `polonius`, relaxed with it
+        let run = |prog: &crate::program::Program, owner: Option<crate::program::DefId>| {
+            let (mut b, mut i) = conditional_return(&tcx, filtering);
+            if let Some(o) = owner { b.source.owner = o; }
+            let moves = gather(&tcx, &b);
+            generate(&tcx, &b, &moves, &mut i, &vec![vec![]; b.local_decls.len()]);
+            let mut regions = compute_regions(&tcx, &test_prog(), &b, i, false);
+            let nll = check_with_scopes(&test_prog(), &tcx, &b, &regions, &moves);
+            let result = mir_borrowck(&tcx, prog, &b, &mut regions, &moves);
+            let polonius = check_polonius(&tcx, &test_prog(), &b, &regions, &moves);
+            (nll, result, polonius)
+        };
+        let (nll, strict, polonius) = run(&test_prog(), None);
         assert!(!nll.accepted(), "fixture must expose NLL's imprecision");
         assert!(nll.errors.iter().any(|e| matches!(e.code(), "E0499" | "E0506")), "{nll:?}");
-        let result = mir_borrowck(&tcx, &test_prog(), &b, &mut regions, &moves);
+        assert!(polonius.accepted());
+        // Stable rustc is NLL: the strict verdict keeps the errors.
+        assert_eq!(codes(&strict), codes(&nll), "filtering={filtering}: strict must be NLL's verdict");
+        assert!(strict.fv_only.is_empty() && strict.relaxed_records.is_empty());
+        // Relaxed Rust without the `polonius` feature: still NLL.
+        let (prog, owner) = relaxed_prog("field-views,two-phase,mut");
+        let (_, other, _) = run(&prog, Some(owner));
+        assert_eq!(codes(&other), codes(&nll));
+        // Relaxed Rust `polonius`: accepted, every NLL error reported as accepted under Polonius.
+        let (prog, owner) = relaxed_prog("polonius");
+        let (_, result, _) = run(&prog, Some(owner));
         assert!(result.accepted(), "filtering={filtering}: {result:?}");
-        assert!(check_polonius(&tcx, &test_prog(), &b, &regions, &moves).accepted());
+        assert_eq!(result.fv_only.len(), nll.errors.len());
+        assert!(result.fv_only.iter().all(|e| matches!(e.fv.as_deref(), Some(crate::borrowck::borrowck_errors::FvNote::Polonius))));
+        assert_eq!(result.relaxed_records.len(), nll.errors.len());
     }
+}
+
+/// A program with one crate whose relaxed Rust features are `features` (MAKEPAD_RUN_RELAXED), and
+/// a fn of it to own fixture MIR.
+fn relaxed_prog(features: &str) -> (crate::program::Program, crate::program::DefId) {
+    let mut session = crate::Session::default();
+    session.options.relaxed = Some(features.to_string());
+    let session = std::sync::Arc::new(session);
+    let path = std::env::temp_dir().join(format!("relax-polonius-{}-{:?}.rs", std::process::id(), std::thread::current().id()));
+    std::fs::write(&path, "fn owner() {}\nfn main() {}\n").unwrap();
+    let mut prog = crate::program::Program::new(&session);
+    prog.load_crate("custom", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), Vec::new()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let owner = (0..prog.defs.len()).map(|i| crate::program::DefId(i as u32))
+        .find(|&d| prog.def(d).kind == crate::program::DefKind::Fn && prog.name(d) == "owner").unwrap();
+    (prog, owner)
 }
 #[test]
 fn lending_items_still_reject_overlapping_use_and_drop_liveness() {
@@ -236,7 +302,7 @@ fn regular_generic_args_are_invariant_and_drop_variance_uses_the_whole_type() {
     let tcx = Tcx::new();
     let b = body(&[tcx.tys.unit, tcx.tys.i32_, rty(&tcx, 1)], vec![block(vec![assign(2,
         Operand::Constant(Box::new(ConstOperand { span: Span::default(), user_ty: None,
-            const_: Const::Unevaluated { def: DefId(100), args: vec![crate::consts::GenericArg::Type(rty(&tcx, 1))], promoted: None } })))], TerminatorKind::Return)]);
+            const_: Const::Unevaluated { def: DefId(100), args: vec![crate::consts::GenericArg::Type(rty(&tcx, 1))], promoted: None, ty: tcx.tys.i32_ } })))], TerminatorKind::Return)]);
     let mut i = input(&b, &[vec![]]); let moves = gather(&tcx, &b);
     generate(&tcx, &b, &moves, &mut i, &[vec![], vec![], vec![]]);
     assert_eq!(i.polonius.live_region_variances[1], Some(D::Bidirectional));

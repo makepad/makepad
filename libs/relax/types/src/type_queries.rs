@@ -3,6 +3,7 @@
 //! Type properties on the shared query engine. Tcx owns tables; providers borrow the
 //! collected program. rustc_middle/src/ty/context.rs:258 and query/plumbing.rs:25.
 
+pub(crate) mod place_types;
 use crate::types::AliasTyKind;
 use crate::types::AliasTy;
 use crate::fxhash::HashSet;
@@ -603,12 +604,17 @@ impl Providers<'_> {
         let q = &self.tcx.queries;
         q.const_eval.get(&q.engine, key, &mut |key| {
             q.read_declarations()?;
+            let emitted = crate::infer::diagnostics::DiagCtxt::thread_emitted();
             let value = crate::const_eval::eval_to_valtree(self.tcx, self.prog, &key);
+            // a failure the evaluator already reported (its own "evaluation panicked" ..) is reported
+            // once; one it left unreported (an overflow found while lowering) gets the generic E0080
             if let Err(ErrorHandled::Reported(error)) = &value {
-                let d = self.prog.def(key.def);
-                self.tcx.dcx.report(crate::next_solver::fulfill::ObligationCause {
-                    body_id: key.def, span: self.prog.files[d.file as usize].ast.item(d.item).lo,
-                }, format!("E0080: constant evaluation failed: {error:?}"));
+                if matches!(error, crate::const_eval::ValTreeCreationError::ErrorHandled(_)) && crate::infer::diagnostics::DiagCtxt::thread_emitted() == emitted {
+                    let d = self.prog.def(key.def);
+                    self.tcx.dcx.report(crate::next_solver::fulfill::ObligationCause {
+                        body_id: key.def, span: self.prog.files[d.file as usize].ast.item(d.item).lo,
+                    }, format!("E0080: constant evaluation failed: {error:?}"));
+                }
             }
             Ok(value)
         }, &|id| self.force(id))
@@ -714,7 +720,19 @@ impl Tcx {
     /// rustc_hir_typeck/src/lib.rs:84-101: closures share their typeck root.
     pub fn typeck(&self, prog: &Program, mut def: DefId) -> std::sync::Arc<crate::typeck::Body> {
         while prog.def(def).kind == crate::program::DefKind::Closure { def = prog.def(def).parent; }
-        Providers { tcx: self, prog }.typeck(def).expect("typeck query")
+        match (Providers { tcx: self, prog }).typeck(def) {
+            Ok(body) => body,
+            // rustc_query_system cycle_error: E0391, the query's error value
+            Err(QueryError::Cycle(_)) => {
+                let d = prog.def(def);
+                let args = self.generic_indices_of(prog, def).identity_types_consts(&self.tys);
+                let mut body = crate::typeck::Body::empty(def, args, d.file, self.tys.unit);
+                body.errors.push(prog.record_error(d.file, prog.files[d.file as usize].ast.item(d.item).lo, "typeck",
+                    format!("E0391: cycle detected when type-checking `{}`", prog.def_path(def))));
+                std::sync::Arc::new(body)
+            }
+            Err(e) => panic!("typeck query: {e:?}"),
+        }
     }
 
     /// Nightly mir/interpret/queries.rs:58,90: retain the environment and full
@@ -740,8 +758,18 @@ impl Tcx {
             };
             assert!(!infer, "const_eval_resolve received non-region inference variables");
         }
-        Providers { tcx: self, prog }.const_eval_resolve(ConstEvalKey { typing_env, def, args: args.into() })
-            .expect("const_eval_resolve query")
+        match (Providers { tcx: self, prog }).const_eval_resolve(ConstEvalKey { typing_env, def, args: args.into() }) {
+            Ok(value) => value,
+            // a constant that needs its own value: E0391 (rustc report_cycle)
+            Err(QueryError::Cycle(_)) => {
+                let d = prog.def(def);
+                self.dcx.report(crate::next_solver::fulfill::ObligationCause {
+                    body_id: def, span: prog.files[d.file as usize].ast.item(d.item).lo,
+                }, format!("E0391: cycle detected when const-evaluating `{}`", prog.def_path(def)));
+                Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::CyclicConst))
+            }
+            Err(e) => panic!("const_eval_resolve query: {e:?}"),
+        }
     }
 
     pub fn needs_drop(&self, prog: &Program, env: TypingEnv, ty: TyId) -> bool {
@@ -795,7 +823,7 @@ mod tests {
     use crate::types::RegionArgsId;
 
     fn program(source: &[u8]) -> (Program, Tcx) {
-        let dir = std::env::temp_dir().join(format!("relax-type-queries-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!("relax-type-queries-{}-{}", std::process::id(), crate::unique_test_suffix()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("lib.rs");
         std::fs::write(&path, source).unwrap();
@@ -1132,11 +1160,22 @@ impl Tcx {
     }
     /// The declaration query retains its interned identity, as rustc's param_env query does.
     pub fn param_env_id(&self, prog: &Program, def: DefId) -> crate::tcx::ParamEnvId {
-        Providers { tcx: self, prog }.param_env(def).expect("param_env query")
+        match (Providers { tcx: self, prog }).param_env(def) {
+            Ok(env) => env,
+            Err(QueryError::Cycle(_)) => {
+                let d = prog.def(def);
+                self.dcx.report(crate::next_solver::fulfill::ObligationCause {
+                    body_id: def, span: prog.files[d.file as usize].ast.item(d.item).lo,
+                }, format!("E0391: cycle detected when computing the bounds of `{}`", prog.def_path(def)));
+                crate::tcx::ParamEnvId::EMPTY
+            }
+            Err(e) => panic!("param_env query: {e:?}"),
+        }
     }
     /// The dyn_compatibility_violations query (provider: dyn_compatibility_violations_uncached).
     pub fn dyn_compatibility_violations(&self, prog: &Program, def: DefId) -> Vec<DefId> {
-        Providers { tcx: self, prog }.dyn_compatibility_violations(def).expect("dyn_compatibility_violations query")
+        // a cycle (the trait's own bounds name `dyn` of itself) leaves the trait compatible here; rustc reports E0391
+        Providers { tcx: self, prog }.dyn_compatibility_violations(def).unwrap_or_default()
     }
     /// The own_existential_vtable_entries query (provider: own_existential_vtable_entries_uncached).
     pub fn own_existential_vtable_entries(&self, prog: &Program, def: DefId) -> Vec<DefId> {

@@ -120,7 +120,7 @@ impl Scope {
         if !s.presented {
             s.events.push(event.clone());
         }
-        Self(Some((index, event, crate::cpu_ns())))
+        Self(Some((index, event, relax_backend::cpu_ns())))
     }
     pub fn slot(slot: u32, phase: &'static str) -> Self {
         if !enabled() {
@@ -166,7 +166,7 @@ impl Drop for Scope {
         let Some((index, mut event, start)) = self.0.take() else {
             return;
         };
-        let elapsed = crate::cpu_ns().saturating_sub(start);
+        let elapsed = relax_backend::cpu_ns().saturating_sub(start);
         let child = CHILD_CPU
             .try_with(|s| {
                 let mut s = s.borrow_mut();

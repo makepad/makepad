@@ -353,6 +353,7 @@ impl<T> RawTable<T> {
         probe_find(self.ctrl, self.bucket_count, hash, |i| eq(unsafe { self.get(i) }))
     }
 
+    #[relax(keep_reachable)]
     pub(crate) fn reserve(&mut self, additional: usize, hasher: &dyn Fn(&T) -> u64) {
         if additional <= self.growth_left { return; }
         let needed = match self.items.checked_add(additional) {
@@ -368,6 +369,7 @@ impl<T> RawTable<T> {
         }
     }
 
+    #[relax(keep_reachable)]
     fn resize_to(&mut self, buckets: usize, hasher: &dyn Fn(&T) -> u64) {
         let mut new = RawTable::<T>::new();
         new.alloc_buckets(buckets);
@@ -389,6 +391,7 @@ impl<T> RawTable<T> {
         mem::swap(self, &mut new);
     }
 
+    #[relax(keep_reachable)]
     fn rehash_in_place(&mut self, hasher: &dyn Fn(&T) -> u64) {
         let mut i = 0;
         while i < self.bucket_count {
@@ -539,7 +542,7 @@ impl<T: Clone> RawTable<T> {
         t
     }
 }
-impl<T> Drop for RawTable<T> {
+unsafe impl<#[may_dangle] T> Drop for RawTable<T> {
     fn drop(&mut self) {
         self.drop_elements();
         if self.bucket_count != 0 {

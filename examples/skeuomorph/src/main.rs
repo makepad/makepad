@@ -347,7 +347,7 @@ script_mod! {
                 window.inner_size: vec2(1060, 1000)
                 pass.clear_color: #x18191c
                 body +: {
-                    backdrop := Surface{
+                    surface := Surface{
                         width: Fill
                         height: Fill
                         proxy: false

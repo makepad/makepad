@@ -48,6 +48,8 @@ makepad-remote = { path = "../libs/remote", version = "0.1.0" }
 makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 # Every native target uses the HAL; web retains its browser backend.
 makepad-hal = { path = "./hal", version = "1.0.0" }
+# the web backend's messages for a host that plays the page (feature web-protocol)
+makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0", optional = true }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }
@@ -89,3 +91,8 @@ makepad-vulkan = { path = "../libs/vulkan", version = "0.1.0" }
 package = "makepad-windows-sys"
 path = "../libs/windows/sys"
 version = "0.1.0"
+
+[features]
+# The web backend's message types built for this machine (src/web_protocol.rs): the web trace
+# host (tools/web_trace) plays the page's side of them.
+web-protocol = ["dep:makepad-wasm-bridge"]

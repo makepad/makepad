@@ -35,6 +35,8 @@ impl u8 {
     pub const fn overflowing_neg(self) -> (u8, bool) { ((0 as u8) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: u8) -> (u8, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: u8) -> (u8, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: u8) -> (u8, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: u8) -> (u8, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (u8, bool) { (((self as u8) << (rhs & 7)) as u8, rhs >= 8) }
     pub const fn overflowing_shr(self, rhs: u32) -> (u8, bool) { (self >> (rhs & 7), rhs >= 8) }
     pub const fn overflowing_pow(self, exp: u32) -> (u8, bool) {
@@ -52,6 +54,15 @@ impl u8 {
     pub const fn wrapping_pow(self, exp: u32) -> u8 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> u8 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> u8 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: u8) -> u8 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: u8) -> u8 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: u8) -> u8 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: u8) -> u8 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: u8) -> u8 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> u8 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> u8 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> u8 { if rhs < u8::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> u8 { if rhs < u8::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: u8) -> Option<u8> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: u8) -> Option<u8> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: u8) -> Option<u8> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -143,6 +154,8 @@ impl u16 {
     pub const fn overflowing_neg(self) -> (u16, bool) { ((0 as u16) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: u16) -> (u16, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: u16) -> (u16, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: u16) -> (u16, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: u16) -> (u16, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (u16, bool) { (((self as u16) << (rhs & 15)) as u16, rhs >= 16) }
     pub const fn overflowing_shr(self, rhs: u32) -> (u16, bool) { (self >> (rhs & 15), rhs >= 16) }
     pub const fn overflowing_pow(self, exp: u32) -> (u16, bool) {
@@ -160,6 +173,15 @@ impl u16 {
     pub const fn wrapping_pow(self, exp: u32) -> u16 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> u16 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> u16 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: u16) -> u16 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: u16) -> u16 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: u16) -> u16 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: u16) -> u16 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: u16) -> u16 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> u16 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> u16 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> u16 { if rhs < u16::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> u16 { if rhs < u16::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: u16) -> Option<u16> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: u16) -> Option<u16> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: u16) -> Option<u16> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -251,6 +273,8 @@ impl u32 {
     pub const fn overflowing_neg(self) -> (u32, bool) { ((0 as u32) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: u32) -> (u32, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: u32) -> (u32, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: u32) -> (u32, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: u32) -> (u32, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (u32, bool) { (((self as u32) << (rhs & 31)) as u32, rhs >= 32) }
     pub const fn overflowing_shr(self, rhs: u32) -> (u32, bool) { (self >> (rhs & 31), rhs >= 32) }
     pub const fn overflowing_pow(self, exp: u32) -> (u32, bool) {
@@ -268,6 +292,15 @@ impl u32 {
     pub const fn wrapping_pow(self, exp: u32) -> u32 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> u32 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> u32 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: u32) -> u32 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: u32) -> u32 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: u32) -> u32 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: u32) -> u32 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: u32) -> u32 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> u32 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> u32 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> u32 { if rhs < u32::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> u32 { if rhs < u32::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: u32) -> Option<u32> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: u32) -> Option<u32> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: u32) -> Option<u32> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -359,6 +392,8 @@ impl u64 {
     pub const fn overflowing_neg(self) -> (u64, bool) { ((0 as u64) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: u64) -> (u64, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: u64) -> (u64, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: u64) -> (u64, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: u64) -> (u64, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (u64, bool) { (((self as u64) << (rhs & 63)) as u64, rhs >= 64) }
     pub const fn overflowing_shr(self, rhs: u32) -> (u64, bool) { (self >> (rhs & 63), rhs >= 64) }
     pub const fn overflowing_pow(self, exp: u32) -> (u64, bool) {
@@ -376,6 +411,15 @@ impl u64 {
     pub const fn wrapping_pow(self, exp: u32) -> u64 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> u64 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> u64 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: u64) -> u64 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: u64) -> u64 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: u64) -> u64 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: u64) -> u64 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: u64) -> u64 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> u64 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> u64 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> u64 { if rhs < u64::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> u64 { if rhs < u64::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: u64) -> Option<u64> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: u64) -> Option<u64> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: u64) -> Option<u64> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -481,6 +525,8 @@ impl u128 {
     pub const fn overflowing_neg(self) -> (u128, bool) { ((0 as u128) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: u128) -> (u128, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: u128) -> (u128, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: u128) -> (u128, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: u128) -> (u128, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (u128, bool) { (((self as u128) << (rhs & 127)) as u128, rhs >= 128) }
     pub const fn overflowing_shr(self, rhs: u32) -> (u128, bool) { (self >> (rhs & 127), rhs >= 128) }
     pub const fn overflowing_pow(self, exp: u32) -> (u128, bool) {
@@ -498,6 +544,15 @@ impl u128 {
     pub const fn wrapping_pow(self, exp: u32) -> u128 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> u128 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> u128 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: u128) -> u128 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: u128) -> u128 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: u128) -> u128 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: u128) -> u128 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: u128) -> u128 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> u128 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> u128 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> u128 { if rhs < u128::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> u128 { if rhs < u128::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: u128) -> Option<u128> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: u128) -> Option<u128> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: u128) -> Option<u128> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -589,6 +644,8 @@ impl usize {
     pub const fn overflowing_neg(self) -> (usize, bool) { ((0 as usize) - self, self != 0) }
     pub const fn overflowing_div(self, rhs: usize) -> (usize, bool) { (self / rhs, false) }
     pub const fn overflowing_rem(self, rhs: usize) -> (usize, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: usize) -> (usize, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: usize) -> (usize, bool) { (self % rhs, false) }
     pub const fn overflowing_shl(self, rhs: u32) -> (usize, bool) { (((self as usize) << (rhs & 63)) as usize, rhs >= 64) }
     pub const fn overflowing_shr(self, rhs: u32) -> (usize, bool) { (self >> (rhs & 63), rhs >= 64) }
     pub const fn overflowing_pow(self, exp: u32) -> (usize, bool) {
@@ -606,6 +663,15 @@ impl usize {
     pub const fn wrapping_pow(self, exp: u32) -> usize { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> usize { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> usize { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: usize) -> usize { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: usize) -> usize { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: usize) -> usize { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: usize) -> usize { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: usize) -> usize { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> usize { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> usize { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> usize { if rhs < usize::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> usize { if rhs < usize::BITS { self.wrapping_shr(rhs) } else { 0 } }
     pub const fn checked_add(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
     pub const fn checked_mul(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
@@ -698,6 +764,8 @@ impl i8 {
     pub const fn overflowing_div(self, rhs: i8) -> (i8, bool) { if self == i8::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: i8) -> (i8, bool) { if rhs == -1 { (0, self == i8::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (i8, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: i8) -> (i8, bool) { if self == i8::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: i8) -> (i8, bool) { if rhs == -1 { (0, self == i8::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (i8, bool) { (((self as u8) << (rhs & 7)) as i8, rhs >= 8) }
     pub const fn overflowing_shr(self, rhs: u32) -> (i8, bool) { (self >> (rhs & 7), rhs >= 8) }
     pub const fn overflowing_pow(self, exp: u32) -> (i8, bool) {
@@ -715,6 +783,16 @@ impl i8 {
     pub const fn wrapping_pow(self, exp: u32) -> i8 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> i8 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> i8 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: i8) -> i8 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: i8) -> i8 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: i8) -> i8 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: i8) -> i8 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: i8) -> i8 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> i8 { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> i8 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> i8 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> i8 { if rhs < i8::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> i8 { if rhs < i8::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(i8::BITS - 1) } }
     pub const fn wrapping_abs(self) -> i8 { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: i8) -> Option<i8> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: i8) -> Option<i8> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -807,6 +885,8 @@ impl i16 {
     pub const fn overflowing_div(self, rhs: i16) -> (i16, bool) { if self == i16::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: i16) -> (i16, bool) { if rhs == -1 { (0, self == i16::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (i16, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: i16) -> (i16, bool) { if self == i16::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: i16) -> (i16, bool) { if rhs == -1 { (0, self == i16::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (i16, bool) { (((self as u16) << (rhs & 15)) as i16, rhs >= 16) }
     pub const fn overflowing_shr(self, rhs: u32) -> (i16, bool) { (self >> (rhs & 15), rhs >= 16) }
     pub const fn overflowing_pow(self, exp: u32) -> (i16, bool) {
@@ -824,6 +904,16 @@ impl i16 {
     pub const fn wrapping_pow(self, exp: u32) -> i16 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> i16 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> i16 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: i16) -> i16 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: i16) -> i16 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: i16) -> i16 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: i16) -> i16 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: i16) -> i16 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> i16 { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> i16 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> i16 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> i16 { if rhs < i16::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> i16 { if rhs < i16::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(i16::BITS - 1) } }
     pub const fn wrapping_abs(self) -> i16 { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: i16) -> Option<i16> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: i16) -> Option<i16> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -916,6 +1006,8 @@ impl i32 {
     pub const fn overflowing_div(self, rhs: i32) -> (i32, bool) { if self == i32::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: i32) -> (i32, bool) { if rhs == -1 { (0, self == i32::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (i32, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: i32) -> (i32, bool) { if self == i32::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: i32) -> (i32, bool) { if rhs == -1 { (0, self == i32::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (i32, bool) { (((self as u32) << (rhs & 31)) as i32, rhs >= 32) }
     pub const fn overflowing_shr(self, rhs: u32) -> (i32, bool) { (self >> (rhs & 31), rhs >= 32) }
     pub const fn overflowing_pow(self, exp: u32) -> (i32, bool) {
@@ -933,6 +1025,16 @@ impl i32 {
     pub const fn wrapping_pow(self, exp: u32) -> i32 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> i32 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> i32 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: i32) -> i32 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: i32) -> i32 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: i32) -> i32 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: i32) -> i32 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: i32) -> i32 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> i32 { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> i32 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> i32 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> i32 { if rhs < i32::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> i32 { if rhs < i32::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(i32::BITS - 1) } }
     pub const fn wrapping_abs(self) -> i32 { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: i32) -> Option<i32> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: i32) -> Option<i32> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -1028,6 +1130,8 @@ impl i64 {
     pub const fn overflowing_div(self, rhs: i64) -> (i64, bool) { if self == i64::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: i64) -> (i64, bool) { if rhs == -1 { (0, self == i64::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (i64, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: i64) -> (i64, bool) { if self == i64::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: i64) -> (i64, bool) { if rhs == -1 { (0, self == i64::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (i64, bool) { (((self as u64) << (rhs & 63)) as i64, rhs >= 64) }
     pub const fn overflowing_shr(self, rhs: u32) -> (i64, bool) { (self >> (rhs & 63), rhs >= 64) }
     pub const fn overflowing_pow(self, exp: u32) -> (i64, bool) {
@@ -1045,6 +1149,16 @@ impl i64 {
     pub const fn wrapping_pow(self, exp: u32) -> i64 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> i64 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> i64 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: i64) -> i64 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: i64) -> i64 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: i64) -> i64 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: i64) -> i64 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: i64) -> i64 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> i64 { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> i64 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> i64 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> i64 { if rhs < i64::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> i64 { if rhs < i64::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(i64::BITS - 1) } }
     pub const fn wrapping_abs(self) -> i64 { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: i64) -> Option<i64> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: i64) -> Option<i64> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -1146,6 +1260,8 @@ impl i128 {
     pub const fn overflowing_div(self, rhs: i128) -> (i128, bool) { if self == i128::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: i128) -> (i128, bool) { if rhs == -1 { (0, self == i128::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (i128, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: i128) -> (i128, bool) { if self == i128::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: i128) -> (i128, bool) { if rhs == -1 { (0, self == i128::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (i128, bool) { (((self as u128) << (rhs & 127)) as i128, rhs >= 128) }
     pub const fn overflowing_shr(self, rhs: u32) -> (i128, bool) { (self >> (rhs & 127), rhs >= 128) }
     pub const fn overflowing_pow(self, exp: u32) -> (i128, bool) {
@@ -1163,6 +1279,16 @@ impl i128 {
     pub const fn wrapping_pow(self, exp: u32) -> i128 { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> i128 { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> i128 { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: i128) -> i128 { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: i128) -> i128 { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: i128) -> i128 { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: i128) -> i128 { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: i128) -> i128 { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> i128 { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> i128 { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> i128 { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> i128 { if rhs < i128::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> i128 { if rhs < i128::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(i128::BITS - 1) } }
     pub const fn wrapping_abs(self) -> i128 { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: i128) -> Option<i128> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: i128) -> Option<i128> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -1258,6 +1384,8 @@ impl isize {
     pub const fn overflowing_div(self, rhs: isize) -> (isize, bool) { if self == isize::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
     pub const fn overflowing_rem(self, rhs: isize) -> (isize, bool) { if rhs == -1 { (0, self == isize::MIN) } else { (self % rhs, false) } }
     pub const fn overflowing_abs(self) -> (isize, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: isize) -> (isize, bool) { if self == isize::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: isize) -> (isize, bool) { if rhs == -1 { (0, self == isize::MIN) } else { (self.rem_euclid(rhs), false) } }
     pub const fn overflowing_shl(self, rhs: u32) -> (isize, bool) { (((self as usize) << (rhs & 63)) as isize, rhs >= 64) }
     pub const fn overflowing_shr(self, rhs: u32) -> (isize, bool) { (self >> (rhs & 63), rhs >= 64) }
     pub const fn overflowing_pow(self, exp: u32) -> (isize, bool) {
@@ -1275,6 +1403,16 @@ impl isize {
     pub const fn wrapping_pow(self, exp: u32) -> isize { self.overflowing_pow(exp).0 }
     pub const fn wrapping_shl(self, rhs: u32) -> isize { self.overflowing_shl(rhs).0 }
     pub const fn wrapping_shr(self, rhs: u32) -> isize { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: isize) -> isize { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: isize) -> isize { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: isize) -> isize { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: isize) -> isize { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: isize) -> isize { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> isize { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> isize { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> isize { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> isize { if rhs < isize::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> isize { if rhs < isize::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(isize::BITS - 1) } }
     pub const fn wrapping_abs(self) -> isize { self.overflowing_abs().0 }
     pub const fn checked_add(self, rhs: isize) -> Option<isize> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
     pub const fn checked_sub(self, rhs: isize) -> Option<isize> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
@@ -1354,7 +1492,7 @@ impl u8 {
     pub const fn to_ascii_uppercase(&self) -> u8 { if self.is_ascii_lowercase() { *self - 32 } else { *self } }
     pub const fn to_ascii_lowercase(&self) -> u8 { if self.is_ascii_uppercase() { *self + 32 } else { *self } }
     pub const fn eq_ignore_ascii_case(&self, other: &u8) -> bool { self.to_ascii_lowercase() == other.to_ascii_lowercase() }
-    pub fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
-    pub fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
+    pub const fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
+    pub const fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
 }
 

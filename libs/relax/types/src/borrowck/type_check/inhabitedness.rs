@@ -18,7 +18,7 @@ impl InhabitedPredicate {
             Self::And(ps) => { for p in ps { if !p.apply_ignore_module(cx, stack) { return false; } } true }
             Self::Or(ps) => { for p in ps { if p.apply_ignore_module(cx, stack) { return true; } } false }
             Self::GenericType(t) => {
-                let env = crate::tcx::TypingEnv { limit: cx.infcx.recursion_limit, mode: cx.typing_mode, param_env: cx.param_env_id() };
+                let env = crate::tcx::TypingEnv { limit: cx.infcx.recursion_limit, mode: cx.typing_mode.get(), param_env: cx.param_env_id() };
                 let normalized = cx.tcx.try_normalize_erasing_regions(cx.prog, env, t).unwrap_or(t);
                 let pred = inhabited_predicate(cx, normalized, &mut Vec::new());
                 if matches!(pred, Self::GenericType(_)) || stack.contains(&t) { return true; }

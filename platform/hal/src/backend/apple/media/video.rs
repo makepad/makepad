@@ -108,6 +108,24 @@ pub struct Prepared {
 pub struct FrameInfo {
     pub yuv: bool,
     pub full_range: bool,
+    /// The `VideoFrame::matrix` selector: 0 BT.709, 1 BT.601, 2 BT.2020.
+    pub matrix: f32,
+}
+
+/// The matrix selector of a decoded buffer's YCbCr matrix attachment (its
+/// H.273 code point); BT.709 when it has none.
+unsafe fn buffer_matrix(pixel_buffer: CVPixelBufferRef) -> f32 {
+    let value = CVBufferCopyAttachment(pixel_buffer, kCVImageBufferYCbCrMatrixKey, std::ptr::null_mut());
+    if value.is_null() {
+        return 0.0;
+    }
+    let code = CVYCbCrMatrixGetIntegerCodePointForString(value as CFStringRef);
+    CFRelease(value);
+    match code {
+        5 | 6 | 7 => 1.0,
+        9 | 10 => 2.0,
+        _ => 0.0,
+    }
 }
 
 /// Keeps the CoreVideo objects of a frame alive while its Metal textures may be sampled; it is
@@ -161,6 +179,7 @@ pub struct Player {
     /// Last frame was presented via NV12 Y/UV planes (not BGRA).
     presents_yuv: bool,
     yuv_full_range: bool,
+    yuv_matrix: f32,
     /// When set, `poll_frame` holds the previous texture until post-seek warm-up completes (or
     /// the hard timeout clears it).
     post_seek_gate: Option<PostSeekGate>,
@@ -233,6 +252,7 @@ impl Player {
                 cpu_texture: None,
                 presents_yuv: false,
                 yuv_full_range: false,
+                yuv_matrix: 0.0,
                 post_seek_gate: None,
                 position_secs: 0.0,
                 duration_secs: 0.0,
@@ -257,7 +277,7 @@ impl Player {
 
     /// How the newest frame is in the textures.
     pub fn frame_info(&self) -> FrameInfo {
-        FrameInfo { yuv: self.presents_yuv, full_range: self.yuv_full_range }
+        FrameInfo { yuv: self.presents_yuv, full_range: self.yuv_full_range, matrix: self.yuv_matrix }
     }
 
     fn clear_yuv_present(&mut self, s: &mut Session, sink: &mut dyn Sink) {
@@ -269,6 +289,7 @@ impl Player {
         }
         self.presents_yuv = false;
         self.yuv_full_range = false;
+        self.yuv_matrix = 0.0;
     }
 
     /// Whether `pixel_buffer` is a biplanar 8-bit NV12-style buffer we can wrap.
@@ -328,6 +349,7 @@ impl Player {
             return false;
         }
         let full_range = CVPixelBufferGetPixelFormatType(pixel_buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+        let matrix = buffer_matrix(pixel_buffer);
         // the CoreVideo objects live as long as the plane textures; the Y texture owns them
         let keep: Box<dyn Any + Send> = Box::new(Keep { pixel_buffer, cv: [cv_y, cv_uv] });
         let t = self.targets;
@@ -343,6 +365,7 @@ impl Player {
         self.cpu_texture = None;
         self.presents_yuv = true;
         self.yuv_full_range = full_range;
+        self.yuv_matrix = matrix;
         true
     }
 

@@ -2,6 +2,8 @@
 //! derive, builtins, fmtmac, macro_reg) and immutable Rust source contexts (source_context). Builds on relax-base.
 //! The layers below are re-exported, so every module of Relax is `crate::<module>` in each layer.
 
+#![recursion_limit = "4096"]
+
 pub use relax_base::*;
 
 /// Compiler statics held for rollback; forget them before destroying their generations.
@@ -52,11 +54,13 @@ fn zone_reset_fresh_process() {
 }
 
 pub mod lit;
+pub mod builtin_attrs;
 pub mod parser;
 pub mod program;
 pub mod def_collector;
 pub mod assoc;
 pub mod macros;
+pub mod macro_check;
 pub mod preload;
 pub mod crate_image;
 pub mod collected;
@@ -81,3 +85,5 @@ pub mod origin_table;
 
 pub mod lang_items;
 pub mod target_features;
+pub mod feature_tables;
+pub mod features;

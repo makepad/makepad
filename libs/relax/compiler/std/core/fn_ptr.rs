@@ -7,3 +7,11 @@ use crate::ops::FnPtr;
 
 impl<F: FnPtr> fmt::Pointer for F { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Pointer::fmt(&(FnPtr::addr(*self) as *const ()), f) } }
 impl<F: FnPtr> fmt::Debug for F { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Pointer::fmt(&(FnPtr::addr(*self) as *const ()), f) } }
+use crate::cmp::{Ordering, PartialOrd, Ord};
+use crate::hash::{Hash, Hasher};
+
+impl<F: FnPtr> PartialEq for F { fn eq(&self, other: &Self) -> bool { self.addr() == other.addr() } }
+impl<F: FnPtr> Eq for F {}
+impl<F: FnPtr> PartialOrd for F { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { self.addr().partial_cmp(&other.addr()) } }
+impl<F: FnPtr> Ord for F { fn cmp(&self, other: &Self) -> Ordering { self.addr().cmp(&other.addr()) } }
+impl<F: FnPtr> Hash for F { fn hash<HH: Hasher>(&self, state: &mut HH) { state.write_usize(self.addr()) } }

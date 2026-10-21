@@ -16,10 +16,14 @@ impl Clone for ! {
 }
 
 impl<'a, T: crate::marker::PointeeSized> Clone for &'a T {
+    #[rustc_diagnostic_item = "noop_method_clone"]
     fn clone(&self) -> &'a T {
         *self
     }
 }
+
+// library/core/src/clone.rs: a mutable reference is never `Clone`
+impl<T: crate::marker::PointeeSized> !Clone for &mut T {}
 
 pub use crate::clone_uninit::CloneToUninit;
 

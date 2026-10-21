@@ -68,7 +68,7 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
             let variant = match layout.enc {
                 crate::layout::TagEnc::Single(v) => v as usize,
                 _ if adt.is_enum => {
-                    let (off, crate::rir::Mem::Int(size, _)) = layout.tag.ok_or(ValTreeCreationError::ErrorHandled("missing enum tag"))? else { return Err(ValTreeCreationError::NonSupportedType(ty)); };
+                    let (off, relax_backend::rir::Mem::Int(size, _)) = layout.tag.ok_or(ValTreeCreationError::ErrorHandled("missing enum tag"))? else { return Err(ValTreeCreationError::NonSupportedType(ty)); };
                     let disc = crate::lower::decode_tag_const(u, scalar(addr + off as u64, size).to_bits(size) as i128, layout, adt).ok_or(ValTreeCreationError::ErrorHandled("missing enum discriminant"))?;
                     adt.discriminants(&u.tcx, &u.prog).iter().position(|(_, v)| v.signed_value() == disc).ok_or(ValTreeCreationError::ErrorHandled("invalid enum tag"))?
                 }

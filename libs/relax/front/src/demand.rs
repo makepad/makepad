@@ -2,14 +2,10 @@
 //! Expansion uncertainty belongs to the invocation scope (rustc's reduced graph),
 //! not to every crate that happens to contain an identifier with the same spelling.
 use super::*;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Borrow;
 
 pub fn within(path: &str, module: &str) -> bool {
     path == module || path.strip_prefix(module).is_some_and(|tail| tail.starts_with("::"))
-}
-
-fn primitive(name: &str) -> bool {
-    matches!(name, "bool" | "char" | "str" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize")
 }
 
 pub fn close(toks: &[Tok], start: usize) -> usize {
@@ -30,15 +26,10 @@ fn word(src: &[u8], t: &Tok) -> String {
     String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).trim_start_matches("r#").into()
 }
 
-/// `word` without the allocation when the token is valid UTF-8 (every Rust source is).
-fn word_ref<'a>(src: &'a [u8], t: &Tok) -> std::borrow::Cow<'a, str> {
-    match String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]) {
-        std::borrow::Cow::Borrowed(text) => std::borrow::Cow::Borrowed(text.trim_start_matches("r#")),
-        std::borrow::Cow::Owned(text) => std::borrow::Cow::Owned(text.trim_start_matches("r#").into()),
-    }
-}
-
 fn is_word(src: &[u8], token: &Tok, expected: &str) -> bool {
+    // the spelling is the word or `r#` and the word: any other length cannot match
+    let len = (token.hi - token.lo) as usize;
+    if len != expected.len() && len != expected.len() + 2 { return false; }
     let text = &src[token.lo as usize..token.hi as usize];
     text.strip_prefix(b"r#").unwrap_or(text) == expected.as_bytes()
 }
@@ -48,25 +39,59 @@ fn is_word(src: &[u8], token: &Tok, expected: &str) -> bool {
 pub fn active_tokens(src: &[u8], toks: &[Tok], cfg: &CfgSet) -> Vec<Tok> {
     let _profile = crate::load_profile::span(cfg.session.runtime.profile, "rust-demand-cfg", "tokens");
     let mut out = Vec::with_capacity(toks.len());
-    active_tokens_inner(src, toks, cfg, &mut out);
+    let groups = Groups::of(toks);
+    active_tokens_inner(src, toks, 0, toks.len(), cfg, &groups, &mut out);
     // a file with disabled items keeps the slack of the unfiltered length for as long as the scan lives
     if out.capacity() - out.len() > out.len() / 32 { out.shrink_to_fit(); }
     out
 }
-fn active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok>) {
+
+/// Where each bracket group of a token slice closes, found in one pass. `close` walks the group
+/// from its opener, so asking it for every nested group re-walks the inner tokens once per
+/// nesting level. The pass counts depth exactly as `close` does (any bracket kind), so for a
+/// slice whose brackets balance the answers agree; any other slice keeps asking `close`.
+struct Groups(Option<Vec<u32>>);
+impl Groups {
+    fn of(toks: &[Tok]) -> Self {
+        let mut matching = vec![0u32; toks.len()];
+        let mut open = Vec::<u32>::new();
+        for (i, t) in toks.iter().enumerate() {
+            match t.kind {
+                T::OpenBrace | T::OpenBracket | T::OpenParen => open.push(i as u32),
+                T::CloseBrace | T::CloseBracket | T::CloseParen => match open.pop() {
+                    Some(o) => matching[o as usize] = i as u32,
+                    None => return Self(None),
+                },
+                _ => {}
+            }
+        }
+        Self(open.is_empty().then_some(matching))
+    }
+    /// `close(&toks[..hi], start)`.
+    fn close(&self, toks: &[Tok], hi: usize, start: usize) -> usize {
+        match &self.0 {
+            Some(matching) if matches!(toks[start].kind, T::OpenBrace | T::OpenBracket | T::OpenParen) => matching[start] as usize,
+            _ => close(&toks[..hi], start),
+        }
+    }
+}
+
+/// `toks[lo..hi]` configured into `out`. Group ends are looked up in `groups` of the whole slice; a
+/// group of the range always closes inside it (the range is a balanced interior).
+fn active_tokens_inner(src: &[u8], toks: &[Tok], lo: usize, hi: usize, cfg: &CfgSet, groups: &Groups, out: &mut Vec<Tok>) {
     let output_start = out.len();
-    let mut i = 0;
-    while i < toks.len() {
+    let mut i = lo;
+    while i < hi {
         // Macro arguments/transcribers are token trees, not configured AST yet.
-        if is_word(src, &toks[i], "macro_rules") && i + 3 < toks.len() {
-            let end = close(toks, i + 3);
+        if is_word(src, &toks[i], "macro_rules") && i + 3 < hi {
+            let end = groups.close(toks, hi, i + 3);
             out.extend_from_slice(&toks[i..=end]);
             i = end + 1;
             continue;
         }
-        if toks[i].kind.is_ident_like() && toks.get(i + 1).is_some_and(|t| t.kind == T::Not)
-            && toks.get(i + 2).is_some_and(|t| matches!(t.kind, T::OpenBrace | T::OpenParen | T::OpenBracket)) {
-            let end = close(toks, i + 2);
+        if toks[i].kind.is_ident_like() && toks.get(i + 1).filter(|_| i + 1 < hi).is_some_and(|t| t.kind == T::Not)
+            && toks.get(i + 2).filter(|_| i + 2 < hi).is_some_and(|t| matches!(t.kind, T::OpenBrace | T::OpenParen | T::OpenBracket)) {
+            let end = groups.close(toks, hi, i + 2);
             out.extend_from_slice(&toks[i..=end]);
             i = end + 1;
             continue;
@@ -74,15 +99,15 @@ fn active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok
         if toks[i].kind == T::Pound {
             let mut attrs = Vec::new();
             let start = i;
-            while i < toks.len() && toks[i].kind == T::Pound {
-                let inner = toks.get(i + 1).is_some_and(|t| t.kind == T::Not);
+            while i < hi && toks[i].kind == T::Pound {
+                let inner = toks.get(i + 1).filter(|_| i + 1 < hi).is_some_and(|t| t.kind == T::Not);
                 // Inner attributes configure this scope; outer attributes configure
                 // the following item. A disabled first item must not erase the file
                 // (or inline module) that carries an unrelated inner attribute.
                 if attrs.first().is_some_and(|a: &Attr| a.inner != inner) { break; }
                 let open = i + 1 + usize::from(inner);
-                if !toks.get(open).is_some_and(|t| t.kind == T::OpenBracket) { break; }
-                let end = close(toks, open);
+                if !toks.get(open).filter(|_| open < hi).is_some_and(|t| t.kind == T::OpenBracket) { break; }
+                let end = groups.close(toks, hi, open);
                 attrs.push(Attr { inner, toks: TokRange { lo: (open + 1) as u32, hi: end as u32 } });
                 i = end + 1;
             }
@@ -91,10 +116,10 @@ fn active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok
             if !crate::cfg::active(view, &attrs, cfg) {
                 if attrs.iter().any(|a| a.inner) { out.truncate(output_start); return; }
                 // The attributed item/statement/field is removed as one unit.
-                while i < toks.len() {
+                while i < hi {
                     match toks[i].kind {
-                        T::OpenBrace => { i = close(toks, i) + 1; break; }
-                        T::OpenParen | T::OpenBracket => i = close(toks, i) + 1,
+                        T::OpenBrace => { i = groups.close(toks, hi, i) + 1; break; }
+                        T::OpenParen | T::OpenBracket => i = groups.close(toks, hi, i) + 1,
                         T::Semi | T::Comma => { i += 1; break; }
                         _ => i += 1,
                     }
@@ -102,21 +127,21 @@ fn active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok
                 continue;
             }
             for a in crate::cfg::expand_cfg_attr_list(view, &attrs, cfg) {
-                let lo = a.toks.lo as usize;
-                let hi = a.toks.hi as usize;
-                if lo >= hi || is_word(src, &toks[lo], "cfg") { continue; }
+                let alo = a.toks.lo as usize;
+                let ahi = a.toks.hi as usize;
+                if alo >= ahi || is_word(src, &toks[alo], "cfg") { continue; }
                 out.push(toks[start]);
                 if a.inner { out.push(Tok { kind: T::Not, ..toks[start] }); }
                 out.push(Tok { kind: T::OpenBracket, ..toks[start] });
-                out.extend_from_slice(&toks[lo..hi]);
-                out.push(Tok { kind: T::CloseBracket, ..toks[hi] });
+                out.extend_from_slice(&toks[alo..ahi]);
+                out.push(Tok { kind: T::CloseBracket, ..toks[ahi] });
             }
             continue;
         }
         if matches!(toks[i].kind, T::OpenBrace | T::OpenParen | T::OpenBracket) {
-            let end = close(toks, i);
+            let end = groups.close(toks, hi, i);
             out.push(toks[i]);
-            active_tokens_inner(src, &toks[i + 1..end], cfg, out);
+            active_tokens_inner(src, toks, i + 1, end, cfg, groups, out);
             out.push(toks[end]);
             i = end + 1;
         } else {
@@ -129,6 +154,10 @@ fn active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok
 #[path = "demand_bindings.rs"]
 mod bindings;
 use bindings::{Binding, Bindings};
+#[path = "demand_view.rs"]
+mod view;
+use view::{ModuleCtx, PathSeg, Scratch, Sym, prim_index, sort_dedup, FLAG_ALL_MODULES, FLAG_EMPTY, FLAG_MACRO, FLAG_MODULE, FLAG_SHADOWED, FLAG_TYPE, FLAG_VALUE};
+pub(crate) use view::{Sym as NameSym, SymCache};
 
 #[derive(Default)]
 pub struct Names {
@@ -148,6 +177,7 @@ pub struct Names {
     empty_rules: BTreeMap<String, (usize, String, Vec<Vec<String>>)>,
     empty_macros: HashSet<String>,
     prepared: Prepared,
+    view: std::sync::OnceLock<view::View>,
 }
 /// Namespace state carried between crates prepared in load order.
 #[derive(Default)]
@@ -165,6 +195,7 @@ impl Names {
 
     pub fn fork(&self) -> Self { Self { crates: self.crates.clone(), ..Self::default() } }
     pub fn merge(&mut self, other: Self, keep_bindings: bool) {
+        self.reset_view();
         // prepare() discards these namespace surfaces for unrelated crates.
         // Do that before merging thousands of names into the global tables.
         if keep_bindings {
@@ -183,6 +214,7 @@ impl Names {
         self.empty_rules.extend(other.empty_rules);
     }
     pub fn add(&mut self, ci: usize, module: &str, src: &[u8], toks: &[Tok], _uses: &[crate::macros::UseItem], mods: &[String]) {
+        self.reset_view();
         self.modules.extend(mods.iter().cloned());
         self.modules.insert(module.into());
         self.scan(ci, module, src, toks);
@@ -196,8 +228,10 @@ impl Names {
         let mut exported = false;
         let mut macro_use = false;
         while i < toks.len() {
-            let spelling = String::from_utf8_lossy(&src[toks[i].lo as usize..toks[i].hi as usize]);
-            let text = spelling.trim_start_matches("r#");
+            // only an identifier is compared as text below
+            let text = if matches!(toks[i].kind, T::Ident | T::RawIdent) {
+                std::str::from_utf8(&src[toks[i].lo as usize..toks[i].hi as usize]).map_or("\u{fffd}", |s| s.trim_start_matches("r#"))
+            } else { "" };
             let public = i > 0 && matches!(toks[i - 1].kind, T::KwPub | T::CloseParen);
             if toks[i].kind == T::Pound && toks.get(i + 1).is_some_and(|t| t.kind == T::OpenBracket) {
                 let end = close(toks, i + 1);
@@ -259,7 +293,10 @@ impl Names {
                     if public { self.public.insert(name); }
                 }
             }
-            if text == "macro_rules" && i + 3 < toks.len() {
+            // `macro_rules ! name { .. }` (a bare `macro_rules`, `macro_rules! {}` and `tests!(macro_rules)` define nothing)
+            if text == "macro_rules" && i + 3 < toks.len() && toks[i + 1].kind == T::Not
+                && matches!(toks[i + 2].kind, T::Ident | T::RawIdent)
+                && matches!(toks[i + 3].kind, T::OpenBrace | T::OpenParen | T::OpenBracket) {
                 let name = word(src, &toks[i + 2]);
                 self.symbols.insert(format!("{module}::{name}"));
                 let end = close(toks, i + 3);
@@ -323,10 +360,6 @@ impl Names {
         let tail = path[at..].join("::");
         vec![if tail.is_empty() { base } else { format!("{base}::{tail}") }]
     }
-    fn binding(&self, path: &str) -> Binding {
-        self.bindings.lookup(path)
-    }
-
     /// Bind one crate's declarations and evaluate its imports to their fixed point.
     /// Imports only add bindings to scopes of their own crate and read crates
     /// earlier in load order, so a crate is final once its dependencies are; the
@@ -335,6 +368,7 @@ impl Names {
         self.prepare_crate_with(ci, None);
     }
     fn prepare_crate_with(&mut self, ci: usize, saved: Option<BindingImage>) {
+        self.reset_view();
         let mut prepared = std::mem::take(&mut self.prepared);
         if prepared.crates == 0 {
             for krate in self.crates.iter() { self.bindings.intern(&krate.name); }
@@ -567,20 +601,17 @@ impl Names {
         self.empty_macros = self.empty_rules.keys().cloned().collect();
         loop {
             let rejected = self.empty_rules.iter().filter(|(name, (ci, scope, calls))| {
-                self.empty_macros.contains(*name) && calls.iter().any(|path| !self.empty_macro(*ci, scope, path))
+                self.empty_macros.contains(*name) && calls.iter().any(|path| !self.empty_macro_strs(*ci, scope, path, true))
             }).map(|(name, _)| name.clone()).collect::<Vec<_>>();
             if rejected.is_empty() { break; }
             for name in rejected { self.empty_macros.remove(&name); }
         }
+        self.reset_view();
     }
     pub fn entry(&self, ci: usize, name: &str) -> BTreeSet<String> {
         self.resolve(ci, &self.crates[ci].name, &[name])
     }
-    pub fn empty_macro<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> bool {
-        let resolved = self.resolve_macro(ci, module, path);
-        let definitions = resolved.iter().filter(|name| self.macros.contains(*name)).collect::<Vec<_>>();
-        !definitions.is_empty() && definitions.iter().all(|name| self.empty_macros.contains(*name))
-    }
+    pub fn empty_macro<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> bool { self.empty_macro_strs(ci, module, path, false) }
     /// Outline a local declaration macro with name-only arguments. Matching
     /// types/identifiers and transcribing tokens does not parse emitted bodies.
     /// An impl owned by a type declared here cannot require this file before
@@ -608,7 +639,7 @@ impl Names {
             kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo,
         }).collect::<Vec<_>>();
         let c = &self.crates[ci];
-        let Ok(def) = crate::macros::parse_def(&name, &c.name, &mtoks) else { return None; };
+        let Ok(def) = crate::macros::parse_def(&name, &c.name, c.edition, &mtoks) else { return None; };
         fn names_only(nodes: &[crate::macros::MNode]) -> bool {
             use crate::macros::{Frag, MNode};
             nodes.iter().all(|n| match n {
@@ -620,9 +651,8 @@ impl Names {
         if !def.arms.iter().all(|(matcher, _)| names_only(matcher)) { return None; }
         let mut parser = crate::parser::Parser::new(&c.cfg.session, src, toks, c.edition);
         parser.krate = c.name.clone();
-        let Ok((expanded, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
-        let mut tokens = Vec::new();
-        if crate::lexer::lex(expanded.as_bytes(), c.edition, &mut tokens).is_err() { return None; }
+        let Ok((expanded, mut tokens, _, _, _)) = parser.expand_rules(&def, open + 1, end) else { return None; };
+        tokens.push(Tok { kind: T::Eof, lo: expanded.len() as u32, hi: expanded.len() as u32 });
         let bytes = expanded.as_bytes();
         let mut at = 0;
         while at < tokens.len() && tokens[at].kind != T::Eof {
@@ -650,89 +680,15 @@ impl Names {
         }
         Some((expanded, tokens))
     }
-    fn resolve<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        if path.len() == 1 && primitive(path[0].borrow()) { out.insert(format!("<primitive>::{}", path[0].borrow())); }
-        let mut found = false;
-        for p in self.absolute(ci, module, path) {
-            let value = self.binding(&p);
-            if !value.targets.is_empty() {
-                found = true;
-                out.insert(p);
-                out.extend(value.targets.iter().map(|id| self.bindings.spelling(id).to_string()));
-                out.extend(value.via.iter().map(|id| self.bindings.spelling(id).to_string()));
-            }
-        }
-        // Rust file selection has no forced core: an unbound first segment
-        // falls back to the std prelude Relax puts in every crate (core's
-        // `prelude` module, Program::prelude_crate), after local scopes.
-        if !found && self.crates[ci].cfg.session.options.rs_lazy
-            && path.first().is_some_and(|first| !matches!(first.borrow(), "" | "crate" | "self" | "super")) {
-            let p = format!("core::prelude::{}", path.join("::"));
-            let value = self.binding(&p);
-            if !value.targets.is_empty() {
-                out.insert(p);
-                out.extend(value.targets.iter().map(|id| self.bindings.spelling(id).to_string()));
-                out.extend(value.via.iter().map(|id| self.bindings.spelling(id).to_string()));
-            }
-        }
-        out
-    }
-    fn import_demands(&self, ci: usize, module: &str, path: &[String], glob: bool) -> BTreeSet<String> {
-        let mut end = path.len();
-        while end != 0 {
-            let resolved = self.resolve(ci, module, &path[..end]);
-            if !resolved.is_empty() {
-                // Enum variants/associated names demand the nearest indexed
-                // owner. An import of a module, and every glob edge, needs only
-                // that module's declaration (an inline module lives in its
-                // parent's file): demand the declaring scope, never the module's
-                // own file. Names later looked up through it demand themselves.
-                // A named import of anything but a trait binds a name that
-                // demands itself when looked up; the loader defers an import
-                // into a skipped module. A trait import is observable without
-                // a lookup (method resolution), so it demands its target.
-                if !glob && !resolved.iter().any(|name| self.trait_symbols.contains(name)) {
-                    return resolved.into_iter().filter(|name| self.modules.contains(name))
-                        .map(|name| name.rsplit_once("::").map_or(name.clone(), |(parent, _)| parent.to_owned())).collect();
-                }
-                return resolved.into_iter().map(|name| if self.modules.contains(&name) {
-                    name.rsplit_once("::").map_or(name.clone(), |(parent, _)| parent.to_owned())
-                } else { name }).collect();
-            }
-            end -= 1;
-        }
-        BTreeSet::new()
-    }
-    fn resolve_macro<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> BTreeSet<String> {
-        let mut result = self.resolve(ci, module, path);
-        if path.len() == 1 {
-            // Textual macros are visible in child modules. Keep shadowed
-            // candidates too; the real expansion pass retains source order.
-            let mut scope = module;
-            loop {
-                let value = self.binding(&format!("{scope}::{}", path[0].borrow()));
-                if value.targets.iter().any(|target| self.macros.contains(self.bindings.spelling(target))) {
-                    result.extend(value.targets.iter().map(|id| self.bindings.spelling(id).to_string())); result.extend(value.via.iter().map(|id| self.bindings.spelling(id).to_string()));
-                }
-                let Some((parent, _)) = scope.rsplit_once("::") else { break; };
-                scope = parent;
-            }
-            // macros::MacroScope::std_prelude: the exported macros of std, core, alloc.
-            if result.is_empty() && self.crates[ci].cfg.session.options.rs_lazy {
-                for krate in ["std", "core", "alloc"] {
-                    let value = self.binding(&format!("{krate}::{}", path[0].borrow()));
-                    if value.targets.iter().any(|target| self.macros.contains(self.bindings.spelling(target))) {
-                        result.extend(value.targets.iter().map(|id| self.bindings.spelling(id).to_string()));
-                        result.extend(value.via.iter().map(|id| self.bindings.spelling(id).to_string()));
-                        break;
-                    }
-                }
-            }
-        }
-        result
-    }
+    fn resolve<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> BTreeSet<String> { self.resolve_strs(ci, module, path) }
+    fn resolve_macro<P: Borrow<str>>(&self, ci: usize, module: &str, path: &[P]) -> BTreeSet<String> { self.resolve_macro_strs(ci, module, path) }
     pub fn resolve_path(&self, ci: usize, module: &str, path: &[String]) -> BTreeSet<String> { self.resolve(ci, module, path) }
+    /// The symbol of a spelling (see `demand_view.rs`).
+    pub fn sym(&self, cache: &mut SymCache, text: &str) -> Sym { self.view().sym(&self.bindings, cache, text) }
+    pub fn spelling_of(&self, s: Sym) -> String { self.view().spelling(&self.bindings, s) }
+    /// The module a qualified name is in.
+    pub fn scope_of(&self, s: Sym) -> Option<Sym> { self.view().parts(&self.bindings, s).map(|(m, _)| m) }
+    pub fn is_type_sym(&self, s: Sym) -> bool { self.flag(self.view(), s, FLAG_TYPE) }
     pub fn is_trait(&self, name: &str) -> bool { self.trait_symbols.contains(name) }
     pub fn is_type(&self, name: &str) -> bool { self.type_symbols.contains(name) }
     /// Names the compiler itself looks up in the std family (typeck's
@@ -746,10 +702,12 @@ impl Names {
             "result", "option", "boxed", "string", "vec", "ffi::CStr", "cell::UnsafeCell", "hint", "intrinsics", "mem", "ptr", "slice", "str"] {
             out.extend(self.resolve(ci, "core", &path.split("::").map(str::to_owned).collect::<Vec<_>>()));
         }
-        if let Some(prelude) = self.bindings.id("core::prelude") {
-            for (_, &id) in self.bindings.modules.get(&prelude).into_iter().flatten() {
-                let binding = &self.bindings.values[id];
-                out.extend(binding.targets.iter().chain(binding.via.iter()).map(|id| self.bindings.spelling(id).to_string()));
+        for edition in ["rust_2015", "rust_2018", "rust_2021", "rust_2024"] {
+            if let Some(prelude) = self.bindings.id(&format!("core::prelude::{edition}")) {
+                for (_, &id) in self.bindings.modules.get(&prelude).into_iter().flatten() {
+                    let binding = &self.bindings.values[id];
+                    out.extend(binding.targets.iter().chain(binding.via.iter()).map(|id| self.bindings.spelling(id).to_string()));
+                }
             }
         }
         // Operators, comparisons, formatting, iteration, conversions, hashing
@@ -767,6 +725,7 @@ impl Names {
         out
     }
     pub fn qualify_index(&mut self, file: &mut FileIndex) {
+        self.reset_view();
         for name in &file.glob_names { self.public.insert(format!("{}::{name}", file.module)); }
         for name in std::mem::take(&mut file.names) {
             let name = format!("{}::{name}", file.module);
@@ -873,20 +832,39 @@ impl Names {
         out
     }
     pub fn references(&self, ci: usize, module: &str, src: &[u8], toks: &[Tok]) -> BTreeSet<String> {
-        self.references_shared(ci, module, src, toks, &mut Lookups::default())
+        let v = self.view();
+        let mut out = Vec::new();
+        self.references_shared(ci, module, src, toks, &mut Lookups::default(), &mut out);
+        out.into_iter().map(|s| v.spelling(&self.bindings, s)).collect()
     }
-    /// `references` of one range among several of the same crate/module: a path
-    /// the caller's earlier ranges already resolved (outside any block import of
-    /// this range, which could change it) is not resolved again.
-    pub fn references_shared(&self, ci: usize, module: &str, src: &[u8], toks: &[Tok], shared: &mut Lookups) -> BTreeSet<String> {
-        if shared.scope.as_ref().map_or(true, |(c, m)| *c != ci || m != module) {
-            shared.scope = Some((ci, module.to_owned()));
-            shared.resolved.clear();
+    /// The names one token range demands, as sorted symbols appended to `out`. A path the caller's
+    /// earlier ranges already resolved (outside any block import of this range, which could change
+    /// it) is not resolved again.
+    pub fn references_shared(&self, ci: usize, module: &str, src: &[u8], toks: &[Tok], shared: &mut Lookups, out: &mut Vec<Sym>) {
+        let v = self.view();
+        let b = &self.bindings;
+        let start = out.len();
+        let Lookups { scope, scope_gen, ctx, resolved: shared_resolved, arena, trie, seen, call, cache, scratch, hits, misses, glob_queries, glob_bindings } = shared;
+        if scope.as_ref().map_or(true, |(c, m)| *c != ci || m != module) {
+            *scope = Some((ci, module.to_owned()));
+            *ctx = Some(self.module_ctx(v, module));
+            *scope_gen += 1;
+            arena.clear();
         }
+        let m = ctx.as_ref().unwrap();
+        *call += 1;
+        let rs_lazy = self.crates[ci].cfg.session.options.rs_lazy;
+        let seg_of = |t: &Tok| -> PathSeg<'_> {
+            let text = match std::str::from_utf8(&src[t.lo as usize..t.hi as usize]) {
+                Ok(text) => text.trim_start_matches("r#"),
+                Err(_) => "\u{fffd}",
+            };
+            PathSeg { text, id: b.segment_id(text) }
+        };
         // Variant declarations are not value lookups through a glob. Keep
         // their payload/discriminant tokens, which may name external types.
         // Generic/attributed shapes we cannot outline here stay conservative.
-        let mut variants = BTreeSet::new();
+        let mut variants = Vec::<usize>::new();
         for at in 0..toks.len().saturating_sub(2) {
             if toks[at].kind != T::KwEnum || toks[at + 2].kind != T::OpenBrace { continue; }
             let end = close(toks, at + 2);
@@ -904,11 +882,13 @@ impl Names {
             }
             variants.extend(declared);
         }
+        variants.sort_unstable();
+        variants.dedup();
         // Block imports are lexical to this source. A conservative union of
         // their candidates may overretain within this file, but never exports
         // those private bindings into another module's glob lookup.
-        let mut local = BTreeMap::<String, BTreeSet<String>>::new();
-        let mut glob_names = None;
+        let mut local = HashMap::<String, Vec<Sym>>::default();
+        let mut glob_names: Option<Vec<Sym>> = None;
         let mut local_types = Vec::<(usize, usize, String)>::new();
         let mut blocks = Vec::new();
         let mut at = 0;
@@ -931,41 +911,59 @@ impl Names {
                 let mut uses = Vec::new();
                 super::super::use_tree(&|k| word(src, &toks[k]), toks, at + 1, end, &[], module, false, &mut uses);
                 for u in uses {
-                    let candidates = self.resolve(ci, module, &u.path);
+                    let segs = self.strs_path(&u.path);
+                    let mut candidates = Vec::new();
+                    self.resolve_core(v, cache, ci, m, &segs, &mut candidates, scratch);
+                    sort_dedup(&mut candidates);
                     if let Some(name) = u.bind {
                         // `resolve` carries the modules on the reexport route
                         // as well as the imported declaration. Only terminal
                         // declarations determine the imported namespace.
-                        let targets = candidates.iter().flat_map(|name| self.binding(name).targets.iter().collect::<Vec<_>>())
-                            .filter(|target| !self.modules.contains(self.bindings.spelling(*target))).collect::<BTreeSet<_>>();
-                        if !targets.is_empty() && targets.iter().all(|target| self.type_symbols.contains(self.bindings.spelling(*target))
-                            && !self.value_symbols.contains(self.bindings.spelling(*target)) && !self.macros.contains(self.bindings.spelling(*target))) {
+                        let mut targets = Vec::new();
+                        for &candidate in &candidates {
+                            let mut segs = std::mem::take(&mut scratch.segs);
+                            segs.clear();
+                            v.segs_of(b, candidate, &mut segs);
+                            self.walk(&segs, scratch);
+                            scratch.segs = segs;
+                            targets.extend_from_slice(&scratch.t);
+                        }
+                        sort_dedup(&mut targets);
+                        targets.retain(|&t| !self.flag(v, t, FLAG_MODULE));
+                        if !targets.is_empty() && targets.iter().all(|&t| self.flag(v, t, FLAG_TYPE)
+                            && !self.flag(v, t, FLAG_VALUE) && !self.flag(v, t, FLAG_MACRO)) {
                             if let Some(&(lo, hi)) = blocks.last() { local_types.push((lo, hi, name.clone())); }
                         }
-                        local.entry(name).or_default().extend(candidates);
+                        let entry = local.entry(name).or_default();
+                        entry.extend_from_slice(&candidates);
+                        sort_dedup(entry);
                     }
                     else {
-                        for candidate in candidates {
-                            let private = within(module, &candidate);
-                            let Some(module) = self.bindings.id(&candidate) else { continue; };
+                        for &candidate in &candidates {
+                            let private = m.is_within(candidate);
+                            // only an interned name is a module of the table
+                            if candidate >= v.base() { continue; }
+                            let module = candidate;
                             // Block globs are private to this range. Only a
                             // path's first token can consult `local` below; do
                             // not materialize every name of a large facade.
                             let names = glob_names.get_or_insert_with(|| {
                                 let mut names = toks.iter().filter(|t| matches!(t.kind,
                                     T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper))
-                                    .filter_map(|t| self.bindings.id(&word(src, t))).collect::<Vec<_>>();
+                                    .filter_map(|t| seg_of(t).id).collect::<Vec<_>>();
                                 names.sort_unstable(); names.dedup(); names
                             });
-                            shared.glob_queries += names.len();
-                            let Some(entries) = self.bindings.modules.get(&module) else { continue; };
+                            *glob_queries += names.len();
+                            let Some(entries) = b.modules.get(&(module as usize)) else { continue; };
                             for &name in names.iter() {
-                                let Some(&id) = entries.get(&name) else { continue; };
-                                let binding = &self.bindings.values[id];
+                                let Some(&id) = entries.get(&(name as usize)) else { continue; };
+                                let binding = &b.values[id];
                                 if !binding.public && !private { continue; }
-                                shared.glob_bindings += 1;
-                                let targets = local.entry(self.bindings.spelling(name).to_string()).or_default();
-                                targets.extend(binding.targets.iter().chain(binding.via.iter()).map(|id| self.bindings.spelling(id).to_string()));
+                                *glob_bindings += 1;
+                                let targets = local.entry(b.spelling(name as usize).to_string()).or_default();
+                                targets.extend_from_slice(binding.targets.ids());
+                                targets.extend_from_slice(binding.via.ids());
+                                sort_dedup(targets);
                             }
                         }
                     }
@@ -979,33 +977,31 @@ impl Names {
             }
             at += 1;
         }
-        let mut out = BTreeSet::new();
-        // The paths this call has resolved, as flag bytes + the `::`-joined spelling (an identifier
-        // never holds `::`, so the key is the path): a repeat costs no allocation.
-        let mut lookups = HashSet::<String>::default();
-        let mut key_buf = String::new();
-        let mut path: Vec<Cow<'_, str>> = Vec::new();
-        let mut implicit_names = BTreeSet::new();
+        let mut implicit = 0u32;
+        let mut path: Vec<PathSeg<'_>> = Vec::new();
+        let mut resolved: Vec<Sym> = Vec::new();
         let mut i = 0;
         while i < toks.len() {
             // Unknown transcribers may emit references absent from the call's
             // arguments. Retain those conservatively; only a certified empty
             // rule can have its transcriber ignored altogether.
-            if is_word(src, &toks[i], "macro_rules") && i + 3 < toks.len()
-                && self.empty_macros.contains(&format!("{module}::{}", word(src, &toks[i + 2]))) {
-                i = close(toks, i + 3) + 1;
-                continue;
+            if is_word(src, &toks[i], "macro_rules") && i + 3 < toks.len() {
+                let name = seg_of(&toks[i + 2]);
+                let empty = m.qid().zip(name.id).and_then(|(q, n)| v.pair_find(b, q, n)).is_some_and(|q| self.flag(v, q, FLAG_EMPTY));
+                if empty {
+                    i = close(toks, i + 3) + 1;
+                    continue;
+                }
             }
-            let implicit: &[&str] = match toks[i].kind {
-                T::Int => &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"],
-                T::Float => &["f32", "f64"], T::Str | T::RawStr => &["str"], T::Char => &["char"],
-                T::Byte => &["u8"], T::KwTrue | T::KwFalse => &["bool"], _ => &[],
+            implicit |= match toks[i].kind {
+                T::Int => 0x1ffe0, T::Float => 0x18, T::Str | T::RawStr => 0x4, T::Char => 0x2,
+                T::Byte => 0x800, T::KwTrue | T::KwFalse => 0x1, _ => 0,
             };
-            implicit_names.extend(implicit.iter().copied());
             if toks[i].kind == T::KwMod && i + 2 < toks.len() {
                 if toks[i + 2].kind == T::OpenBrace {
                     let end = close(toks, i + 2);
-                    out.extend(self.references(ci, &format!("{module}::{}", word(src, &toks[i + 1])), src, &toks[i + 3..end]));
+                    let inner = format!("{module}::{}", word(src, &toks[i + 1]));
+                    self.references_shared(ci, &inner, src, &toks[i + 3..end], &mut Lookups::default(), out);
                     i = end + 1;
                 } else { i += 3; }
                 continue;
@@ -1015,9 +1011,12 @@ impl Names {
                 let mut uses = Vec::new();
                 super::super::use_tree(&|k| word(src, &toks[k]), toks, i + 1, end, &[], module, false, &mut uses);
                 for u in &uses {
-                    if self.crates[ci].cfg.session.options.rs_lazy {
-                        out.extend(self.import_demands(ci, module, &u.path, u.bind.is_none()));
-                    } else if u.bind.is_some() { out.extend(self.resolve(ci, module, &u.path)); }
+                    let segs = self.strs_path(&u.path);
+                    if rs_lazy {
+                        self.import_demands_core(v, cache, ci, m, &segs, u.bind.is_none(), out, scratch);
+                    } else if u.bind.is_some() {
+                        self.resolve_core(v, cache, ci, m, &segs, out, scratch);
+                    }
                 }
                 i = end + usize::from(end < toks.len());
                 continue;
@@ -1030,105 +1029,160 @@ impl Names {
                 if i > 0 && matches!(toks[i - 1].kind, T::KwStruct | T::KwEnum | T::KwTrait | T::KwType) {
                     // A declared type/trait reaches its external impls, but
                     // never a glob-imported homonym of that declaration.
-                    let own = format!("{module}::{}", word(src, &toks[i]));
-                    if self.type_symbols.contains(&own) { out.insert(own); }
+                    let name = seg_of(&toks[i]);
+                    let own = m.qid().zip(name.id).and_then(|(q, n)| v.pair_find(b, q, n));
+                    if let Some(own) = own.filter(|&own| self.flag(v, own, FLAG_TYPE)) { out.push(own); }
                     i += 1; continue;
                 }
                 // Member names, field/parameter labels and function declarations
                 // are not lookups in the surrounding module's namespace.
-                if variants.contains(&i) || i > 0 && matches!(toks[i - 1].kind, T::Dot | T::KwFn)
+                if variants.binary_search(&i).is_ok() || i > 0 && matches!(toks[i - 1].kind, T::Dot | T::KwFn)
                     || toks.get(i + 1).is_some_and(|t| t.kind == T::Colon) {
                     i += 1; continue;
                 }
                 let lookup_at = i;
                 path.clear();
-                path.push(word_ref(src, &toks[i]));
+                path.push(seg_of(&toks[i]));
                 i += 1;
                 while i + 1 < toks.len() && toks[i].kind == T::PathSep && matches!(toks[i + 1].kind, T::Ident | T::RawIdent | T::KwSuper | T::KwSelfValue | T::KwCrate) {
-                    path.push(word_ref(src, &toks[i + 1])); i += 2;
+                    path.push(seg_of(&toks[i + 1])); i += 2;
                 }
                 let invocation = toks.get(i).is_some_and(|token| token.kind == T::Not);
-                if invocation && self.empty_macro(ci, module, &path)
-                    && toks.get(i + 1).is_some_and(|t| matches!(t.kind, T::OpenBrace | T::OpenParen | T::OpenBracket)) {
+                // How much of the path can name anything: a segment the table never saw resolves
+                // nothing, and every shorter prefix is tried below, so the rest is irrelevant.
+                let first = path[0];
+                let block_local = !local.is_empty() && local.contains_key(first.text);
+                let first_ok = first.id.is_some() || matches!(first.text, "crate" | "self" | "super") || block_local
+                    || prim_index(first.text).is_some() || v.dep_root(self, ci, first.text).is_some();
+                let known = if first_ok {
+                    // `self::super::..` and `super::super::..` consume their `super` run without a lookup
+                    let mut k = 1;
+                    if matches!(first.text, "self" | "super") { while path.get(k).is_some_and(|p| p.text == "super") { k += 1; } }
+                    k + path[k..].iter().take_while(|p| p.id.is_some()).count()
+                } else { 0 };
+                if invocation && known == path.len() && toks.get(i + 1).is_some_and(|t| matches!(t.kind, T::OpenBrace | T::OpenParen | T::OpenBracket))
+                    && self.empty_macro_core(v, cache, ci, m, &path, false, scratch) {
                     i = close(toks, i + 1) + 1;
                     continue;
                 }
-                let shadowed = !invocation && local_types.iter().any(|(lo, hi, name)| *lo < lookup_at && lookup_at < *hi && *name == path[0]);
-                key_buf.clear();
-                key_buf.push(char::from(invocation as u8 + 2 * shadowed as u8));
-                for (n, segment) in path.iter().enumerate() { if n > 0 { key_buf.push_str("::"); } key_buf.push_str(segment); }
-                if lookups.contains(key_buf.as_str()) { continue; }
-                lookups.insert(key_buf.clone());
-                let block_local = local.contains_key(&*path[0]);
-                // the shared key leaves out `shadowed` (flag bit 1), as the pair (path, invocation) did
-                key_buf.replace_range(..1, if invocation { "\u{1}" } else { "\u{0}" });
+                if known == 0 { continue; }
+                let shadowed = !invocation && local_types.iter().any(|(lo, hi, name)| *lo < lookup_at && lookup_at < *hi && *name == path[0].text);
+                let mut node = 0u32;
+                for p in &path[..known] {
+                    let id = match p.id { Some(id) => id, None => v.seg(b, cache, p.text) };
+                    let next = trie.len() as u32 + 1;
+                    node = *trie.entry((node, id)).or_insert(next);
+                }
+                let shared_key = (node as u64) << 1 | invocation as u64;
+                let key = (node as u64) << 2 | (invocation as u64) | (shadowed as u64) << 1;
+                if seen.insert(key, *call) == Some(*call) { continue; }
                 if !block_local {
-                    if let Some(resolved) = shared.resolved.get(key_buf.as_str()) {
-                        shared.hits += 1;
-                        for name in resolved { if !out.contains(name.as_str()) { out.insert(name.clone()); } }
-                        continue;
+                    if let Some(&(generation, a, len)) = shared_resolved.get(&shared_key) {
+                        if generation == *scope_gen {
+                            *hits += 1;
+                            out.extend_from_slice(&arena[a as usize..(a + len) as usize]);
+                            continue;
+                        }
                     }
                 }
-                let key = (!block_local).then(|| key_buf.clone());
-                shared.misses += 1;
+                *misses += 1;
+                let mut stored = false;
                 // A type's associated item still demands the defining type.
-                while !path.is_empty() {
-                    let mut resolved = if invocation { self.resolve_macro(ci, module, &path) } else { self.resolve(ci, module, &path) };
-                    if !invocation { resolved.retain(|name| !self.macros.contains(name)); }
+                let mut k = known;
+                while k > 0 {
+                    resolved.clear();
+                    if invocation { self.resolve_macro_core(v, cache, ci, m, &path[..k], &mut resolved, scratch); }
+                    else { self.resolve_core(v, cache, ci, m, &path[..k], &mut resolved, scratch); }
+                    sort_dedup(&mut resolved);
+                    if !invocation { resolved.retain(|&name| !self.flag(v, name, FLAG_MACRO)); }
                     if shadowed {
                         // A named block import shadows outer type bindings only
                         // inside its lexical block. Other namespaces survive.
-                        resolved.retain(|name| {
-                            let targets = self.binding(name).targets;
-                            targets.is_empty() || !targets.iter().all(|target| self.modules.contains(self.bindings.spelling(target))
-                                || self.type_symbols.contains(self.bindings.spelling(target)) && !self.value_symbols.contains(self.bindings.spelling(target)) && !self.macros.contains(self.bindings.spelling(target)))
-                        });
+                        resolved.retain(|&name| !self.binding_flag(v, name, FLAG_SHADOWED, scratch));
                     }
-                    if let Some(targets) = local.get(&*path[0]) {
-                        if path.len() == 1 { resolved.extend(targets.iter().cloned()); }
+                    if let Some(targets) = local.get(path[0].text) {
+                        if k == 1 { resolved.extend_from_slice(targets); }
                         else {
-                            for target in targets {
-                                let value = self.binding(&format!("{target}::{}", path[1..].join("::")));
-                                if !value.targets.is_empty() { resolved.extend(value.targets.iter().map(|id| self.bindings.spelling(id).to_string())); resolved.extend(value.via.iter().map(|id| self.bindings.spelling(id).to_string())); resolved.insert(target.clone()); }
+                            for &target in targets {
+                                let mut segs = std::mem::take(&mut scratch.segs);
+                                segs.clear();
+                                v.segs_of(b, target, &mut segs);
+                                segs.extend(path[1..k].iter().map(|p| p.id.unwrap()));
+                                self.walk(&segs, scratch);
+                                scratch.segs = segs;
+                                if !scratch.t.is_empty() {
+                                    resolved.extend_from_slice(&scratch.t);
+                                    resolved.extend_from_slice(&scratch.v);
+                                    resolved.push(target);
+                                }
                             }
                         }
+                        sort_dedup(&mut resolved);
                     }
                     // A module cannot be a bare value/type expression. A path
                     // such as module::Type still demands its complete binding.
-                    if path.len() == 1 && !invocation {
-                        resolved.retain(|name| {
-                            let binding = self.binding(name);
-                            binding.targets.is_empty() || !binding.targets.iter().all(|target| self.modules.contains(self.bindings.spelling(target)))
-                        });
+                    if k == 1 && !invocation {
+                        resolved.retain(|&name| !self.binding_flag(v, name, FLAG_ALL_MODULES, scratch));
                     }
                     if !resolved.is_empty() {
-                        if let Some(key) = &key { shared.resolved.insert(key.clone(), resolved.iter().cloned().collect()); }
-                        out.extend(resolved);
+                        if !block_local {
+                            let a = arena.len() as u32;
+                            arena.extend_from_slice(&resolved);
+                            shared_resolved.insert(shared_key, (*scope_gen, a, resolved.len() as u32));
+                            stored = true;
+                        }
+                        out.extend_from_slice(&resolved);
                         break;
                     }
-                    path.pop();
+                    k -= 1;
                 }
-                if let Some(key) = key { shared.resolved.entry(key).or_default(); }
+                if !block_local && !stored { shared_resolved.insert(shared_key, (*scope_gen, 0, 0)); }
             } else { i += 1; }
         }
-        out.extend(implicit_names.into_iter().map(|name| format!("<primitive>::{name}")));
-        out
+        for index in 0..17 {
+            if implicit >> index & 1 != 0 { out.push(v.prim(index)); }
+        }
+        dedup_tail(out, start);
     }
+}
+
+fn dedup_tail(out: &mut Vec<Sym>, start: usize) {
+    out[start..].sort_unstable();
+    let mut w = start;
+    for r in start..out.len() {
+        if w == start || out[r] != out[w - 1] { out[w] = out[r]; w += 1; }
+    }
+    out.truncate(w);
 }
 
 // A local macro whose every arm emits only functions with literal names has
 // a complete item outline without evaluating its bodies. Tokens substituted
 // into a function body cannot add items to the containing module.
 /// Resolutions of one crate/module's paths, shared by the ranges a caller
-/// evaluates in it (`Names::references_shared`).
+/// evaluates in it (`Names::references_shared`), and a worker's scratch buffers.
 #[derive(Default)]
 pub struct Lookups {
     scope: Option<(usize, String)>,
-    resolved: HashMap<String, Vec<String>>,
+    scope_gen: u32,
+    ctx: Option<ModuleCtx>,
+    /// (path prefix, invocation) -> the scope generation it was resolved in, its range of `arena`
+    resolved: HashMap<u64, (u32, u32, u32)>,
+    arena: Vec<Sym>,
+    /// path prefixes as nodes: (parent node, segment) -> node
+    trie: HashMap<(u32, Sym), u32>,
+    /// the call that last resolved a (path prefix, flags)
+    seen: HashMap<u64, u32>,
+    call: u32,
+    cache: SymCache,
+    scratch: Scratch,
     pub hits: usize,
     pub misses: usize,
     pub glob_queries: usize,
     pub glob_bindings: usize,
+}
+impl Lookups {
+    /// The symbol caches of this worker, for naming things outside `references_shared`.
+    pub fn cache(&mut self) -> &mut SymCache { &mut self.cache }
 }
 
 pub fn fixed_function_macros(src: &[u8], toks: &[Tok]) -> BTreeMap<String, Vec<String>> {
@@ -1363,6 +1417,7 @@ impl Names {
     }
 
     pub fn recorded_indexes(&mut self, files: &[FileIndex]) {
+        self.reset_view();
         for file in files {
             self.symbols.extend(file.names.iter().cloned());
             self.public.extend(file.glob_names.iter().map(|name| format!("{}::{name}", file.module)));
@@ -1450,9 +1505,9 @@ impl Names {
         let work: Vec<relax_session::sync::Mutex<Option<(NamespaceDelta, Vec<usize>)>>> = images.into_iter().zip(entries).map(|w| relax_session::sync::Mutex::new(Some(w))).collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let out: Vec<relax_session::sync::Mutex<(Vec<u8>, u128)>> = (0..work.len()).map(|_| Default::default()).collect();
-        std::thread::scope(|scope| {
+        crate::pool::scope(|scope| {
             for _ in 0..crate::preload::jobs().clamp(1, work.len().max(1)) {
-                scope.spawn(|| { let _z = crate::zone_alloc::compiler_thread(); let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); loop {
+                scope.spawn(|| { let _mem = crate::memstat::tag(crate::memstat::Tag::Planner); loop {
                     let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(cell) = work.get(k) else { break };
                     let (mut image, entries) = cell.lock().unwrap().take().unwrap();
@@ -1470,6 +1525,7 @@ impl Names {
         self.restore_decoded(ci, decode_namespace(bytes)?, replace)
     }
     pub fn restore_decoded(&mut self, ci: usize, image: NamespaceDelta, replace: bool) -> Option<()> {
+        self.reset_view();
         let mut local = self.fork();
         local.symbols = image.symbols.into_iter().collect();
         local.type_symbols = image.types.into_iter().collect();
@@ -1665,6 +1721,7 @@ impl Names {
         }
     }
     pub fn apply_closure_delta(&mut self, delta: &NamespaceDelta) {
+        self.reset_view();
         self.symbols.extend(delta.symbols.iter().cloned()); self.type_symbols.extend(delta.types.iter().cloned());
         self.trait_symbols.extend(delta.traits.iter().cloned()); self.value_symbols.extend(delta.values.iter().cloned());
         self.public.extend(delta.public.iter().cloned()); self.modules.extend(delta.modules.iter().cloned());
@@ -1707,5 +1764,116 @@ mod image_tests {
         let mut truncated = bytes.clone();
         truncated.pop();
         assert!(strings::decode::<BindingImage>(&truncated).is_none());
+    }
+}
+
+#[cfg(test)]
+mod active_tests {
+    use super::*;
+    fn old_active_tokens_inner(src: &[u8], toks: &[Tok], cfg: &CfgSet, out: &mut Vec<Tok>) {
+        let output_start = out.len();
+        let mut i = 0;
+        while i < toks.len() {
+            // Macro arguments/transcribers are token trees, not configured AST yet.
+            if is_word(src, &toks[i], "macro_rules") && i + 3 < toks.len() {
+                let end = close(toks, i + 3);
+                out.extend_from_slice(&toks[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            if toks[i].kind.is_ident_like() && toks.get(i + 1).is_some_and(|t| t.kind == T::Not)
+                && toks.get(i + 2).is_some_and(|t| matches!(t.kind, T::OpenBrace | T::OpenParen | T::OpenBracket)) {
+                let end = close(toks, i + 2);
+                out.extend_from_slice(&toks[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            if toks[i].kind == T::Pound {
+                let mut attrs = Vec::new();
+                let start = i;
+                while i < toks.len() && toks[i].kind == T::Pound {
+                    let inner = toks.get(i + 1).is_some_and(|t| t.kind == T::Not);
+                    // Inner attributes configure this scope; outer attributes configure
+                    // the following item. A disabled first item must not erase the file
+                    // (or inline module) that carries an unrelated inner attribute.
+                    if attrs.first().is_some_and(|a: &Attr| a.inner != inner) { break; }
+                    let open = i + 1 + usize::from(inner);
+                    if !toks.get(open).is_some_and(|t| t.kind == T::OpenBracket) { break; }
+                    let end = close(toks, open);
+                    attrs.push(Attr { inner, toks: TokRange { lo: (open + 1) as u32, hi: end as u32 } });
+                    i = end + 1;
+                }
+                if attrs.is_empty() { out.push(toks[i]); i += 1; continue; }
+                let view = Src { src, plain: toks, ext: &[], parts: None };
+                if !crate::cfg::active(view, &attrs, cfg) {
+                    if attrs.iter().any(|a| a.inner) { out.truncate(output_start); return; }
+                    // The attributed item/statement/field is removed as one unit.
+                    while i < toks.len() {
+                        match toks[i].kind {
+                            T::OpenBrace => { i = close(toks, i) + 1; break; }
+                            T::OpenParen | T::OpenBracket => i = close(toks, i) + 1,
+                            T::Semi | T::Comma => { i += 1; break; }
+                            _ => i += 1,
+                        }
+                    }
+                    continue;
+                }
+                for a in crate::cfg::expand_cfg_attr_list(view, &attrs, cfg) {
+                    let lo = a.toks.lo as usize;
+                    let hi = a.toks.hi as usize;
+                    if lo >= hi || is_word(src, &toks[lo], "cfg") { continue; }
+                    out.push(toks[start]);
+                    if a.inner { out.push(Tok { kind: T::Not, ..toks[start] }); }
+                    out.push(Tok { kind: T::OpenBracket, ..toks[start] });
+                    out.extend_from_slice(&toks[lo..hi]);
+                    out.push(Tok { kind: T::CloseBracket, ..toks[hi] });
+                }
+                continue;
+            }
+            if matches!(toks[i].kind, T::OpenBrace | T::OpenParen | T::OpenBracket) {
+                let end = close(toks, i);
+                out.push(toks[i]);
+                old_active_tokens_inner(src, &toks[i + 1..end], cfg, out);
+                out.push(toks[end]);
+                i = end + 1;
+            } else {
+                out.push(toks[i]);
+                i += 1;
+            }
+        }
+    }
+    
+    
+    fn lexed(text: &str) -> Vec<Tok> {
+        let mut toks = Vec::new();
+        let _ = crate::lexer::lex(text.as_bytes(), 2021, &mut toks);
+        toks
+    }
+    /// The group table agrees with the walk it replaces: on balanced, nested, attributed, macro and
+    /// malformed token streams.
+    #[test]
+    fn configured_tokens_match_the_nested_walk() {
+        let sess = std::sync::Arc::new(crate::Session::default());
+        let cfg = CfgSet::host(&sess, &[]);
+        let cases = [
+            "fn f() { #[cfg(any())] let x = (1, [2]); #[cfg(all())] g(); } #[cfg(any())] fn h() {} struct S { #[cfg(any())] a: u8, b: u8 }",
+            "macro_rules! m { ($a:expr) => { $a + (1) }; } m!(1); vec![1, 2]; mod a { #![cfg(any())] fn x() {} }",
+            "mod a { #![cfg(all())] fn x() { if true { ( } } }",
+            "fn f() { } } fn g() { }",
+            "fn f( { fn g() { #[cfg(any())] x } ",
+            "macro_rules foo bar { } fn z() { macro_rules ! }",
+            "#[cfg(any())] #[inline] fn a() {} #[cfg_attr(all(), inline)] fn b() {} #[cfg_attr(any(), inline)] fn c() {}",
+            "m!{ #[cfg(any())] 1 } #[derive(Debug)] struct T; #",
+            "fn f() { #[ } ",
+            "",
+        ];
+        for text in cases {
+            let toks = lexed(text);
+            let mut want = Vec::new();
+            old_active_tokens_inner(text.as_bytes(), &toks, &cfg, &mut want);
+            let got = active_tokens(text.as_bytes(), &toks, &cfg);
+            let key = |v: &[Tok]| v.iter().map(|t| (t.kind as u32, t.lo, t.hi)).collect::<Vec<_>>();
+            assert_eq!(key(&got), key(&want), "{text}");
+        }
     }
 }

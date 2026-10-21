@@ -25,7 +25,7 @@ pub fn rerunning_stalled_goal_may_make_progress(infcx: &InferCtxt<'_>, stalled: 
             let mut opaques = Vec::new(); for (key, ty) in storage.iter_lookup_table() { opaques.push((key.clone(), ty.ty)); }
             drop(inner);
             if let SucceededInErased::Yes { accessed_opaques } = previously_succeeded_in_erased {
-                if typing_mode::should_rerun_after_erased_canonicalization(infcx.tcx, &accessed_opaques.rerun, infcx.typing_mode, &opaques) == typing_mode::RerunDecision::No { return false; }
+                if typing_mode::should_rerun_after_erased_canonicalization(infcx.tcx, &accessed_opaques.rerun, infcx.typing_mode.get(), &opaques) == typing_mode::RerunDecision::No { return false; }
             }
             return true;
         }
@@ -57,7 +57,7 @@ pub fn compute_goal_fast_path(infcx: &InferCtxt<'_>, prog: &crate::program::Prog
         PredicateKind::Clause(ClauseKind::Trait(p)) => {
             let GenericArg::Type(ty) = p.trait_ref.args[0] else { unreachable!() };
             let ty = infcx.shallow_resolve(ty);
-            if matches!(tys.kind(ty), TyKind::Infer(_)) && !matches!(infcx.typing_mode, crate::tcx::TypingMode::ErasedNotCoherence) && infcx.inner.borrow_mut().opaque_types().is_empty() {
+            if matches!(tys.kind(ty), TyKind::Infer(_)) && !matches!(infcx.typing_mode.get(), crate::tcx::TypingMode::ErasedNotCoherence) && infcx.inner.borrow_mut().opaque_types().is_empty() {
                 stalled = Some(build_stalled_on(infcx, &[GenericArg::Type(ty)], MaybeInfo::AMBIGUOUS, GoalStalledOnOpaques::Yes { num_opaques_in_storage: 0, previously_succeeded_in_erased: SucceededInErased::No }));
             } else if p.polarity == ClausePolarity::Positive {
                 let lang = infcx.tcx.lang_items.by_def.get(&p.trait_ref.def_id).copied();

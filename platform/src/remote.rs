@@ -1779,7 +1779,7 @@ mod imp {
                     cx.repaint_id
                 );
                 let mut input_result = None;
-                for input in inputs {
+                for input in coalesce_moves(inputs) {
                     // Hardware-faithful injection: the same platform path
                     // (and pointer-pin transform) physical events take.
                     if let Input::Mouse {

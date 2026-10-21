@@ -600,6 +600,11 @@ pub fn new_cx_with_font_set(
 ) -> Cx {
     let mut cx = Cx::new(event_handler);
     cx.init_collect_from_env();
+    // The Splash use record (`wasm_record_splash`, `MAKEPAD_SPLASH_TRACE`):
+    // the module census from before the first script module.
+    if crate::splash_trace::requested() {
+        cx.record_module_census();
+    }
     #[cfg(not(target_arch = "wasm32"))]
     cx.init_splash_blank_from_env();
     let font_set = if cx.is_collecting() { web_font_set } else { font_set };

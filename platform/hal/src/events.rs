@@ -172,6 +172,9 @@ hal_events! {
     /// Zero span means this backend has no GPU timestamps. Cx submits one pass per packet.
     FrameDone = 51, frame_done { window: obj, frame: u64, gpu_ns: u64, present_ns: u64, gpu_start: f64, gpu_end: f64 };
     PipelineReady = 52, pipeline_ready { pipeline: id };
+    /// The packet left draws out: a pipeline they use was still being built for its target's
+    /// layout (they come with a later packet, after `PipelineReady`). Posted before its `FrameDone`.
+    FramePartial = 68, frame_partial { window: obj, frame: u64 };
     PipelineFailed = 53, pipeline_failed { pipeline: id, log: rng };
     BufferEvicted = 54, buffer_evicted { buffer: id };
     TextureShared = 55, texture_shared { texture: id, handle: u64 };

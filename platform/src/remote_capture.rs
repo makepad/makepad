@@ -671,6 +671,7 @@ impl Worker {
                 aac_bitrate_bps: 128_000,
             }),
             keyframe_only: false,
+            ..Default::default()
         };
         self.encoder = Some(
             VideoFileEncoder::new(&self.config.path, options)

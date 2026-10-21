@@ -955,6 +955,7 @@ fn encode_loop(
             aac_bitrate_bps: 128_000,
         }),
         keyframe_only: false,
+        ..Default::default()
     };
     log!("ScreenCap: {}x{} at {}fps, H.264 target {:.1}Mbps, app audio AAC 128kbps",
         width, height, fps, options.video_bitrate_bps as f64 / 1_000_000.0);

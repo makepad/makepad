@@ -17,6 +17,24 @@ pub(super) enum LifetimeKey {
     SelfReference,
     Path(u32, u32),
     ObjectDefault(u32),
+    /// A use inside the where-predicate with binder `Where(pred)`. The derives reuse one type
+    /// node under several predicates with different binders, so a use is keyed by the
+    /// predicate it is resolved in as well as by its node (the unscoped key stays: last wins).
+    Scoped(u32, u32, u32, u32),
+}
+
+impl LifetimeKey {
+    pub(super) fn scoped(self, pred: Option<u32>) -> LifetimeKey {
+        let Some(pred) = pred else { return self };
+        match self {
+            LifetimeKey::Named(a, b) => LifetimeKey::Scoped(pred, 0, a, b),
+            LifetimeKey::Reference(a) => LifetimeKey::Scoped(pred, 1, a, 0),
+            LifetimeKey::SelfReference => LifetimeKey::Scoped(pred, 2, 0, 0),
+            LifetimeKey::Path(a, b) => LifetimeKey::Scoped(pred, 3, a, b),
+            LifetimeKey::ObjectDefault(a) => LifetimeKey::Scoped(pred, 4, a, 0),
+            scoped @ LifetimeKey::Scoped(..) => scoped,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -113,6 +131,19 @@ impl BoundVarContext<'_> {
         crate::next_solver::fulfill::ObligationCause { body_id: self.owner, span }
     }
 
+    /// The where-predicate whose binder encloses the current position.
+    fn pred(&self) -> Option<u32> {
+        self.scopes.iter().rev().find_map(|scope| match scope { Scope::Binder { id: BinderId::Where(n), .. } => Some(*n), _ => None })
+    }
+    /// The recorded mapping of a use: the one made in the current predicate, else the plain one.
+    fn mapped(&self, key: LifetimeKey) -> Option<ResolvedArg> {
+        self.rbv.named_variable_map.get(&key.scoped(self.pred())).or_else(|| self.rbv.named_variable_map.get(&key)).copied()
+    }
+    fn map_use(&mut self, key: LifetimeKey, arg: ResolvedArg) {
+        if let Some(pred) = self.pred() { self.rbv.named_variable_map.insert(key.scoped(Some(pred)), arg); }
+        self.rbv.named_variable_map.insert(key, arg);
+    }
+
     fn declaration(&self, id: LifetimeId) -> &LifetimeDecl {
         if id.owner == self.owner { &self.rbv.names.declarations[id.local as usize] }
         else { self.rbv.names.inherited.iter().find(|d| d.id == id).expect("inherited lifetime declaration") }
@@ -155,9 +186,10 @@ impl BoundVarContext<'_> {
     }
 
     fn visit_lifetime(&mut self, key: LifetimeKey, span: u32) {
-        match self.rbv.names.uses.get(&key).copied().expect("lifetime resolved before bound-variable collection") {
-            LifetimeRes::Static => { self.rbv.named_variable_map.insert(key, ResolvedArg::StaticLifetime); }
-            LifetimeRes::Error => { self.rbv.named_variable_map.insert(key, ResolvedArg::Error); }
+        let res = self.rbv.names.uses.get(&key.scoped(self.pred())).or_else(|| self.rbv.names.uses.get(&key)).copied().expect("lifetime resolved before bound-variable collection");
+        match res {
+            LifetimeRes::Static => self.map_use(key, ResolvedArg::StaticLifetime),
+            LifetimeRes::Error => self.map_use(key, ResolvedArg::Error),
             LifetimeRes::Infer => {}
             LifetimeRes::Param(id) => self.resolve_lifetime_ref(id, key, span),
         }
@@ -209,7 +241,7 @@ impl BoundVarContext<'_> {
                     arg = ResolvedArg::Error;
                 } else if let Some(body) = body { arg = ResolvedArg::Free(body, id); }
             }
-            self.rbv.named_variable_map.insert(key, arg);
+            self.map_use(key, arg);
         } else if self.scopes.iter().any(|scope| matches!(scope, Scope::Binder { apit: true, .. })) {
             self.tcx.dcx.report(self.cause(span), "lifetime is not accessible in this impl Trait bound".into());
         } else {
@@ -268,10 +300,40 @@ impl BoundVarContext<'_> {
             }
         }
         let result = self.remap_opaque_captures(&captures, result, 0);
-        self.rbv.named_variable_map.insert(key, result);
+        self.map_use(key, result);
+    }
+
+    /// rustc_hir_analysis check_opaque_precise_captures: the `use<..>` list names each parameter once, lifetimes
+    /// first, and every type and const parameter in scope of the opaque.
+    fn check_precise_captures(&mut self, bounds: ast::List<ast::Bound>) {
+        let ast = &self.prog.files[self.file as usize].ast;
+        let Some(args) = ast.list(bounds).iter().find_map(|b| if let ast::Bound::Use(a) = b { Some(*a) } else { None }) else { return };
+        let Some(GenericArgs::Angle(list)) = ast.gargs(args) else { return };
+        let text = |i: ast::Ident| self.prog.files[self.file as usize].text(i).to_string();
+        let mut seen: Vec<String> = Vec::new();
+        let mut first_non_lifetime = false;
+        for arg in ast.list(*list) {
+            let (name, pos, lifetime) = match *arg {
+                GenericArg::Lifetime(lt) => (text(lt), lt.lo, true),
+                GenericArg::Type(t) => match ast.ty(t) {
+                    ast::Ty::Path(p) if p.no_qself() && ast.segs(p.segs).len() == 1 => { let seg = ast.segs(p.segs)[0]; (text(seg.name), seg.name.lo, false) }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if lifetime && first_non_lifetime {
+                self.tcx.dcx.report(self.cause(pos), format!("lifetime parameter `{}` must be listed before non-lifetime parameters", name));
+            }
+            if !lifetime { first_non_lifetime = true; }
+            if seen.contains(&name) {
+                self.tcx.dcx.report(self.cause(pos), format!("cannot capture parameter `{}` twice", name));
+            }
+            seen.push(name);
+        }
     }
 
     fn visit_opaque_ty(&mut self, opaque: DefId, bounds: ast::List<ast::Bound>, async_output: Option<ast::TyId>) {
+        if self.tcx.validates(self.prog, self.file) { self.check_precise_captures(bounds); }
         self.rbv.opaque_captured_lifetimes.entry(opaque).or_default();
         let ast = &self.prog.files[self.file as usize].ast;
         let span = ast.item(self.prog.def(self.owner).item).lo;
@@ -343,7 +405,7 @@ impl LifetimeCollector<'_> {
             GenericArg::Lifetime(name) => self.named(name),
             GenericArg::Type(ty) => self.ty(ty),
             GenericArg::Binding(_, args, ty) => { self.args(args); self.ty(ty); }
-            GenericArg::Constraint(_, bounds) => self.bounds(bounds),
+            GenericArg::Constraint(_, args, bounds) => { self.args(args); self.bounds(bounds); },
             GenericArg::Const(_) => {}
         }
     }
@@ -630,8 +692,8 @@ impl BoundVarContext<'_> {
                     _ => {}
                 }
                 for param in ast.list(sig.params) { self.visit_ty(param.ty); }
-                if sig.asyncness {
-                    let opaque = self.prog.node_id_to_def_id[&(self.file, relax_front::def_collector::NodeId::AsyncReturn(def.item))];
+                // (ast_lowering of a foreign fn ignores `async`, rejected by ast validation: no opaque)
+                if let Some(&opaque) = sig.asyncness.then(|| self.prog.node_id_to_def_id.get(&(self.file, relax_front::def_collector::NodeId::AsyncReturn(def.item)))).flatten() {
                     self.visit_opaque_ty(opaque, Default::default(), sig.ret);
                 } else if let Some(ty) = sig.ret { self.visit_ty(ty); }
                 self.scopes.pop();
@@ -774,7 +836,7 @@ impl BoundVarContext<'_> {
             ast::Ty::Ref(name, _, inner) => {
                 let key = name.map_or(LifetimeKey::Reference(ty.0), |lt| LifetimeKey::Named(lt.lo, lt.hi));
                 self.visit_lifetime(key, name.map_or(0, |lt| lt.lo));
-                self.scopes.push(Scope::ObjectLifetimeDefault(self.rbv.named_variable_map.get(&key).copied()));
+                self.scopes.push(Scope::ObjectLifetimeDefault(self.mapped(key)));
                 self.visit_ty(inner);
                 self.scopes.pop();
             }
@@ -947,10 +1009,10 @@ impl BoundVarContext<'_> {
 }
 
 impl BoundVarContext<'_> {
-    /// resolve_bound_vars.rs:904-944 (visit_qpath). HIR's QPath::TypeRelative is a path whose
-    /// resolution stops at a type (`<T>::A`, `T::A`, `Self::A`, `S::new`): its unresolved
-    /// segments, and the resolved prefix's type around them, see an indeterminate (`None`)
-    /// object lifetime default; the prefix's own containers still apply inside it.
+    /// HIR's QPath::TypeRelative is a path whose resolution stops at a type (`<T>::A`, `T::A`,
+    /// `Self::A`, `S::new`): its unresolved segments' arguments are walked without a scope of
+    /// their own (rustc's visit_segment_args only runs for resolved paths), so they see the
+    /// enclosing object lifetime default; the resolved prefix's own containers still apply.
     fn resolved_prefix_len(&self, path: &ast::Path) -> usize {
         let ast = &self.prog.files[self.file as usize].ast;
         let segs = ast.segs(path.segs);
@@ -971,8 +1033,6 @@ impl BoundVarContext<'_> {
     fn visit_path(&mut self, path: &ast::Path) {
         let ast = &self.prog.files[self.file as usize].ast;
         let resolved_len = self.resolved_prefix_len(path);
-        let type_relative = resolved_len < path.segs.len();
-        if type_relative { self.scopes.push(Scope::ObjectLifetimeDefault(None)); }
         let resolved = ast::Path { segs: path.segs.prefix(resolved_len), ..*path };
         if let Some(qself) = ast.qself(path) {
             if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path); }
@@ -991,14 +1051,14 @@ impl BoundVarContext<'_> {
             for argument in arguments {
                 if let GenericArg::Lifetime(name) = *argument {
                     self.named_lifetime(name);
-                    lifetimes.push(self.rbv.named_variable_map.get(&LifetimeKey::Named(name.lo, name.hi)).copied());
+                    lifetimes.push(self.mapped(LifetimeKey::Named(name.lo, name.hi)));
                 }
             }
             let mut j = 0;
             while self.rbv.names.uses.contains_key(&LifetimeKey::Path(segment_id, j)) {
                 let key = LifetimeKey::Path(segment_id, j);
                 self.visit_lifetime(key, segment.name.lo);
-                lifetimes.push(self.rbv.named_variable_map.get(&key).copied());
+                lifetimes.push(self.mapped(key));
                 j += 1;
             }
             let prefix = ast::Path { segs: path.segs.prefix(i + 1), ..*path };
@@ -1023,7 +1083,7 @@ impl BoundVarContext<'_> {
             for argument in arguments {
                 let (name, own_args, ty, bounds) = match *argument {
                     GenericArg::Binding(name, args, ty) => (name, args, Some(ty), None),
-                    GenericArg::Constraint(name, bounds) => (name, ast::GenericArgsId::NONE, None, Some(bounds)),
+                    GenericArg::Constraint(name, args, bounds) => (name, args, None, Some(bounds)),
                     _ => continue,
                 };
                 let own_has_lifetimes = matches!(ast.gargs(own_args), Some(GenericArgs::Angle(args)) if ast.list(*args).iter().any(|a| matches!(a, GenericArg::Lifetime(_))));
@@ -1045,7 +1105,6 @@ impl BoundVarContext<'_> {
             self.visit_ty(qself.ty);
             self.scopes.pop();
         }
-        if type_relative { self.scopes.pop(); }
     }
 
     /// resolve_bound_vars.rs:2000-2094: only the resolved declaration's
@@ -1078,7 +1137,7 @@ impl BoundVarContext<'_> {
                     GenericArg::Type(ty) => self.visit_ty(ty),
                     GenericArg::Const(expr) => self.visit_anon_const(expr),
                     GenericArg::Binding(_, args, ty) => { self.visit_constraint_args(args); self.visit_ty(ty); }
-                    GenericArg::Constraint(_, bounds) => self.visit_bounds(bounds),
+                    GenericArg::Constraint(_, args, bounds) => { self.visit_constraint_args(args); self.visit_bounds(bounds); }
                 }
             }
         }
@@ -1161,12 +1220,12 @@ impl BoundVarContext<'_> {
                         let mut ordinal = 0;
                         for arg in ast.list(*args) {
                             if let GenericArg::Lifetime(lt) = arg {
-                                if ordinal == lifetime_index { return self.rbv.named_variable_map.get(&LifetimeKey::Named(lt.lo, lt.hi)).copied(); }
+                                if ordinal == lifetime_index { return self.mapped(LifetimeKey::Named(lt.lo, lt.hi)); }
                                 ordinal += 1;
                             }
                         }
                     }
-                    return self.rbv.named_variable_map.get(&LifetimeKey::Path(segments.lo + index as u32, lifetime_index)).copied();
+                    return self.mapped(LifetimeKey::Path(segments.lo + index as u32, lifetime_index));
                 }
                 lifetime_index += 1;
             }
@@ -1244,7 +1303,7 @@ mod tests {
         let version = prog.parse_version(old, "round49.rs", edited.into_bytes()).unwrap();
         let pairs: Vec<_> = (0..version.pf.ast.items.len() as u32).map(|i| (i, i)).collect();
         let new = prog.commit_body_version(version, &pairs).unwrap();
-        prog.lower_body_declarations(&[owners[0]]);
+        prog.lower_body_declarations(&[owners[0]], &[new]);
         tcx.publish_file_bodies(&[old, new]);
         let after = owners.map(|d| tcx.typeck(&prog, d));
         let mut recomputed = 0;
@@ -1282,7 +1341,7 @@ mod tests {
         let version = prog.parse_version(old, "round46.rs", edited.into_bytes()).unwrap();
         let pairs: Vec<_> = (0..version.pf.ast.items.len() as u32).map(|i| (i, i)).collect();
         let new = prog.commit_body_version(version, &pairs).unwrap();
-        prog.lower_body_declarations(&[owner]);
+        prog.lower_body_declarations(&[owner], &[new]);
         tcx.publish_file_bodies(&[old, new]);
         let after = tcx.resolve_bound_vars(&prog, owner);
         assert!(after.names.declarations.iter().any(|d| d.name.as_deref() == Some("'fresh")),
@@ -1496,17 +1555,16 @@ mod tests {
         assert_eq!(tcx.dcx.err_count(), 0);
     }
     #[test]
-    fn round33_lifetime_type_relative_paths_have_indeterminate_object_default() {
-        // resolve_bound_vars.rs:927-944 + collect.rs:506-520: `X::A<dyn Tr>` (type-relative)
-        // has no object lifetime default: E0228 in a signature; `<X as G>::A<dyn Tr>` is
-        // resolved and takes A's declared default.
+    fn round33_lifetime_type_relative_paths_take_the_enclosing_object_default() {
+        // resolve_bound_vars.rs:1686-1809 (visit_segment_args runs for resolved paths only):
+        // `X::A<dyn Tr>` (type-relative) pushes no object default scope, so a signature's
+        // `'static` applies (no E0228); `<X as G>::A<dyn Tr>` is resolved and takes A's
+        // declared default.
         let (prog, tcx) = source("#![no_std] trait Tr {} trait G { type A<T: ?Sized>; } fn relative<X: G>(_: X::A<dyn Tr>) {} fn qualified<X: G>(_: <X as G>::A<dyn Tr>) {}", 2021);
-        for name in ["relative"] {
+        for name in ["relative", "qualified"] {
             tcx.fn_sig(&prog, named(&prog, name));
-            assert!(sig_errors(&tcx, &prog, name).iter().any(|e| e.contains("E0228")), "{name}: {:?}", sig_errors(&tcx, &prog, name));
+            assert!(sig_errors(&tcx, &prog, name).is_empty(), "{name}: {:?}", sig_errors(&tcx, &prog, name));
         }
-        tcx.fn_sig(&prog, named(&prog, "qualified"));
-        assert!(sig_errors(&tcx, &prog, "qualified").is_empty(), "{:?}", sig_errors(&tcx, &prog, "qualified"));
         assert_eq!(object_default(&tcx, &prog, named(&prog, "qualified")), [RegionKind::ReStatic]);
     }
     #[test]
@@ -1619,8 +1677,8 @@ impl ResolveBoundVars {
         let index = vars.iter().position(|var| *var == BoundVariableKind::Region(BoundRegionKind::Named(id))).expect("late lifetime declaration");
         RegionKind::ReBound(0, BoundVar(index as u32))
     }
-    pub(super) fn region_for_use(&self, key: LifetimeKey) -> Option<RegionKind> {
-        let arg = match self.named_variable_map.get(&key).copied() {
+    pub(super) fn region_for_use(&self, key: LifetimeKey, pred: Option<u32>) -> Option<RegionKind> {
+        let arg = match self.named_variable_map.get(&key.scoped(pred)).or_else(|| self.named_variable_map.get(&key)).copied() {
             Some(arg) => arg,
             None => {
                 if let LifetimeKey::Named(lo, hi) = key {
@@ -1635,6 +1693,22 @@ impl ResolveBoundVars {
             }
         };
         Some(self.region_for_arg(arg))
+    }
+    /// `map_opaque_lifetime_to_parent_lifetime` for each lifetime the opaque captures: a lifetime
+    /// that maps to a parameter of an enclosing opaque keeps mapping until it reaches the item's own.
+    pub(crate) fn opaque_captured_parent_lifetimes(&self, opaque: DefId, owner: DefId) -> Vec<RegionKind> {
+        self.opaque_captured_lifetimes[&opaque].iter().map(|&(mut arg, _)| {
+            while let ResolvedArg::EarlyBound(id) = arg {
+                let decl = self.names.declarations.iter().chain(self.names.inherited.iter()).find(|d| d.id == id).expect("lifetime declaration");
+                let BinderId::Opaque(outer) = decl.binder else { break };
+                arg = self.opaque_captured_lifetimes[&outer].iter().find(|(_, own)| *own == id).expect("captured lifetime of the enclosing opaque").0;
+            }
+            match arg {
+                // a late-bound parameter of the item, as its signature's liberated regions name it
+                ResolvedArg::LateBound(_, var, _) => RegionKind::ReLateParam(crate::types::RegionScope::Item(owner), crate::types::LateParamKind::Anon(var.0)),
+                _ => self.region_for_arg(arg),
+            }
+        }).collect()
     }
     pub(crate) fn region_for_arg(&self, arg: ResolvedArg) -> RegionKind {
         match arg {
@@ -1657,7 +1731,7 @@ impl ResolveBoundVars {
 }
 
 crate::collected_enum!(BinderId; 0 => Item, 1 => FnPointer(n), 2 => Trait(n), 3 => Where(n), 4 => Closure(n), 5 => GenericBound(n), 6 => ArgumentImplTrait(n), 7 => Opaque(d));
-crate::collected_enum!(LifetimeKey; 0 => Named(a,b), 1 => Reference(n), 2 => SelfReference, 3 => Path(a,b), 4 => ObjectDefault(n));
+crate::collected_enum!(LifetimeKey; 0 => Named(a,b), 1 => Reference(n), 2 => SelfReference, 3 => Path(a,b), 4 => ObjectDefault(n), 5 => Scoped(p,t,a,b));
 crate::collected_enum!(ResolvedArg; 0 => StaticLifetime, 1 => EarlyBound(id), 2 => LateBound(d,v,id), 3 => Free(d,id), 4 => Error);
 crate::collected_fields!(ResolveBoundVars, names, named_variable_map, late_bound_vars_map, opaque_captured_lifetimes, early_indices, generic_indices);
 crate::collected_enum!(BoundVariableKind; 0 => Ty, 1 => Region(r), 2 => Const);

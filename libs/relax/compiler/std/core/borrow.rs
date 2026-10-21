@@ -5,6 +5,7 @@ use crate::fmt;
 use crate::hash::{Hash, Hasher};
 use crate::ops::Deref;
 
+#[rustc_diagnostic_item = "Borrow"]
 pub trait Borrow<Borrowed: ?Sized> {
     fn borrow(&self) -> &Borrowed;
 }
@@ -14,6 +15,7 @@ pub trait BorrowMut<Borrowed: ?Sized>: Borrow<Borrowed> {
 }
 
 impl<T: ?Sized> Borrow<T> for T {
+    #[rustc_diagnostic_item = "noop_method_borrow"]
     fn borrow(&self) -> &T {
         self
     }
@@ -63,10 +65,10 @@ pub enum Cow<'a, B: ?Sized + ToOwned + 'a> {
 pub use Cow::{Borrowed, Owned};
 
 impl<'a, B: ?Sized + ToOwned> Cow<'a, B> {
-    pub fn is_borrowed(&self) -> bool {
+    pub const fn is_borrowed(&self) -> bool {
         matches!(self, Borrowed(_))
     }
-    pub fn is_owned(&self) -> bool {
+    pub const fn is_owned(&self) -> bool {
         !self.is_borrowed()
     }
     pub fn to_mut(&mut self) -> &mut <B as ToOwned>::Owned {
@@ -87,8 +89,6 @@ impl<'a, B: ?Sized + ToOwned> Cow<'a, B> {
 }
 
 impl<'a, B: ?Sized + ToOwned> Borrow<B> for Cow<'a, B>
-where
-    B::Owned: Borrow<B>,
 {
     fn borrow(&self) -> &B {
         &**self
@@ -96,8 +96,6 @@ where
 }
 
 impl<'a, B: ?Sized + ToOwned> Deref for Cow<'a, B>
-where
-    B::Owned: Borrow<B>,
 {
     type Target = B;
     fn deref(&self) -> &B {

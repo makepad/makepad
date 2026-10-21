@@ -101,6 +101,7 @@ fn encode_clip(path: &str, keyframe_only: bool) {
                 aac_bitrate_bps: 128_000,
             }),
             keyframe_only,
+            ..Default::default()
         },
     )
     .expect("file encoder creation");

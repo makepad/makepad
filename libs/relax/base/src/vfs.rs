@@ -283,8 +283,9 @@ fn not_found(path: &str) -> io::Error {
 // pointer and no entry another thread or a later compiler generation can reach. A scope is
 // !Send, so no shared state (a preload pool, a Program the settle swap forgets) can keep a
 // thread's binding alive past its load.
-thread_local! {
-    static BOUND: std::cell::RefCell<Vec<(u64, Arc<ReadSnapshot>)>> = const { std::cell::RefCell::new(Vec::new()) };
+crate::gen_local! {
+    // compiler TLS: the table's buffer is a generation's block, the settle swap forgets it
+    static BOUND: std::cell::RefCell<Vec<(u64, Arc<ReadSnapshot>)>>;
 }
 static BIND_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

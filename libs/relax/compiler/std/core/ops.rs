@@ -7,6 +7,19 @@
 use crate::option::Option::{self, None, Some};
 use crate::marker::{PointeeSized, Unsize};
 
+// library/core/src/ops/unsize.rs: pointer-like types whose pointee unsizes coerce as a whole.
+#[cfg_attr(not(relax_check), lang = "coerce_unsized")]
+pub trait CoerceUnsized<T: ?Sized> {}
+impl<'a, 'b: 'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a U> for &'b mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a mut U> for &'a mut T {}
+impl<'a, 'b: 'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a U> for &'b T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for &'a T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*mut U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for &'a mut T {}
+impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for *mut T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for *const T {}
+impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*mut U> for *mut T {}
+
 #[cfg_attr(not(relax_check), lang = "dispatch_from_dyn")]
 pub trait DispatchFromDyn<T>: Sized {}
 impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a U> for &'a T {}
@@ -14,10 +27,18 @@ impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a mut U
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*const U> for *const T {}
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*mut U> for *mut T {}
 
+#[rustc_diagnostic_item = "Drop"]
 #[cfg_attr(not(relax_check), lang = "drop")]
 pub trait Drop {
     fn drop(&mut self);
 }
+
+/// Types a method may take as `self: Type` without `arbitrary_self_types` (rustc
+/// library/core/src/ops/deref.rs `LegacyReceiver`).
+#[cfg_attr(not(relax_check), lang = "legacy_receiver")]
+pub trait LegacyReceiver {}
+impl<T: ?Sized> LegacyReceiver for &T {}
+impl<T: ?Sized> LegacyReceiver for &mut T {}
 
 #[cfg_attr(not(relax_check), lang = "deref")]
 pub trait Deref: PointeeSized {
@@ -32,6 +53,7 @@ pub trait DerefMut: Deref + PointeeSized {
 
 impl<'a, T: ?Sized> Deref for &'a T {
     type Target = T;
+    #[rustc_diagnostic_item = "noop_method_deref"]
     fn deref(&self) -> &T {
         *self
     }
@@ -42,6 +64,9 @@ impl<'a, T: ?Sized> Deref for &'a mut T {
         &**self
     }
 }
+// library/core/src/ops/deref.rs: a shared reference is never `DerefMut`
+impl<T: ?Sized> !DerefMut for &T {}
+
 impl<'a, T: ?Sized> DerefMut for &'a mut T {
     fn deref_mut(&mut self) -> &mut T {
         &mut **self
@@ -64,19 +89,25 @@ pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
 // implements these for closures, fn items and fn pointers itself.
 #[cfg_attr(not(relax_check), lang = "fn_once")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnOnce<Args> {
     #[cfg_attr(not(relax_check), lang = "fn_once_output")]
     type Output;
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_once(self, args: Args) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "fn_mut")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnMut<Args>: FnOnce<Args> {
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "fn")]
 #[fundamental]
+#[must_use = "closures are lazy and do nothing unless called"]
 pub trait Fn<Args>: FnMut<Args> {
+    #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call(&self, args: Args) -> Self::Output;
 }
 
@@ -191,61 +222,73 @@ pub trait AsyncFnKindHelper<GoalKind> {}
 #[cfg_attr(not(relax_check), lang = "add")]
 pub trait Add<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn add(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "sub")]
 pub trait Sub<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn sub(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "mul")]
 pub trait Mul<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn mul(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "div")]
 pub trait Div<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn div(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "rem")]
 pub trait Rem<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn rem(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "neg")]
 pub trait Neg {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn neg(self) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "not")]
 pub trait Not {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn not(self) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitand")]
 pub trait BitAnd<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitand(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitor")]
 pub trait BitOr<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitor(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "bitxor")]
 pub trait BitXor<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitxor(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "shl")]
 pub trait Shl<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shl(self, rhs: Rhs) -> Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "shr")]
 pub trait Shr<Rhs = Self> {
     type Output;
+    #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shr(self, rhs: Rhs) -> Self::Output;
 }
 
@@ -385,25 +428,25 @@ impl<Idx> RangeInclusive<Idx> {
     pub const fn end(&self) -> &Idx {
         &self.end
     }
-    pub fn into_inner(self) -> (Idx, Idx) {
+    pub const fn into_inner(self) -> (Idx, Idx) {
         (self.start, self.end)
     }
 }
 
 impl<Idx: PartialOrd<Idx>> Range<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
         self.start <= *item && *item < self.end
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         !(self.start < self.end)
     }
 }
 
 impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -412,7 +455,7 @@ impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -421,7 +464,7 @@ impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
@@ -430,13 +473,13 @@ impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
 }
 
 impl<Idx: PartialOrd<Idx>> RangeInclusive<Idx> {
-    pub fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
+    pub const fn contains<U: ?Sized + PartialOrd<Idx>>(&self, item: &U) -> bool
     where
         Idx: PartialOrd<U>,
     {
         self.start <= *item && *item <= self.end
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.exhausted || !(self.start <= self.end)
     }
 }
@@ -449,7 +492,7 @@ pub enum Bound<T> {
 }
 
 impl<T> Bound<T> {
-    pub fn as_ref(&self) -> Bound<&T> {
+    pub const fn as_ref(&self) -> Bound<&T> {
         match self {
             Bound::Included(x) => Bound::Included(x),
             Bound::Excluded(x) => Bound::Excluded(x),
@@ -466,7 +509,7 @@ impl<T> Bound<T> {
 }
 
 impl<T: Clone> Bound<&T> {
-    pub fn cloned(self) -> Bound<T> {
+    pub const fn cloned(self) -> Bound<T> {
         match self {
             Bound::Included(x) => Bound::Included(x.clone()),
             Bound::Excluded(x) => Bound::Excluded(x.clone()),
@@ -716,13 +759,13 @@ impl<B, C> FromResidual<ControlFlow<B, crate::convert::Infallible>> for ControlF
 }
 
 impl<B, C> ControlFlow<B, C> {
-    pub fn is_break(&self) -> bool {
+    pub const fn is_break(&self) -> bool {
         matches!(self, ControlFlow::Break(_))
     }
-    pub fn is_continue(&self) -> bool {
+    pub const fn is_continue(&self) -> bool {
         matches!(self, ControlFlow::Continue(_))
     }
-    pub fn break_value(self) -> Option<B> {
+    pub const fn break_value(self) -> Option<B> {
         match self {
             ControlFlow::Break(b) => Some(b),
             ControlFlow::Continue(_) => None,

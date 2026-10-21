@@ -27,6 +27,9 @@ extern "C" {
 }
 
 const MTL_PIXEL_FORMAT_BGRA8_UNORM: u64 = 80;
+const MTL_PIXEL_FORMAT_R8_UNORM: u64 = 10;
+const MTL_PIXEL_FORMAT_RG8_UNORM: u64 = 30;
+const MTL_RESOURCE_STORAGE_MODE_PRIVATE: u64 = 2 << 4;
 const MTL_TEXTURE_TYPE_2D: u64 = 2;
 const MTL_STORAGE_MODE_SHARED: u64 = 0;
 const MTL_TEXTURE_USAGE_SHADER_READ: u64 = 1;
@@ -38,29 +41,39 @@ pub(crate) struct TextureIntake {
     /// BGRA buffers of `pool_size`, the size of the regions copied.
     pool: *mut c_void,
     pool_size: (u32, u32),
-    /// NV12 buffers of the same size, and the GPU conversion into them.
+    /// NV12 buffers of the same size (video range), and the GPU conversion
+    /// into them; full-range NV12 buffers for planes already in full range.
     nv12_pool: *mut c_void,
+    nv12_full_pool: *mut c_void,
     transfer: *mut c_void,
     /// Source surfaces wrapped once, by handle: (handle, iosurface, texture).
     sources: Vec<(u64, *mut c_void, ObjcId)>,
+    /// GPU memory an NV12 picture's planes pass through (see `nv12_picture`), and its size.
+    staging: ObjcId,
+    staging_bytes: u64,
 }
 
 /// A +1 retained Metal texture over `iosurface`.
 unsafe fn texture_for(device: ObjcId, iosurface: *mut c_void, width: usize, height: usize) -> ObjcId {
+    unsafe { plane_texture_for(device, iosurface, 0, MTL_PIXEL_FORMAT_BGRA8_UNORM, width, height) }
+}
+
+/// A +1 retained Metal texture over plane `plane` of `iosurface`, as `format`.
+unsafe fn plane_texture_for(device: ObjcId, iosurface: *mut c_void, plane: u64, format: u64, width: usize, height: usize) -> ObjcId {
     unsafe {
         let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
         if descriptor.is_null() {
             return std::ptr::null_mut();
         }
         let () = msg_send![descriptor, setTextureType: MTL_TEXTURE_TYPE_2D];
-        let () = msg_send![descriptor, setPixelFormat: MTL_PIXEL_FORMAT_BGRA8_UNORM];
+        let () = msg_send![descriptor, setPixelFormat: format];
         let () = msg_send![descriptor, setWidth: width as u64];
         let () = msg_send![descriptor, setHeight: height as u64];
         let () = msg_send![descriptor, setDepth: 1u64];
         let () = msg_send![descriptor, setMipmapLevelCount: 1u64];
         let () = msg_send![descriptor, setStorageMode: MTL_STORAGE_MODE_SHARED];
         let () = msg_send![descriptor, setUsage: (MTL_TEXTURE_USAGE_SHADER_READ | MTL_TEXTURE_USAGE_RENDER_TARGET)];
-        let texture: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor iosurface: iosurface plane: 0u64];
+        let texture: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor iosurface: iosurface plane: plane];
         let () = msg_send![descriptor, release];
         texture
     }
@@ -130,7 +143,7 @@ impl TextureIntake {
             if status != 0 || transfer.is_null() {
                 return Err(VideoFileError::with_code("VTPixelTransferSessionCreate", status));
             }
-            Ok(TextureIntake { device, queue, pool: std::ptr::null_mut(), pool_size: (0, 0), nv12_pool: std::ptr::null_mut(), transfer, sources: Vec::new() })
+            Ok(TextureIntake { device, queue, pool: std::ptr::null_mut(), pool_size: (0, 0), nv12_pool: std::ptr::null_mut(), nv12_full_pool: std::ptr::null_mut(), transfer, sources: Vec::new(), staging: std::ptr::null_mut(), staging_bytes: 0 })
         }
     }
 
@@ -139,7 +152,7 @@ impl TextureIntake {
             return Ok(());
         }
         unsafe {
-            for pool in [&mut self.pool, &mut self.nv12_pool] {
+            for pool in [&mut self.pool, &mut self.nv12_pool, &mut self.nv12_full_pool] {
                 if !pool.is_null() {
                     CVPixelBufferPoolRelease(*pool);
                     *pool = std::ptr::null_mut();
@@ -147,6 +160,7 @@ impl TextureIntake {
             }
             self.pool = make_pool(kCVPixelFormatType_32BGRA, width, height)?;
             self.nv12_pool = make_pool(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, width, height)?;
+            self.nv12_full_pool = make_pool(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, width, height)?;
             self.pool_size = (width, height);
         }
         Ok(())
@@ -227,6 +241,119 @@ impl TextureIntake {
         }
     }
 
+    /// The picture `copy` makes (BGRA, its alpha kept), for an encoder that
+    /// takes BGRA (HEVC with alpha).
+    pub(crate) unsafe fn bgra_picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        let buffer = unsafe { self.copy(handle, region)? };
+        Ok(GpuPicture { buffer, width: region[2], height: region[3] })
+    }
+
+    /// A `width` x `height` NV12 picture whose planes the shared texture
+    /// `handle` already holds, laid out as BGRA8 texels: `width.div_ceil(4)`
+    /// texels a row (4 bytes of a plane row each, in memory order), the
+    /// `height` luma rows and then the `height / 2` interleaved chroma rows
+    /// (what a GPU pass writes when it converts a picture to NV12). The
+    /// texels are copied on the GPU into the encoder's NV12 buffer (through
+    /// GPU memory: a texture's bytes reach a plane of another format only
+    /// via a buffer), and the copy is waited for.
+    pub(crate) unsafe fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, full_range: bool) -> Result<GpuPicture, VideoFileError> {
+        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+            return Err(VideoFileError::new(format!("texture intake: a {width}x{height} picture cannot be NV12")));
+        }
+        let (texels, rows) = (width.div_ceil(4) as u64, (height + height / 2) as u64);
+        let row_bytes = texels * 4;
+        unsafe {
+            let (surface, source) = self.source(handle)?;
+            let (source_width, source_height) = (IOSurfaceGetWidth(surface as _) as u64, IOSurfaceGetHeight(surface as _) as u64);
+            if texels > source_width || rows > source_height {
+                return Err(VideoFileError::new(format!(
+                    "texture intake: a {width}x{height} NV12 picture needs {texels}x{rows} texels, the texture has {source_width}x{source_height}"
+                )));
+            }
+            self.ensure_pool(width, height)?;
+            let bytes = row_bytes * rows;
+            if self.staging_bytes < bytes {
+                if !self.staging.is_null() {
+                    let () = msg_send![self.staging, release];
+                }
+                self.staging = msg_send![self.device, newBufferWithLength: bytes options: MTL_RESOURCE_STORAGE_MODE_PRIVATE];
+                if self.staging.is_null() {
+                    self.staging_bytes = 0;
+                    return Err(VideoFileError::new(format!("texture intake: no {bytes} B of GPU memory for a picture")));
+                }
+                self.staging_bytes = bytes;
+            }
+            let mut nv12: CVPixelBufferRef = std::ptr::null_mut();
+            let pool = if full_range { self.nv12_full_pool } else { self.nv12_pool };
+            let status = CVPixelBufferPoolCreatePixelBuffer(std::ptr::null(), pool, &mut nv12);
+            if status != 0 || nv12.is_null() {
+                return Err(VideoFileError::with_code("CVPixelBufferPoolCreatePixelBuffer(nv12)", status));
+            }
+            let target = CVPixelBufferGetIOSurface(nv12);
+            let (luma, chroma) = if target.is_null() {
+                (std::ptr::null_mut(), std::ptr::null_mut())
+            } else {
+                (
+                    plane_texture_for(self.device, target, 0, MTL_PIXEL_FORMAT_R8_UNORM, width as usize, height as usize),
+                    plane_texture_for(self.device, target, 1, MTL_PIXEL_FORMAT_RG8_UNORM, width as usize / 2, height as usize / 2),
+                )
+            };
+            if luma.is_null() || chroma.is_null() {
+                for texture in [luma, chroma] {
+                    if !texture.is_null() {
+                        let () = msg_send![texture, release];
+                    }
+                }
+                CVPixelBufferRelease(nv12);
+                return Err(VideoFileError::new("texture intake: the encoder's NV12 buffer has no Metal view"));
+            }
+            let command_buffer: ObjcId = msg_send![self.queue, commandBuffer];
+            let encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+            let () = msg_send![
+                encoder,
+                copyFromTexture: source
+                sourceSlice: 0u64
+                sourceLevel: 0u64
+                sourceOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                sourceSize: MTLSize { width: texels, height: rows, depth: 1 }
+                toBuffer: self.staging
+                destinationOffset: 0u64
+                destinationBytesPerRow: row_bytes
+                destinationBytesPerImage: bytes
+            ];
+            let h = height as u64;
+            for (texture, offset, size) in [
+                (luma, 0, MTLSize { width: width as u64, height: h, depth: 1 }),
+                (chroma, row_bytes * h, MTLSize { width: width as u64 / 2, height: h / 2, depth: 1 }),
+            ] {
+                let () = msg_send![
+                    encoder,
+                    copyFromBuffer: self.staging
+                    sourceOffset: offset
+                    sourceBytesPerRow: row_bytes
+                    sourceBytesPerImage: row_bytes * size.height
+                    sourceSize: size
+                    toTexture: texture
+                    destinationSlice: 0u64
+                    destinationLevel: 0u64
+                    destinationOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                ];
+            }
+            let () = msg_send![encoder, endEncoding];
+            let () = msg_send![command_buffer, commit];
+            let () = msg_send![command_buffer, waitUntilCompleted];
+            let status: u64 = msg_send![command_buffer, status];
+            let () = msg_send![luma, release];
+            let () = msg_send![chroma, release];
+            // MTLCommandBufferStatusCompleted
+            if status != 4 {
+                CVPixelBufferRelease(nv12);
+                return Err(VideoFileError::new(format!("texture intake: the NV12 copy failed (command buffer status {status})")));
+            }
+            Ok(GpuPicture { buffer: nv12, width, height })
+        }
+    }
+
     /// `copy`, then converted on the GPU into an NV12 buffer of the same
     /// size: the picture an encoder takes, holding nothing of the source.
     pub(crate) unsafe fn picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
@@ -256,10 +383,13 @@ impl Drop for TextureIntake {
                 let () = msg_send![texture, release];
                 CFRelease(surface as *const c_void);
             }
-            for pool in [self.pool, self.nv12_pool] {
+            for pool in [self.pool, self.nv12_pool, self.nv12_full_pool] {
                 if !pool.is_null() {
                     CVPixelBufferPoolRelease(pool);
                 }
+            }
+            if !self.staging.is_null() {
+                let () = msg_send![self.staging, release];
             }
             VTPixelTransferSessionInvalidate(self.transfer);
             CFRelease(self.transfer as *const c_void);

@@ -15,7 +15,7 @@
 
 use crate::linux_gst_sys::*;
 use crate::nv12;
-use crate::{VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoTransformInfo};
+use crate::{VideoColor, VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoTransformInfo};
 use std::ffi::{c_void, CString};
 
 const HNS_PER_SECOND: u128 = 10_000_000;
@@ -37,12 +37,46 @@ pub(crate) struct LinuxVideoFileEncoder {
     frame_index: u64,
     finalized: bool,
     nv12_scratch: Vec<u8>,
+    color: VideoColor,
     transform: VideoTransformInfo,
 }
 
 // The pipeline is owned and driven from whichever single thread calls the
 // facade; GStreamer objects are internally thread-safe.
 unsafe impl Send for LinuxVideoFileEncoder {}
+
+/// The caps `colorimetry` string for a colour, in the 4-part numeric form
+/// `range:matrix:transfer:primaries` of the gst-video enums (see
+/// `linux_decoder::colorimetry_to_color` for the tables): range 1 full /
+/// 2 limited; matrix 3 BT709, 4 BT601, 6 BT2020; transfer 5 BT709 (also for
+/// BT.601, the same curve), 13 BT2020_10, 14 PQ, 15 HLG; primaries 1 BT709,
+/// 3 BT470BG, 4 SMPTE170M, 7 BT2020. The numeric form is exact for every
+/// combination, where the preset names cover only a few.
+pub(crate) fn color_to_colorimetry(color: VideoColor) -> String {
+    use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
+    let range = match color.range {
+        VideoRange::Full => 1,
+        VideoRange::Limited => 2,
+    };
+    let matrix = match color.matrix {
+        VideoMatrix::Bt709 => 3,
+        VideoMatrix::Bt601 => 4,
+        VideoMatrix::Bt2020 => 6,
+    };
+    let transfer = match (color.transfer, color.primaries) {
+        (VideoTransfer::Sdr, VideoPrimaries::Bt2020) => 13,
+        (VideoTransfer::Sdr, _) => 5,
+        (VideoTransfer::Pq, _) => 14,
+        (VideoTransfer::Hlg, _) => 15,
+    };
+    let primaries = match color.primaries {
+        VideoPrimaries::Bt709 => 1,
+        VideoPrimaries::Bt470bg => 3,
+        VideoPrimaries::Smpte170m => 4,
+        VideoPrimaries::Bt2020 => 7,
+    };
+    format!("{range}:{matrix}:{transfer}:{primaries}")
+}
 
 impl LinuxVideoFileEncoder {
     pub fn new(path: &str, options: &VideoFileEncoderOptions) -> Result<Self, VideoFileError> {
@@ -66,7 +100,7 @@ impl LinuxVideoFileEncoder {
             VideoFileCodec::H264 => format!(
                 "x264enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h264parse"
             ),
-            VideoFileCodec::H265 => format!(
+            VideoFileCodec::H265 | VideoFileCodec::H265Alpha => format!(
                 "x265enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h265parse"
             ),
         };
@@ -85,12 +119,13 @@ impl LinuxVideoFileEncoder {
         };
         let launch = format!(
             "appsrc name=src block=true max-bytes=0 format=time caps=\"video/x-raw,format=NV12,width={w},\
-             height={h},framerate={n}/{d}\" ! videoconvert ! {codec} ! mp4mux name=mux ! \
+             height={h},framerate={n}/{d},colorimetry={colorimetry}\" ! videoconvert ! {codec} ! mp4mux name=mux ! \
              filesink location=\"{path}\"{audio_branch}",
             w = options.width,
             h = options.height,
             n = options.fps_num,
             d = options.fps_den,
+            colorimetry = color_to_colorimetry(options.color),
             path = path.replace('\\', "\\\\").replace('"', "\\\""),
         );
         let launch_c = CString::new(launch)
@@ -160,10 +195,11 @@ impl LinuxVideoFileEncoder {
                 frame_index: 0,
                 finalized: false,
                 nv12_scratch: Vec::new(),
+                color: options.color,
                 transform: VideoTransformInfo {
                     name: match options.codec {
                         VideoFileCodec::H264 => "GStreamer x264enc (software)".to_string(),
-                        VideoFileCodec::H265 => "GStreamer x265enc (software)".to_string(),
+                        VideoFileCodec::H265 | VideoFileCodec::H265Alpha => "GStreamer x265enc (software)".to_string(),
                     },
                     is_hardware: false,
                 },
@@ -185,8 +221,11 @@ impl LinuxVideoFileEncoder {
         pixel_stride: usize,
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
+        if self.color.is_hdr() {
+            return Err(VideoFileError::new("RGB frames cannot be converted to HDR; push NV12 already in the stream's colour"));
+        }
         let mut scratch = std::mem::take(&mut self.nv12_scratch);
-        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, &mut scratch);
+        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, self.color, &mut scratch);
         let result = self.push_frame_nv12(&scratch, pts_100ns);
         self.nv12_scratch = scratch;
         result
@@ -338,6 +377,22 @@ impl Drop for LinuxVideoFileEncoder {
 mod tests {
     use super::*;
     use crate::PcmAudioTrackOptions;
+
+    #[test]
+    fn colorimetry_string_round_trips() {
+        use crate::linux_decoder::colorimetry_to_color;
+        use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
+        assert_eq!(color_to_colorimetry(VideoColor::BT709), "2:3:5:1");
+        for c in [
+            VideoColor::BT709,
+            VideoColor { matrix: VideoMatrix::Bt601, range: VideoRange::Full, primaries: VideoPrimaries::Smpte170m, transfer: VideoTransfer::Sdr },
+            VideoColor { matrix: VideoMatrix::Bt601, range: VideoRange::Limited, primaries: VideoPrimaries::Bt470bg, transfer: VideoTransfer::Sdr },
+            VideoColor { matrix: VideoMatrix::Bt2020, range: VideoRange::Limited, primaries: VideoPrimaries::Bt2020, transfer: VideoTransfer::Pq },
+            VideoColor { matrix: VideoMatrix::Bt2020, range: VideoRange::Limited, primaries: VideoPrimaries::Bt2020, transfer: VideoTransfer::Hlg },
+        ] {
+            assert_eq!(colorimetry_to_color(&color_to_colorimetry(c), 1920, 1080), c);
+        }
+    }
 
     /// 24 frames of grey + one second of a 440 Hz tone, muxed to MP4: the file must
     /// carry both a video and an AAC audio stream (checked with ffprobe when present).

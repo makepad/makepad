@@ -25,33 +25,35 @@ impl str {
     pub const fn as_bytes(&self) -> &[u8] {
         unsafe { crate::intrinsics_mem::str_as_bytes(self) }
     }
-    pub unsafe fn as_bytes_mut(&mut self) -> &mut [u8] {
+    pub const unsafe fn as_bytes_mut(&mut self) -> &mut [u8] {
         as_bytes_mut(self)
     }
+    #[rustc_as_ptr]
     pub const fn as_ptr(&self) -> *const u8 {
         unsafe { crate::intrinsics_mem::slice_ptr(crate::intrinsics_mem::str_as_bytes(self)) }
     }
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    #[rustc_as_ptr]
+    pub const fn as_mut_ptr(&mut self) -> *mut u8 {
         self.as_ptr() as *mut u8
     }
     pub const fn as_str(&self) -> &str {
         self
     }
 
-    pub fn is_char_boundary(&self, index: usize) -> bool {
+    pub const fn is_char_boundary(&self, index: usize) -> bool {
         is_char_boundary(self, index)
     }
-    pub fn floor_char_boundary(&self, index: usize) -> usize {
+    pub const fn floor_char_boundary(&self, index: usize) -> usize {
         floor_char_boundary(self, index)
     }
-    pub fn ceil_char_boundary(&self, index: usize) -> usize {
+    pub const fn ceil_char_boundary(&self, index: usize) -> usize {
         ceil_char_boundary(self, index)
     }
 
-    pub fn get<I: StrIndex>(&self, i: I) -> Option<&str> {
+    pub const fn get<I: StrIndex>(&self, i: I) -> Option<&str> {
         get(self, i)
     }
-    pub fn get_mut<I: StrIndex>(&mut self, i: I) -> Option<&mut str> {
+    pub const fn get_mut<I: StrIndex>(&mut self, i: I) -> Option<&mut str> {
         get_mut(self, i)
     }
     pub unsafe fn get_unchecked<I: StrIndex>(&self, i: I) -> &str {
@@ -64,17 +66,17 @@ impl str {
         sub(self, begin, end)
     }
     #[track_caller]
-    pub fn split_at(&self, mid: usize) -> (&str, &str) {
+    pub const fn split_at(&self, mid: usize) -> (&str, &str) {
         split_at(self, mid)
     }
     #[track_caller]
-    pub fn split_at_mut(&mut self, mid: usize) -> (&mut str, &mut str) {
+    pub const fn split_at_mut(&mut self, mid: usize) -> (&mut str, &mut str) {
         split_at_mut(self, mid)
     }
-    pub fn split_at_checked(&self, mid: usize) -> Option<(&str, &str)> {
+    pub const fn split_at_checked(&self, mid: usize) -> Option<(&str, &str)> {
         split_at_checked(self, mid)
     }
-    pub fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut str, &mut str)> {
+    pub const fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut str, &mut str)> {
         split_at_mut_checked(self, mid)
     }
 
@@ -188,9 +190,11 @@ impl str {
     pub fn trim_end(&self) -> &str {
         trim_end(self)
     }
+    #[deprecated(since = "1.33.0", note = "superseded by `trim_start`")]
     pub fn trim_left(&self) -> &str {
         trim_start(self)
     }
+    #[deprecated(since = "1.33.0", note = "superseded by `trim_end`")]
     pub fn trim_right(&self) -> &str {
         trim_end(self)
     }
@@ -209,9 +213,11 @@ impl str {
     {
         trim_end_matches(self, pat)
     }
+    #[deprecated(since = "1.33.0", note = "superseded by `trim_start_matches`")]
     pub fn trim_left_matches<'a, P: Pattern<'a>>(&'a self, pat: P) -> &'a str {
         trim_start_matches(self, pat)
     }
+    #[deprecated(since = "1.33.0", note = "superseded by `trim_end_matches`")]
     pub fn trim_right_matches<'a, P: Pattern<'a>>(&'a self, pat: P) -> &'a str
     where
         P::Searcher: ReverseSearcher<'a>,
@@ -227,13 +233,13 @@ impl str {
     {
         strip_suffix(self, suffix)
     }
-    pub fn trim_ascii_start(&self) -> &str {
+    pub const fn trim_ascii_start(&self) -> &str {
         trim_ascii_start(self)
     }
-    pub fn trim_ascii_end(&self) -> &str {
+    pub const fn trim_ascii_end(&self) -> &str {
         trim_ascii_end(self)
     }
-    pub fn trim_ascii(&self) -> &str {
+    pub const fn trim_ascii(&self) -> &str {
         trim_ascii(self)
     }
 
@@ -241,16 +247,16 @@ impl str {
         parse(self)
     }
 
-    pub fn is_ascii(&self) -> bool {
+    pub const fn is_ascii(&self) -> bool {
         is_ascii(self)
     }
-    pub fn eq_ignore_ascii_case(&self, other: &str) -> bool {
+    pub const fn eq_ignore_ascii_case(&self, other: &str) -> bool {
         eq_ignore_ascii_case(self, other)
     }
-    pub fn make_ascii_uppercase(&mut self) {
+    pub const fn make_ascii_uppercase(&mut self) {
         make_ascii_uppercase(self)
     }
-    pub fn make_ascii_lowercase(&mut self) {
+    pub const fn make_ascii_lowercase(&mut self) {
         make_ascii_lowercase(self)
     }
 

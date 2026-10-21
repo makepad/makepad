@@ -10,8 +10,9 @@
 use super::{PErr, PResult, Parser};
 use crate::ast::*;
 use crate::lexer::{Tok, T};
+use crate::tg;
+use crate::tokbuf::TokBuf as Gen;
 
-const CORE: &str = "::__relax_crate_core";
 /// a `>` without a token of its own (see Parser::closes)
 const GT: usize = usize::MAX;
 
@@ -59,7 +60,7 @@ impl<'a> Parser<'a> {
     /// anonymous const of the field's type (rustc: default field values are anonymous consts),
     /// read by `S { a: 1, .. }` for the omitted fields. A generic type's defaults get none
     /// (a const item cannot take the type's parameters): such a `..` is a typeck error.
-    pub(super) fn default_consts(&mut self, id: ItemId) -> PResult<()> {
+    pub(super) fn default_consts(&mut self, id: ItemId, tok_lo: usize) -> PResult<()> {
         let it = self.ast.item(id).clone();
         let mut groups: Vec<(Option<String>, Vec<FieldDef>)> = Vec::new();
         match &it.kind {
@@ -77,41 +78,53 @@ impl<'a> Parser<'a> {
             _ => return Ok(()),
         }
         let name = String::from_utf8_lossy(self.bytes(it.name.lo, it.name.hi)).trim_start_matches("r#").to_string();
-        let mut text = String::new();
+        let mut g = Gen::new(self.edition);
         // live sessions (M10): a struct field's `#[rust(expr)]` initial value (makepad's) is its
         // default too, for running values when an edit adds the field (lower.rs ext_project)
         let live = variant_is_none_live(&groups) && self.session.options.live;
         for (variant, fields) in &groups {
             for f in fields {
                 let Some(fname) = f.name else { continue };
-                let src = match f.default {
+                // the initial value's tokens: a byte span of the item's tokens, or the attribute's token range
+                let init = match f.default {
                     Some(e) => {
                         let ex = self.ast.expr(e);
-                        String::from_utf8_lossy(self.bytes(ex.lo, ex.hi)).into_owned()
+                        (ex.lo, ex.hi, None)
                     }
                     None if live => match self.rust_attr_expr(self.ast.list(f.attrs)) {
-                        Some(x) => x,
+                        Some(r) => (0, 0, Some(r)),
                         None => continue,
                     },
                     None => continue,
                 };
                 let fname = String::from_utf8_lossy(self.bytes(fname.lo, fname.hi)).trim_start_matches("r#").to_string();
-                let ty = String::from_utf8_lossy(self.bytes(f.ty_span.0, f.ty_span.1)).into_owned();
-                text.push_str(&format!("#[allow(non_upper_case_globals)] const {}: {} = {};\n", default_const_name(&name, variant.as_deref(), &fname), ty, src));
+                // a `#[rust(expr)]` initial value is a run-time expression, not a constant of the
+                // program: marked, so the const checker leaves it alone (a real default field
+                // value is an anonymous const like any other)
+                if f.default.is_none() {
+                    tg!(&mut g; #[relax_live_default]);
+                }
+                tg!(&mut g; #[allow(non_upper_case_globals)] const #word(&default_const_name(&name, variant.as_deref(), &fname)) :);
+                self.copy_bytes(&mut g, tok_lo, f.ty_span.0, f.ty_span.1);
+                tg!(&mut g; =);
+                match init.2 {
+                    None => self.copy_bytes(&mut g, tok_lo, init.0, init.1),
+                    Some((a, b)) => self.copy_toks(&mut g, a, b),
+                }
+                tg!(&mut g; ;);
             }
         }
-        if text.is_empty() {
+        if g.is_empty() {
             return Ok(());
         }
-        let g = super::fmtmac::Gen::from_text(text);
-        let start = self.splice_expansion("field default", &g, it.name.lo)?;
+        let start = self.splice_buf("field default", &g, it.name.lo)?;
         let items = self.in_expansion(start, |p| p.items_until(T::Eof))?;
         self.extra_items.extend(items);
         Ok(())
     }
 
-    /// The expression of a field attribute `#[rust(expr)]` (makepad's initial value), as text.
-    fn rust_attr_expr(&self, attrs: &[Attr]) -> Option<String> {
+    /// The tokens of a field attribute `#[rust(expr)]` (makepad's initial value): their range.
+    fn rust_attr_expr(&self, attrs: &[Attr]) -> Option<(usize, usize)> {
         for a in attrs {
             let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
             if hi < lo + 3 || self.tok_text(self.toks.at(lo)) != b"rust" || self.tok_text(self.toks.at(lo + 1)) != b"(" {
@@ -121,9 +134,40 @@ impl<'a> Parser<'a> {
             if self.tok_text(self.toks.at(hi - 1)) != b")" || e <= s {
                 continue;
             }
-            return Some(String::from_utf8_lossy(self.bytes(s, e)).into_owned());
+            return Some((lo + 2, hi - 1));
         }
         None
+    }
+
+    /// Token `i` as the source spelled it (a `>` the parser split off the token is restored).
+    fn copy_tok(&self, g: &mut Gen, i: usize) {
+        let t = self.toks.at(i);
+        if t.kind == T::Gt && self.closes(i) == 2 {
+            g.punct(T::Gt);
+            g.punct(T::Gt);
+        } else {
+            g.put(t.kind, &String::from_utf8_lossy(self.tok_text(t)));
+        }
+    }
+
+    /// Tokens `lo..hi`.
+    pub(crate) fn copy_toks(&self, g: &mut Gen, lo: usize, hi: usize) {
+        for i in lo..hi {
+            self.copy_tok(g, i);
+        }
+    }
+
+    /// The tokens of the byte span `lo..hi`, found by scanning on from token `from`.
+    fn copy_bytes(&self, g: &mut Gen, from: usize, lo: u32, hi: u32) {
+        let n = self.toks.len();
+        let mut i = from;
+        while i < n && self.toks.at(i).hi <= lo {
+            i += 1;
+        }
+        while i < n && self.toks.at(i).hi <= hi {
+            self.copy_tok(g, i);
+            i += 1;
+        }
     }
 
     /// After an item: its expandable derives become impl items in `extra_items`.
@@ -157,9 +201,8 @@ impl<'a> Parser<'a> {
                 }
                 let n = self.tok_text(t);
                 if let Some(e) = EXPANDED.iter().find(|x| x.as_bytes() == n) {
-                    if !wanted.contains(e) {
-                        wanted.push(e);
-                    }
+                    // (written twice, a derive is expanded twice: the impls then conflict, E0119)
+                    wanted.push(e);
                 }
             }
         }
@@ -182,10 +225,10 @@ impl<'a> Parser<'a> {
         let lo = self.ast.list(it.attrs).iter().map(|a| self.toks.at(a.toks.lo as usize).lo).min().unwrap_or(it.lo).min(it.lo);
         let key = crate::parse_work::key(self, "native-derive", lo, it.hi, false);
         if let Some(x) = crate::parse_work::get(&key) {
-            return self.install_derive_text(x.text, it.name.lo);
+            return self.install_derive_buf(&Gen::from_parts(self.edition, x.text, x.toks), it.name.lo);
         }
         let name = String::from_utf8_lossy(self.bytes(it.name.lo, it.name.hi)).into_owned();
-        let (gparams, where_text) = self.derive_generics(tok_lo, &it);
+        let (gparams, where_buf) = self.derive_generics(tok_lo, &it);
         // field types naming a param's associated type (`x: T::Wide`): rustc's derive bounds
         // them too (`where T::Wide: Debug`, deriving/generic find_type_parameters)
         let mut assoc_tys: Vec<String> = Vec::new();
@@ -232,67 +275,111 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let mut text = String::new();
+        let mut all = Gen::new(self.edition);
         for tr in wanted {
             let _profile = crate::load_profile::span(self.session.runtime.profile, "derive-builtin-generate", tr);
-            let path = format!("{CORE}::{}", trait_path(tr).expect("compiler derive trait"));
-            let body = match tr {
-                "Debug" => gen_debug(&name, is_enum, &shapes),
-                "Default" => match gen_default(&name, is_enum, &shapes) {
-                    Some(b) => b,
-                    None => return Err(PErr { pos: it.name.lo, msg: "derive(Default) on an enum needs one `#[default]` unit variant".to_string() }),
-                },
-                "Hash" => gen_hash(&name, is_enum, &shapes),
-                "PartialOrd" => gen_ord(&name, is_enum, &shapes, true, &disc_ty),
-                _ => gen_ord(&name, is_enum, &shapes, false, &disc_ty),
-            };
-            // impl<params + bound> Trait for Name<args> where ..
-            let mut ig = Vec::new();
-            let mut ta = Vec::new();
-            for (kind, n, bounds) in &gparams {
-                match kind {
-                    0 => {
-                        ig.push(format!("{}{}", n, if bounds.is_empty() { String::new() } else { format!(": {}", bounds) }));
-                        ta.push(n.clone());
-                    }
-                    // (`#[derive(Default)]` on an enum takes its `#[default]` unit variant: no
-                    // `T: Default` bounds, rustc deriving/default.rs skip_path_as_bound)
-                    1 if tr == "Default" && is_enum => {
-                        ig.push(if bounds.is_empty() { n.clone() } else { format!("{}: {}", n, bounds) });
-                        ta.push(n.clone());
-                    }
-                    1 => {
-                        let b = if bounds.is_empty() { path.clone() } else { format!("{} + {}", bounds, path) };
-                        ig.push(format!("{}: {}", n, b));
-                        ta.push(n.clone());
-                    }
-                    _ => {
-                        ig.push(format!("const {}: {}", n, bounds));
-                        ta.push(n.clone());
+            let path = trait_path(tr).expect("compiler derive trait");
+            let mut body = Gen::new(self.edition);
+            match tr {
+                "Debug" => gen_debug(&mut body, &name, is_enum, &shapes),
+                "Default" => {
+                    if !gen_default(&mut body, &name, is_enum, &shapes) {
+                        return Err(PErr { pos: it.name.lo, msg: "derive(Default) on an enum needs one `#[default]` unit variant".to_string() });
                     }
                 }
+                "Hash" => {
+                    // the method's hasher parameter must not shadow a generic of the type
+                    // (rustc's derive names it hygienically)
+                    let mut h = "__H".to_string();
+                    while gparams.iter().any(|g| g.1 == h) {
+                        h.push('_');
+                    }
+                    gen_hash(&mut body, &name, is_enum, &shapes, &h)
+                }
+                "PartialOrd" => gen_ord(&mut body, &name, is_enum, &shapes, true, &disc_ty),
+                _ => gen_ord(&mut body, &name, is_enum, &shapes, false, &disc_ty),
+            };
+            // impl<params + bound> Trait for Name<args> where ..
+            tg!(&mut all; impl);
+            if !gparams.is_empty() {
+                all.punct(T::Lt);
+                for (k, (kind, n, bounds)) in gparams.iter().enumerate() {
+                    if k > 0 {
+                        all.punct(T::Comma);
+                    }
+                    match kind {
+                        0 => {
+                            all.word(n);
+                            if !bounds.is_empty() {
+                                tg!(&mut all; : #append(bounds));
+                            }
+                        }
+                        // (`#[derive(Default)]` on an enum takes its `#[default]` unit variant: no
+                        // `T: Default` bounds, rustc deriving/default.rs skip_path_as_bound)
+                        1 if tr == "Default" && is_enum => {
+                            all.word(n);
+                            if !bounds.is_empty() {
+                                tg!(&mut all; : #append(bounds));
+                            }
+                        }
+                        1 => {
+                            tg!(&mut all; #word(n) :);
+                            if !bounds.is_empty() {
+                                tg!(&mut all; #append(bounds) +);
+                            }
+                            trait_path_tokens(&mut all, path);
+                        }
+                        _ => tg!(&mut all; const #word(n) : #append(bounds)),
+                    }
+                }
+                all.punct(T::Gt);
             }
-            let g = if ig.is_empty() { String::new() } else { format!("<{}>", ig.join(", ")) };
-            let a = if ta.is_empty() { String::new() } else { format!("<{}>", ta.join(", ")) };
-            let mut wt = where_text.trim().trim_end_matches(',').to_string();
+            trait_path_tokens(&mut all, path);
+            tg!(&mut all; for #word(&name));
+            if !gparams.is_empty() {
+                all.punct(T::Lt);
+                for (k, (_, n, _)) in gparams.iter().enumerate() {
+                    if k > 0 {
+                        all.punct(T::Comma);
+                    }
+                    all.word(n);
+                }
+                all.punct(T::Gt);
+            }
+            let mut wt = where_buf.clone();
+            wt.trim_comma();
+            let mut have_where = !wt.is_empty();
+            all.append(&wt);
             for at in assoc_tys.iter().filter(|_| !(tr == "Default" && is_enum)) {
-                wt = if wt.is_empty() { format!("where {}: {}", at, path) } else { format!("{}, {}: {}", wt, at, path) };
+                if have_where {
+                    all.punct(T::Comma);
+                } else {
+                    all.word("where");
+                    have_where = true;
+                }
+                for (k, seg) in at.split("::").enumerate() {
+                    if k > 0 {
+                        all.punct(T::PathSep);
+                    }
+                    all.word(seg);
+                }
+                all.punct(T::Colon);
+                trait_path_tokens(&mut all, path);
             }
-            text.push_str(&format!("impl{} {} for {}{} {} {{ {} }}\n", g, path, name, a, wt, body));
+            tg!(&mut all; { #append(&body) });
         }
         if let Some(t) = crate::preload::relax_trace() {
             if t.split(',').any(|p| p.strip_prefix("derive:").map_or(false, |n| name.contains(n))) {
-                eprintln!("derive {} => {}", name, text);
+                eprintln!("derive {} => {}", name, all.s);
             }
         }
-        crate::parse_work::put(key, &crate::builtins::Expansion { text: text.clone(), toks: Vec::new(), origins: Vec::new() });
-        self.install_derive_text(text, it.name.lo)
+        crate::parse_work::put(key, &crate::builtins::Expansion { text: all.s.clone(), toks: all.toks.clone(), origins: Vec::new() });
+        self.install_derive_buf(&all, it.name.lo)
     }
 
-    fn install_derive_text(&mut self, text: String, call: u32) -> PResult<()> {
+    fn install_derive_buf(&mut self, g: &Gen, call: u32) -> PResult<()> {
         let source = self.source_span(call);
-        let g = super::fmtmac::Gen::from_text(text);
-        let start = self.splice_expansion("derive", &g, call)?;
+        let start = self.splice_buf("derive", g, call)?;
         self.token_origins.extend(self.toks.range(start, self.toks.len()).iter().filter(|t| t.kind != T::Eof)
             .map(|t| crate::source::TokenOrigin { lo: t.lo, hi: t.hi, source }));
         let items = self.in_expansion(start, |p| p.items_until(T::Eof))?;
@@ -302,7 +389,7 @@ impl<'a> Parser<'a> {
 
     /// The item's generic params as (kind 0 lifetime / 1 type / 2 const, name, bounds or
     /// const type text) and its where clause text, from its tokens.
-    fn derive_generics(&self, tok_lo: usize, it: &Item) -> (Vec<(u8, String, String)>, String) {
+    fn derive_generics(&self, tok_lo: usize, it: &Item) -> (Vec<(u8, String, Gen)>, Gen) {
         let mut out = Vec::new();
         // the name token, then `<`
         let mut i = tok_lo;
@@ -398,39 +485,35 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 let first = self.toks.at(toks[0]);
-                let txt = |s: &Self, v: &[usize]| -> String {
-                    let mut r = String::new();
-                    for (n, &x) in v.iter().enumerate() {
-                        if n > 0 {
-                            r.push(' ');
-                        }
+                let txt = |s: &Self, v: &[usize]| -> Gen {
+                    let mut r = Gen::new(s.edition);
+                    for &x in v {
                         if x == GT {
-                            r.push('>');
-                        } else if s.toks.at(x).kind == T::Gt && s.closes(x) == 2 {
-                            r.push_str("> >");
+                            r.punct(T::Gt);
                         } else {
-                            r.push_str(&String::from_utf8_lossy(s.tok_text(s.toks.at(x))));
+                            s.copy_tok(&mut r, x);
                         }
                     }
                     r
                 };
+                let name_of = |s: &Self, x: usize| -> String { String::from_utf8_lossy(s.tok_text(s.toks.at(x))).into_owned() };
                 if first.kind == T::Lifetime {
-                    let n = txt(self, &toks[..1]);
-                    let b = if toks.len() > 2 { txt(self, &toks[2..]) } else { String::new() };
+                    let n = name_of(self, toks[0]);
+                    let b = if toks.len() > 2 { txt(self, &toks[2..]) } else { Gen::new(self.edition) };
                     out.push((0, n, b));
                 } else if first.kind == T::KwConst {
-                    let n = if toks.len() > 1 { txt(self, &toks[1..2]) } else { String::new() };
-                    let ty = if toks.len() > 3 { txt(self, &toks[3..]) } else { String::new() };
+                    let n = if toks.len() > 1 { name_of(self, toks[1]) } else { String::new() };
+                    let ty = if toks.len() > 3 { txt(self, &toks[3..]) } else { Gen::new(self.edition) };
                     out.push((2, n, ty));
                 } else {
-                    let n = txt(self, &toks[..1]);
-                    let b = if toks.len() > 2 { txt(self, &toks[2..]) } else { String::new() };
+                    let n = name_of(self, toks[0]);
+                    let b = if toks.len() > 2 { txt(self, &toks[2..]) } else { Gen::new(self.edition) };
                     out.push((1, n, b));
                 }
             }
         }
         // where clause: from `where` at depth 0 to the body `{` or `;` (tuple structs: after `( .. )`)
-        let mut w = String::new();
+        let mut w = Gen::new(self.edition);
         let mut j = end_generics;
         let mut depth = 0i32;
         while j < self.toks.len() {
@@ -451,10 +534,7 @@ impl<'a> Parser<'a> {
                     if d2 <= 0 && (ke == T::OpenBrace || ke == T::Semi) {
                         break;
                     }
-                    if !w.is_empty() {
-                        w.push(' ');
-                    }
-                    w.push_str(&String::from_utf8_lossy(self.tok_text(self.toks.at(e))));
+                    self.copy_tok(&mut w, e);
                     e += 1;
                 }
                 break;
@@ -540,21 +620,50 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// `Name { a: p0, b: p1 }` / `Name(p0, p1)` / `Name` with binding prefix `p`.
-fn pat(ty: &str, s: &Shape, p: &str) -> String {
-    let path = match &s.name {
-        Some(v) => format!("{}::{}", ty, v),
-        None => ty.to_string(),
-    };
+/// `::__relax_crate_core` and the path `segs` (`fmt::Debug`) below it.
+fn trait_path_tokens(g: &mut Gen, segs: &str) {
+    g.core();
+    for seg in segs.split("::") {
+        g.punct(T::PathSep);
+        g.word(seg);
+    }
+}
+
+/// `Self` or `Self::Variant`.
+fn variant_path(g: &mut Gen, variant: Option<&str>) {
+    g.word("Self");
+    if let Some(v) = variant {
+        g.punct(T::PathSep);
+        g.word(v);
+    }
+}
+
+/// `Self::V { a: p0, b: p1 }` / `Self::V(p0, p1)` / `Self::V` with binding prefix `p`.
+fn pat(g: &mut Gen, s: &Shape, p: &str) {
+    variant_path(g, s.name.as_deref());
     match s.kind {
-        0 => path,
+        0 => {}
         1 => {
-            let b: Vec<String> = (0..s.fields.len()).map(|i| format!("{}{}", p, i)).collect();
-            format!("{}({})", path, b.join(", "))
+            g.open();
+            for i in 0..s.fields.len() {
+                if i > 0 {
+                    g.punct(T::Comma);
+                }
+                g.word(&format!("{}{}", p, i));
+            }
+            g.close();
         }
         _ => {
-            let b: Vec<String> = s.fields.iter().enumerate().map(|(i, n)| format!("{}: {}{}", n.as_deref().unwrap_or("_"), p, i)).collect();
-            format!("{} {{ {} }}", path, b.join(", "))
+            g.open_brace();
+            for (i, n) in s.fields.iter().enumerate() {
+                if i > 0 {
+                    g.punct(T::Comma);
+                }
+                g.word(n.as_deref().unwrap_or("_"));
+                g.punct(T::Colon);
+                g.word(&format!("{}{}", p, i));
+            }
+            g.close_brace();
         }
     }
 }
@@ -564,115 +673,184 @@ fn field_name(n: &Option<String>) -> String {
     n.strip_prefix("r#").unwrap_or(n).to_string()
 }
 
-fn gen_debug(ty: &str, is_enum: bool, shapes: &[Shape]) -> String {
-    let mut arms = String::new();
-    for s in shapes {
-        let shown = s.name.clone().unwrap_or_else(|| ty.to_string());
-        let e = match s.kind {
-            0 => format!("f.write_str({:?})", shown),
-            1 => {
-                let mut x = format!("f.debug_tuple({:?})", shown);
-                for i in 0..s.fields.len() {
-                    x.push_str(&format!(".field(__s{})", i));
+fn gen_debug(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) {
+    tg!(g; fn fmt (& self , f : & mut #core() :: fmt :: Formatter < '_ >) -> #core() :: fmt :: Result);
+    g.open_brace();
+    if is_enum && shapes.is_empty() {
+        tg!(g; match * self { });
+    } else {
+        tg!(g; match self);
+        g.open_brace();
+        for s in shapes {
+            let shown = s.name.clone().unwrap_or_else(|| ty.to_string());
+            pat(g, s, "__s");
+            g.punct(T::FatArrow);
+            match s.kind {
+                0 => tg!(g; f . write_str (#str_lit(&shown))),
+                1 => {
+                    tg!(g; f . debug_tuple (#str_lit(&shown)));
+                    // rustc's derive(Debug) passes the last field as `&&self.f` (it may be unsized)
+                    for i in 0..s.fields.len() {
+                        tg!(g; . field);
+                        g.open();
+                        if i + 1 == s.fields.len() {
+                            g.punct(T::And);
+                        }
+                        g.word(&format!("__s{}", i));
+                        g.close();
+                    }
+                    tg!(g; . finish ());
                 }
-                x + ".finish()"
-            }
-            _ => {
-                let mut x = format!("f.debug_struct({:?})", shown);
-                for (i, n) in s.fields.iter().enumerate() {
-                    x.push_str(&format!(".field({:?}, __s{})", field_name(n), i));
+                _ => {
+                    tg!(g; f . debug_struct (#str_lit(&shown)));
+                    for (i, n) in s.fields.iter().enumerate() {
+                        tg!(g; . field);
+                        g.open();
+                        g.str_lit(&field_name(n));
+                        g.punct(T::Comma);
+                        if i + 1 == s.fields.len() {
+                            g.punct(T::And);
+                        }
+                        g.word(&format!("__s{}", i));
+                        g.close();
+                    }
+                    tg!(g; . finish ());
                 }
-                x + ".finish()"
             }
-        };
-        arms.push_str(&format!("{} => {}, ", pat("Self", s, "__s"), e));
+            g.punct(T::Comma);
+        }
+        g.close_brace();
     }
-    let m = if is_enum && shapes.is_empty() { "match *self {}".to_string() } else { format!("match self {{ {} }}", arms) };
-    format!("fn fmt(&self, f: &mut {c}::fmt::Formatter<'_>) -> {c}::fmt::Result {{ {m} }}", c = CORE, m = m)
+    g.close_brace();
 }
 
-fn gen_default(ty: &str, is_enum: bool, shapes: &[Shape]) -> Option<String> {
-    let s = if is_enum { shapes.iter().find(|s| s.default_attr)? } else { shapes.first()? };
-    let path = match &s.name {
-        Some(v) => format!("{}::{}", ty, v),
-        None => ty.to_string(),
-    };
-    let d = format!("{}::default::Default::default()", CORE);
-    let e = match s.kind {
-        0 => path,
-        1 => format!("{}({})", path, vec![d.as_str(); s.fields.len()].join(", ")),
+/// `fn default() -> Self { .. }`; false: an enum without a `#[default]` unit variant.
+fn gen_default(g: &mut Gen, ty: &str, is_enum: bool, shapes: &[Shape]) -> bool {
+    let Some(s) = (if is_enum { shapes.iter().find(|s| s.default_attr) } else { shapes.first() }) else { return false };
+    tg!(g; fn default () -> Self);
+    g.open_brace();
+    g.word(ty);
+    if let Some(v) = &s.name {
+        g.punct(T::PathSep);
+        g.word(v);
+    }
+    let default_call = |g: &mut Gen| tg!(g; #core() :: default :: Default :: default ());
+    match s.kind {
+        0 => {}
+        1 => {
+            g.open();
+            for i in 0..s.fields.len() {
+                if i > 0 {
+                    g.punct(T::Comma);
+                }
+                default_call(g);
+            }
+            g.close();
+        }
         _ => {
-            let f: Vec<String> = s.fields.iter().map(|n| format!("{}: {}", n.as_deref().unwrap_or("_"), d)).collect();
-            format!("{} {{ {} }}", path, f.join(", "))
+            g.open_brace();
+            for (i, n) in s.fields.iter().enumerate() {
+                if i > 0 {
+                    g.punct(T::Comma);
+                }
+                g.word(n.as_deref().unwrap_or("_"));
+                g.punct(T::Colon);
+                default_call(g);
+            }
+            g.close_brace();
         }
-    };
-    Some(format!("fn default() -> Self {{ {} }}", e))
+    }
+    g.close_brace();
+    true
 }
 
-fn gen_hash(_ty: &str, is_enum: bool, shapes: &[Shape]) -> String {
-    let mut arms = String::new();
-    for (vi, s) in shapes.iter().enumerate() {
-        let mut body = String::new();
-        if is_enum && shapes.len() > 1 {
-            body.push_str(&format!("{}::hash::Hash::hash(&({}isize), state); ", CORE, vi));
+fn gen_hash(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], h: &str) {
+    tg!(g; fn hash < #word(h) : #core() :: hash :: Hasher > (& self , state : & mut #word(h)));
+    g.open_brace();
+    if is_enum && shapes.is_empty() {
+        tg!(g; match * self { });
+    } else {
+        tg!(g; match self);
+        g.open_brace();
+        for (vi, s) in shapes.iter().enumerate() {
+            pat(g, s, "__s");
+            tg!(g; =>);
+            g.open_brace();
+            if is_enum && shapes.len() > 1 {
+                tg!(g; #core() :: hash :: Hash :: hash (& (#int(format!("{}isize", vi))), state) ;);
+            }
+            for i in 0..s.fields.len() {
+                tg!(g; #core() :: hash :: Hash :: hash (#word(&format!("__s{}", i)), state) ;);
+            }
+            g.close_brace();
         }
-        for i in 0..s.fields.len() {
-            body.push_str(&format!("{}::hash::Hash::hash(__s{}, state); ", CORE, i));
-        }
-        arms.push_str(&format!("{} => {{ {} }} ", pat("Self", s, "__s"), body));
+        g.close_brace();
     }
-    let m = if is_enum && shapes.is_empty() { "match *self {}".to_string() } else { format!("match self {{ {} }}", arms) };
-    format!("fn hash<__H: {c}::hash::Hasher>(&self, state: &mut __H) {{ {m} }}", c = CORE, m = m)
+    g.close_brace();
 }
 
 /// PartialOrd::partial_cmp (`partial`) or Ord::cmp: lexicographic over variants then fields.
-fn gen_ord(_ty: &str, is_enum: bool, shapes: &[Shape], partial: bool, disc_ty: &str) -> String {
-    let (m, ret, eq) = if partial {
-        (
-            "partial_cmp",
-            format!("{}::option::Option<{}::cmp::Ordering>", CORE, CORE),
-            format!("{}::option::Option::Some({}::cmp::Ordering::Equal)", CORE, CORE),
-        )
-    } else {
-        ("cmp", format!("{}::cmp::Ordering", CORE), format!("{}::cmp::Ordering::Equal", CORE))
-    };
+fn gen_ord(g: &mut Gen, _ty: &str, is_enum: bool, shapes: &[Shape], partial: bool, disc_ty: &str) {
+    let m = if partial { "partial_cmp" } else { "cmp" };
     let tr = if partial { "PartialOrd" } else { "Ord" };
-    let mut body = String::new();
+    let ordering = |g: &mut Gen| tg!(g; #core() :: cmp :: Ordering);
+    // the "equal" result
+    let eq = |g: &mut Gen| {
+        if partial {
+            tg!(g; #core() :: option :: Option :: Some (#core() :: cmp :: Ordering :: Equal));
+        } else {
+            tg!(g; #core() :: cmp :: Ordering :: Equal);
+        }
+    };
+    tg!(g; fn #word(m) (& self , other : & Self) ->);
+    if partial {
+        tg!(g; #core() :: option :: Option <);
+        ordering(g);
+        g.punct(T::Gt);
+    } else {
+        ordering(g);
+    }
+    g.open_brace();
+    if is_enum && shapes.is_empty() {
+        tg!(g; match * self { });
+        g.close_brace();
+        return;
+    }
     if is_enum && shapes.len() > 1 {
         // variants order by their discriminant values (explicit `= n` included), compared as
         // the discriminant type
-        body.push_str(&format!(
-            "let __si = unsafe {{ {c}::intrinsics_mem::discriminant_value(self) }} as {d}; let __oi = unsafe {{ {c}::intrinsics_mem::discriminant_value(other) }} as {d}; if __si != __oi {{ return {c}::cmp::{tr}::{m}(&__si, &__oi); }} ",
-            c = CORE,
-            d = disc_ty,
-            tr = tr,
-            m = m
-        ));
-    }
-    let mut arms = String::new();
-    for s in shapes {
-        let mut b = String::new();
-        for i in 0..s.fields.len() {
-            b.push_str(&format!(
-                "match {c}::cmp::{tr}::{m}(__s{i}, __o{i}) {{ {eq} => {{}} __c => return __c, }} ",
-                c = CORE,
-                tr = tr,
-                m = m,
-                i = i,
-                eq = eq
-            ));
+        for (local, of) in [("__si", "self"), ("__oi", "other")] {
+            tg!(g; let #word(local) = unsafe { #core() :: intrinsics_mem :: discriminant_value (#word(of)) } as #word(disc_ty) ;);
         }
-        b.push_str(&eq);
-        arms.push_str(&format!("({}, {}) => {{ {} }} ", pat("Self", s, "__s"), pat("Self", s, "__o"), b));
+        tg!(g; if __si != __oi { return #core() :: cmp :: #word(tr) :: #word(m) (& __si , & __oi) ; });
+    }
+    tg!(g; match (self , other));
+    g.open_brace();
+    for s in shapes {
+        g.open();
+        pat(g, s, "__s");
+        g.punct(T::Comma);
+        pat(g, s, "__o");
+        g.close();
+        tg!(g; =>);
+        g.open_brace();
+        for i in 0..s.fields.len() {
+            tg!(g; match #core() :: cmp :: #word(tr) :: #word(m) (#word(&format!("__s{}", i)) , #word(&format!("__o{}", i))));
+            g.open_brace();
+            eq(g);
+            tg!(g; => { } __c => return __c ,);
+            g.close_brace();
+        }
+        eq(g);
+        g.close_brace();
     }
     if is_enum && shapes.len() > 1 {
-        arms.push_str(&format!("_ => {}, ", eq));
+        tg!(g; _ =>);
+        eq(g);
+        g.punct(T::Comma);
     }
-    if is_enum && shapes.is_empty() {
-        return format!("fn {m}(&self, other: &Self) -> {r} {{ match *self {{}} }}", m = m, r = ret);
-    }
-    body.push_str(&format!("match (self, other) {{ {} }}", arms));
-    format!("fn {m}(&self, other: &Self) -> {r} {{ {b} }}", m = m, r = ret, b = body)
+    g.close_brace();
+    g.close_brace();
 }
 
 struct TypeParameter { ty: TyId, bound_generic_params: Vec<GenericParam> }
@@ -746,7 +924,7 @@ impl Parser<'_> {
                 match arg {
                     GenericArg::Type(t) => self.find_type_parameters(t, names, bound, out),
                     GenericArg::Binding(_, args, t) => { self.find_args_type_parameters(args, names, bound, out); self.find_type_parameters(t, names, bound, out); }
-                    GenericArg::Constraint(_, bs) => self.find_bounds_type_parameters(bs, names, bound, out),
+                    GenericArg::Constraint(_, args, bs) => { self.find_args_type_parameters(args, names, bound, out); self.find_bounds_type_parameters(bs, names, bound, out); },
                     _ => {}
                 }
             },
@@ -769,38 +947,73 @@ impl Parser<'_> {
 
     /// deriving/generic/mod.rs:565: declaration bounds plus the derive's bounds
     /// on each type parameter and each field projection, with original binders.
-    fn create_derived_impl(&mut self, it: &Item, tok_lo: usize, trait_path: &str, bound_path: &str, copy_bound: bool, unsafe_: bool, body: &str) -> PResult<()> {
+    /// `trait_path` / `bound_path`: below `::__relax_crate_core` (`marker::Copy`).
+    fn create_derived_impl(&mut self, it: &Item, tok_lo: usize, trait_path: &str, bound_path: &str, copy_bound: bool, unsafe_: bool, body: &Gen) -> PResult<()> {
         // deriving/generic/mod.rs:486-493: a `repr(packed)` enum gets no derived impl (its repr
         // is an error of its own)
         if matches!(it.kind, ItemKind::Enum(..)) && self.is_packed(it) { return Ok(()); }
-        let (params, where_text) = self.derive_generics(tok_lo, it);
+        let (params, where_buf) = self.derive_generics(tok_lo, it);
         let mut names = Vec::new();
-        let mut ig = Vec::new(); let mut args = Vec::new();
-        let bound_path = if copy_bound { format!("{bound_path} + {CORE}::marker::Copy") } else { bound_path.to_string() };
-        for (kind, n, b) in &params {
-            args.push(n.clone());
-            ig.push(match kind {
-                0 => if b.is_empty() { n.clone() } else { format!("{n}: {b}") },
-                1 => {
-                    names.push(n.clone());
-                    if b.is_empty() { format!("{n}: {bound_path}") } else { format!("{n}: {bound_path} + {b}") }
-                }
-                _ => format!("const {n}: {b}"),
-            });
+        let name = String::from_utf8_lossy(self.bytes(it.name.lo, it.name.hi)).into_owned();
+        let mut g = Gen::new(self.edition);
+        if unsafe_ {
+            g.word("unsafe");
         }
-        let name = String::from_utf8_lossy(self.bytes(it.name.lo, it.name.hi));
-        let g = if ig.is_empty() { String::new() } else { format!("<{}>", ig.join(", ")) };
-        let a = if args.is_empty() { String::new() } else { format!("<{}>", args.join(", ")) };
+        g.word("impl");
+        if !params.is_empty() {
+            g.punct(T::Lt);
+            for (k, (kind, n, b)) in params.iter().enumerate() {
+                if k > 0 {
+                    g.punct(T::Comma);
+                }
+                match kind {
+                    0 => {
+                        g.word(n);
+                        if !b.is_empty() {
+                            tg!(&mut g; : #append(b));
+                        }
+                    }
+                    1 => {
+                        names.push(n.clone());
+                        g.word(n);
+                        g.punct(T::Colon);
+                        trait_path_tokens(&mut g, bound_path);
+                        if copy_bound {
+                            g.punct(T::Plus);
+                            trait_path_tokens(&mut g, "marker::Copy");
+                        }
+                        if !b.is_empty() {
+                            tg!(&mut g; + #append(b));
+                        }
+                    }
+                    _ => tg!(&mut g; const #word(n) : #append(b)),
+                }
+            }
+            g.punct(T::Gt);
+        }
+        trait_path_tokens(&mut g, trait_path);
+        tg!(&mut g; for #word(&name));
+        if !params.is_empty() {
+            g.punct(T::Lt);
+            for (k, (_, n, _)) in params.iter().enumerate() {
+                if k > 0 {
+                    g.punct(T::Comma);
+                }
+                g.word(n);
+            }
+            g.punct(T::Gt);
+        }
+        g.append(&where_buf);
+        tg!(&mut g; { #append(body) });
         let mut field_params = Vec::new();
         if !names.is_empty() {
             for (_, _, fields) in self.deriving_fields(it) {
                 for f in fields { self.find_type_parameters(f.ty, &names, &mut Vec::new(), &mut field_params); }
             }
         }
-        let text = format!("{}impl{g} {trait_path} for {name}{a} {where_text} {{ {body} }}", if unsafe_ { "unsafe " } else { "" });
-        let first = self.extra_items.len();
-        self.install_derive_text(text, it.name.lo)?;
-        let iid = self.extra_items[first];
+        self.install_derive_buf(&g, it.name.lo)?;
+        // (`items_until` hands earlier extras back with the new item: the newest id is the one just installed)
+        let iid = *self.extra_items.iter().max_by_key(|i| i.0).expect("derived impl");
         let impl_row = match self.ast.item(iid).kind { ItemKind::Impl(r) => r, _ => unreachable!() };
         let mut generics = self.ast.row(impl_row).generics;
         if !field_params.is_empty() {
@@ -826,7 +1039,7 @@ impl Parser<'_> {
     }
 
     fn expand_deriving_copy(&mut self, it: &Item, lo: usize) -> PResult<()> {
-        self.create_derived_impl(it, lo, &format!("{CORE}::marker::Copy"), &format!("{CORE}::marker::Copy"), false, false, "")
+        self.create_derived_impl(it, lo, "marker::Copy", "marker::Copy", false, false, &Gen::new(self.edition))
     }
     fn expand_deriving_clone(&mut self, it: &Item, lo: usize, has_copy: bool) -> PResult<()> {
         let (params, _) = self.derive_generics(lo, it);
@@ -834,13 +1047,16 @@ impl Parser<'_> {
         let simple = union || (has_copy && !params.iter().any(|p| p.0 == 1));
         let copy = union || self.is_packed(it);
         if simple {
-            self.create_derived_impl(it, lo, &format!("{CORE}::clone::TrivialClone"), &format!("{CORE}::clone::TrivialClone"), copy, true, "")?;
+            self.create_derived_impl(it, lo, "clone::TrivialClone", "clone::TrivialClone", copy, true, &Gen::new(self.edition))?;
         }
-        let body = if simple { self.cs_clone_simple(it, union) } else { self.cs_clone(it) };
-        self.create_derived_impl(it, lo, &format!("{CORE}::clone::Clone"), &format!("{CORE}::clone::Clone"), copy, false, &format!("#[inline] fn clone(&self) -> Self {{ {body} }}"))
+        let body = if simple { self.cs_clone_simple(it, lo, union) } else { self.cs_clone(it) };
+        let mut g = Gen::new(self.edition);
+        tg!(&mut g; #[inline] fn clone (& self) -> Self { #append(&body) });
+        self.create_derived_impl(it, lo, "clone::Clone", "clone::Clone", copy, false, &g)
     }
-    fn assert_ty_bounds(&self, it: &Item, path: &str) -> String {
-        let mut seen = Vec::new(); let mut out = String::new();
+    /// `let _: ::core::<path><field type>;` for each distinct field type
+    fn assert_ty_bounds(&self, it: &Item, tok_lo: usize, path: &str) -> Gen {
+        let mut seen = Vec::new(); let mut out = Gen::new(self.edition);
         for (_, _, fields) in self.deriving_fields(it) {
             for f in fields {
                 if let Ty::Path(p) = *self.ast.ty(f.ty) {
@@ -850,53 +1066,90 @@ impl Parser<'_> {
                         if seen.contains(&n) { continue; } seen.push(n);
                     }
                 }
-                let ty = String::from_utf8_lossy(self.bytes(f.ty_span.0, f.ty_span.1));
-                out.push_str(&format!("let _: {CORE}::{path}<{ty}>; "));
+                tg!(&mut out; let _ :);
+                trait_path_tokens(&mut out, path);
+                out.punct(T::Lt);
+                self.copy_bytes(&mut out, tok_lo, f.ty_span.0, f.ty_span.1);
+                tg!(&mut out; > ;);
             }
         }
         out
     }
-    fn cs_clone_simple(&self, it: &Item, union: bool) -> String {
-        let assertions = if union { format!("let _: {CORE}::clone::AssertParamIsCopy<Self>; ") }
-            else { self.assert_ty_bounds(it, "clone::AssertParamIsClone") };
-        format!("{assertions} *self")
+    fn cs_clone_simple(&self, it: &Item, tok_lo: usize, union: bool) -> Gen {
+        let mut out = Gen::new(self.edition);
+        if union {
+            tg!(&mut out; let _ : #core() :: clone :: AssertParamIsCopy < Self > ;);
+        } else {
+            out.append(&self.assert_ty_bounds(it, tok_lo, "clone::AssertParamIsClone"));
+        }
+        tg!(&mut out; * self);
+        out
     }
-    fn cs_clone(&self, it: &Item) -> String {
+    fn cs_clone(&self, it: &Item) -> Gen {
         let is_enum = matches!(it.kind, ItemKind::Enum(..));
         let packed = self.is_packed(it);
-        let mut arms = String::new();
+        let mut arms = Gen::new(self.edition);
+        let mut any = false;
         for (name, data, fields) in self.deriving_fields(it) {
-            let path = name.as_ref().map_or("Self".to_string(), |v| format!("Self::{v}"));
             let mut values = Vec::new(); let mut pattern = Vec::new();
             for (i, f) in fields.iter().enumerate() {
                 let n = f.name.map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
-                let arg = if is_enum { format!("__self_{i}") } else if packed { format!("&{{ self.{n} }}") } else { format!("&self.{n}") };
-                let value = format!("{CORE}::clone::Clone::clone({arg})");
-                match data {
-                    VariantData::Struct(_) => { values.push(format!("{n}: {value}")); pattern.push(format!("{n}: __self_{i}")); }
-                    _ => { values.push(value); pattern.push(format!("__self_{i}")); }
+                let mut value = Gen::new(self.edition);
+                if let VariantData::Struct(_) = data {
+                    value.word(&n);
+                    value.punct(T::Colon);
                 }
+                tg!(&mut value; #core() :: clone :: Clone :: clone);
+                value.open();
+                if is_enum {
+                    value.word(&format!("__self_{i}"));
+                } else if packed {
+                    tg!(&mut value; & { self . #word(&n) });
+                } else {
+                    tg!(&mut value; & self . #word(&n));
+                }
+                value.close();
+                values.push(value);
+                let mut pat = Gen::new(self.edition);
+                if let VariantData::Struct(_) = data {
+                    pat.word(&n);
+                    pat.punct(T::Colon);
+                }
+                pat.word(&format!("__self_{i}"));
+                pattern.push(pat);
             }
-            let value = construct(&path, data, &values);
-            if !is_enum { return value; }
-            arms.push_str(&format!("{} => {value},", construct(&path, data, &pattern)));
+            // `value` of a struct field is `n: Clone::clone(..)` here; the plain value of a tuple field
+            let mut built = Gen::new(self.edition);
+            construct(&mut built, name.as_deref(), data, &values);
+            if !is_enum { return built; }
+            let mut p = Gen::new(self.edition);
+            construct(&mut p, name.as_deref(), data, &pattern);
+            tg!(&mut arms; #append(&p) => #append(&built) ,);
+            any = true;
         }
-        if arms.is_empty() { "match *self {}".into() } else { format!("match self {{ {arms} }}") }
+        let mut out = Gen::new(self.edition);
+        if !any {
+            tg!(&mut out; match * self { });
+        } else {
+            tg!(&mut out; match self { #append(&arms) });
+        }
+        out
     }
     fn expand_deriving_eq(&mut self, it: &Item, lo: usize) -> PResult<()> {
-        let assertions = self.cs_total_eq_assert(it);
-        self.create_derived_impl(it, lo, &format!("{CORE}::cmp::Eq"), &format!("{CORE}::cmp::Eq"), self.is_packed(it), false,
-            &format!("#[inline] fn assert_fields_are_eq(&self) {{ {assertions} }}"))
+        let assertions = self.assert_ty_bounds(it, lo, "cmp::AssertParamIsEq");
+        let mut g = Gen::new(self.edition);
+        tg!(&mut g; #[inline] fn assert_fields_are_eq (& self) { #append(&assertions) });
+        self.create_derived_impl(it, lo, "cmp::Eq", "cmp::Eq", self.is_packed(it), false, &g)
     }
-    fn cs_total_eq_assert(&self, it: &Item) -> String { self.assert_ty_bounds(it, "cmp::AssertParamIsEq") }
     fn expand_deriving_partial_eq(&mut self, it: &Item, lo: usize) -> PResult<()> {
         if matches!(it.kind, ItemKind::Union(..)) {
             return Err(PErr { pos: it.lo, msg: "this trait cannot be derived for unions".into() });
         }
-        self.create_derived_impl(it, lo, &format!("{CORE}::marker::StructuralPartialEq"), &format!("{CORE}::cmp::PartialEq"), false, false, "")?;
+        self.create_derived_impl(it, lo, "marker::StructuralPartialEq", "cmp::PartialEq", false, false, &Gen::new(self.edition))?;
         let body = self.get_substructure_equality_expr(it);
-        self.create_derived_impl(it, lo, &format!("{CORE}::cmp::PartialEq"), &format!("{CORE}::cmp::PartialEq"), self.is_packed(it), false,
-            &format!("#[inline] fn eq(&self, other: &Self) -> bool {{ {body} }}"))
+        let mut g = Gen::new(self.edition);
+        tg!(&mut g; #[inline] fn eq (& self , other : & Self) -> bool { #append(&body) });
+        self.create_derived_impl(it, lo, "cmp::PartialEq", "cmp::PartialEq", self.is_packed(it), false, &g)
     }
     fn maybe_scalar(&self, mut t: TyId) -> bool {
         // rustc_ast ast.rs:2463-2469 Ty::peel_refs: references and raw pointers
@@ -910,46 +1163,94 @@ impl Parser<'_> {
             _ => false,
         }
     }
-    fn get_substructure_equality_expr(&self, it: &Item) -> String {
+    fn get_substructure_equality_expr(&self, it: &Item) -> Gen {
         let is_enum = matches!(it.kind, ItemKind::Enum(..));
         let packed = self.is_packed(it);
         let variants = self.deriving_fields(it);
-        let mut arms = String::new();
+        let mut arms = Gen::new(self.edition);
         for (name, data, fields) in &variants {
-            let path = name.as_ref().map_or("Self".to_string(), |v| format!("Self::{v}"));
-            let mut checks = Vec::new();
+            let mut check = Gen::new(self.edition);
+            let mut checks = 0;
             for scalar in [true, false] {
                 for (i, f) in fields.iter().enumerate() {
                     if self.maybe_scalar(f.ty) != scalar { continue; }
                     let n = f.name.map_or(i.to_string(), |n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
-                    checks.push(if is_enum { format!("*__self_{i} == *__other_{i}") }
-                        else if packed { format!("({{ self.{n} }}) == ({{ other.{n} }})") }
-                        else { format!("self.{n} == other.{n}") });
+                    if checks > 0 {
+                        check.punct(T::AndAnd);
+                    }
+                    checks += 1;
+                    if is_enum {
+                        tg!(&mut check; * #word(&format!("__self_{i}")) == * #word(&format!("__other_{i}")));
+                    } else if packed {
+                        tg!(&mut check; ({ self . #word(&n) }) == ({ other . #word(&n) }));
+                    } else {
+                        tg!(&mut check; self . #word(&n) == other . #word(&n));
+                    }
                 }
             }
-            let check = if checks.is_empty() { "true".into() } else { checks.join(" && ") };
+            if checks == 0 {
+                check.word("true");
+            }
             if !is_enum { return check; }
             let mut left = Vec::new(); let mut right = Vec::new();
             for (i, f) in fields.iter().enumerate() {
                 let n = f.name.map(|n| String::from_utf8_lossy(self.bytes(n.lo, n.hi)).into_owned());
-                left.push(n.as_ref().map_or(format!("__self_{i}"), |n| format!("{n}: __self_{i}")));
-                right.push(n.as_ref().map_or(format!("__other_{i}"), |n| format!("{n}: __other_{i}")));
+                for (side, out) in [("__self_", &mut left), ("__other_", &mut right)] {
+                    let mut x = Gen::new(self.edition);
+                    if let Some(n) = &n {
+                        x.word(n);
+                        x.punct(T::Colon);
+                    }
+                    x.word(&format!("{side}{i}"));
+                    out.push(x);
+                }
             }
-            arms.push_str(&format!("({}, {}) => {check},", construct(&path, *data, &left), construct(&path, *data, &right)));
+            let (mut l, mut r) = (Gen::new(self.edition), Gen::new(self.edition));
+            construct(&mut l, name.as_deref(), *data, &left);
+            construct(&mut r, name.as_deref(), *data, &right);
+            tg!(&mut arms; (#append(&l) , #append(&r)) => #append(&check) ,);
         }
-        if variants.is_empty() { return "match *self {}".into(); }
-        if variants.len() == 1 { return format!("match (self, other) {{ {arms} }}"); }
-        let discr = format!("unsafe {{ {CORE}::intrinsics_mem::discriminant_value(self) == {CORE}::intrinsics_mem::discriminant_value(other) }}");
+        let mut out = Gen::new(self.edition);
+        if variants.is_empty() {
+            tg!(&mut out; match * self { });
+            return out;
+        }
+        if variants.len() == 1 {
+            tg!(&mut out; match (self , other) { #append(&arms) });
+            return out;
+        }
+        let mut discr = Gen::new(self.edition);
+        tg!(&mut discr; unsafe { #core() :: intrinsics_mem :: discriminant_value (self) == #core() :: intrinsics_mem :: discriminant_value (other) });
         if variants.iter().all(|v| v.2.is_empty()) { return discr; }
-        format!("({discr}) && match (self, other) {{ {arms} _ => true }}")
+        tg!(&mut out; (#append(&discr)) && match (self , other) { #append(&arms) _ => true });
+        out
     }
 }
 
-fn construct(path: &str, data: VariantData, fields: &[String]) -> String {
+fn construct(g: &mut Gen, variant: Option<&str>, data: VariantData, fields: &[Gen]) {
+    variant_path(g, variant);
     match data {
-        VariantData::Unit => path.to_string(),
-        VariantData::Tuple(_) => format!("{path}({})", fields.join(", ")),
-        VariantData::Struct(_) => format!("{path} {{ {} }}", fields.join(", ")),
+        VariantData::Unit => {}
+        VariantData::Tuple(_) => {
+            g.open();
+            for (k, f) in fields.iter().enumerate() {
+                if k > 0 {
+                    g.punct(T::Comma);
+                }
+                g.append(f);
+            }
+            g.close();
+        }
+        VariantData::Struct(_) => {
+            g.open_brace();
+            for (k, f) in fields.iter().enumerate() {
+                if k > 0 {
+                    g.punct(T::Comma);
+                }
+                g.append(f);
+            }
+            g.close_brace();
+        }
     }
 }
 
@@ -992,7 +1293,7 @@ mod tests {
             let f = &p.files[d.file as usize];
             let ItemKind::Fn(_, Some(b), _) = f.ast.item(d.item).kind else { panic!("derive body absent") };
             let block = f.ast.block(b);
-            clone_bodies.push(String::from_utf8_lossy(f.bytes(block.lo, block.hi)).into_owned());
+            clone_bodies.push(String::from_utf8_lossy(f.bytes(block.lo, block.hi)).replace(' ', ""));
         }
         assert_eq!(clone_bodies.len(), 3);
         assert!(clone_bodies[0].contains("AssertParamIsClone<u32>"));

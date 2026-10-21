@@ -47,6 +47,7 @@ fn body(types: &[TyId], basic_blocks: Vec<BasicBlockData>) -> Body {
         basic_blocks,
         source_scopes: vec![SourceScopeData { span: Span::default(), parent_scope: None }],
         user_type_annotations: Vec::new(),
+        span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(),
         var_debug_info: Vec::new(),
         arg_count: 0,
         spread_arg: None,

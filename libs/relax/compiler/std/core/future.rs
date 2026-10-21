@@ -2,6 +2,23 @@
 
 use crate::pin::Pin;
 use crate::task::{Context, Poll};
+use crate::ptr::NonNull;
+
+/// The `Context` an async body is resumed with, passed as a raw pointer (coroutines cannot
+/// implement `for<'a, 'b> Coroutine<&'a mut Context<'b>>`; a raw pointer also keeps futures
+/// `Send` and `Sync`).
+#[cfg_attr(not(relax_check), lang = "ResumeTy")]
+#[derive(Debug, Copy, Clone)]
+pub struct ResumeTy(NonNull<Context<'static>>);
+
+unsafe impl Send for ResumeTy {}
+unsafe impl Sync for ResumeTy {}
+
+/// The `Context` behind a `ResumeTy` (what the `.await` desugaring polls with).
+#[cfg_attr(not(relax_check), lang = "get_context")]
+pub unsafe fn get_context<'a, 'b>(cx: ResumeTy) -> &'a mut Context<'b> {
+    unsafe { &mut *cx.0.as_ptr().cast() }
+}
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 #[cfg_attr(not(relax_check), lang = "future_trait")]

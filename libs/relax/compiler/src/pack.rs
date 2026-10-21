@@ -75,7 +75,7 @@ impl Bytes {
             if p.is_null() || p as isize == -1 {
                 return None;
             }
-            note_mapping(p as usize, len);
+            note_mapping(p as usize, len, &f, 0);
             return Some(Bytes { ptr: p, len, mapped: true, owned: Vec::new() });
         }
         #[allow(unreachable_code)]
@@ -95,19 +95,52 @@ impl Bytes {
 
 /// Every read-only cache file mapping of this process: (start, length).
 #[cfg(unix)]
-static MAPPINGS: relax_session::sync::Mutex<Vec<(usize, usize)>> = relax_session::sync::Mutex::new(Vec::new());
+static MAPPINGS: relax_session::sync::Mutex<Vec<Mapping>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// One cache file mapping: where, and (macOS) what to map again over it: the file's path, its
+/// identity (device, inode) and the offset mapped.
+#[cfg(unix)]
+struct Mapping {
+    start: usize,
+    len: usize,
+    #[cfg(target_os = "macos")]
+    again: Option<(std::path::PathBuf, u64, u64, u64)>,
+}
 
 #[cfg(unix)]
-fn note_mapping(start: usize, len: usize) {
+fn note_mapping(start: usize, len: usize, file: &std::fs::File, off: u64) {
     // kept heap: the list outlives every compiler generation
     let _k = crate::zone_alloc::kept();
-    MAPPINGS.lock().unwrap_or_else(|e| e.into_inner()).push((start, len));
+    #[cfg(target_os = "macos")]
+    let again = {
+        use std::os::unix::fs::MetadataExt;
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        use std::os::unix::io::AsRawFd;
+        const F_GETPATH: i32 = 50;
+        let mut buf = [0u8; 1024];
+        let ok = unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buf.as_mut_ptr()) } == 0;
+        let n = buf.iter().position(|b| *b == 0).unwrap_or(0);
+        match (ok, file.metadata()) {
+            (true, Ok(m)) if n > 0 => Some((std::path::PathBuf::from(String::from_utf8_lossy(&buf[..n]).into_owned()), m.dev(), m.ino(), off)),
+            _ => None,
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = (file, off);
+    MAPPINGS.lock().unwrap_or_else(|e| e.into_inner()).push(Mapping {
+        start,
+        len,
+        #[cfg(target_os = "macos")]
+        again,
+    });
 }
 
 #[cfg(unix)]
 fn forget_mapping(start: usize) {
     let mut m = MAPPINGS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(i) = m.iter().position(|&(s, _)| s == start) {
+    if let Some(i) = m.iter().position(|x| x.start == start) {
         m.swap_remove(i);
     }
 }
@@ -117,7 +150,9 @@ fn forget_mapping(start: usize) {
 /// maps up to 16 neighbouring page-cache pages per fault), and they stay counted in RSS/PSS for
 /// the rest of the run though few are read again. The mappings are read-only file pages, so
 /// nothing is lost: a later read faults the page back from the page cache (a minor fault).
-/// Linux/Android only; macOS does not count clean file pages in the footprint. Returns bytes advised.
+/// Linux/Android: madvise(DONTNEED). macOS: that only deactivates the pages, so the same file is
+/// mapped again over the range (MAP_FIXED replaces the mapping atomically; the file is the one
+/// mapped before, checked by device and inode). Returns bytes released.
 pub fn release_resident() -> usize {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -128,9 +163,35 @@ pub fn release_resident() -> usize {
         // the lock is held across the calls: a mapping cannot be unmapped (and its range reused) meanwhile
         let m = MAPPINGS.lock().unwrap_or_else(|e| e.into_inner());
         let mut n = 0;
-        for &(start, len) in m.iter() {
-            if unsafe { madvise(start as *mut u8, len, MADV_DONTNEED) } == 0 {
-                n += len;
+        for x in m.iter() {
+            if unsafe { madvise(x.start as *mut u8, x.len, MADV_DONTNEED) } == 0 {
+                n += x.len;
+            }
+        }
+        return n;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+        extern "C" {
+            fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+        }
+        const PROT_READ: i32 = 1;
+        const MAP_SHARED: i32 = 1;
+        const MAP_FIXED: i32 = 0x10;
+        let m = MAPPINGS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for x in m.iter() {
+            let Some((path, dev, ino, off)) = &x.again else { continue };
+            let Ok(f) = std::fs::File::open(path) else { continue };
+            let Ok(md) = f.metadata() else { continue };
+            if md.dev() != *dev || md.ino() != *ino || md.len() < *off + x.len as u64 {
+                continue;
+            }
+            let p = unsafe { mmap(x.start as *mut u8, x.len, PROT_READ, MAP_SHARED | MAP_FIXED, f.as_raw_fd(), *off as i64) };
+            if p as usize == x.start {
+                n += x.len;
             }
         }
         return n;
@@ -164,7 +225,7 @@ pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static
     if p.is_null() || p as isize == -1 {
         return None;
     }
-    note_mapping(p as usize, span);
+    note_mapping(p as usize, span, file, base);
     Some(unsafe { std::slice::from_raw_parts(p.add((off - base) as usize), len) })
 }
 
@@ -247,6 +308,29 @@ mod tests {
             let pinned = super::map_pinned(&file, 8, 1024).unwrap();
             assert!(!crate::zone_alloc::compiler_owns(pinned.as_ptr()), "pinned copy in the compiler arena");
         }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The settle's release of the cache mappings' resident pages: the process's resident size
+    /// falls by about the mapped size and the same bytes are read again from the file.
+    #[cfg(unix)]
+    #[test]
+    fn release_resident_drops_the_pages_and_keeps_the_bytes() {
+        let path = std::env::temp_dir().join(format!("relax-pack-release-{}", std::process::id()));
+        let len = 192 << 20;
+        let data: Vec<u8> = (0..len).map(|i| (i * 31 + i / 4096) as u8).collect();
+        std::fs::write(&path, &data).unwrap();
+        let map = super::Bytes::map(&path).unwrap();
+        // touch every page
+        let sum = |b: &[u8]| b.iter().step_by(4096).fold(0u64, |a, x| a + *x as u64);
+        let before = sum(&map);
+        let rss0 = crate::memstat::resident() as usize;
+        assert!(super::release_resident() >= len);
+        let rss1 = crate::memstat::resident() as usize;
+        assert!(rss0 >= rss1 + len / 2, "resident {} MB -> {} MB", rss0 >> 20, rss1 >> 20);
+        assert_eq!(&map[..], &data[..]);
+        assert_eq!(sum(&map), before);
+        drop(map);
         std::fs::remove_file(&path).unwrap();
     }
 }

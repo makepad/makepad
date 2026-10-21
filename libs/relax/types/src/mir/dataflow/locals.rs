@@ -40,9 +40,9 @@ impl Visitor for BorrowTransfer<'_> {
                 if !is_indirect(place) { self.0.insert(place.local.0 as usize); }
             }
             Rvalue::Ref(_, BorrowKind::Fake(_), _) | Rvalue::Use(_) | Rvalue::Repeat(..)
-            | Rvalue::ThreadLocalRef(_) | Rvalue::Len(_) | Rvalue::Cast(..) | Rvalue::BinaryOp(..)
-            | Rvalue::NullaryOp(..) | Rvalue::UnaryOp(..) | Rvalue::Discriminant(_) | Rvalue::Aggregate(..)
-            | Rvalue::ShallowInitBox(..) | Rvalue::CopyForDeref(_) => {}
+            | Rvalue::ThreadLocalRef(_) | Rvalue::Cast(..) | Rvalue::BinaryOp(..)
+            | Rvalue::UnaryOp(..) | Rvalue::Discriminant(_) | Rvalue::Aggregate(..)
+            | Rvalue::CopyForDeref(_) => {}
         }
     }
     fn visit_terminator(&mut self, term: &Terminator, at: Location) {
@@ -186,5 +186,70 @@ impl Analysis for MaybeStorageDead {
             StatementKind::StorageDead(local) => { state.insert(local.0 as usize); }
             _ => {}
         }
+    }
+}
+
+/// rustc_mir_dataflow/src/impls/storage_liveness.rs:109. Whether each local requires storage at a
+/// location, i.e. whether its storage can go away without being observed.
+pub struct MaybeRequiresStorage<'r, 'a> { borrowed_locals: std::cell::RefCell<ResultsCursor<'r, 'a>> }
+impl<'r, 'a> MaybeRequiresStorage<'r, 'a> {
+    pub fn new(borrowed_locals: ResultsCursor<'r, 'a>) -> Self { Self { borrowed_locals: std::cell::RefCell::new(borrowed_locals) } }
+    /// Kill locals that are fully moved and have not been borrowed.
+    fn check_for_move(&self, state: &mut BitSet, at: Location) {
+        let mut borrowed = self.borrowed_locals.borrow_mut();
+        let body = borrowed.body();
+        let mut visitor = MoveVisitor { state, borrowed_locals: &mut borrowed };
+        let block = &body.basic_blocks[at.block.0 as usize];
+        match block.statements.get(at.statement_index) {
+            Some(stmt) => visitor.visit_statement(stmt, at),
+            None => visitor.visit_terminator(block.terminator.as_ref().expect("terminator"), at),
+        }
+    }
+}
+struct MoveVisitor<'s, 'b, 'r, 'a> { borrowed_locals: &'b mut ResultsCursor<'r, 'a>, state: &'s mut BitSet }
+impl Visitor for MoveVisitor<'_, '_, '_, '_> {
+    fn visit_local(&mut self, local: &Local, context: PlaceContext, at: Location) {
+        if context == Read(R::Move) {
+            self.borrowed_locals.seek_before_primary_effect(at);
+            if !self.borrowed_locals.get().contains(local.0 as usize) { self.state.remove(local.0 as usize); }
+        }
+    }
+}
+impl Analysis for MaybeRequiresStorage<'_, '_> {
+    fn bottom_value(&self, body: &Body) -> BitSet { BitSet::new_empty(body.local_decls.len()) }
+    fn initialize_start_block(&self, body: &Body, state: &mut BitSet) {
+        // The resume argument is live on function entry (the `self` argument is not cared about).
+        for arg in 2..=body.arg_count as usize { state.insert(arg); }
+    }
+    fn apply_early_statement_effect(&self, state: &mut BitSet, stmt: &Statement, at: Location) {
+        // If a place is borrowed in a statement, it needs storage for that statement.
+        BorrowTransfer(state).visit_statement(stmt, at);
+        match &stmt.kind {
+            StatementKind::StorageDead(l) => { state.remove(l.0 as usize); }
+            // If a place is assigned to in a statement, it needs storage for that statement.
+            StatementKind::Assign(place, _) | StatementKind::SetDiscriminant { place, .. } => { state.insert(place.local.0 as usize); }
+            _ => {}
+        }
+    }
+    fn apply_primary_statement_effect(&self, state: &mut BitSet, _stmt: &Statement, at: Location) {
+        // If we move from a place then it only stops needing storage *after* that statement.
+        self.check_for_move(state, at);
+    }
+    fn apply_early_terminator_effect(&self, state: &mut BitSet, term: &Terminator, at: Location) {
+        // If a place is borrowed in a terminator, it needs storage for that terminator.
+        BorrowTransfer(state).visit_terminator(term, at);
+        // (a `Yield`'s resume argument is not generated: it is written only when the coroutine is
+        // resumed, so it needs storage after the yield, not before)
+        if let TerminatorKind::Call { destination, .. } = &term.kind { state.insert(destination.local.0 as usize); }
+    }
+    fn apply_primary_terminator_effect<'a>(&self, state: &mut BitSet, term: &'a Terminator, at: Location) -> TerminatorEdges<'a> {
+        // A call's destination requires storage for the call and after it returns successfully, but not
+        // after a panic: kill it here and generate it again in the call return effect.
+        if let TerminatorKind::Call { destination, .. } = &term.kind { state.remove(destination.local.0 as usize); }
+        self.check_for_move(state, at);
+        TerminatorEdges::for_terminator(term)
+    }
+    fn apply_call_return_effect(&self, state: &mut BitSet, _block: BasicBlock, places: CallReturnPlaces<'_>) {
+        match places { CallReturnPlaces::Call(place) | CallReturnPlaces::Yield(place) => { state.insert(place.local.0 as usize); } }
     }
 }

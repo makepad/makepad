@@ -32,9 +32,9 @@ struct CandidateStep {
 /// Later derefs must not constrain an earlier receiver (method-probe-no-guessing).
 fn method_autoderef_steps(fcx: &Fcx<'_>, receiver: TyId) -> (Vec<CandidateStep>, Vec<GenericArg>, bool) {
     let (goal, original) = method_response::canonicalize_method_autoderef_goal(&fcx.infcx, fcx.param_env.clone(), receiver);
-    let infcx = crate::infer::InferCtxt::new(fcx.tcx, fcx.infcx.typing_mode, fcx.infcx.recursion_limit);
+    let infcx = crate::infer::InferCtxt::new(fcx.tcx, fcx.infcx.typing_mode.get(), fcx.infcx.recursion_limit);
     let (goal, values) = method_response::instantiate_method_autoderef_goal(&infcx, &goal);
-    for (key, ty) in goal.predefined_opaques_in_body { infcx.inner.borrow_mut().opaque_types().register(key, crate::infer::opaque_types::ProvisionalHiddenType { ty }); }
+    for (key, ty) in goal.predefined_opaques_in_body { infcx.inner.borrow_mut().opaque_types().register(key, crate::infer::opaque_types::ProvisionalHiddenType::new(ty)); }
     let previous = infcx.inner.borrow_mut().opaque_types().num_entries();
     let mut steps = Vec::new();
     let mut cur = infcx.deeply_resolve_ignoring_regions(goal.self_ty);
@@ -66,7 +66,7 @@ fn method_autoderef_steps(fcx: &Fcx<'_>, receiver: TyId) -> (Vec<CandidateStep>,
 }
 /// rustc_hir_analysis/src/autoderef.rs:149-202. Pending normalization goals
 /// belong to the deref query; confirmation records the chosen adjustments.
-fn overloaded_deref_ty(infcx: &crate::infer::InferCtxt<'_>, prog: &Program, env: &ParamEnvId, ty: TyId) -> Option<TyId> {
+pub(crate) fn overloaded_deref_ty(infcx: &crate::infer::InferCtxt<'_>, prog: &Program, env: &ParamEnvId, ty: TyId) -> Option<TyId> {
     let tcx = infcx.tcx;
     let td = tcx.lang_items.get(crate::lang_items::LangItem::Deref)?;
     let target = tcx.lang_items.get(crate::lang_items::LangItem::DerefTarget)?;
@@ -322,23 +322,12 @@ impl Fcx<'_> {
         let (mut steps, original, overflow) = method_autoderef_steps(self, receiver);
         if overflow { self.err(lo, "E0055: reached the recursion limit while auto-dereferencing".into()); return Err(()); }
         // probe.rs:473-563: an unresolved final autoderef type is an error,
-        // with the 2015 raw-pointer compatibility lint and diverging-var exception.
+        // with the 2015 raw-pointer compatibility lint (rustc 1.97 has no diverging-variable exception).
         if let Some(step) = steps.last().filter(|s| s.bad_ty) {
             let (ty, _) = method_response::probe_instantiate_query_response(&self.infcx, self.prog, &self.param_env, &original, &step.response).expect("bad autoderef response");
             let edition = self.prog.crates[self.prog.mods[self.module as usize].krate as usize].edition;
-            let diverging = if let TyKind::Infer(var) = self.tcx.tys.kind(self.infcx.shallow_resolve(ty)) {
-                let mut inner = self.infcx.inner.borrow_mut();
-                let root = inner.type_variables().sub_unification_table_root_var(*var);
-                self.diverging.iter().any(|t| match self.tcx.tys.kind(*t) {
-                    TyKind::Infer(other) => inner.type_variables().sub_unification_table_root_var(*other) == root,
-                    _ => false,
-                })
-            } else { false };
             if step.from_unsafe_deref && edition < 2018 {
-                self.tcx.dcx.warn(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: lo }, "type annotations needed for raw pointer method call (future incompatible)".into());
-            } else if diverging {
-                self.tcx.dcx.warn(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: lo }, "method call on diverging inference variable".into());
-                self.eq(ty, self.tcx.tys.never);
+                crate::lint::emit(self.prog, self.b.def, &crate::lint::TYVAR_BEHIND_RAW_POINTER, self.file, lo, "type annotations needed");
             } else {
                 if !self.infcx.tainted_by_errors() && !self.tcx.tys.has_error(ty) { self.err(lo, "E0282: type annotations needed for method receiver".into()); }
                 self.eq(ty, self.tcx.tys.error);
@@ -379,7 +368,14 @@ impl Fcx<'_> {
         self.rollback_to(snapshot);
         let Some((mut candidate, autoderefs, autoref, unsize, const_ptr)) = result? else { return Ok(None); };
         let mut adjusted = self.shallow(receiver);
-        for step in 0..autoderefs { adjusted = self.deref_step(expr.0, step, adjusted).expect("confirmed autoderef step"); }
+        for step in 0..autoderefs {
+            // the steps were computed by the solver's overloaded_deref_ty (an opaque type of the
+            // function being defined derefs through its item bounds there)
+            adjusted = match self.deref_step(expr.0, step, adjusted) {
+                Some(next) => next,
+                None => overloaded_deref_ty(&self.infcx, self.prog, &self.param_env, self.infcx.deeply_resolve_ignoring_regions(adjusted)).expect("confirmed autoderef step"),
+            };
+        }
         if unsize { let TyKind::Array(element, _) = self.tcx.tys.kind(adjusted) else { panic!("unsize method receiver"); }; adjusted = self.tcx.tys.intern(TyKind::Slice(*element)); }
         // confirm.rs fresh_receiver_args reconstructs object and trait picks;
         // only a where-clause pick retains the caller's original predicate.

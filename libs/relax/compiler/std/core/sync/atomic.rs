@@ -11,6 +11,7 @@ use crate::intrinsics_atomic as ia;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
+#[rustc_diagnostic_item = "Ordering"]
 pub enum Ordering {
     Relaxed,
     Release,
@@ -32,6 +33,17 @@ fn store_order(order: Ordering) -> u8 {
         Ordering::Acquire => panic!("there is no such thing as an acquire store"),
         Ordering::AcqRel => panic!("there is no such thing as an acquire-release store"),
         _ => order as u8,
+    }
+}
+
+/// rustc core/src/sync/atomic.rs `strongest_failure_ordering`
+fn strongest_failure_ordering(order: Ordering) -> Ordering {
+    match order {
+        Ordering::Release => Ordering::Relaxed,
+        Ordering::Relaxed => Ordering::Relaxed,
+        Ordering::SeqCst => Ordering::SeqCst,
+        Ordering::Acquire => Ordering::Acquire,
+        Ordering::AcqRel => Ordering::Acquire,
     }
 }
 
@@ -58,6 +70,7 @@ impl AtomicPrimitive for isize {}
 
 /// An integer shared between threads.
 #[repr(transparent)]
+#[rustc_diagnostic_item = "Atomic"]
 pub struct Atomic<T: AtomicPrimitive> {
     v: UnsafeCell<T>,
 }
@@ -80,24 +93,37 @@ impl<T: AtomicPrimitive> Atomic<T> {
     pub const fn new(v: T) -> Atomic<T> {
         Atomic { v: UnsafeCell::new(v) }
     }
+    #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn compare_and_swap(&self, current: T, new: T, order: Ordering) -> T {
+        let failure = match order { Ordering::AcqRel => Ordering::Acquire, Ordering::Release => Ordering::Relaxed, o => o };
+        match self.compare_exchange(current, new, order, failure) {
+            Ok(x) => x,
+            Err(x) => x,
+        }
+    }
     pub fn get_mut(&mut self) -> &mut T {
         self.v.get_mut()
     }
     pub fn into_inner(self) -> T {
         self.v.into_inner()
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn as_ptr(&self) -> *mut T {
         self.v.get()
     }
     pub fn load(&self, order: Ordering) -> T {
         unsafe { ia::atomic_load(self.v.get() as *const T, load_order(order)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn store(&self, val: T, order: Ordering) {
         unsafe { ia::atomic_store(self.v.get(), val, store_order(order)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn swap(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_swap(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange(&self, current: T, new: T, success: Ordering, failure: Ordering) -> Result<T, T> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg(self.v.get(), current, new, success as u8, f) };
@@ -107,6 +133,7 @@ impl<T: AtomicPrimitive> Atomic<T> {
             Err(prev)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange_weak(&self, current: T, new: T, success: Ordering, failure: Ordering) -> Result<T, T> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg_weak(self.v.get(), current, new, success as u8, f) };
@@ -116,30 +143,39 @@ impl<T: AtomicPrimitive> Atomic<T> {
             Err(prev)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_add(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_add(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_sub(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_sub(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_and(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_and(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_nand(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_nand(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_or(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_or(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_xor(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_xor(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_max(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_max(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_min(&self, val: T, order: Ordering) -> T {
         unsafe { ia::atomic_fetch_min(self.v.get(), val, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> Result<T, T> {
         let mut prev = self.load(fetch_order);
         loop {
@@ -150,6 +186,17 @@ impl<T: AtomicPrimitive> Atomic<T> {
                 },
                 None => return Err(prev),
             }
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn try_update<F: FnMut(T) -> Option<T>>(&self, set_order: Ordering, fetch_order: Ordering, f: F) -> Result<T, T> {
+        self.fetch_update(set_order, fetch_order, f)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn update<F: FnMut(T) -> T>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> T {
+        match self.fetch_update(set_order, fetch_order, |x| Some(f(x))) {
+            Ok(x) => x,
+            Err(x) => x,
         }
     }
 }
@@ -174,6 +221,7 @@ impl<T: AtomicPrimitive + fmt::Debug> fmt::Debug for Atomic<T> {
 
 /// A boolean shared between threads (one byte, 0 or 1).
 #[repr(transparent)]
+#[rustc_diagnostic_item = "Atomic"]
 pub struct AtomicBool {
     v: UnsafeCell<u8>,
 }
@@ -185,24 +233,37 @@ impl AtomicBool {
     pub const fn new(v: bool) -> AtomicBool {
         AtomicBool { v: UnsafeCell::new(v as u8) }
     }
+    #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn compare_and_swap(&self, current: bool, new: bool, order: Ordering) -> bool {
+        let failure = match order { Ordering::AcqRel => Ordering::Acquire, Ordering::Release => Ordering::Relaxed, o => o };
+        match self.compare_exchange(current, new, order, failure) {
+            Ok(x) => x,
+            Err(x) => x,
+        }
+    }
     pub fn get_mut(&mut self) -> &mut bool {
         unsafe { &mut *(self.v.get() as *mut bool) }
     }
-    pub fn into_inner(self) -> bool {
+    pub const fn into_inner(self) -> bool {
         self.v.into_inner() != 0
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn as_ptr(&self) -> *mut bool {
         self.v.get() as *mut bool
     }
     pub fn load(&self, order: Ordering) -> bool {
         unsafe { ia::atomic_load(self.v.get() as *const u8, load_order(order)) != 0 }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn store(&self, val: bool, order: Ordering) {
         unsafe { ia::atomic_store(self.v.get(), val as u8, store_order(order)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn swap(&self, val: bool, order: Ordering) -> bool {
         unsafe { ia::atomic_swap(self.v.get(), val as u8, order as u8) != 0 }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange(&self, current: bool, new: bool, success: Ordering, failure: Ordering) -> Result<bool, bool> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg(self.v.get(), current as u8, new as u8, success as u8, f) };
@@ -212,6 +273,7 @@ impl AtomicBool {
             Err(prev != 0)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange_weak(&self, current: bool, new: bool, success: Ordering, failure: Ordering) -> Result<bool, bool> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg_weak(self.v.get(), current as u8, new as u8, success as u8, f) };
@@ -221,15 +283,19 @@ impl AtomicBool {
             Err(prev != 0)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_and(&self, val: bool, order: Ordering) -> bool {
         unsafe { ia::atomic_fetch_and(self.v.get(), val as u8, order as u8) != 0 }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_or(&self, val: bool, order: Ordering) -> bool {
         unsafe { ia::atomic_fetch_or(self.v.get(), val as u8, order as u8) != 0 }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_xor(&self, val: bool, order: Ordering) -> bool {
         unsafe { ia::atomic_fetch_xor(self.v.get(), val as u8, order as u8) != 0 }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_nand(&self, val: bool, order: Ordering) -> bool {
         // !(x & true) == !x, !(x & false) == true
         if val {
@@ -238,9 +304,11 @@ impl AtomicBool {
             self.swap(true, order)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_not(&self, order: Ordering) -> bool {
         self.fetch_xor(true, order)
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_update<F: FnMut(bool) -> Option<bool>>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> Result<bool, bool> {
         let mut prev = self.load(fetch_order);
         loop {
@@ -251,6 +319,17 @@ impl AtomicBool {
                 },
                 None => return Err(prev),
             }
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn try_update<F: FnMut(bool) -> Option<bool>>(&self, set_order: Ordering, fetch_order: Ordering, f: F) -> Result<bool, bool> {
+        self.fetch_update(set_order, fetch_order, f)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn update<F: FnMut(bool) -> bool>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> bool {
+        match self.fetch_update(set_order, fetch_order, |x| Some(f(x))) {
+            Ok(x) => x,
+            Err(x) => x,
         }
     }
 }
@@ -275,6 +354,7 @@ impl fmt::Debug for AtomicBool {
 
 /// A raw pointer shared between threads.
 #[repr(transparent)]
+#[rustc_diagnostic_item = "Atomic"]
 pub struct AtomicPtr<T> {
     p: UnsafeCell<*mut T>,
 }
@@ -286,24 +366,65 @@ impl<T> AtomicPtr<T> {
     pub const fn new(p: *mut T) -> AtomicPtr<T> {
         AtomicPtr { p: UnsafeCell::new(p) }
     }
+    #[deprecated(since = "1.50.0", note = "Use `compare_exchange` or `compare_exchange_weak` instead")]
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn compare_and_swap(&self, current: *mut T, new: *mut T, order: Ordering) -> *mut T {
+        let failure = match order { Ordering::AcqRel => Ordering::Acquire, Ordering::Release => Ordering::Relaxed, o => o };
+        match self.compare_exchange(current, new, order, failure) {
+            Ok(x) => x,
+            Err(x) => x,
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_ptr_add(&self, val: usize, order: Ordering) -> *mut T {
+        self.fetch_byte_add(val.wrapping_mul(crate::mem::size_of::<T>()), order)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_ptr_sub(&self, val: usize, order: Ordering) -> *mut T {
+        self.fetch_byte_sub(val.wrapping_mul(crate::mem::size_of::<T>()), order)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_byte_add(&self, val: usize, order: Ordering) -> *mut T {
+        match self.fetch_update(order, Ordering::Relaxed, |p| Some((p as usize).wrapping_add(val) as *mut T)) { Ok(x) => x, Err(x) => x }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_byte_sub(&self, val: usize, order: Ordering) -> *mut T {
+        match self.fetch_update(order, Ordering::Relaxed, |p| Some((p as usize).wrapping_sub(val) as *mut T)) { Ok(x) => x, Err(x) => x }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_and(&self, val: usize, order: Ordering) -> *mut T {
+        match self.fetch_update(order, Ordering::Relaxed, |p| Some(((p as usize) & val) as *mut T)) { Ok(x) => x, Err(x) => x }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_or(&self, val: usize, order: Ordering) -> *mut T {
+        match self.fetch_update(order, Ordering::Relaxed, |p| Some(((p as usize) | val) as *mut T)) { Ok(x) => x, Err(x) => x }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn fetch_xor(&self, val: usize, order: Ordering) -> *mut T {
+        match self.fetch_update(order, Ordering::Relaxed, |p| Some(((p as usize) ^ val) as *mut T)) { Ok(x) => x, Err(x) => x }
+    }
     pub fn get_mut(&mut self) -> &mut *mut T {
         self.p.get_mut()
     }
-    pub fn into_inner(self) -> *mut T {
+    pub const fn into_inner(self) -> *mut T {
         self.p.into_inner()
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub const fn as_ptr(&self) -> *mut *mut T {
         self.p.get()
     }
     pub fn load(&self, order: Ordering) -> *mut T {
         unsafe { ia::atomic_load(self.p.get() as *const *mut T, load_order(order)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn store(&self, ptr: *mut T, order: Ordering) {
         unsafe { ia::atomic_store(self.p.get(), ptr, store_order(order)) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn swap(&self, ptr: *mut T, order: Ordering) -> *mut T {
         unsafe { ia::atomic_swap(self.p.get(), ptr, order as u8) }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange(&self, current: *mut T, new: *mut T, success: Ordering, failure: Ordering) -> Result<*mut T, *mut T> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg(self.p.get(), current, new, success as u8, f) };
@@ -313,6 +434,7 @@ impl<T> AtomicPtr<T> {
             Err(prev)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn compare_exchange_weak(&self, current: *mut T, new: *mut T, success: Ordering, failure: Ordering) -> Result<*mut T, *mut T> {
         let f = failure_order(failure);
         let (prev, ok) = unsafe { ia::atomic_cxchg_weak(self.p.get(), current, new, success as u8, f) };
@@ -322,6 +444,7 @@ impl<T> AtomicPtr<T> {
             Err(prev)
         }
     }
+    #[rustc_should_not_be_called_on_const_items]
     pub fn fetch_update<F: FnMut(*mut T) -> Option<*mut T>>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> Result<*mut T, *mut T> {
         let mut prev = self.load(fetch_order);
         loop {
@@ -332,6 +455,17 @@ impl<T> AtomicPtr<T> {
                 },
                 None => return Err(prev),
             }
+        }
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn try_update<F: FnMut(*mut T) -> Option<*mut T>>(&self, set_order: Ordering, fetch_order: Ordering, f: F) -> Result<*mut T, *mut T> {
+        self.fetch_update(set_order, fetch_order, f)
+    }
+    #[rustc_should_not_be_called_on_const_items]
+    pub fn update<F: FnMut(*mut T) -> *mut T>(&self, set_order: Ordering, fetch_order: Ordering, mut f: F) -> *mut T {
+        match self.fetch_update(set_order, fetch_order, |x| Some(f(x))) {
+            Ok(x) => x,
+            Err(x) => x,
         }
     }
 }
@@ -355,10 +489,14 @@ impl<T> fmt::Debug for AtomicPtr<T> {
 }
 
 /// Deprecated initializers still used by vendored code (objc-sys class!/sel! statics).
+#[deprecated(since = "1.34.0", note = "the `new` function is now preferred")]
 pub const ATOMIC_USIZE_INIT: AtomicUsize = AtomicUsize::new(0);
+#[deprecated(since = "1.34.0", note = "the `new` function is now preferred")]
 pub const ATOMIC_ISIZE_INIT: AtomicIsize = AtomicIsize::new(0);
+#[deprecated(since = "1.34.0", note = "the `new` function is now preferred")]
 pub const ATOMIC_BOOL_INIT: AtomicBool = AtomicBool::new(false);
 
+#[rustc_diagnostic_item = "fence"]
 pub fn fence(order: Ordering) {
     match order {
         Ordering::Relaxed => panic!("there is no such thing as a relaxed fence"),
@@ -366,6 +504,7 @@ pub fn fence(order: Ordering) {
     }
 }
 
+#[rustc_diagnostic_item = "compiler_fence"]
 pub fn compiler_fence(order: Ordering) {
     match order {
         Ordering::Relaxed => panic!("there is no such thing as a relaxed fence"),

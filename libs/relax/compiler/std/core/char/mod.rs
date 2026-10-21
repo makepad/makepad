@@ -18,7 +18,7 @@ pub const UNICODE_VERSION: (u8, u8, u8) = crate::unicode::UNICODE_VERSION;
 
 // ---------------------------------------------------------------- conversions
 
-pub fn from_u32(i: u32) -> Option<char> {
+pub const fn from_u32(i: u32) -> Option<char> {
     if (i > 0x10FFFF) || (i >= 0xD800 && i <= 0xDFFF) {
         None
     } else {
@@ -26,7 +26,7 @@ pub fn from_u32(i: u32) -> Option<char> {
     }
 }
 
-pub unsafe fn from_u32_unchecked(i: u32) -> char {
+pub const unsafe fn from_u32_unchecked(i: u32) -> char {
     crate::intrinsics_mem::transmute::<u32, char>(i)
 }
 
@@ -501,7 +501,7 @@ pub fn escape_default(c: char) -> EscapeDefault {
     EscapeDefault(escape_default_iter(c))
 }
 
-pub fn escape_unicode(c: char) -> EscapeUnicode {
+pub const fn escape_unicode(c: char) -> EscapeUnicode {
     EscapeUnicode(EscapeIter::unicode(c))
 }
 

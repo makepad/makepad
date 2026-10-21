@@ -20,6 +20,7 @@ use crate::cmp::Ordering;
 use crate::ops::{Add, Mul};
 
 #[cfg_attr(not(relax_check), lang = "iterator")]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 pub trait Iterator {
     type Item;
 
@@ -93,6 +94,7 @@ pub trait Iterator {
         Zip::new(self, other.into_iter())
     }
 
+    #[rustc_diagnostic_item = "IteratorMap"]
     fn map<B, F: FnMut(Self::Item) -> B>(self, f: F) -> Map<Self, F>
     where
         Self: Sized,
@@ -752,6 +754,7 @@ impl<I: Iterator> IntoIterator for I {
     }
 }
 
+#[rustc_diagnostic_item = "FromIterator"]
 pub trait FromIterator<A>: Sized {
     fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self;
 }

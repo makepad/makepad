@@ -58,18 +58,32 @@ unsafe fn drop_slot<T>(p: *mut u8) {
 }
 
 extern "C" fn key_dtor(p: *mut c_void) {
-    if p as usize == DESTROYED {
-        return; // second destructor round: leave the key empty
-    }
     unsafe {
-        // The runtime cleared the key before calling us: mark it destroyed while the value
-        // drops (access from other destructors then fails with AccessError); the runtime
-        // calls us once more with DESTROYED and then leaves the key empty.
+        // std's `destroy` (sys/thread_local/native/lazy.rs): the key is marked destroyed for good
+        // before the value drops, so access from this and every later destructor fails with
+        // AccessError and nothing re-initialises it. The runtime calls this once per key, last
+        // registered first; a late key's (no drop glue) only after every other destructor ran.
         let header = &*(p as *const SlotHeader);
         let drop_fn = header.drop_slot;
         sys::key_set(header.key, DESTROYED as *const c_void);
         drop_fn(p as *mut u8);
     }
+}
+
+/// The calling thread's value of `key`: read inline from the table the runtime keeps in the
+/// thread's block (word 1 points at its record, whose first three words are the domain the table
+/// belongs to, the table and its length -- domain_threads.rs ThreadData), the host call only
+/// when the thread runs another domain, has no record yet or has not set that key.
+#[inline(always)]
+fn key_value(key: sys::Key) -> usize {
+    unsafe {
+        let block = core::intrinsics_rt::tls_block();
+        let record = *block.add(1) as *const usize;
+        if !record.is_null() && *record == *block && (key as usize) < *record.add(2) {
+            return *(*record.add(1) as *const usize).add(key as usize);
+        }
+    }
+    sys::key_get(key) as usize
 }
 
 impl<T: 'static> LocalKey<T> {
@@ -82,7 +96,9 @@ impl<T: 'static> LocalKey<T> {
         if k != 0 {
             return (k - 1) as sys::Key;
         }
-        let new_key = match sys::key_create(key_dtor) {
+        // rustc never destroys a thread-local whose type has no drop glue (std's native TLS
+        // registers no destructor for it): its value stays readable in every other destructor
+        let new_key = match sys::key_create(key_dtor, !core::mem::needs_drop::<T>()) {
             Some(k) => k,
             None => panic!("failed to allocate a thread-local storage key"),
         };
@@ -97,7 +113,7 @@ impl<T: 'static> LocalKey<T> {
 
     fn slot(&'static self) -> Option<*const T> {
         let key = self.os_key();
-        let p = sys::key_get(key) as usize;
+        let p = key_value(key);
         if p == DESTROYED {
             return None;
         }

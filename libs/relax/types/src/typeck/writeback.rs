@@ -20,6 +20,10 @@ impl WritebackCx<'_, '_> {
         } else {
             *ty = self.infcx.deeply_resolve_ignoring_regions(*ty);
         }
+        // writeback.rs Resolver::fold_region: the typeck's region variables mean nothing outside it; they are erased, and
+        // borrowck takes each erased region of a closure's signature as an external universal region of the closure.
+        let tys = &self.infcx.tcx.tys;
+        *ty = tys.map_regions(*ty, &|r, _| if matches!(tys.region_kind(r), crate::types::RegionKind::ReVar(_)) { tys.intern_region(crate::types::RegionKind::ReErased) } else { r }, 0);
         if self.infcx.tcx.tys.has_infer(*ty) {
             self.unresolved = true;
             *ty = self.infcx.tcx.tys.error;
@@ -53,15 +57,21 @@ impl Fcx<'_> {
         for i in 0..body.pat_ty.len() { if body.pat_typed.get(i) { wbcx.resolve(&mut body.pat_ty[i]); } }
         wbcx.resolve(&mut body.ret);
         for ty in body.hidden_types.values_mut() { wbcx.resolve(ty); }
+        for (_, ty, _) in body.awaits.iter_mut() { wbcx.resolve(ty); }
         for local in &mut body.locals { wbcx.resolve(&mut local.ty); }
         for args in body.res_args.values_mut() { wbcx.resolve_list(args); }
         for method in body.methods.values_mut().chain(body.binops.values_mut()) { wbcx.resolve_list(&mut method.args); }
-        for (_, args) in body.ov_derefs.values_mut().chain(body.ov_index.values_mut()).chain(body.for_next.values_mut()) { wbcx.resolve_list(args); }
+        for (_, args) in body.ov_index.values_mut().chain(body.mutable_index.values_mut()).chain(body.std_index.values_mut()).chain(body.for_next.values_mut()) { wbcx.resolve_list(args); }
         for (_, args, ty) in body.for_into.values_mut() { wbcx.resolve_list(args); wbcx.resolve(ty); }
         for (_, args, ty) in body.try_branch.values_mut() { wbcx.resolve_list(args); wbcx.resolve(ty); }
         for (_, args) in body.try_from_residual.values_mut() { wbcx.resolve_list(args); }
-        for coerce in body.coerce.values_mut() {
-            match coerce { Coerce::ToDyn(a, b) | Coerce::Upcast(a, b) => { wbcx.resolve(a); wbcx.resolve(b); } _ => {} }
+        for adjust in body.adjust_payloads_mut() {
+            wbcx.resolve(&mut adjust.target);
+            match &mut adjust.kind {
+                adjustments::Adjust::Deref(Some((_, args))) => wbcx.resolve_list(args),
+                adjustments::Adjust::Coerce(Coerce::ToDyn(a, b) | Coerce::Upcast(a, b)) => { wbcx.resolve(a); wbcx.resolve(b); }
+                _ => {}
+            }
         }
         for sig in body.closure_sigs.values_mut() {
             wbcx.resolve(&mut sig.bound); wbcx.resolve(&mut sig.liberated);
@@ -71,7 +81,7 @@ impl Fcx<'_> {
         for ty in body.inline_const_types.values_mut() { wbcx.resolve(ty); }
         for captures in body.min_captures.values_mut() {
             for capture in &mut captures.captures { wbcx.resolve_place(&mut capture.place); }
-            for (place, _) in &mut captures.fake_reads { wbcx.resolve_place(place); }
+            for (place, _, _) in &mut captures.fake_reads { wbcx.resolve_place(place); }
             if let Some(coroutine) = &mut captures.coroutine {
                 for capture in &mut coroutine.by_move { wbcx.resolve_place(&mut capture.place); }
                 for capture in &mut coroutine.child_captures {

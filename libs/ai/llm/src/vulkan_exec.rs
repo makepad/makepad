@@ -68,6 +68,7 @@ pub struct VulkanContextArena {
 /// input set. Drop commands and buffers before their owning runtime.
 pub struct VulkanRawGraphSession {
     recorded: RefCell<Option<Recorded>>,
+    vision_int8: Option<VisionInt8>,
     arena: Rc<Arena>,
     plan: Plan,
     pinned: Vec<TensorId>,
@@ -176,6 +177,45 @@ impl VulkanExecRuntime {
         }).collect();
         Ok(VulkanRawGraphSession {
             recorded: RefCell::new(None),
+            vision_int8: None,
+            arena,
+            plan,
+            pinned: pinned.to_vec(),
+            inputs,
+            state: self.state.clone(),
+        })
+    }
+
+    /// The mmproj caller opts in explicitly; ordinary raw graphs and language
+    /// sessions never consult MAKEPAD_VISION_GEMM. Float remains the default.
+    pub(crate) fn create_vision_graph_session(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[TensorId],
+    ) -> Result<VulkanRawGraphSession> {
+        match std::env::var("MAKEPAD_VISION_GEMM").as_deref() {
+            Err(_) | Ok("float") => return self.create_raw_graph_session(ctx, graph, pinned),
+            Ok("int8") => {}
+            Ok(value) => return Err(LlamaError::unsupported(format!(
+                "unknown MAKEPAD_VISION_GEMM={value}; expected float or int8"
+            ))),
+        }
+        let vision_int8 = VisionInt8::prepare(&self.state, ctx, graph, pinned)?;
+        let plan = plan_raw_graph_with_reads(ctx, graph, pinned, &vision_int8.reads)?;
+        if std::env::var_os("MAKEPAD_VULKAN_PROFILE").is_some() {
+            let float_size = plan_raw_graph(ctx, graph, pinned)?.required_size;
+            eprintln!("vision.int8: arena {} bytes; float arena {float_size} bytes; arena delta {} bytes",
+                plan.required_size, plan.required_size as i128 - float_size as i128);
+        }
+        let arena = self.mirror_raw_arena(ctx, plan.required_size)?;
+        let inputs = graph.leafs.iter().copied().filter(|&id| {
+            let t = &ctx.tensors()[id];
+            t.data_offset.is_none() && t.view_src.is_none()
+        }).collect();
+        Ok(VulkanRawGraphSession {
+            recorded: RefCell::new(None),
+            vision_int8: Some(vision_int8),
             arena,
             plan,
             pinned: pinned.to_vec(),
@@ -561,6 +601,128 @@ fn default_reserve_key_count(spec: &HybridDecodeSpec) -> usize {
     1
 }
 
+struct VisionInt8Call {
+    weight: (usize, u32, u32),
+    dims: [u32; 3],
+    input: TensorId,
+    bias: Option<TensorId>,
+}
+
+/// Owned by the resident mmproj graph, after its recording and before its
+/// device in drop order. Shape-sharing bounds scratch by matrix shapes, not
+/// layer count. None entries are GEMMs folded into their bias consumer.
+struct VisionInt8 {
+    weights: BTreeMap<(usize, u32, u32), vkx::Int8Weights>,
+    gemms: BTreeMap<[u32; 3], vkx::Int8Gemm>,
+    calls: BTreeMap<TensorId, Option<VisionInt8Call>>,
+    reads: BTreeMap<TensorId, Vec<TensorId>>,
+}
+
+impl VisionInt8 {
+    fn prepare(state: &State, ctx: &Context, graph: &crate::Graph, pinned: &[TensorId]) -> Result<Self> {
+        vkx::Int8Gemm::supports(&state.device, vkx::Int8GemmMode::Dot4 { rows: 4 }).map_err(vk)?;
+        let mut out = Self {
+            weights: BTreeMap::new(), gemms: BTreeMap::new(),
+            calls: BTreeMap::new(), reads: BTreeMap::new(),
+        };
+        let tensors = ctx.tensors();
+        let mut fused = 0;
+        for (index, &id) in graph.nodes.iter().enumerate() {
+            let t = &tensors[id];
+            if t.op != Op::MulMat { continue; }
+            let (Some(aid), Some(bid)) = (t.src[0], t.src[1]) else { continue };
+            let (a, b) = (&tensors[aid], &tensors[bid]);
+            let (root, extra) = resolve_root(tensors, aid)?;
+            let weight_root = &tensors[root];
+            let Some(offset) = weight_root.data_offset else { continue };
+            if weight_root.op != Op::None || weight_root.desc.usage != crate::BufferUsage::Weights
+                || !matches!(a.desc.ty, TensorType::F16 | TensorType::F32)
+                || b.desc.ty != TensorType::F32 || t.desc.ty != TensorType::F32
+                || !a.is_contiguous() || !b.is_contiguous() || !t.is_contiguous()
+                || a.ne[2..] != [1, 1] || b.ne[2..] != [1, 1] || t.ne[2..] != [1, 1]
+                || a.ne[0] != b.ne[0] || t.ne[..2] != [a.ne[1], b.ne[1]]
+                || a.ne.iter().chain(b.ne.iter()).any(|&d| d <= 0 || d > u32::MAX as i64)
+            {
+                continue;
+            }
+            let dims = [n32(a.ne[1]), n32(a.ne[0]), n32(b.ne[1])];
+            let key = (offset + extra, dims[0], dims[1]);
+            if let std::collections::btree_map::Entry::Vacant(entry) = out.weights.entry(key) {
+                let bytes = ctx.data_at(key.0, a.nbytes()).map_err(LlamaError::format)?;
+                let values: Vec<f32> = if a.desc.ty == TensorType::F16 {
+                    bytes.chunks_exact(2).map(|c| makepad_ai_loader::quant::f16_to_f32(
+                        u16::from_le_bytes([c[0], c[1]])
+                    )).collect()
+                } else {
+                    bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+                };
+                entry.insert(vkx::Int8Weights::upload(&state.device, dims[0], dims[1], &values).map_err(vk)?);
+            }
+            if let std::collections::btree_map::Entry::Vacant(entry) = out.gemms.entry(dims) {
+                entry.insert(vkx::Int8Gemm::new_nt(&state.device, &mut state.library.borrow_mut(),
+                    dims[0], dims[1], dims[2]).map_err(vk)?);
+            }
+            let mut dst = id;
+            let mut bias = None;
+            // Fuse only an immediate compute consumer with no other observer
+            // of the unbiased result. The planner retains both GEMM inputs
+            // until this consumer, before assigning any reusable arena slots.
+            if let Some(&next) = graph.nodes[index + 1..].iter().find(|&&nid| {
+                !matches!(tensors[nid].op, Op::None | Op::View | Op::Reshape | Op::Permute | Op::Transpose)
+            }) {
+                let add = &tensors[next];
+                if add.op == Op::Add && add.is_contiguous() && add.ne == t.ne && add.desc.ty == TensorType::F32 {
+                    let other = if add.src[0] == Some(id) { add.src[1] }
+                        else if add.src[1] == Some(id) { add.src[0] } else { None };
+                    if let Some(bias_id) = other {
+                        let bt = &tensors[bias_id];
+                        let (br, _) = resolve_root(tensors, bias_id)?;
+                        if bt.desc.ty == TensorType::F32 && bt.is_contiguous() && bt.ne == [a.ne[1], 1, 1, 1]
+                            && tensors[br].op == Op::None && tensors[br].data_offset.is_some()
+                            && tensors[br].desc.usage == crate::BufferUsage::Weights
+                            && !used_elsewhere(tensors, &graph.nodes, pinned, id, next)
+                        {
+                            dst = next;
+                            bias = Some(bias_id);
+                            out.calls.insert(id, None);
+                            out.reads.insert(next, vec![aid, bid]);
+                            fused += 1;
+                        }
+                    }
+                }
+            }
+            out.calls.insert(dst, Some(VisionInt8Call { weight: key, dims, input: bid, bias }));
+        }
+        eprintln!("vision.int8: {} GEMMs, {fused} fused biases, {} weight matrices, {} scratch shapes; added weights {} bytes, scratch {} bytes (float arena retained)",
+            out.calls.values().filter(|v| v.is_some()).count(), out.weights.len(), out.gemms.len(),
+            out.weight_bytes(), out.scratch_bytes());
+        Ok(out)
+    }
+
+    fn weight_bytes(&self) -> usize {
+        self.weights.values().map(|w| (w.codes.size + w.metadata.size) as usize).sum()
+    }
+
+    fn scratch_bytes(&self) -> usize {
+        self.gemms.values().map(|g| (g.activation_codes.size + g.activation_metadata.size) as usize).sum()
+    }
+
+    fn dispatch(&self, view: &ExecView<'_>, stream: &mut vkx::Stream, id: TensorId) -> Result<bool> {
+        let Some(call) = self.calls.get(&id) else { return Ok(false) };
+        if let Some(call) = call {
+            // All scratch of a shape is reused. Order its prior reader before
+            // quantisation, and publish the fused output to ordinary nodes.
+            view.inner_barrier(stream);
+            self.gemms[&call.dims].encode_addresses(stream, &self.weights[&call.weight],
+                view.addr(call.input)?, view.addr(id)?, call.bias.map(|b| view.addr(b)).transpose()?).map_err(vk)?;
+            view.inner_barrier(stream);
+            let writes = [view.range(id)?];
+            view.q8_live.borrow_mut().retain(|e| !overlaps(&writes, (e.0, e.0 + 1)));
+        }
+        Ok(true)
+    }
+}
+
 impl VulkanRawGraphSession {
     /// Upload full contiguous inputs, replay the graph, read pinned outputs.
     /// `ctx` must be the context used to create this session; adding other
@@ -619,7 +781,12 @@ impl VulkanRawGraphSession {
             let mut by = BTreeMap::<String, (f64, usize)>::new();
             for (label, ms) in rec.stream.timings().map_err(vk)? {
                 if let Some(node) = label.parse::<usize>().ok().and_then(|i| self.plan.nodes.get(i)) {
-                    let entry = by.entry(format!("{:?}", node.sel)).or_default();
+                    let kind = match self.vision_int8.as_ref().and_then(|v| v.calls.get(&node.node_id)) {
+                        Some(None) => continue,
+                        Some(Some(_)) => "VisionInt8Gemm".to_string(),
+                        None => format!("{:?}", node.sel),
+                    };
+                    let entry = by.entry(kind).or_default();
                     entry.0 += ms;
                     entry.1 += 1;
                 }
@@ -634,10 +801,12 @@ impl VulkanRawGraphSession {
     pub fn device_bytes(&self) -> usize {
         self.arena.main_size + self.arena.ro.iter().map(|(_, _, b)| b.size as usize).sum::<usize>()
             + self.arena.repacked.iter().map(|(_, _, _, _, b)| b.size as usize).sum::<usize>()
+            + self.vision_int8.as_ref().map_or(0, |v| v.weight_bytes() + v.scratch_bytes())
     }
 
     pub fn node_count(&self) -> usize {
-        self.plan.nodes.iter().filter(|n| n.sel != Sel::Skip).count()
+        self.plan.nodes.iter().filter(|n| n.sel != Sel::Skip
+            && !self.vision_int8.as_ref().is_some_and(|v| matches!(v.calls.get(&n.node_id), Some(None)))).count()
     }
 
     fn main_place(&self, id: TensorId, len: usize) -> Result<(&vkx::Buffer, u64)> {
@@ -678,6 +847,11 @@ impl VulkanRawGraphSession {
         let view = ExecView { state: &self.state, arena: &self.arena, ctx, plan: &self.plan, scratch: q8.as_ref().map(|(_, a, b)| (*a, *b)), hazards: Default::default(), q8_live: Default::default() };
         for index in 0..self.plan.nodes.len() {
             if timed { stream.mark(&index.to_string()); }
+            if let Some(vision) = &self.vision_int8 {
+                if vision.dispatch(&view, &mut stream, self.plan.nodes[index].node_id)? {
+                    continue;
+                }
+            }
             view.dispatch_node(&mut stream, index).map_err(|e| LlamaError::format(format!("raw node {index}: {e:?}")))?;
         }
         stream.barrier();
@@ -811,6 +985,10 @@ impl CompiledHybridDecodeVulkan {
         }
         stream.barrier();
         if timed {
+            let (dispatches, barriers) = stream.command_counts();
+            eprintln!("vulkan.plan: nodes={} dispatches={dispatches} barriers={barriers}", self.plan.nodes.len());
+        }
+        if timed {
             stream.mark("end");
         }
         for (id, at, len) in &outputs {
@@ -919,6 +1097,12 @@ enum Sel {
     NormMul,
     /// act(x) * g, the Mul node of a fused Unary + Mul.
     UnaryMul(u32),
+    /// add -> activation, optionally followed by a multiply.
+    AddUnary { add: TensorId, op: u32, gate: Option<TensorId> },
+    SsmConvSilu { conv: TensorId },
+    /// Single-sequence cache round trips, with the row selected on device.
+    ConvState { get: TensorId, set: TensorId },
+    GatedDeltaState { get: TensorId, set: TensorId },
     RopeMulti,
     Unary(u32),
     Glu(u32),
@@ -1164,8 +1348,79 @@ fn next_compute(nodes: &[PlannedNode], i: usize) -> Option<usize> {
 
 /// Whether any node other than `except` reads `id` (or it is a graph output).
 fn used_elsewhere(tensors: &[Tensor], graph_nodes: &[TensorId], pinned: &[TensorId], id: TensorId, except: TensorId) -> bool {
-    pinned.contains(&id)
-        || graph_nodes.iter().any(|&n| n != except && tensors[n].src.iter().flatten().any(|s| *s == id || tensors[*s].view_src == Some(id)))
+    !only_read_by(tensors, graph_nodes, pinned, id, &[except])
+}
+
+fn metadata_only(t: &Tensor) -> bool {
+    matches!(t.op, Op::None | Op::View | Op::Reshape | Op::Permute | Op::Transpose)
+}
+
+/// Include nested views and distinct resident tensor descriptors of the same
+/// storage. An uncertain alias prevents a fusion.
+fn tensor_overlaps(tensors: &[Tensor], a: TensorId, b: TensorId) -> bool {
+    let (Ok((ar, ao)), Ok((br, bo))) = (resolve_root(tensors, a), resolve_root(tensors, b)) else {
+        return true;
+    };
+    let (a0, b0) = if ar == br {
+        (ao, bo)
+    } else if let (Some(ap), Some(bp)) = (tensors[ar].data_offset, tensors[br].data_offset) {
+        (ap + ao, bp + bo)
+    } else {
+        return false;
+    };
+    a0 < b0 + tensors[b].nbytes() && b0 < a0 + tensors[a].nbytes()
+}
+
+fn only_read_by(tensors: &[Tensor], graph: &[TensorId], pinned: &[TensorId], id: TensorId, allowed: &[TensorId]) -> bool {
+    !pinned.iter().any(|&p| tensor_overlaps(tensors, id, p))
+        && graph.iter().all(|&n| {
+            allowed.contains(&n) || metadata_only(&tensors[n])
+                || !tensors[n].src.iter().flatten().any(|&s| tensor_overlaps(tensors, id, s))
+        })
+}
+
+fn fused_mul_parts(tensors: &[Tensor], t: &Tensor) -> Result<(TensorId, TensorId)> {
+    let (Some(s0), Some(s1)) = (t.src[0], t.src[1]) else {
+        return Err(LlamaError::format("fused Mul without operands"));
+    };
+    if matches!(tensors[s0].op, Op::RmsNorm | Op::Unary) {
+        Ok((s0, s1))
+    } else if matches!(tensors[s1].op, Op::RmsNorm | Op::Unary) {
+        Ok((s1, s0))
+    } else {
+        Err(LlamaError::format("fused Mul without its norm/activation"))
+    }
+}
+
+/// Actual kernel accesses, shared by liveness and hazard tracking. Eliminated
+/// intermediates are not read; fused cache updates are writes to resident state.
+fn node_accesses(tensors: &[Tensor], node: &PlannedNode) -> Result<(Vec<TensorId>, Vec<TensorId>)> {
+    let t = &tensors[node.node_id];
+    let mut reads: Vec<_> = t.src.iter().flatten().copied().collect();
+    let mut writes = vec![node.node_id];
+    match node.sel {
+        Sel::Skip => return Ok((Vec::new(), Vec::new())),
+        Sel::NormMul | Sel::UnaryMul(_) => {
+            let (first, other) = fused_mul_parts(tensors, t)?;
+            reads = vec![tensors[first].src[0].unwrap(), other];
+        }
+        Sel::AddUnary { add, gate, .. } => {
+            reads = tensors[add].src.iter().flatten().copied().collect();
+            reads.extend(gate);
+        }
+        Sel::SsmConvSilu { conv } => reads = tensors[conv].src.iter().flatten().copied().collect(),
+        Sel::ConvState { get, set } => {
+            reads = vec![tensors[get].src[0].unwrap(), tensors[get].src[1].unwrap(), t.src[1].unwrap()];
+            writes.push(set);
+        }
+        Sel::GatedDeltaState { get, set } => {
+            reads = t.src[..5].iter().flatten().copied().collect();
+            reads.extend([tensors[get].src[0].unwrap(), tensors[get].src[1].unwrap()]);
+            writes.push(set);
+        }
+        _ => {}
+    }
+    Ok((reads, writes))
 }
 
 /// Fewer, larger dispatches: RmsNorm + Mul(weight) and Unary + Mul(gate)
@@ -1202,7 +1457,10 @@ fn fuse_nodes(tensors: &[Tensor], graph_nodes: &[TensorId], pinned: &[TensorId],
             // The gate has the same shape, everything contiguous.
             _ => o.ne == a.ne && o.is_contiguous() && a.is_contiguous() && x.is_contiguous() && mul.is_contiguous(),
         };
-        if !ok || used_elsewhere(tensors, graph_nodes, pinned, a_id, nodes[j].node_id) {
+        if !ok || tensor_overlaps(tensors, a_id, other)
+            || fused_mul_parts(tensors, mul).ok() != Some((a_id, other))
+            || used_elsewhere(tensors, graph_nodes, pinned, a_id, nodes[j].node_id)
+        {
             i += 1;
             continue;
         }
@@ -1213,6 +1471,186 @@ fn fuse_nodes(tensors: &[Tensor], graph_nodes: &[TensorId], pinned: &[TensorId],
         };
         i = j + 1;
     }
+}
+
+/// Dependent pairs only: independent q/k norms already share a barrier-free
+/// interval, so combining those would not remove a memory barrier.
+fn fuse_small_ops(tensors: &[Tensor], graph: &[TensorId], pinned: &[TensorId], nodes: &mut [PlannedNode]) -> Result<()> {
+    for i in 0..nodes.len() {
+        let Some(j) = next_compute(nodes, i) else { continue };
+        let id = nodes[i].node_id;
+        let out = nodes[j].node_id;
+        let a = &tensors[id];
+        let b = &tensors[out];
+        if nodes[i].sel == Sel::SsmConv && nodes[j].sel == Sel::Unary(10)
+            && b.src[0] == Some(id) && a.ne == b.ne && a.desc.ty == TensorType::F32
+            && b.desc.ty == TensorType::F32 && a.is_contiguous() && b.is_contiguous()
+            && only_read_by(tensors, graph, pinned, id, &[out])
+        {
+            nodes[i].sel = Sel::Skip;
+            nodes[j].sel = Sel::SsmConvSilu { conv: id };
+        } else if nodes[i].sel == Sel::Binary(0) {
+            let (unary, op, gate) = match nodes[j].sel {
+                Sel::Unary(op) => (out, op, None),
+                Sel::UnaryMul(op) => {
+                    let (unary, gate) = fused_mul_parts(tensors, b)?;
+                    (unary, op, Some(gate))
+                }
+                _ => continue,
+            };
+            // Broadcast the bias along contiguous rows; keep the same f32
+            // add, activation and multiply order as the separate kernels.
+            let (Some(x), Some(bias)) = (a.src[0], a.src[1]) else { continue };
+            let bias = &tensors[bias];
+            if tensors[unary].src[0] != Some(id) || !a.is_contiguous()
+                || !tensors[x].is_contiguous() || !b.is_contiguous()
+                || a.ne != b.ne || tensors[x].ne != a.ne
+                || bias.ne != [a.ne[0], 1, 1, 1] || !bias.is_contiguous()
+                || !only_read_by(tensors, graph, pinned, id, &[unary])
+            {
+                continue;
+            }
+            nodes[i].sel = Sel::Skip;
+            nodes[j].sel = Sel::AddUnary { add: id, op, gate };
+        }
+    }
+    // Prefill broadcasts its gate across token rows. The existing UnaryMul
+    // rule covers equal shapes; finish the add/activation chain for this
+    // row-broadcast case too.
+    for i in 0..nodes.len() {
+        let Sel::AddUnary { add, op, gate: None } = nodes[i].sel else { continue };
+        let Some(j) = next_compute(nodes, i) else { continue };
+        if nodes[j].sel != Sel::Binary(2) { continue }
+        let id = nodes[i].node_id;
+        let out = nodes[j].node_id;
+        let t = &tensors[out];
+        let (Some(a), Some(b)) = (t.src[0], t.src[1]) else { continue };
+        let gate = if a == id { b } else if b == id { a } else { continue };
+        let g = &tensors[gate];
+        if t.ne == tensors[id].ne && t.is_contiguous() && g.is_contiguous()
+            && (g.ne == t.ne || g.ne == [t.ne[0], 1, 1, 1])
+            && !tensor_overlaps(tensors, id, gate)
+            && only_read_by(tensors, graph, pinned, id, &[out])
+        {
+            nodes[i].sel = Sel::Skip;
+            nodes[j].sel = Sel::AddUnary { add, op, gate: Some(gate) };
+        }
+    }
+    Ok(())
+}
+
+/// A persistent f32 cache and a single input row selector, unchanged between
+/// gather and scatter. The selector's VALUE stays on device and may change on
+/// replay; no assumption that the active row is zero is made here.
+fn cache_round_trip(ctx: &Context, graph: &[TensorId], get: TensorId, set: TensorId) -> bool {
+    let tensors = ctx.tensors();
+    let g = &tensors[get];
+    let s = &tensors[set];
+    let (Some(cache), Some(rows), Some(dst), Some(write_rows)) = (g.src[0], g.src[1], s.src[2], s.src[1]) else {
+        return false;
+    };
+    let c = &tensors[cache];
+    let r = &tensors[rows];
+    let Ok((root, _)) = resolve_root(tensors, cache) else { return false };
+    let Ok((row_root, _)) = resolve_root(tensors, rows) else { return false };
+    g.op == Op::GetRows && s.op == Op::SetRows && rows == write_rows
+        && resolve_root(tensors, cache).ok() == resolve_root(tensors, dst).ok()
+        && resolve_root(tensors, cache).ok() == resolve_root(tensors, set).ok()
+        && c.ne == s.ne && c.nb == s.nb && c.ne[2..] == [1, 1]
+        && c.desc.ty == TensorType::F32 && c.nb[0] == 4 && c.nb[1] >= c.ne[0] as usize * 4
+        && c.nb[1] % 4 == 0 && c.nbytes() / 4 <= u32::MAX as usize
+        && tensors[root].op == Op::None
+        && tensors[root].data_offset.is_some_and(|offset| offset >= ctx.ro_split())
+        && r.desc.ty == TensorType::I32 && r.ne == [1, 1, 1, 1] && r.is_contiguous()
+        && tensors[row_root].op == Op::None
+        && g.ne == [c.ne[0], 1, 1, 1] && g.is_contiguous() && g.view_src.is_none()
+        && only_read_by(tensors, graph, &[], cache, &[get, set])
+        && graph.iter().all(|&n| n == set || metadata_only(&tensors[n]) || !tensor_overlaps(tensors, cache, n))
+        && graph.iter().all(|&n| metadata_only(&tensors[n]) || !tensor_overlaps(tensors, rows, n))
+}
+
+fn fuse_state_ops(ctx: &Context, graph: &[TensorId], pinned: &[TensorId], nodes: &mut [PlannedNode]) -> Result<()> {
+    let tensors = ctx.tensors();
+    for i in 0..nodes.len() {
+        let id = nodes[i].node_id;
+        let t = &tensors[id];
+        if nodes[i].sel == Sel::GatedDeltaNet && t.op_param_i32(0) == 0 {
+            let state = &tensors[t.src[5].unwrap()];
+            let (get, offset) = resolve_root(tensors, state.id)?;
+            let v = &tensors[t.src[2].unwrap()];
+            let width = v.ne[0] * v.ne[0] * v.ne[1];
+            let output_bytes = (v.ne[0] * v.ne[1] * v.ne[2]) as usize * 4;
+            let Some(gi) = (0..i).find(|&j| nodes[j].node_id == get && nodes[j].sel == Sel::GetRowsF32) else { continue };
+            if offset != 0 || v.ne[3] != 1 || v.ne[2] < 1 || !state.is_contiguous()
+                || state.ne != [v.ne[0], v.ne[0], v.ne[1], 1]
+                || tensors[get].ne != [width, 1, 1, 1] || !t.is_contiguous()
+                || t.nbytes() != output_bytes + width as usize * 4
+                || !only_read_by(tensors, graph, pinned, get, &[id])
+            {
+                continue;
+            }
+            for j in i + 1..nodes.len() {
+                if nodes[j].sel != (Sel::SetRows { f16: false }) { continue }
+                let set = nodes[j].node_id;
+                let source = tensors[set].src[0].unwrap();
+                let s = &tensors[source];
+                if resolve_root(tensors, source)? != (id, output_bytes)
+                    || s.ne != [width, 1, 1, 1] || !s.is_contiguous()
+                    || !only_read_by(tensors, graph, pinned, source, &[set])
+                    || !cache_round_trip(ctx, graph, get, set)
+                {
+                    continue;
+                }
+                nodes[gi].sel = Sel::Skip;
+                nodes[j].sel = Sel::Skip;
+                nodes[i].sel = Sel::GatedDeltaState { get, set };
+                break;
+            }
+        } else if nodes[i].sel == Sel::Concat {
+            let a = &tensors[t.src[0].unwrap()];
+            let b = &tensors[t.src[1].unwrap()];
+            let (get, offset) = resolve_root(tensors, a.id)?;
+            let Some(gi) = (0..i).find(|&j| nodes[j].node_id == get && nodes[j].sel == Sel::GetRowsF32) else { continue };
+            let width = a.ne[0] * a.ne[1];
+            if offset != 0 || a.ne[2..] != [1, 1] || a.ne[0] < 1 || b.ne[0] < 1
+                || b.ne[1..] != a.ne[1..] || t.ne != [a.ne[0] + b.ne[0], a.ne[1], 1, 1]
+                || tensors[get].ne != [width, 1, 1, 1] || !a.is_contiguous() || !t.is_contiguous()
+                || t.nelements() > u32::MAX as i64 || b.nbytes() / 4 > u32::MAX as usize
+                || b.desc.ty != TensorType::F32 || b.nb.iter().any(|nb| nb % 4 != 0)
+                || !only_read_by(tensors, graph, pinned, get, &[id])
+            {
+                continue;
+            }
+            for ci in i + 1..nodes.len() {
+                if nodes[ci].sel != Sel::Copy { continue }
+                let copy = nodes[ci].node_id;
+                let c = &tensors[copy];
+                let source = c.src[0].unwrap();
+                let window = &tensors[source];
+                if c.op != Op::Cont || c.ne != [width, 1, 1, 1] || !c.is_contiguous()
+                    || resolve_root(tensors, source)? != (id, b.ne[0] as usize * 4)
+                    || window.ne != a.ne || window.nb[..3] != t.nb[..3]
+                {
+                    continue;
+                }
+                let si = (ci + 1..nodes.len()).find(|&j| {
+                    let set = nodes[j].node_id;
+                    nodes[j].sel == (Sel::SetRows { f16: false }) && tensors[set].src[0] == Some(copy)
+                        && only_read_by(tensors, graph, pinned, copy, &[set])
+                        && cache_round_trip(ctx, graph, get, set)
+                });
+                if let Some(si) = si {
+                    let set = nodes[si].node_id;
+                    nodes[gi].sel = Sel::Skip;
+                    nodes[ci].sel = Sel::Skip;
+                    nodes[si].sel = Sel::Skip;
+                    nodes[i].sel = Sel::ConvState { get, set };
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Additive float/vision surface. Existing text graph selections stay in
@@ -1336,6 +1774,15 @@ fn plan_graph(ctx: &Context, decode: &HybridDecodeGraph) -> Result<Plan> {
 /// best-fit reuse of blocks whose last reader is done, leaf inputs are
 /// allocated up front, resident tensors keep their logical offsets.
 fn plan_raw_graph(ctx: &Context, graph: &crate::Graph, pinned: &[TensorId]) -> Result<Plan> {
+    plan_raw_graph_with_reads(ctx, graph, pinned, &BTreeMap::new())
+}
+
+fn plan_raw_graph_with_reads(
+    ctx: &Context,
+    graph: &crate::Graph,
+    pinned: &[TensorId],
+    extra_reads: &BTreeMap<TensorId, Vec<TensorId>>,
+) -> Result<Plan> {
     let tensors = ctx.tensors();
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     for &node_id in &graph.nodes {
@@ -1343,21 +1790,28 @@ fn plan_raw_graph(ctx: &Context, graph: &crate::Graph, pinned: &[TensorId]) -> R
         nodes.push(PlannedNode { node_id, sel: select(tensors, t)? });
     }
     fuse_nodes(tensors, &graph.nodes, pinned, &mut nodes);
+    fuse_state_ops(ctx, &graph.nodes, pinned, &mut nodes)?;
+    fuse_small_ops(tensors, &graph.nodes, pinned, &mut nodes)?;
     let mut needed: Vec<TensorId> = graph.nodes.clone();
     needed.extend(graph.leafs.iter().copied());
     needed.sort_unstable();
     needed.dedup();
     let mut last_use: BTreeMap<TensorId, usize> = BTreeMap::new();
     let mut def: BTreeMap<TensorId, usize> = BTreeMap::new();
-    for (index, &node_id) in graph.nodes.iter().enumerate() {
-        let t = &tensors[node_id];
-        for src in t.src.iter().flatten() {
-            let (root, _) = resolve_root(tensors, *src)?;
+    for (index, node) in nodes.iter().enumerate() {
+        // Use the combined dispatch's inputs and outputs. Eliminated
+        // intermediates need neither storage nor a lifetime; retaining them
+        // would introduce false reuse hazards between the remaining kernels.
+        let (reads, writes) = node_accesses(tensors, node)?;
+        for read in reads.into_iter().chain(extra_reads.get(&node.node_id).into_iter().flatten().copied()) {
+            let (root, _) = resolve_root(tensors, read)?;
             last_use.insert(root, index);
         }
-        let (out_root, _) = resolve_root(tensors, node_id)?;
-        def.entry(out_root).or_insert(index);
-        last_use.insert(out_root, index.max(last_use.get(&out_root).copied().unwrap_or(0)));
+        for write in writes {
+            let (root, _) = resolve_root(tensors, write)?;
+            def.entry(root).or_insert(index);
+            last_use.insert(root, index);
+        }
     }
     let end = graph.nodes.len();
     for &pin in pinned {
@@ -1425,6 +1879,9 @@ fn plan_raw_graph(ctx: &Context, graph: &crate::Graph, pinned: &[TensorId]) -> R
             offset
         } else if let Some(&offset) = planned.get(&root) {
             offset
+        } else if !last_use.contains_key(&root) {
+            // Shape-only views of eliminated intermediates have no address.
+            continue;
         } else {
             return Err(LlamaError::format(format!("tensor '{}' has no planned storage", t.name().unwrap_or("<unnamed>"))));
         };
@@ -1542,14 +1999,9 @@ impl ExecView<'_> {
             return Ok(());
         }
         let t = self.tensor(node_id).clone();
-        let mut reads: Vec<(u64, u64)> = t.src.iter().flatten().map(|id| self.range(*id)).collect::<Result<_>>()?;
-        if let Sel::NormMul | Sel::UnaryMul(_) = sel {
-            // A fused node also reads its first node's input.
-            let (first, _) = self.fused_parts(&t)?;
-            let x = self.tensor(first).src[0].ok_or_else(|| LlamaError::format("fused node without input"))?;
-            reads.push(self.range(x)?);
-        }
-        let writes = [self.range(node_id)?];
+        let (read_ids, write_ids) = node_accesses(self.ctx.tensors(), &self.plan.nodes[index])?;
+        let reads = read_ids.into_iter().map(|id| self.range(id)).collect::<Result<Vec<_>>>()?;
+        let writes = write_ids.into_iter().map(|id| self.range(id)).collect::<Result<Vec<_>>>()?;
         if self.hazards.borrow().needs_barrier(&reads, &writes) {
             s.barrier();
             self.hazards.borrow_mut().clear();
@@ -1564,15 +2016,7 @@ impl ExecView<'_> {
     /// A fused Mul node's first node (the norm or activation) and the other
     /// Mul operand (the weight or gate).
     fn fused_parts(&self, t: &Tensor) -> Result<(TensorId, TensorId)> {
-        let (s0, s1) = (self.src_id(t, 0)?, self.src_id(t, 1)?);
-        let is_first = |id: TensorId| matches!(self.tensor(id).op, Op::RmsNorm | Op::Unary);
-        if is_first(s0) {
-            Ok((s0, s1))
-        } else if is_first(s1) {
-            Ok((s1, s0))
-        } else {
-            Err(LlamaError::format("fused Mul without its norm/activation"))
-        }
+        fused_mul_parts(self.ctx.tensors(), t)
     }
 
     /// A barrier inside one node's work (its dispatches depend on each
@@ -1606,6 +2050,21 @@ impl ExecView<'_> {
                 let dst = self.addr(node_id)?;
                 self.copy_f32(s, self.addr(a_id)?, &a.ne, &a.nb, dst, &a.ne, &t.nb)?;
                 self.copy_f32(s, self.addr(b_id)?, &b.ne, &b.nb, dst + (a.ne[axis] as usize * t.nb[axis]) as u64, &b.ne, &t.nb)?;
+            }
+            Sel::ConvState { get, set } => {
+                let gather = self.tensor(get);
+                let cache = self.src_id(gather, 0)?;
+                let rows = self.src_id(gather, 1)?;
+                let a = self.tensor(self.src_id(&t, 0)?);
+                let b_id = self.src_id(&t, 1)?;
+                let b = self.tensor(b_id);
+                let k = self.state.kernel("conv_state")?;
+                let args = k.args().buffer("state", self.addr(set)?).buffer("rows", self.addr(rows)?)
+                    .buffer("x", self.addr(b_id)?).buffer("dst", self.addr(node_id)?)
+                    .u32("prefix", n32(a.ne[0])).u32("channels", n32(a.ne[1])).u32("tokens", n32(b.ne[0]))
+                    .u32("state_row", el(self.tensor(cache).nb[1], 4)?)
+                    .u32("x_t", el(b.nb[0], 4)?).u32("x_c", el(b.nb[1], 4)?);
+                s.dispatch(&args, [n32(a.ne[1]).div_ceil(128), 1, 1]);
             }
             Sel::GetRowsF32 => {
                 let sid = self.src_id(&t, 0)?;
@@ -1676,6 +2135,20 @@ impl ExecView<'_> {
                 let (gx, groups) = groups_1d(n, 256);
                 let args = k.args().buffer("x", self.addr(x_id)?).buffer("g", self.addr(g_id)?).buffer("dst", self.addr(node_id)?)
                     .u32("n", n as u32).u32("groups_x", gx).u32("op", op).u32("gated", 1);
+                s.dispatch(&args, groups);
+            }
+            Sel::AddUnary { add, op, gate } => {
+                let a = self.tensor(add);
+                let n = t.nelements() as usize;
+                let k = self.state.kernel("unary")?;
+                let (gx, groups) = groups_1d(n, 256);
+                let mut args = k.args().buffer("x", self.addr(self.src_id(a, 0)?)?)
+                    .buffer("bias", self.addr(self.src_id(a, 1)?)?).buffer("dst", self.addr(node_id)?)
+                    .u32("n", n as u32).u32("groups_x", gx).u32("op", op).u32("add_width", n32(a.ne[0]));
+                if let Some(gate) = gate {
+                    let g_width = if self.tensor(gate).ne == t.ne { 0 } else { n32(t.ne[0]) };
+                    args = args.buffer("g", self.addr(gate)?).u32("gated", 1).u32("g_width", g_width);
+                }
                 s.dispatch(&args, groups);
             }
             Sel::RopeMulti => {
@@ -1786,15 +2259,51 @@ impl ExecView<'_> {
                     s.dispatch(&args, [n.div_ceil(tile_n), m.div_ceil(tile_m), 1]);
                     return Ok(());
                 }
-                let kernel = self.state.kernel(q.kernel())?;
+                // Decode-only opt-ins. An unset selector preserves the
+                // current kernel and its dispatch exactly.
+                let variant = std::env::var("MAKEPAD_LLM_GEMV").unwrap_or_default();
+                let (row_lanes, rows, workgroup) = match variant.as_str() {
+                    "" | "default" => (32, 1, 256),
+                    "word" => (32, 1, 256),
+                    "rows2" => (32, 2, 256),
+                    "rows4" => (32, 4, 256),
+                    "wide" => (32, 1, 512),
+                    "lanes64" => (64, 1, 256),
+                    "lanes128" => (128, 1, 256),
+                    _ => return Err(LlamaError::unsupported(format!(
+                        "unknown MAKEPAD_LLM_GEMV={variant:?}; expected default, word, rows2, rows4, wide, lanes64 or lanes128"
+                    ))),
+                };
+                let kernel = if variant.is_empty() || variant == "default" {
+                    self.state.kernel(q.kernel())?
+                } else {
+                    let device = &self.state.device;
+                    let f = &device.features;
+                    if workgroup > f.max_workgroup_invocations.min(f.max_workgroup_size[0]) {
+                        return Err(LlamaError::unsupported(format!("MAKEPAD_LLM_GEMV={variant} needs {workgroup} workgroup invocations")));
+                    }
+                    let subgroup = (row_lanes > 32 && f.subgroup_size_control
+                        && (f.min_subgroup_size..=f.max_subgroup_size).contains(&row_lanes))
+                        .then_some(row_lanes);
+                    self.state.library.borrow_mut().get_constants_subgroup(
+                        device, &format!("{}_{}", q.kernel(), variant), &[], subgroup,
+                    ).map_err(vk)?
+                };
+                let groups = n.div_ceil(workgroup / row_lanes * rows);
+                // Wider row groups can exceed the dispatch X limit at the
+                // vocabulary head. Balance the opt-ins' two-dimensional grid
+                // so the final grid row does not schedule thousands of empty groups.
+                let groups_y = if variant.is_empty() || variant == "default" { 1 } else { groups.div_ceil(65535).max(1) };
+                let groups_x = groups.div_ceil(groups_y).max(1);
                 let args = kernel.args().buffer("w", wa).buffer("w4", wa).buffer("xq", xq).buffer("xq4", xq).buffer("xs", xs).buffer("xs4", xs).buffer("dst", self.addr(node_id)?)
-                    .u32("k", k_dim).u32("n", n).u32("m", m).u32("w_row", row_bytes as u32).u32("d_col", el(t.nb[1], 4)?);
-                // One row per 32-lane group, 8 per 256-invocation workgroup.
-                s.dispatch(&args, [n.div_ceil(8), 1, 1]);
+                    .u32("k", k_dim).u32("n", n).u32("m", m).u32("w_row", row_bytes as u32).u32("d_col", el(t.nb[1], 4)?)
+                    .u32("groups_x", groups_x);
+                s.dispatch(&args, [groups_x, groups_y, 1]);
             }
-            Sel::SsmConv => {
-                let s_id = self.src_id(&t, 0)?;
-                let w_id = self.src_id(&t, 1)?;
+            Sel::SsmConv | Sel::SsmConvSilu { .. } => {
+                let conv = if let Sel::SsmConvSilu { conv } = sel { self.tensor(conv) } else { &t };
+                let s_id = self.src_id(conv, 0)?;
+                let w_id = self.src_id(conv, 1)?;
                 let src = self.tensor(s_id);
                 let w = self.tensor(w_id);
                 if w.nb[0] != 4 {
@@ -1802,30 +2311,37 @@ impl ExecView<'_> {
                 }
                 let k = self.state.kernel("ssm_conv")?;
                 let args = k.args().buffer("src", self.addr(s_id)?).buffer("w", self.addr(w_id)?).buffer("dst", self.addr(node_id)?)
+                    .u32("silu", matches!(sel, Sel::SsmConvSilu { .. }) as u32)
                     .u32("d_conv", n32(w.ne[0])).u32("d_inner", n32(w.ne[1]))
                     .u32("s_nb0", el(src.nb[0], 4)?).u32("s_nb1", el(src.nb[1], 4)?).u32("s_nb2", el(src.nb[2], 4)?)
                     .u32("w_nb1", el(w.nb[1], 4)?)
                     .u32("d_nb0", el(t.nb[0], 4)?).u32("d_nb1", el(t.nb[1], 4)?).u32("d_nb2", el(t.nb[2], 4)?);
                 s.dispatch(&args, [n32(w.ne[1]).div_ceil(128), n32(t.ne[1]), n32(t.ne[2])]);
             }
-            Sel::GatedDeltaNet => {
+            Sel::GatedDeltaNet | Sel::GatedDeltaState { .. } => {
                 let ids: Vec<TensorId> = (0..6).map(|i| self.src_id(&t, i)).collect::<Result<_>>()?;
                 let q = self.tensor(ids[0]);
                 let kk = self.tensor(ids[1]);
                 let v = self.tensor(ids[2]);
                 let g = self.tensor(ids[3]);
                 let sv = v.ne[0] as u32;
-                let (qa, ka, sa, da) = (self.addr(ids[0])?, self.addr(ids[1])?, self.addr(ids[5])?, self.addr(node_id)?);
+                let cache = if let Sel::GatedDeltaState { get, .. } = sel { Some(self.tensor(get)) } else { None };
+                let state_id = cache.and_then(|g| g.src[0]).unwrap_or(ids[5]);
+                let (qa, ka, sa, da) = (self.addr(ids[0])?, self.addr(ids[1])?, self.addr(state_id)?, self.addr(node_id)?);
                 let qk_strides = [q.nb[1], q.nb[2], q.nb[3], kk.nb[1], kk.nb[2], kk.nb[3]];
                 let v4 = sv == 128 && q.nb[0] == 4 && kk.nb[0] == 4
+                    && (cache.is_none() || self.tensor(state_id).nb[1] % 16 == 0)
                     && qk_strides.iter().all(|nb| nb % 16 == 0) && [qa, ka, sa, da].iter().all(|a| a % 16 == 0);
-                let k = self.state.kernel(match (v4, t.op_param_i32(0) != 0) {
-                    (false, false) => "gated_delta_net",
-                    (true, false) => "gated_delta_net_v4",
-                    (false, true) => "gated_delta_net_checkpoints",
-                    (true, true) => "gated_delta_net_v4_checkpoints",
+                let checkpoints = t.op_param_i32(0) != 0;
+                let k = self.state.kernel(match (v4, checkpoints, cache.is_some()) {
+                    (false, false, false) => "gated_delta_net",
+                    (true, false, false) => "gated_delta_net_v4",
+                    (false, true, _) => "gated_delta_net_checkpoints",
+                    (true, true, _) => "gated_delta_net_v4_checkpoints",
+                    (false, false, true) => "gated_delta_net_state",
+                    (true, false, true) => "gated_delta_net_v4_state",
                 })?;
-                let args = k.args()
+                let mut args = k.args()
                     .buffer("q", qa).buffer("k", ka).buffer("v", self.addr(ids[2])?)
                     .buffer("g", self.addr(ids[3])?).buffer("beta", self.addr(ids[4])?).buffer("state", sa)
                     .buffer("dst", da).buffer("q4", qa).buffer("k4", ka).buffer("state4", sa).buffer("dst4", da)
@@ -1834,6 +2350,10 @@ impl ExecView<'_> {
                     .u32("q_h", el(q.nb[1], 4)?).u32("q_t", el(q.nb[2], 4)?).u32("q_s", el(q.nb[3], 4)?)
                     .u32("k_h", el(kk.nb[1], 4)?).u32("k_t", el(kk.nb[2], 4)?).u32("k_s", el(kk.nb[3], 4)?)
                     .u32("v_h", el(v.nb[1], 4)?).u32("v_t", el(v.nb[2], 4)?).u32("v_s", el(v.nb[3], 4)?);
+                if let Some(cache) = cache {
+                    args = args.buffer("rows", self.addr(self.src_id(cache, 1)?)?)
+                        .u32("state_row", el(self.tensor(state_id).nb[1], 4)?);
+                }
                 s.dispatch(&args, [sv.div_ceil(4), n32(v.ne[1]), n32(v.ne[3])]);
             }
             Sel::Attn => {

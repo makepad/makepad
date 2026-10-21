@@ -4,8 +4,10 @@
 //! byte stream; the default hasher itself (fast.rs) differs from real std's SipHash.
 
 mod fast;
+mod sip;
 
 pub use fast::{DefaultHasher, FastHasher, RandomState};
+pub use sip::SipHasher;
 
 use crate::marker::PhantomData;
 

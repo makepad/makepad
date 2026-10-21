@@ -815,6 +815,14 @@ impl Cx {
                     makepad_hal::profile::credit();
                 }
             }
+            HalEvent::FramePartial { window: _, frame } => {
+                // its pipeline's PipelineReady repaints; an offscreen render asks `frames_partial`
+                let partial = &mut self.textures.1.partial;
+                if partial.len() >= 256 {
+                    partial.pop_front();
+                }
+                partial.push_back(frame);
+            }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
                     if gpu_ns > 0 {
@@ -840,6 +848,7 @@ impl Cx {
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
+                crate::cx::relax_frame_done();
             }
             HalEvent::PipelineReady { pipeline } => {
                 // a draw built before the pipeline was ready was skipped by the HAL: paint again

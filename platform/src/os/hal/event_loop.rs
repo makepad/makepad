@@ -5,7 +5,8 @@
 //! batch. A backend with a display clock (`info_flags::DISPLAY_CLOCK`: windows on a display)
 //! announces a frame once per vsync after a `FrameRequest`, and the beat runs on that
 //! announcement: an idle app asks for nothing and wakes for nothing. The headless backend and
-//! offscreen windows have no display: the beat runs whenever Cx has work, 60 times a second.
+//! offscreen windows have no display: the beat runs whenever Cx has work, 60 times a second,
+//! or, for a batch renderer (`MAKEPAD_PAINT_INTERVAL`), as fast as the GPU completes frames.
 
 use crate::{cx::{Cx, OsType}, event::hal_intake::hal_window_id, event::Event};
 use makepad_hal::{hal_open, hal_pump, hal_submit, info_flags, open_flags, EventStore, OpenReq};
@@ -15,6 +16,26 @@ use std::{cell::RefCell, rc::Rc};
 /// Time between beats while the app animates or waits for a frame: 60 Hz. The headless backend
 /// has no display to pace it; a window system's `FrameReady` takes this place.
 const BEAT: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+/// Window frames a batch renderer (`batch_interval`) keeps on the GPU at once.
+const BATCH_FRAMES_IN_FLIGHT: usize = 2;
+
+/// The longest a batch renderer's beat waits for the GPU to complete a frame.
+const BATCH_STALL: std::time::Duration = BEAT;
+
+/// `MAKEPAD_PAINT_INTERVAL` (seconds): a process whose windows are hidden
+/// (`MAKEPAD_HIDE_WINDOWS`) and draw offscreen work only (a batch renderer:
+/// Stage's export parts) beats at this interval instead of 60 times a second,
+/// as fast as the GPU completes frames ([`BATCH_FRAMES_IN_FLIGHT`] bound the
+/// beats ahead of it). Ignored for windows on a display, which pace on it.
+fn batch_interval() -> Option<std::time::Duration> {
+    static INTERVAL: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var_os("MAKEPAD_HIDE_WINDOWS")?;
+        let value: f64 = std::env::var("MAKEPAD_PAINT_INTERVAL").ok()?.trim().parse().ok()?;
+        (value.is_finite() && value > 0.0).then(|| std::time::Duration::from_secs_f64(value.max(0.0002)))
+    })
+}
+
 /// A frame request the HAL has not answered for this long is made again.
 const REREQUEST: std::time::Duration = std::time::Duration::from_millis(500);
 /// One budget for all glyph waits and rebuilds of a frame, including newly revealed text.
@@ -214,6 +235,15 @@ impl Cx {
         #[cfg(any(target_vendor = "apple", target_os = "windows"))]
         self.hal.frames.w.game_out(0, makepad_hal::media::game_op::ENABLE, 0, 0, 0, 0, &[]);
         let display_clock = info.flags & info_flags::DISPLAY_CLOCK != 0;
+        // a batch renderer beats as the GPU completes frames, not 60 times a second
+        let batch = batch_interval().filter(|_| !display_clock && !hosted);
+        let period = batch.unwrap_or(BEAT);
+        // the submission serial after each of the last beats: a beat waits for the GPU to
+        // have completed the oldest of them
+        let mut in_flight: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        // when the last beat ran: a frame whose completion never comes holds the beat back
+        // for at most BATCH_STALL (it then paces as an unbatched one would)
+        let mut last_beat = std::time::Instant::now();
 
         let mut next_beat = std::time::Instant::now();
         // a frame asked for and not yet announced: when, so a lost request is asked again
@@ -245,6 +275,9 @@ impl Cx {
                     Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
                     None => u64::MAX,
                 }
+            } else if batch.is_some() && in_flight.len() >= BATCH_FRAMES_IN_FLIGHT && self.frame_completed_serial() < in_flight[0] {
+                // the GPU is behind: its FrameDone wakes the pump
+                BATCH_STALL.saturating_sub(last_beat.elapsed()).as_nanos() as u64
             } else {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
@@ -279,7 +312,9 @@ impl Cx {
                 }
             }
             let announced = std::mem::take(&mut self.hal.beat);
-            let due = std::time::Instant::now() >= next_beat;
+            let gpu_ready = batch.is_none() || in_flight.len() < BATCH_FRAMES_IN_FLIGHT || self.frame_completed_serial() >= in_flight[0]
+                || last_beat.elapsed() >= BATCH_STALL;
+            let due = std::time::Instant::now() >= next_beat && gpu_ready;
             if !hosted && !self.hal.device_lost && (announced || (!display_clock && due && self.hal_has_work())) {
                 requested = None;
                 if log_enabled() && announced {
@@ -294,7 +329,14 @@ impl Cx {
                 // its work ended (that made the period 16.7 ms + the beat's CPU time: ~48 fps
                 // offscreen); a beat more than a period late (idle, a stall) starts a new cadence
                 let now = std::time::Instant::now();
-                next_beat = if next_beat + BEAT > now { next_beat + BEAT } else { now + BEAT };
+                next_beat = if next_beat + period > now { next_beat + period } else { now + period };
+                last_beat = now;
+                if batch.is_some() {
+                    while in_flight.len() >= BATCH_FRAMES_IN_FLIGHT {
+                        in_flight.pop_front();
+                    }
+                    in_flight.push_back(self.frame_submission_serial());
+                }
             }
             if !self.hal_handle_platform_ops() {
                 self.call_event_handler(&Event::Shutdown);
@@ -342,7 +384,26 @@ impl Cx {
         let n = hal_pump(timeout_ns, &mut buf);
         let intake_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
         let mut alive = true;
-        for (time_ns, event) in store.reader(n, buf.arena_len) {
+        // Pointer moves are coalesced per batch: a move directly followed by another move of
+        // the same window and modifiers is dropped and its delta carried into the next, so a
+        // fast pointer costs the app one move per pump, not one per hardware sample.
+        let mut events = store.reader(n, buf.arena_len).peekable();
+        let mut carry = (0.0, 0.0);
+        while let Some((time_ns, mut event)) = events.next() {
+            use makepad_hal::HalEvent;
+            if let HalEvent::MouseMove { window, dx, dy, mods, .. } = event {
+                if let Some((_, HalEvent::MouseMove { window: next_window, mods: next_mods, .. })) = events.peek() {
+                    if *next_window == window && *next_mods == mods {
+                        carry = (carry.0 + dx, carry.1 + dy);
+                        continue;
+                    }
+                }
+                if let HalEvent::MouseMove { dx, dy, .. } = &mut event {
+                    *dx += carry.0;
+                    *dy += carry.1;
+                }
+                carry = (0.0, 0.0);
+            }
             if log_enabled() {
                 use makepad_hal::HalEvent;
                 match event {

@@ -32,6 +32,95 @@ pub mod intrinsics {
         /// true when this target (arm64; x86-64 with FMA3) fuses in hardware: a constant per run
         pub fn fma_native() -> bool;
     }
+    pub use super::intrinsics_simd as simd;
+    /// rustc's `intrinsics::assume` (UB when false): hint::assert_unchecked
+    pub use crate::hint::assert_unchecked as assume;
+}
+
+/// rustc's generic SIMD intrinsics (`core::intrinsics::simd`) on `#[repr(simd)]` types, lane-wise
+/// (lowered per 16-byte chunk to Relax's vector IR; lower/simd.rs). Signatures as rustc's.
+pub mod intrinsics_simd {
+    extern "relax-intrinsic" {
+        pub fn simd_add<T>(x: T, y: T) -> T;
+        pub fn simd_sub<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_mul<T>(x: T, y: T) -> T;
+        pub fn simd_div<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_shl<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_shr<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_and<T>(x: T, y: T) -> T;
+        pub fn simd_or<T>(x: T, y: T) -> T;
+        pub fn simd_xor<T>(x: T, y: T) -> T;
+        pub fn simd_neg<T>(x: T) -> T;
+        pub fn simd_fabs<T>(x: T) -> T;
+        pub fn simd_fsqrt<T>(x: T) -> T;
+        pub fn simd_floor<T>(x: T) -> T;
+        pub fn simd_ceil<T>(x: T) -> T;
+        pub fn simd_trunc<T>(x: T) -> T;
+        pub fn simd_round<T>(x: T) -> T;
+        pub fn simd_minimum_number_nsz<T>(x: T, y: T) -> T;
+        pub fn simd_maximum_number_nsz<T>(x: T, y: T) -> T;
+        pub fn simd_saturating_add<T>(x: T, y: T) -> T;
+        pub fn simd_saturating_sub<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_eq<T, U>(x: T, y: T) -> U;
+        pub fn simd_ne<T, U>(x: T, y: T) -> U;
+        pub fn simd_lt<T, U>(x: T, y: T) -> U;
+        pub fn simd_le<T, U>(x: T, y: T) -> U;
+        pub fn simd_gt<T, U>(x: T, y: T) -> U;
+        pub fn simd_ge<T, U>(x: T, y: T) -> U;
+        pub fn simd_select<M, T>(mask: M, if_true: T, if_false: T) -> T;
+        // lane by lane in scalar code (lower/simd.rs simd_per_lane)
+        pub fn simd_rem<T>(lhs: T, rhs: T) -> T;
+        pub fn simd_ctpop<T>(x: T) -> T;
+        pub fn simd_ctlz<T>(x: T) -> T;
+        pub fn simd_cttz<T>(x: T) -> T;
+        pub fn simd_bswap<T>(x: T) -> T;
+        pub fn simd_bitreverse<T>(x: T) -> T;
+        pub fn simd_round_ties_even<T>(x: T) -> T;
+        pub fn simd_fma<T>(x: T, y: T, z: T) -> T;
+        pub fn simd_relaxed_fma<T>(x: T, y: T, z: T) -> T;
+        pub fn simd_cast<T, U>(x: T) -> U;
+        pub fn simd_as<T, U>(x: T) -> U;
+        pub fn simd_splat<T, U>(value: U) -> T;
+        pub fn simd_extract<T, U>(x: T, idx: u32) -> U;
+        pub fn simd_extract_dyn<T, U>(x: T, idx: u32) -> U;
+        pub fn simd_insert<T, U>(x: T, idx: u32, val: U) -> T;
+        pub fn simd_insert_dyn<T, U>(x: T, idx: u32, val: U) -> T;
+        pub fn simd_shuffle<T, U, V>(x: T, y: T, idx: U) -> V;
+        pub fn simd_bitmask<T, U>(x: T) -> U;
+        pub fn simd_select_bitmask<M, T>(m: M, yes: T, no: T) -> T;
+        pub fn simd_reduce_add_ordered<T, U>(x: T, y: U) -> U;
+        pub fn simd_reduce_add_unordered<T, U>(x: T) -> U;
+        pub fn simd_reduce_mul_ordered<T, U>(x: T, y: U) -> U;
+        pub fn simd_reduce_mul_unordered<T, U>(x: T) -> U;
+        pub fn simd_reduce_all<T>(x: T) -> bool;
+        pub fn simd_reduce_any<T>(x: T) -> bool;
+        pub fn simd_reduce_max<T, U>(x: T) -> U;
+        pub fn simd_reduce_min<T, U>(x: T) -> U;
+        pub fn simd_reduce_and<T, U>(x: T) -> U;
+        pub fn simd_reduce_or<T, U>(x: T) -> U;
+        pub fn simd_reduce_xor<T, U>(x: T) -> U;
+        pub fn simd_gather<T, U, V>(val: T, ptr: U, mask: V) -> T;
+        pub fn simd_scatter<T, U, V>(val: T, ptr: U, mask: V);
+        pub fn simd_masked_load<V, U, T, const ALIGN: SimdAlign>(mask: V, ptr: U, val: T) -> T;
+        pub fn simd_masked_store<V, U, T, const ALIGN: SimdAlign>(mask: V, ptr: U, val: T);
+        pub fn simd_arith_offset<T, U>(ptr: T, offset: U) -> T;
+        pub fn simd_cast_ptr<T, U>(ptr: T) -> U;
+        pub fn simd_expose_provenance<T, U>(ptr: T) -> U;
+        pub fn simd_with_exposed_provenance<T, U>(addr: T) -> U;
+        pub fn simd_funnel_shl<T>(a: T, b: T, shift: T) -> T;
+        pub fn simd_funnel_shr<T>(a: T, b: T, shift: T) -> T;
+    }
+
+    /// Alignment options of the masked load/store intrinsics (rustc core/src/intrinsics/simd)
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum SimdAlign {
+        /// No alignment requirements on the pointer
+        Unaligned = 0,
+        /// The pointer must be aligned to the element type of the SIMD vector
+        Element = 1,
+        /// The pointer must be aligned to the SIMD vector type
+        Vector = 2,
+    }
 }
 
 /// Memory, pointers and type information.
@@ -123,6 +212,9 @@ pub mod intrinsics_rt {
         pub fn panic_impl(msg: *const u8, msg_len: usize, file: *const u8, file_len: usize, line: u32, col: u32) -> !;
         /// The location of the caller of the enclosing #[track_caller] fn (or this call).
         pub fn caller_location() -> &'static crate::panic::Location<'static>;
+        /// This thread's thread-local block: word 0 the domain base, word 1 the runtime's per-thread
+        /// record (thread-local keys: `std::thread::local`). An inline TLS access, not a call.
+        pub fn tls_block() -> *mut usize;
         pub fn abort() -> !;
         /// Runs `f(data)` under a recovery point; true if it panicked or faulted (live: the
         /// panic was reported and the stack reset here; AOT: panics abort). std::thread uses it

@@ -7,7 +7,16 @@ use crate::types::{TyId, RegionId};
 pub struct NoSolution;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum GoalSource { Misc, ImplWhereBound, AliasBoundConstCondition, AliasWellFormed, Normalization }
+pub enum GoalSource {
+    Misc,
+    /// A nested goal required to prove that types are equal/subtypes (always unproductive).
+    TypeRelating,
+    ImplWhereBound,
+    AliasBoundConstCondition,
+    AliasWellFormed,
+    /// A normalization of an alias in a nested goal, tracking the nested goal's own path kind.
+    NormalizeGoal(super::search_graph::PathKind),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegionConstraint { RegionOutlives(RegionId, RegionId), TypeOutlives(TyId, RegionId), Eq(RegionId, RegionId) }

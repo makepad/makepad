@@ -1,0 +1,12 @@
+[package]
+name = "relax-diffpkg"
+version = "0.1.0"
+edition = "2021"
+description = "diff_fast package programs: library-backed programs (box3d) whose `D ...` lines Relax must print exactly as the rustc --release build does (tools/run/fixture/diff_fast.sh)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+makepad-box3d = { path = "../../../../libs/box3d" }
+relax-diffpkg-tables = { path = "tables" }
+ttf-parser = { path = "../../../../libs/ttf-parser" }

@@ -106,6 +106,9 @@ pub struct Metal {
     capture_ns: u64,
     /// `frame::depth_only`'s scratch: the (pipeline, blend) pairs of a pass already asked
     depth_only_seen: Vec<(u32, bool)>,
+    /// Draws left out so far for a pipeline variant still compiling (a frame that adds to it is
+    /// partial, `FramePartial`).
+    pending_draws: u64,
 }
 
 impl Metal {
@@ -141,7 +144,7 @@ impl Metal {
             session: 0,
             backend: backend_id::METAL,
             dialect: dialect::MSL,
-            flags: if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 },
+            flags: info_flags::WINDOW_LAYERS | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 },
             formats,
             msaa: 1,
             dpi: shell.map_or(1.0, |s| s.dpi()),
@@ -173,6 +176,7 @@ impl Metal {
             capture: None,
             capture_ns: 0,
             depth_only_seen: Vec::new(),
+            pending_draws: 0,
         })
     }
 
@@ -223,7 +227,7 @@ impl Metal {
                 continue;
             }
             match done {
-                Done::Frame { sid, target, frame, gpu_ns, present_ns, gpu_span, failed, window, kind, .. } => {
+                Done::Frame { sid, target, frame, gpu_ns, present_ns, gpu_span, failed, partial, window, kind, .. } => {
                     if window && !failed && kind & target::OVERLAY == 0 {
                         world.window_presented(sid, target, frame, gpu_ns, present_ns);
                         if let Some(shell) = self.shell {
@@ -242,7 +246,10 @@ impl Metal {
                         }
                     }
                     // the one place FrameDone is posted: the presenter, and the parent of a lent window
-                    if !failed { world.frame_done(sid, target, kind, frame, gpu_ns, present_ns, gpu_span); }
+                    if !failed {
+                        if partial { world.frame_partial(sid, target, frame); }
+                        world.frame_done(sid, target, kind, frame, gpu_ns, present_ns, gpu_span);
+                    }
                 }
                 Done::Surface { sid, window, w, h, buffer, .. } => match world.session_mut(sid) {
                     Some(s) => s.events.screen_surface(window, [w as u16, h as u16], buffer as u64),
@@ -413,7 +420,7 @@ impl Backend for Metal {
         let lent: Vec<_> = self.window_aliases.iter().filter(|((s, _), _)| *s == sid).map(|((_, id), host)| (*id, *host)).collect();
         let now = world.now();
         for (id, host) in lent {
-            if let Some(s) = world.session_mut(HOST) { self.set_overlay(s, host, None, now); }
+            if let Some(s) = world.session_mut(HOST) { self.set_overlay(s, host, None, Id::NONE, now); }
             self.window_lent(sid, id, host, false);
         }
         if sid == HOST {
@@ -602,8 +609,8 @@ impl Gpu for Metal {
         self.layer_sizes.remove(&(sid, id.index));
     }
 
-    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, now: u64) {
-        self.set_overlay(s, id, rect, now);
+    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
+        self.set_overlay(s, id, rect, layer, now);
     }
 
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

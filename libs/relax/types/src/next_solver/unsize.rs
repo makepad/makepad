@@ -19,11 +19,16 @@ impl EvalCtxt<'_, '_> {
             let mut results = Vec::new();
             if let (TyKind::Dyn(source_principal,..), TyKind::Dyn(target_principal,..)) = (tcx.tys.kind(a),tcx.tys.kind(b)) {
                 let source_bounds = tcx.object_predicates(ecx.solver.prog,a);
-                let principal = source_bounds.iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(t)) if t.trait_ref.def_id == *source_principal));
+                // a principal-less object (`dyn Send + Sync`) carries its first auto trait as `principal`
+                // (Dyn's encoding): rustc's `principal_def_id()` is None for it
+                let prog = ecx.solver.prog;
+                let real = |p: &DefId| *p != NO_DEF && !super::eval_ctxt::trait_is_auto(prog, *p);
+                let (source_principal, target_principal) = (if real(source_principal) { *source_principal } else { NO_DEF }, if real(target_principal) { *target_principal } else { NO_DEF });
+                let principal = source_bounds.iter().find(|p| matches!(&p.kind, PredicateKind::Clause(ClauseKind::Trait(t)) if t.trait_ref.def_id == source_principal));
                 // trait_goals.rs:986-1040: identity/removing auto traits is Misc;
                 // upcast indices count the full principal-supertrait traversal.
                 let mut principals = Vec::new();
-                if source_principal == target_principal || *target_principal == NO_DEF {
+                if source_principal == target_principal || target_principal == NO_DEF {
                     principals.push((BuiltinImplSource::Misc, principal.cloned()));
                 } else if let Some(principal) = principal {
                     let supers = tcx.supertraits(ecx.solver.prog, principal.clone());

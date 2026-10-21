@@ -19,6 +19,10 @@ pub enum RenderTargetFormat {
     Bgra8,
     /// Half-float RGBA (a linear, HDR picture).
     Rgba16f,
+    /// 8-bit BGRA another GPU user reads by its platform handle
+    /// (`Cx::shared_texture_handle`: an encoder taking the picture as it
+    /// lies in GPU memory). Kept, never transient.
+    SharedBgra8,
 }
 
 /// One offscreen pass, its draw list and its colour target.
@@ -67,11 +71,18 @@ impl RenderTarget {
             return false;
         }
         let fixed = TextureSize::Fixed { width: size.0.max(1) as usize, height: size.1.max(1) as usize };
-        self.texture = Texture::new_with_format(cx, match format {
-            RenderTargetFormat::Bgra8 => TextureFormat::RenderBGRAu8 { size: fixed, initial: true },
-            RenderTargetFormat::Rgba16f => TextureFormat::RenderRGBAf16 { size: fixed, initial: true },
-        }).label(cx, self.name);
-        self.texture.set_transient(cx, true);
+        self.texture = match format {
+            RenderTargetFormat::Bgra8 => Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: fixed, initial: true }),
+            RenderTargetFormat::Rgba16f => Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: fixed, initial: true }),
+            #[cfg(not(target_arch = "wasm32"))]
+            RenderTargetFormat::SharedBgra8 => cx.create_shared_texture(size.0.max(1) as usize, size.1.max(1) as usize),
+            // the browser shares no textures with another renderer: a plain target
+            #[cfg(target_arch = "wasm32")]
+            RenderTargetFormat::SharedBgra8 => Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: fixed, initial: true }),
+        }.label(cx, self.name);
+        if format != RenderTargetFormat::SharedBgra8 {
+            self.texture.set_transient(cx, true);
+        }
         self.depth = None;
         self.size = size;
         self.format = format;

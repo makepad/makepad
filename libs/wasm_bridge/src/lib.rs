@@ -6,10 +6,12 @@ pub use makepad_live_id::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm_exports;
 mod from_wasm;
+mod host;
 mod to_wasm;
 mod wasm_types;
 
 pub use from_wasm::*;
+pub use host::*;
 pub use to_wasm::*;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_exports::*;

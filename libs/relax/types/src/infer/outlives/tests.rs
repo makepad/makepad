@@ -60,7 +60,7 @@ fn generic_outlives_uses_disjunction_and_higher_ranked_bounds() {
     assert!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, bounds)).is_empty());
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     infcx.register_ty_outlives(t, b);
-    assert_eq!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, vec![])), vec![RegionResolutionError::GenericBoundFailure(t, b)]);
+    assert_eq!(infcx.resolve_regions_with_outlives_env(&prog, &environment(&tcx, vec![])), vec![RegionResolutionError::GenericBoundFailure(t, b, 0)]);
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     infcx.register_ty_outlives(t, tcx.tys.intern_region(RegionKind::ReStatic));
     let bound = Predicate { kind: PredicateKind::Clause(ClauseKind::TypeOutlives(t, tcx.tys.intern_region(RegionKind::ReBound(0, BoundVar(0))))), bound_vars: vec![crate::next_solver::BoundVariableKind::Region(crate::types::BoundRegionKind::Anon)].into() };

@@ -20,6 +20,20 @@ pub mod libm;
 // ---- language support
 pub mod any;
 pub mod arch;
+// rustc's core::simd: portable-simd's core_simd (library/portable-simd/crates/core_simd/src),
+// pulled in as rustc's core does, over the generic SIMD intrinsics (intrinsics_simd)
+// rustc's core names itself `core` (core_simd's paths say core::)
+// Relax: only in a program whose crate roots enable `portable_simd` (the loader's
+// relax_portable_simd cfg): no other program can name it, and 6k lines stay out of cold starts
+extern crate self as core;
+#[cfg(relax_portable_simd)]
+#[path = "core_simd/mod.rs"]
+#[allow(missing_debug_implementations, dead_code, unsafe_op_in_unsafe_fn)]
+mod core_simd;
+#[cfg(relax_portable_simd)]
+pub mod simd {
+    pub use crate::core_simd::simd::*;
+}
 pub mod borrow;
 pub mod cell;
 pub mod clone;
@@ -208,23 +222,45 @@ pub mod isize {
     pub const MAX: isize = 9223372036854775807;
 }
 
-/// The prelude Relax puts in scope in every crate: Rust 2021's std prelude (a superset of
-/// core's; harmless for no_std crates since user items shadow it).
+/// The preludes (library/core/src/prelude): `rust_2015` is also 2018's (`prelude::v1` is a builtin path), `rust_2021` adds
+/// `FromIterator`, `TryFrom` and `TryInto`, `rust_2024` adds `Future` and `IntoFuture`. The
+/// resolver injects the module of the crate's edition. Relax puts std's prelude (a superset of
+/// core's; harmless for no_std crates since user items shadow it) in every crate.
 pub mod prelude {
-    pub use crate::borrow::ToOwned;
-    pub use crate::boxed::Box;
-    pub use crate::clone::Clone;
-    pub use crate::cmp::{Eq, Ord, PartialEq, PartialOrd};
-    pub use crate::convert::{AsMut, AsRef, From, Into, TryFrom, TryInto};
-    pub use crate::default::Default;
-    pub use crate::iter::{DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator};
-    pub use crate::marker::{Copy, Send, Sized, Sync, Unpin};
-    pub use crate::mem::drop;
-    pub use crate::ops::{AsyncFn, AsyncFnMut, AsyncFnOnce, Drop, Fn, FnMut, FnOnce};
-    pub use crate::option::Option::{self, None, Some};
-    pub use crate::result::Result::{self, Err, Ok};
-    pub use crate::string::{String, ToString};
-    pub use crate::vec::Vec;
+    pub mod rust_2015 {
+        pub use crate::borrow::ToOwned;
+        pub use crate::boxed::Box;
+        pub use crate::clone::Clone;
+        pub use crate::cmp::{Eq, Ord, PartialEq, PartialOrd};
+        pub use crate::convert::{AsMut, AsRef, From, Into};
+        pub use crate::default::Default;
+        pub use crate::iter::{DoubleEndedIterator, ExactSizeIterator, Extend, IntoIterator, Iterator};
+        pub use crate::marker::{Copy, Send, Sized, Sync, Unpin};
+        pub use crate::mem::{align_of, align_of_val, drop, size_of, size_of_val};
+        pub use crate::ops::{AsyncFn, AsyncFnMut, AsyncFnOnce, Drop, Fn, FnMut, FnOnce};
+        pub use crate::option::Option::{self, None, Some};
+        pub use crate::result::Result::{self, Err, Ok};
+        pub use crate::string::{String, ToString};
+        pub use crate::vec::Vec;
+    }
+    /// `core::prelude::v1`: the 2015/2018 set
+    pub mod v1 {
+        pub use super::rust_2015::*;
+    }
+    pub mod rust_2018 {
+        pub use super::rust_2015::*;
+    }
+    pub mod rust_2021 {
+        pub use super::rust_2015::*;
+        pub use crate::convert::{TryFrom, TryInto};
+        pub use crate::iter::FromIterator;
+    }
+    pub mod rust_2024 {
+        pub use super::rust_2015::*;
+        pub use crate::convert::{TryFrom, TryInto};
+        pub use crate::future::{Future, IntoFuture};
+        pub use crate::iter::FromIterator;
+    }
 }
 
 /// `ptr::addr_of!(place)` / `ptr::addr_of_mut!(place)` (core/src/ptr/mod.rs: raw borrows).
@@ -245,12 +281,13 @@ macro_rules! addr_of_mut {
 /// builtin is a constant: `&[Field { offset: offset_of!(T, f), .. }]` is promoted to 'static.
 #[macro_export]
 macro_rules! offset_of {
-    ($T:ty, $($field:tt).+ $(,)?) => {
+    // the field tokens are transcribed as written (`0.1`, `0. 1.1`): the expression parser breaks up floats
+    ($T:ty, $($field:tt)+) => {
         const {
             let u = $crate::mem::MaybeUninit::<$T>::uninit();
             let base = u.as_ptr();
             #[allow(unused_unsafe)]
-            let f = unsafe { &raw const (*base).$($field).+ };
+            let f = unsafe { &raw const (*base).$($field)+ };
             f as *const u8 as usize - base as *const u8 as usize
         }
     };

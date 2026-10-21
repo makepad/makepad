@@ -1,7 +1,7 @@
 // ported from N:rustc_hir_typeck/src/callee.rs @8d1a764
 //! Call receiver adjustments belong to the generic body, not its instances.
 use super::*;
-use crate::{borrowck::tyx::Tx, lang_items::LangItem, upvar::ClosureKind};
+use crate::{tcx::EvalCx, lang_items::LangItem, upvar::ClosureKind};
 
 #[derive(Clone, Copy)]
 pub struct CallTrait {
@@ -25,8 +25,7 @@ fn trait_order(tcx: &Tcx, td: DefId) -> Option<u8> {
 impl Fcx<'_> {
     pub(super) fn record_call_trait(&mut self, e: ExprId, td: DefId, t: TyId, derefs: usize, tupled_args: TyId) {
         let from_param = matches!(self.tcx.tys.kind(t), TyKind::Param(_));
-        let tx = Tx::new(self.prog, self.tcx, self.cx.typing_env, self.cx.state);
-        let by_move = from_param && !tx.is_copy(t);
+        let by_move = from_param && !self.tcx.type_is_copy_modulo_regions(self.prog, &EvalCx::new(self.prog, self.tcx, self.cx.typing_env, self.cx.state), crate::program::NO_DEF, t);
         self.b.call_traits.insert(e.0, CallTrait { trait_def: td, self_ty: t, tupled_args, derefs, from_param, by_move });
     }
 }
@@ -34,14 +33,14 @@ impl Fcx<'_> {
 impl Body {
     /// One source of receiver semantics for expr-use/upvars and borrowck. Concrete
     /// closures are resolved after their owner's capture analysis has completed.
-    pub(crate) fn call_kind(&self, tx: &Tx<'_>, e: ExprId, t: TyId) -> Option<ClosureKind> {
+    pub(crate) fn call_kind(&self, tcx: &Tcx, cx: &EvalCx<'_>, e: ExprId, t: TyId) -> Option<ClosureKind> {
         if let Some(selection) = self.call_traits.get(&e.0) {
-            return trait_order(tx.tcx, selection.trait_def).map(|order| match order % 3 {
+            return trait_order(tcx, selection.trait_def).map(|order| match order % 3 {
                 0 => ClosureKind::Fn, 1 => ClosureKind::FnMut, _ => ClosureKind::FnOnce,
             });
         }
-        match tx.kind(t) {
-            TyKind::Closure(file, ce, args) => crate::upvar::closure_kind(tx.tcx, self, file, ce, args),
+        match tcx.resolved_kind(cx, t) {
+            TyKind::Closure(file, ce, args) => crate::upvar::closure_kind(tcx, self, file, ce, args),
             TyKind::FnDef(..) | TyKind::FnPtr(..) => Some(ClosureKind::FnOnce),
             _ => None,
         }

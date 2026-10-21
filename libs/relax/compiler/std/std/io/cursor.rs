@@ -20,13 +20,13 @@ impl<T> Cursor<T> {
     pub const fn get_ref(&self) -> &T {
         &self.inner
     }
-    pub fn get_mut(&mut self) -> &mut T {
+    pub const fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }
     pub const fn position(&self) -> u64 {
         self.pos
     }
-    pub fn set_position(&mut self, pos: u64) {
+    pub const fn set_position(&mut self, pos: u64) {
         self.pos = pos;
     }
 }

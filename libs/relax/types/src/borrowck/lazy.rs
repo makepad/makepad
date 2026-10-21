@@ -48,7 +48,40 @@ pub fn verdict(src: usize, def: DefId, _args: &[TyId], epoch: u64) -> FnVerdict 
     VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(&def).and_then(|instances| instances.get(&(src, def, epoch))).cloned()
         .unwrap_or_else(|| FnVerdict::Unchecked("not queued".into()))
 }
-fn record(key: ItemKey, value: FnVerdict) { VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value); }
+/// Relaxed Rust D3: the run-time index checks of a clean verdict (the earlier and the later index
+/// expression of each pair the checker accepted as disjoint without a proof), by verdict key. The JIT
+/// lowers them into the verified code of the body (SPEC-V: until then the body is unverified).
+static DISJOINT: LazyLock<Mutex<HashMap<ItemKey, Arc<Vec<(crate::mir::Span, crate::mir::Span)>>>>> = LazyLock::new(|| Mutex::new(HashMap::default()));
+/// The run-time disjoint-index checks of `def`'s current verdict (None: none, or no verdict yet).
+pub fn disjoint_checks(src: usize, def: DefId, epoch: u64) -> Option<Arc<Vec<(crate::mir::Span, crate::mir::Span)>>> {
+    let epoch = QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(epoch, |q| q.canon(src, epoch));
+    DISJOINT.lock().unwrap_or_else(|e| e.into_inner()).get(&(src, def, epoch)).cloned()
+}
+/// The run-time disjoint-index checks a verdict asks for.
+fn runtime_disjoint(v: &super::Verdict) -> Vec<(crate::mir::Span, crate::mir::Span)> {
+    v.relaxed_records.iter().filter_map(|r| match r {
+        super::field_views::RelaxedRecord::Disjoint(d) if !d.proven => Some((d.first, d.second)),
+        _ => None,
+    }).collect()
+}
+/// Whether a completed check may be stored by body key (`StoredVerdict`): a body that needs run-time
+/// disjoint-index checks is checked again in every run (the checks are not part of the stored verdict).
+fn storable(result: &Result<Option<super::Verdict>, String>) -> Option<StoredVerdict> {
+    match result {
+        Ok(Some(v)) if v.errors.is_empty() && runtime_disjoint(v).is_empty() => Some(v.unchecked.first().map_or(StoredVerdict::Clean, |why| StoredVerdict::Unchecked(why.clone()))),
+        Ok(Some(_)) => None,
+        Ok(None) => Some(StoredVerdict::Unchecked("typeck".into())),
+        _ => None,
+    }
+}
+
+/// Counts the verdicts recorded: a consumer waiting on verdicts (SPEC-V: the JIT's unverified slots)
+/// looks again only when it moved.
+pub static RECORDED: AtomicU64 = AtomicU64::new(0);
+fn record(key: ItemKey, value: FnVerdict) {
+    VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value);
+    RECORDED.fetch_add(1, Ordering::Release);
+}
 
 pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], errors: Vec<BorrowError>, origin: Origin) -> Vec<GandalfEvent> {
     let mut admitted = Vec::new();
@@ -103,6 +136,10 @@ pub fn carry_epoch(src: usize, from: u64, to: u64, keep: &dyn Fn(DefId) -> bool)
         if instances.is_empty() { verdicts.remove(&d); }
     }
     drop(verdicts);
+    {
+        let mut d = DISJOINT.lock().unwrap_or_else(|e| e.into_inner());
+        for k in &gone { d.remove(k); }
+    }
     for k in gone {
         q.seen.remove(&k);
         if let Some(at) = q.rank_of.remove(&k) {
@@ -264,6 +301,13 @@ pub(crate) fn zone_take() -> ZoneTaken {
         keys: std::mem::take(&mut *keys),
         queue: std::mem::take(&mut *queue),
     };
+    // the taken queue's payload bytes stay in the static (only the discriminant changes): zeroed, so
+    // a raw scan of the statics (MAKEPAD_RUN_ZONE_CHECK=2) finds no dead pointer there
+    unsafe {
+        let slot: *mut Option<Queue> = &mut *queue;
+        std::ptr::write_bytes(slot as *mut u8, 0, std::mem::size_of::<Option<Queue>>());
+        std::ptr::write(slot, None);
+    }
     #[cfg(test)]
     { assert!(verdicts.is_empty()); assert!(keys.is_empty()); assert!(queue.is_none()); }
     taken
@@ -462,7 +506,7 @@ fn settle_finished_check() {
     for tx in requests { let _ = tx.send(0); }
 }
 
-fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
 }
 fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], result: Result<Option<super::Verdict>, String>, origin: Origin) -> Vec<GandalfEvent> {
@@ -470,6 +514,11 @@ fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[Ty
     match result {
         Ok(Some(v)) => {
             let incomplete = v.errors.is_empty().then(|| v.unchecked.first().cloned()).flatten();
+            let checks = runtime_disjoint(&v);
+            {
+                let mut d = DISJOINT.lock().unwrap_or_else(|e| e.into_inner());
+                if checks.is_empty() { d.remove(&key); } else { crate::zone_alloc::kept_with(|| { d.insert(key, Arc::new(checks)); }); }
+            }
             let events = report_checked(prog, src, epoch, def, args, v.errors, origin);
             if let Some(reason) = incomplete { record(key, FnVerdict::Unchecked(reason)); }
             events
@@ -509,8 +558,8 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
             record(item.key, FnVerdict::Unchecked("stale".into()));
             continue;
         }
-        let _cost = crate::fncost::Record::new(u32::MAX, 0, "gandalf");
-        let t0 = crate::clock::cpu_ns();
+        let _cost = relax_codegen::fncost::Record::new(u32::MAX, 0, "gandalf");
+        let t0 = relax_backend::cpu_ns();
         let mut stale = false;
         let mut discovery_next = None;
         let mut reused_owner = false;
@@ -607,19 +656,14 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                 stale = true; return;
             }
             phase.set("record");
-            let storable = match &result {
-                Ok(Some(v)) if v.errors.is_empty() => Some(v.unchecked.first().map_or(StoredVerdict::Clean, |why| StoredVerdict::Unchecked(why.clone()))),
-                Ok(None) => Some(StoredVerdict::Unchecked("typeck".into())),
-                _ => None,
-            };
-            if let Some(v) = storable {
+            if let Some(v) = storable(&result) {
                 let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
                 keys.extend(item.cache_key.into_iter().chain(owner_key).map(|k| (k, v.clone())));
             }
             phase.set("finish");
             finish_verdict(prog, *identity, *epoch, *def, args, result, Origin::Background);
         });
-        CHECK_NS.fetch_add(crate::clock::cpu_ns() - t0, Ordering::Relaxed);
+        CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
         // An exit cancels the whole attempt, including constant deferrals/discovery.
         // Only a front writer's temporary preemption is queued again below.
         if crate::preempt::is_stopped() { return; }
@@ -698,7 +742,7 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
     if let Some(v) = stored { v.reuse(key); return Vec::new(); }
     let Some(owner) = super::body::CheckedBody::item(prog, def) else { record(key, FnVerdict::Unchecked("no body".into())); return Vec::new(); };
     let args = owner.identity_args(prog, tcx);
-    let t0 = crate::clock::cpu_ns();
+    let t0 = relax_backend::cpu_ns();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let state = crate::tcx::EvalState::new();
         let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
@@ -706,19 +750,14 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
         if !body.errors.is_empty() { return None; }
         Some(super::check_body(&cx, prog, tcx, &body))
     })).map_err(|e| panic_message(&e));
-    CHECK_NS.fetch_add(crate::clock::cpu_ns() - t0, Ordering::Relaxed);
+    CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
     CHECKED.fetch_add(1, Ordering::Relaxed);
     if let Err(msg) = &result {
         PANICS.fetch_add(1, Ordering::Relaxed);
         let mut notes = PANIC_NOTES.lock().unwrap_or_else(|e| e.into_inner());
         if notes.len() < 5 { notes.push(format!("{}: {}", prog.def_path(def), msg)); }
     }
-    let storable = match &result {
-        Ok(Some(v)) if v.errors.is_empty() => Some(v.unchecked.first().map_or(StoredVerdict::Clean, |why| StoredVerdict::Unchecked(why.clone()))),
-        Ok(None) => Some(StoredVerdict::Unchecked("typeck".into())),
-        _ => None,
-    };
-    if let Some(v) = storable {
+    if let Some(v) = storable(&result) {
         let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
         keys.extend(cache_key.into_iter().chain(owner_key).map(|k| (k, v.clone())));
     }
@@ -726,7 +765,7 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
 }
 
 pub struct Growth<'a> {
-    pub changed_insts: &'a [(DefId, Vec<TyId>)], pub before: &'a [Vec<super::fv::Summary>], pub visible_crates: &'a [bool],
+    pub changed_insts: &'a [(DefId, Vec<TyId>)], pub before: &'a [Vec<super::field_views::Summary>], pub visible_crates: &'a [bool],
 }
 pub struct CheckRequest<'a> {
     pub changed: &'a [DefId], pub instances: &'a [(DefId, Vec<TyId>)],
@@ -736,7 +775,7 @@ pub struct CheckRequest<'a> {
     pub growth: Option<Growth<'a>>, pub origin: Origin, pub epoch: u64,
     /// A live edit's summary context: callee summaries computed once for the whole edit
     /// (the summaries before it, the changed bodies' checks, the summaries after it).
-    pub fv: Option<&'a std::rc::Rc<super::fv::SummaryCx>>,
+    pub fv: Option<&'a std::rc::Rc<super::field_views::SummaryCx>>,
 }
 pub struct GateResult { pub events: Vec<GandalfEvent>, pub withheld: usize }
 impl GateResult { pub fn refuses(&self) -> bool { !self.events.is_empty() } }
@@ -794,7 +833,7 @@ pub fn check_now(prog: &Program, tcx: &Tcx, req: &CheckRequest<'_>) -> GateResul
         let d = DefId(i as u32);
         let def = prog.def(d);
         if !growth.visible_crates[def.krate as usize] { continue; }
-        if !matches!(def.kind, crate::program::DefKind::Fn | crate::program::DefKind::AssocFn) || !super::fv::relaxed(prog, d) { continue; }
+        if !matches!(def.kind, crate::program::DefKind::Fn | crate::program::DefKind::AssocFn) || !super::field_views::relaxed(prog, d) { continue; }
         let it = prog.files[def.file as usize].ast.item(def.item);
         let text = String::from_utf8_lossy(&prog.files[def.file as usize].src[it.lo as usize..(it.hi as usize).min(prog.files[def.file as usize].src.len())]);
         if !grown.iter().any(|(g, _, _)| *g != d && text.contains(&format!("{}(", prog.name(*g)))) { continue; }
@@ -825,8 +864,8 @@ pub fn check_now(prog: &Program, tcx: &Tcx, req: &CheckRequest<'_>) -> GateResul
     }
     out
 }
-fn grew(b: &super::fv::Summary, a: &super::fv::Summary) -> bool {
-    use super::fv::Summary;
+fn grew(b: &super::field_views::Summary, a: &super::field_views::Summary) -> bool {
+    use super::field_views::Summary;
     match (b, a) {
         (Summary::Whole, _) => false,
         (Summary::Parts(_), Summary::Whole) => true,

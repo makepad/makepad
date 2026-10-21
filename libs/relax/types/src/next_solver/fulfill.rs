@@ -32,6 +32,7 @@ impl FulfillmentCtxt {
         loop {
             let mut any_changed = false;
             self.obligations.pending.retain_mut(|(obligation, stalled_on)| {
+                infcx.origin_span.set(obligation.cause.span);
                 let result = match infcx.evaluate_root_goal(prog, obligation.goal.clone(), stalled_on.as_ref()) {
                     Ok(result) => result,
                     Err(NoSolution) => { errors.push(NextSolverError::TrueError(obligation.clone())); return false; }
@@ -50,9 +51,25 @@ impl FulfillmentCtxt {
         }
         errors
     }
+    /// rustc `drain_stalled_obligations_for_coroutines`: the pending goals that wait for a coroutine of the body
+    /// being type-checked (its witness is known once the body's MIR is built).
+    pub fn drain_stalled_obligations_for_coroutines(&mut self, infcx: &InferCtxt<'_>) -> Vec<PredicateObligation> {
+        if !matches!(infcx.typing_mode.get(), crate::tcx::TypingMode::Typeck { .. }) { return Vec::new(); }
+        let mut stalled = Vec::new();
+        self.obligations.pending.retain(|(obligation, stalled_on)| {
+            let drain = stalled_on.as_ref().is_some_and(|s| matches!(s.stalled_maybe_info.stalled_on_coroutines, crate::next_solver::StalledOnCoroutines::Yes));
+            if drain { stalled.push(obligation.clone()); }
+            !drain
+        });
+        stalled
+    }
     pub fn evaluate_obligations_error_on_ambiguity(&mut self, infcx: &InferCtxt<'_>, prog: &Program) -> Vec<NextSolverError> {
         let mut errors = self.try_evaluate_obligations(infcx, prog);
-        for (obligation, _) in std::mem::take(&mut self.obligations.pending) { errors.push(NextSolverError::Ambiguity(obligation)); }
+        // fulfillment_error_for_stalled: an ambiguous goal that overflows when evaluated again is an overflow
+        for (obligation, _) in std::mem::take(&mut self.obligations.pending) {
+            let overflow = infcx.probe(|_| matches!(infcx.evaluate_root_goal(prog, obligation.goal.clone(), None), Ok(r) if r.certainty.is_overflow()));
+            errors.push(if overflow { NextSolverError::Overflow(obligation) } else { NextSolverError::Ambiguity(obligation) });
+        }
         errors
     }
 }

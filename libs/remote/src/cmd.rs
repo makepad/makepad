@@ -31,7 +31,7 @@ pub fn answer(dispatch: fn(&Req, &mut Out), line: &str) -> (Vec<u8>, bool) {
 /// Returns whether the reply was cut at the size limit.
 pub fn answer_to(dispatch: fn(&Req, &mut Out), line: &str, w: &mut dyn Write) -> bool {
     let req = Req::parse(line);
-    let mut out = Out { w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true };
+    let mut out = Out { w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true, gone: None };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, &mut out)));
     if r.is_err() {
         out.err("internal error in this command (inspect bug)");
@@ -53,7 +53,12 @@ pub struct Out<'a> {
     pub limit: usize,
     pub truncated: bool,
     ok: bool,
+    /// whether the client went away (its connection closed): long commands stop early
+    gone: Option<Gone>,
 }
+
+/// Says whether the client of a command went away; cheap, callable from any thread.
+pub type Gone = Arc<dyn Fn() -> bool + Send + Sync>;
 
 const LIMIT: usize = 16 << 10;
 
@@ -76,6 +81,14 @@ impl<'a> Out<'a> {
     pub fn flush(&mut self) -> bool {
         self.ok &= self.w.flush().is_ok();
         self.ok
+    }
+    /// The client went away (or a write failed): a long command stops and answers nothing more.
+    pub fn cancelled(&self) -> bool {
+        !self.ok || self.gone.as_ref().is_some_and(|g| g())
+    }
+    /// The client-gone check, detached from `self` (for loops that also write).
+    pub fn gone(&self) -> Gone {
+        self.gone.clone().unwrap_or_else(|| Arc::new(|| false))
     }
     /// The measurement header every reply starts with.
     pub fn measured(&mut self, what: &str, source: &str, partial: &[String]) {
@@ -287,7 +300,9 @@ fn serve(ch: crate::conn::Channel, dispatch: fn(&Req, &mut Out), end_fields: End
             }
             let req = Req::parse(line);
             let t = std::time::Instant::now();
-            let mut out = Out { w: &mut w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true };
+            let conn = ch.conn().clone();
+            let gone: Gone = Arc::new(move || conn.is_closed());
+            let mut out = Out { w: &mut w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true, gone: Some(gone) };
             let cmd = req.cmd.clone();
             // a panic in a command (a bug in the host) answers as an error, the session goes on
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, &mut out)));

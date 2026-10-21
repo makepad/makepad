@@ -7,5 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+relax-codegen = { workspace = true }
+relax-backend = { workspace = true }
 relax-front = { workspace = true }
 relax-session = { workspace = true }

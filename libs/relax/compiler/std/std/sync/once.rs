@@ -62,6 +62,7 @@ impl Once {
         self.state_and_queued.load(Acquire) == COMPLETE
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn call_once<F: FnOnce()>(&self, f: F) {
         if self.is_completed() {
             return;
@@ -73,6 +74,7 @@ impl Once {
         });
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn call_once_force<F: FnOnce(&OnceState)>(&self, f: F) {
         if self.is_completed() {
             return;
@@ -84,12 +86,14 @@ impl Once {
         });
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn wait(&self) {
         if !self.is_completed() {
             self.wait_inner(false);
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn wait_force(&self) {
         if !self.is_completed() {
             self.wait_inner(true);
@@ -180,6 +184,7 @@ impl<T> OnceLock<T> {
         OnceLock { once: Once::new(), value: UnsafeCell::new(MaybeUninit::uninit()), _marker: PhantomData }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn get(&self) -> Option<&T> {
         if self.once.is_completed() {
             Some(unsafe { (*self.value.get()).assume_init_ref() })
@@ -196,11 +201,13 @@ impl<T> OnceLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn wait(&self) -> &T {
         self.once.wait_force();
         unsafe { (*self.value.get()).assume_init_ref() }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn set(&self, value: T) -> Result<(), T> {
         match self.try_insert(value) {
             Ok(_) => Ok(()),
@@ -208,6 +215,7 @@ impl<T> OnceLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn try_insert(&self, value: T) -> Result<&T, (&T, T)> {
         let mut value = Some(value);
         let res = self.get_or_init(|| match value.take() {
@@ -220,6 +228,7 @@ impl<T> OnceLock<T> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn get_or_init<F: FnOnce() -> T>(&self, f: F) -> &T {
         if let Some(v) = self.get() {
             return v;
@@ -235,6 +244,7 @@ impl<T> OnceLock<T> {
         unsafe { self.value.get_mut().assume_init_mut() }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn get_or_try_init<E, F: FnOnce() -> Result<T, E>>(&self, f: F) -> Result<&T, E> {
         if let Some(v) = self.get() {
             return Ok(v);
@@ -291,7 +301,7 @@ impl<T> OnceLock<T> {
     }
 }
 
-impl<T> Drop for OnceLock<T> {
+unsafe impl<#[may_dangle] T> Drop for OnceLock<T> {
     fn drop(&mut self) {
         if self.once.is_completed() {
             unsafe { self.value.get_mut().assume_init_drop() };
@@ -356,6 +366,7 @@ impl<T, F: FnOnce() -> T> LazyLock<T, F> {
         LazyLock { once: Once::new(), init: UnsafeCell::new(Some(f)), value: UnsafeCell::new(None) }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn force(this: &LazyLock<T, F>) -> &T {
         if !this.once.is_completed() {
             let init = &this.init;
@@ -389,6 +400,7 @@ impl<T, F: FnOnce() -> T> LazyLock<T, F> {
         }
     }
 
+    #[rustc_should_not_be_called_on_const_items]
     pub fn get(this: &LazyLock<T, F>) -> Option<&T> {
         if this.once.is_completed() {
             unsafe { (*this.value.get()).as_ref() }

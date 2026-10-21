@@ -491,10 +491,11 @@ mod unix {
 
     fn ready_line(st: &State) {
         let pkg = std::env::var("MAKEPAD_RUN_PACKAGE").unwrap_or_else(|_| "program".to_string());
+        let ahead = crate::jit::ahead_level().name();
         let cache = match std::env::var("MAKEPAD_RUN_CACHE_STATE").as_deref() {
-            Ok("warm") => " (warm)".to_string(),
-            Ok("cold") => " (cold)".to_string(),
-            _ => String::new(),
+            Ok("warm") => format!(" (warm, ahead {ahead})"),
+            Ok("cold") => format!(" (cold, ahead {ahead})"),
+            _ => format!(" (ahead {ahead})"),
         };
         let ms = crate::clock::ms_since_process_start() as f64;
         let line = format!("{} {} ready in {}{}\n", style("1;32", "\u{2713}"), style("1;36", &pkg), secs(ms), style("2", &cache));

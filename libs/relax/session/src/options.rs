@@ -8,7 +8,7 @@ pub enum Borrowck { Off, Moves, Full }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowckAll { Default, Nongeneric, Std, All }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64 }
+pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web }
 impl CheckTarget {
     /// The targets Relax runs on (and checks for), by triple: `MAKEPAD_RUN_CHECK_TARGET` and `makepad host-gen`.
     pub const TRIPLES: [(&'static str, CheckTarget); 4] = [
@@ -17,7 +17,15 @@ impl CheckTarget {
         ("x86_64-pc-windows-gnu", CheckTarget::WindowsX64),
         ("aarch64-linux-android", CheckTarget::AndroidArm64),
     ];
+    /// The web target (`wasm32-unknown-unknown`): the program's crates are read as a web build
+    /// reads them (cfg(target_arch = "wasm32"), the web platform backend) and run by this
+    /// machine's JIT; std stays the machine's (the trace host, `makepad-web-trace`). Not a
+    /// host-gen target.
+    pub const WEB_TRIPLE: &'static str = "wasm32-unknown-unknown";
     pub fn from_triple(triple: &str) -> Option<CheckTarget> {
+        if triple == Self::WEB_TRIPLE {
+            return Some(CheckTarget::Web);
+        }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
 }
@@ -31,6 +39,26 @@ pub enum Priority { Length, References, Sqrt }
 pub enum WorkerQos { Default, Background, Utility }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier0Baseline { Off, Startup, Always }
+/// How much the JIT compiles ahead of the program's calls (`makepad run --ahead=<level>`,
+/// `MAKEPAD_RUN_AHEAD`). Every level compiles what runs on its first call and tiers hot code up to
+/// O3; they differ in the work done for code that has not run yet (jit::AheadPolicy).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AheadLevel {
+    /// iteration: only what ran (plus the startup image and O3 for what is hot)
+    Minimal,
+    /// the default: a bounded, prioritised compile-ahead of what the UI is about to need
+    Balanced,
+    /// a background AOT pass at worker priority: everything reachable from what ran
+    Aot,
+}
+impl AheadLevel {
+    pub fn name(self) -> &'static str {
+        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::Aot => "aot" }
+    }
+    pub fn parse(v: &str) -> Option<AheadLevel> {
+        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot" => Some(AheadLevel::Aot), _ => None }
+    }
+}
 
 /// Effective machine capabilities; detected once by codegen before freezing Options.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +70,8 @@ pub struct CpuFeatures {
     pub bmi1: bool,
     /// FMA3 (vfmadd*) next to AVX: the fused multiply-add intrinsics lower to hardware
     pub fma: bool,
+    /// AVX2 next to AVX: per-lane variable vector shifts (vpsllv*, vpsrlv*, vpsravd)
+    pub avx2: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +238,10 @@ pub struct Options {
     pub check_target: CheckTarget,
     /// `MAKEPAD_RUN_CTFE`; default `Ctfe::On`.
     pub ctfe: Ctfe,
+    /// Set by `makepad check` only: loops count their iterations while a constant is evaluated,
+    /// so one that never ends is rustc's `long_running_const_eval` error (the interpreter's
+    /// terminator limit) instead of a hang. Changes the compiled code.
+    pub const_fuel: bool,
     /// `MAKEPAD_RUN_FREQ_MODE`; default `Frequency::Blend`.
     pub freq_mode: Frequency,
     /// `MAKEPAD_RUN_RA_PRIO`; default `Priority::References`.
@@ -307,6 +341,7 @@ impl Default for Options {
             borrowck_all: BorrowckAll::Default,
             check_target: CheckTarget::Host,
             ctfe: Ctfe::On,
+            const_fuel: false,
             freq_mode: Frequency::Blend,
             ra_prio: Priority::References,
             ra_order: false,
@@ -419,6 +454,7 @@ impl Options {
             borrowck: { let os = get("MAKEPAD_RUN_BORROWCK"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("off") => Borrowck::Off, Some("moves") => Borrowck::Moves, _ => Borrowck::Full } },
             borrowck_all: { let os = get("MAKEPAD_RUN_BORROWCK_ALL"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("nongeneric") => BorrowckAll::Nongeneric, None => BorrowckAll::Default, Some("std") => BorrowckAll::Std, _ => BorrowckAll::All } },
             check_target: { let os = get("MAKEPAD_RUN_CHECK_TARGET"); let v = os.and_then(|v| v.into_string().ok()); CheckTarget::from_triple(v.as_deref().unwrap_or("")).unwrap_or(CheckTarget::Host) },
+            const_fuel: false,
             ctfe: { let os = get("MAKEPAD_RUN_CTFE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Ctfe::Off, Some("check") => Ctfe::Check, _ => Ctfe::On } },
             freq_mode: { let os = get("MAKEPAD_RUN_FREQ_MODE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("sampled") => Frequency::Sampled, Some("static") => Frequency::Static, _ => Frequency::Blend } },
             ra_prio: { let os = get("MAKEPAD_RUN_RA_PRIO"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("len") => Priority::Length, Some("sqrt") => Priority::Sqrt, _ => Priority::References } },
@@ -512,6 +548,7 @@ impl Options {
             borrowck_all,
             check_target,
             ctfe,
+            const_fuel,
             freq_mode,
             ra_prio,
             ra_order,
@@ -673,6 +710,8 @@ impl Options {
         h.u8(*check_target as u8);
         h.str("ctfe");
         h.u8(*ctfe as u8);
+        h.str("const_fuel");
+        h.u8(*const_fuel as u8);
         h.str("freq_mode");
         h.u8(*freq_mode as u8);
         h.str("ra_prio");
@@ -685,8 +724,8 @@ impl Options {
         match tier1_profile { Some(v) => { h.u8(1); h.u64(v.as_encoded_bytes().len() as u64); h.write(v.as_encoded_bytes()); }, None => h.u8(0) }
         match tier1_profile_data { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str(target);
-        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma } = cpu;
-        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma] { h.u8(*b as u8); }
+        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2 } = cpu;
+        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2] { h.u8(*b as u8); }
         h.finish128()
     }
 }
@@ -740,6 +779,9 @@ pub struct RuntimeOptions {
     pub restore: Option<String>,
     /// `MAKEPAD_RUN_WORKER_QOS`; default `WorkerQos::Background`.
     pub worker_qos: WorkerQos,
+    /// `MAKEPAD_RUN_AHEAD` (`--ahead=<level>` sets it); default `AheadLevel::Balanced`. Not part of
+    /// the code identity: every level makes the same code for a slot, so they share warm caches.
+    pub ahead: AheadLevel,
 }
 
 impl Default for RuntimeOptions {
@@ -765,6 +807,7 @@ impl Default for RuntimeOptions {
             tier1_threads: None,
             restore: None,
             worker_qos: WorkerQos::Background,
+            ahead: AheadLevel::Balanced,
         }
     }
 }
@@ -806,6 +849,7 @@ impl RuntimeOptions {
             tier1_threads: { let os = get("MAKEPAD_RUN_O3_THREADS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
             restore: { let os = get("MAKEPAD_RUN_RESTORE"); let v = os.and_then(|v| v.into_string().ok()); v },
             worker_qos: { let os = get("MAKEPAD_RUN_WORKER_QOS"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => WorkerQos::Default, Some("utility") => WorkerQos::Utility, _ => WorkerQos::Background } },
+            ahead: { let os = get("MAKEPAD_RUN_AHEAD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref().and_then(AheadLevel::parse).unwrap_or(AheadLevel::Balanced) },
         }
     }
 }

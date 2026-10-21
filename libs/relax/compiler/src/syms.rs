@@ -14,7 +14,7 @@
 
 use crate::jit::Unit;
 use crate::program::DefId;
-use crate::rir::{Mem, Sym, SymClass};
+use relax_backend::rir::{Mem, Sym, SymClass};
 use crate::types::{TyId, TyKind};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -220,7 +220,7 @@ impl Syms {
 
     fn push(&self, kind: SymKind, value: u64) -> Sym {
         // a domain symbol's table value is its offset in the domain static block (0: no storage)
-        let value = if class_of(&kind) == crate::rir::SymClass::Domain && value != 0 { value - self.dom0 } else { value };
+        let value = if class_of(&kind) == relax_backend::rir::SymClass::Domain && value != 0 { value - self.dom0 } else { value };
         let id = self.kinds.push(kind) as u32;
         if id as usize >= SYM_CAP {
             panic!("symbol table full");
@@ -431,19 +431,19 @@ pub fn set_unit(u: *mut Unit) {
     UNIT_PTR.store(u, Ordering::SeqCst);
 }
 
-/// The optimiser's constant-load reader (`opt::RoReader`): `n` bytes at symbol + offset of
+/// The optimiser's constant-load reader (`passes::RoReader`): `n` bytes at symbol + offset of
 /// the unit `ctx` points to -- the unit the function is built for (Unit::ro_reader), never a
 /// process-wide one: the proc-macro world's unit is made after the program's on a warm start,
 /// and folding the program's loads against its symbol tables (or, once the world is freed,
 /// freed memory) baked another object's bytes into the program's code (a constant slice's
 /// length read as 0; that O2 code went to the disk cache, so every later warm start ran it).
-pub fn ro_read(ctx: usize, s: Sym, n: u32) -> crate::opt::RoRead {
+pub fn ro_read(ctx: usize, s: Sym, n: u32) -> relax_backend::passes::RoRead {
     let u = unsafe { &*(ctx as *const Unit) };
     read_obj(u, s, n)
 }
 
-pub fn read_obj(u: &Unit, s: Sym, n: u32) -> crate::opt::RoRead {
-    use crate::opt::RoRead;
+pub fn read_obj(u: &Unit, s: Sym, n: u32) -> relax_backend::passes::RoRead {
+    use relax_backend::passes::RoRead;
     let idx = match u.syms.obj_of(s) {
         Some(i) => i,
         None => return RoRead::No,
@@ -485,7 +485,7 @@ pub fn read_obj(u: &Unit, s: Sym, n: u32) -> crate::opt::RoRead {
 }
 
 /// A constant leaf the front end reads at compile time (lower.rs const_val and pattern tests).
-pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> crate::opt::RoRead {
+pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
     let n = match m {
         Mem::Int(n, _) => n as u32,
         Mem::F32 => 4,
@@ -548,7 +548,7 @@ fn obj_ptrs(u: &Unit, idx: u32) -> Option<(u64, u64, std::sync::Arc<Vec<(u32, Op
         }
         DataKind::Typed(t) => {
             let mut words = Vec::new();
-            if walk(u, *t, start, 0, &mut words, 0).is_none() {
+            if walk(u, *t, start, 0, &mut words, 0, &mut Vec::new()).is_none() {
                 opaque = true;
             }
             for (off, pointee) in words {
@@ -751,7 +751,7 @@ mod provenance_tests {
 /// Collects the pointer words of a value of type `t` at `base + off`: (offset, whether a data
 /// pointer is `&mut` / `*mut`; None for a fn pointer or a vtable word). None: the value cannot
 /// be classified (union, unknown layout): the whole object is opaque.
-fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>)>, depth: u32) -> Option<()> {
+fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>)>, depth: u32, discs: &mut Vec<(DefId, Vec<i128>)>) -> Option<()> {
     if depth > 24 {
         return None;
     }
@@ -795,12 +795,12 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             let n = n.min(1 << 20);
             // a scalar element type without pointers: nothing to walk per element
             let mut probe = Vec::new();
-            walk(u, et, base, off, &mut probe, depth + 1)?;
+            walk(u, et, base, off, &mut probe, depth + 1, discs)?;
             if probe.is_empty() && !has_enum(u, et, 0) {
                 return Some(());
             }
             for i in 0..n {
-                walk(u, et, base, off + (i * es) as u32, out, depth + 1)?;
+                walk(u, et, base, off + (i * es) as u32, out, depth + 1, discs)?;
             }
             Some(())
         }
@@ -808,12 +808,12 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             let l = u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t);
             for (i, ft) in u.tcx.tys.list(ts).iter().enumerate() {
                 let fo = *l.fields.get(i)?;
-                walk(u, *ft, base, off + fo, out, depth + 1)?;
+                walk(u, *ft, base, off + fo, out, depth + 1, discs)?;
             }
             Some(())
         }
         TyKind::Adt(d, args, _) => {
-            let adt = u.tcx.adts.get(&d)?.clone();
+            let adt = u.tcx.adts.get(&d)?;
             if adt.is_union {
                 return None;
             }
@@ -827,7 +827,16 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
                             raw[k] = unsafe { *p.add(k) };
                         }
                         let disc = crate::lower::decode_tag_const(u, i128::from_le_bytes(raw), &l, &adt)?;
-                        adt.discriminants(&u.tcx, &u.prog).iter().position(|(_, v)| v.signed_value() == disc)?
+                        // the enum's discriminant values are the type's, not the element's: worked
+                        // out once per walk (an array of enums asks once per element)
+                        let at = match discs.iter().position(|(x, _)| *x == d) {
+                            Some(at) => at,
+                            None => {
+                                discs.push((d, adt.discriminants(&u.tcx, &u.prog).iter().map(|(_, v)| v.signed_value()).collect()));
+                                discs.len() - 1
+                            }
+                        };
+                        discs[at].1.iter().position(|v| *v == disc)?
                     }
                     Some(_) => return None,
                     None => 0,
@@ -839,7 +848,7 @@ fn walk(u: &Unit, t: TyId, base: u64, off: u32, out: &mut Vec<(u32, Option<bool>
             for fi in 0..fields.len() {
                 let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args));
                 let fo = if adt.is_enum { l.variant_fields.get(vi).and_then(|v| v.get(fi)).copied() } else { l.fields.get(fi).copied() };
-                walk(u, ft, base, off + fo?, out, depth + 1)?;
+                walk(u, ft, base, off + fo?, out, depth + 1, discs)?;
             }
             Some(())
         }
@@ -968,7 +977,7 @@ pub fn canon_dump(u: &Unit, d: &str) -> String {
 /// pool zeroed, its relocations by stable description and its pc map by file path. Two runs of
 /// the same program (one with MAKEPAD_RUN_PERTURB) must print the same lines: a difference is a
 /// run-dependent value that reached code without a relocation.
-pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &[crate::rir::RelocAt], pc_map: &[(u32, u64)]) {
+pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &[relax_backend::rir::RelocAt], pc_map: &[(u32, u64)]) {
     static F: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     let m = match F.get_or_init(|| std::env::var("MAKEPAD_RUN_RELOC_SIG").ok().and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new)) {
         Some(m) => m,
@@ -984,9 +993,9 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
             c[o..o + 8].fill(0);
         }
         let d = match r {
-            crate::rir::Reloc::Sym(s) => describe(u, *s),
-            crate::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
-            crate::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Sym(s) => describe(u, *s),
+            relax_backend::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
             other => format!("{:?}", other),
         };
         rs.push(format!("{}={}", off, d));
@@ -1052,6 +1061,7 @@ fn stable_fn_name_d(u: &Unit, id: u32, depth: u32) -> String {
             s
         }
         crate::jit::FnKey::Sandbox(b) => if b == u32::MAX { "sandbox:invalid".to_string() } else { format!("sandbox:{}", stable_fn_name_d(u, b, depth + 1)) },
+        crate::jit::FnKey::Plain(b) => format!("plain:{}", stable_fn_name_d(u, b, depth + 1)),
         crate::jit::FnKey::Closure(file, e, p) => {
             let parent = if depth < 16 { stable_fn_name_d(u, p, depth + 1) } else { String::new() };
             format!("closure:{}:{}@{}", u.prog.file_paths.get(file as usize).map_or("", |x| x.as_str()), e, parent)
@@ -1097,7 +1107,7 @@ pub(crate) fn pointer_offsets(u: &Unit, start: u64) -> Option<Vec<u32>> {
         DataKind::Words(w) => ((w.len() as u64) >= len / 8).then(|| w.iter().enumerate().filter(|(_, x)| x.is_some()).map(|(i, _)| (i * 8) as u32).collect()),
         DataKind::Typed(t) => {
             let mut words = Vec::new();
-            walk(u, t, start, 0, &mut words, 0)?;
+            walk(u, t, start, 0, &mut words, 0, &mut Vec::new())?;
             Some(words.into_iter().map(|(o, _)| o).collect())
         }
     }
@@ -1118,8 +1128,8 @@ pub fn obj_pointer_words(u: &Unit, idx: u32) -> Option<Vec<(u32, Sym)>> {
 /// How code may refer to a symbol of this kind: the same in every run (it is part of the code's
 /// shape). Near = inside the unit's reservation (pc-relative), Far = anywhere (pool word), Imm =
 /// a per-run number (immediate field).
-pub fn class_of(k: &SymKind) -> crate::rir::SymClass {
-    use crate::rir::SymClass;
+pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
+    use relax_backend::rir::SymClass;
     match k {
         // glue emitted into the unit's code area; the rest are host functions
         SymKind::Rt(n) => match *n {

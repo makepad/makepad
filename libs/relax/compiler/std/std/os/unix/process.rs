@@ -19,7 +19,8 @@ pub trait CommandExt {
     where
         F: FnMut() -> crate::io::Result<()> + Send + Sync + 'static;
     #[deprecated(note = "should be unsafe, use `pre_exec` instead")]
-    fn before_exec<F>(&mut self, f: F) -> &mut Command
+    #[rustc_deprecated_safe_2024(audit_that = "the closure is async-signal-safe")]
+    unsafe fn before_exec<F>(&mut self, f: F) -> &mut Command
     where
         F: FnMut() -> crate::io::Result<()> + Send + Sync + 'static,
     {

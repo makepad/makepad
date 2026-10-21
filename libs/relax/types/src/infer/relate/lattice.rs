@@ -56,8 +56,10 @@ impl<'tcx> TypeRelation<'tcx> for LatticeOp<'_, 'tcx> {
                 self.relate_bound(v, a, b)?;
                 Ok(v)
             }
+            // combine.rs super_combine_tys (next solver): an alias against anything is an
+            // alias-relate goal, not a structural relation
             (TyKind::Alias(crate::consts::IsRigid::No, _), _) |
-            (_, TyKind::Alias(crate::consts::IsRigid::No, _)) => panic!("unnormalized alias in lattice relation"),
+            (_, TyKind::Alias(crate::consts::IsRigid::No, _)) |
             (TyKind::IntVar(_) | TyKind::FloatVar(_) | TyKind::Error, _) |
             (_, TyKind::IntVar(_) | TyKind::FloatVar(_) | TyKind::Error) => {
                 let mut eq = self.invariant();

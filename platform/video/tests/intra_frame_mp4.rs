@@ -31,7 +31,7 @@ fn synthetic_rgb8(width: u32, height: u32) -> Vec<u8> {
 fn encode(width: u32, height: u32, codec: VideoFileCodec) -> (Vec<u8>, Vec<u8>) {
     let rgb = synthetic_rgb8(width, height);
     let mut nv12_bytes = Vec::new();
-    nv12::rgb8_to_nv12(&rgb, width, height, &mut nv12_bytes);
+    nv12::rgb8_to_nv12(&rgb, width, height, makepad_video::VideoColor::BT709, &mut nv12_bytes);
     let mp4 = encode_intra_frame_mp4(&nv12_bytes, width, height, 30, 8_000_000, codec)
         .expect("encode_intra_frame_mp4");
     (mp4, nv12_bytes)

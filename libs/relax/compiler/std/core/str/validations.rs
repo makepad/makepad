@@ -12,10 +12,10 @@ pub struct Utf8Error {
 }
 
 impl Utf8Error {
-    pub fn valid_up_to(&self) -> usize {
+    pub const fn valid_up_to(&self) -> usize {
         self.valid_up_to
     }
-    pub fn error_len(&self) -> Option<usize> {
+    pub const fn error_len(&self) -> Option<usize> {
         match self.error_len {
             Some(len) => Some(len as usize),
             None => None,
@@ -65,7 +65,7 @@ pub(crate) const fn is_utf8_char_boundary(b: u8) -> bool {
     (b as i8) >= -0x40
 }
 
-pub(crate) fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
+pub(crate) const fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
     let mut index = 0;
     let len = v.len();
     while index < len {

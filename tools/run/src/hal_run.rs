@@ -4,7 +4,9 @@
 use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
-use relax_boot::{Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon};
+use relax_boot::{
+    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
+};
 use relax_compiler::{
     diag::Diagnostic,
     domain::{AppSpec, DomainState},
@@ -66,6 +68,53 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
+/// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
+/// wakes, and shows the JIT loader once the waiting is sustained (LOADER_AFTER in LOADER_WINDOW).
+static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
+/// The JIT loader shows for this much UI-thread JIT waiting within the sliding window (never for
+/// one short hiccup)...
+const LOADER_AFTER: Duration = Duration::from_millis(250);
+const LOADER_WINDOW_NS: u64 = 1_000_000_000;
+/// ...stays at least this long...
+const LOADER_MIN: Duration = Duration::from_millis(1000);
+/// ...and goes once the UI thread waited less than LOADER_TRICKLE in the last LOADER_QUIET_NS
+/// (the trickle of tiny waits a running app always has is quiet). Going, its fade-out holds while
+/// the UI thread waits that much in LOADER_BUSY_NS again (it never fades back in half-way).
+const LOADER_QUIET_NS: u64 = 700_000_000;
+const LOADER_BUSY_NS: u64 = 200_000_000;
+const LOADER_TRICKLE: Duration = Duration::from_millis(40);
+/// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
+/// the warm-up is over.
+const READY_QUIET_NS: u64 = 300_000_000;
+
+fn ui_wait_began() {
+    if !UI_WAIT_ARMED.swap(true, Ordering::AcqRel) {
+        Hal::global().wake_session(HOST);
+    }
+}
+
+/// The JIT loader over the running app (after the warm-up).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Loader {
+    Hidden,
+    /// shown since
+    Shown(Instant),
+    /// fading out (until the layer is done); shown since
+    Going(Instant),
+}
+
+/// Where the window layer over the app is in its sequence.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Stage {
+    /// no layer, or the JIT loader
+    Running,
+    /// the boot field, the app's first frames going under it
+    Boot,
+    /// after the first present, until the app is ready
+    WarmUp,
+    /// ready: the sharp app comes in, the galaxy goes
+    Lift,
+}
 
 pub fn set_environment(environment: Environment) {
     *ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(environment);
@@ -227,11 +276,8 @@ fn document(package_dir: &str) -> Result<Document, String> {
         relax_compiler::vfs::read_to_string(&manifest).map_err(|e| format!("{manifest}: {e}"))?;
     let manifest = relax_compiler::toml::parse_toml(&text).map_err(|e| e.to_string())?;
     let Some(value) = manifest.get_path(&["package", "metadata", "makepad", "bootloader"]) else {
-        let mut document = Document::bundled();
-        if let Ok(source) = relax_compiler::vfs::read_to_string(&document.path) {
-            document.source = source.into();
-        }
-        return Ok(document);
+        // the binary's own document: embedded, never the source tree's copy
+        return Ok(Document::bundled());
     };
     let relative = value
         .as_str()
@@ -243,6 +289,7 @@ fn document(package_dir: &str) -> Result<Document, String> {
     Ok(Document {
         path,
         source: source.into(),
+        live: true,
     })
 }
 
@@ -316,7 +363,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // Inside a makepad window manager the run is one of its windows: it is named by the app.
     #[cfg(target_os = "linux")]
     makepad_hal::wm_socket::set_client_name(package);
-    let info = hal.open_host(&OpenReq::from_env(0, flags, 0.0));
+    // MAKEPAD_RUN_DPI: the scale of a hidden window (tests of how the boot window looks on a HiDPI screen)
+    let dpi_hint = std::env::var("MAKEPAD_RUN_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let info = hal.open_host(&OpenReq::from_env(0, flags, dpi_hint));
     if info.backend == makepad_hal::backend_id::NONE {
         return Err("could not open the host HAL session".into());
     }
@@ -507,7 +556,8 @@ fn retry() -> Result<(), String> {
 
 fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
     let _kept = relax_compiler::zone_alloc::kept();
-    let document_path = document.path.clone();
+    // only a package's own document is watched (the bundled one is the binary's)
+    let document_path = if document.live { document.path.clone() } else { PathBuf::new() };
     let mut roots = Vec::new();
     if package_dir.is_dir() {
         roots.push(makepad_filesystem_watcher::WatchRoot {
@@ -531,7 +581,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
         use makepad_filesystem_watcher::FileSystemWatcher;
         FileSystemWatcher::start(roots, move |event| {
             // Watch roots catch atomic saves and backend rescan notifications too.
-            if event.path == document_path || event.path.is_dir() {
+            if !document_path.as_os_str().is_empty() && (event.path == document_path || event.path.is_dir()) {
                 match relax_compiler::vfs::read_to_string(&document_path) {
                     Ok(source) => {
                         let source: std::sync::Arc<str> = source.into();
@@ -542,6 +592,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                             post(Update::Document(Document {
                                 path: document_path.clone(),
                                 source,
+                                live: true,
                             }));
                         }
                     }
@@ -703,6 +754,13 @@ fn pump(
     let mut next_frame = Instant::now();
     let mut next_status = Instant::now();
     let mut dirty = true;
+    let mut stage = Stage::Running;
+    let mut loader = Loader::Hidden;
+    let mut loader_shows = 0u32;
+    let mut warm_up_at: Option<Instant> = None;
+    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT loader's comings and goings too
+    let trace_loader = std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some();
+    relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
         let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
             let mut guard = state();
@@ -726,7 +784,7 @@ fn pump(
         if pending {
             let mut cmd = CmdWriter::new(HOST);
             if !window.is_none() {
-                cmd.window_overlay(window, false, [0.0; 4]);
+                cmd.window_overlay(window, false, [0.0; 4], Id::NONE);
             }
             cmd.domain_relaunch(domain);
             hal.submit(&cmd.buf());
@@ -736,6 +794,8 @@ fn pump(
             dirty = true;
             match update {
                 Update::Begin { warm } => {
+                    stage = Stage::Running;
+                    loader = Loader::Hidden;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -757,6 +817,14 @@ fn pump(
                     active = true;
                     relaunched |= warm;
                     restartable = true;
+                }
+                Update::Failure(message) if !has_window => {
+                    // No window shows this failure and nobody can retry from it (a backend without
+                    // a shader dialect: headless, a plain program): the run ends with it. A program
+                    // that panicked in main used to leave the process running until it was killed.
+                    eprintln!("makepad: {message}");
+                    let _ = EXIT.compare_exchange(0, 101, Ordering::AcqRel, Ordering::Acquire);
+                    QUIT.store(true, Ordering::Release);
                 }
                 Update::Failure(message) => {
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
@@ -920,7 +988,12 @@ fn pump(
         });
         let mut may_present = true;
         let mut app_frame = false;
+        let mut app_frames = 0;
+        let mut lent_to_app = false;
+        let first_present = active;
         if let Some((geom, borrower_frame, presentations, presenter, lent)) = physical {
+            app_frames = presentations;
+            lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
             app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
             may_present = !borrower_frame || lent == 0;
             if saved_geometry != Some(geom)
@@ -990,6 +1063,111 @@ fn pump(
                     || data.parked.is_some()
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
+        // the window layer (Metal): the boot field the app's first frames go under, the warm-up
+        // after its first present (until the JIT's readiness signal), then the JIT loader for later
+        // sustained UI-thread JIT waiting. An opaque overlay, a failure or a stop takes it away.
+        // the boot stage begins before the app has the window, once the field has presented
+        // (its first frame then never reaches the window before the layer)
+        let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
+        if !layers || (stage != Stage::Boot && !lent_to_app) {
+            stage = Stage::Running;
+        }
+        stage = match stage {
+            Stage::Running if layers && active && visible && host.field_mode() && app_frames > 0 => {
+                Stage::Boot
+            }
+            // compile errors in the boot window show its halted view, not the field
+            Stage::Boot if active && !host.field_mode() => Stage::Running,
+            Stage::Boot if !active && first_present => {
+                warm_up_at = Some(Instant::now());
+                Stage::WarmUp
+            }
+            Stage::WarmUp if relax_compiler::postframe::ready(READY_QUIET_NS) => {
+                if let Some(at) = warm_up_at.take() {
+                    eprintln!(
+                        "makepad-run: warm-up {:.0} ms after the first present ({})",
+                        at.elapsed().as_secs_f64() * 1000.0,
+                        if data.warm { "warm" } else { "cold" }
+                    );
+                }
+                Stage::Lift
+            }
+            Stage::Lift if host.layer_done() => Stage::Running,
+            stage => stage,
+        };
+        let mut wake_in = None;
+        let want = match stage {
+            Stage::Boot => Some(LayerWant::Boot),
+            Stage::WarmUp => {
+                let (done, queued) = relax_compiler::postframe::ahead_progress();
+                Some(LayerWant::WarmUp { done, queued })
+            }
+            Stage::Lift => Some(LayerWant::Ready),
+            Stage::Running if layers && lent_to_app && !active => {
+                use relax_compiler::postframe::{ui_idle_ns, ui_waited_within};
+                let waited_in = |ns| Duration::from_nanos(ui_waited_within(ns));
+                loader = match loader {
+                    Loader::Hidden => {
+                        let waited = waited_in(LOADER_WINDOW_NS);
+                        if waited >= LOADER_AFTER {
+                            loader_shows += 1;
+                            if trace_loader {
+                                eprintln!(
+                                    "makepad-run: jit loader #{} in ({:.0} ms waited in {} ms)",
+                                    loader_shows,
+                                    waited.as_secs_f64() * 1000.0,
+                                    LOADER_WINDOW_NS / 1_000_000
+                                );
+                            }
+                            Loader::Shown(Instant::now())
+                        } else {
+                            if UI_WAIT_ARMED.load(Ordering::Acquire) {
+                                // look again when the waiting would be sustained; once the UI
+                                // thread is not waiting the window disarms (the next wait's hook
+                                // wakes it)
+                                if ui_idle_ns() > 0 {
+                                    UI_WAIT_ARMED.store(false, Ordering::Release);
+                                } else {
+                                    wake_in = Some(LOADER_AFTER - waited);
+                                }
+                            }
+                            Loader::Hidden
+                        }
+                    }
+                    Loader::Shown(at) if at.elapsed() >= LOADER_MIN && waited_in(LOADER_QUIET_NS) < LOADER_TRICKLE => {
+                        Loader::Going(at)
+                    }
+                    Loader::Going(at) if host.layer_done() => {
+                        if trace_loader {
+                            eprintln!(
+                                "makepad-run: jit loader #{} out after {:.0} ms",
+                                loader_shows,
+                                at.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
+                        Loader::Hidden
+                    }
+                    loader => loader,
+                };
+                match loader {
+                    Loader::Hidden => None,
+                    Loader::Shown(_) => Some(LayerWant::Loader {
+                        shown: true,
+                        busy: true,
+                    }),
+                    Loader::Going(_) => Some(LayerWant::Loader {
+                        shown: false,
+                        busy: waited_in(LOADER_BUSY_NS) >= LOADER_TRICKLE,
+                    }),
+                }
+            }
+            Stage::Running => {
+                loader = Loader::Hidden;
+                None
+            }
+        };
+        host.layer(want, app_frames);
+        let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
             progress.tick(&mut data);
             if matches!(data.phase, Phase::Codegen | Phase::FirstFrame) {
@@ -1003,7 +1181,11 @@ fn pump(
         if diagnostics_dirty {
             let records = diagnostics.iter().cloned();
             let records = records.chain(document_errors.iter().cloned());
-            data.diagnostics = records.collect::<Vec<_>>().into();
+            // root causes first, a folded group's members together (the boot window's list order;
+            // the selection, Copy and Open index the same list)
+            let mut records = records.collect::<Vec<_>>();
+            relax_boot::order_diagnostics(&mut records);
+            data.diagnostics = records.into();
             diagnostics_dirty = false;
             dirty = true;
         }
@@ -1019,11 +1201,15 @@ fn pump(
             host.update(data.clone());
             dirty = false;
         }
-        let draw = visible && Instant::now() >= next_frame;
-        let timeout = if visible {
+        let hold = !visible && !layered && host.hold();
+        host.offscreen(hold);
+        let draw = (visible || hold || layered) && Instant::now() >= next_frame;
+        let timeout = if visible || hold || layered {
             next_frame
                 .saturating_duration_since(Instant::now())
                 .as_nanos() as u64
+        } else if let Some(wake_in) = wake_in {
+            wake_in.as_nanos() as u64
         } else if (has_window && active)
             || !work_pending.is_empty()
             || PANICS_CHANGED.load(Ordering::Acquire)
@@ -1057,7 +1243,7 @@ fn pump(
         if draw {
             // frames on a fixed 60 Hz schedule: the time a turn takes is not added to every
             // interval; a turn that fell behind starts the schedule again from now
-            let period = Duration::from_nanos(16_666_667);
+            let period = Duration::from_nanos(host.frame_period_ns());
             let now = Instant::now();
             next_frame += period;
             if next_frame <= now {

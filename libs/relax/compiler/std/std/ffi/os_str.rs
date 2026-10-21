@@ -22,7 +22,7 @@ pub struct OsString {
 }
 
 impl OsStr {
-    pub fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &OsStr {
+    pub const fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &OsStr {
         s.as_ref()
     }
     pub(crate) fn from_raw_bytes(b: &[u8]) -> &OsStr {
@@ -80,7 +80,7 @@ impl Default for &OsStr {
 }
 
 impl OsString {
-    pub fn new() -> OsString {
+    pub const fn new() -> OsString {
         OsString { inner: Vec::new() }
     }
     pub fn with_capacity(capacity: usize) -> OsString {

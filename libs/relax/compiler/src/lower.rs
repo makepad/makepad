@@ -17,10 +17,13 @@ use crate::jit::{FnKey, Unit, ShimInstance};
 use relax_types::instance::{Instance, InstanceKind, ShimKind};
 use crate::layout::{Layout, Leaf};
 use crate::program::{DefId, DefKind, Prim};
-use crate::rir::*;
+use relax_backend::rir::*;
 use crate::typeck::{Body, Coerce, Res};
 use crate::types::{TyId, TyKind};
 use crate::fxhash::HashMap;
+
+mod match_tree;
+mod simd;
 
 /// vtable layout: [drop_in_place (0 when no drop), size, align, methods...]
 pub const VT_DROP: u32 = 0;
@@ -181,6 +184,13 @@ struct LoopCx {
 }
 
 pub struct Lcx<'a> {
+    /// SPEC-V: this body is unverified code: calls that pass `&mut` beside another pointer-holding
+    /// argument go to the callee's unverified-mode twin
+    plain_calls: bool,
+    /// Relaxed Rust D3: the run-time disjoint-index checks of this body's clean verdict ((earlier,
+    /// later) index expressions), and the slot each earlier index is kept in (by its span).
+    d3: Option<std::sync::Arc<Vec<(relax_types::mir::Span, relax_types::mir::Span)>>>,
+    d3_slots: HashMap<(u32, u32, u32), u32>,
     /// lowering a const/static initializer: borrowed temporaries live in static memory
     /// (rustc's constant promotion), not on the initializer's stack
     const_init: bool,
@@ -222,6 +232,10 @@ pub struct Lcx<'a> {
     decl_depth: Vec<Option<usize>>,
     /// instructions run at function entry (drop flag initialisation)
     entry_inits: Vec<Inst>,
+    /// fold branches on known constants (a check only); the registers a fold relied on, which must
+    /// be written exactly once by the finished function (checked in lower_checked_body)
+    pub(crate) fold: bool,
+    pub(crate) fold_regs: std::cell::RefCell<Vec<VReg>>,
     /// rvalue temporaries to drop at the end of the current statement (with a drop flag
     /// when parts may have been moved out)
     stmt_temps: Vec<(VReg, TyId, Option<VReg>)>,
@@ -239,6 +253,8 @@ pub struct Lcx<'a> {
     /// the next indirect call is a virtual call of a #[track_caller] trait method: it passes
     /// the caller location (the vtable holds the tracked fn itself)
     indirect_tracked: bool,
+    /// integer SIMD values evaluated at compile time: (slot base, offset) -> their bytes
+    pub(crate) simd_consts: HashMap<(u32, i32), Vec<u8>>,
     /// temporaries whose lifetime a `let` extends to the end of its block (`let r = &make();`),
     /// one list per drop scope (parallel to `scopes`)
     /// temporaries living to the end of a scope (let-extended; `while let` scrutinees), with
@@ -316,6 +332,7 @@ pub fn fn_name(u: &Unit, key: &FnKey) -> String {
         FnKey::Glue(k, t) => format!("glue{}<{}>", k, crate::typeck::ty_to_string(false, &u.prog, &u.tcx, *t)),
         FnKey::Sandbox(b) if *b == u32::MAX => "sandbox:invalid-fn-pointer".to_string(),
         FnKey::Sandbox(b) => format!("sandbox:{}", u.fns[*b as usize].name),
+        FnKey::Plain(b) => format!("{} [unverified]", u.fns[*b as usize].name),
     }
 }
 
@@ -327,16 +344,25 @@ const ARRAY_STEP: u32 = u32::MAX - 1;
 impl<'a> Lcx<'a> {
     /// `cur_fn`: the slot this body is built for (its closures' parent).
     pub fn new(u: &'a Unit, b: &'a Body, name: String, cur_fn: u32) -> Lcx<'a> {
+        // SPEC-V: unverified code (no clean verdict yet, or an unverified-mode twin) sends its
+        // aliasing-prone calls to unverified-mode twins
+        let plain_calls = crate::jit::PLAIN_LOWER.with(|c| c.get()) == Some(cur_fn) || ((cur_fn as usize) < u.fns.len() && !u.verdict_clean(cur_fn));
         let mut f = Func::new(name, b.file);
         let entry = f.block();
         let n = b.locals.len();
         let ret = u.tcx.normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), b.ret);
         let mut closure_storage = HashMap::default();
         for &ce in b.min_captures.keys() { closure_storage.insert(ce, crate::layout::ClosureStorage::for_codegen(&u.prog, &u.tcx, b, ce)); }
+        // the verdict's disjoint-index checks belong in verified code only (unverified code and its
+        // twins run as written, SPEC-V)
+        let d3 = if plain_calls || (cur_fn as usize) >= u.fns.len() { None } else { u.disjoint_checks(cur_fn) };
         Lcx {
             closure_storage,
             u,
             cur_fn,
+            plain_calls,
+            d3,
+            d3_slots: HashMap::default(),
             b,
             f,
             cur: entry,
@@ -357,6 +383,8 @@ impl<'a> Lcx<'a> {
             drop_flags: vec![None; n],
             decl_depth: vec![None; n],
             entry_inits: Vec::new(),
+            fold: u.prog.session.options.const_fuel,
+            fold_regs: std::cell::RefCell::new(Vec::new()),
             caller_loc: None,
             stmt_temps: Vec::new(),
             match_root: None,
@@ -374,6 +402,7 @@ impl<'a> Lcx<'a> {
             guard_flags: HashMap::default(),
             cond_rescope: None,
             indirect_tracked: false,
+            simd_consts: HashMap::default(),
             extend_ops: Default::default(),
             pat_path: None,
             field_moved: HashMap::default(),
@@ -470,7 +499,7 @@ impl<'a> Lcx<'a> {
     }
 
     fn relax_only_instance(&self, t: TyId) -> bool {
-        !self.u.provided_shared.contains(&t)
+        !self.u.provided_shared_contains(t)
     }
 
     /// An opaque provided enum (provided.rs; rustc's layout, no tag known to Relax) cannot be
@@ -728,11 +757,11 @@ impl<'a> Lcx<'a> {
     }
     /// The pointer stored at `cs + off` in a constant: its symbol, a run-independent small
     /// value (dangling / null), or a load from the constant at run time; None without `cs`.
-    fn const_ptr_val(&mut self, cs: Option<crate::rir::Sym>, off: u32) -> Option<VReg> {
+    fn const_ptr_val(&mut self, cs: Option<relax_backend::rir::Sym>, off: u32) -> Option<VReg> {
         let at = cs?.plus(off as i64);
         Some(match crate::syms::read_leaf(self.u, at, Mem::Int(8, false)) {
-            crate::opt::RoRead::Ptr(p) => self.sym_val(p),
-            crate::opt::RoRead::Bytes(v) if v < 4096 => self.iconst(v as i64),
+            relax_backend::passes::RoRead::Ptr(p) => self.sym_val(p),
+            relax_backend::passes::RoRead::Bytes(v) if v < 4096 => self.iconst(v as i64),
             _ => {
                 let a = self.sym_val(at);
                 let d = self.f.vreg(Cls::I);
@@ -742,18 +771,18 @@ impl<'a> Lcx<'a> {
         })
     }
     /// A symbol's value (an address, a site index) in a vreg (syms.rs).
-    fn sym_val(&mut self, s: crate::rir::Sym) -> VReg {
+    fn sym_val(&mut self, s: relax_backend::rir::Sym) -> VReg {
         let d = self.f.vreg(Cls::I);
         self.emit(Inst::Addr(d, s));
         d
     }
     /// A leaf of a constant's data as a vreg: an integer / float folds to an immediate, a
     /// pointer to its symbol; None when the bytes cannot be read as either (syms.rs).
-    fn const_leaf_at(&mut self, at: crate::rir::Sym, lf: crate::layout::Leaf) -> Option<VReg> {
+    fn const_leaf_at(&mut self, at: relax_backend::rir::Sym, lf: crate::layout::Leaf) -> Option<VReg> {
         match crate::syms::read_leaf(self.u, at, lf.mem) {
-            crate::opt::RoRead::Bytes(raw) => Some(self.const_leaf(raw, lf)),
-            crate::opt::RoRead::Ptr(t) => Some(self.sym_val(t)),
-            crate::opt::RoRead::No | crate::opt::RoRead::Range(_) => None,
+            relax_backend::passes::RoRead::Bytes(raw) => Some(self.const_leaf(raw, lf)),
+            relax_backend::passes::RoRead::Ptr(t) => Some(self.sym_val(t)),
+            relax_backend::passes::RoRead::No | relax_backend::passes::RoRead::Range(_) => None,
         }
     }
     fn addr_add(&mut self, base: VReg, off: i32) -> VReg {
@@ -790,14 +819,6 @@ impl<'a> Lcx<'a> {
                 (l, too_big)
             }
         };
-        // Another shared layout operation can have found a cycle even on a cache hit.
-        if u.coro_cycle.load(std::sync::atomic::Ordering::Relaxed) {
-            // Only the locked build may consume a coroutine layout's cycle diagnostic.
-            crate::jit::lower_ahead_needs_unit();
-            if u.coro_cycle.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
-            }
-        }
         if too_big {
             let t = u.tcx.tys.erase_regions(t);
             let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
@@ -973,12 +994,20 @@ impl<'a> Lcx<'a> {
                 // a pointer-sized leaf the type's niche keeps from 0 (references, Box, NonNull,
                 // a Vec's buffer pointer): codegen folds its null tests (Func::nonnull)
                 let nn = l.niche.filter(|n| n.bytes == 8 && n.start >= 1 && n.start <= n.end).map(|n| n.off);
+                // an unsigned scalar leaf the niche limits to start..=end (char, bool, enum
+                // tags): value ranges decide its niche tests (Func::ranged)
+                let rg = l.niche.filter(|n| n.bytes < 8 && n.start <= n.end && (n.start > 0 || n.end < (1u128 << (8 * n.bytes)) - 1));
                 let mut v = Vec::with_capacity(leaves.len());
                 for lf in leaves {
                     let d = self.f.vreg(lf.cls);
                     self.emit(Inst::Load(lf.mem, d, base, off + lf.off as i32));
-                    if nn == Some(lf.off) && matches!(lf.mem, crate::rir::Mem::Int(8, _)) {
+                    if nn == Some(lf.off) && matches!(lf.mem, relax_backend::rir::Mem::Int(8, _)) {
                         self.f.nonnull.push(d);
+                    }
+                    if let (Some(n), relax_backend::rir::Mem::Int(b, false)) = (rg, lf.mem) {
+                        if n.off == lf.off && n.bytes == b as u32 {
+                            self.f.ranged.push((d, b, n.start as u64, n.end as u64));
+                        }
                     }
                     v.push(d);
                 }
@@ -1449,7 +1478,7 @@ impl<'a> Lcx<'a> {
                 ExprKind::Call(f, _) if matches!(self.kind_ref(b.ty(*f)), TyKind::Closure(..)) => self.mark_root(*f),
                 // overloaded index / deref take `&self` / `&mut self` of the base
                 ExprKind::Index(x, _) if b.ov_index.contains_key(&e.0) => self.mark_root(*x),
-                ExprKind::Unary(UnOp::Deref, x) if b.ov_derefs.contains_key(&(e.0, 0)) => self.mark_root(*x),
+                ExprKind::Unary(UnOp::Deref, x) if b.ov_deref(e.0, 0).is_some() => self.mark_root(*x),
                 _ => {}
             }
         }
@@ -1513,7 +1542,13 @@ impl<'a> Lcx<'a> {
                         }
                         match self.u.tcx.coro_frames.get(&c.ct) {
                             Some(prev) if prev != area => {
-                                self.err(self.pos, format!("internal: coroutine saved locals {:?} lowered again as {:?}", prev, area));
+                                // the second lowering of a future that asked for its own layout
+                                // (jit.rs coro_frame) saved a local of its own type across a suspension
+                                if self.u.coro_selfref.lock().unwrap_or_else(|e| e.into_inner()).contains(&c.ct) {
+                                    self.err(self.pos, "recursion in an async fn or block requires boxing: the future would contain itself (E0733)".to_string());
+                                } else {
+                                    self.err(self.pos, format!("internal: coroutine saved locals {:?} lowered again as {:?}", prev, area));
+                                }
                             }
                             Some(_) => {}
                             None => self.u.tcx.coro_frames.insert(c.ct, area),
@@ -2244,7 +2279,7 @@ impl<'a> Lcx<'a> {
 
     fn abi_param_c(&mut self, t: TyId, c: bool) -> (Vec<VReg>, bool) {
         if c && self.layout(t).size > 0 {
-            if let crate::rir::CArg::Agg(_) = crate::cabi::c_arg(self.u, t) {
+            if let relax_backend::rir::CArg::Agg(_) = crate::cabi::c_arg(self.u, t) {
                 let p = self.f.vreg(Cls::I);
                 self.f.params.push(p);
                 self.f.noalias.push(p);
@@ -2371,6 +2406,14 @@ impl<'a> Lcx<'a> {
                 if let TyKind::Ref(true, inner, _) = self.kind(t) {
                     if !self.unsized_ty(inner) && regs.len() == 1 && self.u.is_unpin(inner) {
                         self.f.noalias.push(regs[0]);
+                    }
+                }
+                // a reference's (or fat reference's data) pointer is never null (rustc `nonnull`
+                // on reference parameters): the niche tests of iterators over a slice parameter
+                // fold
+                if let TyKind::Ref(_, inner, _) = self.kind(t) {
+                    if !regs.is_empty() && self.f.vregs[regs[0].0 as usize] == Cls::I && (regs.len() == 1 || self.unsized_ty(inner)) {
+                        self.f.nonnull.push(regs[0]);
                     }
                 }
                 // `&T` / `&mut T` of a sized T: dereferenceable for the call (rustc
@@ -2604,7 +2647,7 @@ impl<'a> Lcx<'a> {
                         Some(e)
                             if else_.is_none()
                                 && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, .. })
-                                && !self.b.coerce.contains_key(&e.0)
+                                && !self.b.coerce(e.0).is_some()
                                 && self.field_move_path(*e).is_some() =>
                         {
                             // `let S { a, .. } = local(.f)*;` binds in place: what is moved out
@@ -2622,7 +2665,7 @@ impl<'a> Lcx<'a> {
                         Some(e)
                             if else_.is_none()
                                 && !matches!(ast.pat(*pat), Pat::Wild | Pat::Ident { sub: None, by_ref: false, .. })
-                                && !self.b.coerce.contains_key(&e.0)
+                                && !self.b.coerce(e.0).is_some()
                                 && self.is_place_expr(*e)
                                 && (self.pat_binds_by_ref(*pat) || !self.pat_moves_droppable(*pat)) =>
                         {
@@ -2880,7 +2923,7 @@ impl<'a> Lcx<'a> {
     /// references/pointers, a `Deref::deref` (or `deref_mut` in a mutable context) call
     /// for overloaded steps.
     fn deref_place(&mut self, e: u32, k: usize, pl: Place, pt: TyId) -> (Place, TyId) {
-        if let Some((m, args)) = self.b.ov_derefs.get(&(e, k)).cloned() {
+        if let Some((m, args)) = self.b.ov_deref(e, k) {
             let args = self.mono_list(args);
             return self.overloaded_deref(m, args, pl, pt);
         }
@@ -2985,6 +3028,7 @@ impl<'a> Lcx<'a> {
         let exit = self.f.block();
         self.goto(head);
         self.switch(head);
+        self.const_fuel_tick();
         let self_t = self.u.tcx.tys.intern(TyKind::Ref(true, iter_t, crate::types::RegionId::ERASED));
         let r = self.emit_instance(instance, vec![(Val::L(vec![iter_addr]), self_t)], opt_t);
         let rpl = self.val_to_place(r);
@@ -3020,7 +3064,7 @@ impl<'a> Lcx<'a> {
     }
 
     /// `base[i]` through `Index::index` / `IndexMut::index_mut`.
-    fn overloaded_index(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId, i: ExprId, t: TyId) -> (Place, TyId) {
+    fn overloaded_index(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId, i: ExprId, t: TyId, span: (u32, u32)) -> (Place, TyId) {
         let mut def = m;
         let mut mutbl = false;
         if self.want_mut {
@@ -3042,11 +3086,15 @@ impl<'a> Lcx<'a> {
         // (an index coerced to the impl's index type -- `S[bar]` with `impl Index<fn()>`,
         // `v[&string]` with `Index<&str>` -- passes the coerced value)
         let it = match args.get(1) {
-            Some(&ia) if self.b.coerce.contains_key(&i.0) => ia,
+            Some(&ia) if self.b.coerce(i.0).is_some() => ia,
             _ => self.body_ty(i),
         };
         let iv = self.lower_expr_coerced(i, it);
         self.want_mut = saved;
+        if self.d3.is_some() && it == self.u.tcx.tys.usize_ {
+            let leaves = self.to_leaves(iv.clone(), it);
+            self.disjoint_index(span.0, span.1, leaves[0]);
+        }
         let addr = self.place_addr(&pl, pt);
         // an array indexed through its slice's impl: `&[T; N]` unsizes to `&[T]`
         let (self_v, self_t) = match (self.kind(pt), self.kind(args[0])) {
@@ -4037,6 +4085,11 @@ impl<'a> Lcx<'a> {
             Pat::Or(alts) => {
                 // bind the alternative that matched (rustc: each alternative binds the same names)
                 let alts = alts.clone();
+                let mut bound = Vec::new();
+                self.pat_binding_locals(p, &mut bound);
+                if bound.is_empty() {
+                    return;
+                }
                 let sel = match self.or_sel.get(&p.0) {
                     Some(r) => *r,
                     None => {
@@ -4702,18 +4755,24 @@ impl<'a> Lcx<'a> {
             }
             Pat::Or(alts) => {
                 let ok = self.f.block();
+                // which alternative matched is only needed to bind its names
+                let mut bound = Vec::new();
+                self.pat_binding_locals(p, &mut bound);
                 let sel = match self.or_sel.get(&p.0) {
-                    Some(r) => *r,
+                    Some(r) => Some(*r),
+                    None if bound.is_empty() => None,
                     None => {
                         let r = self.f.vreg(Cls::I);
                         self.or_sel.insert(p.0, r);
-                        r
+                        Some(r)
                     }
                 };
                 for (i, a) in ast.list(*alts).iter().enumerate() {
                     let next = if i + 1 == alts.len() { fail } else { self.f.block() };
                     self.test_pat(*a, place, t, next);
-                    self.emit(Inst::Iconst(sel, i as i64));
+                    if let Some(sel) = sel {
+                        self.emit(Inst::Iconst(sel, i as i64));
+                    }
                     self.goto(ok);
                     if i + 1 < alts.len() {
                         self.switch(next);
@@ -4780,7 +4839,7 @@ impl<'a> Lcx<'a> {
     /// `cs` is the same address as a symbol (syms.rs) when known: integers, tags and lengths are
     /// read at compile time from `c`; a pointer value the test compares comes from `cs` (its
     /// symbol, or a load from the constant at run time), never as a bare number.
-    fn test_const_value(&mut self, place: &Place, t: TyId, c: u64, cs: Option<crate::rir::Sym>, fail: u32, depth: u32) {
+    fn test_const_value(&mut self, place: &Place, t: TyId, c: u64, cs: Option<relax_backend::rir::Sym>, fail: u32, depth: u32) {
         if depth > 32 {
             return;
         }
@@ -4814,7 +4873,7 @@ impl<'a> Lcx<'a> {
                 let unsized_ = self.unsized_ty(inner);
                 let cp = unsafe { read_raw(c, Mem::Int(8, false)) };
                 let cps = cs.and_then(|s| match crate::syms::read_leaf(self.u, s, Mem::Int(8, false)) {
-                    crate::opt::RoRead::Ptr(p) => Some(p),
+                    relax_backend::passes::RoRead::Ptr(p) => Some(p),
                     _ => None,
                 });
                 match self.kind(inner) {
@@ -4975,27 +5034,11 @@ impl<'a> Lcx<'a> {
         }
     }
 
-    fn test_tag(&mut self, place: &Place, t: TyId, vi: u32, fail: u32) {
+    /// The discriminant of the enum value at `place: t`, decoded (one vreg, two for a 128-bit tag).
+    fn read_tag(&mut self, place: &Place, t: TyId) -> Option<Vec<VReg>> {
         let l = self.layout(t);
-        let adt = match self.kind_ref(t) {
-            TyKind::Adt(d, _, _) => self.u.tcx.adts.get(d),
-            _ => None,
-        };
-        let adt = match adt {
-            Some(a) => a,
-            None => return,
-        };
-        if adt.variants.len() <= 1 {
-            return;
-        }
-        let Some(discr) = adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi) else { return; };
-        let disc128 = discr.signed_value();
-        let disc = disc128 as i64;
-        let tag = match place {
-            Place::Mem(b, o) => match self.load_disc(*b, *o, t) {
-                Some(d) => d,
-                None => return,
-            },
+        match place {
+            Place::Mem(b, o) => self.load_disc(*b, *o, t),
             Place::Regs(r) if !r.is_empty() => {
                 let raw = match (l.tag, &l.leaves) {
                     (Some((toff, Mem::Int(bytes, _))), Some(lv)) => {
@@ -5012,16 +5055,31 @@ impl<'a> Lcx<'a> {
                     Some(adt) => {
                         let pos = ((self.b.file as u64) << 32) | self.pos as u64;
                         let cur = self.cur;
-                        match emit_decode_tag(self.u, &mut self.f, cur, pos, raw, &l, &adt) {
-                            Some(tag) => tag,
-                            None => return,
-                        }
+                        emit_decode_tag(self.u, &mut self.f, cur, pos, raw, &l, &adt)
                     }
-                    None => raw,
+                    None => Some(raw),
                 }
             }
-            _ => return,
+            _ => None,
+        }
+    }
+
+    fn test_tag(&mut self, place: &Place, t: TyId, vi: u32, fail: u32) {
+        let adt = match self.kind_ref(t) {
+            TyKind::Adt(d, _, _) => self.u.tcx.adts.get(d),
+            _ => None,
         };
+        let adt = match adt {
+            Some(a) => a,
+            None => return,
+        };
+        if adt.variants.len() <= 1 {
+            return;
+        }
+        let Some(discr) = adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi) else { return; };
+        let disc128 = discr.signed_value();
+        let disc = disc128 as i64;
+        let Some(tag) = self.read_tag(place, t) else { return; };
         let k = self.iconst(disc);
         let c = if tag.len() == 2 {
             let hi = self.iconst((disc128 as u128 >> 64) as i64);
@@ -5605,7 +5663,7 @@ impl<'a> Lcx<'a> {
     }
 
     fn apply_coercion(&mut self, e: ExprId, v: Val, target: TyId) -> Val {
-        match self.b.coerce.get(&e.0).copied() {
+        match self.b.coerce(e.0) {
             None | Some(Coerce::MutToConst | Coerce::RefToRaw(_)) => v,
             Some(Coerce::Never) => {
                 // a `!` value used as another type (`fn f(x: !) -> T { x }`): control never gets
@@ -5854,7 +5912,7 @@ impl<'a> Lcx<'a> {
                         }
                         v
                     }
-                    UnOp::Deref if self.b.ov_derefs.contains_key(&(e.0, 0)) || self.box_inner(xt).is_some() => {
+                    UnOp::Deref if self.b.ov_deref(e.0, 0).is_some() || self.box_inner(xt).is_some() => {
                         let (pl, pt) = self.lower_place(e);
                         let v = self.read_place(&pl, pt);
                         // moving out of `*b` (a Box local): the box is freed without dropping
@@ -5980,7 +6038,7 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Cast(x, _) => {
                 let xt = self.body_ty(*x);
-                if let Some(Coerce::ToDyn(..) | Coerce::Upcast(..) | Coerce::Unsize | Coerce::DerefRef(_) | Coerce::ReifyFn | Coerce::ClosureFn | Coerce::UnsafeFn | Coerce::RefToRaw(_)) = self.b.coerce.get(&x.0) {
+                if let Some(Coerce::ToDyn(..) | Coerce::Upcast(..) | Coerce::Unsize | Coerce::DerefRef(_) | Coerce::ReifyFn | Coerce::ClosureFn | Coerce::UnsafeFn | Coerce::RefToRaw(_)) = self.b.coerce(x.0) {
                     return self.lower_expr_coerced(*x, t);
                 }
                 if matches!(self.kind_ref(t), TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..)) {
@@ -6009,6 +6067,11 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Unsafe(b) => self.lower_block(*b),
             ExprKind::ConstBlock(b) => {
+                // an integer SIMD vector (simd_shuffle's index, `const { .. }` in core::simd's
+                // swizzles): evaluated here, its lanes known to the SIMD intrinsics
+                if let Some(v) = self.simd_const_block(*b, t) {
+                    return v;
+                }
                 let previous = self.overflow_checks;
                 self.overflow_checks = true;
                 let value = self.lower_block(*b);
@@ -6047,6 +6110,7 @@ impl<'a> Lcx<'a> {
                 let exit = self.f.block();
                 self.goto(head);
                 self.switch(head);
+                self.const_fuel_tick();
                 let outer = self.scopes.len();
                 self.push_scope();
                 let mark = self.stmt_temps.len();
@@ -6082,6 +6146,7 @@ impl<'a> Lcx<'a> {
                 let res = self.result_place(t);
                 self.goto(head);
                 self.switch(head);
+                self.const_fuel_tick();
 
                 let l = label.map(|x| self.lifetime_sym(x));
                 self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: Some((res.clone(), t)), scope_depth: self.scopes.len(), temps_depth: self.stmt_temps.len() });
@@ -6655,7 +6720,7 @@ impl<'a> Lcx<'a> {
                 d
             }
             // type layouts never have vector leaves
-            Cls::F64 | Cls::V128 => {
+            Cls::F64 | Cls::V128 | Cls::V256 => {
                 let d = self.f.vreg(Cls::F64);
                 self.emit(Inst::Fconst(d, raw, true));
                 d
@@ -6798,7 +6863,7 @@ impl<'a> Lcx<'a> {
                 }
             }
         }
-        if root.is_none() {
+        if root.is_none() && !self.base_is_borrowed_place(bx) {
             // a temporary base: its fields that were not taken are dropped with it
             // (the base temporary itself is not dropped as a whole: its taken fields moved)
             let ba = self.place_addr(&bp, bt);
@@ -6882,7 +6947,7 @@ impl<'a> Lcx<'a> {
                     (self.temp_place(e, v, t), t)
                 }
             },
-            ExprKind::Unary(UnOp::Deref, x) if self.b.ov_derefs.contains_key(&(e.0, 0)) => {
+            ExprKind::Unary(UnOp::Deref, x) if self.b.ov_deref(e.0, 0).is_some() => {
                 let (pl, pt) = self.lower_place(*x);
                 self.deref_place(e.0, 0, pl, pt)
             }
@@ -6920,7 +6985,7 @@ impl<'a> Lcx<'a> {
                 (self.val_to_place(v), t)
             }
             ExprKind::Index(a, i) => {
-                let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = self.b.index_derefs(e.0);
                 let (mut pl, mut pt) = self.lower_place(*a);
                 for k in 0..derefs {
                     let (a2, b2) = self.deref_place(e.0, k, pl, pt);
@@ -6936,7 +7001,7 @@ impl<'a> Lcx<'a> {
                     if let Some(k) = (alo..ilo).find(|&k| src.get(k as usize) == Some(&b'[')) {
                         self.pos = k;
                     }
-                    return self.overloaded_index(m, args, pl, pt, *i, t);
+                    return self.overloaded_index(m, args, pl, pt, *i, t, (ex.lo, ex.hi));
                 }
                 let it = self.body_ty(*i);
                 let iv = self.lower_expr(*i);
@@ -6961,6 +7026,7 @@ impl<'a> Lcx<'a> {
                     }
                 };
                 self.bounds_check(iv[0], len);
+                self.disjoint_index(ex.lo, ex.hi, iv[0]);
                 let el = self.layout(elem);
                 let stride = crate::layout::round_up(el.size, el.align);
                 let s = self.iconst(stride as i64);
@@ -7011,6 +7077,49 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// Whether this lowering makes its verdict's run-time disjoint-index checks (D3).
+    pub fn lowers_disjoint_checks(&self) -> bool { self.d3.is_some() }
+
+    /// Relaxed Rust D3 (the verdict's run-time disjoint-index checks): the index `idx` of the index
+    /// expression at `lo..hi` is kept when a later borrow is checked against it, and compared with
+    /// every earlier index it must differ from; an overlap panics as `get_disjoint_mut(..).unwrap()`
+    /// does (the checker proved the earlier expression runs first on every path to this one).
+    fn disjoint_index(&mut self, lo: u32, hi: u32, idx: VReg) {
+        let Some(checks) = self.d3.clone() else { return };
+        let file = self.b.file;
+        let at = |s: &relax_types::mir::Span| s.file == file && s.lo == lo && s.hi == hi;
+        let slot_of = |this: &mut Self, s: &relax_types::mir::Span| -> u32 {
+            *this.d3_slots.entry((s.file, s.lo, s.hi)).or_insert_with(|| this.f.slot(8, 8))
+        };
+        for (first, second) in checks.iter() {
+            if at(second) {
+                let s = slot_of(self, first);
+                let a = self.f.vreg(Cls::I);
+                self.emit(Inst::SlotAddr(a, s));
+                let v = self.f.vreg(Cls::I);
+                self.emit(Inst::Load(Mem::Int(8, false), v, a, 0));
+                let c = self.f.vreg(Cls::I);
+                self.emit(Inst::ICmp(Cond::Eq, false, c, idx, v));
+                let ok = self.f.block();
+                let bad = self.f.block();
+                self.term(Term::Branch(c, bad, ok));
+                self.switch(bad);
+                let site = self.u.site_sym(self.b.file, lo, "called `Result::unwrap()` on an `Err` value: OverlappingIndices");
+                let sv = self.sym_val(site);
+                let rt = self.u.rs.panic_site;
+                self.emit(Inst::Call(Callee::Host(rt), vec![sv], Vec::new()));
+                self.term(Term::Unreachable);
+                self.switch(ok);
+            }
+        }
+        if checks.iter().any(|(first, _)| at(first)) {
+            let s = slot_of(self, &relax_types::mir::Span { file, lo, hi });
+            let a = self.f.vreg(Cls::I);
+            self.emit(Inst::SlotAddr(a, s));
+            self.emit(Inst::Store(Mem::Int(8, false), a, 0, idx));
+        }
+    }
+
     fn bounds_check(&mut self, idx: VReg, len: VReg) {
         let c = self.f.vreg(Cls::I);
         self.emit(Inst::ICmp(Cond::Lt, false, c, idx, len));
@@ -7031,7 +7140,7 @@ impl<'a> Lcx<'a> {
         let at = self.body_ty(a);
         let (mut pl, mut pt) = self.lower_place(a);
         // autoderef recorded by type checking (Vec<T> -> [T], String -> str, &&[T] ..)
-        let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
+        let derefs = self.b.index_derefs(e.0);
         for k in 0..derefs {
             let (a2, b2) = self.deref_place(e.0, k, pl, pt);
             pl = a2;
@@ -7363,33 +7472,33 @@ impl<'a> Lcx<'a> {
 
     fn popcount64(&mut self, x: VReg) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::IBit(crate::rir::BitOp::Popcnt, d, x));
+        self.emit(Inst::IBit(relax_backend::rir::BitOp::Popcnt, d, x));
         d
     }
 
     /// leading zeros of a 64-bit value (64 for 0)
     fn clz64(&mut self, x: VReg) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::IBit(crate::rir::BitOp::Clz, d, x));
+        self.emit(Inst::IBit(relax_backend::rir::BitOp::Clz, d, x));
         d
     }
 
     /// trailing zeros of a 64-bit value (64 for 0)
     fn ctz64(&mut self, x: VReg) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::IBit(crate::rir::BitOp::Ctz, d, x));
+        self.emit(Inst::IBit(relax_backend::rir::BitOp::Ctz, d, x));
         d
     }
 
     fn rev64(&mut self, x: VReg) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::IBit(crate::rir::BitOp::Rev, d, x));
+        self.emit(Inst::IBit(relax_backend::rir::BitOp::Rev, d, x));
         d
     }
 
     fn bswap64(&mut self, x: VReg) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::IBit(crate::rir::BitOp::Bswap, d, x));
+        self.emit(Inst::IBit(relax_backend::rir::BitOp::Bswap, d, x));
         d
     }
 
@@ -8159,6 +8268,18 @@ impl<'a> Lcx<'a> {
                 v.truncate(n);
                 Val::L(v)
             }
+            (TyKind::Int(_), TyKind::Ptr(..)) if crate::web::BASE != 0 && self.int_ty(from).bits == 32 && self.u.prog.session.options.check_target == crate::options::CheckTarget::Web => {
+                // the web target: a 32-bit integer cast to a pointer is a wasm address, the
+                // offset into the linear memory's 4 GB window (web.rs)
+                let x = if self.int_ty(from).signed {
+                    let z = self.f.vreg(Cls::I);
+                    self.emit(Inst::IBinI(IOp::And, U64, z, x, 0xffff_ffff));
+                    z
+                } else { x };
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::IBinI(IOp::Or, U64, d, x, crate::web::BASE as i64));
+                Val::L(vec![d])
+            }
             (TyKind::FnPtr(..), _) | (TyKind::Int(_), TyKind::Ptr(..)) => Val::L(v),
             _ => Val::L(v),
         }
@@ -8352,6 +8473,27 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// A struct update base that names memory the update does not own: a place reached through a
+    /// reference or raw pointer (`..*self`, `..self.layout`, `..v[i]`) or a static. Its remaining
+    /// fields are copied out (typeck requires them Copy: moving out of a borrow is E0507) and nothing
+    /// of it is dropped; only a value expression's temporary owns what the update leaves behind.
+    fn base_is_borrowed_place(&self, e: ExprId) -> bool {
+        match &self.ast().expr(e).kind {
+            ExprKind::Paren(x) => self.base_is_borrowed_place(*x),
+            ExprKind::Path(_) => self.is_place_expr(e),
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                // auto-deref through a reference makes the projection a borrowed place
+                let derefs = self.b.field_idx.get(&e.0).map_or(0, |&(d, _)| d);
+                (derefs > 0 && self.box_inner(self.body_ty(*x)).is_none()) || self.base_is_borrowed_place(*x)
+            }
+            // `v[i]` through the Index trait is `*v.index(i)`: borrowed; an array's element is part of the array
+            ExprKind::Index(x, _) => self.base_is_borrowed_place(*x) || !matches!(self.kind_ref(self.body_ty(*x)), TyKind::Array(..)),
+            // `*r` of a reference or pointer: borrowed; `*b` of a Box temporary owns its contents
+            ExprKind::Unary(UnOp::Deref, x) => self.box_inner(self.body_ty(*x)).is_none() || self.base_is_borrowed_place(*x),
+            _ => false,
+        }
+    }
+
     fn is_place_expr(&self, e: ExprId) -> bool {
         match &self.ast().expr(e).kind {
             // statics are places: borrowed in place (`STATIC.method()`), never copied or dropped
@@ -8364,6 +8506,50 @@ impl<'a> Lcx<'a> {
             ExprKind::Paren(x) => self.is_place_expr(*x),
             _ => false,
         }
+    }
+
+    /// The way the `Branch` that ends block `b` (to `tb` / `eb`) goes when its condition is a
+    /// constant computed in that block from constants (a const parameter's value, comparisons,
+    /// negation); None when it is not known.
+    fn known_branch(&self, b: u32, tb: u32, eb: u32) -> Option<bool> {
+        let blk = self.f.blocks.get(b as usize)?;
+        let Term::Branch(c, t, e) = blk.term else { return None };
+        if (t, e) != (tb, eb) { return None; }
+        // A register is a constant only if the whole function writes it exactly once (RIR
+        // registers are not SSA: a loop or a join may assign the same one again); the walk goes
+        // only through such registers.
+        fn value(f: &Func, insts: &[&Inst], writes: &dyn Fn(VReg) -> u32, used: &mut Vec<VReg>, v: VReg, depth: u32) -> Option<i128> {
+            if depth > 8 || writes(v) != 1 { return None; }
+            used.push(v);
+            let def = insts.iter().rev().copied().find(|i| matches!(i, Inst::Iconst(d, _) | Inst::Mov(d, _) | Inst::ICmpI(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) if *d == v))?;
+            match def {
+                Inst::Iconst(_, k) => Some(*k as i128),
+                Inst::Mov(_, a) => value(f, insts, writes, used, *a, depth + 1),
+                Inst::ICmpI(cond, signed, _, a, k) => {
+                    let (x, k) = (value(f, insts, writes, used, *a, depth + 1)?, *k as i128);
+                    Some(cmp(*cond, *signed, x, k) as i128)
+                }
+                Inst::ICmp(cond, signed, _, a, b) => {
+                    let (x, y) = (value(f, insts, writes, used, *a, depth + 1)?, value(f, insts, writes, used, *b, depth + 1)?);
+                    Some(cmp(*cond, *signed, x, y) as i128)
+                }
+                _ => None,
+            }
+        }
+        fn cmp(c: Cond, signed: bool, x: i128, y: i128) -> bool {
+            let (x, y) = if signed { (x as i64 as i128, y as i64 as i128) } else { (x as u64 as i128, y as u64 as i128) };
+            match c { Cond::Eq => x == y, Cond::Ne => x != y, Cond::Lt => x < y, Cond::Le => x <= y, Cond::Gt => x > y, Cond::Ge => x >= y }
+        }
+        // Only under a check (the post-monomorphization walk): RIR registers are not SSA, so a
+        // definition found by search is a proof only within the branch's own block; the code a
+        // run executes is lowered as written.
+        if !self.fold { return None; }
+        let local: Vec<&Inst> = self.entry_inits.iter().chain(blk.insts.iter()).collect();
+        let writes = |v: VReg| -> u32 { rir_writes(&self.f, &self.entry_inits, v) };
+        let mut used = Vec::new();
+        let known = value(&self.f, &local, &writes, &mut used, c, 0).map(|k| k != 0);
+        if known.is_some() { self.fold_regs.borrow_mut().extend(used); }
+        known
     }
 
     fn lower_if(&mut self, c: ExprId, then: BlockId, els: Option<ExprId>, t: TyId) -> Val {
@@ -8389,13 +8575,23 @@ impl<'a> Lcx<'a> {
         }
         self.lower_cond(c, tb, eb);
         self.cond_rescope = saved_rescope;
+        // rustc_mir_transform SimplifyConstCondition: a branch on a constant (`if N != 0` once the
+        // const parameter has its value) is taken one way, and its dead successor is not
+        // lowered -- what it names (a constant that cannot be evaluated, a closure) is never
+        // instantiated, as rustc's monomorphization collector never sees it
+        let known = if let_scope { None } else { self.known_branch(self.cur, tb, eb) };
         self.switch(tb);
         // the body of an `if` and its `else` block are temporary scopes (Reference
         // destructors.scope.temporary: "The body of an if ... expression", "The else block")
         let mark = self.stmt_temps.len();
-        let v = self.lower_block(then);
-        if !self.is_never(t) {
-            self.write_place(&res, t, v);
+        if known == Some(false) {
+            self.term(Term::Unreachable);
+            self.dead();
+        } else {
+            let v = self.lower_block(then);
+            if !self.is_never(t) {
+                self.write_place(&res, t, v);
+            }
         }
         self.drop_stmt_temps_from(mark);
         if let_scope {
@@ -8414,7 +8610,10 @@ impl<'a> Lcx<'a> {
             self.scope_marks.truncate(depth);
             self.tail_marks.truncate(depth);
         }
-        if let Some(x) = els {
+        if known == Some(true) {
+            self.term(Term::Unreachable);
+            self.dead();
+        } else if let Some(x) = els {
             let mark = self.stmt_temps.len();
             let v = self.lower_expr_coerced(x, t);
             if !self.is_never(t) {
@@ -8496,6 +8695,34 @@ impl<'a> Lcx<'a> {
     /// The matched place and its owner for move tracking; with a temporary owner
     /// (MatchRoot::Temp) also the temporary for the caller to register (its address and type)
     /// and the scrutinee's field path in it.
+    /// `matches!(x, pat if guard)` / `assert_matches!`: core expands both to a `match` with the
+    /// pattern's arm and a fallback, so `x` is a match scrutinee like `lower_match`'s (rustc
+    /// region.rs: no terminating scope; an rvalue -- or the base of a field of one, such as the
+    /// guard in `matches!(m.lock().unwrap().phase, ..)` -- is a temporary of the enclosing
+    /// statement, dropped at its end), and the pattern's bindings and the guard's temporaries
+    /// belong to the arm. Returns the scrutinee place and the blocks entered on a match (arm
+    /// left) and on no match / a failed guard; the current block is dead afterwards.
+    fn lower_macro_match(&mut self, x: ExprId, pat: Option<PatId>, guard: Option<ExprId>) -> (Place, TyId, u32, u32) {
+        self.want_mut = pat.map_or(false, |p| self.pat_binds_mut_ref(p));
+        let (place, pt, root, temp) = self.scrutinee(x);
+        self.want_mut = false;
+        if let (Some(MatchRoot::Temp(fl)), Some(tp)) = (root, &temp) {
+            self.stmt_temps.push((tp.addr, tp.ty, Some(fl)));
+        }
+        let ok = self.f.block();
+        let fail = self.f.block();
+        if let Some(p) = pat {
+            let gmark = self.stmt_temps.len();
+            let combos = if guard.is_some() { self.or_combos(p, 1024) } else { None };
+            self.enter_arm(x, p, guard, combos, true, &place, pt, root, &temp, fail, gmark);
+            self.drop_stmt_temps_from(gmark);
+            self.pop_scope();
+            self.pop_scope();
+        }
+        self.goto(ok);
+        (place, pt, ok, fail)
+    }
+
     fn scrutinee(&mut self, x: ExprId) -> (Place, TyId, Option<MatchRoot>, Option<ScrutTemp>) {
         let xt = self.body_ty(x);
         // `*tmp_box` of a temporary Box is the owned contents (temp_box_deref), not a place:
@@ -8534,6 +8761,121 @@ impl<'a> Lcx<'a> {
                 return (place, xt, root, Some(ScrutTemp { addr: a, ty: xt, path: Vec::new() }));
             }
             (place, xt, root, None)
+        }
+    }
+
+    /// Enters a match arm whose pattern `pat` is tested against the scrutinee `place: pt` (unless
+    /// `test` is false: a decision tree already did), failing to `next`: binds the pattern (moves
+    /// out of the scrutinee tracked through `root` / `temp`) and runs the guard. Leaves two
+    /// scopes pushed -- the pattern's bindings, then the guard's -- with the current block at the
+    /// arm body; the caller pops them (see `lower_match`). `gmark`: the arm's first statement
+    /// temporary. `combos`: the guarded arm's or-alternative candidates (`or_combos`).
+    #[allow(clippy::too_many_arguments)]
+    fn enter_arm(&mut self, x: ExprId, pat: PatId, guard: Option<ExprId>, combos: Option<Vec<Vec<(u32, usize)>>>, test: bool, place: &Place, pt: TyId, root: Option<MatchRoot>, temp: &Option<ScrutTemp>, next: u32, gmark: usize) {
+        if let (Some(g), Some(combos)) = (guard, combos) {
+            // a guarded arm (rustc match lowering): each or-alternative combination is a
+            // candidate of its own -- test it, bind (moves deferred), run the guard; a
+            // failing guard tries the next alternative, then the next arm, with the
+            // scrutinee untouched
+            let body = self.f.block();
+            let arm_depth = self.scopes.len();
+            self.push_scope();
+            let mut lis = Vec::new();
+            self.pat_binding_locals(pat, &mut lis);
+            for li in &lis {
+                self.local_place(*li);
+                // the pattern's bindings belong to the arm scope (registered before the
+                // guard's scope is pushed)
+                let lt = self.monomorphize(self.b.locals[*li as usize].ty);
+                if self.needs_drop_glue(lt) && !self.foreign[*li as usize] {
+                    self.flag_of(*li);
+                }
+            }
+            // the guard's `let` bindings: a scope of their own, dropped before the guard's
+            // temporaries and the pattern's bindings (rustc if-let guard scopes)
+            self.push_scope();
+            let n = combos.len();
+            for (ci, combo) in combos.into_iter().enumerate() {
+                let alt_fail = if ci + 1 == n { next } else { self.f.block() };
+                self.or_force = combo.into_iter().collect();
+                self.test_pat(pat, place, pt, alt_fail);
+                let saved = (self.match_root, self.pat_path.take());
+                self.match_root = root;
+                self.pat_path = self.root_path(x, root, temp);
+                self.defer_moves = Some(Vec::new());
+                self.bind_pat_place(pat, place, pt);
+                let pend = self.defer_moves.take().unwrap_or_default();
+                self.match_root = saved.0;
+                self.pat_path = saved.1;
+                self.or_force.clear();
+                let gok = self.f.block();
+                let gfail = self.f.block();
+                // a guard is a temporary scope: its `let` scrutinee temporaries drop with its
+                // bindings, in creation order
+                let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
+                self.lower_cond(g, gok, gfail);
+                self.cond_rescope = saved_rescope;
+                // (an if-let guard's temporaries: dropped when it fails, else at the
+                // arm's end)
+                // guard failed: the bindings were copies, nothing was moved; the guard's
+                // own `let` bindings drop here
+                self.switch(gfail);
+                for li in &lis {
+                    if let Some(f) = self.drop_flags[*li as usize] {
+                        self.emit(Inst::Iconst(f, 0));
+                    }
+                }
+                self.drop_scopes_from(arm_depth);
+                self.clear_scope_temp_flags(arm_depth + 1);
+                self.drop_stmt_temps_here(gmark);
+                self.goto(alt_fail);
+                self.switch(gok);
+                for mv in pend {
+                    self.do_move(mv);
+                }
+                self.goto(body);
+                if ci + 1 < n {
+                    self.switch(alt_fail);
+                }
+            }
+            self.switch(body);
+        } else {
+            if test {
+                self.test_pat(pat, place, pt, next);
+            }
+            let arm_depth = self.scopes.len();
+            self.push_scope();
+            let saved = (self.match_root, self.pat_path.take());
+            self.match_root = root;
+            self.pat_path = self.root_path(x, root, temp);
+            // (a guarded arm here has too many or-candidates to try one by one: its moves
+            // happen before the guard, as a dynamic or-dispatch has no single move set; a
+            // failing guard then leaks the moved parts, never drops them twice)
+            self.bind_pat_place(pat, place, pt);
+            self.match_root = saved.0;
+            self.pat_path = saved.1;
+            // the guard's scope (see the candidate path above)
+            self.push_scope();
+            if let Some(g) = guard {
+                let body = self.f.block();
+                let gfail = self.f.block();
+                let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
+                self.lower_cond(g, body, gfail);
+                self.cond_rescope = saved_rescope;
+                self.switch(gfail);
+                let mut lis = Vec::new();
+                self.pat_binding_locals(pat, &mut lis);
+                for li in &lis {
+                    if let Some(f) = self.drop_flags[*li as usize] {
+                        self.emit(Inst::Iconst(f, 0));
+                    }
+                }
+                self.drop_scopes_from(arm_depth);
+                self.clear_scope_temp_flags(arm_depth + 1);
+                self.drop_stmt_temps_here(gmark);
+                self.goto(next);
+                self.switch(body);
+            }
         }
     }
 
@@ -8606,120 +8948,62 @@ impl<'a> Lcx<'a> {
         }
         let join = self.f.block();
         let res = self.result_place(t);
-        for arm in arms {
-            if !self.active(arm.attrs) {
-                continue;
+        let live: Vec<Arm> = arms.iter().filter(|a| self.active(a.attrs)).copied().collect();
+        // the or-alternative combinations of each guarded arm (see below)
+        let combos: Vec<Option<Vec<Vec<(u32, usize)>>>> = live.iter().map(|a| if a.guard.is_some() { self.or_combos(a.pat, 1024) } else { None }).collect();
+        let forced: Vec<bool> = live.iter().zip(&combos).map(|(a, c)| a.guard.is_some() && c.is_some()).collect();
+        // the arms' tests as a decision tree (match_tree.rs): each arm is then entered where the
+        // tree leaves it, and tested in order only after a failed guard or an undecided pattern
+        let mut tree: Option<match_tree::Tree> = None;
+        if live.len() >= 3 {
+            let e: Vec<u32> = (0..=live.len()).map(|_| self.f.block()).collect();
+            let post: Vec<u32> = (0..live.len()).map(|_| self.f.block()).collect();
+            let mut tr = match_tree::Tree::new(e, post);
+            let pats: Vec<PatId> = live.iter().map(|a| a.pat).collect();
+            if let Some(root) = self.match_tree(&pats, &forced, &mut tr, &place, pt) {
+                self.goto(root);
+                tree = Some(tr);
             }
-            let next = self.f.block();
+        }
+        // which entries the tree (and the arms that fall through to later ones) reach
+        let (mut need_e, mut need_post) = (vec![true; live.len()], vec![true; live.len()]);
+        if let Some(tr) = &tree {
+            need_e = tr.used_e.clone();
+            need_post = tr.used_post.clone();
+            for k in 0..live.len() {
+                if k > 0 && (need_e[k - 1] || (live[k - 1].guard.is_some() && need_post[k - 1])) {
+                    need_e[k] = true;
+                }
+                if need_e[k] && !forced[k] {
+                    need_post[k] = true;
+                }
+            }
+        }
+        for (k, arm) in live.iter().enumerate() {
+            let tree_mode = tree.is_some();
+            let combos_path = forced[k];
+            let next = match &tree {
+                Some(tr) => tr.e[k + 1],
+                None => self.f.block(),
+            };
+            if let Some(tr) = &tree {
+                if !need_e[k] && !need_post[k] {
+                    continue;
+                }
+                if need_e[k] {
+                    self.switch(tr.e[k]);
+                    if !combos_path {
+                        self.test_pat(arm.pat, &place, pt, next);
+                        self.goto(tr.post[k]);
+                    }
+                }
+                if !combos_path {
+                    self.switch(tr.post[k]);
+                }
+            }
             // the guard's temporaries (if-let guards) belong to the arm
             let gmark = self.stmt_temps.len();
-            let combos = match arm.guard {
-                Some(_) => self.or_combos(arm.pat, 1024),
-                None => None,
-            };
-            if let (Some(g), Some(combos)) = (arm.guard, combos) {
-                // a guarded arm (rustc match lowering): each or-alternative combination is a
-                // candidate of its own -- test it, bind (moves deferred), run the guard; a
-                // failing guard tries the next alternative, then the next arm, with the
-                // scrutinee untouched
-                let body = self.f.block();
-                let arm_depth = self.scopes.len();
-                self.push_scope();
-                let mut lis = Vec::new();
-                self.pat_binding_locals(arm.pat, &mut lis);
-                for li in &lis {
-                    self.local_place(*li);
-                    // the pattern's bindings belong to the arm scope (registered before the
-                    // guard's scope is pushed)
-                    let lt = self.monomorphize(self.b.locals[*li as usize].ty);
-                    if self.needs_drop_glue(lt) && !self.foreign[*li as usize] {
-                        self.flag_of(*li);
-                    }
-                }
-                // the guard's `let` bindings: a scope of their own, dropped before the guard's
-                // temporaries and the pattern's bindings (rustc if-let guard scopes)
-                self.push_scope();
-                let n = combos.len();
-                for (ci, combo) in combos.into_iter().enumerate() {
-                    let alt_fail = if ci + 1 == n { next } else { self.f.block() };
-                    self.or_force = combo.into_iter().collect();
-                    self.test_pat(arm.pat, &place, pt, alt_fail);
-                    let saved = (self.match_root, self.pat_path.take());
-                    self.match_root = root;
-                    self.pat_path = self.root_path(x, root, &temp);
-                    self.defer_moves = Some(Vec::new());
-                    self.bind_pat_place(arm.pat, &place, pt);
-                    let pend = self.defer_moves.take().unwrap_or_default();
-                    self.match_root = saved.0;
-                    self.pat_path = saved.1;
-                    self.or_force.clear();
-                    let gok = self.f.block();
-                    let gfail = self.f.block();
-                    // a guard is a temporary scope: its `let` scrutinee temporaries drop with its
-                    // bindings, in creation order
-                    let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
-                    self.lower_cond(g, gok, gfail);
-                    self.cond_rescope = saved_rescope;
-                    // (an if-let guard's temporaries: dropped when it fails, else at the
-                    // arm's end)
-                    // guard failed: the bindings were copies, nothing was moved; the guard's
-                    // own `let` bindings drop here
-                    self.switch(gfail);
-                    for li in &lis {
-                        if let Some(f) = self.drop_flags[*li as usize] {
-                            self.emit(Inst::Iconst(f, 0));
-                        }
-                    }
-                    self.drop_scopes_from(arm_depth);
-                    self.clear_scope_temp_flags(arm_depth + 1);
-                    self.drop_stmt_temps_here(gmark);
-                    self.goto(alt_fail);
-                    self.switch(gok);
-                    for mv in pend {
-                        self.do_move(mv);
-                    }
-                    self.goto(body);
-                    if ci + 1 < n {
-                        self.switch(alt_fail);
-                    }
-                }
-                self.switch(body);
-            } else {
-                self.test_pat(arm.pat, &place, pt, next);
-                let arm_depth = self.scopes.len();
-                self.push_scope();
-                let saved = (self.match_root, self.pat_path.take());
-                self.match_root = root;
-                self.pat_path = self.root_path(x, root, &temp);
-                // (a guarded arm here has too many or-candidates to try one by one: its moves
-                // happen before the guard, as a dynamic or-dispatch has no single move set; a
-                // failing guard then leaks the moved parts, never drops them twice)
-                self.bind_pat_place(arm.pat, &place, pt);
-                self.match_root = saved.0;
-                self.pat_path = saved.1;
-                // the guard's scope (see the candidate path above)
-                self.push_scope();
-                if let Some(g) = arm.guard {
-                    let body = self.f.block();
-                    let gfail = self.f.block();
-                    let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
-                    self.lower_cond(g, body, gfail);
-                    self.cond_rescope = saved_rescope;
-                    self.switch(gfail);
-                    let mut lis = Vec::new();
-                    self.pat_binding_locals(arm.pat, &mut lis);
-                    for li in &lis {
-                        if let Some(f) = self.drop_flags[*li as usize] {
-                            self.emit(Inst::Iconst(f, 0));
-                        }
-                    }
-                    self.drop_scopes_from(arm_depth);
-                    self.clear_scope_temp_flags(arm_depth + 1);
-                    self.drop_stmt_temps_here(gmark);
-                    self.goto(next);
-                    self.switch(body);
-                }
-            }
+            self.enter_arm(x, arm.pat, arm.guard, combos[k].clone(), !tree_mode, &place, pt, root, &temp, next, gmark);
             let mark = self.stmt_temps.len();
             let v = self.lower_expr_coerced(arm.body, t);
             if !self.is_never(t) {
@@ -8732,9 +9016,14 @@ impl<'a> Lcx<'a> {
             self.drop_stmt_temps_from(gmark);
             self.pop_scope();
             self.goto(join);
-            self.switch(next);
+            if !tree_mode {
+                self.switch(next);
+            }
         }
         // no arm matched: unreachable for exhaustive matches
+        if let Some(tr) = &tree {
+            self.switch(tr.e[live.len()]);
+        }
         self.term(Term::Unreachable);
         self.switch(join);
         if self.is_never(t) {
@@ -8743,6 +9032,14 @@ impl<'a> Lcx<'a> {
             return self.unit();
         }
         self.read_place(&res, t)
+    }
+
+    /// A loop head in a checked program counts one iteration of the constant being evaluated
+    /// (see Options::const_fuel).
+    fn const_fuel_tick(&mut self) {
+        if !self.u.prog.session.options.const_fuel { return; }
+        let rt = self.u.syms.intern(crate::syms::SymKind::Rt("const_fuel"), const_fuel_addr());
+        self.emit(Inst::Call(Callee::Host(rt), Vec::new(), Vec::new()));
     }
 
     fn lower_for(&mut self, p: PatId, it: ExprId, b: BlockId, label: Option<Ident>) {
@@ -8773,6 +9070,42 @@ impl<'a> Lcx<'a> {
         p
     }
 
+    /// SPEC-V: whether a call with these arguments could pass aliasing pointers to a `noalias`
+    /// parameter: a `&mut` of a sized `Unpin` type (the parameters lowered with `noalias`) and at least
+    /// one other argument that can hold a pointer. Two paths to the same bytes need two such values.
+    fn alias_prone(&mut self, args: &[(Val, TyId)]) -> bool {
+        let mut muts = false;
+        let mut holders = 0;
+        for (_, t) in args {
+            if let TyKind::Ref(true, inner, _) = self.kind_ref(*t).clone() {
+                if !self.unsized_ty(inner) && self.u.is_unpin(inner) { muts = true; }
+            }
+            if self.may_hold_pointer(*t, 0) { holders += 1; }
+        }
+        muts && holders >= 2
+    }
+
+    fn may_hold_pointer(&mut self, t: TyId, depth: u32) -> bool {
+        match self.kind_ref(t).clone() {
+            TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Never | TyKind::Str => false,
+            TyKind::Tuple(v) => {
+                let items: Vec<TyId> = self.u.tcx.tys.list(v).to_vec();
+                items.into_iter().any(|x| self.may_hold_pointer(x, depth + 1))
+            }
+            TyKind::Array(e, _) => depth < 4 && self.may_hold_pointer(e, depth + 1),
+            TyKind::Adt(d, args, _) if depth < 4 => {
+                if self.layout(t).size == 0 { return false; }
+                let u = self.u;
+                let fields: Vec<TyId> = match u.tcx.adts.get(&d) {
+                    Some(a) => a.variants.iter().flat_map(|v| v.fields.iter().map(|f| u.tcx.tys.subst_erasing_regions(f.ty, u.tcx.tys.list(args)))).collect(),
+                    None => return true,
+                };
+                fields.into_iter().any(|f| self.may_hold_pointer(f, depth + 1))
+            }
+            _ => true,
+        }
+    }
+
     /// Emits a call with Relax's ABI. Returns the result value.
     fn emit_call(&mut self, callee: Callee, mut args: Vec<(Val, TyId)>, ret: TyId) -> Val {
         let def = match &callee {
@@ -8789,6 +9122,9 @@ impl<'a> Lcx<'a> {
         if def.is_some_and(|d| self.u.tcx.fn_item_sig(&self.u.prog, d).is_some_and(|s| s.header.abi == crate::types::Abi::RustCall)) {
             self.spread_tuple_argument(&mut args);
         }
+        // SPEC-V: unverified code may break the borrow rules; the callee's `noalias` code must not
+        // see such arguments
+        let to_twin = self.plain_calls && matches!(callee, Callee::Fn(_)) && self.alias_prone(&args);
         // C ABI calls: every aggregate goes by pointer to a private copy, an aggregate
         // result through a result slot; the backend does the C placement (CSig)
         let csig = match &callee {
@@ -8831,7 +9167,7 @@ impl<'a> Lcx<'a> {
         }
         for (v, t) in args.into_iter() {
             let l = self.layout(t);
-            let c_agg = csig.is_some() && l.size > 0 && matches!(crate::cabi::c_arg(self.u, t), crate::rir::CArg::Agg(_));
+            let c_agg = csig.is_some() && l.size > 0 && matches!(crate::cabi::c_arg(self.u, t), relax_backend::rir::CArg::Agg(_));
             match l.leaves {
                 Some(_) if !c_agg => {
                     let r = self.to_leaves(v, t);
@@ -8872,6 +9208,18 @@ impl<'a> Lcx<'a> {
             let l = self.caller_location_val();
             abi_args.push(l);
         }
+        // (the twin has the original's ABI, hence its result slot and implicit caller location)
+        let callee = match callee {
+            Callee::Fn(id) if to_twin => {
+                let twin = self.u.plain_twin(id);
+                if twin != id { self.f.plain_calls = true; }
+                if sret.is_some() && !self.f.sret_callees.contains(&twin) {
+                    self.f.sret_callees.push(twin);
+                }
+                Callee::Fn(twin)
+            }
+            c => c,
+        };
         self.emit(Inst::Call(callee, abi_args, rets.clone()));
         if self.is_never(ret) {
             self.term(Term::Unreachable);
@@ -9024,7 +9372,7 @@ impl<'a> Lcx<'a> {
         // a callable reached as a place (behind references / smart pointers, or a `dyn Fn`
         // place however it was reached: `(*raw_ptr)(..)`, `(*boxed)(..)`) is called through
         // the place (rustc: the overloaded call takes the callee place by reference)
-        let call_derefs = self.b.call_derefs.get(&e.0).copied().or_else(|| if matches!(self.kind_ref(ft), TyKind::Dyn(..)) { Some(0) } else { None });
+        let call_derefs = self.b.call_derefs(e.0).or_else(|| if matches!(self.kind_ref(ft), TyKind::Dyn(..)) { Some(0) } else { None });
         if let Some(n) = call_derefs {
             let (mut pl, mut pt) = self.lower_place(f);
             for k in 0..n {
@@ -9254,7 +9602,7 @@ impl<'a> Lcx<'a> {
     /// `core::intrinsics_atomic::*`. Orderings are `Ordering as u8` (0 Relaxed, 1 Release,
     /// 2 Acquire, 3 AcqRel, 4 SeqCst); one that is not a constant here becomes SeqCst.
     fn atomic_intrinsic(&mut self, name: &str, gargs: &[TyId], vals: &[(Val, TyId)]) -> Val {
-        use crate::rir::{AtomOrd, RmwOp};
+        use relax_backend::rir::{AtomOrd, RmwOp};
         let mut a: Vec<VReg> = Vec::new();
         for (v, ty) in vals {
             let r = self.to_leaves(v.clone(), *ty);
@@ -9613,7 +9961,7 @@ impl<'a> Lcx<'a> {
             // merges, forwards or reorders. A larger value: a volatile access of its first byte
             // keeps the access (and its fault) in place, the value moves as an ordinary read/write.
             "volatile_load" | "volatile_store" => {
-                use crate::rir::AtomOrd;
+                use relax_backend::rir::AtomOrd;
                 let p = leaf(self, 0);
                 let g = g0?;
                 let size = self.layout(g).size;
@@ -10088,26 +10436,26 @@ impl<'a> Lcx<'a> {
                         }
                         40..=53 | 60..=63 => {
                             let fop = match op {
-                                40 => VOp::FAddIntel,
-                                60 => VOp::FAddNeon,
-                                41 => VOp::FSubIntel,
-                                61 => VOp::FSubNeon,
-                                42 => VOp::FMulIntel,
-                                62 => VOp::FMulNeon,
-                                43 => VOp::FDivIntel,
-                                63 => VOp::FDivNeon,
-                                44 => VOp::FMinLt,
-                                45 => VOp::FMaxGt,
-                                46 => VOp::FCmp(Cond::Eq),
-                                47 => VOp::FCmp(Cond::Ne),
-                                48 => VOp::FCmp(Cond::Lt),
-                                49 => VOp::FCmp(Cond::Le),
-                                50 => VOp::FCmp(Cond::Gt),
-                                52 => VOp::FMinNeon,
-                                53 => VOp::FMaxNeon,
-                                _ => VOp::FCmp(Cond::Ge),
+                                40 => VX::FAdd(VW::S, NanBits::Intel),
+                                60 => VX::FAdd(VW::S, NanBits::Neon),
+                                41 => VX::FSub(VW::S, NanBits::Intel),
+                                61 => VX::FSub(VW::S, NanBits::Neon),
+                                42 => VX::FMul(VW::S, NanBits::Intel),
+                                62 => VX::FMul(VW::S, NanBits::Neon),
+                                43 => VX::FDiv(VW::S, NanBits::Intel),
+                                63 => VX::FDiv(VW::S, NanBits::Neon),
+                                44 => VX::FMinLt(VW::S),
+                                45 => VX::FMaxGt(VW::S),
+                                46 => VX::FCmp(Cond::Eq, VW::S),
+                                47 => VX::FCmp(Cond::Ne, VW::S),
+                                48 => VX::FCmp(Cond::Lt, VW::S),
+                                49 => VX::FCmp(Cond::Le, VW::S),
+                                50 => VX::FCmp(Cond::Gt, VW::S),
+                                52 => VX::FMinNeon(VW::S),
+                                53 => VX::FMaxNeon(VW::S),
+                                _ => VX::FCmp(Cond::Ge, VW::S),
                             };
-                            self.emit(Inst::VBin(fop, d, a, b));
+                            self.emit(Inst::VX(fop, d, a, b));
                             return self.vx_result(d, t);
                         }
                         _ => {
@@ -10137,11 +10485,11 @@ impl<'a> Lcx<'a> {
                         5 => VX::BytesShrI(k),
                         6 => VX::BytesShlI(k),
                         7 | 9 => {
-                            self.emit(Inst::VUn(if op == 7 { VUn::FSqrtIntel } else { VUn::FSqrtNeon }, d, a));
+                            self.emit(Inst::VX(VX::FSqrt(VW::S, if op == 7 { NanBits::Intel } else { NanBits::Neon }), d, a, a));
                             return self.vx_result(d, t);
                         }
                         8 => {
-                            self.emit(Inst::VUn(VUn::FAbs, d, a));
+                            self.emit(Inst::VX(VX::FAbs(VW::S), d, a, a));
                             return self.vx_result(d, t);
                         }
                         _ => {
@@ -10173,6 +10521,11 @@ impl<'a> Lcx<'a> {
         let name = self.u.prog.name(d).to_string();
         if name.starts_with("vx_") {
             return Some(self.vx_intrinsic(&name, vals, t));
+        }
+        if name.starts_with("simd_") {
+            if let Some(v) = self.simd_intrinsic(&name, vals, t) {
+                return Some(v);
+            }
         }
         if name.starts_with("atomic_") || name == "spin_loop_hint" {
             return Some(self.atomic_intrinsic(&name, gargs, vals));
@@ -10231,6 +10584,14 @@ impl<'a> Lcx<'a> {
             "from_bits" => {
                 let d = self.f.vreg(cls);
                 self.emit(Inst::Conv(Conv::BitsToF(f64_), d, a[0]));
+                Some(Val::L(vec![d]))
+            }
+            "tls_block" => {
+                // intrinsics_rt::tls_block() -> *mut usize: this thread's thread-local block (word 0
+                // the domain base, word 1 the runtime's per-thread record): the inline TLS sequence
+                let d = self.f.vreg(Cls::I);
+                let sym = self.u.rs.tls_base;
+                self.emit(Inst::TlsAddr(d, sym));
                 Some(Val::L(vec![d]))
             }
             "str_as_bytes" => Some(Val::L(a)),
@@ -10508,7 +10869,7 @@ impl<'a> Lcx<'a> {
                 self.switch(ok);
                 self.unit()
             }
-            "debug_assert" | "debug_assert_eq" | "debug_assert_ne" => self.unit(),
+            "debug_assert" | "debug_assert_eq" | "debug_assert_ne" | "debug_assert_matches" => self.unit(),
             "assert_eq" | "assert_ne" => {
                 let a = mexprs[0];
                 let b2 = mexprs[1];
@@ -10572,23 +10933,60 @@ impl<'a> Lcx<'a> {
                 self.dead();
                 self.unit()
             }
-            "matches" => {
-                let x = mexprs[0];
-                let xt = self.body_ty(x);
-                let v = self.lower_expr(x);
-                let place = self.val_to_place(v);
-                let res = self.f.vreg(Cls::I);
-                let fail = self.f.block();
-                let join = self.f.block();
-                if let Some(p) = margs.pat {
-                    self.test_pat(p, &place, xt, fail);
-                    self.bind_pat_place(p, &place, xt);
-                    if let Some(g) = margs.guard {
-                        let ok = self.f.block();
-                        self.lower_cond(g, ok, fail);
-                        self.switch(ok);
+            "assert_matches" => {
+                // rustc core panicking::assert_matches_failed: the value in Debug and the
+                // pattern's source text
+                let (place, xt, ok, bad) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
+                self.switch(bad);
+                let v = self.read_place(&place, xt);
+                // the pattern's tokens: after the first top-level comma up to its `if` / comma
+                let u = self.u;
+                let src = u.prog.src(self.b.file);
+                let mut depth = 0;
+                let mut start = None;
+                let mut end = m.toks.hi as usize;
+                let mut i = m.toks.lo as usize;
+                while i < m.toks.hi as usize {
+                    match src.tok(i).kind {
+                        crate::lexer::T::OpenParen | crate::lexer::T::OpenBracket | crate::lexer::T::OpenBrace => depth += 1,
+                        crate::lexer::T::CloseParen | crate::lexer::T::CloseBracket | crate::lexer::T::CloseBrace => depth -= 1,
+                        crate::lexer::T::Comma if depth == 0 => {
+                            if start.is_none() {
+                                start = Some(i + 1);
+                            } else {
+                                end = i;
+                                break;
+                            }
+                        }
+                        crate::lexer::T::KwIf if depth == 0 && start.is_some() => {
+                            end = i;
+                            break;
+                        }
+                        _ => {}
                     }
+                    i += 1;
                 }
+                let pat_text = match start {
+                    Some(s) if s < end => self.src_text(src.tok(s).lo, src.tok(end - 1).hi).into_owned(),
+                    _ => String::new(),
+                };
+                self.fmt_lit("assertion `left matches right` failed");
+                if mexprs.len() > 1 {
+                    self.fmt_lit(": ");
+                    self.lower_fmt(e, &mexprs[1..]);
+                }
+                self.fmt_lit("\n  left: ");
+                self.fmt_value(v, xt, b'?');
+                self.fmt_lit(&format!("\n right: {}", pat_text));
+                self.panic_here("");
+                self.switch(ok);
+                self.unit()
+            }
+            "matches" => {
+                let (_, _, ok, fail) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
+                let res = self.f.vreg(Cls::I);
+                let join = self.f.block();
+                self.switch(ok);
                 self.emit(Inst::Iconst(res, 1));
                 self.goto(join);
                 self.switch(fail);
@@ -10858,7 +11256,7 @@ pub fn closure_map(_b: &Body) -> HashMap<u32, u32> {
 /// Compiler-generated helper functions per type. GLUE_DROP: `fn(p: *mut T)` runs T's Drop
 /// impl (if any) and then drops every field that needs it, in declaration order.
 /// Static `core::panic::Location { file, line, col }` data (memoized per site).
-pub fn location_const(u: &Unit, path: &str, line: u32, col: u32) -> crate::rir::Sym {
+pub fn location_const(u: &Unit, path: &str, line: u32, col: u32) -> relax_backend::rir::Sym {
     let a = location_addr(u, path, line, col);
     if a == 0 {
         return u.syms.intern(crate::syms::SymKind::Rt("null"), 0);
@@ -10884,7 +11282,10 @@ fn location_addr(u: &Unit, path: &str, line: u32, col: u32) -> u64 {
     }
     let shown = crate::builtins::file_macro_path(path);
     let path = shown.as_str();
-    let fa = u.lit_data(path.as_bytes());
+    // `file_bytes_with_nul` (rustc Location::file_as_c_str): the name plus its terminating nul
+    let mut file_bytes = path.as_bytes().to_vec();
+    file_bytes.push(0);
+    let fa = u.lit_data(&file_bytes);
     let mut blob = vec![0u8; lay.size as usize];
     let put = |blob: &mut Vec<u8>, off: u32, b: &[u8]| {
         let o = off as usize;
@@ -10893,7 +11294,7 @@ fn location_addr(u: &Unit, path: &str, line: u32, col: u32) -> u64 {
         }
     };
     put(&mut blob, lay.fields[0], &fa.to_le_bytes());
-    put(&mut blob, lay.fields[0] + 8, &(path.len() as u64).to_le_bytes());
+    put(&mut blob, lay.fields[0] + 8, &(file_bytes.len() as u64).to_le_bytes());
     put(&mut blob, lay.fields[1], &line.to_le_bytes());
     put(&mut blob, lay.fields[2], &col.to_le_bytes());
     // pointer words: the file name's bytes; the rest integers
@@ -10928,7 +11329,7 @@ pub fn takes_caller_loc(u: &Unit, id: u32) -> bool {
 /// array, the shim moves them out and writes the result to the result slot (or the caller's
 /// result address). A shim that caught a panic returns 1: its text is read through the crate's
 /// `__host_last_panic` and raised here as a Relax panic.
-pub fn bridge_func(u: &Unit, d: DefId, name: String, shim: crate::rir::Sym, last_panic: crate::rir::Sym) -> Option<Func> {
+pub fn bridge_func(u: &Unit, d: DefId, name: String, shim: relax_backend::rir::Sym, last_panic: relax_backend::rir::Sym) -> Option<Func> {
     let s = u.tcx.fn_sig(&u.prog, d).cloned()?;
     let ps: Vec<TyId> = s.params.iter().map(|p| u.tcx.normalize_erasing_late_bound_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), *p)).collect();
     let ret = u.tcx.normalize_erasing_late_bound_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), s.ret);
@@ -10936,7 +11337,7 @@ pub fn bridge_func(u: &Unit, d: DefId, name: String, shim: crate::rir::Sym, last
 }
 
 /// bridge_func for an explicit signature (a derived method of an opaque type).
-pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: crate::rir::Sym, last_panic: crate::rir::Sym) -> Func {
+pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: relax_backend::rir::Sym, last_panic: relax_backend::rir::Sym) -> Func {
     let mut f = Func::new(name, 0);
     let b = f.block();
     let rl = u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, ret);
@@ -11005,7 +11406,7 @@ pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: cra
     let out = f.vreg(Cls::I);
     let out_len = f.vreg(Cls::I);
     push(&mut f, bad, Inst::SlotAddr(out, out_slot));
-    push(&mut f, bad, Inst::IBinI(IOp::Add, crate::rir::I64, out_len, out, 8));
+    push(&mut f, bad, Inst::IBinI(IOp::Add, relax_backend::rir::I64, out_len, out, 8));
     let lp_sig = crate::cabi::c_sig(u, &[usize_, usize_], u.tcx.tys.unit, None, crate::types::Abi::C);
     push(&mut f, bad, Inst::Call(Callee::CHost(last_panic, Box::new(lp_sig)), vec![out, out_len], Vec::new()));
     let (mp, ml, z, site) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
@@ -11931,7 +12332,7 @@ fn rt_divrem128(mode: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> WideRet {
 /// leaves it), 3 + k suspended at point k. A poll with a null context (the coroutine dropped)
 /// runs the drops of its suspension point.
 fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String> {
-    use crate::regalloc::{term_uses, uses_defs};
+    use relax_backend::regalloc::{term_uses, uses_defs};
     // drop flags whose value is known where they are tested (a value moved out before a
     // suspension point: rustc's maybe-initialized analysis) -- the dead drop would keep the
     // value's slot saved across it
@@ -12677,7 +13078,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
                 Inst::Iconst(_, x) if (0..1 << 32).contains(x) => Some((4, false)),
                 Inst::ICmp(..) | Inst::ICmpI(..) | Inst::FCmp(..) => Some((1, false)),
                 // narrow integers are kept extended in registers
-                Inst::IBin(_, it, ..) | Inst::IBinI(_, it, ..) | Inst::INeg(it, ..) | Inst::INot(it, ..) | Inst::Conv(crate::rir::Conv::IntToInt(it), ..) if it.bits < 64 => Some((((it.bits + 7) / 8).max(1) as u8, it.signed)),
+                Inst::IBin(_, it, ..) | Inst::IBinI(_, it, ..) | Inst::INeg(it, ..) | Inst::INot(it, ..) | Inst::Conv(relax_backend::rir::Conv::IntToInt(it), ..) if it.bits < 64 => Some((((it.bits + 7) / 8).max(1) as u8, it.signed)),
                 _ => None,
             };
             for d in &ds {
@@ -12759,7 +13160,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
         }
     }
     let pos0 = f.blocks[0].pos.first().copied().unwrap_or(0);
-    let push = |b: &mut crate::rir::Block, i: Inst| {
+    let push = |b: &mut relax_backend::rir::Block, i: Inst| {
         b.insts.push(i);
         b.pos.push(pos0);
     };
@@ -12785,7 +13186,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
         pb.pos = ps;
         for (target, list) in [(resume, &mut resume_blocks), (cancel, &mut cancel_blocks)] {
             let nbk = f.block();
-            let mut b = crate::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(target), term_pos: pos0 };
+            let mut b = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(target), term_pos: pos0 };
             for &(v, x) in &const_at[k] {
                 push(&mut b, Inst::Iconst(v, x));
             }
@@ -12831,7 +13232,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
     }
     // the dispatcher becomes the entry; the old entry continues at `start`
     let start = f.block();
-    let old = std::mem::replace(&mut f.blocks[0], crate::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: pos0 });
+    let old = std::mem::replace(&mut f.blocks[0], relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: pos0 });
     f.blocks[start as usize] = old;
     for b in f.blocks.iter_mut() {
         b.term.map_succs(|t| if t == 0 { start } else { t });
@@ -12937,7 +13338,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
 /// `flags`: the flag vregs (each initialized to 0 by an entry instruction). Not for
 /// coroutine bodies (their suspension edges are outside the CFG: CoroFlags).
 fn elaborate_drop_flags(f: &mut Func, flags: &[VReg]) {
-    use crate::regalloc::{for_defs, for_uses, term_uses};
+    use relax_backend::regalloc::{for_defs, for_uses, term_uses};
     if flags.is_empty() {
         return;
     }
@@ -13239,7 +13640,7 @@ impl CoroFlags {
                 match i {
                     Inst::Iconst(_, x) if *x != CF_UNSEEN && *x != CF_ANY => {}
                     _ => {
-                        crate::regalloc::uses_defs(i, &mut us, &mut ds);
+                        relax_backend::regalloc::uses_defs(i, &mut us, &mut ds);
                         for d in &ds {
                             flaglike[d.0 as usize] = false;
                         }
@@ -13585,7 +13986,7 @@ fn arithmetic_overflow_message(op: BinOp) -> &'static str {
 
 /// The runtime helpers lowering interns on first use, by symbol name: a cached entry naming one links
 /// before any lowering has run.
-pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<crate::rir::Sym> {
+pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<relax_backend::rir::Sym> {
     let (kind, addr) = match name {
         "ext_free" => { let f: rt_fn_ty!(fn(u64)) = rt_ext_free; ("ext_free", f as usize as u64) }
         "ext_get" => { let f: rt_fn_ty!(fn(u64, u64, u64) -> u64) = rt_ext_get; ("ext_get", f as usize as u64) }
@@ -13604,8 +14005,8 @@ pub(crate) fn intern_lazy_rt(u: &mut Unit, name: &str) -> Option<crate::rir::Sym
 /// `Term::Resume` becomes the terminate call. The terminate pad calls `rt_cannot_unwind`, which
 /// reports and aborts as rustc's panic_cannot_unwind does. (Calls the optimiser learns cannot
 /// unwind go back to plain calls: opt::demote_invokes.)
-pub(crate) fn abort_unwinding_calls(f: &mut crate::rir::Func, terminate: crate::rir::Sym) {
-    use crate::rir::{Callee, Inst, Term};
+pub(crate) fn abort_unwinding_calls(f: &mut relax_backend::rir::Func, terminate: relax_backend::rir::Sym) {
+    use relax_backend::rir::{Callee, Inst, Term};
     let may_unwind = |i: &Inst| match i {
         Inst::Call(Callee::Host(s), _, _) => *s != terminate,
         Inst::Call(Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig), _, _) => sig.unwinds,
@@ -13654,12 +14055,65 @@ rt_fn! {
 /// A panic reached the edge of a function that cannot unwind (an `extern "C"` body): rustc's
 /// panic_cannot_unwind -- the message, then abort.
 fn rt_cannot_unwind() {
+    if crate::jit::in_checked_const_eval() { crate::jit::leave_pending_panic(); }
     eprintln!("panic in a function that cannot unwind");
     std::process::abort();
 }
 }
 
+rt_fn! {
+/// A loop head of a checked program (Options::const_fuel).
+fn rt_const_fuel() {
+    crate::jit::const_fuel_tick();
+}
+}
+
+pub fn const_fuel_addr() -> u64 {
+    let f: rt_fn_ty!(fn()) = rt_const_fuel;
+    f as usize as u64
+}
+
+/// How many times the function (every block, the entry initialisations, its parameters) writes `v`.
+pub(crate) fn rir_writes(f: &Func, entry_inits: &[Inst], v: VReg) -> u32 {
+    let mut n = f.params.iter().filter(|p| **p == v).count() as u32;
+    for i in entry_inits.iter().chain(f.blocks.iter().flat_map(|b| b.insts.iter())) {
+        i.defs(&mut |d| if d == v { n += 1; });
+    }
+    n
+}
+
 pub fn cannot_unwind_addr() -> u64 {
     let f: rt_fn_ty!(fn()) = rt_cannot_unwind;
     f as usize as u64
+}
+
+#[cfg(test)]
+mod fold_soundness_tests {
+    use super::*;
+
+    /// RIR registers are not SSA: a register a loop assigns again is not a constant, however
+    /// constant its first definition looks (`rir_writes` counts every block, the parameters).
+    #[test]
+    fn a_register_assigned_in_a_loop_is_written_more_than_once() {
+        let mut f = Func::new("t".to_string(), 0);
+        let x = f.vreg(Cls::I);
+        let y = f.vreg(Cls::I);
+        let c = f.vreg(Cls::I);
+        let entry = f.block();
+        let head = f.block();
+        let body = f.block();
+        f.blocks[entry as usize].insts.push(Inst::Iconst(x, 0));
+        f.blocks[entry as usize].term = Term::Jump(head);
+        f.blocks[head as usize].insts.push(Inst::ICmpI(Cond::Ne, false, c, x, 0));
+        f.blocks[head as usize].term = Term::Branch(c, body, entry);
+        f.blocks[body as usize].insts.push(Inst::Iconst(y, 1));
+        f.blocks[body as usize].insts.push(Inst::Mov(x, y));
+        assert_eq!(rir_writes(&f, &[], x), 2, "x: Iconst in the entry block, Mov in the loop");
+        assert_eq!(rir_writes(&f, &[], y), 1);
+        assert_eq!(rir_writes(&f, &[], c), 1);
+        f.params.push(y);
+        assert_eq!(rir_writes(&f, &[], y), 2, "a parameter is a definition");
+        let entry_inits = [Inst::Iconst(c, 1)];
+        assert_eq!(rir_writes(&f, &entry_inits, c), 2, "the entry initialisations count");
+    }
 }

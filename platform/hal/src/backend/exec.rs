@@ -141,7 +141,8 @@ pub trait Gpu {
     fn window_lent(&mut self, _sid: u32, _id: Id, _host: Id, _attach: bool) {}
     /// Configure the separate host surface; `None` restores the last base image
     /// immediately, including when the borrower has stopped producing frames.
-    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, now: u64);
+    /// `layer`: the window layer's texture of session 0 (NONE: an opaque panel at `rect`).
+    fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64);
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
     /// A command for the window system, validated against the tables. True when the backend's
@@ -437,7 +438,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let hosted = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).is_some_and(|w| w.val.is_hosted());
             let host = world.session(sid).and_then(|s| s.windows.get(sid, id).ok()).and_then(|w| w.val.alias_of);
             if let Some(host) = host {
-                if let Some(s) = world.session_mut(HOST) { gpu.window_overlay(s, host, None, now); }
+                if let Some(s) = world.session_mut(HOST) { gpu.window_overlay(s, host, None, Id::NONE, now); }
             }
             let closed = world.release_window(sid, id).is_ok();
             let mut handled = false;
@@ -528,19 +529,26 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             }
             return;
         }
-        HalCmd::WindowOverlay { id, on, rect } => {
+        HalCmd::WindowOverlay { id, on, rect, layer } => {
             if sid != HOST { deny(world, sid); return; }
             let Some(s) = world.session_mut(HOST) else { return };
+            let layer_ok = layer.is_none() || s.textures.get(HOST, layer).is_ok();
             let Ok(w) = s.windows.get_mut(HOST, id) else { s.stale(); return };
-            if on && (w.lent_to == 0 || !w.val.borrower_frame
-                || !rect.iter().all(|v| v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0) {
+            // a panel covers a borrower's frame; a layer may begin before the window is lent (the
+            // borrower's first frame then goes to the app image, never straight to the window)
+            let bad = if layer.is_none() {
+                w.lent_to == 0 || !w.val.borrower_frame || !rect.iter().all(|v| v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0
+            } else {
+                !layer_ok || !w.val.adoptable
+            };
+            if on && bad {
                 s.bad();
                 return;
             }
-            let rect = on.then_some(rect);
-            if w.val.overlay.as_ref().map(|o| o.rect) == rect { return; }
-            w.val.overlay = rect.map(|rect| WindowOverlay { rect, frame: None });
-            gpu.window_overlay(s, id, rect, now);
+            let next = on.then_some((rect, layer));
+            if w.val.overlay.as_ref().map(|o| (o.rect, o.layer)) == next { return; }
+            w.val.overlay = next.map(|(rect, layer)| WindowOverlay { rect, frame: None, layer });
+            gpu.window_overlay(s, id, on.then_some(rect), layer, now);
             return;
         }
         HalCmd::Frame { target, mut kind, packet } => {

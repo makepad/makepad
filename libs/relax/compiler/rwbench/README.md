@@ -16,7 +16,22 @@ in-repo inputs; no UI, GPU or window. The micro-kernels live in `../bench_rt`.
 | `rust_tokenize` | makepad-rust-tokenizer over a large Rust source file |
 | `markdown_parse` | pulldown-cmark over two in-repo markdown documents |
 | `html_parse` | makepad-html over `libs/piano_model/piano-explained.html` |
-| `llm_host` | the LLM host path of one CUDA decode token with no GPU and no weight data (`makepad-ai-llm::host_bench`, makepad commit `e3fc4c003a`): a scaled-down qwen35 GGUF (64 blocks, real 248,320 vocab) written in setup, mapped as a session maps it; per iteration one decode-graph build plus 256 tokens of layout validation, input writes, readback shaping of a 1 MB logits vector, collapse and greedy sampling. `RW_LLM_GGUF=<path>` runs a real GGUF. The CUDA graph planner (`plan_raw_graph`) is not covered: it compiles only with the CUDA kernels built |
+| `llm_host` | the LLM host path of one CUDA decode token with no GPU and no weight data (`makepad-ai-llm::host_bench`, restored in libs/ai/llm from makepad commit `17b9036971`): a scaled-down qwen35 GGUF (64 blocks, real 248,320 vocab) written in setup, mapped as a session maps it; per iteration one decode-graph build plus 256 tokens of layout validation, input writes, readback shaping of a 1 MB logits vector, collapse and greedy sampling. `RW_LLM_GGUF=<path>` runs a real GGUF. The CUDA graph planner (`plan_raw_graph`) is not covered: it compiles only with the CUDA kernels built |
+| `piano_render` | makepad-piano-model: 0.3 s of a fixed pedalled chord phrase through the physical `Piano` (strings, soundboard, sympathetic bank, room) and through `LearnedPiano`; both built fresh per iteration (their `reset()` does not return to the constructed state) |
+| `ogg_decode` | makepad-audio-decode `decode_any` on the one in-repo compressed audio file (`libs/audio_decode/testdata/button-press.ogg`), 8 decodes per iteration. The repo holds no MP3 (the decoder's MP3 tests build streams bit by bit inside the test) |
+| `audio_mix` | makepad-audio-synth `SynthBus` (the game mixer): recipe voices placed around the listener, a tone, two engines with tyres moving past, room send and master dynamics, 40 blocks of 512 |
+| `splash_eval` | makepad-script VM calling a compute-heavy Splash fn (recursion, loops, array and object access, arithmetic); parsed and evaluated once in setup |
+| `csg_boolean` | makepad-csg: primitives meshed at fixed resolution, intersection / difference / union / `union_all` |
+| `box3d_physics` | makepad-box3d (single precision, serial solver, sleeping off): `src/box3d_scene.rs` built fresh per iteration (a hull-box pyramid, a revolute plank bridge with a motor and limits, a spherical-joint sphere rope ending in a capsule, a distance-joint spring pendulum, a rain of spheres, capsules and rocks), 90 steps of 1/60 s with 4 substeps; checksum = every body's transform and velocity bits plus the contact count at steps 30/60/90. The same scene at its small size is the diff_fast package program `relax-diffpkg box3d` (tools/run/fixture/diffpkg) |
+
+### Commercial set
+
+With the commercial checkout at `apps/commercial`, `run.py` also runs the workloads of `apps/commercial/relax_tests/src/bench.rs`
+(package `relax-commercial-tests`, binary `relax-rwbench-commercial`, this crate's `src/harness.rs` included by path), after the
+OSS ones and in the same rounds and tables: `sandbox_sim` (Sandbox's game sim over box3d f64: a crate stack and a capsule-mover
+scene, 300 ticks each, plus a vehicle lap), `level_walk` (nav grid build and seeded walker tours), `model_build` (a props program
+and a character preset built to GLB through the model-script registry and libs/model). `RW_COMMERCIAL=0` leaves them out;
+`NATIVE_COMMERCIAL` names a prebuilt rustc binary of it. The same package's default binary is diff_fast's commercial package program set.
 
 Not here: an Amp program (there is no `apps/commercial/amp` in the tree), whisper. Build with `MAKEPAD_GGML_NO_CUDA=1` (the submit scripts set it) so the llm crate's CUDA store does not run nvcc.
 
@@ -46,18 +61,18 @@ Process failures or checksum mismatches make the runner exit nonzero.
 
 `relax-rwbench <workload>...` prints per workload
 `| name steady_ms=.. tts_main_ms=.. tts_proc_ms=.. iters=.. first_ms=.. <checksum>`.
-`steady_ms` is the median of the last iterations after warm-up; `tts_*` is the time until the
+`steady_ms` is the median of the last iterations that start after 5 s (`RW_STEADY_AFTER_MS`; Relax installs its optimised code about 2 s in); `tts_*` is the time until the
 per-iteration time is within 10% of steady (3-iteration running median): `tts_main` from entering
 `main`, `tts_proc` from process start (`RW_WALL0=<epoch ns>`, set by `run.py`, so it includes Relax's
 compile). Setup (reading inputs, building archives) counts towards time-to-steady. Env: `RW_MS`
-(iteration budget per process, default 3000), `RW_MIN_ITERS` (20), `RW_ROOT` (tree holding the inputs).
+(iteration budget per process, default 8000), `RW_MIN_ITERS` (20), `RW_ROOT` (tree holding the inputs).
 
 ## Run
 
 ```
 python3 run.py <target dir> <name=makepad binary>...
 ```
-builds the rustc side (or uses `NATIVE=<binary>`) and runs every workload (`WORKLOADS="a b"` picks some) under rustc and
+builds the rustc side (or uses `NATIVE=<binary>`; the commercial set `NATIVE_COMMERCIAL`) and runs every workload (`WORKLOADS="a b"` picks some) under rustc and
 under each Relax binary, `ROUNDS` (default 4) interleaved rounds: each round runs every workload once, rustc first, then
 the binaries in alternating order (base, new / new, base / ...). Per name it prints, per workload, the median over rounds
 of the steady ms with the [min..max] spread, the Relax/rustc ratio (median of the per-round ratios, so drift hits both

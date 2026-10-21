@@ -70,9 +70,11 @@ impl Fcx<'_> {
             key.args = args.into();
             hidden.ty = self.infcx.deeply_resolve_ignoring_regions(hidden.ty);
         }
-        let crate::tcx::TypingMode::Typeck { defining_opaque_types_and_generators } = self.infcx.typing_mode else { unreachable!() };
+        let crate::tcx::TypingMode::Typeck { defining_opaque_types_and_generators } = self.infcx.typing_mode.get() else { unreachable!() };
         let defining = self.tcx.defining_opaques(defining_opaque_types_and_generators).to_vec();
         for def_id in defining {
+            // (the body's own definition stands for its coroutines: `stall_coroutines_of_body`)
+            if def_id == self.b.def { continue; }
             match self.prog.def(def_id).kind { DefKind::OpaqueTy => {}, DefKind::Closure => continue, _ => unreachable!("not opaque or generator") }
             let mut usage_kind = UsageKind::None;
             for (key, hidden) in &opaque_types {

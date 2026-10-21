@@ -16,7 +16,7 @@ fn fn_entry_size() {
         prev: Vec<(u64, u32, PcMap, u32)>,
         compiled: bool,
         patch_gen: u32,
-        rir: Option<std::sync::Arc<crate::rir::Func>>,
+        rir: Option<std::sync::Arc<relax_backend::rir::Func>>,
         refs: u32,
         rir_refs: Box<[u32]>,
         entry_ref: AtomicBool,
@@ -29,13 +29,15 @@ fn fn_entry_size() {
         version: u32,
         retired: Vec<(u64, u32, PcMap)>,
         inflight: bool,
-        spec: Option<(Vec<u8>, Vec<(u32, u64)>, Vec<crate::rir::RelocAt>, bool)>,
+        spec: Option<(Vec<u8>, Vec<(u32, u64)>, Vec<relax_backend::rir::RelocAt>, bool)>,
         spec_state: u8,
         spec_depth: u8,
         baseline_hint: AtomicBool,
         hot_hint: AtomicBool,
         o3: AtomicBool,
         base_code: AtomicBool,
+        unverified: AtomicBool,
+        d3_lowered: AtomicBool,
         calls: Box<[u32]>,
     }
     let before = std::mem::size_of::<InlineFnEntry>();
@@ -197,6 +199,41 @@ fn owner_front_write_serves_waiting_readers() {
     });
     reader.join().unwrap();
     assert!(start.elapsed().as_secs() < 5, "the owner's front write waited for a reader waiting for the owner");
+}
+
+#[test]
+fn allocator_swap_serves_background_finish() {
+    isolated_test!(allocator_swap_serves_background_finish);
+    // A background build's job (O2, speculation, O3) that reaches its finish while an allocator
+    // swap pauses the jobs: the finish keeps the job running (Class::keeps_job), so the owner
+    // serves it for the job's thread and the swap's wait ends. Held back, the swap waited forever.
+    crate::owner::call(crate::owner::Class::App, || {});
+    let (began_tx, began_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let job = std::thread::spawn(move || {
+        let _job = compile_job();
+        began_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+        crate::owner::call(crate::owner::Class::FinishBackground, || {});
+        for class in [crate::owner::Class::Finish, crate::owner::Class::Job] {
+            crate::owner::call(class, || {});
+        }
+    });
+    began_rx.recv().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let pauser = std::thread::spawn(move || {
+        pause_compile_jobs(false);
+        done_tx.send(()).unwrap();
+        resume_compile_jobs(false);
+    });
+    while !BG_PAUSE.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    go_tx.send(()).unwrap();
+    assert!(done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok(),
+        "the allocator swap waits for a job whose finish the pause holds back");
+    pauser.join().unwrap();
+    job.join().unwrap();
 }
 
 #[test]
@@ -757,4 +794,63 @@ fn round50_inline_const_reload() {
         .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
         .env("MAKEPAD_RUN_R50_INITIALIZER_CHILD", "inline_literal").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
     assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
+fn deferred_cache_record_is_dropped_when_a_source_changed() {
+    isolated_test!(deferred_cache_record_is_dropped_when_a_source_changed);
+    // A deferred record (Cache::defer_record) is encoded after the install; an edit, rollback or
+    // reload in between (the patch epoch moves) must drop it, never key old code by new text.
+    // Control: the same record with no change in between is encoded.
+    const CHILD: &str = "MAKEPAD_RUN_DEFERRED_RECORD_TEST";
+    const DIR: &str = "MAKEPAD_RUN_DEFERRED_RECORD_TEST_DIR";
+    let Ok(phase) = std::env::var(CHILD) else {
+        let dir = std::env::temp_dir().join(format!("relax-deferred-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("input.rs"), "pub fn hot(out: &mut u32) { *out = 7; }\nfn main() {}\n").unwrap();
+        for phase in ["current", "stale"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::settle_tests::deferred_cache_record_is_dropped_when_a_source_changed", "--nocapture", "--test-threads=1"])
+                .env(CHILD, phase).env(DIR, dir.join(phase)).env("MAKEPAD_RUN_SPEC", "0")
+                .output().unwrap();
+            assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.parent().unwrap().join("input.rs");
+    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, src.to_str().unwrap(), "deferred_record", false).unwrap();
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == "hot").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    crate::owner::call(crate::owner::Class::App, || {
+        let id = u.fn_id(FnKey::Inst(def, Vec::new()));
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let built = unsafe { compile_fn(up, id) }.unwrap();
+        let mut cache = u.cache.take().unwrap();
+        let pending = cache.defer_record(&u, id, &built.0, &built.2, &built.1).expect("a fresh install is deferrable");
+        if phase == "stale" {
+            bump_patch_epoch();
+        }
+        cache.record_pending(&u, &pending);
+        match phase.as_str() {
+            "current" => assert!(cache.pending_bytes() > 0 && cache.stats.recorded == 1, "the control record must be encoded"),
+            _ => assert!(cache.pending_bytes() == 0 && cache.stats.recorded == 0, "a record from before an edit must not be encoded"),
+        }
+        u.cache = Some(cache);
+    });
+    std::mem::forget(u);
 }

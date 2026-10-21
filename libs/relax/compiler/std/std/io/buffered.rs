@@ -83,7 +83,30 @@ impl<R: Read> BufRead for BufReader<R> {
     }
 }
 
+impl<R: Seek> BufReader<R> {
+    /// Seeks relative to the current position; within the buffer it only moves the buffer
+    /// position (std's bufreader.rs: no seek of the inner reader, the buffer is kept).
+    pub fn seek_relative(&mut self, offset: i64) -> Result<()> {
+        let pos = self.pos as u64;
+        if offset < 0 {
+            if let Some(new_pos) = pos.checked_sub(offset.unsigned_abs()) {
+                self.pos = new_pos as usize;
+                return Ok(());
+            }
+        } else if let Some(new_pos) = pos.checked_add(offset as u64) {
+            if new_pos <= self.filled as u64 {
+                self.pos = new_pos as usize;
+                return Ok(());
+            }
+        }
+        self.seek(SeekFrom::Current(offset)).map(drop)
+    }
+}
+
 impl<R: Seek> Seek for BufReader<R> {
+    fn seek_relative(&mut self, offset: i64) -> Result<()> {
+        BufReader::seek_relative(self, offset)
+    }
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         let result;
         if let SeekFrom::Current(n) = pos {

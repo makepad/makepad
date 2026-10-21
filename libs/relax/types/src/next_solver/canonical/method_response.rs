@@ -69,7 +69,7 @@ pub fn probe_instantiate_query_response(infcx: &InferCtxt<'_>, prog: &crate::pro
     crate::infer::relate::relate_args(&mut relation, original, &response.response.var_values).map_err(|_| NoSolution)?;
     let mut goals = relation.goals;
     for (key, ty) in response.response.external_constraints.opaque_types {
-        let previous = infcx.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType { ty });
+        let previous = infcx.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType::new(ty));
         if let Some(previous) = previous { goals.extend(infcx.at(prog, env.clone()).eq(previous, ty).map_err(|_| NoSolution)?); }
     }
     Ok((response.value, goals))

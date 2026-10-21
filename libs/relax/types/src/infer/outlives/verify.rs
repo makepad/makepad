@@ -32,7 +32,22 @@ impl VerifyBound {
     }
 }
 #[derive(Clone, Debug)]
-pub struct Verify { pub ty: TyId, pub region: RegionId, pub bound: VerifyBound }
+pub struct Verify { pub ty: TyId, pub region: RegionId, pub bound: VerifyBound, pub span: u32 }
+/// An alias type is rigid or not by how it was produced (Relax's solver marks the aliases it could not normalize);
+/// rustc's types do not say so, and two spellings of one alias are the same type.
+fn forget_rigidity(tys: &crate::types::Types, t: TyId) -> TyId {
+    struct Forget;
+    impl crate::types::fold::TypeFolder for Forget {
+        fn fold_ty(&mut self, tys: &crate::types::Types, t: TyId, depth: u32) -> TyId {
+            let t = crate::types::fold::super_fold_ty(tys, t, self, depth);
+            match tys.kind(t) {
+                TyKind::Alias(crate::consts::IsRigid::Yes, a) => tys.intern(TyKind::Alias(crate::consts::IsRigid::No, *a)),
+                _ => t,
+            }
+        }
+    }
+    crate::types::fold::TypeFolder::fold_ty(&mut Forget, tys, t, 0)
+}
 pub struct VerifyBoundCx<'a> {
     pub tcx: &'a Tcx, pub prog: &'a Program,
     pub region_bound_pairs: &'a [(TyId, RegionId)], pub implicit_region_bound: Option<RegionId>, pub caller_bounds: &'a [Predicate],
@@ -54,8 +69,9 @@ impl VerifyBoundCx<'_> {
     fn declared_generic_bounds_from_env_for_erased_ty(&self, erased: TyId) -> Vec<Predicate> {
         let mut bounds = Vec::new();
         for p in self.caller_bounds { if test_type_match::can_match_erased_ty(self.tcx, self.prog, p, erased) { bounds.push(p.clone()); } }
+        let erased = forget_rigidity(&self.tcx.tys, erased);
         for &(ty, r) in self.region_bound_pairs {
-            if self.tcx.tys.erase_regions(ty) == erased { bounds.push(Predicate::dummy(PredicateKind::Clause(ClauseKind::TypeOutlives(ty, r)))); }
+            if forget_rigidity(&self.tcx.tys, self.tcx.tys.erase_regions(ty)) == erased { bounds.push(Predicate::dummy(PredicateKind::Clause(ClauseKind::TypeOutlives(ty, r)))); }
         }
         bounds
     }
@@ -79,7 +95,9 @@ impl VerifyBoundCx<'_> {
         let mut env_bounds = Vec::new();
         for p in self.approx_declared_bounds_from_env(ty) {
             let PredicateKind::Clause(ClauseKind::TypeOutlives(t, r)) = p.kind else { unreachable!() };
-            if !p.has_bound_vars(&self.tcx.tys) && t == ty { env_bounds.push(VerifyBound::OutlivedBy(r)); }
+            // (an exact match compares the alias itself, not its interned type: rigidity is not identity)
+            let exact = matches!((self.tcx.tys.kind(t), self.tcx.tys.kind(ty)), (TyKind::Alias(_, a), TyKind::Alias(_, b)) if a == b);
+            if !p.has_bound_vars(&self.tcx.tys) && exact { env_bounds.push(VerifyBound::OutlivedBy(r)); }
             else { env_bounds.push(VerifyBound::IfEq(p)); }
         }
         for r in self.declared_bounds_from_definition(ty) { env_bounds.push(VerifyBound::OutlivedBy(r)); }

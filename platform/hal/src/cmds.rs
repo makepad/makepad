@@ -131,10 +131,16 @@ hal_commands! {
     /// Centers the native window buttons `y_center` points below the window's top edge.
     /// AppKit retains the center across geometry changes; other backends ignore it.
     WindowButtonsCenter = 24, window_buttons_center { id: obj, y_center: f32 };
-    /// Session 0's opaque overlay panel, in window-local points. While enabled its
-    /// window frames update a separate surface, composited after the borrower's
-    /// passes; input goes to session 0. Disabling restores the retained app image.
-    WindowOverlay = 25, window_overlay { id: obj, on: bool, rect: rect };
+    /// Session 0 over a lent window. With `layer` NONE: an opaque panel, in window-local
+    /// points: while enabled session 0's window frames update a separate surface, composited
+    /// after the borrower's passes, and input goes to session 0. With `layer` a texture of
+    /// session 0 (BGRA8, the window's pixel size): the window layer -- the borrower's frames
+    /// go to the retained app image instead of the window, session 0's frame is the window
+    /// (it starts with the app image copied into `layer`, to sample) and input stays with the
+    /// borrower; `rect` is ignored. Needs `info_flags::WINDOW_LAYERS`; it may be enabled on an
+    /// adoptable window before it is lent (so no borrower frame reaches the window first).
+    /// Disabling restores the retained app image.
+    WindowOverlay = 25, window_overlay { id: obj, on: bool, rect: rect, layer: id };
 
     /// Whether the window draws its own caption, for an embedding parent.
     WindowChrome = 26, window_chrome { id: obj, own: bool };

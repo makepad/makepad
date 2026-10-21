@@ -1459,7 +1459,9 @@ fn video_file(id: i64) -> Result<std::sync::Arc<std::sync::Mutex<backend::androi
 /// Opens the video file at `path` (`audio_only` != 0: its sound alone) as decoder `id`. The result
 /// (`hal_media_take`) is its info: width, height, fps_num, fps_den (u32 LE), duration in
 /// microseconds (i64 LE), the picture's MIME type's length (u32 LE) and text, has_audio (u8),
-/// sample_rate (u32 LE), channels (u16 LE). Returns its length, or -1 - the error's.
+/// sample_rate (u32 LE), channels (u16 LE), then the picture track's MediaFormat colour keys as
+/// i32 LE: KEY_COLOR_STANDARD, KEY_COLOR_RANGE, KEY_COLOR_TRANSFER (0: not stated). Returns its
+/// length, or -1 - the error's.
 #[cfg(target_os = "android")]
 #[relax_api]
 pub fn hal_video_file_open(id: i64, path: &str, audio_only: u32) -> i64 {
@@ -1477,22 +1479,27 @@ pub fn hal_video_file_open(id: i64, path: &str, audio_only: u32) -> i64 {
         out.push(info.has_audio as u8);
         out.extend_from_slice(&info.sample_rate.to_le_bytes());
         out.extend_from_slice(&info.channels.to_le_bytes());
+        for v in [info.color_standard, info.color_range, info.color_transfer] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         out
     });
     media_keep(id, result)
 }
 
-/// The next picture of decoder `id`. The result is its time in microseconds (i64 LE), then its
-/// NV12 (the info's width x height). Returns its length, 0 at the end, or -1 - the error's.
+/// The next picture of decoder `id`. The result is its time in microseconds (i64 LE), the
+/// KEY_COLOR_RANGE it is delivered in (i32 LE, 0: not stated), then its NV12 (the info's width x
+/// height). Returns its length, 0 at the end, or -1 - the error's.
 #[cfg(target_os = "android")]
 #[relax_api]
 pub fn hal_video_file_next_frame(id: i64) -> i64 {
     let result = video_file(id).and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).next_frame());
     match result {
         Ok(None) => 0,
-        Ok(Some((time, nv12))) => {
-            let mut out = Vec::with_capacity(8 + nv12.len());
+        Ok(Some((time, range, nv12))) => {
+            let mut out = Vec::with_capacity(12 + nv12.len());
             out.extend_from_slice(&time.to_le_bytes());
+            out.extend_from_slice(&range.to_le_bytes());
             out.extend_from_slice(&nv12);
             media_keep(id, Ok(out))
         }

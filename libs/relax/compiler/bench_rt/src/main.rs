@@ -591,13 +591,402 @@ fn statics_calls() -> u64 {
     acc ^ unsafe { ST_COUNTER }
 }
 
+// ---- codeperf kernels: std containers, closures, dyn dispatch, bounds checks, SIMD, struct moves, tokenizer ----
+
+/// HashMap<u64,u64> (std SipHash) insert / lookup / remove mix, then a String-keyed map
+fn hashmap() -> u64 {
+    let mut m: HashMap<u64, u64> = HashMap::new();
+    let mut x = 12345u64;
+    let mut h = 0u64;
+    for i in 0..30_000u64 {
+        let k = next(&mut x) & 0x3fff;
+        match i % 4 {
+            0 | 1 => {
+                m.insert(k, i);
+            }
+            2 => {
+                h = h.rotate_left(3) ^ m.get(&k).copied().unwrap_or(7);
+            }
+            _ => {
+                h = h.rotate_left(5) ^ m.remove(&k).unwrap_or(9);
+            }
+        }
+    }
+    let mut keys: Vec<u64> = m.keys().copied().collect();
+    keys.sort_unstable();
+    for k in keys.iter().step_by(13) {
+        h = h.rotate_left(7) ^ k ^ m[k];
+    }
+    let mut s: HashMap<String, u32> = HashMap::new();
+    for i in 0..6_000u32 {
+        let k = format!("key{}", next(&mut x) % 900);
+        *s.entry(k).or_insert(0) += i;
+    }
+    let mut ks: Vec<(&String, &u32)> = s.iter().collect();
+    ks.sort();
+    for (k, v) in ks {
+        h = h.rotate_left(5) ^ (k.len() as u64) ^ ((*v as u64) << 8) ^ k.as_bytes()[k.len() - 1] as u64;
+    }
+    h ^ m.len() as u64
+}
+
+/// iterator map/filter/fold with captured state, plus a Vec<Box<dyn Fn>>
+fn closures() -> u64 {
+    let data: Vec<u32> = (0..400_000u32).map(|i| i.wrapping_mul(2654435761) >> 7).collect();
+    let bias = black_box(17u32);
+    let mut seen = 0u64;
+    let acc = data
+        .iter()
+        .map(|v| v.wrapping_add(bias))
+        .filter(|v| v & 3 != 0)
+        .fold(0u64, |a, v| {
+            seen += 1;
+            a.rotate_left(3) ^ v as u64
+        });
+    let k1 = black_box(3u64);
+    let k2 = black_box(11u64);
+    let mut fns: Vec<Box<dyn Fn(u64) -> u64>> = Vec::new();
+    fns.push(Box::new(move |x| x.wrapping_mul(k1)));
+    fns.push(Box::new(move |x| x ^ (x >> k2)));
+    fns.push(Box::new(|x| x.rotate_left(9)));
+    fns.push(Box::new(move |x| x.wrapping_add(k1 * k2)));
+    let mut h = acc ^ seen;
+    for i in 0..480_000u64 {
+        h = fns[(i % 4) as usize](h ^ i);
+    }
+    let mut counter = 0u64;
+    let mut bump = |d: u64| {
+        counter += d;
+        counter
+    };
+    for i in 0..160_000u64 {
+        h ^= bump(i & 7);
+    }
+    h
+}
+
+trait Shape {
+    fn area(&self) -> f64;
+    fn grow(&mut self, k: f64);
+}
+struct Circle(f64);
+struct Rectangle(f64, f64);
+struct Tri(f64, f64);
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        3.14159 * self.0 * self.0
+    }
+    fn grow(&mut self, k: f64) {
+        self.0 += k;
+    }
+}
+impl Shape for Rectangle {
+    fn area(&self) -> f64 {
+        self.0 * self.1
+    }
+    fn grow(&mut self, k: f64) {
+        self.0 += k;
+        self.1 += k * 0.5;
+    }
+}
+impl Shape for Tri {
+    fn area(&self) -> f64 {
+        0.5 * self.0 * self.1
+    }
+    fn grow(&mut self, k: f64) {
+        self.1 += k;
+    }
+}
+
+/// Vec<Box<dyn Shape>> virtual calls in a loop
+fn dyn_trait() -> u64 {
+    let mut shapes: Vec<Box<dyn Shape>> = Vec::new();
+    for i in 0..300 {
+        let f = i as f64 * 0.01;
+        match i % 3 {
+            0 => shapes.push(Box::new(Circle(1.0 + f))),
+            1 => shapes.push(Box::new(Rectangle(1.0 + f, 2.0))),
+            _ => shapes.push(Box::new(Tri(2.0, 1.0 + f))),
+        }
+    }
+    let mut total = 0.0f64;
+    for round in 0..2000 {
+        for s in shapes.iter_mut() {
+            total += s.area();
+            s.grow(black_box(0.001) * (round & 3) as f64);
+        }
+    }
+    total.to_bits()
+}
+
+/// a[i] += b[i-1]*c[i+1]: bounds checks elidable (iterator zip over windows) and not (index arithmetic
+/// through a runtime-valued stride the compiler cannot prove)
+#[inline(never)]
+fn idx_elidable(a: &mut [f32], b: &[f32], c: &[f32]) {
+    let n = a.len().min(b.len()).min(c.len());
+    let (a, b, c) = (&mut a[..n], &b[..n], &c[..n]);
+    for i in 0..n {
+        a[i] += b[i] * c[i];
+    }
+}
+#[inline(never)]
+fn idx_checked(a: &mut [f32], b: &[f32], c: &[f32], stride: usize) {
+    let mut i = 1usize;
+    while i + 1 < a.len() {
+        a[i] += b[i - 1] * c[i + 1];
+        i += stride;
+    }
+}
+fn bounds_idx() -> u64 {
+    let n = 4096usize;
+    let mut a: Vec<f32> = (0..n).map(|i| i as f32 * 0.25).collect();
+    let b: Vec<f32> = (0..n).map(|i| (i % 17) as f32 * 0.5).collect();
+    let c: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.125).collect();
+    let stride = black_box(1usize);
+    for _ in 0..600 {
+        idx_elidable(&mut a, &b, &c);
+        idx_checked(&mut a, &b, &c, stride);
+        for v in a.iter_mut() {
+            *v *= 0.999;
+        }
+    }
+    a.iter().fold(0u64, |h, v| h.rotate_left(5) ^ v.to_bits() as u64)
+}
+
+/// 8-lane f32 dot / mul-add: explicit core::arch NEON / SSE intrinsics, and the plain-array version
+#[cfg(target_arch = "aarch64")]
+fn dot_simd(a: &[f32], b: &[f32]) -> f32 {
+    use core::arch::aarch64::*;
+    unsafe {
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut i = 0;
+        while i + 8 <= a.len() {
+            acc0 = vfmaq_f32(acc0, vld1q_f32(a.as_ptr().add(i)), vld1q_f32(b.as_ptr().add(i)));
+            acc1 = vfmaq_f32(acc1, vld1q_f32(a.as_ptr().add(i + 4)), vld1q_f32(b.as_ptr().add(i + 4)));
+            i += 8;
+        }
+        vaddvq_f32(vaddq_f32(acc0, acc1))
+    }
+}
+#[cfg(target_arch = "x86_64")]
+fn dot_simd(a: &[f32], b: &[f32]) -> f32 {
+    use core::arch::x86_64::*;
+    unsafe {
+        let mut acc0 = _mm_setzero_ps();
+        let mut acc1 = _mm_setzero_ps();
+        let mut i = 0;
+        while i + 8 <= a.len() {
+            acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_loadu_ps(a.as_ptr().add(i)), _mm_loadu_ps(b.as_ptr().add(i))));
+            acc1 = _mm_add_ps(acc1, _mm_mul_ps(_mm_loadu_ps(a.as_ptr().add(i + 4)), _mm_loadu_ps(b.as_ptr().add(i + 4))));
+            i += 8;
+        }
+        let s = _mm_add_ps(acc0, acc1);
+        let mut out = [0.0f32; 4];
+        _mm_storeu_ps(out.as_mut_ptr(), s);
+        (out[0] + out[1]) + (out[2] + out[3])
+    }
+}
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn dot_simd(a: &[f32], b: &[f32]) -> f32 {
+    dot_plain(a, b)
+}
+/// the same 8 independent partial sums in plain arrays (auto-vectorisable); not bit-identical to the
+/// intrinsic version on aarch64 (fused multiply-add), each version has its own checksum
+fn dot_plain(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    for (x, y) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
+        for l in 0..8 {
+            acc[l] += x[l] * y[l];
+        }
+    }
+    ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]))
+}
+fn muladd_plain(y: &mut [f32], x: &[f32], k: f32) {
+    for (o, v) in y.iter_mut().zip(x.iter()) {
+        *o += *v * k;
+    }
+}
+fn f32_simd() -> u64 {
+    let n = 8192usize;
+    let a: Vec<f32> = (0..n).map(|i| ((i * 31) % 101) as f32 * 0.01 - 0.5).collect();
+    let b: Vec<f32> = (0..n).map(|i| ((i * 17) % 89) as f32 * 0.02 - 0.9).collect();
+    let mut y = vec![0.0f32; n];
+    let mut h = 0u64;
+    for r in 0..800 {
+        let d1 = dot_simd(black_box(&a), black_box(&b));
+        let d2 = dot_plain(black_box(&a), black_box(&b));
+        muladd_plain(&mut y, &a, 0.001 * (r & 7) as f32);
+        h = h.rotate_left(7) ^ d1.to_bits() as u64 ^ ((d2.to_bits() as u64) << 20);
+    }
+    for v in y.iter().step_by(31) {
+        h = h.rotate_left(3) ^ v.to_bits() as u64;
+    }
+    h
+}
+
+/// Vec of 64..160-byte structs copied/moved through Option and pushed (the leap MirrorEntry pattern)
+#[derive(Clone)]
+struct Entry {
+    id: u64,
+    kind: u32,
+    flags: u32,
+    pos: [f64; 4],
+    extent: [f32; 8],
+    tag: [u8; 24],
+}
+#[derive(Clone)]
+struct Big {
+    head: Entry,
+    tail: [u64; 5],
+}
+fn make_entry(i: u64) -> Entry {
+    Entry { id: i, kind: (i % 7) as u32, flags: (i >> 3) as u32, pos: [i as f64; 4], extent: [i as f32 * 0.5; 8], tag: [(i & 255) as u8; 24] }
+}
+#[inline(never)]
+fn maybe_entry(i: u64) -> Option<Big> {
+    if i % 5 == 4 {
+        None
+    } else {
+        Some(Big { head: make_entry(i), tail: [i; 5] })
+    }
+}
+fn struct_copy() -> u64 {
+    let mut out: Vec<Big> = Vec::new();
+    let mut small: Vec<Entry> = Vec::new();
+    for round in 0..400u64 {
+        out.clear();
+        small.clear();
+        for i in 0..400u64 {
+            if let Some(b) = maybe_entry(round * 1000 + i) {
+                small.push(b.head.clone());
+                out.push(b);
+            }
+        }
+        // move through Option and back, rewrite a field
+        let mut slot: Option<Big> = None;
+        for b in out.iter_mut() {
+            let prev = slot.replace(b.clone());
+            if let Some(mut p) = prev {
+                p.head.flags ^= 1;
+                *b = p;
+            }
+        }
+    }
+    let mut h = 0u64;
+    for b in out.iter() {
+        h = h.rotate_left(5) ^ b.head.id ^ b.head.flags as u64 ^ b.tail[2] ^ b.head.tag[3] as u64;
+    }
+    for e in small.iter() {
+        h = h.rotate_left(3) ^ e.id ^ e.kind as u64 ^ e.extent[1].to_bits() as u64 ^ e.pos[2].to_bits();
+    }
+    h
+}
+
+/// a byte-level state machine with a big match (the tokenizer pattern)
+fn match_tokens() -> u64 {
+    #[derive(Clone, Copy, PartialEq)]
+    enum St {
+        Start,
+        Ident,
+        Num,
+        Str,
+        StrEsc,
+        Slash,
+        Line,
+        Block,
+        BlockStar,
+        Punct,
+    }
+    let src: Vec<u8> = {
+        let words = [&b"fn main() {\n"[..], b"    let x_1 = 42 + y * 3.5; // note\n", b"    /* block * comment */ s = \"str\\\"ing\";\n", b"}\n", b"if a == b { c += 1 }\n"];
+        let mut v = Vec::new();
+        for i in 0..48000 {
+            v.extend_from_slice(words[i % words.len()]);
+        }
+        v
+    };
+    let mut st = St::Start;
+    let (mut h, mut ntok) = (0u64, 0u64);
+    let mut start = 0usize;
+    for (i, &c) in src.iter().enumerate() {
+        let (next_st, emit) = match st {
+            St::Start => match c {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => (St::Ident, false),
+                b'0'..=b'9' => (St::Num, false),
+                b'"' => (St::Str, false),
+                b'/' => (St::Slash, false),
+                b' ' | b'\n' | b'\t' | b'\r' => (St::Start, false),
+                _ => (St::Punct, false),
+            },
+            St::Ident => match c {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'0'..=b'9' => (St::Ident, false),
+                _ => (St::Start, true),
+            },
+            St::Num => match c {
+                b'0'..=b'9' | b'.' => (St::Num, false),
+                _ => (St::Start, true),
+            },
+            St::Str => match c {
+                b'\\' => (St::StrEsc, false),
+                b'"' => (St::Start, true),
+                _ => (St::Str, false),
+            },
+            St::StrEsc => (St::Str, false),
+            St::Slash => match c {
+                b'/' => (St::Line, false),
+                b'*' => (St::Block, false),
+                _ => (St::Start, true),
+            },
+            St::Line => match c {
+                b'\n' => (St::Start, true),
+                _ => (St::Line, false),
+            },
+            St::Block => match c {
+                b'*' => (St::BlockStar, false),
+                _ => (St::Block, false),
+            },
+            St::BlockStar => match c {
+                b'/' => (St::Start, true),
+                b'*' => (St::BlockStar, false),
+                _ => (St::Block, false),
+            },
+            St::Punct => (St::Start, true),
+        };
+        if emit {
+            ntok += 1;
+            h = h.rotate_left(5) ^ ((st as u64) << 32) ^ (i - start) as u64 ^ src[start] as u64;
+            // the byte that ended the token starts the next one
+            st = St::Start;
+            start = i;
+            let again = match c {
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => St::Ident,
+                b'0'..=b'9' => St::Num,
+                b'"' => St::Str,
+                b'/' => St::Slash,
+                b' ' | b'\n' | b'\t' | b'\r' => St::Start,
+                _ => St::Punct,
+            };
+            if next_st == St::Start || next_st == St::Punct {
+                st = again;
+            }
+        } else {
+            if st == St::Start && next_st != St::Start {
+                start = i;
+            }
+            st = next_st;
+        }
+    }
+    h ^ ntok
+}
+
 fn main() {
     let only: Vec<String> = std::env::args().skip(1).collect();
     if only.iter().any(|o| o == "shape_dump") {
         shape_dump();
         return;
     }
-    let all: [(&str, fn() -> u64); 23] = [
+    let all: [(&str, fn() -> u64); 30] = [
         ("det_trig", det_trig),
         ("det_explog", det_explog),
         ("hash_bytes", hash_bytes),
@@ -621,6 +1010,13 @@ fn main() {
         ("splash_vm", splash_vm),
         ("statics_loop", statics_loop),
         ("statics_calls", statics_calls),
+        ("hashmap", hashmap),
+        ("closures", closures),
+        ("dyn_trait", dyn_trait),
+        ("bounds_idx", bounds_idx),
+        ("f32_simd", f32_simd),
+        ("struct_copy", struct_copy),
+        ("match_tokens", match_tokens),
     ];
     for (n, f) in all.iter() {
         if only.is_empty() || only.iter().any(|o| o == n) {
@@ -727,6 +1123,7 @@ fn inflate() -> u64 {
 /// the CUDA LLM's per-token host work: logits bytes -> Vec<f32> through a Result-collecting map
 /// over chunks_exact (makepad_ai_llm runtime.rs f32_bytes_to_vec), then the greedy argmax
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LlmErr(String);
 #[inline(never)]
 fn llm_f32_bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>, LlmErr> {

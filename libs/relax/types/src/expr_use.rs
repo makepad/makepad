@@ -4,7 +4,7 @@
 use crate::types::AliasTyKind;
 use crate::types::{AliasTy};
 use crate::ast::*;
-use crate::borrowck::tyx::Tx;
+use crate::tcx::{EvalCx, Tcx};
 use crate::program::DefKind;
 use crate::typeck::{Body, Coerce, Res, DEREF_COERCE_KEY};
 use crate::types::{TyId as Type, TyKind};
@@ -39,20 +39,22 @@ pub trait Delegate {
     fn consume(&mut self, place: Place, mode: ConsumeMode);
     fn borrow(&mut self, place: Place, kind: BorrowKind);
     fn mutate(&mut self, place: Place);
-    fn fake_read(&mut self, place: Place, cause: FakeReadCause);
+    /// `node`: the expression the read is for, rustc's `diag_expr_id` (the scrutinee or initializer).
+    fn fake_read(&mut self, place: Place, cause: FakeReadCause, node: u32);
 }
 #[derive(Clone, Copy)]
 enum Access { Consume, Borrow(BorrowKind), Mutate }
 
 pub struct ExprUseVisitor<'a, 'tx, D> {
-    pub tx: &'a Tx<'tx>,
+    pub tcx: &'a Tcx,
+    pub cx: &'a EvalCx<'tx>,
     pub body: &'a Body,
     pub delegate: D,
     /// Missing semantic information must not silently become a shared borrow.
     pub errors: Vec<(u32, &'static str)>,
 }
 impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
-    fn ast(&self) -> &Ast { &self.tx.prog.files[self.body.file as usize].ast }
+    fn ast(&self) -> &Ast { &self.cx.prog.files[self.body.file as usize].ast }
     fn span(&self, e: ExprId) -> Span { let e = self.ast().expr(e); Span { lo: e.lo, hi: e.hi } }
     fn local(&self, root: u32, e: ExprId) -> Place {
         Place { root, root_ty: self.body.locals[root as usize].ty, projections: Vec::new(), expr: e.0, span: self.span(e) }
@@ -65,34 +67,39 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     }
     /// Capture uses require a proven Copy goal; unresolved properties defer analysis.
     pub fn copy_type(&self, t: Type) -> Option<bool> {
-        match self.tx.kind(t) {
+        match self.tcx.resolved_kind(self.cx, t) {
             TyKind::Error | TyKind::Infer(_) => None,
             TyKind::Ref(true, _, _) => Some(false),
             TyKind::Tuple(ts) => {
                 let mut copy = true;
-                for t in self.tx.tcx.tys.list(ts).iter().copied() { copy &= self.copy_type(t)?; }
+                for t in self.tcx.tys.list(ts).iter().copied() { copy &= self.copy_type(t)?; }
                 Some(copy)
             }
             TyKind::Array(t, _) => self.copy_type(t),
             TyKind::Adt(..) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => {
-                let Some(td) = self.tx.copy_trait else { return Some(false) };
-                match self.tx.evaluate_trait(td, t, &[]) {
+                let Some(td) = self.tcx.lang_items.get(crate::lang_items::LangItem::Copy) else { return Some(false) };
+                match self.tcx.evaluate_trait_modulo_regions(self.cx.prog, self.cx, self.body.def, td, t, &[]) {
                     r if r.must_apply_modulo_regions() => Some(true),
                     crate::next_solver::evaluate_obligation::EvaluationResult::EvaluatedToErr => Some(false),
-                    _ => None,
+                    // (rustc type_is_copy_modulo_regions: what is not known to be Copy is not; here the type must not
+                    // be waiting for inference -- a goal waiting for a coroutine of the body never ends in it)
+                    _ => {
+                        let resolved = self.cx.infcx.map_or(t, |infcx| infcx.deeply_resolve_ignoring_regions(t));
+                        if self.tcx.tys.has_infer(resolved) { None } else { Some(false) }
+                    }
                 }
             }
             // structural_traits.rs instantiate_constituent_tys_for_copy_clone_trait: a closure
             // is Copy when its tupled upvars are; coroutines are not (coroutine_clone is a
             // feature gate). The current owner reads its in-progress postorder result.
             TyKind::Closure(file, ce, args) => {
-                if crate::upvar::is_capture_owner(self.tx.tcx, self.body, file, args.parent_args) {
+                if crate::upvar::is_capture_owner(self.tcx, self.body, file, args.parent_args) {
                     return self.body.min_captures.get(&ce).filter(|c| c.errors.is_empty()).map(|c| c.is_copy);
                 }
-                if self.tx.tcx.is_coroutine(t) { return Some(false); }
+                if self.tcx.is_coroutine(t) { return Some(false); }
                 self.copy_type(args.tupled_upvars_ty())
             }
-            _ => Some(self.tx.is_copy(t)),
+            _ => Some(self.tcx.type_is_copy_modulo_regions(self.cx.prog, self.cx, self.body.def, t)),
         }
     }
     fn access(&mut self, p: Place, a: Access) {
@@ -110,34 +117,34 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
         let mut p = self.walk_place(e, mutable)?;
         // rustc walk_adjustment: Deref + Borrow(RawPtr) borrows the referent.
         // Cast operands go through this path just like implicit coercions.
-        if let Some(Coerce::RefToRaw(m)) = self.body.coerce.get(&e.0) {
-            let t = self.tx.builtin_deref(p.ty())?;
+        if let Some(Coerce::RefToRaw(m)) = self.body.coerce(e.0) {
+            let t = self.tcx.builtin_deref(p.ty())?;
             p = p.project(Projection::Deref, t);
-            self.delegate.borrow(p, if *m { BorrowKind::Mut } else { BorrowKind::Imm });
+            self.delegate.borrow(p, if m { BorrowKind::Mut } else { BorrowKind::Imm });
             return None;
         }
         // coerce_to_ref (:406, :515): reborrow mutable references, while an
         // equal shared reference coercion is a no-op. Autoref is an rvalue.
-        if let Some(&m) = self.body.reborrows.get(&e.0) {
-            if let Some(t) = self.tx.builtin_deref(p.ty()) {
+        if let Some(m) = self.body.reborrow(e.0) {
+            if let Some(t) = self.tcx.builtin_deref(p.ty()) {
                 p = p.project(Projection::Deref, t);
-                if let Some(Coerce::DerefRef(n)) = self.body.coerce.get(&e.0) {
-                    for i in 0..*n { p = self.deref(p, e.0 | DEREF_COERCE_KEY, i, m)?; }
+                if let Some(Coerce::DerefRef(n)) = self.body.coerce(e.0) {
+                    for i in 0..n { p = self.deref(p, e.0 | DEREF_COERCE_KEY, i, m)?; }
                 }
                 self.delegate.borrow(p, if m { BorrowKind::Mut } else { BorrowKind::Imm });
                 return None;
             }
         }
-        if self.body.coerce.contains_key(&e.0) { self.consume_place(p); None } else { Some(p) }
+        if self.body.coerce(e.0).is_some() { self.consume_place(p); None } else { Some(p) }
     }
     fn deref(&mut self, p: Place, key: u32, step: usize, mutable: bool) -> Option<Place> {
-        if let Some(t) = self.tx.builtin_deref(p.ty()) {
+        if let Some(t) = self.tcx.builtin_deref(p.ty()) {
             return Some(p.project(Projection::Deref, t));
         }
-        if self.body.ov_derefs.contains_key(&(key, step)) {
+        if self.body.ov_deref(key, step).is_some() {
             // place_op.rs:266 converts overloaded place operations in mutable
             // contexts. Selection must succeed before emitting its autoref.
-            if mutable && !self.has_mutable_place_impl("ops::DerefMut", p.ty(), &[]) {
+            if mutable && !self.has_mutable_place_impl(crate::lang_items::LangItem::DerefMut, p.ty(), &[]) {
                 self.errors.push((key, "unresolved DerefMut obligation"));
             } else { self.delegate.borrow(p, if mutable { BorrowKind::Mut } else { BorrowKind::Imm }); }
         } else { self.errors.push((key, "missing dereference adjustment")); }
@@ -155,18 +162,18 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     /// rvalue reference from the selected method; its pointee is the adjusted
     /// callee type (rustc expr_use_visitor.rs:726-766).
     fn adjusted_deref_ty(&self, t: Type, key: u32, step: usize) -> Option<Type> {
-        if let Some(target) = self.tx.builtin_deref(t) { return Some(target); }
-        let (method, args) = self.body.ov_derefs.get(&(key, step))?;
-        let sig = self.tx.tcx.fn_item_sig(self.tx.prog, *method)?;
-        let ret = self.tx.tcx.tys.subst(sig.ret, self.tx.tcx.tys.list(*args));
-        let ret = self.tx.normalize(ret);
-        self.tx.builtin_deref(ret)
+        if let Some(target) = self.tcx.builtin_deref(t) { return Some(target); }
+        let (method, args) = &self.body.ov_deref(key, step)?;
+        let sig = self.tcx.fn_item_sig(self.cx.prog, *method)?;
+        let ret = self.tcx.tys.subst(sig.ret, self.tcx.tys.list(*args));
+        let ret = self.tcx.normalize_in_body(self.cx.prog, self.cx, self.body.def, ret);
+        self.tcx.builtin_deref(ret)
     }
     /// Categorize the expression while visiting its evaluations. Field/deref
     /// bases are walked without consuming their containing local (:400-437).
     fn walk_expr(&mut self, e: ExprId) -> Option<Place> { self.walk_place(e, false) }
-    fn has_mutable_place_impl(&self, path: &'static str, t: Type, args: &[Type]) -> bool {
-        self.tx.lang(path).is_some_and(|td| self.tx.evaluate_trait(td, t, args).must_apply_modulo_regions())
+    fn has_mutable_place_impl(&self, item: crate::lang_items::LangItem, t: Type, args: &[Type]) -> bool {
+        self.tcx.lang_items.get(item).is_some_and(|td| self.tcx.evaluate_trait_modulo_regions(self.cx.prog, self.cx, self.body.def, td, t, args).must_apply_modulo_regions())
     }
     fn walk_place(&mut self, e: ExprId, mutable: bool) -> Option<Place> {
         let kind = self.ast().expr(e).kind;
@@ -190,9 +197,9 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 let p = self.walk_place(x, mutable);
                 self.consume_expr(i);
                 let mut p = p?;
-                for j in 0..self.body.index_derefs.get(&e.0).copied().unwrap_or(0) { p = self.deref(p, e.0, j, mutable)?; }
+                for j in 0..self.body.index_derefs(e.0) { p = self.deref(p, e.0, j, mutable)?; }
                 if self.body.ov_index.contains_key(&e.0) {
-                    if mutable && !self.has_mutable_place_impl("ops::IndexMut", p.ty(), &[self.body.ty(i)]) {
+                    if mutable && !self.has_mutable_place_impl(crate::lang_items::LangItem::IndexMut, p.ty(), &[self.body.ty(i)]) {
                         self.errors.push((e.0, "unresolved IndexMut obligation"));
                     } else { self.delegate.borrow(p, if mutable { BorrowKind::Mut } else { BorrowKind::Imm }); }
                     return None;
@@ -230,10 +237,10 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             }
             ExprKind::Call(f, args) => {
                 let selection = self.body.call_traits.get(&e.0);
-                let n = selection.map(|s| s.derefs).unwrap_or_else(|| self.body.call_derefs.get(&e.0).copied().unwrap_or(0));
+                let n = selection.map(|s| s.derefs).unwrap_or_else(|| self.body.call_derefs(e.0).unwrap_or(0));
                 let mut t = Some(self.body.ty(f));
                 for step in 0..n { t = t.and_then(|t| self.adjusted_deref_ty(t, e.0, step)); }
-                match t.and_then(|t| self.body.call_kind(self.tx, e, t)) {
+                match t.and_then(|t| self.body.call_kind(self.tcx, self.cx, e, t)) {
                     Some(crate::upvar::ClosureKind::FnOnce) if selection.is_some_and(|s| s.from_param) => {
                         // A generic FnOnce receiver is consumed at its definition.
                         // Monomorphizing F with a Copy closure cannot change that use.
@@ -253,13 +260,13 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             ExprKind::Let(pat, x) => {
                 if let Some(p) = self.adjusted_place(x, false) {
                     self.delegate.borrow(p.clone(), BorrowKind::Imm);
-                    self.delegate.fake_read(p.clone(), FakeReadCause::Let);
+                    self.delegate.fake_read(p.clone(), FakeReadCause::Let, x.0);
                     self.walk_pat(pat, p, false);
                 }
             },
             ExprKind::Match(x, arms) => {
                 let place = self.adjusted_place(x, false);
-                if let Some(p) = &place { self.delegate.fake_read(p.clone(), FakeReadCause::Matched); }
+                if let Some(p) = &place { self.delegate.fake_read(p.clone(), FakeReadCause::Matched, x.0); }
                 for a in self.ast().list(arms).to_vec() {
                     if let Some(p) = &place { self.walk_pat(a.pat, p.clone(), a.guard.is_some()); }
                     if let Some(g) = a.guard { self.consume_expr(g); }
@@ -268,7 +275,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             }
             ExprKind::Closure(_) | ExprKind::Async(..) => {
                 if let Some(caps) = self.body.min_captures.get(&e.0).cloned() {
-                    for (p, cause) in caps.fake_reads { self.delegate.fake_read(p, cause); }
+                    for (p, cause, node) in caps.fake_reads { self.delegate.fake_read(p, cause, node); }
                     for c in caps.captures {
                         match c.info.kind { crate::upvar::CaptureKind::ByValue => self.consume_place(c.place), crate::upvar::CaptureKind::ByRef(k) => self.delegate.borrow(c.place, k) }
                     }
@@ -284,11 +291,11 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 if let Some(x) = base.get() {
                     if let Some(p) = self.walk_expr(x) {
                         let t = p.ty();
-                        for fi in 0..self.tx.n_fields(t, 0) as u32 {
-                            let name = self.tx.field_name(t, 0, fi);
-                            let pf = &self.tx.prog.files[self.body.file as usize];
+                        for fi in 0..self.tcx.place_n_fields(t, 0) as u32 {
+                            let name = self.tcx.place_field_name(self.cx.prog, t, 0, fi);
+                            let pf = &self.cx.prog.files[self.body.file as usize];
                             if fs.iter().any(|f| pf.text(f.name) == name) { continue; }
-                            if let Some(ft) = self.tx.field_ty(t, 0, fi) { self.consume_place(p.clone().project(Projection::Field(0, fi), ft)); }
+                            if let Some(ft) = self.tcx.place_field_ty(self.cx.prog, self.cx, t, 0, fi) { self.consume_place(p.clone().project(Projection::Field(0, fi), ft)); }
                         }
                     }
                 }
@@ -309,37 +316,37 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             ExprKind::Underscore | ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false) => (),
             ExprKind::Tuple(xs) | ExprKind::Array(xs) => {
                 let xs = self.ast().list(xs).to_vec();
-                let array = matches!(self.tx.kind(ty), TyKind::Array(..));
-                let n = match self.tx.kind(ty) { TyKind::Array(_, n) => n.try_to_target_usize(&self.tx.tcx.tys).expect("array length in expression use") as usize, _ => self.tx.n_fields(ty, 0) };
+                let array = matches!(self.tcx.resolved_kind(self.cx, ty), TyKind::Array(..));
+                let n = match self.tcx.resolved_kind(self.cx, ty) { TyKind::Array(_, n) => n.try_to_target_usize(&self.tcx.tys).expect("array length in expression use") as usize, _ => self.tcx.place_n_fields(ty, 0) };
                 let rest = xs.iter().position(|x| matches!(self.ast().expr(*x).kind, ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false)));
                 for (i, x) in xs.iter().enumerate() {
                     if Some(i) == rest { continue; }
                     let fi = if rest.is_some_and(|r| i > r) { n - (xs.len() - i) } else { i } as u32;
-                    let ft = match self.tx.kind(ty) { TyKind::Array(t, _) => Some(t), _ => self.tx.field_ty(ty, 0, fi) };
+                    let ft = match self.tcx.resolved_kind(self.cx, ty) { TyKind::Array(t, _) => Some(t), _ => self.tcx.place_field_ty(self.cx.prog, self.cx, ty, 0, fi) };
                     if let Some(ft) = ft { self.walk_assignee(*x, source.clone().map(|p| p.project(if array { Projection::Index } else { Projection::Field(0, fi) }, ft)), ft); }
                 }
             }
             ExprKind::Struct(row) => {
                 let fs = self.ast().row(row).fields;
                 for f in self.ast().list(fs).to_vec() {
-                    let name = self.tx.prog.files[self.body.file as usize].text(f.name);
-                    for fi in 0..self.tx.n_fields(ty, 0) as u32 {
-                        if self.tx.field_name(ty, 0, fi) == name {
-                            if let Some(ft) = self.tx.field_ty(ty, 0, fi) { self.walk_assignee(f.expr, source.clone().map(|p| p.project(Projection::Field(0, fi), ft)), ft); }
+                    let name = self.cx.prog.files[self.body.file as usize].text(f.name);
+                    for fi in 0..self.tcx.place_n_fields(ty, 0) as u32 {
+                        if self.tcx.place_field_name(self.cx.prog, ty, 0, fi) == name {
+                            if let Some(ft) = self.tcx.place_field_ty(self.cx.prog, self.cx, ty, 0, fi) { self.walk_assignee(f.expr, source.clone().map(|p| p.project(Projection::Field(0, fi), ft)), ft); }
                             break;
                         }
                     }
                 }
             }
             ExprKind::Call(f, xs) => {
-                let vi = match self.body.res.get(&f.0) { Some(Res::Def(d)) if self.tx.prog.def(*d).kind == DefKind::Variant => self.tx.prog.def(*d).sub, _ => 0 };
+                let vi = match self.body.res.get(&f.0) { Some(Res::Def(d)) if self.cx.prog.def(*d).kind == DefKind::Variant => self.cx.prog.def(*d).sub, _ => 0 };
                 let xs = self.ast().list(xs).to_vec();
-                let n = self.tx.n_fields(ty, vi);
+                let n = self.tcx.place_n_fields(ty, vi);
                 let rest = xs.iter().position(|x| matches!(self.ast().expr(*x).kind, ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false)));
                 for (i, x) in xs.iter().enumerate() {
                     if Some(i) == rest { continue; }
                     let fi = if rest.is_some_and(|r| i > r) { n - (xs.len() - i) } else { i } as u32;
-                    if let Some(ft) = self.tx.field_ty(ty, vi, fi) { self.walk_assignee(*x, source.clone().map(|p| p.project(Projection::Field(vi, fi), ft)), ft); }
+                    if let Some(ft) = self.tcx.place_field_ty(self.cx.prog, self.cx, ty, vi, fi) { self.walk_assignee(*x, source.clone().map(|p| p.project(Projection::Field(vi, fi), ft)), ft); }
                 }
             },
             _ => { if let Some(p) = source { self.consume_place(p); } self.use_expr(e, Access::Mutate); }
@@ -347,7 +354,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     }
     fn walk_local(&mut self, pat: PatId, x: ExprId, cause: FakeReadCause, guard: bool) {
         if let Some(p) = self.adjusted_place(x, false) {
-            self.delegate.fake_read(p.clone(), cause);
+            self.delegate.fake_read(p.clone(), cause, x.0);
             self.walk_pat(pat, p, guard);
         }
     }
@@ -369,10 +376,10 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     /// reference type, determines the accessed projection.
     fn walk_pat(&mut self, pat: PatId, mut p: Place, guard: bool) {
         for _ in 0..self.body.pat_derefs.get(&pat.0).copied().unwrap_or(0) {
-            if let Some(t) = self.tx.builtin_deref(p.ty()) { p = p.project(Projection::Deref, t); }
+            if let Some(t) = self.tcx.builtin_deref(p.ty()) { p = p.project(Projection::Deref, t); }
         }
         if self.body.pat_discriminant_reads.contains_key(&pat.0) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
-        let vi = match self.body.pat_res.get(&pat.0) { Some(Res::Def(d)) if self.tx.prog.def(*d).kind == DefKind::Variant => self.tx.prog.def(*d).sub, _ => 0 };
+        let vi = match self.body.pat_res.get(&pat.0) { Some(Res::Def(d)) if self.cx.prog.def(*d).kind == DefKind::Variant => self.cx.prog.def(*d).sub, _ => 0 };
         match self.ast().pat(pat).clone() {
             Pat::Ident { by_ref, mutbl, sub, .. } => {
                 if self.body.pat_local.contains_key(&pat.0) {
@@ -380,29 +387,29 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                     let mode = self.body.pat_bind_ref.get(&pat.0).copied().unwrap_or(if by_ref { if mutbl { 2 } else { 1 } } else { 0 });
                     match mode { 1 => self.delegate.borrow(p.clone(), BorrowKind::Imm), 2 => self.delegate.borrow(p.clone(), BorrowKind::Mut), _ => self.consume_place(p.clone()) }
                 } else if let Some(Res::Def(d)) = self.body.pat_res.get(&pat.0) {
-                    if matches!(self.tx.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
+                    if matches!(self.cx.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
                 }
                 if let Some(s) = sub { self.walk_pat(s, p, guard); }
             }
             Pat::Lit(_) | Pat::Range(..) => self.delegate.borrow(p, BorrowKind::Imm),
             Pat::Path(_) => if let Some(Res::Def(d)) = self.body.pat_res.get(&pat.0) {
-                if matches!(self.tx.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst) { self.delegate.borrow(p, BorrowKind::Imm); }
+                if matches!(self.cx.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst) { self.delegate.borrow(p, BorrowKind::Imm); }
             },
             Pat::Tuple(v) | Pat::TupleStruct(_, v) => {
-                let n = self.tx.n_fields(p.ty(), vi);
+                let n = self.tcx.place_n_fields(p.ty(), vi);
                 let ps = self.ast().list(v).to_vec();
                 let rest = ps.iter().position(|p| matches!(self.ast().pat(*p), Pat::Rest));
                 for (i, sp) in ps.iter().enumerate() {
                     if Some(i) == rest { continue; }
                     let fi = if rest.is_some_and(|r| i > r) { n - (ps.len() - i) } else { i } as u32;
-                    if let Some(t) = self.tx.field_ty(p.ty(), vi, fi) { self.walk_pat(*sp, p.clone().project(Projection::Field(vi, fi), t), guard); }
+                    if let Some(t) = self.tcx.place_field_ty(self.cx.prog, self.cx, p.ty(), vi, fi) { self.walk_pat(*sp, p.clone().project(Projection::Field(vi, fi), t), guard); }
                 }
             }
             Pat::Struct(_, fs, _) => for f in self.ast().list(fs).to_vec() {
-                let name = self.tx.prog.files[self.body.file as usize].text(f.name);
-                for fi in 0..self.tx.n_fields(p.ty(), vi) as u32 {
-                    if self.tx.field_name(p.ty(), vi, fi) == name {
-                        if let Some(t) = self.tx.field_ty(p.ty(), vi, fi) { self.walk_pat(f.pat, p.clone().project(Projection::Field(vi, fi), t), guard); }
+                let name = self.cx.prog.files[self.body.file as usize].text(f.name);
+                for fi in 0..self.tcx.place_n_fields(p.ty(), vi) as u32 {
+                    if self.tcx.place_field_name(self.cx.prog, p.ty(), vi, fi) == name {
+                        if let Some(t) = self.tcx.place_field_ty(self.cx.prog, self.cx, p.ty(), vi, fi) { self.walk_pat(f.pat, p.clone().project(Projection::Field(vi, fi), t), guard); }
                         break;
                     }
                 }
@@ -410,15 +417,15 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
             Pat::Slice(v) => {
                 let ps = self.ast().list(v).to_vec();
                 let rest_only = ps.len() == 1 && crate::typeck::is_rest_pat(self.ast(), ps[0]);
-                if !rest_only && matches!(self.tx.kind(p.ty()), TyKind::Slice(_)) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
-                if let TyKind::Slice(t) | TyKind::Array(t, _) = self.tx.kind(p.ty()) {
+                if !rest_only && matches!(self.tcx.resolved_kind(self.cx, p.ty()), TyKind::Slice(_)) { self.delegate.borrow(p.clone(), BorrowKind::Imm); }
+                if let TyKind::Slice(t) | TyKind::Array(t, _) = self.tcx.resolved_kind(self.cx, p.ty()) {
                     for sp in ps {
                         let rest = crate::typeck::is_rest_pat(self.ast(), sp);
                         self.walk_pat(sp, p.clone().project(if rest { Projection::Subslice } else { Projection::Index }, if rest { self.body.pty(sp) } else { t }), guard);
                     }
                 }
             }
-            Pat::Ref(_, s) | Pat::Box(s) => if let Some(t) = self.tx.builtin_deref(p.ty()) { self.walk_pat(s, p.project(Projection::Deref, t), guard); },
+            Pat::Ref(_, s) | Pat::Box(s) => if let Some(t) = self.tcx.builtin_deref(p.ty()) { self.walk_pat(s, p.project(Projection::Deref, t), guard); },
             Pat::Paren(s) => self.walk_pat(s, p, guard),
             Pat::Or(v) => for s in self.ast().list(v).to_vec() { self.walk_pat(s, p.clone(), guard); },
             Pat::Wild | Pat::Rest => (),
@@ -427,7 +434,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
     }
     fn walk_macro(&mut self, e: ExprId, m: MacCall) {
         if m.args == NO_MAC_ARGS { return; }
-        let pf = &self.tx.prog.files[self.body.file as usize];
+        let pf = &self.cx.prog.files[self.body.file as usize];
         let name = self.ast().segs(m.path.segs).last().map(|s| pf.text(s.name)).unwrap_or("");
         let ma = *self.ast().mac_arg(m.args);
         let xs = self.ast().list(ma.exprs).to_vec();
@@ -460,7 +467,7 @@ mod tests {
         fn consume(&mut self, p: Place, m: ConsumeMode) { self.0.push((p, if m == ConsumeMode::Copy { "copy" } else { "move" })); }
         fn borrow(&mut self, p: Place, k: BorrowKind) { self.0.push((p, if k == BorrowKind::Mut { "mut" } else { "imm" })); }
         fn mutate(&mut self, p: Place) { self.0.push((p, "mutate")); }
-        fn fake_read(&mut self, p: Place, _: FakeReadCause) { self.0.push((p, "fake")); }
+        fn fake_read(&mut self, p: Place, _: FakeReadCause, _: u32) { self.0.push((p, "fake")); }
     }
     #[test]
     fn mutable_reference_consumption_depends_on_recorded_reborrow() {
@@ -475,10 +482,10 @@ mod tests {
         b.locals.push(crate::typeck::Local { name: 0, ty: t, mutable: false, pat: 0 });
         b.res.insert(id.0, Res::Local(0));
         let state = crate::tcx::EvalState::new();
-        let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
         for reborrow in [false, true] {
-            if reborrow { b.reborrows.insert(id.0, true); }
-            let mut v = ExprUseVisitor { tx: &tx, body: &b, delegate: Events::default(), errors: Vec::new() };
+            if reborrow { b.adjustments.insert(id.0, crate::typeck::adjustments::Adjustments { operand: Default::default(), value: vec![crate::typeck::adjustments::Adjustment { kind: crate::typeck::adjustments::Adjust::Borrow(true), target: t, mutbl: false }].into() }); }
+            let mut v = ExprUseVisitor { tcx: &tcx, cx: &cx, body: &b, delegate: Events::default(), errors: Vec::new() };
             v.consume_expr(id);
             assert!(v.errors.is_empty());
             assert_eq!(v.delegate.0.len(), 1);
@@ -500,8 +507,8 @@ mod tests {
         b.locals.push(crate::typeck::Local { name: 0, ty: t, mutable: false, pat: 0 });
         b.res.insert(base.0, Res::Local(0)); b.field_idx.insert(id.0, (0, 0));
         let state = crate::tcx::EvalState::new();
-        let tx = Tx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
-        let mut v = ExprUseVisitor { tx: &tx, body: &b, delegate: Events::default(), errors: Vec::new() };
+        let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let mut v = ExprUseVisitor { tcx: &tcx, cx: &cx, body: &b, delegate: Events::default(), errors: Vec::new() };
         v.consume_expr(id);
         assert!(v.errors.is_empty()); assert_eq!(v.delegate.0.len(), 1);
         assert_eq!(v.delegate.0[0].1, "copy");

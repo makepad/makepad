@@ -19,10 +19,10 @@ impl<T> BTreeSet<T> {
     pub fn iter(&self) -> Iter<'_, T> {
         Iter { iter: self.map.keys() }
     }
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.map.len()
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
     pub fn clear(&mut self) {

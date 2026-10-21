@@ -16,6 +16,21 @@ pub use core::f32;
 pub use core::f64;
 pub use core::hash;
 pub use core::hint;
+// rustc's std::simd: core::simd plus portable-simd's std_float (StdFloat); as core::simd, only
+// with relax_portable_simd
+#[cfg(relax_portable_simd)]
+#[allow(dead_code)]
+mod std_float;
+#[cfg(relax_portable_simd)]
+pub mod simd {
+    pub use core::simd::*;
+    pub use crate::std_float::StdFloat;
+}
+mod sealed {
+    /// This trait being unreachable from outside the crate prevents outside implementations of
+    /// std's extension traits (rustc std/src/lib.rs).
+    pub trait Sealed {}
+}
 pub use core::iter;
 pub use core::marker;
 pub use core::mem;
@@ -52,18 +67,26 @@ pub use ::alloc::rc;
 pub use ::alloc::string;
 pub use ::alloc::vec;
 
+/// std::intrinsics (unstable module): the intrinsics stabilized under `ptr` stay reachable here
+/// (rustc library/core/src/intrinsics/mod.rs: `pub use crate::ptr::{copy, copy_nonoverlapping, write_bytes}`).
+pub mod intrinsics {
+    pub use core::ptr::{copy, copy_nonoverlapping, write_bytes};
+}
+
 pub mod collections {
     pub use core::collections::binary_heap;
     pub use core::collections::btree_map;
     pub use core::collections::btree_set;
     pub use core::collections::hash_map;
     pub use core::collections::hash_set;
+    pub use core::collections::linked_list;
     pub use core::collections::vec_deque;
     pub use core::collections::BTreeMap;
     pub use core::collections::BTreeSet;
     pub use core::collections::BinaryHeap;
     pub use core::collections::HashMap;
     pub use core::collections::HashSet;
+    pub use core::collections::LinkedList;
     pub use core::collections::TryReserveError;
     pub use core::collections::VecDeque;
 }

@@ -9,6 +9,7 @@ pub mod io {
 pub mod process;
 pub mod prelude {
     pub use super::ffi::{OsStrExt, OsStringExt};
+    pub use super::process::{CommandExt, ExitStatusExt};
     pub use super::fs::{DirEntryExt, FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     pub use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 }

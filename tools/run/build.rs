@@ -47,6 +47,8 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=-Wl,-z,nostart-stop-gc");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../libs/relax/base/src/json.rs");
+    println!("cargo:rerun-if-changed=../../libs/relax/base/src/srchash.rs");
     println!("cargo:rerun-if-changed=../../libs/relax/build_stamp.rs");
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let g = build_stamp::graph(&dir);

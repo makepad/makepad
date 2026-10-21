@@ -37,7 +37,7 @@ fn inference_diagnostics_do_not_mask_body_error() {
 }
 
 fn program(source: &[u8]) -> (Program, Tcx) {
-    let dir = std::env::temp_dir().join(format!("relax-typing-env-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!("relax-typing-env-{}-{}", std::process::id(), crate::unique_test_suffix()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("lib.rs");
     std::fs::write(&path, source).unwrap();
@@ -274,12 +274,6 @@ fn round29_borrowck_retains_non_generic_and_region_only_clauses() {
             assert!(infcx.param_env.clauses.iter().any(|p| matches!(p.kind,
                 PredicateKind::Clause(ClauseKind::RegionOutlives(..)))));
         }
-        let state = EvalState::new();
-        let env = TypingEnv { limit: Default::default(), param_env: tcx.intern_param_env(infcx.param_env.clone()), mode: TypingMode::borrowck(&tcx, &prog, def) };
-        let tx = crate::borrowck::tyx::Tx::new(&prog, &tcx, env, &state);
-        tx.polymorphic.set(true);
-        tx.reset_env();
-        assert_eq!(*tx.param_env.borrow(), infcx.param_env);
     }
 }
 
@@ -297,15 +291,6 @@ fn round29_borrowck_opaque_list_and_rigid_skeleton() {
     assert!(tcx.defining_opaques(defining_opaque_types).contains(&opaque));
     assert!(!tcx.defining_opaques(defining_opaque_types).contains(&owner));
     assert!(matches!(TypingMode::borrowck(&tcx, &prog, named(&prog, "ordinary")), TypingMode::Typeck { .. }));
-    let state = EvalState::new();
-    let tx = crate::borrowck::tyx::Tx::new(&prog, &tcx, TypingEnv { limit: Default::default(), param_env: Default::default(), mode }, &state);
-    let rty = crate::borrowck::rty::Rty::new(&tx);
-    let arg = tcx.tys.intern(TyKind::Ref(false, tcx.tys.u8_, tcx.tys.intern_region(crate::types::RegionKind::ReStatic)));
-    let alias = AliasTy { kind: AliasTyKind::Opaque { def_id: opaque }, args: tcx.tys.mk_list(&[arg]), regions: crate::types::RegionArgsId::EMPTY };
-    let rigid = tcx.tys.intern(TyKind::Alias(crate::consts::IsRigid::Yes, alias.clone()));
-    let nonrigid = tcx.tys.intern(TyKind::Alias(crate::consts::IsRigid::No, alias));
-    assert_eq!(rty.skel(rigid), rty.skel(nonrigid));
-    assert!(!rty.skel(rigid).is_empty());
 }
 
 #[test]
@@ -389,7 +374,9 @@ fn round39_field_view_failed_instantiation_is_unknown() {
     let state = EvalState::new();
     let env = TypingEnv::fully_monomorphized(&prog);
     let cx = EvalCx::new(&prog, &tcx, env, &state);
-    let tx = crate::borrowck::tyx::Tx::new(&prog, &tcx, env, &state);
+    let bodies = crate::borrowck::driver::MirBodies::new(&prog, &tcx);
+    let cache = crate::borrowck::field_views::SummaryCx::default();
+    let fenv = crate::borrowck::field_views::FvEnv { prog: &prog, tcx: &tcx, cx: &cx, cache: &cache, bodies: &bodies };
     let def = named(&prog, "projected");
     let body = tcx.typeck(&prog, def);
     assert!(body.errors.is_empty(), "{:?}", body.errors);
@@ -399,13 +386,13 @@ fn round39_field_view_failed_instantiation_is_unknown() {
     assert!(crate::typeck::try_instantiate_body(&cx, &prog, &tcx, def, &[projection]).is_err());
     for _ in 0..2 {
         // Failure (including a cached summary) must never mean an empty Parts set.
-        assert!(crate::borrowck::fv::summaries(&prog, &tcx, &tx, def, &args, 0).is_empty());
-        let forwarded = crate::borrowck::fv::summaries(&prog, &tcx, &tx, named(&prog, "forwarded"), &args, 0);
-        assert_eq!(*forwarded, vec![crate::borrowck::fv::Summary::Whole]);
+        assert!(crate::borrowck::field_views::summaries(&fenv, def, &args, 0).is_empty());
+        let forwarded = crate::borrowck::field_views::summaries(&fenv, named(&prog, "forwarded"), &args, 0);
+        assert_eq!(*forwarded, vec![crate::borrowck::field_views::Summary::Whole]);
     }
     let concrete = crate::typeck::try_instantiate_body(&cx, &prog, &tcx, def, &[tcx.tys.u8_]).unwrap();
     assert!(concrete.errors.is_empty(), "{:?}", concrete.errors);
-    let summary = crate::borrowck::fv::summaries(&prog, &tcx, &tx, def, &[tcx.tys.u8_], 0);
+    let summary = crate::borrowck::field_views::summaries(&fenv, def, &[tcx.tys.u8_], 0);
     assert_eq!(summary.len(), 1);
-    assert!(matches!(&summary[0], crate::borrowck::fv::Summary::Parts(parts) if parts.len() == 1 && parts[0].1));
+    assert!(matches!(&summary[0], crate::borrowck::field_views::Summary::Parts(parts) if parts.len() == 1 && parts[0].1));
 }

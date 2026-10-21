@@ -41,6 +41,22 @@ impl<'a> TypeOutlives<'a> {
             }
         }
     }
+    /// obligations.rs:621 args_must_outlive: type arguments outlive the region, and an
+    /// invariant lifetime argument (all of them without declared variances) is constrained
+    /// too; variant ones are covered by the components.
+    fn args_must_outlive(&mut self, alias: &crate::types::AliasTy, region: RegionId, category: ConstraintCategory) {
+        let tcx = self.tcx;
+        let prog = self.verify_bound.prog;
+        let variances = tcx.opt_alias_variances(prog, alias.kind);
+        let indices = tcx.generic_indices_of(prog, alias.kind.def_id());
+        for &ty in tcx.tys.list(alias.args) {
+            if !matches!(tcx.tys.kind(ty), TyKind::Const(_)) { self.type_must_outlive(ty, region, category); }
+        }
+        for (i, &r) in tcx.tys.region_args(alias.regions).iter().enumerate() {
+            let variance = variances.as_ref().map_or(crate::types::variance::V::Inv, |v| v[indices.lifetimes[i] as usize]);
+            if variance == crate::types::variance::V::Inv { self.delegate.push_sub_region_constraint(region, r, category); }
+        }
+    }
     fn alias_ty_must_outlive(&mut self, ty: TyId, region: RegionId, category: ConstraintCategory) {
         let tcx = self.tcx;
         let TyKind::Alias(_, alias) = tcx.tys.kind(ty) else { unreachable!() };
@@ -50,10 +66,7 @@ impl<'a> TypeOutlives<'a> {
         let env_bounds = self.verify_bound.approx_declared_bounds_from_env(ty);
         let has_infer_regions = tcx.tys.flags(ty).contains(crate::types::TypeFlags::HAS_RE_INFER);
         if env_bounds.is_empty() && trait_bounds.is_empty() && (has_infer_regions || matches!(alias.kind, AliasTyKind::Opaque { .. })) {
-            for &ty in tcx.tys.list(alias.args) { if !matches!(tcx.tys.kind(ty), TyKind::Const(_)) { self.type_must_outlive(ty, region, category); } }
-            for (i, &r) in tcx.tys.region_args(alias.regions).iter().enumerate() {
-                if !components::alias_region_is_bivariant(tcx, self.verify_bound.prog, alias, i) { self.delegate.push_sub_region_constraint(region, r, category); }
-            }
+            self.args_must_outlive(alias, region, category);
             return;
         }
         if let Some(&unique) = trait_bounds.first() {
@@ -61,7 +74,8 @@ impl<'a> TypeOutlives<'a> {
             for &r in &trait_bounds[1..] { all &= r == unique; }
             for p in &env_bounds {
                 let PredicateKind::Clause(ClauseKind::TypeOutlives(_, r)) = p.kind else { unreachable!() };
-                all &= !p.has_bound_vars(&self.tcx.tys) && r == unique;
+                // (`for<'a> T: 'a`-style bounds: only the bound region having bound vars matters)
+                all &= !matches!(self.tcx.tys.region_kind(r), crate::types::RegionKind::ReBound(..)) && r == unique;
             }
             if all { self.delegate.push_sub_region_constraint(region, unique, category); return; }
         }
@@ -78,6 +92,6 @@ impl TypeOutlivesDelegate for &InferCtxt<'_> {
         self.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.tcx.tys, a, b, false);
     }
     fn push_verify(&mut self, ty: TyId, region: RegionId, bound: VerifyBound) {
-        self.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound });
+        self.inner.borrow_mut().unwrap_region_constraints().verify_generic_bound(Verify { ty, region, bound, span: self.origin_span.get() });
     }
 }

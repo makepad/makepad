@@ -41,14 +41,14 @@ impl ZoneTaken {
 
 /// Takes compiler statics before a restore, keeping rollback possible and compiler TLS valid.
 /// Every compiler thread is quiesced; the caller is already in the new compiler generation.
-pub(crate) fn zone_take_all() -> ZoneTaken {
-    ZoneTaken {
-        compiler: crate::zone_take(),
+pub(crate) fn zone_take_all() -> Option<ZoneTaken> {
+    Some(ZoneTaken {
+        compiler: crate::zone_take()?,
         types: relax_types::zone_take(),
         front: relax_front::zone_take(),
         codegen: relax_codegen::zone_take(),
         session: relax_session::zone_take(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -59,8 +59,8 @@ mod reset_tests {
         if std::env::var_os(CHILD).is_some() {
             // Take helpers assert their statics are empty. Repeat to cover an empty take.
             let _phase = crate::zone_alloc::compiler();
-            super::zone_take_all().forget();
-            super::zone_take_all().forget();
+            super::zone_take_all().unwrap().forget();
+            super::zone_take_all().unwrap().forget();
             return;
         }
         // Other native tests use these process-wide caches: reset only in an isolated child.
@@ -81,6 +81,17 @@ pub(crate) struct Acc {
 impl Acc {
     fn new() -> Acc {
         Acc { counts: Vec::new(), cur: 0 }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Acc {
+        Acc::new()
+    }
+
+    /// Pointers into the compiler arena counted so far.
+    #[cfg(test)]
+    pub(crate) fn total(&self) -> usize {
+        self.counts.iter().map(|c| c.1).sum()
     }
 
     /// The following pointers are counted under `name`.
@@ -295,7 +306,7 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     a.field("provided_types");
     a.map(&u.provided_types, |_, _, _| {});
     a.field("provided_shared");
-    a.set(&u.provided_shared);
+    if let Some(s) = u.provided_shared_set() { a.set(s); }
     a.field("missing_stubs");
     if let Ok(g) = u.missing_stubs.try_lock() {
         a.map(&*g, |a, k, _| a.string(k));
@@ -317,6 +328,8 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     a.vec(&u.stats.timeline);
     a.field("stats.tier1_drop_why");
     a.btree(&u.stats.tier1_drop_why, |_, _, _| {});
+    // makepad inspect's records that installed code calls into (sites, probe groups, edits)
+    crate::inspect::scan_kept(&mut a);
     a.counts.retain(|c| c.1 > 0);
     a.counts
 }
@@ -419,6 +432,20 @@ pub(crate) fn static_scan() {
     }
     print_hits("static scan", &hits, &format!(" (generation {g}, {words} words scanned)"));
     tls_scan(g);
+}
+
+/// MAKEPAD_RUN_ZONE_CHECK=2, just before a swap destroys generation `old`: the statics already hold
+/// the new generation's values, so a word still pointing into `old` is a root the swap missed (the
+/// next use of it faults).
+pub(crate) fn stale_roots(old: u64) {
+    if level() < 2 {
+        return;
+    }
+    let mut hits = Vec::new();
+    for (name, base, start, len) in data_regions() {
+        scan_words(start, len, old, |a| format!("{name}+{:#x}", a - base), &mut hits);
+    }
+    print_hits("STALE statics before destroy", &hits, &format!(" (generation {old})"));
 }
 
 /// (module, load base, start, len) of every writable data range of the executable and, when

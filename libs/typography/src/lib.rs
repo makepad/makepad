@@ -13,4 +13,5 @@ pub mod karaoke;
 pub mod layout;
 pub mod outline;
 pub mod path;
+pub mod record;
 pub mod stroke;

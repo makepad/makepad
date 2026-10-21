@@ -105,7 +105,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
                 parts[k] += pp[k];
             }
             rir += b;
-            let n = crate::opt::inst_count(r);
+            let n = relax_codegen::opt::inst_count(r);
             let k = if n > 600 { 2 } else if n > 120 { 1 } else { 0 };
             rir_by[k] += b;
             rir_n[k] += 1;
@@ -118,7 +118,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
     out.push(("slot names".to_string(), names));
     out.push(("slot histories".to_string(), history));
     out.push(("slot pc maps".to_string(), pcm));
-    out.push((format!("slot RIR kept ({} fns; inst {} B, block {} B, func {} B)", n_rir, std::mem::size_of::<crate::rir::Inst>(), std::mem::size_of::<crate::rir::Block>(), std::mem::size_of::<crate::rir::Func>()), rir));
+    out.push((format!("slot RIR kept ({} fns; inst {} B, block {} B, func {} B)", n_rir, std::mem::size_of::<relax_backend::rir::Inst>(), std::mem::size_of::<relax_backend::rir::Block>(), std::mem::size_of::<relax_backend::rir::Func>()), rir));
     out.push((format!("  RIR insts used (of {:.1} MB capacity)", parts[1] as f64 / 1048576.0), parts[0]));
     out.push((format!("  RIR positions used (of {:.1} MB capacity)", parts[3] as f64 / 1048576.0), parts[2]));
     out.push((format!("  RIR of fns <= 120 insts ({})", rir_n[0]), rir_by[0]));
@@ -202,10 +202,10 @@ fn file_arrays(p: &crate::program::Program) -> Vec<(String, u64)> {
 
 /// Shallow bytes of one RIR function (blocks, insts, positions, vregs, slots).
 /// (insts bytes used, insts capacity, pos used, pos capacity) of one RIR function
-pub fn rir_parts(f: &crate::rir::Func) -> [u64; 4] {
+pub fn rir_parts(f: &relax_backend::rir::Func) -> [u64; 4] {
     let mut r = [0u64; 4];
     for blk in &f.blocks {
-        r[0] += (blk.insts.len() * std::mem::size_of::<crate::rir::Inst>()) as u64;
+        r[0] += (blk.insts.len() * std::mem::size_of::<relax_backend::rir::Inst>()) as u64;
         r[1] += vbytes(&blk.insts);
         r[2] += (blk.pos.len() * 8) as u64;
         r[3] += vbytes(&blk.pos);
@@ -213,7 +213,7 @@ pub fn rir_parts(f: &crate::rir::Func) -> [u64; 4] {
     r
 }
 
-pub fn rir_bytes(f: &crate::rir::Func) -> u64 {
+pub fn rir_bytes(f: &relax_backend::rir::Func) -> u64 {
     let mut b = vbytes(&f.blocks) + vbytes(&f.vregs) + vbytes(&f.slots) + vbytes(&f.params) + f.name.capacity() as u64;
     for blk in &f.blocks {
         b += vbytes(&blk.insts) + vbytes(&blk.pos);

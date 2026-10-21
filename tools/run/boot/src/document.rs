@@ -4,28 +4,21 @@ use crate::{
 };
 use makepad_hal::{CmdWriter, Id};
 use makepad_script::{
-    host::ScriptVmHost, id, LiveId, NoTrap, ScriptHeap, ScriptMod, ScriptObject, ScriptObjectRef,
+    host::ScriptVmHost, id, LiveId, NoTrap, ScriptHeap, ScriptMod, ScriptObject,
     ScriptValue, ScriptVm, ScriptVmBase,
 };
 use std::collections::HashMap;
 
-pub const BACKGROUND: usize = 0;
-pub const PROGRESS: usize = 1;
-pub const ERROR_BAND: usize = 2;
-pub const GLYPH: usize = 3;
-pub const ICON: usize = 4;
+pub const ERROR_BAND: usize = 0;
+pub const GLYPH: usize = 1;
+pub const FIELD: usize = 2;
+pub const ICON: usize = 3;
+/// the layer pipe's Id in its bank (its index in `pipes` is `Program::layer`)
+const LAYER_SLOT: u32 = 4;
 pub const PIPE_BANK_SIZE: u32 = 8;
 
 #[derive(Clone, Copy)]
 pub struct Layout {
-    pub margin: f32,
-    pub padding: f32,
-    pub top: f32,
-    pub max_width: f32,
-    pub max_height: f32,
-    pub center: f32,
-    pub columns: f32,
-    pub icon_size: f32,
     pub card_padding: f32,
     pub action_height: f32,
     pub action_gap: f32,
@@ -35,7 +28,6 @@ pub struct Layout {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     App,
-    Progress,
     Status,
     Current,
     Location,
@@ -52,20 +44,19 @@ pub struct Line {
     pub height: f32,
     pub gap: f32,
     pub color: [f32; 4],
-    pub light_color: [f32; 4],
     pub align: f32,
 }
 
 pub struct Program {
-    root: ScriptObjectRef,
-    vm: Option<Box<ScriptVmBase>>,
     pub pipes: Vec<Pipeline>,
+    /// the index of the `layer` pipe in `pipes` (the running app's frame under the window
+    /// layer); a document without it draws no layer
+    pub layer: Option<usize>,
+    /// the document has the `icon` pipe (at ICON)
+    pub icon: bool,
     pub lines: Vec<Line>,
     boot: Layout,
     overlay: Layout,
-    landscape: Option<Layout>,
-    landscape_height: f32,
-    pub settle_seconds: f32,
     hints: HashMap<LiveId, String>,
     pub path: std::path::PathBuf,
 }
@@ -102,16 +93,8 @@ fn positive(
 fn layout(heap: &ScriptHeap, root: ScriptObject, name: LiveId) -> Result<Layout, String> {
     let obj = object(heap, root, name)?;
     Ok(Layout {
-        margin: positive(heap, obj, id!(margin), true)?,
-        padding: positive(heap, obj, id!(padding), true)?,
-        top: positive(heap, obj, id!(top), true)?,
-        max_width: positive(heap, obj, id!(max_width), true)?,
-        max_height: positive(heap, obj, id!(max_height), true)?,
-        center: optional_number(heap, obj, id!(center), 0.0)?,
-        columns: optional_number(heap, obj, id!(column_split), 0.0)?,
-        icon_size: optional_number(heap, obj, id!(icon_size), 72.0)?,
-        card_padding: optional_number(heap, obj, id!(card_padding), 16.0)?,
-        action_height: optional_number(heap, obj, id!(action_height), 52.0)?.max(48.0),
+        card_padding: optional_number(heap, obj, id!(card_padding), 12.0)?,
+        action_height: optional_number(heap, obj, id!(action_height), 48.0)?.max(44.0),
         action_gap: optional_number(heap, obj, id!(action_gap), 8.0)?,
         action_width: optional_number(heap, obj, id!(action_width), 152.0)?.max(1.0),
     })
@@ -182,21 +165,8 @@ impl Program {
             let root = value
                 .as_object()
                 .ok_or("Boot document must return a text/pass object")?;
-            let root_ref = vm.heap_mut().new_object_ref(root);
             let boot = layout(vm.heap(), root, id!(boot))?;
             let overlay = layout(vm.heap(), root, id!(overlay))?;
-            let landscape = if get(vm.heap(), root, id!(landscape)).is_nil() {
-                None
-            } else {
-                Some(layout(vm.heap(), root, id!(landscape))?)
-            };
-            let landscape_height = optional_number(vm.heap(), root, id!(landscape_height), 540.0)?;
-            let settle_seconds = optional_number(vm.heap(), root, id!(settle_seconds), 1.5)?;
-            for name in [id!(phase_target), id!(ease)] {
-                if !vm.heap().is_fn(object(vm.heap(), root, name)?) {
-                    return Err(format!("Boot document {name} must be a function"));
-                }
-            }
             let mut lines = Vec::new();
             let entries = get(vm.heap(), root, id!(lines))
                 .as_array()
@@ -209,7 +179,6 @@ impl Program {
                     .ok_or("Each boot line must be an object")?;
                 let role = match get(vm.heap(), line, id!(role)).as_id() {
                     Some(v) if v == id!(app) => Role::App,
-                    Some(v) if v == id!(progress) => Role::Progress,
                     Some(v) if v == id!(status) => Role::Status,
                     Some(v) if v == id!(current) => Role::Current,
                     Some(v) if v == id!(location) => Role::Location,
@@ -221,28 +190,15 @@ impl Program {
                 };
                 lines.push(Line {
                     role,
-                    size: if matches!(role, Role::Progress) {
-                        0.0
-                    } else {
-                        positive(vm.heap(), line, id!(size), false)?
-                    },
+                    size: positive(vm.heap(), line, id!(size), false)?,
                     height: positive(vm.heap(), line, id!(height), false)?,
                     gap: positive(vm.heap(), line, id!(gap), true)?,
                     color: gpu::color(vm.heap(), get(vm.heap(), line, id!(color))),
-                    light_color: gpu::color(vm.heap(), {
-                        let light = get(vm.heap(), line, id!(light_color));
-                        if light.is_nil() {
-                            get(vm.heap(), line, id!(color))
-                        } else {
-                            light
-                        }
-                    }),
                     align: optional_number(vm.heap(), line, id!(align), 0.0)?.min(1.0),
                 });
             }
             for role in [
                 Role::App,
-                Role::Progress,
                 Role::Status,
                 Role::Domain,
                 Role::Errors,
@@ -285,6 +241,9 @@ impl Program {
                 (id!(tap_resume), "Resume"),
                 (id!(input_label), "Return value"),
                 (id!(paused), "Paused after a panic"),
+                (id!(halted), "Compile halted"),
+                (id!(follow_on), "follow-on"),
+                (id!(root_cause), "root cause"),
                 (id!(resolve), "Resolving dependencies"),
                 (id!(parse), "Reading source"),
                 (id!(typecheck), "Checking types"),
@@ -302,7 +261,7 @@ impl Program {
                 hints.insert(key, label);
             }
             let mut pipes = Vec::new();
-            for (index, key) in [id!(background), id!(progress), id!(error_band), id!(glyph)]
+            for (index, key) in [id!(error_band), id!(glyph), id!(ignition)]
                 .into_iter()
                 .enumerate()
             {
@@ -323,20 +282,30 @@ impl Program {
                     Id::new(bank + ICON as u32, generation),
                 )?);
             }
+            let icon = pipes.len() > ICON;
+            let mut layer = None;
+            if !get(vm.heap(), root, id!(layer)).is_nil() {
+                let shader = object(vm.heap(), root, id!(layer))?;
+                layer = Some(pipes.len());
+                pipes.push(Pipeline::compile(
+                    &mut vm,
+                    shader,
+                    dialect,
+                    Id::new(bank + LAYER_SLOT, generation),
+                )?);
+            }
             Ok((
-                root_ref,
                 boot,
                 overlay,
-                landscape,
-                landscape_height,
-                settle_seconds,
                 lines,
                 hints,
                 pipes,
+                layer,
+                icon,
             ))
         })();
         diagnostics.extend(errors(&mut vm, "codegen"));
-        let (root, boot, overlay, landscape, landscape_height, settle_seconds, lines, hints, pipes) =
+        let (boot, overlay, lines, hints, pipes, layer, icon) =
             match parsed {
                 Ok(parsed) if diagnostics.is_empty() => parsed,
                 Ok(_) => return Err(diagnostics),
@@ -351,29 +320,21 @@ impl Program {
                     return Err(diagnostics);
                 }
             };
-        let mut program = Self {
-            vm: Some(vm.bx),
-            root,
+        Ok(Self {
             pipes,
+            layer,
+            icon,
             lines,
             boot,
             overlay,
-            landscape,
-            landscape_height,
-            settle_seconds,
             hints,
             path: document.path.clone(),
-        };
-        program.call(id!(phase_target), &[0.0, 0.0, 1.0, 6.0, 0.0, 0.0, 0.0])?;
-        program.call(id!(ease), &[0.0, 0.0, 0.0])?;
-        Ok(program)
+        })
     }
 
-    pub fn layout(&self, mode: Mode, size: [f32; 2]) -> Layout {
+    pub fn layout(&self, mode: Mode) -> Layout {
         if mode == Mode::Overlay {
             self.overlay
-        } else if size[0] > size[1] && size[1] < self.landscape_height {
-            self.landscape.unwrap_or(self.boot)
         } else {
             self.boot
         }
@@ -383,16 +344,12 @@ impl Program {
         self.hints[&key].clone()
     }
 
-    pub fn line(&self, role: Role, dark: bool) -> Line {
-        let mut line = *self
+    pub fn line(&self, role: Role) -> Line {
+        *self
             .lines
             .iter()
             .find(|l| l.role == role)
-            .unwrap_or_else(|| self.lines.iter().find(|l| l.role == Role::Status).unwrap());
-        if !dark {
-            line.color = line.light_color;
-        }
-        line
+            .unwrap_or_else(|| self.lines.iter().find(|l| l.role == Role::Status).unwrap())
     }
 
     pub fn hints(&self, state: &State, input: Option<&str>) -> String {
@@ -430,38 +387,6 @@ impl Program {
         hints.join(" · ")
     }
 
-    pub fn call(&mut self, name: LiveId, args: &[f64]) -> Result<f32, Vec<Diagnostic>> {
-        let mut host = ScriptVmHost::new((), ());
-        let mut vm = ScriptVm {
-            host: host.host_context(),
-            bx: self.vm.take().expect("boot VM"),
-        };
-        vm.bx.captured_errors = Some(Vec::new());
-        let function = get(vm.heap(), self.root.as_object(), name);
-        let args: Vec<ScriptValue> = args.iter().map(|v| ScriptValue::from_f64(*v)).collect();
-        let value = vm.call(function, &args);
-        let mut diagnostics = errors(&mut vm, "run");
-        let value = gpu::number(value)
-            .map(|v| v as f32)
-            .filter(|v| v.is_finite());
-        if value.is_none() {
-            diagnostics.push(Diagnostic::new(
-                "run",
-                self.path.to_string_lossy(),
-                1,
-                1,
-                format!("Boot function {name} must return a finite number"),
-            ));
-        }
-        vm.bx.gc_if_needed();
-        self.vm = Some(vm.bx);
-        if diagnostics.is_empty() {
-            Ok(value.unwrap())
-        } else {
-            Err(diagnostics)
-        }
-    }
-
     pub fn create(&self, writer: &mut CmdWriter, dialect: u32) {
         for pipe in &self.pipes {
             pipe.create(writer, dialect);
@@ -476,5 +401,18 @@ impl Program {
 
     pub fn ready(&self) -> bool {
         self.pipes.iter().all(|pipe| pipe.ready)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The bundled document compiles for every dialect, with the window layer's pipe.
+    #[test]
+    fn bundled_document_compiles_with_its_layer() {
+        for dialect in [makepad_hal::dialect::MSL, makepad_hal::dialect::SPIRV, makepad_hal::dialect::HLSL] {
+            let program = super::Program::compile(&crate::Document::bundled(), dialect, 0, 1)
+                .unwrap_or_else(|e| panic!("{:?}", e.iter().map(|d| d.message.clone()).collect::<Vec<_>>()));
+            assert!(program.layer.is_some() && program.icon);
+        }
     }
 }

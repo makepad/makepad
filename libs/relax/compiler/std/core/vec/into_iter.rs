@@ -5,6 +5,7 @@ use crate::fmt;
 use crate::heap;
 use crate::intrinsics_mem as im;
 
+#[rustc_insignificant_dtor]
 pub struct IntoIter<T> {
     buf: crate::ptr::NonNull<T>,
     cap: usize,
@@ -12,6 +13,7 @@ pub struct IntoIter<T> {
     start: usize,
     /// one past the next back index
     end: usize,
+    _marker: crate::marker::PhantomData<T>,
 }
 
 unsafe impl<T: Send> Send for IntoIter<T> {}
@@ -19,7 +21,7 @@ unsafe impl<T: Sync> Sync for IntoIter<T> {}
 
 pub(super) fn new<T>(v: Vec<T>) -> IntoIter<T> {
     let me = crate::mem::ManuallyDrop::new(v);
-    IntoIter { buf: me.ptr, cap: me.cap.get(), start: 0, end: me.len }
+    IntoIter { buf: me.ptr, cap: me.cap.get(), start: 0, end: me.len, _marker: crate::marker::PhantomData }
 }
 
 impl<T> IntoIter<T> {
@@ -94,7 +96,7 @@ impl<T> Default for IntoIter<T> {
     }
 }
 
-impl<T> Drop for IntoIter<T> {
+unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
     fn drop(&mut self) {
         while self.start < self.end {
             unsafe { im::drop_in_place(im::ptr_add_mut(self.buf.as_ptr(), self.start)) };

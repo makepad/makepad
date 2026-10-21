@@ -1,9 +1,5 @@
-//! Clocks of the front end's statistics: CPU time of the calling thread (compile-time numbers
-//! robust to machine load) and a process-wide monotonic wall clock.
-
-// Share the clock with the optimiser: build and pass totals must use the same Windows
-// cycle calibration (and Unix thread CPU clock).
-pub use relax_codegen::cpu_ns;
+//! The front end's process-wide monotonic wall clock (thread CPU time is relax_backend::cpu_ns,
+//! shared with the optimiser so build and pass totals use one calibration).
 
 /// Wall time in ns since the first call of it in this process.
 pub fn wall_ns() -> u64 {

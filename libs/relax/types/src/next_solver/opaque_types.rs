@@ -11,7 +11,7 @@ impl EvalCtxt<'_, '_> {
     pub(super) fn normalize_opaque_type(&mut self, env: &ParamEnvId, p: &ProjectionClause) -> QueryResultOrRerunNonErased {
         let tcx = self.delegate.tcx; let (def, args) = self.alias_args(&p.projection_term);
         let Term::Ty(expected) = p.term else { unreachable!() };
-        let owners = match self.delegate.typing_mode {
+        let owners = match self.delegate.typing_mode.get() {
             TypingMode::Coherence => {
                 self.add_item_bounds_for_hidden_type(env, def, &args, expected)?;
                 self.add_goal(GoalSource::Misc, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Ambiguous) })?;
@@ -25,7 +25,7 @@ impl EvalCtxt<'_, '_> {
         };
         if owners.is_some_and(|o| !tcx.defining_opaques(o).contains(&def)) {
             self.eq(env, self.rigid_alias_term(&p.projection_term), p.term)?;
-        } else if matches!(self.delegate.typing_mode, TypingMode::Typeck { .. } | TypingMode::PostTypeckUntilBorrowck { .. }) {
+        } else if matches!(self.delegate.typing_mode.get(), TypingMode::Typeck { .. } | TypingMode::PostTypeckUntilBorrowck { .. }) {
             let mut normalized_args = Vec::new();
             for a in &args { normalized_args.push(match *a {
                 GenericArg::Lifetime(r) => GenericArg::Lifetime(r),
@@ -33,17 +33,18 @@ impl EvalCtxt<'_, '_> {
                 GenericArg::Const(c) => { let Term::Const(c) = self.structurally_normalize_term(env, Term::Const(c))? else { unreachable!() }; GenericArg::Const(c) }
             }); }
             let key = OpaqueTypeKey { def_id: def, args: normalized_args.clone().into() };
-            let previous = self.delegate.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType { ty: expected });
+            let previous = self.delegate.inner.borrow_mut().opaque_types().register(key, ProvisionalHiddenType::new(expected));
             if let Some(prev) = previous { self.eq(env, p.term, Term::Ty(prev))?; }
-            else if matches!(self.delegate.typing_mode, TypingMode::PostTypeckUntilBorrowck { .. }) {
+            else if matches!(self.delegate.typing_mode.get(), TypingMode::PostTypeckUntilBorrowck { .. }) {
                 let actual = self.type_of(def, &args)?;
                 let actual = FreshErasedRegions(self.delegate).fold_ty(&tcx.tys, actual, 0);
-                let actual = self.normalize_ty(env, actual)?; self.eq(env, p.term, Term::Ty(actual))?;
+                let actual = self.normalize_ty(env, actual)?;
+                self.eq(env, p.term, Term::Ty(actual))?;
             }
             self.add_item_bounds_for_hidden_type(env, def, &normalized_args, expected)?;
         } else {
             let mut actual = self.type_of(def, &args)?;
-            if matches!(self.delegate.typing_mode, TypingMode::PostBorrowck { .. }) { actual = FreshErasedRegions(self.delegate).fold_ty(&tcx.tys, actual, 0); }
+            if matches!(self.delegate.typing_mode.get(), TypingMode::PostBorrowck { .. }) { actual = FreshErasedRegions(self.delegate).fold_ty(&tcx.tys, actual, 0); }
             let actual = self.normalize_ty(env, actual)?; self.eq(env, p.term, Term::Ty(actual))?;
         }
         self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
@@ -62,7 +63,7 @@ impl EvalCtxt<'_, '_> {
         let self_ty = goal.self_ty(self); let tcx = self.delegate.tcx;
         let TyKind::Infer(var) = tcx.tys.kind(self_ty) else { unreachable!() };
         let mut opaque_types = Vec::new();
-        if matches!(self.delegate.typing_mode, TypingMode::Typeck { .. }) {
+        if matches!(self.delegate.typing_mode.get(), TypingMode::Typeck { .. }) {
             let values = self.delegate.inner.borrow_mut().opaque_types().iter_lookup_table().to_vec();
             for (key, hidden) in values {
                 if let TyKind::Infer(other) = tcx.tys.kind(self.delegate.shallow_resolve(hidden.ty)) {
@@ -71,7 +72,7 @@ impl EvalCtxt<'_, '_> {
                 }
             }
         }
-        if matches!(self.delegate.typing_mode, TypingMode::ErasedNotCoherence) {
+        if matches!(self.delegate.typing_mode.get(), TypingMode::ErasedNotCoherence) {
             self.opaque_accesses.update(AccessedOpaques { rerun: typing_mode::RerunCondition::AnyOpaqueHasInferAsHidden })?;
         }
         if opaque_types.is_empty() {

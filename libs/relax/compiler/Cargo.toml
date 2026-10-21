@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 # the git store's deflate/inflate (src/inflate), the manifests' TOML (src/toml) and the
 # proc-macro token model (makepad's libs/relax/lex) need no registry dependencies.
+relax-backend = { workspace = true }
 relax-codegen = { workspace = true }
 # the layers below the JIT, each its own crate so they compile in parallel/pipelined and are
 # reused when only a layer above changes: relax-base <- relax-front <- relax-types <- relax-compiler

@@ -21,6 +21,12 @@ use crate::types::{TyId, TyKind};
 const STEP_BUDGET: u32 = 4_000_000;
 const CALL_DEPTH: u32 = 32;
 
+crate::gen_local! {
+    /// the constants whose data this thread's nested evaluations are reading (const_data)
+    /// (compiler TLS: the settle swap forgets the buffer with its generation)
+    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>>;
+}
+
 struct Ctx<'a> {
     u: &'a mut Unit,
     steps: u32,
@@ -69,6 +75,18 @@ pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64
     }
     unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), buf as *mut u8, size) };
     true
+}
+
+/// Evaluates the inline const block `bl` of the (instantiated) body `body` to the bytes of its
+/// value of type `t`; None outside the subset (lowering then runs the block).
+pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
+    if off(&u.prog.session.clone().options) {
+        return None;
+    }
+    let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
+    let mut env: Vec<Option<Vec<u8>>> = Vec::new();
+    let v = cx.block(body, &mut env, bl)?;
+    (v.len() == cx.size(t) as usize).then_some(v)
 }
 
 /// A successful N01 body is complete: constant queries resolve synchronously or unwind.
@@ -145,7 +163,7 @@ pub fn same_value(u: &mut Unit, t: TyId, a: u64, b: u64, depth: u32) -> bool {
             }
             let vi = if adt.is_enum {
                 // same tag bytes, then that variant's fields
-                if let Some((toff, crate::rir::Mem::Int(n, _))) = l.tag {
+                if let Some((toff, relax_backend::rir::Mem::Int(n, _))) = l.tag {
                     if bytes(a + toff as u64, n as usize) != bytes(b + toff as u64, n as usize) {
                         return false;
                     }
@@ -221,7 +239,7 @@ pub fn defined_mask(u: &mut Unit, t: TyId, a: u64, mask: &mut [u8], off: usize, 
             };
             let vi = if adt.is_enum {
                 match l.tag {
-                    Some((toff, crate::rir::Mem::Int(n, _))) => {
+                    Some((toff, relax_backend::rir::Mem::Int(n, _))) => {
                         for b in mask.iter_mut().skip(off + toff as usize).take(n as usize) {
                             *b = 1;
                         }
@@ -252,6 +270,50 @@ pub fn defined_mask(u: &mut Unit, t: TyId, a: u64, mask: &mut [u8], off: usize, 
             }
         }
         _ => all(mask),
+    }
+}
+
+/// rustc_const_eval interpret/validity.rs, the scalar part: a constant's final value holds only
+/// valid bools and chars (arrays, tuples and structs are walked). The message on the first invalid one.
+pub fn invalid_scalar(u: &mut Unit, t: TyId, a: u64, depth: u32) -> Option<String> {
+    if depth > 16 { return None; }
+    let t = u.tcx.normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), t);
+    let l = u.layout_of(t);
+    match u.tcx.tys.kind(t).clone() {
+        TyKind::Bool => {
+            let v = unsafe { *(a as *const u8) };
+            (v > 1).then(|| format!("constructing invalid value of type bool: encountered {:#04x}, but expected a boolean", v))
+        }
+        TyKind::Char => {
+            let v = unsafe { (a as *const u32).read_unaligned() };
+            (char::from_u32(v).is_none()).then(|| format!("constructing invalid value of type char: encountered {:#x}, but expected a valid unicode scalar value (in `0..=0x10FFFF` but not in `0xD800..=0xDFFF`)", v))
+        }
+        TyKind::Array(et, n) => {
+            let n = n.try_to_target_usize(&u.tcx.tys)?;
+            let es = u.layout_of(et).size as u64;
+            for i in 0..n.min(1 << 16) {
+                if let Some(m) = invalid_scalar(u, et, a + i * es, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        TyKind::Tuple(ts) => {
+            for (i, ft) in u.tcx.tys.list(ts).to_vec().into_iter().enumerate() {
+                let fo = l.fields.get(i).copied().unwrap_or(0) as u64;
+                if let Some(m) = invalid_scalar(u, ft, a + fo, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        TyKind::Adt(d, args, _) => {
+            let adt = u.tcx.adts.get(&d).cloned()?;
+            if adt.is_enum || adt.is_union { return None; }
+            for fi in 0..adt.variants[0].fields.len() {
+                let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, fi as u32, u.tcx.tys.list(args));
+                let fo = l.fields.get(fi).copied()? as u64;
+                if let Some(m) = invalid_scalar(u, ft, a + fo, depth + 1) { return Some(m); }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -327,7 +389,7 @@ impl<'a> Ctx<'a> {
                 ExprKind::MethodCall { .. } => b.methods.get(&e.0).map(|m| m.def),
                 _ => None,
             };
-            self.reason = Some(format!("{}: {:?}, call {:?}, coercion {:?}, source {:?}", self.u.prog.def_path(b.def), ex.kind, call.map(|d| self.u.prog.def_path(d)), b.coerce.get(&e.0), source));
+            self.reason = Some(format!("{}: {:?}, call {:?}, coercion {:?}, source {:?}", self.u.prog.def_path(b.def), ex.kind, call.map(|d| self.u.prog.def_path(d)), b.coerce(e.0), source));
         }
         result
     }
@@ -339,7 +401,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let v = self.eval_raw(b, env, e)?;
-        match b.coerce.get(&e.0).copied() {
+        match b.coerce(e.0) {
             None | Some(Coerce::MutToConst | Coerce::UnsafeFn | Coerce::RefToRaw(_)) => Some(v),
             Some(Coerce::ReifyFn) => self.fn_pointer(b.ty(e)),
             Some(Coerce::ClosureFn) => {
@@ -597,7 +659,7 @@ impl<'a> Ctx<'a> {
                 let (mut rv, rt) = match (m.derefs, m.autoref) {
                     (0, 0) => (self.eval(b, env, recv)?, b.ty(recv)),
                     (0, 1) => (self.borrow(b, env, recv)?, b.ty(recv)),
-                    (1, 1) if !b.ov_derefs.contains_key(&(recv.0, 0)) => {
+                    (1, 1) if !b.ov_deref(recv.0, 0).is_some() => {
                         let TyKind::Ref(_, inner, _) = self.kind(b.ty(recv)) else { return None };
                         (self.eval(b, env, recv)?, inner)
                     }
@@ -622,7 +684,7 @@ impl<'a> Ctx<'a> {
                 self.call_const_fn(m.def, self.u.tcx.tys.list(m.args).to_vec(), vals, t)
             }
             ExprKind::Call(f, args) => {
-                if b.legacy_args.contains_key(&e.0) || b.call_derefs.contains_key(&e.0) {
+                if b.legacy_args.contains_key(&e.0) || b.call_derefs(e.0).is_some() {
                     return None;
                 }
                 let fx = crate::lit::strip_paren(&self.u.prog.files[file].ast, f);
@@ -682,6 +744,26 @@ impl<'a> Ctx<'a> {
             ExprKind::ConstBlock(bl) => self.offset_of(b, e, bl).or_else(|| self.block(b, env, bl)),
             ExprKind::Block(bl, l) if l.is_none() => self.block(b, env, bl),
             ExprKind::Unsafe(bl) => self.block(b, env, bl),
+            ExprKind::While(row) => {
+                // `while cond { body }` (no label, no `while let`): body blocks without break or
+                // continue (those are outside the subset and end the evaluation)
+                let crate::ast::WhileRow { cond, body, label } = *self.u.prog.files[file].ast.row(row);
+                if label.is_some() || matches!(self.u.prog.files[file].ast.expr(cond).kind, ExprKind::Let(..)) {
+                    return None;
+                }
+                loop {
+                    self.steps += 1;
+                    if self.steps > STEP_BUDGET {
+                        return None;
+                    }
+                    let cv = self.eval(b, env, cond)?;
+                    if *cv.first()? & 1 == 0 {
+                        break;
+                    }
+                    self.block(b, env, body)?;
+                }
+                Some(Vec::new())
+            }
             ExprKind::If(c, then, els) => {
                 let cv = self.eval(b, env, c)?;
                 if *cv.first()? & 1 == 1 {
@@ -722,7 +804,7 @@ impl<'a> Ctx<'a> {
                 if b.ov_index.contains_key(&e.0) {
                     return None;
                 }
-                let derefs = b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = b.index_derefs(e.0);
                 let av = self.eval(b, env, a)?;
                 let iv = self.eval(b, env, i)?;
                 let idx = rd_u64(&iv, 0)? as usize;
@@ -794,7 +876,7 @@ impl<'a> Ctx<'a> {
             ExprKind::Path(_) => matches!(b.res.get(&e.0), Some(Res::Local(_))),
             ExprKind::Paren(x) => self.owned_local_place(b, x),
             ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => b.field_idx.get(&e.0).is_none_or(|f| f.0 == 0) && self.owned_local_place(b, x),
-            ExprKind::Index(x, _) => b.index_derefs.get(&e.0).copied().unwrap_or(0) == 0 && self.owned_local_place(b, x),
+            ExprKind::Index(x, _) => b.index_derefs(e.0) == 0 && self.owned_local_place(b, x),
             _ => false,
         }
     }
@@ -811,7 +893,7 @@ impl<'a> Ctx<'a> {
                 let (derefs, fi) = b.field_idx.get(&e.0).map(|&(d, f)| (d as usize, f))?;
                 let (mut ptr, t) = match (derefs, self.kind(b.ty(x))) {
                     (0, _) => (self.borrow(b, env, x)?, b.ty(x)),
-                    (1, TyKind::Ref(_, inner, _)) if !b.ov_derefs.contains_key(&(x.0, 0)) => (self.eval(b, env, x)?, inner),
+                    (1, TyKind::Ref(_, inner, _)) if !b.ov_deref(x.0, 0).is_some() => (self.eval(b, env, x)?, inner),
                     _ => return None,
                 };
                 let off = match self.kind(t) {
@@ -839,7 +921,7 @@ impl<'a> Ctx<'a> {
             }
             ExprKind::Index(x, index) => {
                 if b.ov_index.contains_key(&e.0) { return None; }
-                let derefs = b.index_derefs.get(&e.0).copied().unwrap_or(0);
+                let derefs = b.index_derefs(e.0);
                 let (ptr, t) = match (derefs, self.kind(b.ty(x))) {
                     (0, _) => (self.borrow(b, env, x)?, b.ty(x)),
                     (1, TyKind::Ref(_, inner, _)) => (self.eval(b, env, x)?, inner),
@@ -889,7 +971,7 @@ impl<'a> Ctx<'a> {
                 Some((li, base.checked_add(off as usize)?))
             }
             ExprKind::Index(x, index) => {
-                if b.ov_index.contains_key(&e.0) || b.index_derefs.get(&e.0).copied().unwrap_or(0) != 0 { return None; }
+                if b.ov_index.contains_key(&e.0) || b.index_derefs(e.0) != 0 { return None; }
                 let TyKind::Array(et, n) = self.kind(b.ty(x)) else { return None };
                 let n = n.try_to_target_usize(&self.u.tcx.tys)?;
                 let (li, base) = self.local_place(b, env, x)?;
@@ -1179,7 +1261,7 @@ impl<'a> Ctx<'a> {
                 let l = self.layout(from);
                 if l.uninhabited { return None; }
                 let disc = match l.tag {
-                    Some((toff, crate::rir::Mem::Int(tn, ts))) => {
+                    Some((toff, relax_backend::rir::Mem::Int(tn, ts))) => {
                         let raw = load_int(v.get(toff as usize..(toff + tn as u32) as usize)?, tn as usize, ts);
                         crate::lower::decode_tag_const(self.u, raw, &l, &adt)?
                     }
@@ -1225,8 +1307,20 @@ impl<'a> Ctx<'a> {
         let l = u.layout_of(t);
         let buf = u.data(&vec![0u8; l.size.max(1) as usize], l.align.max(8) as u64, crate::syms::DataKind::Typed(t));
         u.syms.set_data_name(buf, crate::jit::const_name(u, d, &args));
+        // a constant that reads itself, directly or through others, is outside the subset (the
+        // code path reports the cycle); each nested evaluation has a Ctx of its own, so
+        // `depth` alone does not bound this recursion
+        // (and nesting is bounded: each nested evaluation has a Ctx of its own, so `depth` alone does not
+        // stop `C<T>` reading `C<Option<T>>` reading ...)
+        let limit = u.prog.crates[u.prog.def(d).krate as usize].recursion_limit as usize;
+        if CONSTS_READING.try_with(|c| c.borrow().len() >= limit || c.borrow().iter().any(|(cd, ca)| *cd == d && *ca == args)).unwrap_or(false) {
+            return None;
+        }
+        struct Pop;
+        impl Drop for Pop { fn drop(&mut self) { let _ = CONSTS_READING.try_with(|c| { c.borrow_mut().pop(); }); } }
+        let _ = CONSTS_READING.try_with(|c| c.borrow_mut().push((d, args.clone())));
         self.depth += 1;
-        let ok = eval_into(self.u, d, &args, buf);
+        let ok = { let _pop = Pop; eval_into(self.u, d, &args, buf) };
         self.depth -= 1;
         if !ok {
             return None;
@@ -1293,7 +1387,7 @@ impl<'a> Ctx<'a> {
         }
         if adt.is_enum {
             // the tag (lower::emit_store_disc)
-            if let Some((toff, crate::rir::Mem::Int(tn, _))) = l.tag {
+            if let Some((toff, relax_backend::rir::Mem::Int(tn, _))) = l.tag {
                 let tv = match l.enc {
                     crate::layout::TagEnc::Direct => Some(adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi)?.val),
                     crate::layout::TagEnc::Single(_) => None,

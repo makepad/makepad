@@ -1,15 +1,15 @@
 //! Shader-pack transport and platform mapping verification. Pack internals live with the compiler.
 use crate::cx::Cx;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 use crate::{draw_vars::DrawVars, makepad_script::*, script::vm::ScriptVmCx};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 use crate::makepad_script::shader_pack::{ShaderPacks, shader_pack_key};
 use std::borrow::Cow;
 
 impl Cx {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     pub fn record_shader_pack(&mut self, on: bool) { self.draw_shaders.packs.record_enabled(on); }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     pub fn take_shader_pack(&mut self) -> Vec<u8> { self.draw_shaders.packs.take_recording().bytes().to_vec() }
     pub fn install_shader_pack(&mut self, pack: impl Into<Cow<'static, [u8]>>) -> Result<usize, String> {
         let pack = pack.into();
@@ -17,7 +17,7 @@ impl Cx {
         if packs.install(&pack) { Ok(packs.installed_count()) } else { Err(packs.error().to_owned()) }
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 impl DrawVars {
     pub(crate) fn record_shader_pack_entry(vm: &mut ScriptVm, shader: ScriptObject) {
         let mut packs = std::mem::replace(&mut vm.host.cx_mut().draw_shaders.packs, ShaderPacks::new());
@@ -30,7 +30,7 @@ impl DrawVars {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 pub fn verify_shader_pack_entry(vm: &mut ScriptVm, io_self: ScriptObject) -> Result<u64, String> {
     use crate::draw_shader::{CxDrawShaderCode, CxDrawShaderMapping};
     use crate::makepad_script::shader_pack::{record_shader, inspect_shader_pack};
@@ -58,7 +58,7 @@ pub fn verify_shader_pack_entry(vm: &mut ScriptVm, io_self: ScriptObject) -> Res
 }
 /// The first field two mappings differ in (pod types compared by
 /// structure, table constants without their source position).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn mapping_difference(a: &crate::draw_shader::CxDrawShaderMapping, b: &crate::draw_shader::CxDrawShaderMapping) -> Option<String> {
     fn same<T: std::fmt::Debug>(field: &str, a: T, b: T) -> Result<(), String> {
         let (a, b) = (format!("{:?}", a), format!("{:?}", b));
@@ -110,4 +110,59 @@ fn mapping_difference(a: &crate::draw_shader::CxDrawShaderMapping, b: &crate::dr
         Ok(())
     };
     check().err()
+}
+
+/// The trace host's shader pack calls (`makepad-web-trace --record-pack` / `--pack`): pass 1 of a
+/// web export records every draw shader the run applies, as the web build compiles it; pass 2
+/// installs that pack in a build without the compiler (`--cfg makepad_precompiled_shaders`).
+#[cfg(target_arch = "wasm32")]
+mod trace_exports {
+    use crate::cx::Cx;
+
+    /// Record from now on (`on`) or stop.
+    ///
+    /// # Safety
+    /// `cx_ptr` is the Cx `wasm_create_app` returned.
+    #[cfg(not(makepad_precompiled_shaders))]
+    #[no_mangle]
+    pub unsafe extern "C" fn wasm_record_shader_pack(cx_ptr: u32, on: u32) {
+        let cx = &mut *(cx_ptr as *mut Cx);
+        cx.record_shader_pack(on != 0);
+    }
+
+    /// The recording as `[bytes, pack bytes...]` u64 words (the host keeps it).
+    ///
+    /// # Safety
+    /// `cx_ptr` is the Cx `wasm_create_app` returned.
+    #[cfg(not(makepad_precompiled_shaders))]
+    #[no_mangle]
+    pub unsafe extern "C" fn wasm_take_shader_pack(cx_ptr: u32) -> u32 {
+        let cx = &mut *(cx_ptr as *mut Cx);
+        let pack = cx.take_shader_pack();
+        let mut words = vec![pack.len() as u64];
+        words.extend(pack.chunks(8).map(|c| {
+            let mut w = [0u8; 8];
+            w[..c.len()].copy_from_slice(c);
+            u64::from_le_bytes(w)
+        }));
+        Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
+    }
+
+    /// Install the pack at `ptr` (`len` bytes, the host's): its entry count, or 0 (logged) when it
+    /// does not read.
+    ///
+    /// # Safety
+    /// `cx_ptr` is the Cx `wasm_create_app` returned; `ptr..ptr + len` is readable.
+    #[no_mangle]
+    pub unsafe extern "C" fn wasm_install_shader_pack(cx_ptr: u32, ptr: u32, len: u32) -> u32 {
+        let cx = &mut *(cx_ptr as *mut Cx);
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize).to_vec();
+        match cx.install_shader_pack(bytes) {
+            Ok(n) => n as u32,
+            Err(error) => {
+                crate::error!("shader pack: {}", error);
+                0
+            }
+        }
+    }
 }

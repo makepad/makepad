@@ -9,6 +9,20 @@ use crate::types::{TyKind, AliasTyKind, AliasTy, Types};
 use crate::types::fold::{TypeFolder, super_fold_ty};
 use crate::consts::IsRigid;
 impl Tcx {
+    /// Does `t` mention `needle` (a type, structurally)?
+    fn mentions_ty(&self, t: TyId, needle: TyId) -> bool {
+        struct Finder { needle: TyId, found: bool }
+        impl TypeFolder for Finder {
+            fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
+                if t == self.needle { self.found = true; return t; }
+                if !self.found { super_fold_ty(tys, t, self, depth); }
+                t
+            }
+        }
+        let mut f = Finder { needle, found: false };
+        f.fold_ty(&self.tys, t, 0);
+        f.found
+    }
     pub fn alias_ty_with_args(&self, kind: AliasTyKind, args: &[GenericArg]) -> TyId {
         let mut types = Vec::new(); let mut regions = Vec::new();
         for &a in args { match a { GenericArg::Lifetime(r) => regions.push(r), GenericArg::Type(t) => types.push(t), GenericArg::Const(c) => types.push(self.tys.intern(TyKind::Const(c))) } }
@@ -40,15 +54,28 @@ impl Tcx {
 impl EvalCtxt<'_, '_> {
     pub(super) fn assemble_object_bound_candidates(&mut self, env: &ParamEnvId, goal: &GoalKind, candidates: &mut Vec<Candidate>) -> Result<(), NoSolutionOrRerunNonErased> {
         let tcx = self.delegate.tcx;
-        if [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized].iter().any(|&item| tcx.lang_items.get(item) == Some(goal.trait_ref(self).def_id)) || matches!(self.delegate.typing_mode, crate::tcx::TypingMode::Reflection) { return Ok(()); }
+        if [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized].iter().any(|&item| tcx.lang_items.get(item) == Some(goal.trait_ref(self).def_id)) || matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Reflection) { return Ok(()); }
         let ty = goal.self_ty(self);
         let TyKind::Dyn(principal, ..) = tcx.tys.kind(ty) else { return Ok(()); };
         if *principal != NO_DEF && self.check_dyn_compatible(*principal).is_err() { return Ok(()); }
         let bounds = tcx.object_predicates(self.solver.prog, ty);
+        // rustc lowers the projections the principal's supertraits fix into the object type itself
+        // (dyn_trait.rs:225-285, unless the term mentions Self); the candidate's requirements are
+        // rewritten with all of them, so `<dyn Foo as Sup>::A` of `trait Foo: Sup<A = u8>` is `u8`.
+        let mut replacements = bounds.clone();
+        if *principal != NO_DEF {
+            for p in tcx.supertraits(self.solver.prog, bounds[0].clone()) {
+                let PredicateKind::Clause(ClauseKind::Projection(proj)) = &p.kind else { continue };
+                if replacements.iter().any(|r| matches!(&r.kind, PredicateKind::Clause(ClauseKind::Projection(q)) if q.projection_term == proj.projection_term)) { continue; }
+                let Term::Ty(term) = proj.term else { continue };
+                if tcx.mentions_ty(term, ty) { continue; }
+                replacements.push(p);
+            }
+        }
         for (i, p) in bounds.iter().enumerate() {
             if i == 0 && *principal != NO_DEF {
-                for (index, p) in tcx.supertraits(self.solver.prog, p.clone()).into_iter().enumerate() { self.probe_and_consider_object_bound_candidate(env, goal, &p, CandidateSource::BuiltinImpl(BuiltinImplSource::Object(index)), &bounds, candidates)?; }
-            } else { self.probe_and_consider_object_bound_candidate(env, goal, p, CandidateSource::BuiltinImpl(BuiltinImplSource::Misc), &bounds, candidates)?; }
+                for (index, p) in tcx.supertraits(self.solver.prog, p.clone()).into_iter().enumerate() { self.probe_and_consider_object_bound_candidate(env, goal, &p, CandidateSource::BuiltinImpl(BuiltinImplSource::Object(index)), &replacements, candidates)?; }
+            } else { self.probe_and_consider_object_bound_candidate(env, goal, p, CandidateSource::BuiltinImpl(BuiltinImplSource::Misc), &replacements, candidates)?; }
         }
         Ok(())
     }
@@ -94,11 +121,13 @@ impl TypeFolder for ReplaceProjectionWith<'_, '_, '_> {
     fn fold_ty(&mut self, tys: &Types, ty: TyId, depth: u32) -> TyId {
         if let TyKind::Alias(_, a) = tys.kind(ty) {
             if matches!(a.kind, AliasTyKind::Projection { .. }) && tys.list(a.args)[0] == self.self_ty {
-                let mut matching = None; let target = self.ecx.alias_args(&AliasTerm::Ty(ty)); let mut found_def = false;
+                // rustc ReplaceProjectionWith::try_eagerly_replace_alias: the projection bounds of
+                // the object that may match the alias; two are ambiguous, one replaces it. (A
+                // projection no bound matches is left alone: the object type is already in error.)
+                let mut matching = None; let target = self.ecx.alias_args(&AliasTerm::Ty(ty));
                 for p in self.mapping {
                     let PredicateKind::Clause(ClauseKind::Projection(source)) = &p.kind else { continue; };
                     if self.ecx.alias_args(&source.projection_term).0 != target.0 { continue; }
-                    found_def = true;
                     let result = self.ecx.probe().enter_without_propagated_nested_goals(|ecx| {
                         let PredicateKind::Clause(ClauseKind::Projection(p)) = ecx.delegate.instantiate_predicate_binder_with_infer(p) else { unreachable!() };
                         ecx.eq_args(self.env, &ecx.alias_args(&p.projection_term).1, &target.1)?;
@@ -106,8 +135,7 @@ impl TypeFolder for ReplaceProjectionWith<'_, '_, '_> {
                     });
                     if result.is_ok() { if matching.is_some() { self.ambiguous = true; return ty; } matching = Some(p); }
                 }
-                if found_def {
-                    let p = matching.expect("object projection replacement");
+                if let Some(p) = matching {
                     let PredicateKind::Clause(ClauseKind::Projection(p)) = self.ecx.delegate.instantiate_predicate_binder_with_infer(p) else { unreachable!() };
                     if self.ecx.eq_args(self.env, &self.ecx.alias_args(&p.projection_term).1, &target.1).is_err() { self.failed = true; return ty; }
                     let Term::Ty(value) = p.term else { unreachable!() }; return value;

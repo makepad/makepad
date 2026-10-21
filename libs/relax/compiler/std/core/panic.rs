@@ -4,26 +4,38 @@
 use crate::fmt;
 
 /// A source location, as `#[track_caller]` / `Location::caller()` report it.
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+// (Eq / Ord / Hash over the bytes with the nul order exactly as over `file()`)
+#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(relax_check), lang = "panic_location")]
 pub struct Location<'a> {
-    file: &'a str,
+    // the file name and its terminating nul (rustc Location::file_bytes_with_nul)
+    file_bytes_with_nul: &'a [u8],
     line: u32,
     col: u32,
+}
+
+impl fmt::Debug for Location<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Location").field("file", &self.file()).field("line", &self.line).field("col", &self.col).finish()
+    }
 }
 
 impl<'a> Location<'a> {
     /// The location of the caller (through any chain of #[track_caller] fns).
     #[track_caller]
-    pub fn caller() -> &'static Location<'static> {
+    pub const fn caller() -> &'static Location<'static> {
         unsafe { crate::intrinsics_rt::caller_location() }
     }
     /// Built by Relax's lowering for panics and `Location::caller()`.
-    pub const fn internal_constructor(file: &'a str, line: u32, col: u32) -> Location<'a> {
-        Location { file, line, col }
+    pub const fn internal_constructor(file_bytes_with_nul: &'a [u8], line: u32, col: u32) -> Location<'a> {
+        Location { file_bytes_with_nul, line, col }
     }
     pub const fn file(&self) -> &'a str {
-        self.file
+        let bytes = self.file_bytes_with_nul;
+        unsafe { crate::str::from_utf8_unchecked(crate::slice::from_raw_parts(bytes.as_ptr(), bytes.len().saturating_sub(1))) }
+    }
+    pub const fn file_as_c_str(&self) -> &'a crate::ffi::CStr {
+        unsafe { crate::ffi::CStr::from_bytes_with_nul_unchecked(self.file_bytes_with_nul) }
     }
     pub const fn line(&self) -> u32 {
         self.line
@@ -35,7 +47,7 @@ impl<'a> Location<'a> {
 
 impl<'a> fmt::Display for Location<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.col)
+        write!(f, "{}:{}:{}", self.file(), self.line, self.col)
     }
 }
 
@@ -73,9 +85,21 @@ pub auto trait RefUnwindSafe {}
 
 pub struct AssertUnwindSafe<T>(pub T);
 
+// library/core/src/panic/unwind_safe.rs:58-84: shared references, raw pointers and NonNull are unwind
+// safe when their target is RefUnwindSafe; a mutable reference never is.
+impl<T: crate::marker::PointeeSized> !UnwindSafe for &mut T {}
+impl<T: RefUnwindSafe + crate::marker::PointeeSized> UnwindSafe for &T {}
+impl<T: RefUnwindSafe + crate::marker::PointeeSized> UnwindSafe for *const T {}
+impl<T: RefUnwindSafe + crate::marker::PointeeSized> UnwindSafe for *mut T {}
+impl<T: RefUnwindSafe + crate::marker::PointeeSized> UnwindSafe for crate::ptr::NonNull<T> {}
+
 // library/core/src/panic/unwind_safe.rs:194,203.
 impl<T> UnwindSafe for AssertUnwindSafe<T> {}
 impl<T> RefUnwindSafe for AssertUnwindSafe<T> {}
+// library/core/src/panic/unwind_safe.rs:215-247: atomics are interior mutability that is safe across unwinds.
+impl<T: crate::sync::atomic::AtomicPrimitive> RefUnwindSafe for crate::sync::atomic::Atomic<T> {}
+impl RefUnwindSafe for crate::sync::atomic::AtomicBool {}
+impl<T> RefUnwindSafe for crate::sync::atomic::AtomicPtr<T> {}
 
 impl<T> crate::ops::Deref for AssertUnwindSafe<T> {
     type Target = T;

@@ -5,7 +5,7 @@ use crate::crate_image::{Codec, Decode};
 use crate::collected::ImageMap;
 
 crate::collected_fields!(FnSigT, region_contract, generic_indices, bound_regions, params, ret,
-    self_kind, n_generics, n_parent_generics, is_const, rustc_promotable, header,
+    self_kind, n_generics, n_parent_generics, is_const, rustc_promotable, rustc_intrinsic, header,
     track_caller, target_features, safe_target_features);
 crate::collected_fields!(FieldT, name, ty, is_pub, vis_mod);
 crate::collected_fields!(VariantT, def, name, shape, fields, discr);

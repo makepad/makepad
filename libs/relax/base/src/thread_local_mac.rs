@@ -12,21 +12,17 @@
 //! no side effects).
 
 use crate::lexer::T;
+use crate::tg;
+use crate::tokbuf::TokBuf;
 
-/// Paths by crate identity (resolve from any crate, std included).
-const STD: &str = "::__relax_crate_std";
-
-/// Expansion text for the tokens between `thread_local!`'s delimiters.
-pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
-    let text = |r: &[(T, &[u8])]| -> String {
-        let mut s = String::new();
-        for (_, t) in r {
-            s.push_str(&String::from_utf8_lossy(t));
-            s.push(' ');
+/// The tokens between `thread_local!`'s delimiters, expanded.
+pub fn expand(toks: &[(T, &[u8])], edition: u16) -> Result<TokBuf, String> {
+    let copy = |g: &mut TokBuf, r: &[(T, &[u8])]| {
+        for (k, t) in r {
+            g.put(*k, &String::from_utf8_lossy(t));
         }
-        s
     };
-    let mut out = String::new();
+    let mut out = TokBuf::new(edition);
     let mut i = 0;
     while i < toks.len() {
         // attributes and visibility, up to `static`
@@ -46,7 +42,6 @@ pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
             }
             return Err("expected `static NAME: Type = init;`".to_string());
         }
-        let head = text(&toks[start..i]);
         if i + 2 >= toks.len() || toks[i + 1].0 != T::Ident || toks[i + 2].0 != T::Colon {
             return Err("expected `static NAME: Type = init;`".to_string());
         }
@@ -56,7 +51,7 @@ pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
         // macro matcher splits joint tokens: `static X:RefCell<Vec<u32>>=..` is valid)
         let mut j = i + 3;
         let mut depth = 0i32;
-        let mut closes = "";
+        let mut closes = 0;
         while j < toks.len() {
             match toks[j].0 {
                 T::Lt | T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
@@ -64,8 +59,8 @@ pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
                 T::Shl => depth += 2,
                 T::Shr => depth -= 2,
                 T::Eq if depth == 0 => break,
-                T::Ge if depth == 1 => { closes = ">"; break }
-                T::ShrEq if depth == 2 => { closes = ">>"; break }
+                T::Ge if depth == 1 => { closes = 1; break }
+                T::ShrEq if depth == 2 => { closes = 2; break }
                 _ => {}
             }
             j += 1;
@@ -73,7 +68,11 @@ pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
         if j >= toks.len() {
             return Err(format!("`{}`: expected `= init`", name));
         }
-        let ty = text(&toks[i + 3..j]) + closes;
+        let mut ty = TokBuf::new(edition);
+        copy(&mut ty, &toks[i + 3..j]);
+        for _ in 0..closes {
+            ty.punct(T::Gt);
+        }
         let mut k = j + 1;
         if k < toks.len() && toks[k].0 == T::KwConst {
             k += 1;
@@ -89,16 +88,11 @@ pub fn expand(toks: &[(T, &[u8])]) -> Result<String, String> {
             }
             k += 1;
         }
-        let init = text(&toks[e0..k]);
-        out.push_str(&format!(
-            "{} static {}: {std}::thread::LocalKey<{}> = {std}::thread::LocalKey::new({{ fn __relax_thread_local_init() -> {} {{ {} }} __relax_thread_local_init }});\n",
-            head,
-            name,
-            ty,
-            ty,
-            init,
-            std = STD
-        ));
+        let mut init = TokBuf::new(edition);
+        copy(&mut init, &toks[e0..k]);
+        copy(&mut out, &toks[start..i]);
+        tg!(&mut out; static #word(&name) : #std() :: thread :: LocalKey < #append(&ty) > = #std() :: thread :: LocalKey :: new
+            ({ fn __relax_thread_local_init () -> #append(&ty) { #append(&init) } __relax_thread_local_init }) ;);
         i = k + 1;
     }
     Ok(out)

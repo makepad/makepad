@@ -34,6 +34,9 @@ impl LiveLoans {
 pub struct PoloniusContext {
     pub live_region_variances: LiveRegionVariances,
     pub deferred_liveness: DeferredRegionLiveness,
+    /// Locals whose types contain only regions that outlive universal ones: NLL needs no
+    /// liveness for them. Kept for diagnostics (N:polonius/mod.rs boring_nll_locals).
+    pub boring_nll_locals: Vec<crate::mir::Local>,
 }
 impl PoloniusContext {
     pub fn compute_loan_liveness(&self, tcx: &Tcx, prog: &Program, body: &Body, moves: &MoveData,

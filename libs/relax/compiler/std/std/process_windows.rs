@@ -812,7 +812,7 @@ fn child_pipe(ours_readable: bool) -> io::Result<(OwnedHandle, OwnedHandle)> {
 
 // ---- program resolution (real std's resolve_exe / search_paths / program_exists)
 
-fn is_sep_byte(b: u8) -> bool {
+const fn is_sep_byte(b: u8) -> bool {
     b == b'/' || b == b'\\'
 }
 

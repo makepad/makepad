@@ -30,8 +30,22 @@ static RINGS_ON: AtomicBool = AtomicBool::new(false);
 /// frame spikes are watched (`watch`, `events follow=1`, `--agent`)
 static FRAME_WATCH: AtomicBool = AtomicBool::new(false);
 
+/// frames slower than this are `hitch` events (ns; 0: off): always on, MAKEPAD_RUN_HITCH_MS
+/// (default 50) or `hitch ms=<n>|off`
+static HITCH_NS: AtomicU64 = AtomicU64::new(0);
+
 fn flag_update() {
-    MAKEPAD_RUN_RECORDING.store(RINGS_ON.load(Relaxed) || FRAME_WATCH.load(Relaxed), Release);
+    MAKEPAD_RUN_RECORDING.store(RINGS_ON.load(Relaxed) || FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0, Release);
+    // the wait hook: the timeline's rings and the UI thread's frame log both want waits
+    let f: fn(bool, &'static str, &'static str, u64) = wait_trace;
+    crate::waits::TRACE.store(if RINGS_ON.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 { f as usize } else { 0 }, Release);
+}
+
+/// Hitch detection on at inspect's start (MAKEPAD_RUN_HITCH_MS, default 50; 0: off).
+pub fn hitch_init() {
+    let ms = std::env::var("MAKEPAD_RUN_HITCH_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(50);
+    HITCH_NS.store(ms * 1_000_000, Relaxed);
+    flag_update();
 }
 
 /// Frame-time spike detection on (a watcher attached) or off.
@@ -91,6 +105,8 @@ fn ring() -> Option<&'static Ring> {
     if !p.is_null() {
         return Some(unsafe { &*p });
     }
+    // a ring outlives every compiler generation (the owner records on its own thread too)
+    let _k = crate::zone_alloc::kept();
     let r: &'static Ring = Box::leak(Box::new(Ring {
         recs: (0..RING).map(|_| std::cell::UnsafeCell::new(Rec { t: 0, kind: 0, label_len: 0, label: 0, a: 0, b: 0 })).collect(),
         next: AtomicUsize::new(0),
@@ -134,7 +150,7 @@ pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
     if recording() {
         push(Kind::SpanBegin, name, 0, 0);
     }
-    if FRAME_WATCH.load(Relaxed) {
+    if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
         frame_watch(true, name);
     }
 }
@@ -144,48 +160,380 @@ pub extern "C" fn relax_span_end(name: *const u8, len: usize) {
     if recording() {
         push(Kind::SpanEnd, name, 0, 0);
     }
-    if FRAME_WATCH.load(Relaxed) {
+    if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
         frame_watch(false, name);
     }
 }
 
-thread_local! {
-    /// spike detection on the UI thread: span depth, the frame's first begin, its EWMA (ns)
-    static FW: Cell<(u32, u64, u64)> = const { Cell::new((0, 0, 0)) };
+// ---- frames: spikes and hitches (always on; per UI thread, no lock)
+//
+// A frame runs from the first phase that begins after the previous frame's Draw ended to the end
+// of this frame's Draw; gaps over GAP_NS between its root phases (the UI thread idle in the
+// event loop) do not count. Each frame's phases, the UI thread's waits and its lazy compiles go
+// to a fixed log (cleared per frame): a frame over the hitch threshold is analysed from it after
+// it ends and raised as a `hitch` event (at most HITCH_PER_S a second; the rest are counted).
+
+const GAP_NS: u64 = 16_000_000;
+const FRAME_RECS: usize = 8192;
+const HITCH_PER_S: u64 = 4;
+
+#[derive(Clone, Copy)]
+struct FRec {
+    t: u64,
+    /// 1 phase begin, 2 phase end, 3 wait begin, 4 wait end, 5 compile begin, 6 compile end
+    kind: u8,
+    name: &'static str,
+    detail: &'static str,
 }
 
-/// A frame's busy time: from the first phase that begins after the previous frame's Draw ended
-/// to the end of this frame's Draw. A frame over max(100 ms, 4x the running average) after the
-/// first present is a `spike` event.
-fn frame_watch(begin: bool, name: &str) {
+struct FrameLog {
+    depth: u32,
+    start: u64,
+    /// running average of frame time (ns)
+    avg: u64,
+    last_root_end: u64,
+    idle: u64,
+    recs: Vec<FRec>,
+    dropped: u32,
+    compile_depth: u32,
+    compile_t0: u64,
+    compile_ns: u64,
+    compiles: u32,
+    /// probe / count values at the frame's start (only while probes are installed)
+    probes0: Vec<(String, u64, u64)>,
+}
+
+thread_local! {
+    static FL: std::cell::RefCell<Option<Box<FrameLog>>> = const { std::cell::RefCell::new(None) };
+}
+
+static HITCHES: AtomicU64 = AtomicU64::new(0);
+static HITCH_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static HITCH_LAST_NS: AtomicU64 = AtomicU64::new(0);
+static HITCH_WINDOW: AtomicU64 = AtomicU64::new(0);
+
+fn frame_rec(l: &mut FrameLog, kind: u8, name: &'static str, detail: &'static str) {
+    if l.recs.len() < FRAME_RECS {
+        l.recs.push(FRec { t: crate::clock::wall_ns(), kind, name, detail });
+    } else {
+        l.dropped += 1;
+    }
+}
+
+/// A phase begins / ends on this thread (makepad's ui_hang markers).
+fn frame_watch(begin: bool, name: &'static str) {
+    let _k = crate::zone_alloc::kept();
     let now = crate::clock::wall_ns();
-    FW.with(|c| {
-        let (depth, start, avg) = c.get();
+    let done = FL.try_with(|c| {
+        let Ok(mut g) = c.try_borrow_mut() else { return None };
+        let l = g.get_or_insert_with(|| {
+            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new() })
+        });
         if begin {
-            c.set((depth + 1, if start == 0 { now } else { start }, avg));
-            return;
+            if l.start == 0 {
+                l.start = now;
+                l.idle = 0;
+                l.recs.clear();
+                l.dropped = 0;
+                l.compile_ns = 0;
+                l.compiles = 0;
+                l.probes0.clear();
+                if HITCH_NS.load(Relaxed) > 0 && super::instrument::any_counters() {
+                    l.probes0 = super::instrument::counters();
+                }
+            } else if l.depth == 0 && l.last_root_end > l.start && now.saturating_sub(l.last_root_end) > GAP_NS {
+                l.idle += now - l.last_root_end;
+            }
+            l.depth += 1;
+            frame_rec(l, 1, name, "");
+            return None;
         }
-        let depth = depth.saturating_sub(1);
-        if name != "Draw" || start == 0 {
-            c.set((depth, start, avg));
-            return;
+        l.depth = l.depth.saturating_sub(1);
+        if l.start != 0 {
+            frame_rec(l, 2, name, "");
         }
-        let ms = now.saturating_sub(start);
-        let avg2 = if avg == 0 { ms } else { (avg * 15 + ms) / 16 };
-        c.set((depth, 0, avg2));
-        if crate::jit::FIRST_PRESENT.load(Relaxed) && avg > 0 && ms > 100_000_000 && ms > avg * 4 {
-            super::events::emit(
-                "spike",
-                "frame",
-                &format!("\"frame_ms\":{:.1},\"typical_ms\":{:.1},\"more\":[\"why-slow\",\"timeline start\",\"frame slowest\"]", ms as f64 / 1e6, avg as f64 / 1e6),
-            );
+        if l.depth == 0 {
+            l.last_root_end = now;
         }
+        if name != "Draw" || l.start == 0 {
+            return None;
+        }
+        let ms = now.saturating_sub(l.start).saturating_sub(l.idle);
+        let avg = l.avg;
+        l.avg = if avg == 0 { ms } else { (avg * 15 + ms) / 16 };
+        let start = l.start;
+        l.start = 0;
+        if !crate::jit::FIRST_PRESENT.load(Relaxed) {
+            return None;
+        }
+        let spike = FRAME_WATCH.load(Relaxed) && avg > 0 && ms > 100_000_000 && ms > avg * 4;
+        let th = HITCH_NS.load(Relaxed);
+        let hitch = th > 0 && ms >= th;
+        if !spike && !hitch {
+            return None;
+        }
+        let analysis = if hitch { Some(analyse(l, start, now)) } else { None };
+        Some((spike, ms, avg, analysis))
     });
+    let Ok(Some((spike, ms, avg, analysis))) = done else { return };
+    if spike {
+        super::events::emit(
+            "spike",
+            "frame",
+            &format!("\"frame_ms\":{:.1},\"typical_ms\":{:.1},\"more\":[\"why-slow\",\"timeline start\",\"frame slowest\"]", ms as f64 / 1e6, avg as f64 / 1e6),
+        );
+    }
+    if let Some(a) = analysis {
+        let n = HITCHES.fetch_add(1, Relaxed) + 1;
+        // at most HITCH_PER_S events a second; the others are counted in the next one
+        let sec = now / 1_000_000_000;
+        let w = HITCH_WINDOW.load(Relaxed);
+        let in_window = if w >> 8 == sec { w & 0xff } else { 0 };
+        if in_window >= HITCH_PER_S {
+            HITCH_SKIPPED.fetch_add(1, Relaxed);
+            return;
+        }
+        HITCH_WINDOW.store((sec << 8) | (in_window + 1), Relaxed);
+        let skipped = HITCH_SKIPPED.swap(0, Relaxed);
+        let last = HITCH_LAST_NS.swap(now, Relaxed);
+        let since_last = if last == 0 { String::new() } else { format!(",\"since_last_hitch_ms\":{:.0}", now.saturating_sub(last) as f64 / 1e6) };
+        super::events::emit(
+            "hitch",
+            &format!("hitch {}", n),
+            &format!(
+                "\"frame_ms\":{:.1},\"threshold_ms\":{},\"typical_ms\":{:.1},\"hitch\":{},\"not_reported\":{}{},{},\"more\":[\"events on=hitch\",\"why-slow\",\"timeline start\",\"probes\"]",
+                ms as f64 / 1e6,
+                HITCH_NS.load(Relaxed) / 1_000_000,
+                avg as f64 / 1e6,
+                n,
+                skipped,
+                since_last,
+                a
+            ),
+        );
+    }
+}
+
+/// The JSON members of a hitch: its phases (inclusive / self time by phase path), the UI
+/// thread's waits, its lazy compiles, its critical path (where the frame's wall time went, in
+/// order) and the probe deltas over the frame.
+fn analyse(l: &FrameLog, t0: u64, t1: u64) -> String {
+    let ms = |ns: u64| ns as f64 / 1e6;
+    // phases by path (outer>inner, depth <= 3)
+    let mut stack: Vec<(&'static str, u64, u64)> = Vec::new();
+    let mut phases: Vec<(String, u64, u64, u32)> = Vec::new();
+    let mut waits: Vec<(String, u64, u64, u32)> = Vec::new();
+    let mut wait_open: Vec<(String, u64)> = Vec::new();
+    // the critical path: (what, ns) pieces in order
+    let mut path: Vec<(String, u64)> = Vec::new();
+    let mut compile_open = 0u32;
+    let mut cur_t = t0;
+    let what_now = |stack: &[(&'static str, u64, u64)], wait_open: &[(String, u64)], compile_open: u32| -> String {
+        if let Some(w) = wait_open.last() {
+            format!("wait: {}", w.0)
+        } else if compile_open > 0 {
+            "lazy compile".into()
+        } else if stack.is_empty() {
+            "(between phases)".into()
+        } else {
+            stack.iter().rev().take(3).rev().map(|x| x.0).collect::<Vec<_>>().join(">")
+        }
+    };
+    let add_path = |path: &mut Vec<(String, u64)>, what: String, ns: u64| {
+        if ns == 0 {
+            return;
+        }
+        match path.last_mut() {
+            Some(p) if p.0 == what => p.1 += ns,
+            _ => path.push((what, ns)),
+        }
+    };
+    for r in &l.recs {
+        let t = r.t.max(cur_t);
+        add_path(&mut path, what_now(&stack, &wait_open, compile_open), t - cur_t);
+        cur_t = t;
+        match r.kind {
+            1 => stack.push((r.name, r.t, 0)),
+            2 => {
+                while let Some((n, b, child)) = stack.pop() {
+                    let dur = r.t.saturating_sub(b);
+                    let key = stack.iter().rev().take(2).rev().map(|x| x.0).chain(std::iter::once(n)).collect::<Vec<_>>().join(">");
+                    match phases.iter_mut().find(|p| p.0 == key) {
+                        Some(p) => {
+                            p.1 += dur;
+                            p.2 += dur.saturating_sub(child);
+                            p.3 += 1;
+                        }
+                        None => phases.push((key, dur, dur.saturating_sub(child), 1)),
+                    }
+                    if let Some(parent) = stack.last_mut() {
+                        parent.2 += dur;
+                    }
+                    if n == r.name {
+                        break;
+                    }
+                }
+            }
+            3 => wait_open.push((if r.detail.is_empty() { r.name.to_string() } else { format!("{} ({})", r.name, r.detail) }, r.t)),
+            4 => {
+                if let Some((k, b)) = wait_open.pop() {
+                    let dur = r.t.saturating_sub(b);
+                    match waits.iter_mut().find(|w| w.0 == k) {
+                        Some(w) => {
+                            w.1 += dur;
+                            w.2 = w.2.max(dur);
+                            w.3 += 1;
+                        }
+                        None => waits.push((k, dur, dur, 1)),
+                    }
+                }
+            }
+            5 => compile_open += 1,
+            6 => compile_open = compile_open.saturating_sub(1),
+            _ => {}
+        }
+    }
+    add_path(&mut path, what_now(&stack, &wait_open, compile_open), t1.saturating_sub(cur_t));
+    phases.sort_by(|a, b| b.1.cmp(&a.1));
+    waits.sort_by(|a, b| b.1.cmp(&a.1));
+    let ph: Vec<String> = phases.iter().take(10).map(|p| format!("{{\"phase\":{},\"ms\":{:.2},\"self_ms\":{:.2},\"n\":{}}}", json_str(&short(&p.0, 120)), ms(p.1), ms(p.2), p.3)).collect();
+    let wt: Vec<String> = waits.iter().take(6).map(|w| format!("{{\"wait\":{},\"ms\":{:.2},\"max_ms\":{:.2},\"n\":{}}}", json_str(&short(&w.0, 120)), ms(w.1), ms(w.2), w.3)).collect();
+    // the path: its 12 longest pieces in time order, and the time per kind of piece
+    let total: u64 = path.iter().map(|p| p.1).sum();
+    let mut at = 0u64;
+    let mut pieces: Vec<(u64, u64, &str)> = Vec::new();
+    for (w, ns) in &path {
+        pieces.push((at, *ns, w.as_str()));
+        at += ns;
+    }
+    let mut longest: Vec<(u64, u64, &str)> = pieces.clone();
+    longest.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    longest.truncate(12);
+    longest.sort_by_key(|p| p.0);
+    let shown: u64 = longest.iter().map(|p| p.1).sum();
+    let cp: Vec<String> = longest.iter().map(|(at, ns, w)| format!("{{\"at_ms\":{:.1},\"ms\":{:.2},\"on\":{}}}", ms(*at), ms(*ns), json_str(&short(w, 120)))).collect();
+    let mut by: Vec<(&str, u64, u32)> = Vec::new();
+    for (_, ns, w) in &pieces {
+        match by.iter_mut().find(|b| b.0 == *w) {
+            Some(b) => {
+                b.1 += ns;
+                b.2 += 1;
+            }
+            None => by.push((w, *ns, 1)),
+        }
+    }
+    by.sort_by(|a, b| b.1.cmp(&a.1));
+    let time_by: Vec<String> = by.iter().take(8).map(|(w, ns, n)| format!("{{\"on\":{},\"ms\":{:.2},\"pieces\":{}}}", json_str(&short(w, 120)), ms(*ns), n)).collect();
+    let mut probes = Vec::new();
+    if !l.probes0.is_empty() {
+        let now = super::instrument::counters();
+        let mut d: Vec<(String, u64, u64)> = now
+            .iter()
+            .map(|(k, h, ns)| {
+                let (h0, ns0) = l.probes0.iter().find(|x| &x.0 == k).map_or((0, 0), |x| (x.1, x.2));
+                (k.clone(), h.saturating_sub(h0), ns.saturating_sub(ns0))
+            })
+            .filter(|x| x.1 > 0)
+            .collect();
+        d.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        probes = d.iter().take(8).map(|(k, h, ns)| format!("{{\"counter\":{},\"delta\":{}{}}}", json_str(&short(k, 120)), h, if *ns > 0 { format!(",\"ms\":{:.2}", ms(*ns)) } else { String::new() })).collect();
+    }
+    format!(
+        "\"idle_gap_ms\":{:.1},\"phases\":[{}],\"waits\":[{}],\"compile\":{{\"ms\":{:.2},\"n\":{}}},\"time_by\":[{}],\"critical_path\":[{}],\"critical_path_other_ms\":{:.2},\"probe_deltas\":[{}],\"records_dropped\":{}",
+        ms(l.idle),
+        ph.join(","),
+        wt.join(","),
+        ms(l.compile_ns),
+        l.compiles,
+        time_by.join(","),
+        cp.join(","),
+        ms(total.saturating_sub(shown)),
+        probes.join(","),
+        l.dropped
+    )
+}
+
+/// A lazy compile on this thread (jit.rs rt_compile): counted in the frame log of a UI thread
+/// that is inside a frame (outermost compile only).
+pub struct CompileMark(bool);
+
+impl CompileMark {
+    #[inline]
+    pub fn begin() -> CompileMark {
+        if HITCH_NS.load(Relaxed) == 0 {
+            return CompileMark(false);
+        }
+        let on = FL
+            .try_with(|c| {
+                let Ok(mut g) = c.try_borrow_mut() else { return false };
+                let Some(l) = g.as_mut() else { return false };
+                if l.start == 0 {
+                    return false;
+                }
+                l.compile_depth += 1;
+                if l.compile_depth == 1 {
+                    l.compile_t0 = crate::clock::wall_ns();
+                    frame_rec(l, 5, "compile", "");
+                }
+                true
+            })
+            .unwrap_or(false);
+        CompileMark(on)
+    }
+}
+
+impl Drop for CompileMark {
+    fn drop(&mut self) {
+        if !self.0 {
+            return;
+        }
+        let _ = FL.try_with(|c| {
+            let Ok(mut g) = c.try_borrow_mut() else { return };
+            let Some(l) = g.as_mut() else { return };
+            l.compile_depth = l.compile_depth.saturating_sub(1);
+            if l.compile_depth == 0 {
+                l.compile_ns += crate::clock::wall_ns().saturating_sub(l.compile_t0);
+                l.compiles += 1;
+                frame_rec(l, 6, "compile", "");
+            }
+        });
+    }
+}
+
+/// `hitch [ms=<n>|off]`: the hitch threshold (set or shown) and the count so far.
+pub fn cmd_hitch(req: &Req, out: &mut Out) {
+    match req.get("ms") {
+        Some("off") | Some("0") => HITCH_NS.store(0, Relaxed),
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) => HITCH_NS.store(n * 1_000_000, Relaxed),
+            Err(_) => return out.err("hitch ms=<n>|off"),
+        },
+        None => {}
+    }
+    flag_update();
+    out.line(&format!(
+        "{{\"hitch_ms\":{},\"hitches\":{},\"more\":[\"events on=hitch\",\"watch on=hitch\"]}}",
+        HITCH_NS.load(Relaxed) / 1_000_000,
+        HITCHES.load(Relaxed)
+    ));
 }
 
 /// The wait registry's hook (relax_base::waits::TRACE, set while recording): a wait begins (its
 /// kind, detail label and object) or ends.
 fn wait_trace(begin: bool, kind: &'static str, detail: &'static str, object: u64) {
+    if HITCH_NS.load(Relaxed) > 0 {
+        let _ = FL.try_with(|c| {
+            let Ok(mut g) = c.try_borrow_mut() else { return };
+            if let Some(l) = g.as_mut() {
+                if l.start != 0 {
+                    frame_rec(l, if begin { 3 } else { 4 }, kind, detail);
+                }
+            }
+        });
+    }
+    if !recording() {
+        return;
+    }
     if begin {
         // the detail string travels packed in `b`: pointer (47 bits) and length (16 bits)
         push(Kind::WaitBegin, kind, object, (detail.as_ptr() as u64 & ((1 << 47) - 1)) | ((detail.len().min(0xffff) as u64) << 48));
@@ -366,8 +714,6 @@ pub fn cmd_timeline(req: &Req, out: &mut Out) {
             STARTED_NS.store(crate::clock::wall_ns(), Relaxed);
             STOPPED_NS.store(0, Relaxed);
             GPU.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            let f: fn(bool, &'static str, &'static str, u64) = wait_trace;
-            crate::waits::TRACE.store(f as usize, Release);
             RINGS_ON.store(true, Release);
             flag_update();
             let max = req.num("max_s", 30);
@@ -403,7 +749,6 @@ use std::sync::atomic::Ordering::AcqRel;
 fn stop() {
     RINGS_ON.store(false, Release);
     flag_update();
-    crate::waits::TRACE.store(0, Release);
     STOPPED_NS.store(crate::clock::wall_ns(), Relaxed);
     super::mem::mark("timeline stop");
 }

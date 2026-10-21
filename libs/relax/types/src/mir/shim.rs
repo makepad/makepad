@@ -33,7 +33,7 @@ pub fn build_drop_shim(provider: &dyn DropProvider, def: DefId, ty: TyId) -> Res
         phase: MirPhase::Runtime(RuntimePhase::Initial), source: MirSource { owner: def, kind: BodyKind::Shim(ShimKind::DropGlue(ty)) },
         basic_blocks: Vec::new(), local_decls: Vec::new(),
         source_scopes: vec![SourceScopeData { span: source.span, parent_scope: None }],
-        user_type_annotations: Vec::new(), var_debug_info: Vec::new(), arg_count: 1,
+        user_type_annotations: Vec::new(), span: Span::default(), upvars: Vec::new(), allocs: AllocMap::default(), var_debug_info: Vec::new(), arg_count: 1,
         spread_arg: None, promoted: Vec::new(), coroutine: None,
     };
     for (ty, kind) in [(tcx.tys.unit, LocalKind::Return), (ptr_ty, LocalKind::Arg)] {

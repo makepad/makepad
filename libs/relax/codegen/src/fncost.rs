@@ -67,7 +67,7 @@ fn init() {
             Ok(f) => Some(f), Err(e) => { eprintln!("makepad: MAKEPAD_RUN_FN_COST {:?}: {}", path, e); None }
         };
         if let Some(f) = &mut f {
-            let _ = writeln!(f, "# fncost-v1 pid={} clock={} phases={} passes={}\n# fn: id slot tier origin thread start end cpu_ns rir_in rir_out blocks code_bytes name phase_cpu[11] phase_wall[11] pass_cpu[16] instance_typeck_cpu_ns typed_nodes\n# phase: id thread phase start end cpu_ns\n# type: id def args nodes name start end cpu_ns\n# meta: slot name; call/hint: slot monotonic_ns; mark: name monotonic_ns", std::process::id(), if cfg!(unix) { "CLOCK_MONOTONIC" } else { "process-Instant" }, PHASES.join(","), crate::opt::PASS_NAMES.join(","));
+            let _ = writeln!(f, "# fncost-v1 pid={} clock={} phases={} passes={}\n# fn: id slot tier origin thread start end cpu_ns rir_in rir_out blocks code_bytes name phase_cpu[11] phase_wall[11] pass_cpu[16] instance_typeck_cpu_ns typed_nodes\n# phase: id thread phase start end cpu_ns\n# type: id def args nodes name start end cpu_ns\n# meta: slot name; call/hint: slot monotonic_ns; mark: name monotonic_ns", std::process::id(), if cfg!(unix) { "CLOCK_MONOTONIC" } else { "process-Instant" }, PHASES.join(","), relax_backend::stats::PASS_NAMES.join(","));
         }
         Mutex::new(f)
     });
@@ -120,7 +120,7 @@ impl State {
             buf,
             stack: Vec::new(),
             phase: 0,
-            cpu: crate::cpu_ns(),
+            cpu: relax_backend::cpu_ns(),
             wall: mono(),
             tid: format!("{:?}", std::thread::current().id()),
         }
@@ -133,7 +133,7 @@ impl State {
         }
     }
     fn tick(&mut self) {
-        let c = crate::cpu_ns();
+        let c = relax_backend::cpu_ns();
         let w = mono();
         if let Some(r) = self.stack.last_mut() {
             let dc = c.saturating_sub(self.cpu);
@@ -146,7 +146,7 @@ impl State {
                 id, self.tid, PHASES[self.phase], self.wall, w, dc
             ));
         }
-        self.cpu = crate::cpu_ns();
+        self.cpu = relax_backend::cpu_ns();
         self.wall = mono();
     }
 }
@@ -190,7 +190,7 @@ impl Record {
                 _context: context,
             };
         }
-        crate::opt::pass_timing_on();
+        relax_backend::stats::pass_timing_on();
         local(|s| {
             let mut s = s.borrow_mut();
             s.tick();
@@ -216,7 +216,7 @@ impl Record {
                 size: [0; 4],
                 cpu: [0; 11],
                 wall: [0; 11],
-                passes: crate::opt::pass_local(),
+                passes: relax_backend::stats::pass_local(),
                 old_phase,
                 instance: None,
             });
@@ -262,7 +262,7 @@ impl Drop for Record {
             s.tick();
             let r = s.stack.pop().unwrap();
             s.phase = r.old_phase;
-            let now = crate::opt::pass_local();
+            let now = relax_backend::stats::pass_local();
             let passes: Vec<u64> = now
                 .iter()
                 .zip(r.passes)
@@ -369,7 +369,7 @@ pub fn name(slot: u32, name: &str) {
         s.row(format!("meta\t{}\t{}\n", slot, clean(name)));
     });
 }
-pub fn size(input: bool, f: &crate::rir::Func) {
+pub fn size(input: bool, f: &relax_backend::rir::Func) {
     if !input { crate::exec_census::tier(f.baseline, f.full); }
     if !enabled() {
         return;
@@ -418,7 +418,7 @@ pub fn type_detail(def: u32, args: &[u32], nodes: usize, name: &str, start: u64,
     if !enabled() {
         return;
     }
-    let dt = crate::cpu_ns().saturating_sub(cpu);
+    let dt = relax_backend::cpu_ns().saturating_sub(cpu);
     local(|s| {
         let s = s.borrow();
         let row = s.stack.last();

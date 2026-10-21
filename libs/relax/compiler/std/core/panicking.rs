@@ -61,11 +61,11 @@ impl fmt::Write for StackBuf {
 
 #[track_caller]
 #[cfg_attr(not(relax_check), lang = "panic_fmt")]
-pub fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
+pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
     panic_at(args, Location::caller())
 }
 
-pub fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
+pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
     unsafe {
         let depth = depth_step(1);
         if depth > 2 {
@@ -93,14 +93,14 @@ pub fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
 
 /// A constant message: like real core's `panic(&'static str)` its payload is the `&'static str`.
 #[track_caller]
-pub fn panic_str(msg: &'static str) -> ! {
+pub const fn panic_str(msg: &'static str) -> ! {
     let pieces = [msg];
     panic_fmt(fmt::Arguments::new_const(&pieces))
 }
 
 #[track_caller]
 #[cfg_attr(not(relax_check), lang = "panic_display")]
-pub fn panic_display<T: fmt::Display>(x: &T) -> ! {
+pub const fn panic_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("{}", x))
 }
 

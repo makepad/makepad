@@ -30,27 +30,87 @@ pub enum Class {
     Main = 2,
     /// other program threads, patches, the run's own foreground needs
     App = 3,
+    /// a background build's result (speculation, O2, O3 install): never opens a build; served
+    /// inside every pump (a wait for an in-flight slot needs it), at the top only after the
+    /// program threads' requests
+    FinishBackground = 4,
     /// speculation, tiers, seeds, teardown, completion, monitors: only when nothing above waits
-    Background = 4,
+    Background = 5,
 }
-const CLASSES: usize = 5;
-pub const CLASS_NAMES: [&str; CLASSES] = ["job", "finish", "main", "app", "background"];
+pub const CLASSES: usize = 6;
+const CLASS_OF: [Class; CLASSES] = [Class::Job, Class::Finish, Class::Main, Class::App, Class::FinishBackground, Class::Background];
+pub const CLASS_NAMES: [&str; CLASSES] = ["job", "finish", "main", "app", "finish-background", "background"];
 /// makepad inspect's timeline span names of the owner's service, by class
-const SERVE_NAMES: [&str; CLASSES] = ["serve job", "serve finish", "serve main", "serve app", "serve background"];
+const SERVE_NAMES: [&str; CLASSES] = ["serve job", "serve finish", "serve main", "serve app", "serve finish background", "serve background"];
+
+impl Class {
+    /// a back end's result: never refused, served inside pumps
+    pub fn is_finish(self) -> bool {
+        matches!(self, Class::Finish | Class::FinishBackground)
+    }
+
+    /// The requester stays a running compile job while it waits (it holds front guards, queries,
+    /// or slots in flight that only its finish releases). An allocator swap or fork waits for
+    /// every running job, so these are the classes the owner serves for any thread while the jobs
+    /// are paused: one predicate for both sides, so a swap never waits for a job whose request
+    /// the pause holds back (an O2/speculation/O3 finish queued as FinishBackground during a
+    /// CEF-load swap hung Stage: "jobs active 1").
+    pub fn keeps_job(self) -> bool {
+        self == Class::Job || self.is_finish()
+    }
+}
 
 const QUEUED: u8 = 0;
 const RUNNING: u8 = 1;
 const DONE: u8 = 2;
 /// the owner touches the request no more: the requester may return (and free it)
 const RELEASED: u8 = 3;
-/// How long a requester spins for its answer, and the idle owner for the next request, before
-/// sleeping (a sleep/wake pair costs tens of microseconds; warm launches make thousands of
-/// short requests in a row)
-const SPIN: std::time::Duration = std::time::Duration::from_micros(60);
+/// Spin budgets, in microseconds of `spin_loop` iterations. The loops count iterations and read no
+/// clock: a clock read per iteration was a tenth of a cold start's cycles. The iteration cost is
+/// measured once (`calibrate`, on the owner thread at start), so a budget keeps its length on any
+/// core. A sleep/wake pair costs tens of microseconds; warm launches make thousands of short
+/// requests in a row. A requester spins only when the owner is free to take its request at once
+/// (not asleep, not serving another request, nothing else queued): then the answer of a short
+/// request comes within the budget. Behind a long request it sleeps straight away.
+///
+/// Wakeup protocol (the spin is only an optimisation in front of it, never part of it):
+/// - the requester sleeps on `req.done`: it checks `*done` under that mutex before each wait, and
+///   the owner sets `*done` and notifies under the same mutex, so a completion between the check
+///   and the wait is seen;
+/// - the owner sleeps on `WAKE` only with `Q` held and `OWNER_ASLEEP` set, after finding the lanes
+///   empty under `Q`; `push` adds under `Q` and then reads `OWNER_ASLEEP` (SeqCst), so a request
+///   posted between the owner's check and its wait is either seen by the check or notifies.
+const REQUESTER_SPIN_US: u32 = 60;
+const OWNER_SPIN_US: u32 = 60;
+/// spin iterations per microsecond (0: not measured yet, nobody spins)
+static SPIN_PER_US: AtomicU32 = AtomicU32::new(0);
+
+fn calibrate() {
+    static PROBE: AtomicU32 = AtomicU32::new(0);
+    const N: u32 = 4000;
+    let mut best = u128::MAX;
+    for _ in 0..3 {
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            if PROBE.load(Ordering::Relaxed) != 0 {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        best = best.min(t0.elapsed().as_nanos());
+    }
+    SPIN_PER_US.store(((N as u128 * 1000 / best.max(1)) as u32).clamp(1, 100_000), Ordering::Relaxed);
+}
+
+fn spin_iters(us: u32) -> u32 {
+    SPIN_PER_US.load(Ordering::Relaxed).saturating_mul(us)
+}
 
 struct Req {
     run: *mut dyn FnMut(),
     class: Class,
+    /// where it was asked (postframe's long-request log)
+    site: &'static std::panic::Location<'static>,
     /// requester (os thread id)
     from: u64,
     /// the requester's query context
@@ -63,6 +123,11 @@ struct Req {
     panic: Cell<Option<Box<dyn Any + Send>>>,
     /// false: posted (heap, nobody waits); the owner frees it
     waited: bool,
+    /// main-thread request accounting (0: not a main-thread request): wall ns at the push, and at
+    /// the owner's completion
+    t_push: u64,
+    t_serve: AtomicU64,
+    t_done: AtomicU64,
     /// the requester sleeps on these until Done (no thread handle: a thread's TLS destructors
     /// compile too, after std::thread::current() is gone)
     done: Mutex<bool>,
@@ -77,14 +142,18 @@ static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; C
 
 pub(crate) struct ZoneTaken(Queue);
 
-pub(crate) fn zone_take() -> ZoneTaken {
+/// None: a request was queued since the quiesce looked (an app thread asks the owner whenever it
+/// likes, and the gate does not hold it back): the swap is tried again later.
+pub(crate) fn zone_take() -> Option<ZoneTaken> {
     let mut queue = Q.lock().unwrap_or_else(|e| e.into_inner());
     // Quiescence includes draining every request before taking the lanes' buffers.
-    assert!(queue.lanes.iter().all(VecDeque::is_empty), "memlane swap with queued owner requests");
+    if !queue.lanes.iter().all(VecDeque::is_empty) {
+        return None;
+    }
     let taken = ZoneTaken(std::mem::replace(&mut *queue, Queue { lanes: [const { VecDeque::new() }; CLASSES] }));
     #[cfg(test)]
     assert!(queue.lanes.iter().all(|lane| lane.is_empty() && lane.capacity() == 0));
-    taken
+    Some(taken)
 }
 
 pub(crate) fn zone_put_back(taken: ZoneTaken) {
@@ -102,6 +171,8 @@ static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
 static QUEUED_N: AtomicU32 = AtomicU32::new(0);
 /// the owner sleeps on WAKE (a push then notifies it; otherwise it is spinning or busy)
 static OWNER_ASLEEP: AtomicBool = AtomicBool::new(false);
+/// the owner is inside `serve` (a heuristic only: the requesters' spin budget reads it)
+static OWNER_SERVING: AtomicBool = AtomicBool::new(false);
 
 /// os thread id of the owner thread
 static OWNER_TID: AtomicU64 = AtomicU64::new(0);
@@ -114,6 +185,10 @@ static EXIT_HELPER: AtomicU64 = AtomicU64::new(0);
 static CHILD: AtomicBool = AtomicBool::new(false);
 /// wall ns the owner spent serving, by class (the run summary)
 pub static BUSY_NS: [AtomicU64; CLASSES] = [const { AtomicU64::new(0) }; CLASSES];
+/// The main thread's requests to the owner (run summary): [count, wait ns, queue delay ns (push ->
+/// served), wake delay ns (owner done -> requester running), then count and wait ns of the waits
+/// below 20 us, 200 us, 2 ms and above]
+pub static MAIN_ACC: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 /// the main thread's longest wait for a request after the first present (ns), and the class and
 /// requester the owner was serving when it began (a frame hitch: run summary)
 pub static MAIN_WAIT_MAX: AtomicU64 = AtomicU64::new(0);
@@ -201,6 +276,19 @@ pub fn queued_note() -> String {
     )
 }
 
+/// The queued requests as `class:thread` (diagnostics: an allocator swap's long wait names them).
+pub fn queued_detail() -> String {
+    let q = Q.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    for (c, lane) in q.lanes.iter().enumerate() {
+        for r in lane {
+            let from = unsafe { (*(*r as *const Req)).from };
+            out.push(format!("{}:{}", CLASS_NAMES[c], crate::os::thread::name(from)));
+        }
+    }
+    out.join(" ")
+}
+
 /// What the main thread's longest post-present wait was behind (diagnostics).
 pub fn main_wait_behind() -> String {
     match MAIN_WAIT_BEHIND.load(Ordering::Relaxed) {
@@ -254,24 +342,27 @@ pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
 }
 
 /// `call` for work that reads no slot identity (the startup identities stay encoded).
+#[track_caller]
 pub fn call_quick<R>(class: Class, f: impl FnOnce() -> R) -> R {
     request(class, true, None, f).unwrap()
 }
 
 /// `call`, unless the owner has not started it within `ms`: then it is withdrawn (None).
+#[track_caller]
 pub fn call_within<R>(class: Class, ms: u64, f: impl FnOnce() -> R) -> Option<R> {
     // (at least 2 ms: an idle owner picks a request up in microseconds; 0 means "only if the
     // owner is free now")
     request(class, false, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), f)
 }
 
+#[track_caller]
 fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> Option<R> {
     if is_owner() || CHILD.load(Ordering::Relaxed) {
         return Some(f());
     }
     // a front reader that must not wait (lowering ahead) gives the work back first; a back
     // end's finish is never refused (its slots stay in flight until it is served)
-    if class != Class::Finish {
+    if !class.is_finish() {
         crate::jit::lower_ahead_needs_unit();
         crate::preempt::point();
     }
@@ -288,10 +379,11 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
     // a thread waiting for its work on the owner is not a compile job meanwhile (an allocator
     // swap or fork waits for the jobs running; its work runs on the owner, which serves the
     // pauser): pure jobs (Job class) are, they hold front guards and queries
-    let _idle = (class != Class::Job && class != Class::Finish).then(crate::jit::JobIdle::enter);
+    let _idle = (!class.keeps_job()).then(crate::jit::JobIdle::enter);
     let req = Req {
         run,
         class,
+        site: std::panic::Location::caller(),
         from: me(),
         ctx: crate::query::context_ptr(),
         rec: crate::jit::main_rec_target(),
@@ -299,19 +391,45 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         waited: true,
+        t_push: if class == Class::Main && crate::jit::MAIN_TID.load(Ordering::Relaxed) == me() { crate::jit::wall_ns().max(1) } else { 0 },
+        t_serve: AtomicU64::new(0),
+        t_done: AtomicU64::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     };
     let behind = NOW_CLASS.load(Ordering::Relaxed);
+    let behind_from = NOW_FROM.load(Ordering::Relaxed);
     let t_req = std::time::Instant::now();
     let t0 = if main_wait { crate::jit::wall_ns() } else { 0 };
     in_call_add(1);
+    if req.t_push != 0 {
+        crate::postframe::ui_wait_begin();
+    }
     push(&req as *const Req as usize, class);
     let withdrawn = {
         let _w = crate::waits::begin(crate::waits::Kind::Owner, class as u64, OWNER_TID.load(Ordering::Relaxed), CLASS_NAMES[class as usize]);
         wait(&req, deadline)
     };
     in_call_add(-1);
+    if req.t_push != 0 {
+        crate::postframe::ui_wait_end();
+        let now = crate::jit::wall_ns();
+        let w = now.saturating_sub(req.t_push);
+        let done = req.t_done.load(Ordering::Relaxed);
+        MAIN_ACC[0].fetch_add(1, Ordering::Relaxed);
+        MAIN_ACC[1].fetch_add(w, Ordering::Relaxed);
+        if done != 0 {
+            MAIN_ACC[3].fetch_add(now.saturating_sub(done), Ordering::Relaxed);
+        }
+        let b = if w < 20_000 { 4 } else if w < 200_000 { 6 } else if w < 2_000_000 { 8 } else { 10 };
+        MAIN_ACC[b].fetch_add(1, Ordering::Relaxed);
+        MAIN_ACC[b + 1].fetch_add(w, Ordering::Relaxed);
+        let served = req.t_serve.load(Ordering::Relaxed);
+        if served != 0 {
+            crate::jit::main_rec_behind(served.saturating_sub(req.t_push), behind, behind_from);
+        }
+        crate::postframe::main_owner_wait(req.t_push, w);
+    }
     // makepad inspect: a real-time thread (an audio callback) that waited for the compiler
     if crate::inspect::events::watched() {
         let waited = std::time::Instant::now().duration_since(t_req);
@@ -352,8 +470,20 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
 }
 
 /// Posts `f` to the owner and returns at once (it runs later, in class order).
+#[track_caller]
 pub fn post(class: Class, f: impl FnOnce() + Send + 'static) {
-    if is_owner() || CHILD.load(Ordering::Relaxed) {
+    if is_owner() {
+        f();
+        return;
+    }
+    post_queued(class, f);
+}
+
+/// `post`, but queued also when called on the owner (`post` runs `f` at once there): work the
+/// owner hands itself for later, after the requests waiting now.
+#[track_caller]
+pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
+    if CHILD.load(Ordering::Relaxed) {
         f();
         return;
     }
@@ -363,6 +493,7 @@ pub fn post(class: Class, f: impl FnOnce() + Send + 'static) {
     let req = Box::new(Req {
         run: Box::into_raw(run),
         class,
+        site: std::panic::Location::caller(),
         from: me(),
         ctx: std::ptr::null(),
         rec: std::ptr::null(),
@@ -370,6 +501,9 @@ pub fn post(class: Class, f: impl FnOnce() + Send + 'static) {
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         waited: false,
+        t_push: 0,
+        t_serve: AtomicU64::new(0),
+        t_done: AtomicU64::new(0),
         done: Mutex::new(false),
         wake: Condvar::new(),
     });
@@ -403,12 +537,14 @@ fn dequeued(class: usize) {
 
 /// Waits for `req` to be done; true: withdrawn at the deadline before it started.
 fn wait(req: &Req, deadline: Option<std::time::Instant>) -> bool {
-    let t0 = std::time::Instant::now();
-    while t0.elapsed() < SPIN {
-        if req.state.load(Ordering::Acquire) == RELEASED {
-            return false;
+    let behind_other = OWNER_SERVING.load(Ordering::Relaxed) && req.state.load(Ordering::Relaxed) == QUEUED;
+    if !behind_other && !OWNER_ASLEEP.load(Ordering::Relaxed) && QUEUED_N.load(Ordering::Relaxed) <= 1 {
+        for _ in 0..spin_iters(REQUESTER_SPIN_US) {
+            if req.state.load(Ordering::Acquire) == RELEASED {
+                return false;
+            }
+            std::hint::spin_loop();
         }
-        std::hint::spin_loop();
     }
     let mut done = req.done.lock().unwrap_or_else(|e| e.into_inner());
     while !*done {
@@ -452,23 +588,54 @@ enum Mode {
     Pump,
 }
 
+/// Headroom for the program's threads after the first present: a Background request (a
+/// speculative front, an O3 snapshot, a cache batch) holds the owner until it ends, and a program
+/// thread's lazy compile makes several requests in a row with its own work in between (its back
+/// end, then the code it runs up to the next stub). So none starts while a program thread compiles
+/// or within BG_GAP_NS after its last compile ended -- unless background work has waited
+/// BG_STARVE_NS since the last one started (it always progresses; a program thread then waits for
+/// at most one background request in that time).
+const BG_GAP_NS: u64 = 2_000_000;
+const BG_STARVE_NS: u64 = 20_000_000;
+/// wall ns the last Background request started
+static BG_LAST_START: AtomicU64 = AtomicU64::new(0);
+/// pick held a Background request back: the idle owner looks again soon (nothing announces the
+/// end of a gap)
+static BG_HELD: AtomicBool = AtomicBool::new(false);
+
+fn background_held() -> bool {
+    if !crate::jit::FIRST_PRESENT.load(Ordering::Relaxed) || crate::jit::demand_quiet_ns() >= BG_GAP_NS {
+        return false;
+    }
+    crate::jit::wall_ns().saturating_sub(BG_LAST_START.load(Ordering::Relaxed)) < BG_STARVE_NS
+}
+
 fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
     // the process ends (only the exit set's requests), or the program swaps its allocator (only
     // the pauser's): other threads' foreground and background requests wait
-    let only = match EXIT_TID.load(Ordering::Acquire) {
-        0 => crate::jit::paused_for(),
-        e => e,
+    let (only, pause) = match EXIT_TID.load(Ordering::Acquire) {
+        0 => (crate::jit::paused_for(), true),
+        e => (e, false),
     };
     let helper = EXIT_HELPER.load(Ordering::Acquire);
     for c in 0..CLASSES {
-        if mode == Mode::Pump && c >= Class::Main as usize {
-            break;
+        if mode == Mode::Pump && (c == Class::Main as usize || c == Class::App as usize) {
+            continue;
         }
         if c >= Class::Background as usize && FOREGROUND.load(Ordering::Relaxed) > 0 {
             break;
         }
+        if c == Class::Background as usize && mode == Mode::Top && !q.lanes[c].is_empty() {
+            if background_held() {
+                BG_HELD.store(true, Ordering::Relaxed);
+                break;
+            }
+            BG_LAST_START.store(crate::jit::wall_ns(), Ordering::Relaxed);
+        }
         let lane = &mut q.lanes[c];
-        let at = if only != 0 && c >= Class::Main as usize {
+        // a pause serves every request that keeps its job running (Class::keeps_job)
+        let held_back = c >= Class::Main as usize && !(pause && CLASS_OF[c].keeps_job());
+        let at = if only != 0 && held_back {
             lane.iter().position(|r| {
                 let from = unsafe { (*(*r as *const Req)).from };
                 from == only || from == helper && helper != 0
@@ -490,7 +657,12 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
 fn serve(r: usize) {
     let req = unsafe { &*(r as *const Req) };
     req.state.store(RUNNING, Ordering::Release);
+    let was_serving = OWNER_SERVING.swap(true, Ordering::Relaxed);
     let t0 = crate::jit::wall_ns();
+    if req.t_push != 0 {
+        MAIN_ACC[2].fetch_add(t0.saturating_sub(req.t_push), Ordering::Relaxed);
+        req.t_serve.store(t0.max(1), Ordering::Relaxed);
+    }
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
     let prev_now = (NOW_CLASS.swap(req.class as u8, Ordering::Relaxed), NOW_FROM.swap(req.from, Ordering::Relaxed));
@@ -530,7 +702,10 @@ fn serve(r: usize) {
     NOW_FROM.store(prev_now.1, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
     unsafe { crate::query::swap_context(prev_ctx) };
-    BUSY_NS[req.class as usize].fetch_add(crate::jit::wall_ns().saturating_sub(t0), Ordering::Relaxed);
+    OWNER_SERVING.store(was_serving, Ordering::Relaxed);
+    let t1 = crate::jit::wall_ns();
+    BUSY_NS[req.class as usize].fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
+    crate::postframe::owner_served(req.class as usize, req.site, req.from, t0, t1, FOREGROUND.load(Ordering::Relaxed));
     // the process is ending on another thread: this request is never answered (its requester
     // waits until the process is gone)
     if res.as_ref().is_err_and(|p| p.is::<ExitParked>()) {
@@ -544,6 +719,9 @@ fn serve(r: usize) {
             if traced {
                 // the edge that ends the requester's wait
                 crate::inspect::timeline::push(crate::inspect::timeline::Kind::Served, "", req.from, 0);
+            }
+            if req.t_push != 0 {
+                req.t_done.store(crate::jit::wall_ns(), Ordering::Relaxed);
             }
             req.state.store(DONE, Ordering::Release);
             {
@@ -568,10 +746,13 @@ fn serve(r: usize) {
 }
 
 fn owner_loop() -> ! {
+    calibrate();
     loop {
         // idle: a short spin catches the next request of a burst without a sleep and wake
-        let t0 = std::time::Instant::now();
-        while QUEUED_N.load(Ordering::Relaxed) == 0 && FORK.load(Ordering::Relaxed) != 1 && t0.elapsed() < SPIN {
+        for _ in 0..spin_iters(OWNER_SPIN_US) {
+            if QUEUED_N.load(Ordering::Relaxed) != 0 || FORK.load(Ordering::Relaxed) == 1 {
+                break;
+            }
             std::hint::spin_loop();
         }
         let r = {
@@ -587,11 +768,16 @@ fn owner_loop() -> ! {
                     q = Q.lock().unwrap_or_else(|e| e.into_inner());
                     continue;
                 }
+                BG_HELD.store(false, Ordering::Relaxed);
                 if let Some(r) = pick(&mut q, Mode::Top) {
                     break r;
                 }
                 OWNER_ASLEEP.store(true, Ordering::SeqCst);
-                q = WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
+                q = if BG_HELD.load(Ordering::Relaxed) {
+                    WAKE.wait_timeout(q, std::time::Duration::from_millis(1)).map(|x| x.0).unwrap_or_else(|e| e.into_inner().0)
+                } else {
+                    WAKE.wait(q).unwrap_or_else(|e| e.into_inner())
+                };
                 OWNER_ASLEEP.store(false, Ordering::SeqCst);
             }
         };
@@ -617,6 +803,8 @@ fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
     }
     let _w = crate::waits::begin(crate::waits::Kind::Pump, 0, runner, "pump");
     if !is_owner() || CHILD.load(Ordering::Relaxed) {
+        // a job waiting for another thread is not running meanwhile (jit::job_sleep's reason)
+        let _idle = (!CHILD.load(Ordering::Relaxed)).then(crate::jit::JobIdle::enter);
         let t0 = std::time::Instant::now();
         while !done() {
             if CHILD.load(Ordering::Relaxed) && t0.elapsed().as_secs() >= 10 {

@@ -353,7 +353,7 @@ pub struct EscapeUnicode<'a> {
     cur: Option<crate::char::EscapeUnicode>,
 }
 
-pub fn escape_unicode(s: &str) -> EscapeUnicode<'_> {
+pub const fn escape_unicode(s: &str) -> EscapeUnicode<'_> {
     EscapeUnicode { chars: chars(s), cur: None }
 }
 

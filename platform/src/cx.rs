@@ -1333,8 +1333,11 @@ pub fn startup_trace_first_present() {
     if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
         let presented_at = Cx::time_now();
         FIRST_PRESENT_SEEN.store(true, std::sync::atomic::Ordering::Release);
-        relax_first_present();
+        // The launcher is told first: the loader's hook below starts the post-present work, and the
+        // owner thread serving it (a cache batch) made the first call of this report wait for it
+        // (a lazily compiled fn: ~55 ms on a quiet machine) before the launcher saw the frame.
         report_first_present();
+        relax_first_present();
         print_first_present(presented_at);
         startup_trace("FIRST PRESENT ON GLASS");
         startup_trace_flush("cumulative at first present");
@@ -1354,13 +1357,14 @@ fn print_first_present(presented_at: f64) {
     let present_ms = (presented_at - startup_t0()).max(0.0) * 1000.0;
     let main_ms = std::env::var("MAKEPAD_RUN_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let cache = std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
-    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache));
+    let ahead = std::env::var("MAKEPAD_RUN_AHEAD").unwrap_or_else(|_| "balanced".to_string());
+    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache, &ahead));
 }
 
-fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str) -> String {
+fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str, ahead: &str) -> String {
     format!(
-        "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {})",
-        package, present_ms / 1000.0, main_ms / 1000.0, cache
+        "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {}, ahead {})",
+        package, present_ms / 1000.0, main_ms / 1000.0, cache, ahead
     )
 }
 
@@ -1425,3 +1429,38 @@ pub(crate) fn relax_first_present() {
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn relax_first_present() {}
+
+/// The app's shutdown starts (it quits, its last window closed, a remote `/quit`): under Relax the
+/// loader marks the quit (its quit-compile accounting, no settle swap from now on) and writes the
+/// disk cache while the app shuts down -- what a termination signal does, without reporting an
+/// abnormal end. Once per process; a rustc build has no such symbol.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_quit_started() {
+    static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ONCE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let hook = relax_host_symbol(c"relax_quit_started");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn relax_quit_started() {}
+
+/// Each frame the HAL finished, under Relax: the loader logs the frame gaps after the first
+/// present (its post-present responsiveness report). The symbol is looked up once.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_frame_done() {
+    static HOOK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let hook = *HOOK.get_or_init(|| relax_host_symbol(c"relax_frame_done") as usize);
+    if hook != 0 {
+        let hook = unsafe { std::mem::transmute::<usize, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows, target_arch = "wasm32")))]
+pub(crate) fn relax_frame_done() {}

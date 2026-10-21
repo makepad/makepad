@@ -1,0 +1,10 @@
+[package]
+name = "relax-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Relax's shared low-level back end: RIR with vectors, register allocation, x86-64 and AArch64 machine code, jump tables, the C ABI planner and executable memory. Front ends: Relax's Rust (through relax-codegen) and Splash kernels"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+relax-session = { workspace = true }

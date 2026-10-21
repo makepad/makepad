@@ -68,6 +68,8 @@ impl RegionInferenceContext {
     }
     pub fn eval_equal(&self, a: usize, b: usize) -> bool { self.eval_outlives(a,b) && self.eval_outlives(b,a) }
     pub fn eval_outlives(&self, sup: usize, sub: usize) -> bool {
+        let n = self.scc_annotations.len().max(0);
+        let _ = n;
         let a = self.constraint_sccs.scc(sup);
         let b = self.constraint_sccs.scc(sub);
         if a == b { return true; }
@@ -97,10 +99,18 @@ impl RegionInferenceContext {
                     RegionKind::ReBound(..) => *bound,
                     _ => tcx.tys.intern_region(RegionKind::ReVar(self.scc_annotations[self.constraint_sccs.scc(self.to_region_vid(&tcx.tys,*bound))].representative.rvid() as u32)),
                 };
-                extract_verify_if_eq(tcx,prog,ty,bound,generic_ty).is_some_and(|r| self.eval_outlives(self.to_region_vid(&tcx.tys,r),lower))
+                extract_verify_if_eq(tcx,prog,ty,bound,generic_ty).is_some_and(|r| {
+                    let (sup, nvars) = (self.to_region_vid(&tcx.tys,r), self.constraint_sccs.num_vars());
+                    assert!(sup < nvars && lower < nvars, "IfEq verify bound: sup {sup} ({:?}) lower {lower} of {nvars} region variables; generic_ty {generic_ty:?} ty {ty:?} bound {bound:?}", tcx.tys.region_kind(r));
+                    self.eval_outlives(sup,lower)
+                })
             }
             VerifyBound::IsEmpty => self.scc_values.elements_contained_in(self.constraint_sccs.scc(lower)).next().is_none(),
-            VerifyBound::OutlivedBy(r) => self.eval_outlives(*r, lower),
+            VerifyBound::OutlivedBy(r) => {
+                let nvars = self.constraint_sccs.num_vars();
+                assert!(*r < nvars && lower < nvars, "OutlivedBy verify bound: bound region {r} lower {lower} of {nvars} region variables; generic_ty {generic_ty:?}");
+                self.eval_outlives(*r, lower)
+            }
             VerifyBound::AnyBound(bs) => bs.iter().any(|b| self.eval_verify_bound(tcx,prog,generic_ty,lower,b)),
             VerifyBound::AllBounds(bs) => bs.iter().all(|b| self.eval_verify_bound(tcx,prog,generic_ty,lower,b)),
         }
@@ -131,13 +141,20 @@ impl RegionInferenceContext {
         let Some(subject) = self.try_promote_type_test_subject(tcx,test.generic_kind) else { return false; };
         let scc = self.constraint_sccs.scc(test.lower_bound);
         let universal_regions = &self.universal_region_relations.universal_regions;
-        let bounds = if self.scc_values.elements_contained_in(scc).any(|e| matches!(e,RegionElement::PlaceholderRegion(_))) {
-            vec![universal_regions.fr_static]
-        } else {
-            self.scc_values.universal_regions_outlived_by(scc)
-                .flat_map(|ur| self.universal_region_relations.non_local_upper_bounds(ur)).collect()
-        };
-        assert!(!bounds.is_empty(),"promotable type test without a universal lower bound");
+        // A placeholder from a higher universe in the lower bound requires `'static`.
+        if self.scc_values.elements_contained_in(scc).any(|e| matches!(e,RegionElement::PlaceholderRegion(_))) {
+            self.propagated_type_requirements.push(super::ClosureTypeRequirement { subject, outlived_free_region: universal_regions.fr_static, blame_span: test.span });
+            return true;
+        }
+        // For each region outlived by the lower bound, the non-local upper bounds of it; (rustc
+        // asserts only that some universal region is outlived, a region may have no non-local bound).
+        let mut found_outlived_universal_region = false;
+        let mut bounds = Vec::new();
+        for ur in self.scc_values.universal_regions_outlived_by(scc) {
+            found_outlived_universal_region = true;
+            bounds.extend(self.universal_region_relations.non_local_upper_bounds(ur));
+        }
+        assert!(found_outlived_universal_region, "promotable type test without a universal lower bound");
         self.propagated_type_requirements.extend(bounds.into_iter().map(|outlived_free_region|
             super::ClosureTypeRequirement { subject,outlived_free_region,blame_span:test.span }));
         true
@@ -186,7 +203,7 @@ impl RegionInferenceContext {
         let subset: Vec<_> = constraints.iter().copied().filter(|&(a,b)| self.eval_outlives(a,b)).collect();
         let propagated = if subset.is_empty() { constraints } else { subset };
         assert!(!propagated.is_empty());
-        let blame = self.best_blame_constraint(tcx,longer,shorter).expect("propagated region relation has no constraint path");
+        let blame = self.best_blame_constraint(tcx,longer,Origin::FreeRegion,shorter).expect("propagated region relation has no constraint path");
         self.propagated_outlives_requirements.extend(propagated.into_iter().map(|(sup,sub)| OutlivesConstraint { sup,sub,..blame }));
         true
     }
@@ -196,7 +213,7 @@ impl RegionInferenceContext {
             let illegally_outlived_r = match element {
                 RegionElement::RootUniversalRegion(r) => r,
                 RegionElement::PlaceholderRegion(p) => self.definitions.iter().position(|d| d.origin == Origin::Placeholder(p)).unwrap(),
-                RegionElement::Location(p) => self.constraint_path_to(longer_fr, |r| self.liveness_constraints.is_live_at_point(r,p), true).unwrap().1,
+                RegionElement::Location(p) => self.constraint_path_to(longer_fr, |r| self.liveness_constraints.is_live_at_point_eagerly(r,p), true).unwrap().1,
             };
             self.errors.push(RegionErrorKind::PlaceholderOutlivesIllegalRegion { longer_fr, illegally_outlived_r });
         }
@@ -238,12 +255,12 @@ impl RegionInferenceContext {
         }
         None
     }
-    pub fn best_blame_constraint(&self, tcx: &Tcx, from: usize, to: usize) -> Option<OutlivesConstraint> {
+    pub fn best_blame_constraint(&self, tcx: &Tcx, from: usize, from_origin: Origin, to: usize) -> Option<OutlivesConstraint> {
         let mut path = self.constraint_path_to(from, |r| r == to, true)?.0;
         if let Some(unnameable) = path.iter().find_map(|c| match c.category { Category::OutlivesUnnameablePlaceholder(r) => Some(r), _ => None }) {
             if unnameable != from { path = self.constraint_path_to(from, |r| r == unnameable, false)?.0; }
         }
-        let blame_source = self.definitions[from].origin == Origin::FreeRegion;
+        let blame_source = from_origin == Origin::FreeRegion;
         // N:region_infer/region_context.rs:711-727: an implicit unsizing coercion to an ADT
         // over a trait object ranks just after returns when blaming `'static`, unless a
         // type annotation is on the path.

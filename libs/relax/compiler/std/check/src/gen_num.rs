@@ -167,8 +167,8 @@ fn gen_int(o: &mut String, t: &Int) {
     let _ = writeln!(o, "    pub const MIN: {n} = {};", lit_min(t));
     let _ = writeln!(o, "    pub const MAX: {n} = {};", max_of(t));
     let _ = writeln!(o, "    pub const BITS: u32 = {b};");
-    let _ = writeln!(o, "    pub const fn min_value() -> {n} {{ {n}::MIN }}");
-    let _ = writeln!(o, "    pub const fn max_value() -> {n} {{ {n}::MAX }}");
+    let _ = writeln!(o, "    #[rustc_promotable]\n    pub const fn min_value() -> {n} {{ {n}::MIN }}");
+    let _ = writeln!(o, "    #[rustc_promotable]\n    pub const fn max_value() -> {n} {{ {n}::MAX }}");
     // bit operations through intrinsics on the unsigned representation
     let _ = writeln!(o, "    pub const fn count_ones(self) -> u32 {{ unsafe {{ ii::ctpop(self as {u}) }} }}");
     let _ = writeln!(o, "    pub const fn count_zeros(self) -> u32 {{ {b} - self.count_ones() }}");
@@ -250,10 +250,14 @@ fn gen_int(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    pub const fn overflowing_div(self, rhs: {n}) -> ({n}, bool) {{ if self == {n}::MIN && rhs == -1 {{ (self, true) }} else {{ (self / rhs, false) }} }}");
         let _ = writeln!(o, "    pub const fn overflowing_rem(self, rhs: {n}) -> ({n}, bool) {{ if rhs == -1 {{ (0, self == {n}::MIN) }} else {{ (self % rhs, false) }} }}");
         let _ = writeln!(o, "    pub const fn overflowing_abs(self) -> ({n}, bool) {{ if self < 0 {{ self.overflowing_neg() }} else {{ (self, false) }} }}");
+        let _ = writeln!(o, "    pub const fn overflowing_div_euclid(self, rhs: {n}) -> ({n}, bool) {{ if self == {n}::MIN && rhs == -1 {{ (self, true) }} else {{ (self.div_euclid(rhs), false) }} }}");
+        let _ = writeln!(o, "    pub const fn overflowing_rem_euclid(self, rhs: {n}) -> ({n}, bool) {{ if rhs == -1 {{ (0, self == {n}::MIN) }} else {{ (self.rem_euclid(rhs), false) }} }}");
     } else {
         let _ = writeln!(o, "    pub const fn overflowing_neg(self) -> ({n}, bool) {{ ((0 as {n}) - self, self != 0) }}");
         let _ = writeln!(o, "    pub const fn overflowing_div(self, rhs: {n}) -> ({n}, bool) {{ (self / rhs, false) }}");
         let _ = writeln!(o, "    pub const fn overflowing_rem(self, rhs: {n}) -> ({n}, bool) {{ (self % rhs, false) }}");
+        let _ = writeln!(o, "    pub const fn overflowing_div_euclid(self, rhs: {n}) -> ({n}, bool) {{ (self / rhs, false) }}");
+        let _ = writeln!(o, "    pub const fn overflowing_rem_euclid(self, rhs: {n}) -> ({n}, bool) {{ (self % rhs, false) }}");
     }
     let _ = writeln!(o, "    pub const fn overflowing_shl(self, rhs: u32) -> ({n}, bool) {{ (((self as {u}) << (rhs & {})) as {n}, rhs >= {b}) }}", b - 1);
     let _ = writeln!(o, "    pub const fn overflowing_shr(self, rhs: u32) -> ({n}, bool) {{ (self >> (rhs & {}), rhs >= {b}) }}", b - 1);
@@ -278,6 +282,23 @@ fn gen_int(o: &mut String, t: &Int) {
     }
     let _ = writeln!(o, "    pub const fn wrapping_shl(self, rhs: u32) -> {n} {{ self.overflowing_shl(rhs).0 }}");
     let _ = writeln!(o, "    pub const fn wrapping_shr(self, rhs: u32) -> {n} {{ self.overflowing_shr(rhs).0 }}");
+    // rustc int_macros.rs / uint_macros.rs: wrapping_{div,rem}_euclid, unchecked_*, unbounded_sh*
+    let _ = writeln!(o, "    pub const fn wrapping_div_euclid(self, rhs: {n}) -> {n} {{ self.overflowing_div_euclid(rhs).0 }}");
+    let _ = writeln!(o, "    pub const fn wrapping_rem_euclid(self, rhs: {n}) -> {n} {{ self.overflowing_rem_euclid(rhs).0 }}");
+    for op in ["add", "sub", "mul"] {
+        let _ = writeln!(o, "    pub const unsafe fn unchecked_{op}(self, rhs: {n}) -> {n} {{ self.wrapping_{op}(rhs) }}");
+    }
+    if t.signed {
+        let _ = writeln!(o, "    pub const unsafe fn unchecked_neg(self) -> {n} {{ self.wrapping_neg() }}");
+    }
+    let _ = writeln!(o, "    pub const unsafe fn unchecked_shl(self, rhs: u32) -> {n} {{ self.wrapping_shl(rhs) }}");
+    let _ = writeln!(o, "    pub const unsafe fn unchecked_shr(self, rhs: u32) -> {n} {{ self.wrapping_shr(rhs) }}");
+    let _ = writeln!(o, "    pub const fn unbounded_shl(self, rhs: u32) -> {n} {{ if rhs < {n}::BITS {{ self.wrapping_shl(rhs) }} else {{ 0 }} }}");
+    if t.signed {
+        let _ = writeln!(o, "    pub const fn unbounded_shr(self, rhs: u32) -> {n} {{ if rhs < {n}::BITS {{ self.wrapping_shr(rhs) }} else {{ self.wrapping_shr({n}::BITS - 1) }} }}");
+    } else {
+        let _ = writeln!(o, "    pub const fn unbounded_shr(self, rhs: u32) -> {n} {{ if rhs < {n}::BITS {{ self.wrapping_shr(rhs) }} else {{ 0 }} }}");
+    }
     if t.signed {
         let _ = writeln!(o, "    pub const fn wrapping_abs(self) -> {n} {{ self.overflowing_abs().0 }}");
     }
@@ -514,6 +535,9 @@ fn gen_float(o: &mut String, f: &str) {
     let _ = writeln!(o, "    pub const fn is_sign_positive(self) -> bool {{ !self.is_sign_negative() }}");
     let _ = writeln!(o, "    pub const fn is_sign_negative(self) -> bool {{ (self.to_bits() & {sign}) != 0 }}");
     let _ = writeln!(o, "    pub const fn abs(self) -> {f} {{ unsafe {{ intrinsics::fabs_{f}(self) }} }}");
+    let _ = writeln!(o, "    // core num/{f}.rs (stable 1.86): the neighbouring representable value");
+    let _ = writeln!(o, "    pub const fn next_up(self) -> {f} {{ let bits = self.to_bits(); if self.is_nan() || bits == {f}::INFINITY.to_bits() {{ return self; }} let abs = bits & !{sign}; let next = if abs == 0 {{ 1 }} else if bits == abs {{ bits + 1 }} else {{ bits - 1 }}; {f}::from_bits(next) }}");
+    let _ = writeln!(o, "    pub const fn next_down(self) -> {f} {{ let bits = self.to_bits(); if self.is_nan() || bits == {f}::NEG_INFINITY.to_bits() {{ return self; }} let abs = bits & !{sign}; let next = if abs == 0 {{ {sign} | 1 }} else if bits == abs {{ bits - 1 }} else {{ bits + 1 }}; {f}::from_bits(next) }}");
     let _ = writeln!(o, "    pub const fn copysign(self, sign: {f}) -> {f} {{ {f}::from_bits((self.to_bits() & !{sign}) | (sign.to_bits() & {sign})) }}");
     let _ = writeln!(o, "    pub const fn signum(self) -> {f} {{ if self.is_nan() {{ {f}::NAN }} else {{ (1.0 as {f}).copysign(self) }} }}");
     for (m, i) in [("sqrt", "sqrt"), ("floor", "floor"), ("ceil", "ceil"), ("trunc", "trunc"), ("round_ties_even", "rint")] {

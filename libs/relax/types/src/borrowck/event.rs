@@ -81,7 +81,58 @@ pub fn set_app_scope(roots: Vec<String>) {
     let _k = crate::zone_alloc::kept();
     let roots = roots.iter().map(|r| crate::vfs::normalize_path(r)).collect();
     *APP_SCOPE.lock().unwrap_or_else(|e| e.into_inner()) = roots;
+    rescope_user_types();
 }
+
+/// `makepad check`: every crate of the graph is borrow-checked, so every crate keeps its
+/// user-written types. Called before any type checking (run.rs, where the app scope is set).
+pub fn set_check_scope() {
+    CHECK_ALL.store(true, std::sync::atomic::Ordering::SeqCst);
+    rescope_user_types();
+}
+
+static CHECK_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Per crate: 0 undecided, 1 keeps user types, 2 does not. Reset when the scope changes.
+static USER_TYPES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+#[cfg(test)]
+thread_local! { pub(crate) static FORCE_USER_TYPES: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+static USER_TYPES_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The one predicate for "this crate's bodies will be borrow-checked" as far as typeck's
+/// `user_provided_types` / `user_provided_sigs` go (they are read only by the MIR borrowck).
+/// Decided once per crate, before any body of it is checked; the same rule `admit` applies to
+/// Gandalf's queue and its published errors, plus `makepad check`'s scope.
+pub fn user_types_wanted(prog: &Program, krate: u32) -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCE_USER_TYPES.with(|f| f.get()) { return forced; }
+    let mut cache = USER_TYPES.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() <= krate as usize {
+        // the decisions are per crate id, which a settle swap keeps: the buffer is not a generation's
+        let _k = crate::zone_alloc::kept();
+        cache.resize(krate as usize + 1, 0);
+    }
+    match cache[krate as usize] {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let wanted = CHECK_ALL.load(std::sync::atomic::Ordering::SeqCst) || admit(prog, krate);
+    cache[krate as usize] = if wanted { 1 } else { 2 };
+    wanted
+}
+
+/// The scope changed: decisions are redone. A crate that was decided "no" and now is "yes" has
+/// bodies already type-checked without annotations (see `user_types_stale`); in production the
+/// scope is set once, before the first body is checked.
+fn rescope_user_types() {
+    let mut cache = USER_TYPES.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.iter().any(|&d| d == 2) { USER_TYPES_STALE.store(true, std::sync::atomic::Ordering::SeqCst); }
+    cache.clear();
+}
+
+/// Whether the scope grew after some crate had been type-checked without annotations. The
+/// caller must not borrow-check such bodies from the typeck results it already holds.
+pub fn user_types_stale() -> bool { USER_TYPES_STALE.load(std::sync::atomic::Ordering::SeqCst) }
 
 pub fn app_crate(prog: &Program, krate: u32) -> bool {
     let root = crate::vfs::normalize_path(prog.crates[krate as usize].root_path());

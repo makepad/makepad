@@ -3,7 +3,6 @@
 //!
 //! - `current()`: the calling thread's id (nonzero; pthread_t on unix).
 //! - `name(t)`: a thread's name for diagnostics.
-//! - `stack_lo()`: lowest usable address of the calling thread's stack (0: unknown).
 //! - `kick(t)`: interrupts thread `t` for the hang watchdog / MAKEPAD_RUN_COMPILE_WATCH: the fault
 //!   layer's handler then runs on that thread (jit::on_watchdog decides what it does).
 //! - `lower_priority(utility)`: background compile workers below the program's threads.
@@ -56,25 +55,6 @@ mod unix {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
     pub use super::unix::{current, exit_now, fork, kick, name};
-    use super::unix::pthread_self;
-
-    pub fn stack_lo() -> usize {
-        extern "C" {
-            fn pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
-            fn pthread_attr_getstack(attr: *const u64, addr: *mut usize, size: *mut usize) -> i32;
-            fn pthread_attr_destroy(attr: *mut u64) -> i32;
-        }
-        unsafe {
-            let mut attr = [0u64; 16];
-            if pthread_getattr_np(pthread_self(), attr.as_mut_ptr()) != 0 {
-                return 0;
-            }
-            let (mut addr, mut size) = (0usize, 0usize);
-            pthread_attr_getstack(attr.as_ptr(), &mut addr, &mut size);
-            pthread_attr_destroy(attr.as_mut_ptr());
-            addr
-        }
-    }
 
     pub fn lower_priority(_utility: bool) {
         extern "C" {
@@ -103,16 +83,7 @@ mod imp {
     use super::unix::pthread_self;
 
     extern "C" {
-        fn pthread_get_stackaddr_np(t: usize) -> *mut u8;
-        fn pthread_get_stacksize_np(t: usize) -> usize;
         fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
-    }
-
-    pub fn stack_lo() -> usize {
-        unsafe {
-            let t = pthread_self();
-            pthread_get_stackaddr_np(t) as usize - pthread_get_stacksize_np(t)
-        }
     }
 
     pub fn lower_priority(utility: bool) {
@@ -180,16 +151,6 @@ mod imp {
         }
     }
 
-    pub fn stack_lo() -> usize {
-        let (mut lo, mut hi) = (0usize, 0usize);
-        unsafe { GetCurrentThreadStackLimits(&mut lo, &mut hi) };
-        // the reservation's base; its lowest pages are the guard region
-        if lo == 0 {
-            0
-        } else {
-            lo + 3 * 4096 + 65536
-        }
-    }
 
     /// The watchdog / MAKEPAD_RUN_COMPILE_WATCH interrupt: the thread is suspended and its context read
     /// from this (the watching) thread; the fault layer decides (os::fault::interrupt).

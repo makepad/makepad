@@ -41,10 +41,13 @@
 //! ```
 //!
 //! Frames can also be supplied pre-converted as NV12 (`push_frame_nv12`); the
-//! RGB entry points use the BT.709 converters in [`nv12`]. Audio may be pushed
+//! RGB entry points use the converters in [`nv12`] with the encoder's
+//! [`VideoColor`] (BT.709 limited range by default), which is also what the
+//! stream and container are tagged with. Audio may be pushed
 //! interleaved with video or in one block at the end for short clips.
 
 pub mod annex_b;
+pub mod color;
 pub mod hevc_config;
 pub mod mp4_first_frame;
 pub mod nv12;
@@ -52,6 +55,7 @@ pub mod stream_debug;
 pub mod stream_decoder;
 pub mod stream_encoder;
 
+pub use color::{VideoColor, VideoColorUniforms, VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
 pub use stream_decoder::{DecodedFrame, VideoStreamDecoder};
 pub use stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 
@@ -64,6 +68,10 @@ use std::fmt;
 pub enum VideoFileCodec {
     H265,
     H264,
+    /// H.265 with an alpha layer (a transparent overlay): BGRA pictures in,
+    /// premultiplied, the alpha kept. Only where the OS encoder writes it
+    /// (VideoToolbox); elsewhere opening the encoder says so.
+    H265Alpha,
 }
 
 /// Options for the optional AAC audio track, fed as 16-bit interleaved PCM.
@@ -102,6 +110,13 @@ pub struct VideoFileEncoderOptions {
     /// the file cheaply decodable at ANY frame in ANY order — reverse and
     /// bounce playback never forward-decode a GOP to reach a frame.
     pub keyframe_only: bool,
+    /// The colour the pushed RGB is converted to and the stream and
+    /// container are tagged with (pushed NV12 must already be in it).
+    /// The pictures are BT.709 SDR light; another primaries is converted on
+    /// the GPU before the frames are pushed (the RGB entry points only apply
+    /// the matrix and range, and refuse an HDR transfer: HDR frames are
+    /// pushed as NV12 already in the colour).
+    pub color: VideoColor,
 }
 
 impl Default for VideoFileEncoderOptions {
@@ -115,6 +130,7 @@ impl Default for VideoFileEncoderOptions {
             video_bitrate_bps: 8_000_000,
             audio: None,
             keyframe_only: false,
+            color: VideoColor::BT709,
         }
     }
 }
@@ -187,6 +203,10 @@ mod apple_encoder;
 mod apple_intra_frame;
 #[cfg(target_vendor = "apple")]
 mod apple_texture_intake;
+#[cfg(target_vendor = "apple")]
+mod apple_bgra_reader;
+#[cfg(target_vendor = "apple")]
+pub use apple_bgra_reader::BgraFrameReader;
 // Pure Rust and portable: the still writers that get bitstreams, not files (Apple, Android).
 #[cfg(any(target_vendor = "apple", target_os = "android"))]
 mod mp4_single_frame;
@@ -285,6 +305,38 @@ impl GpuPictureMaker {
         return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
     }
 
+    /// Whether [`Self::nv12_picture`] and [`Self::bgra_picture`] work here.
+    pub const TAKES_PLANES: bool = cfg!(target_vendor = "apple");
+
+    /// A `width` x `height` NV12 picture whose planes the shared texture
+    /// `handle` holds, laid out as BGRA8 texels: `width.div_ceil(4)` texels
+    /// a row, each 4 bytes of a plane row in memory order, the `height` luma
+    /// rows and then the `height / 2` interleaved chroma rows (a GPU pass's
+    /// conversion of a picture). Copied on the GPU into the encoder's NV12
+    /// buffer, nothing converted; the planes are in `color`'s matrix and
+    /// range. Apple only ([`Self::TAKES_PLANES`]).
+    pub fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, color: VideoColor) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.nv12_picture(handle, width, height, color.range == VideoRange::Full) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, width, height, color);
+            return Err(VideoFileError::new("NV12 pictures from shared textures are not implemented on this platform yet"));
+        }
+    }
+
+    /// `region` of the shared texture as a BGRA picture, its alpha kept
+    /// (for [`VideoFileCodec::H265Alpha`]). Apple only ([`Self::TAKES_PLANES`]).
+    pub fn bgra_picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.bgra_picture(handle, region) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, region);
+            return Err(VideoFileError::new("BGRA pictures from shared textures are not implemented on this platform yet"));
+        }
+    }
+
     /// `region` is `x, y, width, height` of the texture; its sides even.
     pub fn picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
         if region[2] % 2 != 0 || region[3] % 2 != 0 {
@@ -325,7 +377,7 @@ fn read_picture(handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileEr
         px.swap(0, 2);
     }
     let mut nv12 = Vec::new();
-    nv12::rgbx_to_nv12(&bgra, width, height, 4, &mut nv12);
+    nv12::rgbx_to_nv12(&bgra, width, height, 4, VideoColor::BT709, &mut nv12);
     Ok(GpuPicture { width, height, nv12 })
 }
 
@@ -418,6 +470,11 @@ impl VideoFileEncoder {
                 )));
             }
         }
+        // Media Foundation and GStreamer have no encoder that writes HEVC's alpha layer.
+        #[cfg(not(target_vendor = "apple"))]
+        if options.codec == VideoFileCodec::H265Alpha {
+            return Err(VideoFileError::new("HEVC with alpha: this platform's video encoder cannot write an alpha layer"));
+        }
         #[cfg(target_vendor = "apple")]
         {
             let os = OsVideoFileEncoder::new_with(path, &options, fragment_interval_secs)?;
@@ -471,7 +528,9 @@ impl VideoFileEncoder {
         }
     }
 
-    /// Push one frame of tightly packed RGBA (alpha ignored), `width*height*4` bytes.
+    /// Push one frame of tightly packed RGBA, `width*height*4` bytes: alpha
+    /// ignored, except by [`VideoFileCodec::H265Alpha`], which keeps it
+    /// (premultiplied).
     pub fn push_frame_rgba8(&mut self, rgba: &[u8], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
         let expected = self.options.width as usize * self.options.height as usize * 4;
         if rgba.len() != expected {
@@ -678,6 +737,9 @@ pub struct VideoFileInfo {
     pub has_audio: bool,
     pub audio_sample_rate: u32,
     pub audio_channels: u16,
+    /// What the stream says its colour is (the container, else the
+    /// bitstream), unspecified properties guessed from the size.
+    pub color: VideoColor,
 }
 
 /// One decoded video frame: tightly packed NV12, stride == width.
@@ -686,13 +748,16 @@ pub struct DecodedVideoFrame {
     pub width: u32,
     pub height: u32,
     pub nv12: Vec<u8>,
+    /// The colour of these bytes: the stream's, in the range the decoder
+    /// delivered.
+    pub color: VideoColor,
 }
 
 impl DecodedVideoFrame {
-    /// Convert to tightly packed RGB8 (BT.709).
+    /// Convert to tightly packed RGB8 (matrix and range; see [`nv12`]).
     pub fn to_rgb8(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, &mut out);
+        nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, self.color, &mut out);
         out
     }
 }
@@ -727,6 +792,8 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             width: frame.width,
             height: frame.height,
             nv12: frame.nv12,
+            // the stream decoder delivers the stream's own range
+            color: au.color,
         });
     }
     #[cfg(target_os = "android")]
@@ -736,7 +803,7 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             return Err(VideoFileError::new("first frame decode: the phone decodes HEVC stills only"));
         }
         let nv12 = android_hevc::decode(&au.annex_b, au.width, au.height)?;
-        return Ok(DecodedVideoFrame { pts_100ns: 0, width: au.width, height: au.height, nv12 });
+        return Ok(DecodedVideoFrame { pts_100ns: 0, width: au.width, height: au.height, nv12, color: au.color });
     }
     #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "android")))]
     {
@@ -1074,6 +1141,7 @@ pub fn encode_intra_frame_mp4(
         video_bitrate_bps: bitrate_bps,
         audio: None,
         keyframe_only: true,
+        ..Default::default()
     };
     // A scratch path of our own: the sink writers want a file name, and the
     // caller wants bytes. Unique per process + call so parallel bakers never

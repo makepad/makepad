@@ -3,6 +3,23 @@ use super::*;
 use crate::types::{TyId, TyKind};
 use crate::upvar::ClosureKind;
 
+/// rustc `tcx.coroutine_hidden_types(def_id)` of the coroutine `(file, expr)` of `owner`'s body, instantiated with
+/// the coroutine type's arguments. Made on demand (the owner's coroutine MIR is built) where the goal is checked
+/// -- the crate being checked; elsewhere only what borrowck has already published.
+fn coroutine_hidden_types(ecx: &EvalCtxt<'_, '_>, file: u32, expr: u32, owner: TyId) -> Vec<TyId> {
+    let tcx = ecx.delegate.tcx; let prog = ecx.solver.prog;
+    let TyKind::FnDef(def, args, regions) = *tcx.tys.kind(owner) else { return Vec::new() };
+    let mut hidden = tcx.coroutine_hidden_types.get(&(file, expr));
+    let body = ecx.delegate.cause.body_id;
+    if hidden.is_none() && body != crate::program::NO_DEF && tcx.validates(prog, prog.def(body).file) {
+        crate::borrowck::driver::ensure_coroutine_witnesses(prog, tcx, def);
+        hidden = tcx.coroutine_hidden_types.get(&(file, expr));
+    }
+    let Some(hidden) = hidden else { return Vec::new() };
+    let full = tcx.complete_args(prog, def, tcx.tys.list(args), regions);
+    hidden.iter().map(|&t| tcx.instantiate_ty(prog, def, &full, t)).collect()
+}
+
 pub fn instantiate_constituent_tys_for_auto_trait(ecx: &EvalCtxt<'_, '_>, ty: TyId) -> Result<Vec<TyId>, NoSolution> {
     let tcx = ecx.delegate.tcx;
     Ok(match tcx.tys.kind(ty) {
@@ -10,10 +27,11 @@ pub fn instantiate_constituent_tys_for_auto_trait(ecx: &EvalCtxt<'_, '_>, ty: Ty
         TyKind::Str => vec![tcx.tys.intern(TyKind::Slice(tcx.tys.u8_))],
         TyKind::Ptr(_, t) | TyKind::Ref(_, t, _) | TyKind::Array(t, _) | TyKind::Slice(t) => vec![*t],
         TyKind::Tuple(ts) => tcx.tys.list(*ts).to_vec(),
-        TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: upvars, .. }) => {
-            // EXCEPTION(M7): user decision 2026-10-07
-            // The coroutine witness is empty until MIR witness publication.
-            vec![*upvars]
+        TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, tupled_upvars_ty: upvars, .. }) => {
+            // a coroutine's witness (`CoroutineWitness`): the types of the locals live across a suspension point
+            let mut constituents = vec![*upvars];
+            if tcx.is_coroutine(ty) { constituents.extend(coroutine_hidden_types(ecx, *file, *expr, *owner)); }
+            constituents
         }
         TyKind::Adt(def, args, rs) => {
             let adt = &tcx.adts[def];

@@ -62,7 +62,7 @@ impl S {
     }
     fn closure_overlap(&mut self) {
         let first = &self.callbacks[0];
-        let mut f = || self.clear_callbacks(); //~ ERROR E0502
+        let mut f = || self.clear_callbacks(); //~ ERROR E0500
         f();
         let _ = first.id;
     }

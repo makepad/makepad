@@ -9,8 +9,13 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OpaqueTypeKey { pub def_id: DefId, pub args: Arc<[GenericArg]> }
 
+/// The hidden type of a use of an opaque type, with where it was registered (`span`: the source range of the
+/// location being type-checked, set by borrowck's type ops; empty before).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProvisionalHiddenType { pub ty: TyId }
+pub struct ProvisionalHiddenType { pub ty: TyId, pub span: (u32, u32) }
+impl ProvisionalHiddenType {
+    pub fn new(ty: TyId) -> Self { Self { ty, span: (0, 0) } }
+}
 
 // Kept audit design: rustc_infer/src/infer/opaque_types/table.rs.
 // The index map is equivalent to the nightly ordered map under LIFO undo.
@@ -74,6 +79,12 @@ impl OpaqueTypeTable<'_> {
         self.storage.opaque_types.push((key.clone(), hidden_type));
         self.undo_log.push(UndoLog::OpaqueTypes(key, None));
         None
+    }
+    /// Sets the span of the entries registered since `previous` that have none (`register`'s are made by the
+    /// solver, which does not know the location).
+    pub fn set_span_since(&mut self, previous: OpaqueTypeStorageEntries, span: (u32, u32)) {
+        for (_, h) in &mut self.storage.opaque_types[previous.opaque_types..] { if h.span == (0, 0) { h.span = span; } }
+        for (_, h) in &mut self.storage.duplicate_entries[previous.duplicate_entries..] { if h.span == (0, 0) { h.span = span; } }
     }
     pub fn add_duplicate(&mut self, key: OpaqueTypeKey, hidden_type: ProvisionalHiddenType) {
         self.storage.duplicate_entries.push((key, hidden_type));

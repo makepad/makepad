@@ -43,6 +43,8 @@ struct Dep {
     /// the package it names (`package = ..`, else the key)
     package: String,
     build: bool,
+    /// a `[dev-dependencies]` entry: part of the package's test targets only
+    dev: bool,
     optional: bool,
     default_features: bool,
     features: Vec<String>,
@@ -61,6 +63,8 @@ struct Target {
     edition: String,
     kind: Vec<String>,
     required_features: Vec<String>,
+    /// a test target built with the libtest harness (`harness = false`: its own `main`)
+    harness: bool,
 }
 
 #[derive(Debug)]
@@ -73,6 +77,8 @@ struct Manifest {
     build: Option<String>,
     lib: Option<Target>,
     bins: Vec<Target>,
+    /// integration test targets: `[[test]]` plus discovered tests/*.rs, tests/*/main.rs
+    tests: Vec<Target>,
     features: BTreeMap<String, Vec<String>>,
     deps: Vec<Dep>,
     proc_macro: bool,
@@ -240,6 +246,59 @@ impl Workspace {
         out.retain(|d| !self.excludes.iter().any(|e| d == e || d.starts_with(&format!("{}/", e))));
         out
     }
+
+    fn excluded(&self, dir: &str) -> bool {
+        self.excludes.iter().any(|e| dir == e || dir.starts_with(&format!("{}/", e)))
+    }
+
+    /// Is `dir` a member? Cargo's members are the listed ones plus every path dependency of a
+    /// member that lies inside the workspace root and is not excluded, transitively, through any
+    /// dependency table (normal, dev, build, `[target.*]`; `workspace = true` entries by the
+    /// workspace's own path): apps/commercial names Stage's and Sandbox's crates that way.
+    fn has_member(&self, dir: &str) -> bool {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut todo = self.member_dirs();
+        while let Some(m) = todo.pop() {
+            let m = normalize(&m);
+            if !seen.insert(m.clone()) {
+                continue;
+            }
+            if m == dir {
+                return true;
+            }
+            let Ok(t) = read_toml(&format!("{}/Cargo.toml", m)) else { continue };
+            let mut tables: Vec<&TomlTable> = Vec::new();
+            for k in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                tables.extend(table(&t, k));
+            }
+            if let Some(targets) = table(&t, "target") {
+                for (_, tt) in targets {
+                    if let Some(tt) = tt.as_table() {
+                        for k in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                            tables.extend(table(tt, k));
+                        }
+                    }
+                }
+            }
+            for tbl in tables {
+                for (key, spec) in tbl {
+                    let Some(spec) = spec.as_table() else { continue };
+                    let path = if b(spec, "workspace") == Some(true) {
+                        self.ws_deps.get(key).and_then(|w| w.as_table()).and_then(|w| s(w, "path")).map(|p| join(&self.root, &p))
+                    } else {
+                        s(spec, "path").map(|p| join(&m, &p))
+                    };
+                    if let Some(p) = path {
+                        let p = normalize(&p);
+                        if (p == self.root || p.starts_with(&format!("{}/", self.root))) && !self.excluded(&p) {
+                            todo.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl Resolver {
@@ -381,6 +440,7 @@ impl Resolver {
                 edition: lt.and_then(|l| s(l, "edition")).unwrap_or_else(|| edition.clone()),
                 kind,
                 required_features: lt.map(|l| strs(l, "required-features")).unwrap_or_default(),
+                harness: lt.and_then(|l| b(l, "harness")).unwrap_or(true),
             }
         });
         // [[bin]] + discovered bins
@@ -399,7 +459,7 @@ impl Resolver {
                     }
                 }
             };
-            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features") });
+            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features"), harness: true });
         }
         // autobins: default on, except for edition 2015 packages with explicit [[bin]] targets
         let autobins = match b(pkg, "autobins") {
@@ -427,7 +487,51 @@ impl Resolver {
             for (n, p) in found {
                 // an explicit target with that name or path replaces the discovered one
                 if !bins.iter().any(|b| b.name == n || b.path == p) {
-                    bins.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["bin".to_string()], required_features: Vec::new() });
+                    bins.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["bin".to_string()], required_features: Vec::new(), harness: true });
+                }
+            }
+        }
+        // [[test]] + discovered tests (cargo's target discovery: tests/*.rs and tests/*/main.rs
+        // unless `autotests = false`; an explicit target replaces the discovered one of its name
+        // or path; edition 2015 packages with explicit [[test]] targets discover none)
+        let mut tests: Vec<Target> = Vec::new();
+        let explicit_tests = t.get("test").and_then(|b| b.as_array_of_tables()).map(|v| v.to_vec()).unwrap_or_default();
+        for tt in &explicit_tests {
+            let Some(tname) = s(tt, "name") else { continue };
+            let path = match s(tt, "path") {
+                Some(p) => join(&dir, &p),
+                None => {
+                    let cands = [format!("{}/tests/{}.rs", dir, tname), format!("{}/tests/{}/main.rs", dir, tname)];
+                    match cands.iter().find(|c| crate::vfs::is_file(c)) {
+                        Some(p) => p.clone(),
+                        None => continue,
+                    }
+                }
+            };
+            tests.push(Target { name: tname, path, edition: s(tt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["test".to_string()], required_features: strs(tt, "required-features"), harness: b(tt, "harness").unwrap_or(true) });
+        }
+        let autotests = match b(pkg, "autotests") {
+            Some(v) => v,
+            None => edition != "2015" || explicit_tests.is_empty(),
+        };
+        if autotests {
+            let mut found: Vec<(String, String)> = Vec::new();
+            if let Ok(rd) = crate::vfs::read_dir(format!("{}/tests", dir)) {
+                for (n, is_dir) in rd {
+                    if is_dir {
+                        let p = format!("{}/tests/{}/main.rs", dir, n);
+                        if crate::vfs::is_file(&p) {
+                            found.push((n, p));
+                        }
+                    } else if let Some(stem) = n.strip_suffix(".rs") {
+                        found.push((stem.to_string(), format!("{}/tests/{}", dir, n)));
+                    }
+                }
+            }
+            found.sort();
+            for (n, p) in found {
+                if !tests.iter().any(|x| x.name == n || x.path == p) {
+                    tests.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["test".to_string()], required_features: Vec::new(), harness: true });
                 }
             }
         }
@@ -440,7 +544,7 @@ impl Resolver {
         }
         // dependencies
         let mut deps = Vec::new();
-        let add = |deps: &mut Vec<Dep>, tbl: Option<&TomlTable>, build: bool, platform: Option<String>| -> Result<(), String> {
+        let add = |deps: &mut Vec<Dep>, tbl: Option<&TomlTable>, build: bool, dev: bool, platform: Option<String>| -> Result<(), String> {
             let Some(tbl) = tbl else { return Ok(()) };
             for (key, spec) in tbl {
                 let (mut st, from_ws) = match spec {
@@ -474,6 +578,11 @@ impl Resolver {
                     st = merged;
                     base_dir = self.ws.root.clone();
                 }
+                // a dev-dependency is built only for the root package's tests: a git one (which
+                // makepad run cannot resolve) is left out here, and a test that names it fails to resolve it
+                if dev && st.contains_key("git") {
+                    continue;
+                }
                 if st.contains_key("git") {
                     return Err(format!("{}/Cargo.toml: `{}` is a git dependency; makepad run resolves path and registry packages only", dir, key));
                 }
@@ -486,6 +595,7 @@ impl Resolver {
                     key: key.clone(),
                     package,
                     build,
+                    dev,
                     optional: b(&st, "optional") == Some(true),
                     default_features: b(&st, "default-features").or_else(|| b(&st, "default_features")).unwrap_or(true),
                     features: strs(&st, "features"),
@@ -496,13 +606,20 @@ impl Resolver {
             }
             Ok(())
         };
-        add(&mut deps, table(&t, "dependencies"), false, None)?;
-        add(&mut deps, table(&t, "build-dependencies").or_else(|| table(&t, "build_dependencies")), true, None)?;
+        add(&mut deps, table(&t, "dependencies"), false, false, None)?;
+        add(&mut deps, table(&t, "build-dependencies").or_else(|| table(&t, "build_dependencies")), true, false, None)?;
+        // a registry package's dev-dependencies are never built (only the root package's tests are)
+        if !registry {
+            add(&mut deps, table(&t, "dev-dependencies").or_else(|| table(&t, "dev_dependencies")), false, true, None)?;
+        }
         if let Some(tt) = table(&t, "target") {
             for (plat, v) in tt {
                 if let Some(v) = v.as_table() {
-                    add(&mut deps, table(v, "dependencies"), false, Some(plat.clone()))?;
-                    add(&mut deps, table(v, "build-dependencies").or_else(|| table(v, "build_dependencies")), true, Some(plat.clone()))?;
+                    add(&mut deps, table(v, "dependencies"), false, false, Some(plat.clone()))?;
+                    add(&mut deps, table(v, "build-dependencies").or_else(|| table(v, "build_dependencies")), true, false, Some(plat.clone()))?;
+                    if !registry {
+                        add(&mut deps, table(v, "dev-dependencies").or_else(|| table(v, "dev_dependencies")), false, true, Some(plat.clone()))?;
+                    }
                 }
             }
         }
@@ -513,7 +630,7 @@ impl Resolver {
             }
         }
         let i = self.manifests.len();
-        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, features, deps, proc_macro, registry });
+        self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, features, deps, proc_macro, registry });
         self.by_dir.insert(dir, i);
         Ok(i)
     }
@@ -570,6 +687,18 @@ impl Resolver {
         }
         Err(format!("package `{}` is not a member of the workspace at {}", package, self.ws.root))
     }
+}
+
+/// The test programs of the workspace member `package`: whether it has a lib target, and its
+/// integration test targets by name with their source paths (cargo test's order: the lib's unit
+/// tests, then the test targets by name).
+pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str) -> Result<(Option<String>, Vec<(String, String)>), String> {
+    let mut r = Resolver::new(sess, dir)?;
+    let i = r.find_member(package)?;
+    let m = &r.manifests[i];
+    let mut tests: Vec<(String, String)> = m.tests.iter().map(|t| (t.name.clone(), t.path.clone())).collect();
+    tests.sort();
+    Ok((m.lib.as_ref().map(|l| l.path.clone()), tests))
 }
 
 /// The folder of the workspace member `package` of the workspace containing `dir`.
@@ -707,8 +836,7 @@ pub fn find_root(dir: &str) -> Result<String, String> {
                         return Ok(d);
                     }
                     if let Ok(ws) = Workspace::load(&d) {
-                        let excluded = ws.excludes.iter().any(|e| current == *e || current.starts_with(&format!("{}/", e)));
-                        if !excluded && ws.member_dirs().iter().any(|m| normalize(m) == current) {
+                        if !ws.excluded(&current) && ws.has_member(&current) {
                             return Ok(d);
                         }
                     }
@@ -807,10 +935,25 @@ pub struct Options {
     pub all_features: bool,
     pub features: Vec<String>,
     pub bin: Option<String>,
+    /// `--lib`, `--tests`, `--test <name>` (cargo test's target selection): the graph of the
+    /// package's test harness. The lib's unit tests and the integration tests are separate
+    /// programs (the lib is cfg(test) in the first and plain in the second), so one graph holds
+    /// either the lib test or the integration tests.
+    pub test: Option<TestSel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TestSel {
+    /// the lib target built with `--test`
+    Lib,
+    /// these integration test targets (empty: all of them)
+    Integration(Vec<String>),
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
-    let mut o = Options { no_default_features: false, all_features: false, features: Vec::new(), bin: None };
+    let mut o = Options { no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None };
+    let mut lib = false;
+    let mut tests: Option<Vec<String>> = None;
     let mut i = 0;
     while i < flags.len() {
         let f = flags[i].as_str();
@@ -826,12 +969,22 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                 o.features.extend(v.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string));
             }
             "--bin" => o.bin = Some(value(&mut i)?),
+            "--lib" => lib = true,
+            "--tests" => {
+                tests.get_or_insert_with(Vec::new);
+            }
+            "--test" => {
+                let v = value(&mut i)?;
+                tests.get_or_insert_with(Vec::new).push(v);
+            }
             "--release" => {}
             _ => {
                 if let Some(v) = f.strip_prefix("--features=") {
                     o.features.extend(v.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string));
                 } else if let Some(v) = f.strip_prefix("--bin=") {
                     o.bin = Some(v.to_string());
+                } else if let Some(v) = f.strip_prefix("--test=") {
+                    tests.get_or_insert_with(Vec::new).push(v.to_string());
                 } else {
                     return Err(format!("unit graph: flag `{}` is not supported by makepad run's resolver", f));
                 }
@@ -839,11 +992,19 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
         }
         i += 1;
     }
+    o.test = match (lib, tests) {
+        (true, Some(_)) => return Err("unit graph: --lib and integration tests are separate test programs; select one".to_string()),
+        (true, None) => Some(TestSel::Lib),
+        (false, Some(t)) => Some(TestSel::Integration(t)),
+        (false, None) => None,
+    };
     Ok(o)
 }
 
 struct Feat<'a> {
     r: &'a mut Resolver,
+    /// the node whose dev-dependencies are part of the graph (the root of a test graph)
+    dev_of: Option<(usize, bool)>,
     nodes: HashMap<(usize, bool), Node>,
     work: Vec<((usize, bool), Req)>,
     order: Vec<(usize, bool)>,
@@ -863,7 +1024,7 @@ impl<'a> Feat<'a> {
         self.order.push(k);
         let deps = self.r.manifests[k.0].deps.clone();
         for (di, d) in deps.iter().enumerate() {
-            if !d.optional {
+            if !d.optional && (!d.dev || self.dev_of == Some(k)) {
                 self.follow(k, di, d)?;
             }
         }
@@ -1037,8 +1198,8 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
     let o = parse_flags(flags)?;
     let mut r = Resolver::new(sess, workspace)?;
     let root = r.find_member(package)?;
-    let mut f = Feat { r: &mut r, nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
     let rk = (root, false);
+    let mut f = Feat { r: &mut r, dev_of: o.test.as_ref().map(|_| rk), nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
     f.activate(rk)?;
     if !o.no_default_features {
         f.work.push((rk, Req::Feature("default".to_string())));
@@ -1070,7 +1231,11 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum UKind {
     Lib,
+    /// the root's lib target built with `--test` (its unit tests)
+    LibTest,
     Bin(usize),
+    /// the root's integration test target
+    Test(usize),
     BuildCompile,
     BuildRun,
 }
@@ -1090,9 +1255,13 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
     for &k in order {
         let m = &r.manifests[k.0];
         if m.lib.is_some() {
-            let i = add(k, UKind::Lib, &mut units);
-            if k == (root, false) {
-                roots.push(i);
+            if k == (root, false) && o.test == Some(TestSel::Lib) {
+                roots.push(add(k, UKind::LibTest, &mut units));
+            } else {
+                let i = add(k, UKind::Lib, &mut units);
+                if k == (root, false) && o.test.is_none() {
+                    roots.push(i);
+                }
             }
         }
         if m.build.is_some() && (m.lib.is_some() || k.0 == root) {
@@ -1101,7 +1270,34 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         }
     }
     let rn = &nodes[&(root, false)];
+    let rm = &r.manifests[root];
+    match &o.test {
+        Some(TestSel::Lib) if rm.lib.is_none() => return Err(format!("no library targets found in package `{}`", rm.name)),
+        Some(TestSel::Integration(names)) => {
+            for n in names {
+                if !rm.tests.iter().any(|t| &t.name == n) {
+                    return Err(format!("no test target named `{}` in package `{}`", n, rm.name));
+                }
+            }
+            for (ti, tt) in rm.tests.iter().enumerate() {
+                if !names.is_empty() && !names.contains(&tt.name) {
+                    continue;
+                }
+                if !tt.required_features.iter().all(|f| rn.features.contains(f)) {
+                    continue;
+                }
+                if !tt.harness {
+                    return Err(format!("test target `{}` of package `{}` has `harness = false`: makepad test runs libtest-harness targets only", tt.name, rm.name));
+                }
+                roots.push(add((root, false), UKind::Test(ti), &mut units));
+            }
+        }
+        _ => {}
+    }
     for (bi, bt) in r.manifests[root].bins.iter().enumerate() {
+        if o.test.is_some() {
+            break;
+        }
         if o.bin.as_ref().is_some_and(|b| b != &bt.name) {
             continue;
         }
@@ -1122,9 +1318,13 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         let node = &nodes[k];
         let host = k.1 || matches!(u, UKind::BuildCompile);
         let (kind, name, path, edition, mode): (Vec<String>, String, String, String, &str) = match u {
-            UKind::Lib => {
+            UKind::Lib | UKind::LibTest => {
                 let l = m.lib.as_ref().unwrap();
-                (l.kind.clone(), l.name.clone(), l.path.clone(), l.edition.clone(), "build")
+                (l.kind.clone(), l.name.clone(), l.path.clone(), l.edition.clone(), if matches!(u, UKind::LibTest) { "test" } else { "build" })
+            }
+            UKind::Test(ti) => {
+                let t = &m.tests[*ti];
+                (t.kind.clone(), t.name.clone(), t.path.clone(), t.edition.clone(), "test")
             }
             UKind::Bin(bi) => {
                 let b = &m.bins[*bi];
@@ -1139,10 +1339,12 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         };
         // dependencies
         let mut deps: Vec<(usize, String)> = Vec::new();
+        // dev-dependencies: only the test targets' (the plain lib of a test graph has none)
+        let dev = matches!(u, UKind::LibTest | UKind::Test(_));
         let normal_edges = |deps: &mut Vec<(usize, String)>, build: bool| {
             for (di, tk) in &node.edges {
                 let d = &m.deps[*di];
-                if d.build != build || r.manifests[tk.0].lib.is_none() {
+                if d.build != build || (d.dev && !dev) || r.manifests[tk.0].lib.is_none() {
                     continue;
                 }
                 if let Some(&ti) = index.get(&(*tk, UKind::Lib)) {
@@ -1154,13 +1356,13 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             }
         };
         match u {
-            UKind::Lib => {
+            UKind::Lib | UKind::LibTest => {
                 normal_edges(&mut deps, false);
                 if let Some(&bi) = index.get(&(*k, UKind::BuildRun)) {
                     deps.push((bi, "build_script_build".to_string()));
                 }
             }
-            UKind::Bin(_) => {
+            UKind::Bin(_) | UKind::Test(_) => {
                 if let Some(&li) = index.get(&(*k, UKind::Lib)) {
                     deps.push((li, lib_name(k.0)));
                 }
@@ -1240,8 +1442,17 @@ mod root_tests {
                 // a package with no workspace at all, outside the workspace's members
                 ("solo/Cargo.toml", "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
                 ("solo/src/main.rs", "fn main() {}\n"),
+                // a members package naming a crate only as a never-built path dependency (apps/commercial
+                // and Sandbox): cargo makes that crate a member, so the workspace's inherited deps apply
+                ("hub/Cargo.toml", "[package]\nname = \"hub\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[target.'cfg(any())'.dependencies]\ngame = { path = \"game\" }\n"),
+                ("hub/src/lib.rs", ""),
+                ("hub/game/Cargo.toml", "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nlib = { workspace = true }\n"),
+                ("hub/game/src/main.rs", "fn main() {}\n"),
             ],
         );
+        let _ = std::fs::write(format!("{root}/Cargo.toml"), "[workspace]\nmembers = [\"app\", \"lib\", \"hub\"]\nexclude = [\"bench\"]\n[workspace.dependencies]\nlib = { path = \"lib\" }\n");
+        assert_eq!(find_root(&format!("{root}/hub/game")).unwrap(), normalize(&root));
+        assert!(units(sess, &format!("{root}/hub/game"), "game").iter().any(|n| n == "lib"));
         // from the workspace root and from inside a member's folder
         assert!(units(sess, &root, "app").iter().any(|n| n == "app"));
         assert_eq!(find_root(&format!("{root}/app/src")).unwrap(), normalize(&root));

@@ -532,8 +532,7 @@ impl Media {
                 if info.full_range {
                     bits |= crate::media::yuv::FULL_RANGE;
                 }
-                // the colour matrix of AVFoundation frames is BT.709 (selector 0)
-                s.events.video_frame(video, p.current_position_ms(), bits, 0.0);
+                s.events.video_frame(video, p.current_position_ms(), bits, info.matrix);
             }
         }
     }

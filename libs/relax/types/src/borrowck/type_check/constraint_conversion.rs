@@ -7,7 +7,7 @@ use crate::borrowck::region_infer::{TypeTest, VerifyBound};
 use crate::borrowck::universal_regions::UniversalRegions;
 use crate::infer::outlives::obligations::{TypeOutlives, TypeOutlivesDelegate};
 use crate::infer::outlives::verify;
-use crate::next_solver::type_op::QueryRegionConstraints;
+use crate::next_solver::type_op::{QueryRegionConstraints, ParamEnvAnd, Normalize, TypeOp, TypeOpOutput};
 use crate::next_solver::{ClauseKind, Predicate, PredicateKind};
 use crate::tcx::outlives::OutlivesPredicate;
 use crate::types::{RegionId, RegionKind, TyId, TypeFlags};
@@ -47,23 +47,55 @@ impl<'a, 'tcx> ConstraintConversion<'a, 'tcx> {
         }
     }
 
-    fn convert(&mut self, clause: OutlivesPredicate, constraint_category: ConstraintCategory) {
-        match clause {
-            OutlivesPredicate::Region(r1, r2) => {
-                let r1_vid = self.to_region_vid(r1);
-                let r2_vid = self.to_region_vid(r2);
-                self.add_outlives(r1_vid, r2_vid, constraint_category, self.span);
+    /// constraint_conversion.rs:127 convert (1.97.1): a worklist, because under the next solver the
+    /// type of a `T: 'a` obligation is deeply normalized first, and normalizing it can produce
+    /// further outlives obligations of its own.
+    fn convert(&mut self, predicate: OutlivesPredicate, constraint_category: ConstraintCategory) {
+        let tcx = self.infcx.tcx;
+        let mut outlives_predicates = vec![(predicate, constraint_category)];
+        let limit = self.infcx.recursion_limit(self.infcx.prog);
+        for iteration in 0.. {
+            if outlives_predicates.is_empty() { break; }
+            if iteration > limit {
+                self.infcx.errors.delayed_bug(self.infcx.cause, format!("unexpected overflowed when processing region obligations: {outlives_predicates:?}"));
+                break;
             }
-            OutlivesPredicate::Type(t1, r2) => {
-                // Scraped constraints may have had inference vars.
-                let t1 = self.infcx.deeply_resolve_ignoring_regions(t1);
-                let tcx = self.infcx.tcx;
-                let implicit_region_bound = self.universal_regions.implicit_region_bound()
-                    .map(|fr| tcx.tys.intern_region(RegionKind::ReVar(fr as u32)));
-                let (prog, region_bound_pairs, known) = (self.infcx.prog, self.region_bound_pairs, self.known_type_outlives_obligations);
-                TypeOutlives::new(self, tcx, prog, region_bound_pairs, implicit_region_bound, known)
-                    .type_must_outlive(t1, r2, constraint_category);
+            let mut next_outlives_predicates = vec![];
+            for (pred, constraint_category) in outlives_predicates {
+                match pred {
+                    OutlivesPredicate::Region(r1, r2) => {
+                        let r1_vid = self.to_region_vid(r1);
+                        let r2_vid = self.to_region_vid(r2);
+                        self.add_outlives(r1_vid, r2_vid, constraint_category, self.span);
+                    }
+                    OutlivesPredicate::Type(t1, r2) => {
+                        // Scraped constraints may have had inference vars.
+                        let t1 = self.infcx.deeply_resolve_ignoring_regions(t1);
+                        let t1 = self.normalize_and_add_type_outlives_constraints(t1, &mut next_outlives_predicates);
+                        let implicit_region_bound = self.universal_regions.implicit_region_bound()
+                            .map(|fr| tcx.tys.intern_region(RegionKind::ReVar(fr as u32)));
+                        let (prog, region_bound_pairs, known) = (self.infcx.prog, self.region_bound_pairs, self.known_type_outlives_obligations);
+                        TypeOutlives::new(self, tcx, prog, region_bound_pairs, implicit_region_bound, known)
+                            .type_must_outlive(t1, r2, constraint_category);
+                    }
+                }
             }
+            outlives_predicates = next_outlives_predicates;
+        }
+    }
+
+    /// constraint_conversion.rs:268: the `DeeplyNormalize` type op on the obligation's type;
+    /// the outlives it scrapes join the worklist. A failure keeps the type.
+    fn normalize_and_add_type_outlives_constraints(&self, ty: TyId, next: &mut Vec<(OutlivesPredicate, ConstraintCategory)>) -> TyId {
+        let op = ParamEnvAnd { param_env: self.infcx.param_env_id(), value: Normalize { value: ty } };
+        match op.fully_perform(&self.infcx.infcx, self.infcx.prog) {
+            Ok(TypeOpOutput { output, constraints }) => {
+                if let Some(data) = constraints {
+                    next.extend(data.constraints.iter().flat_map(|c| c.constraint.iter_outlives().map(move |o| (o, c.category))));
+                }
+                output
+            }
+            Err(_) => ty,
         }
     }
 
@@ -103,8 +135,10 @@ impl<'a, 'tcx> ConstraintConversion<'a, 'tcx> {
     fn fold_to_region_vids(&self, ty: TyId) -> TyId {
         let tys = &self.infcx.tcx.tys;
         let universal_regions = self.universal_regions;
-        tys.map_regions(ty, &|r, depth| match tys.region_kind(r) {
-            RegionKind::ReBound(debruijn, _) if debruijn < depth => r,
+        tys.map_regions(ty, &|r, _| match tys.region_kind(r) {
+            // Bound regions stay: those inside the type are its own binders, and those escaping it are the
+            // variables of the `IfEq` pattern's binder, which the region solver matches against.
+            RegionKind::ReBound(..) => r,
             _ => tys.intern_region(RegionKind::ReVar(universal_regions.to_region_vid(tys, r) as u32)),
         }, 0)
     }

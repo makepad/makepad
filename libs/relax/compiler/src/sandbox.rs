@@ -27,16 +27,16 @@
 
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
-use crate::rir::{Callee, Cls, Cond, Conv, Func, IOp, Inst, Sym, Term, VReg, U32, U64};
+use relax_backend::rir::{Callee, Cls, Cond, Conv, Func, IOp, Inst, Sym, Term, VReg, U32, U64};
 use crate::syms::SymKind;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use relax_session::sync::Mutex;
 
 #[cfg(target_arch = "aarch64")]
-use crate::arm64 as tgt;
+use relax_backend::arm64 as tgt;
 #[cfg(not(target_arch = "aarch64"))]
-use crate::x64 as tgt;
+use relax_backend::x64 as tgt;
 
 pub const WINDOW: u64 = 1 << 32;
 /// unmapped bytes on both sides of a window, and the largest offset a masked access may add
@@ -237,7 +237,7 @@ pub fn add_wrapper_crate(krate: u32) {
 
 /// Places a twin's code in the active sandbox code space (None: full, the unit's own code
 /// memory takes it; a recycle is due).
-pub fn emit_twin(u: &Unit, code: &[u8], relocs: &[crate::rir::RelocAt]) -> Option<u64> {
+pub fn emit_twin(u: &Unit, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Option<u64> {
     let at = {
         let mut g = SB.lock().unwrap_or_else(|e| e.into_inner());
         let s = g.as_mut()?;
@@ -356,11 +356,11 @@ unsafe fn recycle_locked(up: *mut Unit) -> Result<(usize, u64), String> {
         }
     }
     // build everything first: nothing changes unless every live twin rebuilt
-    let mut built: Vec<(u32, u64, Vec<u8>, Vec<(u32, u64)>, Option<crate::rir::UnwindInfo>)> = Vec::new();
+    let mut built: Vec<(u32, u64, Vec<u8>, Vec<(u32, u64)>, Option<relax_backend::rir::UnwindInfo>)> = Vec::new();
     let mut next = tbase;
     for &t in &live {
         let (code, map, relocs) = jit::compile_fn(up, t)?;
-        let (n, info) = crate::rir::split_unwind_info(&code);
+        let (n, info) = relax_backend::rir::split_unwind_info(&code);
         let code = &code[..n];
         let at = (next + 15) & !15;
         if at + code.len() as u64 > tbase + tsize {
@@ -604,7 +604,9 @@ pub(crate) fn capture_initial_data(u: &Unit, root: Sym) {
         }
         let size = match u.syms.kind(sym.id) {
             Some(SymKind::Static(d)) => match u.tcx.const_ty(&u.prog, d) {
-                Some(t) => u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t).size.max(1) as usize,
+                // the layout the static's storage was sized with (Unit::layout_of normalizes const aliases
+                // in array lengths: `[u8; N]` with `const N` is N bytes, not an unevaluated length)
+                Some(t) => u.layout_of(t).size.max(1) as usize,
                 None => continue,
             },
             Some(SymKind::Data(i)) => match u.syms.obj_info(i) {
@@ -1332,28 +1334,28 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     let t_ssp = f.vreg(Cls::I);
     let ssp0 = f.vreg(Cls::I);
     let nsp = f.vreg(Cls::I);
-    let mut b0 = crate::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(entry), term_pos: pos0 };
-    let push0 = |b: &mut crate::rir::Block, i: Inst| {
+    let mut b0 = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(entry), term_pos: pos0 };
+    let push0 = |b: &mut relax_backend::rir::Block, i: Inst| {
         b.insts.push(i);
         b.pos.push(pos0);
     };
     push0(&mut b0, Inst::TlsAddr(t_arena, tls_sym.plus(W_ARENA)));
-    push0(&mut b0, Inst::Load(crate::rir::Mem::Int(8, false), ar, t_arena, 0));
+    push0(&mut b0, Inst::Load(relax_backend::rir::Mem::Int(8, false), ar, t_arena, 0));
     // trap blocks (made on demand)
     let site_stack = u.site_sym(f.file, (pos0 & 0xffff_ffff) as u32, "sandboxed module: shadow stack overflow (recursion too deep)");
     let site_fuel = u.site_sym(f.file, (pos0 & 0xffff_ffff) as u32, "sandboxed module: instruction budget (fuel) exhausted");
     let site_abort = u.site_sym(f.file, (pos0 & 0xffff_ffff) as u32, "sandboxed module: aborted (out of memory?)");
     let panic_site = u.rs.panic_site;
-    let mut new_blocks: Vec<crate::rir::Block> = Vec::new();
+    let mut new_blocks: Vec<relax_backend::rir::Block> = Vec::new();
     let nb = f.blocks.len() as u32 + 1; // index of the first appended block (after block 0 is inserted)
-    let trap = |f: &mut Func, nbs: &mut Vec<crate::rir::Block>, site: Sym| -> u32 {
+    let trap = |f: &mut Func, nbs: &mut Vec<relax_backend::rir::Block>, site: Sym| -> u32 {
         let v = f.vreg(Cls::I);
-        nbs.push(crate::rir::Block { insts: vec![Inst::Addr(v, site), Inst::Call(Callee::Host(panic_site), vec![v], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
+        nbs.push(relax_backend::rir::Block { insts: vec![Inst::Addr(v, site), Inst::Call(Callee::Host(panic_site), vec![v], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
         nb + nbs.len() as u32 - 1
     };
     if has_frame {
         push0(&mut b0, Inst::TlsAddr(t_ssp, tls_sym.plus(W_SSP)));
-        push0(&mut b0, Inst::Load(crate::rir::Mem::Int(8, false), ssp0, t_ssp, 0));
+        push0(&mut b0, Inst::Load(relax_backend::rir::Mem::Int(8, false), ssp0, t_ssp, 0));
         push0(&mut b0, Inst::IBinI(IOp::Sub, U64, nsp, ssp0, frame as i64));
         let rel = f.vreg(Cls::I);
         let c = f.vreg(Cls::I);
@@ -1361,7 +1363,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
         push0(&mut b0, Inst::ICmpI(Cond::Lt, false, c, rel, SS_LO as i64));
         let t = trap(f, &mut new_blocks, site_stack);
         // the store of the new shadow sp happens in a continuation block
-        let cont = crate::rir::Block { insts: vec![Inst::Store(crate::rir::Mem::Int(8, false), t_ssp, 0, nsp)], pos: vec![pos0], term: Term::Jump(entry + 1), term_pos: pos0 };
+        let cont = relax_backend::rir::Block { insts: vec![Inst::Store(relax_backend::rir::Mem::Int(8, false), t_ssp, 0, nsp)], pos: vec![pos0], term: Term::Jump(entry + 1), term_pos: pos0 };
         new_blocks.push(cont);
         let cont_ix = nb + new_blocks.len() as u32 - 1;
         b0.term = Term::Branch(c, t, cont_ix);
@@ -1374,7 +1376,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     }
     // rewrite the blocks
     let nblocks = f.blocks.len();
-    let mut out_blocks: Vec<crate::rir::Block> = Vec::with_capacity(nblocks);
+    let mut out_blocks: Vec<relax_backend::rir::Block> = Vec::with_capacity(nblocks);
     let blocks = std::mem::take(&mut f.blocks);
     for b in blocks {
         let mut insts = Vec::with_capacity(b.insts.len() * 2);
@@ -1409,7 +1411,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                 (mv, off)
             };
             let mut defs: Vec<VReg> = Vec::new();
-            crate::regalloc::for_defs(&inst, |d| defs.push(d));
+            relax_backend::regalloc::for_defs(&inst, |d| defs.push(d));
             match inst {
                 Inst::SlotAddr(d, s) => emit(Inst::IBinI(IOp::Add, U64, d, nsp, offs[s as usize] as i64), &mut insts, &mut pos),
                 Inst::Addr(d, sym) => {
@@ -1434,7 +1436,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                     emit(Inst::Iconst(d, sbthunk(t) as i64), &mut insts, &mut pos);
                 }
                 Inst::TlsAddr(..) => return Err(format!("{}: thread-local storage is not available to sandboxed modules", f.name)),
-                Inst::VGather(..) => return Err(format!("{}: vector gathers are not available to sandboxed modules", f.name)),
+                Inst::VGather(..) | Inst::VTbl(..) => return Err(format!("{}: vector gathers are not available to sandboxed modules", f.name)),
                 Inst::Load(mm, d, base, off) => {
                     let (b2, o2) = mask(f, &mut insts, &mut pos, &mut cache, base, off);
                     emit(Inst::Load(mm, d, b2, o2), &mut insts, &mut pos);
@@ -1529,11 +1531,11 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
         // a return gives the shadow frame back
         if has_frame {
             if let Term::Ret(_) = b.term {
-                insts.push(Inst::Store(crate::rir::Mem::Int(8, false), t_ssp, 0, ssp0));
+                insts.push(Inst::Store(relax_backend::rir::Mem::Int(8, false), t_ssp, 0, ssp0));
                 pos.push(b.term_pos);
             }
         }
-        out_blocks.push(crate::rir::Block { insts, pos, term: b.term, term_pos: b.term_pos });
+        out_blocks.push(relax_backend::rir::Block { insts, pos, term: b.term, term_pos: b.term_pos });
     }
     let _ = nblocks;
     // assemble: block 0, the rewritten blocks, then the made ones
@@ -1553,9 +1555,9 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     // MAKEPAD_RUN_SANDBOX_OPT=0/1 forces the O1 clean-up.
     let opt = options.sandbox_opt.unwrap_or(!jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
     if opt {
-        crate::opt::simplify(options, f, None, true, true);
-        crate::opt::licm(f);
-        crate::opt::simplify(options, f, None, true, true);
+        relax_backend::passes::simplify(options, f, None, true, true);
+        relax_backend::passes::licm(options, f);
+        relax_backend::passes::simplify(options, f, None, true, true);
         f.verify().map_err(|e| format!("{}: sandbox clean-up made invalid RIR: {}", f.name, e))?;
     }
     Ok(())
@@ -1624,7 +1626,7 @@ unsafe fn fn_target(up: *mut Unit, id: u32, sandboxed: &HashSet<u32>) -> Result<
 fn add_fuel(f: &mut Func, arena: VReg, site: Sym, panic_site: Sym, pos0: u64, costs: &[i64]) {
     let trap_ix = f.blocks.len() as u32;
     let tv = f.vreg(Cls::I);
-    f.blocks.push(crate::rir::Block { insts: vec![Inst::Addr(tv, site), Inst::Call(Callee::Host(panic_site), vec![tv], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
+    f.blocks.push(relax_backend::rir::Block { insts: vec![Inst::Addr(tv, site), Inst::Call(Callee::Host(panic_site), vec![tv], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
     for (k, &cost) in costs.iter().enumerate() {
         let b = k + 1; // block zero is the confinement prologue
         let t = f.vreg(Cls::I);
@@ -1634,12 +1636,12 @@ fn add_fuel(f: &mut Func, arena: VReg, site: Sym, panic_site: Sym, pos0: u64, co
         let cont_ix = f.blocks.len() as u32;
         let insts = vec![
             Inst::IBinI(IOp::Add, U64, t, arena, FUEL_OFF as i64),
-            Inst::Load(crate::rir::Mem::Int(8, true), v, t, 0),
+            Inst::Load(relax_backend::rir::Mem::Int(8, true), v, t, 0),
             Inst::IBinI(IOp::Sub, U64, v2, v, cost),
-            Inst::Store(crate::rir::Mem::Int(8, true), t, 0, v2),
+            Inst::Store(relax_backend::rir::Mem::Int(8, true), t, 0, v2),
             Inst::ICmpI(Cond::Lt, true, c, v2, 0),
         ];
-        let meter = crate::rir::Block { pos: vec![pos0; insts.len()], insts, term: Term::Branch(c, trap_ix, cont_ix), term_pos: pos0 };
+        let meter = relax_backend::rir::Block { pos: vec![pos0; insts.len()], insts, term: Term::Branch(c, trap_ix, cont_ix), term_pos: pos0 };
         let old = std::mem::replace(&mut f.blocks[b], meter);
         f.blocks.push(old);
     }
@@ -1666,7 +1668,7 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
     // MAKEPAD_RUN_SANDBOX_DUMP=<substring>: the transformed RIR of matching twins
     if let Ok(pat) = std::env::var("MAKEPAD_RUN_SANDBOX_DUMP") {
         if f.name.contains(&pat) {
-            eprintln!("sandbox twin {} ({} insts):\n{}", f.name, crate::opt::inst_count(&f), f.dump());
+            eprintln!("sandbox twin {} ({} insts):\n{}", f.name, relax_codegen::opt::inst_count(&f), f.dump());
         }
     }
     Ok(f)

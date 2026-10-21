@@ -45,6 +45,12 @@ impl Printer<'_> {
             }
             writeln!(s, "    let {}_{i}: {};", if decl.mutability == Mutability::Mut { "mut " } else { "" }, self.ty(decl.ty)).unwrap();
         }
+        for (i, annotation) in body.user_type_annotations.iter().enumerate() {
+            writeln!(s, "    user_ty#{i}: {:?} // inferred {}", annotation.user_ty.value.kind, self.ty(annotation.inferred_ty)).unwrap();
+        }
+        for (i, upvar) in body.upvars.iter().enumerate() {
+            writeln!(s, "    upvar#{i}: {} {:?} {} // {}", upvar.name, upvar.capture, self.ty(upvar.ty), if upvar.mutability == Mutability::Mut { "mut" } else { "imm" }).unwrap();
+        }
         for debug in &body.var_debug_info {
             writeln!(s, "    debug {} => {};", debug.name, self.place(&debug.place)).unwrap();
         }
@@ -92,11 +98,13 @@ impl Printer<'_> {
     }
     fn constant(&self, c: &Const) -> String {
         match c {
-            Const::Unevaluated { def, args, promoted } => {
+            Const::Ty(ty, ct) => format!("{}: {}", self.ty(self.tcx.tys.intern(crate::types::TyKind::Const(*ct))), self.ty(*ty)),
+            Const::Unevaluated { def, args, promoted, ty } => {
                 let mut s = format!("def#{}::<{}>", def.0, self.generic_args(args));
                 if let Some(id) = promoted {
                     write!(s, "::promoted[{}]", id.0).unwrap();
                 }
+                write!(s, ": {}", self.ty(*ty)).unwrap();
                 s
             }
             Const::Val(value, ty) => {
@@ -118,6 +126,7 @@ impl Printer<'_> {
         match op {
             Operand::Copy(place) => format!("copy {}", self.place(place)),
             Operand::Move(place) => format!("move {}", self.place(place)),
+            Operand::RuntimeChecks(checks) => format!("{checks:?}"),
             Operand::Constant(c) => format!("const {}", self.constant(&c.const_)),
         }
     }
@@ -140,6 +149,7 @@ impl Printer<'_> {
             }
             AggregateKind::Closure(id, args) => format!("Closure({}:{}, <{}>)", id.file, id.expr, self.generic_args(args)),
             AggregateKind::Coroutine(id, args) => format!("Coroutine({}:{}, <{}>)", id.file, id.expr, self.generic_args(args)),
+            AggregateKind::CoroutineClosure(id, args) => format!("CoroutineClosure({}:{}, <{}>)", id.file, id.expr, self.generic_args(args)),
             AggregateKind::RawPtr(ty, mutable) => format!("RawPtr({}, {mutable:?})", self.ty(*ty)),
         }
     }
@@ -150,20 +160,34 @@ impl Printer<'_> {
             Rvalue::Ref(region, kind, place) => format!("&{:?} {kind:?} {}", region, self.place(place)),
             Rvalue::ThreadLocalRef(def) => format!("ThreadLocalRef(def#{})", def.0),
             Rvalue::RawPtr(kind, place) => format!("&raw {kind:?} {}", self.place(place)),
-            Rvalue::Len(place) => format!("Len({})", self.place(place)),
             Rvalue::Cast(kind, op, ty) => format!("{} as {} ({kind:?})", self.operand(op), self.ty(*ty)),
             Rvalue::BinaryOp(op, args) => format!("{op:?}({}, {})", self.operand(&args.0), self.operand(&args.1)),
-            Rvalue::NullaryOp(op, ty) => format!("{op:?}::<{}>()", self.ty(*ty)),
             Rvalue::UnaryOp(op, arg) => format!("{op:?}({})", self.operand(arg)),
             Rvalue::Discriminant(place) => format!("discriminant({})", self.place(place)),
             Rvalue::Aggregate(kind, ops) => format!("{}({})", self.aggregate(kind), self.operands(ops)),
-            Rvalue::ShallowInitBox(op, ty) => format!("ShallowInitBox({}, {})", self.operand(op), self.ty(*ty)),
             Rvalue::CopyForDeref(place) => format!("CopyForDeref({})", self.place(place)),
         }
     }
     fn user_projection(&self, user: &UserTypeProjection) -> String {
-        let place = Place { local: Local(user.base.0), projection: user.projection.clone() };
-        format!("user{}", self.place(&place))
+        let mut s = format!("user_ty#{}", user.base.0);
+        for elem in &user.projection {
+            s = match elem {
+                UserTypeProjectionElem::Deref => format!("(*{s})"),
+                UserTypeProjectionElem::Field(field) => format!("({s}.{})", field.0),
+                UserTypeProjectionElem::Index => format!("{s}[_]"),
+                UserTypeProjectionElem::ConstantIndex { offset, min_length, from_end } => {
+                    format!("{s}[{}{offset} of {min_length}]", if *from_end { "-" } else { "" })
+                }
+                UserTypeProjectionElem::Subslice { from, to, from_end } => format!("{s}[{from}..{}{to}]", if *from_end { "-" } else { "" }),
+                UserTypeProjectionElem::Downcast(name, variant) => match name {
+                    Some(name) => format!("({s} as {})", self.prog.syms.str(*name)),
+                    None => format!("({s} as variant#{})", variant.0),
+                },
+                UserTypeProjectionElem::OpaqueCast => format!("({s} as opaque)"),
+                UserTypeProjectionElem::Subtype => format!("({s} as subtype)"),
+            };
+        }
+        s
     }
     fn statement(&self, stmt: &StatementKind) -> String {
         match stmt {
@@ -182,6 +206,7 @@ impl Printer<'_> {
             }
             StatementKind::ConstEvalCounter => "ConstEvalCounter".into(),
             StatementKind::Nop => "nop".into(),
+            StatementKind::BackwardIncompatibleDropHint { place, reason } => format!("BackwardIncompatibleDropHint({}, {reason:?})", self.place(place)),
         }
     }
     fn unwind(&self, unwind: UnwindAction) -> String {

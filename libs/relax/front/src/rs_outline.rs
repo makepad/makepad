@@ -26,16 +26,30 @@ impl Outline {
         pairs(tokens, None)?;
         let active = crate::preload::configured_tokens(src, tokens, cfg);
         let mut declarations = Vec::new();
-        surface(&active, &matching(&active)?, 0, active.len(), &mut declarations);
+        surface(src, &active, &matching(&active)?, 0, active.len(), &mut declarations, true);
         let index = index(src, &declarations)?;
+        verify_elision(src, &active, &index);
         Some((Self { index }, active))
     }
 }
 
 pub(crate) fn expanded_index(src: &[u8], tokens: &[Tok]) -> Option<NameIndex> {
     let mut declarations = Vec::new();
-    surface(tokens, &matching(tokens)?, 0, tokens.len(), &mut declarations);
-    index(src, &declarations)
+    surface(src, tokens, &matching(tokens)?, 0, tokens.len(), &mut declarations, true);
+    let index = index(src, &declarations)?;
+    verify_elision(src, tokens, &index);
+    Some(index)
+}
+
+/// MAKEPAD_RUN_VERIFY_OUTLINE: the index of the elided surface is the index of the whole one.
+fn verify_elision(src: &[u8], tokens: &[Tok], got: &NameIndex) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_OUTLINE").is_some()) { return; }
+    let Some(ends) = matching(tokens) else { return };
+    let mut full = Vec::new();
+    surface(src, tokens, &ends, 0, tokens.len(), &mut full, false);
+    let want = index(src, &full).expect("whole surface indexes");
+    assert!(want == *got, "outline index differs with elided groups");
 }
 
 fn index(src: &[u8], tokens: &[Tok]) -> Option<NameIndex> {
@@ -90,23 +104,41 @@ fn pairs(tokens: &[Tok], mut ends: Option<&mut Vec<u32>>) -> Option<()> {
 // scopes. A brace group belonging to an item body is represented by its original
 // delimiters. Macro definitions' order and attributes survive; their transcribers
 // remain in `active` for the existing textual macro scanner and demand analysis.
-fn surface(tokens: &[Tok], ends: &[u32], mut at: usize, hi: usize, out: &mut Vec<Tok>) {
+fn surface(src: &[u8], tokens: &[Tok], ends: &[u32], mut at: usize, hi: usize, out: &mut Vec<Tok>, elide: bool) {
     let mut module = false;
     let mut foreign = false;
     let mut import = false;
     let mut initializer = false;
+    // between `fn name` and its body or `;`: the parenthesized groups are parameter lists, bounds
+    // and the like (not a `fn(A, B)` pointer type, whose arity an impl head spells)
+    let mut fn_header = false;
     while at < hi {
         let t = tokens[at];
         match t.kind {
             T::KwMod => module = true,
             T::KwExtern => foreign = true,
-            T::KwFn | T::KwCrate => { foreign = false; initializer = false; }
+            T::KwFn => { foreign = false; initializer = false; fn_header = at + 1 < hi && matches!(tokens[at + 1].kind, T::Ident | T::RawIdent); }
+            T::KwCrate => { foreign = false; initializer = false; }
             T::KwConst | T::KwStatic => initializer = true,
             T::KwUse => import = true,
-            T::Semi => { module = false; foreign = false; import = false; initializer = false; }
+            T::Semi => { module = false; foreign = false; import = false; initializer = false; fn_header = false; }
             T::OpenParen | T::OpenBracket => {
                 let end = ends[at] as usize;
-                out.extend_from_slice(&tokens[at..=end]);
+                // The name index reads an attribute's group only for cfg, cfg_attr, macro_export and
+                // path, and never a parameter list: the other groups keep their delimiters only (they
+                // stay one tree for the item scan; their contents are not read)
+                let attribute = t.kind == T::OpenBracket && at > 0 && (tokens[at - 1].kind == T::Pound || tokens[at - 1].kind == T::Not && at > 1 && tokens[at - 2].kind == T::Pound);
+                let unread = if attribute {
+                    !(at + 1 < end && tokens[at + 1].kind == T::Ident && matches!(&src[tokens[at + 1].lo as usize..tokens[at + 1].hi as usize], b"cfg" | b"cfg_attr" | b"macro_export" | b"path"))
+                } else {
+                    t.kind == T::OpenParen && fn_header
+                };
+                if unread && elide {
+                    out.push(t);
+                    out.push(tokens[end]);
+                } else {
+                    out.extend_from_slice(&tokens[at..=end]);
+                }
                 at = end + 1;
                 continue;
             }
@@ -114,9 +146,9 @@ fn surface(tokens: &[Tok], ends: &[u32], mut at: usize, hi: usize, out: &mut Vec
                 let end = ends[at] as usize;
                 out.push(t);
                 if import { out.extend_from_slice(&tokens[at + 1..end]); }
-                else if module || foreign || initializer { surface(tokens, ends, at + 1, end, out); }
+                else if module || foreign || initializer { surface(src, tokens, ends, at + 1, end, out, elide); }
                 out.push(tokens[end]);
-                module = false; foreign = false; import = false; initializer = false;
+                module = false; foreign = false; import = false; initializer = false; fn_header = false;
                 at = end + 1;
                 continue;
             }

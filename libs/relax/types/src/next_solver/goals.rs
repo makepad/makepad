@@ -75,7 +75,7 @@ impl EvalCtxt<'_, '_> {
             self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
         } else {
             let goals = self.delegate.at(self.solver.prog, env).sub(a, b).map_err(|_| NoSolution)?;
-            self.add_goals(GoalSource::Misc, goals)?;
+            self.add_relate_goals(goals)?;
             self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         }
     }
@@ -94,7 +94,7 @@ impl EvalCtxt<'_, '_> {
         };
         let Some(alias) = alias else { return Ok(term); };
         let value = self.next_term_infer_of_alias_kind(&alias);
-        self.add_goal(GoalSource::Normalization, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term: value }))) })?;
+        self.add_goal(GoalSource::TypeRelating, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term: value }))) })?;
         self.try_evaluate_added_goals()?;
         Ok(fold::fold_term(&self.delegate.tcx.tys, value, &mut crate::infer::resolve::DeepResolverIgnoringRegions::new(self.delegate), 0))
     }
@@ -112,12 +112,12 @@ impl EvalCtxt<'_, '_> {
         let ct = f.fold_const(&tcx.tys, ct, 0);
         // eval_ctxt/mod.rs:1498-1513. generic_const_exprs is cut, but opaque
         // arguments still require evaluation in the caller's non-erased mode.
-        if self.delegate.typing_mode.is_erased_not_coherence() && tcx.tys.has_opaque(tcx.tys.intern(TyKind::Const(ct))) {
+        if self.delegate.typing_mode.get().is_erased_not_coherence() && tcx.tys.has_opaque(tcx.tys.intern(TyKind::Const(ct))) {
             return Err(self.opaque_accesses.rerun_always());
         }
         if ct.has_non_region_infer(&tcx.tys) { return Ok(None); }
         let ConstKind::Alias(_, alias) = tcx.tys.const_kind(ct) else { unreachable!() };
-        let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode };
+        let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode.get() };
         match tcx.const_eval_resolve(self.solver.prog, typing_env, alias.kind.def_id(), &alias.args) {
             Ok(value) => Ok(Some(crate::consts::Const::new_value(&tcx.tys, value, self.const_type(&alias)?))),
             Err(crate::const_eval::ErrorHandled::TooGeneric) => Ok(None),

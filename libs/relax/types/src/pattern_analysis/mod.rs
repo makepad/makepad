@@ -33,6 +33,8 @@ pub struct DPat {
     pub ty: TyId,
     /// the source position diagnostics point at (None: a `_` / `..` with no position of its own)
     pub pos: Option<u32>,
+    /// an exclusive range pattern `lo..hi` (the non_contiguous_range_endpoints lint)
+    pub range_excl: bool,
 }
 
 /// The analysis context of one body: its types, the module it is in, the lowered patterns.
@@ -46,6 +48,8 @@ pub struct Cx<'a> {
     pats: Vec<DPat>,
     next_opaque: u32,
     inhabited: RefCell<HashMap<TyId, bool>>,
+    /// errors of constants used as patterns (rustc const_to_pat), in order
+    const_errors: Vec<String>,
 }
 
 impl<'a> Cx<'a> {
@@ -263,7 +267,7 @@ impl<'a> Cx<'a> {
     }
 
     fn push(&mut self, ctor: Ctor, fields: Vec<(usize, PIx)>, arity: usize, ty: TyId, pos: Option<u32>) -> PIx {
-        self.pats.push(DPat { ctor, fields, arity, ty, pos });
+        self.pats.push(DPat { ctor, fields, arity, ty, pos, range_excl: false });
         self.pats.len() - 1
     }
 
@@ -321,6 +325,69 @@ impl<'a> Cx<'a> {
             cur = self.push(Ctor::Ref, vec![(0, cur)], 1, tys[k], pos);
         }
         Some(cur)
+    }
+
+    /// The pattern a destructuring assignment's assignee stands for (rustc lowers `(a, Some(b)) = v`
+    /// to `let (lhs0, Some(lhs1)) = v; a = lhs0; ..`): constructors where the assignee names
+    /// them, a wildcard for every place.
+    fn lower_assignee(&mut self, e: ExprId, t: TyId, depth: u32) -> Option<PIx> {
+        let ast = self.ast();
+        let pos = Some(ast.expr(e).lo);
+        let wild = |cx: &mut Self| Some(cx.push(Ctor::Wildcard, Vec::new(), 0, t, pos));
+        if depth > 32 { return wild(self); }
+        let is_rest = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Range(crate::ast::OptExprId::NONE, crate::ast::OptExprId::NONE, false));
+        // the fields of a positional list with an optional `..`
+        let positional = |cx: &mut Self, elems: &[ExprId], ctor: &Ctor, arity: usize| -> Option<Vec<(usize, PIx)>> {
+            let tys = cx.ctor_sub_tys(ctor, t);
+            let rest = elems.iter().position(|x| is_rest(*x) || matches!(ast.expr(*x).kind, ExprKind::Paren(i) if is_rest(i)));
+            let n = elems.len();
+            let mut out = Vec::new();
+            for (i, x) in elems.iter().enumerate() {
+                if Some(i) == rest { continue; }
+                let idx = match rest { Some(r) if i > r => (arity + i).checked_sub(n)?, _ => i };
+                if idx >= arity { return None; }
+                let (ft, _) = *tys.get(idx)?;
+                out.push((idx, cx.lower_assignee(*x, ft, depth + 1)?));
+            }
+            Some(out)
+        };
+        match ast.expr(e).kind {
+            ExprKind::Paren(x) => self.lower_assignee(x, t, depth + 1),
+            ExprKind::Tuple(elems) => {
+                let TyKind::Tuple(l) = self.kind(t) else { return wild(self) };
+                let arity = self.tcx.tys.list(l).len();
+                let fields = positional(self, ast.list(elems), &Ctor::Struct, arity)?;
+                Some(self.push(Ctor::Struct, fields, arity, t, pos))
+            }
+            ExprKind::Call(f, args) if matches!(ast.expr(f).kind, ExprKind::Path(_)) => {
+                let Some(Res::Def(d)) = self.body.res.get(&e.0).copied() else { return wild(self) };
+                let Some((ctor, arity)) = self.adt_ctor(t, d) else { return wild(self) };
+                let fields = positional(self, ast.list(args), &ctor, arity)?;
+                Some(self.push(ctor, fields, arity, t, pos))
+            }
+            ExprKind::Struct(row) => {
+                let Some(Res::Def(d)) = self.body.res.get(&e.0).copied() else { return wild(self) };
+                let Some((ctor, arity)) = self.adt_ctor(t, d) else { return wild(self) };
+                let TyKind::Adt(ad, _, _) = self.kind(t) else { return wild(self) };
+                let vi = if let Ctor::Variant(i) = ctor { i } else { 0 };
+                let tys = self.ctor_sub_tys(&ctor, t);
+                let mut fields = Vec::new();
+                for fe in ast.list(ast.row(row).fields) {
+                    let idx = self.field_index(ad, vi, fe.name)?;
+                    let (ft, _) = *tys.get(idx)?;
+                    fields.push((idx, self.lower_assignee(fe.expr, ft, depth + 1)?));
+                }
+                Some(self.push(ctor, fields, arity, t, pos))
+            }
+            ExprKind::Path(_) => match self.body.res.get(&e.0).copied() {
+                Some(Res::Def(d)) if matches!(self.prog.def(d).kind, DefKind::Variant | DefKind::Struct) => {
+                    let (ctor, arity) = self.adt_ctor(t, d)?;
+                    Some(self.push(ctor, Vec::new(), arity, t, pos))
+                }
+                _ => wild(self),
+            },
+            _ => wild(self),
+        }
     }
 
     fn lower_inner(&mut self, p: PatId, t: TyId, pos: Option<u32>) -> Option<PIx> {
@@ -481,13 +548,127 @@ impl<'a> Cx<'a> {
                 Some(self.push(ctor, Vec::new(), arity, t, pos))
             }
             DefKind::Const | DefKind::AssocConst => match self.const_value(d, p.0 | PAT_KEY, t) {
-                Some(v) => match self.valtree_to_pat(&v, t, pos, 0) {
-                    Some(x) => Some(x),
-                    None => Some(self.opaque(t, pos)),
-                },
-                None => Some(self.opaque(t, pos)),
+                Some(v) => {
+                    self.const_pattern_structural(&v, t, pos);
+                    match self.valtree_to_pat(&v, t, pos, 0) {
+                        Some(x) => Some(x),
+                        None => Some(self.opaque(t, pos)),
+                    }
+                }
+                // (no value tree to walk: the type is judged -- structural ADTs, no function pointers)
+                None => {
+                    let mut seen = Vec::new();
+                    self.const_pattern_type_walk(t, pos, 0, &mut seen);
+                    self.const_pattern_partial_eq(t, pos);
+                    Some(self.opaque(t, pos))
+                }
             },
             _ => None,
+        }
+    }
+
+    /// rustc `type_marked_structural` (`Ty::is_structural_eq_shallow`): an ADT has an impl of
+    /// `StructuralPartialEq` (the PartialEq derive's, with its bounds).
+    fn type_marked_structural(&self, t: TyId) -> bool {
+        let t = self.tcx.tys.erase_all_regions(t);
+        let Some(td) = self.tcx.lang_items.get(crate::lang_items::LangItem::StructuralPeq) else { return true };
+        let infcx = crate::infer::InferCtxt::new(self.tcx, crate::tcx::TypingMode::non_body_analysis(), self.env.limit);
+        let goal = crate::next_solver::Goal { param_env: self.env.param_env, predicate: crate::next_solver::collect::trait_predicate(td, vec![crate::consts::GenericArg::Type(t)]) };
+        infcx.evaluate_obligation(self.prog, goal).may_apply()
+    }
+
+    /// const_to_pat.rs valtree_to_pat's check on every ADT of the constant's value: it must be
+    /// structural, else "constant of non-structural type `T` in a pattern".
+    fn const_pattern_structural(&mut self, v: &crate::consts::ValTree, t: TyId, pos: Option<u32>) {
+        let before = self.const_errors.len();
+        self.structural_walk(v, t, pos, 0);
+        // the whole constant needs a `PartialEq` impl (type_has_partial_eq_impl)
+        if self.const_errors.len() == before { self.const_pattern_partial_eq(t, pos); }
+    }
+
+    fn const_pattern_partial_eq(&mut self, t: TyId, pos: Option<u32>) {
+        if !matches!(self.kind(t), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Slice(_) | TyKind::Array(..) | TyKind::Tuple(_)) { return; }
+        let t = self.tcx.tys.erase_all_regions(t);
+        if let Some(pe) = self.tcx.lang_items.get(crate::lang_items::LangItem::PartialEq) {
+            let infcx = crate::infer::InferCtxt::new(self.tcx, crate::tcx::TypingMode::non_body_analysis(), self.env.limit);
+            let goal = crate::next_solver::Goal { param_env: self.env.param_env, predicate: crate::next_solver::collect::trait_predicate(pe, vec![crate::consts::GenericArg::Type(t), crate::consts::GenericArg::Type(t)]) };
+            if !infcx.evaluate_obligation(self.prog, goal).may_apply() { self.not_structural(t, pos); }
+        }
+    }
+
+    /// const_to_pat for a constant whose value is not known here: the type alone is judged -- an ADT
+    /// without the derived `StructuralPartialEq`, or a function pointer, cannot be matched on.
+    fn const_pattern_type_walk(&mut self, t: TyId, pos: Option<u32>, depth: u32, seen: &mut Vec<TyId>) {
+        if depth > 8 || seen.contains(&t) { return; }
+        seen.push(t);
+        match self.kind(t) {
+            TyKind::FnPtr(..) => {
+                if let Some(lo) = pos {
+                    let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", "function pointers and raw pointers not derived from integers in patterns behave unpredictably and should not be relied upon. See https://github.com/rust-lang/rust/issues/70861 for details.".to_string());
+                    self.const_errors.push(e);
+                }
+            }
+            TyKind::Adt(d, args, _) => {
+                if !self.type_marked_structural(t) { self.not_structural(t, pos); return; }
+                // (an ADT's fields are not walked: only the value's own variant would matter, and with
+                // no value tree the marker and the PartialEq check are all that can be judged)
+                let _ = (d, args);
+            }
+            TyKind::Ref(_, inner, _) => { let inner = self.reveal(inner); self.const_pattern_type_walk(inner, pos, depth + 1, seen) }
+            TyKind::Tuple(l) => for ft in self.tcx.tys.list(l).to_vec() { self.const_pattern_type_walk(ft, pos, depth + 1, seen); },
+            TyKind::Array(e, _) | TyKind::Slice(e) => self.const_pattern_type_walk(e, pos, depth + 1, seen),
+            _ => {}
+        }
+    }
+
+    fn not_structural(&mut self, t: TyId, pos: Option<u32>) {
+        let Some(lo) = pos else { return };
+        let name = crate::typeck::ty_to_string(false, self.prog, self.tcx, t);
+        let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", format!("constant of non-structural type `{}` in a pattern", name));
+        self.const_errors.push(e);
+    }
+
+    fn structural_walk(&mut self, v: &crate::consts::ValTree, t: TyId, pos: Option<u32>, depth: u32) {
+        if depth > 64 { return; }
+        let child = |cx: &Self, c: &crate::consts::Const| c.try_to_value(&cx.tcx.tys);
+        match self.kind(t) {
+            TyKind::Adt(d, args, _) => {
+                if !self.type_marked_structural(t) { self.not_structural(t, pos); return; }
+                let Some(a) = self.tcx.adts.get(&d) else { return };
+                if a.is_union { return; }
+                let Some(branches) = v.try_to_branch() else { return };
+                let branches: Vec<crate::consts::Value> = match branches.iter().map(|c| child(self, c)).collect::<Option<_>>() { Some(b) => b, None => return };
+                let (vi, fields): (usize, &[crate::consts::Value]) = if a.is_enum {
+                    let Some((first, rest)) = branches.split_first() else { return };
+                    let Some(l) = first.valtree.try_to_leaf() else { return };
+                    (l.to_bits(l.size()) as usize, rest)
+                } else { (0, &branches[..]) };
+                let tys = self.variant_field_tys(d, vi as u32, args);
+                for (f, ft) in fields.iter().zip(tys) { self.structural_walk(&f.valtree, ft, pos, depth + 1); }
+            }
+            // NaN equals nothing: no pattern (const_to_pat NaNPattern)
+            TyKind::Float(p) => {
+                if let Some(l) = v.try_to_leaf() {
+                    let bits = l.to_bits(l.size());
+                    let nan = if p == Prim::F32 { f32::from_bits(bits as u32).is_nan() } else if p == Prim::F64 { f64::from_bits(bits as u64).is_nan() } else { false };
+                    if nan {
+                        let Some(lo) = pos else { return };
+                        let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", "cannot use NaN in patterns".to_string());
+                        self.const_errors.push(e);
+                    }
+                }
+            }
+            TyKind::Ref(_, inner, _) => { let inner = self.reveal(inner); self.structural_walk(v, inner, pos, depth + 1) }
+            TyKind::Tuple(l) => {
+                let Some(branches) = v.try_to_branch() else { return };
+                let tys: Vec<TyId> = self.tcx.tys.list(l).to_vec();
+                for (c, ft) in branches.iter().zip(tys) { if let Some(f) = child(self, c) { self.structural_walk(&f.valtree, ft, pos, depth + 1); } }
+            }
+            TyKind::Array(e, _) | TyKind::Slice(e) => {
+                let Some(branches) = v.try_to_branch() else { return };
+                for c in branches.iter() { if let Some(f) = child(self, c) { self.structural_walk(&f.valtree, e, pos, depth + 1); } }
+            }
+            _ => {}
         }
     }
 
@@ -536,7 +717,7 @@ impl<'a> Cx<'a> {
             return false;
         }
         match self.kind(t) {
-            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Str => true,
+            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str => true,
             TyKind::Ref(_, i, _) => self.valtree_type(i, depth + 1),
             TyKind::Array(e, _) | TyKind::Slice(e) => self.valtree_type(e, depth + 1),
             TyKind::Tuple(l) => self.tcx.tys.list(l).iter().all(|x| self.valtree_type(*x, depth + 1)),
@@ -676,6 +857,16 @@ impl<'a> Cx<'a> {
                 text.parse::<f64>().ok()
             }
             ExprKind::Unary(UnOp::Neg, x) => Some(-self.float_expr(x)?),
+            // a named float constant
+            ExprKind::Path(_) => {
+                let Some(Res::Def(d)) = self.body.res.get(&e.0).copied() else { return None };
+                if !matches!(self.prog.def(d).kind, DefKind::Const | DefKind::AssocConst) { return None; }
+                let t = self.tcx.type_of(self.prog, d).ok()?;
+                let TyKind::Float(p) = self.kind(t) else { return None };
+                let leaf = self.const_value(d, e.0, t)?.try_to_leaf()?;
+                let bits = leaf.to_bits(leaf.size());
+                match p { Prim::F32 => Some(f32::from_bits(bits as u32) as f64), Prim::F64 => Some(f64::from_bits(bits as u64)), _ => None }
+            }
             _ => None,
         }
     }
@@ -730,6 +921,14 @@ impl<'a> Cx<'a> {
             TyKind::Float(_) => {
                 let lo = match a { Some(e) => self.float_expr(e), None => Some(f64::NEG_INFINITY) };
                 let hi = match b { Some(e) => self.float_expr(e), None => Some(f64::INFINITY) };
+                if lo.is_some_and(f64::is_nan) || hi.is_some_and(f64::is_nan) {
+                    // (a NaN endpoint: const_to_pat NaNPattern)
+                    if let Some(p) = pos {
+                        let e = self.prog.record_uncoded_error(self.body.file, p, "typeck", "cannot use NaN in patterns".to_string());
+                        self.const_errors.push(e);
+                    }
+                    return Some(self.opaque(t, pos));
+                }
                 match (lo, hi) {
                     (Some(lo), Some(hi)) => Some(Ctor::FloatRange(lo, hi, end)),
                     _ => None,
@@ -746,14 +945,29 @@ impl<'a> Cx<'a> {
                     None => (Some(MaybeInfiniteInt::PosInfinity), RangeEnd::Excluded),
                 };
                 match (lo, hi) {
-                    (Some(lo), Some(hi)) => IntRange::from_range(lo, hi, end).map(Ctor::IntRange),
+                    (Some(lo), Some(hi)) => {
+                        let r = IntRange::from_range(lo, hi, end);
+                        // rustc_mir_build lower_pattern_range: an empty range is an error (E0030 / E0579)
+                        if r.is_none() && a.is_some() && b.is_some() {
+                            if let Some(p) = pos {
+                                let msg = if incl { "E0030: lower bound for range pattern must be less than or equal to upper bound" } else { "E0579: lower bound for range pattern must be less than upper bound" };
+                                let e = self.prog.record_error(self.body.file, p, "typeck", msg.to_string());
+                                self.const_errors.push(e);
+                            }
+                        }
+                        r.map(Ctor::IntRange)
+                    }
                     _ => None,
                 }
             }
             _ => None,
         };
         match ctor {
-            Some(c) => Some(self.push(c, Vec::new(), 0, t, pos)),
+            Some(c) => {
+                let p = self.push(c, Vec::new(), 0, t, pos);
+                self.pats[p].range_excl = !incl && b.is_some();
+                Some(p)
+            }
             None => Some(self.opaque(t, pos)),
         }
     }
@@ -989,8 +1203,21 @@ impl<'a> Cx<'a> {
 enum LetSource {
     IfLet,
     WhileLet,
+    /// the `if let` guard of a match arm
+    IfLetGuard,
     /// in a `&&` chain or elsewhere: never linted as irrefutable
     Chain,
+}
+
+/// The analysis context of a body (also the lint passes' inhabitedness queries).
+pub fn body_cx<'a>(prog: &'a Program, tcx: &'a Tcx, body: &'a Body) -> Cx<'a> {
+    let d = prog.def(body.def);
+    let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
+    Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()), const_errors: Vec::new() }
+}
+
+impl Cx<'_> {
+    pub fn typing_env(&self) -> TypingEnv { self.env }
 }
 
 struct Checker<'a> {
@@ -1001,11 +1228,12 @@ struct Checker<'a> {
 /// Checks the matches, lets and parameters of a type-checked body: the errors (E0004 /
 /// E0005, located); lints go to the lint sink.
 pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
-    let d = prog.def(body.def);
-    let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::non_body_analysis() };
-    let cx = Cx { prog, tcx, body, env, module: d.scope, krate: d.krate, pats: Vec::new(), next_opaque: 0, inhabited: RefCell::new(HashMap::new()) };
+    let cx = body_cx(prog, tcx, body);
     let mut ck = Checker { cx, errors: Vec::new() };
     ck.run();
+    let mut const_errors = std::mem::take(&mut ck.cx.const_errors);
+    const_errors.dedup();
+    ck.errors.extend(const_errors);
     ck.errors
 }
 
@@ -1021,6 +1249,8 @@ impl<'a> Checker<'a> {
         let typed = |i: usize| body.expr_typed.get(i);
         // the `let` expressions of `if` / `while` conditions
         let mut let_source: HashMap<u32, LetSource> = HashMap::new();
+        // the attributes of the arm an `if let` guard belongs to
+        let mut guard_attrs: HashMap<u32, Vec<Attr>> = HashMap::new();
         let mut blocks: Vec<BlockId> = body.body.into_iter().collect();
         for i in 0..n {
             if !typed(i) { continue; }
@@ -1039,8 +1269,23 @@ impl<'a> Checker<'a> {
                 }
                 ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => blocks.push(b),
                 ExprKind::For(row) => blocks.push(ast.row(row).body),
+                ExprKind::Match(_, arms) => {
+                    for arm in ast.list(arms) {
+                        let Some(g) = arm.guard else { continue };
+                        let g = crate::lit::strip_paren(ast, g);
+                        if let ExprKind::Let(..) = ast.expr(g).kind {
+                            let_source.insert(g.0, LetSource::IfLetGuard);
+                            guard_attrs.insert(g.0, ast.list(arm.attrs).to_vec());
+                        }
+                    }
+                }
                 _ => {}
             }
+        }
+        for i in 0..n {
+            if !typed(i) { continue; }
+            let e = body.expr_at(i);
+            if let ExprKind::Assign(l, r) = ast.expr(e).kind { self.check_assignment_is_irrefutable(l, r); }
         }
         let fn_arg = if self.cx.prog.def(body.def).kind == DefKind::Closure { "closure argument" } else { "function argument" };
         let item_lo = ast.item(self.cx.prog.def(body.def).item).lo;
@@ -1071,7 +1316,8 @@ impl<'a> Checker<'a> {
             match ex.kind {
                 ExprKind::Match(scrut, arms) => {
                     let arms: Vec<(PatId, bool, u32, List<Attr>)> = ast.list(arms).iter().map(|a| (a.pat, a.guard.is_some(), ast.expr(a.body).lo, a.attrs)).collect();
-                    self.check_match(scrut, &arms, false);
+                    let mattrs = ast.list(ast.stmt_attrs(e)).to_vec();
+                    self.check_match(scrut, &arms, false, &mattrs);
                 }
                 ExprKind::Let(pat, init) => {
                     let source = let_source.get(&e.0).copied().unwrap_or(LetSource::Chain);
@@ -1079,10 +1325,12 @@ impl<'a> Checker<'a> {
                         let msg = match source {
                             LetSource::IfLet => Some("irrefutable `if let` pattern -- this pattern will always match, so the `if let` is useless"),
                             LetSource::WhileLet => Some("irrefutable `while let` pattern -- this pattern will always match, so the loop will never exit"),
+                            LetSource::IfLetGuard => Some("irrefutable `if let` guard pattern -- this pattern will always match, so the guard is useless"),
                             LetSource::Chain => None,
                         };
                         if let Some(msg) = msg {
-                            self.lint(&crate::lint::IRREFUTABLE_LET_PATTERNS, ex.lo, msg);
+                            let attrs = guard_attrs.get(&e.0).cloned().unwrap_or_default();
+                            self.lint_in(&crate::lint::IRREFUTABLE_LET_PATTERNS, &attrs, ex.lo, msg);
                         }
                     }
                 }
@@ -1101,7 +1349,7 @@ impl<'a> Checker<'a> {
                     let args = ast.mac_arg(mc.args);
                     // `matches!(e, pat if guard)`: `match e { pat if guard => true, _ => false }`
                     if let (Some(pat), Some(&scrut)) = (args.pat, ast.list(args.exprs).first()) {
-                        self.check_match(scrut, &[(pat, args.guard.is_some(), ex.lo, List::default())], true);
+                        self.check_match(scrut, &[(pat, args.guard.is_some(), ex.lo, List::default())], true, &[]);
                     }
                 }
                 _ => {}
@@ -1170,7 +1418,7 @@ impl<'a> Checker<'a> {
     }
 
     /// arms: (pattern, has guard, fallback position, attributes)
-    fn check_match(&mut self, scrut: ExprId, arms: &[(PatId, bool, u32, List<Attr>)], matches_macro: bool) {
+    fn check_match(&mut self, scrut: ExprId, arms: &[(PatId, bool, u32, List<Attr>)], matches_macro: bool, attrs: &[Attr]) {
         let ast = self.ast();
         let Some(scrut_ty) = self.scrut_ty(scrut) else { return };
         let mut tarms = Vec::new();
@@ -1196,6 +1444,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.report_range_lints(&report.range_lints, ast.expr(scrut).lo, attrs);
         let witnesses = report.non_exhaustiveness_witnesses;
         if witnesses.is_empty() {
             return;
@@ -1229,6 +1478,40 @@ impl<'a> Checker<'a> {
         self.errors.push(self.cx.prog.record_error(self.cx.body.file, pos, "typeck", msg));
     }
 
+    /// rustc.rs lint_overlapping_range_endpoints / lint_non_contiguous_range_endpoints.
+    fn report_range_lints(&self, lints: &[usefulness::RangeLint], fallback: u32, attrs: &[Attr]) {
+        let mut seen: Vec<(PIx, Vec<PIx>, bool)> = Vec::new();
+        for l in lints {
+            match l {
+                usefulness::RangeLint::Overlap { pat, overlaps_with, on } => {
+                    let mut key = overlaps_with.clone();
+                    key.sort_unstable();
+                    if seen.iter().any(|(p, k, o)| *o && p == pat && *k == key) { continue; }
+                    seen.push((*pat, key, true));
+                    let pos = self.cx.pat(*pat).pos.unwrap_or(fallback);
+                    let msg = format!("multiple patterns overlap on their endpoints -- this range overlaps on `{}`", self.cx.print_range(on, self.cx.pat(*pat).ty));
+                    self.lint_in(&crate::lint::OVERLAPPING_RANGE_ENDPOINTS, attrs, pos, &msg);
+                }
+                usefulness::RangeLint::NonContiguous { pat_before, gapped_with, gap } => {
+                    let p = self.cx.pat(*pat_before);
+                    // only an exclusive range `lo..gap`
+                    if !p.range_excl { continue; }
+                    let mut key = gapped_with.clone();
+                    key.sort_unstable();
+                    if seen.iter().any(|(q, k, o)| !*o && q == pat_before && *k == key) { continue; }
+                    seen.push((*pat_before, key, false));
+                    let pos = p.pos.unwrap_or(fallback);
+                    let g = self.cx.print_range(gap, p.ty);
+                    if gapped_with.is_empty() {
+                        self.lint_in(&crate::lint::NON_CONTIGUOUS_RANGE_ENDPOINTS, attrs, pos, &format!("exclusive range missing `{}`", g));
+                    } else {
+                        self.lint_in(&crate::lint::NON_CONTIGUOUS_RANGE_ENDPOINTS, attrs, pos, &format!("multiple ranges are one apart -- this range doesn't match `{}` because `..` is an exclusive range", g));
+                    }
+                }
+            }
+        }
+    }
+
     fn report_unreachable(&self, p: PIx, covered_by: &[PIx], fallback: u32, attrs: &[Attr]) {
         let pat = self.cx.pat(p);
         let pos = pat.pos.unwrap_or(fallback);
@@ -1242,6 +1525,25 @@ impl<'a> Checker<'a> {
     }
 
     /// A refutable binding's analysis: (witnesses), None when it is not analysed.
+    /// E0005 for a destructuring assignment `lhs = rhs` whose assignee is refutable.
+    fn check_assignment_is_irrefutable(&mut self, lhs: ExprId, rhs: ExprId) {
+        let ast = self.ast();
+        let destructuring = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Tuple(_) | ExprKind::Call(..) | ExprKind::Struct(_) | ExprKind::Path(_) | ExprKind::Paren(_));
+        if !destructuring(lhs) { return; }
+        let t = self.cx.body.ty(rhs);
+        if self.cx.tcx.tys.flags(t).intersects(TypeFlags::HAS_ERROR | TypeFlags::HAS_NON_REGION_INFER) { return; }
+        let t = self.cx.reveal(t);
+        let Some(pat) = self.cx.lower_assignee(lhs, t, 0) else { return };
+        let validity = if self.is_known_valid_scrutinee(rhs) { PlaceValidity::ValidOnly } else { PlaceValidity::MaybeInvalid };
+        let Some(report) = usefulness::compute_match_usefulness(&self.cx, &[MatchArm { pat, has_guard: false }], t, validity) else { return };
+        let witnesses = &report.non_exhaustiveness_witnesses;
+        if witnesses.is_empty() { return; }
+        let ty = self.cx.ty_str(t);
+        let joined = self.cx.joined_uncovered_patterns(witnesses);
+        let msg = format!("E0005: refutable pattern in local binding -- pattern{} {} not covered; the matched value is of type `{}`", if witnesses.len() == 1 { "" } else { "s" }, joined, ty);
+        self.errors.push(self.cx.prog.record_error(self.cx.body.file, ast.expr(lhs).lo, "typeck", msg));
+    }
+
     fn analyze_binding(&mut self, p: PatId, scrut: Option<ExprId>, fallback: u32) -> Option<(PIx, usefulness::UsefulnessReport)> {
         let pat = self.cx.lower(p)?;
         let ty = self.cx.pat(pat).ty;
@@ -1250,6 +1552,7 @@ impl<'a> Checker<'a> {
             _ => PlaceValidity::ValidOnly,
         };
         let report = usefulness::compute_match_usefulness(&self.cx, &[MatchArm { pat, has_guard: false }], ty, validity)?;
+        self.report_range_lints(&report.range_lints, fallback, &[]);
         // (check_match.rs analyze_patterns: the redundant parts of a useful pattern)
         if let Usefulness::Useful(subs) = &report.arm_usefulness[0] {
             for (sp, covered_by) in subs {

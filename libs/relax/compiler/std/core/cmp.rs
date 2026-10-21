@@ -6,7 +6,11 @@ use crate::option::Option::{self, None, Some};
 
 #[cfg_attr(not(relax_check), lang = "eq")]
 pub trait PartialEq<Rhs: crate::marker::PointeeSized = Self>: crate::marker::PointeeSized {
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialeq_eq"]
     fn eq(&self, other: &Rhs) -> bool;
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialeq_ne"]
     fn ne(&self, other: &Rhs) -> bool {
         !self.eq(other)
     }
@@ -15,6 +19,10 @@ pub trait PartialEq<Rhs: crate::marker::PointeeSized = Self>: crate::marker::Poi
 pub trait Eq: PartialEq<Self> + crate::marker::PointeeSized {
     #[doc(hidden)]
     fn assert_fields_are_eq(&self) {}
+    #[doc(hidden)]
+    #[deprecated(note = "implementation detail of `#[derive(Eq)]`")]
+    #[rustc_diagnostic_item = "assert_receiver_is_total_eq"]
+    fn assert_receiver_is_total_eq(&self) {}
 }
 // :395: field-bound assertions emitted by derive(Eq).
 pub struct AssertParamIsEq<T: Eq + crate::marker::PointeeSized> { _field: crate::marker::PhantomData<T> }
@@ -62,7 +70,7 @@ impl Ordering {
             _ => self,
         }
     }
-    pub fn then_with<F: FnOnce() -> Ordering>(self, f: F) -> Ordering {
+    pub const fn then_with<F: FnOnce() -> Ordering>(self, f: F) -> Ordering {
         match self {
             Equal => f(),
             _ => self,
@@ -84,23 +92,34 @@ impl Ord for Ordering {
 
 #[cfg_attr(not(relax_check), lang = "partial_ord")]
 pub trait PartialOrd<Rhs: crate::marker::PointeeSized = Self>: PartialEq<Rhs> + crate::marker::PointeeSized {
+    #[rustc_diagnostic_item = "cmp_partialord_cmp"]
     fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialord_lt"]
     fn lt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less))
     }
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialord_le"]
     fn le(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less | Equal))
     }
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialord_gt"]
     fn gt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater))
     }
+    #[must_use]
+    #[rustc_diagnostic_item = "cmp_partialord_ge"]
     fn ge(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater | Equal))
     }
 }
 
 pub trait Ord: Eq + PartialOrd<Self> + crate::marker::PointeeSized {
+    #[rustc_diagnostic_item = "ord_cmp_method"]
     fn cmp(&self, other: &Self) -> Ordering;
+    #[rustc_diagnostic_item = "cmp_ord_max"]
     fn max(self, other: Self) -> Self
     where
         Self: Sized,
@@ -111,6 +130,7 @@ pub trait Ord: Eq + PartialOrd<Self> + crate::marker::PointeeSized {
             other
         }
     }
+    #[rustc_diagnostic_item = "cmp_ord_min"]
     fn min(self, other: Self) -> Self
     where
         Self: Sized,

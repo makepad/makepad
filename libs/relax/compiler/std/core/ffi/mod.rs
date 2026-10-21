@@ -97,19 +97,19 @@ fn memchr0(bytes: &[u8]) -> Option<usize> {
 
 impl CStr {
     /// # Safety: `ptr` points to a nul-terminated string valid for 'a.
-    pub unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a CStr {
+    pub const unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a CStr {
         let len = strlen(ptr);
         let bytes = crate::slice::from_raw_parts(ptr as *const u8, len + 1);
         CStr::from_bytes_with_nul_unchecked(bytes)
     }
-    pub fn from_bytes_with_nul(bytes: &[u8]) -> Result<&CStr, FromBytesWithNulError> {
+    pub const fn from_bytes_with_nul(bytes: &[u8]) -> Result<&CStr, FromBytesWithNulError> {
         match memchr0(bytes) {
             Some(nul) if nul + 1 == bytes.len() => Ok(unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }),
             Some(position) => Err(FromBytesWithNulError::InteriorNul { position }),
             None => Err(FromBytesWithNulError::NotNulTerminated),
         }
     }
-    pub fn from_bytes_until_nul(bytes: &[u8]) -> Result<&CStr, FromBytesUntilNulError> {
+    pub const fn from_bytes_until_nul(bytes: &[u8]) -> Result<&CStr, FromBytesUntilNulError> {
         match memchr0(bytes) {
             Some(nul) => Ok(unsafe { CStr::from_bytes_with_nul_unchecked(&bytes[..nul + 1]) }),
             None => Err(FromBytesUntilNulError(())),
@@ -119,23 +119,24 @@ impl CStr {
     pub const unsafe fn from_bytes_with_nul_unchecked(bytes: &[u8]) -> &CStr {
         &*(bytes as *const [u8] as *const CStr)
     }
+    #[rustc_as_ptr]
     pub const fn as_ptr(&self) -> *const c_char {
         self.inner.as_ptr()
     }
-    pub fn count_bytes(&self) -> usize {
+    pub const fn count_bytes(&self) -> usize {
         self.inner.len() - 1
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.inner.len() == 1
     }
-    pub fn to_bytes(&self) -> &[u8] {
+    pub const fn to_bytes(&self) -> &[u8] {
         let b = self.to_bytes_with_nul();
         &b[..b.len() - 1]
     }
-    pub fn to_bytes_with_nul(&self) -> &[u8] {
+    pub const fn to_bytes_with_nul(&self) -> &[u8] {
         unsafe { &*(&self.inner as *const [c_char] as *const [u8]) }
     }
-    pub fn to_str(&self) -> Result<&str, crate::str::Utf8Error> {
+    pub const fn to_str(&self) -> Result<&str, crate::str::Utf8Error> {
         crate::str::from_utf8(self.to_bytes())
     }
     pub fn to_string_lossy(&self) -> crate::borrow::Cow<'_, str> {

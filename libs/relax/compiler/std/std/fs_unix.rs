@@ -1083,6 +1083,12 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
     Ok(())
 }
 
+/// Deprecated alias of `os::unix::fs::symlink` (rustc library/std/src/fs.rs `soft_link`).
+#[deprecated(since = "1.1.0", note = "replaced with std::os::unix::fs::symlink and std::os::windows::fs::{symlink_file, symlink_dir}")]
+pub fn soft_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
+    symlink_raw(original.as_ref(), link.as_ref())
+}
+
 pub(crate) fn symlink_raw(original: &Path, link: &Path) -> io::Result<()> {
     let a = cstr(original)?;
     let b = cstr(link)?;

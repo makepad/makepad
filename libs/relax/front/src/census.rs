@@ -347,7 +347,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                             match g {
                                 GenericArg::Type(t) => self.ty(*t, false),
                                 GenericArg::Binding(_, _, t) => self.ty(*t, false),
-                                GenericArg::Constraint(_, b) => self.bounds(pp.ast.list(*b)),
+                                GenericArg::Constraint(_, _, b) => self.bounds(pp.ast.list(*b)),
                                 GenericArg::Const(e) => self.expr(*e),
                                 GenericArg::Lifetime(_) => {}
                             }

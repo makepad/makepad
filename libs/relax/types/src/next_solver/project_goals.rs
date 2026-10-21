@@ -37,7 +37,7 @@ impl EvalCtxt<'_, '_> {
         }
         let term = self.next_term_infer_of_alias_kind(&p.projection_term);
         let goal = Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::NormalizesTo(NormalizesTo { alias: p.projection_term, term })) };
-        let (nested, evaluation) = self.evaluate_goal_raw(goal)?;
+        let (nested, evaluation) = self.evaluate_goal_raw(GoalSource::TypeRelating, goal)?;
         self.eq(&env, p.term, term)?;
         for (source, goal) in nested { self.add_goal(source, goal)?; }
         self.evaluate_added_goals_and_make_canonical_response(evaluation.certainty)
@@ -69,7 +69,6 @@ impl EvalCtxt<'_, '_> {
         if let (AliasTerm::Const(alias), Term::Const(ct)) = (&p.alias, value) {
             self.add_goal(GoalSource::Misc, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::ConstArgHasType(ct, self.const_type(alias)?))) })?;
         }
-        let value = match value { Term::Ty(t) => Term::Ty(self.normalize_ty(env, t)?), value => value };
         self.eq(env, p.term, value)
     }
     pub(super) fn rigid_alias_term(&self, alias: &AliasTerm) -> Term {
@@ -87,7 +86,7 @@ impl EvalCtxt<'_, '_> {
         let item = tcx.fetch_eligible_assoc_item(self.solver.prog, def, imp);
         if !tcx.associated_item_has_value(self.solver.prog, item) {
             if self.delegate.impl_self_is_guaranteed_unsized(self.solver.prog, imp) {
-                if matches!(self.delegate.typing_mode, crate::tcx::TypingMode::Coherence) {
+                if matches!(self.delegate.typing_mode.get(), crate::tcx::TypingMode::Coherence) {
                     self.add_goal(GoalSource::Misc, Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Ambiguous) })?;
                     return Ok(());
                 }

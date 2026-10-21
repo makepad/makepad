@@ -75,7 +75,7 @@ impl Code {
             return None;
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if !makepad_codegen::exec::codegen_allowed() {
+        if crate::native::options().no_codegen {
             return None;
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -110,7 +110,10 @@ impl Code {
                     sys::munmap(ptr, map_len);
                     return None;
                 }
-                makepad_codegen::exec::clear_cache(ptr as usize, ptr as usize + len);
+                extern "C" {
+                    fn __clear_cache(start: *mut u8, end: *mut u8);
+                }
+                __clear_cache(ptr as *mut u8, (ptr as *mut u8).add(len));
             }
             Some(Code { ptr: ptr as *mut u8, map_len, len })
         }

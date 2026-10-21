@@ -31,8 +31,8 @@ impl<'a> TypeRelation<'a> for MatchAgainstHigherRankedOutlives<'a> {
         if self.variance == V::Bi { return Ok(pattern); }
         if matches!(self.tcx.tys.kind(pattern), TyKind::Error | TyKind::Bound(..)) { return Err(TypeError::Mismatch); }
         if pattern == value { return Ok(pattern); }
-        if let (TyKind::Alias(ar, a), TyKind::Alias(br, b)) = (self.tcx.tys.kind(pattern), self.tcx.tys.kind(value)) {
-            if ar != br || a.kind != b.kind || self.tcx.tys.list(a.args).len() != self.tcx.tys.list(b.args).len() { return Err(TypeError::Mismatch); }
+        if let (TyKind::Alias(_, a), TyKind::Alias(_, b)) = (self.tcx.tys.kind(pattern), self.tcx.tys.kind(value)) {
+            if a.kind != b.kind || self.tcx.tys.list(a.args).len() != self.tcx.tys.list(b.args).len() { return Err(TypeError::Mismatch); }
             let tcx = self.tcx;
             for (&x, &y) in tcx.tys.list(a.args).iter().zip(tcx.tys.list(b.args)) { self.tys(x, y)?; }
             let ars = self.tcx.tys.region_args(a.regions); let brs = self.tcx.tys.region_args(b.regions);

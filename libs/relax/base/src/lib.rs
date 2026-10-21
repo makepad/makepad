@@ -4,14 +4,17 @@
 //! and the proc-macro token model (pm, pm_tokens).
 //! The layers below are re-exported, so every module of Relax is `crate::<module>` in each layer.
 
-pub use relax_codegen::{arm64, exec_census, fncost, warm, opt, regalloc, rir, x64};
+#![recursion_limit = "1024"]
+
 
 pub mod fxhash;
 pub mod memstat;
 pub use relax_session::{gen_local, options, sip, Session};
 pub mod conc;
+pub mod pool;
 pub mod query;
 pub mod preempt;
+pub mod stack;
 pub mod arena;
 pub mod json;
 pub mod diag;
@@ -26,6 +29,7 @@ pub mod vfs;
 pub mod packsrc;
 pub mod progress;
 pub mod run_state;
+pub mod boot_stats;
 pub mod dirs;
 pub use relax_lex::tokens as pm_tokens;
 pub mod pm;
@@ -35,6 +39,7 @@ pub mod relaxed;
 pub mod srchash;
 pub mod simd;
 pub mod thread_local_mac;
+pub mod tokbuf;
 pub mod cfg;
 pub mod registry;
 pub mod resolve;

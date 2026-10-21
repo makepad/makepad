@@ -69,6 +69,7 @@ pub fn tick(n: u64, rss: u64) {
 
 /// A phase marker on the memory timeline (main start, first present, snapshots, the app's marks).
 pub fn mark(label: &str) {
+    let _k = crate::zone_alloc::kept();
     let mut m = MARKS.lock().unwrap_or_else(|e| e.into_inner());
     if m.len() < 1024 {
         crate::zone_alloc::kept_with(|| m.push((now_ms(), label.to_string())));
@@ -174,6 +175,9 @@ fn os_regions(s: &mut Snap) {
     }
     let page = unsafe { vm_page_size } as u64;
     let (mut addr, mut depth) = (0u64, 0u32);
+    // MAKEPAD_RUN_MEM_REGIONS=1: the largest resident regions (address, size, resident, dirtied, tag, share mode, protection)
+    let list = std::env::var_os("MAKEPAD_RUN_MEM_REGIONS").is_some();
+    let mut big: Vec<(u64, u64, u64, u64, u32, u32, u32)> = Vec::new();
     // a VM object mapped more than once (Relax's JIT code has a writable and an executable view;
     // shared libraries' pages) counts once
     let mut seen_objects: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -198,8 +202,50 @@ fn os_regions(s: &mut Snap) {
             let shared = matches!(share_mode, 4 | 5 | 7);
             let cat = tag_name(info[5]);
             s.add(&format!("regions/{}/{}", if shared { "shared" } else { "private" }, cat), resident);
+            // pages_reusable (index 16): resident but MADV_FREE_REUSABLE -- in the resident size, not in the footprint
+            if list {
+                big.push((resident, addr, size, info[9] as u64 * page, info[5], share_mode, info[0]));
+            }
+            let reusable = info[16] as u64 * page;
+            if reusable > 0 {
+                s.add(&format!("regions reusable/{}/{}", if shared { "shared" } else { "private" }, cat), reusable);
+            }
+            let dirty = info[9] as u64 * page;
+            if dirty > 0 {
+                s.add(&format!("regions dirtied/{}/{}", if shared { "shared" } else { "private" }, cat), dirty);
+            }
         }
         addr += size;
+    }
+    if list {
+        if let Some(a) = crate::jit::unit_areas() {
+            extern "C" { fn mincore(addr: *mut u8, len: usize, vec: *mut u8) -> i32; }
+            let names = ["exec", "ro data", "rw", "syms"];
+            for k in 0..4 {
+                let (lo, hi) = match k { 0 => (a[0], a[1]), 1 => (a[1], a[2]), 2 => (a[2], a[2] + crate::jit::UNIT_RW_SIZE), _ => (a[2] + crate::jit::UNIT_RW_SIZE, a[4]) };
+                let pages = ((hi - lo) / page) as usize;
+                let mut v = vec![0u8; pages];
+                let mut res = 0usize;
+                for chunk in 0..(pages + 4095) / 4096 {
+                    let (c0, c1) = (chunk * 4096, ((chunk + 1) * 4096).min(pages));
+                    if unsafe { mincore((lo + c0 as u64 * page) as *mut u8, (c1 - c0) * page as usize, v.as_mut_ptr().add(c0)) } == 0 {
+                        res += v[c0..c1].iter().filter(|b| **b & 1 != 0).count();
+                    }
+                }
+                eprintln!("makepad-run mem unit {}: {:#x}..{:#x} ({:.0} MB) resident {:.1} MB", names[k], lo, hi, (hi - lo) as f64 / 1048576.0, res as f64 * page as f64 / 1048576.0);
+            }
+        }
+        big.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        for (res, a, size, dirty, tag, share, prot) in big.into_iter().take(14) {
+            extern "C" {
+                fn proc_regionfilename(pid: i32, address: u64, buffer: *mut u8, size: u32) -> i32;
+                fn getpid() -> i32;
+            }
+            let mut buf = [0u8; 1024];
+            let n = unsafe { proc_regionfilename(getpid(), a, buf.as_mut_ptr(), buf.len() as u32) };
+            let file = if n > 0 { String::from_utf8_lossy(&buf[..n as usize]).into_owned() } else { String::new() };
+            eprintln!("makepad-run mem region: {:#x} size {:.1} MB resident {:.1} MB dirtied {:.1} MB tag {} share {} prot {} file {}", a, size as f64 / 1048576.0, res as f64 / 1048576.0, dirty as f64 / 1048576.0, tag, share, prot, file);
+        }
     }
 }
 
@@ -380,8 +426,8 @@ fn keep(name: &str, s: Snap) {
 pub fn cmd_memory(req: &Req, out: &mut Out) {
     out.line(&format!("{{\"freed_by_domain_teardown_bytes\":{}}}", crate::domain::freed_by_teardown()));
     for d in crate::domain::list() {
-        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_committed_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
-            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, d.arena_committed, d.static_committed, d.threads,
+        out.line(&format!("{{\"domain\":{},\"package\":{},\"state\":{},\"arena_in_use_bytes\":{},\"arena_committed_bytes\":{},\"arena_touched_small_bytes\":{},\"arena_live_slot_bytes\":{},\"arena_large_bytes\":{},\"static_committed_bytes\":{},\"threads\":{},\"thread_names\":[{}]}}",
+            d.id, json_str(&d.package), json_str(&format!("{:?}", d.state)), d.arena_in_use, d.arena_committed, d.arena_detail.0, d.arena_detail.1, d.arena_detail.2, d.static_committed, d.threads,
             d.thread_names.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")));
     }
     let compiler = req.get("compiler") == Some("1");

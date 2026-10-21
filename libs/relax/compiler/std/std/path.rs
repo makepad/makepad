@@ -34,17 +34,17 @@ const HAS_PREFIXES: bool = false;
 #[cfg(windows)]
 const HAS_PREFIXES: bool = true;
 
-pub fn is_separator(c: char) -> bool {
+pub const fn is_separator(c: char) -> bool {
     c.is_ascii() && is_sep_byte(c as u8)
 }
 
 #[cfg(unix)]
-fn is_sep_byte(b: u8) -> bool {
+const fn is_sep_byte(b: u8) -> bool {
     b == b'/'
 }
 
 #[cfg(unix)]
-fn is_verbatim_sep(b: u8) -> bool {
+const fn is_verbatim_sep(b: u8) -> bool {
     b == b'/'
 }
 
@@ -55,12 +55,12 @@ fn parse_prefix(_path: &OsStr) -> Option<Prefix<'_>> {
 }
 
 #[cfg(windows)]
-fn is_sep_byte(b: u8) -> bool {
+const fn is_sep_byte(b: u8) -> bool {
     b == b'/' || b == b'\\'
 }
 
 #[cfg(windows)]
-fn is_verbatim_sep(b: u8) -> bool {
+const fn is_verbatim_sep(b: u8) -> bool {
     b == b'\\'
 }
 
@@ -712,7 +712,7 @@ fn iter_after_back<'a, 'b>(mut iter: Components<'a>, mut suffix: Components<'b>)
 }
 
 impl Path {
-    pub fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &Path {
+    pub const fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &Path {
         let os: &OsStr = s.as_ref();
         unsafe { &*(os as *const OsStr as *const Path) }
     }
@@ -879,7 +879,7 @@ impl Path {
 }
 
 impl PathBuf {
-    pub fn new() -> PathBuf {
+    pub const fn new() -> PathBuf {
         PathBuf { inner: OsString::new() }
     }
     pub fn with_capacity(capacity: usize) -> PathBuf {

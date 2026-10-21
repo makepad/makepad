@@ -831,6 +831,227 @@ let gemv_k = {
     }
 }
 
+// Opt-in decode GEMVs. Each lane still loads 16-byte weight payloads;
+// activation loads and corrections are outside the explicit row calls.
+// All accumulators are registers, never dynamically indexed local arrays.
+// Source-level counts per 16 nibble bytes (32 codes), excluding addresses,
+// scale extraction and float accumulation: Q4 = 28 integer ops + 10
+// dot4, Q5 = 56 integer ops + 10 dot4, Q6 = 56 integer ops + 10 dot4.
+// Q4/Q5/Q6 additionally need 8 dot4 + 8 integer ops for activation sums
+// shared across the rows. Q8 per 32 code bytes = 25 integer ops + 16 dot4, with
+// its activation sum read from quantize_q8's metadata. Conversions omitted.
+// These are algorithmic counts, not claims about a driver's instruction ISA.
+let gemv_decode = gemv_k{
+    format: 5
+    unit_bytes: 176
+    row_lanes: 32
+    rpg: 1
+    groups_x: shader.uniform(u32)
+    partial: shader.workgroup(vec4f, 16)
+    main: fn() {
+        let t = local_id().x
+        let lane = t % self.row_lanes
+        let group = group_id().x + group_id().y * self.groups_x
+        let row0 = (group * (self.workgroup_size / self.row_lanes) + t / self.row_lanes) * self.rpg
+        let row1 = min(row0 + 1, self.n - 1)
+        let row2 = min(row0 + 2, self.n - 1)
+        let row3 = min(row0 + 3, self.n - 1)
+        let slot = lane >> 3
+        let part = lane & 7
+        for col in 0..self.m {
+            var acc = vec4(0.0, 0.0, 0.0, 0.0)
+            if row0 < self.n {
+                var u = slot
+                while u < self.k / 256 {
+                    let xb = col * self.k + u * 256
+                    var lo_at = xb + (part >> 1) * 64 + (part & 1) * 16
+                    var hi_at = lo_at + 32
+                    if self.format == 6 {
+                        lo_at = xb + (part >> 2) * 128 + ((part >> 1) & 1) * 32 + (part & 1) * 16
+                        hi_at = lo_at + 64
+                    }
+                    if self.format == 8 {
+                        lo_at = xb + part * 32
+                        hi_at = lo_at + 16
+                    }
+                    let xlo = self.xq4[lo_at >> 4]
+                    let xhi = self.xq4[hi_at >> 4]
+                    // Keep the original per-lane correction order. Splitting
+                    // a full-block sum between lanes changes decode rounding.
+                    var sc = vec4(0.0, 0.0, 0.0, 0.0)
+                    if self.format == 4 || self.format == 5 {
+                        let meta = self.xs4[xb / 64 + (part >> 1)]
+                        sc = vec4(meta.x, float(self.sum16(xlo)), meta.z, float(self.sum16(xhi)))
+                    } else if self.format == 6 {
+                        sc = vec4(self.xs[lo_at / 32].x, float(self.sum16(xlo)), self.xs[hi_at / 32].x, float(self.sum16(xhi)))
+                    } else {
+                        let slo = self.xs[lo_at / 32]
+                        sc = vec4(slo.x, slo.y, 0.0, 0.0)
+                    }
+                    let ub = u * self.unit_bytes
+                    acc.x += self.decode_part(row0 * self.w_row + ub, part, xlo, xhi, sc)
+                    if self.rpg >= 2 {
+                        acc.y += self.decode_part(row1 * self.w_row + ub, part, xlo, xhi, sc)
+                    }
+                    if self.rpg == 4 {
+                        acc.z += self.decode_part(row2 * self.w_row + ub, part, xlo, xhi, sc)
+                        acc.w += self.decode_part(row3 * self.w_row + ub, part, xlo, xhi, sc)
+                    }
+                    u += self.row_lanes / 8
+                }
+            }
+            // Wide row groups use one subgroup reduction when the hardware
+            // width matches. Smaller subgroups use shared partials;
+            // every invocation reaches both barriers, including tail rows.
+            var total = acc
+            let sg = subgroup_size()
+            if self.row_lanes == 32 {
+                // Preserve the current kernel's tree, independently of
+                // the hardware subgroup width; this path needs no barrier.
+                total += subgroup_shuffle_xor(total, 16)
+                total += subgroup_shuffle_xor(total, 8)
+                total += subgroup_shuffle_xor(total, 4)
+                total += subgroup_shuffle_xor(total, 2)
+                total += subgroup_shuffle_xor(total, 1)
+            } else if sg == self.row_lanes {
+                total = subgroup_add(acc)
+            } else if sg < self.row_lanes {
+                let sub = subgroup_add(acc)
+                if subgroup_lane() == 0 {
+                    self.partial[t / sg] = sub
+                }
+                barrier()
+                if lane == 0 {
+                    let first = t / sg
+                    total = self.partial[first]
+                    for i in 1..self.row_lanes / sg {
+                        total += self.partial[first + i]
+                    }
+                }
+                barrier()
+            } else {
+                if self.row_lanes == 64 {
+                    total += subgroup_shuffle_xor(total, 32)
+                }
+                total += subgroup_shuffle_xor(total, 16)
+                total += subgroup_shuffle_xor(total, 8)
+                total += subgroup_shuffle_xor(total, 4)
+                total += subgroup_shuffle_xor(total, 2)
+                total += subgroup_shuffle_xor(total, 1)
+            }
+            if lane == 0 && row0 < self.n {
+                self.dst[col * self.d_col + row0] = total.x
+                if self.rpg >= 2 && row0 + 1 < self.n {
+                    self.dst[col * self.d_col + row0 + 1] = total.y
+                }
+                if self.rpg == 4 {
+                    if row0 + 2 < self.n {
+                        self.dst[col * self.d_col + row0 + 2] = total.z
+                    }
+                    if row0 + 3 < self.n {
+                        self.dst[col * self.d_col + row0 + 3] = total.w
+                    }
+                }
+            }
+        }
+    }
+    // Four codes sum to <=252 in each byte: no inter-byte carry. Bias
+    // correction uses one dot4 instead of four (5 dot4 per 16 codes).
+    dot16small: fn(a, x) {
+        let raw = self.dot16raw(a, x)
+        let sum = dot4_u8(a.x + a.y + a.z + a.w, u32(16843009))
+        return i32(raw) - (i32(sum) << 7)
+    }
+    dot16raw: fn(a, x) {
+        return dot4_u8(a.x, x.x) + dot4_u8(a.y, x.y) + dot4_u8(a.z, x.z) + dot4_u8(a.w, x.w)
+    }
+    decode_part: fn(bo, part, xlo, xhi, sc) {
+        let b16 = bo >> 4
+        let m4 = vec4u(u32(252645135), u32(252645135), u32(252645135), u32(252645135))
+        if self.format == 8 {
+            let ds = self.w4[b16]
+            var dw = ds.w
+            if part < 2 {
+                dw = ds.x
+            } else if part < 4 {
+                dw = ds.y
+            } else if part < 6 {
+                dw = ds.z
+            }
+            let d = unpack_half2(dw >> ((part & 1) * 16)).x
+            let flip = vec4u(u32(2155905152), u32(2155905152), u32(2155905152), u32(2155905152))
+            let a = self.w4[b16 + 1 + part * 2] ^ flip
+            let b = self.w4[b16 + 2 + part * 2] ^ flip
+            let ones = vec4u(u32(16843009), u32(16843009), u32(16843009), u32(16843009))
+            let raw = self.dot16raw(a, xlo) + self.dot16raw(b, xhi)
+            let wsum = self.dot16raw(a, ones) + self.dot16raw(b, ones)
+            let v = i32(raw) - ((i32(wsum) + i32(sc.y)) << 7)
+            return d * sc.x * float(v)
+        }
+        if self.format == 6 {
+            let half = part >> 2
+            let g = (part >> 1) & 1
+            let q = self.w4[b16 + half * 4 + (part & 3)]
+            let high = self.w4[b16 + 8 + half * 2 + (part & 1)]
+            let sh = g * 2
+            let h = high >> vec4u(sh, sh, sh, sh)
+            let m6 = vec4u(u32(808464432), u32(808464432), u32(808464432), u32(808464432))
+            let lo = (q & m4) | ((h << vec4u(4, 4, 4, 4)) & m6)
+            let hi = ((q >> vec4u(4, 4, 4, 4)) & m4) | (h & m6)
+            let scales = self.w4[b16 + 12]
+            var sl = scales.x
+            var shigh = scales.y
+            if half == 1 {
+                sl = scales.z
+                shigh = scales.w
+            }
+            let shift = 24 - (part & 3) * 8
+            let dl = float(i32(sl << shift) >> 24)
+            let dh = float(i32(shigh << shift) >> 24)
+            let d = unpack_half2(self.w4[b16 + 13].x & u32(65535)).x
+            let vl = self.dot16small(lo, xlo) - 32 * i32(sc.y)
+            let vh = self.dot16small(hi, xhi) - 32 * i32(sc.w)
+            return d * (dl * sc.x * float(vl) + dh * sc.z * float(vh))
+        }
+        let head = self.w4[b16]
+        let dm = unpack_half2(head.x)
+        var at = b16 + 1 + part
+        if self.format == 5 {
+            at += 2
+        }
+        let q = self.w4[at]
+        var lo = q & m4
+        var hi = (q >> vec4u(4, 4, 4, 4)) & m4
+        if self.format == 5 {
+            let high = self.w4[b16 + 1 + (part & 1)]
+            let sb = part & 6
+            let h = high >> vec4u(sb, sb, sb, sb)
+            let m5 = vec4u(u32(269488144), u32(269488144), u32(269488144), u32(269488144))
+            lo = lo | ((h << vec4u(4, 4, 4, 4)) & m5)
+            hi = hi | ((h << vec4u(3, 3, 3, 3)) & m5)
+        }
+        // Decode the adjacent sub-block scales/mins together as packed
+        // bytes, before extracting the pair and applying each scale once.
+        var scales = head.y & u32(1061109567)
+        var mins = head.z & u32(1061109567)
+        if part >= 4 {
+            scales = (head.w & u32(252645135)) | ((head.y >> 2) & u32(808464432))
+            mins = ((head.w >> 4) & u32(252645135)) | ((head.z >> 2) & u32(808464432))
+        }
+        let shift = (part & 2) * 8
+        let sp = scales >> shift
+        let mp = mins >> shift
+        let sl = float(sp & 255)
+        let sh = float((sp >> 8) & 255)
+        let ml = float(mp & 255)
+        let mh = float((mp >> 8) & 255)
+        let vl = self.dot16small(lo, xlo)
+        let vh = self.dot16small(hi, xhi)
+        return sc.x * (dm.x * sl * float(vl) - dm.y * ml * sc.y)
+            + sc.z * (dm.x * sh * float(vh) - dm.y * mh * sc.w)
+    }
+}
+
 // Gated delta rule over the tokens of one sequence. 32 lanes own one
 // state column (sv/32 elements each); the state is stored transposed
 // (a column's sv values contiguous), q/k heads map to value heads by
@@ -846,7 +1067,7 @@ let gdn = {
     v: shader.buffer(f32)
     g: shader.buffer(f32)
     beta: shader.buffer(f32)
-    state: shader.buffer(f32)
+    state: shader.buffer_rw(f32)
     dst: shader.buffer_rw(f32)
     sv: shader.uniform(u32)
     h: shader.uniform(u32)
@@ -874,14 +1095,14 @@ let gdn = {
             let iq = head % self.q_heads
             let ik = head % self.k_heads
             let scale = inverseSqrt(float(self.sv))
-            let sbase = ((seq * self.h + head) * self.sv + col) * self.sv + lane * per
+            let sbase = self.state_base(seq, head, col, lane, per)
             var ls = array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             for j in 0..per {
                 ls[j] = self.state[sbase + j]
             }
-            var qo = seq * self.q_s + iq * self.q_h
-            var ko = seq * self.k_s + ik * self.k_h
-            var vo = seq * self.v_s + head * self.v_h
+            var qo = self.q_start(seq, iq)
+            var ko = self.k_start(seq, ik)
+            var vo = self.v_start(seq, head)
             var bo = seq * self.n_tokens * self.h + head
             var go = (seq * self.n_tokens * self.h + head) * self.gate_g
             for t in 0..self.n_tokens {
@@ -923,12 +1144,21 @@ let gdn = {
                 go += self.h * self.gate_g
             }
             if self.checkpoints == 0 {
-                let out = self.n_seqs * self.n_tokens * self.h * self.sv + sbase
                 for j in 0..per {
-                    self.dst[out + j] = ls[j]
+                    self.write_state(sbase, j, ls[j])
                 }
             }
         }
+    }
+    q_start: fn(seq, head) { return seq * self.q_s + head * self.q_h }
+    k_start: fn(seq, head) { return seq * self.k_s + head * self.k_h }
+    v_start: fn(seq, head) { return seq * self.v_s + head * self.v_h }
+    state_base: fn(seq, head, col, lane, per) {
+        return ((seq * self.h + head) * self.sv + col) * self.sv + lane * per
+    }
+    write_state: fn(base, j, v) {
+        let out = self.n_seqs * self.n_tokens * self.h * self.sv + base
+        self.dst[out + j] = v
     }
     // The sum over the 32 lanes of this lane's group (any subgroup size
     // >= 32: the butterfly stays inside the 32-aligned group).
@@ -950,7 +1180,7 @@ let gdn = {
 let gdn_v4 = gdn{
     q4: shader.buffer(vec4f)
     k4: shader.buffer(vec4f)
-    state4: shader.buffer(vec4f)
+    state4: shader.buffer_rw(vec4f)
     dst4: shader.buffer_rw(vec4f)
     main: fn() {
         let lane = local_id().x % 32
@@ -960,10 +1190,11 @@ let gdn_v4 = gdn{
         let iq = head % self.q_heads
         let ik = head % self.k_heads
         let scale = inverseSqrt(float(self.sv))
-        var ls = self.state4[((seq * self.h + head) * self.sv + col) * 32 + lane]
-        var qo = (seq * self.q_s + iq * self.q_h) / 4 + lane
-        var ko = (seq * self.k_s + ik * self.k_h) / 4 + lane
-        var vo = seq * self.v_s + head * self.v_h
+        let si = self.state_base(seq, head, col, lane, u32(4)) / 4
+        var ls = self.state4[si]
+        var qo = self.q_start(seq, iq) / 4 + lane
+        var ko = self.k_start(seq, ik) / 4 + lane
+        var vo = self.v_start(seq, head)
         var bo = seq * self.n_tokens * self.h + head
         var go = (seq * self.n_tokens * self.h + head) * self.gate_g
         for t in 0..self.n_tokens {
@@ -994,12 +1225,39 @@ let gdn_v4 = gdn{
             go += self.h * self.gate_g
         }
         if self.checkpoints == 0 {
-            let out = (self.n_seqs * self.n_tokens * self.h * self.sv) / 4
-                + ((seq * self.h + head) * self.sv + col) * 32 + lane
-            self.dst4[out] = ls
+            self.write_state4(si, ls)
         }
     }
+    write_state4: fn(base, v) {
+        let out = (self.n_seqs * self.n_tokens * self.h * self.sv) / 4 + base
+        self.dst4[out] = v
+    }
 }
+
+// Every invocation owns its state slice, so the selected row can be read
+// and written in place. Single-sequence address functions also keep the
+// push constants within the 128-byte limit without extra parameter buffers.
+let gdn_state = gdn{
+    rows: shader.buffer(i32)
+    state_row: shader.uniform(u32)
+    q_start: fn(seq, head) { return head * self.q_h }
+    k_start: fn(seq, head) { return head * self.k_h }
+    v_start: fn(seq, head) { return head * self.v_h }
+    state_base: fn(seq, head, col, lane, per) {
+        return u32(self.rows[0]) * self.state_row + (head * self.sv + col) * self.sv + lane * per
+    }
+    write_state: fn(base, j, v) { self.state[base + j] = v }
+}
+let gdn_v4_state = gdn_v4{
+    rows: shader.buffer(i32)
+    state_row: shader.uniform(u32)
+    q_start: gdn_state.q_start
+    k_start: gdn_state.k_start
+    v_start: gdn_state.v_start
+    state_base: gdn_state.state_base
+    write_state4: fn(base, v) { self.state4[base] = v }
+}
+
 
 {
     // ---- copies --------------------------------------------------------
@@ -1276,13 +1534,25 @@ let gdn_v4 = gdn{
         groups_x: shader.uniform(u32)
         op: shader.uniform(u32)
         gated: shader.uniform(u32)
+        g_width: shader.uniform(u32)
+        // Optional row-broadcast add before the activation.
+        bias: shader.buffer(f32)
+        add_width: shader.uniform(u32)
         main: fn() {
             let gr = group_id()
             let i = (gr.y * self.groups_x + gr.x) * self.workgroup_size + local_id().x
             if i < self.n {
-                var v = self.apply(self.op, self.x[i])
+                var x = self.x[i]
+                if self.add_width > 0 {
+                    x = x + self.bias[i % self.add_width]
+                }
+                var v = self.apply(self.op, x)
                 if self.gated == 1 {
-                    v = v * self.g[i]
+                    var gi = i
+                    if self.g_width > 0 {
+                        gi = i % self.g_width
+                    }
+                    v = v * self.g[gi]
                 }
                 self.dst[i] = v
             }
@@ -1394,6 +1664,46 @@ let gdn_v4 = gdn{
 
     // ---- recurrent (qwen35 Gated DeltaNet layers) ------------------------
 
+    // Gather + concat + the final state window + scatter. One invocation
+    // owns a channel; it reads the old prefix in order before overwriting
+    // earlier entries of that same channel. The full convolution input is
+    // still materialized for the convolution, for decode and prefill alike.
+    conv_state: {
+        workgroup_size: 128
+        state: shader.buffer_rw(f32)
+        rows: shader.buffer(i32)
+        x: shader.buffer(f32)
+        dst: shader.buffer_rw(f32)
+        prefix: shader.uniform(u32)
+        channels: shader.uniform(u32)
+        tokens: shader.uniform(u32)
+        state_row: shader.uniform(u32)
+        x_t: shader.uniform(u32)
+        x_c: shader.uniform(u32)
+        main: fn() {
+            let c = global_id().x
+            if c < self.channels {
+                let sb = u32(self.rows[0]) * self.state_row + c * self.prefix
+                let db = c * (self.prefix + self.tokens)
+                for k in 0..self.prefix {
+                    let v = self.state[sb + k]
+                    self.dst[db + k] = v
+                    if k >= self.tokens {
+                        self.state[sb + k - self.tokens] = v
+                    }
+                }
+                for t in 0..self.tokens {
+                    let v = self.x[c * self.x_c + t * self.x_t]
+                    let k = self.prefix + t
+                    self.dst[db + k] = v
+                    if k >= self.tokens {
+                        self.state[sb + k - self.tokens] = v
+                    }
+                }
+            }
+        }
+    }
+
     // Short causal convolution (ggml ssm_conv): src [d_conv - 1 + T, C, S]
     // with time along dim 0, w [d_conv, C], dst [C, T, S];
     // dst[c, t, s] = sum_k src[t + k, c, s] * w[k, c]. One invocation per
@@ -1405,6 +1715,7 @@ let gdn_v4 = gdn{
         dst: shader.buffer_rw(f32)
         d_conv: shader.uniform(u32)
         d_inner: shader.uniform(u32)
+        silu: shader.uniform(u32)
         s_nb0: shader.uniform(u32)
         s_nb1: shader.uniform(u32)
         s_nb2: shader.uniform(u32)
@@ -1422,6 +1733,9 @@ let gdn_v4 = gdn{
                 for k in 0..self.d_conv {
                     sum += self.src[base + (t + k) * self.s_nb0] * self.w[c * self.w_nb1 + k]
                 }
+                if self.silu == 1 {
+                    sum = sum / (1.0 + exp(-sum))
+                }
                 self.dst[s * self.d_nb2 + t * self.d_nb1 + c * self.d_nb0] = sum
             }
         }
@@ -1433,6 +1747,8 @@ let gdn_v4 = gdn{
     gated_delta_net_checkpoints: gdn{checkpoints: 1}
     gated_delta_net_v4: gdn_v4{}
     gated_delta_net_v4_checkpoints: gdn_v4{checkpoints: 1}
+    gated_delta_net_state: gdn_state{}
+    gated_delta_net_v4_state: gdn_v4_state{}
 
     // ---- attention -----------------------------------------------------
 
@@ -1766,6 +2082,48 @@ let gdn_v4 = gdn{
             return dot4_u8(a.x, x.x) + dot4_u8(a.y, x.y) + dot4_u8(a.z, x.z) + dot4_u8(a.w, x.w)
         }
     }
+
+    // word: 1 row/32 lanes, 256 threads. Per 16 payload bytes: Q4/Q5
+    // 18 dot4 including x sums, Q6 18, Q8 8; integer counts above.
+    gemv_q4k_word: gemv_decode{format: 4 unit_bytes: 144}
+    gemv_q5k_word: gemv_decode{}
+    gemv_q6k_word: gemv_decode{format: 6 unit_bytes: 224}
+    gemv_q80_word: gemv_decode{format: 8 unit_bytes: 272}
+
+    // rows2: 2 rows/32 lanes. Same weight ops; x loads halved and Q4/Q5/Q6
+    // amortises to 14 dot4/16 payload bytes (10 weight + 8/2 activation).
+    gemv_q4k_rows2: gemv_decode{format: 4 unit_bytes: 144 rpg: 2}
+    gemv_q5k_rows2: gemv_decode{rpg: 2}
+    gemv_q6k_rows2: gemv_decode{format: 6 unit_bytes: 224 rpg: 2}
+    gemv_q80_rows2: gemv_decode{format: 8 unit_bytes: 272 rpg: 2}
+
+    // rows4: 4 rows/32 lanes. Same weight ops; x loads quartered and Q4/Q5/Q6
+    // amortises to 12 dot4/16 payload bytes (10 weight + 8/4 activation).
+    gemv_q4k_rows4: gemv_decode{format: 4 unit_bytes: 144 rpg: 4}
+    gemv_q5k_rows4: gemv_decode{rpg: 4}
+    gemv_q6k_rows4: gemv_decode{format: 6 unit_bytes: 224 rpg: 4}
+    gemv_q80_rows4: gemv_decode{format: 8 unit_bytes: 272 rpg: 4}
+
+    // wide: 1 row/32 lanes, 512 threads; word's 18/18/18/8 dot4 counts
+    // per 16 payload bytes, twice as many independent rows per workgroup.
+    gemv_q4k_wide: gemv_decode{format: 4 unit_bytes: 144 workgroup_size: 512}
+    gemv_q5k_wide: gemv_decode{workgroup_size: 512}
+    gemv_q6k_wide: gemv_decode{format: 6 unit_bytes: 224 workgroup_size: 512}
+    gemv_q80_wide: gemv_decode{format: 8 unit_bytes: 272 workgroup_size: 512}
+
+    // lanes64: word's 18/18/18/8 dot4 per 16 payload bytes, eight units
+    // in flight per row; one subgroup_add per row at subgroup size 64.
+    gemv_q4k_lanes64: gemv_decode{format: 4 unit_bytes: 144 row_lanes: 64}
+    gemv_q5k_lanes64: gemv_decode{row_lanes: 64}
+    gemv_q6k_lanes64: gemv_decode{format: 6 unit_bytes: 224 row_lanes: 64}
+    gemv_q80_lanes64: gemv_decode{format: 8 unit_bytes: 272 row_lanes: 64}
+
+    // lanes128: word's 18/18/18/8 dot4 per 16 payload bytes, sixteen
+    // units in flight; one subgroup_add per row at subgroup size 128.
+    gemv_q4k_lanes128: gemv_decode{format: 4 unit_bytes: 144 row_lanes: 128}
+    gemv_q5k_lanes128: gemv_decode{row_lanes: 128}
+    gemv_q6k_lanes128: gemv_decode{format: 6 unit_bytes: 224 row_lanes: 128}
+    gemv_q80_lanes128: gemv_decode{format: 8 unit_bytes: 272 row_lanes: 128}
 
     // ---- quantised row lookups and prefill matmuls (see `deq`) -------
 

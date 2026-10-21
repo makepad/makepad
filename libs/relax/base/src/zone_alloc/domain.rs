@@ -1,9 +1,9 @@
 //! JIT program heaps. Native allocations never select these heaps: only the program allocator
 //! ABI does. This boundary keeps provided crates and runtime process-wide state shared, even
 //! when called by a domain thread; pointers are still freed according to their owning range.
-use super::compiler::Arena;
+use super::compiler::{self, Arena};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -38,9 +38,6 @@ impl Drop for Registry {
         HELD.store(false, Ordering::Release);
     }
 }
-thread_local! {
-    static CURRENT: Cell<*const DomainHeap> = const { Cell::new(std::ptr::null()) };
-}
 
 impl DomainHeap {
     pub fn new() -> Option<Box<Self>> {
@@ -64,6 +61,10 @@ impl DomainHeap {
     }
     pub fn stats(&self) -> (usize, usize) {
         (self.inner.arena.requested_bytes(), self.inner.arena.committed())
+    }
+    /// (bytes touched in small chunks, bytes in live slots, bytes in large blocks, chunks in the partial list)
+    pub fn detail(&self) -> (usize, usize, usize, usize) {
+        self.inner.arena.detail()
     }
     pub fn range(&self) -> (usize, usize) {
         self.inner.arena.range()
@@ -102,18 +103,9 @@ impl Drop for DomainHeap {
 }
 
 /// The domain registry owns the pointer and keeps it alive through this thread's TLS destructors.
+/// The thread allocates in its arena from now on (null: the system heap).
 pub unsafe fn enter(heap: *const DomainHeap) {
-    let old = CURRENT.with(|c| c.replace(heap));
-    if old != heap {
-        // the thread's chunks in the heap it leaves go back to that heap's partial list (it is
-        // alive: the thread is still registered in its domain); the next heap starts empty
-        if let Some(old) = old.as_ref() {
-            old.inner.arena.detach_thread();
-        }
-        if let Some(heap) = heap.as_ref() {
-            heap.inner.arena.enter_thread();
-        }
-    }
+    compiler::enter_domain(heap.as_ref().map_or(std::ptr::null(), |h| &*h.inner.arena as *const Arena));
 }
 
 #[derive(Clone, Copy)]
@@ -124,7 +116,7 @@ struct Header {
     offset: usize,
 }
 
-unsafe fn allocate(heap: &Heap, size: usize, align: usize, zero: bool) -> *mut u8 {
+unsafe fn allocate(arena: &Arena, size: usize, align: usize, zero: bool) -> *mut u8 {
     let align = align.max(std::mem::align_of::<Header>());
     let offset = (std::mem::size_of::<Header>() + align - 1) & !(align - 1);
     let Some(total) = size.max(1).checked_add(offset) else {
@@ -134,9 +126,9 @@ unsafe fn allocate(heap: &Heap, size: usize, align: usize, zero: bool) -> *mut u
         return std::ptr::null_mut();
     };
     let raw = if zero {
-        heap.arena.alloc_zeroed_counted(layout, size)
+        arena.alloc_zeroed_counted(layout, size)
     } else {
-        heap.arena.alloc_counted(layout, size)
+        arena.alloc_counted(layout, size)
     };
     if raw.is_null() {
         return raw;
@@ -145,9 +137,9 @@ unsafe fn allocate(heap: &Heap, size: usize, align: usize, zero: bool) -> *mut u
     p.cast::<Header>().sub(1).write(Header { size, align, offset });
     p
 }
-unsafe fn release(heap: &Heap, p: *mut u8) {
+unsafe fn release(arena: &Arena, p: *mut u8) {
     let h = p.cast::<Header>().sub(1).read();
-    heap.arena.dealloc_counted(
+    arena.dealloc_counted(
         p.sub(h.offset),
         Layout::from_size_align_unchecked(h.size.max(1) + h.offset, h.align),
         h.size,
@@ -178,31 +170,31 @@ unsafe fn owner(p: *mut u8) -> Option<Arc<Heap>> {
 pub unsafe fn dealloc(p: *mut u8) -> bool {
     // The common free is of a block of the heap this thread is inside (alive while the thread
     // is registered in its domain): no registry lock.
-    if let Some(h) = CURRENT.try_with(|c| c.get()).ok().and_then(|h| h.as_ref()) {
-        if h.inner.arena.owns(p) {
-            release(&h.inner, p);
+    if let Some(a) = compiler::domain_here() {
+        if a.owns(p) {
+            release(a, p);
             return true;
         }
     }
     if let Some(heap) = owner(p) {
-        release(&heap, p);
+        release(&heap.arena, p);
         true
     } else {
-        false
+        web_dealloc_c(p)
     }
 }
 pub unsafe fn realloc_owned(p: *mut u8, size: usize) -> Option<*mut u8> {
-    if let Some(heap) = CURRENT.with(|c| c.get().as_ref()) {
-        if heap.inner.arena.owns(p) { return Some(reallocate(&heap.inner, p, size)); }
+    if let Some(a) = compiler::domain_here() {
+        if a.owns(p) { return Some(reallocate(a, p, size)); }
     }
-    let heap = owner(p)?;
-    Some(reallocate(&heap, p, size))
+    let Some(heap) = owner(p) else { return web_realloc_c(p, size) };
+    Some(reallocate(&heap.arena, p, size))
 }
-unsafe fn reallocate(heap: &Heap, p: *mut u8, size: usize) -> *mut u8 {
+unsafe fn reallocate(heap: &Arena, p: *mut u8, size: usize) -> *mut u8 {
     let h = p.cast::<Header>().sub(1).read();
     let old = Layout::from_size_align_unchecked(h.size.max(1) + h.offset, h.align);
     if let Some(total) = size.max(1).checked_add(h.offset) {
-        if h.size != 0 && size != 0 && Layout::from_size_align(total, h.align).is_ok() && heap.arena.resize_in_place(p.sub(h.offset), old, total) {
+        if h.size != 0 && size != 0 && Layout::from_size_align(total, h.align).is_ok() && heap.resize_in_place(p.sub(h.offset), old, total) {
             p.cast::<Header>().sub(1).write(Header { size, ..h });
             return p;
         }
@@ -215,56 +207,87 @@ unsafe fn reallocate(heap: &Heap, p: *mut u8, size: usize) -> *mut u8 {
     q
 }
 
-/// Rust's allocator ABI carries the layout, so its slots need no C header.
-#[inline]
+/// Rust's allocator ABI carries the layout, so its slots need no C header. The fast paths are
+/// the arena's own (one thread-local read, no call); a thread inside no domain uses the system heap.
 pub unsafe extern "C" fn program_alloc(size: usize, align: usize) -> *mut u8 {
-    let l = Layout::from_size_align_unchecked(size, align);
-    CURRENT.with(|c| match c.get().as_ref() {
-        Some(h) => h.inner.arena.alloc(l),
-        None => System.alloc(l),
-    })
+    compiler::domain_alloc(Layout::from_size_align_unchecked(size, align), system_alloc)
+}
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn system_alloc(size: usize, align: usize) -> *mut u8 {
+    System.alloc(Layout::from_size_align_unchecked(size, align))
 }
 pub unsafe extern "C" fn program_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
     let l = Layout::from_size_align_unchecked(size, align);
-    CURRENT.with(|c| match c.get().as_ref() {
-        Some(h) => h.inner.arena.alloc_zeroed(l),
+    match compiler::domain_here() {
+        Some(a) => a.alloc_zeroed(l),
         None => System.alloc_zeroed(l),
-    })
+    }
 }
+/// Also the native global allocator's free (every free of a provided crate passes here).
 #[inline]
 pub unsafe fn dealloc_layout(p: *mut u8, l: Layout) -> bool {
-    if let Some(h) = CURRENT.with(|c| c.get().as_ref()) {
-        if h.inner.arena.owns(p) {
-            h.inner.arena.dealloc(p, l);
-            return true;
-        }
+    if compiler::domain_dealloc(p, l) {
+        return true;
     }
+    // a block outside every domain heap's range (an ordinary native one, or the web target's
+    // linear memory): no call into the owner lookup
+    let address = p as usize;
+    if address < LOW.load(Ordering::Acquire) || address >= HIGH.load(Ordering::Acquire) {
+        return web_dealloc_layout(p, l);
+    }
+    dealloc_other(p, l)
+}
+/// A block of another domain's heap (freed by native code, another thread or after an enter).
+#[cold]
+#[inline(never)]
+unsafe fn dealloc_other(p: *mut u8, l: Layout) -> bool {
     if let Some(h) = owner(p) {
         h.arena.dealloc(p, l);
         true
-    } else { false }
+    } else { web_dealloc_layout(p, l) }
 }
-#[inline]
 pub unsafe extern "C" fn program_dealloc(p: *mut u8, size: usize, align: usize) {
-    let l = Layout::from_size_align_unchecked(size, align);
-    if !dealloc_layout(p, l) { System.dealloc(p, l); }
+    compiler::domain_free(p, Layout::from_size_align_unchecked(size, align), dealloc_shared)
 }
-unsafe fn resize_layout(h: &Heap, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
-    if h.arena.resize_in_place(p, l, size) { return p; }
-    let q = h.arena.alloc(Layout::from_size_align_unchecked(size, l.align()));
+/// `program_dealloc` of a block that is not of the current domain's heap: another heap's, or the
+/// system heap's.
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn dealloc_shared(p: *mut u8, size: usize, align: usize) {
+    let l = Layout::from_size_align_unchecked(size, align);
+    if !dealloc_other(p, l) {
+        System.dealloc(p, l);
+    }
+}
+unsafe fn resize_layout(a: &Arena, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+    if a.resize_in_place(p, l, size) { return p; }
+    let q = a.alloc(Layout::from_size_align_unchecked(size, l.align()));
     if !q.is_null() {
         std::ptr::copy_nonoverlapping(p, q, l.size().min(size));
-        h.arena.dealloc(p, l);
+        a.dealloc(p, l);
     }
     q
 }
 pub unsafe fn realloc_layout(p: *mut u8, l: Layout, size: usize) -> Option<*mut u8> {
-    if let Some(h) = CURRENT.with(|c| c.get().as_ref()) {
-        if h.inner.arena.owns(p) { return Some(resize_layout(&h.inner, p, l, size)); }
+    if let Some(a) = compiler::domain_here() {
+        if a.owns(p) { return Some(resize_layout(a, p, l, size)); }
     }
-    let h = owner(p)?;
-    Some(resize_layout(&h, p, l, size))
+    let Some(h) = owner(p) else { return web_realloc_layout(p, l, size) };
+    Some(resize_layout(&h.arena, p, l, size))
 }
+
+// The web target's linear memory (web.rs): native code may free or grow the program's blocks.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::web::{dealloc_c as web_dealloc_c, dealloc_layout as web_dealloc_layout, realloc_c as web_realloc_c, realloc_layout as web_realloc_layout};
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+unsafe fn web_dealloc_c(_: *mut u8) -> bool { false }
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+unsafe fn web_realloc_c(_: *mut u8, _: usize) -> Option<*mut u8> { None }
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+unsafe fn web_dealloc_layout(_: *mut u8, _: Layout) -> bool { false }
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+unsafe fn web_realloc_layout(_: *mut u8, _: Layout, _: usize) -> Option<*mut u8> { None }
 pub unsafe extern "C" fn program_resize(p: *mut u8, old: usize, align: usize, size: usize) -> *mut u8 {
     let l = Layout::from_size_align_unchecked(old, align);
     realloc_layout(p, l, size).unwrap_or_else(|| System.realloc(p, l, size))
@@ -283,19 +306,19 @@ extern "C" {
     fn _aligned_free(p: *mut u8);
 }
 pub unsafe extern "C" fn program_malloc(size: usize) -> *mut u8 {
-    CURRENT.with(|c| match c.get().as_ref() {
-        Some(h) => allocate(&h.inner, size, 16, false),
+    match compiler::domain_here() {
+        Some(a) => allocate(a, size, 16, false),
         None => malloc(size),
-    })
+    }
 }
 pub unsafe extern "C" fn program_calloc(n: usize, size: usize) -> *mut u8 {
     let Some(total) = n.checked_mul(size) else {
         return std::ptr::null_mut();
     };
-    CURRENT.with(|c| match c.get().as_ref() {
-        Some(h) => allocate(&h.inner, total, 16, true),
+    match compiler::domain_here() {
+        Some(a) => allocate(a, total, 16, true),
         None => calloc(n, size),
-    })
+    }
 }
 pub unsafe extern "C" fn program_free(p: *mut u8) {
     if !p.is_null() && !dealloc(p) {
@@ -317,30 +340,28 @@ pub unsafe extern "C" fn program_memalign(out: *mut *mut u8, align: usize, size:
     if !align.is_power_of_two() || align < std::mem::size_of::<usize>() {
         return 22;
     }
-    CURRENT.with(|c| {
-        if let Some(h) = c.get().as_ref() {
-            let p = allocate(&h.inner, size, align, false);
-            if p.is_null() {
-                return 12;
-            }
+    if let Some(a) = compiler::domain_here() {
+        let p = allocate(a, size, align, false);
+        if p.is_null() {
+            return 12;
+        }
+        *out = p;
+        return 0;
+    }
+    #[cfg(unix)]
+    {
+        posix_memalign(out, align, size)
+    }
+    #[cfg(windows)]
+    {
+        let p = _aligned_malloc(size, align);
+        if p.is_null() {
+            12
+        } else {
             *out = p;
-            return 0;
+            0
         }
-        #[cfg(unix)]
-        {
-            posix_memalign(out, align, size)
-        }
-        #[cfg(windows)]
-        {
-            let p = _aligned_malloc(size, align);
-            if p.is_null() {
-                12
-            } else {
-                *out = p;
-                0
-            }
-        }
-    })
+    }
 }
 #[cfg(windows)]
 pub unsafe extern "C" fn program_aligned_malloc(size: usize, align: usize) -> *mut u8 {
@@ -357,6 +378,11 @@ pub unsafe extern "C" fn program_aligned_free(p: *mut u8) {
 
 /// The same targets are used by heap inspection with sampling on or off.
 pub fn symbol(name: &[u8]) -> Option<usize> {
+    compiler::bind_program_tls();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(a) = super::web::symbol(name) {
+        return Some(a);
+    }
     Some(match name {
         b"relax_alloc" => program_alloc as *const () as usize,
         b"relax_alloc_zeroed" => program_alloc_zeroed as *const () as usize,
@@ -380,7 +406,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layout_entries_fast_and_slow_paths() {
+        symbol(b"relax_alloc");
+        let first = DomainHeap::new().unwrap();
+        let second = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*first);
+            // small (fast path), large, over-aligned, zero-sized-ish: allocate, fill, free
+            let mut live = Vec::new();
+            for round in 0..3 {
+                for &(size, align) in &[(1, 1), (16, 8), (24, 8), (100, 16), (129, 8), (4096, 16), (4097, 8), (300_000, 8), (64, 64), (5000, 4096)] {
+                    let p = program_alloc(size, align);
+                    assert!(!p.is_null() && p as usize % align == 0);
+                    std::ptr::write_bytes(p, round as u8, size);
+                    live.push((p, size, align));
+                }
+            }
+            assert!(first.stats().0 > 0);
+            // grow a small block through the Rust realloc entry, then free everything
+            let (p, size, align) = live.pop().unwrap();
+            let q = program_resize(p, size, align, size + 9000);
+            assert!(!q.is_null());
+            live.push((q, size + 9000, align));
+            // a thread inside no domain frees half of them (another heap's blocks: the owner path)
+            let half: Vec<(usize, usize, usize)> = live.drain(..live.len() / 2).map(|(p, s, a)| (p as usize, s, a)).collect();
+            std::thread::spawn(move || {
+                for (p, s, a) in half {
+                    program_dealloc(p as *mut u8, s, a);
+                }
+            })
+            .join()
+            .unwrap();
+            // after an enter into another heap the rest are foreign blocks of this thread
+            enter(&*second);
+            for (p, s, a) in live.drain(..) {
+                program_dealloc(p, s, a);
+            }
+            assert_eq!(first.stats().0, 0);
+            assert_eq!(second.stats().0, 0);
+            // the second heap's own blocks take the fast path both ways
+            let p = program_alloc(48, 8);
+            assert!(second.range().0 <= p as usize && (p as usize) < second.range().0 + second.range().1);
+            program_dealloc(p, 48, 8);
+            assert_eq!(second.stats().0, 0);
+            enter(std::ptr::null());
+            // no domain: the system heap
+            let p = program_alloc(32, 8);
+            assert!(owner(p).is_none());
+            program_dealloc(p, 32, 8);
+        }
+    }
+
+    #[test]
     fn cross_thread_free_realloc_and_native_state() {
+        symbol(b"relax_alloc");
         let first = DomainHeap::new().unwrap();
         let second = DomainHeap::new().unwrap();
         unsafe {

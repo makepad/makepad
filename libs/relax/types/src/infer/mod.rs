@@ -21,7 +21,7 @@ use std::cell::{Cell, RefCell};
 pub struct InferCtxtInner {
     type_variable_storage: type_variable::TypeVariableStorage,
     region_constraint_storage: Option<region_constraints::RegionConstraintStorage>,
-    region_obligations: Vec<(TyId, RegionId)>,
+    region_obligations: Vec<(TyId, RegionId, u32)>,
     opaque_type_storage: opaque_types::OpaqueTypeStorage,
     const_unification_storage: unify_key::ConstUnificationStorage,
     int_unification_storage: unify_key::IntUnificationStorage,
@@ -30,7 +30,7 @@ pub struct InferCtxtInner {
 }
 
 impl InferCtxtInner {
-    pub fn region_obligations(&self) -> &[(TyId, RegionId)] { &self.region_obligations }
+    pub fn region_obligations(&self) -> &[(TyId, RegionId, u32)] { &self.region_obligations }
     pub fn const_unification_table(&mut self) -> unify_key::ConstUnificationTable<'_> { self.const_unification_storage.with_log(&mut self.undo_log) }
     pub fn int_unification_table(&mut self) -> unify_key::IntUnificationTable<'_> { self.int_unification_storage.with_log(&mut self.undo_log) }
     pub fn float_unification_table(&mut self) -> unify_key::FloatUnificationTable<'_> { self.float_unification_storage.with_log(&mut self.undo_log) }
@@ -41,11 +41,12 @@ impl InferCtxtInner {
 
 pub struct InferCtxt<'a> {
     pub tcx: &'a Tcx,
-    pub typing_mode: TypingMode,
+    pub typing_mode: Cell<TypingMode>,
     pub recursion_limit: crate::tcx::RecursionLimit,
     pub skip_leak_check: bool,
-    pub enable_next_solver_overflow_fcw: bool,
     pub cause: crate::next_solver::fulfill::ObligationCause,
+    /// The span of the root obligation being proven (the solver's `origin_span`): the origin of the region obligations it registers.
+    pub origin_span: Cell<u32>,
     pub errors: diagnostics::DiagCtxt,
     pub(crate) diagnostic_checkpoint: diagnostics::DiagnosticCheckpoint,
     tainted: Cell<bool>,
@@ -63,11 +64,11 @@ impl<'a> InferCtxt<'a> {
     pub fn set_tainted_by_errors(&self) { self.tainted.set(true); }
     pub fn register_ty_outlives(&self, ty: TyId, region: RegionId) {
         let mut inner = self.inner.borrow_mut();
-        inner.region_obligations.push((ty, region));
+        inner.region_obligations.push((ty, region, self.origin_span.get()));
         inner.undo_log.push(snapshot::undo_log::UndoLog::PushRegionObligation);
     }
     pub fn new(tcx: &'a Tcx, typing_mode: TypingMode, recursion_limit: crate::tcx::RecursionLimit) -> Self {
-        Self { tcx, typing_mode, recursion_limit, skip_leak_check: false, enable_next_solver_overflow_fcw: true, cause: Default::default(), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
+        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, skip_leak_check: false, cause: Default::default(), origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
     }
     pub fn for_item(tcx: &'a Tcx, prog: &crate::program::Program, typing_mode: TypingMode, def: crate::program::DefId) -> Self {
         let mut infcx = Self::new(tcx, typing_mode, crate::tcx::RecursionLimit::for_item(prog, def));
@@ -172,7 +173,7 @@ impl<'a> InferCtxt<'a> {
     /// outlives/obligations.rs:201.
     pub fn take_registered_region_obligations(&self) -> Vec<(TyId, RegionId)> {
         assert!(!self.in_snapshot(), "cannot take registered region obligations in a snapshot");
-        std::mem::take(&mut self.inner.borrow_mut().region_obligations)
+        std::mem::take(&mut self.inner.borrow_mut().region_obligations).into_iter().map(|(t, r, _)| (t, r)).collect()
     }
     /// mod.rs take_and_reset_region_constraints.
     pub fn take_and_reset_region_constraints(&self) -> region_constraints::RegionConstraintData {

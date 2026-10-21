@@ -14,7 +14,7 @@ pub enum Node {
     Synthetic(u32, Synthetic),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Synthetic { Iteration, ForMatch, ForArm, ForBody, AwaitArm, AwaitLoop, MacroArm, MacroBranch, MacroStatement, DebugBranch, AssignBlock, AssignLet, Assignment }
+pub enum Synthetic { Iteration, ForMatch, ForArm, ForBody, ForIntoIter, ForNext, TryBranch, TryFromResidual, WhileElse, WhileElseBlock, WhileBreak, WhileBreakExpr, AwaitIntoFuture, AwaitPollCall, AwaitNewUnchecked, AwaitGetContext, AwaitArm, AwaitLoop, AwaitBody, AwaitPoll, AwaitReady, AwaitPending, AwaitYield, MacroArm, MacroBranch, MacroStatement, DebugBranch, AssignBlock, AssignLet, Assignment }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScopeData { Node, CallSite, Arguments, Destruction, IfThen, IfThenRescope, MatchGuard, Remainder(u32) }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -42,6 +42,10 @@ pub struct ScopeTree {
     nodes: HashMap<(Node, ScopeData), ScopeId>,
     var_map: HashMap<u32, ScopeId>,
     pub rvalue_scopes: HashMap<u32, Option<ScopeId>>,
+    /// The tail expressions of blocks of editions before 2024, whose temporaries are dropped earlier
+    /// from edition 2024 (rustc `backwards_incompatible_scope`; recorded for the lint
+    /// `tail_expr_drop_order`, which only `makepad check` runs).
+    backwards_incompatible_nodes: std::collections::HashSet<Node>,
     positions: HashMap<u32, ExprPosition>,
     yield_in_scope: Vec<Vec<u32>>,
 }
@@ -57,14 +61,26 @@ impl ScopeTree {
     pub fn yields_in_scope(&self, scope: ScopeId) -> &[u32] { &self.yield_in_scope[scope.0 as usize] }
     /// `None` is static extension, never an unknown expression (which is a caller error).
     /// rustc_middle/src/middle/region.rs:308,346: return the child of Destruction.
-    pub fn temporary_scope(&self, expr: ExprId) -> Option<ScopeId> {
+    pub fn temporary_scope(&self, expr: ExprId) -> Option<ScopeId> { self.temp_lifetime(expr).0 }
+    /// rustc `ScopeTree::temporary_scope`: the scope the temporaries of `expr` die in, and the scope
+    /// they will die in from edition 2024 when that differs (`TempLifetime`).
+    pub fn temp_lifetime(&self, expr: ExprId) -> (Option<ScopeId>, Option<ScopeId>) {
         let mut scope = self.scope(Node::Expr(expr.0), ScopeData::Node).expect("expression outside scope tree");
-        if let Some(s) = self.rvalue_scopes.get(&expr.0) { return *s; }
+        if let Some(s) = self.rvalue_scopes.get(&expr.0) { return (*s, None); }
+        let mut backwards_incompatible = None;
         while let Some(p) = self.encl_scope(scope) {
-            match self.scopes[p.0 as usize].data {
-                ScopeData::Destruction => return Some(scope),
-                ScopeData::IfThenRescope | ScopeData::MatchGuard => return Some(p),
-                _ => scope = p,
+            let data = &self.scopes[p.0 as usize];
+            match data.data {
+                ScopeData::Destruction => return (Some(scope), backwards_incompatible),
+                ScopeData::IfThenRescope | ScopeData::MatchGuard => return (Some(p), backwards_incompatible),
+                _ => {
+                    // passing through a tail expression whose temporaries live longer than they will
+                    // from edition 2024: remember the first one (region.rs `default_temporary_scope`)
+                    if backwards_incompatible.is_none() && self.backwards_incompatible_nodes.contains(&data.node) {
+                        backwards_incompatible = self.scope(data.node, ScopeData::Node);
+                    }
+                    scope = p;
+                }
             }
         }
         panic!("expression without destruction scope")
@@ -140,7 +156,11 @@ impl Resolve<'_> {
         for (i, stmt) in ast.list(statements).iter().enumerate() {
             if i + 1 == statements.len() {
                 if let Some((e, false)) = ast.stmt_expr(stmt) {
-                    self.expr(e, node_edition(self.file, Node::Block(b.0)) >= 2024);
+                    let terminating = node_edition(self.file, Node::Block(b.0)) >= 2024;
+                    if !terminating && crate::lint::enabled() {
+                        self.tree.backwards_incompatible_nodes.insert(Node::Expr(e.0));
+                    }
+                    self.expr(e, terminating);
                     break;
                 }
             }
@@ -265,7 +285,17 @@ impl Resolve<'_> {
             }
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => { self.expr(a, false); self.expr(b, false); }
             ExprKind::Unary(_, x) | ExprKind::AddrOf(_, _, x) | ExprKind::Cast(x, _) | ExprKind::Field(x, _) |
-            ExprKind::TupleField(x, _) | ExprKind::Paren(x) | ExprKind::Box(x) | ExprKind::Try(x) => self.expr(x, false),
+            ExprKind::TupleField(x, _) | ExprKind::Paren(x) | ExprKind::Box(x) => self.expr(x, false),
+            ExprKind::Try(x) => {
+                // `match Try::branch(x) { .. }`: the call has its own scope
+                let cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::TryBranch), false);
+                self.expr(x, false);
+                self.cx = cx;
+                // `return FromResidual::from_residual(residual)` of the break arm
+                self.node(Node::Synthetic(e.0, Synthetic::TryFromResidual), false);
+                self.cx = cx;
+            }
             ExprKind::Call(f, args) => { self.expr(f, false); for x in ast.list(args) { self.expr(*x, false); } }
             ExprKind::MethodCall(recv, row) => { self.expr(recv, false); for x in ast.list(ast.row(row).args) { self.expr(*x, false); } }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => self.block(b, false),
@@ -279,17 +309,30 @@ impl Resolve<'_> {
                 let crate::ast::WhileRow { cond, body: b, .. } = *ast.row(row);
                 // rustc_ast_lowering/src/expr.rs:659: loop { if cond { body } else { break } }.
                 self.node(Node::Synthetic(e.0, Synthetic::Iteration), true);
+                let cx = self.cx;
                 self.if_then(e, cond, b);
+                self.cx = cx;
+                // `else { break; }`: the else block expression, its block and its statement
+                self.node(Node::Synthetic(e.0, Synthetic::WhileElse), true);
+                self.node(Node::Synthetic(e.0, Synthetic::WhileElseBlock), false);
+                self.node(Node::Synthetic(e.0, Synthetic::WhileBreak), true);
+                self.node(Node::Synthetic(e.0, Synthetic::WhileBreakExpr), false);
             }
             ExprKind::Loop(b, _) => self.block(b, true),
             ExprKind::For(row) => {
                 let crate::ast::ForRow { pat: p, iter: head, body: b, .. } = *ast.row(row);
                 // rustc_ast_lowering/src/expr.rs:1726,1875: DropTemps(match into_iter(head) { .. }).
                 self.node(Node::Synthetic(e.0, Synthetic::ForMatch), true);
+                let cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::ForIntoIter), false);
                 self.expr(head, false);
+                self.cx = cx;
                 self.node(Node::Synthetic(e.0, Synthetic::ForArm), true);
                 self.node(Node::Synthetic(e.0, Synthetic::Iteration), true);
                 self.node(Node::Synthetic(e.0, Synthetic::ForBody), true);
+                let cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::ForNext), false);
+                self.cx = cx;
                 self.cx.var_parent = self.cx.parent;
                 self.pat(p);
                 self.block(b, false);
@@ -326,10 +369,33 @@ impl Resolve<'_> {
             }
             ExprKind::Await(x) => {
                 // rustc_ast_lowering/src/expr.rs:1105-1168: the awaitee arm encloses the poll loop.
+                let cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitIntoFuture), false);
                 self.expr(x, false);
+                self.cx = cx;
                 let future_scope = self.node(Node::Synthetic(e.0, Synthetic::AwaitArm), true);
                 self.node(Node::Synthetic(e.0, Synthetic::AwaitLoop), true);
+                // loop { match poll(..) { Ready(result) => break result, Pending => {} } task_context = yield (); }
+                let loop_cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitBody), true);
+                let body_cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitPoll), true);
+                let poll_cx = self.cx;
+                // the poll call and the calls of its arguments
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitPollCall), false);
+                let call_cx = self.cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitNewUnchecked), false);
+                self.cx = call_cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitGetContext), false);
+                self.cx = poll_cx;
+                for arm in [Synthetic::AwaitReady, Synthetic::AwaitPending] {
+                    self.node(Node::Synthetic(e.0, arm), true);
+                    self.cx = poll_cx;
+                }
+                self.cx = body_cx;
+                self.node(Node::Synthetic(e.0, Synthetic::AwaitYield), true);
                 self.suspension(e, YieldKind::Await { operand: x, future_scope });
+                self.cx = loop_cx;
             }
             ExprKind::Yield(x) => { if let Some(x) = x.get() { self.expr(x, false); } self.suspension(e, YieldKind::Yield); }
             ExprKind::Tuple(xs) | ExprKind::Array(xs) => for x in ast.list(xs) { self.expr(*x, false); },

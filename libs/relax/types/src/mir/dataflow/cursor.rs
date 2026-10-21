@@ -12,6 +12,7 @@ impl<'r, 'a> ResultsCursor<'r, 'a> {
     pub(super) fn new(results: &'r Results<'a>) -> Self {
         Self { results, state: results.analysis.bottom_value(results.body), block: None, next_step: 0 }
     }
+    pub fn body(&self) -> &'a Body { self.results.body }
     pub fn get(&self) -> &BitSet {
         assert!(self.block.is_some(), "cursor must be positioned before inspection");
         &self.state

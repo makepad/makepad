@@ -1,7 +1,6 @@
 //! C signatures from Rust types (the classification itself is relax-codegen's cabi).
 
-pub use relax_codegen::cabi::*;
-use crate::rir::{CAgg, CArg, CConv, CSig, Mem};
+use relax_backend::rir::{CAgg, CArg, CConv, CSig, Mem};
 use crate::types::{Abi, TyId, TyKind};
 
 fn mem_size(m: Mem) -> u32 {
@@ -134,7 +133,7 @@ pub fn c_sig(u: &crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Option<u
         match c_arg(u, ret) {
             CArg::Scalar(Mem::Int(n, signed)) => {
                 if n < 8 {
-                    ret_narrow = Some(crate::rir::IntTy { bits: n * 8, signed });
+                    ret_narrow = Some(relax_backend::rir::IntTy { bits: n * 8, signed });
                 }
                 None
             }

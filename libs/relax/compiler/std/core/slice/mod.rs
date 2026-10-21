@@ -32,19 +32,21 @@ pub use join::{concat_str, concat_vec, join_str, join_vec};
 use crate::cmp::Ordering;
 use crate::intrinsics_mem as im;
 
-pub unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+#[rustc_diagnostic_item = "slice_from_raw_parts"]
+pub const unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
     im::slice_from_raw(data, len)
 }
 
-pub unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
+#[rustc_diagnostic_item = "slice_from_raw_parts_mut"]
+pub const unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {
     im::slice_from_raw_mut(data, len)
 }
 
-pub fn from_ref<T>(s: &T) -> &[T] {
+pub const fn from_ref<T>(s: &T) -> &[T] {
     unsafe { im::slice_from_raw(s as *const T, 1) }
 }
 
-pub fn from_mut<T>(s: &mut T) -> &mut [T] {
+pub const fn from_mut<T>(s: &mut T) -> &mut [T] {
     unsafe { im::slice_from_raw_mut(s as *mut T, 1) }
 }
 
@@ -133,7 +135,7 @@ pub fn reverse<T>(s: &mut [T]) {
     }
 }
 
-pub fn rotate_left<T>(s: &mut [T], mid: usize) {
+pub const fn rotate_left<T>(s: &mut [T], mid: usize) {
     if mid > s.len() {
         crate::panicking::panic_str("assertion failed: mid <= self.len()");
     }
@@ -145,7 +147,7 @@ pub fn rotate_left<T>(s: &mut [T], mid: usize) {
     reverse(s);
 }
 
-pub fn rotate_right<T>(s: &mut [T], k: usize) {
+pub const fn rotate_right<T>(s: &mut [T], k: usize) {
     if k > s.len() {
         crate::panicking::panic_str("assertion failed: k <= self.len()");
     }
@@ -180,7 +182,7 @@ pub fn clone_from_slice<T: Clone>(dst: &mut [T], src: &[T]) {
 
 #[cold]
 #[track_caller]
-fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {
+const fn len_mismatch_fail(dst_len: usize, src_len: usize) -> ! {
     crate::panicking::panic_fmt(format_args!(
         "copy_from_slice: source slice length ({}) does not match destination slice length ({})",
         src_len, dst_len
@@ -250,7 +252,7 @@ pub fn ends_with<T: PartialEq>(s: &[T], needle: &[T]) -> bool {
 }
 
 #[track_caller]
-pub fn swap<T>(s: &mut [T], a: usize, b: usize) {
+pub const fn swap<T>(s: &mut [T], a: usize, b: usize) {
     let len = s.len();
     if a >= len {
         crate::panicking::panic_bounds(a, len);
@@ -273,6 +275,106 @@ pub fn split_at_mut<T>(s: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
     unsafe {
         let p = s as *mut [T] as *mut T;
         (im::slice_from_raw_mut(p, mid), im::slice_from_raw_mut(im::ptr_add_mut(p, mid), len - mid))
+    }
+}
+
+/// rustc library/core/src/slice/mod.rs (1.97.1) `get_disjoint_unchecked_mut`: the elements (or
+/// sub-slices) at `indices`, which the caller guarantees are in bounds and pairwise disjoint.
+#[track_caller]
+pub unsafe fn get_disjoint_unchecked_mut<T, I, const N: usize>(s: &mut [T], indices: [I; N]) -> [&mut I::Output; N]
+where
+    I: GetDisjointMutIndex + SliceIndex<[T]>,
+{
+    let slice: *mut [T] = s;
+    crate::array::from_fn(|k| unsafe { &mut *indices[k].clone().get_unchecked_mut(slice) })
+}
+
+/// rustc's `get_disjoint_mut`: the elements (or sub-slices) at `indices` when every one is in bounds
+/// and no two overlap.
+pub fn get_disjoint_mut<T, I, const N: usize>(s: &mut [T], indices: [I; N]) -> Result<[&mut I::Output; N], GetDisjointMutError>
+where
+    I: GetDisjointMutIndex + SliceIndex<[T]>,
+{
+    get_disjoint_check_valid(&indices, s.len())?;
+    // SAFETY: every index is in bounds and they are pairwise disjoint (checked above)
+    unsafe { Ok(get_disjoint_unchecked_mut(s, indices)) }
+}
+
+/// rustc's `get_disjoint_check_valid`: every index against `len` and against each earlier one.
+fn get_disjoint_check_valid<I: GetDisjointMutIndex, const N: usize>(indices: &[I; N], len: usize) -> Result<(), GetDisjointMutError> {
+    for (i, idx) in indices.iter().enumerate() {
+        if !idx.is_in_bounds(len) {
+            return Err(GetDisjointMutError::IndexOutOfBounds);
+        }
+        for idx2 in &indices[..i] {
+            if idx.is_overlapping(idx2) {
+                return Err(GetDisjointMutError::OverlappingIndices);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The error of `get_disjoint_mut` (rustc's `GetDisjointMutError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetDisjointMutError {
+    /// An index provided was out-of-bounds for the slice.
+    IndexOutOfBounds,
+    /// Two indices provided were overlapping.
+    OverlappingIndices,
+}
+
+impl crate::fmt::Display for GetDisjointMutError {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        let msg = match self {
+            GetDisjointMutError::IndexOutOfBounds => "an index is out of bounds",
+            GetDisjointMutError::OverlappingIndices => "there were overlapping indices",
+        };
+        crate::fmt::Display::fmt(msg, f)
+    }
+}
+
+impl crate::error::Error for GetDisjointMutError {}
+
+/// rustc's `GetDisjointMutIndex`: an index `get_disjoint_mut` takes (usize, `Range<usize>`,
+/// `RangeInclusive<usize>`).
+pub unsafe trait GetDisjointMutIndex: Clone {
+    /// `self` is in bounds for `len` slice elements.
+    fn is_in_bounds(&self, len: usize) -> bool;
+    /// `self` overlaps `other` (zero-length ranges do not overlap at the ends, only in the middle).
+    fn is_overlapping(&self, other: &Self) -> bool;
+}
+
+unsafe impl GetDisjointMutIndex for usize {
+    #[inline]
+    fn is_in_bounds(&self, len: usize) -> bool {
+        *self < len
+    }
+    #[inline]
+    fn is_overlapping(&self, other: &Self) -> bool {
+        *self == *other
+    }
+}
+
+unsafe impl GetDisjointMutIndex for crate::ops::Range<usize> {
+    #[inline]
+    fn is_in_bounds(&self, len: usize) -> bool {
+        (self.start <= self.end) & (self.end <= len)
+    }
+    #[inline]
+    fn is_overlapping(&self, other: &Self) -> bool {
+        (self.start < other.end) & (other.start < self.end)
+    }
+}
+
+unsafe impl GetDisjointMutIndex for crate::ops::RangeInclusive<usize> {
+    #[inline]
+    fn is_in_bounds(&self, len: usize) -> bool {
+        (self.start <= self.end) & (self.end < len)
+    }
+    #[inline]
+    fn is_overlapping(&self, other: &Self) -> bool {
+        (self.start <= other.end) & (other.start <= self.end)
     }
 }
 

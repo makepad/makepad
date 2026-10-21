@@ -10,6 +10,10 @@
 
 use crate::string::String;
 
+/// The harness `makepad test <package>` runs a crate's `#[test]` fns with (libtest's semantics).
+#[doc(hidden)]
+pub mod test;
+
 // These entries only exchange scalars; every input is valid. No pointers or
 // caller-owned buffers cross the loader boundary.
 extern "C" {

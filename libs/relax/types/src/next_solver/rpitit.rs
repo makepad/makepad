@@ -30,6 +30,12 @@ impl Tcx {
         OpaqueGenerics { parent: table.generic_indices.clone(), captured_lifetimes }
     }
 
+    /// `map_opaque_lifetime_to_parent_lifetime` of each lifetime the opaque captures.
+    pub(crate) fn opaque_captured_parent_lifetimes(&self, prog: &Program, opaque: DefId) -> Vec<RegionId> {
+        let table = self.resolve_bound_vars(prog, prog.opaque_owner(opaque));
+        table.opaque_captured_parent_lifetimes(opaque, prog.opaque_owner(opaque)).into_iter().map(|k| self.tys.intern_region(k)).collect()
+    }
+
     /// hir_ty_lowering/mod.rs:3631-3690: opaque arguments use the resolved
     /// capture map. Lowering never discovers or publishes declaration inputs.
     pub(crate) fn lower_opaque_ty(&self, prog: &Program, opaque: DefId) -> TyId {
@@ -99,12 +105,17 @@ impl Tcx {
     }
 
     pub fn own_clauses_of(&self, prog: &Program, def: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def).own_clauses.get_or_init(|| self.own_clauses_uncached(prog, def))
+        &self.declaration_queries(prog, def).own_clauses.get_or_init_cyclic(|| self.own_clauses_uncached(prog, def)).0
+    }
+
+    /// The errors of lowering the definition's clauses (see `own_clauses_uncached`).
+    pub fn own_clauses_errors(&self, prog: &Program, def: DefId) -> &[String] {
+        &self.declaration_queries(prog, def).own_clauses.get_or_init_cyclic(|| self.own_clauses_uncached(prog, def)).1
     }
 
     /// rustc_hir_analysis/src/collect/item_bounds.rs: elaboration belongs to the provider.
     pub fn item_bounds(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).item_bounds.get_or_init(|| self.item_bounds_uncached(prog, def_id))
+        self.declaration_queries(prog, def_id).item_bounds.get_or_init_cyclic(|| self.item_bounds_uncached(prog, def_id))
     }
     fn item_bounds_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
         let mut out = Vec::new();
@@ -116,7 +127,7 @@ impl Tcx {
         out
     }
     pub fn explicit_item_bounds(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).explicit_item_bounds.get_or_init(|| self.explicit_item_bounds_uncached(prog, def_id))
+        self.declaration_queries(prog, def_id).explicit_item_bounds.get_or_init_cyclic(|| self.explicit_item_bounds_uncached(prog, def_id))
     }
     pub(crate) fn explicit_item_bounds_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
         match prog.impl_trait_in_trait_data.get(&def_id) {
@@ -130,6 +141,12 @@ impl Tcx {
             for predicate in &mut bounds { *predicate = fold::fold_predicate(&self.tys, predicate, &mut folder); }
             return bounds;
         }
+        self.lower_assoc_item_bounds(prog, def_id, &crate::tcx::EvalState::new())
+    }
+
+    /// The bounds written on an associated type (`type A: Bound;`), lowered with `state`'s
+    /// error capture.
+    fn lower_assoc_item_bounds(&self, prog: &Program, def_id: DefId, state: &crate::tcx::EvalState) -> Vec<Predicate> {
         let def = prog.def(def_id);
         let ast = &prog.files[def.file as usize].ast;
         let Some(&crate::ast::TypeAliasItem { bounds, .. }) = ast.as_alias(&ast.item(def.item).kind) else { return Vec::new(); };
@@ -139,11 +156,107 @@ impl Tcx {
         for &i in &indices.lifetimes { regions.push(self.tys.intern_region(RegionKind::ReEarlyParam(i))); }
         let alias = self.tys.intern(TyKind::Alias(IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id }, args: self.tys.mk_list(&indices.identity_types_consts(&self.tys)), regions: self.tys.intern_region_args(&regions) }));
         env.regions = env.regions.with_binder(None);
-        let state = crate::tcx::EvalState::new();
-        let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
+        let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv::fully_monomorphized(&prog), state);
         let mut bounds_out = Vec::new();
         self.lower_bounds(&cx, def_id, &env, alias, bounds, true, super::collect::PredicateFilter::All, &mut bounds_out);
+        // item_bounds.rs:72-90: also collect `where Self::Assoc: Trait` from the parent trait's where clauses
+        let trait_def = prog.def(def_id).parent;
+        if prog.def(trait_def).kind == DefKind::Trait {
+            for clause in self.own_clauses_of(prog, trait_def) {
+                if let Some(clause) = self.remap_gat_vars_and_recurse_into_nested_projections(prog, trait_def, def_id, clause) {
+                    if !bounds_out.contains(&clause) { bounds_out.push(clause); }
+                }
+            }
+        }
         bounds_out
+    }
+
+    /// item_bounds.rs:112-232: a trait where clause whose self type is (a projection of) the associated
+    /// item, `for<'a> Self::Gat<'a>: Bound<'b>` becoming a bound of the GAT over its own parameters.
+    fn remap_gat_vars_and_recurse_into_nested_projections(&self, prog: &Program, trait_def: DefId, assoc_item: DefId, clause: &Predicate) -> Option<Predicate> {
+        let mut clause_ty = match &clause.kind {
+            PredicateKind::Clause(ClauseKind::Trait(t)) => match t.trait_ref.args.first()? { GenericArg::Type(t) => *t, _ => return None },
+            PredicateKind::Clause(ClauseKind::Projection(p)) => {
+                let AliasTerm::Ty(alias) = p.projection_term else { return None };
+                let TyKind::Alias(_, a) = self.tys.kind(alias) else { return None };
+                *self.tys.list(a.args).first()?
+            }
+            PredicateKind::Clause(ClauseKind::TypeOutlives(ty, _)) => *ty,
+            _ => return None,
+        };
+        let trait_identity = self.generic_indices_of(prog, trait_def).identity_args(&self.tys);
+        let gat_vars: Vec<GenericArg> = loop {
+            let TyKind::Alias(_, a) = self.tys.kind(clause_ty) else { return None };
+            let AliasTyKind::Projection { def_id: alias_def } = a.kind else { return None };
+            let full = self.complete_args(prog, alias_def, self.tys.list(a.args), a.regions);
+            if prog.def(alias_def).parent == trait_def && full[..trait_identity.len().min(full.len())] == trait_identity[..] && alias_def == assoc_item {
+                break full[trait_identity.len()..].to_vec();
+            }
+            // a nested projection: its self type may be the item
+            clause_ty = *self.tys.list(a.args).first()?;
+        };
+        if gat_vars.is_empty() { return Some(clause.clone()); }
+        // every GAT argument must be a distinct bound variable of the clause's own binder
+        let mut mapping: Vec<(u32, GenericArg)> = Vec::new();
+        for (k, var) in gat_vars.iter().enumerate() {
+            let index = (trait_identity.len() + k) as u32;
+            let (bound, mapped) = match var {
+                GenericArg::Lifetime(r) => match self.tys.region_kind(*r) {
+                    RegionKind::ReBound(0, v) => (v.0, GenericArg::Lifetime(self.tys.intern_region(RegionKind::ReEarlyParam(index)))),
+                    _ => return None,
+                },
+                GenericArg::Type(t) => match self.tys.kind(*t) {
+                    TyKind::Bound(0, bt) => (bt.var.0, GenericArg::Type(self.tys.intern(TyKind::Param(index)))),
+                    _ => return None,
+                },
+                GenericArg::Const(_) => return None,
+            };
+            if mapping.iter().any(|(b, _)| *b == bound) { return None; }
+            mapping.push((bound, mapped));
+        }
+        struct MapAndCompress<'a> { tcx: &'a Tcx, mapping: Vec<(u32, GenericArg)>, still: Vec<(u32, BoundVariableKind)>, kinds: &'a [BoundVariableKind] }
+        impl MapAndCompress<'_> {
+            fn new_var(&mut self, old: u32) -> u32 {
+                if let Some(i) = self.still.iter().position(|(o, _)| *o == old) { return i as u32; }
+                self.still.push((old, self.kinds[old as usize].clone()));
+                (self.still.len() - 1) as u32
+            }
+        }
+        impl TypeFolder for MapAndCompress<'_> {
+            fn fold_region(&mut self, tys: &Types, r: RegionId, depth: u32) -> RegionId {
+                if let RegionKind::ReBound(d, v) = tys.region_kind(r) {
+                    if d + 1 == depth {
+                        if let Some((_, GenericArg::Lifetime(m))) = self.mapping.iter().find(|(b, _)| *b == v.0) { return *m; }
+                        let n = self.new_var(v.0);
+                        return tys.intern_region(RegionKind::ReBound(d, crate::types::BoundVar(n)));
+                    }
+                }
+                r
+            }
+            fn fold_ty(&mut self, tys: &Types, t: TyId, depth: u32) -> TyId {
+                if let TyKind::Bound(d, bt) = tys.kind(t) {
+                    if *d + 1 == depth {
+                        if let Some((_, GenericArg::Type(m))) = self.mapping.iter().find(|(b, _)| *b == bt.var.0) { return *m; }
+                        let n = self.new_var(bt.var.0);
+                        return tys.intern(TyKind::Bound(*d, crate::types::BoundTy { var: crate::types::BoundVar(n), kind: bt.kind }));
+                    }
+                }
+                super_fold_ty(tys, t, self, depth)
+            }
+        }
+        let mut folder = MapAndCompress { tcx: self, mapping, still: Vec::new(), kinds: &clause.bound_vars };
+        let _ = folder.tcx;
+        let folded = fold::fold_predicate(&self.tys, clause, &mut folder);
+        let bound_vars: Vec<BoundVariableKind> = folder.still.iter().map(|(_, k)| k.clone()).collect();
+        Some(Predicate { kind: folded.kind, bound_vars: bound_vars.into() })
+    }
+
+    /// The errors of lowering an associated type's bounds (wfcheck lowers them for every item).
+    pub(crate) fn assoc_item_bounds_errors(&self, prog: &Program, def_id: DefId) -> Vec<String> {
+        let state = crate::tcx::EvalState::new();
+        state.errors.replace(Some(Vec::new()));
+        self.lower_assoc_item_bounds(prog, def_id, &state);
+        state.errors.take().unwrap_or_default()
     }
 }
 

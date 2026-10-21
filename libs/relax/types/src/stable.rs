@@ -318,9 +318,9 @@ pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
         })
         .collect();
     if chunk > 0 {
-        std::thread::scope(|s| {
+        crate::pool::scope(|s| {
             for (out, inp) in fh.chunks_mut(chunk).zip(inputs.chunks(chunk)) {
-                s.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                s.spawn(move || {
                     for (o, (path, src)) in out.iter_mut().zip(inp) {
                         *o = crate::crate_image::file_hash(path, src);
                     }
@@ -409,7 +409,7 @@ pub fn loaded_crate_fingerprint(prog: &Program, ci: usize, previous: &[Option<u1
         (prog.file_paths[i].as_str(), &f.src[..(f.src_len as usize).min(f.src.len())])
     }).collect();
     let name = prog.syms.str(c.name);
-    Some(std::thread::scope(|s| s.spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    Some(crate::pool::scope(|s| s.spawn(move || {
         crate::crate_image::fingerprint(name, c.root_path(), c.edition, c.proc_macro, &c.cfg.set,
             inputs.into_iter().map(|(p, b)| crate::crate_image::file_hash(p, b)), &deps, c.context.fingerprint())
     }).join().expect("front fingerprint worker")))
@@ -452,18 +452,19 @@ mod tests {
 
 // ------------------------------------------------------------ build id
 
-/// The running binary's identity: macOS = the Mach-O LC_UUID of the main executable (ld writes a
-/// content hash there), elsewhere a hash of the executable file. Changes with any change to the
+/// The running binary's identity, from the linked bytes (nothing is computed from sources): macOS =
+/// the page hashes in the linker's code signature, Linux = the linker's GNU build id (a content
+/// hash), otherwise a hash of the executable file. Changes with any change to the
 /// compiler, codegen or rustc flags; never a timestamp.
 pub fn build_id() -> u128 {
     static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
         #[cfg(target_os = "macos")]
         {
-            if let Some(u) = macho_uuid() {
+            if let Some(cd) = macho_code_directory() {
                 let mut h = Sip128::new();
-                h.str("build-uuid");
-                h.write(&u);
+                h.str("build-codedir");
+                h.write(cd);
                 return h.finish128();
             }
         }
@@ -516,31 +517,63 @@ fn android_runtime_image() -> Vec<u8> {
     panic!("cannot read makepad run's Android runtime image for its build identity");
 }
 
+/// The linker's code signature CodeDirectory of the running executable (arm64 macOS: ld always
+/// writes one). It holds a SHA-256 of every page of the final file (code, data, symbol tables,
+/// everything), so it changes with any byte; read from the mapped image, no file I/O. (LC_UUID is
+/// not enough: it does not cover the symbol table or other link-edit data.)
 #[cfg(target_os = "macos")]
-fn macho_uuid() -> Option<[u8; 16]> {
+fn macho_code_directory() -> Option<&'static [u8]> {
     extern "C" {
         static _mh_execute_header: u8;
     }
     unsafe {
         let base = &_mh_execute_header as *const u8;
         let rd = |off: usize| -> u32 { std::ptr::read_unaligned(base.add(off) as *const u32) };
+        let rd64 = |off: usize| -> u64 { std::ptr::read_unaligned(base.add(off) as *const u64) };
         if rd(0) != 0xfeed_facf {
             return None;
         }
         let ncmds = rd(16) as usize;
         let mut off = 32;
+        let (mut text_vm, mut link_vm, mut link_fileoff) = (None, 0u64, 0u64);
+        let mut sig = None;
         for _ in 0..ncmds {
             let cmd = rd(off);
             let size = rd(off + 4) as usize;
-            if cmd == 0x1b {
-                let mut u = [0u8; 16];
-                std::ptr::copy_nonoverlapping(base.add(off + 8), u.as_mut_ptr(), 16);
-                return Some(u);
-            }
             if size == 0 {
                 return None;
             }
+            if cmd == 0x19 {
+                // LC_SEGMENT_64: segname[16] vmaddr vmsize fileoff filesize
+                let name = std::slice::from_raw_parts(base.add(off + 8), 16);
+                if name.starts_with(b"__TEXT\0") {
+                    text_vm = Some(rd64(off + 24));
+                } else if name.starts_with(b"__LINKEDIT\0") {
+                    link_vm = rd64(off + 24);
+                    link_fileoff = rd64(off + 40);
+                }
+            } else if cmd == 0x1d {
+                // LC_CODE_SIGNATURE: dataoff datasize
+                sig = Some((rd(off + 8) as u64, rd(off + 12) as usize));
+            }
             off += size;
+        }
+        let (dataoff, datasize) = sig?;
+        let slide = (base as u64).wrapping_sub(text_vm?);
+        let blob = std::slice::from_raw_parts(
+            slide.wrapping_add(link_vm).wrapping_add(dataoff.wrapping_sub(link_fileoff)) as *const u8,
+            datasize,
+        );
+        // SuperBlob (big endian): magic 0xfade0cc0, length, count, then (type, offset) per blob
+        let be = |o: usize| -> Option<usize> { Some(u32::from_be_bytes(blob.get(o..o + 4)?.try_into().ok()?) as usize) };
+        if be(0)? != 0xfade_0cc0 {
+            return None;
+        }
+        for i in 0..be(8)? {
+            let (ty, boff) = (be(12 + i * 8)?, be(16 + i * 8)?);
+            if ty == 0 && be(boff)? == 0xfade_0c02 {
+                return blob.get(boff..boff + be(boff + 4)?);
+            }
         }
         None
     }

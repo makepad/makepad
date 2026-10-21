@@ -11,7 +11,7 @@
 use relax_session::sync::Mutex;
 
 /// The shipped relaxation features (spec names).
-pub const FEATURES: &[&str] = &["mut", "imports", "field-views", "two-phase"];
+pub const FEATURES: &[&str] = &["mut", "imports", "field-views", "two-phase", "polonius", "disjoint-index"];
 
 /// One accepted relaxation.
 #[derive(Clone, Debug)]
@@ -22,8 +22,44 @@ pub struct Note {
     /// the rustc error code strict mode reports
     pub code: &'static str,
     pub msg: String,
-    /// write-back: insert `text` at byte `pos` of `file`
-    pub fix: Option<(String, u32, String)>,
+    /// write-back: the structured edits of `file` (applied by `apply`)
+    pub fix: Option<(String, Vec<Edit>)>,
+}
+
+/// One structured edit of a source file: bytes `lo..hi` become `text` (`lo == hi` inserts). Every
+/// write-back of relaxed Rust (relaxed `mut` / imports, field views, Polonius, disjoint indices) is a
+/// list of these at positions the AST, the token table or MIR spans give; `apply` is the one printer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub lo: u32,
+    pub hi: u32,
+    pub text: String,
+}
+
+/// The printer: splice `edits` into `src`. Identical edits apply once; edits at one insertion
+/// position apply in ascending text order; an edit overlapping one already taken is left out
+/// (returned, so the caller reports it).
+pub fn apply(src: &[u8], edits: &[Edit]) -> (Vec<u8>, Vec<Edit>) {
+    let mut v: Vec<&Edit> = edits.iter().collect();
+    v.sort_by(|a, b| (a.lo, a.hi, &a.text).cmp(&(b.lo, b.hi, &b.text)));
+    v.dedup();
+    let mut out = Vec::with_capacity(src.len() + 64);
+    let mut left = Vec::new();
+    let mut at = 0usize;
+    for e in v {
+        let (lo, hi) = (e.lo as usize, e.hi as usize);
+        // a replacement must start at or after the end of the previous one; insertions may share
+        // a position with each other and with the start of a replacement
+        if lo < at || hi > src.len() || lo > hi {
+            left.push(e.clone());
+            continue;
+        }
+        out.extend_from_slice(&src[at..lo]);
+        out.extend_from_slice(e.text.as_bytes());
+        at = hi;
+    }
+    out.extend_from_slice(&src[at..]);
+    (out, left)
 }
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
@@ -145,33 +181,29 @@ pub fn print_report(notes: &[Note]) {
     eprintln!("makepad-run strict-report: {} site(s) rustc rejects{}{}", v.len(), if t.is_empty() { "" } else { ": " }, t.join(", "));
 }
 
-/// `makepad fix --to-strict`: applies the write-back edits (each once, from the end of each file
-/// backwards). Returns (files changed, edits).
+/// `makepad fix --to-strict`: applies the write-back edits of every note through `apply`.
+/// Returns (files changed, edits).
 pub fn apply_fixes(notes: &[Note]) -> std::io::Result<(usize, usize)> {
-    let mut by_file: Vec<(String, Vec<(u32, String)>)> = Vec::new();
+    let mut by_file: Vec<(String, Vec<Edit>)> = Vec::new();
     for n in notes {
-        let Some((f, pos, text)) = &n.fix else { continue };
+        let Some((f, es)) = &n.fix else { continue };
         match by_file.iter_mut().find(|x| &x.0 == f) {
-            Some(x) => {
-                if !x.1.iter().any(|e| e.0 == *pos && &e.1 == text) {
-                    x.1.push((*pos, text.clone()));
-                }
-            }
-            None => by_file.push((f.clone(), vec![(*pos, text.clone())])),
+            Some(x) => x.1.extend(es.iter().cloned()),
+            None => by_file.push((f.clone(), es.clone())),
         }
     }
     let (mut files, mut edits) = (0, 0);
     for (f, mut es) in by_file {
-        let mut src = std::fs::read(&f)?;
-        // from the end backwards; edits at one position end up in ascending text order
-        es.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        for (pos, text) in &es {
-            let p = (*pos as usize).min(src.len());
-            src.splice(p..p, text.bytes());
-            edits += 1;
+        es.sort_by(|a, b| (a.lo, a.hi, &a.text).cmp(&(b.lo, b.hi, &b.text)));
+        es.dedup();
+        let src = std::fs::read(&f)?;
+        let (out, left) = apply(&src, &es);
+        for e in &left {
+            eprintln!("makepad fix: {}: edit at byte {}..{} overlaps another edit, left out", f, e.lo, e.hi);
         }
+        edits += es.len() - left.len();
         let tmp = format!("{}.makepad-run-fix", f);
-        std::fs::write(&tmp, &src)?;
+        std::fs::write(&tmp, &out)?;
         std::fs::rename(&tmp, &f)?;
         files += 1;
     }

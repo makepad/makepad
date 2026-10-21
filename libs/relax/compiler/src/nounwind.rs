@@ -4,7 +4,7 @@
 //! unwinding to the callee instance/ABI. Relax additionally analyzes its O1 RIR.
 
 use crate::query::{Fingerprint, QueryEngine, QueryError, QueryId, QueryTable};
-use crate::rir::{Callee, Func, Inst, Term};
+use relax_backend::rir::{Callee, Func, Inst, Term};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ fn facts_fp(facts: &[(u32, bool)]) -> Fingerprint {
 /// The projection of optimized RIR read by body_may_unwind. Non-call instructions
 /// affect this input only through reachability; invoked calls cannot escape their pad.
 fn body_fp(f: &Func) -> Fingerprint {
-    let reach = crate::regalloc::reachable(f);
+    let reach = relax_backend::regalloc::reachable(f);
     let mut h = crate::sip::Sip128::new();
     for (bi, b) in f.blocks.iter().enumerate() {
         if !reach[bi] { continue; }
@@ -31,7 +31,7 @@ fn body_fp(f: &Func) -> Fingerprint {
             if let Inst::Call(c, _, _) = i {
                 match c {
                     Callee::Fn(slot) => { h.u8(1); h.u32(*slot); }
-                    _ => { h.u8(2); h.u8(crate::opt::may_unwind(c, &|_| false) as u8); }
+                    _ => { h.u8(2); h.u8(relax_codegen::opt::may_unwind(c, &|_| false) as u8); }
                 }
             }
         }
@@ -94,7 +94,7 @@ impl QueryCx {
             // snapshot. Unbuilt/recursive callees were recorded as false in that build.
             // Rust's unwind ABI defaults to may-unwind without rustc_nounwind:
             // rustc_middle/src/ty/layout.rs:1238,1300. No optimistic cycle seed.
-            Ok(!crate::opt::body_may_unwind(body, &|callee| {
+            Ok(!relax_codegen::opt::body_may_unwind(body, &|callee| {
                 body.nounwind_inputs.iter().find(|f| f.0 == callee).is_some_and(|f| f.1)
             }))
         }, &|id| self.force(id)))
@@ -112,7 +112,7 @@ impl QueryCx {
         };
         let inlined = build(&mut f, &answer)?;
         // Capture the answers needed when this body later becomes a callee input.
-        crate::opt::body_may_unwind(&f, &answer);
+        relax_codegen::opt::body_may_unwind(&f, &answer);
         let mut requested = Vec::new();
         for fact in used.into_inner() { requested.push(fact); }
         requested.sort_unstable();
@@ -209,7 +209,7 @@ mod tests {
             let candidates = if known { vec![(1, Arc::new(body(&[])), 0)] } else { vec![] };
             let q = QueryCx::new(&candidates);
             let (out, _) = q.optimize(0, f.clone(), &mut |out, nounwind| {
-                crate::opt::demote_invokes(out, nounwind);
+                relax_codegen::opt::demote_invokes(out, nounwind);
                 // Repeated consultation must be deduplicated.
                 assert_eq!(nounwind(1), known);
                 assert!(!nounwind(77));

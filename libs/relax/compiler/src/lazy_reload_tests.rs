@@ -76,7 +76,7 @@ fn gandalf_live_edit_guard_and_reporting() {
     // fresh runtime, and the parent observes the actual console and JSON streams.
     const CHILD: &str = "MAKEPAD_RUN_GANDALF_GATE_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["app", "framework", "all", "std", "std_all"] {
+        for case in ["app", "framework", "all", "std", "std_all", "lazy"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::gandalf_live_edit_guard_and_reporting", "--nocapture", "--test-threads=1", "--format=terse"])
                 .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", if case.ends_with("all") { "1" } else { "0" })
@@ -84,6 +84,12 @@ fn gandalf_live_edit_guard_and_reporting() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
+            if case == "lazy" {
+                // D3: without --check-first the patch is installed and the verdict is reported as soon as the
+                // background check has it (Gandalf's console line), never as a refusal
+                assert!(stderr.lines().any(|l| l.contains("borrow check failed: ") && l.contains("::value at ") && !l.ends_with("(live edit refused)")), "{case}: {stderr}");
+                continue;
+            }
             let reported = stderr.lines().any(|l| l.starts_with("borrow check failed: ") && l.contains("::value at ") && l.ends_with("(live edit refused)"));
             assert_eq!(reported, !matches!(case, "framework" | "std"), "{case}: {stderr}");
             let diagnostics: Vec<_> = stdout.lines().filter_map(|l| crate::json::parse(l.as_bytes()).ok())
@@ -100,7 +106,9 @@ fn gandalf_live_edit_guard_and_reporting() {
         }
         return;
     };
-    crate::borrowck::lazy::disable_gandalf();
+    if case != "lazy" { crate::borrowck::lazy::disable_gandalf(); }
+    // `makepad run --check-first` refuses a bad live edit synchronously; the default never blocks the patch
+    crate::jit::CHECK_FIRST.store(case != "lazy", std::sync::atomic::Ordering::Relaxed);
     crate::diag::enable();
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-gandalf-gate-{}", std::process::id()));
@@ -124,12 +132,12 @@ fn gandalf_live_edit_guard_and_reporting() {
         dir.display(), crate::diag::quote(&app), dir.display(), crate::diag::quote(&framework));
     let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
     assert_eq!(roots, vec![crate::vfs::normalize_path(&app)]);
-    let target = if case == "app" { app_crate } else { framework_crate };
+    let target = if case == "app" || case == "lazy" { app_crate } else { framework_crate };
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);
         (d.krate == target && prog.name(id) == "value").then_some(id)
     }).unwrap();
-    let path = if case == "app" { app } else { framework };
+    let path = if case == "app" || case == "lazy" { app } else { framework };
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     crate::borrowck::event::set_app_scope(roots);
@@ -149,8 +157,16 @@ fn gandalf_live_edit_guard_and_reporting() {
     run(11);
     let old_file = u.prog.def(def).file;
     let bad = b"pub fn value(out: &mut u32) { let mut x = 1u32; let r = &x; x = 2; *out = *r; }\n";
+    let console = (case == "lazy").then(|| crate::gandalf_out::Console::start(false, false));
     let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: old_file, path: path.clone(), src: bad.to_vec() }]) };
-    if matches!(case.as_str(), "framework" | "std") {
+    if case == "lazy" {
+        assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+        assert!(!outcome.lines.iter().any(|l| l.starts_with("refused by the borrow checker")));
+        // the worker acknowledges a settle request between checks: the second one is answered after the queued check ran
+        crate::borrowck::settle().recv().unwrap();
+        crate::borrowck::settle().recv().unwrap();
+        assert!(console.unwrap().finish() >= 1, "the background check reported the borrow error");
+    } else if matches!(case.as_str(), "framework" | "std") {
         assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
         assert_ne!(u.prog.def(def).file, old_file);
         assert!(!log.exists(), "guarded-out bodies must not emit Gandalf events");
@@ -174,6 +190,333 @@ fn gandalf_live_edit_guard_and_reporting() {
     assert_eq!(fixed.rung, crate::reload::Rung::Patch, "{:?}", fixed.lines);
     run(23);
     // Like settle_tests: process exit owns the runtime worker/executable-memory teardown.
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// SPEC-V: a patch runs before its verdict as baseline code with `noalias` dropped; a rejected one
+/// is never promoted, is reported and reverts; a clean one is promoted with its `noalias` facts.
+#[test]
+fn specv_patch_before_verdict() {
+    const CHILD: &str = "MAKEPAD_RUN_SPECV_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for case in ["bad", "clean"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lazy_reload_tests::specv_patch_before_verdict", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0")
+                .output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
+            if case == "bad" {
+                assert!(stderr.lines().any(|l| l.contains("REVERTED") && l.contains("::value")), "{case}: {stderr}");
+            }
+        }
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-{}-{}", case, std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "pub fn value(out: &mut u32) { *out = 11; }\n").unwrap();
+    let log = dir.join("live.jsonl");
+    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_app", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == "value").then_some(id)
+    }).unwrap();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let (id, entry) = crate::owner::call(crate::owner::Class::App, || {
+        let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
+        (id, u.entry(id))
+    });
+    let run = |expected| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }
+            .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, expected);
+    };
+    run(11);
+    let text: &[u8] = if case == "bad" {
+        b"pub fn value(out: &mut u32) { let mut x = 1u32; let r = &x; x = 2; *out = *r; }\n"
+    } else {
+        b"pub fn value(out: &mut u32) { *out = 23; }\n"
+    };
+    let old_file = u.prog.def(def).file;
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: old_file, path: app.clone(), src: text.to_vec() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    // the patch applied at once, before any verdict: baseline code, no noalias, flagged unverified
+    {
+        let f = &u.fns[id as usize];
+        assert!(f.unverified.load(Ordering::Relaxed), "the patch ran without a clean verdict");
+        assert_eq!(f.patch_gen, outcome.group);
+    }
+    run(if case == "bad" { 2 } else { 23 });
+    // the RIR of the patched body is built on demand (the first run built the code, not necessarily kept RIR)
+    unsafe { crate::jit::build_rir(up, id) }.unwrap();
+    {
+        let r = u.fns[id as usize].rir.as_ref().expect("RIR");
+        assert!(r.baseline && r.noalias.is_empty() && !r.withheld_noalias.is_empty(), "unverified: baseline, noalias dropped (baseline {}, noalias {})", r.baseline, r.noalias.len());
+    }
+    if case == "bad" {
+        assert!(!unsafe { crate::jit::compile_tier1(up, id) }, "no O3 build of a body without a clean verdict");
+    }
+    let mut undos = vec![outcome.undo.unwrap()];
+    let ids = vec![id];
+    let mut pending = vec![crate::reload::PendingPatch { group: outcome.group, what: "lib.rs".into(), ids, event_seq: crate::inspect::events::last_seq() }];
+    crate::reload::UNVERIFIED_PATCHES.fetch_add(1, Ordering::AcqRel);
+    assert!(!crate::reload::observations_verified());
+    // the worker acknowledges a settle request between checks: the second one is answered after the queued check ran
+    crate::borrowck::settle().recv().unwrap();
+    crate::borrowck::settle().recv().unwrap();
+    let t0 = std::time::Instant::now();
+    while !pending.is_empty() && t0.elapsed().as_secs() < 20 {
+        crate::reload::settle_verdicts(up, &mut pending, &mut undos);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(pending.is_empty(), "the verdict arrived");
+    assert!(crate::reload::observations_verified());
+    if case == "bad" {
+        assert!(undos.is_empty(), "the failed patch group was rolled back");
+        run(11); // the previous code runs again
+        assert_eq!(u.fns[id as usize].patch_gen, 0);
+        let events = std::fs::read_to_string(&log).unwrap();
+        assert!(events.lines().any(|l| l.contains("patch_reverted") && l.contains("::value")), "{events}");
+    } else {
+        run(23);
+        assert!(u.refresh_verified(id), "a clean verdict verifies the slot");
+        // promotion: the normal RIR O3 starts from keeps the `&mut` parameter's noalias
+        unsafe { crate::jit::build_normal(up, id) }.unwrap();
+        let r = u.fns[id as usize].rir.as_ref().expect("RIR");
+        assert!(!r.baseline && !r.noalias.is_empty(), "verified: promoted with its noalias facts (baseline {}, noalias {})", r.baseline, r.noalias.len());
+    }
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// SPEC-V: an unverified body that breaks the borrow rules (`callee(&mut x, &mut x)`) calls a verified
+/// callee compiled with `noalias`: the call goes to the callee's unverified-mode twin, so the result is the
+/// machine's (2), not the one the `noalias` code computes (1, as the same call made from verified code
+/// shows).
+#[test]
+fn specv_aliased_call_from_unverified_body() {
+    const CHILD: &str = "MAKEPAD_RUN_SPECV_ALIAS_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::specv_aliased_call_from_unverified_body", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    // `through_raw` must have its clean verdict before its first run: the checker's whole-app discovery
+    // (`--ahead=aot`; the other levels check only the bodies that ran)
+    crate::jit::set_ahead_level(crate::options::AheadLevel::Aot);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-alias-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let original = "pub fn callee(a: &mut u32, b: &mut u32) -> u32 { *a = 1; *b = 2; *a }\n\
+        pub fn through_raw(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n\
+        pub fn value(out: &mut u32) { *out = 11; }\n\
+        pub fn early(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n";
+    std::fs::write(dir.join("app/src/lib.rs"), original).unwrap();
+    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", dir.join("live.jsonl"));
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_alias", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (callee_def, raw_def, value_def, early_def) = (find("callee"), find("through_raw"), find("value"), find("early"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    let ids = crate::owner::call(crate::owner::Class::App, || {
+        let c = u.fn_id(crate::jit::FnKey::Inst(callee_def, vec![]));
+        let r = u.fn_id(crate::jit::FnKey::Inst(raw_def, vec![]));
+        let v = u.fn_id(crate::jit::FnKey::Inst(value_def, vec![]));
+        let e = u.fn_id(crate::jit::FnKey::Inst(early_def, vec![]));
+        (c, r, v, u.entry(r), u.entry(v), e, u.entry(e))
+    });
+    let (callee, raw, value, raw_entry, value_entry, early, early_entry) = ids;
+    let run = |entry, expected| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        assert_eq!(result, expected);
+    };
+    // the checker queues the program at the first compile; wait until the originals are verified.
+    // `early` runs before its verdict: unverified code, its aliasing call goes to the twin (2)
+    run(value_entry, 11);
+    run(early_entry, 2);
+    assert!(u.fns[early as usize].rir.as_ref().is_some_and(|r| r.plain_calls), "the unverified lowering calls the twin");
+    let t0 = std::time::Instant::now();
+    loop {
+        crate::borrowck::settle().recv().unwrap();
+        if [callee, raw, value, early].iter().all(|&i| u.verdict_clean(i)) { break; }
+        assert!(t0.elapsed().as_secs() < 20, "the originals never got a clean verdict");
+    }
+    // verified now: its promotion lowers it again, calling `callee` itself (no twin calls left)
+    assert!(u.refresh_verified(early));
+    unsafe { crate::jit::build_normal(up, early) }.unwrap();
+    {
+        let r = u.fns[early as usize].rir.as_ref().expect("RIR");
+        assert!(!r.plain_calls && !r.baseline, "verified: lowered again without twin calls");
+        let twin = u.plain_twin_of(callee).expect("the twin of callee");
+        assert!(!r.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(t), _, _) if *t == twin))));
+    }
+    // verified code: `callee` is compiled with noalias, and a call that aliases (through raw pointers, so
+    // the checker accepts it) gets the answer the noalias code computes
+    run(raw_entry, 1);
+    assert!(!u.fns[callee as usize].unverified.load(Ordering::Relaxed));
+    // an unverified body that aliases the same way, safely written (a borrow error)
+    let patched = "pub fn callee(a: &mut u32, b: &mut u32) -> u32 { *a = 1; *b = 2; *a }\n\
+        pub fn through_raw(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n\
+        pub fn value(out: &mut u32) { let mut x = 0u32; *out = callee(&mut x, &mut x); }\n";
+    let file = u.prog.def(value_def).file;
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file, path: app.clone(), src: patched.as_bytes().to_vec() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    assert!(u.fns[value as usize].unverified.load(Ordering::Relaxed));
+    run(value_entry, 2);
+    let twin = u.plain_twin_of(callee).expect("the aliasing call went to the callee's twin");
+    assert!(u.fns[twin as usize].compiled);
+    // the twin tiers up (O3, built without noalias): the aliasing call still gets the machine's answer
+    assert!(unsafe { crate::jit::compile_tier1(up, twin) }, "the twin gets O3 code");
+    assert!(u.fns[twin as usize].o3.load(Ordering::Relaxed) && u.fns[twin as usize].unverified.load(Ordering::Relaxed));
+    run(value_entry, 2);
+    // ... but the patched body itself, awaiting its verdict, does not
+    assert!(!unsafe { crate::jit::compile_tier1(up, value) }, "no O3 build of a patch without its verdict");
+    // the verdict rejects the patch: it reverts
+    let mut undos = vec![outcome.undo.unwrap()];
+    let mut pending = vec![crate::reload::PendingPatch { group: outcome.group, what: "lib.rs".into(), ids: vec![value], event_seq: crate::inspect::events::last_seq() }];
+    crate::reload::UNVERIFIED_PATCHES.fetch_add(1, Ordering::AcqRel);
+    let t0 = std::time::Instant::now();
+    while !pending.is_empty() && t0.elapsed().as_secs() < 20 {
+        crate::reload::settle_verdicts(up, &mut pending, &mut undos);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(pending.is_empty() && undos.is_empty());
+    run(value_entry, 11);
+    // the twin is never promoted
+    assert!(u.fns[twin as usize].unverified.load(Ordering::Relaxed));
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Relaxed Rust D3: a pair of index borrows the checker accepts only with a run-time check
+/// (`&mut v[i]`, `&mut v[j]`). Before the verdict the body runs as written (SPEC-V: unverified);
+/// once it is clean, the verified code is lowered with the check: an overlap panics as
+/// `get_disjoint_mut(..).unwrap()` does, distinct indices run as before. Without the relaxed feature
+/// the verdict is an error and no check is lowered.
+#[test]
+fn d3_disjoint_check_lowered_from_the_verdict() {
+    const CHILD: &str = "MAKEPAD_RUN_D3_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for case in ["relaxed", "strict", "check-first"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lazy_reload_tests::d3_disjoint_check_lowered_from_the_verdict", "--nocapture", "--test-threads=1", "--format=terse"])
+                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0")
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    use std::sync::atomic::Ordering;
+    // `makepad run --check-first`: the check runs before the first lowering, so the first code has the check
+    crate::jit::CHECK_FIRST.store(case == "check-first", Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-d3-{}-{}", case, std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    // io = [i, j, result]
+    // io = [i, j, result]; `pair` indexes an array (built-in), `pair_vec` a Vec (IndexMut)
+    std::fs::write(dir.join("app/src/lib.rs"), "pub fn pair(io: &mut [usize; 3]) {\n    let (i, j) = (io[0], io[1]);\n    let mut v = [1usize, 2, 3];\n    let a = &mut v[i];\n    let b = &mut v[j];\n    *a += 10;\n    *b += 100;\n    io[2] = v[0] + v[1] + v[2];\n}\n\
+        pub fn pair_vec(io: &mut [usize; 3]) {\n    let (i, j) = (io[0], io[1]);\n    let mut v = vec![1usize, 2, 3];\n    let a = &mut v[i];\n    let b = &mut v[j];\n    *a += 10;\n    *b += 100;\n    io[2] = v[0] + v[1] + v[2];\n}\n").unwrap();
+    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", dir.join("live.jsonl"));
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let mut session = crate::Session::default();
+    session.options.relaxed = Some(if case == "strict" { "none" } else { "disjoint-index" }.to_string());
+    let session = Arc::new(session);
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "d3_app", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let defs = [find("pair"), find("pair_vec")];
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    for def in defs {
+    let (id, entry) = crate::owner::call(crate::owner::Class::App, || {
+        let id = u.fn_id(crate::jit::FnKey::Inst(def, vec![]));
+        (id, u.entry(id))
+    });
+    let run = |i: usize, j: usize| -> Result<usize, String> {
+        let mut io = [i, j, 0usize];
+        unsafe { crate::jit::call_jit(up, entry, &mut io as *mut [usize; 3] as u64) }.map(|_| io[2]).map_err(|p| p.message)
+    };
+    if case == "check-first" {
+        assert_eq!(run(0, 1), Ok(116));
+        assert!(u.fns[id as usize].d3_lowered.load(Ordering::Relaxed), "checked before the first lowering");
+        assert!(run(1, 1).expect_err("the first code checks").contains("OverlappingIndices"));
+        continue;
+    }
+    // unverified: the code runs as written (an overlap writes the one element twice). (The program's
+    // other fns are checked in the background meanwhile: a later fn may have its verdict before
+    // its first call, and then its first code is verified code.)
+    assert_eq!(run(0, 1), Ok(116));
+    if !u.fns[id as usize].d3_lowered.load(Ordering::Relaxed) {
+        assert_eq!(run(1, 1), Ok(116));
+    }
+    let t0 = std::time::Instant::now();
+    loop {
+        crate::borrowck::settle().recv().unwrap();
+        if !matches!(u.verdict_state(id), crate::jit::Verdict::Pending) { break; }
+        assert!(t0.elapsed().as_secs() < 20, "no verdict");
+    }
+    if case == "strict" {
+        assert!(matches!(u.verdict_state(id), crate::jit::Verdict::Failed(_)), "strict: NLL rejects the pair");
+        assert!(u.disjoint_checks(id).is_none());
+    } else {
+        assert!(u.verdict_clean(id), "relaxed: accepted with a run-time check");
+        let checks = u.disjoint_checks(id).expect("the verdict asks for the check");
+        assert_eq!(checks.len(), 1);
+        assert!(u.refresh_verified(id));
+        // the verified code: lowered again with the check, and installed
+        let _ = run(0, 1);
+        assert!(unsafe { crate::jit::compile_tier1(up, id) }, "O3 build of the verified body");
+        assert!(u.fns[id as usize].d3_lowered.load(Ordering::Relaxed), "the verified code was lowered with the verdict's checks");
+        assert_eq!(run(0, 1), Ok(116));
+        assert_eq!(run(2, 0), Ok(116));
+        let overlap = run(1, 1).expect_err("an overlap panics");
+        assert!(overlap.contains("OverlappingIndices"), "{overlap}");
+    }
+    }
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }

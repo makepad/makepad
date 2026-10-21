@@ -134,6 +134,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
+            let _kept = crate::zone_alloc::kept();
             let gregs = uc.add(40) as *mut u64;
             // MAKEPAD_RUN_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is
             if sig == SIG_WATCHDOG && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
@@ -292,6 +294,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
+            let _kept = crate::zone_alloc::kept();
             let reg = |i: usize| uc.add(OFFSETS[i]) as *mut u64;
             // MAKEPAD_RUN_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is
             if sig == watchdog_signal() && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
@@ -561,6 +565,8 @@ mod imp {
 
     extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         unsafe {
+            // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
+            let _kept = crate::zone_alloc::kept();
             if sig == SIGABRT {
                 report_abort(uc);
                 // back to the default action: abort() raises again and the process ends

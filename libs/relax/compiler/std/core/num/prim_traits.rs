@@ -1170,8 +1170,8 @@ impl Ord for char { fn cmp(&self, other: &char) -> Ordering { (*self as u32).cmp
 
 #[cfg(not(relax_check))]
 impl bool {
-    pub fn then_some<T>(self, t: T) -> Option<T> { if self { Some(t) } else { None } }
-    pub fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> { if self { Some(f()) } else { None } }
+    pub const fn then_some<T>(self, t: T) -> Option<T> { if self { Some(t) } else { None } }
+    pub const fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> { if self { Some(f()) } else { None } }
 }
 
 // ---- conversions (From where real core has it, TryFrom for every other pair)

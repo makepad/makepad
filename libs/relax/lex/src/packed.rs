@@ -119,6 +119,12 @@ impl PackedToks {
             }
         }
     }
+    /// Only the kind of token `i` (the caller keeps `i < len()`): the parser's peeks read nothing else.
+    #[inline]
+    pub fn kind_at(&self, i: usize) -> T {
+        assert!(i < self.n, "token {i} of {}", self.n);
+        unsafe { std::mem::transmute::<u8, T>((*self.rows.add(i) & 0x7f) as u8) }
+    }
     #[inline]
     pub fn get(&self, i: usize) -> Option<Tok> { (i < self.n).then(|| self.at(i)) }
     pub fn last(&self) -> Option<Tok> { self.n.checked_sub(1).map(|i| self.at(i)) }

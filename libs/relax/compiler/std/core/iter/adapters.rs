@@ -12,7 +12,7 @@ pub struct Map<I, F> {
 }
 
 impl<I, F> Map<I, F> {
-    pub(crate) fn new(iter: I, f: F) -> Map<I, F> {
+    pub(crate) const fn new(iter: I, f: F) -> Map<I, F> {
         Map { iter, f }
     }
 }
@@ -51,7 +51,7 @@ pub struct Filter<I, P> {
 }
 
 impl<I, P> Filter<I, P> {
-    pub(crate) fn new(iter: I, predicate: P) -> Filter<I, P> {
+    pub(crate) const fn new(iter: I, predicate: P) -> Filter<I, P> {
         Filter { iter, predicate }
     }
 }
@@ -94,7 +94,7 @@ pub struct FilterMap<I, F> {
 }
 
 impl<I, F> FilterMap<I, F> {
-    pub(crate) fn new(iter: I, f: F) -> FilterMap<I, F> {
+    pub(crate) const fn new(iter: I, f: F) -> FilterMap<I, F> {
         FilterMap { iter, f }
     }
 }
@@ -135,7 +135,7 @@ pub struct Enumerate<I> {
 }
 
 impl<I> Enumerate<I> {
-    pub(crate) fn new(iter: I) -> Enumerate<I> {
+    pub(crate) const fn new(iter: I) -> Enumerate<I> {
         Enumerate { iter, count: 0 }
     }
 }
@@ -239,7 +239,7 @@ pub struct Rev<I> {
 }
 
 impl<I> Rev<I> {
-    pub(crate) fn new(iter: I) -> Rev<I> {
+    pub(crate) const fn new(iter: I) -> Rev<I> {
         Rev { iter }
     }
 }
@@ -278,7 +278,7 @@ pub struct Take<I> {
 }
 
 impl<I> Take<I> {
-    pub(crate) fn new(iter: I, n: usize) -> Take<I> {
+    pub(crate) const fn new(iter: I, n: usize) -> Take<I> {
         Take { iter, n }
     }
 }
@@ -341,7 +341,7 @@ pub struct Skip<I> {
 }
 
 impl<I> Skip<I> {
-    pub(crate) fn new(iter: I, n: usize) -> Skip<I> {
+    pub(crate) const fn new(iter: I, n: usize) -> Skip<I> {
         Skip { iter, n }
     }
 }
@@ -430,7 +430,7 @@ pub struct Chain<A, B> {
 }
 
 impl<A, B> Chain<A, B> {
-    pub(crate) fn new(a: A, b: B) -> Chain<A, B> {
+    pub(crate) const fn new(a: A, b: B) -> Chain<A, B> {
         Chain { a: Some(a), b: Some(b) }
     }
 }
@@ -492,7 +492,7 @@ pub struct Cloned<I> {
 }
 
 impl<I> Cloned<I> {
-    pub(crate) fn new(it: I) -> Cloned<I> {
+    pub(crate) const fn new(it: I) -> Cloned<I> {
         Cloned { it }
     }
 }
@@ -521,7 +521,7 @@ pub struct Copied<I> {
 }
 
 impl<I> Copied<I> {
-    pub(crate) fn new(it: I) -> Copied<I> {
+    pub(crate) const fn new(it: I) -> Copied<I> {
         Copied { it }
     }
 }
@@ -557,7 +557,7 @@ pub struct Peekable<I: Iterator> {
 }
 
 impl<I: Iterator> Peekable<I> {
-    pub(crate) fn new(iter: I) -> Peekable<I> {
+    pub(crate) const fn new(iter: I) -> Peekable<I> {
         Peekable { iter, peeked: None }
     }
     pub fn peek(&mut self) -> Option<&I::Item> {
@@ -677,7 +677,7 @@ pub struct SkipWhile<I, P> {
 }
 
 impl<I, P> SkipWhile<I, P> {
-    pub(crate) fn new(iter: I, predicate: P) -> SkipWhile<I, P> {
+    pub(crate) const fn new(iter: I, predicate: P) -> SkipWhile<I, P> {
         SkipWhile { iter, flag: false, predicate }
     }
 }
@@ -707,7 +707,7 @@ pub struct TakeWhile<I, P> {
 }
 
 impl<I, P> TakeWhile<I, P> {
-    pub(crate) fn new(iter: I, predicate: P) -> TakeWhile<I, P> {
+    pub(crate) const fn new(iter: I, predicate: P) -> TakeWhile<I, P> {
         TakeWhile { iter, flag: false, predicate }
     }
 }
@@ -743,7 +743,7 @@ pub struct MapWhile<I, P> {
 }
 
 impl<I, P> MapWhile<I, P> {
-    pub(crate) fn new(iter: I, predicate: P) -> MapWhile<I, P> {
+    pub(crate) const fn new(iter: I, predicate: P) -> MapWhile<I, P> {
         MapWhile { iter, predicate }
     }
 }
@@ -770,7 +770,7 @@ pub struct Scan<I, St, F> {
 }
 
 impl<I, St, F> Scan<I, St, F> {
-    pub(crate) fn new(iter: I, state: St, f: F) -> Scan<I, St, F> {
+    pub(crate) const fn new(iter: I, state: St, f: F) -> Scan<I, St, F> {
         Scan { iter, f, state }
     }
 }
@@ -1004,7 +1004,7 @@ pub struct Fuse<I> {
 }
 
 impl<I> Fuse<I> {
-    pub(crate) fn new(iter: I) -> Fuse<I> {
+    pub(crate) const fn new(iter: I) -> Fuse<I> {
         Fuse { iter: Some(iter) }
     }
 }
@@ -1056,7 +1056,7 @@ pub struct Inspect<I, F> {
 }
 
 impl<I, F> Inspect<I, F> {
-    pub(crate) fn new(iter: I, f: F) -> Inspect<I, F> {
+    pub(crate) const fn new(iter: I, f: F) -> Inspect<I, F> {
         Inspect { iter, f }
     }
 }

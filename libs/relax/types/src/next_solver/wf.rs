@@ -35,6 +35,17 @@ impl WfPredicates<'_, '_> {
             let p = tcx.instantiate_predicate(self.prog, def, args, &p);
             if !predicate_has_escaping_bound_vars(&tcx.tys, &p) { self.out.push(Goal { param_env: self.env.clone(), predicate: p }); }
         }
+        // rustc `predicates_of` of an ADT includes its `inferred_outlives_of` (RFC 2093)
+        if tcx.adts.contains_key(&def) {
+            for p in crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, self.prog, def) {
+                let kind = match p {
+                    crate::tcx::outlives::OutlivesPredicate::Region(a, b) => ClauseKind::RegionOutlives(a, b),
+                    crate::tcx::outlives::OutlivesPredicate::Type(t, r) => ClauseKind::TypeOutlives(t, r),
+                };
+                let p = tcx.instantiate_predicate(self.prog, def, args, &Predicate::dummy(PredicateKind::Clause(kind)));
+                if !predicate_has_escaping_bound_vars(&tcx.tys, &p) { self.out.push(Goal { param_env: self.env.clone(), predicate: p }); }
+            }
+        }
     }
     fn add_wf_preds_for_inherent_projection(&mut self, def: DefId, args: &[GenericArg], impl_format: bool) {
         let tcx = self.infcx.tcx;

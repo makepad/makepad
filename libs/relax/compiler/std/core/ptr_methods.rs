@@ -8,41 +8,44 @@ use crate::intrinsics_mem as im;
 
 #[cfg(not(relax_check))]
 impl<T: crate::marker::PointeeSized> *const T {
-    pub fn is_null(self) -> bool {
+    #[rustc_diagnostic_item = "ptr_const_is_null"]
+    pub const fn is_null(self) -> bool {
         (self as *const u8 as usize) == 0
     }
-    pub fn cast<U>(self) -> *const U {
+    #[rustc_diagnostic_item = "const_ptr_cast"]
+    pub const fn cast<U>(self) -> *const U {
         self as *const U
     }
-    pub fn cast_mut(self) -> *mut T {
+    #[rustc_diagnostic_item = "ptr_cast_mut"]
+    pub const fn cast_mut(self) -> *mut T {
         self as *mut T
     }
-    pub fn addr(self) -> usize {
+    pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
-    pub unsafe fn as_ref<'a>(self) -> Option<&'a T> {
+    pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {
         if self.is_null() {
             None
         } else {
             Some(&*self)
         }
     }
-    pub fn byte_add(self, count: usize) -> *const T {
+    pub const fn byte_add(self, count: usize) -> *const T {
         self.wrapping_byte_add(count)
     }
-    pub fn byte_sub(self, count: usize) -> *const T {
+    pub const fn byte_sub(self, count: usize) -> *const T {
         self.wrapping_byte_sub(count)
     }
-    pub fn byte_offset(self, count: isize) -> *const T {
+    pub const fn byte_offset(self, count: isize) -> *const T {
         self.wrapping_byte_add(count as usize)
     }
-    pub fn wrapping_byte_add(self, count: usize) -> *const T {
+    pub const fn wrapping_byte_add(self, count: usize) -> *const T {
         let mut p = self;
         let a = &mut p as *mut *const T as *mut usize;
         unsafe { *a = (*a).wrapping_add(count) };
         p
     }
-    pub fn wrapping_byte_sub(self, count: usize) -> *const T {
+    pub const fn wrapping_byte_sub(self, count: usize) -> *const T {
         let mut p = self;
         let a = &mut p as *mut *const T as *mut usize;
         unsafe { *a = (*a).wrapping_sub(count) };
@@ -52,48 +55,48 @@ impl<T: crate::marker::PointeeSized> *const T {
 
 #[cfg(not(relax_check))]
 impl<T> *const T {
-    pub unsafe fn add(self, count: usize) -> *const T {
+    pub const unsafe fn add(self, count: usize) -> *const T {
         im::ptr_add(self, count)
     }
-    pub unsafe fn sub(self, count: usize) -> *const T {
+    pub const unsafe fn sub(self, count: usize) -> *const T {
         ((self as usize).wrapping_sub(count.wrapping_mul(im::size_of::<T>()))) as *const T
     }
-    pub unsafe fn offset(self, count: isize) -> *const T {
+    pub const unsafe fn offset(self, count: isize) -> *const T {
         ((self as usize).wrapping_add((count as usize).wrapping_mul(im::size_of::<T>()))) as *const T
     }
-    pub fn wrapping_add(self, count: usize) -> *const T {
+    pub const fn wrapping_add(self, count: usize) -> *const T {
         ((self as usize).wrapping_add(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
     }
-    pub fn wrapping_sub(self, count: usize) -> *const T {
+    pub const fn wrapping_sub(self, count: usize) -> *const T {
         ((self as usize).wrapping_sub(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
     }
-    pub fn wrapping_offset(self, count: isize) -> *const T {
+    pub const fn wrapping_offset(self, count: isize) -> *const T {
         ((self as usize).wrapping_add((count as usize).wrapping_mul(unsafe { im::size_of::<T>() }))) as *const T
     }
     /// Distance in elements; both pointers into the same allocation.
-    pub unsafe fn offset_from(self, origin: *const T) -> isize {
+    pub const unsafe fn offset_from(self, origin: *const T) -> isize {
         let size = im::size_of::<T>();
         if size == 0 {
             crate::panicking::panic_str("assertion failed: 0 < pointee_size && pointee_size <= isize::MAX as usize");
         }
         ((self as usize).wrapping_sub(origin as usize) as isize) / (size as isize)
     }
-    pub unsafe fn offset_from_unsigned(self, origin: *const T) -> usize {
+    pub const unsafe fn offset_from_unsigned(self, origin: *const T) -> usize {
         self.offset_from(origin) as usize
     }
-    pub unsafe fn read(self) -> T {
+    pub const unsafe fn read(self) -> T {
         im::ptr_read(self)
     }
-    pub unsafe fn read_unaligned(self) -> T {
+    pub const unsafe fn read_unaligned(self) -> T {
         crate::ptr::read_unaligned(self)
     }
     pub unsafe fn read_volatile(self) -> T {
         crate::ptr::read_volatile(self)
     }
-    pub unsafe fn copy_to(self, dest: *mut T, count: usize) {
+    pub const unsafe fn copy_to(self, dest: *mut T, count: usize) {
         im::copy(self, dest, count)
     }
-    pub unsafe fn copy_to_nonoverlapping(self, dest: *mut T, count: usize) {
+    pub const unsafe fn copy_to_nonoverlapping(self, dest: *mut T, count: usize) {
         im::copy_nonoverlapping(self, dest, count)
     }
     pub fn is_aligned(self) -> bool {
@@ -123,134 +126,137 @@ impl<T> *const T {
 
 #[cfg(not(relax_check))]
 impl<T> *const [T] {
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         unsafe { im::slice_len(&*self) }
     }
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.len() == 0
     }
-    pub fn as_ptr(self) -> *const T {
+    pub const fn as_ptr(self) -> *const T {
         self as *const T
     }
 }
 
 #[cfg(not(relax_check))]
 impl<T: crate::marker::PointeeSized> *mut T {
-    pub fn is_null(self) -> bool {
+    #[rustc_diagnostic_item = "ptr_is_null"]
+    pub const fn is_null(self) -> bool {
         (self as *const u8 as usize) == 0
     }
-    pub fn cast<U>(self) -> *mut U {
+    #[rustc_diagnostic_item = "ptr_cast"]
+    pub const fn cast<U>(self) -> *mut U {
         self as *mut U
     }
-    pub fn cast_const(self) -> *const T {
+    #[rustc_diagnostic_item = "ptr_cast_const"]
+    pub const fn cast_const(self) -> *const T {
         self as *const T
     }
-    pub fn addr(self) -> usize {
+    pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
-    pub unsafe fn as_ref<'a>(self) -> Option<&'a T> {
+    pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {
         if self.is_null() {
             None
         } else {
             Some(&*self)
         }
     }
-    pub unsafe fn as_mut<'a>(self) -> Option<&'a mut T> {
+    pub const unsafe fn as_mut<'a>(self) -> Option<&'a mut T> {
         if self.is_null() {
             None
         } else {
             Some(&mut *self)
         }
     }
-    pub fn byte_add(self, count: usize) -> *mut T {
+    pub const fn byte_add(self, count: usize) -> *mut T {
         self.wrapping_byte_add(count)
     }
-    pub fn byte_sub(self, count: usize) -> *mut T {
+    pub const fn byte_sub(self, count: usize) -> *mut T {
         self.wrapping_byte_sub(count)
     }
-    pub fn byte_offset(self, count: isize) -> *mut T {
+    pub const fn byte_offset(self, count: isize) -> *mut T {
         self.wrapping_byte_add(count as usize)
     }
-    pub fn wrapping_byte_add(self, count: usize) -> *mut T {
+    pub const fn wrapping_byte_add(self, count: usize) -> *mut T {
         let mut p = self;
         let a = &mut p as *mut *mut T as *mut usize;
         unsafe { *a = (*a).wrapping_add(count) };
         p
     }
-    pub fn wrapping_byte_sub(self, count: usize) -> *mut T {
+    pub const fn wrapping_byte_sub(self, count: usize) -> *mut T {
         let mut p = self;
         let a = &mut p as *mut *mut T as *mut usize;
         unsafe { *a = (*a).wrapping_sub(count) };
         p
     }
-    pub unsafe fn drop_in_place(self) {
+    pub const unsafe fn drop_in_place(self) {
         im::drop_in_place(self)
     }
 }
 
 #[cfg(not(relax_check))]
 impl<T> *mut T {
-    pub unsafe fn add(self, count: usize) -> *mut T {
+    pub const unsafe fn add(self, count: usize) -> *mut T {
         im::ptr_add_mut(self, count)
     }
-    pub unsafe fn sub(self, count: usize) -> *mut T {
+    pub const unsafe fn sub(self, count: usize) -> *mut T {
         ((self as usize).wrapping_sub(count.wrapping_mul(im::size_of::<T>()))) as *mut T
     }
-    pub unsafe fn offset(self, count: isize) -> *mut T {
+    pub const unsafe fn offset(self, count: isize) -> *mut T {
         ((self as usize).wrapping_add((count as usize).wrapping_mul(im::size_of::<T>()))) as *mut T
     }
-    pub fn wrapping_add(self, count: usize) -> *mut T {
+    pub const fn wrapping_add(self, count: usize) -> *mut T {
         ((self as usize).wrapping_add(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
     }
-    pub fn wrapping_sub(self, count: usize) -> *mut T {
+    pub const fn wrapping_sub(self, count: usize) -> *mut T {
         ((self as usize).wrapping_sub(count.wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
     }
-    pub fn wrapping_offset(self, count: isize) -> *mut T {
+    pub const fn wrapping_offset(self, count: isize) -> *mut T {
         ((self as usize).wrapping_add((count as usize).wrapping_mul(unsafe { im::size_of::<T>() }))) as *mut T
     }
-    pub unsafe fn offset_from(self, origin: *const T) -> isize {
+    pub const unsafe fn offset_from(self, origin: *const T) -> isize {
         (self as *const T).offset_from(origin)
     }
-    pub unsafe fn offset_from_unsigned(self, origin: *const T) -> usize {
+    pub const unsafe fn offset_from_unsigned(self, origin: *const T) -> usize {
         (self as *const T).offset_from(origin) as usize
     }
-    pub unsafe fn read(self) -> T {
+    pub const unsafe fn read(self) -> T {
         im::ptr_read(self as *const T)
     }
-    pub unsafe fn read_unaligned(self) -> T {
+    pub const unsafe fn read_unaligned(self) -> T {
         crate::ptr::read_unaligned(self as *const T)
     }
     pub unsafe fn read_volatile(self) -> T {
         crate::ptr::read_volatile(self as *const T)
     }
-    pub unsafe fn write(self, val: T) {
+    pub const unsafe fn write(self, val: T) {
         im::ptr_write(self, val)
     }
-    pub unsafe fn write_unaligned(self, val: T) {
+    pub const unsafe fn write_unaligned(self, val: T) {
         crate::ptr::write_unaligned(self, val)
     }
     pub unsafe fn write_volatile(self, val: T) {
         crate::ptr::write_volatile(self, val)
     }
-    pub unsafe fn write_bytes(self, val: u8, count: usize) {
+    pub const unsafe fn write_bytes(self, val: u8, count: usize) {
         im::write_bytes(self, val, count)
     }
-    pub unsafe fn replace(self, src: T) -> T {
+    pub const unsafe fn replace(self, src: T) -> T {
         crate::ptr::replace(self, src)
     }
-    pub unsafe fn swap(self, with: *mut T) {
+    pub const unsafe fn swap(self, with: *mut T) {
         crate::ptr::swap(self, with)
     }
-    pub unsafe fn copy_from(self, src: *const T, count: usize) {
+    pub const unsafe fn copy_from(self, src: *const T, count: usize) {
         im::copy(src, self, count)
     }
-    pub unsafe fn copy_from_nonoverlapping(self, src: *const T, count: usize) {
+    pub const unsafe fn copy_from_nonoverlapping(self, src: *const T, count: usize) {
         im::copy_nonoverlapping(src, self, count)
     }
-    pub unsafe fn copy_to(self, dest: *mut T, count: usize) {
+    pub const unsafe fn copy_to(self, dest: *mut T, count: usize) {
         im::copy(self as *const T, dest, count)
     }
-    pub unsafe fn copy_to_nonoverlapping(self, dest: *mut T, count: usize) {
+    pub const unsafe fn copy_to_nonoverlapping(self, dest: *mut T, count: usize) {
         im::copy_nonoverlapping(self as *const T, dest, count)
     }
     pub fn is_aligned(self) -> bool {
@@ -263,13 +269,13 @@ impl<T> *mut T {
 
 #[cfg(not(relax_check))]
 impl<T> *mut [T] {
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         unsafe { im::slice_len(&*self) }
     }
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.len() == 0
     }
-    pub fn as_mut_ptr(self) -> *mut T {
+    pub const fn as_mut_ptr(self) -> *mut T {
         self as *mut T
     }
 }

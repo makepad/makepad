@@ -60,12 +60,20 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     let mut main_tops: Vec<Vec<u64>> = Vec::new();
     let t0 = std::time::Instant::now();
     while t0.elapsed().as_millis() < probe as u128 {
-        if let Some(c) = super::capture_all(&is_main).pop() {
-            main_tops.push(c.frames.iter().copied().take(depth).collect());
+        match super::capture_all(&is_main) {
+            Ok(mut c) => {
+                if let Some(c) = c.pop() {
+                    main_tops.push(c.frames.iter().copied().take(depth).collect());
+                }
+            }
+            Err(e) => return out.err(&e),
         }
         std::thread::sleep(std::time::Duration::from_millis((probe / 10).max(5)));
     }
-    let caps = super::capture_all(&|_| true);
+    let caps = match super::capture_all(&|_| true) {
+        Ok(c) => c,
+        Err(e) => return out.err(&e),
+    };
     let elapsed_ns = t0.elapsed().as_nanos().max(1) as u64;
     let waits = crate::waits::snapshot();
     let list: Vec<super::threads::Thread> = caps.iter().map(|c| c.t.clone()).collect();

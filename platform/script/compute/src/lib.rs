@@ -28,6 +28,9 @@ use makepad_relax_api::relax_api;
 pub mod cost;
 pub mod boundary;
 pub mod host;
+/// The store of native kernel code between runs (the native back ends only).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub mod kcache;
 pub mod ir;
 pub mod js;
 pub mod kernel;
