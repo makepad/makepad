@@ -2224,8 +2224,8 @@ impl MatchEvent for App {
                 callout_tooltip_button.area().rect(cx),
                 CalloutTooltipOptions {
                     position: TooltipPosition::Right,
-                    text_color: vec4(1.0, 0.0, 0.0, 1.0), // red
-                    bg_color: vec4(0.0, 1.0, 0.0, 1.0), // green
+                    text_color: Some(vec4(1.0, 0.0, 0.0, 1.0)), // red
+                    bg_color: Some(vec4(0.0, 1.0, 0.0, 1.0)), // green
                     ..Default::default()
                 }
             );

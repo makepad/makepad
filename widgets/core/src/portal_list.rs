@@ -1091,7 +1091,8 @@ impl ScriptHook for PortalList {
             self.vec_index = Vec2Index::X;
         }
 
-        if self.auto_tail {
+        // Only a new list starts out following its end; a reload keeps the user's scroll intent.
+        if self.auto_tail && apply.is_new() {
             self.tail_range = true;
         }
     }
