@@ -627,12 +627,6 @@ impl Resolver {
                 }
             }
         }
-        if registry {
-            let build_deps: Vec<String> = deps.iter().filter(|d| d.build).map(|d| d.package.clone()).collect();
-            if let Some(c) = crate::registry::c_build_dep(&build_deps) {
-                return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): makepad run runs no C compiler", name, version, c));
-            }
-        }
         let i = self.manifests.len();
         self.manifests.push(Manifest { dir: dir.clone(), name, version, edition, links, build, lib, bins, tests, features, deps, proc_macro, registry });
         self.by_dir.insert(dir, i);
@@ -1042,6 +1036,17 @@ impl<'a> Feat<'a> {
         }
         if self.node(k).edges.iter().any(|e| e.0 == di) {
             return Ok(());
+        }
+        // a registry package that compiles C or C++ (Relax runs no C compiler): decided here, on a
+        // build-dependency the feature resolution switched on, not on the manifest's list -- an
+        // optional `cc` behind a feature that is off (objc-sys's `unstable-exception`, rav1e's and
+        // av-scenechange's `asm`, signal-hook's `cc`) builds no C; and before the dependency is
+        // looked up (a vendored tree need not hold `cc` to say so)
+        if d.build && self.r.manifests[k.0].registry {
+            if let Some(c) = crate::registry::c_build_dep(std::slice::from_ref(&d.package)) {
+                let m = &self.r.manifests[k.0];
+                return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): makepad run runs no C compiler", m.name, m.version, c));
+            }
         }
         let (dir, registry) = self.r.dep_dir(d)?;
         let t = self.r.load(&dir, registry)?;
