@@ -275,8 +275,30 @@ struct BuildPaths {
     manifest_file: PathBuf,
     java_file: PathBuf,
     xr_file: PathBuf,
+    /// `resources/android/java/**/*.java` of the res crate, compiled beside
+    /// Makepad's Java.
+    app_java_sources: Vec<PathBuf>,
+    /// `resources/android/libs/*.jar` of the res crate: on javac's classpath,
+    /// and dexed into the APK.
+    app_jars: Vec<PathBuf>,
     dst_unaligned_apk: PathBuf,
     dst_apk: PathBuf,
+}
+
+/// The files under `dir` (recursively) whose extension is `ext`, sorted. An app
+/// ships Java this way when the system class loader must find it, as for a
+/// `Service` or `BroadcastReceiver` its manifest declares.
+fn app_android_files(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, String> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = ls(dir)?
+        .into_iter()
+        .filter(|rel| rel.extension().and_then(|e| e.to_str()) == Some(ext))
+        .map(|rel| dir.join(rel))
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 pub struct BuildResult {
@@ -1111,7 +1133,10 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
     cp_all(&cargo_manifest_dir.join("src/android/res"), &res_dir, false)?;
 
     let build_crate_dir = get_crate_dir(opts.build_crate)?;
-    let app_android_res = get_crate_dir(opts.res_crate)?.join("resources/android/res");
+    let app_android = get_crate_dir(opts.res_crate)?.join("resources/android");
+    let app_java_sources = app_android_files(&app_android.join("java"), "java")?;
+    let app_jars = app_android_files(&app_android.join("libs"), "jar")?;
+    let app_android_res = app_android.join("res");
     if app_android_res.is_dir() {
         cp_all(&app_android_res, &res_dir, false)?;
     }
@@ -1189,6 +1214,8 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
         manifest_file,
         java_file,
         xr_file,
+        app_java_sources,
+        app_jars,
         dst_unaligned_apk,
         dst_apk,
     })
@@ -1266,9 +1293,10 @@ fn compile_java(
     ];
     let mut java_sources = java_sources;
     java_sources.extend(extra_sources.iter().cloned());
+    java_sources.extend(build_paths.app_java_sources.iter().cloned());
 
     let mut hasher = DefaultHasher::new();
-    for source in &java_sources {
+    for source in java_sources.iter().chain(&build_paths.app_jars) {
         source.to_string_lossy().hash(&mut hasher);
         fs::read(source)
             .map_err(|e| format!("failed to read Java source {:?}: {e}", source))?
@@ -1310,6 +1338,10 @@ fn compile_java(
     }
 
     let android_jar = android_jar_path(sdk_dir, urls);
+    let classpath = std::env::join_paths(
+        std::iter::once(&android_jar).chain(&build_paths.app_jars),
+    )
+    .map_err(|e| format!("can't join the javac classpath: {e}"))?;
     let _ = rmdir(&build_paths.java_out_dir);
     mkdir(&build_paths.java_out_dir)?;
     // Force UTF-8: Chinese Windows defaults javac to GBK, and UTF-8 comments
@@ -1323,7 +1355,7 @@ fn compile_java(
         "1.8",
         "-Xlint:-options",
         "-classpath",
-        android_jar.to_str().unwrap(),
+        classpath.to_str().unwrap(),
         "-Xlint:deprecation",
         "-d",
         build_paths.java_out_dir.to_str().unwrap(),
@@ -1395,6 +1427,11 @@ fn build_dex(
 
     for class_file in &class_files {
         args.push(class_file.to_str().unwrap());
+    }
+    // An app's jars can carry past 64K methods; with --min-api at 21 or
+    // above, D8 then writes classes2.dex and on, which the APK and AAB take.
+    for jar in &build_paths.app_jars {
+        args.push(jar.to_str().unwrap());
     }
 
     shell_env_cap(
@@ -1971,7 +2008,10 @@ fn cp_android_runtime_assets(
             &dst_dir.join("android"),
             &format!("{logical_prefix}/android"),
             |relative| {
-                relative.starts_with("AndroidManifest.xml.template") || relative.starts_with("res")
+                relative.starts_with("AndroidManifest.xml.template")
+                    || relative.starts_with("res")
+                    || relative.starts_with("java")
+                    || relative.starts_with("libs")
             },
             |_| Ok(()),
         )?;
@@ -2528,8 +2568,15 @@ fn assemble_aab_base_module(
             .map_err(|e| format!("Cant write to {:?}: {e}", dst_path))?;
     }
 
-    // dex/classes.dex
-    cp(classes_dex, &base_dir.join("dex/classes.dex"), false)?;
+    // dex/classes.dex, and classes2.dex… when D8 split past 64K methods.
+    let dex_dir = classes_dex.parent().unwrap();
+    for dex in fs::read_dir(dex_dir).map_err(|e| format!("Cant read {:?}: {e}", dex_dir))? {
+        let dex = dex.map_err(|e| format!("Cant read {:?}: {e}", dex_dir))?.path();
+        let name = dex.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("classes") && name.ends_with(".dex") {
+            cp(&dex, &base_dir.join("dex").join(name), false)?;
+        }
+    }
 
     // lib/<abi>/*.so (only if the staged libs dir actually has anything).
     if libs_root.is_dir() && ls(libs_root).map(|v| !v.is_empty()).unwrap_or(false) {
