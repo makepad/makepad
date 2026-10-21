@@ -8674,6 +8674,34 @@ impl<'a> Lcx<'a> {
     /// The matched place and its owner for move tracking; with a temporary owner
     /// (MatchRoot::Temp) also the temporary for the caller to register (its address and type)
     /// and the scrutinee's field path in it.
+    /// `matches!(x, pat if guard)` / `assert_matches!`: core expands both to a `match` with the
+    /// pattern's arm and a fallback, so `x` is a match scrutinee like `lower_match`'s (rustc
+    /// region.rs: no terminating scope; an rvalue -- or the base of a field of one, such as the
+    /// guard in `matches!(m.lock().unwrap().phase, ..)` -- is a temporary of the enclosing
+    /// statement, dropped at its end), and the pattern's bindings and the guard's temporaries
+    /// belong to the arm. Returns the scrutinee place and the blocks entered on a match (arm
+    /// left) and on no match / a failed guard; the current block is dead afterwards.
+    fn lower_macro_match(&mut self, x: ExprId, pat: Option<PatId>, guard: Option<ExprId>) -> (Place, TyId, u32, u32) {
+        self.want_mut = pat.map_or(false, |p| self.pat_binds_mut_ref(p));
+        let (place, pt, root, temp) = self.scrutinee(x);
+        self.want_mut = false;
+        if let (Some(MatchRoot::Temp(fl)), Some(tp)) = (root, &temp) {
+            self.stmt_temps.push((tp.addr, tp.ty, Some(fl)));
+        }
+        let ok = self.f.block();
+        let fail = self.f.block();
+        if let Some(p) = pat {
+            let gmark = self.stmt_temps.len();
+            let combos = if guard.is_some() { self.or_combos(p, 1024) } else { None };
+            self.enter_arm(x, p, guard, combos, true, &place, pt, root, &temp, fail, gmark);
+            self.drop_stmt_temps_from(gmark);
+            self.pop_scope();
+            self.pop_scope();
+        }
+        self.goto(ok);
+        (place, pt, ok, fail)
+    }
+
     fn scrutinee(&mut self, x: ExprId) -> (Place, TyId, Option<MatchRoot>, Option<ScrutTemp>) {
         let xt = self.body_ty(x);
         // `*tmp_box` of a temporary Box is the owned contents (temp_box_deref), not a place:
@@ -8712,6 +8740,121 @@ impl<'a> Lcx<'a> {
                 return (place, xt, root, Some(ScrutTemp { addr: a, ty: xt, path: Vec::new() }));
             }
             (place, xt, root, None)
+        }
+    }
+
+    /// Enters a match arm whose pattern `pat` is tested against the scrutinee `place: pt` (unless
+    /// `test` is false: a decision tree already did), failing to `next`: binds the pattern (moves
+    /// out of the scrutinee tracked through `root` / `temp`) and runs the guard. Leaves two
+    /// scopes pushed -- the pattern's bindings, then the guard's -- with the current block at the
+    /// arm body; the caller pops them (see `lower_match`). `gmark`: the arm's first statement
+    /// temporary. `combos`: the guarded arm's or-alternative candidates (`or_combos`).
+    #[allow(clippy::too_many_arguments)]
+    fn enter_arm(&mut self, x: ExprId, pat: PatId, guard: Option<ExprId>, combos: Option<Vec<Vec<(u32, usize)>>>, test: bool, place: &Place, pt: TyId, root: Option<MatchRoot>, temp: &Option<ScrutTemp>, next: u32, gmark: usize) {
+        if let (Some(g), Some(combos)) = (guard, combos) {
+            // a guarded arm (rustc match lowering): each or-alternative combination is a
+            // candidate of its own -- test it, bind (moves deferred), run the guard; a
+            // failing guard tries the next alternative, then the next arm, with the
+            // scrutinee untouched
+            let body = self.f.block();
+            let arm_depth = self.scopes.len();
+            self.push_scope();
+            let mut lis = Vec::new();
+            self.pat_binding_locals(pat, &mut lis);
+            for li in &lis {
+                self.local_place(*li);
+                // the pattern's bindings belong to the arm scope (registered before the
+                // guard's scope is pushed)
+                let lt = self.monomorphize(self.b.locals[*li as usize].ty);
+                if self.needs_drop_glue(lt) && !self.foreign[*li as usize] {
+                    self.flag_of(*li);
+                }
+            }
+            // the guard's `let` bindings: a scope of their own, dropped before the guard's
+            // temporaries and the pattern's bindings (rustc if-let guard scopes)
+            self.push_scope();
+            let n = combos.len();
+            for (ci, combo) in combos.into_iter().enumerate() {
+                let alt_fail = if ci + 1 == n { next } else { self.f.block() };
+                self.or_force = combo.into_iter().collect();
+                self.test_pat(pat, place, pt, alt_fail);
+                let saved = (self.match_root, self.pat_path.take());
+                self.match_root = root;
+                self.pat_path = self.root_path(x, root, temp);
+                self.defer_moves = Some(Vec::new());
+                self.bind_pat_place(pat, place, pt);
+                let pend = self.defer_moves.take().unwrap_or_default();
+                self.match_root = saved.0;
+                self.pat_path = saved.1;
+                self.or_force.clear();
+                let gok = self.f.block();
+                let gfail = self.f.block();
+                // a guard is a temporary scope: its `let` scrutinee temporaries drop with its
+                // bindings, in creation order
+                let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
+                self.lower_cond(g, gok, gfail);
+                self.cond_rescope = saved_rescope;
+                // (an if-let guard's temporaries: dropped when it fails, else at the
+                // arm's end)
+                // guard failed: the bindings were copies, nothing was moved; the guard's
+                // own `let` bindings drop here
+                self.switch(gfail);
+                for li in &lis {
+                    if let Some(f) = self.drop_flags[*li as usize] {
+                        self.emit(Inst::Iconst(f, 0));
+                    }
+                }
+                self.drop_scopes_from(arm_depth);
+                self.clear_scope_temp_flags(arm_depth + 1);
+                self.drop_stmt_temps_here(gmark);
+                self.goto(alt_fail);
+                self.switch(gok);
+                for mv in pend {
+                    self.do_move(mv);
+                }
+                self.goto(body);
+                if ci + 1 < n {
+                    self.switch(alt_fail);
+                }
+            }
+            self.switch(body);
+        } else {
+            if test {
+                self.test_pat(pat, place, pt, next);
+            }
+            let arm_depth = self.scopes.len();
+            self.push_scope();
+            let saved = (self.match_root, self.pat_path.take());
+            self.match_root = root;
+            self.pat_path = self.root_path(x, root, temp);
+            // (a guarded arm here has too many or-candidates to try one by one: its moves
+            // happen before the guard, as a dynamic or-dispatch has no single move set; a
+            // failing guard then leaks the moved parts, never drops them twice)
+            self.bind_pat_place(pat, place, pt);
+            self.match_root = saved.0;
+            self.pat_path = saved.1;
+            // the guard's scope (see the candidate path above)
+            self.push_scope();
+            if let Some(g) = guard {
+                let body = self.f.block();
+                let gfail = self.f.block();
+                let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
+                self.lower_cond(g, body, gfail);
+                self.cond_rescope = saved_rescope;
+                self.switch(gfail);
+                let mut lis = Vec::new();
+                self.pat_binding_locals(pat, &mut lis);
+                for li in &lis {
+                    if let Some(f) = self.drop_flags[*li as usize] {
+                        self.emit(Inst::Iconst(f, 0));
+                    }
+                }
+                self.drop_scopes_from(arm_depth);
+                self.clear_scope_temp_flags(arm_depth + 1);
+                self.drop_stmt_temps_here(gmark);
+                self.goto(next);
+                self.switch(body);
+            }
         }
     }
 
@@ -8839,111 +8982,7 @@ impl<'a> Lcx<'a> {
             }
             // the guard's temporaries (if-let guards) belong to the arm
             let gmark = self.stmt_temps.len();
-            if let (Some(g), Some(combos)) = (arm.guard, combos[k].clone()) {
-                // a guarded arm (rustc match lowering): each or-alternative combination is a
-                // candidate of its own -- test it, bind (moves deferred), run the guard; a
-                // failing guard tries the next alternative, then the next arm, with the
-                // scrutinee untouched
-                let body = self.f.block();
-                let arm_depth = self.scopes.len();
-                self.push_scope();
-                let mut lis = Vec::new();
-                self.pat_binding_locals(arm.pat, &mut lis);
-                for li in &lis {
-                    self.local_place(*li);
-                    // the pattern's bindings belong to the arm scope (registered before the
-                    // guard's scope is pushed)
-                    let lt = self.monomorphize(self.b.locals[*li as usize].ty);
-                    if self.needs_drop_glue(lt) && !self.foreign[*li as usize] {
-                        self.flag_of(*li);
-                    }
-                }
-                // the guard's `let` bindings: a scope of their own, dropped before the guard's
-                // temporaries and the pattern's bindings (rustc if-let guard scopes)
-                self.push_scope();
-                let n = combos.len();
-                for (ci, combo) in combos.into_iter().enumerate() {
-                    let alt_fail = if ci + 1 == n { next } else { self.f.block() };
-                    self.or_force = combo.into_iter().collect();
-                    self.test_pat(arm.pat, &place, pt, alt_fail);
-                    let saved = (self.match_root, self.pat_path.take());
-                    self.match_root = root;
-                    self.pat_path = self.root_path(x, root, &temp);
-                    self.defer_moves = Some(Vec::new());
-                    self.bind_pat_place(arm.pat, &place, pt);
-                    let pend = self.defer_moves.take().unwrap_or_default();
-                    self.match_root = saved.0;
-                    self.pat_path = saved.1;
-                    self.or_force.clear();
-                    let gok = self.f.block();
-                    let gfail = self.f.block();
-                    // a guard is a temporary scope: its `let` scrutinee temporaries drop with its
-                    // bindings, in creation order
-                    let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
-                    self.lower_cond(g, gok, gfail);
-                    self.cond_rescope = saved_rescope;
-                    // (an if-let guard's temporaries: dropped when it fails, else at the
-                    // arm's end)
-                    // guard failed: the bindings were copies, nothing was moved; the guard's
-                    // own `let` bindings drop here
-                    self.switch(gfail);
-                    for li in &lis {
-                        if let Some(f) = self.drop_flags[*li as usize] {
-                            self.emit(Inst::Iconst(f, 0));
-                        }
-                    }
-                    self.drop_scopes_from(arm_depth);
-                    self.clear_scope_temp_flags(arm_depth + 1);
-                    self.drop_stmt_temps_here(gmark);
-                    self.goto(alt_fail);
-                    self.switch(gok);
-                    for mv in pend {
-                        self.do_move(mv);
-                    }
-                    self.goto(body);
-                    if ci + 1 < n {
-                        self.switch(alt_fail);
-                    }
-                }
-                self.switch(body);
-            } else {
-                if !tree_mode {
-                    self.test_pat(arm.pat, &place, pt, next);
-                }
-                let arm_depth = self.scopes.len();
-                self.push_scope();
-                let saved = (self.match_root, self.pat_path.take());
-                self.match_root = root;
-                self.pat_path = self.root_path(x, root, &temp);
-                // (a guarded arm here has too many or-candidates to try one by one: its moves
-                // happen before the guard, as a dynamic or-dispatch has no single move set; a
-                // failing guard then leaks the moved parts, never drops them twice)
-                self.bind_pat_place(arm.pat, &place, pt);
-                self.match_root = saved.0;
-                self.pat_path = saved.1;
-                // the guard's scope (see the candidate path above)
-                self.push_scope();
-                if let Some(g) = arm.guard {
-                    let body = self.f.block();
-                    let gfail = self.f.block();
-                    let saved_rescope = self.cond_rescope.replace(self.scopes.len() - 1);
-                    self.lower_cond(g, body, gfail);
-                    self.cond_rescope = saved_rescope;
-                    self.switch(gfail);
-                    let mut lis = Vec::new();
-                    self.pat_binding_locals(arm.pat, &mut lis);
-                    for li in &lis {
-                        if let Some(f) = self.drop_flags[*li as usize] {
-                            self.emit(Inst::Iconst(f, 0));
-                        }
-                    }
-                    self.drop_scopes_from(arm_depth);
-                    self.clear_scope_temp_flags(arm_depth + 1);
-                    self.drop_stmt_temps_here(gmark);
-                    self.goto(next);
-                    self.switch(body);
-                }
-            }
+            self.enter_arm(x, arm.pat, arm.guard, combos[k].clone(), !tree_mode, &place, pt, root, &temp, next, gmark);
             let mark = self.stmt_temps.len();
             let v = self.lower_expr_coerced(arm.body, t);
             if !self.is_never(t) {
@@ -10876,23 +10915,9 @@ impl<'a> Lcx<'a> {
             "assert_matches" => {
                 // rustc core panicking::assert_matches_failed: the value in Debug and the
                 // pattern's source text
-                let x = mexprs[0];
-                let xt = self.body_ty(x);
-                let v = self.lower_expr(x);
-                let place = self.val_to_place(v.clone());
-                let ok = self.f.block();
-                let bad = self.f.block();
-                if let Some(p) = margs.pat {
-                    self.test_pat(p, &place, xt, bad);
-                    self.bind_pat_place(p, &place, xt);
-                    if let Some(g) = margs.guard {
-                        let g_ok = self.f.block();
-                        self.lower_cond(g, g_ok, bad);
-                        self.switch(g_ok);
-                    }
-                }
-                self.goto(ok);
+                let (place, xt, ok, bad) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
                 self.switch(bad);
+                let v = self.read_place(&place, xt);
                 // the pattern's tokens: after the first top-level comma up to its `if` / comma
                 let u = self.u;
                 let src = u.prog.src(self.b.file);
@@ -10937,22 +10962,10 @@ impl<'a> Lcx<'a> {
                 self.unit()
             }
             "matches" => {
-                let x = mexprs[0];
-                let xt = self.body_ty(x);
-                let v = self.lower_expr(x);
-                let place = self.val_to_place(v);
+                let (_, _, ok, fail) = self.lower_macro_match(mexprs[0], margs.pat, margs.guard);
                 let res = self.f.vreg(Cls::I);
-                let fail = self.f.block();
                 let join = self.f.block();
-                if let Some(p) = margs.pat {
-                    self.test_pat(p, &place, xt, fail);
-                    self.bind_pat_place(p, &place, xt);
-                    if let Some(g) = margs.guard {
-                        let ok = self.f.block();
-                        self.lower_cond(g, ok, fail);
-                        self.switch(ok);
-                    }
-                }
+                self.switch(ok);
                 self.emit(Inst::Iconst(res, 1));
                 self.goto(join);
                 self.switch(fail);
