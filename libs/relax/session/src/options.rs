@@ -39,6 +39,26 @@ pub enum Priority { Length, References, Sqrt }
 pub enum WorkerQos { Default, Background, Utility }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier0Baseline { Off, Startup, Always }
+/// How much the JIT compiles ahead of the program's calls (`makepad run --ahead=<level>`,
+/// `MAKEPAD_RUN_AHEAD`). Every level compiles what runs on its first call and tiers hot code up to
+/// O3; they differ in the work done for code that has not run yet (jit::AheadPolicy).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AheadLevel {
+    /// iteration: only what ran (plus the startup image and O3 for what is hot)
+    Minimal,
+    /// the default: a bounded, prioritised compile-ahead of what the UI is about to need
+    Balanced,
+    /// a background AOT pass at worker priority: everything reachable from what ran
+    Aot,
+}
+impl AheadLevel {
+    pub fn name(self) -> &'static str {
+        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::Aot => "aot" }
+    }
+    pub fn parse(v: &str) -> Option<AheadLevel> {
+        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot" => Some(AheadLevel::Aot), _ => None }
+    }
+}
 
 /// Effective machine capabilities; detected once by codegen before freezing Options.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -759,6 +779,9 @@ pub struct RuntimeOptions {
     pub restore: Option<String>,
     /// `MAKEPAD_RUN_WORKER_QOS`; default `WorkerQos::Background`.
     pub worker_qos: WorkerQos,
+    /// `MAKEPAD_RUN_AHEAD` (`--ahead=<level>` sets it); default `AheadLevel::Balanced`. Not part of
+    /// the code identity: every level makes the same code for a slot, so they share warm caches.
+    pub ahead: AheadLevel,
 }
 
 impl Default for RuntimeOptions {
@@ -784,6 +807,7 @@ impl Default for RuntimeOptions {
             tier1_threads: None,
             restore: None,
             worker_qos: WorkerQos::Background,
+            ahead: AheadLevel::Balanced,
         }
     }
 }
@@ -825,6 +849,7 @@ impl RuntimeOptions {
             tier1_threads: { let os = get("MAKEPAD_RUN_O3_THREADS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
             restore: { let os = get("MAKEPAD_RUN_RESTORE"); let v = os.and_then(|v| v.into_string().ok()); v },
             worker_qos: { let os = get("MAKEPAD_RUN_WORKER_QOS"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => WorkerQos::Default, Some("utility") => WorkerQos::Utility, _ => WorkerQos::Background } },
+            ahead: { let os = get("MAKEPAD_RUN_AHEAD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref().and_then(AheadLevel::parse).unwrap_or(AheadLevel::Balanced) },
         }
     }
 }

@@ -161,7 +161,7 @@ fn run_page(st: &Style) -> String {
     p.section("Options:");
     p.row("--verbose", "Phase timings and info (also MAKEPAD_RUN_VERBOSE=1)");
     p.row("--quiet", "Hide the compile-error stream");
-    p.row("--ahead", "Compile in the background what the last run used");
+    p.row("--ahead=<level>", "Compile ahead of the calls: minimal (only what runs,\nfor editing), balanced (default: what the UI is\nabout to need) or aot (a background pass over\neverything reachable); also MAKEPAD_RUN_AHEAD");
     p.row("--check-first", "Borrow-check each function before it first runs (the\ndefault checks in the background and never waits)");
     p.row("--units <json>", "Use a saved unit graph instead of cargo");
     p.row("--agent", "Park panics for an agent; print events on stderr");

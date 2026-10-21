@@ -1357,13 +1357,14 @@ fn print_first_present(presented_at: f64) {
     let present_ms = (presented_at - startup_t0()).max(0.0) * 1000.0;
     let main_ms = std::env::var("MAKEPAD_RUN_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let cache = std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
-    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache));
+    let ahead = std::env::var("MAKEPAD_RUN_AHEAD").unwrap_or_else(|_| "balanced".to_string());
+    eprintln!("{}", first_present_line(&package, present_ms, main_ms, &cache, &ahead));
 }
 
-fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str) -> String {
+fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str, ahead: &str) -> String {
     format!(
-        "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {})",
-        package, present_ms / 1000.0, main_ms / 1000.0, cache
+        "makepad: {} first frame at {:.2} s (main at {:.2} s, cache {}, ahead {})",
+        package, present_ms / 1000.0, main_ms / 1000.0, cache, ahead
     )
 }
 

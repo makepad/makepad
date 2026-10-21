@@ -815,7 +815,7 @@ pub unsafe fn spec_seed_manifest(up: *mut Unit) {
     // after the first present: what the earlier run installed after its first present (the
     // slots before it were linked as this run's start called them)
     let list = owner::call_quick(owner::Class::App, || (&mut *up).cache.as_ref().map(|c| c.manifest[c.manifest_present..].to_vec()).unwrap_or_default());
-    if list.is_empty() || !pipelined() {
+    if list.is_empty() || !pipelined() || !ahead_policy().spec_cached {
         return;
     }
     struct P(*mut Unit);
@@ -3737,7 +3737,7 @@ impl Unit {
         // after the first present only the slots the program's own builds make (their callees),
         // not a speculative or tier-up build's, and no cold callee (panics, formatting): what
         // the UI thread's next calls most likely meet
-        if self.front.helpers > 0 && (startup_phase() || ahead_foreground() && !match key {
+        if self.front.helpers > 0 && (startup_phase() || ahead_policy().post_present_helpers > 0 && ahead_foreground() && !match key {
             FnKey::Inst(d, _) => is_cold_def(&self.prog, &self.tcx, *d) || is_cold_name(&self.prog.def_path(*d)),
             _ => true,
         }) {
@@ -4819,7 +4819,9 @@ impl Unit {
             trace_stored_verdict(&self.prog, d, "instance", cached.as_ref());
             let src: std::sync::Arc<dyn crate::borrowck::lazy::FrontSource> = std::sync::Arc::new(BorrowckFront(self.front.clone()));
             let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
-            crate::borrowck::lazy::note_program(options, &src, epoch);
+            if borrowck_discovery() {
+                crate::borrowck::lazy::note_program(options, &src, epoch);
+            }
             crate::borrowck::lazy::note_compiled(options, &src, crate::borrowck::lazy::NoteFn {
                 def: d, args: a, cache_key: key, epoch, rank, cached,
             });
@@ -6965,7 +6967,11 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
         cache.record_o2(u, id, &c.code, &c.relocs, &c.pc_map);
         u.cache = Some(cache);
     }
-    if u.fns[id as usize].o3.load(Ordering::Relaxed) || crate::inspect::instrument::active(id) {
+    // an O3 build of the slot is running (queued with this one: tier1_thread's o2_hot): this install
+    // would change the slot under it, and it would be dropped and built again (cold Stage: 1.8k O3
+    // builds dropped so) -- the O2 code stays the cache entry, the O3 code runs
+    let o3_building = u.fns[id as usize].compiled && TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).contains(&id);
+    if u.fns[id as usize].o3.load(Ordering::Relaxed) || o3_building || crate::inspect::instrument::active(id) {
         O2_STATS[2].fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -7341,6 +7347,8 @@ pub unsafe fn settle_drop(up: *mut Unit) -> SettleDrops {
     let queue = TIER_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     let active = TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
     let mut pinned: std::collections::HashSet<u32> = queue.iter().map(|x| x.0).chain(active.iter().copied()).collect();
+    // aot: the slots whose callees are speculated after the burst keep their RIR until then
+    pinned.extend(AOT_DEFERRED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0 == up as usize).map(|x| x.1));
     // Queued jobs have not enumerated their inline snapshots yet. Their known RIR
     // dependency graph is still pending input too; dropping it would make each queued
     // caller recheck shared callees. The edges survive slot RIR eviction (warm rebuilds).
@@ -9419,6 +9427,10 @@ pub(crate) fn sample_periods() -> &'static [u64] {
     })
 }
 const SAMPLES_HOT: u32 = 5;
+/// The sampler hands what it read to the owner at most this often (sampler_thread) ...
+const SAMPLE_BATCH: std::time::Duration = std::time::Duration::from_millis(16);
+/// ... or once this many samples wait
+const SAMPLE_BATCH_PCS: usize = 2048;
 /// callers credited with a sample too (a loop calling a hot callee is hot itself)
 #[cfg(not(target_os = "android"))]
 pub(crate) const SAMPLE_CALLERS: usize = 2;
@@ -9759,6 +9771,7 @@ fn sampler_thread() {
     let mut last = std::time::Instant::now();
     let mut last_write = std::time::Instant::now();
     let mut last_progress = std::time::Instant::now();
+    let mut last_batch = std::time::Instant::now();
     let periods = sample_periods();
     let mut period_index = 0;
     // wakes in a row in which no sampled thread was on a CPU (macOS: an idle app); past
@@ -9801,6 +9814,25 @@ fn sampler_thread() {
             let threads = SAMPLED.lock().map(|g| g.len()).unwrap_or(0);
             eprintln!("sampler: t={:.1} ms, {} threads, {} pcs", t, threads, pcs.len());
         }
+        // Decay even with no samples or a busy unit lock. Otherwise yesterday's hot code
+        // retains its priority during an idle spell. Catch up after delayed sampler wakes.
+        let now = wall_ns();
+        let halves = now.saturating_sub(last_half) / HEAT_HALF_NS;
+        if halves > 0 {
+            last_half += halves * HEAT_HALF_NS;
+            if let Some(counts) = HEAT.lock().unwrap().as_mut() {
+                counts.retain(|_, c| {
+                    *c = c.checked_shr(halves.min(32) as u32).unwrap_or(0);
+                    *c > 0
+                });
+            }
+        }
+        // the samples go to the owner in batches, one unit call per SAMPLE_BATCH (not one per
+        // 2 ms wake: an animating Stage at idle woke the owner 500 times a second for them)
+        if !TIER_STOP.load(Ordering::SeqCst) && last_batch.elapsed() < SAMPLE_BATCH && pcs.len() < SAMPLE_BATCH_PCS && selfs.len() < SAMPLE_BATCH_PCS {
+            continue;
+        }
+        last_batch = std::time::Instant::now();
         // Train only after the first structural O3 installation. Sampling
         // retired code would mix the old and new code shapes during long calls.
         if !selfs.is_empty() && !TIER_STOP.load(Ordering::SeqCst) {
@@ -9881,19 +9913,6 @@ fn sampler_thread() {
             });
         }
         selfs.clear();
-        // Decay even with no samples or a busy unit lock. Otherwise yesterday's hot code
-        // retains its priority during an idle spell. Catch up after delayed sampler wakes.
-        let now = wall_ns();
-        let halves = now.saturating_sub(last_half) / HEAT_HALF_NS;
-        if halves > 0 {
-            last_half += halves * HEAT_HALF_NS;
-            if let Some(counts) = HEAT.lock().unwrap().as_mut() {
-                counts.retain(|_, c| {
-                    *c = c.checked_shr(halves.min(32) as u32).unwrap_or(0);
-                    *c > 0
-                });
-            }
-        }
         if pcs.is_empty() || TIER_STOP.load(Ordering::SeqCst) {
             pcs.clear();
             continue;
@@ -9919,7 +9938,11 @@ fn sampler_thread() {
                     *c += weight;
                     (before, *c)
                 });
-                if before < SAMPLES_HOT && count >= SAMPLES_HOT {
+                // a slot counted again after it went cold (tier_revalidate) is queued at its first
+                // sample: it runs again, so its earlier hotness counts (steady lukewarm UI code never
+                // crosses SAMPLES_HOT twice)
+                let rearmed = before == 0 && unsafe { (*tier_rec(&u.slots, id).add(5)).load(Ordering::Relaxed) & REARMED != 0 };
+                if before < SAMPLES_HOT && count >= SAMPLES_HOT || rearmed {
                     if sample_trace() {
                         eprintln!("sampler: {} hot", u.fns[id as usize].name);
                     }
@@ -10259,6 +10282,78 @@ fn hot_twin_callers(u: &Unit, cands: Option<&[u32]>, twin: Option<u32>) -> Vec<u
     }
 }
 
+/// Tier record word 5 (O1 code bytes): the slot was counted again once (tier_revalidate) and
+/// queued since: its next build goes ahead whatever its age.
+const REARMED: u64 = 1 << 63;
+/// A calls / samples entry older than this whose slot is not hot now (fewer than SAMPLES_HOT recent
+/// samples: under ~0.5% of a thread) is counted again (tier_revalidate).
+const REVALIDATE_NS: u64 = 1_000_000_000;
+/// O3 queue entries counted again (they had gone cold before their build)
+pub static TIER_REVALIDATED: AtomicU64 = AtomicU64::new(0);
+
+/// The O3 queue's backlog of code that has gone cold (queue lock held): an entry queued by its
+/// calls or samples REVALIDATE_NS ago or earlier, whose slot is not hot now, goes back to counting
+/// (its count stub in the slot again) instead of being built. Hot code is queued again within its
+/// count window and built then (REARMED: whatever its age); startup code that was busy once (a
+/// cold Stage queued 2k slots before its first present) and lukewarm UI code never builds. The
+/// level's policy (o3_revalidate).
+fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
+    if q.is_empty() || !ahead_policy().o3_revalidate {
+        return;
+    }
+    let now = wall_ns();
+    if !q.iter().any(|e| matches!(e.1, Q_CALLS | Q_SAMPLES) && now.saturating_sub(e.2) >= REVALIDATE_NS) {
+        return;
+    }
+    let up = TIER_UNIT.load(Ordering::Acquire);
+    if up.is_null() {
+        return;
+    }
+    let u = unsafe { &*up };
+    // (profile replay builds what its profile names, as recorded)
+    if t1prof_replay(&u.prog.session.options) {
+        return;
+    }
+    let Some(calls) = u.tier1.as_ref().map(|t| t.calls) else { return };
+    let heat = HEAT.lock().unwrap();
+    // no samples at all (no sampler on this platform): no evidence either way, the count decides
+    let Some(h) = heat.as_ref() else { return };
+    let mut n = 0u64;
+    q.retain(|&(id, why, at, _)| {
+        // still hot: as many recent samples (decayed) as make a slot hot
+        if !matches!(why, Q_CALLS | Q_SAMPLES) || now.saturating_sub(at) < REVALIDATE_NS || h.get(&id).copied().unwrap_or(0) >= SAMPLES_HOT {
+            return true;
+        }
+        unsafe {
+            let rec = tier_rec(&u.slots, id);
+            let len = (*rec.add(5)).load(Ordering::Relaxed);
+            if len & REARMED != 0 || (*rec.add(3)).load(Ordering::Acquire) != T_QUEUED {
+                return true;
+            }
+            let code = (*rec.add(1)).load(Ordering::Relaxed);
+            let stub = (*rec.add(2)).load(Ordering::Relaxed);
+            (*rec).store(calls, Ordering::Relaxed);
+            (*rec.add(4)).store(now, Ordering::Relaxed);
+            (*rec.add(5)).store(len | REARMED, Ordering::Relaxed);
+            (*rec.add(3)).store(T_COUNTING, Ordering::Release);
+            let s = u.slots.table(id) as *const AtomicU64;
+            // other code was installed meanwhile (O2, a patch): the stub is not its entry; build it
+            if (*s).compare_exchange(code, stub, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                (*rec.add(3)).store(T_QUEUED, Ordering::Release);
+                return true;
+            }
+        }
+        n += 1;
+        false
+    });
+    if n > 0 {
+        TIER_REVALIDATED.fetch_add(n, Ordering::Relaxed);
+        if tier1_trace() {
+            eprintln!("O3q @{:.3} {} cold entries counted again, q={}", now as f64 / 1e9, n, q.len());
+        }
+    }
+}
+
 fn tier_push(id: u32, why: u8, rate: u64) {
     let mut q = TIER_QUEUE.lock().unwrap();
     q.push((id, why, wall_ns(), rate));
@@ -10299,7 +10394,8 @@ fn spawn_tier1_threads(runtime: &crate::options::RuntimeOptions, options: &crate
     } else if runtime.tier1_adaptive {
         (3.min(cap), 3.max(cores / 2).min(cap))
     } else {
-        (3.min(cap), 3.min(cap))
+        let n = 3.min(cap).min(ahead_policy().o3_threads);
+        (n, n)
     };
     for k in 0..max {
         let runtime = crate::zone_alloc::kept_clone(runtime);
@@ -10676,7 +10772,7 @@ fn rt_hot(slot: u64) -> u64 {
         let took = now.saturating_sub((*rec.add(4)).load(Ordering::Relaxed));
         // ... unless the calls came very fast (a tight loop: hot before the sampler's first
         // ticks see it -- bench_rt rc_refcell's cold run stayed at O1, 6x rustc)
-        let small = (*rec.add(5)).load(Ordering::Relaxed) <= SMALL_CODE;
+        let small = (*rec.add(5)).load(Ordering::Relaxed) & !REARMED <= SMALL_CODE;
         if (*rec.add(3)).load(Ordering::Relaxed) == T_COUNTING && (took > CALL_WINDOW_NS || (took > CALL_FAST_NS && !small && unseen())) {
             // too slow a rate, or no CPU to show: count again from now (the stub stays)
             if let Some(t) = &u.tier1 {
@@ -10731,6 +10827,7 @@ fn tier1_thread(runtime: &crate::options::RuntimeOptions, k: usize, normal: usiz
                 // queue during startup. Already-running builds finish when demand drops.
                 let ready = tier1_workers_ready();
                 if !startup_holds_tier1() && (k == 0 || ready) && (k < normal || q.len() > 32) {
+                    tier_revalidate(&mut q);
                     if let Some(e) = tier_pop(&mut q) {
                         TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).push(e.0);
                         break e;
@@ -12107,6 +12204,98 @@ pub fn bump_patch_epoch() {
     PATCH_EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
+// ------------------------------------------------------------ compile-ahead policy
+//
+// One knob, `makepad run --ahead=<level>` / MAKEPAD_RUN_AHEAD (RuntimeOptions::ahead), sets how much
+// is compiled for code that has not run yet. Every level compiles what runs on its first call, links
+// the previous run's startup image, and builds O3 for what is measurably hot. The levels are budgets
+// of the one set of mechanisms below, not separate paths:
+// - speculation: the callees of what was built (spec_enqueue_calls), the cached callees of what was
+//   linked (spec_enqueue_cached), the previous run's post-present manifest (spec_seed_manifest);
+// - the ahead helpers after the first present (they check and lower the callees the UI's builds
+//   make, slot_named);
+// - teardown built ahead (prepare_teardown), Gandalf's whole-app discovery (note_program), the
+//   previous run's fns compiled on a worker (run.rs start_ahead);
+// - the O3 queue: an entry queued long ago for code that has gone cold is counted again
+//   (tier_pop), so a backlog of once-busy startup code never builds unless it runs hot again.
+// Cold Stage on the old default (aot without these bounds, 165): 27k teardown builds (85% never
+// called, 4.6 s), Gandalf 4.4k app bodies (8.4 s; 13.8 s warm, 5.3k bodies), a 2k-entry O3 backlog
+// at the first present, 1.8k O3 builds dropped behind their own O2 build: 2-4 cores busy for 25 s+.
+
+static AHEAD_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// The run's level (the driver sets it from `--ahead=` / MAKEPAD_RUN_AHEAD before main).
+pub fn set_ahead_level(l: crate::options::AheadLevel) {
+    AHEAD_LEVEL.store(l as u8, Ordering::Relaxed);
+}
+
+pub fn ahead_level() -> crate::options::AheadLevel {
+    match AHEAD_LEVEL.load(Ordering::Relaxed) {
+        0 => crate::options::AheadLevel::Minimal,
+        2 => crate::options::AheadLevel::Aot,
+        _ => crate::options::AheadLevel::Balanced,
+    }
+}
+
+/// What a level allows (see the section comment).
+pub(crate) struct AheadPolicy {
+    /// callees of built code are speculated (spec_enqueue_calls)
+    spec_calls: bool,
+    /// cached callees of linked code, and the previous run's post-present manifest, are linked ahead
+    spec_cached: bool,
+    /// speculation depth (None: MAKEPAD_RUN_SPEC_DEPTH)
+    spec_depth: Option<u8>,
+    /// from this depth on only fall-through calls (None: MAKEPAD_RUN_SPEC_HOT_FROM)
+    spec_hot_from: Option<u8>,
+    /// fn pointers and vtables of code that ran are followed (MAKEPAD_RUN_SPEC_DYN)
+    spec_dyn: bool,
+    /// speculative workers at most
+    spec_jobs: usize,
+    /// built-ahead results nobody called expire (MAKEPAD_RUN_SPEC_TTL_MS)
+    spec_expire: bool,
+    /// ahead helpers after the first present (0: the UI's builds check and lower their own bodies)
+    post_present_helpers: u32,
+    /// the program's teardown is built ahead
+    teardown: bool,
+    /// Gandalf checks every body of the app, not only the ones that ran
+    borrowck_discovery: bool,
+    /// the previous run's startup fns are compiled on a worker
+    pub(crate) last_run: bool,
+    /// O3 queue entries of code gone cold are counted again
+    o3_revalidate: bool,
+    /// O3 workers at most
+    o3_threads: usize,
+}
+
+pub(crate) fn ahead_policy() -> &'static AheadPolicy {
+    use crate::options::AheadLevel;
+    const MINIMAL: AheadPolicy = AheadPolicy {
+        spec_calls: false, spec_cached: false, spec_depth: Some(0), spec_hot_from: Some(0), spec_dyn: false, spec_jobs: 1, spec_expire: true,
+        post_present_helpers: 0, teardown: false, borrowck_discovery: false, last_run: false, o3_revalidate: true, o3_threads: 2,
+    };
+    const BALANCED: AheadPolicy = AheadPolicy {
+        spec_calls: true, spec_cached: true, spec_depth: None, spec_hot_from: None, spec_dyn: true, spec_jobs: 2, spec_expire: true,
+        post_present_helpers: u32::MAX, teardown: false, borrowck_discovery: false, last_run: false, o3_revalidate: true, o3_threads: 2,
+    };
+    const AOT: AheadPolicy = AheadPolicy {
+        spec_calls: true, spec_cached: true, spec_depth: Some(AOT_DEPTH), spec_hot_from: Some(AOT_DEPTH), spec_dyn: true, spec_jobs: usize::MAX, spec_expire: false,
+        post_present_helpers: u32::MAX, teardown: true, borrowck_discovery: true, last_run: true, o3_revalidate: false, o3_threads: 3,
+    };
+    match ahead_level() {
+        AheadLevel::Minimal => &MINIMAL,
+        AheadLevel::Balanced => &BALANCED,
+        AheadLevel::Aot => &AOT,
+    }
+}
+
+/// aot: speculation follows every call of what it built (a depth no call chain reaches)
+const AOT_DEPTH: u8 = 250;
+
+/// Whether Gandalf's whole-app discovery runs (the level's policy).
+pub(crate) fn borrowck_discovery() -> bool {
+    ahead_policy().borrowck_discovery
+}
+
 /// MAKEPAD_RUN_SPEC_ORDER=lifo: newest queued first (the callees of the latest compile)
 fn spec_lifo(options: &crate::options::Options) -> bool {
     options.spec_order
@@ -12121,7 +12310,7 @@ fn spec_yield(options: &crate::options::Options) -> bool {
 /// Default: fall-through only while the machine runs on battery (less work built ahead that
 /// is never called), every warm call on mains power. MAKEPAD_RUN_SPEC_HOT=1/0 overrides.
 pub fn spec_hot_only(options: &crate::options::Options) -> bool {
-    options.spec_hot.unwrap_or_else(on_battery)
+    options.spec_hot.unwrap_or_else(|| ahead_level() != crate::options::AheadLevel::Aot && on_battery())
 }
 
 /// Is the machine running on battery power (read once, at the first speculation)?
@@ -12131,15 +12320,15 @@ pub fn on_battery() -> bool {
 
 /// MAKEPAD_RUN_SPEC_HOT_FROM=n: from depth n on only fall-through calls are speculated (default 2)
 fn spec_hot_from(options: &crate::options::Options) -> u8 {
-    options.spec_hot_from
+    ahead_policy().spec_hot_from.unwrap_or(options.spec_hot_from)
 }
 
 fn spec_depth_max(options: &crate::options::Options) -> u8 {
-    options.spec_depth
+    ahead_policy().spec_depth.unwrap_or(options.spec_depth)
 }
 
 fn spec_jobs(options: &crate::options::Options) -> usize {
-    options.spec_jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6))
+    options.spec_jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6).min(ahead_policy().spec_jobs))
 }
 
 static SPEC_UNIT: std::sync::atomic::AtomicPtr<Unit> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
@@ -12175,7 +12364,7 @@ unsafe fn spec_enqueue(up: *mut Unit, id: u32, depth: u8) {
         Some(r) => r.clone(),
         None => return,
     };
-    spec_enqueue_calls(up, &rir, &[], depth);
+    spec_enqueue_calls(up, id, &rir, &[], depth);
 }
 
 fn note_entered(_u: &Unit, id: u32) {
@@ -12260,15 +12449,50 @@ fn cold_blocks(u: &Unit, func: &relax_backend::rir::Func) -> Vec<bool> {
 /// MAKEPAD_RUN_SPEC_DYN=0: speculation follows direct calls only, not fn pointers and vtables
 fn spec_dyn() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SPEC_DYN").map_or(true, |v| v != "0"))
+    ahead_policy().spec_dyn && *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SPEC_DYN").map_or(true, |v| v != "0"))
 }
 
-/// Queues the slots `func` calls (but not `skip`) at depth + 1 (lock held).
-unsafe fn spec_enqueue_calls(up: *mut Unit, func: &relax_backend::rir::Func, skip: &[u32], depth: u8) {
+/// aot: slots (unit, slot, depth) built in a UI burst whose callees are speculated after it
+static AOT_DEFERRED: relax_session::sync::Mutex<Vec<(usize, u32, u8)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// aot: once the UI's burst is over, the callees of the slots built during it are speculated (any
+/// thread; the monitor's tick).
+pub fn aot_drain() {
+    if ahead_level() != crate::options::AheadLevel::Aot || ui_burst() || startup_phase() {
+        return;
+    }
+    let roots = std::mem::take(&mut *AOT_DEFERRED.lock().unwrap_or_else(|e| e.into_inner()));
+    if roots.is_empty() {
+        return;
+    }
+    let _job = compile_job();
+    owner::call(owner::Class::Background, || {
+        let up = SPEC_UNIT.load(Ordering::Acquire);
+        if SPEC_STOP.load(Ordering::SeqCst) || up.is_null() {
+            return;
+        }
+        for (unit, id, depth) in roots {
+            if unit == up as usize && (id as usize) < unsafe { (&*up).fns.len() } {
+                unsafe { spec_enqueue(up, id, depth) };
+            }
+        }
+    });
+}
+
+/// Queues the slots `func` (slot `id`'s RIR) calls (but not `skip`) at depth + 1 (lock held).
+unsafe fn spec_enqueue_calls(up: *mut Unit, id: u32, func: &relax_backend::rir::Func, skip: &[u32], depth: u8) {
+    if startup_phase() || !ahead_policy().spec_calls { return; }
     // nor in a burst of the UI thread's lazy compiles after the present: the ahead helpers check
     // and lower the callees its builds make (cheaper than whole speculative builds, of which
-    // a burst called few: 119 of 14.9k compiles in a cold Stage's first 10 s after present)
-    if startup_phase() || ui_burst() { return; }
+    // a burst called few: 119 of 14.9k compiles in a cold Stage's first 10 s after present);
+    // aot speculates them after the burst (aot_drain)
+    if ui_burst() {
+        if ahead_level() == crate::options::AheadLevel::Aot {
+            SPEC_UNIT.store(up, Ordering::Release);
+            crate::zone_alloc::kept_with(|| AOT_DEFERRED.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, id, depth)));
+        }
+        return;
+    }
     let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let options = &session.options;
     if !pipelined() || depth >= spec_depth_max(options) {
@@ -12462,7 +12686,7 @@ const TEARDOWN_DEPTH: u8 = 3;
 /// teardown runs once, at the end. As a speculative worker's, each build takes the unit lock
 /// only when no thread waits for it (lock_bg), at a lowered priority; the thread stops at exit.
 pub unsafe fn prepare_teardown(up: *mut Unit) {
-    if !pipelined() {
+    if !pipelined() || !ahead_policy().teardown {
         return;
     }
     struct P(*mut Unit);
@@ -12578,7 +12802,7 @@ static SPEC_BUILT: relax_session::sync::Mutex<Vec<(u32, u64)>> = relax_session::
 pub static SPEC_EXPIRED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 fn note_spec_built(options: &crate::options::Options, id: u32) {
-    if spec_ttl_ns(options) != 0 {
+    if spec_ttl_ns(options) != 0 && ahead_policy().spec_expire {
         SPEC_BUILT.lock().unwrap().push((id, wall_ns()));
     }
 }
@@ -12597,7 +12821,7 @@ pub fn expire_spec(options: &crate::options::Options) {
     // headless program (released on quiet, startup_main) keeps what it built.
     if startup_phase() || !FIRST_PRESENT.load(Ordering::Acquire) { return; }
     let ttl = spec_ttl_ns(options);
-    if ttl == 0 {
+    if ttl == 0 || !ahead_policy().spec_expire {
         return;
     }
     let now = wall_ns();
@@ -13425,7 +13649,7 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
         skip.extend(p.deferred.iter().map(|x| x.0));
         let depth = if spec { (&*up).fns[id as usize].spec_depth } else { 0 };
         if !pipelined() || !defer_startup_root(up, id, depth) {
-            spec_enqueue_calls(up, &p.func, &skip, depth);
+            spec_enqueue_calls(up, id, &p.func, &skip, depth);
         }
     }
     let u = &mut *up;
@@ -13894,9 +14118,11 @@ fn spawn_helpers(f: &std::sync::Arc<FrontShared>, _q: &std::collections::VecDequ
         return;
     }
     let _k = crate::zone_alloc::kept();
-    for i in 0..f.helpers {
+    // after the startup: the level's share of them (they serve the UI's bursts)
+    let n = if startup_phase() { f.helpers } else { f.helpers.min(ahead_policy().post_present_helpers) };
+    for i in 0..n {
         let f2 = f.clone();
-        if std::thread::Builder::new().name(format!("run-ahead{}", i)).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); ahead_helper(f2) }).is_ok() {
+        if std::thread::Builder::new().name(format!("run-ahead{}", i)).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); ahead_helper(f2, i) }).is_ok() {
             f.live_helpers.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -13932,11 +14158,17 @@ pub fn ui_burst() -> bool {
 /// A helper thread: checks and lowers queued slots' bodies ahead through the startup and the
 /// warm-up after the first present (then speculative workers check what they build ahead) or
 /// until the unit is dropped.
-fn ahead_helper(f: std::sync::Arc<FrontShared>) {
+fn ahead_helper(f: std::sync::Arc<FrontShared>, index: u32) {
     loop {
         let id = {
             let mut q = f.queue.lock().unwrap_or_else(|e| e.into_inner());
             loop {
+                // a startup helper past the level's post-present share ends at the present (the
+                // others serve the UI's bursts; the last one out drops what no build took)
+                if !startup_phase() && FIRST_PRESENT.load(Ordering::Acquire) && index >= ahead_policy().post_present_helpers.max(1) {
+                    f.live_helpers.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
                 let burst_over = !startup_phase() && FIRST_PRESENT.load(Ordering::Acquire) && q.is_empty() && !ahead_burst();
                 if !f.alive.load(Ordering::SeqCst) || !ahead_phase() || burst_over {
                     if burst_over {
@@ -14672,7 +14904,7 @@ unsafe fn spec_enqueue_cached(up: *mut Unit, ids: &[u32], depth: u8) {
     }
     let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let options = &session.options;
-    if !pipelined() || ids.is_empty() || depth >= spec_depth_max(options) {
+    if !pipelined() || ids.is_empty() || depth >= spec_depth_max(options) || !ahead_policy().spec_cached {
         return;
     }
     let u = &mut *up;

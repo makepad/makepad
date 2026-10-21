@@ -323,6 +323,9 @@ fn specv_aliased_call_from_unverified_body() {
     }
     use std::sync::atomic::Ordering;
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    // `through_raw` must have its clean verdict before its first run: the checker's whole-app discovery
+    // (`--ahead=aot`; the other levels check only the bodies that ran)
+    crate::jit::set_ahead_level(crate::options::AheadLevel::Aot);
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-specv-alias-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
