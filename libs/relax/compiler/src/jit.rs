@@ -624,7 +624,31 @@ const TLS_CAP: usize = 1 << 20;
 const TLS_FIRST_FREE: u32 = 16;
 static TLS_KEY: AtomicU64 = AtomicU64::new(u64::MAX);
 
-extern "C" fn tls_dtor(p: *mut u8) {
+thread_local! {
+    /// This thread exits: the program's thread-local destructors run (tls_exit). (const, no
+    /// destructor: readable at every point of the thread's exit)
+    static THREAD_EXIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// This thread is exiting and runs the program's thread-local destructors. They run after the
+/// host's own thread-locals are destroyed (glibc runs pthread key destructors after
+/// __call_tls_dtors; Windows' guard is one of the host's), so compiler work for this thread (a
+/// destructor's lazy compile) must not touch those: it runs on the owner thread (rt_compile).
+pub(crate) fn in_thread_exit() -> bool {
+    THREAD_EXIT.try_with(|e| e.get()).unwrap_or(true)
+}
+
+/// The OS key's destructor: the thread exits. Its program thread-locals are destroyed, then the
+/// runtime's own (no program code runs on the thread after that).
+extern "C" fn tls_exit(p: *mut u8) {
+    let _ = THREAD_EXIT.try_with(|e| e.set(true));
+    tls_dtor(p);
+    free_runtime_tls();
+}
+
+/// Runs the program's thread-local destructors of block `p` and frees it (thread exit, or the end
+/// of a native worker's callback: domain_callback).
+fn tls_dtor(p: *mut u8) {
     // pthread clears its key before calling us. Reinstall it while Relax std destructors run.
     os::tls::set(tls_key(), p);
     let registrations = unsafe { crate::domain_threads::finish(p as u64) };
@@ -642,7 +666,7 @@ fn tls_key() -> u64 {
     static CREATE: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
     let _g = CREATE.lock().unwrap_or_else(|e| e.into_inner());
     if TLS_KEY.load(Ordering::Acquire) == u64::MAX {
-        TLS_KEY.store(os::tls::key_create(tls_dtor), Ordering::Release);
+        TLS_KEY.store(os::tls::key_create(tls_exit), Ordering::Release);
     }
     TLS_KEY.load(Ordering::Acquire)
 }
@@ -1103,17 +1127,53 @@ fn fork_child() {
 }
 
 
+/// A thread-local of the runtime that program code reaches (format buffers, the panic being
+/// raised). Program code runs during thread exit -- its thread-locals' destructors (tls_exit),
+/// after the host's own thread-locals are destroyed -- so std must never destroy these: the
+/// value has no destructor (none is registered), and tls_exit frees it once the thread's last
+/// program code has run.
+struct ExitCell<T>(std::cell::RefCell<std::mem::ManuallyDrop<T>>);
+
+impl<T> ExitCell<T> {
+    const fn new(v: T) -> Self {
+        ExitCell(std::cell::RefCell::new(std::mem::ManuallyDrop::new(v)))
+    }
+    fn borrow(&self) -> std::cell::Ref<'_, T> {
+        std::cell::Ref::map(self.0.borrow(), |v| &**v)
+    }
+    fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+        std::cell::RefMut::map(self.0.borrow_mut(), |v| &mut **v)
+    }
+}
+
+impl<T: Default> ExitCell<T> {
+    /// Frees the value (a default, which owns nothing, takes its place: a later use still works).
+    fn free(&self) {
+        if let Ok(mut v) = self.0.try_borrow_mut() {
+            drop(std::mem::take(&mut **v));
+        }
+    }
+}
+
 thread_local! {
     /// saved host context of this thread's innermost `enter` (sp); 0 = no recovery point
     static CTX: std::cell::UnsafeCell<[u64; 2]> = const { std::cell::UnsafeCell::new([0; 2]) };
     /// stack of format buffers: format!/write! to non-Formatter targets push one
     // (the outer buffer is kept-heap: a thread-local past the compiler generations)
-    static FMT: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(crate::zone_alloc::kept_with(|| vec![String::new()]));
+    static FMT: ExitCell<Vec<String>> = ExitCell::new(crate::zone_alloc::kept_with(|| vec![String::new()]));
     /// the last popped buffer (valid until the next pop)
-    static FMT_POPPED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-    static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
+    static FMT_POPPED: ExitCell<String> = const { ExitCell::new(String::new()) };
+    static PANIC: ExitCell<Option<PanicInfo>> = const { ExitCell::new(None) };
     /// "file:line:col" of a panic raised through panic_impl (std's own panics)
-    static PANIC_LOC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static PANIC_LOC: ExitCell<String> = const { ExitCell::new(String::new()) };
+}
+
+/// Frees this thread's runtime thread-locals (tls_exit: no program code runs on it any more).
+fn free_runtime_tls() {
+    let _ = FMT.try_with(|c| c.free());
+    let _ = FMT_POPPED.try_with(|c| c.free());
+    let _ = PANIC.try_with(|c| c.free());
+    let _ = PANIC_LOC.try_with(|c| c.free());
 }
 
 crate::gen_local! {
@@ -1135,7 +1195,7 @@ fn install_ice_hook() {
         if owner::is_owner() {
             if let Some(l) = info.location() {
                 let s = format!(" (at {}:{})", l.file(), l.line());
-                ICE_LOC.with(|c| *c.borrow_mut() = s);
+                let _ = ICE_LOC.try_with(|c| *c.borrow_mut() = s);
             }
             // MAKEPAD_RUN_ICE_BT=1: the compiler's own backtrace of an internal error
             if std::env::var_os("MAKEPAD_RUN_ICE_BT").is_some() {
@@ -1145,7 +1205,9 @@ fn install_ice_hook() {
         }
         // speculative work on an ahead helper: its panics are caught and the locked build redoes
         // (and reports) that body, so they are not diagnostics
-        if std::thread::current().name().is_some_and(|n| n.starts_with("run-ahead")) { return; }
+        // (the pthread name: std::thread::current() aborts on a thread whose locals are destroyed,
+        // and a program's thread-local destructor may panic there)
+        if crate::os::thread::name(crate::os::thread::current()).starts_with("run-ahead") { return; }
         prev(info);
     }));
 }
@@ -1165,7 +1227,7 @@ fn positioned_fatal(u: &Unit, id: u32, msg: &str) -> String {
 }
 
 pub fn take_ice_location() -> String {
-    ICE_LOC.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    ICE_LOC.try_with(|c| std::mem::take(&mut *c.borrow_mut())).unwrap_or_default()
 }
 
 /// A fault at or just below the stack pointer: the stack's guard page was hit (frames
@@ -1982,6 +2044,12 @@ fn rt_compile(slot: u64) -> u64 {
     // own OS calls must not change it
     let _keep = os::proc::KeepLastError::new();
     ensure_altstack();
+    // a destructor of the program's thread-locals, first called at thread exit: this thread's
+    // compiler thread-locals are gone, so the whole build runs on the owner (only the request
+    // touches this thread's state, through try_with)
+    if in_thread_exit() && !owner::is_owner() {
+        return owner::call(owner::program_class(), || unsafe { compile_slot(UNIT, slot as u32) });
+    }
     let _frame = crate::inspect::timeline::CompileMark::begin();
     unsafe {
         let _exec_call = profile_path().map(|_| crate::exec_profile::call(UNIT as usize, slot as u32));
