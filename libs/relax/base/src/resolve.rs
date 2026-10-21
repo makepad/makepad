@@ -1202,6 +1202,47 @@ impl Units {
     }
 }
 
+/// cargo's CARGO_PKG_* environment of the package at `dir` beyond its name and version, from the
+/// manifest's `[package]` (a `key.workspace = true` field from the workspace root's
+/// `[workspace.package]`): authors (joined by `:`), description, homepage, repository, license,
+/// license-file, rust-version and readme; the empty string for a field the manifest lacks, as cargo
+/// gives them. Build scripts and crates read them (the `built` crate requires every one).
+pub fn package_meta_env(dir: &str) -> Vec<(String, String)> {
+    const KEYS: [(&str, &str); 8] = [
+        ("CARGO_PKG_AUTHORS", "authors"),
+        ("CARGO_PKG_DESCRIPTION", "description"),
+        ("CARGO_PKG_HOMEPAGE", "homepage"),
+        ("CARGO_PKG_REPOSITORY", "repository"),
+        ("CARGO_PKG_LICENSE", "license"),
+        ("CARGO_PKG_LICENSE_FILE", "license-file"),
+        ("CARGO_PKG_RUST_VERSION", "rust-version"),
+        ("CARGO_PKG_README", "readme"),
+    ];
+    let pkg = read_toml(&format!("{}/Cargo.toml", dir)).ok().and_then(|t| table(&t, "package").cloned()).unwrap_or_default();
+    // the workspace root's [workspace.package], read when a field inherits from it
+    let mut ws: Option<TomlTable> = None;
+    let mut out = Vec::with_capacity(KEYS.len());
+    for (env, key) in KEYS {
+        let mut v = pkg.get(key).cloned();
+        if let Some(Toml::Table(x)) = &v {
+            if b(x, "workspace") == Some(true) {
+                let w = ws.get_or_insert_with(|| {
+                    find_root(dir).ok().and_then(|r| read_toml(&format!("{}/Cargo.toml", r)).ok()).and_then(|t| table(&t, "workspace").and_then(|w| table(w, "package")).cloned()).unwrap_or_default()
+                });
+                v = w.get(key).cloned();
+            }
+        }
+        let text = match v {
+            Some(Toml::Str(x, _)) => x,
+            Some(Toml::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(":"),
+            // `readme = true` / `false`, a number: no text to give
+            _ => String::new(),
+        };
+        out.push((env.to_string(), text));
+    }
+    out
+}
+
 /// The unit graph of `package` in the workspace at `workspace` (see the module comment).
 pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String]) -> Result<Units, String> {
     let o = parse_flags(flags)?;
