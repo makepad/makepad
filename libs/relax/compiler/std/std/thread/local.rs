@@ -74,7 +74,6 @@ extern "C" fn key_dtor(p: *mut c_void) {
 /// thread's block (word 1 points at its record, whose first three words are the domain the table
 /// belongs to, the table and its length -- domain_threads.rs ThreadData), the host call only
 /// when the thread runs another domain, has no record yet or has not set that key.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 fn key_value(key: sys::Key) -> usize {
     unsafe {
@@ -84,14 +83,6 @@ fn key_value(key: sys::Key) -> usize {
             return *(*record.add(1) as *const usize).add(key as usize);
         }
     }
-    sys::key_get(key) as usize
-}
-
-/// The web targets: the runtime's per-thread record holds host words (native pointers, 8 bytes),
-/// which a wasm program cannot read in place; the host call answers.
-#[cfg(target_family = "wasm")]
-#[inline(always)]
-fn key_value(key: sys::Key) -> usize {
     sys::key_get(key) as usize
 }
 

@@ -221,8 +221,7 @@ impl InlineLimits {
 
 pub fn inline_rule(f: &Func, callee_id: u32, nargs: usize, nrets: usize, attrs: u8, lim: &InlineLimits) -> Option<usize> {
     let (n, leaf, rec) = callee_shape(f, callee_id);
-    // a naked fn is its asm only: never inlined (rustc: naked implies inline(never))
-    if rec || f.naked {
+    if rec {
         return None;
     }
     // a callee that never returns (panic helpers) only runs on cold paths: keep it a call
@@ -6032,84 +6031,6 @@ pub fn drop_undemanded_masks(options: &relax_session::Options, f: &mut Func) -> 
     any
 }
 
-/// A memory access through `p = q + k` (a single-def constant offset) reads `[q + k + off]`
-/// when q still holds its value there (defined once, or not redefined between in the block): an
-/// unrolled byte loop's `lea rsi,[r12+1]; movzx edx,byte [rsi-1]` per byte was left by
-/// fold_post_increments and flatten_step_chains; p then dies (the CRC loop of ogg parse_page:
-/// four leas per four bytes). Returns whether an access changed.
-pub fn fold_offset_bases(options: &relax_session::Options, f: &mut Func) -> bool {
-    if opt_off(options, "-offbase") {
-        return false;
-    }
-    let nv = f.vregs.len();
-    let mut ndef = vec![0u32; nv];
-    for p in &f.params {
-        ndef[p.0 as usize] += 2;
-    }
-    let mut off_of: Vec<Option<(VReg, i64, u32, u32)>> = vec![None; nv];
-    for (bi, b) in f.blocks.iter().enumerate() {
-        for (k, i) in b.insts.iter().enumerate() {
-            for_defs(i, |d| ndef[d.0 as usize] += 1);
-            if let Inst::IBinI(IOp::Add, it, d, q, c) = *i {
-                if it.bits == 64 && d != q {
-                    off_of[d.0 as usize] = Some((q, c, bi as u32, k as u32));
-                }
-            }
-        }
-    }
-    let mut changed = false;
-    for bi in 0..f.blocks.len() {
-        for k in 0..f.blocks[bi].insts.len() {
-            let base = match f.blocks[bi].insts[k] {
-                Inst::Load(_, _, b, _) | Inst::Store(_, b, _, _) | Inst::VLoad(_, b, _) | Inst::VStore(b, _, _) | Inst::LoadX(_, _, b, ..) | Inst::StoreX(_, b, ..) | Inst::VLoadX(_, b, ..) | Inst::VStoreX(b, ..) => b,
-                _ => continue,
-            };
-            if ndef[base.0 as usize] != 1 {
-                continue;
-            }
-            let Some((q, c, db, dk)) = off_of[base.0 as usize] else { continue };
-            let same = ndef[q.0 as usize] == 1
-                || db as usize == bi && (dk as usize) < k && (dk as usize + 1..k).all(|j| {
-                    let mut hit = false;
-                    for_defs(&f.blocks[bi].insts[j], |v| hit |= v == q);
-                    !hit
-                });
-            if !same {
-                continue;
-            }
-            let fits = |o: i32| -> Option<i32> { i32::try_from(o as i64 + c).ok() };
-            let n = match f.blocks[bi].insts[k] {
-                Inst::Load(m, d, _, o) => fits(o).map(|o| Inst::Load(m, d, q, o)),
-                Inst::Store(m, _, o, v) if v != base => fits(o).map(|o| Inst::Store(m, q, o, v)),
-                Inst::VLoad(d, _, o) => fits(o).map(|o| Inst::VLoad(d, q, o)),
-                Inst::VStore(_, o, v) => fits(o).map(|o| Inst::VStore(q, o, v)),
-                Inst::LoadX(m, d, _, x, sh, o) if x != base => fits(o).map(|o| Inst::LoadX(m, d, q, x, sh, o)),
-                Inst::StoreX(m, _, x, sh, o, v) if x != base && v != base => fits(o).map(|o| Inst::StoreX(m, q, x, sh, o, v)),
-                Inst::VLoadX(d, _, x, sh, o) if x != base => fits(o).map(|o| Inst::VLoadX(d, q, x, sh, o)),
-                Inst::VStoreX(_, x, sh, o, v) if x != base => fits(o).map(|o| Inst::VStoreX(q, x, sh, o, v)),
-                _ => None,
-            };
-            if let Some(n) = n {
-                f.blocks[bi].insts[k] = n;
-                changed = true;
-            }
-        }
-    }
-    changed
-}
-
-/// `passes::rename` plus the backend-only indexed memory forms `addr_modes` makes (the passes
-/// at the end of O3 run after it).
-fn rename_operands(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
-    match *i {
-        Inst::LoadX(m, d, b, x, sh, o) => Inst::LoadX(m, d, a(b), a(x), sh, o),
-        Inst::StoreX(m, b, x, sh, o, v) => Inst::StoreX(m, a(b), a(x), sh, o, a(v)),
-        Inst::VLoadX(d, b, x, sh, o) => Inst::VLoadX(d, a(b), a(x), sh, o),
-        Inst::VStoreX(b, x, sh, o, v) => Inst::VStoreX(a(b), a(x), sh, o, a(v)),
-        _ => rename(i, a),
-    }
-}
-
 /// Variables read again after a copy into them: `t = x >> n; x = t; ... use t` (O3, before
 /// register allocation). Copy propagation and value numbering make later reads of a variable x
 /// (several definitions: a loop-carried bit buffer, a counter) read the single-definition
@@ -6258,8 +6179,6 @@ pub fn reuse_copied_variables(options: &relax_session::Options, f: &mut Func) ->
     if !ok.iter().any(|&o| o) {
         return false;
     }
-    // MAKEPAD_RUN_OPT=-revarx: indexed memory operands keep the temporary (bisection)
-    let indexed = !opt_off(options, "-revarx");
     let mut any = false;
     for bi in 0..nb {
         if !reach[bi] {
@@ -6275,7 +6194,7 @@ pub fn reuse_copied_variables(options: &relax_session::Options, f: &mut Func) ->
                     u
                 }
             };
-            let n = if indexed { rename_operands(&f.blocks[bi].insts[k], &look) } else { rename(&f.blocks[bi].insts[k], &look) };
+            let n = rename(&f.blocks[bi].insts[k], &look);
             if n != f.blocks[bi].insts[k] {
                 f.blocks[bi].insts[k] = n;
                 any = true;

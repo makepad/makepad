@@ -30,6 +30,16 @@ extern "C" {
     pub safe fn main_hosted() -> bool;
 }
 
+// The calling thread's FP control register (AArch64 FPCR): Relax compiles no inline assembly,
+// so the two instructions are the loader's. Scalars only.
+#[cfg(target_arch = "aarch64")]
+extern "C" {
+    #[link_name = "__relax_fpcr_read"]
+    pub safe fn fpcr_read() -> u64;
+    #[link_name = "__relax_fpcr_write"]
+    pub safe fn fpcr_write(v: u64);
+}
+
 extern "C" {
     fn __relax_realtime(root: usize, data: usize, meta: usize);
 }

@@ -1021,20 +1021,6 @@ pub struct AsmArgs {
 pub const ASM_NORETURN: u32 = 1;
 pub const ASM_RAW: u32 = 2;
 pub const ASM_ATT_SYNTAX: u32 = 4;
-pub const ASM_NOMEM: u32 = 8;
-pub const ASM_READONLY: u32 = 16;
-pub const ASM_PURE: u32 = 32;
-pub const ASM_PRESERVES_FLAGS: u32 = 64;
-pub const ASM_NOSTACK: u32 = 128;
-pub const ASM_MAY_UNWIND: u32 = 256;
-/// `clobber_abi("C")` / `"system"` / `"efiapi"` (the target's C convention)
-pub const ASM_CLOBBER_C: u32 = 1 << 16;
-/// `clobber_abi("sysv64")`
-pub const ASM_CLOBBER_SYSV64: u32 = 1 << 17;
-/// `clobber_abi("win64")`
-pub const ASM_CLOBBER_WIN64: u32 = 1 << 18;
-/// an ABI `clobber_abi` names that is none of these (an error when the block is checked)
-pub const ASM_CLOBBER_UNKNOWN: u32 = 1 << 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsmDir {

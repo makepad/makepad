@@ -785,7 +785,6 @@ impl Tcx {
     /// Collects impls and ADTs; registers functions and constants for their declaration
     /// queries. Coherence is not checked (check_coherence / report_coherence).
     pub fn collect_declarations(&mut self, prog: &Program) {
-        self.tys.ptr_bytes = prog.ptr_bytes;
         self.declarations = Default::default();
         self.queries.register_files(prog.files.len());
         self.queries.register_crates(prog.crates.len());
@@ -1558,9 +1557,7 @@ impl Tcx {
 
     #[cold]
     fn init_signature<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<SigParts>>) -> &'a SigParts {
-        // (computed outside the cell's Once: relax_base::query::init_once)
-        let diagnostics = std::cell::Cell::new(None);
-        let value: &Box<_> = crate::query::init_once(cell, || {
+        cell.get_or_init(|| {
             if crate::why::enabled() && prog.files.get(prog.def(d).file as usize)
                 .and_then(|f| f.ast.items.get(prog.def(d).item.0 as usize)).is_some() {
                 let cause = prog.why_def(d, "signature-demand");
@@ -1572,19 +1569,16 @@ impl Tcx {
             typing_env.limit = RecursionLimit::for_item(prog, d);
             let cx = EvalCx::new(prog, self, typing_env, &state);
             let checkpoint = self.dcx.checkpoint();
-            let parts = self.sig_parts_captured(&cx, prog, d);
+            let mut parts = self.sig_parts_captured(&cx, prog, d);
             if !parts.errors.is_empty() { cx.errors().note_reported_error(); }
-            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
-            Box::new(parts)
-        }, |parts| {
-            let (errors, warnings) = diagnostics.take().unwrap_or_default();
+            let (errors, warnings) = cx.errors().take_since(checkpoint);
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 parts.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-        });
-        value
+            Box::new(parts)
+        })
     }
 
     /// fn_sig(d).header.abi without lowering the signature: lower_fn_header reads it from
@@ -2208,9 +2202,7 @@ impl Tcx {
 
     #[cold]
     fn init_const_decl<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<ConstDecl>>) -> &'a ConstDecl {
-        // (computed outside the cell's Once: relax_base::query::init_once)
-        let diagnostics = std::cell::Cell::new(None);
-        let value: &Box<_> = crate::query::init_once(cell, || {
+        cell.get_or_init(|| {
             let _mem = crate::memstat::tag(crate::memstat::Tag::Sigs);
             let state = EvalState::new();
             let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
@@ -2222,17 +2214,14 @@ impl Tcx {
             crate::program::missing_restore(enclosing);
             decl.errors = cx.state.errors.replace(outer).unwrap_or_default();
             if !decl.errors.is_empty() { cx.errors().note_reported_error(); }
-            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
-            Box::new(decl)
-        }, |decl| {
-            let (errors, warnings) = diagnostics.take().unwrap_or_default();
+            let (errors, warnings) = cx.errors().take_since(checkpoint);
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 decl.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-        });
-        value
+            Box::new(decl)
+        })
     }
 
     fn const_decl_uncached(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, d: DefId) -> ConstDecl {
@@ -2400,11 +2389,11 @@ impl Tcx {
         if let (Some(literal), TyKind::Int(prim)) = (literal, self.tys.kind(expected_ty)) {
             let le = pf.ast.expr(literal);
             let text = std::str::from_utf8(pf.bytes(le.lo, le.hi)).unwrap_or("");
-            let (bytes, signed) = self.tys.int_info(*prim);
+            let (bytes, signed) = crate::types::Types::int_info(*prim);
             let matches = match crate::const_fold::int_suffix(text) {
                 None => signed || !neg,
                 Some(suffix) => crate::program::PRIMS.iter().find(|(n, _)| *n == suffix)
-                    .is_some_and(|(_, p)| self.tys.int_info(*p) == (bytes, signed) && (signed || !neg)),
+                    .is_some_and(|(_, p)| crate::types::Types::int_info(*p) == (bytes, signed) && (signed || !neg)),
             };
             if let (true, Some(value)) = (matches, crate::const_fold::parse_int_lit(text)) {
                 let value = if neg { value.wrapping_neg() } else { value };

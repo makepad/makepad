@@ -221,7 +221,7 @@ impl<'a> Cx<'a> {
             TyKind::Bool => ConstructorSet::Bool,
             TyKind::Char => ConstructorSet::Integers { range_1: uint_range(0, 0xD7FF), range_2: Some(uint_range(0xE000, 0x10FFFF)) },
             TyKind::Int(p) => {
-                let (bytes, signed) = self.tcx.tys.int_info(p);
+                let (bytes, signed) = crate::types::Types::int_info(p);
                 let range = if matches!(p, Prim::Isize) {
                     IntRange { lo: MaybeInfiniteInt::NegInfinity, hi: MaybeInfiniteInt::PosInfinity }
                 } else if matches!(p, Prim::Usize) {
@@ -813,7 +813,7 @@ impl<'a> Cx<'a> {
     fn int_value(&self, t: TyId, bits: u128) -> Option<MaybeInfiniteInt> {
         match self.kind(t) {
             TyKind::Int(p) => {
-                let (bytes, signed) = self.tcx.tys.int_info(p);
+                let (bytes, signed) = crate::types::Types::int_info(p);
                 let size = bytes * 8;
                 let bits = if size == 128 { bits } else { bits & ((1u128 << size) - 1) };
                 Some(if signed { MaybeInfiniteInt::new_finite_int(bits, size) } else { MaybeInfiniteInt::new_finite_uint(bits) })
@@ -1017,7 +1017,7 @@ impl<'a> Cx<'a> {
     fn int_size(&self, t: TyId) -> (u32, bool, bool) {
         match self.kind(t) {
             TyKind::Int(p) => {
-                let (b, s) = self.tcx.tys.int_info(p);
+                let (b, s) = crate::types::Types::int_info(p);
                 (b * 8, s, matches!(p, Prim::Isize | Prim::Usize))
             }
             _ => (32, false, false),

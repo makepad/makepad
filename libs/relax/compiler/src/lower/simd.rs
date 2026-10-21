@@ -11,7 +11,7 @@ use super::*;
 
 /// The lane type of a SIMD value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Lane {
+enum Lane {
     S(VW),
     U(VW),
     F(VW),
@@ -28,7 +28,7 @@ impl Lane {
 impl<'a> Lcx<'a> {
     /// (lane type, lane count) of a `#[repr(simd)]` struct: one array field `[E; N]` or N
     /// fields of one primitive type E (the older form); None for any other type.
-    pub(super) fn simd_shape(&mut self, t: TyId) -> Option<(Lane, u32)> {
+    fn simd_shape(&mut self, t: TyId) -> Option<(Lane, u32)> {
         let TyKind::Adt(d, args, _) = self.kind(t) else { return None };
         let nf = self.u.tcx.adts.get(&d).filter(|a| !a.is_enum && !a.is_union)?.variants[0].fields.len();
         let env = crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog);

@@ -22,7 +22,7 @@ pub struct RegConfig {
     /// registers an instruction overwrites while it runs (backend scratch use, e.g. x64 rcx for
     /// variable shifts): bit r = int register r, bit 32 + x = float register x. No value live at
     /// such an instruction (operands, result, or live across) is placed in them.
-    pub clobbers: Option<fn(&relax_session::Options, &Func, &Inst) -> u64>,
+    pub clobbers: Option<fn(&relax_session::Options, &Inst) -> u64>,
     /// `Env::sym_class` (0: none): an address of a domain symbol is a thread-local block read
     /// and an add, not a constant, so it is never rematerialised
     pub sym_class: u64,
@@ -788,25 +788,6 @@ pub fn solve_liveness(f: &Func, reach: &[bool], words: usize, gen: &[u64], kill:
     (live_in, live_out)
 }
 
-/// The callee-saved registers asm! blocks write (outputs, clobbers): the prologue saves them as
-/// it saves the ones values were given.
-fn asm_callee_writes(f: &Func, cfg: &RegConfig, int: &mut Vec<u8>, flt: &mut Vec<u8>) {
-    for b in &f.blocks {
-        for i in &b.insts {
-            let Inst::Call(Callee::Asm(a), _, _) = i else { continue };
-            let mut m = a.writes;
-            while m != 0 {
-                let bit = m.trailing_zeros() as u8;
-                m &= m - 1;
-                let (r, set, used) = if bit < 32 { (bit, &cfg.int_callee, &mut *int) } else { (bit - 32, &cfg.flt_callee, &mut *flt) };
-                if set.contains(&r) && !used.contains(&r) {
-                    used.push(r);
-                }
-            }
-        }
-    }
-}
-
 pub fn allocate(options: &relax_session::Options, f: &Func, cfg: &RegConfig) -> Alloc {
     allocate_with(options, f, cfg, true, None)
 }
@@ -1095,25 +1076,18 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 continue;
             }
             for (ii, i) in b.insts.iter().enumerate() {
-                let mut m = cl(options, f, i);
+                let mut m = cl(options, i);
                 if m == 0 {
                     continue;
                 }
                 let p = block_start[bi] + 2 * ii as u32 + 1;
-                // an asm! block's registers also hold its results until they are moved out: no
-                // result of it lives in another one's register (positions p..=p+1)
-                let w = if matches!(i, Inst::Call(Callee::Asm(_), _, _)) { 2 } else { 1 };
                 while m != 0 {
                     let r = m.trailing_zeros() as usize;
                     m &= m - 1;
                     if occ[r].is_empty() {
                         occ[r].resize(pos_words, 0);
                     }
-                    // a float register is the instruction's temporary from before it reads its
-                    // operands until after it writes its results (x64 xmm0 / xmm1): its operands
-                    // and results stay out too; an integer one only after the operands are read.
-                    // An asm! block's registers also hold its results (w = 2).
-                    bits_fill(&mut occ[r], p, p + if r >= 32 { 2 } else { w });
+                    bits_fill(&mut occ[r], p, p + 1);
                 }
             }
         }
@@ -1525,7 +1499,6 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
         }
     }
     windows.extend(region_windows);
-    asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
     Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows, chained, save_skip, restore_skip }
 }
 
@@ -1975,7 +1948,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
                 for_defs(i, |d| call_res.push((p, d.0)));
             }
             if let Some(cl) = cfg.clobbers {
-                let mut m = cl(options, f, i);
+                let mut m = cl(options, i);
                 while m != 0 {
                     let r = m.trailing_zeros() as usize;
                     m &= m - 1;
@@ -2175,7 +2148,6 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
             remat[v] = Remat::No;
         }
     }
-    asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
     Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows: Vec::new(), chained: Vec::new(), save_skip: Default::default(), restore_skip: Default::default() }
 }
 

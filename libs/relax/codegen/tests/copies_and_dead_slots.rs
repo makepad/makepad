@@ -240,33 +240,3 @@ fn a_mask_whose_result_is_read_only_in_its_bits_is_a_copy() {
     opt::drop_undemanded_masks(&relax_session::Options::default(), &mut g);
     assert!(matches!(g.blocks[1].insts[1], Inst::IBinI(IOp::And, ..)));
 }
-
-#[test]
-fn an_access_through_a_constant_offset_reads_the_base() {
-    // p1 = p + 1; a = [p1 - 1]; p = p + 4 (after): a reads [p + 0]
-    let mut f = Func::new("ob".into(), 0);
-    let p = f.vreg(Cls::I);
-    f.params.push(p);
-    f.rets.push(Cls::I);
-    let (p1, a) = (f.vreg(Cls::I), f.vreg(Cls::I));
-    f.block();
-    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, p1, p, 1));
-    push(&mut f, 0, Inst::Load(Mem::Int(1, false), a, p1, -1));
-    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, p, p, 4));
-    f.blocks[0].term = Term::Ret(vec![a]);
-    assert!(opt::fold_offset_bases(&relax_session::Options::default(), &mut f));
-    assert!(matches!(f.blocks[0].insts[1], Inst::Load(_, _, b, 0) if b == p));
-    // the base redefined between: unchanged
-    let mut g = Func::new("ob2".into(), 0);
-    for v in &f.vregs {
-        g.vreg(*v);
-    }
-    g.params = f.params.clone();
-    g.rets = f.rets.clone();
-    g.block();
-    push(&mut g, 0, Inst::IBinI(IOp::Add, U64, p1, p, 1));
-    push(&mut g, 0, Inst::IBinI(IOp::Add, U64, p, p, 4));
-    push(&mut g, 0, Inst::Load(Mem::Int(1, false), a, p1, -1));
-    g.blocks[0].term = Term::Ret(vec![a]);
-    assert!(!opt::fold_offset_bases(&relax_session::Options::default(), &mut g));
-}

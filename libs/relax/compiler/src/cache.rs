@@ -41,7 +41,7 @@ mod collected;
 pub use collected::{CollectedCache, CollectedRecord, CollectedWritten};
 mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
-pub(crate) use image::{complete_identities_unit, ids_report_unit, image_broken_unit, image_slot_by_key_unit, name_unnamed_unit, prelink_unit, PrelinkedSlot};
+pub(crate) use image::{complete_identities_unit, ids_report_unit, image_slot_by_key_unit, name_unnamed_unit, prelink_unit, PrelinkedSlot};
 mod items;
 mod demand;
 mod front_run;
@@ -308,9 +308,6 @@ pub struct CacheStats {
     pub ids_failed: u64,
     pub ids_ns: u64,
     pub ids_bg: u64,
-    /// of them, decoded in the prelink because their keys name a changed crate, and its wall ns
-    pub ids_unsure: u64,
-    pub ids_unsure_ns: u64,
 }
 
 /// Interior storage for the cache installed in a Unit. The owner thread protects
@@ -501,12 +498,6 @@ pub struct Cache {
     /// carries a fresh image
     image_slots: usize,
     image_stale: usize,
-    /// code reached a slot of the loaded image without an identity (`image_broken`): the
-    /// manifest carries no image from now on (written at once, at exit too), so no later run
-    /// starts from it
-    image_bad: bool,
-    /// the root crate whose manifest load_manifest read
-    manifest_root: Option<u32>,
     /// slot -> the code entry its code was linked from this run (lazily or prelinked): the next
     /// manifest's image takes that entry
     linked_key: HashMap<u32, u128>,
@@ -717,8 +708,6 @@ impl Cache {
             manifest_done: false,
             image_slots: 0,
             image_stale: 0,
-            image_bad: false,
-            manifest_root: None,
             linked_key: HashMap::new(),
             slot_keys: HashMap::new(),
             key_waits: false,
@@ -1175,11 +1164,6 @@ impl Cache {
 
     fn dec_file(&mut self, u: &Unit, d: &mut D) -> Option<u32> {
         let ident = d.u128()?;
-        self.file_by_ident(u, ident)
-    }
-
-    /// The file of this program with identity `ident` (enc_file).
-    fn file_by_ident(&mut self, u: &Unit, ident: u128) -> Option<u32> {
         if ident == 0 { return None; }
         if self.file_ids_n != u.prog.file_paths.len() {
             for i in self.file_ids_n..u.prog.file_paths.len() {
@@ -2024,10 +2008,9 @@ impl Cache {
                 self.why("missing foreign fn");
                 return None;
             }
-            // a static's domain-0 address (asm! sym): code naming one is not cached
-            SymKind::StaticAddr(_) => {
-                self.why("asm sym of a static");
-                return None;
+            SymKind::Asm(t) => {
+                e.u8(5);
+                e.str(&t);
             }
             SymKind::Site(i) => {
                 let sites = u.sites.lock().unwrap_or_else(|x| x.into_inner());
@@ -2605,7 +2588,6 @@ impl Cache {
     }
 
     pub fn load_manifest(&mut self, root: u32) {
-        self.manifest_root = Some(root);
         let Some(key) = self.manifest_key(root) else { return };
         if let Some(pk) = self.stores.iter().find(|st| st.path == self.code_path[root as usize]).cloned() {
             if let Some((KIND_MANIFEST, p)) = pk.get(key) {
@@ -2676,7 +2658,7 @@ impl Cache {
         // keeps the image (a rewrite there covers only the slots already keyed, and the
         // next start would prelink a few dozen slots instead of ~20,000). Slots whose entry
         // an O2/O3 build replaced since stay lazy at the next start (image.rs img_live).
-        if self.manifest_done && crate::preempt::is_stopped() && !self.image_bad {
+        if self.manifest_done && crate::preempt::is_stopped() {
             return true;
         }
         let Some(key) = self.manifest_key(root) else { self.manifest_done = true; return true };
@@ -2707,7 +2689,7 @@ impl Cache {
             self.manifest_done = true;
             return true;
         }
-        let img = if self.mode != Mode::Verify && !self.image_bad {
+        let img = if self.mode != Mode::Verify {
             match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
         } else { None };
         self.manifest_done = true;
@@ -2716,7 +2698,7 @@ impl Cache {
         // mid-run write) must not replace the loaded image with one covering fewer slots: the
         // next start would prelink a fraction of it (Calculator: 16,000 -> 2 slots)
         let n_img = img.as_ref().map_or(0, |i| i.1 as usize);
-        if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 && !self.image_bad {
+        if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 {
             if self.verbose {
                 eprintln!("makepad-run cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
@@ -5369,12 +5351,7 @@ mod data_tests {
         for kind in kinds {
             let key = FnKey::Shim(crate::jit::ShimInstance { kind, args: vec![callable, pointer, borrowed, early, alias, object, reference, array, tuple, slice] });
             let mut bytes = E::default();
-            let mut crates = vec![];
-            assert!(cache.enc_fnkey(&u, &key, &mut bytes, &mut crates, 0).is_some());
-            // the image's walk of a key finds the crates its encoder named (prelink's key_ok)
-            crates.sort_unstable();
-            crates.dedup();
-            assert_eq!(cache.key_crates(&u, &bytes.0), Some(crates));
+            assert!(cache.enc_fnkey(&u, &key, &mut bytes, &mut vec![], 0).is_some());
             assert!(!encoded.contains(&bytes.0), "colliding shim key");
             encoded.push(bytes.0);
         }
@@ -5386,7 +5363,7 @@ mod data_tests {
             assert_eq!(decoder.p, bytes.len());
             // the image's skip walks exactly the bytes the encoder wrote (a short skip cut thunk keys)
             let mut skipped = D { b: &bytes, p: 0 };
-            assert!(image::skip_fnkey(&mut skipped, 0, &mut image::no_atoms).is_some() && skipped.p == bytes.len(), "skip_fnkey stopped at {} of {}", skipped.p, bytes.len());
+            assert!(image::skip_fnkey(&mut skipped, 0).is_some() && skipped.p == bytes.len(), "skip_fnkey stopped at {} of {}", skipped.p, bytes.len());
             let mut again = E::default();
             assert!(cache.enc_fnkey(&u, &key, &mut again, &mut vec![], 0).is_some());
             assert_eq!(bytes, again.0);
@@ -6369,7 +6346,7 @@ impl Linker {
                 let expr = d.u32()?;
                 if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
                 // a parent the startup image names: its slot, decoded or not
-                let parent = match self.image_slot_at(u, d) {
+                let parent = match self.image_slot_at(d) {
                     Some(p) => p,
                     None => {
                         let pk = self.dec_fnkey(u, d, depth + 1)?;
@@ -6399,7 +6376,7 @@ impl Linker {
             }
             // SPEC-V: an unverified-mode twin, keyed by its base (a base the startup image names: its slot)
             4 => {
-                let base = match self.image_slot_at(u, d) {
+                let base = match self.image_slot_at(d) {
                     Some(b) => b,
                     None => {
                         let bk = self.dec_fnkey(u, d, depth + 1)?;
@@ -6462,7 +6439,7 @@ impl Linker {
                 let def = self.cache().dec_def(u, d)?;
                 u.foreign_sym(def)?
             }
-            // 5 was an asm! stub of an older loader: an entry naming one is not used
+            // 5 was an asm! stub (no assembler any more): an entry naming one is not used
             5 => return None,
             6 => {
                 let file = self.cache().dec_file(u, d)?;
@@ -6471,7 +6448,7 @@ impl Linker {
                 u.site_sym(file, pos, msg)
             }
             7 => {
-                let id = match self.image_slot_at(u, d) {
+                let id = match self.image_slot_at(d) {
                     Some(id) => id,
                     None => {
                         let t = crate::jit::wall_ns();

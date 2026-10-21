@@ -51,14 +51,13 @@ impl<T> DeclarationCell<T> {
         self.get_or_init(compute)
     }
     pub(crate) fn get_or_init(&self, compute: impl FnOnce() -> T) -> &T {
-        // (computed outside the cell's Once: relax_base::query::init_once)
-        let declaration = crate::query::init_once(&self.0, || {
+        let declaration = self.0.get_or_init(|| {
             let enclosing = crate::program::missing_save();
             let value = compute();
             let misses = crate::program::take_missing();
             crate::program::missing_restore(enclosing);
             Box::new(Declaration { value, misses })
-        }, |_| {});
+        });
         // Replaying nested misses makes every dependent cell retry after a module load.
         if !declaration.misses.is_empty() { crate::program::note_misses(&declaration.misses); }
         &declaration.value

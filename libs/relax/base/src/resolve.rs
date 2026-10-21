@@ -168,8 +168,6 @@ pub struct Resolver {
     manifests: Vec<Manifest>,
     by_dir: HashMap<String, usize>,
     cfg: crate::cfg::CfgSet,
-    /// `--allow-c`: registry packages that compile C are accepted (cargo builds them, native.rs)
-    allow_c: bool,
 }
 
 fn read_toml(path: &str) -> Result<TomlTable, String> {
@@ -307,7 +305,7 @@ impl Resolver {
     /// `dir` is where `makepad run` starts (the current folder, a git run's workspace): the
     /// workspace is found as cargo finds it (find_root).
     pub fn new(sess: &std::sync::Arc<crate::Session>, dir: &str) -> Result<Resolver, String> {
-        Ok(Resolver { ws: Workspace::load(&find_root(dir)?)?, vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
+        Ok(Resolver { ws: Workspace::load(&find_root(dir)?)?, vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]) })
     }
 
     fn registry_dir(&self, name: &str, req: &str) -> Result<String, String> {
@@ -1044,10 +1042,10 @@ impl<'a> Feat<'a> {
         // optional `cc` behind a feature that is off (objc-sys's `unstable-exception`, rav1e's and
         // av-scenechange's `asm`, signal-hook's `cc`) builds no C; and before the dependency is
         // looked up (a vendored tree need not hold `cc` to say so)
-        if d.build && self.r.manifests[k.0].registry && !self.r.allow_c {
+        if d.build && self.r.manifests[k.0].registry {
             if let Some(c) = crate::registry::c_build_dep(std::slice::from_ref(&d.package)) {
                 let m = &self.r.manifests[k.0];
-                return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): it {}", m.name, m.version, c, relax_session::options::C_GATE));
+                return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): makepad run runs no C compiler", m.name, m.version, c));
             }
         }
         let (dir, registry) = self.r.dep_dir(d)?;

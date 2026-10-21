@@ -97,7 +97,7 @@ fn fold_to_valtree(tcx: &Tcx, prog: &Program, key: &ConstEvalKey, fold_only: boo
         None => return Folded::Execute(key.clone()),
     };
     let size = match tcx.tys.kind(ty) {
-        TyKind::Int(p) => tcx.tys.int_info(*p).0 as u8,
+        TyKind::Int(p) => crate::types::Types::int_info(*p).0 as u8,
         TyKind::Bool => 1,
         TyKind::Char => 4,
         _ => return Folded::Value(Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(ty)))),

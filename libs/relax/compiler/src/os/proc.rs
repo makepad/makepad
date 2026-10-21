@@ -242,12 +242,6 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// A shared library by absolute path (--allow-c's native library), its symbols global.
-    pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
-    }
-
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
         // RTLD_NOW | RTLD_GLOBAL
@@ -465,12 +459,6 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// A shared library by absolute path (--allow-c's native library), its symbols global.
-    pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 8).is_null() }
-    }
-
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.dylib\0", name) };
         // RTLD_NOW | RTLD_GLOBAL
@@ -541,11 +529,6 @@ mod imp {
             }
         }
         std::ptr::null_mut()
-    }
-
-    /// --allow-c's native library is not supported on Windows.
-    pub fn load_path(_path: &str) -> bool {
-        false
     }
 
     /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.

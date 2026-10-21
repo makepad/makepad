@@ -3076,8 +3076,6 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
         }
         Inst::Call(callee, args, rets) => {
             let target = match callee {
-                // an asm! block runs only as machine code: its function stays native
-                Callee::Asm(_) => return Err("inline assembly"),
                 Callee::Fn(id) | Callee::CFn(id, _) => Target::Table(slots.table(*id)),
                 Callee::Indirect(v) | Callee::CIndirect(v, _) => Target::Cell(l.cell[v.0 as usize]),
                 Callee::Host(s) | Callee::CHost(s, _) => Target::Addr(sym_val(*s)),

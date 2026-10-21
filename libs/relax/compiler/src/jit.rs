@@ -470,9 +470,6 @@ pub struct Unit {
     pub tls_next: u32,
     /// panicking stand-ins for foreign fns this host lacks, by symbol
     missing_stubs: relax_session::sync::Mutex<HashMap<String, u64>>,
-    /// the symbols the program's global_asm! defines, placed on the first foreign lookup
-    /// (global_asm.rs)
-    pub(crate) global_asm: std::sync::OnceLock<HashMap<String, u64>>,
     /// tier-up policy (None: O1 only) and its per-slot records / hot glue
     pub tier1: Option<Tier1Cfg>,
     /// O3 left calls to callees that had never run (ATTR_COLD): callee -> those O3
@@ -656,13 +653,7 @@ fn tls_dtor(p: *mut u8) {
     os::tls::set(tls_key(), p);
     let registrations = unsafe { crate::domain_threads::finish(p as u64) };
     os::tls::set(tls_key(), std::ptr::null_mut());
-    if crate::web32::on() {
-        // its shadow stack (web32.rs) goes back with it
-        crate::web32::thread_exit(p as u64);
-        crate::web32::free(p as u64, TLS_CAP);
-    } else {
-        os::mem::free(p as u64, TLS_CAP);
-    }
+    os::mem::free(p as u64, TLS_CAP);
     for (base, token) in registrations { crate::domain::thread_finished(base, token); }
 }
 
@@ -729,8 +720,7 @@ fn rt_tls_block() -> u64 {
     if !b.is_null() {
         return b as u64;
     }
-    // the wasm32 program's thread-local blocks are in its window (`&THREAD_LOCAL` is an offset)
-    let b = if crate::web32::on() { crate::web32::alloc(TLS_CAP) } else { os::mem::alloc_rw(TLS_CAP) };
+    let b = os::mem::alloc_rw(TLS_CAP);
     // a thread nothing assigned a domain to (one native code started, or the first use of a
     // thread JIT code started before its start put it in its parent's domain): the default
     unsafe { *(b as *mut u64) = crate::domain::default_base() };
@@ -1360,7 +1350,7 @@ fn spec_pad(body: String, spec: u64, numeric: bool) -> String {
 }
 
 rt_fn! {
-pub(crate) fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
+fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
     let s = unsafe { std::slice::from_raw_parts(p, len as usize) };
     let s = String::from_utf8_lossy(s).into_owned();
     let ty = ((spec >> 40) & 0xff) as u8;
@@ -1506,7 +1496,7 @@ pub fn tls_block() -> u64 {
 }
 
 rt_fn! {
-pub(crate) fn rt_fmt_pop() -> StrRet {
+fn rt_fmt_pop() -> StrRet {
     let s = FMT.with(|f| {
         let mut v = f.borrow_mut();
         let s = v.pop().unwrap_or_default();
@@ -1536,7 +1526,7 @@ fn rt_fmt_print(stream: u64) {
 }
 
 rt_fn! {
-pub(crate) fn rt_str_eq(p1: *const u8, l1: u64, p2: *const u8, l2: u64) -> u64 {
+fn rt_str_eq(p1: *const u8, l1: u64, p2: *const u8, l2: u64) -> u64 {
     if l1 != l2 {
         return 0;
     }
@@ -1747,7 +1737,7 @@ fn rt_panic_bounds(idx: u64, len: u64, site: u64, _a3: u64, _a4: u64, _a5: u64, 
 
 rt_fn! {
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len: u64, line: u64, col: u64, regs: *const u64, _a7: u64) {
+fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len: u64, line: u64, col: u64, regs: *const u64, _a7: u64) {
     let m = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(msg, len as usize)).into_owned() };
     let f = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(file, file_len as usize)).into_owned() };
     PANIC_LOC.with(|l| *l.borrow_mut() = format!("{}:{}:{}", f, line as u32, col as u32));
@@ -1947,8 +1937,8 @@ pub fn set_program_args(args: Vec<Vec<u8>>) {
 
 #[repr(C)]
 pub struct ArgsRet {
-    pub(crate) argc: u64,
-    pub(crate) argv: u64,
+    argc: u64,
+    argv: u64,
 }
 
 rt_fn! {
@@ -2008,7 +1998,7 @@ fn fatal_compile_error(p: &PanicInfo, report: &str) {
 }
 
 rt_fn! {
-pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
+fn rt_thread_run(entry: u64, arg: u64) -> u64 {
     ensure_altstack();
     let u = unsafe { UNIT };
     // runs on the calling thread, in the domain it is in
@@ -2030,7 +2020,7 @@ rt_fn! {
 /// core::intrinsics_rt::catch_panic: `f(data)` under a recovery point (std::panic::
 /// catch_unwind, std::thread's start routine). The panic message itself was printed by
 /// std's hook; the report adds where it happened.
-pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
+fn rt_catch_panic(f: u64, data: u64) -> u64 {
     ensure_altstack();
     let u = unsafe { UNIT };
     // a recovery point inside running code: the domain of that code, not the unit's own
@@ -2446,17 +2436,11 @@ impl Unit {
                 });
             }
         }
-        // the wasm32 web target's program: the unit lives in the linear memory's window (web32.rs)
-        let w32 = prog.ptr_bytes == 4;
-        let exec_size: u64 = if w32 { crate::web32::UNIT_CODE } else { 768 << 20 };
-        let data_size: u64 = if w32 { crate::web32::UNIT_DATA } else { UNIT_DATA_SIZE };
+        let exec_size: u64 = 768 << 20;
+        let data_size: u64 = UNIT_DATA_SIZE;
         let rw_size: u64 = UNIT_RW_SIZE;
         let syms_size = (crate::syms::SYM_CAP * 8) as u64;
-        let exec_base = if w32 {
-            crate::web32::reserve_unit(exec_size as usize, (data_size + rw_size + syms_size) as usize)
-        } else {
-            os::mem::reserve(exec_size as usize, (data_size + rw_size + syms_size) as usize)
-        };
+        let exec_base = os::mem::reserve(exec_size as usize, (data_size + rw_size + syms_size) as usize);
         let misc = exec_base;
         let data_base = exec_base + exec_size;
         let rw_base = data_base + data_size;
@@ -2553,7 +2537,6 @@ impl Unit {
             // slot 0 of the block: the thread's domain static block (domain.rs)
             tls_next: TLS_FIRST_FREE,
             missing_stubs: Default::default(),
-            global_asm: std::sync::OnceLock::new(),
             tier1: {
                 let t = Tier1Cfg::from_options(options);
                 TIER1_ENABLED.store(t.is_some(), Ordering::Relaxed);
@@ -2636,19 +2619,6 @@ impl Unit {
             let ld = x64::land();
             u.rt.land = u.emit_code(&ld);
         }
-        if w32 {
-            // the wasm32 program's runtime entries take and return offsets (web32.rs)
-            u.rt.fmt_str = crate::web32::w32_fmt_str as *const () as usize as u64;
-            u.rt.str_eq = crate::web32::w32_str_eq as *const () as usize as u64;
-            u.rt.thread_run = crate::web32::w32_thread_run as *const () as usize as u64;
-            u.rt.catch_panic = crate::web32::w32_catch_panic as *const () as usize as u64;
-            u.rt.args = crate::web32::w32_args as *const () as usize as u64;
-            u.rt.memcpy = crate::web32::w32_memcpy as *const () as usize as u64;
-            u.rt.memmove = crate::web32::w32_memmove as *const () as usize as u64;
-            u.rt.memset = crate::web32::w32_memset as *const () as usize as u64;
-            u.rt.fmt_pop = crate::web32::w32_fmt_pop as *const () as usize as u64;
-            u.rt.panic_impl = u.emit_code(&panic_tramp(crate::web32::w32_panic_impl as *const () as usize as u64));
-        }
         u.env.resume = u.rt.resume;
         if os::fault::NEEDS_HANG_TRAMP {
             HANG_TRAMP.store(u.emit_code(&relax_backend::x64::hang_tramp(rt_hang as *const () as usize as u64)), Ordering::Relaxed);
@@ -2681,14 +2651,6 @@ impl Unit {
             rethrow: u.syms.intern(crate::syms::SymKind::Rt("rethrow"), u.rt.rethrow),
         };
         relax_codegen::opt::set_mem_fns(u.rs.memcpy, u.rs.memmove);
-        if w32 {
-            // the shadow stacks' thread-local words, and the code transform (relax_codegen::web32)
-            let off = u.tls_alloc(16, 8);
-            crate::web32::set_ss_off(off);
-            let ss = u.syms.intern(crate::syms::SymKind::Rt("w32_ss"), off as u64);
-            let grow = u.syms.intern(crate::syms::SymKind::Rt("w32_stack"), crate::web32::rt_w32_stack as *const () as usize as u64);
-            relax_codegen::web32::configure(relax_codegen::web32::Cfg { syms: u.syms.vals, base: crate::web32::BASE, ss, grow });
-        }
         // runtime symbols lowering interns on first use: a cached entry may name them before any
         // function of this run was lowered (the cache links them by name)
         let _ = u.syms.intern(crate::syms::SymKind::Rt("divrem128"), crate::lower::divrem128_addr());
@@ -2859,15 +2821,6 @@ impl Unit {
         // filled whole right away (the startup image's code)
         os::mem::prefault(at, len as usize);
         at
-    }
-
-    /// `len` bytes of code memory (global_asm.rs places a block whose fields need its address
-    /// before it is written: write_reserved_code).
-    pub(crate) fn reserve_asm_code(&self, len: u64, align: u64) -> u64 {
-        bump(&self.code_next, len.max(1), align.max(16), self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory")
-    }
-    pub(crate) fn write_reserved_code(&self, at: u64, b: &[u8]) {
-        unsafe { os::mem::write_code(at, b) };
     }
 
     fn emit_code(&self, b: &[u8]) -> u64 {
@@ -3490,17 +3443,6 @@ impl Unit {
         None
     }
 
-    /// size_of::<usize>() of the program's target (4 on wasm32).
-    pub fn ptr_bytes(&self) -> u32 {
-        self.tcx.tys.ptr_bytes
-    }
-
-    /// A pointer or usize word as the program stores it: `ptr_bytes` little-endian bytes (an
-    /// address in the wasm32 window as its offset, its low 32 bits).
-    pub fn ptr_word(&self, v: u64) -> Vec<u8> {
-        if self.ptr_bytes() == 4 { (v as u32).to_le_bytes().to_vec() } else { v.to_le_bytes().to_vec() }
-    }
-
     /// vtable of `src` as `dy` (built once): [drop, size, align, methods...]
     pub fn vtable(&self, src: TyId, dy: TyId) -> Result<u64, String> {
         let src = self.tcx.tys.erase_regions(src);
@@ -3563,12 +3505,11 @@ impl Unit {
                 words.push(address); wsyms.push(Some(self.data_sym(address)));
             }
         }
-        let pb = self.ptr_bytes();
-        let mut bytes = Vec::with_capacity(words.len() * pb as usize);
+        let mut bytes = Vec::with_capacity(words.len() * 8);
         for w in &words {
-            bytes.extend_from_slice(&self.ptr_word(*w));
+            bytes.extend_from_slice(&w.to_le_bytes());
         }
-        let a = self.data(&bytes, pb as u64, crate::syms::DataKind::Words(wsyms));
+        let a = self.data(&bytes, 8, crate::syms::DataKind::Words(wsyms));
         self.syms.set_data_name(a, format!("vtable:{}:{}", crate::syms::stable_ty(self, src), crate::syms::stable_ty(self, dy)));
         // a racing builder of the same vtable: everyone uses the first (one symbol per vtable)
         let a = self.vtables.insert_first((src, dy), a);
@@ -3697,36 +3638,19 @@ impl Unit {
         } else if let Some(id) = self.fn_map.get(&key) {
             return id;
         }
-        // fn_create is a leaf lock: nothing under it waits for a query, the owner or a pump
-        // (owner::Leaf). The slot's name is made before it, its ahead work queued after it
-        // (is_cold_def reads the signature: a query).
-        let name = {
-            let _k = crate::zone_alloc::kept();
-            fn_name(self, &key)
-        };
-        let id = {
-            let _g = self.fn_create.lock().unwrap_or_else(|e| e.into_inner());
-            let _leaf = crate::owner::Leaf::enter();
-            if let Some(id) = self.fn_map.get(&key) {
-                return id;
-            }
-            self.fn_create_locked(&key, name)
-        };
-        self.slot_ahead(id, &key);
-        id
-    }
-
-    /// fn_id's new slot `id` for `key` (the caller holds fn_create).
-    fn fn_create_locked(&self, key: &FnKey, name: String) -> u32 {
+        let _g = self.fn_create.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = self.fn_map.get(&key) {
+            return id;
+        }
         let id = self.fns.len() as u32;
         self.ensure_slots(id, 1);
         // identity state: the slot's key and name (and the map's copy of the key) are the
         // program's, not the compiler arena's
-        let (entry_key, map_key) = {
+        let (entry_key, map_key, name) = {
             let _k = crate::zone_alloc::kept();
-            (key.clone(), key.clone())
+            (key.clone(), key.clone(), fn_name(self, &key))
         };
-        let file = self.key_file(key);
+        let file = self.key_file(&key);
         let stub_addr = self.slots.stub(id);
         let stub = x64::stub(id, self.lazy_entry);
         let slot_addr = self.slots.table(id);
@@ -3739,10 +3663,10 @@ impl Unit {
             }
             *(slot_addr as *mut u64) = stub_addr;
         }
-        self.slot_named(id, key);
+        self.slot_named(id, &key);
         self.fns.push(Self::new_entry(entry_key, name, file, stub_addr, stub.len() as u32));
         if let Some(index) = self.reload_slots.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            index.insert(key, id);
+            index.insert(&key, id);
         }
         self.fn_map.insert(map_key, id);
         id
@@ -3819,11 +3743,6 @@ impl Unit {
             }
         }
         self.front.slot_keys.insert(id, key.clone());
-    }
-
-    /// Slot `id` (named `key`, pushed) goes to the lowering-ahead helpers' queue. Not under
-    /// fn_create: is_cold_def reads the signature (a query, which may wait).
-    fn slot_ahead(&self, id: u32, key: &FnKey) {
         // after the first present only the slots the program's own builds make (their callees),
         // not a speculative or tier-up build's, and no cold callee (panics, formatting): what
         // the UI thread's next calls most likely meet
@@ -3861,11 +3780,7 @@ impl Unit {
             }
             let count = relax_backend::rir::SlotTable::seg_slots(seg);
             let code = count * (THUNK_SIZE + STUB_SIZE);
-            let base = if self.prog.ptr_bytes == 4 {
-                crate::web32::reserve_slots(code, count * (8 + TIER_REC))
-            } else {
-                os::mem::reserve(code, count * (8 + TIER_REC))
-            };
+            let base = os::mem::reserve(code, count * (8 + TIER_REC));
             let thunk = base;
             let stub = thunk + (count * THUNK_SIZE) as u64;
             let table = base + code as u64;
@@ -3937,7 +3852,6 @@ impl Unit {
         let name = crate::zone_alloc::kept_with(|| fn_name(self, &key).into_boxed_str());
         let file = self.key_file(&key);
         self.slot_named(id, &key);
-        self.slot_ahead(id, &key);
         let f = &mut self.fns[id as usize];
         f.key = crate::zone_alloc::kept_clone(&key);
         f.name = name;
@@ -4160,9 +4074,6 @@ impl Unit {
         if let Some(a) = lookup_interposer(&link) {
             return Some(a);
         }
-        if let Some(&a) = self.global_asm.get().and_then(|m| m.get(&link)) {
-            return Some(a);
-        }
         if let Some(a) = loader_symbol(link.as_bytes()) {
             return Some(a as u64);
         }
@@ -4178,23 +4089,9 @@ impl Unit {
     /// on a miss).
     pub fn foreign_addr(&self, d: DefId) -> Option<u64> {
         let link = self.link_name(d);
-        // the wasm32 web target imports only what web32.rs gives in the offset ABI; anything
-        // else is missing there, as in a browser
-        if self.prog.ptr_bytes == 4 {
-            if let Some(a) = crate::web32::symbol(link.as_bytes()) {
-                return Some(a as u64);
-            }
-            return (self.prog.def(d).kind == DefKind::ForeignFn).then(|| self.missing_foreign_stub(d));
-        }
         // dlsym / GetProcAddress answer the symbols the loader provides to programs (loader_symbol) first
         if let Some(a) = lookup_interposer(&link) {
             return Some(a);
-        }
-        // the program's own global_asm! labels
-        if !self.prog.global_asms.is_empty() {
-            if let Some(&a) = crate::global_asm::symbols(self).get(&link) {
-                return Some(a);
-            }
         }
         if let Some(a) = loader_symbol(link.as_bytes()) {
             return Some(a as u64);
@@ -8879,7 +8776,7 @@ unsafe fn build_rir_inner_body(up: *mut Unit, id: u32) -> Result<relax_backend::
                 let value = v.try_to_value(&u.tcx.tys).ok_or("intrinsic const argument did not evaluate")?;
                 let scalar = value.valtree.try_to_leaf().ok_or("intrinsic const argument is not scalar")?;
                 let (size, signed) = match u.tcx.tys.kind(value.ty) {
-                    TyKind::Int(p) => u.tcx.tys.int_info(*p),
+                    TyKind::Int(p) => crate::types::Types::int_info(*p),
                     TyKind::Bool => (1, false),
                     TyKind::Char => (4, false),
                     _ => return Err("intrinsic const argument has a non-scalar type".into()),
@@ -9072,7 +8969,6 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
         key
     };
     if matches!(key, FnKey::Glue(GLUE_UNNAMED, _)) {
-        crate::cache::image_broken_unit(up, id);
         return Err(format!("slot {} of the startup image has no identity (its key did not decode)", id));
     }
     if let FnKey::Shim(ref shim) = key {
@@ -9558,10 +9454,6 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         // through within their blocks (the allocator joins a copy only with a value in no unit)
         if relax_codegen::opt::drop_undemanded_masks(options, func) {
             relax_backend::passes::local_copy_prop(func);
-            relax_backend::passes::dce(func);
-        }
-        // accesses through a constant offset of a base that is still live read the base
-        if relax_codegen::opt::fold_offset_bases(options, func) {
             relax_backend::passes::dce(func);
         }
         // reads of a temporary a variable was copied from read the variable: one register
@@ -13789,9 +13681,29 @@ extern "C" fn recorded_exit(code: i32) -> ! {
     os::proc::exit(code)
 }
 
+/// std::relax::fpcr_read / fpcr_write: the calling thread's FP control register (AArch64 FPCR).
+/// Relax compiles no inline assembly; JIT code reaches these two instructions here.
+#[cfg(target_arch = "aarch64")]
+extern "C" fn relax_fpcr_read() -> u64 {
+    let v: u64;
+    // SAFETY: reads this thread's FP control bits.
+    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+#[cfg(target_arch = "aarch64")]
+extern "C" fn relax_fpcr_write(v: u64) {
+    // SAFETY: writes this thread's FP control bits; callers restore what they read.
+    unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
+}
+
 /// Symbols the loader provides to the programs it runs (found through dlsym).
-pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
+fn loader_symbol(name: &[u8]) -> Option<usize> {
     match name {
+        #[cfg(target_arch = "aarch64")]
+        b"__relax_fpcr_read" => Some(relax_fpcr_read as *const () as usize),
+        #[cfg(target_arch = "aarch64")]
+        b"__relax_fpcr_write" => Some(relax_fpcr_write as *const () as usize),
         #[cfg(unix)]
         b"exit" => Some(recorded_exit as *const () as usize),
         #[cfg(unix)]

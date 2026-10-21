@@ -1371,12 +1371,12 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
         use crate::types::TyKind::*;
         match (u.tcx.tys.kind(from), u.tcx.tys.kind(to)) {
             (Int(a), Int(b)) => {
-                let (sa, ga) = u.tcx.tys.int_info(*a);
-                let (sb, gb) = u.tcx.tys.int_info(*b);
+                let (sa, ga) = crate::types::Types::int_info(*a);
+                let (sb, gb) = crate::types::Types::int_info(*b);
                 (ga == gb && sb >= sa) || (!ga && gb && sb > sa)
             }
             (Float(a), Float(b)) => fsize(*a) <= fsize(*b),
-            (Int(a), Float(b)) => u.tcx.tys.int_info(*a).0 < fsize(*b),
+            (Int(a), Float(b)) => crate::types::Types::int_info(*a).0 < fsize(*b),
             _ => false,
         }
     };
