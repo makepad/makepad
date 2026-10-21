@@ -23,6 +23,21 @@ extern "C" {
     /// live patch (from the watcher thread).
     #[link_name = "__relax_on_patch"]
     pub safe fn on_patch(wake: extern "C" fn());
+    /// The runner hosts the process's main thread (`makepad run` of a HAL program: the provided
+    /// HAL's main loop runs there and `main` runs on a thread of its own). False under the bare
+    /// `relax` runner, where the program's own HAL runs its main loop as in its rustc build.
+    #[link_name = "__relax_main_hosted"]
+    pub safe fn main_hosted() -> bool;
+}
+
+// The calling thread's FP control register (AArch64 FPCR): Relax compiles no inline assembly,
+// so the two instructions are the loader's. Scalars only.
+#[cfg(target_arch = "aarch64")]
+extern "C" {
+    #[link_name = "__relax_fpcr_read"]
+    pub safe fn fpcr_read() -> u64;
+    #[link_name = "__relax_fpcr_write"]
+    pub safe fn fpcr_write(v: u64);
 }
 
 extern "C" {

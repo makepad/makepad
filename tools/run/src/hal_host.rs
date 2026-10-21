@@ -25,7 +25,7 @@ impl Host {
         let domain = launch.domain;
         let hook = launch.clone();
         let primary = crate::hal_run::spec(domain);
-        let privileged = primary.is_some() && crate::PRIVILEGED.load(std::sync::atomic::Ordering::Relaxed);
+        let privileged = primary.is_some() && relax_runner::privileged();
         let around: Around = Arc::new(move |run: &mut dyn FnMut()| with_caps(Caps { privileged }, || with_launch(&hook, || run())));
         let mut spec = primary.unwrap_or_else(|| AppSpec {
             package: launch.app.clone(), args: launch.args.split_terminator('\0').map(str::to_string).collect(), ..Default::default()

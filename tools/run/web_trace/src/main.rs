@@ -184,7 +184,8 @@ fn trace(args: &[String]) -> Result<(), String> {
         loader_args.push("--cfg".into());
         loader_args.push(c.clone());
     }
-    let code = makepad_run::run_checkout(loader_args, rest.clone());
+    relax_runner::set_host(&makepad_run::HOST);
+    let code = relax_runner::run_checkout(loader_args, rest.clone());
     if code != 0 {
         return Err(format!("{} did not boot (status {})", package, code));
     }
@@ -321,6 +322,6 @@ fn main() {
                 relax_compiler::os::proc::exit(1);
             }
         }
-        _ => makepad_run::main(),
+        _ => relax_runner::main(&makepad_run::HOST),
     }
 }

@@ -276,7 +276,7 @@ fn boot_thread(
     let remote_file = files.join("remote.spec");
     let spec = if remote.is_empty() { std::fs::read_to_string(&remote_file).unwrap_or_default() } else { let _ = std::fs::write(&remote_file, remote); remote.to_string() };
     if !spec.trim().is_empty() {
-        match makepad_run::remote::dial_in_background(spec.trim(), files) {
+        match relax_runner::remote::dial_in_background(spec.trim(), files) {
             Ok(()) => logcat::log("makepad-remote: dialling the hub (from the intent / remote.spec)"),
             Err(e) => logcat::log(&format!("makepad-remote: not dialling: {e}")),
         }

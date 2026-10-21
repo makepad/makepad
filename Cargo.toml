@@ -225,6 +225,7 @@ workspace.members = [
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
+    "tools/run/runner",
     "tools/run/boot",
     "tools/run/fixture/diffpkg",
     "tools/run/fixture/diffpkg/tables",
@@ -527,6 +528,8 @@ incremental = true
 # The makepad run host and Relax JIT build whole: incremental release splits each crate into many more
 # codegen units, which costs the JIT compiler speed.
 [profile.release.package.makepad-run]
+incremental = false
+[profile.release.package.relax-runner]
 incremental = false
 [profile.release.package.makepad-run-android]
 incremental = false

@@ -174,7 +174,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     // Java owns Android's UI loop; this boot thread compiles and runs domain 0.
     if cfg!(target_os = "android") {
         // the APK's boot app is the window manager when the host was built `--privileged`
-        let privileged = crate::PRIVILEGED.load(Ordering::Relaxed);
+        let privileged = relax_runner::privileged();
         return makepad_hal::with_caps(makepad_hal::Caps { privileged }, || compile());
     }
     makepad_hal::expect_main_loop();

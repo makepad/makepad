@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 makepad-run = { path = ".." }
+relax-runner = { path = "../runner" }
 makepad-network = { path = "../../../platform/network" }
 relax-compiler = { workspace = true }
 makepad-jni-sys = { path = "../../../libs/jni-sys", version = "0.4.0" }

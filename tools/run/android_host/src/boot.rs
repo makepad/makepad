@@ -83,19 +83,19 @@ pub fn memory_budget_mb() -> Option<u64> {
 pub fn boot(b: &Boot) -> Result<(), String> {
     let _zone = relax_compiler::zone_alloc::compiler();
     relax_compiler::clock::mark_process_start();
-    makepad_run::init_embedded(&b.exe);
+    relax_runner::init_embedded(&b.exe, &makepad_run::HOST);
     if b.privileged {
-        makepad_run::set_privileged();
+        relax_runner::set_privileged();
     }
     set_state("booting", String::new());
     let opts = Vec::new();
     let mut rest = vec![b.package.clone()];
     rest.extend(b.cargo_flags.iter().cloned());
     let code = match &b.source {
-        Source::Checkout => makepad_run::run_checkout(opts, rest),
+        Source::Checkout => relax_runner::run_checkout(opts, rest),
         Source::Archive { file, offset, len } => {
-            let workspace = makepad_run::mount_archive(file, *offset, *len, None)?;
-            makepad_run::run_mounted(&workspace, opts, rest)
+            let workspace = relax_runner::mount_archive(file, *offset, *len, None)?;
+            relax_runner::run_mounted(&workspace, opts, rest)
         }
     };
     if code != 0 {

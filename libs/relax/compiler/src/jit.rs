@@ -13681,9 +13681,29 @@ extern "C" fn recorded_exit(code: i32) -> ! {
     os::proc::exit(code)
 }
 
+/// std::relax::fpcr_read / fpcr_write: the calling thread's FP control register (AArch64 FPCR).
+/// Relax compiles no inline assembly; JIT code reaches these two instructions here.
+#[cfg(target_arch = "aarch64")]
+extern "C" fn relax_fpcr_read() -> u64 {
+    let v: u64;
+    // SAFETY: reads this thread's FP control bits.
+    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+#[cfg(target_arch = "aarch64")]
+extern "C" fn relax_fpcr_write(v: u64) {
+    // SAFETY: writes this thread's FP control bits; callers restore what they read.
+    unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
+}
+
 /// Symbols the loader provides to the programs it runs (found through dlsym).
 fn loader_symbol(name: &[u8]) -> Option<usize> {
     match name {
+        #[cfg(target_arch = "aarch64")]
+        b"__relax_fpcr_read" => Some(relax_fpcr_read as *const () as usize),
+        #[cfg(target_arch = "aarch64")]
+        b"__relax_fpcr_write" => Some(relax_fpcr_write as *const () as usize),
         #[cfg(unix)]
         b"exit" => Some(recorded_exit as *const () as usize),
         #[cfg(unix)]
@@ -13693,6 +13713,7 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_frame_done" => Some(crate::postframe::relax_frame_done as *const () as usize),
         b"relax_quit_requested" => Some(crate::run::relax_quit_requested as *const () as usize),
         b"relax_quit_started" => Some(crate::run::relax_quit_started as *const () as usize),
+        b"__relax_main_hosted" => Some(crate::run::relax_main_hosted as *const () as usize),
         b"__relax_guard_enter" => Some(__relax_guard_enter as *const () as usize),
         b"__relax_guard_leave" => Some(__relax_guard_leave as *const () as usize),
         // Relax's std reads virtual files (git runs) through these (vfs.rs)

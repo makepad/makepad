@@ -2700,6 +2700,14 @@ pub fn quitting() {
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
 }
 
+/// std::relax::main_hosted: the runner's host has the process's main thread (the HAL's main loop
+/// and window) and the program's `main` runs as a guest on a thread of its own. False under the
+/// bare runner (`relax`: nothing hosts, the program's own HAL runs its main loop) and for a
+/// program without the HAL.
+pub(crate) extern "C" fn relax_main_hosted() -> bool {
+    HOSTED_RUN.load(Ordering::Acquire)
+}
+
 pub(crate) extern "C" fn relax_quit_requested() {
     crate::tui::abnormal();
     quit_mark();

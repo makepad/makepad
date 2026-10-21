@@ -7,7 +7,7 @@
 fn main() {
     // Relax runs itself again for each build script (this executable, as the APK's libmakepad_exe.so)
     if std::env::args().nth(1).as_deref() == Some("run") {
-        makepad_run::main();
+        relax_runner::main(&makepad_run::HOST);
         return;
     }
     let mut words = std::env::args().skip(1);

@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # the loader (Relax as a library, the provided crates): `run_checkout --exports wasm_`
 makepad-run = { path = ".." }
+relax-runner = { path = "../runner" }
 relax-compiler = { workspace = true }
 # the page's half of the messages (FromWasmRead / ToWasmWrite) and the message types themselves
 makepad-wasm-bridge = { path = "../../../libs/wasm_bridge", version = "1.0.0" }

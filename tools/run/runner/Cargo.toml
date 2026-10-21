@@ -1,0 +1,23 @@
+[package]
+name = "relax-runner"
+version = "0.1.0"
+edition = "2021"
+description = "The runner of `makepad run` without provided crates: compiler, session, boot and the minimal host. Bin `relax` (internal dev tool) JIT-compiles every crate of a program from source; the `makepad` binary (tools/run) is this runner plus the provided crates and the HAL window host"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "relax_runner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relax"
+path = "src/bin/relax.rs"
+
+[dependencies]
+relax-compiler = { workspace = true }
+makepad-remote = { workspace = true }
+# fetching sources (`run <git url>`): Relax's git client (relax's `git` module) on the
+# system's HTTP stack
+relax-light-http = { workspace = true }
+makepad-network = { path = "../../../platform/network" }

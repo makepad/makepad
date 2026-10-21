@@ -67,11 +67,17 @@ pub unsafe fn android_on_load(vm: *mut std::ffi::c_void, app: fn()) -> i32 {
 }
 
 /// `app` is the whole of the app's main: it creates its `Cx` itself.
-/// Under Relax the host has done the same around the program's `main` (it gave the process's main
-/// thread to the HAL and called `main` on a thread of its own), so the app just runs.
+/// Under `makepad run` the host has done the same around the program's `main` (it gave the
+/// process's main thread to the HAL and called `main` on a thread of its own), so the app just
+/// runs. Under the bare `relax` runner nothing hosts: the HAL is the program's own, as in a
+/// rustc build.
 pub fn run_app(app: fn()) {
-    #[cfg(all(any(target_vendor = "apple", target_os = "linux", target_os = "windows"), not(relax)))]
-    {
+    #[cfg(relax)]
+    let hosted = std::relax::main_hosted();
+    #[cfg(not(relax))]
+    let hosted = false;
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "windows"))]
+    if !hosted {
         /// Ends the main loop when the app thread is done, however it is done.
         struct Done;
         impl Drop for Done {
@@ -113,8 +119,9 @@ pub fn run_app(app: fn()) {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] app thread joined; run_app returning");
         }
+        return;
     }
-    #[cfg(not(all(any(target_vendor = "apple", target_os = "linux", target_os = "windows"), not(relax))))]
+    let _ = hosted;
     app();
 }
 

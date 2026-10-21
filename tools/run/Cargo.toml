@@ -2,7 +2,7 @@
 name = "makepad-run"
 version = "0.1.0"
 edition = "2021"
-description = "makepad run: boots makepad apps from source (the JIT plus the provided crates)"
+description = "makepad run: boots makepad apps from source (the runner, tools/run/runner, plus the provided crates and the HAL window host)"
 license = "MIT OR Apache-2.0"
 publish = false
 # tests/ are `makepad test` programs (they use makepad's macros), not cargo tests
@@ -19,13 +19,11 @@ path = "src/main.rs"
 [dependencies]
 makepad-relax-api = { workspace = true, features = ["host-shims"] }
 relax-compiler = { workspace = true }
+relax-runner = { path = "runner" }
 relax-session = { workspace = true }
 makepad-remote = { workspace = true }
 # provided crates (Relax binds their C-shaped fns to this binary's code; loader-core.md section 8)
 relax-provided-fixture = { workspace = true, features = ["host-shims"] }
-# fetching sources (`run <git url>`): Relax's git client (relax's `git` module) on the
-# system's HTTP stack
-relax-light-http = { workspace = true }
 
 makepad-live-id = { path = "../../libs/live_id", features = ["host-shims"] }
 makepad-script = { path = "../../platform/script", features = ["host-shims"] }
