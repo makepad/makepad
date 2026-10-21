@@ -1734,7 +1734,15 @@ impl<'a> Parser<'a> {
             x
         };
         if trace {
-            eprintln!("expand {}! => {}", def.name, text);
+            // MAKEPAD_RUN_TRACE=expand:<macro name>: the expansion, where it was called, at what depth and
+            // on which thread; `bt` among the trace words adds a backtrace (which pass expands it)
+            let thr = std::thread::current();
+            eprintln!("expand {}! @{} base={} depth={} thr={} => {}", def.name, call_lo, self.src.len() + self.ext.len(), self.exp_depth, thr.name().unwrap_or("?"), text);
+            if crate::preload::relax_trace().map_or(false, |t| t.split(',').any(|x| x == "bt")) {
+                let bt = std::backtrace::Backtrace::force_capture().to_string();
+                let frames: Vec<String> = bt.lines().filter(|l| l.contains("relax_") || l.contains("makepad")).filter(|l| !l.trim_start().starts_with("at ")).take(40).map(|l| l.trim().to_string()).collect();
+                eprintln!("expand-bt {}! @{}: {}", def.name, call_lo, frames.join(" | "));
+            }
         }
         let base = (self.src.len() + self.ext.len()) as u32;
         if crate::macros::uses::recording() {

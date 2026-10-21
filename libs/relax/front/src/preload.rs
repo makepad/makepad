@@ -611,9 +611,17 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -
     crate::why::event("parse", &path, 0, "", None);
     let src_len = src.len();
     let t = std::time::Instant::now();
+    if trace() && crate::memstat::enabled() { eprintln!("boot-trace-job-start: {} {} src={}KB", ctx.name, path, src_len >> 10); }
+    // MAKEPAD_RUN_BOOT_TRACE with MAKEPAD_RUN_MEM_REPORT: the bytes this job retains on its thread and its peak
+    let (live0, peak) = (crate::memstat::thread_live(), crate::memstat::peak_start());
     let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&ctx.name, &path, &mod_path, &ctx.cfg));
     let r = ctx.context.parse_input(src, Some(toks), ctx.edition, Some(crate::macros::MacroScope::new(ctx.table.clone())), bctx, crate::parser::lazy_auto());
     PARSE_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    if trace() && crate::memstat::enabled() {
+        let pk = crate::memstat::peak_end(peak);
+        eprintln!("boot-trace-job: {} {} src={}KB retained={}KB peak={}KB rss={}MB live={}MB {:.1}ms", ctx.name, path, src_len >> 10,
+            (crate::memstat::thread_live() - live0) >> 10, pk >> 10, crate::memstat::resident() >> 20, crate::memstat::live_total() >> 20, t.elapsed().as_secs_f64() * 1e3);
+    }
     let mut error = None;
     let mut parsed = match r {
         Ok((pf, used)) => Some((pf, used.unwrap())),
