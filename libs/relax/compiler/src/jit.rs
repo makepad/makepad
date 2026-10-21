@@ -9342,7 +9342,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         relax_codegen::loops::clear_unreachable(func);
         // unrolled reads at constant offsets: the slots they read can now go to registers (a
         // write-through counter's stores nobody reads go first, then the copy chains)
-        if cfg.sroa && relax_codegen::opt::drop_unread_slot_stores(func) {
+        if cfg.sroa && relax_codegen::opt::dead_slot_stores(func) {
             relax_codegen::opt::forward_slot_copies(func);
         }
         if cfg.sroa && relax_backend::passes::sroa(func) {
@@ -9378,7 +9378,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     // stores into slot bytes nobody reads back: the forwarding passes above left them behind
     // (a `[0u8; 8]` buffer filled by copy_from_slice and read by from_le_bytes, the load
     // forwarded from the source: zero-fill and copy stores, every refill)
-    if cfg.sroa && relax_codegen::opt::drop_unread_slot_stores(func) {
+    if cfg.sroa && relax_codegen::opt::dead_slot_stores(func) {
         relax_backend::passes::live_dce(func);
     }
     if cfg.licm && !relax_backend::stats::opt_off(options, "-promote") && relax_codegen::opt::promote_loop_memory(func) {
@@ -9403,6 +9403,8 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         relax_backend::passes::addr_modes(func);
         // results computed early for one later use move next to it (O3)
         relax_codegen::opt::sink_single_uses(func);
+        // reads of a temporary a variable was copied from read the variable: one register
+        relax_codegen::opt::reuse_copied_variables(options, func);
     }
     if let Some(stats) = inline_stats { stats.report(name); }
     inlined
@@ -9605,7 +9607,10 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
     // later wider loads of narrower stores otherwise fail store forwarding (layout_widgets)
     if cfg.sroa && !relax_backend::stats::opt_off(options, "-postinline") {
         for _ in 0..3 {
-            let ch = relax_codegen::opt::forward_slot_dests(func) | relax_codegen::opt::forward_slot_dests_x(options, func, 32);
+            // zero fills a copy overwrites before any read go first: the copy's stores are
+            // then the only writes of those bytes, so the reads after it can be forwarded
+            let ch = relax_codegen::opt::dead_slot_stores(func);
+            let ch = ch | relax_codegen::opt::forward_slot_dests(func) | relax_codegen::opt::forward_slot_dests_x(options, func, 32);
             let ch = ch | relax_codegen::opt::split_wide_slot_accesses(func);
             let ch = ch | relax_codegen::opt::sroa_post_inline(func);
             if !ch {

@@ -5811,65 +5811,370 @@ pub fn promote_dyn_read_slots(f: &mut Func) -> bool {
     true
 }
 
-/// Stores into a slot that nothing ever reads back at those bytes (no load, no copy out of the
-/// slot overlaps them) go: after full unrolling, a write-through counter's memory copy
-/// (`start` of an array iterator) is written every iteration and read by nobody, and it keeps
-/// the slot from being forwarded or scalar-replaced. Only slots `slot_scan` follows completely
-/// (not escaping). Returns whether any store went.
-pub fn drop_unread_slot_stores(f: &mut Func) -> bool {
+/// Variables read again after a copy into them: `t = x >> n; x = t; ... use t` (O3, before
+/// register allocation). Copy propagation and value numbering make later reads of a variable x
+/// (several definitions: a loop-carried bit buffer, a counter) read the single-definition
+/// temporary t its value came from. t and x then hold the same value over the same stretch,
+/// both live: two registers, and the copy `x = t` stays a move (`shrx rdi,r13,rsi; mov r13,rdi`,
+/// `mov rax,r12; sub eax,esi; mov rsi,rax; mov r12,rsi` per bit-reader step in inflate).
+/// LLVM has no such pair: SSA phis coalesce.
+/// Here every read of t at which x still holds t's value (on every path from the copy, a
+/// forward must-analysis over copies, kill at any other definition of x or of t) reads x
+/// instead, when that leaves t read only between its definition and the copy in the copy's
+/// block: t then dies at the copy and the allocator gives both one register.
+/// Candidates: `Mov(x, t)`, x defined more than once, t defined once in the same block before
+/// it, not a parameter and not a value the allocator recomputes (constants, addresses).
+/// MAKEPAD_RUN_OPT=-revar: off (bisection).
+pub fn reuse_copied_variables(options: &relax_session::Options, f: &mut Func) -> bool {
+    if opt_off(options, "-revar") {
+        return false;
+    }
+    let nv = f.vregs.len();
+    let nb = f.blocks.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 2;
+    }
+    // single-def vreg -> (block, index) of its definition
+    let mut def_at = vec![(u32::MAX, 0u32); nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (k, i) in b.insts.iter().enumerate() {
+            for_defs(i, |d| {
+                ndef[d.0 as usize] += 1;
+                def_at[d.0 as usize] = (bi as u32, k as u32);
+            });
+        }
+    }
+    let reach = reachable(f);
+    // candidates: (block, index of the copy, x, t)
+    const NONE: u32 = u32::MAX;
+    let mut cand: Vec<(u32, u32, VReg, VReg)> = Vec::new();
+    let mut by_t = vec![NONE; nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if !reach[bi] {
+            continue;
+        }
+        for (k, i) in b.insts.iter().enumerate() {
+            let Inst::Mov(x, t) = *i else { continue };
+            let (xu, tu) = (x.0 as usize, t.0 as usize);
+            if x == t || ndef[tu] != 1 || ndef[xu] < 2 || by_t[tu] != NONE || def_at[tu].0 != bi as u32 || def_at[tu].1 >= k as u32 {
+                continue;
+            }
+            let (db, di) = def_at[tu];
+            if matches!(f.blocks[db as usize].insts[di as usize], Inst::Iconst(..) | Inst::Fconst(..) | Inst::VConst(..) | Inst::Addr(..) | Inst::SlotAddr(..)) {
+                continue;
+            }
+            by_t[tu] = cand.len() as u32;
+            cand.push((bi as u32, k as u32, x, t));
+        }
+    }
+    if cand.is_empty() {
+        return false;
+    }
+    let nc = cand.len();
+    let w = (nc + 63) / 64;
+    // x -> its candidates (x is the target of several copies: one per temporary)
+    let mut by_x: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    for (c, &(_, _, x, _)) in cand.iter().enumerate() {
+        by_x[x.0 as usize].push(c as u32);
+    }
+    let bit = |s: &[u64], c: usize| s[c / 64] >> (c % 64) & 1 != 0;
+    // the state change of one instruction: copies set their bit, other defs of x or t clear
+    let step = |s: &mut [u64], bi: usize, k: usize, i: &Inst| {
+        for_defs(i, |d| {
+            for &c in &by_x[d.0 as usize] {
+                let c = c as usize;
+                if cand[c].0 as usize == bi && cand[c].1 as usize == k {
+                    s[c / 64] |= 1 << (c % 64);
+                } else {
+                    s[c / 64] &= !(1 << (c % 64));
+                }
+            }
+            let c = by_t[d.0 as usize];
+            if c != NONE {
+                s[c as usize / 64] &= !(1 << (c % 64));
+            }
+        });
+    };
+    let preds = relax_backend::regalloc::preds_of(f, &reach);
+    let order = relax_backend::frame::block_rpo(f);
+    let mut inn = vec![!0u64; nb * w];
+    let mut out = vec![!0u64; nb * w];
+    let mut cur = vec![0u64; w];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in &order {
+            let bi = b as usize;
+            if !reach[bi] {
+                continue;
+            }
+            if bi == 0 {
+                cur.iter_mut().for_each(|x| *x = 0);
+            } else {
+                cur.iter_mut().for_each(|x| *x = !0);
+                for &p in &preds[bi] {
+                    for j in 0..w {
+                        cur[j] &= out[p as usize * w + j];
+                    }
+                }
+            }
+            inn[bi * w..bi * w + w].copy_from_slice(&cur);
+            for (k, i) in f.blocks[bi].insts.iter().enumerate() {
+                step(&mut cur, bi, k, i);
+            }
+            if out[bi * w..bi * w + w] != cur[..] {
+                out[bi * w..bi * w + w].copy_from_slice(&cur);
+                changed = true;
+            }
+        }
+    }
+    // a candidate qualifies when each read of t is either rewritable or lies between t's
+    // definition and the copy
+    let mut ok = vec![true; nc];
+    let mut uses = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if !reach[bi] {
+            continue;
+        }
+        cur.copy_from_slice(&inn[bi * w..bi * w + w]);
+        let mut check = |cur: &[u64], u: VReg, k: usize| {
+            let c = by_t[u.0 as usize];
+            if c != NONE && !bit(cur, c as usize) {
+                let (cb, ck, _, _) = cand[c as usize];
+                if !(cb as usize == bi && k <= ck as usize) {
+                    ok[c as usize] = false;
+                }
+            }
+        };
+        for (k, i) in b.insts.iter().enumerate() {
+            for_uses(i, |u| check(&cur, u, k));
+            step(&mut cur, bi, k, i);
+        }
+        term_uses(&b.term, &mut uses);
+        for &u in &uses {
+            check(&cur, u, usize::MAX);
+        }
+    }
+    if !ok.iter().any(|&o| o) {
+        return false;
+    }
+    let mut any = false;
+    for bi in 0..nb {
+        if !reach[bi] {
+            continue;
+        }
+        cur.copy_from_slice(&inn[bi * w..bi * w + w]);
+        for k in 0..f.blocks[bi].insts.len() {
+            let look = |u: VReg| -> VReg {
+                let c = by_t[u.0 as usize];
+                if c != NONE && ok[c as usize] && bit(&cur, c as usize) {
+                    cand[c as usize].2
+                } else {
+                    u
+                }
+            };
+            let n = rename(&f.blocks[bi].insts[k], &look);
+            if n != f.blocks[bi].insts[k] {
+                f.blocks[bi].insts[k] = n;
+                any = true;
+            }
+            step(&mut cur, bi, k, &f.blocks[bi].insts[k]);
+        }
+        let mut t = f.blocks[bi].term.clone();
+        relax_backend::regalloc::term_vregs_mut(&mut t, |v| {
+            let c = by_t[v.0 as usize];
+            if c != NONE && ok[c as usize] && bit(&cur, c as usize) {
+                *v = cand[c as usize].2;
+                any = true;
+            }
+        });
+        f.blocks[bi].term = t;
+    }
+    any
+}
+
+/// Dead stores into slots (O3): a store, vector store or copy into a slot whose bytes no later
+/// read can see -- on every path from it the bytes are overwritten first, or never read again
+/// -- goes. Backward liveness of slot bytes over the CFG, for the slots `slot_scan` follows
+/// completely (not escaping): every read of such a slot is a load or a copy out of it.
+/// `let mut tmp = [0u8; 16]; tmp.copy_from_slice(src); dst.copy_from_slice(&tmp)` (brotli's
+/// ring-buffer copy): the 16 zero byte stores before the copy were kept, and with them the slot
+/// (forwarding needs one store per byte range); after full unrolling, a write-through counter's
+/// memory copy nobody reads. Slots over 256 bytes are tracked in 256 chunks (a store kills only
+/// the chunks it covers). Returns whether any store went.
+pub fn dead_slot_stores(f: &mut Func) -> bool {
     let ns = f.slots.len();
     if ns == 0 {
         return false;
     }
     let SlotScan { vs, esc, .. } = slot_scan(f);
     const NONE: u32 = u32::MAX;
+    // per tracked slot: first bit, bytes per bit, bit count
+    let mut base = vec![NONE; ns];
+    let mut gran = vec![1i64; ns];
+    let mut nbits = vec![0i64; ns];
+    let mut tot = 0usize;
+    for s2 in 0..ns {
+        let size = f.slots[s2].size as i64;
+        if esc[s2] || size == 0 {
+            continue;
+        }
+        let g = (size + 255) / 256;
+        base[s2] = tot as u32;
+        gran[s2] = g;
+        nbits[s2] = (size + g - 1) / g;
+        tot += nbits[s2] as usize;
+    }
+    if tot == 0 {
+        return false;
+    }
+    let w = (tot + 63) / 64;
     let sl = |v: VReg| vs[v.0 as usize].0;
-    let at = |v: VReg| vs[v.0 as usize].1;
-    let mut reads: Vec<Vec<(i64, i64)>> = vec![Vec::new(); ns];
-    for b in &f.blocks {
-        for i in &b.insts {
-            match *i {
-                Inst::Load(m, _, base, off) if sl(base) != NONE => {
-                    let o = at(base) + off as i64;
-                    reads[sl(base) as usize].push((o, o + mem_size(m) as i64));
+    // bits [a, b) of the bit vector
+    fn set(s: &mut [u64], a: usize, b: usize) {
+        for i in a..b {
+            s[i / 64] |= 1 << (i % 64);
+        }
+    }
+    fn clr(s: &mut [u64], a: usize, b: usize) {
+        for i in a..b {
+            s[i / 64] &= !(1 << (i % 64));
+        }
+    }
+    fn any(s: &[u64], a: usize, b: usize) -> bool {
+        (a..b).any(|i| s[i / 64] >> (i % 64) & 1 != 0)
+    }
+    // what an instruction does to a tracked slot: (slot, lo, hi) read and written byte ranges,
+    // hi = i64::MAX: unknown offset (the whole slot)
+    #[derive(Clone, Copy)]
+    struct Acc {
+        rd: Option<(u32, i64, i64)>,
+        wr: Option<(u32, i64, i64)>,
+    }
+    let acc = |f: &Func, i: &Inst| -> Acc {
+        let at = |v: VReg| vs[v.0 as usize].1;
+        let tracked = |v: VReg| sl(v) != NONE && base[sl(v) as usize] != NONE;
+        let mut a = Acc { rd: None, wr: None };
+        let vw = |v: VReg| if f.vregs[v.0 as usize] == Cls::V256 { 32 } else { 16 };
+        match *i {
+            Inst::Load(m, _, b, o) if tracked(b) => a.rd = Some((sl(b), at(b) + o as i64, at(b) + o as i64 + mem_size(m) as i64)),
+            Inst::VLoad(d, b, o) if tracked(b) => a.rd = Some((sl(b), at(b) + o as i64, at(b) + o as i64 + vw(d))),
+            Inst::LoadX(_, _, b, ..) | Inst::VLoadX(_, b, ..) if tracked(b) => a.rd = Some((sl(b), 0, i64::MAX)),
+            Inst::Store(m, b, o, _) if tracked(b) => a.wr = Some((sl(b), at(b) + o as i64, at(b) + o as i64 + mem_size(m) as i64)),
+            Inst::VStore(b, o, v) if tracked(b) => a.wr = Some((sl(b), at(b) + o as i64, at(b) + o as i64 + vw(v))),
+            Inst::StoreX(_, b, ..) | Inst::VStoreX(b, ..) if tracked(b) => a.wr = Some((sl(b), 0, i64::MAX)),
+            Inst::Copy(d, s2, n) => {
+                if tracked(s2) {
+                    a.rd = Some((sl(s2), at(s2), at(s2) + n as i64));
                 }
-                Inst::VLoad(_, base, off) if sl(base) != NONE => {
-                    let o = at(base) + off as i64;
-                    reads[sl(base) as usize].push((o, o + 16));
+                if tracked(d) {
+                    a.wr = Some((sl(d), at(d), at(d) + n as i64));
                 }
-                Inst::LoadX(_, _, base, ..) if sl(base) != NONE => reads[sl(base) as usize].push((i64::MIN, i64::MAX)),
-                Inst::Copy(_, s2, n) if sl(s2) != NONE => {
-                    let o = at(s2);
-                    reads[sl(s2) as usize].push((o, o + n as i64));
+            }
+            _ => {}
+        }
+        a
+    };
+    // a byte range as bits: (overlapping bits, fully covered bits); None: out of the slot
+    let bits = |s2: u32, lo: i64, hi: i64| -> Option<((usize, usize), (usize, usize))> {
+        let s2 = s2 as usize;
+        let (b0, g, n) = (base[s2] as i64, gran[s2], nbits[s2]);
+        if hi == i64::MAX || lo < 0 || hi > f.slots[s2].size as i64 || lo >= hi {
+            return None;
+        }
+        let over = ((b0 + lo / g) as usize, (b0 + (hi + g - 1) / g).min(b0 + n) as usize);
+        let full_hi = if hi == f.slots[s2].size as i64 { n } else { hi / g };
+        let cov = ((b0 + (lo + g - 1) / g) as usize, (b0 + full_hi) as usize);
+        Some((over, if cov.0 < cov.1 { cov } else { (0, 0) }))
+    };
+    let whole = |s2: u32| (base[s2 as usize] as usize, (base[s2 as usize] as i64 + nbits[s2 as usize]) as usize);
+    // backward transfer of one instruction; returns whether its write is dead
+    let xfer = |live: &mut [u64], a: Acc| -> bool {
+        let mut dead = false;
+        if let Some((s2, lo, hi)) = a.wr {
+            match bits(s2, lo, hi) {
+                Some((over, cov)) => {
+                    dead = !any(live, over.0, over.1);
+                    clr(live, cov.0, cov.1);
                 }
-                _ => {}
+                None => {
+                    let (x, y) = whole(s2);
+                    dead = hi == i64::MAX && !any(live, x, y);
+                }
+            }
+        }
+        if let Some((s2, lo, hi)) = a.rd {
+            match bits(s2, lo, hi) {
+                Some((over, _)) => set(live, over.0, over.1),
+                None => {
+                    let (x, y) = whole(s2);
+                    set(live, x, y);
+                }
+            }
+        }
+        dead
+    };
+    let nb = f.blocks.len();
+    let reach = reachable(f);
+    let mut order = relax_backend::frame::block_rpo(f);
+    order.reverse();
+    let mut live_in = vec![0u64; nb * w];
+    let mut cur = vec![0u64; w];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in &order {
+            let bi = b as usize;
+            if !reach[bi] {
+                continue;
+            }
+            cur.iter_mut().for_each(|x| *x = 0);
+            for t in f.blocks[bi].term.succs() {
+                for j in 0..w {
+                    cur[j] |= live_in[t as usize * w + j];
+                }
+            }
+            for i in f.blocks[bi].insts.iter().rev() {
+                let a = acc(f, i);
+                xfer(&mut cur, a);
+            }
+            if live_in[bi * w..bi * w + w] != cur[..] {
+                live_in[bi * w..bi * w + w].copy_from_slice(&cur);
+                changed = true;
             }
         }
     }
-    let unread = |s2: usize, lo: i64, hi: i64| -> bool { !esc[s2] && reads[s2].iter().all(|&(a, b2)| b2 <= lo || hi <= a) };
-    let mut any = false;
-    for b in &mut f.blocks {
-        let mut k = 0;
-        while k < b.insts.len() {
-            let drop = match b.insts[k] {
-                Inst::Store(m, base, off, _) if sl(base) != NONE => {
-                    let o = at(base) + off as i64;
-                    unread(sl(base) as usize, o, o + mem_size(m) as i64)
-                }
-                _ => false,
-            };
-            if drop {
-                b.insts.remove(k);
-                if k < b.pos.len() {
-                    b.pos.remove(k);
-                }
-                any = true;
-            } else {
-                k += 1;
+    let mut dead: Vec<(usize, usize)> = Vec::new();
+    for bi in 0..nb {
+        if !reach[bi] {
+            continue;
+        }
+        cur.iter_mut().for_each(|x| *x = 0);
+        for t in f.blocks[bi].term.succs() {
+            for j in 0..w {
+                cur[j] |= live_in[t as usize * w + j];
+            }
+        }
+        for k in (0..f.blocks[bi].insts.len()).rev() {
+            let a = acc(f, &f.blocks[bi].insts[k]);
+            if xfer(&mut cur, a) {
+                dead.push((bi, k));
             }
         }
     }
-    any
+    if dead.is_empty() {
+        return false;
+    }
+    // indices were pushed in descending order per block: removal keeps the others valid
+    for (bi, k) in dead {
+        let b = &mut f.blocks[bi];
+        b.insts.remove(k);
+        if k < b.pos.len() {
+            b.pos.remove(k);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
