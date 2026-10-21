@@ -5488,10 +5488,30 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
 /// After an outer compile of slot `id` that began at `w0` installed it (unit call): the
 /// execution profile's call and the compile-wall statistics.
 unsafe fn compile_note(up: *mut Unit, id: u32, w0: u64) {
+    if QUIT_SEEN.load(Ordering::Relaxed) {
+        quit_compile_note(&*up, id, w0);
+    }
     if (&*up).prog.session.runtime.profile && crate::exec_profile::is_call(up as usize, id) && (&*up).fns[id as usize].compiled && (&*up).fns[id as usize].build_err.is_none() {
         (&*up).exec_note(id, crate::exec_profile::CALL);
     }
     compile_wall_add(up, w0);
+}
+
+/// Lazy compiles after the app asked to quit: count, wall ns (the quit waits for them). The exit
+/// summary reports them; MAKEPAD_RUN_QUIT_LOG=<path> also lists each (ms, thread, slot).
+pub static QUIT_COMPILES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+fn quit_compile_note(u: &Unit, id: u32, w0: u64) {
+    let dt = wall_ns().saturating_sub(w0);
+    QUIT_COMPILES[0].fetch_add(1, Ordering::Relaxed);
+    QUIT_COMPILES[1].fetch_add(dt, Ordering::Relaxed);
+    static LOG: std::sync::OnceLock<Option<relax_session::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| std::env::var_os("MAKEPAD_RUN_QUIT_LOG").and_then(|p| crate::zone_alloc::kept_with(|| std::fs::OpenOptions::new().create(true).append(true).open(p).ok().map(relax_session::sync::Mutex::new))));
+    if let Some(f) = log {
+        use std::io::Write;
+        let line = format!("{:.3} {} {}\n", dt as f64 / 1e6, crate::os::thread::name(me()), u.fns[id as usize].name);
+        let _ = f.lock().unwrap_or_else(|e| e.into_inner()).write_all(line.as_bytes());
+    }
 }
 
 /// Compile-wall statistics for one outer compile that began at `w0` (on the owner thread).
@@ -13377,6 +13397,7 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_first_present" => Some(relax_first_present as *const () as usize),
         b"relax_frame_done" => Some(crate::postframe::relax_frame_done as *const () as usize),
         b"relax_quit_requested" => Some(crate::run::relax_quit_requested as *const () as usize),
+        b"relax_quit_started" => Some(crate::run::relax_quit_started as *const () as usize),
         b"__relax_guard_enter" => Some(__relax_guard_enter as *const () as usize),
         b"__relax_guard_leave" => Some(__relax_guard_leave as *const () as usize),
         // Relax's std reads virtual files (git runs) through these (vfs.rs)

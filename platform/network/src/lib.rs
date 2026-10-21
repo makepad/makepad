@@ -34,7 +34,7 @@ pub const HTTP_BODY_LIMIT_ERROR: &str = "response body exceeds configured limit"
 
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
-    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse,
+    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, HttpServerThread,
     HttpServerResponseSender,
 };
 pub use crate::runtime::{NetworkConfig, NetworkRuntime};

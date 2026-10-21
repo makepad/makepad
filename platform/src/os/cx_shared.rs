@@ -1508,6 +1508,8 @@ impl Cx {
             }
         }
         if let Event::Shutdown = event {
+            // every quit path ends here (a window close, a lost session): the shutdown starts
+            crate::cx::relax_quit_started();
             // An open `/cap/start` file is finished before the app goes.
             crate::remote::finish_capture_on_shutdown(self);
         }

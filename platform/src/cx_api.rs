@@ -1290,6 +1290,7 @@ impl Cx {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] Cx::quit queued at {}", std::panic::Location::caller());
         }
+        crate::cx::relax_quit_started();
         self.platform_ops.push_back(CxOsOp::Quit);
     }
 

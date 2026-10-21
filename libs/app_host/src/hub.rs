@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest};
+use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest, HttpServerThread};
 use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WIRE};
 use makepad_platform::makepad_micro_serde::{DeBin, SerBin};
 use makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
@@ -47,6 +47,15 @@ pub enum HubEvent {
 pub struct AppHub {
     pub port: u16,
     pub rx: Receiver<HubEvent>,
+    /// Its accept loop. Dropping the hub stops it; the `app-hub` worker ends when the last
+    /// connection did (its request channel closes), so a quitting host leaves no thread behind.
+    server: HttpServerThread,
+}
+
+impl Drop for AppHub {
+    fn drop(&mut self) {
+        self.server.stop();
+    }
 }
 
 impl AppHub {
@@ -70,7 +79,7 @@ impl AppHub {
             Err(_) => return None,
         }
         let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
-        start_http_server(HttpServer {
+        let server = start_http_server(HttpServer {
             listen_address: addr,
             request: request_tx,
             post_max_size: 1024 * 1024,
@@ -159,12 +168,17 @@ impl AppHub {
                 }
                 },
             )
-            .ok()?;
+            .ok();
+        let Some(worker) = worker else {
+            server.stop();
+            return None;
+        };
         worker.detach();
 
         Some(AppHub {
             port,
             rx: event_rx,
+            server,
         })
     }
 }

@@ -1430,6 +1430,26 @@ pub(crate) fn relax_first_present() {
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn relax_first_present() {}
 
+/// The app's shutdown starts (it quits, its last window closed, a remote `/quit`): under Relax the
+/// loader marks the quit (its quit-compile accounting, no settle swap from now on) and writes the
+/// disk cache while the app shuts down -- what a termination signal does, without reporting an
+/// abnormal end. Once per process; a rustc build has no such symbol.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_quit_started() {
+    static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ONCE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let hook = relax_host_symbol(c"relax_quit_started");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn relax_quit_started() {}
+
 /// Each frame the HAL finished, under Relax: the loader logs the frame gaps after the first
 /// present (its post-present responsiveness report). The symbol is looked up once.
 #[cfg(any(unix, windows))]

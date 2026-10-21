@@ -2375,6 +2375,10 @@ pub(crate) fn zone_put_back(taken: ZoneTaken) {
 }
 
 extern "C" fn at_exit() {
+    if jit::QUIT_SEEN.load(Ordering::Relaxed) {
+        verbose!("makepad-run quit: {} lazy compiles after the quit request, {:.0} ms",
+            jit::QUIT_COMPILES[0].load(Ordering::Relaxed), jit::QUIT_COMPILES[1].load(Ordering::Relaxed) as f64 / 1e6);
+    }
     finish_run("exit", EXIT_SUMMARY.get().and_then(|exit| exit.code.get().copied()));
 }
 
@@ -2603,6 +2607,20 @@ pub fn quitting() {
 
 pub(crate) extern "C" fn relax_quit_requested() {
     crate::tui::abnormal();
+    quit_mark();
+}
+
+/// The app's own shutdown starts (it quit, its last window closed, a remote quit: platform
+/// cx.rs): the quit is marked from here, and the quit write starts, as for a signal.
+pub(crate) extern "C" fn relax_quit_started() {
+    // a child app of a window manager (a domain with a parent) quitting is not the run's end
+    if crate::domain::current_app_domain().and_then(crate::domain::info).is_some_and(|i| i.parent.is_some()) {
+        return;
+    }
+    quit_mark();
+}
+
+fn quit_mark() {
     static ONCE: AtomicBool = AtomicBool::new(false);
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }

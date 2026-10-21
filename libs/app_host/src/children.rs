@@ -418,6 +418,10 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         if let Some((timer, _)) = self.wake.take() {
             cx.stop_timer(timer);
         }
+        // No child is left to talk to: the hub's threads end (its accept loop now, its worker
+        // when the quit children's sockets closed). The next launch starts a new hub.
+        self.hub = None;
+        self.hub_failed = false;
     }
 
     fn retry_closing(&mut self, cx: &mut Cx) {
