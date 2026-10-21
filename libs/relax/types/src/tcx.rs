@@ -1557,7 +1557,9 @@ impl Tcx {
 
     #[cold]
     fn init_signature<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<SigParts>>) -> &'a SigParts {
-        cell.get_or_init(|| {
+        // (computed outside the cell's Once: relax_base::query::init_once)
+        let diagnostics = std::cell::Cell::new(None);
+        let value: &Box<_> = crate::query::init_once(cell, || {
             if crate::why::enabled() && prog.files.get(prog.def(d).file as usize)
                 .and_then(|f| f.ast.items.get(prog.def(d).item.0 as usize)).is_some() {
                 let cause = prog.why_def(d, "signature-demand");
@@ -1569,16 +1571,19 @@ impl Tcx {
             typing_env.limit = RecursionLimit::for_item(prog, d);
             let cx = EvalCx::new(prog, self, typing_env, &state);
             let checkpoint = self.dcx.checkpoint();
-            let mut parts = self.sig_parts_captured(&cx, prog, d);
+            let parts = self.sig_parts_captured(&cx, prog, d);
             if !parts.errors.is_empty() { cx.errors().note_reported_error(); }
-            let (errors, warnings) = cx.errors().take_since(checkpoint);
+            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
+            Box::new(parts)
+        }, |parts| {
+            let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 parts.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-            Box::new(parts)
-        })
+        });
+        value
     }
 
     /// fn_sig(d).header.abi without lowering the signature: lower_fn_header reads it from
@@ -2202,7 +2207,9 @@ impl Tcx {
 
     #[cold]
     fn init_const_decl<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<ConstDecl>>) -> &'a ConstDecl {
-        cell.get_or_init(|| {
+        // (computed outside the cell's Once: relax_base::query::init_once)
+        let diagnostics = std::cell::Cell::new(None);
+        let value: &Box<_> = crate::query::init_once(cell, || {
             let _mem = crate::memstat::tag(crate::memstat::Tag::Sigs);
             let state = EvalState::new();
             let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
@@ -2214,14 +2221,17 @@ impl Tcx {
             crate::program::missing_restore(enclosing);
             decl.errors = cx.state.errors.replace(outer).unwrap_or_default();
             if !decl.errors.is_empty() { cx.errors().note_reported_error(); }
-            let (errors, warnings) = cx.errors().take_since(checkpoint);
+            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
+            Box::new(decl)
+        }, |decl| {
+            let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 decl.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-            Box::new(decl)
-        })
+        });
+        value
     }
 
     fn const_decl_uncached(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, d: DefId) -> ConstDecl {

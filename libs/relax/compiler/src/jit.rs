@@ -3651,19 +3651,36 @@ impl Unit {
         } else if let Some(id) = self.fn_map.get(&key) {
             return id;
         }
-        let _g = self.fn_create.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(id) = self.fn_map.get(&key) {
-            return id;
-        }
+        // fn_create is a leaf lock: nothing under it waits for a query, the owner or a pump
+        // (owner::Leaf). The slot's name is made before it, its ahead work queued after it
+        // (is_cold_def reads the signature: a query).
+        let name = {
+            let _k = crate::zone_alloc::kept();
+            fn_name(self, &key)
+        };
+        let id = {
+            let _g = self.fn_create.lock().unwrap_or_else(|e| e.into_inner());
+            let _leaf = crate::owner::Leaf::enter();
+            if let Some(id) = self.fn_map.get(&key) {
+                return id;
+            }
+            self.fn_create_locked(&key, name)
+        };
+        self.slot_ahead(id, &key);
+        id
+    }
+
+    /// fn_id's new slot `id` for `key` (the caller holds fn_create).
+    fn fn_create_locked(&self, key: &FnKey, name: String) -> u32 {
         let id = self.fns.len() as u32;
         self.ensure_slots(id, 1);
         // identity state: the slot's key and name (and the map's copy of the key) are the
         // program's, not the compiler arena's
-        let (entry_key, map_key, name) = {
+        let (entry_key, map_key) = {
             let _k = crate::zone_alloc::kept();
-            (key.clone(), key.clone(), fn_name(self, &key))
+            (key.clone(), key.clone())
         };
-        let file = self.key_file(&key);
+        let file = self.key_file(key);
         let stub_addr = self.slots.stub(id);
         let stub = x64::stub(id, self.lazy_entry);
         let slot_addr = self.slots.table(id);
@@ -3676,10 +3693,10 @@ impl Unit {
             }
             *(slot_addr as *mut u64) = stub_addr;
         }
-        self.slot_named(id, &key);
+        self.slot_named(id, key);
         self.fns.push(Self::new_entry(entry_key, name, file, stub_addr, stub.len() as u32));
         if let Some(index) = self.reload_slots.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            index.insert(&key, id);
+            index.insert(key, id);
         }
         self.fn_map.insert(map_key, id);
         id
@@ -3756,6 +3773,11 @@ impl Unit {
             }
         }
         self.front.slot_keys.insert(id, key.clone());
+    }
+
+    /// Slot `id` (named `key`, pushed) goes to the lowering-ahead helpers' queue. Not under
+    /// fn_create: is_cold_def reads the signature (a query, which may wait).
+    fn slot_ahead(&self, id: u32, key: &FnKey) {
         // after the first present only the slots the program's own builds make (their callees),
         // not a speculative or tier-up build's, and no cold callee (panics, formatting): what
         // the UI thread's next calls most likely meet
@@ -3865,6 +3887,7 @@ impl Unit {
         let name = crate::zone_alloc::kept_with(|| fn_name(self, &key).into_boxed_str());
         let file = self.key_file(&key);
         self.slot_named(id, &key);
+        self.slot_ahead(id, &key);
         let f = &mut self.fns[id as usize];
         f.key = crate::zone_alloc::kept_clone(&key);
         f.name = name;

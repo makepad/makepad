@@ -114,6 +114,7 @@ fn same_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
 pub fn main(host: &'static Host) {
     relax_compiler::memstat::tune_malloc();
     set_host(host);
+    relax_compiler::wasm_export::startup();
     run(relax_compiler::os::proc::args_bytes())
 }
 

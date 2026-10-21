@@ -22,6 +22,328 @@ static CAPTURED: Mutex<Option<BTreeMap<u32, Func>>> = Mutex::new(None);
 /// the first captured slot: the run's entry (the test fn, main)
 static ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
+/// Process start (the loader's main): `MAKEPAD_RUN_WASM_EXPORT_BLOCKS=1` turns block coverage on
+/// before the program loads (code cache off), so the export drops the blocks the run never entered.
+pub fn startup() {
+    if enabled() && std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_BLOCKS").is_some_and(|v| v != "0") {
+        std::env::set_var("MAKEPAD_RUN_CACHE", "off");
+        crate::coverage::enable();
+    }
+}
+
+/// Block shaking: the coverage stores in a captured body (a byte store of 1 to a coverage table
+/// address, the address an `Iconst`) are removed; a block whose stores all name blocks that never
+/// ran becomes a trap when `trap` (its code never ran in the trace: the same contract as an
+/// untraced function). Returns (blocks trapped, coverage stores removed).
+fn shake_blocks(f: &mut Func, trap: bool, keep: &dyn Fn(u32) -> bool, mut stub: Option<&mut u32>) -> (usize, usize) {
+    use relax_backend::rir::{Mem, Term, VReg};
+    // single-definition Iconsts
+    let mut defs: HashMap<VReg, (u32, i64)> = HashMap::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Some(d) = def_of(i) {
+                let e = defs.entry(d).or_insert((0, 0));
+                e.0 += 1;
+                if let Inst::Iconst(_, v) = i {
+                    e.1 = *v;
+                } else {
+                    e.1 = i64::MIN;
+                }
+            }
+        }
+    }
+    for p in &f.params {
+        defs.entry(*p).or_insert((0, 0)).0 += 1;
+    }
+    // a coverage store, possibly merged by the optimiser with its neighbours (consecutive blocks
+    // have consecutive bytes: two byte stores become one 2-, 4- or 8-byte store of 0x0101..):
+    // Some(any of its bytes' blocks ran)
+    let cov = |i: &Inst| -> Option<bool> {
+        if let Inst::Store(Mem::Int(w, _), base, off, _) = i {
+            let (n, v) = defs.get(base).copied()?;
+            if n == 1 && v != i64::MIN {
+                let a = (v as u64).wrapping_add(*off as i64 as u64);
+                let mut any = None;
+                for k in 0..(*w as u64).max(1) {
+                    if let Some(h) = crate::coverage::hit_at(a + k) {
+                        any = Some(any.unwrap_or(false) || h);
+                    }
+                }
+                return any;
+            }
+        }
+        None
+    };
+    // per block: Some(entered) when it holds coverage stores (entered when any of them ran)
+    let state: Vec<Option<bool>> = f
+        .blocks
+        .iter()
+        .map(|b| {
+            let hits: Vec<bool> = b.insts.iter().filter_map(|i| cov(i)).collect();
+            (!hits.is_empty()).then(|| hits.iter().any(|h| *h))
+        })
+        .collect();
+    let mut dead: Vec<bool> = state.iter().map(|s| trap && *s == Some(false)).collect();
+    // rare-but-required: a never-entered block that calls a keep_reachable function (a GC, a
+    // growth path) stays, and so does the never-entered code leading to it
+    if dead.iter().any(|d| *d) {
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for t in succs(&b.term) {
+                if (t as usize) < preds.len() {
+                    preds[t as usize].push(bi);
+                }
+            }
+        }
+        let mut work: Vec<usize> = (0..f.blocks.len()).filter(|&bi| dead[bi] && f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::Call(relax_backend::rir::Callee::Fn(t) | relax_backend::rir::Callee::CFn(t, _), _, _) if keep(*t)))).collect();
+        let mut seen = vec![false; f.blocks.len()];
+        while let Some(bi) = work.pop() {
+            if seen[bi] || state[bi] == Some(true) {
+                continue;
+            }
+            seen[bi] = true;
+            dead[bi] = false;
+            work.extend(preds[bi].iter().copied());
+        }
+    }
+    let (mut trapped, mut removed) = (0, 0);
+    let fname = f.name.clone();
+    for (bi, b) in f.blocks.iter_mut().enumerate() {
+        if state[bi].is_none() {
+            continue;
+        }
+        let n_cov = b.insts.iter().filter(|i| cov(i).is_some()).count();
+        removed += n_cov;
+        if dead[bi] {
+            b.insts.clear();
+            b.pos.clear();
+            if let Some(n) = stub.as_deref_mut() {
+                // the replay gate's build: the trap names the block (`env.u(id)` of an id past
+                // every slot)
+                if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNTRACED").is_some() {
+                    eprintln!("  block stub {} = {} b{}", *n, fname, bi);
+                }
+                b.insts.push(Inst::Call(relax_backend::rir::Callee::Fn(*n), Vec::new(), Vec::new()));
+                b.pos.push(0);
+                *n += 1;
+            }
+            b.term = Term::Unreachable;
+            trapped += 1;
+            continue;
+        }
+        let positioned = b.pos.len() == b.insts.len();
+        let keep: Vec<bool> = b.insts.iter().map(|i| cov(i).is_none()).collect();
+        let mut k = 0;
+        b.insts.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        if positioned {
+            let mut k = 0;
+            b.pos.retain(|_| {
+                k += 1;
+                keep[k - 1]
+            });
+        }
+    }
+    // the other shapes the optimiser leaves (a coverage base reached through Mov/IBinI/IBin, an
+    // indexed store): every store whose address derives from a coverage-table constant goes
+    {
+        use std::collections::HashSet;
+        let mut cvr: HashSet<VReg> = HashSet::new();
+        loop {
+            let n0 = cvr.len();
+            for b in &f.blocks {
+                for i in &b.insts {
+                    match i {
+                        Inst::Iconst(d, v) if crate::coverage::hit_at(*v as u64).is_some() => {
+                            cvr.insert(*d);
+                        }
+                        Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) if cvr.contains(a) => {
+                            cvr.insert(*d);
+                        }
+                        Inst::IBin(relax_backend::rir::IOp::Add, _, d, a, c) if cvr.contains(a) || cvr.contains(c) => {
+                            cvr.insert(*d);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if cvr.len() == n0 {
+                break;
+            }
+        }
+        if !cvr.is_empty() {
+            for b in f.blocks.iter_mut() {
+                let keep: Vec<bool> = b.insts.iter().map(|i| !matches!(i, Inst::Store(_, a, _, _) | Inst::StoreX(_, a, _, _, _, _) | Inst::AtomicStore(_, _, a, _) if cvr.contains(a))).collect();
+                if keep.iter().all(|k| *k) {
+                    continue;
+                }
+                removed += keep.iter().filter(|k| !**k).count();
+                let positioned = b.pos.len() == b.insts.len();
+                let mut k = 0;
+                b.insts.retain(|_| { k += 1; keep[k - 1] });
+                if positioned {
+                    let mut k = 0;
+                    b.pos.retain(|_| { k += 1; keep[k - 1] });
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        relax_backend::passes::dce(f);
+        // a coverage address still named: a store shape this pass does not know (it would write
+        // into linear memory at a wrapped address): say so
+        let left = f.blocks.iter().flat_map(|b| b.insts.iter()).filter(|i| matches!(i, Inst::Iconst(_, v) if crate::coverage::hit_at(*v as u64).is_some())).count();
+        if left > 0 {
+            eprintln!("wasm export: {}: {} coverage addresses left after the strip", f.name, left);
+        }
+    }
+    (trapped, removed)
+}
+
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+/// Blanks the unused top-level statements of the record's blocks in the data images: (blocks in
+/// the record, blocks found, bytes of the found blocks, bytes blanked, items dropped). An item
+/// with `used` false is dropped; `used` true or null stays.
+fn splash_blank(path: &str, images: &mut [(u32, Vec<u8>)]) -> (usize, usize, usize, usize, usize) {
+    let src = match std::fs::read(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("wasm export: splash record {}: {}", path, e);
+            return (0, 0, 0, 0, 0);
+        }
+    };
+    let rec = match crate::json::parse(&src) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wasm export: splash record {}: {}", path, e);
+            return (0, 0, 0, 0, 0);
+        }
+    };
+    let mut by_hash: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
+    let mut n_blocks = 0;
+    let mut dropped = 0;
+    for b in rec.get("blocks").map(|b| b.arr()).unwrap_or(&[]) {
+        n_blocks += 1;
+        let Ok(h) = u64::from_str_radix(b.get("hash").map(|h| h.str()).unwrap_or(""), 16) else { continue };
+        let e = by_hash.entry(h).or_default();
+        for it in b.get("items").map(|i| i.arr()).unwrap_or(&[]) {
+            if matches!(it.get("used"), Some(crate::json::Json::Bool(false))) {
+                let (s, t) = (it.get("start").map_or(0.0, |v| v.num()) as usize, it.get("end").map_or(0.0, |v| v.num()) as usize);
+                if t > s {
+                    e.push((s, t));
+                    dropped += 1;
+                }
+            }
+        }
+    }
+    let (mut found, mut total, mut blanked, mut whole) = (0, 0, 0, 0usize);
+    let mut unmatched: Vec<(usize, String)> = Vec::new();
+    let splash_files = splash_file_hashes();
+    for (_, bytes) in images.iter_mut() {
+        if bytes.len() < 16 {
+            continue;
+        }
+        let h = fnv64(bytes);
+        let Some(ranges) = by_hash.get(&h) else {
+            // a `.splash` file's text (include_str! of a module registry) that no VM evaluated in
+            // the run (the record lists every text any VM evaluated): blanked whole
+            if splash_files.contains(&h) {
+                whole += 1;
+                total += bytes.len();
+                for c in bytes.iter_mut() {
+                    if *c != b'\n' {
+                        *c = b' ';
+                        blanked += 1;
+                    }
+                }
+            } else if bytes.len() >= 4096 && std::str::from_utf8(bytes).is_ok() {
+                unmatched.push((bytes.len(), String::from_utf8_lossy(&bytes[..60]).replace('\n', " ")));
+            }
+            continue;
+        };
+        found += 1;
+        total += bytes.len();
+        for &(s, t) in ranges {
+            let n = bytes.len();
+            for c in &mut bytes[s.min(n)..t.min(n)] {
+                if *c != b'\n' {
+                    *c = b' ';
+                    blanked += 1;
+                }
+            }
+        }
+    }
+    unmatched.sort_by(|a, b| b.0.cmp(&a.0));
+    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        eprintln!("wasm export: splash: {} .splash files in the crates; {} embedded ones no VM evaluated, blanked whole", splash_files.len(), whole);
+        eprintln!("wasm export: splash: {} text objects >= 4 KB not in the record, {} bytes", unmatched.len(), unmatched.iter().map(|u| u.0).sum::<usize>());
+        for (n, t) in unmatched.iter().take(20) {
+            eprintln!("  unrecorded text {:7} {}", n, t);
+        }
+    }
+    (n_blocks, found, total, blanked, dropped)
+}
+
+/// FNV-1a 64 of every `.splash` file in the program's crate directories (what include_str! of a
+/// `.splash` path embeds verbatim); `target` and hidden directories are skipped.
+fn splash_file_hashes() -> std::collections::HashSet<u64> {
+    let mut out = std::collections::HashSet::new();
+    let mut dirs: Vec<std::path::PathBuf> = crate::run::crate_dirs().into_iter().map(|(_, d)| std::path::PathBuf::from(d)).collect();
+    dirs.sort();
+    dirs.dedup();
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = Default::default();
+    while let Some(d) = dirs.pop() {
+        if !seen.insert(d.clone()) {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => {
+                    if !name.starts_with('.') && name != "target" {
+                        dirs.push(p);
+                    }
+                }
+                Ok(t) if t.is_file() && name.ends_with(".splash") => {
+                    if let Ok(b) = std::fs::read(&p) {
+                        out.insert(fnv64(&b));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn succs(t: &relax_backend::rir::Term) -> Vec<u32> {
+    use relax_backend::rir::Term;
+    match t {
+        Term::Jump(a) => vec![*a],
+        Term::Branch(_, a, b) | Term::Invoke(a, b) => vec![*a, *b],
+        Term::Switch(_, tab) => tab.targets.iter().copied().chain(std::iter::once(tab.default)).collect(),
+        Term::Ret(_) | Term::Unreachable | Term::Resume => Vec::new(),
+    }
+}
+
+fn def_of(i: &Inst) -> Option<relax_backend::rir::VReg> {
+    match i {
+        Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::Mov(d, _) | Inst::IBin(_, _, d, _, _) | Inst::IBinI(_, _, d, _, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FUnary(_, _, d, _) | Inst::FCmp(_, _, d, _, _) | Inst::Conv(_, d, _) | Inst::Load(_, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Sel(d, _, _, _) | Inst::TlsAddr(d, _) => Some(*d),
+        // anything else defining a vreg counts as "not a plain constant": the vreg is reported
+        // as defined (several times) so a base it defines is never read as a coverage address
+        Inst::Call(_, _, r) => r.first().copied(),
+        _ => None,
+    }
+}
+
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT").is_some())
@@ -128,7 +450,11 @@ pub fn finish(u: &Unit) {
     let Some(mut funcs) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     // the trace: slots whose code was installed (called); a build made ahead of a call that
     // never came is not part of it
+    let n_cap = funcs.len();
     funcs.retain(|id, _| (*id as usize) < u.fns.len() && u.fns[*id as usize].code != 0);
+    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        eprintln!("wasm export: {} slots captured, {} installed (of {} slots in the unit)", n_cap, funcs.len(), u.fns.len());
+    }
     if let Ok(pat) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_DUMP") {
         for (id, f) in &funcs {
             if f.name.contains(pat.as_str()) {
@@ -162,6 +488,12 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     // untraced calls are a bare trap (option untraced: env.u(id) first, for a message)
     let mut opts = wasm::Options { panic_abort: true, untraced_import: false, ..wasm::Options::default() };
     let mut single = true;
+    // off by default: under brotli the merged module is LARGER (P(DOOM), block-shaken: raw -360 KB,
+    // 23,345 -> 18,620 functions, br11 +5.0 KB): the compressor already shares near-identical
+    // bodies, the callers' extra constants cost more. Kept as an option for raw size / compile time.
+    let mut merge = false;
+    let mut splash = true;
+    let mut blocks = crate::coverage::on();
     // -tee,-remat,...: switch size techniques off (or on) to measure them
     {
         for t in optv.split(',').filter(|t| !t.is_empty()) {
@@ -177,23 +509,95 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                 "sp0" => opts.sp0 = on,
                 "abort" => opts.panic_abort = on,
                 "byname" => opts.order_by_name = on,
+                "bybytes" => opts.order_by_bytes = on,
                 "fold" => opts.fold_identical = on,
                 "st" => single = on,
                 "names" => opts.names = on,
                 "untraced" => opts.untraced_import = on,
                 "exnref" => opts.exnref = on,
+                "merge" => merge = on,
+                "splash" => splash = on,
+                "blocks" => blocks = on && crate::coverage::on(),
                 _ => eprintln!("wasm export: unknown option {}", n),
             }
         }
     }
     let abort = opts.panic_abort;
+    // block shaking (coverage on): blocks the run never entered trap; keep_reachable closures stay
+    // whole (they are kept because the trace may miss them). The coverage stores go either way.
+    let shaken_store: BTreeMap<u32, Func>;
+    let funcs: &BTreeMap<u32, Func> = if crate::coverage::on() {
+        let (mut nt, mut nr, mut nb) = (0usize, 0usize, 0usize);
+        let mut w = funcs.clone();
+        let keep = |t: u32| (t as usize) < u.fns.len() && crate::jit::keep_reachable(u, t);
+        // block stub ids (the untraced option): past every slot id
+        let mut stub_id = 0x4000_0000u32.max(u.fns.len() as u32);
+        let untraced = opts.untraced_import;
+        for (id, f) in w.iter_mut() {
+            nb += f.blocks.len();
+            let (t, r) = shake_blocks(f, blocks && !kept.contains(id), &keep, if untraced { Some(&mut stub_id) } else { None });
+            nt += t;
+            nr += r;
+        }
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            eprintln!("wasm export: blocks: {} of {} blocks trapped (never entered), {} coverage stores removed", nt, nb, nr);
+        }
+        shaken_store = w;
+        &shaken_store
+    } else {
+        funcs
+    };
     let mut m = Module::new(opts);
     let mut roots: Vec<(u32, String)> = ROOTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if roots.is_empty() {
         roots.push((ENTRY.load(std::sync::atomic::Ordering::Relaxed), "main".to_string()));
     }
     roots.retain(|r| funcs.contains_key(&r.0));
-    let reached = reach(u, funcs, &roots.iter().map(|r| r.0).collect::<Vec<_>>());
+    // roots: the entry and every function whose address any traced code takes (directly or in
+    // the data it names): the program enters those through pointers made at run time (callbacks
+    // a provided crate holds, vtables), which the static walk from the entry does not see. A slot
+    // that ran but is named only by direct calls its callers' later builds inlined is dropped.
+    let mut seeds: Vec<u32> = roots.iter().map(|r| r.0).collect();
+    address_taken(u, funcs, &mut seeds);
+    let reached = reach(u, funcs, &seeds);
+    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        eprintln!("wasm export: {} roots (entry + address-taken), {} of {} captured reached", seeds.len(), reached.len(), funcs.len());
+        // the untraced callees (slot, name), for the stub ids `env.u(id)` reports
+        let mut un: std::collections::BTreeSet<u32> = Default::default();
+        for id in &reached {
+            for b in &funcs[id].blocks {
+                for i in &b.insts {
+                    if let Inst::Call(relax_backend::rir::Callee::Fn(t) | relax_backend::rir::Callee::CFn(t, _), _, _) = i {
+                        if !funcs.contains_key(t) {
+                            un.insert(*t);
+                        }
+                    }
+                }
+            }
+        }
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNTRACED").is_some() {
+            for t in &un {
+                let n = if (*t as usize) < u.fns.len() { u.fns[*t as usize].name.to_string() } else { String::new() };
+                eprintln!("  untraced slot {} {}", t, n);
+            }
+        }
+    }
+    // functions that differ only in constants become one body (relax_backend::merge)
+    let merged_store: BTreeMap<u32, Func>;
+    let funcs: &BTreeMap<u32, Func> = if merge {
+        let mut w: BTreeMap<u32, Func> = reached.iter().map(|id| (*id, funcs[id].clone())).collect();
+        let keep: std::collections::HashSet<u32> = seeds.iter().copied().collect();
+        let mut next = (u.fns.len() as u32).max(w.keys().next_back().map_or(0, |k| k + 1));
+        let ms = relax_backend::merge::merge_similar(&mut w, &keep, &mut next, 16);
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            eprintln!("wasm export: merge: {} rounds, {} groups, {} functions merged ({} thunks), {} extra params; {} -> {} functions", ms.rounds, ms.groups, ms.merged, ms.thunks, ms.params, reached.len(), w.len());
+        }
+        merged_store = w;
+        &merged_store
+    } else {
+        funcs
+    };
+    let reached: Vec<u32> = if merge { funcs.keys().copied().collect() } else { reached };
     for id in &reached {
         m.add_func(*id, &funcs[id]);
     }
@@ -305,6 +709,16 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         }
         images.push((id, bytes));
     }
+    // Splash shaking: `MAKEPAD_RUN_WASM_EXPORT_SPLASH=<splash use record>` (platform splash_trace.rs,
+    // MAKEPAD_SPLASH_TRACE): in each embedded `script_mod!` text (found by its hash), the top-level
+    // statements no run used are blanked to spaces (newlines kept): kept statements stay verbatim,
+    // length and offsets unchanged, no code patched
+    if let (true, Ok(rec)) = (splash, std::env::var("MAKEPAD_RUN_WASM_EXPORT_SPLASH")) {
+        let st = splash_blank(&rec, &mut images);
+        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            eprintln!("wasm export: splash: {} blocks in the record, {} found in the data; {} of {} bytes blanked ({} items dropped)", st.0, st.1, st.3, st.2, st.4);
+        }
+    }
     let n_data = images.len();
     // MAKEPAD_RUN_WASM_EXPORT_STATS: the data by what it is (literals and vtables, statics, blocks)
     let mut data_kinds: HashMap<String, (usize, usize)> = HashMap::new();
@@ -333,6 +747,37 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
     if let Err(e) = std::fs::write(path, &out.bytes) {
         eprintln!("wasm export: {}: {}", std::path::Path::new(&path).display(), e);
         return;
+    }
+    // MAKEPAD_RUN_WASM_EXPORT_FNLIST=<file>: one line per module function for size analysis:
+    // slot, wasm bytes (0: folded into an identical one), RIR insts, blocks, direct call sites to
+    // it in the module, address taken, kept (keep_reachable, not traced), name
+    if let Ok(fl) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
+        use relax_backend::rir::Callee;
+        let mut calls_in: HashMap<u32, usize> = HashMap::new();
+        for id in &reached {
+            for b in &funcs[id].blocks {
+                for i in &b.insts {
+                    if let Inst::Call(Callee::Fn(t) | Callee::CFn(t, _), _, _) = i {
+                        *calls_in.entry(*t).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let taken: std::collections::HashSet<u32> = seeds.iter().copied().collect();
+        let mut txt = String::new();
+        for (id, n, b) in &out.stats.fn_sizes {
+            let f = &funcs[id];
+            let ni: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
+            txt.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", id, b, ni, f.blocks.len(), calls_in.get(id).copied().unwrap_or(0), taken.contains(id) as u8, kept.contains(id) as u8, n));
+        }
+        let fl = fl.replace("%p", &std::process::id().to_string());
+        let _ = std::fs::write(&fl, txt);
+        // and the data objects: bytes, what it is, its name or first bytes
+        let mut dt = String::new();
+        for (b, n) in &data_top {
+            dt.push_str(&format!("{}\t{}\n", b, n.chars().take(100).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>()));
+        }
+        let _ = std::fs::write(format!("{}.data", fl), dt);
     }
     if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
         let s = &out.stats;
@@ -378,6 +823,48 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             eprintln!("  failed {:5} x {}", n, k);
         }
     }
+}
+
+/// Slots whose address the captured code takes: `FnAddr`, thunk addresses, and function pointers
+/// in the data those functions name (vtables, statics), followed through data pointers.
+fn address_taken(u: &Unit, funcs: &BTreeMap<u32, Func>, out: &mut Vec<u32>) {
+    let mut data_seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut dwork: Vec<u32> = Vec::new();
+    for f in funcs.values() {
+        for b in &f.blocks {
+            for i in &b.insts {
+                match i {
+                    Inst::FnAddr(_, t) => out.push(*t),
+                    Inst::Addr(_, s) | Inst::TlsAddr(_, s) => match u.syms.kind(s.id) {
+                        Some(SymKind::Thunk(t)) => out.push(t),
+                        Some(SymKind::Data(_) | SymKind::Rw(_) | SymKind::Static(_)) => dwork.push(s.id),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    while let Some(d) = dwork.pop() {
+        if !data_seen.insert(d) {
+            continue;
+        }
+        let Some((bytes, _, _)) = data_of(u, d) else { continue };
+        for w in bytes.chunks_exact(8) {
+            let w = u64::from_le_bytes(w.try_into().unwrap());
+            if w > 0x1_0000 {
+                if let Some(s) = u.syms.symbol_at(w, u) {
+                    match u.syms.kind(s.id) {
+                        Some(SymKind::Thunk(t)) => out.push(t),
+                        Some(SymKind::Data(_) | SymKind::Rw(_) | SymKind::Static(_)) => dwork.push(s.id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
 }
 
 /// The captured functions the entry reaches: by calls, function addresses, and function pointers
@@ -434,7 +921,12 @@ fn single_thread(name: &str) -> Option<HostBind> {
     Some(match name {
         "pthread_create" | "pthread_join" | "pthread_detach" | "pthread_attr_init" | "pthread_attr_setstacksize" | "pthread_attr_destroy" | "pthread_setname_np" => HostBind::Trap,
         n if n.starts_with("__relax_domain_") => HostBind::Trap,
-        "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_self" | "pthread_threadid_np" | "pthread_main_np" | "sched_yield" | "__relax_key_delete" => HostBind::Builtin(Builtin::Nop),
+        // Linux std's only syscall is futex wait/wake (std sys/linux.rs): a no-op returning 0, as
+        // macOS's __ulock_*
+        "syscall" | "__relax_wait_enter" | "__relax_wait_leave" | "__relax_wake" | "__ulock_wake" | "__ulock_wait" | "pthread_threadid_np" | "sched_yield" | "__relax_key_delete" => HostBind::Builtin(Builtin::Nop),
+        // the one thread: id 1 (0 is a lock's "no owner": a reentrant lock would think it holds
+        // itself), the main thread (gettid == getpid)
+        "pthread_self" | "pthread_main_np" | "gettid" | "getpid" => HostBind::Builtin(Builtin::One),
         "__relax_key_create" => HostBind::Builtin(Builtin::KeyCreate),
         "__relax_key_get" => HostBind::Builtin(Builtin::KeyGet),
         "__relax_key_set" => HostBind::Builtin(Builtin::KeySet),

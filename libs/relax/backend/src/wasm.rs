@@ -111,8 +111,11 @@ pub enum Builtin {
     Memset,
     /// (f, data) -> u64: calls fn pointer `f(data)`; 0 when it returned, 1 when it unwound
     CatchPanic,
-    /// does nothing; its results are zero (single-threaded waits, wakes, thread ids)
+    /// does nothing; its results are zero (single-threaded waits and wakes)
     Nop,
+    /// does nothing; its integer results are 1: the one thread's id (never 0, the "no owner"
+    /// of locks), "is the main thread"
+    One,
     /// thread-local keys of a single-threaded program: (dtor) -> key, (key) -> value,
     /// (key, value); a table in linear memory
     KeyCreate,
@@ -165,11 +168,13 @@ pub struct Options {
     pub order_by_name: bool,
     /// identical function bodies are emitted once
     pub fold_identical: bool,
+    /// functions ordered by their body bytes (similar bodies adjacent for the compressor)
+    pub order_by_bytes: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, remat_slots: false, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true }
+        Options { stack_size: 1 << 20, heap_pages: 16, untraced_import: true, names: false, export_tag: true, exnref: false, data_first: false, tee: true, remat: true, remat_slots: false, sp0: false, panic_abort: false, order_by_name: true, fold_identical: true, order_by_bytes: true }
     }
 }
 
@@ -510,7 +515,11 @@ impl<'a> Module<'a> {
         let mut iord: Vec<usize> = (0..ni).collect();
         iord.sort_by(|a, b| fuse[*b].cmp(&fuse[*a]).then(a.cmp(b)));
         let mut dord: Vec<usize> = (ni..ni + n_user + n_help).filter(|g| canon[*g] == *g).collect();
-        if opts.order_by_name {
+        if opts.order_by_bytes {
+            // similar bodies next to each other (the compressor's window): by their bytes
+            let body = |g: usize| -> &[u8] { if g < ni + n_user { &bodies[g - ni].bytes } else { &helper_bodies[g - ni - n_user].bytes } };
+            dord.sort_by(|a, b| body(*a).cmp(body(*b)).then(a.cmp(b)));
+        } else if opts.order_by_name {
             let key = |g: usize| if g < ni + n_user { funcs[g - ni].1.name.as_str() } else { "\u{10FFFF}" };
             dord.sort_by(|a, b| key(*a).cmp(key(*b)).then(a.cmp(b)));
         } else {
@@ -734,7 +743,8 @@ impl<'a> Module<'a> {
         st.n_imports = ni;
         st.failed = failed;
         st.untraced_sites = self.sh.untraced_sites;
-        st.fn_sizes = funcs.iter().zip(bodies.iter()).map(|((id, f), b)| (*id, f.name.clone(), b.bytes.len())).collect();
+        // a folded copy emits no body: 0 bytes
+        st.fn_sizes = funcs.iter().zip(bodies.iter()).enumerate().map(|(k, ((id, f), b))| (*id, f.name.clone(), if canon[ni + k] == ni + k { b.bytes.len() } else { 0 })).collect();
         Output { bytes: out, stats: st }
     }
 }
@@ -2658,6 +2668,9 @@ impl<'a> Fx<'a> {
                 }
             }
             Inst::AtomicRmw(op, m, _, d, addr, src) => {
+                // the address (and a min/max source) is read twice: a value just set must stay in
+                // its local (the tee shortcut would drop the set for a single counted use)
+                self.last_set.0 = usize::MAX;
                 let t = self.tmp64;
                 let (lop, lal) = self.load_op(*m)?;
                 let (sop, sal) = self.store_op(*m)?;
@@ -2706,6 +2719,7 @@ impl<'a> Fx<'a> {
                 self.set(*d);
             }
             Inst::AtomicCas(m, _, _, d, addr, exp, new) => {
+                self.last_set.0 = usize::MAX;
                 let t = self.tmp64;
                 let (lop, lal) = self.load_op(*m)?;
                 let (sop, sal) = self.store_op(*m)?;
@@ -3378,11 +3392,12 @@ fn helper_body(o: &Options, h: Helper, sh: &mut Shared, fn_ix: &HashMap<u32, u32
                         g(&mut c, 0);
                     }
                 }
-                Builtin::Nop => {
+                Builtin::Nop | Builtin::One => {
+                    let k = (bi == Builtin::One) as u8;
                     for r in &t.results {
                         match r {
-                            I32 => c.extend_from_slice(&[I32C, 0]),
-                            I64 => c.extend_from_slice(&[I64C, 0]),
+                            I32 => c.extend_from_slice(&[I32C, k]),
+                            I64 => c.extend_from_slice(&[I64C, k]),
                             F32 => {
                                 c.push(F32C);
                                 c.extend_from_slice(&[0; 4]);
