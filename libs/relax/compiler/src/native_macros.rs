@@ -55,6 +55,11 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
     let features: &[&str] = match u.name.as_str() {
         "makepad_derive_widget" => &["default", "nightly"],
         "makepad_live_id" => &["default"],
+        // see `optional` below: the target side's feature of a graph that links relax-native-macros
+        "makepad_micro_proc_macro" => &["relax-tokens"],
+        // the loader's copy is built with it (the loader links makepad-hal, which enables it): a
+        // graph that links makepad-hal (its own tests) asks for that build
+        "makepad_relax_api" => &["host-shims"],
         _ => &[],
     };
     if u.edition != 2021 || !u.features.iter().all(|f| features.contains(&f.as_str())) {
@@ -98,11 +103,17 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
         return Err(error(root.join("build.rs").display().to_string(), "build script was added".into()));
     }
     let (_, expected) = relax_native_macros::DEPENDENCIES.iter().find(|(name, _)| *name == u.name).unwrap();
-    if u.deps.len() != expected.len() {
+    // A graph that also links relax-native-macros as a library (relax-compiler's) holds
+    // micro_proc_macro once, with the target side's `relax-tokens` (unitgraph: host and target
+    // copies are one crate). The proc-macro side of that graph is the accepted one plus that
+    // feature's optional dependency, which no macro entry reaches.
+    let optional = |alias: &str| u.name == "makepad_micro_proc_macro" && alias == "relax_lex" && u.features.iter().any(|f| f == "relax-tokens");
+    let deps: Vec<&(usize, String)> = u.deps.iter().filter(|(_, alias)| !optional(alias)).collect();
+    if deps.len() != expected.len() {
         return Err(error(root.join("Cargo.toml").display().to_string(), "dependency count differs".into()));
     }
     for name in *expected {
-        let (dep, _) = u.deps.iter().find(|(_, alias)| alias == name)
+        let (dep, _) = deps.iter().copied().find(|(_, alias)| alias == name)
             .ok_or_else(|| error(root.join("Cargo.toml").display().to_string(), format!("missing dependency alias {name}")))?;
         if reg.units[*dep].name != *name {
             return Err(error(root.join("Cargo.toml").display().to_string(), format!("dependency {name} resolves to {}", reg.units[*dep].name)));

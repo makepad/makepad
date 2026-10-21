@@ -273,6 +273,7 @@ impl Plan {
                     for (alias, qual, target) in &scan.aliases { Arc::make_mut(&mut table).add_alias(c.name.clone(), alias.clone(), (qual.clone(), target.clone())); }
                     for name in &scan.macro_use { Arc::make_mut(&mut table).macro_use.entry(c.name.clone()).or_default().push(name.clone()); }
                     modules.mods.extend(scan.mods.iter().cloned());
+                    modules.items.extend(scan.mod_items.iter().cloned());
                     for u in &scan.uses {
                         if let Some(bind) = &u.bind {
                             if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
@@ -568,6 +569,14 @@ impl Plan {
             for name in names.implicit_demands() {
                 origins.entry(name.clone()).or_insert((String::new(), "implicit".into()));
                 demands.insert(name);
+            }
+        }
+        for c in crates.iter() {
+            // A crate built with `--test` (cfg(test): `makepad test`) is entered at its `#[test]`
+            // fns, wherever they are: all of its own items are demanded, its dependencies' only
+            // as they reach them.
+            if c.cfg.set.iter().any(|x| x == "test") && forced.insert(c.name.clone()) {
+                force_origin.entry(c.name.clone()).or_insert((c.root.clone(), "test harness".into()));
             }
         }
         for (ci, c) in crates.iter().enumerate() {

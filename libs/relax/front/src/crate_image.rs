@@ -203,14 +203,15 @@ fields!(MTok, kind, text, pos);
 impl Codec for MacroDef {
     fn put(&self, w: &mut Vec<u8>) {
         self.name.put(w); self.krate.put(w); self.exported.put(w); self.arms.put(w);
-        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w);
+        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w); self.def_mod.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         Some(Self { name: Codec::get(r)?, krate: Codec::get(r)?, exported: Codec::get(r)?, arms: Codec::get(r)?,
-            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, input: None })
+            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, def_mod: Codec::get(r)?, input: None })
     }
 }
 fields!(UseItem, module, path, bind, is_pub);
+fields!(ModItem, pos, end, macro_use);
 fields!(LazyCtx, krate, path, module_path, mods, s2_fmt);
 /// Option<Box<LazyCtx>>'s encoding
 impl Codec for crate::parser::FileLazy {
@@ -364,12 +365,13 @@ impl Codec for CrateMods {
         self.root.put(w);
         self.src.put(w);
         self.mods.put(w);
+        self.items.put(w);
         self.uses.put(w);
         self.externs.put(w);
         self.renames.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
-        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, ..Default::default() })
+        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, ..Default::default() })
     }
 }
 impl Codec for MacroUse {

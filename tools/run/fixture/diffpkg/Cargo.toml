@@ -8,3 +8,5 @@ publish = false
 
 [dependencies]
 makepad-box3d = { path = "../../../../libs/box3d" }
+relax-diffpkg-tables = { path = "tables" }
+ttf-parser = { path = "../../../../libs/ttf-parser" }

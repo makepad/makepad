@@ -67,6 +67,9 @@ pub struct MacroDef {
     /// identifiers resolve local variables there (definition-site hygiene)
     pub def_file: String,
     pub def_pos: u32,
+    /// the module (path as `module_path!` prints it) the `macro_rules!` is written in; empty:
+    /// unknown (made by an expansion, a built-in), visible wherever the crate is
+    pub def_mod: String,
     /// Exact definition input, for prescan/outline/parser reuse. Images already
     /// contain parsed arms and need not persist this cold-parse acceleration.
     pub(crate) input: Option<std::sync::Arc<RuleInput>>,
@@ -137,6 +140,17 @@ pub struct UseItem {
 
 /// One crate's module tree and imports (for macro path resolution before name resolution:
 /// rustc resolves macro paths with the same import resolution as items).
+/// One `mod` item of a crate as the preload scan reads it: where it sits in its parent's file
+/// (`pos`: its `mod` keyword, `end`: the end of the item -- its `;` or closing brace) and whether
+/// it carries `#[macro_use]`. rustc's legacy `macro_rules!` scope is made of these
+/// (rustc_resolve build_reduced_graph.rs: `MacroRulesScope`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModItem {
+    pub pos: u32,
+    pub end: u32,
+    pub macro_use: bool,
+}
+
 #[derive(Default)]
 pub struct CrateMods {
     /// the crate root's module path (the crate name)
@@ -146,6 +160,8 @@ pub struct CrateMods {
     pub src: String,
     /// every module path of the crate
     pub mods: crate::fxhash::HashSet<String>,
+    /// the `mod` item of each module (not the root)
+    pub items: HashMap<String, ModItem>,
     /// `use` / `extern crate` bindings per module
     pub uses: HashMap<String, Vec<UseItem>>,
     /// extern prelude: names the crate refers to other crates by -> their crate names
@@ -154,6 +170,38 @@ pub struct CrateMods {
     pub renames: crate::fxhash::HashSet<String>,
     /// the crate's resolved scopes, computed once on first use (CrateScope::compute)
     pub scope: std::sync::OnceLock<CrateScope>,
+}
+
+impl CrateMods {
+    /// Is the `macro_rules!` `d` of this crate in rustc's legacy (textual) scope in module `from`
+    /// at source position `at` (None: at any position of it)? A definition is in scope after it
+    /// in its module and in the modules declared after it inside that module; it leaves its module
+    /// only through `#[macro_use]` on the `mod` item, and then is in scope after that item in the
+    /// parent (rustc_resolve build_reduced_graph.rs: `MacroRulesScope::Binding` chained through
+    /// `define_macro`, `#[macro_use]` modules `restore_macro_rules_scope` to the parent; ident.rs
+    /// `visit_scopes`). What the scan has no `mod` item for (a module an expansion made) is not
+    /// known to be out of scope.
+    pub fn in_textual_scope(&self, d: &MacroDef, from: &str, at: Option<u32>) -> bool {
+        if d.def_mod.is_empty() { return true; }
+        let mut m = d.def_mod.as_str();
+        let mut e = d.def_pos;
+        loop {
+            if from == m {
+                return at.map_or(true, |a| a > e);
+            }
+            if let Some(rest) = from.strip_prefix(m).and_then(|r| r.strip_prefix("::")) {
+                // `from` is inside `m`: in scope when the child `mod` item toward it is after `e`
+                let child = &from[..m.len() + 2 + rest.find("::").unwrap_or(rest.len())];
+                return self.items.get(child).map_or(true, |it| it.pos > e);
+            }
+            // `from` is outside `m`: only a `#[macro_use]` module hands its macros to its parent
+            let Some(it) = self.items.get(m) else { return true };
+            let Some((parent, _)) = m.rsplit_once("::") else { return false };
+            if !it.macro_use { return false; }
+            e = it.end;
+            m = parent;
+        }
+    }
 }
 
 /// A crate's module scopes resolved once (rustc_resolve's import fixpoint, for the macro and
@@ -656,14 +704,14 @@ impl MacroTable {
         if !added {
             return;
         }
-        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, uses, externs: old.externs.clone(), renames, scope: Default::default() };
+        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs: old.externs.clone(), renames, scope: Default::default() };
         self.add_crate(k.to_string(), std::sync::Arc::new(cm));
         // a crate not loaded yet whose scope a parse ahead of its load computed (preloaded files'
         // lookups) copied this crate's names as they were: computed afresh on next use
         let stale: Vec<String> = self.crates.iter().filter(|(n, c)| !self.sealed.contains(n.as_str()) && c.scope.get().is_some()).map(|(n, _)| n.clone()).collect();
         for n in stale {
             let c = self.crates[&n].clone();
-            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), scope: Default::default() };
+            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), scope: Default::default() };
             self.crates.insert(n, std::sync::Arc::new(fresh));
         }
     }
@@ -733,8 +781,10 @@ fn lookup_in_t<S: AsRef<str>>(table: &MacroTable, local: &[MacroRef], name: &str
         }
         return None;
     }
-    // textual scope: the crate's own macro_rules
-    if let Some(d) = all().find(|d| d.krate == cur) {
+    // textual scope: the crate's own macro_rules that are in scope in this module (the position
+    // within it is the parser's: MacroScope has none; Parser::rules_in_textual_scope)
+    let cm = table.crates.get(cur);
+    if let Some(d) = all().find(|d| d.krate == cur && cm.map_or(true, |c| c.in_textual_scope(d, module, None))) {
         return Some(d.clone());
     }
     // the module's imports (non-glob, then glob)
@@ -1328,7 +1378,7 @@ impl MacroScope {
         MacroScope { table, local: Vec::new(), looked: Default::default(), local_uses: Default::default(), uses_base: Default::default(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default() }
     }
 
-    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, pos: u32, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
+    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, module: &str, pos: u32, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
         let same = self.table.defs.get(name).into_iter().flatten().rev().chain(self.local.iter().rev()).find(|d| {
             d.name == name && d.krate == krate && d.def_file == file && d.def_pos == pos && d.exported == exported && d.builtin == 0
                 && d.input.as_ref().is_some_and(|input| input.local_inner == local_inner && input.tokens == tokens)
@@ -1343,6 +1393,7 @@ impl MacroScope {
             if local_inner { local_inner_macros(&mut d); }
             d.def_file = file.into();
             d.def_pos = pos;
+            d.def_mod = module.into();
             self.define(d);
         }
         Ok(())
@@ -2122,7 +2173,7 @@ pub fn parse_def(name: &str, krate: &str, edition: u16, toks: &[MTok]) -> Result
         i = bc + 1;
         arms.push((matcher, body));
     }
-    Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0,
+    Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0, def_mod: String::new(),
         input: Some(std::sync::Arc::new(RuleInput { tokens: toks.to_vec(), local_inner: false })) })
 }
 
@@ -2869,5 +2920,43 @@ mod replay_tests {
         assert!(scope.lookup("value", "app", &["dep".into(), "dep".into()], "app::lib_rr").is_none());
         assert!(scope.lookup("missing", "app", &["crate".into(), "lib_rr".into()], "app").is_none());
         assert!(scope.finish().replays(&table, "app", "app.rs"));
+    }
+
+    /// rustc's legacy macro_rules scope: a definition reaches its module after it and the modules
+    /// declared after it, and leaves its module only through `#[macro_use]` on the `mod` item.
+    #[test]
+    fn textual_scope_is_lexical_and_leaves_modules_only_through_macro_use() {
+        let mut cm = CrateMods { root: "c".into(), ..Default::default() };
+        let item = |pos, end, macro_use| ModItem { pos, end, macro_use };
+        // c: macro a (pos 10); mod b { macro b1 (pos 20) } at 30..40 ; #[macro_use] mod m { macro m1 } at 50..60; mod x; at 70..71
+        // c::b::inner, c::m::sub (with its own #[macro_use] mod deep { macro d1 } at 15..25)
+        for (m, it) in [("c::b", item(30, 40, false)), ("c::m", item(50, 60, true)), ("c::x", item(70, 71, false)),
+            ("c::m::deep", item(15, 25, true)), ("c::m::sib", item(30, 31, false))] {
+            cm.mods.insert(m.into());
+            cm.items.insert(m.into(), it);
+        }
+        let def = |module: &str, pos| {
+            let mut d = parse_def("n", "c", 2021, &[]).unwrap_or_else(|_| unreachable!());
+            d.def_mod = module.into();
+            d.def_pos = pos;
+            d
+        };
+        let a = def("c", 10);
+        assert!(cm.in_textual_scope(&a, "c", Some(11)) && !cm.in_textual_scope(&a, "c", Some(9)));
+        assert!(cm.in_textual_scope(&a, "c::x", None) && cm.in_textual_scope(&a, "c::b", None));
+        let b1 = def("c::b", 20);
+        // a sibling and the parent do not see a module's macro without #[macro_use]
+        assert!(!cm.in_textual_scope(&b1, "c", None) && !cm.in_textual_scope(&b1, "c::x", None));
+        assert!(cm.in_textual_scope(&b1, "c::b", Some(21)));
+        // #[macro_use] mod m: in scope in the parent after the mod item, and in later siblings
+        let m1 = def("c::m", 52);
+        assert!(cm.in_textual_scope(&m1, "c", Some(61)) && !cm.in_textual_scope(&m1, "c", Some(49)));
+        assert!(cm.in_textual_scope(&m1, "c::x", None) && !cm.in_textual_scope(&m1, "c::b", None));
+        // a macro in a #[macro_use] mod nested in a module that is not #[macro_use] stays in it
+        let d1 = def("c::m::deep", 16);
+        assert!(cm.in_textual_scope(&d1, "c::m", Some(26)) && !cm.in_textual_scope(&d1, "c::m", Some(24)));
+        assert!(cm.in_textual_scope(&d1, "c", Some(61)) && cm.in_textual_scope(&d1, "c::m::sib", None));
+        let s1 = def("c::m::sib", 32);
+        assert!(!cm.in_textual_scope(&s1, "c::m", None) && !cm.in_textual_scope(&s1, "c", None));
     }
 }

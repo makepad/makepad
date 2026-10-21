@@ -346,7 +346,7 @@ pub fn override_rules(options: &crate::options::Options, d: crate::macros::Macro
         crate::gen_local! {
             static BF: std::cell::OnceCell<crate::macros::MacroRef>;
         }
-        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u8, def_file: String::new(), def_pos: 0, input: None })).clone());
+        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u8, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None })).clone());
     }
     d
 }
@@ -400,7 +400,7 @@ pub fn macro_def(name: &str) -> Option<crate::macros::MacroRef> {
             d.resize(i + 1, None);
         }
         if d[i].is_none() {
-            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, input: None }));
+            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None }));
         }
         d[i].clone()
     })

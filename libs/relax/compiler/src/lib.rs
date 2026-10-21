@@ -65,6 +65,8 @@ pub mod lower;
 pub mod cabi;
 pub use relax_types::*;
 pub mod run;
+mod harness;
+mod test_pkg;
 pub mod tui;
 pub mod check;
 mod gandalf_out;
@@ -281,6 +283,12 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
             a.extend_from_slice(&args[3..]);
             let code = run::cmd_run(sess, &a);
             std::process::exit(code);
+        }
+        // `makepad test <file.rs>`: one file's tests; `makepad test <package>`: the package's
+        // lib and integration tests, each a harness program (run.rs `--harness`)
+        "test" if !args[2..].iter().any(|a| a.ends_with(".rs")) => {
+            let code = test_pkg::cmd_test_package(&args[2..]);
+            os::proc::exit(code);
         }
         "test" => {
             let code = cmd_test(sess, &args[2..]);

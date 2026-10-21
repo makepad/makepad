@@ -1272,7 +1272,7 @@ impl Program {
             }
             // Resolve scopes against the loader's complete dependency imports. Do not retain
             // a scope the prescan computed against its earlier macro table.
-            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), ..Default::default() });
+            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), ..Default::default() });
             table.add_crate(ahead.name.clone(), mods);
             if !ahead.macro_use.is_empty() {
                 let v = table.macro_use.entry(ahead.name.clone()).or_default();

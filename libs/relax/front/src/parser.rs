@@ -1227,8 +1227,10 @@ impl<'a> Parser<'a> {
         let edition = self.edition;
         let rule_scope = self.scope_stack.last().copied().unwrap_or(0);
         self.rule_scopes.push((name.lo, rule_scope));
+        // the module it is written in (an expansion's position is not a source position: unknown)
+        let def_mod = if (name.lo as usize) < self.src.len() { self.cur_module() } else { String::new() };
         let scope = self.macros.as_mut().unwrap();
-        scope.define_tokens(&n, &self.krate, self.edition, file, name.lo, exported, local_inner, &mt)
+        scope.define_tokens(&n, &self.krate, self.edition, file, &def_mod, name.lo, exported, local_inner, &mt)
             .map_err(|msg| PErr { pos: name.lo, msg })?;
         if crate::lexer::validation_enabled() {
             if let Some(d) = scope.local.last() {

@@ -58,13 +58,11 @@ unsafe fn drop_slot<T>(p: *mut u8) {
 }
 
 extern "C" fn key_dtor(p: *mut c_void) {
-    if p as usize == DESTROYED {
-        return; // second destructor round: leave the key empty
-    }
     unsafe {
-        // The runtime cleared the key before calling us: mark it destroyed while the value
-        // drops (access from other destructors then fails with AccessError); the runtime
-        // calls us once more with DESTROYED and then leaves the key empty.
+        // std's `destroy` (sys/thread_local/native/lazy.rs): the key is marked destroyed for good
+        // before the value drops, so access from this and every later destructor fails with
+        // AccessError and nothing re-initialises it. The runtime calls this once per key, last
+        // registered first; a late key's (no drop glue) only after every other destructor ran.
         let header = &*(p as *const SlotHeader);
         let drop_fn = header.drop_slot;
         sys::key_set(header.key, DESTROYED as *const c_void);

@@ -227,6 +227,7 @@ workspace.members = [
     "tools/run",
     "tools/run/boot",
     "tools/run/fixture/diffpkg",
+    "tools/run/fixture/diffpkg/tables",
     "tools/run/android_host",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
