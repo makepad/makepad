@@ -31,6 +31,7 @@ use makepad_render_material::ibl::EnvMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use super::studio::light_frame;
+use super::skyline::SkylineBand;
 use super::{HdriParams, ImageFit, LightImageParams};
 
 /// The longest side a light's picture is kept at. A light rarely spans more
@@ -52,6 +53,9 @@ pub const MASK_SOFTNESS_SHARE: f32 = 0.05;
 #[derive(Clone, Debug, Default)]
 pub struct ImageSet {
     pub images: HashMap<String, Arc<EnvMap>>,
+    /// The skyline's strip (`HdriParams::skyline`), rendered by the app; None
+    /// draws no skyline.
+    pub skyline: Option<Arc<SkylineBand>>,
 }
 
 impl ImageSet {

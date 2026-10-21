@@ -62,6 +62,7 @@ pub mod imperfections;
 pub mod composite;
 pub mod volumetric;
 pub mod weather;
+pub mod skyline;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -156,6 +157,10 @@ pub struct Env {
     /// covers the sky, and 1 where it is not measured (Studio mode, a fair sky
     /// with no clouds, an image that is the whole base).
     ground_gain: Vec3f,
+    /// The skyline's strip and its turn (degrees), laid over the base in
+    /// `base_at`: Some exactly in Sky mode with `params.skyline` on and a band
+    /// in the images ([`Self::has_skyline`]).
+    skyline: Option<(std::sync::Arc<skyline::SkylineBand>, f32)>,
     /// The key ([`Self::key`]), measured on the engine's first ask and kept
     /// (D15, M5): the app's preview bakes never ask, and a held drag paid the
     /// key's integrals on every bake.
@@ -303,13 +308,21 @@ impl Env {
             outside.lights.clear();
             outside.intensity_ev = 0.0;
             outside.rotation_deg = 0.0;
-            // The window looks out at the generated sky, not at a base image.
+            // The window looks out at the generated sky, not at a base image,
+            // and a studio draws no skyline.
             outside.base_image = None;
+            outside.skyline = None;
             Some(Box::new(Env::new_cancellable(&outside, images, cancelled)?))
         } else {
             None
         };
         let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
+        // The skyline is a layer of the sky: drawn in Sky mode, when its block
+        // is on and the app has handed its strip over.
+        let skyline = match (params.mode(), params.skyline.as_ref(), images.skyline.as_ref()) {
+            (Mode::Sky, Some(block), Some(band)) if block.on => Some((band.clone(), block.turn_deg)),
+            _ => None,
+        };
         let mut env = Env {
             params,
             scale,
@@ -327,6 +340,7 @@ impl Env {
             dome: Vec3f::default(),
             ground_gain: Vec3f::all(1.0),
             base_image: None,
+            skyline,
             measured_key: OnceLock::new(),
         };
         // The weather's veil and the ground are lit by the dome as this map
@@ -361,12 +375,26 @@ impl Env {
         &self.params
     }
 
+    /// True when this map draws the skyline: Sky mode, `params.skyline` on,
+    /// and a band in the images it was built with.
+    pub fn has_skyline(&self) -> bool {
+        self.skyline.is_some()
+    }
+
+    /// 2^intensity_ev, the factor every lookup ends with (for the tests; the
+    /// layers read the field).
+    #[cfg(test)]
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
     /// over it, then the weather; Studio: backdrop, under any gobo shadow cast
     /// onto it; or a base image, the whole base or below its mask, the
-    /// weather's veil over it there too), lights overlay, x 2^intensity_ev.
+    /// weather's veil over it there too), the skyline over the base (Sky mode,
+    /// the veil in front of it too), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         self.radiance_with(dir, None, Sampling::default())
     }
@@ -389,8 +417,28 @@ impl Env {
     }
 
     /// The base under the lights along `d`, in the map's own frame: the
-    /// mode's own base layer, a base image, or both through the image's mask.
+    /// mode's own base layer, a base image, or both through the image's mask;
+    /// then the skyline over all of it, the weather's veil in front of the
+    /// city as it is in front of the sky (`skyline::over_veiled`). The city
+    /// hides what stands behind it, a storm's bolt included. Without a
+    /// skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
+        let c = self.base_under_skyline(d, without, at);
+        let Some((band, turn)) = &self.skyline else {
+            return c;
+        };
+        let s = band.sample(d, *turn);
+        if s == [0.0; 4] {
+            return c;
+        }
+        match &self.weather {
+            Some(weather) => skyline::over_veiled(s, c, &|x| weather.veil(d, x, self.weather_sun, self.dome)),
+            None => skyline::over_veiled(s, c, &|x| x),
+        }
+    }
+
+    /// [`Self::base_at`] without the skyline.
+    fn base_under_skyline(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         match &self.base_image {
             // An image that is the whole base: the sky under it is never seen, so it is not drawn.
             Some(image) if !image.replaces_sky() => image.radiance(d),

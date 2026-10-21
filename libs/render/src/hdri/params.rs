@@ -153,6 +153,7 @@ clamped_copy!(
     ImperfectionParams,
     CasterParams,
     BaseImageParams,
+    SkylineParams,
 );
 
 /// Everything that defines one environment map.
@@ -180,6 +181,27 @@ pub struct HdriParams {
     /// A loaded equirect as the base under the lights (1b): the whole base, or
     /// only its part below the horizon with the generated sky above. None = off.
     pub base_image: Option<BaseImageParams>,
+    /// The night skyline as a layer of the sky (`hdri/skyline.rs`): a city
+    /// strip the app renders and hands over in `ImageSet::skyline`, laid over
+    /// the base under the lights. None = no skyline (presets from before it).
+    pub skyline: Option<SkylineParams>,
+}
+
+/// The skyline layer's settings. The engine reads `on` and `turn_deg`; the
+/// app renders the strip from the rest (makepad-skyline), so the engine never
+/// depends on the skyline's own crate.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct SkylineParams {
+    pub on: bool,
+    pub seed: u32,
+    /// Rotates the skyline round the viewer, degrees, -180..180.
+    pub turn_deg: f32,
+    /// Share of the city's lights kept on by day, 0..1.
+    pub lights_by_day: f32,
+    /// The skyline's own settings by their Rust keys (makepad_skyline::PARAMS[i].key),
+    /// e.g. "ct_d" -> 0.6. Missing keys take the skyline's defaults; the app
+    /// owns their ranges (the engine never reads them).
+    pub settings: HashMap<String, f64>,
 }
 
 /// A loaded equirect (a photographed panorama, a render) as the base layer
@@ -1056,6 +1078,27 @@ impl CasterParams {
     }
 }
 
+/// The largest `SkylineParams::seed` clamp() keeps.
+pub const SKYLINE_SEED_MAX: u32 = 9_999_999;
+
+impl SkylineParams {
+    /// The turn wraps, the share and the seed are held; a setting that is not
+    /// finite is dropped (the skyline's default takes its place), reported as
+    /// `settings.<key>`. The settings' own ranges are the app's.
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        f.wrap180(prefix, "turn_deg", &mut self.turn_deg, 0.0);
+        f.range(prefix, "lights_by_day", &mut self.lights_by_day, 0.0, 1.0, 0.0);
+        f.int(prefix, "seed", &mut self.seed, 0, SKYLINE_SEED_MAX);
+        // Sorted, so the report comes out the same every time.
+        let mut dropped: Vec<String> = self.settings.iter().filter(|(_, value)| !value.is_finite()).map(|(key, _)| key.clone()).collect();
+        dropped.sort();
+        for key in dropped {
+            self.settings.remove(&key);
+            f.push(prefix, &format!("settings.{key}"));
+        }
+    }
+}
+
 /// A stroke light (a Lumi-curve): a smooth curve through directions on the sky.
 #[derive(Clone, Debug, PartialEq, DeJson)]
 pub struct StrokeParams {
@@ -1335,6 +1378,7 @@ impl Default for HdriParams {
             studio: StudioParams::default(),
             lights: Vec::new(),
             base_image: None,
+            skyline: None,
         }
     }
 }
@@ -1489,6 +1533,9 @@ impl HdriParams {
         }
         if let Some(base) = self.base_image.as_mut() {
             base.clamp_fields("base_image", &mut f);
+        }
+        if let Some(skyline) = self.skyline.as_mut() {
+            skyline.clamp_fields("skyline", &mut f);
         }
         f.changed
     }
@@ -3405,7 +3452,42 @@ mod layer_param_tests {
             assert_eq!(&loaded, p, "{name}");
             assert!(loaded.lights.iter().all(|l| l.kind.is_none() && l.caster.is_none() && l.kind() == LightKind::Light), "{name}");
             assert_eq!(loaded.to_json(), p.to_json(), "{name}: saved again as it was");
+            // The skyline is an Option after every older field: a preset without it
+            // loads without one, and one saved now writes no such key.
+            assert!(p.skyline.is_none() && loaded.skyline.is_none(), "{name}");
+            assert!(!old.contains("\"skyline\"") && !p.to_json().contains("\"skyline\""), "{name}");
         }
+        // A skyline block round-trips, its settings included.
+        let mut p = every_older_block();
+        p.mode = "sky".to_string();
+        let settings: HashMap<String, f64> = [("ct_d".to_string(), 0.6), ("lt_n".to_string(), 3.0)].into_iter().collect();
+        p.skyline = Some(SkylineParams { on: true, seed: 42, turn_deg: -35.5, lights_by_day: 0.25, settings });
+        assert!(p.clone().clamp().is_empty());
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()), "presets save the skyline");
+        assert_eq!(HdriParams::deserialize_json(&p.serialize_json()).unwrap(), p);
+        let off = HdriParams { skyline: Some(SkylineParams { on: false, settings: HashMap::new(), ..p.skyline.clone().unwrap() }), ..p.clone() };
+        assert_eq!(HdriParams::from_json(&off.to_json()), Ok(off.clone()), "an empty settings map too");
+    }
+
+    #[test]
+    fn clamp_holds_the_skyline_and_reports_it() {
+        let mut settings: HashMap<String, f64> = HashMap::new();
+        settings.insert("ct_d".to_string(), 0.6);
+        settings.insert("zz".to_string(), f64::NAN);
+        settings.insert("aa".to_string(), f64::INFINITY);
+        let mut p = HdriParams { skyline: Some(SkylineParams { on: true, seed: 20_000_000, turn_deg: 270.0, lights_by_day: 1.5, settings }), ..HdriParams::default() };
+        let changed = p.clamp();
+        assert_eq!(changed, ["skyline.turn_deg", "skyline.lights_by_day", "skyline.seed", "skyline.settings.aa", "skyline.settings.zz"]);
+        let held = p.skyline.as_ref().unwrap();
+        assert_eq!((held.turn_deg, held.lights_by_day, held.seed), (-90.0, 1.0, SKYLINE_SEED_MAX));
+        assert_eq!(held.settings.len(), 1);
+        assert_eq!(held.settings.get("ct_d"), Some(&0.6));
+        // NaN takes the field's default; the ends stay put; clamped() holds what clamp() holds.
+        let nan = SkylineParams { on: false, seed: 0, turn_deg: f32::NAN, lights_by_day: f32::NAN, settings: HashMap::new() };
+        assert_eq!(nan.clamped(), SkylineParams { turn_deg: 0.0, lights_by_day: 0.0, ..nan.clone() });
+        let ends = SkylineParams { on: true, seed: SKYLINE_SEED_MAX, turn_deg: 180.0, lights_by_day: 0.0, settings: HashMap::new() };
+        assert_eq!(ends.clamped(), ends);
+        assert!(HdriParams { skyline: Some(ends), ..HdriParams::default() }.clamp().is_empty());
     }
 
     #[test]
