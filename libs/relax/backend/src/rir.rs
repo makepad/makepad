@@ -783,7 +783,8 @@ pub enum Inst {
     Copy(VReg, VReg, u32),
     /// d = c != 0 ? a : b (c an integer vreg; a, b, d of one class)
     Sel(VReg, VReg, VReg, VReg), // d, c, a, b
-    /// fused multiply-add, one rounding: d = (neg_prod ? -(a*b) : a*b) + (neg_add ? -c : c).
+    /// fused multiply-add, one rounding: d = (neg_prod ? -a : a) * b + (neg_add ? -c : c), the
+    /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`).
     /// The only fusion RIR has (the optimiser never fuses).
     FMulAdd(bool, bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, f64?, d, a, b, c
     /// atomic load (Mem::Int only; the value is extended by signedness)
@@ -808,7 +809,8 @@ pub enum Inst {
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
-    /// f32 lanes, one rounding: (neg_prod ? -(a*b) : a*b) + (neg_add ? -c : c)
+    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations,
+    /// as `FMulAdd`)
     VFma(bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, d, a, b, c
     /// every lane = the low 32 bits of s (an I or F32 vreg)
     VSplat(VReg, VReg),

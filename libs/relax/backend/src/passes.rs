@@ -4250,7 +4250,9 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
             };
             let mut replaced = false;
             if let (Some(d), Some(key)) = (cand, key) {
-                if let Some(e) = st.avail.iter().find(|x| x.0 == key).map(|x| x.1) {
+                // the same key with another result class is another value: a VExtract of one
+                // lane as an integer (sign-extended) and as an f32
+                if let Some(e) = st.avail.iter().find(|x| x.0 == key && f.vregs[x.1 .0 as usize] == f.vregs[d.0 as usize]).map(|x| x.1) {
                     if e != d {
                         b.insts[k] = match fx.fact[e.0 as usize] {
                             Some(x) => Inst::Iconst(d, x),

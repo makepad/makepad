@@ -4990,6 +4990,16 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     } else {
         f
     };
+    // negated fused multiply-add operands as explicit negations (NaN signs, see legal.rs)
+    let unfused;
+    let f = if f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::FMulAdd(np, na, ..) | Inst::VFma(np, na, ..) if *np || *na))) {
+        let mut g = f.clone();
+        crate::legal::expand_fma_negations(&mut g);
+        unfused = g;
+        &unfused
+    } else {
+        f
+    };
     // vector ops without an instruction sequence here: per-lane scalar code
     let legal;
     // (MAKEPAD_RUN_OPT=-vxnative: every expandable op, the legaliser's reference meaning)

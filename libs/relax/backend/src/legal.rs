@@ -73,6 +73,67 @@ pub fn legalize(f: &mut Func, native: &dyn Fn(VX) -> bool, native_shuffle: bool)
     changed
 }
 
+/// Fused multiply-adds with a negated operand as a negation then the plain fused op: on x86-64
+/// the vfnmadd/vfmsub forms negate the product or addend after the multiply, so a NaN operand
+/// keeps its sign, while RIR's `neg_prod`/`neg_add` negate `a`/`c` themselves (a NaN's sign
+/// flips, as `(-a).mul_add(b, c)` and NEON's fmsub/fnmadd do). Returns whether anything changed.
+pub fn expand_fma_negations(f: &mut Func) -> bool {
+    let wants = |i: &Inst| matches!(i, Inst::FMulAdd(np, na, ..) | Inst::VFma(np, na, ..) if *np || *na);
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        if !f.blocks[bi].insts.iter().any(|i| wants(i)) {
+            continue;
+        }
+        changed = true;
+        let old = std::mem::take(&mut f.blocks[bi].insts);
+        let old_pos = std::mem::take(&mut f.blocks[bi].pos);
+        let mut out = Vec::with_capacity(old.len() + 8);
+        let mut pos = Vec::with_capacity(old.len() + 8);
+        for (k, i) in old.into_iter().enumerate() {
+            let p = old_pos.get(k).copied().unwrap_or(0);
+            match i {
+                Inst::FMulAdd(np, na, w, d, mut a, b, mut c) if np || na => {
+                    let cls = if w { Cls::F64 } else { Cls::F32 };
+                    if np {
+                        let t = f.vreg(cls);
+                        out.push(Inst::FUnary(FUn::Neg, w, t, a));
+                        pos.push(p);
+                        a = t;
+                    }
+                    if na {
+                        let t = f.vreg(cls);
+                        out.push(Inst::FUnary(FUn::Neg, w, t, c));
+                        pos.push(p);
+                        c = t;
+                    }
+                    out.push(Inst::FMulAdd(false, false, w, d, a, b, c));
+                }
+                Inst::VFma(np, na, d, mut a, b, mut c) if np || na => {
+                    let cls = f.vregs[d.0 as usize];
+                    if np {
+                        let t = f.vreg(cls);
+                        out.push(Inst::VX(VX::FNeg(VW::S), t, a, a));
+                        pos.push(p);
+                        a = t;
+                    }
+                    if na {
+                        let t = f.vreg(cls);
+                        out.push(Inst::VX(VX::FNeg(VW::S), t, c, c));
+                        pos.push(p);
+                        c = t;
+                    }
+                    out.push(Inst::VFma(false, false, d, a, b, c));
+                }
+                i => out.push(i),
+            }
+            pos.push(p);
+        }
+        f.blocks[bi].insts = out;
+        f.blocks[bi].pos = pos;
+    }
+    changed
+}
+
 struct Ex<'a> {
     f: &'a mut Func,
     out: &'a mut Vec<Inst>,

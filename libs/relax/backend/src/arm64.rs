@@ -3254,6 +3254,9 @@ impl<'a> Gen<'a> {
                     _ => {
                         let rc = self.use_i(*c, S0);
                         self.cmp_imm(rc, 0);
+                        // the flags now hold this test: a chained compare's are gone (a later
+                        // select of that compare reads its materialised bool)
+                        self.sel_chain = None;
                         NE
                     }
                 };
