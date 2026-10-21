@@ -12,7 +12,10 @@
 
 use makepad_draw::*;
 use makepad_render_material::ibl;
-use super::arr;
+use super::{arr, atmosphere, night, vec, weather, HdriParams};
+use makepad_draw::makepad_micro_serde::SerJson;
+use std::f32::consts::PI;
+use std::sync::{Arc, Mutex};
 
 /// The band's lowest FADE_DEG degrees fade its alpha (and, premultiplied, its
 /// light) to 0, so the generated ground takes over below it without a seam.
@@ -78,6 +81,120 @@ impl SkylineBand {
     pub fn peak(&self) -> f32 {
         self.texels.iter().fold(0.0f32, |peak, t| peak.max(t[0]).max(t[1]).max(t[2]))
     }
+
+    /// The band's brightest texels by region, for a caster's bloom (`BandPeaks::near`), built
+    /// once per map.
+    pub fn peaks(&self) -> BandPeaks {
+        BandPeaks::new(self)
+    }
+}
+
+/// Texels a side of a [`BandPeaks`] level-0 block.
+const PEAK_BLOCK: usize = 4;
+
+/// Upper bounds of the band's light over its regions, for a caster's bloom (`Env::base_peak`),
+/// as `composite::Peaks` holds a base image's: level 0 the brightest channel of the texels in
+/// each PEAK_BLOCK x PEAK_BLOCK block, each later level the most of 2 x 2 of the one before
+/// (the last block of a row or a column may hold fewer). A city light far thinner than a
+/// raster cell asks only the cells round it to be sampled finely, so a few lights are kept as
+/// points (`caster::BLOOM_FINE_POINTS_MAX`); the band's single brightest texel would ask it of
+/// every cell over the band, and the budget would leave each its own coarse samples.
+pub struct BandPeaks {
+    /// (blocks a row, rows of blocks, the most of each block, row by row) per level.
+    levels: Vec<(usize, usize, Vec<f32>)>,
+    w: usize,
+    h: usize,
+    top_deg: f32,
+    bottom_deg: f32,
+}
+
+impl BandPeaks {
+    fn new(band: &SkylineBand) -> BandPeaks {
+        let (w, h) = (band.w, band.h);
+        let mut peaks = BandPeaks { levels: Vec::new(), w, h, top_deg: band.top_deg, bottom_deg: band.bottom_deg };
+        if w == 0 || h == 0 || band.texels.len() < w * h || !(band.top_deg - band.bottom_deg > 0.0) {
+            return peaks;
+        }
+        let (gw, gh) = (w.div_ceil(PEAK_BLOCK), h.div_ceil(PEAK_BLOCK));
+        let mut top = vec![0.0f32; gw * gh];
+        for y in 0..h {
+            for x in 0..w {
+                let t = band.texels[y * w + x];
+                // A NaN texel counts as none (max keeps the other side).
+                let block = &mut top[(y / PEAK_BLOCK) * gw + x / PEAK_BLOCK];
+                *block = block.max(t[0]).max(t[1]).max(t[2]);
+            }
+        }
+        peaks.levels.push((gw, gh, top));
+        while let Some((lw, lh, below)) = peaks.levels.last().filter(|(lw, lh, _)| *lw > 1 || *lh > 1) {
+            let (nw, nh) = (lw.div_ceil(2), lh.div_ceil(2));
+            let mut next = vec![0.0f32; nw * nh];
+            for y in 0..*lh {
+                for x in 0..*lw {
+                    let at = &mut next[(y / 2) * nw + x / 2];
+                    *at = at.max(below[y * lw + x]);
+                }
+            }
+            peaks.levels.push((nw, nh, next));
+        }
+        peaks
+    }
+
+    /// What the band may draw within `radius` (radians) of `d` (map frame, the band turned by
+    /// `turn_deg` as `SkylineBand::sample` turns it), a bilinear read's reach included: the
+    /// most any channel of its texels there holds, never less than a read there returns, and
+    /// the spacing its detail asks for (radians), half its texel, as `BaseImage::peak` asks.
+    /// None where no row of the band is within reach, or nothing there is lit.
+    pub fn near(&self, d: Vec3f, turn_deg: f32, radius: f32) -> Option<(f32, f32)> {
+        let (tau, w, h) = (std::f32::consts::TAU, self.w as i64, self.h as i64);
+        if self.levels.is_empty() {
+            return None;
+        }
+        let span = (self.top_deg - self.bottom_deg).to_radians();
+        let texel = (tau / self.w as f32).max(span / self.h as f32);
+        let r = radius.max(0.0) + 1.5 * texel;
+        let el = d.y.clamp(-1.0, 1.0).asin();
+        let (top, bottom) = (self.top_deg.to_radians(), self.bottom_deg.to_radians());
+        if !(el - r <= top && el + r >= bottom) {
+            return None;
+        }
+        let row = |e: f32| (((top - e) / span * self.h as f32).floor() as i64).clamp(0, h - 1);
+        let (y0, y1) = (row(el + r), row(el - r));
+        // The cap's reach along the band, asin(sin r / cos el), while it holds neither pole.
+        let reach = r.sin() / el.cos();
+        let (x0, x1) = if !(reach < 1.0) || el.abs() + r >= 0.5 * std::f32::consts::PI {
+            (0, w - 1)
+        } else {
+            let u = ibl::dir_to_equirect_uv(arr(d))[0] - turn_deg / 360.0;
+            let du = reach.asin() / tau;
+            (((u - du) * self.w as f32).floor() as i64, ((u + du) * self.w as f32).floor() as i64)
+        };
+        // The columns as at most two runs inside 0..w (the band wraps round).
+        let runs: Vec<(i64, i64)> = if x1 - x0 + 1 >= w {
+            vec![(0, w - 1)]
+        } else {
+            let (a, b) = (x0.rem_euclid(w), x1.rem_euclid(w));
+            if a <= b { vec![(a, b)] } else { vec![(a, w - 1), (0, b)] }
+        };
+        let (bx, by) = (|x: i64| x / PEAK_BLOCK as i64, |y: i64| y / PEAK_BLOCK as i64);
+        // The level at which the region spans at most four entries a side.
+        let widest = runs.iter().map(|&(a, b)| bx(b) - bx(a)).max().unwrap_or(0).max(by(y1) - by(y0));
+        let mut k = 0usize;
+        while (widest >> k) > 3 && k + 1 < self.levels.len() {
+            k += 1;
+        }
+        let (lw, lh, values) = &self.levels[k];
+        let (lw, lh) = (*lw as i64, *lh as i64);
+        let mut most = 0.0f32;
+        for y in (by(y0) >> k).min(lh - 1)..=(by(y1) >> k).min(lh - 1) {
+            for &(a, b) in &runs {
+                for x in (bx(a) >> k).min(lw - 1)..=(bx(b) >> k).min(lw - 1) {
+                    most = most.max(values[(y * lw + x) as usize]);
+                }
+            }
+        }
+        (most > 0.0).then_some((most, 0.5 * (tau / self.w as f32).min(span / self.h as f32)))
+    }
 }
 
 /// Lays the strip over an already-veiled base: (1-a)·base + veil(s) - (1-a)·veil(0).
@@ -96,6 +213,119 @@ pub fn over_veiled(s: [f32; 4], base: Vec3f, veil: &dyn Fn(Vec3f) -> Vec3f) -> V
     }
 }
 
+/// Entries of [`SkylineLight`]'s horizon rings; equals makepad_skyline::RING (the app asserts it).
+pub const RING: usize = 64;
+
+/// The ring's two elevations, degrees: just over the horizon and over the city's roofs.
+const RING_LOW_DEG: f32 = 1.0;
+const RING_HIGH_DEG: f32 = 15.0;
+
+/// The sky's light on the city, as the skyline lights its strip by day (makepad_skyline's
+/// `SkyLight`, field by field, the app adding `lights_by_day` and `emit_gain`). In the strip's
+/// frame: u is the strip's x/w (`SkylineBand::sample`'s, turned by the block's turn_deg), and
+/// ring entry i stands at u = (i + 0.5) / RING. Map units before intensity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkylineLight {
+    /// Where the sun stands: the strip's u, and its elevation in degrees (below 0 at night).
+    pub sun_u: f32,
+    pub sun_el_deg: f32,
+    /// The radiance off a white Lambertian surface facing the sun (its irradiance / pi),
+    /// through the weather's rain and fog; 0 while the sun is below the horizon.
+    pub sun_rgb: [f32; 3],
+    /// The radiance off a white level surface under the sky alone (its irradiance / pi), the
+    /// night's glow and moonlight included.
+    pub ambient_rgb: [f32; 3],
+    /// The sky round the horizon at 1 and at 15 degrees, as the map draws it without its
+    /// clouds, discs and volume, the weather's veil in front.
+    pub ring_low: [[f32; 3]; RING],
+    pub ring_high: [[f32; 3]; RING],
+}
+
+/// The sky's light as the skyline needs it, in the strip frame (turned by the block's
+/// turn_deg), map units before intensity. Cheap: builds only the atmosphere, the night sky and
+/// the weather, never the clouds, volume or lights. A params value without a skyline block
+/// uses turn 0.
+///
+/// Built as `Env::new_for_width_par` builds them, from the clamped params and the weathered
+/// sky. The ring is `atmosphere.sky + night.glow` (`Env::sky_layers` without its clouds, discs
+/// and volume, and without the stars, points a ring of 64 looks cannot sample, as
+/// `Env::dome_light` leaves them out), through the weather's veil when there is one, lit by the
+/// open sky: the sun with no cover over it and the open dome's mean (the clouds' ambient, which
+/// `Env::dome_light` measures on a sky nothing covers).
+///
+/// The atmosphere's table takes tens of milliseconds to build, so the three layers of the
+/// last sky asked for are kept (`SKY_LIGHT_LAYERS`, keyed by the clamped sky block's JSON and
+/// the seed, exactly): a change of the turn or of the skyline's own settings, or the strip
+/// asking again, reads them. Whatever is kept, the result is the one built afresh.
+pub fn skyline_light(params: &HdriParams) -> SkylineLight {
+    let mut params = params.clone();
+    params.clamp();
+    let turn = params.skyline.as_ref().map_or(0.0, |block| block.turn_deg);
+    let layers = sky_light_layers(&params);
+    let SkyLightLayers { atmo, night, weather } = &*layers;
+    let (veil_sun, dome) = (atmo.sun_irradiance(), atmo.ambient() + night.ambient());
+    let horizon = |i: usize, el_deg: f32| -> [f32; 3] {
+        let u = ((i as f32 + 0.5) / RING as f32 + turn / 360.0).rem_euclid(1.0);
+        let d = vec(ibl::equirect_uv_to_dir([u, 0.5 - el_deg / 180.0]));
+        let c = atmo.sky(d) + night.glow(d);
+        arr(match &weather {
+            Some(weather) => weather.veil(d, c, veil_sun, dome),
+            None => c,
+        })
+    };
+    let mut ring_low = [[0.0; 3]; RING];
+    let mut ring_high = [[0.0; 3]; RING];
+    for i in 0..RING {
+        ring_low[i] = horizon(i, RING_LOW_DEG);
+        ring_high[i] = horizon(i, RING_HIGH_DEG);
+    }
+    let sun = atmo.sun_dir();
+    let through = weather.as_ref().map_or(1.0, |weather| weather.transmittance_toward(sun));
+    let sun_rgb = if sun.y > 0.0 { arr(atmo.sun_irradiance() * (through / PI)) } else { [0.0; 3] };
+    let white = Vec3f::all(1.0);
+    let ambient = atmo.sky_irradiance() * (1.0 / PI) + night.ground(vec3f(0.0, -1.0, 0.0), white);
+    SkylineLight {
+        sun_u: (ibl::dir_to_equirect_uv(arr(sun))[0] - turn / 360.0).rem_euclid(1.0),
+        sun_el_deg: sun.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        sun_rgb,
+        ambient_rgb: arr(ambient),
+        ring_low,
+        ring_high,
+    }
+}
+
+/// What [`skyline_light`] reads the sky's light from, built as `Env::new_for_width_par`
+/// builds them: from the weathered sky, the weather from the user's block.
+struct SkyLightLayers {
+    atmo: atmosphere::Atmosphere,
+    night: night::NightSky,
+    weather: Option<weather::Weather>,
+}
+
+/// The last sky's layers, by the clamped sky block's JSON and the seed (the key itself, so no
+/// two skies share an entry).
+static SKY_LIGHT_LAYERS: Mutex<Option<((String, u32), Arc<SkyLightLayers>)>> = Mutex::new(None);
+
+/// The layers of `params` (clamped), from SKY_LIGHT_LAYERS when they are the last sky's.
+fn sky_light_layers(params: &HdriParams) -> Arc<SkyLightLayers> {
+    let key = (params.sky.serialize_json(), params.seed);
+    // A poisoned lock only means a panic elsewhere: the entry it holds is whole.
+    if let Some((kept, layers)) = SKY_LIGHT_LAYERS.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *kept == key {
+            return layers.clone();
+        }
+    }
+    let weathered = weather::weathered_sky(&params.sky);
+    let sky = &weathered;
+    let atmo = atmosphere::Atmosphere::new(atmosphere::sun_direction(&sky.sun), &sky.atmosphere, &sky.sun_disc);
+    let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
+    // The weather works its floors out from the user's block, as in the Env.
+    let weather = weather::Weather::new(&params.sky, atmo.sun_dir());
+    let layers = Arc::new(SkyLightLayers { atmo, night, weather });
+    *SKY_LIGHT_LAYERS.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, layers.clone()));
+    layers
+}
+
 /// Smoothstep over 0..1.
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -106,7 +336,7 @@ fn smooth(t: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, SkylineParams, WeatherParams, SkyParams};
-    use crate::hdri::weather::Weather;
+    use crate::hdri::weather::{self, Weather};
     use makepad_render_material::ibl;
     use std::sync::Arc;
 
@@ -345,6 +575,291 @@ mod tests {
         let (q, images) = with_band(&p, band(20.0, -5.0, [1.0, 1.0, 1.0, 1.0]));
         assert!(!Env::new_with(&q, &images).has_skyline());
         assert!(Env::new_with(&q, &images).bake(64) == Env::new(&p).bake(64));
+    }
+
+    /// The sun set by hand at `elevation_deg` and `azimuth_deg` (compass).
+    fn sun_at(p: &mut HdriParams, elevation_deg: f32, azimuth_deg: f32) {
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.elevation_deg = elevation_deg;
+        p.sky.sun.azimuth_deg = azimuth_deg;
+    }
+
+    #[test]
+    fn an_opaque_skyline_over_the_sun_takes_the_key_away() {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 3.0, 0.0);
+        let (q, images) = with_band(&p, band(10.0, -5.0, [0.0, 0.0, 0.0, 1.0]));
+        let key = Env::new_with(&q, &images).sun();
+        let open = Env::new(&p).sun().expect("the sun is up").radiance.max_elem();
+        assert!(key.map_or(true, |k| k.radiance.max_elem() < 1e-3 * open), "{key:?} against {open}");
+    }
+
+    #[test]
+    fn a_half_covered_sun_keeps_about_half_its_key() {
+        // The band's top exactly at the sun's centre: the disc is symmetric, so half of it shows.
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 3.0, 0.0);
+        let open = Env::new(&p).sun().expect("the sun is up").radiance;
+        let (q, images) = with_band(&p, band(3.0, -5.0, [0.0, 0.0, 0.0, 1.0]));
+        let half = Env::new_with(&q, &images).sun().expect("half the sun shows").radiance;
+        for (k, (h, o)) in [(half.x, open.x), (half.y, open.y), (half.z, open.z)].into_iter().enumerate() {
+            assert!((h / o - 0.5).abs() <= 0.1, "channel {k}: {h} of {o} is {}", h / o);
+        }
+    }
+
+    #[test]
+    fn a_skyline_away_from_the_sun_leaves_the_key_alone() {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 40.0, 0.0);
+        let (q, images) = with_band(&p, band(10.0, -5.0, [5.0, 4.0, 3.0, 1.0])); // a bright night city
+        assert_eq!(Env::new_with(&q, &images).sun(), Env::new(&p).sun());
+    }
+
+    #[test]
+    fn the_strips_emission_is_never_the_sun() {
+        // A glowing transparent band over the sun's disc adds light to the map there, not to the key.
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 3.0, 0.0);
+        let (q, images) = with_band(&p, band(10.0, -5.0, [50.0, 50.0, 50.0, 0.0]));
+        assert_eq!(Env::new_with(&q, &images).sun(), Env::new(&p).sun());
+    }
+
+    /// A night sky with nothing bright in it (no moon, no stars) behind a strip of `texel_deg`
+    /// texels from 0 to 10 degrees, transparent but for one texel of `bright`, centred at compass
+    /// azimuth 30 + texel_deg/2, elevation 5 + texel_deg/2 (its bilinear read two texels across).
+    fn one_bright_texel(bright: f32, texel_deg: f32) -> (HdriParams, ImageSet, f32, f32) {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, -20.0, 180.0);
+        p.sky.night.moon = false;
+        p.sky.night.stars = 0.0;
+        let (w, h) = ((360.0 / texel_deg) as usize, (10.0 / texel_deg) as usize);
+        let mut texels = vec![[0.0; 4]; w * h];
+        // Column c is x/w = (c + 0.5)/w, azimuth (x/w - 0.5) * 360; row r spans 10 - r t .. 10 - (r + 1) t.
+        let (column, row) = ((210.0 / texel_deg) as usize, (5.0 / texel_deg) as usize - 1);
+        texels[row * w + column] = [bright, bright, bright, 1.0];
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: 10.0, bottom_deg: 0.0 });
+        (q, images, 30.0 + 0.5 * texel_deg, 5.0 + 0.5 * texel_deg)
+    }
+
+    /// The bright light a solid 40 x 30 degree caster with 20 degrees of bloom (cells of 3.5
+    /// degrees), its threshold 2 EV under `one_bright_texel`'s light, holds at nine places 0.4
+    /// degrees apart (a cell in all), its left edge about 3 degrees right of the light.
+    fn bloom_by_place(texel_deg: f32) -> Vec<f64> {
+        use crate::hdri::caster::fixtures::caster_at;
+        let bright = 64.0;
+        let (mut q, images, az, el) = one_bright_texel(bright, texel_deg);
+        (0..9)
+            .map(|k| {
+                let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 20.0, bloom_threshold_ev: bright.log2() - 2.0, ..CasterParams::default() };
+                q.lights = vec![caster_at(az + 23.0 + 0.4 * k as f32, el, 40.0, 30.0, None, settings)];
+                let env = Env::new_with(&q, &images);
+                let bloom = env.studio.caster(0).and_then(|c| c.bloom());
+                if let Some(cell) = bloom.map(|b| b.cell()) {
+                    assert!(cell > (2.0 * texel_deg + 0.5).to_radians().tan(), "the premise: a cell ({} degrees) is wider than the light", cell.atan().to_degrees());
+                }
+                bloom.map_or(0.0, |b| b.energy())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_blooming_caster_sees_a_skyline_light_finer_than_its_cells() {
+        // Bloom's fine detail (`Env::base_peak`): a single city light thinner than a raster
+        // cell, on a dark night, 2 EV over the threshold as caster.rs's highlight in a base
+        // image is, 2 degrees across (1-degree texels) and half a degree (0.25-degree texels,
+        // under the 0.22 degrees BLOOM_LIGHT_SAMPLES_MAX a side samples a cell at). At every
+        // place each blooms, within 15 % of its mean, as caster.rs's storm's bolt does, and as
+        // its own area: the small one a sixteenth of the large one's, within 15 %. (Read at the
+        // cells' corners alone they bloomed at none of some places; with the band's single
+        // brightest texel as the bound of every cell over the band, all of them asked to
+        // sample finely, the budget left each its coarse samples, and the small light was
+        // missed: that needs the band's light by region, `BandPeaks`.)
+        let mut means = Vec::new();
+        for texel_deg in [1.0, 0.25] {
+            let energies = bloom_by_place(texel_deg);
+            let mean = energies.iter().sum::<f64>() / energies.len() as f64;
+            let by_place: Vec<String> = energies.iter().map(|e| format!("{:.3}", e / mean.max(1e-30))).collect();
+            println!("a {texel_deg}-degree city light's bloom by place, of its mean {mean:.4e}: {}", by_place.join(" "));
+            assert!(energies.iter().all(|&e| e > 0.0 && (e / mean - 1.0).abs() <= 0.15), "the {texel_deg}-degree light does not bloom alike as it moves: {} of the mean {mean:.4e}", by_place.join(" "));
+            means.push(mean);
+        }
+        let ratio = means[1] / means[0];
+        assert!((ratio * 16.0 - 1.0).abs() <= 0.15, "the small light blooms {ratio} of the large one's, not a sixteenth");
+    }
+
+    #[test]
+    fn the_bands_peaks_bound_every_read_near_them() {
+        // An odd-sized band of random texels (some dark), so blocks end short and the wrap is
+        // uneven; at random places, reaches and turns, whatever the band draws within the reach
+        // is never over what `near` reports, and `near` reports nothing only where it draws none.
+        let mut state = 5u32;
+        let (w, h) = (97, 13);
+        let texels: Vec<[f32; 4]> = (0..w * h)
+            .map(|_| {
+                let lit = next(&mut state) < 0.3;
+                let mut c = || if lit { 10.0 * next(&mut state) } else { 0.0 };
+                [c(), c(), c(), 1.0]
+            })
+            .collect();
+        let b = SkylineBand { w, h, texels, top_deg: 12.0, bottom_deg: -3.0 };
+        let peaks = b.peaks();
+        for _ in 0..300 {
+            let centre = dir(360.0 * next(&mut state), -10.0 + 30.0 * next(&mut state));
+            let radius = (0.2 + 8.0 * next(&mut state)).to_radians();
+            let turn = -180.0 + 360.0 * next(&mut state);
+            let bound = peaks.near(centre, turn, radius);
+            // Directions within the reach: the centre turned off by up to `radius` either way.
+            let side = Vec3f::cross(centre, vec3f(0.0, 1.0, 0.0)).normalize();
+            let up = Vec3f::cross(side, centre).normalize();
+            for _ in 0..40 {
+                let (a, r) = (std::f32::consts::TAU * next(&mut state), radius * next(&mut state).sqrt());
+                let d = (centre * r.cos() + (side * a.cos() + up * a.sin()) * r.sin()).normalize();
+                let s = b.sample(d, turn);
+                let most = s[0].max(s[1]).max(s[2]);
+                match bound {
+                    Some((peak, step)) => assert!(most <= peak * (1.0 + 1e-6) && step > 0.0, "{most} drawn under a bound of {peak}"),
+                    None => assert!(most == 0.0, "{most} drawn where nothing is reported"),
+                }
+            }
+        }
+        // Far from the band's rows there is nothing to report.
+        assert!(peaks.near(dir(0.0, 40.0), 0.0, 1f32.to_radians()).is_none());
+        assert!(peaks.near(dir(0.0, -20.0), 0.0, 1f32.to_radians()).is_none());
+    }
+
+    #[test]
+    fn the_ring_is_the_skys_own_horizon() {
+        let p = HdriParams::default();
+        let l = skyline_light(&p);
+        let env = Env::new(&HdriParams { lights: vec![], intensity_ev: 0.0, rotation_deg: 0.0, ..p.clone() });
+        let mut worst = 0.0f32;
+        for i in [0, 16, 32, 48] {
+            let u = (i as f32 + 0.5) / RING as f32;
+            for (el, ring) in [(1.0, &l.ring_low), (15.0, &l.ring_high)] {
+                let want = env.radiance(dir_at_u(u, el)) / env.scale();
+                let got = vec(ring[i]);
+                worst = worst.max((got - want).length() / want.length());
+                println!("ring {i} at {el}: {got:?} vs the map's {want:?} (worst so far {worst:.2e})");
+                // Clouds and the volume are left out of the ring: the default params have no 2D
+                // cloud cover at the horizon worth more than 5 %.
+                assert!((got - want).length() < 0.05 * want.length() + 1e-6, "{i} at {el}: {got:?} vs {want:?}");
+            }
+        }
+    }
+
+    fn skyline_on() -> SkylineParams {
+        SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() }
+    }
+
+    #[test]
+    fn the_suns_place_is_handed_over_in_the_strip_frame() {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 20.0, 0.0);
+        let a = skyline_light(&p);
+        p.skyline = Some(SkylineParams { turn_deg: 90.0, ..skyline_on() });
+        let b = skyline_light(&p);
+        assert!((a.sun_el_deg - 20.0).abs() < 0.01, "{}", a.sun_el_deg);
+        // Compass azimuth 0 is the map's u = 0.5; a turn of 90 moves the city a quarter toward
+        // a larger u, so in the strip's frame the sun stands a quarter back.
+        assert!((a.sun_u - 0.5).abs() < 1e-4, "{}", a.sun_u);
+        assert!(((a.sun_u - b.sun_u).rem_euclid(1.0) - 0.25).abs() < 1e-4, "{} then {}", a.sun_u, b.sun_u);
+        // The ring turned by a quarter the same way: the strip's entry i looks where the
+        // unturned strip's entry i + 16 does.
+        for i in 0..RING {
+            assert_eq!(b.ring_low[i], a.ring_low[(i + 16) % RING], "{i}");
+            assert_eq!(b.ring_high[i], a.ring_high[(i + 16) % RING], "{i}");
+        }
+        assert!(a.ring_low[0] != a.ring_low[32], "the premise: the ring is not even round the horizon");
+        assert_eq!((a.sun_rgb, a.ambient_rgb), (b.sun_rgb, b.ambient_rgb));
+    }
+
+    #[test]
+    fn the_kept_sky_is_the_sky_built_afresh() {
+        // skyline_light keeps the last sky's layers: asked in turn for two skies, two seeds and
+        // two turns, each answer is its own, the same each time it is asked.
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 12.0, 70.0);
+        let mut q = p.clone();
+        q.sky.atmosphere.haze = 3.0;
+        let mut r = p.clone();
+        r.seed = 99;
+        let mut t = p.clone();
+        t.skyline = Some(SkylineParams { turn_deg: 45.0, ..skyline_on() });
+        let first: Vec<SkylineLight> = [&p, &q, &r, &t].iter().map(|x| skyline_light(x)).collect();
+        let again: Vec<SkylineLight> = [&t, &r, &q, &p].iter().map(|x| skyline_light(x)).rev().collect();
+        assert!(first == again);
+        assert!(first[0] != first[1] && first[0] != first[3], "a hazier sky and a turn change the light");
+    }
+
+    #[test]
+    fn noon_lights_the_strip_and_night_does_not() {
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 50.0, 0.0);
+        let day = skyline_light(&p);
+        sun_at(&mut p, -20.0, 0.0);
+        let night = skyline_light(&p);
+        assert!(day.sun_rgb[1] > 0.5 && day.ambient_rgb[1] > 0.05, "{day:?}");
+        assert!(night.sun_rgb == [0.0; 3] && night.ambient_rgb[1] < 0.01, "{night:?}");
+    }
+
+    #[test]
+    fn the_strips_light_is_the_grounds_own() {
+        // A white ground under the clear sky by day, as the atmosphere lights it (atmosphere.rs:
+        // albedo x (sky + sun x sin elevation) / pi): sun_rgb x sin(el) + ambient_rgb is that
+        // ground's radiance straight down.
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 35.0, 120.0);
+        p.sky.atmosphere.ground_color = [1.0; 3];
+        let l = skyline_light(&p);
+        let env = Env::new(&p);
+        let ground = env.radiance(dir(0.0, -89.0));
+        let lit = vec(l.sun_rgb) * 35f32.to_radians().sin() + vec(l.ambient_rgb);
+        assert!(close3(lit, ground, 1e-3), "{lit:?} vs the ground {ground:?}");
+        // The weather's rain dims the sun along its way, by the weather's own transmittance.
+        let mut wet = p.clone();
+        wet.sky.weather = Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() });
+        let rainy = skyline_light(&wet);
+        let sky = weather::weathered_sky(&wet.sky);
+        let sun = crate::hdri::atmosphere::sun_direction(&sky.sun);
+        let through = Weather::new(&wet.sky, sun).expect("rain draws").transmittance_toward(sun);
+        assert!(through < 0.99, "the premise: the rain dims the sun ({through})");
+        let open = crate::hdri::atmosphere::Atmosphere::new(sun, &sky.atmosphere, &sky.sun_disc).sun_irradiance() * (through / std::f32::consts::PI);
+        assert!(close3(vec(rainy.sun_rgb), open, 1e-5), "{:?} vs {open:?}", rainy.sun_rgb);
+    }
+
+    #[test]
+    fn the_ring_is_veiled_by_the_weather() {
+        // Fog in front of the horizon: the ring is the open sky through the weather's veil, lit
+        // as the map's own veil is (the dome and the sun), so it is not the clear sky's.
+        let mut p = HdriParams::default();
+        p.sky.weather = Some(WeatherParams { kind: "fog".to_string(), ..WeatherParams::default() });
+        let foggy = skyline_light(&p);
+        let clear = skyline_light(&HdriParams { sky: SkyParams { weather: None, ..weather::weathered_sky(&p.sky) }, ..p.clone() });
+        for i in [0, 20, 40] {
+            let (f, c) = (vec(foggy.ring_low[i]), vec(clear.ring_low[i]));
+            assert!(f.is_finite() && c.is_finite() && (f - c).length() > 1e-3 * c.length(), "{i}: the fog veils the ring: {f:?} vs {c:?}");
+        }
+    }
+
+    #[test]
+    fn no_skyline_blooms_and_keys_bit_identical() {
+        // A blooming caster beside the sun: a skyline block that is off, or a band with no
+        // block, leaves its bloom, the bake and the key as they are.
+        use crate::hdri::caster::fixtures::caster_at;
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 30.0, 200.0);
+        let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 10.0, bloom_threshold_ev: 2.0, ..CasterParams::default() };
+        p.lights = vec![caster_at(200.0, 47.0, 40.0, 30.0, None, settings)];
+        let base = Env::new(&p);
+        let (base_map, base_key) = (base.bake(64), base.sun());
+        assert!(base.studio.caster(0).and_then(|c| c.bloom()).is_some(), "the premise: the sun blooms over the caster");
+        let (mut q, images) = with_band(&p, band(20.0, -5.0, [3.0, 3.0, 3.0, 1.0]));
+        q.skyline.as_mut().unwrap().on = false;
+        for env in [Env::new_with(&q, &images), Env::new_with(&p, &images)] {
+            assert!(!env.has_skyline());
+            assert!(env.bake(64) == base_map);
+            assert_eq!(env.sun(), base_key);
+        }
     }
 
     #[test]

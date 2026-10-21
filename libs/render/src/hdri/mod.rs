@@ -507,7 +507,9 @@ impl Env {
         // M5: the casters share one budget of samples (`caster::BLOOM_CELL_BUDGET`), so many
         // blooming casters cost no more than one may.
         let casters = entries.len();
-        let fine_base = self.base_image.is_some() || (self.atmo.is_some() && self.weather.is_some());
+        let fine_base = self.base_image.is_some() || (self.atmo.is_some() && self.weather.is_some()) || self.has_skyline();
+        // The city's lights by region, gathered once for every caster and cell.
+        let city_peaks = self.skyline.as_ref().map(|(band, _)| band.peaks());
         for entry in entries {
             let built = {
                 let env: &Env = self;
@@ -515,7 +517,7 @@ impl Env {
                 let behind = |d: Vec3f| env.content_before(d, entry, at);
                 let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
                 let bright = env.studio.bright_boxes(entry);
-                let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius);
+                let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius, city_peaks.as_ref());
                 let peak: Option<&(dyn Fn(Vec3f, f32) -> Option<(f32, f32)> + Sync)> = if fine_base { Some(&peak) } else { None };
                 caster::CasterBloom::build(caster, width, casters, &hot, &bright, peak, &behind, &sharp, cancelled, run)
             };
@@ -532,17 +534,20 @@ impl Env {
     /// may miss (fix round 3 of S3's review): the most luminance it may draw
     /// there, times 2^intensity_ev, and the spacing that detail asks for
     /// (radians). A base image's (`BaseImage::peak`, under or beside the sky it
-    /// replaces) and a storm's bolt (`Weather::fine_step_near`, no bound). None
-    /// where the base has no such detail: the sky's discs are sampled apart
-    /// (`hot_spots`), and the rest of a generated sky and the backdrop are
-    /// smooth at a cell's scale.
-    fn base_peak(&self, d: Vec3f, radius: f32) -> Option<(f32, f32)> {
+    /// replaces), a storm's bolt (`Weather::fine_step_near`, no bound) and
+    /// the skyline's lights there (`city_peaks`, the band's `BandPeaks`, built
+    /// once per map): a city light is far finer than a cell. None where the base
+    /// has no such detail: the sky's discs are sampled apart (`hot_spots`),
+    /// and the rest of a generated sky and the backdrop are smooth at a
+    /// cell's scale.
+    fn base_peak(&self, d: Vec3f, radius: f32, city_peaks: Option<&skyline::BandPeaks>) -> Option<(f32, f32)> {
         let image = self.base_image.as_ref().map(|image| image.peak(d, radius)).map(|(lum, step)| (lum * self.scale, step));
         let bolt = self.weather.as_ref().filter(|_| self.atmo.is_some()).and_then(|weather| weather.fine_step_near(d, radius)).map(|step| (f32::INFINITY, step));
-        match (image, bolt) {
-            (Some(a), Some(b)) => Some((a.0.max(b.0), a.1.min(b.1))),
-            (a, b) => a.or(b),
-        }
+        let city = match (&self.skyline, city_peaks) {
+            (Some((_, turn)), Some(peaks)) => peaks.near(d, *turn, radius).map(|(most, step)| (most * self.scale, step)),
+            _ => None,
+        };
+        [image, bolt, city].into_iter().flatten().reduce(|a, b| (a.0.max(b.0), a.1.min(b.1)))
     }
 
     /// The sky a window shows along `d` (map frame) over `base`, the base
@@ -927,16 +932,21 @@ impl Env {
     fn disc_share(&self, key: &EnvSun, disc: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
         const DISC_GRID: usize = 64;
         let replaced = self.base_image.as_ref().filter(|image| image.replaces_sky());
-        if !self.studio.has_lights() && replaced.is_none() {
+        if !self.studio.has_lights() && replaced.is_none() && !self.has_skyline() {
             return Vec3f::all(1.0);
         }
         #[cfg(test)]
         probe::count(probe::Work::Key);
         let through = |d: Vec3f, v: Vec3f| {
-            let base = match replaced {
+            let mut base = match replaced {
                 Some(image) => image.compose(d, v),
                 None => v,
             };
+            // The skyline hides what of the disc its alpha covers; its own
+            // light is the city's, never the sun's.
+            if let Some((band, turn)) = &self.skyline {
+                base *= 1.0 - band.sample(d, *turn)[3];
+            }
             self.lights_over(d, base, false, Sampling::default())
         };
         let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);

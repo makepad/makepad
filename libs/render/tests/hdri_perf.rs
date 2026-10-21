@@ -16,6 +16,7 @@
 
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
+use makepad_render::hdri::skyline::skyline_light;
 use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, VolumetricParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
@@ -659,4 +660,30 @@ fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
         }
         assert!(slow.is_empty(), "four soft blooming casters' pre-passes over their allowance: {}", slow.join(", "));
     });
+}
+
+/// The sky's light the app hands the skyline (Task 4 of the skyline layer): built on every
+/// change of the sky block, so it must stay well under a held bake's budget.
+#[test]
+#[ignore]
+fn skyline_light_is_cheap() {
+    let p = HdriParams::default();
+    let t = std::time::Instant::now();
+    for _ in 0..20 {
+        std::hint::black_box(skyline_light(&p));
+    }
+    let ms = t.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    eprintln!("skyline_light {ms:.2} ms");
+    // What that mean is made of: a new sky builds the atmosphere's table (as every Env does),
+    // the same sky asked again reads the kept layers.
+    let mut other = p.clone();
+    other.sky.sun.hour = 9.5;
+    let t = std::time::Instant::now();
+    std::hint::black_box(skyline_light(&other));
+    let fresh = t.elapsed().as_secs_f64() * 1000.0;
+    let t = std::time::Instant::now();
+    std::hint::black_box(skyline_light(&other));
+    let kept = t.elapsed().as_secs_f64() * 1000.0;
+    eprintln!("skyline_light: a new sky {fresh:.2} ms, the same sky again {kept:.3} ms");
+    assert!(ms < 3.0);
 }

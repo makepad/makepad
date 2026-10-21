@@ -123,6 +123,8 @@ pub struct Atmosphere {
     /// Radiance of the lit ground (Lambertian, ground_color albedo).
     ground: Vec3f,
     ambient: Vec3f,
+    /// The sky's irradiance on a level surface (the disc excluded).
+    sky_irradiance: Vec3f,
     sun_irradiance: Vec3f,
     /// Radiance at the centre of the disc: sun irradiance / effective solid angle.
     disc_radiance: Vec3f,
@@ -172,6 +174,7 @@ impl Atmosphere {
             lut,
             ground,
             ambient,
+            sky_irradiance,
             sun_irradiance,
             disc_radiance: sun_irradiance * (1.0 / solid_angle as f32),
             disc_radius,
@@ -251,6 +254,12 @@ impl Atmosphere {
     /// Mean radiance of the upper hemisphere (the disc excluded).
     pub fn ambient(&self) -> Vec3f {
         self.ambient
+    }
+
+    /// The irradiance the sky (the disc excluded) puts on a level surface:
+    /// the ground's light from above, the sun's apart.
+    pub fn sky_irradiance(&self) -> Vec3f {
+        self.sky_irradiance
     }
 
     /// Unit direction toward the sun, in the map's own frame (before the
