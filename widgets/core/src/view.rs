@@ -1315,6 +1315,12 @@ impl Widget for View {
             fling_caught = scroll_bars.catch_fling_on_press(cx, event);
         }
 
+        // A child list that can't scroll leaves a scroll to this view when it can take it.
+        let container_axes = self
+            .scroll_bars_obj
+            .as_ref()
+            .map_or([false; 2], |bars| bars.scroll_container_axes(cx, event));
+        cx.begin_scroll_container(container_axes);
         if !fling_caught {
             match &self.event_order {
                 EventOrder::Up => {
@@ -1338,6 +1344,7 @@ impl Widget for View {
                 }
             }
         }
+        cx.end_scroll_container(container_axes);
 
         event.hit_tweak_ray(self.area(), self.widget_uid());
 
@@ -1733,6 +1740,7 @@ impl View {
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, v: Vec2d) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.stop_motion();
             scroll_bars.set_scroll_pos(cx, v);
         } else {
             self.layout.scroll = v;

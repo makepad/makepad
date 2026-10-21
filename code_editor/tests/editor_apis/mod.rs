@@ -1,4 +1,5 @@
 use super::*;
+use makepad_widgets::event::{TouchPoint, TouchState, TouchUpdateEvent};
 use crate::{
     decoration::DecorationSet,
     document::{AnchorRange, CodeDocument, PreparedDocument},
@@ -35,12 +36,24 @@ fn edit(document: &CodeDocument, change: Change) {
 }
 
 fn editor() -> (Cx, CodeEditor) {
+    editor_from(|vm| script_eval!(vm, { use mod.widgets.* CodeEditor{} }))
+}
+
+/// An editor whose bars scroll it when a finger drags the text.
+fn drag_scrolling_editor() -> (Cx, CodeEditor) {
+    editor_from(|vm| script_eval!(vm, {
+        use mod.widgets.*
+        CodeEditor{scroll_bars +: {scroll_bar_x.drag_scrolling: true scroll_bar_y.drag_scrolling: true}}
+    }))
+}
+
+fn editor_from(eval: impl FnOnce(&mut ScriptVm) -> ScriptValue) -> (Cx, CodeEditor) {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     let editor = cx.with_vm(|vm| {
         makepad_widgets::script_mod(vm);
         crate::script_mod(vm);
         vm.bx.captured_errors = Some(Vec::new());
-        let value = script_eval!(vm, { use mod.widgets.* CodeEditor{} });
+        let value = eval(vm);
         let editor = CodeEditor::script_from_value(vm, value);
         assert!(vm.take_errors().is_empty());
         editor
@@ -476,17 +489,23 @@ fn content_opacity_is_clamped_without_changing_background_or_theme() {
 }
 
 fn record_editor(cx: &mut Cx, editor: &mut CodeEditor, session: &mut CodeSession) {
+    record_frame(cx, 200.0, |cx| editor.draw_walk_editor(cx, session, Walk::fixed(480.0, 200.0)));
+}
+
+/// Records one frame of a pass 480 wide and `height` tall, drawn by `draw`.
+fn record_frame(cx: &mut Cx, height: f64, draw: impl FnOnce(&mut Cx2d)) {
     let pass = DrawPass::new(cx);
-    pass.set_size(cx, dvec2(480.0, 200.0));
+    pass.set_size(cx, dvec2(480.0, height));
     let mut list = DrawList2d::new(cx);
     let event = DrawEvent::default();
-    let mut draw = CxDraw::new(cx, &event);
-    let mut cx = Cx2d::new(&mut draw);
+    let mut cx_draw = CxDraw::new(cx, &event);
+    let mut cx = Cx2d::new(&mut cx_draw);
     cx.begin_pass(&pass, Some(1.0));
     list.begin_always(&mut cx);
-    cx.begin_root_turtle(dvec2(480.0, 200.0), Layout::default());
-    editor.draw_walk_editor(&mut cx, session, Walk::fixed(480.0, 200.0));
-    cx.end_turtle();
+    cx.begin_root_turtle(dvec2(480.0, height), Layout::default());
+    draw(&mut cx);
+    // Ended like a pass, so the editor's area gets its clip and takes hits.
+    cx.end_pass_sized_turtle();
     list.end(&mut cx);
     cx.end_pass(&pass);
 }
@@ -838,4 +857,296 @@ fn diff_admission_twenty_thousand_rows_off_thread() {
     assert_eq!(session.document().diff_metadata().unwrap().rows.as_ptr(), rows_ptr);
     assert_eq!(session.document().decorations().as_ptr(), decorations_ptr);
     assert_eq!(session.layout().height(), row_count as f64);
+}
+
+fn touch(state: TouchState, abs: Vec2d, time: f64) -> Event {
+    Event::TouchUpdate(TouchUpdateEvent {
+        time,
+        window_id: WindowId(0, 0),
+        modifiers: KeyModifiers::default(),
+        touches: vec![TouchPoint {
+            state,
+            abs,
+            time,
+            uid: 1,
+            rotation_angle: 0.0,
+            force: 0.0,
+            radius: dvec2(0.0, 0.0),
+            handled: std::cell::Cell::new(Area::Empty),
+            sweep_lock: std::cell::Cell::new(Area::Empty),
+        }],
+    })
+}
+
+/// Records the given editor with three lines far wider than its 480pt viewport.
+fn wide_editor((mut cx, mut editor): (Cx, CodeEditor)) -> (Cx, CodeEditor, CodeSession) {
+    editor.word_wrap = false;
+    let mut session = CodeSession::new(doc(&["x".repeat(400), "y".repeat(400), "z".repeat(400)].join("\n")));
+    record_editor(&mut cx, &mut editor, &mut session);
+    (cx, editor, session)
+}
+
+#[test]
+fn a_touch_drag_scrolls_instead_of_selecting() {
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    let before = session.selections()[0];
+    let (start, end) = (dvec2(240.0, 20.0), dvec2(140.0, 20.0));
+    for (state, abs, time) in [
+        (TouchState::Start, start, 0.0),
+        (TouchState::Move, end, 0.05),
+        (TouchState::Stop, end, 0.1),
+    ] {
+        editor.handle_event(&mut cx, &touch(state, abs, time), &mut Scope::empty(), &mut session);
+        assert_eq!(session.selections()[0], before);
+        assert!(matches!(editor.keep_cursor_in_view, KeepCursorInView::Off));
+    }
+    assert_eq!(editor.scroll_bars.get_scroll_pos().x, 100.0);
+    assert!(!cx.fingers.is_drag_claimed(live_id_num!(touch, 1).into()));
+    cx.action(());
+    cx.handle_actions();
+    assert!(!cx.has_key_focus(editor.area()));
+}
+
+#[test]
+fn a_touch_drag_selects_like_the_mouse_without_drag_scrolling() {
+    let (mut cx, mut editor, mut session) = wide_editor(editor());
+    editor.handle_event(&mut cx, &touch(TouchState::Start, dvec2(240.0, 20.0), 0.0), &mut Scope::empty(), &mut session);
+    assert!(cx.fingers.is_drag_claimed(live_id_num!(touch, 1).into()));
+    let end = dvec2(140.0, 20.0 + 2.0 * editor.cell_size.y);
+    editor.handle_event(&mut cx, &touch(TouchState::Move, end, 0.05), &mut Scope::empty(), &mut session);
+    assert_eq!(session.selections()[0].cursor.position.line_index, 2);
+    assert_eq!(editor.scroll_bars.get_scroll_pos(), dvec2(0.0, 0.0));
+}
+
+#[test]
+fn a_touch_tap_places_the_cursor_like_a_click() {
+    let abs = dvec2(240.0, 20.0);
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    let before = session.selections()[0];
+    editor.handle_event(&mut cx, &touch(TouchState::Start, abs, 0.0), &mut Scope::empty(), &mut session);
+    assert_eq!(session.selections()[0], before);
+    editor.handle_event(&mut cx, &touch(TouchState::Stop, abs, 0.1), &mut Scope::empty(), &mut session);
+    assert!(matches!(editor.keep_cursor_in_view, KeepCursorInView::Off));
+    cx.action(());
+    cx.handle_actions();
+    assert!(cx.has_key_focus(editor.area()));
+    let tapped = session.selections()[0];
+
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    let press = Event::MouseDown(MouseDownEvent {
+        abs,
+        button: MouseButton::PRIMARY,
+        window_id: WindowId(0, 0),
+        modifiers: KeyModifiers::default(),
+        handled: std::cell::Cell::new(Area::Empty),
+        time: 0.0,
+    });
+    editor.handle_event(&mut cx, &press, &mut Scope::empty(), &mut session);
+    assert_eq!(session.selections()[0], tapped);
+    assert_ne!(tapped, before);
+}
+
+#[test]
+fn a_mouse_drag_selects_and_claims_the_drag_from_the_scroll_bars() {
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(0, 0)));
+    let press = Event::MouseDown(MouseDownEvent {
+        abs: dvec2(240.0, 20.0),
+        button: MouseButton::PRIMARY,
+        window_id: WindowId(0, 0),
+        modifiers: KeyModifiers::default(),
+        handled: std::cell::Cell::new(Area::Empty),
+        time: 0.0,
+    });
+    editor.handle_event(&mut cx, &press, &mut Scope::empty(), &mut session);
+    assert!(cx.fingers.is_drag_claimed(live_id!(mouse).into()));
+    assert!(matches!(editor.keep_cursor_in_view, KeepCursorInView::Always(..)));
+    let drag = Event::MouseMove(MouseMoveEvent {
+        abs: dvec2(140.0, 20.0 + 2.0 * editor.cell_size.y),
+        lock_delta: dvec2(0.0, 0.0),
+        window_id: WindowId(0, 0),
+        modifiers: KeyModifiers::default(),
+        time: 0.05,
+        handled: std::cell::Cell::new(Area::Empty),
+    });
+    editor.handle_event(&mut cx, &drag, &mut Scope::empty(), &mut session);
+    assert_eq!(session.selections()[0].cursor.position.line_index, 2);
+    assert_eq!(editor.scroll_bars.get_scroll_pos(), dvec2(0.0, 0.0));
+}
+
+#[test]
+fn a_fit_editor_in_a_scroll_view_lays_out_every_line_but_draws_only_the_ones_in_view() {
+    let (mut cx, mut editor) = editor();
+    editor.word_wrap = false;
+    editor.pad_left_top = dvec2(0.0, 0.0);
+    let text: String = (0..3000).map(|i| format!("\"key_{i}\": {i},\n")).collect();
+    let mut session = CodeSession::new(doc(&text));
+    let line_count = session.document().as_text().as_lines().len();
+    // The editor sits 100pt down a scroll view that shows at most 500pt.
+    let mut draw = |cx: &mut Cx, editor: &mut CodeEditor, scroll_y: f64| {
+        record_frame(cx, 600.0, |cx| {
+            cx.begin_turtle(
+                Walk { height: Size::Fit { min: None, max: Some(FitBound::Abs(500.0)) }, ..Walk::fill() },
+                Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)),
+            );
+            cx.walk_turtle(Walk::fixed(480.0, 100.0));
+            editor.draw_walk_editor(cx, &mut session, Walk { height: Size::fit(), ..Walk::fill() });
+            cx.end_turtle();
+        })
+    };
+
+    draw(&mut cx, &mut editor, 0.0);
+    let line_height = editor.cell_size.y;
+    let text_height = line_count as f64 * line_height;
+    assert!((editor.area().rect(&cx).size.y - text_height).abs() < 0.5);
+    assert_eq!(editor.line_start, 0);
+    assert!(editor.line_end as f64 * line_height < 400.0 + 3.0 * line_height);
+
+    draw(&mut cx, &mut editor, 100.0 + text_height - 500.0);
+    assert_eq!(editor.line_end, line_count);
+    assert!((line_count - editor.line_start) as f64 * line_height < 500.0 + 3.0 * line_height);
+}
+
+#[test]
+fn a_capped_fit_editor_scrolled_out_of_view_draws_nothing() {
+    let (mut cx, mut editor) = editor();
+    editor.word_wrap = false;
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let mut session = CodeSession::new(doc(&text));
+    let capped = Walk { height: Size::Fit { min: None, max: Some(FitBound::Abs(300.0)) }, ..Walk::fill() };
+    // The editor sits `above` the top of a 400pt scroll view scrolled down by `scroll_y`.
+    let mut draw = |cx: &mut Cx, editor: &mut CodeEditor, above: f64, scroll_y: f64| {
+        record_frame(cx, 400.0, |cx| {
+            cx.begin_turtle(Walk::fill(), Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)));
+            cx.walk_turtle(Walk::fixed(480.0, above));
+            editor.draw_walk_editor(cx, &mut session, capped);
+            cx.end_turtle();
+        })
+    };
+
+    // Scrolled past the editor, with the editor scrolled inside itself too.
+    draw(&mut cx, &mut editor, 0.0, 0.0);
+    editor.set_scroll_pos(&mut cx, dvec2(0.0, 1000.0));
+    draw(&mut cx, &mut editor, 0.0, 600.0);
+    assert_eq!(editor.line_start, editor.line_end);
+
+    // Not scrolled down far enough to reach it.
+    editor.set_scroll_pos(&mut cx, dvec2(0.0, 0.0));
+    draw(&mut cx, &mut editor, 1000.0, 0.0);
+    assert_eq!(editor.line_start, editor.line_end);
+}
+
+#[test]
+fn a_second_finger_never_restarts_a_touch_drag() {
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    let second = |state, abs: Vec2d, time| match touch(state, abs, time) {
+        Event::TouchUpdate(mut e) => {
+            e.touches[0].uid = 2;
+            Event::TouchUpdate(e)
+        }
+        _ => unreachable!(),
+    };
+    editor.handle_event(&mut cx, &touch(TouchState::Start, dvec2(240.0, 20.0), 0.0), &mut Scope::empty(), &mut session);
+    editor.handle_event(&mut cx, &touch(TouchState::Move, dvec2(200.0, 20.0), 0.05), &mut Scope::empty(), &mut session);
+    editor.handle_event(&mut cx, &second(TouchState::Start, dvec2(100.0, 40.0), 0.1), &mut Scope::empty(), &mut session);
+    editor.handle_event(&mut cx, &touch(TouchState::Move, dvec2(190.0, 20.0), 0.15), &mut Scope::empty(), &mut session);
+    assert_eq!(editor.scroll_bars.get_scroll_pos().x, 50.0);
+}
+
+/// An editor that only scrolls sideways, and does so when a finger drags it.
+fn sideways_editor() -> (Cx, CodeEditor) {
+    editor_from(|vm| script_eval!(vm, {
+        use mod.widgets.*
+        CodeEditor{scroll_bars +: {show_scroll_y: false scroll_bar_x.drag_scrolling: true}}
+    }))
+}
+
+/// A quick touch flick to the left, which leaves the text gliding.
+fn flick_left(cx: &mut Cx, editor: &mut CodeEditor, session: &mut CodeSession) {
+    for (state, x, time) in [
+        (TouchState::Start, 240.0, 0.0),
+        (TouchState::Move, 200.0, 0.01),
+        (TouchState::Move, 140.0, 0.02),
+        (TouchState::Stop, 140.0, 0.03),
+    ] {
+        editor.handle_event(cx, &touch(state, dvec2(x, 20.0), time), &mut Scope::empty(), session);
+    }
+    // The platform lets go of a finger once it lifts.
+    cx.release_touch_captures(1);
+}
+
+#[test]
+fn setting_the_scroll_stops_a_fling() {
+    let press = touch(TouchState::Start, dvec2(240.0, 20.0), 0.05);
+
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    flick_left(&mut cx, &mut editor, &mut session);
+    assert!(editor.scroll_bars.catch_fling_on_press(&mut cx, &press), "the flick is still gliding");
+
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    flick_left(&mut cx, &mut editor, &mut session);
+    editor.set_scroll_pos(&mut cx, dvec2(0.0, 0.0));
+    assert!(!editor.scroll_bars.catch_fling_on_press(&mut cx, &press));
+}
+
+#[test]
+fn a_mouse_press_that_selects_still_stops_a_fling() {
+    let (mut cx, mut editor, mut session) = wide_editor(drag_scrolling_editor());
+    flick_left(&mut cx, &mut editor, &mut session);
+    let mouse_press = Event::MouseDown(MouseDownEvent {
+        abs: dvec2(240.0, 20.0),
+        button: MouseButton::PRIMARY,
+        window_id: WindowId(0, 0),
+        modifiers: KeyModifiers::default(),
+        handled: std::cell::Cell::new(Area::Empty),
+        time: 0.05,
+    });
+    editor.handle_event(&mut cx, &mouse_press, &mut Scope::empty(), &mut session);
+    let press = touch(TouchState::Start, dvec2(240.0, 20.0), 0.06);
+    assert!(!editor.scroll_bars.catch_fling_on_press(&mut cx, &press));
+}
+
+#[test]
+fn a_touch_on_code_leaves_the_axes_it_cant_scroll_to_a_scroller_around_it() {
+    let (mut cx, mut editor, mut session) = wide_editor(sideways_editor());
+    editor.handle_event(&mut cx, &touch(TouchState::Start, dvec2(240.0, 20.0), 0.0), &mut Scope::empty(), &mut session);
+    let digit = live_id_num!(touch, 1).into();
+    assert!(!cx.fingers.can_join_scroll_drag(digit, Vec2Index::X, Area::Empty));
+    assert!(cx.fingers.can_join_scroll_drag(digit, Vec2Index::Y, Area::Empty));
+
+    // Code that fits takes neither axis, but it still holds the press for a scroller around it.
+    let (mut cx, mut editor) = sideways_editor();
+    let mut session = CodeSession::new(doc("{}"));
+    record_editor(&mut cx, &mut editor, &mut session);
+    editor.handle_event(&mut cx, &touch(TouchState::Start, dvec2(20.0, 10.0), 0.0), &mut Scope::empty(), &mut session);
+    assert!(cx.fingers.can_join_scroll_drag(digit, Vec2Index::X, Area::Empty));
+    assert!(cx.fingers.can_join_scroll_drag(digit, Vec2Index::Y, Area::Empty));
+}
+
+#[test]
+fn a_shared_drag_catches_up_with_the_finger_once_it_picks_the_code_axis() {
+    let (mut cx, mut editor, mut session) = wide_editor(sideways_editor());
+    editor.handle_event(&mut cx, &touch(TouchState::Start, dvec2(240.0, 20.0), 0.0), &mut Scope::empty(), &mut session);
+    // A scroller around the code takes the other axis, so the drag waits to see which way it goes.
+    assert!(cx.is_scroll_drag_owner(live_id_num!(touch, 1).into(), Vec2Index::Y, Area::Empty));
+    editor.handle_event(&mut cx, &touch(TouchState::Move, dvec2(237.0, 20.0), 0.05), &mut Scope::empty(), &mut session);
+    assert_eq!(editor.scroll_bars.get_scroll_pos().x, 0.0);
+    editor.handle_event(&mut cx, &touch(TouchState::Move, dvec2(200.0, 21.0), 0.1), &mut Scope::empty(), &mut session);
+    assert_eq!(editor.scroll_bars.get_scroll_pos().x, 40.0);
+}
+
+#[test]
+fn a_wrapped_fit_editor_draws_every_line_on_its_first_frame() {
+    let (mut cx, mut editor) = editor();
+    editor.word_wrap = true;
+    editor.pad_left_top = dvec2(0.0, 0.0);
+    let text: String = (0..30).map(|i| format!("{i} {}\n", "word ".repeat(60))).collect();
+    let mut session = CodeSession::new(doc(&text));
+    let line_count = session.document().as_text().as_lines().len();
+    record_frame(&mut cx, 5000.0, |cx| {
+        editor.draw_walk_editor(cx, &mut session, Walk { height: Size::fit(), ..Walk::fill() });
+    });
+    assert!(session.layout().height() > line_count as f64, "the lines wrapped");
+    assert_eq!(editor.line_end, line_count);
+    assert!((editor.area().rect(&cx).size.y - session.layout().height() * editor.cell_size.y).abs() < 0.5);
 }
