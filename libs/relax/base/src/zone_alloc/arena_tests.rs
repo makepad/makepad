@@ -18,6 +18,18 @@ mod tests {
     }
 
     #[test]
+    fn class_table_matches_the_arithmetic() {
+        // the domain fast paths index the table by size granule without raising to 16 first
+        assert_eq!(SMALL_CLASS[0], 0);
+        assert_eq!(SMALL_CLASS[1], 0);
+        for need in 16..=1 << MAX_SHIFT {
+            let c = class_for(need);
+            assert_eq!(c, class_calc(need), "{need}");
+            assert!(class_size(c) >= need && (c == 0 || class_size(c - 1) < need), "{need}");
+        }
+    }
+
+    #[test]
     fn sizes_alignment_zeroing_and_escape() {
         let _serial = lock(&TEST_LOCK);
         trim();

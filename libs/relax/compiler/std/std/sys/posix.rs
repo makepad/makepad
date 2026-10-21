@@ -275,12 +275,14 @@ impl Drop for NativeThread {
 /// A thread-local storage key whose destructor runs with the thread's value at thread exit.
 pub type Key = u32;
 extern "C" {
-    fn __relax_key_create(dtor: extern "C" fn(*mut c_void)) -> u32;
+    fn __relax_key_create(dtor: extern "C" fn(*mut c_void), late: u32) -> u32;
     fn __relax_key_delete(key: u32);
     fn __relax_key_get(key: u32) -> *mut c_void;
     fn __relax_key_set(key: u32, value: *const c_void);
 }
-pub fn key_create(dtor: extern "C" fn(*mut c_void)) -> Option<Key> { Some(unsafe { __relax_key_create(dtor) }) }
+/// `late`: the value type has no drop glue; its slot stays readable through every destructor
+/// round and is freed (by `dtor`) after them.
+pub fn key_create(dtor: extern "C" fn(*mut c_void), late: bool) -> Option<Key> { Some(unsafe { __relax_key_create(dtor, late as u32) }) }
 pub fn key_delete(key: Key) { unsafe { __relax_key_delete(key); } }
 pub fn key_get(key: Key) -> *mut c_void { unsafe { __relax_key_get(key) } }
 pub fn key_set(key: Key, value: *const c_void) { unsafe { __relax_key_set(key, value); } }

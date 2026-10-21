@@ -23,8 +23,15 @@ const fn class_size(c: usize) -> usize {
 /// The smallest class whose size is at least `need` (16 <= need <= 256 KB).
 #[inline(always)]
 fn class_for(need: usize) -> usize {
+    if need <= SMALL_MAX {
+        SMALL_CLASS[(need + 15) >> 4] as usize
+    } else {
+        class_calc(need)
+    }
+}
+const fn class_calc(need: usize) -> usize {
     if need <= 128 {
-        (need.max(16) + 15) / 16 - 1
+        (if need < 16 { 16 } else { need } + 15) / 16 - 1
     } else {
         let b = (usize::BITS - 1 - (need - 1).leading_zeros()) as usize;
         let p = 1usize << b;
@@ -32,6 +39,18 @@ fn class_for(need: usize) -> usize {
         8 + (b - 7) * 4 + (need - p + step - 1) / step - 1
     }
 }
+/// `class_for` up to 4 KB by 16-byte granule: every class size there is a multiple of 16, so
+/// the class depends only on the granule count (one load instead of the log2 arithmetic).
+const SMALL_MAX: usize = 4096;
+const SMALL_CLASS: [u8; SMALL_MAX / 16 + 1] = {
+    let mut t = [0u8; SMALL_MAX / 16 + 1];
+    let mut g = 0;
+    while g <= SMALL_MAX / 16 {
+        t[g] = class_calc(g * 16) as u8;
+        g += 1;
+    }
+    t
+};
 
 #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
 const PLATFORM_MAX_ORDER: usize = 15; // 64 GB of virtual address space, not resident memory
@@ -125,15 +144,67 @@ const STRIDE: [usize; CLASSES] = {
 thread_local! {
     static DEPTH: Cell<usize> = const { Cell::new(0) };
     static CURRENT: Cell<[Current; CLASSES]> = const { Cell::new([NO_CURRENT; CLASSES]) };
-    static DOMAIN_ARENA: Cell<usize> = const { Cell::new(0) };
     /// The thread's TLS destructors have started: its chunks are handed back and it takes no new
     /// ones (compiler arena); it allocates one slot at a time from the shared lists.
     static EXITED: Cell<bool> = const { Cell::new(false) };
     /// This thread has a destructor registered that hands its chunks back when it ends.
     static EXIT_REGISTERED: Cell<bool> = const { Cell::new(false) };
     static EXIT_GUARD: ExitGuard = const { ExitGuard };
-    /// Domain enter/exit hands these chunks back before changing the active arena.
-    static DOMAIN_CURRENT: Cell<[Current; CLASSES]> = const { Cell::new([NO_CURRENT; CLASSES]) };
+    /// The domain arena this thread is inside and its chunk cache of it (`DomainTls`).
+    static DOMAIN: DomainTls = const {
+        DomainTls { arena: Cell::new(std::ptr::null()), id: Cell::new(0), current: Cell::new([NO_CURRENT; CLASSES]) }
+    };
+}
+
+/// The domain arena a thread is inside (`enter_domain`; null: none) and the thread's current
+/// chunk per class of it. One destructor-free thread-local, so the program allocator's fast path
+/// reads it with one thread-pointer-relative access and no lazy-init check. `id` is the arena's
+/// (ids are never reused): a free into another arena compares it, so a stale record can never
+/// match a new arena allocated at a dropped one's address. Entering another arena hands these
+/// chunks back first.
+struct DomainTls {
+    arena: Cell<*const Arena>,
+    id: Cell<usize>,
+    current: Cell<[Current; CLASSES]>,
+}
+/// The calling thread's `DomainTls`. A const thread-local without drop glue cannot fail.
+#[inline(always)]
+fn domain_tls() -> &'static DomainTls {
+    match DOMAIN.try_with(|t| t as *const DomainTls) {
+        Ok(t) => unsafe { &*t },
+        Err(_) => std::process::abort(),
+    }
+}
+
+/// x86-64 Linux: `DOMAIN`'s offset from the thread pointer. The executable's static TLS sits at
+/// the same offset on every thread (the JIT's own block cell relies on it too, os/tls.rs). The
+/// compiled `try_with` is the general-dynamic model: a `__tls_get_addr` call that the linker
+/// relaxes to fs:0 + offset, but the argument registers it would clobber stay saved around it;
+/// the program allocator's fast paths read fs:0 + this offset instead and save nothing.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static DOMAIN_OFFSET: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[inline(always)]
+fn thread_pointer() -> usize {
+    let tp: usize;
+    // fs:0 holds the thread pointer itself (x86-64 TLS ABI)
+    unsafe { std::arch::asm!("mov {}, qword ptr fs:[0]", out(reg) tp, options(pure, readonly, nostack, preserves_flags)) };
+    tp
+}
+/// Called before the program allocator's entries are handed out (domain.rs `symbol`).
+pub fn bind_program_tls() {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    DOMAIN_OFFSET.store((domain_tls() as *const DomainTls as usize).wrapping_sub(thread_pointer()), Ordering::Relaxed);
+}
+/// `domain_tls` for the program allocator's fast paths (after `bind_program_tls`).
+#[inline(always)]
+fn program_tls() -> &'static DomainTls {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe {
+        &*(thread_pointer().wrapping_add(DOMAIN_OFFSET.load(Ordering::Relaxed)) as *const DomainTls)
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    domain_tls()
 }
 
 /// Hands the thread's chunks back when it ends, however it was started (a thread without
@@ -615,8 +686,10 @@ impl Arena {
     /// fails and inlines to one thread-pointer-relative access; `with` stays a call.
     #[inline(always)]
     fn with_current<R>(&self, f: impl FnOnce(&Cell<[Current; CLASSES]>) -> R) -> R {
-        let r = if self.dynamic { DOMAIN_CURRENT.try_with(f) } else { CURRENT.try_with(f) };
-        match r {
+        if self.dynamic {
+            return f(&domain_tls().current);
+        }
+        match CURRENT.try_with(f) {
             Ok(r) => r,
             // a const, destructor-free TLS cannot fail; if it somehow does, stop rather than guess
             Err(_) => std::process::abort(),
@@ -624,7 +697,7 @@ impl Arena {
     }
     fn try_current<R>(&self, f: impl FnOnce(&Cell<[Current; CLASSES]>) -> R) -> Result<R, std::thread::AccessError> {
         if self.dynamic {
-            DOMAIN_CURRENT.try_with(f)
+            Ok(f(&domain_tls().current))
         } else {
             CURRENT.try_with(f)
         }
@@ -645,15 +718,18 @@ impl Arena {
     pub unsafe fn alloc_counted(&self, l: Layout, requested: usize) -> *mut u8 {
         self.alloc_inner(l, requested)
     }
-    pub fn enter_thread(&self) {
-        DOMAIN_ARENA.with(|c| c.set(self.id));
+    /// The calling thread is now inside this domain arena (`enter_domain`).
+    fn enter_thread(&self) {
+        let t = domain_tls();
+        t.arena.set(self);
+        t.id.set(self.id);
     }
     /// May this thread use its per-class chunk cache of this arena? A domain arena only for the
     /// threads that entered it (the cache holds the chunks of the arena they are in); the compiler
     /// arena for every thread (a thread without chunks has empty slots).
     #[inline(always)]
     fn cache_fast(&self) -> bool {
-        !self.dynamic || DOMAIN_ARENA.try_with(|c| c.get() == self.id).unwrap_or(false)
+        !self.dynamic || domain_tls().id.get() == self.id
     }
     /// `cache_fast`, and the thread is not past its TLS destructors (it would never hand a new chunk back).
     fn cache_here(&self) -> bool {
@@ -896,30 +972,7 @@ impl Arena {
                 self.abandon(class);
                 return null_mut();
             }
-            let h = self.headers.get_unchecked(c.index);
-            let o = &mut *h.owned.get();
-            let mut p = o.free;
-            if p == 0 && h.remote.load(Ordering::Relaxed) != 0 {
-                self.drain(h, h.remote.swap(0, Ordering::Acquire));
-                p = o.free;
-            }
-            if p != 0 {
-                o.free = *(p as *const usize);
-            } else if o.bump.load(Ordering::Relaxed) + o.stride <= CHUNK {
-                let b = o.bump.load(Ordering::Relaxed);
-                p = self.base.load(Ordering::Relaxed) + c.index * CHUNK + b;
-                o.bump.store(b + o.stride, Ordering::Relaxed);
-            } else {
-                // full: the thread moves on, later frees into this chunk make it listable
-                let mut s = lock(&h.state);
-                self.handoff(c.index, &mut s);
-                drop(s);
-                self.set_current(class, NO_CURRENT);
-                return null_mut();
-            }
-            o.live.store(o.live.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
-            h.account.store(h.account.load(Ordering::Relaxed).wrapping_add(accounted), Ordering::Relaxed);
-            return p as *mut u8;
+            return self.pop_owned(c.index, class, accounted);
         }
         let h = &self.headers[c.index];
         let mut s = lock(&h.state);
@@ -943,6 +996,130 @@ impl Arena {
         h.live.fetch_add(1, Ordering::Relaxed);
         s.bytes += size;
         p
+    }
+    /// A slot of the calling thread's own chunk `index` of `class` (compiler arena layout: owned
+    /// free list, then bump), or null when the chunk is full (it is handed back).
+    #[inline(always)]
+    unsafe fn pop_owned(&self, index: usize, class: usize, accounted: usize) -> *mut u8 {
+        let h = self.headers.get_unchecked(index);
+        let o = &mut *h.owned.get();
+        let p = o.free;
+        let p = if p != 0 {
+            o.free = *(p as *const usize);
+            p
+        } else {
+            let b = o.bump.load(Ordering::Relaxed);
+            if b + o.stride > CHUNK || h.remote.load(Ordering::Relaxed) != 0 {
+                return self.pop_owned_slow(index, class, accounted);
+            }
+            o.bump.store(b + o.stride, Ordering::Relaxed);
+            self.base.load(Ordering::Relaxed) + index * CHUNK + b
+        };
+        o.live.store(o.live.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        h.account.store(h.account.load(Ordering::Relaxed).wrapping_add(accounted), Ordering::Relaxed);
+        p as *mut u8
+    }
+    /// `pop_owned` with an empty owned list: the blocks other threads freed first, then the bump;
+    /// a full chunk goes back (later frees into it make it listable) and the thread moves on.
+    #[cold]
+    #[inline(never)]
+    unsafe fn pop_owned_slow(&self, index: usize, class: usize, accounted: usize) -> *mut u8 {
+        let h = self.headers.get_unchecked(index);
+        let o = &mut *h.owned.get();
+        if h.remote.load(Ordering::Relaxed) != 0 {
+            self.drain(h, h.remote.swap(0, Ordering::Acquire));
+        }
+        let p = o.free;
+        let p = if p != 0 {
+            o.free = *(p as *const usize);
+            p
+        } else if o.bump.load(Ordering::Relaxed) + o.stride <= CHUNK {
+            let b = o.bump.load(Ordering::Relaxed);
+            o.bump.store(b + o.stride, Ordering::Relaxed);
+            self.base.load(Ordering::Relaxed) + index * CHUNK + b
+        } else {
+            let mut s = lock(&h.state);
+            self.handoff(index, &mut s);
+            drop(s);
+            self.set_current(class, NO_CURRENT);
+            return null_mut();
+        };
+        o.live.store(o.live.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        h.account.store(h.account.load(Ordering::Relaxed).wrapping_add(accounted), Ordering::Relaxed);
+        p as *mut u8
+    }
+    /// A block of the calling thread's own chunk `index` of `class` goes back on its owned list.
+    #[inline(always)]
+    unsafe fn push_owned(&self, index: usize, class: usize, p: *mut u8, requested: usize) {
+        let h = self.headers.get_unchecked(index);
+        let o = &mut *h.owned.get();
+        *(p as *mut usize) = o.free;
+        o.free = p as usize;
+        let live = o.live.load(Ordering::Relaxed) - 1;
+        o.live.store(live, Ordering::Relaxed);
+        h.account.store(h.account.load(Ordering::Relaxed).wrapping_sub(requested), Ordering::Relaxed);
+        // An emptied chunk that has been carved far goes back at once (its pages are
+        // released as before); a lightly used one stays the thread's, ready for its next block.
+        if live == 0 && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
+            self.release_emptied(index, class);
+        }
+    }
+    /// The program allocator's fast path (`domain_alloc`): this is the domain arena the calling
+    /// thread is inside and `t` its record, so the chunk cache is the thread's without a check.
+    /// A small block with at most 16-byte alignment, from the thread's current chunk of its class
+    /// (owned list, then bump); everything else takes the general path in one tail call.
+    #[inline(always)]
+    unsafe fn alloc_in(&self, t: &DomainTls, l: Layout) -> *mut u8 {
+        let size = l.size();
+        if COMPILER && size <= SMALL_MAX && l.align() <= 16 {
+            // the compiler arena's class of `need` = max(size, 16), no power-of-two rounding
+            // (granules 0 and 1 are both class 0)
+            let class = SMALL_CLASS[(size + 15) >> 4] as usize;
+            let index = t.current.as_ptr().cast::<Current>().add(class).read().index;
+            if index != NONE {
+                let h = self.headers.get_unchecked(index);
+                let o = &mut *h.owned.get();
+                let mut p = o.free;
+                if p != 0 {
+                    o.free = *(p as *const usize);
+                } else {
+                    let b = o.bump.load(Ordering::Relaxed);
+                    if b + o.stride > CHUNK || h.remote.load(Ordering::Relaxed) != 0 {
+                        return alloc_in_slow(size, l.align(), self);
+                    }
+                    o.bump.store(b + o.stride, Ordering::Relaxed);
+                    p = self.base.load(Ordering::Relaxed) + index * CHUNK + b;
+                }
+                o.live.store(o.live.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+                h.account.store(h.account.load(Ordering::Relaxed).wrapping_add(size), Ordering::Relaxed);
+                return p as *mut u8;
+            }
+        }
+        alloc_in_slow(size, l.align(), self)
+    }
+    /// `alloc_in`'s free of block `p` at `off` in this arena: a domain arena has no generations
+    /// (no tombstones); a block of the thread's current chunk of its class goes on the owned list.
+    #[inline(always)]
+    unsafe fn dealloc_in(&self, t: &DomainTls, p: *mut u8, off: usize, l: Layout) {
+        let size = l.size();
+        if COMPILER && size <= SMALL_MAX && l.align() <= 16 {
+            let class = SMALL_CLASS[(size + 15) >> 4] as usize;
+            let index = off / CHUNK;
+            if t.current.as_ptr().cast::<Current>().add(class).read().index == index {
+                let h = self.headers.get_unchecked(index);
+                let o = &mut *h.owned.get();
+                *(p as *mut usize) = o.free;
+                o.free = p as usize;
+                let live = o.live.load(Ordering::Relaxed) - 1;
+                o.live.store(live, Ordering::Relaxed);
+                h.account.store(h.account.load(Ordering::Relaxed).wrapping_sub(size), Ordering::Relaxed);
+                if live == 0 && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
+                    release_emptied_c(index, class, self);
+                }
+                return;
+            }
+        }
+        dealloc_in_slow(p, size, l.align(), self)
     }
     #[inline(always)]
     unsafe fn alloc_inner(&self, l: Layout, requested: usize) -> *mut u8 {
@@ -1065,7 +1242,9 @@ impl Arena {
             return;
         }
         if self.dynamic {
-            DOMAIN_ARENA.with(|c| c.set(0));
+            let t = domain_tls();
+            t.arena.set(std::ptr::null());
+            t.id.set(0);
         }
         let Ok(slots) = self.try_current(|c| c.replace([NO_CURRENT; CLASSES])) else {
             return;
@@ -1181,20 +1360,12 @@ impl Arena {
         if COMPILER {
             // a block of the thread's own current chunk of its class goes back on the owned list
             let need = l.size().max(l.align()).max(16);
-            if need <= 1 << MAX_SHIFT && self.cache_fast() && self.current_of(self.class_idx(need, l.align())).index == index {
-                let h = self.headers.get_unchecked(index);
-                let o = &mut *h.owned.get();
-                *(p as *mut usize) = o.free;
-                o.free = p as usize;
-                let live = o.live.load(Ordering::Relaxed) - 1;
-                o.live.store(live, Ordering::Relaxed);
-                h.account.store(h.account.load(Ordering::Relaxed).wrapping_sub(requested), Ordering::Relaxed);
-                // An emptied chunk that has been carved far goes back at once (its pages are
-                // released as before); a lightly used one stays the thread's, ready for its next block.
-                if live == 0 && o.bump.load(Ordering::Relaxed) > OWNED_KEEP_MAX {
-                    self.release_emptied(index, self.class_idx(need, l.align()));
+            if need <= 1 << MAX_SHIFT && self.cache_fast() {
+                let class = self.class_idx(need, l.align());
+                if self.current_of(class).index == index {
+                    self.push_owned(index, class, p, requested);
+                    return;
                 }
-                return;
             }
         }
         self.dealloc_slow(p, l, requested, index);
@@ -1527,6 +1698,85 @@ impl Drop for Arena {
     }
 }
 
+// The fast paths' callees are `extern "C"` (they cannot unwind), so the program allocator's
+// extern "C" entries reach them in tail calls (no unwind guard around the call). The arena comes
+// last: the request's arguments stay in the registers they arrived in.
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn alloc_in_slow(size: usize, align: usize, a: &Arena) -> *mut u8 {
+    a.alloc_inner(Layout::from_size_align_unchecked(size, align), size)
+}
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn dealloc_in_slow(p: *mut u8, size: usize, align: usize, a: &Arena) {
+    a.dealloc_counted(p, Layout::from_size_align_unchecked(size, align), size)
+}
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn release_emptied_c(index: usize, class: usize, a: &Arena) {
+    a.release_emptied(index, class)
+}
+/// Puts the calling thread inside domain arena `a` (null: none): the chunks it holds in the
+/// arena it leaves go back to that arena (alive: the thread is still registered in its domain);
+/// the next arena starts with an empty cache.
+pub unsafe fn enter_domain(a: *const Arena) {
+    let old = domain_tls().arena.get();
+    if old == a {
+        return;
+    }
+    if let Some(old) = old.as_ref() {
+        old.detach_thread();
+    }
+    if let Some(a) = a.as_ref() {
+        a.enter_thread();
+    }
+}
+/// The domain arena the calling thread is inside.
+#[inline(always)]
+pub fn domain_here() -> Option<&'static Arena> {
+    unsafe { domain_tls().arena.get().as_ref() }
+}
+/// Allocates in the domain arena the calling thread is inside; `none` (a thread inside no
+/// domain) otherwise. Every path but the fast one ends in a tail call, so the fast path saves
+/// no registers.
+#[inline(always)]
+pub unsafe fn domain_alloc(l: Layout, none: unsafe extern "C" fn(usize, usize) -> *mut u8) -> *mut u8 {
+    let t = program_tls();
+    match t.arena.get().as_ref() {
+        Some(a) => a.alloc_in(t, l),
+        None => none(l.size(), l.align()),
+    }
+}
+/// Frees `p` like `domain_dealloc`; a block that is not of the current domain arena goes to
+/// `other` (in a tail call, as every path but the fast one).
+#[inline(always)]
+pub unsafe fn domain_free(p: *mut u8, l: Layout, other: unsafe extern "C" fn(*mut u8, usize, usize)) {
+    let t = program_tls();
+    let Some(a) = t.arena.get().as_ref() else {
+        return other(p, l.size(), l.align());
+    };
+    let off = (p as usize).wrapping_sub(a.base.load(Ordering::Relaxed));
+    if off >= RESERVE {
+        return other(p, l.size(), l.align());
+    }
+    a.dealloc_in(t, p, off, l)
+}
+/// Frees a block of the domain arena the calling thread is inside; false when the block is not
+/// one (the caller finds its owner).
+#[inline(always)]
+pub unsafe fn domain_dealloc(p: *mut u8, l: Layout) -> bool {
+    let t = domain_tls();
+    let Some(a) = t.arena.get().as_ref() else {
+        return false;
+    };
+    // an entered arena is reserved (`Arena::create` fails otherwise): its base is not 0
+    let off = (p as usize).wrapping_sub(a.base.load(Ordering::Relaxed));
+    if off >= RESERVE {
+        return false;
+    }
+    a.dealloc_in(t, p, off, l);
+    true
+}
 pub fn init() -> bool {
     DEFAULT.init()
 }

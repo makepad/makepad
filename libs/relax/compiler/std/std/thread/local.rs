@@ -98,7 +98,9 @@ impl<T: 'static> LocalKey<T> {
         if k != 0 {
             return (k - 1) as sys::Key;
         }
-        let new_key = match sys::key_create(key_dtor) {
+        // rustc never destroys a thread-local whose type has no drop glue (std's native TLS
+        // registers no destructor for it): its value stays readable in every other destructor
+        let new_key = match sys::key_create(key_dtor, !core::mem::needs_drop::<T>()) {
             Some(k) => k,
             None => panic!("failed to allocate a thread-local storage key"),
         };

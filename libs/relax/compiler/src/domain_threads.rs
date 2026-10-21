@@ -46,8 +46,11 @@ pub(crate) unsafe fn data(block: u64) -> &'static mut ThreadData {
     &mut *(*slot as *mut ThreadData)
 }
 
-pub extern "C" fn key_create(dtor: usize) -> u32 {
-    crate::domain::tls_key_create(crate::domain::current(), dtor)
+/// `late`: the key's type has no drop glue. As rustc's thread-locals of such types (never
+/// destroyed), its value stays readable through every destructor round; its `dtor` only frees
+/// the slot, after the last round (`finish`).
+pub extern "C" fn key_create(dtor: usize, late: u32) -> u32 {
+    crate::domain::tls_key_create(crate::domain::current(), dtor, late != 0)
 }
 pub extern "C" fn key_delete(key: u32) {
     crate::domain::tls_key_delete(crate::domain::current(), key);
@@ -97,10 +100,8 @@ pub(crate) unsafe fn finish(block: u64) -> Vec<(u64, u64)> {
         return Vec::new();
     }
     let p = *slot as *mut ThreadData;
-    loop {
-        // Complete a round before revisiting keys set by a destructor. LocalKey marks itself
-        // destroyed while it drops; a later destructor must see that marker, not a fresh key.
-        let pending: Vec<(u64, u32)> = (*p)
+    let set = |late: bool| -> Vec<(u64, u32, Option<usize>)> {
+        (*p)
             .values
             .iter()
             .flat_map(|(base, values)| {
@@ -110,11 +111,14 @@ pub(crate) unsafe fn finish(block: u64) -> Vec<(u64, u64)> {
                     .filter(|(_, v)| **v != 0)
                     .map(move |(key, _)| (*base, key as u32))
             })
-            .collect();
-        if pending.is_empty() {
-            break;
-        }
-        for (key_base, key) in pending {
+            .filter_map(|(base, key)| {
+                let d = crate::domain::tls_destructor(base, key);
+                (d.is_some_and(|d| d.1) == late).then_some((base, key, d.map(|d| d.0)))
+            })
+            .collect()
+    };
+    let run = |pending: Vec<(u64, u32, Option<usize>)>| {
+        for (key_base, key, dtor) in pending {
             // End the borrow before JIT runs: a destructor can initialise another TLS key.
             let value = (*p)
                 .values
@@ -125,13 +129,26 @@ pub(crate) unsafe fn finish(block: u64) -> Vec<(u64, u64)> {
             if value == 0 {
                 continue;
             }
-            if let Some(dtor) = crate::domain::tls_destructor(key_base, key) {
+            if let Some(dtor) = dtor {
                 crate::domain::enter(key_base);
                 let f: extern "C" fn(*mut c_void) = std::mem::transmute(dtor);
                 f(value as *mut c_void);
             }
         }
+    };
+    loop {
+        // Complete a round before revisiting keys set by a destructor. LocalKey marks itself
+        // destroyed while it drops; a later destructor must see that marker, not a fresh key.
+        // Late keys (no drop glue) stay set and readable meanwhile.
+        let pending = set(false);
+        if pending.is_empty() {
+            break;
+        }
+        run(pending);
     }
+    // No program code runs after the rounds: the late keys' slots are freed (a late key's
+    // destructor drops no value, so it sets no other key).
+    run(set(true));
     *slot = 0;
     let registrations = std::mem::take(&mut (*p).registrations);
     drop(Box::from_raw(p));

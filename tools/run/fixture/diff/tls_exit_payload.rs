@@ -1,8 +1,7 @@
-// KNOWN FAILING (all tiers): a panic caught inside a thread-local's destructor at thread exit has the
-// payload "explicit panic" under Relax, rustc keeps the message ("tally exit too long"). Relax std keeps the
-// payload in a thread-local (std/panic.rs PAYLOAD) that is already destroyed then, and its LocalKey destroys
-// keys of types without drop glue too (rustc's never are). Found by FIX-TLS 2026-10-21. Move to ../diff/ when
-// fixed.
+// A panic caught inside a thread-local's destructor at thread exit keeps its payload ("tally exit too
+// long"), and a thread-local without drop glue stays readable in other thread-locals' destructors (rustc never
+// destroys those). Relax std once kept the payload in a destroyed thread-local ("explicit panic") and destroyed
+// keys of types without drop glue (FIX-TLS 2026-10-21; fixed by ALLOC: late keys, std/thread/local.rs).
 macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 fn rounds(f: fn()) {
     let ms: u64 = std::env::var("DIFF_SLEEP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -26,6 +25,15 @@ impl Drop for T {
     }
 }
 thread_local! { static K: RefCell<Option<T>> = const { RefCell::new(None) }; }
+thread_local! { static N: std::cell::Cell<u32> = const { std::cell::Cell::new(7) }; }
+struct R;
+impl Drop for R {
+    fn drop(&mut self) {
+        let n = N.try_with(|n| { n.set(n.get() + 1); n.get() });
+        REPORTS.lock().unwrap().push(format!("late {:?}", n.ok()));
+    }
+}
+thread_local! { static L: RefCell<Option<R>> = const { RefCell::new(None) }; }
 
 fn work() {
     REPORTS.lock().unwrap().clear();
@@ -33,6 +41,9 @@ fn work() {
     drop(T("main"));
     std::thread::spawn(|| drop(T("live"))).join().unwrap();
     std::thread::spawn(|| K.with(|k| *k.borrow_mut() = Some(T("exit")))).join().unwrap();
+    // N is set before L (first thread) or first touched in L's destructor at exit (second)
+    std::thread::spawn(|| { N.with(|n| n.set(40)); L.with(|l| *l.borrow_mut() = Some(R)); }).join().unwrap();
+    std::thread::spawn(|| L.with(|l| *l.borrow_mut() = Some(R))).join().unwrap();
     for r in REPORTS.lock().unwrap().iter() { d!("{}", r); }
     std::panic::set_hook(h);
 }

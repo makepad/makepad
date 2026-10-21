@@ -711,8 +711,9 @@ pub(crate) fn compile_phase(id: DomainId, phase: &str) -> Result<(), String> {
 
 // Keys are domain-local records, not OS keys that survive each restart. Domain 0 also owns
 // keys for native callback threads; every ThreadData holds only its own values.
-static TLS_KEYS: Mutex<Vec<(u64, Vec<Option<usize>>)>> = Mutex::new(Vec::new());
-pub(crate) fn tls_key_create(base: u64, dtor: usize) -> u32 {
+/// Per key: its destructor and whether it is late (domain_threads::key_create).
+static TLS_KEYS: Mutex<Vec<(u64, Vec<Option<(usize, bool)>>)>> = Mutex::new(Vec::new());
+pub(crate) fn tls_key_create(base: u64, dtor: usize, late: bool) -> u32 {
     let _kept = crate::zone_alloc::kept();
     let mut keys = TLS_KEYS.lock().unwrap_or_else(|e| e.into_inner());
     let i = match keys.iter().position(|k| k.0 == base) {
@@ -721,7 +722,7 @@ pub(crate) fn tls_key_create(base: u64, dtor: usize) -> u32 {
     };
     let values = &mut keys[i].1;
     let key = values.len() as u32;
-    values.push(Some(dtor));
+    values.push(Some((dtor, late)));
     key
 }
 pub(crate) fn tls_key_delete(base: u64, key: u32) {
@@ -730,7 +731,7 @@ pub(crate) fn tls_key_delete(base: u64, key: u32) {
         if let Some(k) = values.get_mut(key as usize) { *k = None; }
     }
 }
-pub(crate) fn tls_destructor(base: u64, key: u32) -> Option<usize> {
+pub(crate) fn tls_destructor(base: u64, key: u32) -> Option<(usize, bool)> {
     TLS_KEYS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|k| k.0 == base)?.1.get(key as usize).copied().flatten()
 }
 pub(crate) fn forget_tls_keys(base: u64) {
