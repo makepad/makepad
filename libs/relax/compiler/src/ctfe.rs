@@ -40,7 +40,7 @@ struct Ctx<'a> {
 pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64) -> bool {
     let options = &u.prog.session.clone().options;
     let _mem = crate::memstat::tag(crate::memstat::Tag::Ctfe);
-    if off(options) {
+    if off(options) || u.ptr_bytes() != 8 {
         return false;
     }
     let init = match relax_types::const_eval::const_body(&u.prog, d) { Some(e) => e, None => return false };
@@ -80,7 +80,7 @@ pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64
 /// Evaluates the inline const block `bl` of the (instantiated) body `body` to the bytes of its
 /// value of type `t`; None outside the subset (lowering then runs the block).
 pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
-    if off(&u.prog.session.clone().options) {
+    if off(&u.prog.session.clone().options) || u.ptr_bytes() != 8 {
         return None;
     }
     let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
@@ -337,6 +337,8 @@ pub fn zero_undefined(u: &mut Unit, t: TyId, a: u64) {
 }
 
 /// MAKEPAD_RUN_CTFE=0: every initializer is compiled and run (the reference behaviour).
+/// (The evaluator models 8-byte pointer and usize words: a wasm32 program's initializers run as
+/// code, web32.rs, whatever the option says.)
 fn off(options: &crate::options::Options) -> bool {
     options.ctfe == crate::options::Ctfe::Off
 }
@@ -365,7 +367,7 @@ impl<'a> Ctx<'a> {
     fn int_of(&self, t: TyId) -> Option<(usize, bool)> {
         match self.u.tcx.tys.kind(t) {
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(*p);
+                let (b, s) = self.u.tcx.tys.int_info(*p);
                 Some((b as usize, s))
             }
             TyKind::Bool => Some((1, false)),

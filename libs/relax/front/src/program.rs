@@ -661,6 +661,9 @@ pub struct Program {
     pub files: Vec<std::sync::Arc<ParsedFile>>,
     /// the proc-macro world's program: its core/alloc/std files come from the program's load
     /// (SHARED_STD) when that load runs
+    /// The target's pointer width in bytes: 4 for the wasm32 web target, else 8 (a proc-macro
+    /// world runs on this machine: always 8).
+    pub ptr_bytes: u32,
     pub std_from_shared: bool,
     /// the std crates include core::simd / std::simd (relax_portable_simd; `std_simd_wanted`)
     pub std_simd: bool,
@@ -849,6 +852,7 @@ impl Program {
             syms: Interner::default(),
             files: Vec::new(),
             std_from_shared: false,
+            ptr_bytes: sess.options.check_target.web().map_or(8, |w| w.bytes()),
             std_simd: false,
             part_interned: Default::default(),
             pending_macs: Vec::new(),

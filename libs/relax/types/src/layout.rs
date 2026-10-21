@@ -617,8 +617,10 @@ impl Layouts {
 
     fn compute(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId) -> Layout {
         let k = tcx.tys.kind(t).clone();
-        let ptr = Mem::Int(8, false);
-        let nonnull = |off: u32| Some(Niche { off, bytes: 8, start: 1, end: u64::MAX as u128 });
+        // a thin pointer (and usize) is `pb` bytes: 8, or 4 on the wasm32 web target
+        let pb = tcx.tys.ptr_bytes;
+        let ptr = Mem::Int(pb as u8, false);
+        let nonnull = |off: u32| Some(Niche { off, bytes: pb, start: 1, end: if pb == 8 { u64::MAX as u128 } else { u32::MAX as u128 } });
         match k {
             TyKind::Bool => {
                 let mut l = scalar(1, Mem::Int(1, false), Cls::I);
@@ -631,7 +633,7 @@ impl Layouts {
                 l
             }
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(p);
+                let (b, s) = tcx.tys.int_info(p);
                 if b == 16 {
                     // i128/u128: two words (low, high), lowered as word pairs
                     return plain(16, 16, Some(vec![Leaf { off: 0, mem: Mem::Int(8, false), cls: Cls::I }, Leaf { off: 8, mem: Mem::Int(8, s), cls: Cls::I }]));
@@ -643,16 +645,16 @@ impl Layouts {
             TyKind::Ref(_, inner, _) | TyKind::Ptr(_, inner) => {
                 let is_ref = matches!(k, TyKind::Ref(..));
                 let mut l = if self.is_unsized(lcx, tcx, inner) && !matches!(tcx.tys.kind(self.struct_tail_for_codegen(lcx, tcx, inner)), TyKind::Foreign(_)) {
-                    let mut l = plain(16, 8, Some(vec![Leaf { off: 0, mem: ptr, cls: Cls::I }, Leaf { off: 8, mem: ptr, cls: Cls::I }]));
-                    l.fields = vec![0, 8];
+                    let mut l = plain(2 * pb, pb, Some(vec![Leaf { off: 0, mem: ptr, cls: Cls::I }, Leaf { off: pb, mem: ptr, cls: Cls::I }]));
+                    l.fields = vec![0, pb];
                     // A dyn pointer's vtable is non-null even when its data pointer is raw.
                     // Slice metadata is a length and has no invalid values.
                     if matches!(tcx.tys.kind(self.struct_tail_for_codegen(lcx, tcx, inner)), TyKind::Dyn(..)) {
-                        l.niche = nonnull(8);
+                        l.niche = nonnull(pb);
                     }
                     l
                 } else {
-                    scalar(8, ptr, Cls::I)
+                    scalar(pb, ptr, Cls::I)
                 };
                 // references are never null (rustc: the data pointer's valid range starts at 1;
                 // of a fat reference's two scalars the first wins a tie)
@@ -662,7 +664,7 @@ impl Layouts {
                 l
             }
             TyKind::FnPtr(..) => {
-                let mut l = scalar(8, ptr, Cls::I);
+                let mut l = scalar(pb, ptr, Cls::I);
                 l.niche = nonnull(0);
                 l
             }
@@ -709,9 +711,10 @@ impl Layouts {
                 let el = self.of(lcx, tcx, e);
                 let stride = self.rup(lcx, el.size, el.align);
                 let full = (stride as u64).saturating_mul(n);
-                // rustc_abi obj_size_bound: 2^61 bytes on a 64-bit target; a larger value type has no
+                // rustc_abi obj_size_bound: 2^61 bytes on a 64-bit target (2^31 on a 32-bit one); a larger value type has no
                 // layout (E0080 "values of the type `..` are too big for the target architecture")
-                if (stride as u128) * (n as u128) >= 1u128 << 61 {
+                let bound = if tcx.tys.ptr_bytes == 4 { 1u128 << 31 } else { 1u128 << 61 };
+                if (stride as u128) * (n as u128) >= bound {
                     tcx.dcx.report(crate::next_solver::fulfill::ObligationCause { body_id: crate::program::NO_DEF, span: 0 },
                         format!("E0080: values of the type `{}` are too big for the target architecture", crate::typeck::ty_to_string(false, lcx.prog, tcx, t)));
                 }
@@ -748,9 +751,9 @@ impl Layouts {
                     if !adt.is_union && self.live_editable(lcx, tcx, d, &adt, t) {
                         let n_base = (adt.ext_from as usize).min(fts.len());
                         let mut l = self.struct_layout(lcx, tcx, &fts[..n_base], repr, Kind::AlwaysSized);
-                        let ext = self.rup(lcx, l.size, 8);
-                        l.align = l.align.max(8);
-                        l.size = self.rup(lcx, ext + 8, l.align);
+                        let ext = self.rup(lcx, l.size, pb);
+                        l.align = l.align.max(pb);
+                        l.size = self.rup(lcx, ext + pb, l.align);
                         l.ext = Some(ext);
                         l.leaves = None;
                         l.fields.resize(fts.len(), u32::MAX);
@@ -1091,12 +1094,12 @@ impl Layouts {
         ds.sort();
         ds.dedup();
         let discr_signed = match adt.repr_int {
-            Some(p) => crate::types::Types::int_info(p).1,
+            Some(p) => tcx.tys.int_info(p).1,
             None => true,
         };
         let discr_bytes = match adt.repr_int {
-            Some(p) => crate::types::Types::int_info(p).0,
-            None => 8,
+            Some(p) => tcx.tys.int_info(p).0,
+            None => tcx.tys.ptr_bytes,
         };
         let dmax = if discr_bytes >= 16 { u128::MAX } else { (1u128 << (discr_bytes * 8)) - 1 };
         let smax: u128 = if discr_bytes >= 16 { i128::MAX as u128 } else { (1u128 << (discr_bytes * 8 - 1)) - 1 };
@@ -1118,7 +1121,7 @@ impl Layouts {
         // rustc_middle discr_range_of_repr
         let (min_bytes, signed) = match adt.repr_int {
             Some(p) => {
-                let (b, s) = crate::types::Types::int_info(p);
+                let (b, s) = tcx.tys.int_info(p);
                 (b, s)
             }
             None => {

@@ -13,7 +13,7 @@ use crate::mir::{
 };
 use crate::program::Prim;
 use crate::region_scope::ScopeId;
-use crate::types::{TyId, TyKind, Types};
+use crate::types::{TyId, TyKind};
 
 impl Builder<'_> {
     /// as_rvalue.rs:`as_local_rvalue`: an rvalue suitable for use until the end of the current scope
@@ -300,7 +300,7 @@ impl Builder<'_> {
                     TyKind::Int(p) => *p,
                     _ => return Err(self.error(span, UnsupportedReason::UnresolvedFact("shift by a non-integer"))),
                 };
-                let (rhs_size, rhs_signed) = Types::int_info(rhs_prim);
+                let (rhs_size, rhs_signed) = self.root.cx.tcx.tys.int_info(rhs_prim);
                 let (unsigned_rhs, unsigned_ty) = if !rhs_signed {
                     (to_copy(&rhs), rhs_ty)
                 } else {
@@ -432,11 +432,11 @@ impl Builder<'_> {
         }
     }
     fn is_signed(&self, ty: TyId) -> bool {
-        matches!(self.root.cx.tcx.tys.kind(ty), TyKind::Int(p) if Types::int_info(*p).1)
+        matches!(self.root.cx.tcx.tys.kind(ty), TyKind::Int(p) if self.root.cx.tcx.tys.int_info(*p).1)
     }
     fn int_size(&self, ty: TyId, span: Span) -> BuildResult<u32> {
         match self.root.cx.tcx.tys.kind(ty) {
-            TyKind::Int(p) => Ok(Types::int_info(*p).0),
+            TyKind::Int(p) => Ok(self.root.cx.tcx.tys.int_info(*p).0),
             _ => Err(self.error(span, UnsupportedReason::UnresolvedFact("integer type expected"))),
         }
     }
@@ -458,7 +458,7 @@ impl Builder<'_> {
         Ok(if cx.tcx.type_is_copy_modulo_regions(cx.prog, cx.eval, self.owner.owner, ty) { Operand::Copy(place) } else { Operand::Move(place) })
     }
     fn int_literal(&self, span: Span, ty: TyId, bits: u128) -> Operand {
-        let size = match self.root.cx.tcx.tys.kind(ty) { TyKind::Int(p) => Types::int_info(*p).0 as u8, _ => 1 };
+        let size = match self.root.cx.tcx.tys.kind(ty) { TyKind::Int(p) => self.root.cx.tcx.tys.int_info(*p).0 as u8, _ => 1 };
         const_from_scalar(ty, bits, size, span)
     }
     /// A `0` value of the integer type.
@@ -474,7 +474,7 @@ impl Builder<'_> {
     }
     /// The minimum value of the signed integer type.
     fn minval_literal(&self, span: Span, ty: TyId) -> Operand {
-        let size = match self.root.cx.tcx.tys.kind(ty) { TyKind::Int(p) => Types::int_info(*p).0, _ => 4 };
+        let size = match self.root.cx.tcx.tys.kind(ty) { TyKind::Int(p) => self.root.cx.tcx.tys.int_info(*p).0, _ => 4 };
         self.int_literal(span, ty, 1u128 << (size * 8 - 1))
     }
 

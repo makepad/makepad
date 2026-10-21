@@ -9,6 +9,9 @@ mod socket;
 #[cfg(windows)]
 #[path = "socket_windows.rs"]
 mod socket;
+#[cfg(target_family = "wasm")]
+#[path = "socket_web.rs"]
+mod socket;
 pub(crate) mod tcp;
 mod udp;
 

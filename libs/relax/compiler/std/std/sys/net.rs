@@ -1,7 +1,7 @@
 //! Sockets: the constants and sockaddr layouts every OS shares, and the byte-level sockaddr
 //! encoders (macOS has the leading length byte; Linux and Windows a u16 family). The OS half --
-//! foreign declarations, per-OS constants, addrinfo, socket startup -- is net_unix.rs (libc) or
-//! net_windows.rs (Winsock, ws2_32).
+//! foreign declarations, per-OS constants, addrinfo, socket startup -- is net_unix.rs (libc),
+//! net_windows.rs (Winsock, ws2_32) or net_web.rs (names only: the web targets have no sockets).
 
 use core::ffi::c_int;
 
@@ -10,6 +10,9 @@ use core::ffi::c_int;
 mod imp;
 #[cfg(windows)]
 #[path = "net_windows.rs"]
+mod imp;
+#[cfg(target_family = "wasm")]
+#[path = "net_web.rs"]
 mod imp;
 pub use self::imp::*;
 

@@ -63,7 +63,7 @@ pub(crate) fn eval_query_expr(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: 
     let f = &prog.files[file as usize];
     let ex = f.ast.expr(e);
     let (bytes, signed) = match tcx.tys.kind(ty) {
-        TyKind::Int(p) => crate::types::Types::int_info(*p),
+        TyKind::Int(p) => tcx.tys.int_info(*p),
         TyKind::Bool => (1, false),
         TyKind::Char => (4, false),
         _ => return None,
@@ -82,7 +82,7 @@ pub(crate) fn eval_query_expr(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: 
         ExprKind::Lit(LitKind::Int) if integral => {
             let text = std::str::from_utf8(f.bytes(ex.lo, ex.hi)).ok()?;
             if let Some(suffix) = int_suffix(text) {
-                if prim_int(suffix) != Some((bytes, signed)) { return None; }
+                if prim_int(&tcx.tys, suffix) != Some((bytes, signed)) { return None; }
             }
             let value = parse_int_lit(text)?;
             let max = if signed { mask >> 1 } else { mask };
@@ -102,7 +102,7 @@ pub(crate) fn eval_query_expr(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: 
             if matches!(operand.kind, ExprKind::Lit(LitKind::Int)) {
                 let text = std::str::from_utf8(f.bytes(operand.lo, operand.hi)).ok()?;
                 if let Some(suffix) = int_suffix(text) {
-                    if prim_int(suffix) != Some((bytes, signed)) { return None; }
+                    if prim_int(&tcx.tys, suffix) != Some((bytes, signed)) { return None; }
                 }
                 let value = parse_int_lit(text)?;
                 if value > (1u128 << (bits - 1)) { return None; }
@@ -230,9 +230,9 @@ fn wrap_int(v: i128, bytes: u32, signed: bool) -> i128 {
     }
 }
 
-fn prim_int(text: &str) -> Option<(u32, bool)> {
+fn prim_int(tys: &crate::types::Types, text: &str) -> Option<(u32, bool)> {
     let p = crate::program::PRIMS.iter().find(|(n, _)| *n == text)?.1;
-    match crate::types::Types::int_info(p) {
+    match tys.int_info(p) {
         (0, _) => None,
         x => Some(x),
     }

@@ -825,13 +825,14 @@ impl<'a> Lcx<'a> {
     /// value (dangling / null), or a load from the constant at run time; None without `cs`.
     fn const_ptr_val(&mut self, cs: Option<relax_backend::rir::Sym>, off: u32) -> Option<VReg> {
         let at = cs?.plus(off as i64);
-        Some(match crate::syms::read_leaf(self.u, at, Mem::Int(8, false)) {
+        let pm = self.pmem();
+        Some(match crate::syms::read_leaf(self.u, at, pm) {
             relax_backend::passes::RoRead::Ptr(p) => self.sym_val(p),
             relax_backend::passes::RoRead::Bytes(v) if v < 4096 => self.iconst(v as i64),
             _ => {
                 let a = self.sym_val(at);
                 let d = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), d, a, 0));
+                self.emit(Inst::Load(pm, d, a, 0));
                 d
             }
         })
@@ -934,10 +935,18 @@ impl<'a> Lcx<'a> {
         self.trait_methods.entry(d).or_default().insert(args.to_vec(), found.clone());
         found
     }
+    /// size_of::<usize>() of the target (4 on the wasm32 web target).
+    fn pb(&self) -> u32 {
+        self.u.tcx.tys.ptr_bytes
+    }
+    /// A pointer-sized word in memory (pointers, usize, vtable entries).
+    fn pmem(&self) -> Mem {
+        Mem::Int(self.u.tcx.tys.ptr_bytes as u8, false)
+    }
     fn int_ty(&self, t: TyId) -> IntTy {
         match self.u.tcx.tys.kind(t) {
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(*p);
+                let (b, s) = self.u.tcx.tys.int_info(*p);
                 IntTy { bits: (b * 8) as u8, signed: s }
             }
             TyKind::Bool => IntTy { bits: 8, signed: false },
@@ -1067,7 +1076,7 @@ impl<'a> Lcx<'a> {
                 for lf in leaves {
                     let d = self.f.vreg(lf.cls);
                     self.emit(Inst::Load(lf.mem, d, base, off + lf.off as i32));
-                    if nn == Some(lf.off) && matches!(lf.mem, relax_backend::rir::Mem::Int(8, _)) {
+                    if nn == Some(lf.off) && matches!(lf.mem, relax_backend::rir::Mem::Int(n, _) if n as u32 == self.pb()) {
                         self.f.nonnull.push(d);
                     }
                     if let (Some(n), relax_backend::rir::Mem::Int(b, false)) = (rg, lf.mem) {
@@ -1248,7 +1257,8 @@ impl<'a> Lcx<'a> {
             // bit 0: built by code that knows dead slots (removed or retyped fields) and does
             // not set them -- the drop glue then leaves them alone (lower.rs ext_drop_fn)
             let z = self.iconst(has_dead_slots(self.u, t) as i64);
-            self.emit(Inst::Store(Mem::Int(8, false), a, off + e as i32, z));
+            let pm = self.pmem();
+            self.emit(Inst::Store(pm, a, off + e as i32, z));
         }
     }
 
@@ -1441,7 +1451,8 @@ impl<'a> Lcx<'a> {
                     let pa = if packed > 0 { pa.min(packed) } else { pa };
                     let x = crate::layout::round_up(unaligned, pa);
                     let va0 = self.f.vreg(Cls::I);
-                    self.emit(Inst::Load(Mem::Int(8, false), va0, r[1], 16));
+                    let pm = self.pmem();
+                    self.emit(Inst::Load(pm, va0, r[1], (VT_ALIGN * self.pb()) as i32));
                     let va = if packed > 0 {
                         let pn = self.iconst(packed as i64);
                         let c0 = self.f.vreg(Cls::I);
@@ -1596,7 +1607,8 @@ impl<'a> Lcx<'a> {
             for s in self.f.slots.iter_mut() {
                 s.born = false;
             }
-            match coroutine_transform(&mut self.f, &c) {
+            let ptr_bytes = self.pb();
+            match coroutine_transform(&mut self.f, &c, ptr_bytes) {
                 Ok((sz, al, shape)) => {
                     let area = (sz, al);
                     if self.errors.is_empty() {
@@ -1895,7 +1907,8 @@ impl<'a> Lcx<'a> {
                     self.addr_add(env, off)
                 } else {
                     let d = self.f.vreg(Cls::I);
-                    self.emit(Inst::Load(Mem::Int(8, false), d, env, off));
+                    let pm = self.pmem();
+                    self.emit(Inst::Load(pm, d, env, off));
                     d
                 };
                 self.locals[*li as usize] = Some(LocalSt::Slot(a));
@@ -2080,7 +2093,8 @@ impl<'a> Lcx<'a> {
                 self.addr_add(env, off)
             } else {
                 let d = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), d, env, off));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, d, env, off));
                 d
             };
             self.locals[*li as usize] = Some(LocalSt::Slot(a));
@@ -3506,7 +3520,8 @@ impl<'a> Lcx<'a> {
                 let mut sub = prefix.to_vec();
                 sub.push((BOX_STEP, 0));
                 let ptr = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), ptr, addr, 0));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, ptr, addr, 0));
                 self.drop_tree(entries, ptr, inner, &sub);
                 if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
                     let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
@@ -4444,7 +4459,8 @@ impl<'a> Lcx<'a> {
             TyKind::Dyn(..) => {
                 // a `dyn` tail: through the vtable's drop entry (0 when nothing to drop)
                 let fp = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), fp, len, (VT_DROP * 8) as i32));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, fp, len, (VT_DROP * self.pb()) as i32));
                 let yes = self.f.block();
                 let join = self.f.block();
                 self.term(Term::Branch(fp, yes, join));
@@ -4948,14 +4964,17 @@ impl<'a> Lcx<'a> {
             }
             TyKind::Ref(_, inner, _) => {
                 let unsized_ = self.unsized_ty(inner);
-                let cp = unsafe { read_raw(c, Mem::Int(8, false)) };
-                let cps = cs.and_then(|s| match crate::syms::read_leaf(self.u, s, Mem::Int(8, false)) {
+                // pointer-sized words (a wasm32 word holds the window offset: syms::read_ptr)
+                let pb = self.pb() as u64;
+                let pm = self.pmem();
+                let cp = crate::syms::read_ptr(self.u, c);
+                let cps = cs.and_then(|s| match crate::syms::read_leaf(self.u, s, pm) {
                     relax_backend::passes::RoRead::Ptr(p) => Some(p),
                     _ => None,
                 });
                 match self.kind(inner) {
                     TyKind::Str => {
-                        let cl = unsafe { read_raw(c + 8, Mem::Int(8, false)) };
+                        let cl = unsafe { read_raw(c + pb, pm) };
                         let v = self.read_place(place, t);
                         let a = match self.const_ptr_val(cs, 0) {
                             Some(a) => a,
@@ -4966,7 +4985,7 @@ impl<'a> Lcx<'a> {
                         branch(self, r);
                     }
                     TyKind::Slice(el) => {
-                        let cl = unsafe { read_raw(c + 8, Mem::Int(8, false)) };
+                        let cl = unsafe { read_raw(c + pb, pm) };
                         let v = self.read_place(place, t);
                         let v = self.to_leaves(v, t);
                         let n = self.iconst(cl as i64);
@@ -5817,7 +5836,8 @@ impl<'a> Lcx<'a> {
                 }
                 let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return Val::L(p) };
                 let vt = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), vt, p[1], (slot * 8) as i32));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, vt, p[1], (slot * self.pb() as usize) as i32));
                 let _ = target;
                 Val::L(vec![p[0], vt])
             }
@@ -6964,7 +6984,8 @@ impl<'a> Lcx<'a> {
             if let Some(e) = self.layout(bt).ext {
                 let ba = self.place_addr(&bp, bt);
                 let blk = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), blk, ba, e as i32));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, blk, ba, e as i32));
                 let blk = {
                     let m = self.iconst(!1i64);
                     self.ibin(IOp::And, false, blk, m)
@@ -8288,7 +8309,7 @@ impl<'a> Lcx<'a> {
                 let addr = self.place_addr(&place, from);
                 let Some(mut words) = self.load_disc(addr, 0, from) else { return self.unit(); };
                 let repr = self.u.tcx.adts[&d].repr_int.unwrap_or(Prim::Isize);
-                let signed = crate::types::Types::int_info(repr).1;
+                let signed = self.u.tcx.tys.int_info(repr).1;
                 if self.is_wide(to) {
                     if words.len() == 1 {
                         let hi = if signed { { let shift = self.iconst(63); self.ibin(IOp::Shr, true, words[0], shift) } } else { self.iconst(0) };
@@ -8345,9 +8366,10 @@ impl<'a> Lcx<'a> {
                 v.truncate(n);
                 Val::L(v)
             }
-            (TyKind::Int(_), TyKind::Ptr(..)) if crate::web::BASE != 0 && self.int_ty(from).bits == 32 && self.u.prog.session.options.check_target == crate::options::CheckTarget::Web => {
-                // the web target: a 32-bit integer cast to a pointer is a wasm address, the
-                // offset into the linear memory's 4 GB window (web.rs)
+            (TyKind::Int(_), TyKind::Ptr(..)) if crate::web::BASE != 0 && self.int_ty(from).bits == 32 && self.u.prog.session.options.check_target == crate::options::CheckTarget::Web(crate::options::PtrWidth::W64) => {
+                // the wasm64 web target: a 32-bit integer cast to a pointer is a wasm address, the
+                // offset into the linear memory's 4 GB window (web.rs); on wasm32 a pointer is that
+                // offset already
                 let x = if self.int_ty(from).signed {
                     let z = self.f.vreg(Cls::I);
                     self.emit(Inst::IBinI(IOp::And, U64, z, x, 0xffff_ffff));
@@ -8355,6 +8377,12 @@ impl<'a> Lcx<'a> {
                 } else { x };
                 let d = self.f.vreg(Cls::I);
                 self.emit(Inst::IBinI(IOp::Or, U64, d, x, crate::web::BASE as i64));
+                Val::L(vec![d])
+            }
+            (TyKind::Int(_), TyKind::Ptr(..)) if self.pb() == 4 && self.int_ty(from).bits > 32 => {
+                // wasm32: an address is 32 bits; a wider integer truncates (as rustc's inttoptr)
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::Conv(Conv::IntToInt(relax_backend::rir::U32), d, x));
                 Val::L(vec![d])
             }
             (TyKind::FnPtr(..), _) | (TyKind::Int(_), TyKind::Ptr(..)) => Val::L(v),
@@ -9337,7 +9365,8 @@ impl<'a> Lcx<'a> {
                 let receiver = self.to_leaves(vals[0].0.clone(), vals[0].1);
                 assert_eq!(receiver.len(), 2, "virtual receiver metadata");
                 let ptr = self.f.vreg(Cls::I);
-                self.emit(Inst::Load(Mem::Int(8, false), ptr, receiver[1], (index * 8) as i32));
+                let pm = self.pmem();
+                self.emit(Inst::Load(pm, ptr, receiver[1], (index * self.pb() as usize) as i32));
                 vals[0] = (Val::L(vec![receiver[0]]), self.u.tcx.tys.usize_);
                 self.indirect_tracked = self.u.tcx.fn_sig(&self.u.prog, d).is_some_and(|s| s.track_caller);
                 if self.u.tcx.fn_sig(&self.u.prog, d).is_some_and(|s| s.header.abi == crate::types::Abi::RustCall) { self.spread_tuple_argument(&mut vals); }
@@ -9714,10 +9743,10 @@ impl<'a> Lcx<'a> {
                         let it = self.int_ty(g);
                         Mem::Int(it.bits / 8, it.signed)
                     }
-                    _ => Mem::Int(8, false),
+                    _ => self.pmem(),
                 }
             }
-            None => Mem::Int(8, false),
+            None => self.pmem(),
         };
         let rmw = |n: &str| -> Option<RmwOp> {
             Some(match n {
@@ -9836,7 +9865,8 @@ impl<'a> Lcx<'a> {
                     if let TyKind::Dyn(..) = self.kind(g) {
                         // through the vtable's drop entry (0 when the type has no drop)
                         let fp = self.f.vreg(Cls::I);
-                        self.emit(Inst::Load(Mem::Int(8, false), fp, p[1], (VT_DROP * 8) as i32));
+                        let pm = self.pmem();
+                        self.emit(Inst::Load(pm, fp, p[1], (VT_DROP * self.pb()) as i32));
                         let yes = self.f.block();
                         let join = self.f.block();
                         self.term(Term::Branch(fp, yes, join));
@@ -9889,7 +9919,8 @@ impl<'a> Lcx<'a> {
                     TyKind::Dyn(..) => {
                         let d = self.f.vreg(Cls::I);
                         let w = if size { VT_SIZE } else { VT_ALIGN };
-                        self.emit(Inst::Load(Mem::Int(8, false), d, p[1], (w * 8) as i32));
+                        let pm = self.pmem();
+                        self.emit(Inst::Load(pm, d, p[1], (w * self.pb()) as i32));
                         d
                     }
                     TyKind::Slice(e) if size => {
@@ -9960,9 +9991,10 @@ impl<'a> Lcx<'a> {
                                     m as i64
                                 };
                                 let vs = self.f.vreg(Cls::I);
-                                self.emit(Inst::Load(Mem::Int(8, false), vs, p[1], (VT_SIZE * 8) as i32));
+                                let pm = self.pmem();
+                                self.emit(Inst::Load(pm, vs, p[1], (VT_SIZE * self.pb()) as i32));
                                 let va0 = self.f.vreg(Cls::I);
-                                self.emit(Inst::Load(Mem::Int(8, false), va0, p[1], (VT_ALIGN * 8) as i32));
+                                self.emit(Inst::Load(pm, va0, p[1], (VT_ALIGN * self.pb()) as i32));
                                 // `repr(packed(n))`: the tail's alignment is capped at n (rustc:
                                 // packed structs clamp every field's alignment, the dynamic one too)
                                 let packed = match self.kind(g) {
@@ -10045,7 +10077,7 @@ impl<'a> Lcx<'a> {
                 let kind = self.kind(g);
                 let scalar = match kind {
                     TyKind::Int(_) | TyKind::Bool | TyKind::Char => Some((Mem::Int(self.int_ty(g).bits / 8, self.int_ty(g).signed), None)),
-                    TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::Ref(..) if size == 8 => Some((Mem::Int(8, false), None)),
+                    TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::Ref(..) if size == self.pb() => Some((self.pmem(), None)),
                     TyKind::Float(_) if size == 4 || size == 8 => Some((Mem::Int(size as u8, false), Some(size == 8))),
                     _ => None,
                 };
@@ -11367,14 +11399,15 @@ fn location_addr(u: &Unit, path: &str, line: u32, col: u32) -> u64 {
             blob[o..o + b.len()].copy_from_slice(b);
         }
     };
-    put(&mut blob, lay.fields[0], &fa.to_le_bytes());
-    put(&mut blob, lay.fields[0] + 8, &(file_bytes.len() as u64).to_le_bytes());
+    let pb = u.ptr_bytes();
+    put(&mut blob, lay.fields[0], &u.ptr_word(fa));
+    put(&mut blob, lay.fields[0] + pb, &u.ptr_word(file_bytes.len() as u64));
     put(&mut blob, lay.fields[1], &line.to_le_bytes());
     put(&mut blob, lay.fields[2], &col.to_le_bytes());
     // pointer words: the file name's bytes; the rest integers
-    let mut words = vec![None; (blob.len() + 7) / 8];
-    assert!(lay.fields[0] % 8 == 0, "Location's file field is not 8-aligned");
-    words[(lay.fields[0] / 8) as usize] = Some(u.data_sym(fa));
+    let mut words = vec![None; (blob.len() + pb as usize - 1) / pb as usize];
+    assert!(lay.fields[0] % pb == 0, "Location's file field is not pointer-aligned");
+    words[(lay.fields[0] / pb) as usize] = Some(u.data_sym(fa));
     let a = u.data(&blob, lay.align.max(1) as u64, crate::syms::DataKind::Words(words));
     u.syms.set_data_name(a, format!("loc:{}:{}:{}", path, line, col));
     // another thread may have made this location meanwhile (the memo is not held while the
@@ -11702,7 +11735,7 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
             let d = f.vreg(Cls::I);
             let discr = adt.discriminant_for_variant(&u.tcx, &u.prog, v)?;
             push_at(f, b, pos, Inst::Iconst(d, discr.signed_value() as i64));
-            if crate::types::Types::int_info(discr.ty).0 == 16 {
+            if u.tcx.tys.int_info(discr.ty).0 == 16 {
                 let hi = f.vreg(Cls::I);
                 push_at(f, b, pos, Inst::Iconst(hi, (discr.val >> 64) as i64));
                 vec![d, hi]
@@ -11851,7 +11884,10 @@ pub fn decode_tag_const(u: &Unit, raw: i128, l: &Layout, adt: &crate::tcx::AdtT)
     use crate::layout::TagEnc;
     if l.uninhabited { return None; }
     Some(match l.enc {
-        TagEnc::Direct => crate::tcx::Discr { val: raw as u128, ty: adt.repr_int.unwrap_or(Prim::Isize) }.signed_value(),
+        TagEnc::Direct => {
+            let ty = adt.repr_int.unwrap_or(Prim::Isize);
+            crate::tcx::Discr { val: raw as u128, ty, bytes: u.tcx.tys.int_info(ty).0 }.signed_value()
+        }
         TagEnc::Single(v) => adt.discriminant_for_variant(&u.tcx, &u.prog, v)?.signed_value(),
         TagEnc::Niche { untagged, lo, hi, start } => {
             let bytes = match l.tag {
@@ -12405,7 +12441,7 @@ fn rt_divrem128(mode: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> WideRet {
 /// State word (rustc's discriminant): 0 unresumed, 1 returned, 2 poisoned (running: a panic
 /// leaves it), 3 + k suspended at point k. A poll with a null context (the coroutine dropped)
 /// runs the drops of its suspension point.
-fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String> {
+fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u32, u64), String> {
     use relax_backend::regalloc::{term_uses, uses_defs};
     // drop flags whose value is known where they are tested (a value moved out before a
     // suspension point: rustc's maybe-initialized analysis) -- the dead drop would keep the
@@ -12532,9 +12568,9 @@ fn coroutine_transform(f: &mut Func, c: &Coro) -> Result<(u32, u32, u64), String
                             changed = true;
                         }
                     }
-                    // a narrower value is never an address
-                    Inst::Load(m, ..) | Inst::Store(m, ..) | Inst::AtomicLoad(m, ..) | Inst::AtomicStore(m, ..) if *m != Mem::Int(8, false) && *m != Mem::Int(8, true) => {}
-                    Inst::IBin(_, it, ..) | Inst::IBinI(_, it, ..) if it.bits < 64 => {}
+                    // a value narrower than a pointer is never an address (4 bytes on wasm32)
+                    Inst::Load(m, ..) | Inst::Store(m, ..) | Inst::AtomicLoad(m, ..) | Inst::AtomicStore(m, ..) if !matches!(m, Mem::Int(n, _) if *n as u32 >= ptr_bytes) => {}
+                    Inst::IBin(_, it, ..) | Inst::IBinI(_, it, ..) if (it.bits as u32) < ptr_bytes * 8 => {}
                     Inst::ICmp(..) | Inst::ICmpI(..) | Inst::FCmp(..) | Inst::FBin(..) | Inst::FUnary(..) => {}
                     Inst::Load(_, d, base, _) | Inst::VLoad(d, base, _) | Inst::AtomicLoad(_, _, d, base) => {
                         let r = read_through(&pts, &content, &uset, *base);

@@ -656,7 +656,13 @@ fn tls_dtor(p: *mut u8) {
     os::tls::set(tls_key(), p);
     let registrations = unsafe { crate::domain_threads::finish(p as u64) };
     os::tls::set(tls_key(), std::ptr::null_mut());
-    os::mem::free(p as u64, TLS_CAP);
+    if crate::web32::on() {
+        // its shadow stack (web32.rs) goes back with it
+        crate::web32::thread_exit(p as u64);
+        crate::web32::free(p as u64, TLS_CAP);
+    } else {
+        os::mem::free(p as u64, TLS_CAP);
+    }
     for (base, token) in registrations { crate::domain::thread_finished(base, token); }
 }
 
@@ -723,7 +729,8 @@ fn rt_tls_block() -> u64 {
     if !b.is_null() {
         return b as u64;
     }
-    let b = os::mem::alloc_rw(TLS_CAP);
+    // the wasm32 program's thread-local blocks are in its window (`&THREAD_LOCAL` is an offset)
+    let b = if crate::web32::on() { crate::web32::alloc(TLS_CAP) } else { os::mem::alloc_rw(TLS_CAP) };
     // a thread nothing assigned a domain to (one native code started, or the first use of a
     // thread JIT code started before its start put it in its parent's domain): the default
     unsafe { *(b as *mut u64) = crate::domain::default_base() };
@@ -1353,7 +1360,7 @@ fn spec_pad(body: String, spec: u64, numeric: bool) -> String {
 }
 
 rt_fn! {
-fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
+pub(crate) fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
     let s = unsafe { std::slice::from_raw_parts(p, len as usize) };
     let s = String::from_utf8_lossy(s).into_owned();
     let ty = ((spec >> 40) & 0xff) as u8;
@@ -1499,7 +1506,7 @@ pub fn tls_block() -> u64 {
 }
 
 rt_fn! {
-fn rt_fmt_pop() -> StrRet {
+pub(crate) fn rt_fmt_pop() -> StrRet {
     let s = FMT.with(|f| {
         let mut v = f.borrow_mut();
         let s = v.pop().unwrap_or_default();
@@ -1529,7 +1536,7 @@ fn rt_fmt_print(stream: u64) {
 }
 
 rt_fn! {
-fn rt_str_eq(p1: *const u8, l1: u64, p2: *const u8, l2: u64) -> u64 {
+pub(crate) fn rt_str_eq(p1: *const u8, l1: u64, p2: *const u8, l2: u64) -> u64 {
     if l1 != l2 {
         return 0;
     }
@@ -1740,7 +1747,7 @@ fn rt_panic_bounds(idx: u64, len: u64, site: u64, _a3: u64, _a4: u64, _a5: u64, 
 
 rt_fn! {
 #[allow(clippy::too_many_arguments)]
-fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len: u64, line: u64, col: u64, regs: *const u64, _a7: u64) {
+pub(crate) fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len: u64, line: u64, col: u64, regs: *const u64, _a7: u64) {
     let m = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(msg, len as usize)).into_owned() };
     let f = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(file, file_len as usize)).into_owned() };
     PANIC_LOC.with(|l| *l.borrow_mut() = format!("{}:{}:{}", f, line as u32, col as u32));
@@ -1940,8 +1947,8 @@ pub fn set_program_args(args: Vec<Vec<u8>>) {
 
 #[repr(C)]
 pub struct ArgsRet {
-    argc: u64,
-    argv: u64,
+    pub(crate) argc: u64,
+    pub(crate) argv: u64,
 }
 
 rt_fn! {
@@ -2001,7 +2008,7 @@ fn fatal_compile_error(p: &PanicInfo, report: &str) {
 }
 
 rt_fn! {
-fn rt_thread_run(entry: u64, arg: u64) -> u64 {
+pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
     ensure_altstack();
     let u = unsafe { UNIT };
     // runs on the calling thread, in the domain it is in
@@ -2023,7 +2030,7 @@ rt_fn! {
 /// core::intrinsics_rt::catch_panic: `f(data)` under a recovery point (std::panic::
 /// catch_unwind, std::thread's start routine). The panic message itself was printed by
 /// std's hook; the report adds where it happened.
-fn rt_catch_panic(f: u64, data: u64) -> u64 {
+pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
     ensure_altstack();
     let u = unsafe { UNIT };
     // a recovery point inside running code: the domain of that code, not the unit's own
@@ -2439,11 +2446,17 @@ impl Unit {
                 });
             }
         }
-        let exec_size: u64 = 768 << 20;
-        let data_size: u64 = UNIT_DATA_SIZE;
+        // the wasm32 web target's program: the unit lives in the linear memory's window (web32.rs)
+        let w32 = prog.ptr_bytes == 4;
+        let exec_size: u64 = if w32 { crate::web32::UNIT_CODE } else { 768 << 20 };
+        let data_size: u64 = if w32 { crate::web32::UNIT_DATA } else { UNIT_DATA_SIZE };
         let rw_size: u64 = UNIT_RW_SIZE;
         let syms_size = (crate::syms::SYM_CAP * 8) as u64;
-        let exec_base = os::mem::reserve(exec_size as usize, (data_size + rw_size + syms_size) as usize);
+        let exec_base = if w32 {
+            crate::web32::reserve_unit(exec_size as usize, (data_size + rw_size + syms_size) as usize)
+        } else {
+            os::mem::reserve(exec_size as usize, (data_size + rw_size + syms_size) as usize)
+        };
         let misc = exec_base;
         let data_base = exec_base + exec_size;
         let rw_base = data_base + data_size;
@@ -2623,6 +2636,19 @@ impl Unit {
             let ld = x64::land();
             u.rt.land = u.emit_code(&ld);
         }
+        if w32 {
+            // the wasm32 program's runtime entries take and return offsets (web32.rs)
+            u.rt.fmt_str = crate::web32::w32_fmt_str as *const () as usize as u64;
+            u.rt.str_eq = crate::web32::w32_str_eq as *const () as usize as u64;
+            u.rt.thread_run = crate::web32::w32_thread_run as *const () as usize as u64;
+            u.rt.catch_panic = crate::web32::w32_catch_panic as *const () as usize as u64;
+            u.rt.args = crate::web32::w32_args as *const () as usize as u64;
+            u.rt.memcpy = crate::web32::w32_memcpy as *const () as usize as u64;
+            u.rt.memmove = crate::web32::w32_memmove as *const () as usize as u64;
+            u.rt.memset = crate::web32::w32_memset as *const () as usize as u64;
+            u.rt.fmt_pop = crate::web32::w32_fmt_pop as *const () as usize as u64;
+            u.rt.panic_impl = u.emit_code(&panic_tramp(crate::web32::w32_panic_impl as *const () as usize as u64));
+        }
         u.env.resume = u.rt.resume;
         if os::fault::NEEDS_HANG_TRAMP {
             HANG_TRAMP.store(u.emit_code(&relax_backend::x64::hang_tramp(rt_hang as *const () as usize as u64)), Ordering::Relaxed);
@@ -2655,6 +2681,14 @@ impl Unit {
             rethrow: u.syms.intern(crate::syms::SymKind::Rt("rethrow"), u.rt.rethrow),
         };
         relax_codegen::opt::set_mem_fns(u.rs.memcpy, u.rs.memmove);
+        if w32 {
+            // the shadow stacks' thread-local words, and the code transform (relax_codegen::web32)
+            let off = u.tls_alloc(16, 8);
+            crate::web32::set_ss_off(off);
+            let ss = u.syms.intern(crate::syms::SymKind::Rt("w32_ss"), off as u64);
+            let grow = u.syms.intern(crate::syms::SymKind::Rt("w32_stack"), crate::web32::rt_w32_stack as *const () as usize as u64);
+            relax_codegen::web32::configure(relax_codegen::web32::Cfg { syms: u.syms.vals, base: crate::web32::BASE, ss, grow });
+        }
         // runtime symbols lowering interns on first use: a cached entry may name them before any
         // function of this run was lowered (the cache links them by name)
         let _ = u.syms.intern(crate::syms::SymKind::Rt("divrem128"), crate::lower::divrem128_addr());
@@ -3456,6 +3490,17 @@ impl Unit {
         None
     }
 
+    /// size_of::<usize>() of the program's target (4 on wasm32).
+    pub fn ptr_bytes(&self) -> u32 {
+        self.tcx.tys.ptr_bytes
+    }
+
+    /// A pointer or usize word as the program stores it: `ptr_bytes` little-endian bytes (an
+    /// address in the wasm32 window as its offset, its low 32 bits).
+    pub fn ptr_word(&self, v: u64) -> Vec<u8> {
+        if self.ptr_bytes() == 4 { (v as u32).to_le_bytes().to_vec() } else { v.to_le_bytes().to_vec() }
+    }
+
     /// vtable of `src` as `dy` (built once): [drop, size, align, methods...]
     pub fn vtable(&self, src: TyId, dy: TyId) -> Result<u64, String> {
         let src = self.tcx.tys.erase_regions(src);
@@ -3518,11 +3563,12 @@ impl Unit {
                 words.push(address); wsyms.push(Some(self.data_sym(address)));
             }
         }
-        let mut bytes = Vec::with_capacity(words.len() * 8);
+        let pb = self.ptr_bytes();
+        let mut bytes = Vec::with_capacity(words.len() * pb as usize);
         for w in &words {
-            bytes.extend_from_slice(&w.to_le_bytes());
+            bytes.extend_from_slice(&self.ptr_word(*w));
         }
-        let a = self.data(&bytes, 8, crate::syms::DataKind::Words(wsyms));
+        let a = self.data(&bytes, pb as u64, crate::syms::DataKind::Words(wsyms));
         self.syms.set_data_name(a, format!("vtable:{}:{}", crate::syms::stable_ty(self, src), crate::syms::stable_ty(self, dy)));
         // a racing builder of the same vtable: everyone uses the first (one symbol per vtable)
         let a = self.vtables.insert_first((src, dy), a);
@@ -3815,7 +3861,11 @@ impl Unit {
             }
             let count = relax_backend::rir::SlotTable::seg_slots(seg);
             let code = count * (THUNK_SIZE + STUB_SIZE);
-            let base = os::mem::reserve(code, count * (8 + TIER_REC));
+            let base = if self.prog.ptr_bytes == 4 {
+                crate::web32::reserve_slots(code, count * (8 + TIER_REC))
+            } else {
+                os::mem::reserve(code, count * (8 + TIER_REC))
+            };
             let thunk = base;
             let stub = thunk + (count * THUNK_SIZE) as u64;
             let table = base + code as u64;
@@ -4128,6 +4178,14 @@ impl Unit {
     /// on a miss).
     pub fn foreign_addr(&self, d: DefId) -> Option<u64> {
         let link = self.link_name(d);
+        // the wasm32 web target imports only what web32.rs gives in the offset ABI; anything
+        // else is missing there, as in a browser
+        if self.prog.ptr_bytes == 4 {
+            if let Some(a) = crate::web32::symbol(link.as_bytes()) {
+                return Some(a as u64);
+            }
+            return (self.prog.def(d).kind == DefKind::ForeignFn).then(|| self.missing_foreign_stub(d));
+        }
         // dlsym / GetProcAddress answer the symbols the loader provides to programs (loader_symbol) first
         if let Some(a) = lookup_interposer(&link) {
             return Some(a);
@@ -8821,7 +8879,7 @@ unsafe fn build_rir_inner_body(up: *mut Unit, id: u32) -> Result<relax_backend::
                 let value = v.try_to_value(&u.tcx.tys).ok_or("intrinsic const argument did not evaluate")?;
                 let scalar = value.valtree.try_to_leaf().ok_or("intrinsic const argument is not scalar")?;
                 let (size, signed) = match u.tcx.tys.kind(value.ty) {
-                    TyKind::Int(p) => crate::types::Types::int_info(*p),
+                    TyKind::Int(p) => u.tcx.tys.int_info(*p),
                     TyKind::Bool => (1, false),
                     TyKind::Char => (4, false),
                     _ => return Err("intrinsic const argument has a non-scalar type".into()),

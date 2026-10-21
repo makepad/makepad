@@ -15,7 +15,22 @@ pub enum Borrowck { Off, Moves, Full }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowckAll { Default, Nongeneric, Std, All }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web }
+pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web(PtrWidth) }
+/// The web target's pointer width, a parameter of the target (`wasm32-unknown-unknown` /
+/// `wasm64-unknown-unknown`): usize, isize and pointers are 4 or 8 bytes, every layout is rustc's
+/// for that triple, and the trace host runs the program in that mode (32: pointers are offsets into
+/// the linear memory's window; 64: native pointers inside it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtrWidth { W32, W64 }
+impl PtrWidth {
+    /// size_of::<usize>() (and of a thin pointer)
+    pub fn bytes(self) -> u32 {
+        match self {
+            PtrWidth::W32 => 4,
+            PtrWidth::W64 => 8,
+        }
+    }
+}
 impl CheckTarget {
     /// The targets Relax runs on (and checks for), by triple: `MAKEPAD_RUN_CHECK_TARGET` and `makepad host-gen`.
     pub const TRIPLES: [(&'static str, CheckTarget); 4] = [
@@ -24,14 +39,25 @@ impl CheckTarget {
         ("x86_64-pc-windows-gnu", CheckTarget::WindowsX64),
         ("aarch64-linux-android", CheckTarget::AndroidArm64),
     ];
-    /// The web target (`wasm32-unknown-unknown`): the program's crates are read as a web build
-    /// reads them (cfg(target_arch = "wasm32"), the web platform backend) and run by this
-    /// machine's JIT; std stays the machine's (the trace host, `makepad-web-trace`). Not a
-    /// host-gen target.
-    pub const WEB_TRIPLE: &'static str = "wasm32-unknown-unknown";
+    /// The web targets, by pointer width: the program's crates are read as a web build reads
+    /// them (cfg(target_family = "wasm"), the web platform backend), every layout is rustc's for
+    /// the triple, and this machine's JIT runs them in the trace host (`makepad-web-trace`). Not
+    /// host-gen targets.
+    pub const WEB_TRIPLES: [(&'static str, PtrWidth); 2] = [("wasm32-unknown-unknown", PtrWidth::W32), ("wasm64-unknown-unknown", PtrWidth::W64)];
+    /// The web target's pointer width, None for the native targets.
+    pub fn web(self) -> Option<PtrWidth> {
+        match self {
+            CheckTarget::Web(w) => Some(w),
+            _ => None,
+        }
+    }
+    /// The triple of a web target.
+    pub fn web_triple(w: PtrWidth) -> &'static str {
+        Self::WEB_TRIPLES.iter().find(|(_, x)| *x == w).unwrap().0
+    }
     pub fn from_triple(triple: &str) -> Option<CheckTarget> {
-        if triple == Self::WEB_TRIPLE {
-            return Some(CheckTarget::Web);
+        if let Some((_, w)) = Self::WEB_TRIPLES.iter().find(|(t, _)| *t == triple) {
+            return Some(CheckTarget::Web(*w));
         }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
@@ -746,7 +772,15 @@ impl Options {
         h.str("borrowck_all");
         h.u8(*borrowck_all as u8);
         h.str("check_target");
-        h.u8(*check_target as u8);
+        h.u8(match *check_target {
+            CheckTarget::Host => 0,
+            CheckTarget::MacosArm64 => 1,
+            CheckTarget::LinuxX64 => 2,
+            CheckTarget::WindowsX64 => 3,
+            CheckTarget::AndroidArm64 => 4,
+            CheckTarget::Web(PtrWidth::W32) => 5,
+            CheckTarget::Web(PtrWidth::W64) => 6,
+        });
         h.str("ctfe");
         h.u8(*ctfe as u8);
         h.str("const_fuel");

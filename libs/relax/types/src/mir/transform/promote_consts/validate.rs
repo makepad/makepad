@@ -5,7 +5,7 @@ use super::super::qualifs::{in_rvalue, last_projection, operand_ty, place_prefix
 use super::{is_thread_local_static, stmt_at, Candidate, StmtOrTerm, TempState};
 use crate::mir::*;
 use crate::program::DefKind;
-use crate::types::{TyKind, Types};
+use crate::types::TyKind;
 
 struct Unpromotable;
 
@@ -277,7 +277,7 @@ impl Validator<'_> {
                 match op {
                     BinOp::Div | BinOp::Rem => {
                         if let TyKind::Int(prim) = *ccx.tcx.tys.kind(lhs_ty) {
-                            let (bytes, signed) = Types::int_info(prim);
+                            let (bytes, signed) = ccx.tcx.tys.int_info(prim);
                             let bits = bytes * 8;
                             let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
                             // Integer division: the RHS must be a non-zero const.

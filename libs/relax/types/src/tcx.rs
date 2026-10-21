@@ -785,6 +785,7 @@ impl Tcx {
     /// Collects impls and ADTs; registers functions and constants for their declaration
     /// queries. Coherence is not checked (check_coherence / report_coherence).
     pub fn collect_declarations(&mut self, prog: &Program) {
+        self.tys.ptr_bytes = prog.ptr_bytes;
         self.declarations = Default::default();
         self.queries.register_files(prog.files.len());
         self.queries.register_crates(prog.crates.len());
@@ -2399,11 +2400,11 @@ impl Tcx {
         if let (Some(literal), TyKind::Int(prim)) = (literal, self.tys.kind(expected_ty)) {
             let le = pf.ast.expr(literal);
             let text = std::str::from_utf8(pf.bytes(le.lo, le.hi)).unwrap_or("");
-            let (bytes, signed) = crate::types::Types::int_info(*prim);
+            let (bytes, signed) = self.tys.int_info(*prim);
             let matches = match crate::const_fold::int_suffix(text) {
                 None => signed || !neg,
                 Some(suffix) => crate::program::PRIMS.iter().find(|(n, _)| *n == suffix)
-                    .is_some_and(|(_, p)| crate::types::Types::int_info(*p) == (bytes, signed) && (signed || !neg)),
+                    .is_some_and(|(_, p)| self.tys.int_info(*p) == (bytes, signed) && (signed || !neg)),
             };
             if let (true, Some(value)) = (matches, crate::const_fold::parse_int_lit(text)) {
                 let value = if neg { value.wrapping_neg() } else { value };

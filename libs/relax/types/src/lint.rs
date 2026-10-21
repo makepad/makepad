@@ -418,7 +418,7 @@ pub fn check_literals(prog: &Program, tcx: &crate::tcx::Tcx, body: &crate::typec
         let neg = negated.contains(&e.0);
         match (kind, tcx.tys.kind(t)) {
             (LitKind::Int, TyKind::Int(p)) => {
-                let (bytes, signed) = crate::types::Types::int_info(*p);
+                let (bytes, signed) = tcx.tys.int_info(*p);
                 let Some(v) = crate::const_fold::parse_int_lit(text) else { continue };
                 let bits = bytes * 8;
                 let (max, min_abs) = if signed { ((1u128 << (bits - 1)) - 1, 1u128 << (bits - 1)) } else { (if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 }, 0) };

@@ -54,9 +54,10 @@ pub mod reload;
 pub mod modules;
 pub mod sandbox;
 pub mod domain;
-mod domain_threads;
+pub(crate) mod domain_threads;
 pub mod jit;
 pub mod web;
+pub mod web32;
 pub mod coverage;
 pub mod owner;
 pub mod postframe;
@@ -230,7 +231,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         crate::options::CheckTarget::MacosArm64 => "aarch64-apple-darwin",
         crate::options::CheckTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
         crate::options::CheckTarget::AndroidArm64 => "aarch64-linux-android",
-        crate::options::CheckTarget::Web => crate::options::CheckTarget::WEB_TRIPLE,
+        crate::options::CheckTarget::Web(w) => crate::options::CheckTarget::web_triple(w),
         _ if cfg!(target_os = "android") => "aarch64-linux-android",
         _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => "aarch64-apple-darwin",
         _ if cfg!(windows) => "x86_64-pc-windows-gnu",
@@ -654,13 +655,16 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<
 /// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
 /// core::simd.
 pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
-    // the web target runs on this machine's std (cfg.rs `web`)
-    let web = sess.options.check_target == crate::options::CheckTarget::Web;
-    let mut c = if web { cfg::CfgSet::machine(sess, &[]) } else { cfg::CfgSet::host(sess, &[]) };
-    if web {
-        // core::arch::wasm32 (std/core/arch/wasm32.rs)
-        c.set.push("relax_web".to_string());
-    }
+    // a web target's std is read as rustc's std for the triple (cfg.rs `web`), with Relax std's
+    // web layer (`relax_web`: core::arch::wasm32, std/sys/web.rs)
+    let mut c = match sess.options.check_target {
+        crate::options::CheckTarget::Web(w) => {
+            let mut c = cfg::CfgSet::web(sess, w, &[]);
+            c.set.push("relax_web".to_string());
+            c
+        }
+        _ => cfg::CfgSet::host(sess, &[]),
+    };
     if simd {
         c.set.push("relax_portable_simd".to_string());
     }

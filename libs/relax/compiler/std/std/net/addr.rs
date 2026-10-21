@@ -306,7 +306,14 @@ fn host_port(host: &str, port: u16) -> io::Result<alloc::vec::IntoIter<SocketAdd
     lookup(host, port)
 }
 
+/// Host names cannot be resolved (rustc's sys/net/connection/unsupported.rs `lookup_host`).
+#[cfg(target_family = "wasm")]
+fn lookup(_host: &str, _port: u16) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
+    Err(io::Error::UNSUPPORTED_PLATFORM)
+}
+
 /// getaddrinfo(host) with SOCK_STREAM hints, ports set afterwards (as real std does).
+#[cfg(not(target_family = "wasm"))]
 fn lookup(host: &str, port: u16) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
     let c_host = match CString::new(host) {
         Ok(c) => c,

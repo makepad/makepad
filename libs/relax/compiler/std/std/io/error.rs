@@ -182,6 +182,12 @@ pub fn decode_error_kind(code: i32) -> ErrorKind {
     crate::sys::os::decode_error_kind(code)
 }
 
+/// rustc's sys/io/error/generic.rs (the web targets have no OS errors).
+#[cfg(target_family = "wasm")]
+pub fn decode_error_kind(_code: i32) -> ErrorKind {
+    ErrorKind::Uncategorized
+}
+
 /// errno -> ErrorKind (real std's sys::io::error::unix::decode_error_kind).
 #[cfg(unix)]
 pub fn decode_error_kind(errno: i32) -> ErrorKind {
@@ -274,6 +280,7 @@ impl Error {
     pub const READ_EXACT_EOF: Error = const_error!(ErrorKind::UnexpectedEof, "failed to fill whole buffer");
     pub const WRITE_ALL_EOF: Error = const_error!(ErrorKind::WriteZero, "failed to write whole buffer");
     pub const ZERO_TIMEOUT: Error = const_error!(ErrorKind::InvalidInput, "cannot set a 0 duration timeout");
+    pub(crate) const UNSUPPORTED_PLATFORM: Error = const_error!(ErrorKind::Unsupported, "operation not supported on this platform");
     pub const NO_ADDRESSES: Error = const_error!(ErrorKind::InvalidInput, "could not resolve to any addresses");
 
     /// Stores the aligned descriptor directly so static errors remain const and allocation-free.
@@ -361,7 +368,10 @@ impl Error {
 
     pub(crate) fn is_interrupted(&self) -> bool {
         match self.repr.data() {
+            #[cfg(not(target_family = "wasm"))]
             ErrorData::Os(code) => code == sys::os::EINTR,
+            #[cfg(target_family = "wasm")]
+            ErrorData::Os(_) => false,
             ErrorData::Simple(kind) => kind == ErrorKind::Interrupted,
             ErrorData::SimpleMessage(message) => message.kind == ErrorKind::Interrupted,
             ErrorData::Custom(c) => c.kind == ErrorKind::Interrupted,
