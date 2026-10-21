@@ -38,6 +38,7 @@ pub enum Class {
     Background = 5,
 }
 pub const CLASSES: usize = 6;
+const CLASS_OF: [Class; CLASSES] = [Class::Job, Class::Finish, Class::Main, Class::App, Class::FinishBackground, Class::Background];
 pub const CLASS_NAMES: [&str; CLASSES] = ["job", "finish", "main", "app", "finish-background", "background"];
 /// makepad inspect's timeline span names of the owner's service, by class
 const SERVE_NAMES: [&str; CLASSES] = ["serve job", "serve finish", "serve main", "serve app", "serve finish background", "serve background"];
@@ -46,6 +47,16 @@ impl Class {
     /// a back end's result: never refused, served inside pumps
     pub fn is_finish(self) -> bool {
         matches!(self, Class::Finish | Class::FinishBackground)
+    }
+
+    /// The requester stays a running compile job while it waits (it holds front guards, queries,
+    /// or slots in flight that only its finish releases). An allocator swap or fork waits for
+    /// every running job, so these are the classes the owner serves for any thread while the jobs
+    /// are paused: one predicate for both sides, so a swap never waits for a job whose request
+    /// the pause holds back (an O2/speculation/O3 finish queued as FinishBackground during a
+    /// CEF-load swap hung Stage: "jobs active 1").
+    pub fn keeps_job(self) -> bool {
+        self == Class::Job || self.is_finish()
     }
 }
 
@@ -265,6 +276,19 @@ pub fn queued_note() -> String {
     )
 }
 
+/// The queued requests as `class:thread` (diagnostics: an allocator swap's long wait names them).
+pub fn queued_detail() -> String {
+    let q = Q.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    for (c, lane) in q.lanes.iter().enumerate() {
+        for r in lane {
+            let from = unsafe { (*(*r as *const Req)).from };
+            out.push(format!("{}:{}", CLASS_NAMES[c], crate::os::thread::name(from)));
+        }
+    }
+    out.join(" ")
+}
+
 /// What the main thread's longest post-present wait was behind (diagnostics).
 pub fn main_wait_behind() -> String {
     match MAIN_WAIT_BEHIND.load(Ordering::Relaxed) {
@@ -355,7 +379,7 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
     // a thread waiting for its work on the owner is not a compile job meanwhile (an allocator
     // swap or fork waits for the jobs running; its work runs on the owner, which serves the
     // pauser): pure jobs (Job class) are, they hold front guards and queries
-    let _idle = (class != Class::Job && !class.is_finish()).then(crate::jit::JobIdle::enter);
+    let _idle = (!class.keeps_job()).then(crate::jit::JobIdle::enter);
     let req = Req {
         run,
         class,
@@ -589,9 +613,9 @@ fn background_held() -> bool {
 fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
     // the process ends (only the exit set's requests), or the program swaps its allocator (only
     // the pauser's): other threads' foreground and background requests wait
-    let only = match EXIT_TID.load(Ordering::Acquire) {
-        0 => crate::jit::paused_for(),
-        e => e,
+    let (only, pause) = match EXIT_TID.load(Ordering::Acquire) {
+        0 => (crate::jit::paused_for(), true),
+        e => (e, false),
     };
     let helper = EXIT_HELPER.load(Ordering::Acquire);
     for c in 0..CLASSES {
@@ -609,7 +633,9 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
             BG_LAST_START.store(crate::jit::wall_ns(), Ordering::Relaxed);
         }
         let lane = &mut q.lanes[c];
-        let at = if only != 0 && c >= Class::Main as usize {
+        // a pause serves every request that keeps its job running (Class::keeps_job)
+        let held_back = c >= Class::Main as usize && !(pause && CLASS_OF[c].keeps_job());
+        let at = if only != 0 && held_back {
             lane.iter().position(|r| {
                 let from = unsafe { (*(*r as *const Req)).from };
                 from == only || from == helper && helper != 0

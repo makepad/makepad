@@ -202,6 +202,41 @@ fn owner_front_write_serves_waiting_readers() {
 }
 
 #[test]
+fn allocator_swap_serves_background_finish() {
+    isolated_test!(allocator_swap_serves_background_finish);
+    // A background build's job (O2, speculation, O3) that reaches its finish while an allocator
+    // swap pauses the jobs: the finish keeps the job running (Class::keeps_job), so the owner
+    // serves it for the job's thread and the swap's wait ends. Held back, the swap waited forever.
+    crate::owner::call(crate::owner::Class::App, || {});
+    let (began_tx, began_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let job = std::thread::spawn(move || {
+        let _job = compile_job();
+        began_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+        crate::owner::call(crate::owner::Class::FinishBackground, || {});
+        for class in [crate::owner::Class::Finish, crate::owner::Class::Job] {
+            crate::owner::call(class, || {});
+        }
+    });
+    began_rx.recv().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let pauser = std::thread::spawn(move || {
+        pause_compile_jobs(false);
+        done_tx.send(()).unwrap();
+        resume_compile_jobs(false);
+    });
+    while !BG_PAUSE.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    go_tx.send(()).unwrap();
+    assert!(done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok(),
+        "the allocator swap waits for a job whose finish the pause holds back");
+    pauser.join().unwrap();
+    job.join().unwrap();
+}
+
+#[test]
 fn hot_o3_cache_roundtrip() {
     isolated_test!(hot_o3_cache_roundtrip);
     // Tiering is process-global: the second unit is a fresh launch, sharing only disk cache.

@@ -12860,8 +12860,8 @@ fn pause_compile_jobs(trace: bool) {
     while BG_ACTIVE.load(Ordering::SeqCst) > mine || owner::busy_for_other(me()) {
         if t0.elapsed().as_millis() >= next_log {
             next_log += 5000;
-            eprintln!("makepad: the allocator swap waits for compile jobs ({:.0} s): jobs active {}, waiting for the owner {}, owner busy for another thread {}",
-                t0.elapsed().as_secs_f64(), BG_ACTIVE.load(Ordering::SeqCst), BG_IDLE.load(Ordering::SeqCst), owner::busy_for_other(me()));
+            eprintln!("makepad: the allocator swap waits for compile jobs ({:.0} s): jobs active {}, waiting for the owner {}, owner busy for another thread {}; queued: {}",
+                t0.elapsed().as_secs_f64(), BG_ACTIVE.load(Ordering::SeqCst), BG_IDLE.load(Ordering::SeqCst), owner::busy_for_other(me()), owner::queued_detail());
         }
         std::thread::sleep(std::time::Duration::from_micros(200));
     }
@@ -13898,12 +13898,18 @@ fn ahead_helper(f: std::sync::Arc<FrontShared>) {
                 let burst_over = !startup_phase() && FIRST_PRESENT.load(Ordering::Acquire) && q.is_empty() && !ahead_burst();
                 if !f.alive.load(Ordering::SeqCst) || !ahead_phase() || burst_over {
                     if burst_over {
-                        crate::postframe::ahead_over();
                         let keys = std::mem::take(&mut *f.ahead_post.lock().unwrap_or_else(|e| e.into_inner()));
-                        let unused: Vec<_> = keys.iter().filter_map(|k| f.ahead.remove(k)).collect();
+                        let unused: Vec<_> = keys.iter().filter_map(|k| f.ahead.remove(k).map(|b| (k.0, b))).collect();
                         AHEAD_DROPPED.fetch_add(unused.len() as u64, Ordering::Relaxed);
+                        // (its line after the count: it reports the drops)
+                        crate::postframe::ahead_over();
                         drop(keys);
                         drop(q);
+                        if ahead_trace() {
+                            let _r = front_read("ahead_trace");
+                            let prog = unsafe { &*f.prog.load(Ordering::Relaxed) };
+                            for (d, _) in &unused { eprintln!("ahead-dropped {}", prog.def_path(*d)); }
+                        }
                         drop(unused);
                         q = f.queue.lock().unwrap_or_else(|e| e.into_inner());
                         // a slot queued meanwhile: this burst goes on
@@ -13945,6 +13951,13 @@ fn ahead_helper(f: std::sync::Arc<FrontShared>) {
             lower_ahead(&f, id, false);
         }
     }
+}
+
+/// MAKEPAD_RUN_AHEAD_TRACE: also one line per body the helpers check after the present (its typeck
+/// cpu ns), per body a build takes and per body dropped untaken at a burst's end (their precision).
+fn ahead_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_AHEAD_TRACE").is_some())
 }
 
 struct LoweredAhead {
@@ -14160,6 +14173,7 @@ fn publish_ahead(f: &FrontShared, key: AheadKey, epoch: u64, body: std::sync::Ar
     } else {
         // The build took over. Drop outside the claim lock, including large bodies.
         drop(claim);
+        if FIRST_PRESENT.load(Ordering::Relaxed) { AHEAD_LATE.fetch_add(1, Ordering::Relaxed); }
         drop(body);
         DONE_BODY_BYTES.fetch_add(freed_since(before), Ordering::Relaxed);
     }
@@ -14171,6 +14185,8 @@ fn publish_ahead(f: &FrontShared, key: AheadKey, epoch: u64, body: std::sync::Ar
 pub static AHEAD_STATS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// bodies checked ahead after the first present that no build took by the end of their burst
 pub static AHEAD_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// bodies checked ahead after the first present whose build had begun meanwhile (checked twice)
+pub static AHEAD_LATE: AtomicU64 = AtomicU64::new(0);
 /// AHEAD_STATS as they stood at the first present (the helpers end there).
 pub static AHEAD_AT_PRESENT: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
@@ -14195,6 +14211,9 @@ fn take_ahead(prog: &Program, f: &FrontShared, tcx: &Tcx, d: DefId, args: &[TyId
         return Err("epoch");
     }
     AHEAD_STATS[1].fetch_add(1, Ordering::Relaxed);
+    if ahead_trace() && FIRST_PRESENT.load(Ordering::Relaxed) {
+        eprintln!("ahead-taken {}", prog.def_path(d));
+    }
     if *b.args == *args { return Ok(b); }
     Ok(crate::typeck::codegen_body(prog, tcx, d, args))
 }
@@ -14320,11 +14339,15 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
         }
         let epoch = tcx.collect_epoch.load(Ordering::SeqCst);
         let _o = crate::clock::origin("ahead");
+        let t_trace = if ahead_trace() && FIRST_PRESENT.load(Ordering::Relaxed) { cpu_ns() } else { 0 };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _p = crate::preempt::Preemptible::on();
             crate::preempt::point();
             tcx.typeck(prog, key.0)
         }));
+        if t_trace != 0 {
+            eprintln!("ahead-checked {} {}", cpu_ns() - t_trace, prog.def_path(key.0));
+        }
         if r.as_ref().is_err_and(|p| crate::preempt::is_preempted(&**p)) {
             inprog_end(f, &key);
             if crate::preempt::is_stopped() { return; }

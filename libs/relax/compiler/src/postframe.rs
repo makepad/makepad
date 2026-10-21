@@ -308,8 +308,8 @@ pub(crate) fn ahead_over() {
 
 fn ahead_line() -> String {
     let ah = |i: usize| crate::jit::AHEAD_STATS[i].load(Relaxed).saturating_sub(crate::jit::AHEAD_AT_PRESENT[i].load(Relaxed));
-    format!("makepad-run post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms",
-        ah(0), ah(1), crate::jit::AHEAD_DROPPED.load(Relaxed), ms(ah(4)), ms(ah(3)), ah(5), ah(6), ms(ah(7)))
+    format!("makepad-run post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends, {} late: their build had begun), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms",
+        ah(0), ah(1), crate::jit::AHEAD_DROPPED.load(Relaxed), crate::jit::AHEAD_LATE.load(Relaxed), ms(ah(4)), ms(ah(3)), ah(5), ah(6), ms(ah(7)))
 }
 
 /// The window's sums (one line).
