@@ -6398,6 +6398,12 @@ fn callee_attrs(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, fns: &cra
         // a closure body is usually called from the one adapter instance made for it; with
         // the core hint (O3) it inlines like #[inline]
         FnKey::Closure(..) if core_hint => relax_codegen::opt::ATTR_HINT,
+        // drop glue at O3 as any other generated instance: rustc leaves drop_in_place unhinted
+        // (Instance::requires_inline) and LLVM inlines it by cost like an unhinted same-crate fn.
+        // Without it an enum's glue (Result<f32, E>: the error payload's drops on the Err arm)
+        // inlined only through the hot-site rule, so any change in which round reached the site
+        // left a per-element drop call (llm_host's `.map(Ok).collect::<Result<Vec<f32>, _>>()`)
+        FnKey::Glue(..) if core_hint => relax_codegen::opt::ATTR_HINT,
         FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Closure(..) => 0,
         // twins are never inlined into anything (their callers are twins built from RIR)
         FnKey::Sandbox(_) | FnKey::Plain(_) => return None,
@@ -9219,6 +9225,8 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
                 inlined.push((c, rule));
             }
         }
+        // the code must not depend on the order the sites were taken in
+        relax_backend::passes::renumber_rpo(func);
         relax_backend::stats::pass_time(5, ti);
     }
     opt_pipeline(options, func, ro, cfg, layout_for(options, name), true, nounwind);
@@ -9230,6 +9238,7 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         let more = relax_codegen::opt::inline_calls_ordered(options, func, id, get, single, nounwind, &limits, freqs.as_deref(), inline_stats.as_mut());
         relax_backend::stats::pass_time(5, ti);
         if !more.is_empty() {
+            relax_backend::passes::renumber_rpo(func);
             for (c, rule) in more {
                 if !inlined.iter().any(|x| x.0 == c) {
                     inlined.push((c, rule));

@@ -2654,6 +2654,28 @@ pub fn relayout(f: &mut Func) {
     relayout_order(f);
 }
 
+/// Numbers the blocks in reverse postorder from the entry (unreachable ones after, in index
+/// order). Inlining appends each body's blocks in the order sites were taken, so the same code
+/// reached by a different inline order had different block numbers, and the passes and the
+/// allocator that visit blocks by index (relayout's next seed, ties) made different code from it
+/// (html_parse process_entity: identical RIR up to numbering, 2% more instructions).
+pub fn renumber_rpo(f: &mut Func) {
+    let order = crate::frame::block_rpo(f);
+    if order.iter().enumerate().all(|(i, b)| i as u32 == *b) {
+        return;
+    }
+    let mut map = vec![0u32; order.len()];
+    for (i, b) in order.iter().enumerate() {
+        map[*b as usize] = i as u32;
+    }
+    let mut old: Vec<Option<Block>> = std::mem::take(&mut f.blocks).into_iter().map(Some).collect();
+    for b in &order {
+        let mut blk = old[*b as usize].take().unwrap();
+        blk.term.map_succs(|t| map[t as usize]);
+        f.blocks.push(blk);
+    }
+}
+
 /// Appends a block's single-predecessor jump target to it (straight-line code after
 /// inlining and branch folding), so compares end up next to their branches.
 #[inline(never)]
