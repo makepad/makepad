@@ -76,6 +76,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::finish::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
+    crate::shader::video_color::script_mod(vm);
     crate::shader::draw_nv12::script_mod(vm);
     crate::shader::draw_cube::script_mod(vm);
     makepad_script::glyph_coverage::script_mod(vm);

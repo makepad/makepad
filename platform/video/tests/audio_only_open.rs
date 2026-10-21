@@ -57,6 +57,7 @@ fn encode_clip(path: &std::path::Path, with_audio: bool) {
                 aac_bitrate_bps: 128_000,
             }),
             keyframe_only: false,
+            ..Default::default()
         },
     )
     .expect("file encoder creation");

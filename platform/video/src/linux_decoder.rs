@@ -16,7 +16,7 @@
 
 use crate::linux_gst_sys::*;
 use crate::nv12;
-use crate::{DecodedAudioChunk, DecodedVideoFrame, VideoFileError, VideoFileInfo};
+use crate::{DecodedAudioChunk, DecodedVideoFrame, VideoColor, VideoFileError, VideoFileInfo};
 use std::ffi::{c_void, CString};
 
 pub(crate) struct LinuxVideoFileDecoder {
@@ -25,6 +25,8 @@ pub(crate) struct LinuxVideoFileDecoder {
     appsink: *mut GstElement,
     bus: *mut GstBus,
     info: VideoFileInfo,
+    /// The colour of the delivered bytes (the negotiated caps' colorimetry).
+    frame_color: VideoColor,
 }
 
 unsafe impl Send for LinuxVideoFileDecoder {}
@@ -46,6 +48,74 @@ fn caps_field<'a>(caps: &'a str, key: &str) -> Option<&'a str> {
         return Some(rest.trim().trim_end_matches(';'));
     }
     None
+}
+
+/// GStreamer colorimetry presets as `range:matrix:transfer:primaries`
+/// (gst-plugins-base video-color.c, the `gst_video_colorimetry_to_string`
+/// table). Case-insensitive; `jpeg` is the legacy name of `1:4:7:1`.
+fn colorimetry_preset(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "bt709" => "2:3:5:1",
+        "bt601" => "2:4:5:4",
+        "smpte240m" => "2:5:6:5",
+        "srgb" => "1:1:7:1",
+        "jpeg" => "1:4:7:1",
+        "bt2020" => "2:6:11:7",
+        "bt2020-10" => "2:6:13:7",
+        "bt2100-pq" => "2:6:14:7",
+        "bt2100-hlg" => "2:6:15:7",
+        _ => return None,
+    })
+}
+
+/// A caps `colorimetry` string (a preset name or the 4-part numeric form)
+/// to a [`VideoColor`]. Numeric values are the gst-video enums:
+///
+/// * GstVideoColorRange: 0 unknown, 1 = 0_255 (full), 2 = 16_235 (limited)
+/// * GstVideoColorMatrix: 0 unknown, 1 RGB, 2 FCC, 3 BT709, 4 BT601,
+///   5 SMPTE240M, 6 BT2020
+/// * GstVideoTransferFunction: 0 unknown, 1..4 gamma 1.0/1.8/2.0/2.2,
+///   5 BT709, 6 SMPTE240M, 7 SRGB, 8 gamma 2.8, 9 LOG100, 10 LOG316,
+///   11 BT2020_12, 12 ADOBERGB, 13 BT2020_10, 14 SMPTE2084 (PQ),
+///   15 ARIB_STD_B67 (HLG), 16 BT601
+/// * GstVideoColorPrimaries: 0 unknown, 1 BT709, 2 BT470M, 3 BT470BG,
+///   4 SMPTE170M, 5 SMPTE240M, 6 FILM, 7 BT2020, 8 ADOBERGB, 9 SMPTEST428,
+///   10 SMPTERP431, 11 SMPTEEG432, 12 EBU3213
+///
+/// Anything unknown or missing falls back as [`VideoColor::from_h273`] does.
+pub(crate) fn colorimetry_to_color(colorimetry: &str, width: u32, height: u32) -> VideoColor {
+    let lower = colorimetry.trim().trim_matches('"').to_ascii_lowercase();
+    let numeric = colorimetry_preset(&lower).unwrap_or(&lower);
+    let mut parts = numeric.split(':').map(|p| p.trim().parse::<u32>().ok());
+    let (range, matrix, transfer, primaries) = match (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Some(r)), Some(Some(m)), Some(Some(t)), Some(Some(p)), None) => (r, m, t, p),
+        _ => (0, 0, 0, 0),
+    };
+    let matrix = match matrix {
+        3 => 1,
+        4 => 6,
+        5 => 7,
+        6 => 9,
+        _ => 2,
+    };
+    let transfer = match transfer {
+        5 | 16 => 1,
+        6 => 7,
+        7 => 13,
+        11 => 15,
+        13 => 14,
+        14 => 16,
+        15 => 18,
+        _ => 2,
+    };
+    let primaries = match primaries {
+        1 => 1,
+        3 => 5,
+        4 | 5 => 6,
+        7 => 9,
+        _ => 2,
+    };
+    VideoColor::from_h273(primaries, transfer, matrix, range == 1, width, height)
 }
 
 impl LinuxVideoFileDecoder {
@@ -157,6 +227,14 @@ impl LinuxVideoFileDecoder {
                     format!("decoder negotiated no geometry (caps: {caps_text})"),
                 ));
             }
+            // videoconvert (when the decoder's own format is not NV12) keeps the
+            // colorimetry: the capsfilter after it names only the format. So the
+            // caps here are the stream's colour in the range delivered.
+            let color = colorimetry_to_color(
+                caps_field(&caps_text, "colorimetry").unwrap_or(""),
+                width,
+                height,
+            );
             let mut duration_ns: i64 = 0;
             let _ =
                 (gst.gst_element_query_duration)(pipeline, GST_FORMAT_TIME, &mut duration_ns);
@@ -185,7 +263,9 @@ impl LinuxVideoFileDecoder {
                     has_audio: false,
                     audio_sample_rate: 0,
                     audio_channels: 0,
+                    color,
                 },
+                frame_color: color,
             })
         }
     }
@@ -238,6 +318,7 @@ impl LinuxVideoFileDecoder {
                     width: self.info.width,
                     height: self.info.height,
                     nv12: nv12_bytes,
+                    color: self.frame_color,
                 }))
             };
             (self.gst.gst_buffer_unmap)(buffer, &mut map);
@@ -285,5 +366,30 @@ impl Drop for LinuxVideoFileDecoder {
             (self.gst.gst_object_unref)(self.bus as *mut c_void);
             (self.gst.gst_object_unref)(self.pipeline as *mut c_void);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
+
+    #[test]
+    fn colorimetry_presets_and_numeric() {
+        let c = colorimetry_to_color("bt709", 1920, 1080);
+        assert_eq!(c, VideoColor::BT709);
+        let c = colorimetry_to_color("bt601", 720, 576);
+        assert_eq!((c.matrix, c.primaries, c.range), (VideoMatrix::Bt601, VideoPrimaries::Smpte170m, VideoRange::Limited));
+        let c = colorimetry_to_color("1:4:7:1", 1920, 1080);
+        assert_eq!((c.matrix, c.primaries, c.range, c.transfer), (VideoMatrix::Bt601, VideoPrimaries::Bt709, VideoRange::Full, VideoTransfer::Sdr));
+        assert_eq!(colorimetry_to_color("jpeg", 640, 480), c);
+        let c = colorimetry_to_color("bt2100-pq", 3840, 2160);
+        assert_eq!((c.matrix, c.primaries, c.transfer), (VideoMatrix::Bt2020, VideoPrimaries::Bt2020, VideoTransfer::Pq));
+        assert_eq!(colorimetry_to_color("bt2100-hlg", 3840, 2160).transfer, VideoTransfer::Hlg);
+        assert_eq!(colorimetry_to_color("2:6:13:7", 3840, 2160).transfer, VideoTransfer::Sdr);
+        // missing or unknown: size guess
+        assert_eq!(colorimetry_to_color("", 1920, 1080), VideoColor::BT709);
+        assert_eq!(colorimetry_to_color("0:0:0:0", 720, 480).matrix, VideoMatrix::Bt601);
+        assert_eq!(colorimetry_to_color("nonsense", 1280, 720), VideoColor::BT709);
     }
 }

@@ -48,6 +48,7 @@ fn encode_with(codec: VideoFileCodec, tag: &str, audio: bool) -> Vec<u8> {
             video_bitrate_bps: 2_000_000,
             audio: audio.then_some(PcmAudioTrackOptions { sample_rate: 48_000, channels: 2, aac_bitrate_bps: 192_000 }),
             keyframe_only: false,
+            ..Default::default()
         },
     )
     .unwrap();

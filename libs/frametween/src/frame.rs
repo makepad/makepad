@@ -5,7 +5,7 @@
 //! library — the VJ re-exports these names, so its own call sites (and
 //! its behaviour) never moved.
 
-use makepad_widgets_core::makepad_platform::video_file::nv12;
+use makepad_widgets_core::makepad_platform::video_file::{nv12, VideoColor};
 
 pub struct Frame {
     /// Pacing timestamp — monotonic for the clock (synthetic in bounce).
@@ -43,7 +43,8 @@ impl Pixels {
             Pixels::Bgra(v) => v.clone(),
             Pixels::Nv12 { data, width, height } => {
                 let mut out = Vec::new();
-                nv12::nv12_to_bgra_u32(data, *width, *height, &mut out);
+                // a test view: the tween's frames carry no colour of their own
+                nv12::nv12_to_bgra_u32(data, *width, *height, VideoColor::BT709, &mut out);
                 out
             }
         }

@@ -44,6 +44,7 @@ fn options() -> VideoFileEncoderOptions {
         video_bitrate_bps: 6_000_000,
         audio: Some(PcmAudioTrackOptions { sample_rate: RATE, channels: 2, aac_bitrate_bps: 128_000 }),
         keyframe_only: true,
+        ..Default::default()
     }
 }
 

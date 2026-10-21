@@ -119,7 +119,7 @@ impl VideoStreamEncoder {
             )));
         }
         let mut nv12 = Vec::new();
-        crate::nv12::rgb8_to_nv12(rgb, self.options.width, self.options.height, &mut nv12);
+        crate::nv12::rgb8_to_nv12(rgb, self.options.width, self.options.height, crate::VideoColor::BT709, &mut nv12);
         self.push_frame_nv12(&nv12, pts_100ns)
     }
 

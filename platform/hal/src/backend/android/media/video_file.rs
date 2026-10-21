@@ -24,6 +24,17 @@ pub struct Info {
     pub has_audio: bool,
     pub sample_rate: u32,
     pub channels: u16,
+    /// MediaFormat KEY_COLOR_STANDARD / KEY_COLOR_RANGE / KEY_COLOR_TRANSFER of the picture
+    /// track (0: the file does not say).
+    pub color_standard: i32,
+    pub color_range: i32,
+    pub color_transfer: i32,
+}
+
+/// The colour keys of a MediaFormat; 0 for one it does not carry.
+fn color_keys(format: &Format) -> (i32, i32, i32) {
+    let get = |key: &std::ffi::CStr| format.get_int(key).unwrap_or(0);
+    (get(c"color-standard"), get(c"color-range"), get(c"color-transfer"))
 }
 
 /// One stream: its demuxer, its codec and where the two are.
@@ -32,6 +43,8 @@ struct Stream {
     codec: Codec,
     input_done: bool,
     output_done: bool,
+    /// KEY_COLOR_RANGE of the codec's output format (0: not stated).
+    output_range: i32,
 }
 
 impl Stream {
@@ -51,7 +64,7 @@ impl Stream {
             checked(ndk::AMediaCodec_configure(codec.0, format.0, surface, std::ptr::null_mut(), 0), &format!("configure the {mime} decoder"))?;
             checked(ndk::AMediaCodec_start(codec.0), &format!("start the {mime} decoder"))?;
         }
-        Ok(Some((Stream { extractor, codec, input_done: false, output_done: false }, format)))
+        Ok(Some((Stream { extractor, codec, input_done: false, output_done: false, output_range: 0 }, format)))
     }
 
     /// Hand the codec every sample it has room for.
@@ -121,6 +134,7 @@ impl FileDecoder {
             let (r, window) = Reader::yuv(info.width, info.height, 3)?;
             let (stream, format) = Stream::open(path, "video/", window)?.ok_or_else(|| format!("{path} has no picture"))?;
             info.video_mime = format.get_string(c"mime");
+            (info.color_standard, info.color_range, info.color_transfer) = color_keys(&format);
             info.duration_us = format.get_long(c"durationUs").unwrap_or(0);
             video = Some(stream);
             reader = Some(r);
@@ -149,8 +163,9 @@ impl FileDecoder {
         &self.info
     }
 
-    /// The next picture: its time (microseconds) and NV12; `None` at the end.
-    pub fn next_frame(&mut self) -> Result<Option<(i64, Vec<u8>)>, String> {
+    /// The next picture: its time (microseconds), the KEY_COLOR_RANGE the decoder delivers it in
+    /// (the output format's, else the track's, 0 when neither says) and NV12; `None` at the end.
+    pub fn next_frame(&mut self) -> Result<Option<(i64, i32, Vec<u8>)>, String> {
         let (Some(stream), Some(reader)) = (self.video.as_mut(), self.reader.as_ref()) else { return Ok(None) };
         let mut progress = Instant::now();
         while !stream.output_done {
@@ -165,10 +180,13 @@ impl FileDecoder {
                 stream.output_done = end;
                 if picture {
                     let nv12 = reader.next_nv12(self.info.width, self.info.height, STALL)?;
-                    return Ok(Some((out.presentation_time_us, nv12)));
+                    let range = if stream.output_range != 0 { stream.output_range } else { self.info.color_range };
+                    return Ok(Some((out.presentation_time_us, range, nv12)));
                 }
                 progress = Instant::now();
             } else if index == OUTPUT_FORMAT_CHANGED {
+                let format = Format(unsafe { ndk::AMediaCodec_getOutputFormat(stream.codec.0) });
+                stream.output_range = color_keys(&format).1;
                 progress = Instant::now();
             } else if progress.elapsed() > STALL {
                 return Err("the picture decoder stalled".into());

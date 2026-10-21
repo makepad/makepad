@@ -8,7 +8,8 @@
 use {
     crate::{
         windows_encoder::{ensure_media_foundation, hr_err, to_wide},
-        DecodedAudioChunk, DecodedVideoFrame, VideoFileCodec, VideoFileError, VideoFileInfo,
+        DecodedAudioChunk, DecodedVideoFrame, VideoColor, VideoFileCodec, VideoFileError,
+        VideoFileInfo,
     },
     windows::{
         core::{GUID, PCWSTR},
@@ -24,7 +25,14 @@ use {
             MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
             MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
             MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-            MF_SOURCE_READER_MEDIASOURCE,
+            MF_SOURCE_READER_MEDIASOURCE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+            MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MFNominalRange_0_255,
+            MFVideoPrimaries_BT2020, MFVideoPrimaries_BT470_2_SysBG, MFVideoPrimaries_BT709,
+            MFVideoPrimaries_SMPTE170M, MFVideoPrimaries_SMPTE240M, MFVideoTransFunc_2020,
+            MFVideoTransFunc_2084, MFVideoTransFunc_240M, MFVideoTransFunc_709,
+            MFVideoTransFunc_HLG, MFVideoTransFunc_sRGB, MFVideoTransferMatrix_BT2020_10,
+            MFVideoTransferMatrix_BT2020_12, MFVideoTransferMatrix_BT601,
+            MFVideoTransferMatrix_BT709,
         },
         Win32::System::Com::StructuredStorage::{
             PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -47,6 +55,96 @@ pub struct WindowsVideoFileDecoder {
     /// Opened for sound alone: the video stream was never selected, so
     /// nothing may read it and nothing may re-arm it.
     audio_only: bool,
+    /// The colour of the bytes `next_frame` returns: the stream's, with the
+    /// range of the reader's current NV12 output type.
+    frame_color: VideoColor,
+    /// The stream's colour attributes, for an output type that leaves some out.
+    stream_codes: MfColorCodes,
+}
+
+/// The attributes of a media type that carry colour, as the SDK's raw values
+/// (`None` when absent or 0 = unknown).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct MfColorCodes {
+    primaries: Option<u32>,
+    transfer: Option<u32>,
+    matrix: Option<u32>,
+    range: Option<u32>,
+}
+
+impl MfColorCodes {
+    unsafe fn read(mt: &windows::Win32::Media::MediaFoundation::IMFMediaType) -> Self {
+        let get = |key: &GUID| mt.GetUINT32(key).ok().filter(|v| *v != 0);
+        MfColorCodes {
+            primaries: get(&MF_MT_VIDEO_PRIMARIES),
+            transfer: get(&MF_MT_TRANSFER_FUNCTION),
+            matrix: get(&MF_MT_YUV_MATRIX),
+            range: get(&MF_MT_VIDEO_NOMINAL_RANGE),
+        }
+    }
+
+    /// Each property from `self`, else from `other`.
+    fn or(self, other: MfColorCodes) -> MfColorCodes {
+        MfColorCodes {
+            primaries: self.primaries.or(other.primaries),
+            transfer: self.transfer.or(other.transfer),
+            matrix: self.matrix.or(other.matrix),
+            range: self.range.or(other.range),
+        }
+    }
+
+    fn color(self, width: u32, height: u32) -> VideoColor {
+        mf_to_color(self, width, height)
+    }
+}
+
+/// MFVideoPrimaries_* to the H.273 ColourPrimaries code point (2 = unspecified).
+fn mf_primaries_h273(v: Option<u32>) -> u32 {
+    match v {
+        Some(v) if v == MFVideoPrimaries_BT709.0 as u32 => 1,
+        Some(v) if v == MFVideoPrimaries_BT470_2_SysBG.0 as u32 => 5,
+        Some(v) if v == MFVideoPrimaries_SMPTE170M.0 as u32 => 6,
+        // SMPTE 240M has the SMPTE 170M primaries
+        Some(v) if v == MFVideoPrimaries_SMPTE240M.0 as u32 => 6,
+        Some(v) if v == MFVideoPrimaries_BT2020.0 as u32 => 9,
+        _ => 2,
+    }
+}
+
+/// MFVideoTransFunc_* to the H.273 TransferCharacteristics code point.
+fn mf_transfer_h273(v: Option<u32>) -> u32 {
+    match v {
+        Some(v) if v == MFVideoTransFunc_709.0 as u32 => 1,
+        Some(v) if v == MFVideoTransFunc_240M.0 as u32 => 7,
+        Some(v) if v == MFVideoTransFunc_sRGB.0 as u32 => 13,
+        Some(v) if v == MFVideoTransFunc_2020.0 as u32 => 14,
+        Some(v) if v == MFVideoTransFunc_2084.0 as u32 => 16,
+        Some(v) if v == MFVideoTransFunc_HLG.0 as u32 => 18,
+        _ => 2,
+    }
+}
+
+/// MFVideoTransferMatrix_* to the H.273 MatrixCoefficients code point.
+fn mf_matrix_h273(v: Option<u32>) -> u32 {
+    match v {
+        Some(v) if v == MFVideoTransferMatrix_BT709.0 as u32 => 1,
+        Some(v) if v == MFVideoTransferMatrix_BT601.0 as u32 => 6,
+        Some(v) if v == MFVideoTransferMatrix_BT2020_10.0 as u32 => 9,
+        Some(v) if v == MFVideoTransferMatrix_BT2020_12.0 as u32 => 9,
+        _ => 2,
+    }
+}
+
+fn mf_to_color(codes: MfColorCodes, width: u32, height: u32) -> VideoColor {
+    let full = codes.range == Some(MFNominalRange_0_255.0 as u32);
+    VideoColor::from_h273(
+        mf_primaries_h273(codes.primaries),
+        mf_transfer_h273(codes.transfer),
+        mf_matrix_h273(codes.matrix),
+        full,
+        width,
+        height,
+    )
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -250,6 +348,15 @@ impl WindowsVideoFileDecoder {
                 .unwrap_or(coded_width as usize)
                 .max(coded_width as usize);
 
+            // Colour: what the stream says (the native type, else the decoder's
+            // output type, which carries what the bitstream's VUI said), and the
+            // range the reader delivers in.
+            // The frames are what the output type says where it says it (the
+            // reader's video processor may convert), else the stream's.
+            let stream_codes = MfColorCodes::read(&native).or(MfColorCodes::read(&current));
+            let stream_color = stream_codes.color(width, height);
+            let frame_color = MfColorCodes::read(&current).or(stream_codes).color(width, height);
+
             // Audio: request 16-bit PCM at the native rate/layout when a
             // stream exists.
             let mut has_audio = false;
@@ -329,11 +436,14 @@ impl WindowsVideoFileDecoder {
                     has_audio,
                     audio_sample_rate,
                     audio_channels,
+                    color: stream_color,
                 },
                 video_stride,
                 video_eos: false,
                 audio_eos: false,
                 audio_only: false,
+                frame_color,
+                stream_codes,
             })
         }
     }
@@ -431,6 +541,7 @@ impl WindowsVideoFileDecoder {
                     has_audio: true,
                     audio_sample_rate,
                     audio_channels,
+                    color: VideoColor::BT709,
                 },
                 video_stride: 0,
                 // There is no picture to read, and saying so here is what
@@ -438,6 +549,8 @@ impl WindowsVideoFileDecoder {
                 video_eos: true,
                 audio_eos: false,
                 audio_only: true,
+                frame_color: VideoColor::BT709,
+                stream_codes: MfColorCodes::default(),
             })
         }
     }
@@ -470,6 +583,7 @@ impl WindowsVideoFileDecoder {
                 .map(|v| (v as i32).unsigned_abs() as usize)
                 .unwrap_or(self.coded_width as usize)
                 .max(self.coded_width as usize);
+            self.frame_color = MfColorCodes::read(&current).or(self.stream_codes).color(self.info.width, self.info.height);
         }
     }
 
@@ -565,6 +679,7 @@ impl WindowsVideoFileDecoder {
                 width: self.info.width,
                 height: self.info.height,
                 nv12,
+                color: self.frame_color,
             }))
         }
     }
@@ -651,5 +766,38 @@ impl WindowsVideoFileDecoder {
         self.video_eos = self.audio_only;
         self.audio_eos = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{VideoMatrix, VideoPrimaries, VideoTransfer};
+
+    #[test]
+    fn mf_codes_map_to_video_color() {
+        let hd = MfColorCodes {
+            primaries: Some(MFVideoPrimaries_BT709.0 as u32),
+            transfer: Some(MFVideoTransFunc_709.0 as u32),
+            matrix: Some(MFVideoTransferMatrix_BT709.0 as u32),
+            range: Some(MFNominalRange_0_255.0 as u32),
+        };
+        let c = mf_to_color(hd, 1920, 1080);
+        assert_eq!((c.matrix, c.range, c.primaries, c.transfer), (VideoMatrix::Bt709, VideoRange::Full, VideoPrimaries::Bt709, VideoTransfer::Sdr));
+        let hdr = MfColorCodes {
+            primaries: Some(MFVideoPrimaries_BT2020.0 as u32),
+            transfer: Some(MFVideoTransFunc_2084.0 as u32),
+            matrix: Some(MFVideoTransferMatrix_BT2020_10.0 as u32),
+            range: None,
+        };
+        let c = mf_to_color(hdr, 3840, 2160);
+        assert_eq!((c.matrix, c.transfer, c.range), (VideoMatrix::Bt2020, VideoTransfer::Pq, VideoRange::Limited));
+        let hlg = MfColorCodes { transfer: Some(MFVideoTransFunc_HLG.0 as u32), ..hdr };
+        assert_eq!(mf_to_color(hlg, 3840, 2160).transfer, VideoTransfer::Hlg);
+        // nothing said: size guess
+        assert_eq!(mf_to_color(MfColorCodes::default(), 1920, 1080), VideoColor::BT709);
+        assert_eq!(mf_to_color(MfColorCodes::default(), 720, 576).primaries, VideoPrimaries::Bt470bg);
+        let smpte240 = MfColorCodes { primaries: Some(MFVideoPrimaries_SMPTE240M.0 as u32), ..Default::default() };
+        assert_eq!(mf_to_color(smpte240, 1280, 720).primaries, VideoPrimaries::Smpte170m);
     }
 }

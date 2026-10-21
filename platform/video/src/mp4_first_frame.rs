@@ -9,7 +9,7 @@
 //! on every OS.
 
 use crate::stream_encoder::StreamVideoCodec;
-use crate::VideoFileError;
+use crate::{VideoColor, VideoFileError};
 
 /// The first video sample of a container, ready for a stream decoder.
 pub struct FirstAccessUnit {
@@ -20,6 +20,8 @@ pub struct FirstAccessUnit {
     /// The picture size the sample entry declares.
     pub width: u32,
     pub height: u32,
+    /// The sample entry's `colr` box, else the guess for the size.
+    pub color: VideoColor,
 }
 
 fn err(what: &str) -> VideoFileError {
@@ -94,8 +96,23 @@ struct VideoTrack<'a> {
     config: &'a [u8],
     width: u32,
     height: u32,
+    color: Option<(u32, u32, u32, bool)>,
     first_sample_offset: u64,
     first_sample_size: u32,
+}
+
+/// The H.273 code points (primaries, transfer, matrix, full range) of a
+/// visual sample entry's `colr` box: `nclx` (ISO/IEC 14496-12) or
+/// QuickTime's `nclc` (which has no range flag).
+pub fn colr_code_points(sample_entry_children: &[u8]) -> Option<(u32, u32, u32, bool)> {
+    let colr = find_box(sample_entry_children, b"colr")?;
+    let kind = colr.get(0..4)?;
+    let code = |at: usize| colr.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as u32);
+    match kind {
+        b"nclx" => Some((code(4)?, code(6)?, code(8)?, colr.get(10).is_some_and(|b| b & 0x80 != 0))),
+        b"nclc" => Some((code(4)?, code(6)?, code(8)?, false)),
+        _ => None,
+    }
 }
 
 fn video_track<'a>(moov: &'a [u8]) -> Result<VideoTrack<'a>, VideoFileError> {
@@ -146,6 +163,7 @@ fn video_track<'a>(moov: &'a [u8]) -> Result<VideoTrack<'a>, VideoFileError> {
         };
         let config = find_box(children, config_fourcc)
             .ok_or_else(|| err("no codec configuration record"))?;
+        let color = colr_code_points(children);
 
         // stsz: sample_size (uniform if non-zero) + count + per-sample sizes.
         let (_, stsz) = full_box(find_box(stbl, b"stsz").ok_or_else(|| err("no stsz"))?)
@@ -178,7 +196,7 @@ fn video_track<'a>(moov: &'a [u8]) -> Result<VideoTrack<'a>, VideoFileError> {
             return Err(err("no chunk offsets"));
         };
 
-        return Ok(VideoTrack { codec, config, width, height, first_sample_offset, first_sample_size });
+        return Ok(VideoTrack { codec, config, width, height, color, first_sample_offset, first_sample_size });
     }
     Err(err("no video track"))
 }
@@ -282,7 +300,11 @@ pub fn first_access_unit(bytes: &[u8]) -> Result<FirstAccessUnit, VideoFileError
         crate::annex_b::push_annex_b_nal(&mut annex_b, nal);
         at += len;
     }
-    Ok(FirstAccessUnit { codec: track.codec, annex_b, width: track.width, height: track.height })
+    let color = match track.color {
+        Some((p, t, m, full)) => VideoColor::from_h273(p, t, m, full, track.width, track.height),
+        None => VideoColor::guess(track.width, track.height),
+    };
+    Ok(FirstAccessUnit { codec: track.codec, annex_b, width: track.width, height: track.height, color })
 }
 
 #[cfg(test)]

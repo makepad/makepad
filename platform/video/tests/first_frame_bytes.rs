@@ -43,6 +43,7 @@ fn one_frame_file(codec: VideoFileCodec) -> Vec<u8> {
             video_bitrate_bps: 4_000_000,
             audio: None,
             keyframe_only: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -74,7 +75,7 @@ fn assert_decodes(codec: VideoFileCodec) {
     // must resemble the gradient, not noise or black: mean absolute error
     // on the Y plane against the source's own NV12 conversion.
     let mut src_nv12 = Vec::new();
-    nv12::rgb8_to_nv12(&synthetic_frame_rgb8(), WIDTH, HEIGHT, &mut src_nv12);
+    nv12::rgb8_to_nv12(&synthetic_frame_rgb8(), WIDTH, HEIGHT, makepad_video::VideoColor::BT709, &mut src_nv12);
     let y_len = WIDTH as usize * HEIGHT as usize;
     let mae: f64 = frame.nv12[..y_len]
         .iter()

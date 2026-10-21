@@ -16,7 +16,7 @@
 use {
     crate::apple_decoder::{nserror_to_video_error, AutoreleasePool},
     crate::{
-        nv12, VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoTransformInfo,
+        nv12, VideoColor, VideoFileCodec, VideoFileEncoderOptions, VideoFileError, VideoRange, VideoTransformInfo,
     },
     makepad_apple_sys::*,
     std::ffi::c_void,
@@ -110,6 +110,27 @@ unsafe fn wait_for_input_ready(input: ObjcId, context: &str) -> Result<(), Video
     )))
 }
 
+/// The NV12 pixel format of a colour's range.
+fn nv12_format(color: VideoColor) -> u32 {
+    match color.range {
+        VideoRange::Full => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        VideoRange::Limited => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    }
+}
+
+/// CoreVideo's strings for a colour's primaries, transfer and matrix
+/// (process-lifetime constants).
+fn color_strings(color: VideoColor) -> [CFStringRef; 3] {
+    let (p, t, m, _) = color.h273();
+    unsafe {
+        [
+            CVColorPrimariesGetStringForIntegerCodePoint(p as i32),
+            CVTransferFunctionGetStringForIntegerCodePoint(t as i32),
+            CVYCbCrMatrixGetStringForIntegerCodePoint(m as i32),
+        ]
+    }
+}
+
 pub struct MacosVideoFileEncoder {
     writer: RcObjcId,
     video_input: RcObjcId,
@@ -127,6 +148,10 @@ pub struct MacosVideoFileEncoder {
     audio_frames_pushed: u64,
     finalized: bool,
     nv12_scratch: Vec<u8>,
+    /// What pushed RGB becomes and the stream is tagged with.
+    color: VideoColor,
+    /// The colour strings of `color`, attached to every NV12 buffer pushed.
+    color_strings: [CFStringRef; 3],
     /// Made on the first frame pushed as a shared texture.
     intake: Option<crate::apple_texture_intake::TextureIntake>,
 }
@@ -211,6 +236,13 @@ impl MacosVideoFileEncoder {
             // VideoToolbox; frames of the track's size are untouched.
             let scaling_key = str_to_nsstring("AVVideoScalingModeKey");
             let resize_aspect = str_to_nsstring("AVVideoScalingModeResizeAspect");
+            // The colour the stream's VUI and the container's `colr` say
+            // (the range follows the source buffers' pixel format).
+            let color_strings = color_strings(options.color);
+            let color_properties = ns_dictionary(
+                &[AVVideoColorPrimariesKey, AVVideoTransferFunctionKey, AVVideoYCbCrMatrixKey],
+                &[color_strings[0] as ObjcId, color_strings[1] as ObjcId, color_strings[2] as ObjcId],
+            );
             let video_settings = ns_dictionary(
                 &[
                     AVVideoCodecKey,
@@ -218,8 +250,9 @@ impl MacosVideoFileEncoder {
                     AVVideoHeightKey,
                     AVVideoCompressionPropertiesKey,
                     scaling_key,
+                    AVVideoColorPropertiesKey,
                 ],
-                &[codec_type, width_number, height_number, compression, resize_aspect],
+                &[codec_type, width_number, height_number, compression, resize_aspect, color_properties],
             );
             let video_input: ObjcId = msg_send![
                 class!(AVAssetWriterInput),
@@ -249,7 +282,7 @@ impl MacosVideoFileEncoder {
             // NV12 source buffers, matching the facade's frame format.
             let nv12_number: ObjcId = msg_send![
                 class!(NSNumber),
-                numberWithUnsignedInt: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                numberWithUnsignedInt: nv12_format(options.color)
             ];
             let source_attrs = ns_dictionary(
                 &[
@@ -403,6 +436,8 @@ impl MacosVideoFileEncoder {
                 audio_frames_pushed: 0,
                 finalized: false,
                 nv12_scratch: Vec::new(),
+                color: options.color,
+                color_strings,
                 intake: None,
             })
         }
@@ -422,8 +457,11 @@ impl MacosVideoFileEncoder {
         pixel_stride: usize,
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
+        if self.color.is_hdr() {
+            return Err(VideoFileError::new("RGB frames cannot be converted to HDR; push NV12 already in the stream's colour"));
+        }
         let mut scratch = std::mem::take(&mut self.nv12_scratch);
-        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, &mut scratch);
+        nv12::rgbx_to_nv12(rgb, self.width, self.height, pixel_stride, self.color, &mut scratch);
         let result = self.push_frame_nv12(&scratch, pts_100ns);
         self.nv12_scratch = scratch;
         result
@@ -496,12 +534,17 @@ impl MacosVideoFileEncoder {
                 std::ptr::null(),
                 width,
                 height,
-                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                nv12_format(self.color),
                 std::ptr::null(),
                 &mut pixel_buffer,
             );
             if status != 0 || pixel_buffer.is_null() {
                 return Err(VideoFileError::with_code("CVPixelBufferCreate(nv12)", status));
+            }
+            // The bytes are already in the stream's colour: say so, so
+            // nothing between here and the encoder converts them.
+            for (key, value) in [kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey].into_iter().zip(self.color_strings) {
+                CVBufferSetAttachment(pixel_buffer, key, value as *const c_void, 1);
             }
             CVPixelBufferLockBaseAddress(pixel_buffer, 0);
             let y_ptr = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0) as *mut u8;

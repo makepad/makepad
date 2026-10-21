@@ -18,10 +18,11 @@ pub struct DecodedFrame {
 }
 
 impl DecodedFrame {
-    /// Convert to tightly packed RGB8 (BT.709).
+    /// Convert to tightly packed RGB8. Live streams are BT.709 limited range
+    /// both ways (our encoder writes them so).
     pub fn to_rgb8(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        crate::nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, &mut out);
+        crate::nv12::nv12_to_rgb8(&self.nv12, self.width, self.height, crate::VideoColor::BT709, &mut out);
         out
     }
 }

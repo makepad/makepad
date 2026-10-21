@@ -18,7 +18,7 @@
 //! No JPEGs or PNGs ever touch the disk: sources are decoded in memory and
 //! kept only as hardware-decodable HEVC.
 
-use makepad_video::{encode_intra_frame_mp4, nv12, VideoFileCodec, VideoFileEncoderOptions};
+use makepad_video::{encode_intra_frame_mp4, nv12, VideoColor, VideoFileCodec, VideoFileEncoderOptions};
 use makepad_video::decode_first_frame_from_file;
 use makepad_widgets_core::ImageBuffer;
 use std::path::Path;
@@ -129,13 +129,13 @@ impl Planes {
     pub fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Planes {
         debug_assert!(width % 2 == 0 && height % 2 == 0);
         let mut nv12 = Vec::new();
-        nv12::rgbx_to_nv12(rgba, width, height, 4, &mut nv12);
+        nv12::rgbx_to_nv12(rgba, width, height, 4, VideoColor::BT709, &mut nv12);
         Planes::from_nv12(width, height, &nv12).expect("nv12 size")
     }
 
     pub fn to_rgba(&self) -> Vec<u8> {
         let mut bgra = Vec::new();
-        nv12::nv12_to_bgra_u32(&self.to_nv12(), self.width, self.height, &mut bgra);
+        nv12::nv12_to_bgra_u32(&self.to_nv12(), self.width, self.height, VideoColor::BT709, &mut bgra);
         let mut out = Vec::with_capacity(bgra.len() * 4);
         for p in bgra {
             out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 255]);
@@ -276,6 +276,7 @@ pub fn encoder_options(width: u32, height: u32, fps: u32, bpp: f64, keyframe_onl
         video_bitrate_bps: bitrate,
         audio: None,
         keyframe_only,
+        ..Default::default()
     }
 }
 
@@ -322,7 +323,7 @@ pub struct FullFrame {
 pub fn full_frame(planes: &Planes) -> FullFrame {
     let (w, h) = (planes.width as usize, planes.height as usize);
     let mut level0 = Vec::new();
-    nv12::nv12_to_bgra_u32(&planes.to_nv12(), planes.width, planes.height, &mut level0);
+    nv12::nv12_to_bgra_u32(&planes.to_nv12(), planes.width, planes.height, VideoColor::BT709, &mut level0);
     let mut chain = level0;
     let (mut lw, mut lh) = (w, h);
     let mut max_level = 0usize;

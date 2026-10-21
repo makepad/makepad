@@ -222,6 +222,7 @@ impl Probe {
                         video_bitrate_bps: 20_000_000,
                         audio: None,
                         keyframe_only: true,
+                        ..Default::default()
                     };
                     let _ = std::fs::remove_file(&self.path);
                     let opened = std::time::Instant::now();
@@ -436,6 +437,7 @@ fn make_video(dir: &std::path::Path, fps: u32) -> Result<(), String> {
         video_bitrate_bps: 12_000_000,
         audio: Some(PcmAudioTrackOptions { sample_rate: 48_000, channels: 2, aac_bitrate_bps: 128_000 }),
         keyframe_only: false,
+        ..Default::default()
     };
     let mut encoder = VideoFileEncoder::new(path.to_str().unwrap(), options).map_err(|e| e.to_string())?;
     let mut rgb = vec![0u8; (VIDEO_W * VIDEO_H * 3) as usize];

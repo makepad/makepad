@@ -120,6 +120,7 @@ fn encoder_options(width: u32, height: u32, args: &Args) -> VideoFileEncoderOpti
         video_bitrate_bps: args.bitrate,
         audio: None,
         keyframe_only: false,
+        ..Default::default()
     }
 }
 

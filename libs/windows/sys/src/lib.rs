@@ -14919,6 +14919,42 @@ impl MFVideoNormalizedRect { pub fn default() -> Self { unsafe { ::core::mem::ze
 impl ::core::default::Default for MFVideoNormalizedRect { fn default() -> Self {Self::default()} }
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+pub struct MFVideoPrimaries(pub i32);
+impl MFVideoPrimaries { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for MFVideoPrimaries { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for MFVideoPrimaries { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for MFVideoPrimaries {}
+impl ::core::fmt::Debug for MFVideoPrimaries { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for MFVideoPrimaries { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for MFVideoPrimaries { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for MFVideoPrimaries { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for MFVideoPrimaries { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const MFVideoPrimaries_BT2020: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(9i64 as _);
+pub const MFVideoPrimaries_BT470_2_SysBG: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(4i64 as _);
+pub const MFVideoPrimaries_BT470_2_SysM: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(3i64 as _);
+pub const MFVideoPrimaries_BT709: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(2i64 as _);
+pub const MFVideoPrimaries_SMPTE170M: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(5i64 as _);
+pub const MFVideoPrimaries_SMPTE240M: crate::Win32::Media::MediaFoundation::MFVideoPrimaries = crate::Win32::Media::MediaFoundation::MFVideoPrimaries(6i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct MFVideoTransferFunction(pub i32);
+impl MFVideoTransferFunction { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for MFVideoTransferFunction { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for MFVideoTransferFunction { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for MFVideoTransferFunction {}
+impl ::core::fmt::Debug for MFVideoTransferFunction { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for MFVideoTransferFunction { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for MFVideoTransferFunction { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for MFVideoTransferFunction { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for MFVideoTransferFunction { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const MFVideoTransFunc_2020: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(13i64 as _);
+pub const MFVideoTransFunc_2084: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(15i64 as _);
+pub const MFVideoTransFunc_240M: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(6i64 as _);
+pub const MFVideoTransFunc_709: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(5i64 as _);
+pub const MFVideoTransFunc_HLG: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(16i64 as _);
+pub const MFVideoTransFunc_sRGB: crate::Win32::Media::MediaFoundation::MFVideoTransferFunction = crate::Win32::Media::MediaFoundation::MFVideoTransferFunction(7i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct MFVideoTransferMatrix(pub i32);
 impl MFVideoTransferMatrix { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
 impl ::core::default::Default for MFVideoTransferMatrix { fn default() -> Self {Self::default()} }
@@ -15040,7 +15076,9 @@ pub const MF_MT_MAX_KEYFRAME_SPACING: crate::core::GUID = crate::core::GUID { da
 pub const MF_MT_MINIMUM_DISPLAY_APERTURE: crate::core::GUID = crate::core::GUID { data1: 3610806118, data2: 6398, data3: 18630, data4: [161,119,238,137,72,103,200,196,] };
 pub const MF_MT_PIXEL_ASPECT_RATIO: crate::core::GUID = crate::core::GUID { data1: 3325520414, data2: 36106, data3: 16423, data4: [190,69,109,154,10,211,155,182,] };
 pub const MF_MT_SUBTYPE: crate::core::GUID = crate::core::GUID { data1: 4158868634, data2: 17128, data3: 18196, data4: [183,75,203,41,215,44,53,229,] };
+pub const MF_MT_TRANSFER_FUNCTION: crate::core::GUID = crate::core::GUID { data1: 1605434601, data2: 48732, data3: 18741, data4: [168,17,236,131,143,142,237,147,] };
 pub const MF_MT_VIDEO_NOMINAL_RANGE: crate::core::GUID = crate::core::GUID { data1: 3256585957, data2: 47446, data3: 16497, data4: [141,175,50,94,223,92,171,17,] };
+pub const MF_MT_VIDEO_PRIMARIES: crate::core::GUID = crate::core::GUID { data1: 3690718423, data2: 1856, data3: 20192, data4: [129,146,133,10,176,226,25,53,] };
 pub const MF_MT_VIDEO_PROFILE: crate::core::GUID = crate::core::GUID { data1: 2910234635, data2: 11612, data3: 19979, data4: [179,117,100,229,32,19,112,54,] };
 pub const MF_MT_YUV_MATRIX: crate::core::GUID = crate::core::GUID { data1: 1042535504, data2: 11381, data3: 19749, data4: [160,14,185,22,112,209,35,39,] };
 pub const MF_PD_DURATION: crate::core::GUID = crate::core::GUID { data1: 1821969715, data2: 48014, data3: 18298, data4: [133,152,13,93,150,252,216,138,] };
