@@ -910,7 +910,7 @@ impl VisionTower {
         let session = match &self.runtime {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             VisionRuntime::Vulkan(runtime) => VisionSession::Vulkan(Box::new(
-                runtime.create_raw_graph_session(&self.weights.ctx, &graph, &[cur])?,
+                runtime.create_vision_graph_session(&self.weights.ctx, &graph, &[cur])?,
             )),
             VisionRuntime::Metal(runtime) => {
                 let prepared =

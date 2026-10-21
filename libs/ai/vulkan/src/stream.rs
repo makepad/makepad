@@ -23,6 +23,8 @@ pub struct Stream {
     query_count: u32,
     /// (label, query index) of the timed spans, when timing.
     pub spans: Vec<(String, u32)>,
+    dispatch_count: usize,
+    barrier_count: usize,
 }
 
 impl Drop for Stream {
@@ -104,6 +106,8 @@ impl Device {
                 queries,
                 query_count: 0,
                 spans: Vec::new(),
+                dispatch_count: 0,
+                barrier_count: 0,
             })
         }
     }
@@ -125,6 +129,8 @@ impl Stream {
         }
         self.query_count = 0;
         self.spans.clear();
+        self.dispatch_count = 0;
+        self.barrier_count = 0;
         self.recording = true;
         Ok(())
     }
@@ -132,6 +138,7 @@ impl Stream {
     /// One kernel dispatch of `groups` workgroups.
     pub fn dispatch(&mut self, args: &Args, groups: [u32; 3]) {
         debug_assert!(self.recording);
+        self.dispatch_count += 1;
         let d = &self.device;
         unsafe {
             d.cmd_bind_pipeline(self.cb, vk::PipelineBindPoint::COMPUTE, args.kernel().pipeline);
@@ -142,6 +149,7 @@ impl Stream {
 
     /// Everything dispatched before is visible to everything after.
     pub fn barrier(&mut self) {
+        self.barrier_count += 1;
         let mb = [vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE)];
@@ -154,6 +162,12 @@ impl Stream {
     pub fn copy(&mut self, src: &Buffer, src_offset: u64, dst: &Buffer, dst_offset: u64, size: u64) {
         let region = [vk::BufferCopy { src_offset, dst_offset, size }];
         unsafe { self.device.cmd_copy_buffer(self.cb, src.buffer, dst.buffer, &region) };
+    }
+
+    /// Dispatches and memory barriers in the current recording, including
+    /// those encoded by compound operations.
+    pub fn command_counts(&self) -> (usize, usize) {
+        (self.dispatch_count, self.barrier_count)
     }
 
     pub fn fill(&mut self, dst: &Buffer, offset: u64, size: u64, value: u32) {
