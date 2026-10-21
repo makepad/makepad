@@ -4535,6 +4535,22 @@ impl<'a> Gen<'a> {
             self.fin_i(d, rd);
             return;
         }
+        // d = a - b with d in b's register: neg d; add d, a (no copy through rax and back)
+        if op == IOp::Sub && rd == rb && rd != ra && !crate::stats::opt_off(options, "-negadd") {
+            self.a.rex(it != U32, 0, 0, rd, false);
+            self.a.byte(0xf7);
+            self.a.modrm_rr(3, rd);
+            if it == U32 {
+                self.a.alu_rr32(0x01, rd, ra);
+            } else {
+                self.a.alu_rr(0x01, rd, ra);
+                if it.bits < 64 && !self.low_only[d.0 as usize] {
+                    self.a.extend(rd, it.bits, it.signed);
+                }
+            }
+            self.fin_i(d, rd);
+            return;
+        }
         let work = if rd == rb && rd != ra { RAX } else { rd };
         self.a.mov_rr(work, ra);
         if it == U32 {

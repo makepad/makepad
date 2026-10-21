@@ -9478,6 +9478,10 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
             relax_backend::passes::local_copy_prop(func);
             relax_backend::passes::dce(func);
         }
+        // accesses through a constant offset of a base that is still live read the base
+        if relax_codegen::opt::fold_offset_bases(options, func) {
+            relax_backend::passes::dce(func);
+        }
         // reads of a temporary a variable was copied from read the variable: one register
         relax_codegen::opt::reuse_copied_variables(options, func);
     }
