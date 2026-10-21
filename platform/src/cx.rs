@@ -192,6 +192,9 @@ pub struct Cx {
     pub pending_live_edit_request: bool,
     /// Re-evaluate Splash definitions while preserving imperative widget state.
     pub pending_style_reload: bool,
+    /// How many whole-tree reload walks (`Event::LiveEdit` or `Event::ScriptReapply`) have run,
+    /// so a widget kept outside the tree can tell whether it missed one.
+    pub reload_generation: u64,
 
     /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
     /// the freshly re-run `script_mod` value with. A file-change hot reload
@@ -1052,6 +1055,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_style_reload: false,
+            reload_generation: 0,
             pending_live_edit_request: false,
             live_edit_apply: Apply::Reload,
             pending_window_geom_changes: Default::default(),

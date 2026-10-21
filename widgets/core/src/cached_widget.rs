@@ -103,14 +103,23 @@ impl ScriptHook for CachedWidget {
             });
         }
 
+        // Each heap has its own singletons, so isolates never share widgets with the app or each other.
+        let key = (vm.bx.heap.heap_key(), self.template_id);
+
         // If widget already exists, apply updates to it
         if let Some(widget) = &mut self.widget {
             if let Some(template_value) = self.template_value {
                 widget.script_apply(vm, apply, scope, template_value);
             }
             let widget = widget.clone();
-            vm.cx_mut()
-                .widget_tree_insert_child_deep(self.uid, self.template_id, widget);
+            let cx = vm.cx_mut();
+            if apply.is_reload() && cx.has_global::<WidgetWrapperCache>() {
+                let generation = cx.reload_generation;
+                if let Some(entry) = cx.get_global::<WidgetWrapperCache>().map.get_mut(&key) {
+                    entry.1 = generation;
+                }
+            }
+            cx.widget_tree_insert_child_deep(self.uid, self.template_id, widget);
             return;
         }
 
@@ -121,22 +130,26 @@ impl ScriptHook for CachedWidget {
         }
 
         // Try to retrieve the widget from the global cache.
-        // Each heap has its own singletons, so isolates never share widgets with the app or each other.
-        let key = (vm.bx.heap.heap_key(), self.template_id);
         let cx = vm.cx_mut();
-        if let Some(widget) = cx
+        let generation = cx.reload_generation;
+        if let Some((widget, applied_generation)) = cx
             .get_global::<WidgetWrapperCache>()
             .map
-            .get_mut(&key)
+            .get(&key)
+            .cloned()
         {
-            self.widget = Some(widget.clone());
+            self.widget = Some(widget);
+            // Nothing held the cached widget during a later reload, so it still has the old styling.
+            if applied_generation != generation {
+                cx.request_script_reapply();
+            }
         } else if let Some(template_value) = self.template_value {
             // If not in cache, create a new widget and add it to the cache
             let widget = WidgetRef::script_from_value_scoped(vm, scope, template_value);
             let cx = vm.cx_mut();
             cx.get_global::<WidgetWrapperCache>()
                 .map
-                .insert(key, widget.clone());
+                .insert(key, (widget.clone(), generation));
             self.widget = Some(widget);
         }
         if let Some(widget) = &self.widget {
@@ -200,7 +213,8 @@ impl CachedWidget {}
 #[derive(Default)]
 pub struct WidgetWrapperCache {
     /// Keyed by the heap that created each widget, and then its template ID.
-    map: HashMap<(usize, LiveId), WidgetRef>,
+    /// The value is the widget and the `Cx::reload_generation` it was last applied at.
+    map: HashMap<(usize, LiveId), (WidgetRef, u64)>,
 }
 
 /// Forgets the cached widgets of isolates whose heaps died,

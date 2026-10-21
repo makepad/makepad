@@ -334,6 +334,7 @@ macro_rules! _app_main_event_closure {
                     } else {
                         cx.live_edit_apply()
                     };
+                    cx.reload_generation += 1;
                     cx.with_vm(|vm| {
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
@@ -355,6 +356,7 @@ macro_rules! _app_main_event_closure {
                         .as_ref()
                         .map(|r| $crate::ScriptValue::from(r.as_object()));
                     if let Some(value) = value {
+                        cx.reload_generation += 1;
                         cx.with_vm(|vm| {
                             <$app as $crate::ScriptApply>::script_apply(
                                 app,
