@@ -934,6 +934,14 @@ impl Widget for DropDown {
                 self.set_closed(cx);
             }
 
+            // The open menu sits on top, so a scroll over it leaves what's under it alone.
+            if let Event::Scroll(e) = popup_event {
+                let is_over = menu.menu_contains_pos(cx, e.abs);
+                let area = self.draw_bg.area();
+                cx.is_scroll_owner(e, area, Vec2Index::X, is_over);
+                cx.is_scroll_owner(e, area, Vec2Index::Y, is_over);
+            }
+
             // check if we clicked outside of the popup menu
             if let Event::MouseDown(e) = popup_event {
                 if !menu.menu_contains_pos(cx, e.abs) {

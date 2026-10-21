@@ -193,13 +193,23 @@ impl Widget for FlatList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
-        self.scroll_bars.handle_event(cx, event, scope);
+        // Scrolls reach the items first, so a scrollable inside an item takes them.
+        let is_scroll = matches!(event, Event::Scroll(_));
+        if !is_scroll {
+            self.scroll_bars.handle_event(cx, event, scope);
+        }
 
+        let container_axes = self.scroll_bars.scroll_container_axes(cx, event);
+        cx.begin_scroll_container(container_axes);
         for (_item_id, item) in self.items.iter_mut() {
             let item_uid = item.widget.widget_uid();
             cx.group_widget_actions(uid, item_uid, |cx| {
                 item.widget.handle_event(cx, event, scope)
             });
+        }
+        cx.end_scroll_container(container_axes);
+        if is_scroll {
+            self.scroll_bars.handle_event(cx, event, scope);
         }
     }
 

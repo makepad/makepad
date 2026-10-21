@@ -41,6 +41,8 @@ pub enum MouseKind {
     Up,
     Click,
     Scroll,
+    /// One finger on a touch screen; `MouseInput::phase` is `start`, `move`, `stop` or `cancel`.
+    Touch,
 }
 
 impl MouseKind {
@@ -51,6 +53,7 @@ impl MouseKind {
             Self::Up => "up",
             Self::Click => "click",
             Self::Scroll => "scroll",
+            Self::Touch => "touch",
         }
     }
 }
@@ -83,6 +86,9 @@ pub struct MouseInput {
     pub dy: f64,
     pub modifiers: KeyModifiers,
     pub wait: bool,
+    /// A scroll's trackpad gesture phase (`began`, `changed`, `ended`, `momentum`,
+    /// `momentum_ended`, `touched`; `None` is a mouse wheel), or a touch's phase.
+    pub phase: Option<&'static str>,
 }
 
 impl MouseInput {
@@ -97,6 +103,7 @@ impl MouseInput {
             dy: 0.0,
             modifiers: KeyModifiers::default(),
             wait: true,
+            phase: None,
         }
     }
 }
@@ -186,6 +193,9 @@ impl RemoteClient {
         if input.kind == MouseKind::Scroll {
             params.push(("dx", dx.as_str()));
             params.push(("dy", dy.as_str()));
+        }
+        if let Some(phase) = input.phase {
+            params.push(("phase", phase));
         }
         push_modifier_params(&mut params, &input.modifiers);
         if let Some(window) = &window {

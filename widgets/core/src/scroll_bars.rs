@@ -290,6 +290,12 @@ impl ScrollBars {
         self.scroll
     }
 
+    /// Whether a shown bar scrolls its view when a finger or the mouse drags the content.
+    pub fn has_drag_scrolling(&self) -> bool {
+        (self.show_scroll_x && self.scroll_bar_x.drag_scrolling())
+            || (self.show_scroll_y && self.scroll_bar_y.drag_scrolling())
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -326,6 +332,21 @@ impl ScrollBars {
             }
         }
 
+        // A press that something outside us already holds (like an overlay drawn over us) is never ours to join.
+        if self.has_drag_scrolling() {
+            match event {
+                Event::MouseDown(e) if !e.handled.get().is_empty() => {
+                    cx.fingers.mark_press_as_held_outside(live_id!(mouse).into(), self.area);
+                }
+                Event::TouchUpdate(e) => {
+                    for touch in e.touches.iter().filter(|t| t.state == TouchState::Start && !t.handled.get().is_empty()) {
+                        cx.fingers.mark_press_as_held_outside(live_id_num!(touch, touch.uid).into(), self.area);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if self.show_scroll_x {
             let mut ret_x = None;
             self.scroll_bar_x
@@ -358,6 +379,26 @@ impl ScrollBars {
                 self.redraw(cx);
             }
         }
+    }
+
+    /// The axes (x, y) these bars could take `event` along, if it's a scroll
+    /// (see [`Cx::begin_scroll_container`]).
+    pub fn scroll_container_axes(&self, cx: &mut Cx, event: &Event) -> [bool; 2] {
+        let Event::Scroll(e) = event else {
+            return [false; 2];
+        };
+        let mut axes = [false; 2];
+        if self.ignore_scroll_input {
+            return axes;
+        }
+        let bars = [(self.show_scroll_x, &self.scroll_bar_x), (self.show_scroll_y, &self.scroll_bar_y)];
+        for (is_shown, bar) in bars {
+            if is_shown {
+                let [x, y] = bar.scroll_container_axes(cx, e, self.area);
+                axes = [axes[0] || x, axes[1] || y];
+            }
+        }
+        axes
     }
 
     pub fn handle_scroll_event(
@@ -472,6 +513,12 @@ impl ScrollBars {
             self.scroll_bar_y.stop_fling(press_time);
         }
         true
+    }
+
+    /// See [`ScrollBar::stop_motion`].
+    pub fn stop_motion(&mut self) {
+        self.scroll_bar_x.stop_motion();
+        self.scroll_bar_y.stop_motion();
     }
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {

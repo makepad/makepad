@@ -72,7 +72,10 @@ fn wheel(cx: &mut Cx, log: &mut LogList, dy: f64, handled: bool) -> bool {
         time: 0.0,
         phase: ScrollPhase::None,
     });
+    // The page around the list could take the wheel too, as a scroll view says before passing it in.
+    cx.begin_scroll_container([false, true]);
     log.handle_event(cx, &event, &mut Scope::empty());
+    cx.end_scroll_container([false, true]);
     event.scroll_handled(Vec2Index::Y)
 }
 

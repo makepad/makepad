@@ -357,10 +357,16 @@ impl Widget for TabBar {
                     cx.widget_action(uid, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag => {}
-                TabAction::TouchDown { abs, time } => {
-                    self.finger_scroll = FingerScrollState::Dragging {
-                        samples: vec![FingerScrollSample { abs: abs.x, time }],
-                    };
+                TabAction::TouchDown { abs, time, digit_id } => {
+                    // An overflowing strip takes the horizontal drag, so nothing around it moves too.
+                    let is_overflowing = self.scroll_bars.get_scroll_view_total().x
+                        > self.scroll_bars.get_scroll_view_visible().x + 0.5;
+                    let area = self.scroll_bars.area();
+                    if is_overflowing && cx.is_scroll_drag_owner(digit_id, Vec2Index::X, area) {
+                        self.finger_scroll = FingerScrollState::Dragging {
+                            samples: vec![FingerScrollSample { abs: abs.x, time }],
+                        };
+                    }
                 }
                 TabAction::TouchScroll { abs, time } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {

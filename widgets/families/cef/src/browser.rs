@@ -1251,7 +1251,18 @@ impl Widget for Browser {
                     self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, true);
                 }
                 Hit::FingerScroll(fe) => {
-                    self.send_mouse_wheel_internal(cx, fe.abs, fe.modifiers, fe.scroll);
+                    // The page scrolls itself, so it takes the whole gesture over it.
+                    let is_owner = match event {
+                        Event::Scroll(se) => {
+                            let area = self.browser_area();
+                            let is_owner_x = cx.is_scroll_owner(se, area, Vec2Index::X, true);
+                            cx.is_scroll_owner(se, area, Vec2Index::Y, true) || is_owner_x
+                        }
+                        _ => false,
+                    };
+                    if is_owner {
+                        self.send_mouse_wheel_internal(cx, fe.abs, fe.modifiers, fe.scroll);
+                    }
                 }
                 Hit::KeyDown(key_event) => {
                     if self.suppress_next_paste_shortcut

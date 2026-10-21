@@ -1132,11 +1132,19 @@ impl MenuBar {
                     self.draw_bg.redraw(cx);
                 }
             }
-            Hit::FingerScroll(fe) if self.panel_scroll_max > 0.0 => {
-                let next = (self.panel_scroll + fe.scroll.y).clamp(0.0, self.panel_scroll_max);
-                if next != self.panel_scroll {
-                    self.panel_scroll = next;
-                    self.redraw_overlay(cx);
+            Hit::FingerScroll(fe) => {
+                // The open menu takes scrolls over it, so the content under it stays put.
+                if let Event::Scroll(e) = event {
+                    let area = self.draw_panel.area();
+                    cx.is_scroll_owner(e, area, Vec2Index::X, true);
+                    cx.is_scroll_owner(e, area, Vec2Index::Y, true);
+                }
+                if self.panel_scroll_max > 0.0 {
+                    let next = (self.panel_scroll + fe.scroll.y).clamp(0.0, self.panel_scroll_max);
+                    if next != self.panel_scroll {
+                        self.panel_scroll = next;
+                        self.redraw_overlay(cx);
+                    }
                 }
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over => {
