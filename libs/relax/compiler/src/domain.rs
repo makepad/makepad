@@ -112,13 +112,14 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
     // block took it off the shared data for nothing (and the disk cache named the copy as a
     // fresh, zeroed block: the warm run read a length of 0). An object whose kind cannot tell
     // is scanned word by word, as before.
+    let pw = u.ptr_bytes() as usize;
     let words: Vec<usize> = match crate::syms::pointer_offsets(u, start) {
-        Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + 8 <= bytes.len()).collect(),
-        None => (0..bytes.len() / 8).map(|i| i * 8).collect(),
+        Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + pw <= bytes.len()).collect(),
+        None => (0..bytes.len() / pw).map(|i| i * pw).collect(),
     };
     let mut reaches = false;
     for &k in &words {
-        let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
+        let w = crate::syms::word_in(u, &bytes, k);
         if (lo..hi).contains(&w) {
             // a static (materialized when laid out) or an anonymous mutable block: one constant
             // evaluation made (a promoted temporary) has no initial image yet -- every domain needs it
@@ -134,7 +135,7 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
         }
         let moved = rehome(u, cs, seen, false);
         if moved != cs {
-            bytes[k..k + 8].copy_from_slice(&(moved + (w - cs)).to_le_bytes());
+            bytes[k..k + pw].copy_from_slice(&u.ptr_word(moved + (w - cs)));
             reaches = true;
         }
     }
@@ -148,9 +149,9 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), new as *mut u8, bytes.len()) };
     // a word pointing into the object itself (a self-referential constant) points at the copy
     for &k in &words {
-        let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
+        let w = crate::syms::word_in(u, &bytes, k);
         if (start..start + len).contains(&w) {
-            unsafe { *((new + k as u64) as *mut u64) = new + (w - start) };
+            unsafe { crate::syms::write_ptr(u, new + k as u64, new + (w - start)) };
         }
     }
     seen.insert(addr, new);
@@ -328,7 +329,7 @@ fn materialize_in(u: &Unit, base: u64, sym: u32, seen: &mut HashSet<u32>) {
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), at as *mut u8, bytes.len()) };
     for (o, t) in provenance_words(u, &bytes) {
         if let Some(to) = offset_of(u, t) {
-            unsafe { *((at + o as u64) as *mut u64) = base + to };
+            unsafe { crate::syms::write_ptr(u, at + o as u64, base + to) };
             if !matches!(u.syms.kind(t.id), Some(SymKind::Static(_) | SymKind::Rw(_))) {
                 materialize_in(u, base, t.id, seen);
             }
@@ -339,7 +340,8 @@ fn materialize_in(u: &Unit, base: u64, sym: u32, seen: &mut HashSet<u32>) {
 /// Makes a new domain's block: reserved once (it never moves), holding the initial image of
 /// every static laid out so far. Returns its base.
 pub fn create(u: &Unit) -> u64 {
-    let base = crate::os::mem::alloc_rw(BLOCK_SIZE);
+    // a wasm32 program's statics are in its window (web32.rs)
+    let base = if crate::web32::on() { crate::web32::alloc(BLOCK_SIZE) } else { crate::os::mem::alloc_rw(BLOCK_SIZE) };
     let ids: Vec<u32> = u.syms.initial_data.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
     let mut seen = HashSet::new();
     for id in ids {
@@ -356,7 +358,7 @@ pub fn create(u: &Unit) -> u64 {
 pub fn destroy(base: u64) {
     forget_tls_keys(base);
     BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|b| *b != base);
-    crate::os::mem::free(base, BLOCK_SIZE);
+    if crate::web32::on() { crate::web32::free(base, BLOCK_SIZE) } else { crate::os::mem::free(base, BLOCK_SIZE) }
 }
 
 /// A static was just laid out (jit.rs `static_addr`, after its initial image was captured): copy
@@ -1048,7 +1050,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if compile_phase(id, "link").is_err() { return Ok(id); }
     let t2 = std::time::Instant::now();
     // the libraries the new crates link
-    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, first_file);
+    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file);
     if !missing.is_empty() && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("makepad-run domain: libraries not found: {:?}", missing);
     }

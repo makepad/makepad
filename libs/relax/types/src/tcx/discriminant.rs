@@ -11,17 +11,18 @@ use crate::types::Types;
 pub enum VariantDiscr { Explicit(DefId), Relative(u32) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Discr { pub val: u128, pub ty: Prim }
+/// `bytes`: the size of `ty` on the target (isize, the default repr, is 4 bytes on wasm32).
+pub struct Discr { pub val: u128, pub ty: Prim, pub bytes: u32 }
 impl Discr {
     pub fn signed_value(self) -> i128 {
-        let (bytes, signed) = Types::int_info(self.ty);
+        let (bytes, signed) = (self.bytes, prim_signed(self.ty));
         let shift = 128 - bytes * 8;
         if signed { ((self.val << shift) as i128) >> shift } else { self.val as i128 }
     }
     pub fn wrap_incr(self) -> Self { self.checked_add(1).0 }
     /// ty/util.rs:83-105: preserve the representation's signed overflow boundary.
     pub fn checked_add(self, n: u128) -> (Self, bool) {
-        let (bytes, signed) = Types::int_info(self.ty);
+        let (bytes, signed) = (self.bytes, prim_signed(self.ty));
         let bits = bytes * 8;
         let mask = u128::MAX >> (128 - bits);
         let (val, overflow) = if signed {
@@ -38,30 +39,36 @@ impl Discr {
             let val = if overflow { n - (mask - self.val) - 1 } else { self.val + n };
             (val, overflow)
         };
-        (Self { val, ty: self.ty }, overflow)
+        (Self { val, ty: self.ty, bytes: self.bytes }, overflow)
     }
+}
+fn prim_signed(p: Prim) -> bool {
+    Types::int_info_of(p, 8).1
 }
 impl std::fmt::Display for Discr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if Types::int_info(self.ty).1 { write!(f, "{}", self.signed_value()) } else { write!(f, "{}", self.val) }
+        if prim_signed(self.ty) { write!(f, "{}", self.signed_value()) } else { write!(f, "{}", self.val) }
     }
 }
 impl AdtT {
-    fn initial_discriminant(&self) -> Discr { Discr { val: 0, ty: self.repr_int.unwrap_or(Prim::Isize) } }
+    fn initial_discriminant(&self, tcx: &Tcx) -> Discr {
+        let ty = self.repr_int.unwrap_or(Prim::Isize);
+        Discr { val: 0, ty, bytes: tcx.tys.int_info(ty).0 }
+    }
     /// adt.rs:640-675: evaluate the declaration's anonymous constant by its identity.
     pub fn eval_explicit_discr(&self, tcx: &Tcx, prog: &Program, def: DefId) -> Result<Discr, ErrorHandled> {
         assert!(self.is_enum());
-        let initial = self.initial_discriminant();
+        let initial = self.initial_discriminant(tcx);
         let value = tcx.const_eval_resolve(prog, TypingEnv::fully_monomorphized(prog), def, &[])?;
         let leaf = value.try_to_leaf().ok_or_else(evaluation_error)?;
-        Ok(Discr { val: leaf.to_bits(Types::int_info(initial.ty).0 as u8), ty: initial.ty })
+        Ok(Discr { val: leaf.to_bits(initial.bytes as u8), ty: initial.ty, bytes: initial.bytes })
     }
     pub fn discriminants(&self, tcx: &Tcx, prog: &Program) -> Vec<(u32, Discr)> {
         assert!(self.is_enum());
         let mut prev = None::<Discr>;
         let mut result = Vec::with_capacity(self.variants.len());
         for (i, v) in self.variants.iter().enumerate() {
-            let mut discr = prev.map_or(self.initial_discriminant(), Discr::wrap_incr);
+            let mut discr = prev.map_or(self.initial_discriminant(tcx), Discr::wrap_incr);
             if let VariantDiscr::Explicit(def) = v.discr {
                 if let Ok(value) = self.eval_explicit_discr(tcx, prog, def) { discr = value; }
             }
@@ -75,7 +82,7 @@ impl AdtT {
     /// executable provider. A failed evaluation keeps the recovery value, as `discriminants`.
     pub fn fold_discriminants(&self, tcx: &Tcx, prog: &Program) -> Option<Vec<u128>> {
         assert!(self.is_enum());
-        let initial = self.initial_discriminant();
+        let initial = self.initial_discriminant(tcx);
         let mut prev = None::<Discr>;
         let mut result = Vec::with_capacity(self.variants.len());
         for v in &self.variants {
@@ -83,7 +90,7 @@ impl AdtT {
             if let VariantDiscr::Explicit(def) = v.discr {
                 let value = crate::const_eval::fold_without_execution(tcx, prog, TypingEnv::fully_monomorphized(prog), def)?;
                 if let Some(leaf) = value.ok().and_then(|v| v.try_to_leaf()) {
-                    discr = Discr { val: leaf.to_bits(Types::int_info(initial.ty).0 as u8), ty: initial.ty };
+                    discr = Discr { val: leaf.to_bits(initial.bytes as u8), ty: initial.ty, bytes: initial.bytes };
                 }
             }
             prev = Some(discr);
@@ -95,7 +102,7 @@ impl AdtT {
     pub fn discriminant_for_variant(&self, tcx: &Tcx, prog: &Program, index: u32) -> Option<Discr> {
         if !self.is_enum() { return None; }
         let (def, offset) = self.discriminant_def_for_variant(index)?;
-        let value = def.and_then(|def| self.eval_explicit_discr(tcx, prog, def).ok()).unwrap_or(self.initial_discriminant());
+        let value = def.and_then(|def| self.eval_explicit_discr(tcx, prog, def).ok()).unwrap_or(self.initial_discriminant(tcx));
         Some(value.checked_add(offset as u128).0)
     }
     pub fn discriminant_def_for_variant(&self, index: u32) -> Option<(Option<DefId>, u32)> {
@@ -115,7 +122,7 @@ impl AdtT {
         let mut errors = Vec::new();
         let mut prev = None::<Discr>;
         for v in &self.variants {
-            let wrapped = prev.map_or(self.initial_discriminant(), Discr::wrap_incr);
+            let wrapped = prev.map_or(self.initial_discriminant(tcx), Discr::wrap_incr);
             let current = match v.discr {
                 VariantDiscr::Explicit(def) => match self.eval_explicit_discr(tcx, prog, def) {
                     Ok(discr) => discr,

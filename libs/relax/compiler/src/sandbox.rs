@@ -636,15 +636,16 @@ pub(crate) fn initial_bytes(u: &Unit, sym: u32) -> Result<Vec<u8>, String> {
 /// known data object, static or thunk). Never inspect a running host static here.
 pub(crate) fn provenance_words(u: &Unit, b: &[u8]) -> Vec<(u32, Sym)> {
     let mut out = Vec::new();
+    let pw = u.ptr_bytes() as usize;
     let mut i = 0;
-    while i + 8 <= b.len() {
-        let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        if w > 0x10000 {
+    while i + pw <= b.len() {
+        let w = crate::syms::word_in(u, b, i);
+        if (if pw == 4 { w & 0xffff_ffff } else { w }) > 0x10000 {
             if let Some(s) = u.syms.symbol_at(w, u) {
                 out.push((i as u32, s));
             }
         }
-        i += 8;
+        i += pw;
     }
     out
 }
@@ -1485,6 +1486,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                 }
                 Inst::Call(callee, args, rets) => {
                     let callee = match callee {
+                        Callee::Asm(_) => return Err(format!("{}: inline assembly, which sandboxed modules cannot run", f.name)),
                         Callee::Fn(id) => Callee::Fn(call_target(up, id, &sandboxed)?),
                         Callee::CFn(id, sig) => Callee::CFn(call_target(up, id, &sandboxed)?, sig),
                         Callee::Indirect(v) => Callee::Indirect(mask_fn(f, &mut insts, &mut pos, p, v)),

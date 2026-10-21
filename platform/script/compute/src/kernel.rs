@@ -981,29 +981,20 @@ struct FpEnv {
     saved: u64,
 }
 
-/// The thread's FP control register (FPCR) and its write. Relax compiles no inline assembly:
-/// under Relax (this crate provided or JIT-compiled) they are the loader's (std::relax).
+/// The thread's FP control register (FPCR) and its write (Relax assembles it).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn fpcr_read() -> u64 {
-    #[cfg(relax)]
-    return std::relax::fpcr_read();
-    #[cfg(not(relax))]
-    {
-        let v: u64;
-        // SAFETY: reads this thread's FP control bits.
-        unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
-        v
-    }
+    let v: u64;
+    // SAFETY: reads this thread's FP control bits.
+    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn fpcr_write(v: u64) {
-    #[cfg(relax)]
-    std::relax::fpcr_write(v);
     // SAFETY: writes this thread's FP control bits; callers restore what they read.
-    #[cfg(not(relax))]
     unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
 }
 

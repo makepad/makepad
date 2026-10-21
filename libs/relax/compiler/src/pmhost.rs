@@ -352,6 +352,8 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
     let mut prog = crate::program::Program::new(sess);
     // core/alloc/std: the program's own parses (program::SharedParse), not a second copy
     prog.std_from_shared = true;
+    // macros run on this machine: its pointer width, whatever the program's target
+    prog.ptr_bytes = 8;
     // macros run here: the machine's cfg, never MAKEPAD_RUN_CHECK_TARGET's
     let host = |f: &[String]| crate::cfg::CfgSet::machine(sess, f);
     let core = prog.load_crate_deferred("core", &format!("{}/core/lib.rs", std_dir), 2021, host(&[]), Vec::new())?;

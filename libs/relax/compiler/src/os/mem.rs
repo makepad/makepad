@@ -194,6 +194,22 @@ mod imp {
         base
     }
 
+    /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is
+    /// taken.
+    pub fn reserve_at(at: u64, code: usize, rest: usize) -> u64 {
+        const MAP_FIXED_NOREPLACE: i32 = 0x100000;
+        let p = unsafe { super::unix::mmap(at as *mut u8, code + rest, super::unix::PROT_RW, super::unix::MAP_PRIVATE_ANON | MAP_FIXED_NOREPLACE, -1, 0) };
+        if p as isize == -1 || p as u64 != at {
+            return 0;
+        }
+        crate::memstat::name_mapping(at as usize, code, c"makepad-run-jit-code");
+        crate::memstat::name_mapping(at as usize + code, rest, c"makepad-run-jit-data");
+        if unsafe { mprotect(at as *mut u8, code, PROT_RWX) } != 0 {
+            panic!("reservation: mprotect RWX failed");
+        }
+        at
+    }
+
     /// Gives a reservation back.
     pub fn release(base: u64, code: usize, rest: usize) {
         super::unix::retire(base, code + rest);
@@ -320,6 +336,25 @@ mod imp {
             }
             let at = code_alloc_at(code, base);
             assert_eq!(at, base, "reservation: code view not at the base");
+            base
+        }
+    }
+
+    /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is
+    /// taken.
+    pub fn reserve_at(at: u64, code: usize, rest: usize) -> u64 {
+        const VM_FLAGS_FIXED: i32 = 0;
+        unsafe {
+            let task = mach_task_self();
+            let mut base: u64 = at;
+            if mach_vm_allocate(task, &mut base, (code + rest) as u64, VM_FLAGS_FIXED) != 0 || base != at {
+                return 0;
+            }
+            if super::no_codegen() {
+                return base;
+            }
+            let c = code_alloc_at(code, base);
+            assert_eq!(c, base, "reservation: code view not at the base");
             base
         }
     }

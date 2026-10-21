@@ -152,3 +152,58 @@ pub unsafe fn functions(up: *const Unit) -> Vec<FnCoverage> {
     }
     out
 }
+
+/// Whether `addr` is a block byte of the coverage table, and then whether that block ran in ANY
+/// lowering of its slot (the wasm export reads the block stores that travelled into optimised
+/// code). Each lowering of a slot (baseline, then O2, ...) gets its own bytes, and the build the
+/// export captures may have run little or not at all after it was installed: a block counts as
+/// run when the same block (index, in a lowering with the same block count) of the same slot ran
+/// in any lowering. Read once the run is over (the union is computed on the first call).
+pub fn hit_at(addr: u64) -> Option<bool> {
+    let t = TABLE.load(Ordering::Acquire);
+    if t.is_null() {
+        return None;
+    }
+    let base = t as u64;
+    if addr < base || addr >= base + NEXT.load(Ordering::Relaxed).min(CAP) as u64 {
+        return None;
+    }
+    let k = (addr - base) as usize;
+    struct Union {
+        /// (first byte, range index), sorted
+        starts: Vec<(usize, usize)>,
+        /// per range: (unit, slot, block count)
+        keys: Vec<(usize, u32, usize)>,
+        ran: std::collections::HashSet<(usize, u32, usize, usize)>,
+    }
+    static U: std::sync::OnceLock<Union> = std::sync::OnceLock::new();
+    let u = U.get_or_init(|| {
+        let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut starts = Vec::with_capacity(ranges.len());
+        let mut keys = Vec::with_capacity(ranges.len());
+        let mut ran = std::collections::HashSet::new();
+        for (ri, r) in ranges.iter().enumerate() {
+            starts.push((r.first, ri));
+            let n = r.pos.len();
+            keys.push((r.unit, r.slot, n));
+            for b in 0..n {
+                if unsafe { std::ptr::read_volatile(t.add(r.first + b)) } != 0 {
+                    ran.insert((r.unit, r.slot, n, b));
+                }
+            }
+        }
+        starts.sort_unstable();
+        Union { starts, keys, ran }
+    });
+    let i = u.starts.partition_point(|s| s.0 <= k);
+    if i == 0 {
+        return Some(unsafe { std::ptr::read_volatile(t.add(k)) } != 0);
+    }
+    let (first, ri) = u.starts[i - 1];
+    let (unit, slot, n) = u.keys[ri];
+    let b = k - first;
+    if b >= n {
+        return Some(unsafe { std::ptr::read_volatile(t.add(k)) } != 0);
+    }
+    Some(u.ran.contains(&(unit, slot, n, b)))
+}

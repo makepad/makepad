@@ -46,6 +46,10 @@ pf = os.environ.get("RUN_PREFIX", "nice -n 10" if os.name != "nt" else "none")
 prefix = [] if pf in ("", "none") else shlex.split(os.path.expandvars(pf))
 exe = ".exe" if os.name == "nt" else ""
 env = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=os.path.join(target, "rustc"))
+# The rustc baseline is "shipping rustc": the target's default CPU, not the workspace's host target-cpu=native
+# (.cargo/config.toml). RUSTFLAGS replaces the config's flags; RW_RUSTFLAGS picks another baseline
+# (e.g. "-C target-cpu=native" for the native-cpu comparison).
+env["RUSTFLAGS"] = os.environ.get("RW_RUSTFLAGS", "")
 native = os.environ.get("NATIVE")
 if not native:
     subprocess.run(prefix + ["cargo", "build", "--release", "--offline", "-q", "-j", "8"], cwd=here, env=env, check=True)

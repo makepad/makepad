@@ -9,7 +9,7 @@ use crate::mir::{
     UserTypeAnnotationIndex,
 };
 use crate::program::Prim;
-use crate::types::{TyId, TyKind, Types};
+use crate::types::{TyId, TyKind};
 
 impl Builder<'_> {
     /// as_constant.rs:`as_constant`. Compile `expr`, yielding a compile-time constant. Assumes that
@@ -120,7 +120,7 @@ impl Builder<'_> {
                 int_scalar(b as u128, 1)
             }
             (LitKind::Int, TyKind::Int(p)) => {
-                let (size, signed) = Types::int_info(*p);
+                let (size, signed) = tys.int_info(*p);
                 let n = crate::const_fold::parse_int_lit(&text).ok_or_else(|| bad(self))?;
                 if neg {
                     // Unsigned "negation" has the same bitwise effect as signed negation.

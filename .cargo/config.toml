@@ -1,8 +1,13 @@
-# Keep workspace builds free of global rustc flags.
+# Host builds use the CPU they are built on (user, 2026-10-21): every native workspace build on this machine gets
+# `-C target-cpu=native` (AVX2/AVX-512/FMA/BMI on x64; the exact Apple/ARM core on arm64).
+#
+# Only the host targets below get it: cross targets (wasm32/wasm64, Android, iOS, other OSes) keep their own
+# baselines. A RUSTFLAGS environment variable replaces these flags entirely, so a build for distribution or a
+# benchmark baseline that must stay generic sets RUSTFLAGS explicitly (rwbench's "shipping rustc" baseline does).
 #
 # PGO data for makepad-box3d is trained by libs/box3d/pgo.sh (not checked in).
 # Do not enable it here with a relative -Cprofile-use path:
-# Cargo applies build.rustflags to every crate in the graph, and rustc resolves
+# Cargo applies rustflags to every crate in the graph, and rustc resolves
 # that path relative to each crate being compiled. That breaks builds for
 # dependencies and tools such as `cargo install --path=./tools/cargo_makepad`.
 #
@@ -10,3 +15,21 @@
 # RUSTFLAGS="-Cprofile-use=/tmp/box3d-pgo/merged.profdata" cargo build --release -p makepad-box3d
 [build]
 rustflags = []
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]

@@ -122,7 +122,7 @@ impl Tcx {
         let values = self.variances.get_or_init(|| infer(self));
         if let Some(v) = values.get(&def) { return v.clone(); }
         let Some(parts) = self.signature_parts(prog, def) else { return Vec::new(); };
-        parts.variances.get_or_init(|| {
+        crate::query::init_once(&parts.variances, || {
             let sig = self.fn_sig(prog, def).unwrap();
             let mut walk = Walk { tcx: self, tys: &self.tys, values, indices: &sig.generic_indices,
                 uses: vec![V::Bi; sig.generic_indices.len()], deps: HashSet::default() };
@@ -131,7 +131,7 @@ impl Tcx {
             for &i in &sig.generic_indices.consts { walk.uses[i as usize] = V::Inv; }
             for v in &mut walk.uses { if *v == V::Bi { *v = V::Inv; } }
             walk.uses
-        }).clone()
+        }, |_| {}).clone()
     }
 }
 

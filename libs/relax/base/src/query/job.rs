@@ -36,7 +36,7 @@ pub(super) fn runner_id() -> u64 {
     WAIT_HOOK.get().map_or(0, |h| (h.me)())
 }
 
-static WAIT_HOOK: std::sync::OnceLock<WaitHook> = std::sync::OnceLock::new();
+pub(super) static WAIT_HOOK: std::sync::OnceLock<WaitHook> = std::sync::OnceLock::new();
 
 pub fn set_wait_hook(hook: WaitHook) {
     let _ = WAIT_HOOK.set(hook);

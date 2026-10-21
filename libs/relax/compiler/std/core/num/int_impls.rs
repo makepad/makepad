@@ -615,7 +615,7 @@ impl u128 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u128, ParseIntError> { parse::parse_u128(src.as_bytes(), radix) }
 }
 
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), target_pointer_width = "64"))]
 impl usize {
     pub const MIN: usize = 0;
     pub const MAX: usize = 18446744073709551615;
@@ -731,6 +731,125 @@ impl usize {
     }
     pub const fn from_be_bytes(bytes: [u8; 8]) -> usize { usize::from_le_bytes(bytes).swap_bytes() }
     pub const fn from_ne_bytes(bytes: [u8; 8]) -> usize { usize::from_le_bytes(bytes) }
+    pub fn from_str_radix(src: &str, radix: u32) -> Result<usize, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, usize::MAX as u64) { Ok(v) => Ok(v as usize), Err(e) => Err(e) } }
+}
+
+#[cfg(all(not(relax_check), target_pointer_width = "32"))]
+impl usize {
+    pub const MIN: usize = 0;
+    pub const MAX: usize = 4294967295;
+    pub const BITS: u32 = 32;
+    #[rustc_promotable]
+    pub const fn min_value() -> usize { usize::MIN }
+    #[rustc_promotable]
+    pub const fn max_value() -> usize { usize::MAX }
+    pub const fn count_ones(self) -> u32 { unsafe { ii::ctpop(self as usize) } }
+    pub const fn count_zeros(self) -> u32 { 32 - self.count_ones() }
+    pub const fn leading_zeros(self) -> u32 { unsafe { ii::ctlz(self as usize) } }
+    pub const fn trailing_zeros(self) -> u32 { unsafe { ii::cttz(self as usize) } }
+    pub const fn leading_ones(self) -> u32 { (!self).leading_zeros() }
+    pub const fn trailing_ones(self) -> u32 { (!self).trailing_zeros() }
+    pub const fn rotate_left(self, n: u32) -> usize { let k = n % 32; if k == 0 { self } else { (((self as usize) << k) | ((self as usize) >> (32 - k))) as usize } }
+    pub const fn rotate_right(self, n: u32) -> usize { let k = n % 32; if k == 0 { self } else { (((self as usize) >> k) | ((self as usize) << (32 - k))) as usize } }
+    pub const fn swap_bytes(self) -> usize { unsafe { ii::bswap(self as usize) as usize } }
+    pub const fn reverse_bits(self) -> usize { unsafe { ii::bitreverse(self as usize) as usize } }
+    pub const fn from_be(x: usize) -> usize { x.swap_bytes() }
+    pub const fn from_le(x: usize) -> usize { x }
+    pub const fn to_be(self) -> usize { self.swap_bytes() }
+    pub const fn to_le(self) -> usize { self }
+    pub const fn overflowing_add(self, rhs: usize) -> (usize, bool) { let r = self + rhs; (r, r < self) }
+    pub const fn overflowing_sub(self, rhs: usize) -> (usize, bool) { let r = self - rhs; (r, self < rhs) }
+    pub const fn overflowing_mul(self, rhs: usize) -> (usize, bool) { let wide = (self as u64) * (rhs as u64); let r = wide as usize; (r, (r as u64) != wide) }
+    pub const fn overflowing_neg(self) -> (usize, bool) { ((0 as usize) - self, self != 0) }
+    pub const fn overflowing_div(self, rhs: usize) -> (usize, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem(self, rhs: usize) -> (usize, bool) { (self % rhs, false) }
+    pub const fn overflowing_div_euclid(self, rhs: usize) -> (usize, bool) { (self / rhs, false) }
+    pub const fn overflowing_rem_euclid(self, rhs: usize) -> (usize, bool) { (self % rhs, false) }
+    pub const fn overflowing_shl(self, rhs: u32) -> (usize, bool) { (((self as usize) << (rhs & 31)) as usize, rhs >= 32) }
+    pub const fn overflowing_shr(self, rhs: u32) -> (usize, bool) { (self >> (rhs & 31), rhs >= 32) }
+    pub const fn overflowing_pow(self, exp: u32) -> (usize, bool) {
+        let mut base = self; let mut exp = exp; let mut acc: usize = 1; let mut over = false;
+        if exp == 0 { return (1, false); }
+        while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
+        let r = acc.overflowing_mul(base); (r.0, over | r.1)
+    }
+    pub const fn wrapping_add(self, rhs: usize) -> usize { self.overflowing_add(rhs).0 }
+    pub const fn wrapping_sub(self, rhs: usize) -> usize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_mul(self, rhs: usize) -> usize { self * rhs }
+    pub const fn wrapping_neg(self) -> usize { self.overflowing_neg().0 }
+    pub const fn wrapping_div(self, rhs: usize) -> usize { self.overflowing_div(rhs).0 }
+    pub const fn wrapping_rem(self, rhs: usize) -> usize { self.overflowing_rem(rhs).0 }
+    pub const fn wrapping_pow(self, exp: u32) -> usize { self.overflowing_pow(exp).0 }
+    pub const fn wrapping_shl(self, rhs: u32) -> usize { self.overflowing_shl(rhs).0 }
+    pub const fn wrapping_shr(self, rhs: u32) -> usize { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: usize) -> usize { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: usize) -> usize { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: usize) -> usize { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: usize) -> usize { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: usize) -> usize { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> usize { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> usize { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> usize { if rhs < usize::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> usize { if rhs < usize::BITS { self.wrapping_shr(rhs) } else { 0 } }
+    pub const fn checked_add(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_sub(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_mul(self, rhs: usize) -> Option<usize> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_div(self, rhs: usize) -> Option<usize> { if rhs == 0 { None } else { Some(self / rhs) } }
+    pub const fn checked_rem(self, rhs: usize) -> Option<usize> { if rhs == 0 { None } else { Some(self % rhs) } }
+    pub const fn checked_div_euclid(self, rhs: usize) -> Option<usize> { self.checked_div(rhs) }
+    pub const fn checked_rem_euclid(self, rhs: usize) -> Option<usize> { self.checked_rem(rhs) }
+    pub const fn checked_neg(self) -> Option<usize> { let (r, o) = self.overflowing_neg(); if o { None } else { Some(r) } }
+    pub const fn checked_shl(self, rhs: u32) -> Option<usize> { if rhs < 32 { Some(self.wrapping_shl(rhs)) } else { None } }
+    pub const fn checked_shr(self, rhs: u32) -> Option<usize> { if rhs < 32 { Some(self.wrapping_shr(rhs)) } else { None } }
+    pub const fn checked_pow(self, exp: u32) -> Option<usize> { let (r, o) = self.overflowing_pow(exp); if o { None } else { Some(r) } }
+    pub const fn saturating_add(self, rhs: usize) -> usize { match self.checked_add(rhs) { Some(v) => v, None => usize::MAX } }
+    pub const fn saturating_sub(self, rhs: usize) -> usize { if self > rhs { self - rhs } else { 0 } }
+    pub const fn saturating_mul(self, rhs: usize) -> usize { match self.checked_mul(rhs) { Some(v) => v, None => usize::MAX } }
+    pub const fn saturating_pow(self, exp: u32) -> usize { match self.checked_pow(exp) { Some(v) => v, None => usize::MAX } }
+    pub const fn saturating_div(self, rhs: usize) -> usize { self / rhs }
+    pub const fn pow(self, exp: u32) -> usize { self.wrapping_pow(exp) }
+    pub const fn abs_diff(self, other: usize) -> usize { if self < other { (other as usize).wrapping_sub(self as usize) } else { (self as usize).wrapping_sub(other as usize) } }
+    pub const fn midpoint(self, rhs: usize) -> usize { ((self as u64 + rhs as u64) / 2) as usize }
+    pub const fn rem_euclid(self, rhs: usize) -> usize { self % rhs }
+    pub const fn div_euclid(self, rhs: usize) -> usize { self / rhs }
+    pub const fn div_ceil(self, rhs: usize) -> usize { let d = self / rhs; let r = self % rhs; if r > 0 { d + 1 } else { d } }
+    pub const fn next_multiple_of(self, rhs: usize) -> usize { match self % rhs { 0 => self, r => self + (rhs - r) } }
+    pub const fn checked_next_multiple_of(self, rhs: usize) -> Option<usize> { if rhs == 0 { return None; } match self % rhs { 0 => Some(self), r => self.checked_add(rhs - r) } }
+    pub const fn is_power_of_two(self) -> bool { self.count_ones() == 1 }
+    const fn one_less_than_next_power_of_two(self) -> usize { if self <= 1 { return 0; } let p = self - 1; let z = p.leading_zeros(); usize::MAX >> z }
+    pub const fn next_power_of_two(self) -> usize { self.one_less_than_next_power_of_two().wrapping_add(1) }
+    pub const fn checked_next_power_of_two(self) -> Option<usize> { self.one_less_than_next_power_of_two().checked_add(1) }
+    pub const fn is_multiple_of(self, rhs: usize) -> bool { match rhs { 0 => self == 0, _ => self % rhs == 0 } }
+    pub const fn cast_signed(self) -> isize { self as isize }
+    pub const fn checked_add_signed(self, rhs: isize) -> Option<usize> { let (a, b) = self.overflowing_add(rhs as usize); if b ^ (rhs < 0) { None } else { Some(a) } }
+    pub const fn wrapping_add_signed(self, rhs: isize) -> usize { self.wrapping_add(rhs as usize) }
+    pub const fn saturating_add_signed(self, rhs: isize) -> usize { let (res, over) = self.overflowing_add(rhs as usize); if over == (rhs < 0) { res } else if over { usize::MAX } else { 0 } }
+    pub const fn checked_sub_signed(self, rhs: isize) -> Option<usize> { if rhs >= 0 { self.checked_sub(rhs as usize) } else { self.checked_add(rhs.unsigned_abs()) } }
+    pub const fn overflowing_add_signed(self, rhs: isize) -> (usize, bool) { let (res, overflowed) = self.overflowing_add(rhs as usize); (res, overflowed ^ (rhs < 0)) }
+    pub const fn overflowing_sub_signed(self, rhs: isize) -> (usize, bool) { let (res, overflow) = self.overflowing_sub(rhs as usize); (res, overflow ^ (rhs < 0)) }
+    pub const fn wrapping_sub_signed(self, rhs: isize) -> usize { self.wrapping_sub(rhs as usize) }
+    pub const fn saturating_sub_signed(self, rhs: isize) -> usize { let (res, overflow) = self.overflowing_sub_signed(rhs); if !overflow { res } else if rhs < 0 { usize::MAX } else { 0 } }
+    pub const fn isqrt(self) -> usize { if self < 2 { return self; } let mut x = self; let mut c: usize = 0; let mut d: usize = 1 << (((32 - 1) - self.leading_zeros()) & !1); while d != 0 { if x >= c + d { x -= c + d; c = (c >> 1) + d; } else { c >>= 1; } d >>= 2; } c }
+    pub const fn checked_ilog2(self) -> Option<u32> { if self <= 0 { None } else { Some(31 - self.leading_zeros()) } }
+    pub const fn checked_ilog10(self) -> Option<u32> { if self <= 0 { return None; } let mut n = 0u32; let mut v = self; while v >= 10 { v /= 10; n += 1; } Some(n) }
+    pub const fn checked_ilog(self, base: usize) -> Option<u32> { if self <= 0 || base < 2 { return None; } let mut n = 0u32; let mut r = self; while r >= base { r /= base; n += 1; } Some(n) }
+    #[track_caller]
+    pub const fn ilog2(self) -> u32 { match self.checked_ilog2() { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    #[track_caller]
+    pub const fn ilog10(self) -> u32 { match self.checked_ilog10() { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    #[track_caller]
+    pub const fn ilog(self, base: usize) -> u32 { if base < 2 { crate::panicking::panic_str("base of integer logarithm must be at least 2") } match self.checked_ilog(base) { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    pub const fn to_le_bytes(self) -> [u8; 4] {
+        let v = self as usize;
+        [(v >> 0) as u8, (v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8]
+    }
+    pub const fn to_be_bytes(self) -> [u8; 4] { self.swap_bytes().to_le_bytes() }
+    pub const fn to_ne_bytes(self) -> [u8; 4] { self.to_le_bytes() }
+    pub const fn from_le_bytes(bytes: [u8; 4]) -> usize {
+        (((bytes[0] as usize) << 0) | ((bytes[1] as usize) << 8) | ((bytes[2] as usize) << 16) | ((bytes[3] as usize) << 24)) as usize
+    }
+    pub const fn from_be_bytes(bytes: [u8; 4]) -> usize { usize::from_le_bytes(bytes).swap_bytes() }
+    pub const fn from_ne_bytes(bytes: [u8; 4]) -> usize { usize::from_le_bytes(bytes) }
     pub fn from_str_radix(src: &str, radix: u32) -> Result<usize, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, usize::MAX as u64) { Ok(v) => Ok(v as usize), Err(e) => Err(e) } }
 }
 
@@ -1351,7 +1470,7 @@ impl i128 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i128, ParseIntError> { parse::parse_i128(src.as_bytes(), radix) }
 }
 
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), target_pointer_width = "64"))]
 impl isize {
     pub const MIN: isize = -9223372036854775807 - 1;
     pub const MAX: isize = 9223372036854775807;
@@ -1475,6 +1594,127 @@ impl isize {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<isize, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, isize::MIN as i64, isize::MAX as i64) { Ok(v) => Ok(v as isize), Err(e) => Err(e) } }
 }
 
+#[cfg(all(not(relax_check), target_pointer_width = "32"))]
+impl isize {
+    pub const MIN: isize = -2147483647 - 1;
+    pub const MAX: isize = 2147483647;
+    pub const BITS: u32 = 32;
+    #[rustc_promotable]
+    pub const fn min_value() -> isize { isize::MIN }
+    #[rustc_promotable]
+    pub const fn max_value() -> isize { isize::MAX }
+    pub const fn count_ones(self) -> u32 { unsafe { ii::ctpop(self as usize) } }
+    pub const fn count_zeros(self) -> u32 { 32 - self.count_ones() }
+    pub const fn leading_zeros(self) -> u32 { unsafe { ii::ctlz(self as usize) } }
+    pub const fn trailing_zeros(self) -> u32 { unsafe { ii::cttz(self as usize) } }
+    pub const fn leading_ones(self) -> u32 { (!self).leading_zeros() }
+    pub const fn trailing_ones(self) -> u32 { (!self).trailing_zeros() }
+    pub const fn rotate_left(self, n: u32) -> isize { let k = n % 32; if k == 0 { self } else { (((self as usize) << k) | ((self as usize) >> (32 - k))) as isize } }
+    pub const fn rotate_right(self, n: u32) -> isize { let k = n % 32; if k == 0 { self } else { (((self as usize) >> k) | ((self as usize) << (32 - k))) as isize } }
+    pub const fn swap_bytes(self) -> isize { unsafe { ii::bswap(self as usize) as isize } }
+    pub const fn reverse_bits(self) -> isize { unsafe { ii::bitreverse(self as usize) as isize } }
+    pub const fn from_be(x: isize) -> isize { x.swap_bytes() }
+    pub const fn from_le(x: isize) -> isize { x }
+    pub const fn to_be(self) -> isize { self.swap_bytes() }
+    pub const fn to_le(self) -> isize { self }
+    pub const fn overflowing_add(self, rhs: isize) -> (isize, bool) { let r = (self as usize).wrapping_add(rhs as usize) as isize; (r, ((self ^ r) & (rhs ^ r)) < 0) }
+    pub const fn overflowing_sub(self, rhs: isize) -> (isize, bool) { let r = (self as usize).wrapping_sub(rhs as usize) as isize; (r, ((self ^ rhs) & (self ^ r)) < 0) }
+    pub const fn overflowing_mul(self, rhs: isize) -> (isize, bool) { let wide = (self as i64) * (rhs as i64); let r = wide as isize; (r, (r as i64) != wide) }
+    pub const fn overflowing_neg(self) -> (isize, bool) { if self == isize::MIN { (isize::MIN, true) } else { (-self, false) } }
+    pub const fn overflowing_div(self, rhs: isize) -> (isize, bool) { if self == isize::MIN && rhs == -1 { (self, true) } else { (self / rhs, false) } }
+    pub const fn overflowing_rem(self, rhs: isize) -> (isize, bool) { if rhs == -1 { (0, self == isize::MIN) } else { (self % rhs, false) } }
+    pub const fn overflowing_abs(self) -> (isize, bool) { if self < 0 { self.overflowing_neg() } else { (self, false) } }
+    pub const fn overflowing_div_euclid(self, rhs: isize) -> (isize, bool) { if self == isize::MIN && rhs == -1 { (self, true) } else { (self.div_euclid(rhs), false) } }
+    pub const fn overflowing_rem_euclid(self, rhs: isize) -> (isize, bool) { if rhs == -1 { (0, self == isize::MIN) } else { (self.rem_euclid(rhs), false) } }
+    pub const fn overflowing_shl(self, rhs: u32) -> (isize, bool) { (((self as usize) << (rhs & 31)) as isize, rhs >= 32) }
+    pub const fn overflowing_shr(self, rhs: u32) -> (isize, bool) { (self >> (rhs & 31), rhs >= 32) }
+    pub const fn overflowing_pow(self, exp: u32) -> (isize, bool) {
+        let mut base = self; let mut exp = exp; let mut acc: isize = 1; let mut over = false;
+        if exp == 0 { return (1, false); }
+        while exp > 1 { if (exp & 1) == 1 { let r = acc.overflowing_mul(base); acc = r.0; over |= r.1; } exp /= 2; let r = base.overflowing_mul(base); base = r.0; over |= r.1; }
+        let r = acc.overflowing_mul(base); (r.0, over | r.1)
+    }
+    pub const fn wrapping_add(self, rhs: isize) -> isize { self.overflowing_add(rhs).0 }
+    pub const fn wrapping_sub(self, rhs: isize) -> isize { self.overflowing_sub(rhs).0 }
+    pub const fn wrapping_mul(self, rhs: isize) -> isize { self * rhs }
+    pub const fn wrapping_neg(self) -> isize { self.overflowing_neg().0 }
+    pub const fn wrapping_div(self, rhs: isize) -> isize { self.overflowing_div(rhs).0 }
+    pub const fn wrapping_rem(self, rhs: isize) -> isize { self.overflowing_rem(rhs).0 }
+    pub const fn wrapping_pow(self, exp: u32) -> isize { self.overflowing_pow(exp).0 }
+    pub const fn wrapping_shl(self, rhs: u32) -> isize { self.overflowing_shl(rhs).0 }
+    pub const fn wrapping_shr(self, rhs: u32) -> isize { self.overflowing_shr(rhs).0 }
+    pub const fn wrapping_div_euclid(self, rhs: isize) -> isize { self.overflowing_div_euclid(rhs).0 }
+    pub const fn wrapping_rem_euclid(self, rhs: isize) -> isize { self.overflowing_rem_euclid(rhs).0 }
+    pub const unsafe fn unchecked_add(self, rhs: isize) -> isize { self.wrapping_add(rhs) }
+    pub const unsafe fn unchecked_sub(self, rhs: isize) -> isize { self.wrapping_sub(rhs) }
+    pub const unsafe fn unchecked_mul(self, rhs: isize) -> isize { self.wrapping_mul(rhs) }
+    pub const unsafe fn unchecked_neg(self) -> isize { self.wrapping_neg() }
+    pub const unsafe fn unchecked_shl(self, rhs: u32) -> isize { self.wrapping_shl(rhs) }
+    pub const unsafe fn unchecked_shr(self, rhs: u32) -> isize { self.wrapping_shr(rhs) }
+    pub const fn unbounded_shl(self, rhs: u32) -> isize { if rhs < isize::BITS { self.wrapping_shl(rhs) } else { 0 } }
+    pub const fn unbounded_shr(self, rhs: u32) -> isize { if rhs < isize::BITS { self.wrapping_shr(rhs) } else { self.wrapping_shr(isize::BITS - 1) } }
+    pub const fn wrapping_abs(self) -> isize { self.overflowing_abs().0 }
+    pub const fn checked_add(self, rhs: isize) -> Option<isize> { let (r, o) = self.overflowing_add(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_sub(self, rhs: isize) -> Option<isize> { let (r, o) = self.overflowing_sub(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_mul(self, rhs: isize) -> Option<isize> { let (r, o) = self.overflowing_mul(rhs); if o { None } else { Some(r) } }
+    pub const fn checked_div(self, rhs: isize) -> Option<isize> { if rhs == 0 || (self == isize::MIN && rhs == -1) { None } else { Some(self / rhs) } }
+    pub const fn checked_rem(self, rhs: isize) -> Option<isize> { if rhs == 0 || (self == isize::MIN && rhs == -1) { None } else { Some(self % rhs) } }
+    pub const fn checked_abs(self) -> Option<isize> { if self == isize::MIN { None } else { Some(self.abs()) } }
+    pub const fn checked_div_euclid(self, rhs: isize) -> Option<isize> { if rhs == 0 || (self == isize::MIN && rhs == -1) { None } else { Some(self.div_euclid(rhs)) } }
+    pub const fn checked_rem_euclid(self, rhs: isize) -> Option<isize> { if rhs == 0 || (self == isize::MIN && rhs == -1) { None } else { Some(self.rem_euclid(rhs)) } }
+    pub const fn checked_neg(self) -> Option<isize> { let (r, o) = self.overflowing_neg(); if o { None } else { Some(r) } }
+    pub const fn checked_shl(self, rhs: u32) -> Option<isize> { if rhs < 32 { Some(self.wrapping_shl(rhs)) } else { None } }
+    pub const fn checked_shr(self, rhs: u32) -> Option<isize> { if rhs < 32 { Some(self.wrapping_shr(rhs)) } else { None } }
+    pub const fn checked_pow(self, exp: u32) -> Option<isize> { let (r, o) = self.overflowing_pow(exp); if o { None } else { Some(r) } }
+    pub const fn saturating_add(self, rhs: isize) -> isize { match self.checked_add(rhs) { Some(v) => v, None => if rhs > 0 { isize::MAX } else { isize::MIN } } }
+    pub const fn saturating_sub(self, rhs: isize) -> isize { match self.checked_sub(rhs) { Some(v) => v, None => if rhs > 0 { isize::MIN } else { isize::MAX } } }
+    pub const fn saturating_mul(self, rhs: isize) -> isize { match self.checked_mul(rhs) { Some(v) => v, None => if (self < 0) == (rhs < 0) { isize::MAX } else { isize::MIN } } }
+    pub const fn saturating_pow(self, exp: u32) -> isize { match self.checked_pow(exp) { Some(v) => v, None => if self < 0 && exp % 2 == 1 { isize::MIN } else { isize::MAX } } }
+    pub const fn saturating_neg(self) -> isize { if self == isize::MIN { isize::MAX } else { -self } }
+    pub const fn saturating_abs(self) -> isize { if self == isize::MIN { isize::MAX } else { self.abs() } }
+    pub const fn saturating_div(self, rhs: isize) -> isize { match self.overflowing_div(rhs) { (r, false) => r, (_, true) => isize::MAX } }
+    pub const fn pow(self, exp: u32) -> isize { self.wrapping_pow(exp) }
+    pub const fn abs_diff(self, other: isize) -> usize { if self < other { (other as usize).wrapping_sub(self as usize) } else { (self as usize).wrapping_sub(other as usize) } }
+    pub const fn midpoint(self, rhs: isize) -> isize { ((self as i64 + rhs as i64) / 2) as isize }
+    pub const fn abs(self) -> isize { if self < 0 { self.wrapping_neg() } else { self } }
+    pub const fn unsigned_abs(self) -> usize { self.wrapping_abs() as usize }
+    pub const fn signum(self) -> isize { if self < 0 { -1 } else if self == 0 { 0 } else { 1 } }
+    pub const fn is_positive(self) -> bool { self > 0 }
+    pub const fn is_negative(self) -> bool { self < 0 }
+    pub const fn rem_euclid(self, rhs: isize) -> isize { let r = self % rhs; if r < 0 { r.wrapping_add(rhs.wrapping_abs()) } else { r } }
+    pub const fn div_euclid(self, rhs: isize) -> isize { let q = self / rhs; if self % rhs < 0 { if rhs > 0 { q - 1 } else { q + 1 } } else { q } }
+    pub const fn cast_unsigned(self) -> usize { self as usize }
+    pub const fn overflowing_add_unsigned(self, rhs: usize) -> (isize, bool) { let rhs = rhs as isize; let (res, o) = self.overflowing_add(rhs); (res, o ^ (rhs < 0)) }
+    pub const fn checked_add_unsigned(self, rhs: usize) -> Option<isize> { let (a, b) = self.overflowing_add_unsigned(rhs); if b { None } else { Some(a) } }
+    pub const fn saturating_add_unsigned(self, rhs: usize) -> isize { match self.checked_add_unsigned(rhs) { Some(v) => v, None => isize::MAX } }
+    pub const fn wrapping_add_unsigned(self, rhs: usize) -> isize { self.wrapping_add(rhs as isize) }
+    pub const fn overflowing_sub_unsigned(self, rhs: usize) -> (isize, bool) { let rhs = rhs as isize; let (res, o) = self.overflowing_sub(rhs); (res, o ^ (rhs < 0)) }
+    pub const fn checked_sub_unsigned(self, rhs: usize) -> Option<isize> { let (a, b) = self.overflowing_sub_unsigned(rhs); if b { None } else { Some(a) } }
+    pub const fn saturating_sub_unsigned(self, rhs: usize) -> isize { match self.checked_sub_unsigned(rhs) { Some(v) => v, None => isize::MIN } }
+    pub const fn wrapping_sub_unsigned(self, rhs: usize) -> isize { self.wrapping_sub(rhs as isize) }
+    pub const fn checked_ilog2(self) -> Option<u32> { if self <= 0 { None } else { Some(31 - self.leading_zeros()) } }
+    pub const fn checked_ilog10(self) -> Option<u32> { if self <= 0 { return None; } let mut n = 0u32; let mut v = self; while v >= 10 { v /= 10; n += 1; } Some(n) }
+    pub const fn checked_ilog(self, base: isize) -> Option<u32> { if self <= 0 || base < 2 { return None; } let mut n = 0u32; let mut r = self; while r >= base { r /= base; n += 1; } Some(n) }
+    #[track_caller]
+    pub const fn ilog2(self) -> u32 { match self.checked_ilog2() { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    #[track_caller]
+    pub const fn ilog10(self) -> u32 { match self.checked_ilog10() { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    #[track_caller]
+    pub const fn ilog(self, base: isize) -> u32 { if base < 2 { crate::panicking::panic_str("base of integer logarithm must be at least 2") } match self.checked_ilog(base) { Some(v) => v, None => crate::panicking::panic_str("argument of integer logarithm must be positive") } }
+    pub const fn to_le_bytes(self) -> [u8; 4] {
+        let v = self as usize;
+        [(v >> 0) as u8, (v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8]
+    }
+    pub const fn to_be_bytes(self) -> [u8; 4] { self.swap_bytes().to_le_bytes() }
+    pub const fn to_ne_bytes(self) -> [u8; 4] { self.to_le_bytes() }
+    pub const fn from_le_bytes(bytes: [u8; 4]) -> isize {
+        (((bytes[0] as usize) << 0) | ((bytes[1] as usize) << 8) | ((bytes[2] as usize) << 16) | ((bytes[3] as usize) << 24)) as isize
+    }
+    pub const fn from_be_bytes(bytes: [u8; 4]) -> isize { isize::from_le_bytes(bytes).swap_bytes() }
+    pub const fn from_ne_bytes(bytes: [u8; 4]) -> isize { isize::from_le_bytes(bytes) }
+    pub fn from_str_radix(src: &str, radix: u32) -> Result<isize, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, isize::MIN as i64, isize::MAX as i64) { Ok(v) => Ok(v as isize), Err(e) => Err(e) } }
+}
+
 #[cfg(not(relax_check))]
 impl u8 {
     pub const fn is_ascii(&self) -> bool { *self < 128 }
@@ -1492,7 +1732,7 @@ impl u8 {
     pub const fn to_ascii_uppercase(&self) -> u8 { if self.is_ascii_lowercase() { *self - 32 } else { *self } }
     pub const fn to_ascii_lowercase(&self) -> u8 { if self.is_ascii_uppercase() { *self + 32 } else { *self } }
     pub const fn eq_ignore_ascii_case(&self, other: &u8) -> bool { self.to_ascii_lowercase() == other.to_ascii_lowercase() }
-    pub const fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
-    pub const fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
+    pub fn make_ascii_uppercase(&mut self) { *self = self.to_ascii_uppercase(); }
+    pub fn make_ascii_lowercase(&mut self) { *self = self.to_ascii_lowercase(); }
 }
 

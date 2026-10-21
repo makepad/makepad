@@ -114,6 +114,7 @@ fn same_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
 pub fn main(host: &'static Host) {
     relax_compiler::memstat::tune_malloc();
     set_host(host);
+    relax_compiler::wasm_export::startup();
     run(relax_compiler::os::proc::args_bytes())
 }
 
@@ -153,6 +154,10 @@ fn run(raw_args: Vec<Vec<u8>>) {
     // a build script's RUSTC (Relax itself) asked for its version
     if relax_compiler::relax_as_rustc() {
         return;
+    }
+    // cargo's RUSTC_WRAPPER of an --allow-c native build, or a stubbed build script of it
+    if let Some(code) = relax_compiler::native::wrapper() {
+        std::process::exit(code);
     }
     // a child started in a virtual folder of a git repository run gets the mount table
     if let Err(e) = relax_compiler::vfs::mount_from_env() {

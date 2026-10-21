@@ -228,13 +228,9 @@ extern "C" fn js_worker_wait(timeout_ms: f64) {
     g.sleeping.insert(id, None);
 }
 
-extern "C" fn js_spawn_thread(request_id: u32, context_ptr: u32, stack_size: u32, name_ptr: *const u8, name_len: usize) -> u32 {
+extern "C" fn js_spawn_thread(request_id: u32, context_ptr: u32, stack_size: u32, name_ptr: u32, name_len: u32) -> u32 {
     count(6);
-    let name = if name_ptr.is_null() || name_len == 0 {
-        String::new()
-    } else {
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) }).into_owned()
-    };
+    let name = if name_ptr == 0 || name_len == 0 { String::new() } else { read_str(name_ptr, name_len) };
     queue(Queued::SpawnThread { request_id, context_ptr, stack_size, name });
     1
 }

@@ -48,14 +48,16 @@ mod test_child {
 }
 
 pub mod front;
+pub mod global_asm;
 pub mod live;
 pub mod reload;
 pub mod modules;
 pub mod sandbox;
 pub mod domain;
-mod domain_threads;
+pub(crate) mod domain_threads;
 pub mod jit;
 pub mod web;
+pub mod web32;
 pub mod coverage;
 pub mod owner;
 pub mod postframe;
@@ -199,6 +201,22 @@ pub fn relax_as_rustc() -> bool {
 /// rustc: compiler/rustc_session/src/config.rs:2428, session.rs:90-93.
 pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
     let mut options = crate::options::Options::from_env();
+    // `--no-asm` / `--allow-c` anywhere before `--`, for every command (run, test, check, the
+    // relax runner): the environment carries them to the processes this one starts (build
+    // scripts, test harnesses); cli_main drops them from the arguments
+    for a in args.iter().take_while(|a| a.as_str() != "--") {
+        match a.as_str() {
+            "--no-asm" => {
+                options.no_asm = true;
+                std::env::set_var("MAKEPAD_RUN_NO_ASM", "1");
+            }
+            "--allow-c" => {
+                options.allow_c = true;
+                std::env::set_var("MAKEPAD_RUN_ALLOW_C", "1");
+            }
+            _ => {}
+        }
+    }
     options.live |= args.get(1).map(String::as_str) == Some("live");
     if args.get(1).map(String::as_str) == Some("fix") {
         options.relaxed = Some("all".to_string());
@@ -213,7 +231,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         crate::options::CheckTarget::MacosArm64 => "aarch64-apple-darwin",
         crate::options::CheckTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
         crate::options::CheckTarget::AndroidArm64 => "aarch64-linux-android",
-        crate::options::CheckTarget::Web => crate::options::CheckTarget::WEB_TRIPLE,
+        crate::options::CheckTarget::Web(w) => crate::options::CheckTarget::web_triple(w),
         _ if cfg!(target_os = "android") => "aarch64-linux-android",
         _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => "aarch64-apple-darwin",
         _ if cfg!(windows) => "x86_64-pc-windows-gnu",
@@ -229,7 +247,14 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
     }
     // a program's own arguments after `--` may be any bytes (`makepad run p -- $'\xff'`): Relax
     // reads its own options lossily, the program gets the bytes (run.rs)
-    let args: Vec<String> = os::proc::args_bytes().iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    let mut args: Vec<String> = os::proc::args_bytes().iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    // the gates were read into the session (session_from_env)
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let mut k = 0;
+    args.retain(|a| {
+        k += 1;
+        !(k <= end && (a == "--no-asm" || a == "--allow-c"))
+    });
     if args.get(1).map(String::as_str) == Some("--version") {
         println!("makepad run {}", PROVENANCE);
         std::process::exit(0);
@@ -630,13 +655,16 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<
 /// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
 /// core::simd.
 pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
-    // the web target runs on this machine's std (cfg.rs `web`)
-    let web = sess.options.check_target == crate::options::CheckTarget::Web;
-    let mut c = if web { cfg::CfgSet::machine(sess, &[]) } else { cfg::CfgSet::host(sess, &[]) };
-    if web {
-        // core::arch::wasm32 (std/core/arch/wasm32.rs)
-        c.set.push("relax_web".to_string());
-    }
+    // a web target's std is read as rustc's std for the triple (cfg.rs `web`), with Relax std's
+    // web layer (`relax_web`: core::arch::wasm32, std/sys/web.rs)
+    let mut c = match sess.options.check_target {
+        crate::options::CheckTarget::Web(w) => {
+            let mut c = cfg::CfgSet::web(sess, w, &[]);
+            c.set.push("relax_web".to_string());
+            c
+        }
+        _ => cfg::CfgSet::host(sess, &[]),
+    };
     if simd {
         c.set.push("relax_portable_simd".to_string());
     }

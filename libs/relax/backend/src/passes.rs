@@ -49,6 +49,7 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
                 Callee::CHost(h, sig) => Callee::CHost(*h, sig.clone()),
                 Callee::CIndirect(v, sig) => Callee::CIndirect(m(*v), sig.clone()),
                 Callee::CFn(i, sig) => Callee::CFn(*i, sig.clone()),
+                Callee::Asm(b) => Callee::Asm(b.clone()),
             };
             let mut a2 = Vec::new();
             for v in a {

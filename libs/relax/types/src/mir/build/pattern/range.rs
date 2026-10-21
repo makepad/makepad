@@ -10,7 +10,7 @@ pub(crate) fn scalar_size(tys: &Types, ty: TyId) -> Option<(u8, bool)> {
         TyKind::Bool => (1, false),
         TyKind::Char => (4, false),
         TyKind::Int(p) => {
-            let (bytes, signed) = Types::int_info(p);
+            let (bytes, signed) = tys.int_info(p);
             (bytes as u8, signed)
         }
         TyKind::Float(p) => (if p == crate::program::Prim::F32 { 4 } else { 8 }, false),

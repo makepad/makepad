@@ -63,6 +63,16 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &target::Env) ->
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     install_probe();
+    // the wasm32 web target's program (web32.rs): pointers are offsets into its window
+    if let Some(c) = crate::web32::applies(env.syms) {
+        let mut g = f.clone();
+        crate::web32::transform(&mut g, &c, env.sym_class)?;
+        return compile_native(options, &g, env, freq);
+    }
+    compile_native(options, f, env, freq)
+}
+
+fn compile_native(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     #[cfg(target_arch = "aarch64")]
     {
         // the function runs in the threaded interpreter (interp.rs, MAKEPAD_RUN_INTERP /

@@ -89,14 +89,24 @@ impl Sub<Instant> for Instant {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl fmt::Debug for Instant {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Instant").field("tv_sec", &self.0.secs).field("tv_nsec", &self.0.nanos()).finish()
     }
 }
 
+/// The web targets' Debug is the derived one of rustc's unsupported platform type: `Instant(<duration>)`.
+#[cfg(target_family = "wasm")]
+impl fmt::Debug for Instant {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Instant").field(&self.0.duration()).finish()
+    }
+}
+
 impl SystemTime {
     /// (seconds, nanoseconds) since the epoch, for futimens (fs.rs File::set_times)
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn unix_parts(&self) -> (i64, u32) {
         (self.0.secs, self.0.nanos())
     }
@@ -127,6 +137,7 @@ impl SystemTime {
         }
     }
     /// From a stat-style (seconds, nanoseconds) pair (fs::Metadata times).
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn from_parts(secs: i64, nanos: i64) -> SystemTime {
         SystemTime(Timespec::new(secs, nanos))
     }
@@ -161,9 +172,17 @@ impl SubAssign<Duration> for SystemTime {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl fmt::Debug for SystemTime {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("SystemTime").field("tv_sec", &self.0.secs).field("tv_nsec", &self.0.nanos()).finish()
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl fmt::Debug for SystemTime {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("SystemTime").field(&self.0.duration()).finish()
     }
 }
 

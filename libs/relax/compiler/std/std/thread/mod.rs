@@ -163,7 +163,7 @@ pub fn panicking() -> bool {
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     match NonZeroUsize::new(sys::available_parallelism()) {
         Some(n) => Ok(n),
-        None => Err(io::const_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform")),
+        None => Err(io::const_error!(io::ErrorKind::NotFound, "the number of hardware threads is not known for the target platform")),
     }
 }
 
@@ -294,6 +294,11 @@ fn spawn_native(stack_size: usize, start: Box<ThreadStart>) -> io::Result<sys::N
         Ok(native) => Ok(native),
         Err(r) => {
             drop(unsafe { Box::from_raw(arg as *mut ThreadStart) });
+            #[cfg(target_family = "wasm")]
+            let _ = r;
+            #[cfg(target_family = "wasm")]
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+            #[cfg(not(target_family = "wasm"))]
             Err(io::Error::from_raw_os_error(r))
         }
     }

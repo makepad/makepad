@@ -366,6 +366,30 @@ fn memory_and_slots() {
     assert_eq!(run(&[fu], 0, &[xv]).unwrap(), vec![want]);
 }
 
+/// An atomic read-modify-write reads its address twice: an address computed just before it
+/// (one counted use) must stay in its local (the tee shortcut once dropped the set: the
+/// add went to address 0, P(DOOM)'s store_lock drop counter stayed 0).
+#[test]
+fn atomic_rmw_address_just_set() {
+    let mut f = B::new(&[Cls::I], &[Cls::I]);
+    let x = f.p(0);
+    let s = f.f.slot(16, 8);
+    let p = f.v(Cls::I);
+    f.i(Inst::SlotAddr(p, s));
+    f.i(Inst::Store(Mem::Int(8, false), p, 8, x));
+    let a = f.v(Cls::I);
+    f.i(Inst::IBinI(IOp::Add, I64, a, p, 8));
+    let one = f.iconst(1);
+    let old = f.v(Cls::I);
+    f.i(Inst::AtomicRmw(RmwOp::Add, Mem::Int(8, false), AtomOrd::SeqCst, old, a, one));
+    let r = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), r, p, 8));
+    let sum = f.bin(IOp::Add, I64, r, old);
+    f.term(Term::Ret(vec![sum]));
+    // [p+8] = 5, old = 5, new = 6: 11
+    assert_eq!(run(&[f.done()], 0, &[5]).unwrap(), vec![11]);
+}
+
 /// Direct, recursive, indirect, host and untraced calls; multiple results.
 #[test]
 fn calls() {

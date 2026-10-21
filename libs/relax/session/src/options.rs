@@ -3,12 +3,34 @@
 //! compiler/rustc_session/src/options.rs:222-259 (whole-options dependency hash).
 use crate::sip::Sip128;
 
+/// The error inline assembly in crate `krate` gets under `--no-asm`.
+pub fn asm_blocked(krate: &str) -> String {
+    format!("inline assembly (asm!, global_asm!, naked_asm!) in crate `{}` is blocked by `--no-asm` (MAKEPAD_RUN_NO_ASM=1)", krate)
+}
+/// The error a program whose dependencies compile C gets without `--allow-c`.
+pub const C_GATE: &str = "is built only with `--allow-c` (or MAKEPAD_RUN_ALLOW_C=1): cargo and the system C compiler build it, and its library is linked into the run";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Borrowck { Off, Moves, Full }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowckAll { Default, Nongeneric, Std, All }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web }
+pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web(PtrWidth) }
+/// The web target's pointer width, a parameter of the target (`wasm32-unknown-unknown` /
+/// `wasm64-unknown-unknown`): usize, isize and pointers are 4 or 8 bytes, every layout is rustc's
+/// for that triple, and the trace host runs the program in that mode (32: pointers are offsets into
+/// the linear memory's window; 64: native pointers inside it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtrWidth { W32, W64 }
+impl PtrWidth {
+    /// size_of::<usize>() (and of a thin pointer)
+    pub fn bytes(self) -> u32 {
+        match self {
+            PtrWidth::W32 => 4,
+            PtrWidth::W64 => 8,
+        }
+    }
+}
 impl CheckTarget {
     /// The targets Relax runs on (and checks for), by triple: `MAKEPAD_RUN_CHECK_TARGET` and `makepad host-gen`.
     pub const TRIPLES: [(&'static str, CheckTarget); 4] = [
@@ -17,14 +39,25 @@ impl CheckTarget {
         ("x86_64-pc-windows-gnu", CheckTarget::WindowsX64),
         ("aarch64-linux-android", CheckTarget::AndroidArm64),
     ];
-    /// The web target (`wasm32-unknown-unknown`): the program's crates are read as a web build
-    /// reads them (cfg(target_arch = "wasm32"), the web platform backend) and run by this
-    /// machine's JIT; std stays the machine's (the trace host, `makepad-web-trace`). Not a
-    /// host-gen target.
-    pub const WEB_TRIPLE: &'static str = "wasm32-unknown-unknown";
+    /// The web targets, by pointer width: the program's crates are read as a web build reads
+    /// them (cfg(target_family = "wasm"), the web platform backend), every layout is rustc's for
+    /// the triple, and this machine's JIT runs them in the trace host (`makepad-web-trace`). Not
+    /// host-gen targets.
+    pub const WEB_TRIPLES: [(&'static str, PtrWidth); 2] = [("wasm32-unknown-unknown", PtrWidth::W32), ("wasm64-unknown-unknown", PtrWidth::W64)];
+    /// The web target's pointer width, None for the native targets.
+    pub fn web(self) -> Option<PtrWidth> {
+        match self {
+            CheckTarget::Web(w) => Some(w),
+            _ => None,
+        }
+    }
+    /// The triple of a web target.
+    pub fn web_triple(w: PtrWidth) -> &'static str {
+        Self::WEB_TRIPLES.iter().find(|(_, x)| *x == w).unwrap().0
+    }
     pub fn from_triple(triple: &str) -> Option<CheckTarget> {
-        if triple == Self::WEB_TRIPLE {
-            return Some(CheckTarget::Web);
+        if let Some((_, w)) = Self::WEB_TRIPLES.iter().find(|(t, _)| *t == triple) {
+            return Some(CheckTarget::Web(*w));
         }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
@@ -77,6 +110,9 @@ pub struct CpuFeatures {
     pub fma: bool,
     /// AVX2 next to AVX: per-lane variable vector shifts (vpsllv*, vpsrlv*, vpsravd)
     pub avx2: bool,
+    /// AVX-512F + AVX-512VL (OS-enabled): EVEX encodings reach xmm16..xmm31, so the register
+    /// allocator gets 16 more float/vector registers (x64 reg_config)
+    pub avx512: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -85,12 +121,22 @@ pub struct Options {
     pub verbose: bool,
     /// `MAKEPAD_RUN_CHECK_WINDOWS`; default `false`.
     pub check_windows: bool,
+    /// `--no-asm` / `MAKEPAD_RUN_NO_ASM=1` (sandboxed uses): `asm!`, `global_asm!` and
+    /// `naked_asm!` are an error naming the crate and the flag. Default `false`: inline assembly
+    /// is assembled (backend asm).
+    pub no_asm: bool,
+    /// `--allow-c` / `MAKEPAD_RUN_ALLOW_C=1`: dependencies whose build script compiles C are built
+    /// by cargo and the system C compiler and linked in (front native.rs); without it they are an
+    /// error naming the flag. Default `false`.
+    pub allow_c: bool,
     /// `MAKEPAD_RUN_GATHER`; default `false`.
     pub gather: bool,
     /// `MAKEPAD_RUN_MEMCONST`; default `false`.
     pub memconst: bool,
     /// `MAKEPAD_RUN_NO_AVX`; default `false`.
     pub no_avx: bool,
+    /// `MAKEPAD_RUN_NO_AVX512`; default `false`: no xmm16..31 (CpuFeatures::avx512).
+    pub no_avx512: bool,
     /// `MAKEPAD_RUN_NO_BITOPS`; default `false`.
     pub no_bitops: bool,
     /// `MAKEPAD_RUN_NO_BLOCK_FREQ`; default `false`.
@@ -272,9 +318,12 @@ impl Default for Options {
         Self {
             verbose: false,
             check_windows: false,
+            no_asm: false,
+            allow_c: false,
             gather: false,
             memconst: false,
             no_avx: false,
+            no_avx512: false,
             no_bitops: false,
             no_block_freq: false,
             no_bmi2: false,
@@ -377,9 +426,12 @@ impl Options {
         Self {
             verbose: get("MAKEPAD_RUN_VERBOSE").is_some_and(|v| v == "1"),
             check_windows: { let os = get("MAKEPAD_RUN_CHECK_WINDOWS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
+            no_asm: get("MAKEPAD_RUN_NO_ASM").is_some_and(|v| v == "1"),
+            allow_c: get("MAKEPAD_RUN_ALLOW_C").is_some_and(|v| v == "1"),
             gather: { let os = get("MAKEPAD_RUN_GATHER"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             memconst: { let os = get("MAKEPAD_RUN_MEMCONST"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_avx: { let os = get("MAKEPAD_RUN_NO_AVX"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
+            no_avx512: { let os = get("MAKEPAD_RUN_NO_AVX512"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bitops: { let os = get("MAKEPAD_RUN_NO_BITOPS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_block_freq: { let os = get("MAKEPAD_RUN_NO_BLOCK_FREQ"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bmi2: { let os = get("MAKEPAD_RUN_NO_BMI2"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
@@ -478,10 +530,14 @@ impl Options {
         let Self {
             // Logging does not change compiled code or invalidate warm caches.
             verbose: _,
+            // which dependencies cargo builds does not change the code Relax compiles from them
+            allow_c: _,
             check_windows,
+            no_asm,
             gather,
             memconst,
             no_avx,
+            no_avx512,
             no_bitops,
             no_block_freq,
             no_bmi2,
@@ -565,12 +621,16 @@ impl Options {
         h.str("relax-options-v1");
         h.str("check_windows");
         h.u8(*check_windows as u8);
+        h.str("no_asm");
+        h.u8(*no_asm as u8);
         h.str("gather");
         h.u8(*gather as u8);
         h.str("memconst");
         h.u8(*memconst as u8);
         h.str("no_avx");
         h.u8(*no_avx as u8);
+        h.str("no_avx512");
+        h.u8(*no_avx512 as u8);
         h.str("no_bitops");
         h.u8(*no_bitops as u8);
         h.str("no_block_freq");
@@ -712,7 +772,15 @@ impl Options {
         h.str("borrowck_all");
         h.u8(*borrowck_all as u8);
         h.str("check_target");
-        h.u8(*check_target as u8);
+        h.u8(match *check_target {
+            CheckTarget::Host => 0,
+            CheckTarget::MacosArm64 => 1,
+            CheckTarget::LinuxX64 => 2,
+            CheckTarget::WindowsX64 => 3,
+            CheckTarget::AndroidArm64 => 4,
+            CheckTarget::Web(PtrWidth::W32) => 5,
+            CheckTarget::Web(PtrWidth::W64) => 6,
+        });
         h.str("ctfe");
         h.u8(*ctfe as u8);
         h.str("const_fuel");
@@ -729,8 +797,8 @@ impl Options {
         match tier1_profile { Some(v) => { h.u8(1); h.u64(v.as_encoded_bytes().len() as u64); h.write(v.as_encoded_bytes()); }, None => h.u8(0) }
         match tier1_profile_data { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str(target);
-        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2 } = cpu;
-        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2] { h.u8(*b as u8); }
+        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512 } = cpu;
+        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512] { h.u8(*b as u8); }
         h.finish128()
     }
 }
