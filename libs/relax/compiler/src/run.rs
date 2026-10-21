@@ -124,7 +124,7 @@ extern "C" {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot] [--quiet] [--verbose] <package> [cargo flags] [-- program args]");
+    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot-max|aot-min] [--quiet] [--verbose] <package> [cargo flags] [-- program args]");
     2
 }
 
@@ -468,7 +468,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut units_json = String::new();
     if let Some(v) = std::env::var_os("MAKEPAD_RUN_AHEAD") {
         if v.to_str().and_then(crate::options::AheadLevel::parse).is_none() {
-            eprintln!("makepad-run: MAKEPAD_RUN_AHEAD={} is not a level: minimal, balanced or aot", v.to_string_lossy());
+            eprintln!("makepad-run: MAKEPAD_RUN_AHEAD={} is not a level: minimal, balanced, aot-max or aot-min", v.to_string_lossy());
             return 2;
         }
     }
@@ -507,7 +507,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                     std::env::set_var("MAKEPAD_RUN_AHEAD", l.name());
                 }
                 None => {
-                    eprintln!("makepad-run: --ahead=<level> wants minimal, balanced or aot");
+                    eprintln!("makepad-run: --ahead=<level> wants minimal, balanced, aot-max or aot-min");
                     return 2;
                 }
             },
@@ -1908,22 +1908,26 @@ fn startup_defs(prog: &crate::program::Program, path: &str) -> Vec<DefId> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let mut by_path = std::collections::HashMap::new();
+    // A path names one fn only when no other fn has it: the methods of different impls share
+    // theirs (`core::sync::atomic::::store` is every atomic type's), and a generic impl's
+    // method compiled with no type arguments does not normalize (aot warm runs: 63 internal
+    // compiler errors in the ahead worker). Ambiguous paths are left to the program's calls.
+    let mut by_path: std::collections::HashMap<String, Option<DefId>> = std::collections::HashMap::new();
     for (i, d) in prog.defs.iter().enumerate() {
         if matches!(d.kind, DefKind::Fn | DefKind::AssocFn) {
-            by_path.insert(prog.def_path(DefId(i as u32)), DefId(i as u32));
+            by_path.entry(prog.def_path(DefId(i as u32))).and_modify(|e| *e = None).or_insert(Some(DefId(i as u32)));
         }
     }
     let mut out = Vec::new();
     for l in list.lines() {
-        if let Some(d) = by_path.get(l.trim()) {
+        if let Some(Some(d)) = by_path.get(l.trim()) {
             out.push(*d);
         }
     }
     out
 }
 
-/// Ahead-of-call compilation on a worker (`--ahead=aot`): the previous run's startup functions, in
+/// Ahead-of-call compilation on a worker (`--ahead=aot-max|aot-min`): the previous run's startup functions, in
 /// order, at worker priority. Compiles serialize with lazy compiles on the owner thread, so the
 /// worker overlaps with the program's own execution, not with its compiles.
 fn start_ahead(up: *mut Unit, defs: Vec<DefId>, runtime: &crate::options::RuntimeOptions) {
@@ -2380,6 +2384,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
             // speculative results nobody called within the TTL go (memory: jit::expire_spec)
             jit::expire_spec(options);
             jit::aot_drain();
+            jit::ahead_complete_tick();
             // recorded disk-cache entries are written out as they pile up, not held to the exit
             spill_cache();
             // Independent allocator relief for later O3 bursts and non-GUI programs.
@@ -2667,7 +2672,7 @@ static MID_COLLECTED_TRIED: AtomicBool = AtomicBool::new(false);
 /// A mid-run write recorded the startup manifest (its window had closed).
 static MID_MANIFEST_DONE: AtomicBool = AtomicBool::new(false);
 
-/// Compile totals since boot, the startup list for `--ahead=aot`, and the JSON report.
+/// Compile totals since boot, the startup list for the aot levels, and the JSON report.
 /// jit::wall_ns() when main was called (MAKEPAD_RUN_MAIN_COMPILE_LOG's time base)
 static MAIN_START_WALL: AtomicU64 = AtomicU64::new(0);
 
@@ -3178,7 +3183,7 @@ fn summary_inner(why: &str) {
         let q = jit::TIER_QUEUED.load(Ordering::Relaxed);
         if q > 0 {
             verbose!(
-                "makepad-run: O3 (ahead {}): {} hot, {} counted again before their build (gone cold), {} installed ({} rebuild requests), {} dropped {:?}; {} RIRs rebuilt ({:.0} ms); cpu {:.0} ms on the owner, {:.0} ms off it",
+                "makepad-run: O3 (ahead {}): {} hot, {} counted again before their build (gone cold), {} installed ({} rebuild requests), {} dropped {:?}; {} RIRs rebuilt ({:.0} ms); snapshots {:.0} ms cpu on the owner ({} inline candidates built there, {:.0} ms; {} fronts off it, {:.0} ms cpu; {} optimised off it, {:.0} ms cpu), back ends {:.0} ms cpu off it",
                 jit::ahead_level().name(),
                 q,
                 jit::TIER_REVALIDATED.load(Ordering::Relaxed),
@@ -3189,6 +3194,12 @@ fn summary_inner(why: &str) {
                 jit::TIER1_RIR_REBUILT[0].load(Ordering::Relaxed),
                 jit::TIER1_RIR_REBUILT[1].load(Ordering::Relaxed) as f64 / 1e6,
                 s.tier1_locked_ns as f64 / 1e6,
+                jit::TIER1_SNAP_BUILT[0].load(Ordering::Relaxed),
+                jit::TIER1_SNAP_BUILT[1].load(Ordering::Relaxed) as f64 / 1e6,
+                jit::TIER1_SNAP_FRONTS[0].load(Ordering::Relaxed),
+                jit::TIER1_SNAP_FRONTS[1].load(Ordering::Relaxed) as f64 / 1e6,
+                jit::TIER1_SNAP_OFF[0].load(Ordering::Relaxed),
+                jit::TIER1_SNAP_OFF[1].load(Ordering::Relaxed) as f64 / 1e6,
                 s.tier1_free_ns as f64 / 1e6,
             );
         }

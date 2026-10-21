@@ -8,7 +8,7 @@
 //!   cache/                  the store files (code, front images, graph certificates,
 //!                           the collected program image): store.rs
 //!   registry/               crates.io packages downloaded for this workspace (registry.rs)
-//!   startup/<pkg>.startup   the startup manifest of `makepad run --ahead=aot`
+//!   startup/<pkg>.startup   the startup manifest of `makepad run --ahead=aot-max|aot-min`
 //!   build-scripts/<hex>/, build/<crate>-<hex>/out   build script units and OUT_DIRs (as deep
 //!                           as cargo's: scripts find the workspace 5 folders above OUT_DIR)
 //!   serve/                  the `makepad serve` endpoint

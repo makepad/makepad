@@ -48,15 +48,20 @@ pub enum AheadLevel {
     Minimal,
     /// the default: a bounded, prioritised compile-ahead of what the UI is about to need
     Balanced,
-    /// a background AOT pass at worker priority: everything reachable from what ran
-    Aot,
+    /// a background AOT pass at worker priority: everything reachable from what ran, on every
+    /// worker the policy allows
+    AotMax,
+    /// the same coverage as AotMax, slowly: few workers, every background compile thread in the
+    /// OS's background class (macOS QOS_CLASS_BACKGROUND on efficiency cores, Linux SCHED_IDLE,
+    /// Windows EcoQoS); left running a few minutes, the warm cache then holds all of it
+    AotMin,
 }
 impl AheadLevel {
     pub fn name(self) -> &'static str {
-        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::Aot => "aot" }
+        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::AotMax => "aot-max", AheadLevel::AotMin => "aot-min" }
     }
     pub fn parse(v: &str) -> Option<AheadLevel> {
-        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot" => Some(AheadLevel::Aot), _ => None }
+        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot-max" => Some(AheadLevel::AotMax), "aot-min" => Some(AheadLevel::AotMin), _ => None }
     }
 }
 

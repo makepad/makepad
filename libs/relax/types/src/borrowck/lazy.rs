@@ -436,6 +436,16 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
     }
     WAKE.notify_one();
 }
+/// Checks queued (0 also before the worker started); the aot levels' completion line reads it.
+pub fn queued() -> usize {
+    QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |q| q.order.len())
+}
+
+/// Bodies checked so far this run.
+pub fn checked() -> u64 {
+    CHECKED.load(Ordering::Relaxed)
+}
+
 pub fn note_program(options: &crate::options::Options, src: &Arc<dyn FrontSource>, epoch: u64) {
     enqueue(options, src, crate::program::NO_DEF, None, None, epoch, None, None);
 }
@@ -607,6 +617,16 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                 if d < prog.defs.len() { discovery_next = Some(d); }
                 return;
             }
+            // Every instance checks the same generic body and can persist its owner verdict. The
+            // stored one is looked up first: it needs only the definition, not the owner's identity
+            // arguments (a warm aot run's discovery reuses ~21k stored verdicts)
+            let (owner_key, stored) = item.src.owner_verdict(prog, *def, *epoch);
+            phase.set("stored");
+            if let Some(v) = stored {
+                reused_owner = true;
+                v.reuse(item.key);
+                return;
+            }
             let identity_args;
             let args = match &item.args {
                 Some(args) => args,
@@ -616,14 +636,6 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                     &identity_args
                 }
             };
-            // Every instance checks the same generic body and can persist its owner verdict.
-            let (owner_key, stored) = item.src.owner_verdict(prog, *def, *epoch);
-            phase.set("stored");
-            if let Some(v) = stored {
-                reused_owner = true;
-                v.reuse(item.key);
-                return;
-            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _p = crate::preempt::Preemptible::on();
                 crate::preempt::point();

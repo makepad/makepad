@@ -199,3 +199,44 @@ fn stores_in_a_loop_read_by_the_next_iteration_stay() {
     assert_eq!(f.blocks[0].insts.len(), 2);
     assert_eq!(f.blocks[1].insts.len(), 3);
 }
+
+#[test]
+fn a_mask_whose_result_is_read_only_in_its_bits_is_a_copy() {
+    // loop variable n (u32): n = n - (e & 0xff); read only as `n as u8` and `(n >> 3) & 7`
+    let mut f = Func::new("bd".into(), 0);
+    let (n, p) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params.push(n);
+    f.params.push(p);
+    f.rets.push(Cls::I);
+    let (e, m, t, a, b, c, q) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+    const U32: IntTy = IntTy { bits: 32, signed: false };
+    const U8: IntTy = IntTy { bits: 8, signed: false };
+    for _ in 0..3 {
+        f.block();
+    }
+    f.blocks[0].term = Term::Jump(1);
+    push(&mut f, 1, Inst::Load(Mem::Int(4, false), e, p, 0));
+    push(&mut f, 1, Inst::IBinI(IOp::And, U32, m, e, 255));
+    push(&mut f, 1, Inst::IBin(IOp::Sub, U32, t, n, m));
+    push(&mut f, 1, Inst::Mov(n, t));
+    push(&mut f, 1, Inst::IBinI(IOp::Shr, U32, a, n, 3));
+    push(&mut f, 1, Inst::IBinI(IOp::And, U32, b, a, 7));
+    push(&mut f, 1, Inst::Conv(Conv::IntToInt(U8), c, n));
+    push(&mut f, 1, Inst::Store(Mem::Int(1, false), p, 8, c));
+    push(&mut f, 1, Inst::ICmpI(Cond::Eq, false, q, b, 0));
+    f.blocks[1].term = Term::Branch(q, 2, 1);
+    f.blocks[2].term = Term::Ret(vec![b]);
+    assert!(opt::drop_undemanded_masks(&relax_session::Options::default(), &mut f));
+    assert!(matches!(f.blocks[1].insts[1], Inst::Mov(d, s) if d == m && s == e));
+    // the byte cast feeds only a byte store: a copy too
+    assert!(matches!(f.blocks[1].insts[6], Inst::Mov(d, s) if d == c && s == n));
+    // b is returned (all bits): its mask stays
+    assert!(matches!(f.blocks[1].insts[5], Inst::IBinI(IOp::And, ..)));
+    // a full read of n (returned) keeps the mask
+    let mut g = f.clone();
+    g.blocks[1].insts[1] = Inst::IBinI(IOp::And, U32, m, e, 255);
+    g.blocks[2].term = Term::Ret(vec![n]);
+    g.blocks[1].insts[6] = Inst::Conv(Conv::IntToInt(U8), c, n);
+    opt::drop_undemanded_masks(&relax_session::Options::default(), &mut g);
+    assert!(matches!(g.blocks[1].insts[1], Inst::IBinI(IOp::And, ..)));
+}

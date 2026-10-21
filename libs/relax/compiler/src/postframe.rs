@@ -148,7 +148,14 @@ fn in_window(t: u64) -> bool {
 }
 
 fn may_log() -> bool {
-    LOGGED.fetch_add(1, Relaxed) < LOG_MAX
+    LOGGED.fetch_add(1, Relaxed) < if owner_long_all() { 20 * LOG_MAX } else { LOG_MAX }
+}
+
+/// MAKEPAD_RUN_OWNER_LONG=1: every long owner request of the run is logged, not only the first
+/// windows' (diagnostics of what the UI's requests queued behind)
+fn owner_long_all() -> bool {
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALL.get_or_init(|| std::env::var_os("MAKEPAD_RUN_OWNER_LONG").is_some())
 }
 
 fn ms(ns: u64) -> f64 {
@@ -198,7 +205,7 @@ pub(crate) fn main_compile(name: &str, r: &MainCompile) {
     if dt >= STALL_LOG_NS && may_log() {
         let behind = match r.behind {
             0 => "-".to_string(),
-            c => format!("{} for `{}`", crate::owner::CLASS_NAMES[(c - 1) as usize], crate::os::thread::name(r.behind_from)),
+            c => format!("{} for `{}` from {}", crate::owner::CLASS_NAMES[(c - 1) as usize], crate::os::thread::name(r.behind_from), r.behind_site.map_or("?".to_string(), |l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()))),
         };
         eprintln!(
             "makepad-run main stall: `{}` {:.1} ms at +{:.2} s after the first present (owner queue {:.1} ms, longest behind {} {:.1} ms; typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; at its start {} compile jobs ran, queued: speculative {}, O2 {}, O3 {})",
@@ -245,7 +252,9 @@ pub(crate) fn owner_served(class: usize, site: &std::panic::Location<'_>, from: 
             SERVED_BLOCKING[class].fetch_add(dt, Relaxed);
         }
     }
-    if dt >= STALL_LOG_NS && t0 < fp + 3 * WINDOW_NS && may_log() {
+    // MAKEPAD_RUN_OWNER_LONG=1: every long request of the run, not only the first windows'
+    let all = owner_long_all();
+    if dt >= STALL_LOG_NS && (all || t0 < fp + 3 * WINDOW_NS) && may_log() {
         eprintln!(
             "makepad-run owner long: {} request of `{}` from {}:{} served {:.1} ms at +{:.2} s ({} program-thread requests queued at its end)",
             crate::owner::CLASS_NAMES[class],

@@ -5811,6 +5811,130 @@ pub fn promote_dyn_read_slots(f: &mut Func) -> bool {
     true
 }
 
+/// Bit-tracking dead code for masks and casts (LLVM's BDCE): per integer vreg, the bits any of
+/// its uses reads (a fixed point over every use, so multi-definition variables -- a bit
+/// reader's `bitsleft`, read only as `bitsleft as u8` and `(bitsleft >> 3) & 7` -- are covered);
+/// an `x & k` whose result is read only within k, or an integer cast whose result is read only
+/// within the source's low bits, becomes a copy of x (then coalesced: `bitsleft -= entry & 0xff`
+/// was movzx + sub). Narrow operations re-extend their results (both backends), so a narrow
+/// result's demanded bits above its width demand its top bit (signed) or nothing (unsigned).
+/// MAKEPAD_RUN_OPT=-bdce: off (bisection).
+pub fn drop_undemanded_masks(options: &relax_session::Options, f: &mut Func) -> bool {
+    if opt_off(options, "-bdce") {
+        return false;
+    }
+    let nv = f.vregs.len();
+    const ALL: u64 = !0;
+    let mask = |w: u8| if w >= 64 { ALL } else { (1u64 << w) - 1 };
+    // the bits of an operation's w-bit result that its demanded 64-bit register bits read
+    let narrow = |d: u64, it: IntTy| -> u64 {
+        if it.bits >= 64 {
+            d
+        } else {
+            let m = mask(it.bits);
+            (d & m) | if it.signed && d & !m != 0 { 1u64 << (it.bits - 1) } else { 0 }
+        }
+    };
+    // the low bits an add / sub / mul result's bits depend on
+    let upto = |d: u64| if d == 0 { 0 } else { mask(64 - d.leading_zeros() as u8) };
+    let mut dem = vec![0u64; nv];
+    let mut changed = true;
+    let mut tu = Vec::new();
+    let isint = |f: &Func, v: VReg| f.vregs[v.0 as usize] == Cls::I;
+    while changed {
+        changed = false;
+        let mut need = |v: VReg, m: u64, dem: &mut Vec<u64>| {
+            let e = &mut dem[v.0 as usize];
+            if *e | m != *e {
+                *e |= m;
+                changed = true;
+            }
+        };
+        for b in &f.blocks {
+            for i in &b.insts {
+                match *i {
+                    Inst::Mov(d, x) => need(x, dem[d.0 as usize], &mut dem),
+                    Inst::IBin(op, it, d, x, y) => {
+                        let r = narrow(dem[d.0 as usize], it);
+                        match op {
+                            IOp::Add | IOp::Sub | IOp::Mul => {
+                                need(x, upto(r), &mut dem);
+                                need(y, upto(r), &mut dem);
+                            }
+                            // bitwise results are not re-extended: the operands' upper bits pass through
+                            IOp::And | IOp::Or | IOp::Xor => {
+                                need(x, dem[d.0 as usize], &mut dem);
+                                need(y, dem[d.0 as usize], &mut dem);
+                            }
+                            IOp::Shl | IOp::Shr if it.bits == 64 && x != y => {
+                                need(x, ALL, &mut dem);
+                                need(y, 63, &mut dem);
+                            }
+                            _ => {
+                                need(x, ALL, &mut dem);
+                                need(y, ALL, &mut dem);
+                            }
+                        }
+                    }
+                    Inst::IBinI(op, it, d, x, k) => {
+                        let full = dem[d.0 as usize];
+                        let r = narrow(full, it);
+                        // a narrow bitwise immediate may be emitted as the 64-bit form with the
+                        // immediate sign-extended: the operand's upper bits pass through
+                        let kk = if it.bits >= 64 { k as u64 } else { k as u64 | !mask(it.bits) };
+                        let m = match op {
+                            IOp::Add | IOp::Sub | IOp::Mul => upto(r),
+                            IOp::And => full & kk,
+                            IOp::Or => full & !(k as u64 & mask(it.bits)),
+                            IOp::Xor => full,
+                            // shifted left (and re-extended when narrow)
+                            IOp::Shl if (0..it.bits as i64).contains(&k) => r >> k,
+                            // a 64-bit logical shift of the register (narrow values too): bit i
+                            // of the result is bit i + k of the operand
+                            IOp::Shr if !it.signed && (0..it.bits as i64).contains(&k) => full << k,
+                            _ => ALL,
+                        };
+                        need(x, m, &mut dem);
+                    }
+                    Inst::INeg(it, d, x) | Inst::INot(it, d, x) => {
+                        let r = narrow(dem[d.0 as usize], it);
+                        need(x, if matches!(i, Inst::INeg(..)) { upto(r) } else { r }, &mut dem);
+                    }
+                    Inst::Conv(Conv::IntToInt(it), d, x) => need(x, narrow(dem[d.0 as usize], it), &mut dem),
+                    Inst::Store(Mem::Int(n, _), base, _, v) if base != v => {
+                        need(base, ALL, &mut dem);
+                        need(v, mask(8 * n), &mut dem);
+                    }
+                    Inst::StoreX(Mem::Int(n, _), base, idx, _, _, v) if base != v && idx != v => {
+                        need(base, ALL, &mut dem);
+                        need(idx, ALL, &mut dem);
+                        need(v, mask(8 * n), &mut dem);
+                    }
+                    _ => for_uses(i, |u| if isint(f, u) { need(u, ALL, &mut dem) }),
+                }
+            }
+            term_uses(&b.term, &mut tu);
+            for &u in &tu {
+                need(u, ALL, &mut dem);
+            }
+        }
+    }
+    let ints: Vec<bool> = f.vregs.iter().map(|c| *c == Cls::I).collect();
+    let mut any = false;
+    for b in &mut f.blocks {
+        for i in &mut b.insts {
+            let n = match *i {
+                Inst::IBinI(IOp::And, it, d, x, k) if dem[d.0 as usize] & !(k as u64 & mask(it.bits)) == 0 => Inst::Mov(d, x),
+                Inst::Conv(Conv::IntToInt(it), d, x) if ints[x.0 as usize] && dem[d.0 as usize] & !mask(it.bits) == 0 => Inst::Mov(d, x),
+                _ => continue,
+            };
+            *i = n;
+            any = true;
+        }
+    }
+    any
+}
+
 /// Variables read again after a copy into them: `t = x >> n; x = t; ... use t` (O3, before
 /// register allocation). Copy propagation and value numbering make later reads of a variable x
 /// (several definitions: a loop-carried bit buffer, a counter) read the single-definition

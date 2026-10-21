@@ -34,6 +34,7 @@ extern "system" {
     pub fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
     pub fn SetThreadStackGuarantee(size: *mut u32) -> i32;
     pub fn SetThreadPriority(t: HANDLE, priority: i32) -> i32;
+    pub fn SetThreadInformation(t: HANDLE, class: i32, info: *const u8, size: u32) -> i32;
     pub fn GetThreadDescription(t: HANDLE, desc: *mut *mut u16) -> i32;
     pub fn LocalFree(p: *mut u8) -> *mut u8;
     pub fn TerminateProcess(p: HANDLE, code: u32) -> i32;

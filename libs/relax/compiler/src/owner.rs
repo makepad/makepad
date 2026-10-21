@@ -196,6 +196,8 @@ static MAIN_WAIT_BEHIND: AtomicU64 = AtomicU64::new(u64::MAX);
 /// what the owner serves now: class (u8::MAX: idle) and requester
 static NOW_CLASS: AtomicU8 = AtomicU8::new(u8::MAX);
 static NOW_FROM: AtomicU64 = AtomicU64::new(0);
+/// the call site of the request being served (null: none)
+static NOW_SITE: std::sync::atomic::AtomicPtr<std::panic::Location<'static>> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 thread_local! {
     static IS_OWNER: Cell<bool> = const { Cell::new(false) };
@@ -399,6 +401,8 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
     };
     let behind = NOW_CLASS.load(Ordering::Relaxed);
     let behind_from = NOW_FROM.load(Ordering::Relaxed);
+    // SAFETY: only &'static Locations are stored
+    let behind_site = unsafe { NOW_SITE.load(Ordering::Relaxed).as_ref() };
     let t_req = std::time::Instant::now();
     let t0 = if main_wait { crate::jit::wall_ns() } else { 0 };
     in_call_add(1);
@@ -426,7 +430,7 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
         MAIN_ACC[b + 1].fetch_add(w, Ordering::Relaxed);
         let served = req.t_serve.load(Ordering::Relaxed);
         if served != 0 {
-            crate::jit::main_rec_behind(served.saturating_sub(req.t_push), behind, behind_from);
+            crate::jit::main_rec_behind(served.saturating_sub(req.t_push), behind, behind_from, behind_site);
         }
         crate::postframe::main_owner_wait(req.t_push, w);
     }
@@ -666,6 +670,7 @@ fn serve(r: usize) {
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
     let prev_now = (NOW_CLASS.swap(req.class as u8, Ordering::Relaxed), NOW_FROM.swap(req.from, Ordering::Relaxed));
+    let prev_site = NOW_SITE.swap(req.site as *const std::panic::Location<'static> as *mut _, Ordering::Relaxed);
     DEPTH.with(|d| d.set(d.get() + 1));
     let frame = crate::jit::frame_enter(req.rec);
     // makepad inspect's timeline: the owner's service of this request is a span
@@ -700,6 +705,7 @@ fn serve(r: usize) {
     DEPTH.with(|d| d.set(d.get() - 1));
     NOW_CLASS.store(prev_now.0, Ordering::Relaxed);
     NOW_FROM.store(prev_now.1, Ordering::Relaxed);
+    NOW_SITE.store(prev_site, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
     unsafe { crate::query::swap_context(prev_ctx) };
     OWNER_SERVING.store(was_serving, Ordering::Relaxed);
