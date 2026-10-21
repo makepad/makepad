@@ -33,7 +33,7 @@ use makepad_ai_cuda::llm_ops::{
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
     layer_norm, quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched,
     dequant_q8_0_f16, rms_norm_mul, rope_multi, rope_vision, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
-    upscale_bilinear,
+    upscale_bilinear, im2col_1d_f32, UNARY_COS, UNARY_SIN, UNARY_SQR,
 
     QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
     QUANT_IQ4XS as MKLLM_QUANT_IQ4XS, QUANT_Q3K as MKLLM_QUANT_Q3K,
@@ -1073,6 +1073,8 @@ enum KernelSel {
     // llama.cpp qwen35.cpp:276 / ggml-cuda.cu:2520: CPY view -> cache, not CONT+SET_ROWS
     CopyViewTo,
     Concat,
+    // ggml IM2COL, 1D, f32 -> f32 (conv1d lowered to im2col + GEMM).
+    Im2col1d,
     SsmConv,
     // llama.cpp ggml-cuda.cu:4006 SSM_CONV + SILU
     SsmConvSilu,
@@ -1445,6 +1447,34 @@ fn select_kernel(
                 return Err(unsupported_node(t, "strided unary"));
             }
             KernelSel::Unary(op)
+        }
+        // Standalone elementwise ops, run on the unary kernel (llm_ops codes).
+        Op::Sin | Op::Cos | Op::Sqr => {
+            let s = src(0)?;
+            if s.desc.ty != TensorType::F32 || t.desc.ty != TensorType::F32 {
+                return Err(unsupported_node(t, "non-f32 elementwise op"));
+            }
+            if !s.is_contiguous() || !t.is_contiguous() {
+                return Err(unsupported_node(t, "strided elementwise op"));
+            }
+            KernelSel::Unary(match t.op {
+                Op::Sin => UNARY_SIN,
+                Op::Cos => UNARY_COS,
+                _ => UNARY_SQR,
+            })
+        }
+        Op::Im2col => {
+            let input = src(1)?;
+            if t.op_param_i32(6) != 0 {
+                return Err(unsupported_node(t, "2D im2col"));
+            }
+            if input.desc.ty != TensorType::F32 || t.desc.ty != TensorType::F32 {
+                return Err(unsupported_node(t, "im2col needs f32 input and output"));
+            }
+            if !input.is_contiguous() || !t.is_contiguous() || input.ne[3] != 1 {
+                return Err(unsupported_node(t, "strided or 4D im2col"));
+            }
+            KernelSel::Im2col1d
         }
         Op::Glu => {
             if t.src[1].is_none() {
@@ -3523,6 +3553,32 @@ impl ExecView<'_> {
                         )
                     },
                     "unary",
+                )
+            }
+            KernelSel::Im2col1d => {
+                // src0 is the convolution kernel (only its width is read),
+                // src1 the [IW, IC, N] input.
+                let k_id = self.src_id(&t, 0)?;
+                let x_id = self.src_id(&t, 1)?;
+                let kernel_width = tensors[k_id].ne[0] as i32;
+                let x = &tensors[x_id];
+                check(
+                    unsafe {
+                        im2col_1d_f32(
+                            self.ptr_of(x_id)?,
+                            self.ptr_of(node_id)?,
+                            x.ne[0] as i32,
+                            x.ne[1] as i32,
+                            x.ne[2] as i32,
+                            kernel_width,
+                            t.ne[1] as i32,
+                            t.op_param_i32(0),
+                            t.op_param_i32(2),
+                            t.op_param_i32(4),
+                            stream,
+                        )
+                    },
+                    "im2col",
                 )
             }
             KernelSel::UnaryMul(op) => {
