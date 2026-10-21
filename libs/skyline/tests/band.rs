@@ -253,7 +253,8 @@ fn at_noon_the_city_is_lit_by_the_sun_not_by_its_windows() {
     // than 3x the median city texel (facade level)
     assert!(peak_over_median(&day, &city) < 3.0);
     assert!(peak_over_median(&night, &city) > 4.5);
-    // daylight: the median lit city texel at noon is at least 6x the night's median
+    // daylight: the median lit city texel at noon is at least 6x the night's median (brighter by day; that the sun's own
+    // term lights the faces toward it is `the_sun_lights_the_facades_that_face_it`)
     assert!(median(&day, &city) > 6.0 * median(&night, &city));
 }
 
@@ -354,4 +355,84 @@ fn visual_check_pngs() {
         let crop: Vec<u8> = (0..2 * b.h).flat_map(|y| (0..2 * cw).flat_map(move |x| { let o = ((y / 2) * b.w + x0 + x / 2) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
         write(&format!("{name}_city.png"), 2 * cw, 2 * b.h, &crop);
     }
+}
+
+/// Noon's light with the sun at azimuth `sun_u` and of strength `sun` (x noon's).
+fn noon_sun(sun_u: f32, sun: f32) -> SkyLight { SkyLight { sun_u, sun_rgb: [3.0 * sun, 2.9 * sun, 2.7 * sun], ..noon([1.2, 1.3, 1.5]) } }
+
+// Measured (1024 px, the city's 745 texels): median 0.563 with the sun behind the camera, 0.328 with it in front (18 deg
+// from it at noon is the same), 0.327 with no sun: the facades the camera sees are lit by the sun only when they face it.
+// Thresholds 1.4x (measured 1.72x both).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_sun_lights_the_facades_that_face_it() {
+    let p = city_params();
+    let night = render_band_lit(&p, 1024, &SkyLight::example());
+    let city = city_rows(&p, &night);
+    let c = p[P::CtC] as f32;
+    // the sun behind the camera (the facades the camera sees face it), in front of it (they face away), and none
+    let (front, back, none) = (render_band_lit(&p, 1024, &noon_sun(c + 0.5, 1.0)), render_band_lit(&p, 1024, &noon_sun(c, 1.0)), render_band_lit(&p, 1024, &noon_sun(c + 0.5, 0.0)));
+    let (mf, mb, mn) = (median(&front, &city), median(&back, &city), median(&none, &city));
+    println!("city median at noon: sun behind the camera {mf}, in front {mb}, no sun {mn}");
+    assert!(mf > 1.4 * mn, "{mf} {mn}");
+    assert!(mf > 1.4 * mb, "{mf} {mb}");
+}
+
+/// The nearest range's (k = 4) own rock texels, with their columns' slope (the shader's, over +-0.01 rad): opaque, below
+/// its ridge and above the front treeline's top and the ground rise (two pixels of margin), in the columns `cols` of
+/// the turn `(u0, half width)`; at `p` without forests, city or props, so nothing else stands there.
+fn near_range_texels(p: &Params, b: &Band, sector: (f64, f64)) -> Vec<(usize, f64)> {
+    let z = Zones::new(p);
+    let m = terrain::margin(p, 1.0, b.w);
+    let cols = terrain::columns(&z, p, 0.0, 1.0, b.w, m);
+    let px = std::f64::consts::TAU / b.w as f64;
+    let dn = (0.01 / px).round().max(1.0) as usize;
+    let h = |x: usize| cols[(x + m) * terrain::ROWS + 4][0] as f64;
+    let mut out = vec![];
+    for x in 0..b.w {
+        let du = ((x as f64 + 0.5) / b.w as f64 - sector.0 + 0.5).rem_euclid(1.0) - 0.5;
+        if du.abs() > sector.1 || x < dn || x + dn >= b.w { continue; }
+        let c = |r: usize| cols[(x + m) * terrain::ROWS + r];
+        let near = (c(6)[1] as f64).max(c(5)[2] as f64);
+        let dh = (h(x + dn) - h(x - dn)) / (2.0 * dn as f64 * px);
+        for y in 0..b.h {
+            let (el, i) = (row_el(p, b, y), y * b.w + x);
+            if el < h(x) - 2.0 * px && el > near + 2.0 * px && b.texels[i][3] > 0.9 { out.push((i, dh)); }
+        }
+    }
+    out
+}
+
+/// The mean luminance of the texels whose slope passes `f`.
+fn mean_lum(b: &Band, t: &[(usize, f64)], f: impl Fn(f64) -> bool) -> f32 {
+    let l: Vec<f32> = t.iter().filter(|(_, dh)| f(*dh)).map(|(i, _)| lum(&b.texels[*i])).collect();
+    assert!(l.len() > 20, "only {} texels", l.len());
+    l.iter().sum::<f32>() / l.len() as f32
+}
+
+// Measured (1024 px; the nearest range round u 0.3, 1230 texels): sun to the left, rising flanks 0.248, falling 0.113
+// (2.2x); to the right, falling 0.251, rising 0.111 (2.3x); the sun behind the camera 0.336, beyond the ridge 0.063 (5.3x;
+// with the normal's z toward the view, as the brief wrote it, this would come out the other way round).
+// Thresholds 1.6x and 3x.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_sun_lights_the_flanks_that_face_it() {
+    // no forests, city or props (only rock on the nearest range), no haze, no ambient: the sun alone lights the rock
+    let mut p = Params::default();
+    for k in [P::TrW, P::CtW, P::Haze, P::PrPyl, P::PrTurb, P::PrCrane, P::PrInd, P::PrChurch, P::PrTown, P::PrLamp, P::PrBridge, P::PrFair, P::PrMast, P::PrFar, P::PrFarm, P::PrCoast] { p.set(k as usize, 0.0); }
+    let probe = render_band(&p, 1024);
+    // the 0.2 of the turn where the nearest range shows most
+    let u0 = (0..100).map(|i| i as f64 / 100.0).max_by_key(|&u| near_range_texels(&p, &probe, (u, 0.1)).len()).unwrap();
+    let sector = (u0, 0.1);
+    let low = |du: f64| SkyLight { sun_u: (u0 + du) as f32, sun_el_deg: 20.0, sun_rgb: [3.0; 3], ambient_rgb: [0.0; 3], ring_low: [[0.5; 3]; RING], ring_high: [[0.5; 3]; RING], ..SkyLight::example() };
+    let (left, right, behind, ahead) = (render_band_lit(&p, 1024, &low(-0.25)), render_band_lit(&p, 1024, &low(0.25)), render_band_lit(&p, 1024, &low(0.5)), render_band_lit(&p, 1024, &low(0.0)));
+    let t = near_range_texels(&p, &left, sector);
+    // a flank rising to the right faces left (its normal -dh), one falling to the right faces right
+    let (rising, falling) = (|dh: f64| dh > 0.15, |dh: f64| dh < -0.15);
+    let (l_r, l_f, r_r, r_f) = (mean_lum(&left, &t, rising), mean_lum(&left, &t, falling), mean_lum(&right, &t, rising), mean_lum(&right, &t, falling));
+    let (be, ah) = (mean_lum(&behind, &t, |_| true), mean_lum(&ahead, &t, |_| true));
+    println!("range 4 at u {u0}: {} texels; sun left: rising flanks {l_r}, falling {l_f}; sun right: rising {r_r}, falling {r_f}; sun behind the camera {be}, ahead {ah}", t.len());
+    // the sun to the left lights the flanks facing left, to the right those facing right
+    assert!(l_r > 1.6 * l_f, "{l_r} {l_f}");
+    assert!(r_f > 1.6 * r_r, "{r_f} {r_r}");
+    // the flanks face the camera: the sun behind it lights them more than the sun beyond the ridge
+    assert!(be > 3.0 * ah, "{be} {ah}");
 }
