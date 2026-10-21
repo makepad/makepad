@@ -255,7 +255,7 @@ pub fn inline_rule(f: &Func, callee_id: u32, nargs: usize, nrets: usize, attrs: 
 /// its inline attributes. Returns (inlined callee slot, rule) per inlined call site.
 pub fn inline_calls(options: &relax_session::Options, f: &mut Func, self_id: u32, get: &dyn Fn(u32) -> Option<(*const Func, u8)>, nounwind: &dyn Fn(u32) -> bool, lim: &InlineLimits) -> Vec<(u32, usize)> {
     if lim.ordered {
-        return inline_calls_ordered(options, f, self_id, get, &|_, _| false, nounwind, lim, None, None);
+        return inline_calls_ordered(options, f, self_id, get, &|_| None, &|_, _| false, nounwind, lim, None, None);
     }
     let mut inlined = Vec::new();
     let mut budget = lim.budget;
@@ -339,11 +339,16 @@ pub struct InlineStats {
     growth_after: usize,
     pub left: [usize; 5],
     pub rejected: std::collections::BTreeMap<(String, &'static str), usize>,
+    /// calls left in hot blocks (not cold, not panic paths): name, reason, callee size
+    pub hot_rejected: std::collections::BTreeMap<(String, &'static str, usize), usize>,
 }
 
 impl InlineStats {
-    fn reject(&mut self, name: String, reason: usize) {
+    fn reject(&mut self, name: String, reason: usize, hot: Option<usize>) {
         const REASONS: [&str; 5] = ["cold", "no-rir", "no-rule", "budget", "arity"];
+        if let Some(size) = hot {
+            *self.hot_rejected.entry((name.clone(), REASONS[reason], size)).or_default() += 1;
+        }
         self.left[reason] += 1;
         *self.rejected.entry((name, REASONS[reason])).or_default() += 1;
     }
@@ -359,15 +364,26 @@ impl InlineStats {
             name, self.inlined + self.left.iter().sum::<usize>(), self.inlined,
             self.hot_inlined + self.hot_left, self.growth_before.unwrap_or(0), self.growth_after,
             self.left[0], self.left[1], self.left[2], self.left[3], self.left[4], top);
+        if !self.hot_rejected.is_empty() {
+            eprintln!("  hot calls left: {}", self.hot_rejected.iter().map(|((n, why, size), k)| format!("{} ({}, {} insts, {})", n, why, size, k)).collect::<Vec<_>>().join("; "));
+        }
         eprintln!("  rules: {}", RULE_NAMES.iter().zip(self.rules).map(|(rule, n)| format!("{} {}", rule, n)).collect::<Vec<_>>().join(", "));
     }
+}
+
+/// O3's caller growth ceiling: max(4x, +8000) instructions. Bottom-up inlining (callees bring
+/// their own inlining, priced by their optimised bodies) made the room usable: max(2x, +4000)
+/// refused html_parse's and maps' hot sites for budget (html 0.66, maps 0.97, text_shape 0.985,
+/// geomean 0.969 vs 2x); top-down, the same room had cost text_shape 5% and Stage 4.6% (INL3).
+pub fn growth_ceiling(size: usize) -> usize {
+    size.saturating_mul(4).max(size.saturating_add(8000))
 }
 
 impl InlineLimits {
     pub fn tier1_for(f: &Func) -> Self {
         let mut lim = Self::tier1();
         let size = inline_inst_count(f);
-        lim.growth_limit = Some(size.saturating_mul(2).max(size.saturating_add(4000)));
+        lim.growth_limit = Some(growth_ceiling(size));
         lim
     }
 }
@@ -408,7 +424,11 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
 /// The queue uses stable block/instruction indices: splitting invalidates only the tail,
 /// whose calls are enqueued again in the new continuation block.
 /// `single(caller, callee)` proves that caller's O1 body owns the sole reference.
-pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self_id: u32, get: &dyn Fn(u32) -> Option<(*const Func, u8)>, single: &dyn Fn(u32, u32) -> bool, nounwind: &dyn Fn(u32) -> bool, lim: &InlineLimits, freqs: Option<&[f32]>, mut stats: Option<&mut InlineStats>) -> Vec<(u32, usize)> {
+/// `prepared(callee)`: the callee bottom-up (O3), as (the body to inline: its own first inlining
+/// round, unoptimised; the optimised body that prices the site). A site takes it when the priced
+/// body passes the rules and fits, charging the growth ceiling with the priced size; otherwise
+/// the site is decided on `get`'s body as before (top-down), whose calls then come up here again.
+pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self_id: u32, get: &dyn Fn(u32) -> Option<(*const Func, u8)>, prepared: &dyn Fn(u32) -> Option<(*const Func, *const Func)>, single: &dyn Fn(u32, u32) -> bool, nounwind: &dyn Fn(u32) -> bool, lim: &InlineLimits, freqs: Option<&[f32]>, mut stats: Option<&mut InlineStats>) -> Vec<(u32, usize)> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
     let depths = relax_backend::regalloc::loop_depths(f, &reachable(f));
@@ -422,7 +442,9 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     let mut queue = BinaryHeap::new();
     let mut budget = lim.budget;
     let mut inst_count = inline_inst_count(f);
-    let mut growth_limit = lim.growth_limit.unwrap_or_else(|| inst_count.saturating_mul(2).max(inst_count.saturating_add(4000)));
+    let mut growth_limit = lim.growth_limit.unwrap_or_else(|| growth_ceiling(inst_count));
+    // the size the ceiling sees: the actual size, but a priced callee counts its priced size
+    let mut priced = inst_count;
     // Keep the separate raw-size free allowance.
     let mut free_budget = if opt_off(options, "-freecap") { usize::MAX } else { InlineLimits::tier1().budget };
     let mut inlined = Vec::new();
@@ -431,6 +453,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         s.hot_left = 0;
         s.left = [0; 5];
         s.rejected.clear();
+        s.hot_rejected.clear();
     }
     // Scalar closure combinators do not carry a per-element call penalty.
     // Look through adapter forwarding bodies for an actual loop before giving
@@ -459,7 +482,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             for (ii, inst) in f.blocks[bi].insts.iter().enumerate() {
                 if let Inst::Call(Callee::Fn(id), _, _) = inst {
                     let found = get(*id);
-                    let size = found.map_or(usize::MAX, |(p, _)| inline_inst_count(unsafe { &*p }));
+                    let size = found.map_or(usize::MAX, |(p, _)| inline_inst_count(unsafe { &*prepared(*id).map_or(p, |x| x.1) }));
                     // Closure adapters need to be fused as a chain. Importing
                     // their loop after unrelated work has spent the budget
                     // leaves an indirect/aggregate call on every iteration.
@@ -483,50 +506,50 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         }
     };
     enqueue(f, 0, &priorities, &loop_sites, &mut queue);
-    while let Some((_, _, Reverse(size), Reverse(bi), Reverse(ii))) = queue.pop() {
+    while let Some((_, _, _, Reverse(bi), Reverse(ii))) = queue.pop() {
         let Some(Inst::Call(Callee::Fn(id), args, rets)) = f.blocks[bi].insts.get(ii) else { continue };
         let (id, args, rets) = (*id, args.clone(), rets.clone());
         let found = get(id);
-        let callee = found.map(|(p, _)| unsafe { &*p });
-        let cost = size.saturating_sub(args.len() + rets.len() + 3);
-        // Preserve the raw-size R13 free cap; the paid budget charges net growth.
-        let free = size <= INLINE_FREE_INSTS && size <= free_budget;
-        // A tiny body (no bigger than the call's own argument/return moves, or within the free
-        // size) is admitted whatever the caller has grown to: refusing it keeps a call that costs
-        // more than the body (sandbox leap, node 165: encode_cascades left core::mem::drop x130,
-        // rc::header_of x140, slice::iter::next x26 as calls -- "budget" -- once big chains had
-        // filled the growth ceiling). Only the raw free allowance is charged for it.
-        let tiny = size <= INLINE_FREE_INSTS;
-        // ... and one no bigger than the call itself costs nothing: no allowance at all.
-        let no_growth = cost == 0;
-        let rule = found.and_then(|(_, attrs)| site_rule(options, callee.unwrap(), id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], lim));
-        // New admissions respect the actual growth ceiling, including ABI moves.
-        let growth = callee.map_or(0, |c| size.saturating_add(args.len()).saturating_add(
-            c.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
-        ).saturating_sub(1));
-        let reason = if matches!(f.blocks[bi].term, Term::Unreachable | Term::Resume) {
-            Some(0)
-        } else if callee.is_none() {
-            Some(1)
-        } else if ancestry[bi].contains(&id) || rule.is_none() {
-            Some(2)
-        } else if found.unwrap().1 & ATTR_COLD != 0 && !free && rule != Some(RULE_COST) {
-            Some(0)
-        } else if callee.unwrap().params.len() != args.len() || callee.unwrap().rets.len() != rets.len() {
-            Some(4)
-        } else if match rule.unwrap() {
-            _ if no_growth => false,
-            RULE_COST => size > free_budget || !tiny && inst_count.saturating_add(growth) > growth_limit,
-            RULE_SINGLE => inst_count.saturating_add(growth) > growth_limit,
-            _ => !free && (cost > budget || !tiny && inst_count > growth_limit),
-        } {
-            Some(3)
-        } else {
-            None
-        };
-        if reason.is_some() {
-            continue;
+        // the bottom-up body first, then the snapshot body: (inlined body, priced body)
+        let mut pick = None;
+        for (bottom_up, (body, shape)) in prepared(id).map(|x| (true, x)).into_iter().chain(found.map(|(p, _)| (false, (p, p)))) {
+            let (callee, shape) = unsafe { (&*body, &*shape) };
+            let size = inline_inst_count(shape);
+            let cost = size.saturating_sub(args.len() + rets.len() + 3);
+            // Preserve the raw-size R13 free cap; the paid budget charges net growth.
+            let free = size <= INLINE_FREE_INSTS && size <= free_budget;
+            // A tiny body (no bigger than the call's own argument/return moves, or within the free
+            // size) is admitted whatever the caller has grown to: refusing it keeps a call that costs
+            // more than the body (sandbox leap, node 165: encode_cascades left core::mem::drop x130,
+            // rc::header_of x140, slice::iter::next x26 as calls -- "budget" -- once big chains had
+            // filled the growth ceiling). Only the raw free allowance is charged for it.
+            let tiny = size <= INLINE_FREE_INSTS;
+            // ... and one no bigger than the call itself costs nothing: no allowance at all.
+            let no_growth = cost == 0;
+            let attrs = found.unwrap().1;
+            let rule = site_rule(options, shape, id, args.len(), rets.len(), attrs, priorities[bi].1, priorities[bi].2, single(*ancestry[bi].last().unwrap(), id), ancestry[bi].len() - 1, multi_depths[bi], lim);
+            // New admissions respect the actual growth ceiling, including ABI moves.
+            let growth = size.saturating_add(args.len()).saturating_add(
+                shape.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
+            ).saturating_sub(1);
+            let refused = matches!(f.blocks[bi].term, Term::Unreachable | Term::Resume)
+                || ancestry[bi].contains(&id) || rule.is_none()
+                || attrs & ATTR_COLD != 0 && !free && rule != Some(RULE_COST)
+                || callee.params.len() != args.len() || callee.rets.len() != rets.len()
+                || match rule.unwrap() {
+                    _ if no_growth => false,
+                    RULE_COST => size > free_budget || !tiny && priced.saturating_add(growth) > growth_limit,
+                    RULE_SINGLE => priced.saturating_add(growth) > growth_limit,
+                    _ => !free && (cost > budget || !tiny && priced > growth_limit),
+                };
+            if !refused {
+                pick = Some((callee, rule.unwrap(), growth, size, cost, free, no_growth, bottom_up));
+                break;
+            }
         }
+        let Some((callee, rule, growth, size, cost, free, no_growth, bottom_up)) = pick else { continue };
+        let callee = Some(callee);
+        let rule = Some(rule);
         match rule.unwrap() {
             // the body moves here (its one caller): the ceiling grows with it, so the calls
             // around it (Vec::push in the absorbed loop) still fit
@@ -545,8 +568,10 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         let start = f.blocks.len();
         let old_block_size = f.blocks[bi].insts.len();
         inline_site(f, bi, ii, callee.unwrap(), &args, &rets, nounwind);
+        let before = inst_count;
         inst_count = inst_count - old_block_size + f.blocks[bi].insts.len()
             + f.blocks[start..].iter().map(|b| b.insts.len()).sum::<usize>();
+        priced = if bottom_up { priced.saturating_add(growth) } else { priced + inst_count - before };
         priorities.resize(f.blocks.len(), priorities[bi]);
         let parent_loop = loop_sites[bi];
         loop_sites.resize(f.blocks.len(), parent_loop);
@@ -592,7 +617,8 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                 } else {
                     1
                 };
-                s.reject(callee.map_or_else(|| format!("fn#{}", id), |c| c.name.clone()), reason);
+                let hot = (priorities[bi].1 && reason != 0).then(|| callee.map_or(0, inline_inst_count));
+                s.reject(callee.map_or_else(|| format!("fn#{}", id), |c| c.name.clone()), reason, hot);
             }
         }
     }
@@ -4793,11 +4819,32 @@ mod inline_priority_tests {
         let mut lim = InlineLimits::tier1();
         lim.budget = 27;
         let mut f = caller();
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, Some(&[1.0, 0.5, 0.0]), None), vec![(1, RULE_SMALL_LEAF)]);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&[1.0, 0.5, 0.0]), None), vec![(1, RULE_SMALL_LEAF)]);
         lim.budget = 54;
         let mut f = caller();
         assert_eq!(inline_calls(options, &mut f, 0, &get, &|_| false, &lim).len(), 2);
         f.verify().unwrap();
+    }
+
+    #[test]
+    fn priced_body_decides_and_inlined_body_moves() {
+        // bottom-up O3: the optimised body prices the site, the inlined-only body is inlined
+        let options = &relax_session::Options::default();
+        let (raw, opt) = (callee(400), callee(30));
+        let get = |_: u32| Some((&raw as *const Func, 0));
+        let mut f = caller();
+        let n = inline_inst_count(&f);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&raw as *const Func, &opt as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 2);
+        assert!(inline_inst_count(&f) > n + 2 * 390);
+        f.verify().unwrap();
+        // refused bottom-up (priced too big), the snapshot body decides: here too big as well
+        let mut f = caller();
+        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&opt as *const Func, &raw as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).is_empty());
+        // ... and here small enough: the snapshot body moves
+        let get = |_: u32| Some((&opt as *const Func, 0));
+        let mut f = caller();
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&raw as *const Func, &raw as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 2);
+        assert!(inline_inst_count(&f) < n + 2 * 40);
     }
 
     #[test]
@@ -4830,7 +4877,7 @@ mod inline_priority_tests {
         c.params.push(VReg(0));
         let get = |_: u32| Some((&c as *const Func, ATTR_ALWAYS));
         let mut stats = InlineStats::default();
-        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, Some(&mut stats)).is_empty());
+        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, Some(&mut stats)).is_empty());
         assert_eq!(stats.left, [0, 0, 0, 0, 2]);
     }
 
@@ -4848,7 +4895,7 @@ mod inline_priority_tests {
         let mut lim = InlineLimits::tier1();
         lim.budget = 27;
         let mut stats = InlineStats::default();
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
         assert_eq!(stats.inlined, 1);
         assert_eq!(stats.left, [0, 0, 0, 1, 0]);
         f.verify().unwrap();
@@ -4886,7 +4933,7 @@ mod inline_priority_tests {
         f.blocks[2].term = Term::Jump(0);
         assert!(relax_backend::regalloc::loop_depths(&f, &reachable(&f)).iter().all(|d| *d >= 1));
         let mut stats = InlineStats::default();
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.01, 1.0, 0.0]), Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.01, 1.0, 0.0]), Some(&mut stats)), vec![(2, RULE_SMALL_LEAF)]);
         assert_eq!(stats.hot_inlined, 1);
         assert_eq!(stats.hot_left, 1); // the exposed call inherits hotness
         assert_eq!(stats.growth_before, Some(3));
@@ -4902,12 +4949,12 @@ mod inline_priority_tests {
         let get = |id: u32| (id != 99).then_some((&c as *const Func, 0));
         for (freq, expected) in [(0.049, 0), (HOT_FREQ, 1)] {
             let mut f = caller();
-            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.01, freq, 1.0]), None).len(), expected);
+            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.01, freq, 1.0]), None).len(), expected);
         }
         for (blocks, expected) in [(64, 1), (65, 0)] {
             let mut f = caller();
             while f.blocks.len() < blocks { f.block(); }
-            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), expected);
+            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), expected);
         }
     }
 
@@ -4918,7 +4965,7 @@ mod inline_priority_tests {
             let c = callee(size);
             let get = |_: u32| Some((&c as *const Func, attrs));
             let mut f = caller();
-            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0, 0.0, 1.0]), None).len(), expected);
+            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0, 0.0, 1.0]), None).len(), expected);
             f.verify().unwrap();
         }
         // inline(always) still consumes the paid allowance.
@@ -4926,7 +4973,7 @@ mod inline_priority_tests {
         let get = |_: u32| Some((&c as *const Func, ATTR_ALWAYS));
         let mut lim = InlineLimits::tier1();
         lim.budget = 27;
-        assert_eq!(inline_calls_ordered(options, &mut caller(), 0, &get, &|_, _| false, &|_| false, &lim, Some(&[0.0, 0.0, 1.0]), None).len(), 1);
+        assert_eq!(inline_calls_ordered(options, &mut caller(), 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&[0.0, 0.0, 1.0]), None).len(), 1);
     }
 
     #[test]
@@ -4937,9 +4984,10 @@ mod inline_priority_tests {
         let mut f = callee(0);
         f.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![]); 200];
         f.blocks[0].pos = vec![0; 200];
-        let lim = InlineLimits::tier1_for(&f);
+        let mut lim = InlineLimits::tier1_for(&f);
+        lim.growth_limit = Some(4200);
         let mut stats = InlineStats::default();
-        let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, None, Some(&mut stats));
+        let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats));
         // Each inline grows by 24 instructions but costs only 22 budget units.
         assert_eq!(inlined.len(), 167);
         assert_eq!(inline_inst_count(&f), 4208);
@@ -4956,18 +5004,18 @@ mod inline_priority_tests {
         let get = |id: u32| Some((if id == 3 { &free } else { &paid } as *const Func, 0));
         let mut f = caller();
         let lim = InlineLimits::tier1_for(&f);
-        assert_eq!(lim.growth_limit, Some(4002));
+        assert_eq!(lim.growth_limit, Some(8002));
         // Model growth from the first round; the original ceiling must still apply.
         let v = f.vreg(Cls::I);
-        f.blocks[0].insts.extend(vec![Inst::Iconst(v, 1); 4001]);
-        f.blocks[0].pos.extend(vec![0; 4001]);
+        f.blocks[0].insts.extend(vec![Inst::Iconst(v, 1); 8001]);
+        f.blocks[0].pos.extend(vec![0; 8001]);
         f.blocks[0].insts.push(Inst::Call(Callee::Fn(3), vec![], vec![]));
         f.blocks[0].pos.push(0);
         let mut stats = InlineStats::default();
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)).len(), 1);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)).len(), 1);
         assert_eq!(stats.left[3], 2);
         assert_eq!(stats.growth_after, inline_inst_count(&f));
-        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)).is_empty());
+        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)).is_empty());
         f.verify().unwrap();
     }
 
@@ -4976,7 +5024,7 @@ mod inline_priority_tests {
         assert_eq!(InlineLimits::tier1_for(&callee(100)).budget, 4000);
         assert_eq!(InlineLimits::tier1_for(&callee(16000)).budget, 4000);
         assert_eq!(InlineLimits::tier1_for(&callee(30000)).budget, 4000);
-        assert_eq!(InlineLimits::tier1_for(&callee(16000)).growth_limit, Some(32000));
+        assert_eq!(InlineLimits::tier1_for(&callee(16000)).growth_limit, Some(64000));
     }
 
     #[test]
@@ -5043,7 +5091,7 @@ mod inline_priority_tests {
             let mut lim = InlineLimits::tier1();
             lim.budget = 0;
             let mut stats = InlineStats::default();
-            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, Some(&[0.0]), Some(&mut stats)), vec![(1, RULE_COST)]);
+            assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, Some(&[0.0]), Some(&mut stats)), vec![(1, RULE_COST)]);
             assert_eq!(stats.rules[RULE_COST], 1);
             f.verify().unwrap();
         }
@@ -5060,7 +5108,7 @@ mod inline_priority_tests {
             let mut lim = InlineLimits::tier1();
             lim.budget = 0;
             let mut stats = InlineStats::default();
-            let result = inline_calls_ordered(options, &mut f, 0, &get, &single, &|_| false, &lim, Some(&[0.0]), Some(&mut stats));
+            let result = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &single, &|_| false, &lim, Some(&[0.0]), Some(&mut stats));
             assert_eq!(result, if refs == 1 { vec![(1, RULE_SINGLE)] } else { vec![] });
             assert_eq!(stats.rules[RULE_SINGLE], usize::from(refs == 1));
             f.verify().unwrap();
@@ -5073,7 +5121,7 @@ mod inline_priority_tests {
         let c = callee(500);
         let get = |id| (id == 1).then_some((&c as *const Func, ATTR_COLD));
         let mut f = one_call(1);
-        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| true, &|_| false, &InlineLimits::tier1(), Some(&[1.0]), None).is_empty());
+        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| true, &|_| false, &InlineLimits::tier1(), Some(&[1.0]), None).is_empty());
         assert!(matches!(f.blocks[0].insts[0], Inst::Call(Callee::Fn(1), _, _)));
     }
 
@@ -5085,7 +5133,7 @@ mod inline_priority_tests {
         for term in [Term::Unreachable, Term::Resume] {
             let mut f = one_call(1);
             f.blocks[0].term = term;
-            assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| true, &|_| false, &InlineLimits::tier1(), None, None).is_empty());
+            assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| true, &|_| false, &InlineLimits::tier1(), None, None).is_empty());
         }
     }
 
@@ -5097,7 +5145,7 @@ mod inline_priority_tests {
             options.opt.push(toggle.into());
             let get = |id| (id == 1).then_some((&c as *const Func, 0));
             let mut f = one_call(1);
-            assert!(inline_calls_ordered(&options, &mut f, 0, &get, &|_, _| toggle.is_empty(), &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None).is_empty());
+            assert!(inline_calls_ordered(&options, &mut f, 0, &get, &|_| None, &|_, _| toggle.is_empty(), &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None).is_empty());
         }
     }
 
@@ -5112,10 +5160,10 @@ mod inline_priority_tests {
         let mut lim = InlineLimits::tier1();
         lim.budget = 0;
         lim.growth_limit = Some(10000);
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &lim, None, None), vec![(1, RULE_COST); 4]);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, None), vec![(1, RULE_COST); 4]);
         f.verify().unwrap();
         lim.growth_limit = Some(999);
-        assert!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_, _| false, &|_| false, &lim, None, None).is_empty());
+        assert!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, None).is_empty());
     }
 
     #[test]
@@ -5127,7 +5175,7 @@ mod inline_priority_tests {
             let mut lim = InlineLimits::tier1();
             lim.budget = 0;
             lim.growth_limit = Some(ceiling);
-            assert_eq!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_, _| true, &|_| false, &lim, None, None).len(), expected);
+            assert_eq!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_| None, &|_, _| true, &|_| false, &lim, None, None).len(), expected);
         }
     }
 
@@ -5142,7 +5190,7 @@ mod inline_priority_tests {
         let mut lim = InlineLimits::tier1();
         lim.budget = 0;
         lim.growth_limit = Some(5000);
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|owner, _| owner == 0, &|_| false, &lim, None, None).len(), 9);
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|owner, _| owner == 0, &|_| false, &lim, None, None).len(), 9);
         assert_eq!(inline_inst_count(&f), 4500); // exceeds the 4000-instruction free allowance
         f.verify().unwrap();
     }
@@ -5178,7 +5226,7 @@ mod inline_priority_tests {
             }).collect();
             let get = |id: u32| callees.get(id.wrapping_sub(1) as usize).map(|c| (c as *const Func, 0));
             let mut f = one_call(1);
-            let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
+            let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
             assert_eq!(inlined, (1..=expected).map(|id| (id, RULE_COST)).collect::<Vec<_>>());
             f.verify().unwrap();
         }
@@ -5198,7 +5246,7 @@ mod inline_priority_tests {
         for owner in [0, 1] {
             let mut f = one_call(1);
             let single = |caller, callee| caller == owner && callee == 2;
-            let result = inline_calls_ordered(options, &mut f, 0, &get, &single, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
+            let result = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &single, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
             assert_eq!(result, if owner == 1 { vec![(1, RULE_COST), (2, RULE_SINGLE)] } else { vec![(1, RULE_COST)] });
             f.verify().unwrap();
         }
