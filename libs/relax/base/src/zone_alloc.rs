@@ -84,6 +84,10 @@ mod disabled {
         ScratchGuard
     }
     #[inline]
+    pub fn outside_scratch<R>(f: impl FnOnce() -> R) -> R {
+        f()
+    }
+    #[inline]
     pub fn active() -> bool {
         false
     }
@@ -150,7 +154,7 @@ use disabled as burst;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 use disabled as compiler;
 
-pub use burst::{scratch, stats as burst_stats, trim as burst_trim, ScratchGuard};
+pub use burst::{outside_scratch, scratch, stats as burst_stats, trim as burst_trim, ScratchGuard};
 pub use relax_session::phase::{in_compiler, PhaseGuard};
 
 use relax_session::phase::ROUTING as MODE;

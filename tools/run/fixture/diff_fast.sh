@@ -22,6 +22,9 @@ T=${TARGET:-$root/target/release}
 case $T in /*) ;; *) T=$PWD/$T ;; esac
 M=$T/makepad
 [ -x "$M" ] || { echo "diff: no $M (cargo build --release -p makepad-run)"; exit 2; }
+# the std tree of the checkout being tested: a makepad binary whose target dir is outside its tree otherwise
+# looks for <target>/../src/libs/relax/compiler/std and every run exits 1 with no output
+export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_fast_cache}
 jobs=${DIFF_JOBS:-4}
 sleepms=${DIFF_SLEEP_MS:-250}
@@ -112,7 +115,11 @@ check() {
         [ -n "$fail" ] && break
         sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.$k.raw" > "$work/$p.$k.d"
         rc=$(cat "$work/$p.$k.rc" 2>/dev/null)
-        if ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
+        if [ "$rc" != "$nrc" ] && [ ! -s "$work/$p.$k.d" ] && ! grep -aq . "$work/$p.$k.raw"; then
+            # makepad itself failed (no std, bad binary, crash before main): not a codegen difference
+            fail="HARNESS ERROR: $p at tier $k: makepad exited $rc with no output: $(grep -a -m1 . "$work/$p.$k.err" | cut -c1-240)"
+            harness=1
+        elif ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
             fail="$p at tier $k: stdout differs from rustc (cksum native $sum, $k $(cksum < "$work/$p.$k.d"))
 $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
         elif [ "$rc" != "$nrc" ] || { case $p in *~*) false ;; *) ! grep -aq '[1-9][0-9]* passed; 0 failed' "$work/$p.$k.raw" ;; esac; }; then
@@ -120,7 +127,7 @@ $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
         fi
     done
 }
-ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=
+ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=; harness=
 [ -n "$pkgfail" ] && n=$(printf '%s' "$pkgfail" | grep -c .)
 for p in $progs $pkgprogs; do
     n=$((n + 1)); check "$p"
@@ -132,7 +139,21 @@ for p in $known; do
     if [ -z "$fail" ]; then kfixed="$kfixed $p"; else kfail=$((kfail + 1)); fi
 done
 [ -n "$kfixed" ] && echo "diff: known-failing programs now pass, git mv them from known/ to diff/:$kfixed"
+# per tier: programs whose D lines and exit status equal the native run's (each tier on its own)
+tiers=
+for k in o1 base o3; do
+    t=0; tn=0
+    for p in $progs $pkgprogs; do
+        tn=$((tn + 1))
+        [ -s "$work/$p.native.d" ] || continue
+        sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.$k.raw" > "$work/$p.$k.d"
+        cmp -s "$work/$p.native.d" "$work/$p.$k.d" && [ "$(cat "$work/$p.$k.rc" 2>/dev/null)" = "$(cat "$work/$p.native.rc" 2>/dev/null)" ] && t=$((t + 1))
+    done
+    tiers="$tiers $k $t/$tn"
+done
+echo "diff tiers:$tiers"
 rm -r "$work"
+[ -n "$harness" ] && { printf '%s' "$bad"; echo "diff: HARNESS ERROR (makepad runs failed without output; see above)"; exit 2; }
 if [ $ok = $n ]; then echo "diff: $ok/$n equal (known failing: $kfail)"; exit 0; fi
 printf '%s' "$bad"
 echo "diff: $ok/$n equal (known failing: $kfail)"

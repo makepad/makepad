@@ -367,6 +367,20 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+/// Runs `f` with this thread's scratch routing off (nested scopes included): what it allocates
+/// outlives the compile it runs in -- state the compiler keeps from one compile to the next, in
+/// the compiler arena on a compiler thread.
+pub fn outside_scratch<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = DEPTH.try_with(|d| d.set(self.0));
+        }
+    }
+    let _r = Restore(DEPTH.try_with(|d| d.replace(0)).unwrap_or(0));
+    f()
+}
+
 pub fn scratch(runtime: &crate::options::RuntimeOptions) -> ScratchGuard {
     if !runtime.burst_arena {
         return ScratchGuard(false, PhantomData);

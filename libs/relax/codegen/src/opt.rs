@@ -219,6 +219,22 @@ impl InlineLimits {
     }
 }
 
+/// The largest body any O3 rule admits for a callee with these attributes (the cost rule's
+/// bodies are small: at most 25 instructions that are not moves or constants): a bottom-up
+/// preparation whose O1 body is already larger rarely optimises down into range, so it is not
+/// prepared and its sites decide on the snapshot body.
+pub fn max_admitted_insts(options: &relax_session::Options, attrs: u8) -> usize {
+    let lim = InlineLimits::tier1();
+    if single_on(options) {
+        return INLINE_SINGLE_INSTS;
+    }
+    let mut n = lim.leaf_insts.max(lim.hot_insts);
+    if attrs & ATTR_ALWAYS != 0 { n = n.max(lim.always_insts); }
+    if attrs & ATTR_HINT != 0 { n = n.max(lim.hint_insts); }
+    if attrs & ATTR_CHAIN != 0 { n = n.max(lim.chain_insts); }
+    n
+}
+
 pub fn inline_rule(f: &Func, callee_id: u32, nargs: usize, nrets: usize, attrs: u8, lim: &InlineLimits) -> Option<usize> {
     let (n, leaf, rec) = callee_shape(f, callee_id);
     // a naked fn is its asm only: never inlined (rustc: naked implies inline(never))
@@ -333,6 +349,8 @@ fn inline_inst_count(f: &Func) -> usize {
 #[derive(Default)]
 pub struct InlineStats {
     pub inlined: usize,
+    /// sites admitted only as their constant arguments price the callee
+    pub in_context: usize,
     pub rules: [usize; RULE_NAMES.len()],
     hot_inlined: usize,
     hot_left: usize,
@@ -361,8 +379,8 @@ impl InlineStats {
             .filter(|(i, ((_, why), _))| *i < 5 || *why == "budget")
             .map(|(_, ((name, reason), n))| format!("{} ({}, {})", name, reason, n))
             .collect::<Vec<_>>().join("; ");
-        eprintln!("inline-stats {}: sites {}, inlined {}, hot {}, growth {}->{} insts, left: cold {}, no-rir {}, no-rule {}, budget {}, arity {}; top: {}",
-            name, self.inlined + self.left.iter().sum::<usize>(), self.inlined,
+        eprintln!("inline-stats {}: sites {}, inlined {} ({} priced in context), hot {}, growth {}->{} insts, left: cold {}, no-rir {}, no-rule {}, budget {}, arity {}; top: {}",
+            name, self.inlined + self.left.iter().sum::<usize>(), self.inlined, self.in_context,
             self.hot_inlined + self.hot_left, self.growth_before.unwrap_or(0), self.growth_after,
             self.left[0], self.left[1], self.left[2], self.left[3], self.left[4], top);
         if !self.hot_rejected.is_empty() {
@@ -372,19 +390,148 @@ impl InlineStats {
     }
 }
 
-/// O3's caller growth ceiling: max(4x, +8000) instructions. Bottom-up inlining (callees bring
-/// their own inlining, priced by their optimised bodies) made the room usable: max(2x, +4000)
-/// refused html_parse's and maps' hot sites for budget (html 0.66, maps 0.97, text_shape 0.985,
-/// geomean 0.969 vs 2x); top-down, the same room had cost text_shape 5% and Stage 4.6% (INL3).
-pub fn growth_ceiling(size: usize) -> usize {
-    size.saturating_mul(4).max(size.saturating_add(8000))
+/// O3's caller growth ceiling, scaled by the caller's measured hotness (HotSpot C2's frequent
+/// vs small limits, .NET's profile-boosted size tolerance): a caller the sampler found hot
+/// (its block frequencies are sampled) gets max(4x, +8000) instructions -- bottom-up inlining
+/// made that room usable, max(2x, +4000) refused html_parse's and maps' hot sites for budget
+/// (html 0.66, maps 0.97) --; every other caller max(2x, +4000): Stage's lukewarm UI functions
+/// grew 3x in code with the big room and its O3 compile CPU went up 4x.
+pub fn growth_ceiling(size: usize, hot: bool) -> usize {
+    if hot {
+        size.saturating_mul(4).max(size.saturating_add(8000))
+    } else {
+        size.saturating_mul(2).max(size.saturating_add(4000))
+    }
+}
+
+/// In-context pricing (LLVM InlineCost's simplified values): the body a site whose arguments
+/// include constants actually brings. Optimistic constant propagation over executable blocks
+/// (Wegman-Zadeck SCCP), integer operations only; RIR registers are not SSA, so a register's
+/// value is the meet of its definitions in executable blocks. In the result, an instruction
+/// whose value is a constant is an `Iconst`, a branch on a constant a jump, a block no executable
+/// edge reaches empty, and what nothing uses any more is gone. `consts`: per parameter, its
+/// constant. None: the constants change nothing. (`hash::fast::mix_bytes` with a constant
+/// length: the 16-byte loop and two of the three tails are dead.)
+pub fn specialize_for_args(callee: &Func, consts: &[Option<i64>]) -> Option<Func> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum V { Top, C(i64), Bot }
+    fn meet(a: V, b: V) -> V {
+        match (a, b) {
+            (V::Top, x) | (x, V::Top) => x,
+            (V::C(x), V::C(y)) if x == y => V::C(x),
+            _ => V::Bot,
+        }
+    }
+    if callee.blocks.is_empty() || !consts.iter().any(|c| c.is_some()) {
+        return None;
+    }
+    let mut val = vec![V::Top; callee.vregs.len()];
+    for (k, p) in callee.params.iter().enumerate() {
+        val[p.0 as usize] = meet(val[p.0 as usize], consts.get(k).copied().flatten().map_or(V::Bot, V::C));
+    }
+    let mut exec = vec![false; callee.blocks.len()];
+    exec[0] = true;
+    let bin = |op: IOp, it: IntTy, a: V, b: V| match (a, b) {
+        (V::C(x), V::C(y)) => fold_ibin(op, it, x, y).map_or(V::Bot, V::C),
+        (V::Bot, _) | (_, V::Bot) => V::Bot,
+        _ => V::Top,
+    };
+    loop {
+        let mut changed = false;
+        for bi in 0..callee.blocks.len() {
+            if !exec[bi] { continue; }
+            let b = &callee.blocks[bi];
+            for i in &b.insts {
+                let g = |v: &VReg| val[v.0 as usize];
+                let r = match i {
+                    Inst::Iconst(_, k) => V::C(*k),
+                    Inst::Mov(_, a) => g(a),
+                    Inst::IBin(op, it, _, a, b) => bin(*op, *it, g(a), g(b)),
+                    Inst::IBinI(op, it, _, a, k) => bin(*op, *it, g(a), V::C(*k)),
+                    Inst::INeg(it, _, a) => bin(IOp::Sub, *it, V::C(0), g(a)),
+                    Inst::INot(it, _, a) => bin(IOp::Xor, *it, g(a), V::C(-1)),
+                    Inst::ICmp(c, sg, _, a, b) => match (g(a), g(b)) {
+                        (V::C(x), V::C(y)) => V::C(cmp_i(*c, *sg, x, y) as i64),
+                        (V::Bot, _) | (_, V::Bot) => V::Bot,
+                        _ => V::Top,
+                    },
+                    Inst::ICmpI(c, sg, _, a, k) => match g(a) {
+                        V::C(x) => V::C(cmp_i(*c, *sg, x, *k) as i64),
+                        x => x,
+                    },
+                    Inst::Conv(c @ Conv::IntToInt(_), _, a) => match g(a) {
+                        V::C(x) => match fold_conv(*c, K::I(x)) { Some(K::I(y)) => V::C(y), _ => V::Bot },
+                        x => x,
+                    },
+                    Inst::Sel(_, c, a, b) => match g(c) {
+                        V::C(0) => g(b),
+                        V::C(_) => g(a),
+                        V::Top => V::Top,
+                        V::Bot => meet(g(a), g(b)),
+                    },
+                    _ => V::Bot,
+                };
+                i.defs(|d| {
+                    let m = meet(val[d.0 as usize], r);
+                    if m != val[d.0 as usize] { val[d.0 as usize] = m; changed = true; }
+                });
+            }
+            let mut mark = |t: u32, changed: &mut bool| if !exec[t as usize] { exec[t as usize] = true; *changed = true; };
+            match &b.term {
+                Term::Branch(c, t, e) => match val[c.0 as usize] {
+                    V::C(0) => mark(*e, &mut changed),
+                    V::C(_) => mark(*t, &mut changed),
+                    V::Top => {}
+                    V::Bot => { mark(*t, &mut changed); mark(*e, &mut changed); }
+                },
+                t => for s in t.succs() { mark(s, &mut changed); },
+            }
+        }
+        if !changed { break; }
+    }
+    let mut g = callee.clone();
+    let mut folded = false;
+    for (bi, b) in g.blocks.iter_mut().enumerate() {
+        if !exec[bi] {
+            if !b.insts.is_empty() || !matches!(b.term, Term::Unreachable) { folded = true; }
+            b.insts.clear();
+            b.pos.clear();
+            b.term = Term::Unreachable;
+            continue;
+        }
+        for i in b.insts.iter_mut() {
+            if matches!(i, Inst::Iconst(..)) || !is_pure(i) { continue; }
+            let mut one = None;
+            let mut n = 0;
+            i.defs(|d| { one = Some(d); n += 1; });
+            if let (1, Some(d)) = (n, one) {
+                if let V::C(k) = val[d.0 as usize] {
+                    if callee.vregs[d.0 as usize] == Cls::I {
+                        *i = Inst::Iconst(d, k);
+                        folded = true;
+                    }
+                }
+            }
+        }
+        if let Term::Branch(c, t, e) = b.term {
+            if let V::C(k) = val[c.0 as usize] {
+                b.term = Term::Jump(if k != 0 { t } else { e });
+                folded = true;
+            }
+        }
+    }
+    if !folded {
+        return None;
+    }
+    dce(&mut g);
+    Some(g)
 }
 
 impl InlineLimits {
-    pub fn tier1_for(f: &Func) -> Self {
+    pub fn tier1_for(f: &Func, hot: bool) -> Self {
         let mut lim = Self::tier1();
         let size = inline_inst_count(f);
-        lim.growth_limit = Some(growth_ceiling(size));
+        lim.growth_limit = Some(growth_ceiling(size, hot));
         lim
     }
 }
@@ -443,7 +590,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     let mut queue = BinaryHeap::new();
     let mut budget = lim.budget;
     let mut inst_count = inline_inst_count(f);
-    let mut growth_limit = lim.growth_limit.unwrap_or_else(|| growth_ceiling(inst_count));
+    let mut growth_limit = lim.growth_limit.unwrap_or_else(|| growth_ceiling(inst_count, false));
     // the size the ceiling sees: the actual size, but a priced callee counts its priced size
     let mut priced = inst_count;
     // Keep the separate raw-size free allowance.
@@ -483,7 +630,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             for (ii, inst) in f.blocks[bi].insts.iter().enumerate() {
                 if let Inst::Call(Callee::Fn(id), _, _) = inst {
                     let found = get(*id);
-                    let size = found.map_or(usize::MAX, |(p, _)| inline_inst_count(unsafe { &*prepared(*id).map_or(p, |x| x.1) }));
+                    let size = found.map_or(usize::MAX, |(p, _)| inline_inst_count(unsafe { &*if loop_sites[bi] { prepared(*id).map_or(p, |x| x.1) } else { p } }));
                     // Closure adapters need to be fused as a chain. Importing
                     // their loop after unrelated work has spent the budget
                     // leaves an indirect/aggregate call on every iteration.
@@ -507,13 +654,54 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         }
     };
     enqueue(f, 0, &priorities, &loop_sites, &mut queue);
+    // f's registers: (definitions, the constant of a single definition) -- a site's constant
+    // arguments price its callee in context (specialize_for_args); kept current as bodies move in
+    let mut kdef: Vec<(u32, Option<i64>)> = vec![(0, None); f.vregs.len()];
+    fn note_defs(kdef: &mut Vec<(u32, Option<i64>)>, insts: &[Inst], nv: usize) {
+        kdef.resize(nv, (0, None));
+        for i in insts {
+            let k = match i {
+                Inst::Iconst(_, k) => Some(*k),
+                Inst::Mov(_, a) if kdef[a.0 as usize].0 == 1 => kdef[a.0 as usize].1,
+                _ => None,
+            };
+            i.defs(|d| {
+                let e = &mut kdef[d.0 as usize];
+                e.0 += 1;
+                e.1 = if e.0 == 1 { k } else { None };
+            });
+        }
+    }
+    for p in &f.params { kdef[p.0 as usize].0 = 1; }
+    for b in 0..f.blocks.len() { note_defs(&mut kdef, &f.blocks[b].insts, f.vregs.len()); }
+    let mut specialized: std::collections::HashMap<(u32, bool, Vec<Option<i64>>), Option<Box<Func>>> = std::collections::HashMap::new();
     while let Some((_, _, _, Reverse(bi), Reverse(ii))) = queue.pop() {
         let Some(Inst::Call(Callee::Fn(id), args, rets)) = f.blocks[bi].insts.get(ii) else { continue };
         let (id, args, rets) = (*id, args.clone(), rets.clone());
         let found = get(id);
-        // the bottom-up body first, then the snapshot body: (inlined body, priced body)
+        let consts: Vec<Option<i64>> = args.iter().map(|a| kdef.get(a.0 as usize).and_then(|e| if e.0 == 1 { e.1 } else { None })).collect();
+        // the bottom-up body first, then the snapshot body: (inlined body, priced body); each
+        // priced as written, then (constant arguments) as this site sees it
         let mut pick = None;
-        for (bottom_up, (body, shape)) in prepared(id).map(|x| (true, x)).into_iter().chain(found.map(|(p, _)| (false, (p, p)))) {
+        // bottom-up bodies serve sites in loops (where a callee's own inlining pays per
+        // iteration); elsewhere the snapshot body decides, top-down, and no preparation is made
+        let bottom = if loop_sites[bi] { prepared(id) } else { None };
+        let plain: Vec<(bool, *const Func, *const Func)> = bottom.map(|(b, s)| (true, b, s)).into_iter().chain(found.map(|(p, _)| (false, p, p))).collect();
+        // as written first; the constant-argument pricing only for a site those refused
+        let mut tries: Vec<(bool, bool, *const Func, *const Func)> = plain.iter().map(|&(u, b, s)| (u, false, b, s)).collect();
+        let any_const = consts.iter().any(|c| c.is_some());
+        let mut k = 0;
+        loop {
+            if k == plain.len() && any_const {
+                for &(bottom_up, body, shape) in &plain {
+                    let spec = specialized.entry((id, bottom_up, consts.clone())).or_insert_with(|| specialize_for_args(unsafe { &*shape }, &consts).map(Box::new));
+                    if let Some(g) = spec {
+                        tries.push((bottom_up, true, body, &**g as *const Func));
+                    }
+                }
+            }
+            let Some(&(_, in_context, body, shape)) = tries.get(k) else { break };
+            k += 1;
             let (callee, shape) = unsafe { (&*body, &*shape) };
             let size = inline_inst_count(shape);
             let cost = size.saturating_sub(args.len() + rets.len() + 3);
@@ -544,11 +732,11 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                     _ => !free && (cost > budget || !tiny && priced > growth_limit),
                 };
             if !refused {
-                pick = Some((callee, rule.unwrap(), growth, size, cost, free, no_growth, bottom_up));
+                pick = Some((callee, rule.unwrap(), growth, size, cost, free, no_growth, in_context));
                 break;
             }
         }
-        let Some((callee, rule, growth, size, cost, free, no_growth, bottom_up)) = pick else { continue };
+        let Some((callee, rule, growth, size, cost, free, no_growth, in_context)) = pick else { continue };
         let callee = Some(callee);
         let rule = Some(rule);
         match rule.unwrap() {
@@ -563,16 +751,26 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         inlined.push((id, rule.unwrap()));
         if let Some(s) = stats.as_deref_mut() {
             s.inlined += 1;
+            s.in_context += usize::from(in_context);
             s.rules[rule.unwrap()] += 1;
             s.hot_inlined += usize::from(priorities[bi].1);
         }
         let start = f.blocks.len();
         let old_block_size = f.blocks[bi].insts.len();
         inline_site(f, bi, ii, callee.unwrap(), &args, &rets, nounwind);
+        // the call's results lose its definition; the parameter moves and the body add theirs
+        // (block `start` is the continuation: instructions that were there already)
+        for r in &rets { kdef[r.0 as usize].0 = kdef[r.0 as usize].0.saturating_sub(1); }
+        let nv = f.vregs.len();
+        note_defs(&mut kdef, &f.blocks[bi].insts[ii..], nv);
+        for b in start + 1..f.blocks.len() { note_defs(&mut kdef, &f.blocks[b].insts, nv); }
         let before = inst_count;
         inst_count = inst_count - old_block_size + f.blocks[bi].insts.len()
             + f.blocks[start..].iter().map(|b| b.insts.len()).sum::<usize>();
-        priced = if bottom_up { priced.saturating_add(growth) } else { priced + inst_count - before };
+        // the ceiling counts what moved in (a bottom-up body's unoptimised size: its priced size
+        // let collect_hybrid_decode_run take prepared bodies past the room top-down had, llm_host
+        // +2.1%), except a body priced in context (its constants fold it right away)
+        priced = if in_context { priced.saturating_add(growth) } else { priced + inst_count - before };
         priorities.resize(f.blocks.len(), priorities[bi]);
         let parent_loop = loop_sites[bi];
         loop_sites.resize(f.blocks.len(), parent_loop);
@@ -4923,25 +5121,93 @@ mod inline_priority_tests {
         f.verify().unwrap();
     }
 
+    /// `caller` with both calls in its loop (bottom-up bodies serve sites in loops)
+    fn caller_in_loop() -> Func {
+        let mut f = caller();
+        f.blocks[0].insts.clear();
+        f.blocks[0].pos.clear();
+        f.blocks[1].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![]), Inst::Call(Callee::Fn(2), vec![], vec![])];
+        f.blocks[1].pos = vec![0, 0];
+        f
+    }
+
     #[test]
     fn priced_body_decides_and_inlined_body_moves() {
         // bottom-up O3: the optimised body prices the site, the inlined-only body is inlined
         let options = &relax_session::Options::default();
         let (raw, opt) = (callee(400), callee(30));
         let get = |_: u32| Some((&raw as *const Func, 0));
-        let mut f = caller();
+        let mut f = caller_in_loop();
         let n = inline_inst_count(&f);
         assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&raw as *const Func, &opt as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 2);
         assert!(inline_inst_count(&f) > n + 2 * 390);
         f.verify().unwrap();
-        // refused bottom-up (priced too big), the snapshot body decides: here too big as well
+        // outside a loop the snapshot body decides (here: too big), inside one the bottom-up body
         let mut f = caller();
+        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&raw as *const Func, &opt as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None), vec![(2, RULE_SMALL_LEAF)]);
+        // refused bottom-up (priced too big), the snapshot body decides: here too big as well
+        let mut f = caller_in_loop();
         assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&opt as *const Func, &raw as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).is_empty());
         // ... and here small enough: the snapshot body moves
         let get = |_: u32| Some((&opt as *const Func, 0));
-        let mut f = caller();
+        let mut f = caller_in_loop();
         assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| Some((&raw as *const Func, &raw as *const Func)), &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 2);
         assert!(inline_inst_count(&f) < n + 2 * 40);
+    }
+
+    /// `fn(len) { let mut i = 0; while i + 16 <= len { <work>; i += 16 } if len - i >= 8 { <tail> } }`
+    fn counted_loop(work: usize) -> Func {
+        let mut f = Func::new("counted".into(), 0);
+        let len = f.vreg(Cls::I);
+        f.params.push(len);
+        let (i, t, c, r, c8, x) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        for _ in 0..6 { f.block(); }
+        let it = IntTy { bits: 64, signed: false };
+        let mut set = |b: usize, insts: Vec<Inst>, term: Term| { f.blocks[b].pos = vec![0; insts.len()]; f.blocks[b].insts = insts; f.blocks[b].term = term; };
+        set(0, vec![Inst::Iconst(i, 0)], Term::Jump(1));
+        set(1, vec![Inst::IBinI(IOp::Add, it, t, i, 16), Inst::ICmp(Cond::Le, false, c, t, len)], Term::Branch(c, 2, 3));
+        let mut body: Vec<Inst> = (0..work).map(|_| Inst::IBin(IOp::Mul, it, x, x, len)).collect();
+        body.push(Inst::IBinI(IOp::Add, it, i, i, 16));
+        set(2, body, Term::Jump(1));
+        set(3, vec![Inst::IBin(IOp::Sub, it, r, len, i), Inst::ICmpI(Cond::Ge, false, c8, r, 8)], Term::Branch(c8, 4, 5));
+        let tail: Vec<Inst> = (0..work).map(|_| Inst::IBin(IOp::Xor, it, x, x, r)).collect();
+        set(4, tail, Term::Ret(vec![]));
+        set(5, vec![], Term::Ret(vec![]));
+        f
+    }
+
+    #[test]
+    fn constant_arguments_price_in_context() {
+        let f = counted_loop(200);
+        // len = 4: the loop and the 8-byte tail are dead
+        let g = specialize_for_args(&f, &[Some(4)]).unwrap();
+        g.verify().unwrap();
+        assert!(inline_inst_count(&g) < 4, "{}", g.dump());
+        // len = 8: the loop is dead, the tail runs
+        let g = specialize_for_args(&f, &[Some(8)]).unwrap();
+        assert!(inline_inst_count(&g) >= 200 && inline_inst_count(&g) < 206, "{}", g.dump());
+        // len = 40: the loop runs, nothing decided (i is not a constant there)
+        assert!(specialize_for_args(&f, &[Some(40)]).map_or(true, |g| inline_inst_count(&g) > 400));
+        assert!(specialize_for_args(&f, &[None]).is_none());
+        // a site passing len = 4 inlines the 400-instruction body, one passing a variable keeps the call
+        let options = &relax_session::Options::default();
+        let get = |_: u32| Some((&f as *const Func, 0));
+        let site = |arg: Option<i64>| {
+            let mut c = Func::new("caller".into(), 0);
+            let a = c.vreg(Cls::I);
+            c.block();
+            c.blocks[0].insts = match arg { Some(k) => vec![Inst::Iconst(a, k)], None => vec![] };
+            if arg.is_none() { c.params.push(a); }
+            c.blocks[0].insts.push(Inst::Call(Callee::Fn(1), vec![a], vec![]));
+            c.blocks[0].pos = vec![0; c.blocks[0].insts.len()];
+            c.blocks[0].term = Term::Ret(vec![]);
+            c
+        };
+        let mut c = site(Some(4));
+        assert_eq!(inline_calls_ordered(options, &mut c, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 1);
+        c.verify().unwrap();
+        let mut c = site(None);
+        assert!(inline_calls_ordered(options, &mut c, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).is_empty());
     }
 
     #[test]
@@ -5081,7 +5347,7 @@ mod inline_priority_tests {
         let mut f = callee(0);
         f.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![]); 200];
         f.blocks[0].pos = vec![0; 200];
-        let mut lim = InlineLimits::tier1_for(&f);
+        let mut lim = InlineLimits::tier1_for(&f, true);
         lim.growth_limit = Some(4200);
         let mut stats = InlineStats::default();
         let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats));
@@ -5100,7 +5366,7 @@ mod inline_priority_tests {
         let free = callee(INLINE_FREE_INSTS);
         let get = |id: u32| Some((if id == 3 { &free } else { &paid } as *const Func, 0));
         let mut f = caller();
-        let lim = InlineLimits::tier1_for(&f);
+        let lim = InlineLimits::tier1_for(&f, true);
         assert_eq!(lim.growth_limit, Some(8002));
         // Model growth from the first round; the original ceiling must still apply.
         let v = f.vreg(Cls::I);
@@ -5118,10 +5384,10 @@ mod inline_priority_tests {
 
     #[test]
     fn budget_does_not_scale_with_caller() {
-        assert_eq!(InlineLimits::tier1_for(&callee(100)).budget, 4000);
-        assert_eq!(InlineLimits::tier1_for(&callee(16000)).budget, 4000);
-        assert_eq!(InlineLimits::tier1_for(&callee(30000)).budget, 4000);
-        assert_eq!(InlineLimits::tier1_for(&callee(16000)).growth_limit, Some(64000));
+        assert_eq!(InlineLimits::tier1_for(&callee(100), true).budget, 4000);
+        assert_eq!(InlineLimits::tier1_for(&callee(16000), true).budget, 4000);
+        assert_eq!(InlineLimits::tier1_for(&callee(30000), true).budget, 4000);
+        assert_eq!(InlineLimits::tier1_for(&callee(16000), true).growth_limit, Some(64000));
     }
 
     #[test]
