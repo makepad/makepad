@@ -237,6 +237,19 @@ struct Parked {
     event: std::sync::Arc<str>,
     /// (thread name, message, location): why-hung's verdict names the parked panic
     what: (String, String, String),
+    /// its frames, innermost first (lookup pcs): `eval`'s default scope, `locals`
+    frames: Vec<u64>,
+}
+
+/// Parked panic `id` (the newest with None): (id, its domain, its frames as lookup pcs, its
+/// thread's os id).
+pub fn parked_frames(id: Option<u64>) -> Option<(u64, Option<crate::domain::DomainId>, Vec<u64>, u64)> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = match id {
+        Some(k) => list.iter().find(|p| p.id == k)?,
+        None => list.iter().max_by_key(|p| p.id)?,
+    };
+    Some((p.id, p.domain, p.frames.clone(), p.os_id))
 }
 
 // ---- retry boundaries (DESIGN.md §10b): makepad's event dispatch runs inside one while an agent
@@ -300,7 +313,7 @@ pub fn release_domain(domain: crate::domain::DomainId) {
 
 pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     let _k = crate::zone_alloc::kept();
-    if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() {
+    if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
     }
     let domain = crate::domain::current_app_domain();
@@ -366,7 +379,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     // Do not park a new cleanup panic after that release.
     if domain.is_some_and(crate::domain::cancelled) { return; }
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()) });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect() });
     list.push(p.clone());
     parked_changed();
     if !watched {

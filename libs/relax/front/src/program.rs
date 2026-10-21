@@ -1784,6 +1784,60 @@ impl Program {
             previous: Some(self.files[old as usize].clone()), context: self.crates[krate as usize].context.clone() }
     }
 
+    /// A parse of a NEW file that becomes child module `child` of module `parent` (makepad
+    /// inspect's probes and `eval`: code compiled in a module's scope): the parent's crate,
+    /// edition, cfg and macro table; `module_path!()` names the child.
+    pub fn child_parse_snapshot(&self, parent: u32, child: &str, path: &str) -> ParseSnapshot {
+        let krate = self.mods[parent as usize].krate;
+        let kname = self.syms.str(self.crates[krate as usize].name).to_string();
+        let normal = self.mods[parent as usize].normal;
+        let mod_path = format!("{}::{}", self.def_path(self.mods[normal as usize].def), child);
+        ParseSnapshot { old: self.mods[normal as usize].file, path: path.to_string(), edition: self.crates[krate as usize].edition, kname, mod_path,
+            cfg: self.crates[krate as usize].cfg.clone(), macros: self.macros.clone(), reuse: Default::default(), previous: None,
+            context: self.crates[krate as usize].context.clone() }
+    }
+
+    /// Adds `v` (a child_parse_snapshot parse) as a new private module `name` of module `parent`
+    /// and collects its items there: it is the parent's child, so the parent's private items,
+    /// imports and `crate::` / `super::` paths are its own as for any child module; `name` is
+    /// not bound in the parent (nothing of the program can name it). The parent's names are in
+    /// scope unqualified through a glob of the parent (what `use super::*;` gives a child).
+    /// Returns (module, file). The caller resolves the imports it added (resolve_imports_added).
+    pub fn add_child_module(&mut self, parent: u32, name: &str, v: FileVersion) -> Result<(u32, u32), String> {
+        let parent = self.mods[parent as usize].normal;
+        let krate = self.mods[parent as usize].krate;
+        for &(lo, hi) in &v.idents {
+            let s = std::str::from_utf8(&v.pf.src[lo as usize..hi as usize]).unwrap_or("?").to_string();
+            self.syms.intern(&s);
+        }
+        let table = std::sync::Arc::make_mut(&mut self.macros);
+        for d in v.macros {
+            table.push(d);
+        }
+        self.crates[krate as usize].context = v.context;
+        let mut pf = v.pf;
+        self.map_image(&v.path, krate, &mut pf);
+        self.files.push(std::sync::Arc::new(pf));
+        self.file_paths.push(v.path);
+        self.exec_profile_file(self.file_paths.len() as u32 - 1);
+        self.file_crate.push(krate);
+        self.file_blocks.push(v.blocks);
+        let f = self.files.len() as u32 - 1;
+        let sym = self.syms.intern(name);
+        let pdef = self.mods[parent as usize].def;
+        let d = self.add_def(Def { kind: DefKind::Mod, name: sym, parent: pdef, file: f, item: ItemId(0), sub: 0, is_pub: false, krate, scope: parent });
+        let m = self.new_module(d, Some(parent), None, krate, f);
+        self.defs[d.0 as usize].sub = m;
+        self.mods[m as usize].globs.push((pdef, false));
+        if self.imports_done {
+            self.scope_cache.clear();
+        }
+        let dir = dir_of(&self.file_paths[f as usize]).to_string();
+        let items: Vec<ItemId> = self.files[f as usize].ast.root_items.iter().copied().collect();
+        self.collect_items(f, &items, m, &dir, false)?;
+        Ok((m, f))
+    }
+
     /// Item-level macro calls of crate `krate` no macro resolved at their parse, expanded again
     /// now that every file of the crate is loaded (its expansions' macro_rules! and imports are in
     /// the table), to a fixpoint -- what rustc's resolve/expand loop does for macros an expansion
@@ -5322,6 +5376,20 @@ impl ParseSnapshot {
             assert_eq!(v.blocks, full.blocks);
         }
         Ok(v)
+    }
+
+    /// A file whose items are `stream` (tokens built by the caller, a proc-macro-like
+    /// expansion), with `src` as the file's own text (the tokens' file-0 spans point into it:
+    /// diagnostics name it).
+    pub fn parse_tokens(&self, src: Vec<u8>, stream: crate::pm_tokens::TokenStream) -> Result<FileVersion, String> {
+        let Self { old, path, edition, kname, mod_path, cfg, macros, .. } = self;
+        let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(kname, path, mod_path, cfg));
+        let context = self.context.edited(path, src.into());
+        let (mut pf, used) = crate::parser::parse_token_stream(stream, path, *edition, Some(crate::macros::MacroScope::new(macros.clone())), bctx, context.sources().clone(), false)
+            .map_err(|(span, m)| format!("{}:{}: {}", path, span.lo, m))?;
+        let prep = prepare_file(&mut pf, cfg);
+        let local = used.map(|u| u.local).unwrap_or_default();
+        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: local, reuse: Default::default(), context })
     }
 
     pub fn parse_full(&self, src: Vec<u8>) -> Result<FileVersion, String> {

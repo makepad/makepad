@@ -50,6 +50,19 @@ fn get<'a>(kv: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
 
 /// Like [`run`] for a request typed as one line (words split on spaces).
 pub fn run_line(client: &Client, line: &str, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
+    // a JSON request goes as it is (its values keep their spaces and `=`)
+    if line.trim_start().starts_with('{') {
+        let mut err = false;
+        let mut lines = client.cmd(line.trim())?;
+        while let Some(l) = lines.next() {
+            let l = l?;
+            err |= l.starts_with("{\"err\":");
+            if !each(&l) {
+                break;
+            }
+        }
+        return Ok(err);
+    }
     let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     run(client, &argv, each)
 }

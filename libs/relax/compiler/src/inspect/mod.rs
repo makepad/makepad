@@ -11,6 +11,7 @@
 pub mod client;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod cfi;
+pub mod eval;
 pub mod events;
 pub mod gpuprof;
 mod hang;
@@ -119,7 +120,10 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("count", "<fn> [time=1]", "exact call counts (and inclusive time) of every slot of a fn: its code is rebuilt with probes and installed as a probe group G<n>"),
     ("break", "<fn>|<file>:<line>", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
-    ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook; std::relax::probe::{emit, count, hist, sample, pause} record for it"),
+    ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook, compiled as a child module of the hooked fn's module (its private items, `use`s and `crate::` paths are in scope); std::relax::probe::{emit, count, hist, sample, pause} record for it. A fn is named by its path: `krate::Type::method`, `Type::method`, `crate::Type::method`, `<Type as Trait>::method`"),
+    ("eval", "[in=<krate::module>] [panic=P<n>] [mutate=1] <expr>", "evaluates a Rust expression in a module's scope (default: a parked panic's innermost program frame) in the app's domain: its type and {:#?} (bytes when not Debug); reads only unless mutate=1"),
+    ("static", "<krate::module::NAME> [debug=1]", "a static's address, type and bytes in the app's domain; a reference or pointer is followed to its target allocation, with whether what it describes fits there"),
+    ("locals", "[panic=P<n>] [frame=N]", "a parked panic's frames; frame N's fn, line and named locals with their types, and the by-name probe that reads their values"),
     ("probes", "[since=<seq>]", "installed probes and counts with hits and time, parked breakpoints, pause state; each answer is snapshot <seq>: since=<seq> gives every counter's change, rate and started / stopped since then"),
     ("hitch", "[ms=<n>|off]", "frames over the threshold (default 50 ms, always on) are `hitch` events with phases, waits, lazy compiles, critical path and probe deltas: `events on=hitch`, `watch on=hitch`"),
     ("rm", "<G<n>|all>", "removes probe groups: the code they replaced comes back (no recompile)"),
@@ -187,6 +191,9 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         // Commands the program registered (`relax_register_inspect`), scoped to its domain.
         c if provider(c).is_some() => cmd_provided(req, out),
         "probe" => probes::cmd(req, out),
+        "eval" => eval::cmd_eval(req, out),
+        "static" => eval::cmd_static(req, out),
+        "locals" => eval::cmd_locals(req, out),
         "watch" => events::cmd_watch(req, out),
         "events" => events::cmd_events(req, out),
         "panics" => events::cmd_panics(out),
@@ -600,7 +607,7 @@ fn display_name(u: &crate::jit::Unit, id: u32, depth: u32) -> String {
     let f = &u.fns[id as usize];
     match &f.key {
         crate::jit::FnKey::Inst(d, args) => {
-            let mut s = u.prog.def_path(*d).replace("::::", "::");
+            let mut s = crate::lower::display_path(&u.prog, *d);
             if !args.is_empty() {
                 let a: Vec<String> = args.iter().map(|t| crate::typeck::ty_to_string(false, &u.prog, &u.tcx, u.tcx.tys.erase_regions(*t))).collect();
                 s.push('<');
@@ -612,6 +619,14 @@ fn display_name(u: &crate::jit::Unit, id: u32, depth: u32) -> String {
         crate::jit::FnKey::Closure(_, _, p) if depth < 8 && (*p as usize) < u.fns.len() => format!("{{closure}} in {}", display_name(u, *p, depth + 1)),
         _ => f.name.to_string(),
     }
+}
+
+/// The path inspect gives code it compiles for an agent (probes, eval): a file in this process's
+/// staging folder in the temp dir (its diagnostics name it).
+pub(crate) fn staged_path(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("relax-probes-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(name).to_string_lossy().into_owned()
 }
 
 /// One frame as a short JSON object.

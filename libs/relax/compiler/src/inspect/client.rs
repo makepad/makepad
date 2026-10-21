@@ -41,14 +41,14 @@ pub fn main(args: &[String]) -> i32 {
         return remote::hosts();
     }
     if let Some((host, app)) = target.split_once(':') {
-        let line = if args.len() > 1 { args[1..].join(" ") } else { "help".to_string() };
+        let line = request_line(&args[1..]);
         return remote::main(host, app, &line);
     }
     if target == "schema" {
         println!("{}", super::schema());
         return 0;
     }
-    let line = if args.len() > 1 { args[1..].join(" ") } else { "help".to_string() };
+    let line = request_line(&args[1..]);
     let cmd = line.split_whitespace().next().unwrap_or("").to_string();
     if target == "all" {
         return all(&line, &cmd);
@@ -81,6 +81,58 @@ pub fn main(args: &[String]) -> i32 {
             eprintln!("makepad inspect: {} (pid {}): {}", app.app, app.pid, e);
             2
         }
+    }
+}
+
+/// The request line of a command's words. Code an agent passes (`eval <expr>`, `probe add <hook>
+/// <code>`) keeps its text: it goes as a JSON request (`key=value` words split it otherwise).
+fn request_line(words: &[String]) -> String {
+    if words.is_empty() {
+        return "help".to_string();
+    }
+    let opt = |w: &str| -> Option<(String, String)> {
+        let w = w.trim_start_matches("--");
+        let (k, v) = w.split_once('=').unwrap_or((w, ""));
+        matches!(k, "in" | "mutate" | "panic" | "domain").then(|| (k.to_string(), if v.is_empty() && k == "mutate" { "1".to_string() } else { v.to_string() }))
+    };
+    let json = |cmd: &str, kv: &[(String, String)]| {
+        let mut s = format!("{{\"cmd\":{}", super::json_str(cmd));
+        for (k, v) in kv {
+            s.push_str(&format!(",{}:{}", super::json_str(k), super::json_str(v)));
+        }
+        s.push('}');
+        s
+    };
+    match words[0].as_str() {
+        "eval" => {
+            // options first (`--in path` or `in=path`, `mutate=1`, `panic=P1`), then the expression
+            let mut kv = Vec::new();
+            let mut i = 1;
+            while i < words.len() {
+                if words[i] == "--in" && i + 1 < words.len() {
+                    kv.push(("in".to_string(), words[i + 1].clone()));
+                    i += 2;
+                } else if let Some(o) = words[i].contains('=').then(|| opt(&words[i])).flatten().or_else(|| (words[i] == "--mutate").then(|| ("mutate".to_string(), "1".to_string()))) {
+                    kv.push(o);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            kv.push(("expr".to_string(), words[i..].join(" ")));
+            json("eval", &kv)
+        }
+        "probe" if words.get(1).map(String::as_str) == Some("add") && words.len() > 3 => {
+            let mut rest: Vec<String> = words[3..].to_vec();
+            let mut kv = Vec::new();
+            while rest.last().is_some_and(|w| w == "mutate=1" || w == "--mutate") {
+                rest.pop();
+                kv.push(("mutate".to_string(), "1".to_string()));
+            }
+            kv.push(("code".to_string(), rest.join(" ")));
+            json(&format!("probe add {}", words[2]), &kv)
+        }
+        _ => words.join(" "),
     }
 }
 

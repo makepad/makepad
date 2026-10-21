@@ -13457,6 +13457,7 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_retry_take" => Some(crate::inspect::events::relax_retry_take as *const () as usize),
         // makepad inspect's probes: std::relax::probe (Relax std relax.rs)
         b"__relax_probe_emit" => Some(crate::inspect::probes::relax_probe_emit as *const () as usize),
+        b"__relax_probe_result" => Some(crate::inspect::eval::relax_probe_result as *const () as usize),
         b"__relax_probe_count" => Some(crate::inspect::probes::relax_probe_count as *const () as usize),
         b"__relax_probe_hist" => Some(crate::inspect::probes::relax_probe_hist as *const () as usize),
         b"__relax_probe_sample" => Some(crate::inspect::probes::relax_probe_sample as *const () as usize),

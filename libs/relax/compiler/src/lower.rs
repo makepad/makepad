@@ -324,9 +324,74 @@ pub struct Lcx<'a> {
     tail_marks: Vec<Option<usize>>,
 }
 
+/// A definition's path as source names it: an impl's item is named through its self type
+/// (`ttf_parser::Face::parse`; a trait impl's `ttf_parser::<Face as Trait>::method`), not by the
+/// impl's empty name (`def_path`'s `ttf_parser::::parse`). From the impl's syntax only: no
+/// resolution (every new slot is named).
+pub fn display_path(prog: &crate::program::Program, d: crate::program::DefId) -> String {
+    use crate::program::DefKind;
+    let def = prog.def(d);
+    if def.parent == crate::program::NO_DEF || prog.def(def.parent).kind != DefKind::Impl {
+        return prog.def_path(d);
+    }
+    let imp = prog.def(def.parent);
+    let file = &prog.files[imp.file as usize];
+    let Some(ii) = file.ast.as_impl(&file.ast.item(imp.item).kind) else { return prog.def_path(d) };
+    let mut s = if imp.parent == crate::program::NO_DEF { String::new() } else { display_path(prog, imp.parent) };
+    if !s.is_empty() {
+        s.push_str("::");
+    }
+    let self_ty = ty_label(file, ii.self_ty, 0);
+    match &ii.trait_ {
+        Some(t) => {
+            s.push('<');
+            s.push_str(&self_ty);
+            s.push_str(" as ");
+            s.push_str(&path_label(file, t));
+            s.push('>');
+        }
+        None => s.push_str(&self_ty),
+    }
+    s.push_str("::");
+    s.push_str(prog.syms.str(def.name));
+    s
+}
+
+/// A path as written, without its generic arguments.
+fn path_label(file: &crate::parser::ParsedFile, p: &crate::ast::Path) -> String {
+    let mut s = String::new();
+    for (k, seg) in file.ast.segs(p.segs).iter().enumerate() {
+        if k > 0 || p.segs.global() {
+            s.push_str("::");
+        }
+        s.push_str(file.text(seg.name));
+    }
+    s
+}
+
+/// A type as written (generic arguments and lengths left out), for names.
+fn ty_label(file: &crate::parser::ParsedFile, t: crate::ast::TyId, depth: u32) -> String {
+    use crate::ast::Ty;
+    if depth > 6 {
+        return "_".into();
+    }
+    match file.ast.ty(t) {
+        Ty::Path(p) => path_label(file, p),
+        Ty::Ref(_, m, inner) => format!("&{}{}", if *m { "mut " } else { "" }, ty_label(file, *inner, depth + 1)),
+        Ty::Ptr(m, inner) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_label(file, *inner, depth + 1)),
+        Ty::Slice(inner) => format!("[{}]", ty_label(file, *inner, depth + 1)),
+        Ty::Array(inner, _) => format!("[{}; _]", ty_label(file, *inner, depth + 1)),
+        Ty::Paren(inner) => ty_label(file, *inner, depth + 1),
+        Ty::Tuple(l) => format!("({})", file.ast.list(*l).iter().map(|x| ty_label(file, *x, depth + 1)).collect::<Vec<_>>().join(", ")),
+        Ty::Never => "!".into(),
+        Ty::DynTrait(..) => "dyn _".into(),
+        _ => "_".into(),
+    }
+}
+
 pub fn fn_name(u: &Unit, key: &FnKey) -> String {
     match key {
-        FnKey::Inst(d, _) => u.prog.def_path(*d),
+        FnKey::Inst(d, _) => display_path(&u.prog, *d),
         FnKey::Closure(_, e, p) => format!("{{closure#{}}}@{}", e, p),
         FnKey::Shim(shim) => shim_name(&u.prog, &u.tcx, shim),
         FnKey::Glue(k, t) => format!("glue{}<{}>", k, crate::typeck::ty_to_string(false, &u.prog, &u.tcx, *t)),
@@ -2565,7 +2630,8 @@ impl<'a> Lcx<'a> {
                 return Err(format!("no local or parameter `{}` in scope at line {} (in scope: {})", name, pt.line, names.join(", ")));
             };
             let t = self.u.tcx.tys.erase_regions(self.monomorphize(self.b.locals[li as usize].ty));
-            if t != *want {
+            // the same type modulo regions (`want` has none: probes.rs by_name_params)
+            if self.u.tcx.tys.erase_all_regions(t) != *want {
                 return Err(format!("`{}` is `{}` at line {}, the probe takes `&{}`", name, crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t), pt.line, crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, *want)));
             }
             let addr = match self.local_place(li) {

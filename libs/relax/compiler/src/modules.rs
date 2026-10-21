@@ -422,10 +422,109 @@ unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: 
     Ok((krate, root_file, defs))
 }
 
-/// makepad inspect's probes: loads the module at `path` as a trusted crate depending on `deps`
-/// (owner thread): (crate, root file, its definitions).
-pub(crate) unsafe fn load_trusted(up: *mut Unit, name: &str, path: &str, deps: &[String]) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
-    load(up, name, path, deps, false)
+/// makepad inspect's probes and `eval`: compiles `v` as a new private child module `name` of
+/// module `parent` (Program::add_child_module: the parent's private items, imports and `crate::`
+/// paths are in scope), type-checks it and compiles its non-generic fns and what they reach
+/// (owner thread): (the child module, its definitions). On an error nothing of it stays reachable.
+pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: crate::program::FileVersion) -> Result<(u32, Vec<DefId>), Vec<String>> {
+    let u = &mut *up;
+    let d0 = u.prog.defs.len();
+    let i0 = u.prog.imports.len();
+    let e0 = u.prog.errors.len();
+    let f0 = u.prog.files.len();
+    let path = v.path.clone();
+    let child = {
+        let _fw = jit::front_write();
+        crate::run::preserve_collected_boot(u);
+        u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let r = u.prog.add_child_module(parent, name, v);
+        if r.is_ok() {
+            u.prog.resolve_imports_added(i0, d0);
+        }
+        u.prog.reclaim_caches();
+        r
+    };
+    let defs: Vec<DefId> = (d0 as u32..u.prog.defs.len() as u32).map(DefId).collect();
+    let fail = |up: *mut Unit, errs: Vec<String>| -> Result<(u32, Vec<DefId>), Vec<String>> {
+        drop_defs(up, &defs);
+        (&mut *up).prog.errors.truncate(e0);
+        Err(errs)
+    };
+    let (child, _file) = match child {
+        Ok(c) => c,
+        Err(e) => return fail(up, vec![e]),
+    };
+    let u = &mut *up;
+    let mine_file = |p: &str| p == path;
+    let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| e.starts_with(path.as_str())).cloned().collect();
+    for im in u.prog.imports.iter().skip(i0) {
+        if !im.done {
+            let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
+            errs.push(format!("{}:{}:{}: unresolved import", u.prog.file_paths[im.file as usize], l, c));
+        }
+    }
+    if errs.is_empty() {
+        let _fw = jit::front_write();
+        let visible = u.prog.crates_seeing_files(f0 as u32..u.prog.files.len() as u32);
+        errs.extend(u.tcx.collect_added_in(&u.prog, &defs, false, Some(&visible)).into_iter().filter(|e| e.starts_with(path.as_str())));
+    }
+    if errs.is_empty() {
+        for &d in &defs {
+            if !matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) {
+                continue;
+            }
+            if let Some(a) = crate::borrowck::identity_args(&u.tcx, &u.prog, d) {
+                let b = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, d, &a)));
+                match b {
+                    Ok(b) => {
+                        for e in &b.errors {
+                            if !errs.contains(e) {
+                                errs.push(e.clone());
+                            }
+                        }
+                    }
+                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- makepad run bug, report it", u.prog.def_path(d))),
+                }
+            }
+        }
+    }
+    if !errs.is_empty() {
+        return fail(up, errs);
+    }
+    let roots: Vec<u32> = root_fns(u, &defs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
+    let mine = |u: &Unit, id: u32| match &u.fns[id as usize].key {
+        FnKey::Inst(d, _) => mine_file(&u.prog.file_paths[u.prog.def(*d).file as usize]),
+        FnKey::Closure(file, _, _) => u.prog.file_paths.get(*file as usize).is_some_and(|p| mine_file(p)),
+        _ => false,
+    };
+    if let Err(e) = compile_all(up, roots, &mine, &mine) {
+        return fail(up, e);
+    }
+    Ok((child, defs))
+}
+
+/// The module a `crate::a::b` / `krate::a::b` path names (a crate's root for `krate`): inspect's
+/// `--in` and the scope of a hooked fn.
+pub(crate) fn module_named(u: &Unit, path: &str) -> Option<u32> {
+    let path = path.trim().trim_start_matches("::");
+    let mut segs = path.split("::").filter(|s| !s.is_empty());
+    let first = segs.next()?.replace('-', "_");
+    let krate = (0..u.prog.crates.len()).rev().find(|&k| u.prog.syms.str(u.prog.crates[k].name) == first)?;
+    let mut m = u.prog.crates[krate].root_mod;
+    for s in segs {
+        let sym = u.prog.syms.get(s)?;
+        let d = *u.prog.mods[m as usize].types.get(&sym)?;
+        if u.prog.def(d).kind != DefKind::Mod {
+            return None;
+        }
+        m = u.prog.def(d).sub;
+    }
+    Some(m)
+}
+
+/// The module whose scope resolves the names in fn `d`'s body (its block module's named module).
+pub(crate) fn scope_of(u: &Unit, d: DefId) -> u32 {
+    u.prog.mods[u.prog.def(d).scope as usize].normal
 }
 
 /// How an export's parameter or result crosses into the sandbox (wrapper generation).

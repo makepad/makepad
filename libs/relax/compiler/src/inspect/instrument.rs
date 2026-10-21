@@ -383,28 +383,108 @@ pub(super) fn find(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u32, O
         return out;
     }
     let mut exact = Vec::new();
+    let mut tail = Vec::new();
     let mut loose = Vec::new();
     for id in 0..u.fns.len() {
         let f = &u.fns[id];
         if !f.compiled || f.name.is_empty() {
             continue;
         }
-        let n = f.name.replace("::::", "::");
-        if n == query || n.split('<').next() == Some(query) {
-            exact.push((id as u32, None, n));
-        } else if loose.len() < max && (n.ends_with(query) || n.contains(query)) {
-            loose.push((id as u32, None, n));
+        match name_match(&f.name, query) {
+            Match::Exact => exact.push((id as u32, None, f.name.to_string())),
+            Match::Tail if tail.len() < max => tail.push((id as u32, None, f.name.to_string())),
+            Match::Loose if loose.len() < max => loose.push((id as u32, None, f.name.to_string())),
+            _ => {}
         }
         if exact.len() >= max {
             break;
         }
     }
-    if exact.is_empty() {
-        loose.truncate(max);
-        loose
-    } else {
-        exact
+    for v in [exact, tail, loose] {
+        if !v.is_empty() {
+            return v;
+        }
     }
+    Vec::new()
+}
+
+#[derive(PartialEq, Debug)]
+pub(super) enum Match {
+    None,
+    /// a substring of the name
+    Loose,
+    /// the name's last path segments
+    Tail,
+    Exact,
+}
+
+/// `<A as Trait>` in a slot name (lower.rs display_path's trait-impl form) as `A`: a trait impl's
+/// method is also found as `Type::method`.
+fn collapse_qself(n: &str) -> String {
+    let mut out = String::with_capacity(n.len());
+    let mut rest = n;
+    while let Some(k) = rest.find('<') {
+        out.push_str(&rest[..k]);
+        let r = &rest[k + 1..];
+        // the matching `>` and the top-level ` as ` inside it
+        let (mut depth, mut end, mut as_at) = (0i32, None, None);
+        for (i, c) in r.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                '>' => depth -= 1,
+                ' ' if depth == 0 && as_at.is_none() && r[i..].starts_with(" as ") => as_at = Some(i),
+                _ => {}
+            }
+        }
+        match (end, as_at) {
+            (Some(e), Some(a)) => {
+                out.push_str(&r[..a]);
+                rest = &r[e + 1..];
+            }
+            _ => {
+                out.push('<');
+                rest = r;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How a fn query names slot `name`: the whole path (`ttf_parser::Face::parse`), its last
+/// segments (`Face::parse`; `crate::Face::parse` is the same), `<Face as Trait>::method` or
+/// `Face::method` for a trait impl's method, else any substring.
+pub(super) fn name_match(name: &str, query: &str) -> Match {
+    let q = query.trim();
+    let q = q.strip_prefix("crate::").or_else(|| q.strip_prefix("::")).unwrap_or(q);
+    let crate_rel = query.trim().starts_with("crate::");
+    let collapsed = if name.contains(" as ") { Some(collapse_qself(name)) } else { None };
+    let forms = std::iter::once(name).chain(collapsed.as_deref());
+    let mut best = Match::None;
+    for n in forms {
+        if !crate_rel && n == q {
+            return Match::Exact;
+        }
+        let tail = n.len() > q.len() && n.ends_with(q) && n[..n.len() - q.len()].ends_with("::");
+        let tail = tail || (q.starts_with('<') && n.ends_with(q));
+        if crate_rel && tail {
+            // `crate::X`: X directly under a crate root
+            let prefix = &n[..n.len() - q.len()];
+            if prefix.strip_suffix("::").is_some_and(|root| !root.is_empty() && !root.contains("::")) {
+                return Match::Exact;
+            }
+        }
+        if tail {
+            best = Match::Tail;
+        } else if best == Match::None && n.contains(q) {
+            best = Match::Loose;
+        }
+    }
+    best
 }
 
 /// The line of a RIR position ((file << 32) | byte offset).
@@ -1177,5 +1257,26 @@ mod zone_tests {
             }
             assert_eq!(count(), 0, "round {} after rm", round);
         }
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::{name_match, Match};
+
+    #[test]
+    fn fn_queries_name_impl_methods() {
+        let n = "ttf_parser::Face::parse";
+        assert_eq!(name_match(n, "ttf_parser::Face::parse"), Match::Exact);
+        assert_eq!(name_match(n, "Face::parse"), Match::Tail);
+        assert_eq!(name_match(n, "crate::Face::parse"), Match::Exact);
+        assert_eq!(name_match(n, "ace::parse"), Match::Loose);
+        assert_eq!(name_match(n, "Glyph::parse"), Match::None);
+        let t = "makepad_model_script::vector::<Outline as ttf_parser::OutlineBuilder>::move_to";
+        assert_eq!(name_match(t, "<Outline as ttf_parser::OutlineBuilder>::move_to"), Match::Tail);
+        assert_eq!(name_match(t, "Outline::move_to"), Match::Tail);
+        assert_eq!(name_match(t, "makepad_model_script::vector::Outline::move_to"), Match::Exact);
+        assert_eq!(name_match(t, "crate::vector::Outline::move_to"), Match::Exact);
+        assert_eq!(name_match("a::b::f", "crate::f"), Match::Tail);
     }
 }
