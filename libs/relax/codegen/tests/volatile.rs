@@ -21,7 +21,7 @@ fn all_passes(f: &mut Func) {
         opt::forward_slot_loads(f);
         passes::sroa(f);
         passes::simplify(&relax_session::Options::default(), f, None, true, true);
-        passes::licm(f);
+        passes::licm(&relax_session::Options::default(), f);
         passes::live_dce(f);
         passes::sink_consts(f);
         passes::relayout(f);

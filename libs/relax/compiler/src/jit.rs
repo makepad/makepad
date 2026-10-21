@@ -8250,7 +8250,7 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut relax_backen
                 verify_pass(func, "simplify");
             }
             let t = relax_backend::stats::pass_clock();
-            let l = cfg.licm && relax_backend::passes::licm(func);
+            let l = cfg.licm && relax_backend::passes::licm(options, func);
             relax_backend::stats::pass_time(10, t);
             verify_pass(func, "licm");
             if l {
@@ -8268,7 +8268,7 @@ fn opt_pipeline_inner(options: &crate::options::Options, func: &mut relax_backen
                 relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
                 verify_pass(func, "simplify");
             }
-            if cfg.licm && relax_backend::passes::licm(func) {
+            if cfg.licm && relax_backend::passes::licm(options, func) {
                 verify_pass(func, "licm");
                 relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
                 verify_pass(func, "simplify");

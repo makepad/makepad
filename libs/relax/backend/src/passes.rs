@@ -3767,72 +3767,36 @@ pub fn cse_can_change(f: &Func) -> bool {
     keys.windows(2).any(|w| w[0] == w[1])
 }
 
-pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
-    if !cse_can_change(f) {
-        return false;
-    }
-    let n = f.blocks.len();
+/// The pointer roots local_cse and licm ask alias questions with. `ndef` is the def count per
+/// vreg (params counted). Returns, per vreg, `1<<40 | p` for an address derived from noalias
+/// param p by address arithmetic, LOADED_ROOT for a pointer not derived from any noalias param
+/// (other params, loaded pointers, call results: it may point anywhere except into a noalias
+/// param's memory -- rustc marks `&mut T` (T: Unpin) and frozen `&T` params LLVM `noalias`:
+/// rustc_ty_utils/src/abi.rs, `no_alias`; LLVM's "based on" does not pass through memory),
+/// 1+slot for a stack slot, 0 unknown; then the noalias params whose address this function
+/// stores or returns (captured: left alone, cheap insurance for unsafe code in our own std);
+/// then per vreg the noalias param whose address it may hold through any def, to a fixpoint
+/// (u32::MAX: none; call arguments). Params in `f.noalias` only: withheld ones (code that runs
+/// before its borrow-check verdict) get no roots, so nothing is concluded from them.
+pub const LOADED_ROOT: u64 = 3u64 << 40;
+
+pub fn noalias_roots(f: &Func, ndef: &[u32]) -> (Vec<u64>, Vec<u32>, Vec<u32>) {
+    const LOADED: u64 = LOADED_ROOT;
     let nv = f.vregs.len();
-    let mut uses = Vec::new();
-    let mut defs = Vec::new();
-    let mut ndef = vec![0u32; nv];
-    for p in &f.params {
-        ndef[p.0 as usize] += 1;
-    }
-    // store forwarding / load invalidation needs pointer roots only when both occur
-    let (mut has_load, mut has_store) = (false, false);
-    for b in &f.blocks {
-        for i in &b.insts {
-            match i {
-                Inst::Load(..) => has_load = true,
-                Inst::Store(..) => has_store = true,
-                _ => {}
-            }
-            for_defs(i, |d| ndef[d.0 as usize] += 1);
-        }
-    }
-    let idom = idoms(f);
-    let mut npred = vec![0u32; n];
-    for (bi, b) in f.blocks.iter().enumerate() {
-        if idom[bi] == u32::MAX {
-            continue;
-        }
-        for t in b.term.succs() {
-            npred[t as usize] += 1;
-        }
-    }
-    let (pre, post, children) = dom_numbers(&idom);
-    // cleanup pads (unwind targets) and what they dominate run only while unwinding: no CSE
-    // there (cold; pads are a tenth of the code with unwinding on)
-    let mut pad = vec![false; n];
-    for b in &f.blocks {
-        if let Term::Invoke(_, u) = b.term {
-            pad[u as usize] = true;
-        }
-    }
     let single = |v: VReg| ndef[v.0 as usize] == 1;
-    // pointer roots of single-def address vregs: 1+slot for stack slots, 1<<40|vreg for
-    // noalias params, 0 unknown
     let mut root = vec![0u64; nv];
     for p in &f.noalias {
         if ndef[p.0 as usize] == 1 {
             root[p.0 as usize] = (1u64 << 40) | p.0 as u64;
         }
     }
-    // LOADED: a pointer that is not derived from a noalias param by address arithmetic (other
-    // params, loaded pointers, call results). It may point anywhere except into a noalias
-    // param's memory (rustc marks `&mut T` (T: Unpin) and frozen `&T` params LLVM `noalias`:
-    // rustc_ty_utils/src/abi.rs, `no_alias`; LLVM's "based on" does not pass through memory).
-    const LOADED: u64 = 3u64 << 40;
-    if has_load && has_store {
-        for p in &f.params {
-            if ndef[p.0 as usize] == 1 && root[p.0 as usize] == 0 {
-                root[p.0 as usize] = LOADED;
-            }
+    for p in &f.params {
+        if ndef[p.0 as usize] == 1 && root[p.0 as usize] == 0 {
+            root[p.0 as usize] = LOADED;
         }
     }
     // defs in order of appearance in reverse postorder approximated by block order
-    for _ in 0..if has_load && has_store { 2 } else { 0 } {
+    for _ in 0..2 {
         for b in &f.blocks {
             for i in &b.insts {
                 match i {
@@ -3855,15 +3819,9 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
             }
         }
     }
-    // noalias params stored as a value somewhere: rustc's `noalias` (LLVM's: an access through
-    // a pointer not *based on* the param, e.g. one loaded from memory, may not touch the
-    // param's memory, whatever the callees do) already covers calls; a param this function
-    // itself stores is still left alone (cheap insurance for unsafe code in our own std)
-    // which vregs may hold a noalias param's address (any def count: copies through
-    // multi-def vregs too), to a fixpoint; a param whose address is stored is captured
     let mut captured: Vec<u32> = Vec::new();
-    if has_load && has_store && !f.noalias.is_empty() {
-        let mut taint: Vec<u32> = vec![u32::MAX; nv];
+    let mut taint: Vec<u32> = vec![u32::MAX; nv];
+    if !f.noalias.is_empty() {
         for p in &f.noalias {
             taint[p.0 as usize] = p.0;
         }
@@ -3914,6 +3872,60 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
             }
         }
     }
+    (root, captured, taint)
+}
+
+pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
+    if !cse_can_change(f) {
+        return false;
+    }
+    let n = f.blocks.len();
+    let nv = f.vregs.len();
+    let mut uses = Vec::new();
+    let mut defs = Vec::new();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    // store forwarding / load invalidation needs pointer roots only when both occur
+    let (mut has_load, mut has_store) = (false, false);
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                Inst::Load(..) => has_load = true,
+                Inst::Store(..) => has_store = true,
+                _ => {}
+            }
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    let idom = idoms(f);
+    let mut npred = vec![0u32; n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if idom[bi] == u32::MAX {
+            continue;
+        }
+        for t in b.term.succs() {
+            npred[t as usize] += 1;
+        }
+    }
+    let (pre, post, children) = dom_numbers(&idom);
+    // cleanup pads (unwind targets) and what they dominate run only while unwinding: no CSE
+    // there (cold; pads are a tenth of the code with unwinding on)
+    let mut pad = vec![false; n];
+    for b in &f.blocks {
+        if let Term::Invoke(_, u) = b.term {
+            pad[u as usize] = true;
+        }
+    }
+    let single = |v: VReg| ndef[v.0 as usize] == 1;
+    // pointer roots (see noalias_roots); only store forwarding / load invalidation needs them
+    const LOADED: u64 = LOADED_ROOT;
+    let (root, captured, _) = if has_load && has_store {
+        noalias_roots(f, &ndef)
+    } else {
+        (vec![0u64; nv], Vec::new(), Vec::new())
+    };
     let may_alias = |a: VReg, b: VReg| -> bool {
         if a == b {
             return true;
@@ -5394,7 +5406,7 @@ pub fn natural_loops(f: &Func) -> (Vec<Vec<u32>>, Vec<(u32, Vec<bool>)>) {
     (preds, loops)
 }
 
-pub fn licm(f: &mut Func) -> bool {
+pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
     if forward_only(f) {
         return false;
     }
@@ -5417,6 +5429,31 @@ pub fn licm(f: &mut Func) -> bool {
         }
     }
     let mut changed = false;
+    // loads of an uncaptured noalias param's memory (`&mut self` fields) are invariant in a loop
+    // whose stores go through pointers not derived from that param and whose calls are not
+    // handed it: rustc's `noalias`, with local_cse's roots. Params withheld until the borrow
+    // check's verdict are not in `f.noalias`, so they hoist nothing.
+    let mut na = if f.noalias.is_empty() || no_noalias(options) { None } else { Some(noalias_roots(f, &ndef)) };
+    // a param handed to a call anywhere in the function may be kept by it (then reached later through a
+    // loaded pointer, which the roots take as not derived from the param): captured for the hoist
+    if let Some((_, cap, taint)) = na.as_mut() {
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let Inst::Call(c, args, _) = i {
+                    let ind = match c {
+                        Callee::Indirect(x) | Callee::CIndirect(x, _) => Some(*x),
+                        _ => None,
+                    };
+                    for a in args.iter().copied().chain(ind) {
+                        let t = taint[a.0 as usize];
+                        if t != u32::MAX && !cap.contains(&t) {
+                            cap.push(t);
+                        }
+                    }
+                }
+            }
+        }
+    }
     for (h, body) in &loops {
         let outside: Vec<u32> = preds[*h as usize].iter().copied().filter(|p| !body[*p as usize]).collect();
         if outside.len() != 1 {
@@ -5427,6 +5464,45 @@ pub fn licm(f: &mut Func) -> bool {
             continue;
         }
         let mut hoisted: Vec<(Inst, u64)> = Vec::new();
+        // the noalias params whose memory the loop may write (None: any memory, or unknown)
+        let na_clob: Option<Vec<u32>> = na.as_ref().and_then(|(root, _, taint)| {
+            let mut cl: Vec<u32> = Vec::new();
+            for bi in 0..n {
+                if !body[bi] {
+                    continue;
+                }
+                for i in &f.blocks[bi].insts {
+                    match i {
+                        Inst::Store(_, base, ..) | Inst::StoreX(_, base, ..) | Inst::VStore(base, ..) | Inst::Copy(base, ..) => {
+                            let r = root[base.0 as usize];
+                            if r >> 40 == 1 {
+                                cl.push((r & 0xffff_ffff) as u32);
+                            } else if r != LOADED_ROOT && !(r != 0 && r < (1u64 << 40)) {
+                                // a store through a pointer of unknown root
+                                return None;
+                            }
+                        }
+                        Inst::Call(c, args, _) => {
+                            let callee = match c {
+                                Callee::Indirect(x) | Callee::CIndirect(x, _) => Some(*x),
+                                _ => None,
+                            };
+                            for a in args.iter().chain(callee.iter()) {
+                                if taint[a.0 as usize] != u32::MAX {
+                                    cl.push(taint[a.0 as usize]);
+                                }
+                            }
+                        }
+                        // a read of memory: the param's memory is ours alone, nothing orders against it
+                        Inst::AtomicLoad(..) => {}
+                        // atomics, fences, FP env: ordering points and writes the roots do not model
+                        i if is_mem_effect(i) => return None,
+                        _ => {}
+                    }
+                }
+            }
+            Some(cl)
+        });
         // a loop that writes no memory and calls nothing: loads from dereferenceable params
         // read the same value on every iteration and may run before it
         let read_only = (0..n).all(|bi| !body[bi] || (f.blocks[bi].insts.iter().all(|i| !is_mem_effect(i)) && matches!(f.blocks[bi].term, Term::Jump(_) | Term::Branch(..) | Term::Ret(_) | Term::Unreachable)));
@@ -5486,6 +5562,19 @@ pub fn licm(f: &mut Func) -> bool {
                     let pure = match i {
                         Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => false,
                         Inst::Load(m, _, base, off) if read_only && *off >= 0 && ndef[base.0 as usize] == 1 && f.deref.iter().any(|(p, sz)| p == base && (*off as i64 + mem_size(*m) as i64) <= *sz as i64) => true,
+                        // a load of an uncaptured noalias param's own dereferenceable memory that
+                        // the loop never writes: same value every iteration, and safe to run
+                        // before the loop (the param is dereferenceable for the whole call)
+                        Inst::Load(m, _, base, off)
+                            if *off >= 0
+                                && ndef[base.0 as usize] == 1
+                                && f.noalias.contains(base)
+                                && f.deref.iter().any(|(p, sz)| p == base && (*off as i64 + mem_size(*m) as i64) <= *sz as i64)
+                                && na.as_ref().map_or(false, |(_, cap, _)| !cap.contains(&base.0))
+                                && na_clob.as_ref().map_or(false, |cl| !cl.contains(&base.0)) =>
+                        {
+                            true
+                        }
                         Inst::Load(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::Mov(..) => false,
                         i if is_mem_effect(i) => false,
                         _ => true,
