@@ -5,28 +5,9 @@
 //!   instance and part as JSON for `check_props.js`.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
-pub use makepad_widgets;
+pub use makepad_skyline::makepad_widgets;
 
-#[path = "../src/city.rs"]
-mod city;
-#[path = "../src/export.rs"]
-mod export;
-#[path = "../src/params.rs"]
-mod params;
-#[path = "../src/post.rs"]
-mod post;
-#[path = "../src/props/mod.rs"]
-mod props;
-#[path = "../src/render.rs"]
-mod render;
-#[path = "../src/rng.rs"]
-mod rng;
-#[path = "../src/shaders.rs"]
-mod shaders;
-#[path = "../src/terrain.rs"]
-mod terrain;
-#[path = "../src/zones.rs"]
-mod zones;
+use makepad_skyline::{city, params, props, shaders, zones};
 
 use makepad_widgets::makepad_draw::{self, *};
 use params::{Params, P, PARAMS};

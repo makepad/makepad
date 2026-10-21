@@ -12,4 +12,5 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-skyline = { path = "../../libs/skyline" }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }

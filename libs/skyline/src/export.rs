@@ -14,11 +14,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 pub enum ExportKind { Png, Exr }
 
 /// The strip as premultiplied linear HDR texels, `w` x `h`, top row first.
-#[allow(dead_code)] // the HDRI layer's input
 pub struct Band { pub w: usize, pub h: usize, pub texels: Vec<[f32; 4]> }
 
 /// Receives a requested band once, on a worker thread.
-#[allow(dead_code)] // the HDRI layer's input
 pub type BandDone = Box<dyn FnOnce(Result<Band, String>) + Send>;
 
 const TILE: usize = 4096;
@@ -59,10 +57,12 @@ impl Skyline {
 
     /// Asks for the strip at `p`, `w` px wide, as a [`Band`]; `done` gets it when the last tile has been read back, or
     /// the reason it failed. The holder's draw must call [`Skyline::draw_job`].
-    #[allow(dead_code)] // the HDRI layer's input
     pub fn request_band(&mut self, _cx: &mut Cx, p: &Params, w: usize, done: BandDone) {
         if let Err((e, Sink::Band(done))) = self.start(p, w, Sink::Band(done)) { std::thread::spawn(move || done(Err(e))); }
     }
+
+    /// True while a job (an export or a band) runs: [`Skyline::request_band`] and `start_export` would be refused.
+    pub fn busy(&self) -> bool { self.job.is_some() }
 
     /// Starts a job, or hands the sink back when one is running.
     fn start(&mut self, p: &Params, w: usize, sink: Sink) -> Result<(), (String, Sink)> {

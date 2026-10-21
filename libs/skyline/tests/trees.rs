@@ -1,30 +1,11 @@
 //! The single trees against the web page: `SKYLINE_TREES=FILE [SKYLINE_PARAMS=FILE] [SKYLINE_W=4096] cargo test --release
-//! -p makepad-example-skyline --test trees` writes the strip's tree mesh (`terrain::trees`) as raw little-endian f32
+//! -p makepad-skyline --test trees` writes the strip's tree mesh (`terrain::trees`) as raw little-endian f32
 //! vertices and u32 indices for `trees_check.js`, and prints its size and build time.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
-pub use makepad_widgets;
+pub use makepad_skyline::makepad_widgets;
 
-#[path = "../src/city.rs"]
-mod city;
-#[path = "../src/export.rs"]
-mod export;
-#[path = "../src/params.rs"]
-mod params;
-#[path = "../src/post.rs"]
-mod post;
-#[path = "../src/props/mod.rs"]
-mod props;
-#[path = "../src/render.rs"]
-mod render;
-#[path = "../src/rng.rs"]
-mod rng;
-#[path = "../src/shaders.rs"]
-mod shaders;
-#[path = "../src/terrain.rs"]
-mod terrain;
-#[path = "../src/zones.rs"]
-mod zones;
+use makepad_skyline::{params, rng, shaders, terrain};
 
 use makepad_widgets::makepad_draw::Cx;
 

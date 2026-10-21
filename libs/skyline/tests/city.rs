@@ -3,31 +3,12 @@
 //!   depth compile for Metal, HLSL and GLSL ES;
 //! - `gpu_march_time` (ignored, needs a GPU): the march's GPU time per view, as the frame time of 2K marches less that
 //!   of K, over K, after a warm-up (the page's own figure is its city program under a timer query).
-//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-example-skyline --test city -- --include-ignored --nocapture`
+//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test city -- --include-ignored --nocapture`
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
-pub use makepad_widgets;
+pub use makepad_skyline::makepad_widgets;
 
-#[path = "../src/city.rs"]
-mod city;
-#[path = "../src/export.rs"]
-mod export;
-#[path = "../src/params.rs"]
-mod params;
-#[path = "../src/post.rs"]
-mod post;
-#[path = "../src/props/mod.rs"]
-mod props;
-#[path = "../src/render.rs"]
-mod render;
-#[path = "../src/rng.rs"]
-mod rng;
-#[path = "../src/shaders.rs"]
-mod shaders;
-#[path = "../src/terrain.rs"]
-mod terrain;
-#[path = "../src/zones.rs"]
-mod zones;
+use makepad_skyline::{city, params, render, shaders};
 
 use makepad_widgets::makepad_draw::{self, *};
 use std::{cell::RefCell, rc::Rc};

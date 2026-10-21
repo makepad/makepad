@@ -6,26 +6,12 @@
 //! and a panel with the seed, the exports and every parameter as a grouped slider.
 //!
 //! Flags: `--params FILE` loads the web page's saved parameters; `--view-px N` renders both views
-//! N pixels wide whatever the window. The checks against the page are in `tests/checks.rs`.
+//! N pixels wide whatever the window. The checks against the page are in `libs/skyline/tests/checks.rs`.
 pub use makepad_widgets;
 
 use makepad_widgets::*;
 
-mod city;
-mod export;
-mod params;
-mod post;
-mod props;
-mod render;
-mod rng;
-mod shaders;
-mod terrain;
-mod zones;
-
-use export::ExportKind;
-use params::{Params, COUNT, P, PARAMS};
-use render::{Skyline, ViewSpec};
-use shaders::DrawSkyBackdrop;
+use makepad_skyline::{rng, shaders::DrawSkyBackdrop, ExportKind, Params, Skyline, ViewSpec, COUNT, P, PARAMS};
 
 app_main!(App);
 
@@ -312,13 +298,7 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        crate::shaders::script_mod(vm);
-        crate::terrain::script_mod(vm);
-        crate::city::script_mod(vm);
-        crate::props::kit::script_mod(vm);
-        crate::props::script_mod(vm);
-        crate::post::script_mod(vm);
-        crate::render::script_mod(vm);
+        makepad_skyline::script_mod(vm);
         self::script_mod(vm)
     }
 

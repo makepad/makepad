@@ -4,33 +4,14 @@
 //! - `gpu_hashes_and_views_match_the_cpu` (ignored, needs a GPU): `hcell`, `rnd` and `hb4` drawn by
 //!   the scene shader helpers and read back as RGBA32F equal `rng.rs` bit for bit, and `pix_view` and
 //!   `city_view` match an f64 reference. `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p
-//!   makepad-example-skyline --test checks -- --include-ignored --nocapture`;
+//!   makepad-skyline --test checks -- --include-ignored --nocapture`;
 //! - `dump_layout`: with `SKYLINE_DUMP=FILE` (and `SKYLINE_PARAMS=FILE`, the page's saved
 //!   parameters) writes the zones and the strip's columns as JSON for `check_layout.js`.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
-pub use makepad_widgets;
+pub use makepad_skyline::makepad_widgets;
 
-#[path = "../src/city.rs"]
-mod city;
-#[path = "../src/export.rs"]
-mod export;
-#[path = "../src/params.rs"]
-mod params;
-#[path = "../src/post.rs"]
-mod post;
-#[path = "../src/props/mod.rs"]
-mod props;
-#[path = "../src/render.rs"]
-mod render;
-#[path = "../src/rng.rs"]
-mod rng;
-#[path = "../src/shaders.rs"]
-mod shaders;
-#[path = "../src/terrain.rs"]
-mod terrain;
-#[path = "../src/zones.rs"]
-mod zones;
+use makepad_skyline::{params, render, rng, shaders, terrain, zones};
 
 use makepad_widgets::makepad_draw::{self, *};
 use rng::{fract, Rng, TAU};

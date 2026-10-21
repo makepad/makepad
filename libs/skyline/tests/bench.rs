@@ -5,31 +5,12 @@
 //!   view leaves it idling at a fraction of it), then the view. Per view frame: GPU ms (the HAL's GPU timestamps of every
 //!   pass packet of the frame, summed) and the draw's CPU ms (recording the passes). The HAL's frame profile (stderr, each
 //!   case) adds the frame's CPU build.
-//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-example-skyline --test bench -- --include-ignored --nocapture`
+//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test bench -- --include-ignored --nocapture`
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
-pub use makepad_widgets;
+pub use makepad_skyline::makepad_widgets;
 
-#[path = "../src/city.rs"]
-mod city;
-#[path = "../src/export.rs"]
-mod export;
-#[path = "../src/params.rs"]
-mod params;
-#[path = "../src/post.rs"]
-mod post;
-#[path = "../src/props/mod.rs"]
-mod props;
-#[path = "../src/render.rs"]
-mod render;
-#[path = "../src/rng.rs"]
-mod rng;
-#[path = "../src/shaders.rs"]
-mod shaders;
-#[path = "../src/terrain.rs"]
-mod terrain;
-#[path = "../src/zones.rs"]
-mod zones;
+use makepad_skyline::{params, render};
 
 use makepad_widgets::makepad_draw::{self, *};
 use std::{cell::RefCell, rc::Rc};
@@ -71,13 +52,7 @@ impl Bench {
 fn register(vm: &mut ScriptVm) {
     makepad_platform::script::script_mod(vm);
     makepad_draw::script_mod(vm);
-    shaders::script_mod(vm);
-    terrain::script_mod(vm);
-    city::script_mod(vm);
-    props::kit::script_mod(vm);
-    props::script_mod(vm);
-    post::script_mod(vm);
-    render::script_mod(vm);
+    makepad_skyline::script_mod(vm);
 }
 
 fn preset(name: &str) -> params::Params {
