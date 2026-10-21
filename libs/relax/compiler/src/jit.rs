@@ -6064,6 +6064,7 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
     let rir = twin_func.as_ref().unwrap_or_else(|| u.fns[id as usize].rir.as_ref().unwrap());
     let cg = tier0_codegen_rir(options, rir, u.opt.fold, u.opt.layout);
     let func = &cg;
+    crate::wasm_export::capture(id, func);
     // without O3 these are the only compiles: allocate thoroughly
     let env_full;
     let env = if func.baseline || (TIER1_ENABLED.load(Ordering::Relaxed) && !func.full) {
@@ -6547,6 +6548,40 @@ fn relax_mark(u: &Unit, id: u32) -> u8 {
     l
 }
 
+/// Whether slot `id`'s fn (or its impl block) carries `#[relax(keep_reachable)]`.
+pub fn keep_reachable(u: &Unit, id: u32) -> bool {
+    let d = match &u.fns[id as usize].key {
+        FnKey::Inst(d, _) => *d,
+        _ => return false,
+    };
+    let def = u.prog.def(d);
+    if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) {
+        return false;
+    }
+    let marked = |d: DefId| -> bool {
+        let def = u.prog.def(d);
+        let f = &u.prog.files[def.file as usize];
+        let text = |k: usize| f.tok_text(k as u32).to_string();
+        f.ast.list(f.ast.item(def.item).attrs).iter().any(|a| {
+            let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+            hi > lo + 1 && f.tok_text(lo as u32) == "relax" && crate::builtins::relax_keep_toks(&text, &f.toks, lo + 1, hi)
+        })
+    };
+    marked(d) || (def.parent.0 != u32::MAX && (def.parent.0 as usize) < u.prog.defs.len() && u.prog.def(def.parent).kind == DefKind::Impl && marked(def.parent))
+}
+
+/// The RIR a wasm export takes for slot `id` (built now if the run never built it): what its
+/// baseline code would be compiled from.
+pub unsafe fn export_rir(up: *mut Unit, id: u32) -> Result<relax_backend::rir::Func, String> {
+    if (&*up).fns[id as usize].rir.is_none() {
+        build_rir(up, id)?;
+    }
+    let u = &*up;
+    let session = u.prog.session.clone();
+    let rir = u.fns[id as usize].rir.clone().ok_or("no RIR for this slot")?;
+    Ok(tier0_codegen_rir(&session.options, &rir, u.opt.fold, u.opt.layout).into_owned())
+}
+
 thread_local! {
     /// compile_tier1 builds the first code of a `#[relax(O3, always)]` slot (compile_o3_always)
     static O3_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -6884,6 +6919,7 @@ impl O2Work {
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (func, inlined) = optimize_tree(options, id, prep, &mut done)?;
             let cg = tier0_codegen_rir(options, &func, fold, layout);
+            crate::wasm_export::capture(id, &cg);
             let _scratch = crate::zone_alloc::scratch(&session.runtime);
             let c = relax_codegen::native::compile(options, &cg, &env)?;
             Ok::<_, String>((func, inlined, c))
@@ -13187,6 +13223,7 @@ pub(crate) unsafe fn compile_batch_off_lock(up: *mut Unit, ids: &[u32], threads:
                             }
                         };
                         let cg = tier0_codegen_rir(options, &rir, fold, rotate);
+                        crate::wasm_export::capture(id, &cg);
                         let e = &env;
                         let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: e.opt_regs && !rir.baseline, syms: e.syms, sym_class: e.sym_class };
                         let c = relax_codegen::native::compile(options, &cg, &env)?;
@@ -13438,6 +13475,7 @@ impl BackWork {
             };
             let t1 = cpu_ns();
             let cg = tier0_codegen_rir(options, &rir, fold, rotate);
+            crate::wasm_export::capture(id, &cg);
             let mut env = env;
             env.opt_regs &= !rir.baseline;
             compile_watch(Some((&format!("codegen {}", cg.name), relax_codegen::opt::inst_count(&cg))));

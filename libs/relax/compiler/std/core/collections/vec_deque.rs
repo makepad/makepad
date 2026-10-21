@@ -113,6 +113,7 @@ impl<T> VecDeque<T> {
         }
     }
 
+    #[relax(keep_reachable)]
     fn grow_for(&mut self, additional: usize) {
         if self.try_reserve(additional).is_err() {
             crate::panicking::panic_str("capacity overflow");

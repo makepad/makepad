@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use makepad_relax_api::relax_api;
 use crate::array::*;
 use crate::function::*;
@@ -401,6 +402,7 @@ impl ScriptHeap {
         count
     }
 
+    #[relax(keep_reachable)]
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
         self.mark_vec.clear();
 
@@ -647,6 +649,7 @@ impl ScriptHeap {
         }
     }
 
+    #[relax(keep_reachable)]
     pub fn sweep(&mut self, log_stats: bool) {
         let start = crate::clock::monotonic_now();
 

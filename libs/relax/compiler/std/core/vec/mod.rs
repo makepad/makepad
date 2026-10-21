@@ -377,6 +377,7 @@ impl<T> Vec<T> {
 
     /// `reserve(1)` of a full vector, out of line as upstream `RawVec::grow_one`
     #[inline(never)]
+    #[relax(keep_reachable)]
     fn grow_one(&mut self) {
         self.reserve(1);
     }

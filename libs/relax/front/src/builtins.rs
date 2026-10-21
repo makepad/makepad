@@ -1743,7 +1743,7 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
         // `#[relax(O2)]` / `#[relax(O3)]` / `#[relax(O3, always)]` (makepad-relax): read by Relax
         // itself from the item's attributes (relax_level), never expanded; other arguments run
         // the macro, whose compile_error! reports them
-        if last == "relax" && relax_level_toks(&text, toks, i, hi).is_some() {
+        if last == "relax" && (relax_level_toks(&text, toks, i, hi).is_some() || relax_keep_toks(&text, toks, i, hi)) {
             continue;
         }
         if !last.is_empty() && crate::macro_reg::has_attr(&last) {
@@ -1770,6 +1770,11 @@ pub fn relax_level_toks(text: &dyn Fn(usize) -> String, toks: &(impl TokSeq + ?S
         ["O3", ",", "always", ")"] => Some(4),
         _ => None,
     }
+}
+
+/// Whether a `relax(..)` attribute's arguments at tokens [i, hi) are `(keep_reachable)`.
+pub fn relax_keep_toks(text: &dyn Fn(usize) -> String, toks: &(impl TokSeq + ?Sized), i: usize, hi: usize) -> bool {
+    i < hi && toks.at(i).kind == T::OpenParen && (i + 1..hi).map(|k| text(k)).collect::<Vec<_>>() == ["keep_reachable", ")"]
 }
 
 /// Runs the attribute macro of attribute `attr` on the item at tokens [lo, hi) (its own

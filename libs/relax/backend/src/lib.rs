@@ -19,6 +19,7 @@ pub mod regalloc;
 pub mod rir;
 pub mod stats;
 pub mod switch;
+pub mod wasm;
 pub mod x64;
 
 /// CPU time of the calling thread in ns (compile-time stats robust to machine load).
