@@ -853,6 +853,7 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
+            false,
             -1.0,
             false,
         );
@@ -1092,7 +1093,7 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// The layer has faded out (the ready lift, a stall's veil): the run may take it away.
+    /// The layer has faded out (the ready lift, the JIT loader): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
             .as_mut()
@@ -1114,15 +1115,25 @@ impl Boot {
         let layered = renderer.layer.on && program.layer.is_some();
         let look = layered.then(|| renderer.layer.look(reduce_motion));
         let hud = look.is_none_or(|l| l.hud);
+        let corner = look.is_some_and(|l| l.corner);
+        // the JIT loader: the whole galaxy in a square at the bottom-right corner
+        let region = if corner {
+            let side = layer::LOADER_SIDE.min(viewport[0].min(viewport[1]) * 0.4);
+            let margin = layer::LOADER_MARGIN;
+            [viewport[0] - side - margin, viewport[1] - side - margin, side, side]
+        } else {
+            [0.0, 0.0, viewport[0], viewport[1]]
+        };
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
             &program.pipes[FIELD],
             &self.state,
             time,
-            [0.0, 0.0, viewport[0], viewport[1]],
+            region,
             reduce_motion,
             false,
+            corner,
             look.map_or(-1.0, |l| l.resolve),
             renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
         );
@@ -1298,16 +1309,27 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if look.is_some_and(|l| l.blur) {
-            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
+        if let Some(look) = look {
+            if look.corner {
+                app(&mut writer, layer::APP, look.sharp, 0.0);
+            }
+            if look.blur {
+                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
+            }
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
+            // the JIT loader's galaxy stays inside its square
+            let field_scissor = if corner {
+                region.map(|v| v * dpi)
+            } else {
+                scissor
+            };
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
                 field::INSTANCES,
                 frame.count,
                 &field_uniforms,
-                scissor,
+                field_scissor,
             );
         }
         program.pipes[GLYPH].draw(
@@ -1317,7 +1339,7 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
-        if let Some(look) = look {
+        if let Some(look) = look.filter(|l| !l.corner) {
             app(&mut writer, layer::APP, look.sharp, 0.0);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());

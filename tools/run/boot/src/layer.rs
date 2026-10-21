@@ -6,9 +6,10 @@
 //! screen); at the first present a Gaussian-blurred app fades in behind the still-working galaxy
 //! (its stars glinting, the warm-up arc advancing with the functions built ahead); when the app
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
-//! goes. Later, a stall of the UI thread on JIT compiles (a tab switch) veils the app the same
-//! way: its frozen frame fades into the blur under the glinting galaxy, and the sharp app fades
-//! back in once it presents again. Every fade runs on this session's clock, never the app's.
+//! goes. Later, sustained JIT waiting of the UI thread (a tab switch's compiles) fades in the JIT
+//! loader: a small galaxy in the bottom-right corner over the sharp app, its stars glinting per
+//! compile, no blur. The run decides when it shows and goes (hysteresis); a fade is never
+//! reversed half-way. Every fade runs on this session's clock, never the app's.
 use makepad_hal::Id;
 use std::time::Instant;
 
@@ -25,9 +26,12 @@ pub const SIGMA: f32 = 4.0;
 
 const FADE_IN: f32 = 0.5;
 const LIFT: f32 = 1.1;
-/// a stall's veil: in over the frozen app, out as the app presents again
-const STALL_IN: f32 = 0.15;
-const STALL_OUT: f32 = 0.3;
+/// the JIT loader's fades
+const LOADER_IN: f32 = 0.35;
+const LOADER_OUT: f32 = 0.6;
+/// the JIT loader's square side and its margin to the window's corner (points)
+pub const LOADER_SIDE: f32 = 200.0;
+pub const LOADER_MARGIN: f32 = 12.0;
 
 /// What the run asks the layer to show (hal_run, from the JIT's signals).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,8 +42,9 @@ pub enum Want {
     WarmUp { done: u64, queued: u64 },
     /// ready: the arc closes, the sharp app comes in, the galaxy goes
     Ready,
-    /// the UI thread stalled on JIT compiles after the warm-up: still stalled, or it presented
-    Stall { stalled: bool },
+    /// the JIT loader after the warm-up: `shown` while the run wants it; going, its fade-out holds
+    /// while the UI thread is `busy` on the JIT again (it is never reversed)
+    Loader { shown: bool, busy: bool },
 }
 
 /// What one frame of the layer draws.
@@ -50,13 +55,15 @@ pub struct Look {
     /// the field's backdrop opacity over the blurred app
     pub backdrop: f32,
     pub galaxy: f32,
-    /// the sharp app's opacity, over everything
+    /// the sharp app's opacity: over everything, or under the galaxy (`corner`)
     pub sharp: f32,
     /// the warm-up arc (-1: none) and the seconds since ready (-1: not yet)
     pub progress: f32,
     pub resolve: f32,
-    /// the HUD, the frame's brackets and the swap ring (the warm-up; a stall shows the galaxy only)
+    /// the HUD, the frame's brackets and the swap ring (the warm-up; the loader shows the galaxy only)
     pub hud: bool,
+    /// the JIT loader: the galaxy alone in the bottom-right corner, over the sharp app
+    pub corner: bool,
     /// the layer has faded out: it can go
     pub done: bool,
 }
@@ -71,8 +78,8 @@ pub struct Layer {
     ready_at: Option<Instant>,
     /// the arc, never going back
     progress: f32,
-    /// a stall's veil, 0 (the sharp app) to 1 (the blurred app under the galaxy)
-    veil: f32,
+    /// the JIT loader's opacity
+    loader: f32,
     last: Instant,
     /// the app frames blurred last (the blur is made again only for a new app frame)
     pub blurred: Option<u64>,
@@ -88,14 +95,6 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The veil going (`u` from 0, the blurred app under the galaxy, to 1, the sharp app): the sharp
-/// app comes in over it as the galaxy goes over `galaxy_out` of the way (the ready lift, and a
-/// stall's veil both ways).
-fn unveil(look: &mut Look, u: f32, galaxy_out: [f32; 2]) {
-    look.sharp = smooth(0.0, 1.0, u);
-    look.galaxy = 1.0 - smooth(galaxy_out[0], galaxy_out[1], u);
-}
-
 impl Layer {
     pub fn new() -> Self {
         Self {
@@ -106,7 +105,7 @@ impl Layer {
             warm_at: None,
             ready_at: None,
             progress: 0.0,
-            veil: 0.0,
+            loader: 0.0,
             last: Instant::now(),
             blurred: None,
             app_frames: 0,
@@ -141,9 +140,9 @@ impl Layer {
             Some(Want::Ready) => {
                 self.ready_at.get_or_insert_with(Instant::now);
             }
-            Some(Want::Stall { .. }) => {
-                if !matches!(self.want, Some(Want::Stall { .. })) {
-                    self.veil = 0.0;
+            Some(Want::Loader { .. }) => {
+                if !matches!(self.want, Some(Want::Loader { .. })) {
+                    self.loader = 0.0;
                     self.last = Instant::now();
                 }
             }
@@ -173,6 +172,7 @@ impl Layer {
             progress: -1.0,
             resolve: -1.0,
             hud: true,
+            corner: false,
             done: false,
         };
         match self.want {
@@ -189,19 +189,27 @@ impl Layer {
                     let lift = if reduce_motion { LIFT * 0.5 } else { LIFT };
                     look.resolve = t;
                     look.progress = 1.0;
-                    unveil(&mut look, (t / lift - 0.3) / 0.7, [-0.05 / 0.7, 0.6 / 0.7]);
+                    look.sharp = smooth(0.3 * lift, lift, t);
+                    look.galaxy = 1.0 - smooth(0.25 * lift, 0.9 * lift, t);
                     look.done = t >= lift;
                 }
             }
-            Some(Want::Stall { stalled }) => {
-                // the warm-up's veil without its HUD, coming and going with the stall
-                let rate = if stalled { dt / STALL_IN } else { -dt / STALL_OUT };
-                self.veil = (self.veil + rate).clamp(0.0, 1.0);
-                look.blur = true;
+            Some(Want::Loader { shown, busy }) => {
+                // in while shown; going, it holds while the UI thread is busy again
+                let rate = if shown {
+                    dt / LOADER_IN
+                } else if busy {
+                    0.0
+                } else {
+                    -dt / LOADER_OUT
+                };
+                self.loader = (self.loader + rate).clamp(0.0, 1.0);
                 look.backdrop = 0.0;
                 look.hud = false;
-                unveil(&mut look, 1.0 - self.veil, [0.0, 0.8]);
-                look.done = !stalled && self.veil <= 0.0;
+                look.corner = true;
+                look.sharp = 1.0;
+                look.galaxy = smooth(0.0, 1.0, self.loader);
+                look.done = !shown && self.loader <= 0.0;
             }
         }
         self.done = look.done;

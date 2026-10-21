@@ -249,8 +249,9 @@ let Quad = {
         // (fault, corner radius, 0, 0)
         field_frame: uniform(vec4(0.0))
         field_fault: uniform(vec4(0.0))
-        // over a running app (the window layer): (on: 1, or 2 for a JIT stall's veil without the
-        // frame's brackets and the swap ring; galaxy opacity, backdrop opacity, arc progress or -1);
+        // over a running app (the window layer): (on: 1, or 2 for the corner JIT loader without
+        // the frame's brackets, the swap ring, the dust and the main() glow: its stars alone; galaxy
+        // opacity, backdrop opacity, arc progress or -1);
         // zero: the boot window
         field_layer: uniform(vec4(0.0))
         d: varying(vec2f)
@@ -274,7 +275,9 @@ let Quad = {
                 + step(1.5, self.field_layer.x) * step(3.5, k) * (1.0 - step(5.5, k))
             let arc = vec2(self.view.z * 1.45 + 10.0, self.view.z * 1.45 * self.view.w + 10.0) * step(-0.5, self.field_layer.w) * step(0.5, self.field_layer.x)
             let extent = if k < 0.5 { vec2(mix(3.5, 7.0 * self.field_params.y + 1.0, twinkling)) } else if k < 1.5 { vec2(2.0) } else if k < 2.5 { vec2(10.0 * self.field_params.y) } else if k < 3.5 { vec2(self.view.z) } else if k < 4.5 { vec2(self.view.z * 1.7 + 6.0, self.view.z * 1.7 * self.view.w + 6.0) * (1.0 - gone) } else if k < 6.5 { frame.zw * 0.5 * (1.0 - gone) } else { arc }
-            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent
+            // the corner JIT loader (layer 2) is the stars alone: no dust, no main() glow
+            let loose = step(1.5, self.field_layer.x) * (dust + step(2.5, k) * (1.0 - step(3.5, k)))
+            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent * (1.0 - loose)
             self.d = p - center
             self.px = p * self.dpi
             self.vertex_pos = vec4(p.x / vp.x * 2.0 - 1.0, 1.0 - p.y / vp.y * 2.0, 0.0, 1.0)

@@ -4,7 +4,7 @@
 //! their crate is parsed; O3 installs ignite gold stars with a cross flare; the compiler-zone
 //! swap clears the dust with an expanding ring. Every function compiled glints its star (a short
 //! white sparkle), in the boot window and over the running app (the window layer: the warm-up
-//! after the first present, the veil of a later stall on JIT compiles).
+//! after the first present, the JIT loader of later sustained JIT waiting).
 //!
 //! Every number is the loader's own (`relax_base::boot_stats`, read once per frame). The picture
 //! is ONE draw of ONE retained instance buffer that only ever grows: the frame appends the
@@ -271,6 +271,7 @@ impl Field {
         region: [f32; 4],
         reduce_motion: bool,
         halted: bool,
+        fit: bool,
         resolve: f32,
         scatter: bool,
     ) -> Frame {
@@ -365,7 +366,7 @@ impl Field {
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let (radius, cy) = if halted {
+        let (radius, cy) = if halted || fit {
             // the whole galaxy, scatter included, inside the region
             ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
         } else {
@@ -421,7 +422,7 @@ impl Field {
     /// Every function installed since the last frame glints its star: function `i` of an arm
     /// belongs to its star `i / FNS_PER_STAR` (the newest star while that one is not born yet),
     /// or with `scatter` (over the running app) to a star of the arm picked by its hash, so the
-    /// compiles of a stall sparkle across the galaxy. The stars' records are written again with
+    /// compiles of a tab switch sparkle across the galaxy. The stars' records are written again with
     /// the glint's time.
     fn glint(&mut self, writer: &mut CmdWriter, pipe: &Pipeline, time: f32, scatter: bool) {
         self.touched.clear();

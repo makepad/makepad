@@ -69,13 +69,20 @@ static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
-/// wakes, and veils the app once the stall's waiting adds up to STALL_AFTER.
+/// wakes, and shows the JIT loader once the waiting is sustained (LOADER_AFTER in LOADER_WINDOW).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// A UI-thread stall with this much JIT waiting veils the app (shorter ones never flicker it in).
-const STALL_AFTER: Duration = Duration::from_millis(120);
-/// JIT waits of the UI thread further apart than this (with no app frame between) are separate
-/// stalls.
-const STALL_GAP_NS: u64 = 100_000_000;
+/// The JIT loader shows for this much UI-thread JIT waiting within the sliding window (never for
+/// one short hiccup)...
+const LOADER_AFTER: Duration = Duration::from_millis(250);
+const LOADER_WINDOW_NS: u64 = 1_000_000_000;
+/// ...stays at least this long...
+const LOADER_MIN: Duration = Duration::from_millis(1000);
+/// ...and goes once the UI thread waited less than LOADER_TRICKLE in the last LOADER_QUIET_NS
+/// (the trickle of tiny waits a running app always has is quiet). Going, its fade-out holds while
+/// the UI thread waits that much in LOADER_BUSY_NS again (it never fades back in half-way).
+const LOADER_QUIET_NS: u64 = 700_000_000;
+const LOADER_BUSY_NS: u64 = 200_000_000;
+const LOADER_TRICKLE: Duration = Duration::from_millis(40);
 /// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
 /// the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
@@ -86,10 +93,20 @@ fn ui_wait_began() {
     }
 }
 
+/// The JIT loader over the running app (after the warm-up).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Loader {
+    Hidden,
+    /// shown since
+    Shown(Instant),
+    /// fading out (until the layer is done); shown since
+    Going(Instant),
+}
+
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer, or a JIT stall's veil
+    /// no layer, or the JIT loader
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -738,11 +755,11 @@ fn pump(
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
-    let mut stall = false;
-    // the stall's start: the app's presented frames and the UI thread's JIT waiting until then (a
-    // new frame or an idle gap begins the next one)
-    let mut stall_from = (0u64, 0u64);
+    let mut loader = Loader::Hidden;
+    let mut loader_shows = 0u32;
     let mut warm_up_at: Option<Instant> = None;
+    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT loader's comings and goings too
+    let trace_loader = std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some();
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
         let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
@@ -778,7 +795,7 @@ fn pump(
             match update {
                 Update::Begin { warm } => {
                     stage = Stage::Running;
-                    stall = false;
+                    loader = Loader::Hidden;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -1047,8 +1064,8 @@ fn pump(
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
-        // after its first present (until the JIT's readiness signal), then the veil of a later
-        // UI-thread stall on JIT compiles. An opaque overlay, a failure or a stop takes it away.
+        // after its first present (until the JIT's readiness signal), then the JIT loader for later
+        // sustained UI-thread JIT waiting. An opaque overlay, a failure or a stop takes it away.
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
@@ -1087,32 +1104,65 @@ fn pump(
             }
             Stage::Lift => Some(LayerWant::Ready),
             Stage::Running if layers && lent_to_app && !active => {
-                // the stall's JIT waiting so far; it ends when the app presents again
-                let total = relax_compiler::postframe::ui_waited_ns();
-                if stall_from.0 != app_frames || relax_compiler::postframe::ui_idle_ns() > STALL_GAP_NS {
-                    stall_from = (app_frames, total);
-                }
-                let waited = Duration::from_nanos(total.saturating_sub(stall_from.1));
-                if waited >= STALL_AFTER {
-                    stall = true;
-                } else if UI_WAIT_ARMED.load(Ordering::Acquire) {
-                    // look again when this stall would show; once the UI thread is not waiting
-                    // the window disarms (the next wait's hook wakes it)
-                    if relax_compiler::postframe::ui_idle_ns() > 0 {
-                        UI_WAIT_ARMED.store(false, Ordering::Release);
-                    } else {
-                        wake_in = Some(STALL_AFTER - waited);
+                use relax_compiler::postframe::{ui_idle_ns, ui_waited_within};
+                let waited_in = |ns| Duration::from_nanos(ui_waited_within(ns));
+                loader = match loader {
+                    Loader::Hidden => {
+                        let waited = waited_in(LOADER_WINDOW_NS);
+                        if waited >= LOADER_AFTER {
+                            loader_shows += 1;
+                            if trace_loader {
+                                eprintln!(
+                                    "makepad-run: jit loader #{} in ({:.0} ms waited in {} ms)",
+                                    loader_shows,
+                                    waited.as_secs_f64() * 1000.0,
+                                    LOADER_WINDOW_NS / 1_000_000
+                                );
+                            }
+                            Loader::Shown(Instant::now())
+                        } else {
+                            if UI_WAIT_ARMED.load(Ordering::Acquire) {
+                                // look again when the waiting would be sustained; once the UI
+                                // thread is not waiting the window disarms (the next wait's hook
+                                // wakes it)
+                                if ui_idle_ns() > 0 {
+                                    UI_WAIT_ARMED.store(false, Ordering::Release);
+                                } else {
+                                    wake_in = Some(LOADER_AFTER - waited);
+                                }
+                            }
+                            Loader::Hidden
+                        }
                     }
+                    Loader::Shown(at) if at.elapsed() >= LOADER_MIN && waited_in(LOADER_QUIET_NS) < LOADER_TRICKLE => {
+                        Loader::Going(at)
+                    }
+                    Loader::Going(at) if host.layer_done() => {
+                        if trace_loader {
+                            eprintln!(
+                                "makepad-run: jit loader #{} out after {:.0} ms",
+                                loader_shows,
+                                at.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
+                        Loader::Hidden
+                    }
+                    loader => loader,
+                };
+                match loader {
+                    Loader::Hidden => None,
+                    Loader::Shown(_) => Some(LayerWant::Loader {
+                        shown: true,
+                        busy: true,
+                    }),
+                    Loader::Going(_) => Some(LayerWant::Loader {
+                        shown: false,
+                        busy: waited_in(LOADER_BUSY_NS) >= LOADER_TRICKLE,
+                    }),
                 }
-                if stall && waited.is_zero() && host.layer_done() {
-                    stall = false;
-                }
-                stall.then_some(LayerWant::Stall {
-                    stalled: !waited.is_zero(),
-                })
             }
             Stage::Running => {
-                stall = false;
+                loader = Loader::Hidden;
                 None
             }
         };
