@@ -161,6 +161,12 @@ pub struct Env {
     /// `base_at`: Some exactly in Sky mode with `params.skyline` on and a band
     /// in the images ([`Self::has_skyline`]).
     skyline: Option<(std::sync::Arc<skyline::SkylineBand>, f32)>,
+    /// The skyline's lights by region (`skyline::BandPeaks`), for a caster's
+    /// bloom (`base_peak`): built once, with the band.
+    city_peaks: Option<skyline::BandPeaks>,
+    /// The width the casters' bloom was rastered for (`new_for_width`), so
+    /// [`Self::with_skyline`] rasters it again as the build did.
+    bloom_width: usize,
     /// The key ([`Self::key`]), measured on the engine's first ask and kept
     /// (D15, M5): the app's preview bakes never ask, and a held drag paid the
     /// key's integrals on every bake.
@@ -170,18 +176,21 @@ pub struct Env {
 /// What one bake hands each of its lookups: the cloud march it reads, when it
 /// has one, and the angular size of its texels (radians; 0 for a lookup along
 /// one exact direction), over which a line thinner than a texel is averaged
-/// (the lightning's channel, D7).
+/// (the lightning's channel, D7). `bare` leaves out the sky's points, the
+/// sun's and the moon's discs and the stars, which a few looks round the
+/// horizon cannot sample (`Env::skyline_light`'s ring, as `dome_light`).
 #[derive(Clone, Copy, Default)]
 struct Sampling<'a> {
     cache: Option<&'a volumetric::CloudCache>,
     texel: f32,
+    bare: bool,
 }
 
 impl<'a> Sampling<'a> {
     /// The lookups of a bake `width` wide (2:1, so a texel is as tall as it
     /// is wide at the equator).
     fn bake(width: usize, cache: Option<&'a volumetric::CloudCache>) -> Sampling<'a> {
-        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32 }
+        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false }
     }
 }
 
@@ -319,10 +328,7 @@ impl Env {
         let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
         // The skyline is a layer of the sky: drawn in Sky mode, when its block
         // is on and the app has handed its strip over.
-        let skyline = match (params.mode(), params.skyline.as_ref(), images.skyline.as_ref()) {
-            (Mode::Sky, Some(block), Some(band)) if block.on => Some((band.clone(), block.turn_deg)),
-            _ => None,
-        };
+        let skyline = images.skyline.as_ref().and_then(|band| Env::skyline_of(&params, band));
         let mut env = Env {
             params,
             scale,
@@ -340,7 +346,9 @@ impl Env {
             dome: Vec3f::default(),
             ground_gain: Vec3f::all(1.0),
             base_image: None,
+            city_peaks: skyline.as_ref().map(|(band, _)| band.peaks()),
             skyline,
+            bloom_width: width,
             measured_key: OnceLock::new(),
         };
         // The weather's veil and the ground are lit by the dome as this map
@@ -379,6 +387,107 @@ impl Env {
     /// and a band in the images it was built with.
     pub fn has_skyline(&self) -> bool {
         self.skyline.is_some()
+    }
+
+    /// The band and its turn, by the rule the ImageSet path keeps: Sky mode
+    /// and `params.skyline` on (`params` clamped).
+    fn skyline_of(params: &HdriParams, band: &std::sync::Arc<skyline::SkylineBand>) -> Option<(std::sync::Arc<skyline::SkylineBand>, f32)> {
+        match (params.mode(), params.skyline.as_ref()) {
+            (Mode::Sky, Some(block)) if block.on => Some((band.clone(), block.turn_deg)),
+            _ => None,
+        }
+    }
+
+    /// This map with the skyline's strip laid over its base, as if `band`
+    /// had been in the ImageSet it was built with: the map, its key and its
+    /// casters' bloom are that Env's, bit for bit. The app's two phases: build
+    /// the map without the strip, hand the strip [`Self::skyline_light`],
+    /// render it, attach it here. Only what reads the band is done again: its
+    /// lights by region, the casters' bloom (at the width the map was built
+    /// for) and the key, which is measured again on the next ask. The turn is
+    /// the params' (Sky mode with the block on; otherwise the map is returned
+    /// unchanged, as the ImageSet path draws no skyline then). The casters'
+    /// rows are rastered on this thread; [`Self::with_skyline_par`] spreads them.
+    pub fn with_skyline(self, band: std::sync::Arc<skyline::SkylineBand>) -> Env {
+        self.with_skyline_par(band, &|| false, &caster::serial_rows).expect("a bloom nothing cancels is built")
+    }
+
+    /// [`Self::with_skyline`] with the casters' bloom rows spread by `run`
+    /// (as [`Self::new_for_width_par`]), polling `cancelled`: None when it
+    /// stopped (or the runner skipped a row), and the map is then dropped.
+    pub fn with_skyline_par(mut self, band: std::sync::Arc<skyline::SkylineBand>, cancelled: &dyn Fn() -> bool, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Option<Env> {
+        let Some(skyline) = Env::skyline_of(&self.params, &band) else {
+            return Some(self);
+        };
+        self.city_peaks = Some(skyline.0.peaks());
+        self.skyline = Some(skyline);
+        // The bloom read the base without the city: it is rastered again from
+        // nothing, in list order, as the build rastered it.
+        self.studio.clear_caster_blooms();
+        if !self.build_caster_bloom(self.bloom_width, cancelled, run) {
+            return None;
+        }
+        self.measured_key = OnceLock::new();
+        Some(self)
+    }
+
+    /// The sky's light as the skyline needs it (`makepad_skyline::SkyLight`,
+    /// field by field, the app adding `lights_by_day` and `emit_gain`), taken
+    /// from this map itself, so the city follows the sky the map draws: in the
+    /// strip's frame (turned by the skyline block's turn_deg; 0 without a
+    /// block), map units before intensity.
+    /// - The rings: the base as the map draws it under the skyline (clouds,
+    ///   volume, weather and its veil, a base image) at u = (i + 0.5) / RING,
+    ///   at 1 and 15 degrees, without its points (the discs and the stars,
+    ///   whose light the ring's few looks cannot sample; the sun's reaches the
+    ///   strip as `sun_rgb`).
+    /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
+    ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
+    ///   so under a closed deck the strip is as unlit by the sun as the key.
+    /// - `ambient_rgb`: the rest of the map's own white ground's light (its
+    ///   ground gain included), so `sun_rgb * sin(el) + ambient_rgb` is the
+    ///   white ground straight down. Never under 0.
+    /// In Studio mode the rings are the backdrop and the sun and the ambient
+    /// are 0; under an image that is the whole base the rings are the image
+    /// and the sun and the ambient the generated sky's (the image is not metered).
+    pub fn skyline_light(&self) -> skyline::SkylineLight {
+        use skyline::RING;
+        let turn = self.params.skyline.as_ref().map_or(0.0, |block| block.turn_deg);
+        let at = Sampling { bare: true, ..Sampling::default() };
+        let ring = |el_deg: f32| -> [[f32; 3]; RING] {
+            let mut ring = [[0.0; 3]; RING];
+            for (i, entry) in ring.iter_mut().enumerate() {
+                let u = ((i as f32 + 0.5) / RING as f32 + turn / 360.0).rem_euclid(1.0);
+                let d = vec(ibl::equirect_uv_to_dir([u, 0.5 - el_deg / 180.0]));
+                *entry = arr(self.base_under_skyline(d, None, at));
+            }
+            ring
+        };
+        let (ring_low, ring_high) = (ring(skyline::RING_LOW_DEG), ring(skyline::RING_HIGH_DEG));
+        let Some(atmo) = &self.atmo else {
+            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high };
+        };
+        let pi = std::f32::consts::PI;
+        let sun = atmo.sun_dir();
+        let elevation = sun.y.clamp(-1.0, 1.0).asin();
+        let outer = atmo.sun_outer_radius();
+        let visible = smoothstep(-outer, outer, elevation);
+        let sun_rgb = if visible > 0.0 { atmo.sun_irradiance() * (self.cover_toward(sun) * visible / pi) } else { Vec3f::default() };
+        // The white ground as the map lights it: the atmosphere's (the sky and
+        // the sun over a level surface) and the night's, times the ground gain.
+        let rise = sun.y.max(0.0);
+        let night = self.night.as_ref().map_or(Vec3f::default(), |night| night.ground(vec3f(0.0, -1.0, 0.0), Vec3f::all(1.0)));
+        let white = ((atmo.sky_irradiance() + atmo.sun_irradiance() * rise) * (1.0 / pi) + night) * self.ground_gain;
+        let ambient = white - sun_rgb * rise;
+        let ambient = vec3f(ambient.x.max(0.0), ambient.y.max(0.0), ambient.z.max(0.0));
+        skyline::SkylineLight {
+            sun_u: (ibl::dir_to_equirect_uv(arr(sun))[0] - turn / 360.0).rem_euclid(1.0),
+            sun_el_deg: elevation.to_degrees(),
+            sun_rgb: arr(sun_rgb),
+            ambient_rgb: arr(ambient),
+            ring_low,
+            ring_high,
+        }
     }
 
     /// 2^intensity_ev, the factor every lookup ends with (for the tests; the
@@ -508,8 +617,6 @@ impl Env {
         // blooming casters cost no more than one may.
         let casters = entries.len();
         let fine_base = self.base_image.is_some() || (self.atmo.is_some() && self.weather.is_some()) || self.has_skyline();
-        // The city's lights by region, gathered once for every caster and cell.
-        let city_peaks = self.skyline.as_ref().map(|(band, _)| band.peaks());
         for entry in entries {
             let built = {
                 let env: &Env = self;
@@ -517,7 +624,7 @@ impl Env {
                 let behind = |d: Vec3f| env.content_before(d, entry, at);
                 let sharp = |d: Vec3f| env.studio.caster_sharp(entry, d);
                 let bright = env.studio.bright_boxes(entry);
-                let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius, city_peaks.as_ref());
+                let peak = |d: Vec3f, radius: f32| env.base_peak(d, radius);
                 let peak: Option<&(dyn Fn(Vec3f, f32) -> Option<(f32, f32)> + Sync)> = if fine_base { Some(&peak) } else { None };
                 caster::CasterBloom::build(caster, width, casters, &hot, &bright, peak, &behind, &sharp, cancelled, run)
             };
@@ -535,15 +642,15 @@ impl Env {
     /// there, times 2^intensity_ev, and the spacing that detail asks for
     /// (radians). A base image's (`BaseImage::peak`, under or beside the sky it
     /// replaces), a storm's bolt (`Weather::fine_step_near`, no bound) and
-    /// the skyline's lights there (`city_peaks`, the band's `BandPeaks`, built
-    /// once per map): a city light is far finer than a cell. None where the base
+    /// the skyline's lights there (the band's `BandPeaks`, built with the
+    /// band): a city light is far finer than a cell. None where the base
     /// has no such detail: the sky's discs are sampled apart (`hot_spots`),
     /// and the rest of a generated sky and the backdrop are smooth at a
     /// cell's scale.
-    fn base_peak(&self, d: Vec3f, radius: f32, city_peaks: Option<&skyline::BandPeaks>) -> Option<(f32, f32)> {
+    fn base_peak(&self, d: Vec3f, radius: f32) -> Option<(f32, f32)> {
         let image = self.base_image.as_ref().map(|image| image.peak(d, radius)).map(|(lum, step)| (lum * self.scale, step));
         let bolt = self.weather.as_ref().filter(|_| self.atmo.is_some()).and_then(|weather| weather.fine_step_near(d, radius)).map(|step| (f32::INFINITY, step));
-        let city = match (&self.skyline, city_peaks) {
+        let city = match (&self.skyline, &self.city_peaks) {
             (Some((_, turn)), Some(peaks)) => peaks.near(d, *turn, radius).map(|(most, step)| (most * self.scale, step)),
             _ => None,
         };
@@ -559,7 +666,7 @@ impl Env {
     /// this map's.
     fn window_sky_at(&self, d: Vec3f, base: Vec3f, at: Sampling) -> Vec3f {
         match &self.window_sky {
-            Some(outside) => outside.radiance_with(d, None, Sampling { cache: None, texel: at.texel }),
+            Some(outside) => outside.radiance_with(d, None, Sampling { cache: None, ..at }),
             None => base,
         }
     }
@@ -586,9 +693,9 @@ impl Env {
             Some(atmo) => match &self.weather {
                 // Below the horizon the ground lit by this map's own sky (D7): a
                 // deck the Clouds or the volume close lights it with no weather too.
-                None => weather::relit_ground(d, self.sky_layers(d, atmo, without, at.cache, true), self.ground_gain),
+                None => weather::relit_ground(d, self.sky_layers(d, atmo, without, at.cache, !at.bare), self.ground_gain),
                 Some(weather) => {
-                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at.cache, true);
+                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at.cache, !at.bare);
                     // Below the horizon: the ground lit by this map's own sky (D7),
                     // and the wet ground's mirror of the sky above it.
                     // The mirror shows the sky as the weather shows it: through the
@@ -598,7 +705,7 @@ impl Env {
                     // light does not carry (plan 2's N3 takes out exactly what the key
                     // carries, no more).
                     let seen = |v: Vec3f| {
-                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, true), self.weather_sun, self.dome)
+                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
                             + weather.lightning(v, at.texel)
                     };
                     let c = weather.ground(d, dry(d), self.ground_gain, &seen);
@@ -852,11 +959,7 @@ impl Env {
         // marched volume, and the weather's rain, its shafts and fog. What
         // stands in front of the disc after that, the lights and a base
         // image's mask, is `disc_share`.
-        let cover = |dir: Vec3f| {
-            self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
-                * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
-                * self.weather.as_ref().map_or(1.0, |weather| weather.transmittance_toward(dir))
-        };
+        let cover = |dir: Vec3f| self.cover_toward(dir);
         let sun = atmo.sun_dir();
         let elevation = sun.y.clamp(-1.0, 1.0).asin();
         let outer = atmo.sun_outer_radius();
@@ -892,6 +995,16 @@ impl Env {
         Some((KeyTerm::Moon(arrived), self.key_to_world(EnvSun { radiance, ..moon })))
     }
 
+    /// What the sky's cover passes along `dir` (map frame), as the key and
+    /// the strip's sun are dimmed: the 2D layer's unfaded cover (in
+    /// volumetric mode the cirrus veil's), the marched volume, and the
+    /// weather's rain, its shafts and fog.
+    fn cover_toward(&self, dir: Vec3f) -> f32 {
+        self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
+            * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
+            * self.weather.as_ref().map_or(1.0, |weather| weather.transmittance_toward(dir))
+    }
+
     /// The studio's key light in the map's own frame, as the map draws it
     /// (D1, `Studio::key`). A window filled with sky as the key carries the
     /// sky it lets in, so it is measured here, against that sky: the base in
@@ -908,7 +1021,7 @@ impl Env {
             .into_iter()
             .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
             .collect();
-        let fine_texels = Sampling { cache: None, texel: weather::CHANNEL_FOOTPRINT };
+        let fine_texels = Sampling { texel: weather::CHANNEL_FOOTPRINT, ..Sampling::default() };
         let sky = |d: Vec3f| self.window_sky_at(d, self.base_at(d, None, fine_texels), fine_texels);
         let fine = |d: Vec3f, radius: f32| self.window_sky_step_near(d, radius);
         self.studio.measured_window_key(&sky, &hot, &fine)

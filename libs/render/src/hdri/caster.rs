@@ -260,6 +260,11 @@ impl CasterLayer {
         self.bloom = Some(Arc::new(bloom));
     }
 
+    /// Takes the bloom away (`Studio::clear_caster_blooms`): the caster is as it was built.
+    pub(crate) fn clear_bloom(&mut self) {
+        self.bloom = None;
+    }
+
     /// The bloom the pre-pass kept, for the tests.
     #[cfg(test)]
     pub(crate) fn bloom(&self) -> Option<&CasterBloom> {

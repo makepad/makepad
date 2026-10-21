@@ -16,8 +16,9 @@
 
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
-use makepad_render::hdri::skyline::skyline_light;
-use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, VolumetricParams};
+use makepad_render::hdri::skyline::SkylineBand;
+use std::sync::Arc;
+use makepad_render::hdri::{CasterParams, Env, GoboParams, HdriParams, ImageSet, LightParams, SkylineParams, VolumetricParams, WeatherParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -662,28 +663,85 @@ fn four_soft_blooming_casters_stay_well_under_a_held_bake() {
     });
 }
 
-/// The sky's light the app hands the skyline (Task 4 of the skyline layer): built on every
-/// change of the sky block, so it must stay well under a held bake's budget.
+/// The skies the strip's light and its attachment are timed under: clear, a 2D deck, rain,
+/// the overcast kind, and a marched volume (its 128 ring looks march it without a cache).
+fn skyline_skies() -> Vec<(&'static str, HdriParams)> {
+    let clear = HdriParams::default();
+    let weather = |kind: &str| {
+        let mut p = cloudy_sky();
+        p.sky.weather = Some(WeatherParams { kind: kind.to_string(), ..WeatherParams::default() });
+        p
+    };
+    let mut volume = cloudy_sky();
+    volume.sky.volumetric = Some(VolumetricParams::default());
+    vec![("clear", clear), ("clouds", cloudy_sky()), ("rain", weather("rain")), ("overcast", weather("overcast")), ("volume", volume)]
+}
+
+/// The sky's light the app hands the skyline (Task 4 of the skyline layer), read from the
+/// map's own Env once it is built: the Env build is the bake's, so this is what the strip adds
+/// per change. The first call on a fresh Env (nothing is kept between calls), the slowest of
+/// five fresh Envs per sky. Measured 0.04 ms (clear) to 0.36 ms (a volume's unmarched looks);
+/// the bound is about five times the slowest.
 #[test]
 #[ignore]
-fn skyline_light_is_cheap() {
-    let p = HdriParams::default();
-    let t = std::time::Instant::now();
-    for _ in 0..20 {
-        std::hint::black_box(skyline_light(&p));
+fn skyline_light_on_a_fresh_env_is_cheap() {
+    let mut slow = Vec::new();
+    for (name, p) in skyline_skies() {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let env = Env::new(&p);
+            let t = Instant::now();
+            std::hint::black_box(env.skyline_light());
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let worst = times.iter().cloned().fold(0.0, f64::max);
+        println!("hdri_perf: skyline_light {name:<9} {worst:6.3} ms (slowest of 5 fresh Envs)");
+        if worst > SKYLINE_LIGHT_MS {
+            slow.push(format!("{name}: {worst:.2} ms"));
+        }
     }
-    let ms = t.elapsed().as_secs_f64() * 1000.0 / 20.0;
-    eprintln!("skyline_light {ms:.2} ms");
-    // What that mean is made of: a new sky builds the atmosphere's table (as every Env does),
-    // the same sky asked again reads the kept layers.
-    let mut other = p.clone();
-    other.sky.sun.hour = 9.5;
-    let t = std::time::Instant::now();
-    std::hint::black_box(skyline_light(&other));
-    let fresh = t.elapsed().as_secs_f64() * 1000.0;
-    let t = std::time::Instant::now();
-    std::hint::black_box(skyline_light(&other));
-    let kept = t.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("skyline_light: a new sky {fresh:.2} ms, the same sky again {kept:.3} ms");
-    assert!(ms < 3.0);
+    assert!(slow.is_empty(), "skyline_light over {SKYLINE_LIGHT_MS} ms: {}", slow.join(", "));
 }
+
+/// `skyline_light_on_a_fresh_env_is_cheap`'s bound.
+const SKYLINE_LIGHT_MS: f64 = 2.0;
+
+/// Attaching the strip to a built map (`Env::with_skyline`): a 1024 x 64 band (a city light
+/// every 16 texels) and a blooming caster with the low sun beside it, so its lights by region
+/// and the caster's bloom are built again; against the same Env's build. The slowest of five.
+/// Measured 2.7 ms against an 18 ms Env build; the bound is about five times that.
+#[test]
+#[ignore]
+fn with_skyline_on_a_blooming_map_is_cheap() {
+    let mut p = HdriParams::default();
+    p.sky.sun.mode = "manual".to_string();
+    p.sky.sun.elevation_deg = 4.0;
+    p.sky.sun.azimuth_deg = 0.0;
+    p.skyline = Some(SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() });
+    let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 15.0, bloom_threshold_ev: 3.0, ..CasterParams::default() };
+    p.lights = vec![LightParams { azimuth_deg: 10.0, elevation_deg: 16.0, width_deg: 30.0, height_deg: 16.0, gobo: None, caster: Some(settings), ..LightParams::new_caster() }];
+    let (w, h) = (1024, 64);
+    let mut texels = vec![[0.04, 0.04, 0.05, 1.0]; w * h];
+    for (k, texel) in texels.iter_mut().enumerate() {
+        if k % 16 == 5 && (k / w) % 4 == 1 {
+            *texel = [30.0, 24.0, 16.0, 1.0];
+        }
+    }
+    let band = Arc::new(SkylineBand { w, h, texels, top_deg: 10.0, bottom_deg: -2.0 });
+    let (mut builds, mut attaches) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        let t = Instant::now();
+        let env = Env::new(&p);
+        builds.push(t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        let env = env.with_skyline(band.clone());
+        attaches.push(t.elapsed().as_secs_f64() * 1000.0);
+        assert!(env.has_skyline());
+    }
+    let (build, attach) = (builds.iter().cloned().fold(0.0, f64::max), attaches.iter().cloned().fold(0.0, f64::max));
+    println!("hdri_perf: with_skyline {w}x{h} band, a blooming caster: {attach:6.2} ms (the Env build {build:6.2} ms), slowest of 5");
+    assert!(attach < WITH_SKYLINE_MS, "with_skyline took {attach:.1} ms, over {WITH_SKYLINE_MS} ms");
+}
+
+/// `with_skyline_on_a_blooming_map_is_cheap`'s bound.
+const WITH_SKYLINE_MS: f64 = 15.0;

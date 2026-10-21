@@ -12,10 +12,7 @@
 
 use makepad_draw::*;
 use makepad_render_material::ibl;
-use super::{arr, atmosphere, night, vec, weather, HdriParams};
-use makepad_draw::makepad_micro_serde::SerJson;
-use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
+use super::arr;
 
 /// The band's lowest FADE_DEG degrees fade its alpha (and, premultiplied, its
 /// light) to 0, so the generated ground takes over below it without a seam.
@@ -217,113 +214,30 @@ pub fn over_veiled(s: [f32; 4], base: Vec3f, veil: &dyn Fn(Vec3f) -> Vec3f) -> V
 pub const RING: usize = 64;
 
 /// The ring's two elevations, degrees: just over the horizon and over the city's roofs.
-const RING_LOW_DEG: f32 = 1.0;
-const RING_HIGH_DEG: f32 = 15.0;
+pub(super) const RING_LOW_DEG: f32 = 1.0;
+pub(super) const RING_HIGH_DEG: f32 = 15.0;
 
 /// The sky's light on the city, as the skyline lights its strip by day (makepad_skyline's
-/// `SkyLight`, field by field, the app adding `lights_by_day` and `emit_gain`). In the strip's
-/// frame: u is the strip's x/w (`SkylineBand::sample`'s, turned by the block's turn_deg), and
-/// ring entry i stands at u = (i + 0.5) / RING. Map units before intensity.
+/// `SkyLight`, field by field, the app adding `lights_by_day` and `emit_gain`), from the map
+/// itself (`Env::skyline_light`). In the strip's frame: u is the strip's x/w
+/// (`SkylineBand::sample`'s, turned by the block's turn_deg), and ring entry i stands at
+/// u = (i + 0.5) / RING. Map units before intensity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkylineLight {
     /// Where the sun stands: the strip's u, and its elevation in degrees (below 0 at night).
     pub sun_u: f32,
     pub sun_el_deg: f32,
     /// The radiance off a white Lambertian surface facing the sun (its irradiance / pi),
-    /// through the weather's rain and fog; 0 while the sun is below the horizon.
+    /// through the cover the key is dimmed by (clouds, volume, rain and fog), fading out with
+    /// the key as the disc sets.
     pub sun_rgb: [f32; 3],
-    /// The radiance off a white level surface under the sky alone (its irradiance / pi), the
-    /// night's glow and moonlight included.
+    /// The rest of the light on a white level surface (its irradiance / pi): the sky, the
+    /// night's glow and moonlight, under the map's own ground gain.
     pub ambient_rgb: [f32; 3],
-    /// The sky round the horizon at 1 and at 15 degrees, as the map draws it without its
-    /// clouds, discs and volume, the weather's veil in front.
+    /// The sky round the horizon at 1 and at 15 degrees, as the map draws it there (its
+    /// clouds, volume and weather veil included), without the discs and the stars.
     pub ring_low: [[f32; 3]; RING],
     pub ring_high: [[f32; 3]; RING],
-}
-
-/// The sky's light as the skyline needs it, in the strip frame (turned by the block's
-/// turn_deg), map units before intensity. Cheap: builds only the atmosphere, the night sky and
-/// the weather, never the clouds, volume or lights. A params value without a skyline block
-/// uses turn 0.
-///
-/// Built as `Env::new_for_width_par` builds them, from the clamped params and the weathered
-/// sky. The ring is `atmosphere.sky + night.glow` (`Env::sky_layers` without its clouds, discs
-/// and volume, and without the stars, points a ring of 64 looks cannot sample, as
-/// `Env::dome_light` leaves them out), through the weather's veil when there is one, lit by the
-/// open sky: the sun with no cover over it and the open dome's mean (the clouds' ambient, which
-/// `Env::dome_light` measures on a sky nothing covers).
-///
-/// The atmosphere's table takes tens of milliseconds to build, so the three layers of the
-/// last sky asked for are kept (`SKY_LIGHT_LAYERS`, keyed by the clamped sky block's JSON and
-/// the seed, exactly): a change of the turn or of the skyline's own settings, or the strip
-/// asking again, reads them. Whatever is kept, the result is the one built afresh.
-pub fn skyline_light(params: &HdriParams) -> SkylineLight {
-    let mut params = params.clone();
-    params.clamp();
-    let turn = params.skyline.as_ref().map_or(0.0, |block| block.turn_deg);
-    let layers = sky_light_layers(&params);
-    let SkyLightLayers { atmo, night, weather } = &*layers;
-    let (veil_sun, dome) = (atmo.sun_irradiance(), atmo.ambient() + night.ambient());
-    let horizon = |i: usize, el_deg: f32| -> [f32; 3] {
-        let u = ((i as f32 + 0.5) / RING as f32 + turn / 360.0).rem_euclid(1.0);
-        let d = vec(ibl::equirect_uv_to_dir([u, 0.5 - el_deg / 180.0]));
-        let c = atmo.sky(d) + night.glow(d);
-        arr(match &weather {
-            Some(weather) => weather.veil(d, c, veil_sun, dome),
-            None => c,
-        })
-    };
-    let mut ring_low = [[0.0; 3]; RING];
-    let mut ring_high = [[0.0; 3]; RING];
-    for i in 0..RING {
-        ring_low[i] = horizon(i, RING_LOW_DEG);
-        ring_high[i] = horizon(i, RING_HIGH_DEG);
-    }
-    let sun = atmo.sun_dir();
-    let through = weather.as_ref().map_or(1.0, |weather| weather.transmittance_toward(sun));
-    let sun_rgb = if sun.y > 0.0 { arr(atmo.sun_irradiance() * (through / PI)) } else { [0.0; 3] };
-    let white = Vec3f::all(1.0);
-    let ambient = atmo.sky_irradiance() * (1.0 / PI) + night.ground(vec3f(0.0, -1.0, 0.0), white);
-    SkylineLight {
-        sun_u: (ibl::dir_to_equirect_uv(arr(sun))[0] - turn / 360.0).rem_euclid(1.0),
-        sun_el_deg: sun.y.clamp(-1.0, 1.0).asin().to_degrees(),
-        sun_rgb,
-        ambient_rgb: arr(ambient),
-        ring_low,
-        ring_high,
-    }
-}
-
-/// What [`skyline_light`] reads the sky's light from, built as `Env::new_for_width_par`
-/// builds them: from the weathered sky, the weather from the user's block.
-struct SkyLightLayers {
-    atmo: atmosphere::Atmosphere,
-    night: night::NightSky,
-    weather: Option<weather::Weather>,
-}
-
-/// The last sky's layers, by the clamped sky block's JSON and the seed (the key itself, so no
-/// two skies share an entry).
-static SKY_LIGHT_LAYERS: Mutex<Option<((String, u32), Arc<SkyLightLayers>)>> = Mutex::new(None);
-
-/// The layers of `params` (clamped), from SKY_LIGHT_LAYERS when they are the last sky's.
-fn sky_light_layers(params: &HdriParams) -> Arc<SkyLightLayers> {
-    let key = (params.sky.serialize_json(), params.seed);
-    // A poisoned lock only means a panic elsewhere: the entry it holds is whole.
-    if let Some((kept, layers)) = SKY_LIGHT_LAYERS.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if *kept == key {
-            return layers.clone();
-        }
-    }
-    let weathered = weather::weathered_sky(&params.sky);
-    let sky = &weathered;
-    let atmo = atmosphere::Atmosphere::new(atmosphere::sun_direction(&sky.sun), &sky.atmosphere, &sky.sun_disc);
-    let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
-    // The weather works its floors out from the user's block, as in the Env.
-    let weather = weather::Weather::new(&params.sky, atmo.sun_dir());
-    let layers = Arc::new(SkyLightLayers { atmo, night, weather });
-    *SKY_LIGHT_LAYERS.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, layers.clone()));
-    layers
 }
 
 /// Smoothstep over 0..1.
@@ -336,7 +250,7 @@ fn smooth(t: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::hdri::{dir_from_az_el, vec, CasterParams, Env, HdriParams, ImageSet, LightParams, SkylineParams, WeatherParams, SkyParams};
-    use crate::hdri::weather::{self, Weather};
+    use crate::hdri::weather::Weather;
     use makepad_render_material::ibl;
     use std::sync::Arc;
 
@@ -727,37 +641,67 @@ mod tests {
         assert!(peaks.near(dir(0.0, -20.0), 0.0, 1f32.to_radians()).is_none());
     }
 
+    fn skyline_on() -> SkylineParams {
+        SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() }
+    }
+
+    /// The skies the strip's light is checked under: clear, fog, rain, a 2D deck with cirrus
+    /// reaching the horizon, and the overcast and storm kinds, the sun at 25 degrees.
+    fn skies() -> Vec<(&'static str, HdriParams)> {
+        let mut clear = HdriParams::default();
+        sun_at(&mut clear, 25.0, 140.0);
+        let weather = |kind: &str| {
+            let mut p = clear.clone();
+            p.sky.weather = Some(WeatherParams { kind: kind.to_string(), ..WeatherParams::default() });
+            p
+        };
+        let mut clouds = clear.clone();
+        clouds.sky.clouds.coverage = 0.6;
+        clouds.sky.clouds.cirrus = 0.4;
+        vec![("clear", clear.clone()), ("fog", weather("fog")), ("rain", weather("rain")), ("clouds", clouds), ("overcast", weather("overcast")), ("storm", weather("storm"))]
+    }
+
     #[test]
-    fn the_ring_is_the_skys_own_horizon() {
-        let p = HdriParams::default();
-        let l = skyline_light(&p);
-        let env = Env::new(&HdriParams { lights: vec![], intensity_ev: 0.0, rotation_deg: 0.0, ..p.clone() });
-        let mut worst = 0.0f32;
-        for i in [0, 16, 32, 48] {
-            let u = (i as f32 + 0.5) / RING as f32;
-            for (el, ring) in [(1.0, &l.ring_low), (15.0, &l.ring_high)] {
-                let want = env.radiance(dir_at_u(u, el)) / env.scale();
-                let got = vec(ring[i]);
-                worst = worst.max((got - want).length() / want.length());
-                println!("ring {i} at {el}: {got:?} vs the map's {want:?} (worst so far {worst:.2e})");
-                // Clouds and the volume are left out of the ring: the default params have no 2D
-                // cloud cover at the horizon worth more than 5 %.
-                assert!((got - want).length() < 0.05 * want.length() + 1e-6, "{i} at {el}: {got:?} vs {want:?}");
+    fn the_ring_is_the_maps_own_horizon() {
+        // Every entry of both rings is what the map draws there (lights removed, over the
+        // intensity), its clouds, its weather and their veil included: the map's own lookup.
+        for (name, p) in skies() {
+            let l = Env::new(&p).skyline_light();
+            let env = Env::new(&HdriParams { lights: vec![], intensity_ev: 0.0, rotation_deg: 0.0, ..p.clone() });
+            let mut worst = 0.0f32;
+            for i in 0..RING {
+                let u = (i as f32 + 0.5) / RING as f32;
+                for (el, ring) in [(1.0, &l.ring_low), (15.0, &l.ring_high)] {
+                    let want = env.radiance(dir_at_u(u, el)) / env.scale();
+                    let got = vec(ring[i]);
+                    worst = worst.max((got - want).length() / want.length().max(1e-30));
+                    assert!(got == want, "{name}: {i} at {el}: {got:?} vs the map's {want:?}");
+                }
             }
+            println!("{name}: the ring against the map, worst relative error {worst:.1e}; ring_low[0] {:?}", l.ring_low[0]);
         }
     }
 
-    fn skyline_on() -> SkylineParams {
-        SkylineParams { on: true, seed: 7, turn_deg: 0.0, lights_by_day: 0.0, settings: Default::default() }
+    #[test]
+    fn the_ring_leaves_out_the_sun_sitting_on_it() {
+        // The sun's disc on a ring direction (u = 0.5/64 at 1 degree) is the sun's light, which
+        // the strip takes as sun_rgb: the ring there is the sky round it.
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 1.0, (0.5 / RING as f32 - 0.5) * 360.0 + 360.0);
+        let env = Env::new(&p);
+        let l = env.skyline_light();
+        assert!(env.radiance(dir_at_u(0.5 / RING as f32, 1.0)).max_elem() > 100.0 * vec(l.ring_low[0]).max_elem(), "the premise: the disc is there");
+        let beside = vec(l.ring_low[1]).max_elem().max(vec(l.ring_low[RING - 1]).max_elem());
+        assert!(vec(l.ring_low[0]).max_elem() < 2.0 * beside, "{:?} beside {beside}", l.ring_low[0]);
     }
 
     #[test]
     fn the_suns_place_is_handed_over_in_the_strip_frame() {
         let mut p = HdriParams::default();
         sun_at(&mut p, 20.0, 0.0);
-        let a = skyline_light(&p);
+        let a = Env::new(&p).skyline_light();
         p.skyline = Some(SkylineParams { turn_deg: 90.0, ..skyline_on() });
-        let b = skyline_light(&p);
+        let b = Env::new(&p).skyline_light();
         assert!((a.sun_el_deg - 20.0).abs() < 0.01, "{}", a.sun_el_deg);
         // Compass azimuth 0 is the map's u = 0.5; a turn of 90 moves the city a quarter toward
         // a larger u, so in the strip's frame the sun stands a quarter back.
@@ -771,74 +715,135 @@ mod tests {
         }
         assert!(a.ring_low[0] != a.ring_low[32], "the premise: the ring is not even round the horizon");
         assert_eq!((a.sun_rgb, a.ambient_rgb), (b.sun_rgb, b.ambient_rgb));
-    }
-
-    #[test]
-    fn the_kept_sky_is_the_sky_built_afresh() {
-        // skyline_light keeps the last sky's layers: asked in turn for two skies, two seeds and
-        // two turns, each answer is its own, the same each time it is asked.
-        let mut p = HdriParams::default();
-        sun_at(&mut p, 12.0, 70.0);
-        let mut q = p.clone();
-        q.sky.atmosphere.haze = 3.0;
-        let mut r = p.clone();
-        r.seed = 99;
-        let mut t = p.clone();
-        t.skyline = Some(SkylineParams { turn_deg: 45.0, ..skyline_on() });
-        let first: Vec<SkylineLight> = [&p, &q, &r, &t].iter().map(|x| skyline_light(x)).collect();
-        let again: Vec<SkylineLight> = [&t, &r, &q, &p].iter().map(|x| skyline_light(x)).rev().collect();
-        assert!(first == again);
-        assert!(first[0] != first[1] && first[0] != first[3], "a hazier sky and a turn change the light");
+        // The map's rotation turns the band with the map, and the intensity is the map's last
+        // factor: neither changes the strip's light.
+        let turned = HdriParams { rotation_deg: 40.0, intensity_ev: 2.0, ..p.clone() };
+        assert_eq!(Env::new(&turned).skyline_light(), b);
     }
 
     #[test]
     fn noon_lights_the_strip_and_night_does_not() {
         let mut p = HdriParams::default();
         sun_at(&mut p, 50.0, 0.0);
-        let day = skyline_light(&p);
+        let day = Env::new(&p).skyline_light();
         sun_at(&mut p, -20.0, 0.0);
-        let night = skyline_light(&p);
+        let night = Env::new(&p).skyline_light();
         assert!(day.sun_rgb[1] > 0.5 && day.ambient_rgb[1] > 0.05, "{day:?}");
         assert!(night.sun_rgb == [0.0; 3] && night.ambient_rgb[1] < 0.01, "{night:?}");
     }
 
     #[test]
-    fn the_strips_light_is_the_grounds_own() {
-        // A white ground under the clear sky by day, as the atmosphere lights it (atmosphere.rs:
-        // albedo x (sky + sun x sin elevation) / pi): sun_rgb x sin(el) + ambient_rgb is that
-        // ground's radiance straight down.
-        let mut p = HdriParams::default();
-        sun_at(&mut p, 35.0, 120.0);
-        p.sky.atmosphere.ground_color = [1.0; 3];
-        let l = skyline_light(&p);
-        let env = Env::new(&p);
-        let ground = env.radiance(dir(0.0, -89.0));
-        let lit = vec(l.sun_rgb) * 35f32.to_radians().sin() + vec(l.ambient_rgb);
-        assert!(close3(lit, ground, 1e-3), "{lit:?} vs the ground {ground:?}");
-        // The weather's rain dims the sun along its way, by the weather's own transmittance.
-        let mut wet = p.clone();
-        wet.sky.weather = Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() });
-        let rainy = skyline_light(&wet);
-        let sky = weather::weathered_sky(&wet.sky);
-        let sun = crate::hdri::atmosphere::sun_direction(&sky.sun);
-        let through = Weather::new(&wet.sky, sun).expect("rain draws").transmittance_toward(sun);
-        assert!(through < 0.99, "the premise: the rain dims the sun ({through})");
-        let open = crate::hdri::atmosphere::Atmosphere::new(sun, &sky.atmosphere, &sky.sun_disc).sun_irradiance() * (through / std::f32::consts::PI);
-        assert!(close3(vec(rainy.sun_rgb), open, 1e-5), "{:?} vs {open:?}", rainy.sun_rgb);
+    fn the_strips_sun_is_the_keys() {
+        // sun_rgb is the key's light per channel (no lights stand in front of the disc here):
+        // their ratio is the disc's alone, the same under every sky and at every elevation, so
+        // a deck that hides the key hides the strip's sun, and the strip's sun fades over the
+        // horizon with the key.
+        let ratio = |p: &HdriParams| -> Option<Vec3f> {
+            let env = Env::new(p);
+            let (l, key) = (env.skyline_light(), env.sun());
+            match key {
+                Some(key) if key.radiance.max_elem() > 0.0 => Some(vec3f(l.sun_rgb[0] / key.radiance.x, l.sun_rgb[1] / key.radiance.y, l.sun_rgb[2] / key.radiance.z)),
+                // No key, or one the cover hides outright (dense fog): no sun on the strip.
+                _ => {
+                    assert!(l.sun_rgb == [0.0; 3], "no key, yet the strip's sun is {:?}", l.sun_rgb);
+                    None
+                }
+            }
+        };
+        let clear = ratio(&skies()[0].1).expect("the sun is up");
+        // Thinner covers, which pass part of the sun: light fog, a drizzle, a thin deck.
+        let mut thin = Vec::new();
+        for (name, fog, rain, coverage) in [("light fog", 0.1, 0.0, 0.0), ("drizzle", 0.0, 0.15, 0.0), ("thin deck", 0.0, 0.0, 0.25)] {
+            let mut p = skies()[0].1.clone();
+            if fog > 0.0 || rain > 0.0 {
+                p.sky.weather = Some(WeatherParams { fog, rain, ..WeatherParams::default() });
+            }
+            p.sky.clouds.coverage = coverage;
+            thin.push((name, p));
+        }
+        let open_key = Env::new(&skies()[0].1).sun().unwrap().radiance.y;
+        let partly = thin.iter().filter(|(_, p)| Env::new(p).sun().map_or(0.0, |k| k.radiance.y / open_key) > 0.05 && Env::new(p).sun().map_or(0.0, |k| k.radiance.y / open_key) < 0.95).count();
+        assert!(partly >= 2, "the premise: thin covers pass part of the key ({partly} of 3)");
+        for (name, p) in skies().into_iter().chain(thin) {
+            let env = Env::new(&p);
+            let (key, sun) = (env.sun().map_or(0.0, |k| k.radiance.y), env.skyline_light().sun_rgb[1]);
+            println!("{name}: the key's green {key:.4e} ({:.3} of the open sky's), the strip's sun {sun:.4e}", key / open_key);
+            if let Some(r) = ratio(&p) {
+                assert!(close3(r, clear, 1e-4), "{name}: {r:?} vs the clear sky's {clear:?}");
+            }
+        }
+        for el in [-0.5f32, -0.2, -0.1, 0.0, 0.1, 0.2, 5.0] {
+            let mut p = HdriParams::default();
+            sun_at(&mut p, el, 140.0);
+            if let Some(r) = ratio(&p) {
+                assert!(close3(r, clear, 1e-4), "at {el}: {r:?} vs {clear:?}");
+            }
+        }
+        // A closed deck: the overcast kind's key is all but gone, and so is the strip's sun.
+        let overcast = Env::new(&skies()[4].1);
+        let open = Env::new(&skies()[0].1).skyline_light().sun_rgb[1];
+        assert!(overcast.skyline_light().sun_rgb[1] < 0.05 * open, "{:?} under the overcast against {open}", overcast.skyline_light().sun_rgb);
     }
 
     #[test]
-    fn the_ring_is_veiled_by_the_weather() {
-        // Fog in front of the horizon: the ring is the open sky through the weather's veil, lit
-        // as the map's own veil is (the dome and the sun), so it is not the clear sky's.
-        let mut p = HdriParams::default();
-        p.sky.weather = Some(WeatherParams { kind: "fog".to_string(), ..WeatherParams::default() });
-        let foggy = skyline_light(&p);
-        let clear = skyline_light(&HdriParams { sky: SkyParams { weather: None, ..weather::weathered_sky(&p.sky) }, ..p.clone() });
-        for i in [0, 20, 40] {
-            let (f, c) = (vec(foggy.ring_low[i]), vec(clear.ring_low[i]));
-            assert!(f.is_finite() && c.is_finite() && (f - c).length() > 1e-3 * c.length(), "{i}: the fog veils the ring: {f:?} vs {c:?}");
+    fn the_strips_light_is_the_maps_white_ground() {
+        // A white ground: sun_rgb x sin(el) + ambient_rgb is the map's ground straight down,
+        // the cover's ground gain included (D7), by day, under a deck and by moonlight.
+        let mut cases = Vec::new();
+        for (name, el, coverage) in [("clear", 35.0, 0.0), ("cloudy", 35.0, 0.7), ("overcast clouds", 20.0, 1.0), ("moonlit", -20.0, 0.0)] {
+            let mut p = HdriParams::default();
+            sun_at(&mut p, el, 120.0);
+            p.sky.atmosphere.ground_color = [1.0; 3];
+            p.sky.clouds.coverage = coverage;
+            cases.push((name, el, p));
         }
+        for (name, el, p) in cases {
+            let env = Env::new(&p);
+            let l = env.skyline_light();
+            let ground = env.radiance(dir(0.0, -90.0)) / env.scale();
+            let rise = el.to_radians().sin().max(0.0);
+            let lit = vec(l.sun_rgb) * rise + vec(l.ambient_rgb);
+            println!("{name}: sun {:?} ambient {:?}, the ground {ground:?}, gain {:?}", l.sun_rgb, l.ambient_rgb, env.ground_gain);
+            assert!(close3(lit, ground, 1e-4), "{name}: {lit:?} vs the ground {ground:?}");
+        }
+    }
+
+    #[test]
+    fn a_skyline_attached_later_is_the_skyline_built_with() {
+        // The app's two phases: the map built without the strip, its light handed over, the
+        // strip attached. A blooming caster over a city with lights in it and the low sun
+        // beside it: the bake, the key and the bloom are those of the map built with the strip
+        // in its ImageSet, bit for bit, also when the key was asked for before the strip came.
+        use crate::hdri::caster::fixtures::caster_at;
+        let mut p = HdriParams::default();
+        sun_at(&mut p, 3.0, 0.0);
+        let settings = CasterParams { bloom_strength: 1.0, bloom_length_deg: 15.0, bloom_threshold_ev: 3.0, ..CasterParams::default() };
+        p.lights = vec![caster_at(12.0, 14.0, 20.0, 14.0, None, settings)];
+        let (w, h) = (256, 24);
+        let mut texels = vec![[0.05, 0.05, 0.06, 1.0]; w * h];
+        for k in 0..40 {
+            texels[(4 + k % 16) * w + 100 + 3 * k] = [40.0, 30.0, 20.0, 1.0];
+        }
+        let city = SkylineBand { w, h, texels, top_deg: 3.0, bottom_deg: -4.0 };
+        let (q, images) = with_band(&p, city.clone());
+        let built = Env::new_with(&q, &images);
+        let bloom = |env: &Env| env.studio.caster(0).and_then(|c| c.bloom()).map(|b| b.energy());
+        assert!(bloom(&built).is_some_and(|e| e > 0.0), "the premise: the caster blooms");
+        let (map, key) = (built.bake(64), built.sun());
+        let asked = Env::new(&q);
+        let before = asked.sun();
+        let later = asked.with_skyline(Arc::new(city.clone()));
+        assert!(later.has_skyline());
+        assert!(later.bake(64) == map, "the bake");
+        assert_eq!(later.sun(), key, "the key");
+        assert_ne!(before, key, "the premise: the city changes the key");
+        assert_eq!(bloom(&later), bloom(&built), "the bloom");
+        assert_eq!(later.skyline_light(), built.skyline_light(), "the strip's light is the base's, without the strip");
+        // A block that is off draws no strip, attached or not.
+        let mut off = q.clone();
+        off.skyline.as_mut().unwrap().on = false;
+        let unchanged = Env::new(&off).with_skyline(Arc::new(city));
+        assert!(!unchanged.has_skyline() && unchanged.bake(64) == Env::new(&off).bake(64));
     }
 
     #[test]

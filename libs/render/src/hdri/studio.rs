@@ -548,6 +548,15 @@ impl Studio {
         }
     }
 
+    /// Takes every caster's bloom away, so the studio is as it was built
+    /// (`Env::with_skyline` rasters the bloom again over a new base).
+    pub(super) fn clear_caster_blooms(&mut self) {
+        for caster in self.casters.iter_mut().flatten() {
+            caster.clear_bloom();
+        }
+        self.any_fx = self.fx.iter().any(|fx| !fx.is_plain()) || self.casters.iter().flatten().any(|c| !c.is_plain());
+    }
+
     /// The caster at studio entry `entry`; None for a light.
     pub(super) fn caster(&self, entry: usize) -> Option<&CasterLayer> {
         self.casters.get(entry).and_then(Option::as_ref)
