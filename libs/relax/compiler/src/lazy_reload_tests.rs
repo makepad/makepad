@@ -330,7 +330,8 @@ fn specv_aliased_call_from_unverified_body() {
     std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     let original = "pub fn callee(a: &mut u32, b: &mut u32) -> u32 { *a = 1; *b = 2; *a }\n\
         pub fn through_raw(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n\
-        pub fn value(out: &mut u32) { *out = 11; }\n";
+        pub fn value(out: &mut u32) { *out = 11; }\n\
+        pub fn early(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n";
     std::fs::write(dir.join("app/src/lib.rs"), original).unwrap();
     std::env::set_var("MAKEPAD_RUN_LIVE_LOG", dir.join("live.jsonl"));
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
@@ -342,7 +343,7 @@ fn specv_aliased_call_from_unverified_body() {
         let id = crate::program::DefId(i as u32);
         (d.krate == app_crate && prog.name(id) == name).then_some(id)
     }).unwrap();
-    let (callee_def, raw_def, value_def) = (find("callee"), find("through_raw"), find("value"));
+    let (callee_def, raw_def, value_def, early_def) = (find("callee"), find("through_raw"), find("value"), find("early"));
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     crate::borrowck::event::set_app_scope(roots);
@@ -352,27 +353,39 @@ fn specv_aliased_call_from_unverified_body() {
         let c = u.fn_id(crate::jit::FnKey::Inst(callee_def, vec![]));
         let r = u.fn_id(crate::jit::FnKey::Inst(raw_def, vec![]));
         let v = u.fn_id(crate::jit::FnKey::Inst(value_def, vec![]));
-        (c, r, v, u.entry(r), u.entry(v))
+        let e = u.fn_id(crate::jit::FnKey::Inst(early_def, vec![]));
+        (c, r, v, u.entry(r), u.entry(v), e, u.entry(e))
     });
-    let (callee, raw, value, raw_entry, value_entry) = ids;
+    let (callee, raw, value, raw_entry, value_entry, early, early_entry) = ids;
     let run = |entry, expected| {
         let mut result = 0u32;
         unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         assert_eq!(result, expected);
     };
-    // the checker queues the program at the first compile; wait until the originals are verified
+    // the checker queues the program at the first compile; wait until the originals are verified.
+    // `early` runs before its verdict: unverified code, its aliasing call goes to the twin (2)
     run(value_entry, 11);
+    run(early_entry, 2);
+    assert!(u.fns[early as usize].rir.as_ref().is_some_and(|r| r.plain_calls), "the unverified lowering calls the twin");
     let t0 = std::time::Instant::now();
     loop {
         crate::borrowck::settle().recv().unwrap();
-        if [callee, raw, value].iter().all(|&i| u.verdict_clean(i)) { break; }
+        if [callee, raw, value, early].iter().all(|&i| u.verdict_clean(i)) { break; }
         assert!(t0.elapsed().as_secs() < 20, "the originals never got a clean verdict");
+    }
+    // verified now: its promotion lowers it again, calling `callee` itself (no twin calls left)
+    assert!(u.refresh_verified(early));
+    unsafe { crate::jit::build_normal(up, early) }.unwrap();
+    {
+        let r = u.fns[early as usize].rir.as_ref().expect("RIR");
+        assert!(!r.plain_calls && !r.baseline, "verified: lowered again without twin calls");
+        let twin = u.plain_twin_of(callee).expect("the twin of callee");
+        assert!(!r.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(t), _, _) if *t == twin))));
     }
     // verified code: `callee` is compiled with noalias, and a call that aliases (through raw pointers, so
     // the checker accepts it) gets the answer the noalias code computes
     run(raw_entry, 1);
     assert!(!u.fns[callee as usize].unverified.load(Ordering::Relaxed));
-    assert!(u.plain_twin_of(callee).is_none(), "verified code does not use twins");
     // an unverified body that aliases the same way, safely written (a borrow error)
     let patched = "pub fn callee(a: &mut u32, b: &mut u32) -> u32 { *a = 1; *b = 2; *a }\n\
         pub fn through_raw(out: &mut u32) { let mut x = 0u32; let p = &mut x as *mut u32; *out = callee(unsafe { &mut *p }, unsafe { &mut *p }); }\n\
@@ -384,6 +397,12 @@ fn specv_aliased_call_from_unverified_body() {
     run(value_entry, 2);
     let twin = u.plain_twin_of(callee).expect("the aliasing call went to the callee's twin");
     assert!(u.fns[twin as usize].compiled);
+    // the twin tiers up (O3, built without noalias): the aliasing call still gets the machine's answer
+    assert!(unsafe { crate::jit::compile_tier1(up, twin) }, "the twin gets O3 code");
+    assert!(u.fns[twin as usize].o3.load(Ordering::Relaxed) && u.fns[twin as usize].unverified.load(Ordering::Relaxed));
+    run(value_entry, 2);
+    // ... but the patched body itself, awaiting its verdict, does not
+    assert!(!unsafe { crate::jit::compile_tier1(up, value) }, "no O3 build of a patch without its verdict");
     // the verdict rejects the patch: it reverts
     let mut undos = vec![outcome.undo.unwrap()];
     let mut pending = vec![crate::reload::PendingPatch { group: outcome.group, what: "lib.rs".into(), ids: vec![value], event_seq: crate::inspect::events::last_seq() }];

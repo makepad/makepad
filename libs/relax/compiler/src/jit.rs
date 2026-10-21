@@ -4768,12 +4768,20 @@ impl Unit {
             FnKey::Inst(d, args) => {
                 if !crate::borrowck::event::admit(&self.prog, self.prog.def(*d).krate) || crate::borrowck::body::CheckedBody::item(&self.prog, *d).is_none() { return Verdict::Clean; }
                 let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
-                match crate::borrowck::lazy::verdict(std::sync::Arc::as_ptr(&self.front) as usize, *d, args, epoch) {
-                    FnVerdict::Clean => Verdict::Clean,
-                    FnVerdict::Errors(events) => Verdict::Failed(events),
+                let pending = match crate::borrowck::lazy::verdict(std::sync::Arc::as_ptr(&self.front) as usize, *d, args, epoch) {
+                    FnVerdict::Clean => return Verdict::Clean,
+                    FnVerdict::Errors(events) => return Verdict::Failed(events),
                     FnVerdict::Pending => Verdict::Pending,
                     FnVerdict::Unchecked(why) if matches!(why.as_str(), "stale" | "not queued" | "changed") => Verdict::Pending,
-                    FnVerdict::Unchecked(why) => Verdict::Unverifiable(why),
+                    FnVerdict::Unchecked(why) => return Verdict::Unverifiable(why),
+                };
+                // not checked in this run yet: the owner's verdict stored by an earlier run (the one the
+                // background checker reuses when it reaches this body; it waits for the start, so a warm
+                // launch would otherwise lower every app body it compiles as unverified code)
+                match self.stored_owner_verdict(*d, epoch) {
+                    Some(crate::borrowck::lazy::StoredVerdict::Clean) => Verdict::Clean,
+                    Some(crate::borrowck::lazy::StoredVerdict::Unchecked(why)) => Verdict::Unverifiable(why),
+                    None => pending,
                 }
             }
             FnKey::Closure(_, _, parent) => self.verdict_state(*parent),
@@ -4781,6 +4789,22 @@ impl Unit {
             FnKey::Plain(_) => Verdict::Unverifiable("unverified-mode twin".into()),
             _ => Verdict::Clean,
         }
+    }
+
+    /// SPEC-V: the verdict an earlier run stored for owner `d` under the current sources (cache.rs
+    /// OwnerVerdicts: the crate fingerprints and the definition), if any.
+    /// Looked up once per owner and epoch (sweep_verdicts asks again for every waiting slot).
+    fn stored_owner_verdict(&self, d: DefId, epoch: u64) -> Option<crate::borrowck::lazy::StoredVerdict> {
+        if let Some(v) = self.front.stored_owner.get(&(epoch, d)) {
+            return v;
+        }
+        let c = self.cache.as_ref()?;
+        let v = match self.front.owner_verdicts.get(&epoch) {
+            Some(v) => v,
+            None => crate::zone_alloc::kept_with(|| self.front.owner_verdicts.insert_first(epoch, std::sync::Arc::new(c.owner_verdicts(epoch)))),
+        };
+        let found = v.lookup(&self.prog, d, epoch).1;
+        crate::zone_alloc::kept_with(|| self.front.stored_owner.insert_first((epoch, d), found))
     }
 
     /// Relaxed Rust D3: the run-time disjoint-index checks slot `id`'s clean verdict asks its code
@@ -4814,6 +4838,19 @@ impl Unit {
     /// SPEC-V: the twin of `id`, if one exists.
     pub(crate) fn plain_twin_of(&self, id: u32) -> Option<u32> {
         self.fn_map.get(&FnKey::Plain(id))
+    }
+
+    /// SPEC-V: whether slot `id` may get O3 code. Verified code does; so does unverified code (twins,
+    /// bodies whose verdict is pending or will never come), built from its unverified lowering as it
+    /// is: `noalias` withheld, its aliasing-prone calls still going to twins, never inlined, never
+    /// cached, built again once its verdict is clean (sweep_verdicts). Not while a live patch awaits
+    /// its verdict, and never for the code of a patch without a clean verdict: a rejected patch group
+    /// is rolled back to the code it replaced, as a whole.
+    pub(crate) fn o3_allowed(&self, id: u32) -> bool {
+        if self.refresh_verified(id) { return true; }
+        let body = match self.fns[id as usize].key { FnKey::Plain(b) => b, _ => id };
+        crate::reload::observations_verified()
+            && (self.fns[id as usize].patch_gen == 0 && self.fns[body as usize].patch_gen == 0 || self.verdict_clean(body))
     }
 
     /// SPEC-V: whether slot `id`'s code is verified. A flagged slot whose verdict has become clean
@@ -6676,8 +6713,9 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
         O2_STATS[2].fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    if snapshot && (f.building || f.inflight || f.rir.as_ref().map_or(true, |r| r.full)) {
-        // no RIR to copy yet (or a build open): its full build after the present
+    if snapshot && (f.building || f.inflight || f.rir.as_ref().map_or(true, |r| r.full || r.plain_calls)) {
+        // no RIR to copy yet (or a build open, or SPEC-V: an unverified lowering that calls twins,
+        // which is lowered again): its full build after the present
         crate::zone_alloc::kept_with(|| O2_LATER.lock().unwrap_or_else(|e| e.into_inner()).push((up as usize, id)));
         return None;
     }
@@ -6685,7 +6723,8 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     // served meanwhile)
     wait_inflight(up, id);
     let f = &(&*up).fns[id as usize];
-    let lowered = f.rir.as_ref().map(|r| (**r).clone());
+    // (SPEC-V: an unverified lowering that calls twins is lowered again, as verified code)
+    let lowered = f.rir.as_ref().filter(|r| !r.plain_calls).map(|r| (**r).clone());
     if begin_build(up, id).is_err() {
         O2_STATS[2].fetch_add(1, Ordering::Relaxed);
         return None;
@@ -7338,6 +7377,12 @@ unsafe fn build_rir_mode(up: *mut Unit, id: u32, mode: RirMode) -> Result<(), St
     }
 }
 
+/// RIR a Normal build replaces: baseline code, or (SPEC-V) an unverified lowering (noalias withheld,
+/// calls to twins) -- upgraded only once the body's verdict is clean.
+fn upgradable(r: &relax_backend::rir::Func) -> bool {
+    r.baseline || r.plain_calls || !r.withheld_noalias.is_empty()
+}
+
 unsafe fn build_rir_unguarded(up: *mut Unit, id: u32, mode: RirMode) -> Result<(), String> {
     let normal = mode == RirMode::Normal;
     (&mut *up).check_before_lowering(id);
@@ -7350,21 +7395,17 @@ unsafe fn build_rir_unguarded(up: *mut Unit, id: u32, mode: RirMode) -> Result<(
         let u = &mut *up;
         if let Some(r) = &u.fns[id as usize].rir {
             let to_o2 = normal && o2_build() && !r.full;
-            if !normal || !(r.baseline || to_o2) || u.fns[id as usize].building || u.fns[id as usize].inflight {
+            if !normal || !(upgradable(r) || to_o2) || u.fns[id as usize].building || u.fns[id as usize].inflight {
                 return Ok(());
             }
-            // D3: the verdict asks for run-time disjoint-index checks, which an unverified lowering
-            // lacks: the body is lowered again (below) instead of upgraded
-            if !u.fns[id as usize].d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id).is_some() {
+            // the verdict is clean (checked above). An unverified lowering is lowered again (below)
+            // instead of upgraded when it sends calls to unverified-mode twins (SPEC-V: verified code
+            // calls the slots themselves) or lacks the run-time disjoint-index checks the verdict
+            // asks for (D3); otherwise it is reused (prepare_rir_from gives it its noalias facts back)
+            if r.plain_calls || !u.fns[id as usize].d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id).is_some() {
                 u.fns[id as usize].rir = None;
             } else {
-            let mut f = (**r).clone();
-            // SPEC-V: the verdict is clean (checked above): the body gets its noalias facts back
-            if !f.withheld_noalias.is_empty() {
-                let w = std::mem::take(&mut f.withheld_noalias);
-                f.noalias.extend(w);
-            }
-            lowered = Some(f);
+                lowered = Some((**r).clone());
             }
         }
         if let Some(e) = &u.fns[id as usize].build_err {
@@ -7467,7 +7508,13 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     let u = &mut *up;
     let baseline = baseline && !u.pairs_sincos(&func);
     func.baseline = baseline;
-    if unverified { func.withheld_noalias = std::mem::take(&mut func.noalias); }
+    if unverified {
+        func.withheld_noalias = std::mem::take(&mut func.noalias);
+    } else if !func.withheld_noalias.is_empty() {
+        // SPEC-V: an unverified lowering reused now that the verdict is clean gets its facts back
+        let w = std::mem::take(&mut func.withheld_noalias);
+        func.noalias.extend(w);
+    }
     // O2: a `#[relax(O2)]` fn built by the O2 worker (o2_thread) compiles as O1 does without
     // O3; its on-demand builds on the program's threads stay O1
     let full = !baseline && o2_build() && marked_hot(u, id);
@@ -7656,7 +7703,7 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
                 }
                 nested_ns += cpu_ns() - tn;
             }
-            if want && !baseline && (&*up).fns[*c as usize].rir.as_ref().is_some_and(|r| r.baseline) {
+            if want && !baseline && (&*up).fns[*c as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
                 let tn = cpu_ns();
                 let _ = build_rir_mode(up, *c, RirMode::Normal);
                 nested_ns += cpu_ns() - tn;
@@ -9722,6 +9769,10 @@ fn sampler_thread() {
             let counts = heat.get_or_insert_with(std::collections::HashMap::new);
             for &os::sample::Sample { pc, weight } in &pcs {
                 let Some(id) = u.find_fn(pc) else { continue };
+                // SPEC-V: a twin's samples heat its base slot too: the body is hot whichever lowering
+                // of it runs, and verified callers lowered again (hot_twin_callers) call the base
+                let base = match u.fns[id as usize].key { FnKey::Plain(b) => Some(b), _ => None };
+                for id in std::iter::once(id).chain(base) {
                 unsafe { base_sampled(up, id) };
                 let (before, count) = crate::zone_alloc::kept_with(|| {
                     let c = counts.entry(id).or_insert(0);
@@ -9735,6 +9786,7 @@ fn sampler_thread() {
                     }
                     // (the sampler's own vector grows here, on the owner: kept, it outlives the compiler arena)
                     crate::zone_alloc::kept_with(|| hot.push(id));
+                }
                 }
             }
             // HEAT before TIER_QUEUE nowhere (tier_pop holds the queue, then reads HEAT)
@@ -9987,7 +10039,9 @@ fn await_verdict(id: u32, w: Await) {
 /// verified, and the promotions that waited for them run. A no-op until `lazy::RECORDED` or the patch
 /// epoch changes. Any thread; the unit is read under a unit call.
 pub fn sweep_verdicts() {
-    let now = crate::borrowck::lazy::RECORDED.load(Ordering::Acquire).wrapping_mul(1 << 20).wrapping_add(PATCH_EPOCH.load(Ordering::SeqCst));
+    // (the pending patches too: unverified O3 builds wait for none to be pending)
+    let now = crate::borrowck::lazy::RECORDED.load(Ordering::Acquire).wrapping_mul(1 << 20).wrapping_add(PATCH_EPOCH.load(Ordering::SeqCst))
+        .wrapping_add((crate::reload::UNVERIFIED_PATCHES.load(Ordering::Acquire) as u64) << 48);
     if SWEPT.swap(now, Ordering::Relaxed) == now {
         return;
     }
@@ -9999,19 +10053,29 @@ pub fn sweep_verdicts() {
         let u = &*up;
         let mut n = 0u32;
         let mut relower = Vec::new();
+        let mut verified = Vec::new();
         for id in 0..u.fns.len() {
             if u.fns[id].unverified.load(Ordering::Relaxed) && u.refresh_verified(id as u32) {
                 n += 1;
-                // D3: the installed code lacks the verdict's disjoint-index checks; it is built again
-                if u.fns[id].compiled && !u.fns[id].d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id as u32).is_some() {
+                // D3: the installed code lacks the verdict's disjoint-index checks; O3 code built
+                // while unverified lacks its noalias facts: built again
+                if u.fns[id].compiled && (u.fns[id].o3.load(Ordering::Relaxed) || !u.fns[id].d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(id as u32).is_some()) {
                     relower.push(id as u32);
+                } else {
+                    verified.push(id as u32);
                 }
             }
         }
+        // ... and warm ones whose unverified lowering calls hot twins
+        relower.extend(hot_twin_callers(u, Some(&verified), None));
         for id in relower { tier_push(id, Q_RETIER, 0); }
         let released: Vec<(u32, Await)> = {
             let mut a = AWAIT_VERDICT.lock().unwrap_or_else(|e| e.into_inner());
-            let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *a).into_iter().partition(|(id, _)| !u.fns[*id as usize].unverified.load(Ordering::Relaxed));
+            // an O3 build of unverified code waits only for a live patch's verdict (Unit::o3_allowed)
+            let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *a).into_iter().partition(|(id, w)| match w {
+                Await::Tier(..) => u.o3_allowed(*id),
+                Await::O2 => !u.fns[*id as usize].unverified.load(Ordering::Relaxed),
+            });
             crate::zone_alloc::kept_with(|| *a = keep);
             go
         };
@@ -10027,6 +10091,29 @@ pub fn sweep_verdicts() {
         n
     });
     let _ = verified;
+}
+
+/// SPEC-V: the slots among `cands` (None: every slot the sampler saw lately) that are verified, warm
+/// (in HEAT) and still run an unverified lowering whose calls go to `twin` (None: to any twin that is
+/// hot or has O3 code). Built again (retier), they are lowered as verified code, so the hot chain
+/// under them reaches the slots themselves: noalias, inlining, cache entries. Unit read; HEAT is
+/// taken here and released before the caller queues them (tier_pop reads HEAT under the queue).
+fn hot_twin_callers(u: &Unit, cands: Option<&[u32]>, twin: Option<u32>) -> Vec<u32> {
+    let heat = HEAT.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(h) = heat.as_ref() else { return Vec::new() };
+    let hot = |t: u32| matches!(u.fns[t as usize].key, FnKey::Plain(_)) && match twin {
+        Some(w) => t == w,
+        None => u.fns[t as usize].o3.load(Ordering::Relaxed) || h.get(&t).is_some_and(|n| *n >= SAMPLES_HOT),
+    };
+    let calls_hot = |c: u32| {
+        let f = &u.fns[c as usize];
+        h.contains_key(&c) && f.compiled && !f.unverified.load(Ordering::Relaxed) && !matches!(f.key, FnKey::Plain(_) | FnKey::Sandbox(_))
+            && f.rir.as_ref().is_some_and(|r| r.plain_calls && r.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(t), _, _) if hot(*t)))))
+    };
+    match cands {
+        Some(c) => c.iter().copied().filter(|&c| calls_hot(c)).collect(),
+        None => h.keys().copied().filter(|&c| (c as usize) < u.fns.len() && calls_hot(c)).collect(),
+    }
 }
 
 fn tier_push(id: u32, why: u8, rate: u64) {
@@ -10263,7 +10350,9 @@ impl Unit {
             FnKey::Inst(d, _) => self.prog.def(*d).kind != DefKind::ForeignFn,
             FnKey::Closure(..) => true,
             FnKey::Sandbox(base) => *base != u32::MAX,
-            FnKey::Shim(_) | FnKey::Glue(..) | FnKey::Plain(_) => false,
+            // SPEC-V: twins tier up too (Unit::o3_allowed); the sampler queues only counted slots
+            FnKey::Plain(_) => true,
+            FnKey::Shim(_) | FnKey::Glue(..) => false,
         };
         self.arm_counter_as(id, code, counted);
     }
@@ -10840,8 +10929,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     if t1prof_replay(options) && !owner::is_owner() {
         return owner::call(owner::Class::Background, || compile_tier1(up, id));
     }
-    // SPEC-V: O3 needs the body's clean verdict
-    if !owner::call(owner::Class::Background, || (&*up).refresh_verified(id)) {
+    // SPEC-V: unverified code gets O3 code too, built as it is (Unit::o3_allowed)
+    if !owner::call(owner::Class::Background, || (&*up).o3_allowed(id)) {
         await_verdict(id, Await::Tier(Q_SAMPLES, 0));
         return false;
     }
@@ -10885,7 +10974,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             TIER1_RIR_REBUILT[0].fetch_add(1, Ordering::Relaxed);
             TIER1_RIR_REBUILT[1].fetch_add(wall_ns() - t, Ordering::Relaxed);
         }
-        if (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline) {
+        if (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
             let _ = build_rir_mode(up, id, RirMode::Normal);
         }
         // A caller's version alone cannot protect an in-flight build: a patch may change
@@ -10968,7 +11057,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         input_pins.push(TierActive(c));
         let u = &mut *up;
         u.sync_entry_ref(c);
-        if u.fns[c as usize].rir.as_ref().is_some_and(|r| r.baseline) {
+        if u.fns[c as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
             let _ = build_rir_mode(up, c, RirMode::Normal);
         }
         let u = &mut *up;
@@ -11385,7 +11474,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 // it a panic through the frame skipped its cleanups.
                 let recursive = self_call || inlined.contains(&id);
                 let frame_max = if recursive { TIER1_CACHE_FRAME_MAX } else { TIER1_CACHE_FRAME_MAX_FLAT };
-                if frame_size <= frame_max {
+                // SPEC-V: unverified O3 code is never the slot's entry (it is built again once verified)
+                let unverified = u.fns[id as usize].unverified.load(Ordering::Relaxed);
+                if frame_size <= frame_max && !unverified {
                     if let Some(mut c) = u.cache.take() {
                         c.record_o3(u, id, &code, &relocs, &map, &inlined, &nounwind_used);
                         u.cache = Some(c);
@@ -11480,6 +11571,13 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 }
                 if again && !(t1prof_on(options) && T1PROF.lock().unwrap().as_ref().map_or(false, |p| p.replay)) {
                     u.retier(id);
+                }
+                // SPEC-V: a twin tiered up: its warm callers that are verified by now are lowered
+                // again, so they call the base slot (which the twin's samples heat as well)
+                if matches!(u.fns[id as usize].key, FnKey::Plain(_)) {
+                    for c in hot_twin_callers(u, None, Some(id)) {
+                        u.retier(c);
+                    }
                 }
                 u.stats.code_bytes += code.len() as u64;
                 u.stats.tier1_installed += 1;
@@ -13477,6 +13575,8 @@ pub struct FrontShared {
     alive: AtomicBool,
     pub(crate) warm_cache: AtomicBool,
     owner_verdicts: crate::conc::MemoMap<u64, std::sync::Arc<crate::cache::OwnerVerdicts>>,
+    /// SPEC-V: the stored owner verdicts looked up so far, by (epoch, owner) (Unit::stored_owner_verdict)
+    stored_owner: crate::conc::MemoMap<(u64, DefId), Option<crate::borrowck::lazy::StoredVerdict>>,
     /// slot -> key (the fns table moves when it grows)
     slot_keys: crate::conc::MemoMap<u32, FnKey>,
     /// checked bodies with the collect epoch they were checked at
@@ -13518,6 +13618,7 @@ impl FrontShared {
             alive: AtomicBool::new(false),
             warm_cache: AtomicBool::new(false),
             owner_verdicts: Default::default(),
+            stored_owner: Default::default(),
             slot_keys: crate::conc::MemoMap::with_bits(16),
             ahead: Default::default(),
             inprog: Default::default(),

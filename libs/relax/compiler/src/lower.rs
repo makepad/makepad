@@ -9140,6 +9140,7 @@ impl<'a> Lcx<'a> {
         let callee = match callee {
             Callee::Fn(id) if to_twin => {
                 let twin = self.u.plain_twin(id);
+                if twin != id { self.f.plain_calls = true; }
                 if sret.is_some() && !self.f.sret_callees.contains(&twin) {
                     self.f.sret_callees.push(twin);
                 }

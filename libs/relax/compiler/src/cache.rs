@@ -1612,7 +1612,17 @@ impl Cache {
                 }
                 self.enc_tys(u, &shim.args, e, crates, 0)
             }
-            FnKey::Sandbox(_) | FnKey::Plain(_) => None,
+            FnKey::Sandbox(_) => None,
+            // SPEC-V: an unverified-mode twin is its base's body lowered as unverified code: keyed
+            // by the base (the code that ran before its verdict, and the calls to it, are cached)
+            FnKey::Plain(base) => {
+                if base as usize >= u.fns.len() {
+                    return None;
+                }
+                e.u8(4);
+                let bk = u.fns[base as usize].key.clone();
+                self.enc_fnkey(u, &bk, e, crates, depth + 1)
+            }
             FnKey::Inst(d, args) => {
                 e.u8(0);
                 self.enc_def(u, d, e, crates);
@@ -2903,7 +2913,7 @@ fn key_defs(u: &Unit, key: &FnKey) -> Vec<DefId> {
     for _ in 0..32 {
         match k {
             FnKey::Inst(d, _) => { out.push(d); break; }
-            FnKey::Closure(_, _, parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
+            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
             _ => break,
         }
     }
@@ -6359,6 +6369,17 @@ impl Linker {
                     _ => return None,
                 };
                 FnKey::Shim(crate::jit::ShimInstance { kind, args: self.cache().dec_tys(u, d, 0)? })
+            }
+            // SPEC-V: an unverified-mode twin, keyed by its base (a base the startup image names: its slot)
+            4 => {
+                let base = match self.image_slot_at(d) {
+                    Some(b) => b,
+                    None => {
+                        let bk = self.dec_fnkey(u, d, depth + 1)?;
+                        u.fn_id(bk)
+                    }
+                };
+                FnKey::Plain(base)
             }
             _ => return None,
         })

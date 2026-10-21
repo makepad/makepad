@@ -735,6 +735,8 @@ pub(super) fn skip_fnkey(d: &mut D, depth: u32) -> Option<()> {
             }
             skip_tys(d, 0)
         }
+        // an unverified-mode twin: its base's key
+        4 => skip_fnkey(d, depth + 1),
         _ => None,
     }
 }
@@ -1648,7 +1650,7 @@ impl Linker {
     fn image_slot_by_key(&mut self, u: &mut Unit, key: &crate::jit::FnKey) -> Option<u32> {
         // a closure's key encodes its parents' keys: those named first
         let parent = |u: &Unit, k: &crate::jit::FnKey| match k {
-            crate::jit::FnKey::Closure(_, _, p) if (*p as usize) < u.fns.len() => Some(*p),
+            crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) if (*p as usize) < u.fns.len() => Some(*p),
             _ => None,
         };
         let mut p = parent(u, key);
