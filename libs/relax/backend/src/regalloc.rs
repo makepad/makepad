@@ -923,6 +923,13 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 }
             }
         }
+        let equal = equal_copies(options, f, &reach, &tab, &block_start, &ranges, &wts, &remat);
+        for &(w, a, b) in &equal {
+            if !pairs.iter().any(|x| x.1 == a && x.2 == b) {
+                pairs.push((w, a, b));
+            }
+        }
+        let equal: std::collections::HashSet<(u32, u32)> = equal.iter().map(|x| (x.1, x.2)).collect();
         pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         for (_, a, b) in pairs {
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
@@ -931,7 +938,10 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             }
             let x = merged.get(&ra).map(|v| v.as_slice()).unwrap_or(ranges.of(ra));
             let y = merged.get(&rb).map(|v| v.as_slice()).unwrap_or(ranges.of(rb));
-            if x.is_empty() || y.is_empty() || ranges_meet(x, y) {
+            // overlapping ranges join only for a copy of one value (equal_copies) between two
+            // values not yet in a unit: wherever both are live they hold the same bits
+            let same = (ra, rb) == (a, b) && !merged.contains_key(&ra) && !merged.contains_key(&rb) && equal.contains(&(a, b));
+            if x.is_empty() || y.is_empty() || (ranges_meet(x, y) && !same) {
                 continue;
             }
             let u = union_ranges(x, y);
@@ -2523,6 +2533,82 @@ fn affinities(f: &Func, reach: &[bool], block_start: &[u32], ranges: &Ranges, wt
     Aff { e: m.iter().map(|e| (e.1, e.2)).collect(), off }
 }
 
+/// Copies whose two values may share a register although both stay live: `d = s` (a `Mov`, or an
+/// integer cast the backends emit as a plain move -- upper bits nobody reads, or a source already
+/// zero above the target width; the condition both backends' `Conv::IntToInt` use) where d has no
+/// other definition and s is not redefined anywhere d is live. Wherever both are live they hold the
+/// same bits, so they do not interfere (LLVM's coalescer joins such copies by value number). A cast
+/// of a value that stays live (`entry as u8` as a shift count, `entry` read again after) then needs
+/// no copy. (weight, lower vreg, higher vreg).
+#[allow(clippy::too_many_arguments)]
+fn equal_copies(options: &relax_session::Options, f: &Func, reach: &[bool], tab: &OpTab, block_start: &[u32], ranges: &Ranges, wts: &[f32], remat: &[Remat]) -> Vec<(f32, u32, u32)> {
+    let nv = f.vregs.len();
+    let mut cand: Vec<(u32, u32, f32, u8)> = Vec::new(); // (d, s, weight, cast width or 0 for a Mov)
+    let mut any_cast = false;
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if !reach[bi] {
+            continue;
+        }
+        for i in &b.insts {
+            let (d, s2, cast) = match *i {
+                Inst::Mov(d, s2) => (d, s2, 0),
+                Inst::Conv(Conv::IntToInt(it), d, s2) => (d, s2, it.bits),
+                _ => continue,
+            };
+            if d == s2 || f.vregs[d.0 as usize] != f.vregs[s2.0 as usize] || f.vregs[d.0 as usize].is_vec() || remat[d.0 as usize].is_some() || remat[s2.0 as usize].is_some() {
+                continue;
+            }
+            any_cast |= cast != 0;
+            cand.push((d.0, s2.0, wts[bi], cast));
+        }
+    }
+    if cand.is_empty() {
+        return Vec::new();
+    }
+    let (low, zero) = if any_cast {
+        let low = crate::passes::low_bits_only(options, f);
+        let zero = crate::passes::zero_above(options, f, &low);
+        (low, zero)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // definition positions of every vreg (params at 0)
+    let mut ndef = vec![0u32; nv];
+    let mut defs_at: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+        defs_at[p.0 as usize].push(0);
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if !reach[bi] {
+            continue;
+        }
+        let k0 = tab.first[bi] as usize;
+        for ii in 0..b.insts.len() {
+            for &d in tab.defs(k0 + ii) {
+                ndef[d as usize] += 1;
+                defs_at[d as usize].push(block_start[bi] + 2 * ii as u32 + 2);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (d, s2, w, cast) in cand {
+        if ndef[d as usize] != 1 {
+            continue;
+        }
+        // a cast is a plain move: its upper bits nobody reads, or its source zero above fewer bits
+        if cast != 0 && !(low[d as usize] || (zero[s2 as usize] > 0 && zero[s2 as usize] < cast)) {
+            continue;
+        }
+        let rd = ranges.of(d);
+        if defs_at[s2 as usize].iter().any(|&q| rd.iter().any(|&(a, b)| a < q && q <= b)) {
+            continue;
+        }
+        out.push((w, d.min(s2), d.max(s2)));
+    }
+    out
+}
+
 /// Spill weight of every vreg: its uses and defs, each weighted 8^loop depth, divided by the
 /// length of its live ranges.
 #[inline(never)]
@@ -3206,6 +3292,12 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
     let reach0 = reachable(f);
     let mut preds = preds_of(f, &reach0);
     let mut loops = natural_loops(f, &reach0, &preds, false);
+    if trace_on(f) {
+        for (hd, m) in &loops {
+            let hb = m.iter().enumerate().any(|(b, x)| *x && hot.map_or(true, |h| h.get(b).copied().unwrap_or(false)));
+            eprintln!("split-loop {} loop h{} blocks {} hot {}", f.name, hd, m.iter().filter(|x| **x).count(), hb);
+        }
+    }
     if let Some(h) = hot {
         loops.retain(|(_, m)| m.iter().enumerate().any(|(b, x)| *x && h.get(b).copied().unwrap_or(false)));
     }
@@ -3416,6 +3508,10 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
                     }
                 });
             }
+        }
+        if trace_on(f) {
+            let sp: Vec<String> = split.iter().map(|x| format!("v{}->v{}{}", x.0, x.1, if through_pieces.contains(&x.1) { "t" } else { "" })).collect();
+            eprintln!("split-loop {} h{} blocks {} exits {} refd {}: {}", f.name, header, blocks_of[li].len(), exits.len(), refd.len(), sp.join(" "));
         }
         if split.is_empty() {
             continue;

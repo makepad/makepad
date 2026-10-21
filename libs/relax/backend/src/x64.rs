@@ -319,39 +319,44 @@ impl Asm {
     }
     /// sign/zero extension of the low `bits` of `r` in place
     fn extend(&mut self, r: u8, bits: u8, signed: bool) {
+        self.extend_from(r, r, bits, signed);
+    }
+    /// d = the low `bits` of s, sign/zero extended: one instruction, no copy first (movzx / movsx
+    /// read any source register)
+    fn extend_from(&mut self, d: u8, s: u8, bits: u8, signed: bool) {
         match (bits, signed) {
             (8, true) => {
-                self.rex(true, r, 0, r, r >= 4);
+                self.rex(true, d, 0, s, s >= 4);
                 self.byte(0x0f);
                 self.byte(0xbe);
-                self.modrm_rr(r, r);
+                self.modrm_rr(d, s);
             }
-            (8, false) => self.movzx8(r, r),
+            (8, false) => self.movzx8(d, s),
             (16, true) => {
-                self.rex(true, r, 0, r, false);
+                self.rex(true, d, 0, s, false);
                 self.byte(0x0f);
                 self.byte(0xbf);
-                self.modrm_rr(r, r);
+                self.modrm_rr(d, s);
             }
             (16, false) => {
-                self.rex(true, r, 0, r, false);
+                self.rex(true, d, 0, s, false);
                 self.byte(0x0f);
                 self.byte(0xb7);
-                self.modrm_rr(r, r);
+                self.modrm_rr(d, s);
             }
             (32, true) => {
                 // movsxd r64, r32
-                self.rex(true, r, 0, r, false);
+                self.rex(true, d, 0, s, false);
                 self.byte(0x63);
-                self.modrm_rr(r, r);
+                self.modrm_rr(d, s);
             }
             (32, false) => {
                 // mov r32, r32 zero-extends
-                self.rex(false, r, 0, r, false);
+                self.rex(false, s, 0, d, false);
                 self.byte(0x89);
-                self.modrm_rr(r, r);
+                self.modrm_rr(s, d);
             }
-            _ => {}
+            _ => self.mov_rr(d, s),
         }
     }
     fn load_ext(&mut self, dst: u8, base: u8, disp: i32, bytes: u8, signed: bool) {
@@ -4433,11 +4438,12 @@ impl<'a> Gen<'a> {
             Conv::IntToInt(it) => {
                 let rs = self.use_i(options, s, R10);
                 let rd = self.def_i(d, R10);
-                self.a.mov_rr(rd, rs);
                 // zero above fewer bits than the target: the extension is the value itself
                 let z = self.zero_above[s.0 as usize];
                 if !self.low_only[d.0 as usize] && !(z > 0 && z < it.bits) {
-                    self.a.extend(rd, it.bits, it.signed);
+                    self.a.extend_from(rd, rs, it.bits, it.signed);
+                } else {
+                    self.a.mov_rr(rd, rs);
                 }
                 self.fin_i(d, rd);
             }
@@ -4736,6 +4742,19 @@ impl<'a> Gen<'a> {
         };
         let rd = self.def_i(d, R10);
         let w = it != U32;
+        // d = a & 0xff / 0xffff / 0xffffffff into another register: movzx / mov r32 (no copy first;
+        // the flags are not set, so no compare reuses them)
+        let mask_bits = match k {
+            0xff => 8,
+            0xffff => 16,
+            0xffff_ffff => 32,
+            _ => 0,
+        };
+        if op == IOp::And && rd != ra && mask_bits != 0 && (w || mask_bits < 32) {
+            self.a.extend_from(rd, ra, mask_bits, false);
+            self.fin_i(d, rd);
+            return;
+        }
         if !w && matches!(op, IOp::Div | IOp::Rem) {
             // not formed by the optimiser; keep the general path
         } else if !w {
