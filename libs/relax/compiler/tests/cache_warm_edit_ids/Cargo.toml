@@ -1,0 +1,11 @@
+[package]
+name = "cache-warm-edit-ids"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wf-edit = { path = "edit" }
+wf-host = { path = "host" }
+
+[workspace]

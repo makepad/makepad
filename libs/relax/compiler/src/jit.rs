@@ -9072,6 +9072,7 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
         key
     };
     if matches!(key, FnKey::Glue(GLUE_UNNAMED, _)) {
+        crate::cache::image_broken_unit(up, id);
         return Err(format!("slot {} of the startup image has no identity (its key did not decode)", id));
     }
     if let FnKey::Shim(ref shim) = key {
