@@ -1856,7 +1856,14 @@ impl<'a> Parser<'a> {
             // `is_trailing_mac`): its expansion's `;` after the one expression is linted
             let save = self.pos;
             self.pos = start;
+            // the shape of the expansion only, without expanding the calls in it (rustc's
+            // is_trailing_mac parse does not either): with macros on, every nested call of the
+            // expansion was expanded here and again by the statement parse below, 3^depth
+            // expansions for statement macros nested through blocks (nom's alt_trait_inner! /
+            // succ! chains of depth 21 took every byte of memory under `makepad check`)
+            let macros = self.macros.take();
             let one_expr = self.outer_attrs().is_ok() && self.expr().is_ok() && self.kind() == T::Semi && self.nth(1) == T::Eof;
+            self.macros = macros;
             let semi = self.lo();
             self.pos = save;
             if one_expr {

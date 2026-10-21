@@ -1377,4 +1377,28 @@ mod tests {
         crate::macros::uses::record(false);
         assert!(t.is_empty(), "{}", t.len());
     }
+
+    #[test]
+    fn a_block_ending_macro_call_is_expanded_once_while_recording_lint_uses() {
+        // the trailing-semicolon probe parsed a block-ending call's expansion with macro expansion
+        // on: a chain of statement macros nested through blocks (nom's alt_trait_inner!/succ!)
+        // expanded 3^depth times under `makepad check` (9 calls here, 6561 expansions). A const
+        // initializer so the body is parsed at load whatever the lazy-body mode.
+        let mut src = String::from("macro_rules! step { (0) => { () };");
+        for n in 1..=8 {
+            src.push_str(&format!(" ({n}) => {{ {{ step!({}) }} }};", n - 1));
+        }
+        src.push_str(" }\nconst X: () = { step!(8) };\n");
+        let sess = &std::sync::Arc::new(relax_session::Session::default());
+        let path = std::env::temp_dir().join(format!("relax-rsim-expansions-{}.rs", std::process::id()));
+        std::fs::write(&path, &src).unwrap();
+        crate::macros::uses::record(true);
+        let mut prog = Program::new(sess);
+        let k = prog.load_crate("rsim_test", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), vec![]);
+        crate::macros::uses::record(false);
+        std::fs::remove_file(path).unwrap();
+        let k = k.unwrap();
+        let expansions: usize = prog.files.iter().zip(&prog.file_crate).filter(|(_, &c)| c == k).map(|(f, _)| f.exp_map.len()).sum();
+        assert_eq!(expansions, 9, "expansions of a chain of 9 calls");
+    }
 }
