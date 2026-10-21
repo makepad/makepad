@@ -346,7 +346,7 @@ impl WindowsVideoFileEncoder {
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| hr_err("set video major type", e))?;
             let (subtype, profile) = match options.codec {
-                VideoFileCodec::H265 => (&MFVideoFormat_HEVC, eAVEncH265VProfile_Main_420_8.0),
+                VideoFileCodec::H265 | VideoFileCodec::H265Alpha => (&MFVideoFormat_HEVC, eAVEncH265VProfile_Main_420_8.0),
                 VideoFileCodec::H264 => (&MFVideoFormat_H264, eAVEncH264VProfile_Main.0),
             };
             out_type
@@ -475,7 +475,7 @@ impl WindowsVideoFileEncoder {
                 Some(info) => eprintln!(
                     "video file encoder: {} video transform '{}' (hardware: {})",
                     match options.codec {
-                        VideoFileCodec::H265 => "H.265",
+                        VideoFileCodec::H265 | VideoFileCodec::H265Alpha => "H.265",
                         VideoFileCodec::H264 => "H.264",
                     },
                     info.name,

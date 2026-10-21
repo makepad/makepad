@@ -106,6 +106,9 @@ pub struct Metal {
     capture_ns: u64,
     /// `frame::depth_only`'s scratch: the (pipeline, blend) pairs of a pass already asked
     depth_only_seen: Vec<(u32, bool)>,
+    /// Draws left out so far for a pipeline variant still compiling (a frame that adds to it is
+    /// partial, `FramePartial`).
+    pending_draws: u64,
 }
 
 impl Metal {
@@ -173,6 +176,7 @@ impl Metal {
             capture: None,
             capture_ns: 0,
             depth_only_seen: Vec::new(),
+            pending_draws: 0,
         })
     }
 
@@ -223,7 +227,7 @@ impl Metal {
                 continue;
             }
             match done {
-                Done::Frame { sid, target, frame, gpu_ns, present_ns, gpu_span, failed, window, kind, .. } => {
+                Done::Frame { sid, target, frame, gpu_ns, present_ns, gpu_span, failed, partial, window, kind, .. } => {
                     if window && !failed && kind & target::OVERLAY == 0 {
                         world.window_presented(sid, target, frame, gpu_ns, present_ns);
                         if let Some(shell) = self.shell {
@@ -242,7 +246,10 @@ impl Metal {
                         }
                     }
                     // the one place FrameDone is posted: the presenter, and the parent of a lent window
-                    if !failed { world.frame_done(sid, target, kind, frame, gpu_ns, present_ns, gpu_span); }
+                    if !failed {
+                        if partial { world.frame_partial(sid, target, frame); }
+                        world.frame_done(sid, target, kind, frame, gpu_ns, present_ns, gpu_span);
+                    }
                 }
                 Done::Surface { sid, window, w, h, buffer, .. } => match world.session_mut(sid) {
                     Some(s) => s.events.screen_surface(window, [w as u16, h as u16], buffer as u64),

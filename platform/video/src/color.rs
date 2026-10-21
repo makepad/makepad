@@ -307,6 +307,28 @@ impl VideoColor {
         }
     }
 
+    /// R'G'B' (0..1) to Y'CbCr as rows of `(r, g, b, offset)` on 0..1
+    /// values: `Y = dot(rgb, row0.rgb) + row0.w`, likewise Cb (row 1) and
+    /// Cr (row 2), each a byte over 255, rounded where it is stored. The
+    /// uniforms of a GPU pass that converts a picture to this colour's
+    /// matrix and range ([`Self::encode_ycbcr`]'s maths).
+    pub fn rgb_to_yuv_rows(&self) -> [[f32; 4]; 3] {
+        let (kr, kb) = self.matrix.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (ys, cs, yo) = match self.range {
+            VideoRange::Limited => (219.0, 224.0, 16.0),
+            VideoRange::Full => (255.0, 255.0, 0.0),
+        };
+        let (ys, cs) = (ys / 255.0, cs / 255.0);
+        let (pb, pr) = (0.5 / (1.0 - kb), 0.5 / (1.0 - kr));
+        let row = |r: f64, g: f64, b: f64, w: f64| [r as f32, g as f32, b as f32, w as f32];
+        [
+            row(ys * kr, ys * kg, ys * kb, yo / 255.0),
+            row(-cs * kr * pb, -cs * kg * pb, cs * 0.5, 128.0 / 255.0),
+            row(cs * 0.5, -cs * kg * pr, -cs * kb * pr, 128.0 / 255.0),
+        ]
+    }
+
     /// RGB (linear light) of these primaries to BT.709 RGB, row major.
     pub fn gamut_to_bt709(&self) -> [[f64; 3]; 3] {
         let to_xyz = rgb_to_xyz(self.primaries);

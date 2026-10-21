@@ -815,6 +815,14 @@ impl Cx {
                     makepad_hal::profile::credit();
                 }
             }
+            HalEvent::FramePartial { window: _, frame } => {
+                // its pipeline's PipelineReady repaints; an offscreen render asks `frames_partial`
+                let partial = &mut self.textures.1.partial;
+                if partial.len() >= 256 {
+                    partial.pop_front();
+                }
+                partial.push_back(frame);
+            }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
                     if gpu_ns > 0 {

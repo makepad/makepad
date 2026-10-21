@@ -100,7 +100,7 @@ impl LinuxVideoFileEncoder {
             VideoFileCodec::H264 => format!(
                 "x264enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h264parse"
             ),
-            VideoFileCodec::H265 => format!(
+            VideoFileCodec::H265 | VideoFileCodec::H265Alpha => format!(
                 "x265enc bitrate={kbps} speed-preset=veryfast key-int-max={gop} ! h265parse"
             ),
         };
@@ -199,7 +199,7 @@ impl LinuxVideoFileEncoder {
                 transform: VideoTransformInfo {
                     name: match options.codec {
                         VideoFileCodec::H264 => "GStreamer x264enc (software)".to_string(),
-                        VideoFileCodec::H265 => "GStreamer x265enc (software)".to_string(),
+                        VideoFileCodec::H265 | VideoFileCodec::H265Alpha => "GStreamer x265enc (software)".to_string(),
                     },
                     is_hardware: false,
                 },

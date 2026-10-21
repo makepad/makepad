@@ -33,6 +33,8 @@ struct Ticket {
     window: bool,
     /// the frame's target kind and flags, for `World::frame_done`
     kind: u32,
+    /// draws were left out for a pipeline still being built (`FramePartial`)
+    partial: bool,
 }
 
 /// The drawable a window frame renders into: held (with its texture) until the frame is encoded.
@@ -398,7 +400,7 @@ impl Metal {
                         let (gpu_ns, gpu_span) = t.time.span(cb).map_or((0, [0.0; 2]), |(busy, start, end)| {
                             ((busy.max(0.0) * 1e9) as u64, [start, end])
                         });
-                        mailbox.push(Done::Frame { sid: t.sid, target: t.target, frame: t.frame, gpu_ns, present_ns, gpu_span, failed: status == 5, window: t.window, kind: t.kind, incarnation: t.font_frames.clone() });
+                        mailbox.push(Done::Frame { sid: t.sid, target: t.target, frame: t.frame, gpu_ns, present_ns, gpu_span, failed: status == 5, partial: t.partial, window: t.window, kind: t.kind, incarnation: t.font_frames.clone() });
                     }
                 })]
             };
@@ -638,6 +640,7 @@ impl Metal {
         let hosted = is_window && s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
         let pick = kind & target::PICK != 0;
         let mut window_encoded = false;
+        let mut partial = false;
         if sid == HOST && is_window && !pick {
             self.copy_layer_image(s, target, seq);
         }
@@ -649,8 +652,10 @@ impl Metal {
             let index = samples.as_ref().and_then(|x| x.reserve());
             let name = s.string(pass.name).unwrap_or("").to_string();
             let before = s.stats.skipped_draws;
+            let pending_before = self.pending_draws;
             let missing_input = pick && view.draws[dr.clone()].iter().any(|draw| read_ids(view.arena, draw.pick_tex).any(|id| self.pick_pending.contains(&(sid, id))));
             let shaders = self.encode_pass(s, sid, target, is_window, pick, pass, &view.draws[dr], view, cb, seq, index, &samples, frame, now, &mut deps);
+            partial |= !pick && self.pending_draws != pending_before;
             if pick {
                 let incomplete = missing_input || shaders.is_none() || s.stats.skipped_draws != before;
                 for id in pass.color.iter().filter(|id| !id.is_none()) {
@@ -678,7 +683,7 @@ impl Metal {
             _ => PassTime::Buffer,
         };
         if let Some(b) = self.batch.as_mut() {
-            b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind });
+            b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind, partial });
         }
         if is_window {
             if kind & target::CAPTURE != 0 && !pick {
@@ -932,7 +937,12 @@ impl Metal {
                 Select::State(pso) => pso,
                 // still compiling or failed: the draw is left out, the app paints again when the
                 // pipeline is ready
-                Select::Pending | Select::Failed => {
+                Select::Pending => {
+                    s.stats.skipped_draws += 1;
+                    self.pending_draws += 1;
+                    continue;
+                }
+                Select::Failed => {
                     s.stats.skipped_draws += 1;
                     continue;
                 }

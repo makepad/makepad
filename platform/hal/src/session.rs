@@ -707,6 +707,14 @@ impl World {
         if who.is_empty() { l.remove(&sid); } else { l.insert(sid, who); }
     }
 
+    /// A frame left draws out for a pipeline still being built (`FramePartial`), before its
+    /// `frame_done`.
+    pub fn frame_partial(&mut self, sid: u32, target: Id, frame: u64) {
+        if self.sessions.contains_key(&sid) {
+            self.to_session(sid, |q| q.frame_partial(target, frame));
+        }
+    }
+
     /// Reports completion through one path so every backend wakes both the presenter and,
     /// for a lent window, its compositor. The target kind disambiguates window/texture ids.
     pub fn frame_done(&mut self, sid: u32, target: Id, kind: u32, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2]) {

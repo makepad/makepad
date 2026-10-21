@@ -68,6 +68,10 @@ use std::fmt;
 pub enum VideoFileCodec {
     H265,
     H264,
+    /// H.265 with an alpha layer (a transparent overlay): BGRA pictures in,
+    /// premultiplied, the alpha kept. Only where the OS encoder writes it
+    /// (VideoToolbox); elsewhere opening the encoder says so.
+    H265Alpha,
 }
 
 /// Options for the optional AAC audio track, fed as 16-bit interleaved PCM.
@@ -199,6 +203,10 @@ mod apple_encoder;
 mod apple_intra_frame;
 #[cfg(target_vendor = "apple")]
 mod apple_texture_intake;
+#[cfg(target_vendor = "apple")]
+mod apple_bgra_reader;
+#[cfg(target_vendor = "apple")]
+pub use apple_bgra_reader::BgraFrameReader;
 // Pure Rust and portable: the still writers that get bitstreams, not files (Apple, Android).
 #[cfg(any(target_vendor = "apple", target_os = "android"))]
 mod mp4_single_frame;
@@ -295,6 +303,38 @@ impl GpuPictureMaker {
         return Ok(GpuPictureMaker {});
         #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
         return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+    }
+
+    /// Whether [`Self::nv12_picture`] and [`Self::bgra_picture`] work here.
+    pub const TAKES_PLANES: bool = cfg!(target_vendor = "apple");
+
+    /// A `width` x `height` NV12 picture whose planes the shared texture
+    /// `handle` holds, laid out as BGRA8 texels: `width.div_ceil(4)` texels
+    /// a row, each 4 bytes of a plane row in memory order, the `height` luma
+    /// rows and then the `height / 2` interleaved chroma rows (a GPU pass's
+    /// conversion of a picture). Copied on the GPU into the encoder's NV12
+    /// buffer, nothing converted; the planes are in `color`'s matrix and
+    /// range. Apple only ([`Self::TAKES_PLANES`]).
+    pub fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, color: VideoColor) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.nv12_picture(handle, width, height, color.range == VideoRange::Full) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, width, height, color);
+            return Err(VideoFileError::new("NV12 pictures from shared textures are not implemented on this platform yet"));
+        }
+    }
+
+    /// `region` of the shared texture as a BGRA picture, its alpha kept
+    /// (for [`VideoFileCodec::H265Alpha`]). Apple only ([`Self::TAKES_PLANES`]).
+    pub fn bgra_picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.bgra_picture(handle, region) };
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (handle, region);
+            return Err(VideoFileError::new("BGRA pictures from shared textures are not implemented on this platform yet"));
+        }
     }
 
     /// `region` is `x, y, width, height` of the texture; its sides even.
@@ -430,6 +470,11 @@ impl VideoFileEncoder {
                 )));
             }
         }
+        // Media Foundation and GStreamer have no encoder that writes HEVC's alpha layer.
+        #[cfg(not(target_vendor = "apple"))]
+        if options.codec == VideoFileCodec::H265Alpha {
+            return Err(VideoFileError::new("HEVC with alpha: this platform's video encoder cannot write an alpha layer"));
+        }
         #[cfg(target_vendor = "apple")]
         {
             let os = OsVideoFileEncoder::new_with(path, &options, fragment_interval_secs)?;
@@ -483,7 +528,9 @@ impl VideoFileEncoder {
         }
     }
 
-    /// Push one frame of tightly packed RGBA (alpha ignored), `width*height*4` bytes.
+    /// Push one frame of tightly packed RGBA, `width*height*4` bytes: alpha
+    /// ignored, except by [`VideoFileCodec::H265Alpha`], which keeps it
+    /// (premultiplied).
     pub fn push_frame_rgba8(&mut self, rgba: &[u8], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
         let expected = self.options.width as usize * self.options.height as usize * 4;
         if rgba.len() != expected {

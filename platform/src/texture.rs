@@ -291,6 +291,14 @@ impl Texture {
         TextureId(self.0.id, self.0.generation)
     }
 
+    /// Whether the GPU has completed the last pass that drew into this texture
+    /// (false before one did): another GPU user may read its pixels now (an
+    /// encoder taking a shared texture by its handle). Polls completions.
+    pub fn gpu_drawn(&self, cx: &mut Cx) -> bool {
+        let serial = cx.textures[self.texture_id()].producer_serial;
+        serial != 0 && cx.frame_completion_serial() >= serial
+    }
+
     /// Queue a full RenderBGRAu8 attachment without waiting for the GPU. The
     /// request follows its pending producer, or issues only an ordered copy
     /// when already rendered. On the HAL a SharedBGRAu8 image that no pass of
@@ -402,6 +410,8 @@ impl FrameSerials {
 #[derive(Default)]
 pub(crate) struct TextureLifetime {
     pub(crate) serials: Arc<FrameSerials>,
+    /// Serials of the latest passes the HAL completed with draws left out (`FramePartial`).
+    pub(crate) partial: std::collections::VecDeque<u64>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) retired: Vec<RetiredTexture>,
     pub(crate) readbacks: TextureReadbacks,
