@@ -6,6 +6,8 @@ pub use makepad_alloc_epoch as alloc_epoch;
 pub mod archive_cache;
 pub mod folder_access;
 pub mod os;
+#[cfg(all(not(target_arch = "wasm32"), feature = "web-protocol"))]
+pub mod web_protocol;
 
 #[cfg(any(
     test,
@@ -190,6 +192,8 @@ pub use crate::xr_tsdf::{
 };
 
 #[cfg(target_arch = "wasm32")]
+pub use makepad_wasm_bridge;
+#[cfg(all(not(target_arch = "wasm32"), feature = "web-protocol"))]
 pub use makepad_wasm_bridge;
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]

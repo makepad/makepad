@@ -242,6 +242,10 @@ pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
         }
         return None;
     }
+    // coverage stores name this process's table (coverage.rs): such code is never cached
+    if crate::coverage::on() {
+        return None;
+    }
     match std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref() {
         Some("off") | Some("0") => None,
         Some("verify") => Some(Mode::Verify),

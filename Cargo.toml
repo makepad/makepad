@@ -229,6 +229,7 @@ workspace.members = [
     "tools/run/android_host",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
+    "tools/run/web_trace",
     "libs/gpu_trace",
     "libs/relax/compiler",
     "libs/relax/base",

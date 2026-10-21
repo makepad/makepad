@@ -171,7 +171,7 @@ fn compile_fresh(p: &Program, writable: u64, key: Option<u128>) -> Option<Code> 
     if f.verify().is_err() {
         return None;
     }
-    emit_keyed(&f, key)
+    emit_keyed(&f, key, true)
 }
 
 /// The stored machine code under `key`, re-targeted at this process's host trampoline (the
@@ -218,13 +218,18 @@ pub(crate) fn reloc_value(r: rir::Reloc) -> u64 {
 }
 
 /// Machine code for optimised RIR, in its own executable mapping, kept in the store under `key`
-/// when there is one.
-pub(crate) fn emit_keyed(f: &Func, key: Option<u128>) -> Option<Code> {
+/// when there is one. `thorough`: the back end's thorough register allocation (coalescing, spill
+/// windows, live-range splitting at loops: three allocation rounds); off, one quick round.
+/// Scalar kernels take it (Stage-like kernels 2-9% faster on arm64). The four-wide kernels do not:
+/// they are the large ones (Stage's largest: 66k instructions in 14k blocks), there it cost 27% of
+/// Stage's cold-start instructions (x64: 732 -> 536 G, CPU at present -6%), and their throughput
+/// is the same with the quick round (bench_kernels, arm64 mini and x64).
+pub(crate) fn emit_keyed(f: &Func, key: Option<u128>, thorough: bool) -> Option<Code> {
     if options().no_codegen {
         // MAKEPAD_RUN_NO_CODEGEN: no executable memory; the interpreter runs the program
         return None;
     }
-    let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0 };
     let mut c = target::compile(options(), f, &env).ok()?;
     if c.relocs.iter().any(|r| !matches!(r.target, rir::Reloc::Sym(rir::Sym { id: HOST_TRAMPOLINE, .. }) | rir::Reloc::Value(_))) {
         return None;

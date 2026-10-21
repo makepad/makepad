@@ -8,7 +8,7 @@ pub enum Borrowck { Off, Moves, Full }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowckAll { Default, Nongeneric, Std, All }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64 }
+pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web }
 impl CheckTarget {
     /// The targets Relax runs on (and checks for), by triple: `MAKEPAD_RUN_CHECK_TARGET` and `makepad host-gen`.
     pub const TRIPLES: [(&'static str, CheckTarget); 4] = [
@@ -17,7 +17,15 @@ impl CheckTarget {
         ("x86_64-pc-windows-gnu", CheckTarget::WindowsX64),
         ("aarch64-linux-android", CheckTarget::AndroidArm64),
     ];
+    /// The web target (`wasm32-unknown-unknown`): the program's crates are read as a web build
+    /// reads them (cfg(target_arch = "wasm32"), the web platform backend) and run by this
+    /// machine's JIT; std stays the machine's (the trace host, `makepad-web-trace`). Not a
+    /// host-gen target.
+    pub const WEB_TRIPLE: &'static str = "wasm32-unknown-unknown";
     pub fn from_triple(triple: &str) -> Option<CheckTarget> {
+        if triple == Self::WEB_TRIPLE {
+            return Some(CheckTarget::Web);
+        }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
 }

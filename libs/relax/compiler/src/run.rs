@@ -363,6 +363,10 @@ pub(crate) fn resolve_package(
             verbose!("makepad-run: build scripts to remove ({}; only makepad-platform keeps one): {}", l.len(), names.join(", "));
         }
     }
+    if boot {
+        let _k = crate::zone_alloc::kept();
+        *CRATE_DIRS.lock().unwrap() = g.crates.iter().zip(g.pkg.iter()).map(|(c, (dir, _, _))| (c.name.clone(), dir.clone())).collect();
+    }
     // every crate's cfg set (its env!() environment is set when it is loaded: `set_crate_env`)
     let order = crate::crates::topo_order(&g.crates);
     let mut cfgs: Vec<crate::cfg::CfgSet> = Vec::with_capacity(g.crates.len());
@@ -1549,6 +1553,15 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         crate::os::proc::exit(code);
     }
     code
+}
+
+/// The booted program's crates: (crate name, package dir), in graph order.
+static CRATE_DIRS: relax_session::sync::Mutex<Vec<(String, String)>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// The crates of the program `cmd_run` booted, by name, with their package directories (a host
+/// serving the program's resources: the web trace host maps `/<crate>/<path>` to them).
+pub fn crate_dirs() -> Vec<(String, String)> {
+    CRATE_DIRS.lock().unwrap().clone()
 }
 
 /// What `--exports` published: (symbol, address) of each exported fn, in program order.

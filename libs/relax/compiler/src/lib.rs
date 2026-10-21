@@ -55,6 +55,8 @@ pub mod sandbox;
 pub mod domain;
 mod domain_threads;
 pub mod jit;
+pub mod web;
+pub mod coverage;
 pub mod owner;
 pub mod postframe;
 mod nounwind;
@@ -208,6 +210,7 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         crate::options::CheckTarget::MacosArm64 => "aarch64-apple-darwin",
         crate::options::CheckTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
         crate::options::CheckTarget::AndroidArm64 => "aarch64-linux-android",
+        crate::options::CheckTarget::Web => crate::options::CheckTarget::WEB_TRIPLE,
         _ if cfg!(target_os = "android") => "aarch64-linux-android",
         _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => "aarch64-apple-darwin",
         _ if cfg!(windows) => "x86_64-pc-windows-gnu",
@@ -618,7 +621,13 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool) -> Vec<
 /// The cfg set of the std crates: the host's, plus relax_portable_simd when the program uses
 /// core::simd.
 pub fn std_cfg(sess: &std::sync::Arc<crate::Session>, simd: bool) -> cfg::CfgSet {
-    let mut c = cfg::CfgSet::host(sess, &[]);
+    // the web target runs on this machine's std (cfg.rs `web`)
+    let web = sess.options.check_target == crate::options::CheckTarget::Web;
+    let mut c = if web { cfg::CfgSet::machine(sess, &[]) } else { cfg::CfgSet::host(sess, &[]) };
+    if web {
+        // core::arch::wasm32 (std/core/arch/wasm32.rs)
+        c.set.push("relax_web".to_string());
+    }
     if simd {
         c.set.push("relax_portable_simd".to_string());
     }

@@ -8268,6 +8268,18 @@ impl<'a> Lcx<'a> {
                 v.truncate(n);
                 Val::L(v)
             }
+            (TyKind::Int(_), TyKind::Ptr(..)) if crate::web::BASE != 0 && self.int_ty(from).bits == 32 && self.u.prog.session.options.check_target == crate::options::CheckTarget::Web => {
+                // the web target: a 32-bit integer cast to a pointer is a wasm address, the
+                // offset into the linear memory's 4 GB window (web.rs)
+                let x = if self.int_ty(from).signed {
+                    let z = self.f.vreg(Cls::I);
+                    self.emit(Inst::IBinI(IOp::And, U64, z, x, 0xffff_ffff));
+                    z
+                } else { x };
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::IBinI(IOp::Or, U64, d, x, crate::web::BASE as i64));
+                Val::L(vec![d])
+            }
             (TyKind::FnPtr(..), _) | (TyKind::Int(_), TyKind::Ptr(..)) => Val::L(v),
             _ => Val::L(v),
         }

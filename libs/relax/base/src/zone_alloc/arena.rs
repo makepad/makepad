@@ -34,14 +34,17 @@ fn class_for(need: usize) -> usize {
 }
 
 #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
-const MAX_ORDER: usize = 15; // 64 GB of virtual address space, not resident memory
+const PLATFORM_MAX_ORDER: usize = 15; // 64 GB of virtual address space, not resident memory
 // Android arm64 kernels give a process 39 bits of address space (512 GB) and ART reserves its
 // own share: at 64 GB per arena the phone WM ran out after six domains ('reserving domain heap'
 // for the next app opened). 8 GB each leaves room for dozens.
 #[cfg(all(target_pointer_width = "64", target_os = "android"))]
-const MAX_ORDER: usize = 12;
+const PLATFORM_MAX_ORDER: usize = 12;
 #[cfg(not(target_pointer_width = "64"))]
-const MAX_ORDER: usize = 7; // 256 MB on 32-bit; exhaustion falls back to the heap
+const PLATFORM_MAX_ORDER: usize = 7; // 256 MB on 32-bit; exhaustion falls back to the heap
+// The web target's linear memory (zone_alloc/web.rs): 2 GB at a fixed address inside one 4 GB
+// window, so a pointer's low 32 bits are its wasm address.
+const MAX_ORDER: usize = if WEB_AT != 0 { 10 } else { PLATFORM_MAX_ORDER };
 const N: usize = 1 << MAX_ORDER;
 const RESERVE: usize = N * CHUNK;
 const NONE: usize = usize::MAX;
@@ -410,6 +413,24 @@ mod os {
         crate::memstat::name_mapping(base, size, label);
         base
     }
+    /// Reserves exactly `[at, at + size)`, or nothing (0): never moved, never over a mapping.
+    pub unsafe fn reserve_at(at: usize, size: usize, label: &'static std::ffi::CStr) -> usize {
+        // Linux: MAP_FIXED_NOREPLACE; macOS has none: the hint, kept only when it was honoured
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const FLAGS: i32 = 2 | ANON | 0x100000;
+        #[cfg(target_os = "macos")]
+        const FLAGS: i32 = 2 | ANON;
+        let p = mmap(at as *mut c_void, size, 0, FLAGS, -1, 0);
+        if p as isize == -1 {
+            return 0;
+        }
+        if p as usize != at {
+            munmap(p, size);
+            return 0;
+        }
+        crate::memstat::name_mapping(at, size, label);
+        at
+    }
     pub unsafe fn unreserve(base: usize, size: usize) {
         munmap(base as *mut c_void, size);
     }
@@ -464,6 +485,10 @@ mod os {
         }
         // Windows cannot release reservation prefixes; retain the <=2 MB slop.
         (raw + align - 1) & !(align - 1)
+    }
+    /// Reserves exactly `[at, at + size)`, or nothing (0).
+    pub unsafe fn reserve_at(at: usize, size: usize, _label: &'static std::ffi::CStr) -> usize {
+        VirtualAlloc(at as *mut _, size, 0x2000, 1) as usize
     }
     pub unsafe fn unreserve(base: usize, _size: usize) {
         let mut info: MemoryBasicInformation = std::mem::zeroed();
@@ -730,7 +755,13 @@ impl Arena {
             if !*tried {
                 *tried = true;
                 self.base.store(
-                    unsafe { os::reserve(RESERVE, CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL }) },
+                    unsafe {
+                        if WEB_AT != 0 {
+                            os::reserve_at(WEB_AT, RESERVE, LABEL)
+                        } else {
+                            os::reserve(RESERVE, CHUNK, if self.dynamic { c"makepad-run-domain" } else { LABEL })
+                        }
+                    },
                     Ordering::Release,
                 );
             }

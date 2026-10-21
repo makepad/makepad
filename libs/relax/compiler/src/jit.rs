@@ -7587,6 +7587,9 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
         (&mut *up).fns[id as usize].build_err = Some(e.as_str().into());
     }
     let mut func = r?;
+    if crate::coverage::on() {
+        crate::coverage::instrument(up, id, &mut func);
+    }
     relax_codegen::fncost::size(true, &func);
     // Keep the wrapper's sandbox calls in the saved RIR, not just its O1 codegen
     // copy. O3 and callers inlining this wrapper must also call the twins; base
@@ -12997,9 +13000,10 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_key_delete" => Some(crate::domain_threads::key_delete as *const () as usize),
         b"__relax_key_get" => Some(crate::domain_threads::key_get as *const () as usize),
         b"__relax_key_set" => Some(crate::domain_threads::key_set as *const () as usize),
-        // run-time modules (modules.rs; Relax's std::relax); the C allocator through relax
-        // inspect's heap veneers (one indirect jump; tracking patches the word)
-        _ => crate::inspect::heap::veneer(name).or_else(|| crate::modules::symbol(name)),
+        // the web target's runtime and its embedder's page side (web.rs), then run-time modules
+        // (modules.rs; Relax's std::relax); the C allocator through relax inspect's heap veneers
+        // (one indirect jump; tracking patches the word)
+        _ => crate::web::symbol(name).or_else(|| crate::inspect::heap::veneer(name)).or_else(|| crate::modules::symbol(name)),
     }
 }
 

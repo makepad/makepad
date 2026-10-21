@@ -60,7 +60,8 @@ fn compile_fresh(p: &Program, key: Option<u128>) -> Option<Code> {
     if f.verify().is_err() {
         return None;
     }
-    crate::native::emit_keyed(&f, key)
+    // one quick allocation round (see emit_keyed)
+    crate::native::emit_keyed(&f, key, false)
 }
 
 /// The vector RIR of a kernel (None when declined), before optimisation.

@@ -1,0 +1,19 @@
+[package]
+name = "makepad-web-trace"
+version = "0.1.0"
+edition = "2021"
+description = "makepad-web-trace: runs an app's web build (cfg wasm32, the web platform backend) on Relax's JIT against a virtual browser, and records what it executes and loads"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "makepad-web-trace"
+path = "src/main.rs"
+
+[dependencies]
+# the loader (Relax as a library, the provided crates): `run_checkout --exports wasm_`
+makepad-run = { path = ".." }
+relax-compiler = { workspace = true }
+# the page's half of the messages (FromWasmRead / ToWasmWrite) and the message types themselves
+makepad-wasm-bridge = { path = "../../../libs/wasm_bridge", version = "1.0.0" }
+makepad-platform = { path = "../../../platform", version = "2.0.0", features = ["web-protocol"] }
