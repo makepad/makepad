@@ -315,6 +315,10 @@ impl Resolver {
         let Some(vers) = self.ws.lock.get(name) else {
             return self.fetched_dir(name, req);
         };
+        // Cargo.lock may hold several versions of one package (bitflags 1 and 2 in one graph):
+        // only the ones the requirement accepts are candidates; without a parsable match, all.
+        let matching: Vec<String> = vers.iter().filter(|v| crate::registry::Version::parse(v).is_some_and(|ver| crate::registry::matches(req, &ver))).cloned().collect();
+        let vers: &Vec<String> = if matching.is_empty() { vers } else { &matching };
         let home = std::env::var("CARGO_HOME").ok().or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.cargo", h))).unwrap_or_default();
         let src = format!("{}/registry/src", home);
         for v in vers {
