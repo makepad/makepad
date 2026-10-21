@@ -402,6 +402,56 @@ pub fn slot_addr_vregs(f: &Func) -> Vec<bool> {
     (0..nv).map(|v| sa[v] && ndef[v] == 1).collect()
 }
 
+/// Per value: its frame position (`at[slot] + offset`, slot_layout's numbering) when its one
+/// definition is a slot address, or a single-definition Mov / constant Add of one; i64::MIN
+/// otherwise. Slot colouring gives a slot copied whole into another, and dead after, the
+/// destination's storage (slot_colors_used): that Copy has the same position on both sides
+/// and moves nothing, so the backends emit no code for it (its loads would also wait on the
+/// narrow stores that just built the value: a failed store forward per copy).
+pub fn slot_addr_positions(f: &Func, at: &[i64]) -> Vec<i64> {
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    let mut pos = vec![i64::MIN; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::SlotAddr(d, s) = i {
+                if ndef[d.0 as usize] == 1 {
+                    if let Some(&a) = at.get(*s as usize) {
+                        pos[d.0 as usize] = a;
+                    }
+                }
+            }
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, s, k) = match i {
+                    Inst::Mov(d, s) => (*d, *s, 0),
+                    Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, s, k) => (*d, *s, *k),
+                    _ => continue,
+                };
+                // a frame position grows downwards: slot bytes at `at - offset`
+                if ndef[d.0 as usize] == 1 && pos[d.0 as usize] == i64::MIN && pos[s.0 as usize] != i64::MIN {
+                    pos[d.0 as usize] = pos[s.0 as usize] - k;
+                    grew = true;
+                }
+            }
+        }
+    }
+    pos
+}
+
 /// Every block once: reverse postorder of those reachable from the entry, then the others in
 /// index order (dataflow sweeps in this order settle in about loop depth + 2 passes; lowering's
 /// block numbers are not in flow order -- a join is made before the blocks that reach it).
