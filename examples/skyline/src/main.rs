@@ -11,7 +11,7 @@ pub use makepad_widgets;
 
 use makepad_widgets::*;
 
-use makepad_skyline::{rng, shaders::DrawSkyBackdrop, ExportKind, Params, Skyline, ViewSpec, COUNT, P, PARAMS};
+use makepad_skyline::{rng, shaders::DrawSkyBackdrop, ExportKind, Params, SkyLight, Skyline, ViewSpec, COUNT, P, PARAMS};
 
 app_main!(App);
 
@@ -139,7 +139,7 @@ impl Widget for SkylineView {
         self.rect = rect;
         self.draw_sky.draw_vars.set_uniform(cx, live_id!(horizon), &[view.horizon as f32]);
         self.draw_sky.draw_abs(cx, rect);
-        self.sky.draw_view(cx, rect, &view, &self.params, true);
+        self.sky.draw_view(cx, rect, &view, &self.params, true, &SkyLight::example());
         if self.export.as_mut().is_some_and(|e| e.draw_job(cx)) { self.next_tile = cx.new_next_frame(); }
         DrawStep::done()
     }
@@ -285,7 +285,7 @@ impl MatchEvent for App {
             if self.ui.button(cx, button).clicked(actions) {
                 let width = [2048, 4096, 8192][self.ui.drop_down(cx, ids!(export_w)).selected_item().min(2)];
                 let p = self.params.clone();
-                let msg = self.view_mut(cx, false, |v, cx| { v.redraw(cx); v.export.as_mut().map(|e| e.start_export(cx, kind, width, &p)) });
+                let msg = self.view_mut(cx, false, |v, cx| { v.redraw(cx); v.export.as_mut().map(|e| e.start_export(cx, kind, width, &p, &SkyLight::example())) });
                 let msg = msg.flatten().unwrap_or_else(|| Err("no strip view".into())).unwrap_or_else(|e| e);
                 self.ui.label(cx, ids!(message)).set_text(cx, &msg);
             }

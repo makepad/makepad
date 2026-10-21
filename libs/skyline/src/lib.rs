@@ -14,8 +14,10 @@ pub mod shaders;
 pub mod post;
 pub mod render;
 pub mod export;
+pub mod light;
 
 pub use export::{Band, BandDone, ExportKind};
+pub use light::{SkyLight, RING};
 pub use params::{ParamDef, Params, COUNT, P, PARAMS, SEED_MAX};
 pub use render::{SceneTarget, Skyline, ViewSpec};
 

@@ -96,6 +96,12 @@ pub const SEED_MAX: u32 = 9_999_999;
 pub const SIL: [f32; 3] = [0.004, 0.006, 0.012];
 pub const HAZE_COL: [f32; 3] = [0.16, 0.18, 0.28];
 
+/// The caches' hash: `bits` folded into `h` one word at a time ([`Params::hash`], `SkyLight::hash`).
+pub fn hash_bits(mut h: u64, bits: impl Iterator<Item = u64>) -> u64 {
+    for b in bits { h = (h ^ b).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29); }
+    h
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Params { pub v: [f64; COUNT], pub seed: u32 }
 
@@ -131,11 +137,7 @@ impl Params {
 
     /// A hash of the seed and the listed parameters: the key of a cache built from them.
     pub fn hash(&self, keys: &[P], extra: &[f64]) -> u64 {
-        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ self.seed as u64;
-        for x in keys.iter().map(|p| self[*p]).chain(extra.iter().copied()) {
-            h = (h ^ x.to_bits()).wrapping_mul(0x0000_0100_0000_01b3).rotate_left(29);
-        }
-        h
+        hash_bits(0xcbf2_9ce4_8422_2325u64 ^ self.seed as u64, keys.iter().map(|p| self[*p]).chain(extra.iter().copied()).map(f64::to_bits))
     }
 
     /// A seed from the clock (the dice).

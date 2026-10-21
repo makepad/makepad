@@ -15,7 +15,8 @@
 //! are only recorded again when the picture changes: a repaint of the window just draws the final
 //! quad over the retained targets. The core depends on `makepad_draw` only.
 use crate::city::City;
-use crate::params::{Params, HAZE_COL, P, SIL};
+use crate::light::SkyLight;
+use crate::params::{Params, P, SIL};
 use crate::post::Post;
 use crate::props::{Bucket, Props};
 use crate::rng::TAU;
@@ -104,6 +105,8 @@ impl SceneTarget {
 /// What every scene drawer gets: the view, the parameters, the zones and the shared inputs.
 pub struct SceneCtx<'a> {
     pub view: &'a ViewSpec, pub p: &'a Params,
+    /// The sky's light, and its rings as a texture (`Skyline::ring_tex`).
+    pub light: &'a SkyLight, pub ring: &'a Texture,
     /// The placement zones (the city and the props read them).
     pub z: &'a Zones,
     /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
@@ -120,7 +123,7 @@ pub struct SceneCtx<'a> {
 }
 
 impl SceneCtx<'_> {
-    /// Every parameter (by its key), the view and the shared textures onto a scene shader.
+    /// Every parameter (by its key), the view, the sky's light and the shared textures onto a scene shader.
     pub fn set_uniforms(&self, cx: &Cx, vars: &mut DrawVars) {
         self.p.set_uniforms(cx, vars);
         let (v, m) = (self.view, self.view.pad as f64);
@@ -132,7 +135,14 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(mirror), &[if self.mirror { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(up_dy), &[self.up_dy as f32]);
         vars.set_uniform(cx, live_id!(sil), &SIL);
-        vars.set_uniform(cx, live_id!(haze_col), &HAZE_COL);
+        let l = self.light;
+        vars.set_uniform(cx, live_id!(sun_u), &[l.sun_u]);
+        vars.set_uniform(cx, live_id!(sun_el), &[l.sun_el_deg.to_radians()]);
+        vars.set_uniform(cx, live_id!(sun_rgb), &l.sun_rgb);
+        vars.set_uniform(cx, live_id!(ambient_rgb), &l.ambient_rgb);
+        vars.set_uniform(cx, live_id!(lit), &[l.lights_factor()]);
+        vars.set_uniform(cx, live_id!(emit_gain), &[l.emit_gain]);
+        bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
         bind_texture(cx, vars, live_id!(tree_cov), &self.tree_cov);
     }
@@ -192,6 +202,8 @@ pub struct Skyline {
     #[rust] pub zones: Option<(u64, Zones)>,
     #[rust] pub cols: Option<ColumnCache>,
     #[rust] blank: Option<Texture>,
+    /// The sky's horizon rings (`SkyLight::ring_texels`) and the hash of the light they were written for.
+    #[rust] ring_tex: Option<(u64, Texture)>,
     /// The key of the picture the targets hold.
     #[rust] pub drawn: Option<u64>,
     #[rust] pub stats: Stats,
@@ -200,22 +212,22 @@ pub struct Skyline {
 }
 
 impl Skyline {
-    /// Draws `view` into `rect` of the current pass: records the passes when the picture changed,
+    /// Draws `view` into `rect` of the current pass, lit by `light`: records the passes when the picture changed,
     /// then the final composite (`tone`: the display tone shoulder; an export keeps the raw HDR).
     /// The scene has the blur's margin, so lights at the edges blur with their real neighbours; the final crops it.
-    pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool) {
+    pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool, light: &SkyLight) {
         let view = &self.post.scene_view(p, shown);
-        self.update_inputs(cx, view, p);
+        self.update_inputs(cx, view, p, light);
         // the picture: every parameter but the view's own (pan, zoom and the field of view only
-        // place the view, which its first azimuth, span and size say), and the view
+        // place the view, which its first azimuth, span and size say), the view and the sky's light
         let view_only = [P::Pan as usize, P::Zoom as usize, P::Vfov as usize];
         let mut picture: Vec<f64> = p.v.iter().enumerate().filter(|(i, _)| !view_only.contains(i)).map(|(_, x)| *x).collect();
-        picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon]);
+        picture.extend([view.u0, view.span, view.w as f64, view.h as f64, view.horizon, f64::from_bits(light.hash())]);
         let key = p.hash(&[], &picture);
         if self.scene.is_none() { self.scene = Some(SceneTarget::new(cx, "skyline_scene", true)); }
         if self.drawn != Some(key) {
             let t1 = Cx::monotonic_now();
-            self.record(cx, view, p);
+            self.record(cx, view, p, light);
             (self.drawn, self.stats.renders, self.stats.record_ms) = (Some(key), self.stats.renders + 1, ms_since(t1));
         }
         let (scene, mirror) = (self.scene.as_ref().unwrap(), self.mirror.as_ref());
@@ -234,8 +246,8 @@ impl Skyline {
             &mut po.draw_final.draw_vars, &mut po.draw_blur.draw_vars, &mut po.draw_water.draw_vars] { v.texture_slots = Default::default(); }
     }
 
-    /// The zones and the columns for this view, rebuilt when what they depend on changed.
-    fn update_inputs(&mut self, cx: &mut Cx, view: &ViewSpec, p: &Params) {
+    /// The zones, the columns for this view and the sky's rings, rebuilt when what they depend on changed.
+    fn update_inputs(&mut self, cx: &mut Cx, view: &ViewSpec, p: &Params, light: &SkyLight) {
         let zkey = p.hash(ZONE_KEYS, &[]);
         if self.zones.as_ref().map(|z| z.0) != Some(zkey) {
             let t = Cx::monotonic_now();
@@ -266,18 +278,25 @@ impl Skyline {
         if self.blank.is_none() {
             self.blank = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 { width: 1, height: 1, data: Some(vec![0.0; 4]), updated: TextureUpdated::Full }));
         }
+        let lkey = light.hash();
+        if self.ring_tex.as_ref().map(|r| r.0) != Some(lkey) {
+            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(light.ring_texels()), updated: TextureUpdated::Full };
+            let tex = match self.ring_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
+            self.ring_tex = Some((lkey, tex));
+        }
     }
 
     /// Records every pass of the view: the producers, the scene, the mirror, the post passes.
-    fn record(&mut self, cx: &mut Cx2d, view: &ViewSpec, p: &Params) {
+    fn record(&mut self, cx: &mut Cx2d, view: &ViewSpec, p: &Params, light: &SkyLight) {
         let z = &self.zones.as_ref().unwrap().1;
         let cols = self.cols.as_ref().unwrap();
         debug_assert_eq!(cols.m, cols.geom[2] as usize);
         let blank = self.blank.as_ref().unwrap();
+        let ring = &self.ring_tex.as_ref().unwrap().1;
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
         let mv = view.mirrored();
-        let mut sc = SceneCtx { view, p, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
+        let mut sc = SceneCtx { view, p, light, ring, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);

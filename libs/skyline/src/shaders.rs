@@ -38,7 +38,16 @@ script_mod! {
         haze: uniform(0.5)
         glow: uniform(0.5)
         sil: uniform(vec3(0.004, 0.006, 0.012))
-        haze_col: uniform(vec3(0.16, 0.18, 0.28))
+        // the sky's light (`light.rs`): the sun's azimuth (a strip u) and elevation (rad), the sun's and the sky's ambient
+        // light (radiance off a white Lambertian surface), the share of the lights on, the gain on the skyline's own light
+        sun_u: uniform(0.0)
+        sun_el: uniform(-1.5707964)
+        sun_rgb: uniform(vec3(0.0, 0.0, 0.0))
+        ambient_rgb: uniform(vec3(0.0, 0.0, 0.0))
+        lit: uniform(1.0)
+        emit_gain: uniform(1.0)
+        // the horizon rings, RING x 2 texels: row 0 the sky at +1 degree, row 1 at +15 degrees (`SkyLight::ring_texels`)
+        ring_tex: texture_2d(float)
         seed: uniform(7.0)
         ct_c: uniform(0.55)
         ct_r: uniform(1.0)
@@ -70,6 +79,30 @@ script_mod! {
         }
         // coverage of a signed distance d over a pixel of size px
         cover: fn(d: float, px: float) -> float { return clamp(d / px + 0.5, 0.0, 1.0) }
+        // ring row v (0.25 the low ring, 0.75 the high one) at azimuth u: linear between its two nearest samples, wrapping
+        // round the turn, as a + (b - a) f, so a ring of one colour gives that colour exactly (the example's night)
+        ring_at: fn(u: float, v: float) -> vec3 {
+            let n = self.ring_tex.size().x; let x = fract(u) * n - 0.5; let i0 = floor(x); let i1 = i0 + 1.0
+            let a = self.ring_tex.sample_nearest(vec2((i0 - n * floor(i0 / n) + 0.5) / n, v)).xyz
+            let b = self.ring_tex.sample_nearest(vec2((i1 - n * floor(i1 / n) + 0.5) / n, v)).xyz
+            return a + (b - a) * (x - i0)
+        }
+        // the haze at azimuth u: the sky just over the horizon there
+        haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.25) }
+        // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
+        sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.25); return a + (self.ring_at(u, 0.75) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
+        // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
+        sun_dir: fn(u: float) -> vec3 {
+            let az = (self.sun_u - u) * 6.2831853
+            return vec3(cos(self.sun_el) * sin(az), sin(self.sun_el), cos(self.sun_el) * cos(az))
+        }
+        // daylight off a surface of albedo al: the sky's ambient (times ao) plus the sun times its cosine term ks; 0 at night
+        day_lit: fn(al: vec3, ao: float, ks: float) -> vec3 { return al * (self.ambient_rgb * ao + self.sun_rgb * ks) }
+        // the sun's share of the day: 0 below -6 degrees, 1 above +2 (`lights_factor` the other way round, without lights_by_day)
+        day: fn() -> float { let t = clamp((0.0349066 - self.sun_el) / 0.1396263, 0.0, 1.0); return 1.0 - t * t * (3.0 - 2.0 * t) }
+        // the daylight's aerial perspective: the share of the haze in front of a surface d m away, by the city march's
+        // extinction (per 70 m block); 0 at night, where the night's own haze terms stand in
+        aerial: fn(d: float) -> float { return self.day() * (1.0 - exp(0.0 - d * (0.0015 + 0.0075 * self.haze) / 70.0)) }
         // the fragment's raw view: azimuth u (0..1), raw elevation (rad), radians per pixel
         view_raw: fn() -> vec3 {
             let pp = self.frag()
@@ -137,7 +170,8 @@ script_mod! {
             let g = self.col_row(pp.x, 6.0)
             let a = self.ang_raw(pp.y)
             let dome = exp(0.0 - max(a, 0.0) * self.dome_k) * g.w * self.glow * smoothstep(0.0 - 0.012, 0.0, a)
-            return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10), 0.0)
+            // the city's own light: fades with the lights by day
+            return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.emit_gain), 0.0)
         }
         fragment: fn(){
             self.fb0 = vec4(0.0, 0.0, 0.0, 0.0)
@@ -165,13 +199,23 @@ script_mod! {
                 tm = r.w * max(self.cover(r.z - ang, 1.5 * px), dot(tr, ch))
                 if ang < r.y - px { tm = r.w }
             }
-            if k > 4.5 { return vec4(sil * (0.6 * tm), tm) }
-            let t = (4.0 - k) / 4.0; let hz = self.haze_col; let hz2 = self.haze * self.haze * 0.35; let m = self.cover(r.x - ang, px)
+            // by day: the trees (no normal: lit half from above), the rock by the ridge's slope (the change of its height
+            // per column over 0.01 rad either side, so the ridge's pixel-scale roughness does not stripe the flank below; within
+            // the columns' margin, which is over 0.045 rad; facing the viewer, -z in the pixel's frame), warmer on the nearer ranges
+            let u = self.view_raw().x; let sun = self.sun_dir(u)
+            let tday = self.day_lit(vec3(0.07, 0.07, 0.07), 1.0, 0.5 + 0.5 * sun.y)
+            if k > 4.5 { return vec4(sil * (0.6 * tm) + tday * tm, tm) }
+            let dn = max(1.0, floor(0.01 / self.px0() + 0.5))
+            let dh = (self.col_row(pp.x + dn, k).x - self.col_row(pp.x - dn, k).x) / (2.0 * dn * px)
+            let rday = self.day_lit(vec3(0.14, 0.14, 0.14) * mix(vec3(1.0, 1.0, 1.0), vec3(1.15, 1.0, 0.82), k / 4.0), 1.0, max(dot(normalize(vec3(0.0 - dh, 1.0, -0.6)), sun), 0.0))
+            let t = (4.0 - k) / 4.0; let hz = self.haze_at(u); let hz2 = self.haze * self.haze * 0.35; let m = self.cover(r.x - ang, px)
             let ftop = clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0)
             let fog = pow(1.0 - smoothstep(0.0, 0.55 * self.hk + 0.004, ang), 1.4)
             let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
-            let rock = mix(mix(sil, fogc, ftop), fogc * (1.1 + 0.2 * t), fog * mix(0.1, 0.9, hz2) * (0.25 + 0.75 * t))
-            return vec4(sil * (0.6 * tm) + rock * (m * (1.0 - tm)), tm + m * (1.0 - tm))
+            let rock = mix(mix(sil + rday, fogc, ftop), fogc * (1.1 + 0.2 * t), fog * mix(0.1, 0.9, hz2) * (0.25 + 0.75 * t))
+            let c = vec4(sil * (0.6 * tm) + tday * tm + rock * (m * (1.0 - tm)), tm + m * (1.0 - tm))
+            // by day the air between: toward the haze by the range's distance (none at night, the night's haze is above)
+            return vec4(c.xyz + (hz * c.w - c.xyz) * self.aerial(5000.0 * pow(6.0, (4.0 - k) * 0.25)), c.w)
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
     }
@@ -183,7 +227,9 @@ script_mod! {
         pixel: fn(){
             let pp = self.frag(); let g = self.col_row(pp.x, 6.0)
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
-            return vec4(mix(self.sil * 0.5, self.sil * 1.6, g.x) * gm, gm)
+            // by day: lit from above (normal up)
+            let day = self.day_lit(vec3(0.10, 0.10, 0.10), 1.0, max(sin(self.sun_el), 0.0))
+            return vec4((mix(self.sil * 0.5, self.sil * 1.6, g.x) + day) * gm, gm)
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
     }

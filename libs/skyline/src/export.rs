@@ -5,6 +5,7 @@
 //! k + 1 (two targets in turn); its scene has the blur's and the water's margins (`draw_view`), so tiles meet without a
 //! seam. Metal leaves out the first draw into a new target layout while it builds the pipeline (and a tile can be the first
 //! to draw the water or a props layer), so there every tile is read until two reads agree.
+use crate::light::SkyLight;
 use crate::params::{Params, P};
 use crate::render::{SceneTarget, Skyline, ViewSpec};
 use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, makepad_script::pod_heap::f16_to_f32, *};
@@ -26,10 +27,10 @@ enum Sink { File(ExportKind, std::path::PathBuf), Band(BandDone) }
 /// From the workers: tile i's texels, or the job's end (its message).
 enum News { Tile(usize, Result<Texels, String>), Done(Result<String, String>) }
 
-/// A running job: the strip `w` x `h` at `p`; the next tile to draw, the one drawn last frame,
+/// A running job: the strip `w` x `h` at `p`, lit by `light`; the next tile to draw, the one drawn last frame,
 /// the reads in flight, the tiles done; whether each tile is read until two reads agree (`first`: its last read, `rounds`).
 pub struct Job {
-    p: Params, w: usize, h: usize, next: usize, drawn: Option<usize>, reads: usize, done: usize, check: bool,
+    p: Params, light: SkyLight, w: usize, h: usize, next: usize, drawn: Option<usize>, reads: usize, done: usize, check: bool,
     first: Option<Texels>, rounds: usize, out: Texels, sink: Option<Sink>, t0: f64, targets: Vec<SceneTarget>, tx: Sender<News>, rx: Receiver<News>,
 }
 
@@ -46,33 +47,33 @@ impl Job {
 fn send(tx: &Sender<News>, n: News) { let _ = tx.send(n); SignalToUI::set_ui_signal(); }
 
 impl Skyline {
-    /// Starts exporting the strip at `p`, `width` px wide (the height from the field of view), into the Downloads folder;
-    /// the message is for the message line.
-    pub fn start_export(&mut self, _cx: &mut Cx, kind: ExportKind, width: usize, p: &Params) -> Result<String, String> {
+    /// Starts exporting the strip at `p` lit by `light`, `width` px wide (the height from the field of view), into the
+    /// Downloads folder; the message is for the message line.
+    pub fn start_export(&mut self, _cx: &mut Cx, kind: ExportKind, width: usize, p: &Params, light: &SkyLight) -> Result<String, String> {
         let h = ViewSpec::strip(p, width).h;
         let path = downloads().join(format!("skyline_{width}x{h}.{}", if kind == ExportKind::Png { "png" } else { "exr" }));
-        self.start(p, width, Sink::File(kind, path)).map_err(|(e, _)| e)?;
+        self.start(p, light, width, Sink::File(kind, path)).map_err(|(e, _)| e)?;
         Ok(format!("Rendering {kind:?} {width} x {h} ..."))
     }
 
-    /// Asks for the strip at `p`, `w` px wide, as a [`Band`]; `done` gets it when the last tile has been read back, or
+    /// Asks for the strip at `p` lit by `light`, `w` px wide, as a [`Band`]; `done` gets it when the last tile has been read back, or
     /// the reason it failed. The holder's draw must call [`Skyline::draw_job`].
-    pub fn request_band(&mut self, _cx: &mut Cx, p: &Params, w: usize, done: BandDone) {
-        if let Err((e, Sink::Band(done))) = self.start(p, w, Sink::Band(done)) { std::thread::spawn(move || done(Err(e))); }
+    pub fn request_band(&mut self, _cx: &mut Cx, p: &Params, light: &SkyLight, w: usize, done: BandDone) {
+        if let Err((e, Sink::Band(done))) = self.start(p, light, w, Sink::Band(done)) { std::thread::spawn(move || done(Err(e))); }
     }
 
     /// True while a job (an export or a band) runs: [`Skyline::request_band`] and `start_export` would be refused.
     pub fn busy(&self) -> bool { self.job.is_some() }
 
     /// Starts a job, or hands the sink back when one is running.
-    fn start(&mut self, p: &Params, w: usize, sink: Sink) -> Result<(), (String, Sink)> {
+    fn start(&mut self, p: &Params, light: &SkyLight, w: usize, sink: Sink) -> Result<(), (String, Sink)> {
         if self.job.is_some() { return Err(("An export is still running".into(), sink)); }
         let (v, (tx, rx)) = (ViewSpec::strip(p, w), channel());
         let check = cfg!(any(target_os = "macos", target_os = "ios"));
         let out = vec![[0.0; 4]; v.w * v.h];
         let t0 = Cx::monotonic_now();
-        let (p, sink) = (p.clone(), Some(sink));
-        self.job = Some(Job { p, w: v.w, h: v.h, next: 0, drawn: None, reads: 0, done: 0, check, first: None, rounds: 0, out, sink, t0, targets: vec![], tx, rx });
+        let (p, light, sink) = (p.clone(), light.clone(), Some(sink));
+        self.job = Some(Job { p, light, w: v.w, h: v.h, next: 0, drawn: None, reads: 0, done: 0, check, first: None, rounds: 0, out, sink, t0, targets: vec![], tx, rx });
         Ok(())
     }
 
@@ -99,7 +100,7 @@ impl Skyline {
             let tone = matches!(job.sink, Some(Sink::File(ExportKind::Png, _)));
             let t = &mut job.targets[i % 2];
             cx.make_child_pass(&t.pass);
-            t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &view, &job.p, tone));
+            t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &view, &job.p, tone, &job.light));
             (job.drawn, job.next) = (Some(i), i + 1);
         }
         let more = job.sink.is_some();

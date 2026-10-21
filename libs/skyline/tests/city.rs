@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
 
-use makepad_skyline::{city, params, render, shaders};
+use makepad_skyline::{city, light, params, render, shaders};
 
 use makepad_widgets::makepad_draw::{self, *};
 use std::{cell::RefCell, rc::Rc};
@@ -56,7 +56,7 @@ fn register(vm: &mut ScriptVm) {
 }
 
 /// One timed case: the march over the view (its product rows, or the whole view as the page draws it), `k` times.
-struct Bench { _window: WindowHandle, window_pass: DrawPass, root: DrawList2d, target: render::SceneTarget, draw: city::DrawSkyCity, case: (params::Params, render::ViewSpec, bool), k: usize }
+struct Bench { _window: WindowHandle, window_pass: DrawPass, root: DrawList2d, target: render::SceneTarget, draw: city::DrawSkyCity, ring: Texture, case: (params::Params, render::ViewSpec, bool), k: usize }
 
 impl Bench {
     fn draw(&mut self, cx: &mut Cx2d) {
@@ -64,7 +64,7 @@ impl Bench {
         self.root.begin_always(cx);
         cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::flow_overlay());
         cx.make_child_pass(&self.target.pass);
-        let ((p, v, full), k, draw) = (&self.case, self.k, &mut self.draw);
+        let ((p, v, full), k, draw, ring) = (&self.case, self.k, &mut self.draw, &self.ring);
         let rows = if *full { (0.0, v.h as f64) } else { let (t, b) = city::reach(p).unwrap(); ((v.row_of(t) - 4.0).floor().max(0.0), (v.row_of(b) + 4.0).ceil().min(v.h as f64)) };
         self.target.record(cx, v.w, v.h, |cx| {
             let vars = &mut draw.draw_vars;
@@ -73,7 +73,7 @@ impl Bench {
             vars.set_uniform(cx, live_id!(view_span), &[v.u0 as f32, v.span as f32]);
             vars.set_uniform(cx, live_id!(view_horizon), &[v.horizon as f32]);
             vars.set_uniform(cx, live_id!(sil), &params::SIL);
-            vars.set_uniform(cx, live_id!(haze_col), &params::HAZE_COL);
+            render::bind_texture(cx, vars, live_id!(ring_tex), ring); // the example's night: no sun, the fixed haze
             for _ in 0..k { draw.draw_abs(cx, Rect { pos: dvec2(0.0, rows.0), size: dvec2(v.w as f64, rows.1 - rows.0) }); }
         });
         cx.end_pass_sized_turtle();
@@ -106,7 +106,9 @@ fn gpu_march_time() {
             let window_pass = DrawPass::new(cx);
             window.set_pass(cx, &window_pass);
             let target = render::SceneTarget::new(cx, "city_bench", true);
-            *handler.borrow_mut() = Some(Bench { _window: window, window_pass, root: DrawList2d::new(cx), target, draw, case: first.clone(), k: 1 });
+            let format = TextureFormat::VecRGBAf32 { width: light::RING, height: 2, data: Some(light::SkyLight::example().ring_texels()), updated: TextureUpdated::Full };
+            let ring = Texture::new_with_format(cx, format);
+            *handler.borrow_mut() = Some(Bench { _window: window, window_pass, root: DrawList2d::new(cx), target, draw, ring, case: first.clone(), k: 1 });
             cx.redraw_all();
         }
         if let Event::Draw(event) = event {

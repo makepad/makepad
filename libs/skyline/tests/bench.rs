@@ -40,7 +40,7 @@ impl Bench {
             if self.mode != Mode::Cached { (s.drawn, s.city.key) = (None, None); }
             if self.mode == Mode::Cold { (s.zones, s.cols, s.props.key, s.trees.mesh) = (None, None, None, None); }
             cx.make_child_pass(&target.pass);
-            target.record(cx, v.w, v.h, |cx| s.draw_view(cx, rect, v, p, true));
+            target.record(cx, v.w, v.h, |cx| s.draw_view(cx, rect, v, p, true, &makepad_skyline::SkyLight::example()));
         }
         cx.end_pass_sized_turtle();
         self.root.end(cx);

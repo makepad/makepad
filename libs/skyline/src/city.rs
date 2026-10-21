@@ -89,7 +89,9 @@ script_mod! {
             return mix(clamp((f - a) / w + 0.5, 0.0, 1.0) * clamp((b - f) / w + 0.5, 0.0, 1.0), b - a, smoothstep(0.7, 1.6, w))
         }
         fragment: fn(){
-            let vr = self.view_raw(); let u = vr.x; let ang = vr.y; let px = vr.z; let hz = self.haze_col; let tau = 6.2831853; let cf = 0.05; let cey = 0.09
+            let vr = self.view_raw(); let u = vr.x; let ang = vr.y; let px = vr.z; let hz = self.haze_at(u); let tau = 6.2831853; let cf = 0.05; let cey = 0.09
+            // the sun in the march's world frame (x, up, z; azimuth u along (cos, sin) of x, z), and the glass's sky
+            let sw = vec3(cos(self.sun_el) * cos(self.sun_u * tau), sin(self.sun_el), cos(self.sun_el) * sin(self.sun_u * tau)); let sky10 = self.sky_at(u, 0.1745329)
             let dd = self.city_d(); let r0 = 0.5 * dd; let r1 = 1.55 * dd; let tf = 6.0 + 44.0 * self.ct_h; let tf2 = tf - 2.0
             var hcap = tf * cf + 0.9
             let aw = vec2(step(0.999, self.ct_w), smoothstep(0.0, 0.02, self.ct_w))
@@ -204,7 +206,8 @@ script_mod! {
                     if above > 0.5 && nt >= 40.0 && h6.z > 0.3 {
                         var pb = vec3(ctr.x + off.x, ytop + ha, ctr.y + off.y); if mast > 0.5 { pb = vec3(mp.x, ytop + hm, mp.z) }
                         pb = pb - ray.o; let tb2 = dot(pb, ray.d); let bd = length(pb - ray.d * tb2) / (max(tb2, 0.01) * px)
-                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * (0.004 + 0.0185 * self.haze))))
+                        // it burns day and night
+                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * (0.004 + 0.0185 * self.haze))) * self.emit_gain)
                     }
                     if ray.sa.y > 0.0 {
                         // the nearest surface, then (where it only partly covers the pixel) the next two: the page's `shadeCity`
@@ -226,7 +229,12 @@ script_mod! {
                                 // street canyon, the crease where a section meets what it stands on, walls toward downtown, the sky
                                 let aog = mix(0.5, 1.0, sy.x); let aos = mix(1.0, mix(0.62, 1.0, sy.y), step(0.5, id)); let face = mix(0.8, 1.0, 0.5 + 0.5 * dot(n.xz, gd))
                                 let tnt = vec3(0.92, 0.96, 1.04) * (1.0 + (ht.xyz - 0.5) * 0.35) * (0.55 + 0.95 * hs.z)
-                                let wall = tnt * (hz * 0.17 * face * mix(0.72, 1.0, sy.z) * aos * aog + vec3(1.0, 0.62, 0.32) * self.glow * 0.012 / (1.0 + 8.0 * y * y) * aos)
+                                // by day: the sun on the face hit and the sky's ambient, darker down in the street canyon (aog);
+                                // albedo 0.28 the facades, 0.20 the roof boxes and the dome (0.25 here, their body is dimmed by 0.8
+                                // below) and the mast, in the tower's tint
+                                var alb = 0.28; if id > 5.5 { alb = 0.20 } else if id > 2.5 { alb = 0.25 }
+                                let dayc = self.day_lit(vec3(0.92, 0.96, 1.04) * (1.0 + (ht.xyz - 0.5) * 0.35) * alb, aog, max(dot(n, sw), 0.0))
+                                let wall = tnt * (hz * 0.17 * face * mix(0.72, 1.0, sy.z) * aos * aog + vec3(1.0, 0.62, 0.32) * self.glow * 0.012 / (1.0 + 8.0 * y * y) * aos) + dayc
                                 var body = wall; var e = vec3(0.0)
                                 if id < 2.5 {
                                     // the facade: whole window cells only (columns divide the wall, half a pier at each corner)
@@ -256,16 +264,17 @@ script_mod! {
                                     let lit = mix(step(hfl.x + 1e-4, pfl * 0.95) * step(wing, 0.5 + 0.5 * occ) * step(hr.x, occ) * (1.0 - rf.x), pfl * 0.54 * occ, rf.y)
                                     // recessed windows: seen at a grazing angle the piers hide the glass
                                     let cosv = abs(dot(n, ray.d)); let reveal = clamp(1.0 - mix(0.3, 0.12, curt) * sqrt(max(1.0 - cosv * cosv, 0.0)) / max(cosv, 1e-3), 0.0, 1.0)
-                                    let ea = gm * lit * (0.4 + 0.8 * hr.y) * self.lights * 0.55 * mix(0.55, 1.0, cosv) * mix(1.0, 0.8, curt) * reveal
+                                    let ea = gm * lit * (0.4 + 0.8 * hr.y) * self.lights * 0.55 * mix(0.55, 1.0, cosv) * mix(1.0, 0.8, curt) * reveal * (self.lit * self.emit_gain)
                                     if ea > 0.003 { e = mix(self.kelvin(mix(self.temp, min(self.temp * 1.9, 12000.0), step(0.62, hfl.y))), vec3(0.78, 1.0, 0.8) * 0.85, step(0.86, hfl.y)) * ea }
-                                    // the glass mirrors the glow at the horizon, tinted per tower; fall-off across the wall, occlusion at its corners
+                                    // the glass mirrors the sky low over the horizon (10 degrees up; the haze at night), tinted per tower;
+                                    // fall-off across the wall, occlusion at its corners
                                     let fc1 = max(1.0 - cosv, 0.0); let fres = 0.15 + 0.85 * fc1 * fc1 * fc1; let refl = 1.0 / (1.0 + 7.0 * max(ray.d.y, 0.0))
-                                    let glass = hz * (0.04 + 0.34 * fres) * mix(0.35, 1.0, refl) * (0.8 + 0.4 * hr.z) * mix(0.6, 1.0, aog) * vec3(0.85 + 0.3 * ht.y, 1.0, 0.85 + 0.3 * ht.z)
+                                    let glass = sky10 * (0.04 + 0.34 * fres) * mix(0.35, 1.0, refl) * (0.8 + 0.4 * hr.z) * mix(0.6, 1.0, aog) * vec3(0.85 + 0.3 * ht.y, 1.0, 0.85 + 0.3 * ht.z)
                                     let sw = clamp(sc, 0.0, ww); let cq = vec2(sw, ww - sw); let co2 = vec2(1.0) / (vec2(1.0) + cq * cq * 200.0)
                                     body = mix(wall, glass, gm * mix(0.5, 1.0, reveal)) * (1.0 + 0.1 * (2.0 * sw / ww - 1.0) * sign(gd.y + 1e-4) * (1.0 - cyls)) * (1.0 - 0.1 * (co2.x + co2.y) * (1.0 - cyls))
                                 }
                                 if id > 2.5 && id < 5.5 { body = body * 0.8 }
-                                if id > 5.5 { body = self.sil * 3.0 }
+                                if id > 5.5 { body = self.sil * 3.0 + dayc }
                                 bc += mix(body, hz * 0.7, fog) * cw; ec += e * (1.0 - 0.6 * fog) * cw; cacc += cw
                             }
                             if cacc > 0.985 { break }
@@ -327,10 +336,10 @@ fn band(sc: &SceneCtx) -> Option<Rect> {
 
 impl City {
     /// Marches the city into its two targets, a pass the scene pass `consumer` samples; recorded again only when the
-    /// march's parameters or the view changed.
+    /// march's parameters, the sky's light or the view changed.
     pub fn draw_pass(&mut self, cx: &mut Cx2d, sc: &SceneCtx, consumer: DrawPassId) {
         let v = sc.view;
-        let key = sc.p.hash(CITY_KEYS, &[v.u0, v.span, v.w as f64, v.h as f64, v.horizon]);
+        let key = sc.p.hash(CITY_KEYS, &[v.u0, v.span, v.w as f64, v.h as f64, v.horizon, f64::from_bits(sc.light.hash())]);
         let target = self.target.get_or_insert_with(|| SceneTarget::new(cx, "skyline_city", true));
         if self.key != Some(key) {
             let city = &mut self.draw_city;

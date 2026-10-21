@@ -167,11 +167,14 @@ script_mod! {
             let y = floor(i / self.parts_geom.x)
             return self.parts.sample_nearest(vec2((i - y * self.parts_geom.x + 0.5) / self.parts_geom.x, (y + 0.5) / self.parts_geom.y))
         }
-        // body tone of an unlit prop d m away (prTone): as black as the front treeline near, the range tops' tone from 5 km
-        tone: fn(d: float) -> vec3 {
+        // body tone of an unlit prop d m away (prTone): as black as the front treeline near, the range tops' tone from 5 km;
+        // hz the haze at its azimuth, day its daylight (added before the haze)
+        tone: fn(d: float, hz: vec3, day: vec3) -> vec3 {
             let t = clamp(log(d / 5000.0) / log(6.0), 0.0, 1.0); let nk = clamp(log(d / 400.0) / log(12.5), 0.0, 1.0); let hz2 = self.haze * self.haze * 0.35
-            let fogc = mix(self.haze_col * (0.7 + 0.25 * t), self.haze_col * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
-            return mix(self.sil * mix(0.6, 1.0, nk), fogc, clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0) * nk)
+            let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
+            let c = mix(self.sil * mix(0.6, 1.0, nk) + day, fogc, clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0) * nk)
+            // by day the air between, as the ranges' (`aerial`)
+            return c + (hz - c) * self.aerial(d)
         }
         // range k's coverage at pass column x, elevation ang (DrawSkyRange's: rock, then its forest band and single trees)
         range_cover: fn(x: float, k: float, ang: float, px: float, tr: float) -> float {
@@ -190,6 +193,8 @@ script_mod! {
             if (fl & 4u) == 0u { w = self.pix_view(vr) }
             if (fl & 3u) == 2u && self.mirror > 0.5 { eye = -6.3 }
             let e2 = vec2(cos(w.x * 6.2831853), sin(w.x * 6.2831853)); let dl = vec2(cos(h2.z), sin(h2.z)); let den = dl.x * e2.y - dl.y * e2.x
+            // the haze at the pixel's azimuth; the gate on the instance's lights (`lit`: the city's lights, by day off), its beacons' (on)
+            let hzc = self.haze_at(vr.x); let gate = vec2(self.lit * self.emit_gain, self.emit_gain)
             // the instance's own frame: s, height y, distance, the line's distance p, d(dist)/ds
             var fs = 0.0; var fy = 0.0; var fd = h0.y; var fp = h0.y; var fsf = 0.0; var cut = self.mirror > 0.5 && vr.y <= 0.0
             if line {
@@ -224,7 +229,7 @@ script_mod! {
                         // the one evaluator's inputs: covers dd, factor k, lines A and B, a veil s faded by f, a point light la (see ppDraw)
                         var dd = vec3(1.0e9); var k = 0.0; var da = 0.0; var wa = 1.0e9; var db = 0.0; var wb = 1.0; var kb = 0.0; var s = 0.0; var f = 0.0; var e = 0.0
                         var la = 0.0; var lr = 0.0; var lfog = fog; var li = 0.0; var kw = b.w; var lf = 0.0; var pl = 1.0; var cc = 0.0; var hw = 0.0; var lc = 0.0
-                        var lat = false; var wr = false; var col = vec3(-1.0); var o = 0.0
+                        var lat = false; var wr = false; var col = vec3(-1.0); var o = 0.0; var bcn = false
                         if t == 0.0 || t == 3.0 {
                             let ab = a.zw - a.xy; let lg = max(length(ab), 0.000001); let d = ab / lg; let ss = dot(r, d); cc = dot(r, vec2(0.0 - d.y, d.x));
                             hw = mix(b.x, b.y, clamp(ss / lg, 0.0, 1.0))
@@ -274,7 +279,8 @@ script_mod! {
                                 let sm = smoothstep(vec3(380.0, 0.0, 0.0 - a.z), vec3(600.0, 1.0, a.z * 0.3),
                                     vec3(sp, exp(0.0 - dn * dn / (wp * wp)) * (0.5 + 1.1 * n) - 0.12, r.y + a.z * 0.5))
                                 k = clamp(b.y * exp(0.0 - sp / abs(b.z)) * (1.0 - sm.x) * sm.y * sm.z, 0.0, 1.0)
-                                em = em + max(self.haze_col * c.y + vec3(0.02, 0.013, 0.007) * self.glow * (0.5 + 0.53 * c.y) - 0.8 * self.sil, vec3(0.0)) * k
+                                // the haze it stands in, the city's glow on it (fading with the lights) and the sky's ambient by day
+                                em = em + max(hzc * c.y + vec3(0.02, 0.013, 0.007) * self.glow * (0.5 + 0.53 * c.y) * self.lit + self.ambient_rgb * 0.5 - 0.8 * self.sil, vec3(0.0)) * k
                                 if b.z < 0.0 { li = k * exp(0.0 - length(r) / 22.0) * 0.2; kw = 0.45 }
                             }
                         } else if t == 21.0 {
@@ -353,11 +359,13 @@ script_mod! {
                         let cv = clamp(dd / pxm + 0.5, vec3(0.0), vec3(1.0)); let lm = max(ln.x, ln.y * kb); let gg = cv.x * cv.y * cv.z * k * mix(lm, max(lm * e, s), f)
                         if o == 0.0 { m = max(m, gg) } else if o == 1.0 { li = gg } else { ck = gg; cn = b.w }
                         if la > 0.0 { // a red aviation light: the city's tower beacons' size and strength
+                            // a beacon (`Ctx::beacon`'s core radius 0, or the aviation light below) burns day and night
+                            bcn = lr <= 0.0
                             if lr < 0.0 { la = la * 0.07 * (1.0 - 0.6 * (1.0 - exp(0.0 - gd / 70.0 * (0.004 + 0.0185 * self.haze)))); col = vec3(1.0, 0.08, 0.03); lfog = 1.0 }
                             li = la * (if lr > 0.0 { self.glow_pt(lq, lr, pxm) } else { exp(0.0 - dot(lq, lq) / (3.0 * pxm * pxm)) })
                         }
                         if clp { m = max(m0, m * ck); li = li * ck }
-                        if li > 0.0 { em = em + (if col.x < 0.0 { self.kelvin(self.temp * kw) } else { col }) * (li * self.lights * lfog) }
+                        if li > 0.0 { em = em + (if col.x < 0.0 { self.kelvin(self.temp * kw) } else { col }) * (li * self.lights * lfog * (if bcn { gate.y } else { gate.x })) }
                     }
                 }
                 // in the props layer's own pass: behind the nearer ranges (the page's prMtHide; in the scene the draw order does it)
@@ -369,7 +377,9 @@ script_mod! {
                 }
                 if (fl & 8u) != 0u && self.parts_geom.z > 0.5 { let hd = 1.0 - self.city_hide(fd); m = m * hd; em = em * hd } // behind a nearer city surface
             }
-            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }) * m, m); self.fb1 = vec4(em, m)
+            // by day the body is lit by the ambient and the sun (no normal: by its height)
+            let day = self.day_lit(vec3(0.18, 0.18, 0.18), 1.0, 0.35 + 0.65 * max(sin(self.sun_el), 0.0))
+            self.fb0 = vec4(self.tone(if h1.w > 0.0 { h1.w } else { fd }, hzc, day) * m, m); self.fb1 = vec4(em, m)
         }
     }
 
