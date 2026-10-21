@@ -18,7 +18,10 @@ use {
     },
     makepad_android_state::{get_activity, get_java_vm},
     std::ffi::c_uint,
-    std::sync::{Arc, Condvar, Mutex},
+    std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    },
     std::time::Duration,
     std::{
         cell::Cell,
@@ -594,6 +597,8 @@ static mut CHOREOGRAPHER_POST_CALLBACK_FN: Option<
     ) -> i32,
 > = None;
 
+static IS_RENDER_LOOP_RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
 /// If `no_android_choreographer` is present (e.g. OHOS with non-compatiblity), we fallback to a simple loop with frame pacing.
 /// This will be replaced by proper a vsync mechanism once we firgure it out for that OHOS.
@@ -605,6 +610,10 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     device_refresh_rate: jni_sys::jfloat,
     sdk_version: jni_sys::jint,
 ) {
+    // A recreated activity calls this again while the running app's loop keeps going.
+    if IS_RENDER_LOOP_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     // If the Choreographer is not available (e.g. OHOS), use a manual render loop
     #[cfg(no_android_choreographer)]
     {
@@ -656,8 +665,10 @@ pub unsafe fn post_vsync_callback() {
     if let Some(post_callback) = CHOREOGRAPHER_POST_CALLBACK_FN {
         if !CHOREOGRAPHER.is_null() && from_java_messages_already_set() {
             post_callback(CHOREOGRAPHER, Some(vsync_callback), std::ptr::null_mut());
+            return;
         }
     }
+    IS_RENDER_LOOP_RUNNING.store(false, Ordering::SeqCst);
 }
 
 /// Fallback render loop used when the Android Choreographer isn't available
@@ -687,7 +698,12 @@ fn init_simple_render_loop(device_refresh_rate: f32) {
             // shutdown. The check is at the top of the loop, before the send,
             // so a shutdown during the sleep produces no stray send.
             if !from_java_messages_already_set() {
-                break;
+                IS_RENDER_LOOP_RUNNING.store(false, Ordering::SeqCst);
+                // A new app may have started just now and seen us still running,
+                // so keep feeding it unless it already spawned its own loop.
+                if !from_java_messages_already_set() || IS_RENDER_LOOP_RUNNING.swap(true, Ordering::SeqCst) {
+                    break;
+                }
             }
 
             let now = std::time::Instant::now();
