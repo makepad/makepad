@@ -615,7 +615,9 @@ struct Gen<'a> {
     /// the block ends `t = x & K; t ==/!= 0; branch`: emitted as tst x, #K (the And skipped)
     test_fuse: Option<(VReg, i64)>,
     /// a compare whose flags the selects right after it read (csel / fcsel on the condition, no
-    /// `cmp c, #0`): (its bool vreg, condition)
+    /// `cmp c, #0`): (its bool vreg, condition). Valid only for the selects that directly follow
+    /// the compare in its block: any other instruction, a fused compare-and-branch, or a block
+    /// boundary ends it (the flags then belong to something else).
     sel_chain: Option<(VReg, u8)>,
     /// the last spill store emitted: (sp offset, register, word position right after it)
     last_spill: Option<(i64, u8, usize)>,
@@ -1055,6 +1057,9 @@ impl<'a> Gen<'a> {
             let mut skip_next = false;
             // a block start can be a jump target: no spill store before it carries over
             self.last_spill = None;
+            // nor flags: the previous block's terminator (a fused cmp + b.cond) or another
+            // predecessor set them, not the compare a select chain was started for
+            self.sel_chain = None;
             for (ii, inst) in b.insts.iter().enumerate() {
                 self.pc_map.push(((self.a.pos() * 4) as u32, b.pos[ii]));
                 self.cur_pos = self.al.inst_pos(bi, ii);
@@ -1067,6 +1072,11 @@ impl<'a> Gen<'a> {
                             self.remat_into(r, VReg(v));
                         }
                     }
+                }
+                // only selects continue a chain; checked before any instruction is skipped or
+                // fused into the terminator (a fused compare rewrites the flags)
+                if !matches!(inst, Inst::Sel(..)) {
+                    self.sel_chain = None;
                 }
                 if fused && ii == n - 1 {
                     break;
@@ -1089,9 +1099,6 @@ impl<'a> Gen<'a> {
                 // a compare feeding the selects right after it: they read its flags (nothing between
                 // them sets flags); when they are all its uses, the bool is never materialised
                 // (`cmp; cset; cmp #0; csel` was `cmp; csel`: Paeth's lo / hi / thresh selects)
-                if !matches!(inst, Inst::Sel(..)) {
-                    self.sel_chain = None;
-                }
                 if let Inst::ICmp(_, _, d, ..) | Inst::ICmpI(_, _, d, ..) | Inst::FCmp(_, _, d, ..) = inst {
                     let mut k = 0;
                     while ii + 1 + k < n && !(fused && ii + 1 + k == n - 1) {
@@ -4080,6 +4087,46 @@ mod tests {
         };
         f.blocks[b1 as usize].term = Term::Ret(vec![last]);
         assert!(compile(options, &f, &env).is_ok());
+    }
+
+    /// A select chain reads the flags of the compare right before it, never stale ones: here
+    /// the compare's other select sits in the next block, after a fused `cmp; b.cond` rewrote the
+    /// flags, so it must test the materialised bool again (`cmp c, #0; csel`). It used to read the
+    /// branch's flags and pick the wrong side: zune-jpeg's `get_mut(..).unwrap_or(&mut tmp)`
+    /// wrote every IDCT row into `tmp` at O3, and Stage's thumbnails came out as garbage.
+    #[test]
+    fn a_select_after_a_fused_branch_tests_its_bool_again() {
+        let options = &relax_session::Options::default();
+        let mut f = Func::new("selchain".to_string(), 0);
+        let it = IntTy { bits: 64, signed: false };
+        let (p, q) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([p, q]);
+        f.rets.push(Cls::I);
+        let (b0, b1, b2) = (f.block(), f.block(), f.block());
+        let (c, k, s, e, d) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        for inst in [Inst::Iconst(k, 8), Inst::ICmpI(Cond::Ne, false, c, p, 0), Inst::Sel(s, c, q, k), Inst::ICmpI(Cond::Eq, false, e, s, 8)] {
+            f.blocks[b0 as usize].insts.push(inst);
+            f.blocks[b0 as usize].pos.push(0);
+        }
+        f.blocks[b0 as usize].term = Term::Branch(e, b1, b2);
+        f.blocks[b1 as usize].insts.push(Inst::Sel(d, c, p, q));
+        f.blocks[b1 as usize].pos.push(0);
+        f.blocks[b1 as usize].term = Term::Ret(vec![d]);
+        let s2 = f.vreg(Cls::I);
+        f.blocks[b2 as usize].insts.push(Inst::IBinI(IOp::Add, it, s2, s, 1));
+        f.blocks[b2 as usize].pos.push(0);
+        f.blocks[b2 as usize].term = Term::Ret(vec![s2]);
+        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        let r = compile(options, &f, &env).expect("compiles");
+        let w: Vec<u32> = r.code[..r.text_len as usize].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let csel = |x: u32| x & 0x7FE0_0C00 == 0x1A80_0000;
+        let cmp0 = |x: u32| x & 0x7FFF_FC1F == 0x7100_001F;
+        let sels: Vec<usize> = (0..w.len()).filter(|&i| csel(w[i])).collect();
+        assert_eq!(sels.len(), 2, "two selects: {:08x?}", w);
+        // the first select reads the chained compare's flags; the second, after the fused
+        // branch (b.cond), tests the bool again
+        let bcond = (sels[0]..sels[1]).rev().find(|&i| w[i] & 0xFF00_0010 == 0x5400_0000).expect("fused b.cond");
+        assert!((bcond + 1..sels[1]).any(|i| cmp0(w[i])), "the select after the fused branch reads stale flags: {:08x?}", w);
     }
 
     /// The fused entry branches (`x == 0` as cbz/cbnz, `x & 8 == 0` as tst + b.cond) also relax
