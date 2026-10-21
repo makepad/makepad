@@ -1,25 +1,26 @@
-//! NEON ×4 differential fuzz: random kernel-shaped AIR programs (divergent
+//! Four-wide (x4) differential fuzz: random kernel-shaped AIR programs (divergent
 //! and uniform branches, loops with breaks and continues at every depth,
 //! per-lane frames, hostile loads, integer division, shifts, selects,
 //! variables written under masks) run on the interpreter, scalar native
-//! code and NEON code, with guard words around every buffer: every word
-//! must agree, and nothing outside a buffer may change.
-#![cfg(target_arch = "aarch64")]
+//! code and x4 vector code (the shared back end: NEON on AArch64, SSE4.1/AVX2 on
+//! x86-64), with guard words around every buffer: every word must agree, and
+//! nothing outside a buffer may change.
+#![cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 
 use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::ir::{self, Block, Program, Region, Regions, Stmt};
 use makepad_script_compute::kernel::{compile, compile_with, K_BASE};
-use makepad_script_compute::{arm64, neon, Backend};
+use makepad_script_compute::{native, native_vec, Backend};
 
 #[path = "support/kernel_gen.rs"]
 mod kernel_gen;
 use kernel_gen::*;
 
-/// Runs p on the interpreter, scalar and NEON code: (interpreter,
-/// scalar, NEON) buffers and ctx, and whether the guards held.
+/// Runs p on the interpreter, scalar and x4 code: (interpreter,
+/// scalar, x4) buffers and ctx, and whether the guards held.
 fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>>, Vec<u32>); 3]> {
-    let vcode = neon::compile(p)?;
-    let scode = arm64::compile(p)?;
+    let vcode = native_vec::compile(p)?;
+    let scode = native::compile(p)?;
     let mut ib = Bufs::new(&mut Rng(seed), n);
     let mut ictx = ctx0.to_vec();
     {
@@ -63,7 +64,7 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>
     Some([(ib.words, ictx), (sb.words, sctx), (vb.words, vctx)])
 }
 
-/// Deletes statements while NEON still disagrees with scalar code.
+/// Deletes statements while x4 code still disagrees with scalar code.
 fn minimize(p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regions) -> Program {
     minimize_by(p, n, ctx0, seed, regions, |[_, s, v]| s != v)
 }
@@ -113,7 +114,7 @@ fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regi
         while k < total {
             let mut q = p.clone();
             let mut kk = k;
-            if remove(&mut q.body, &mut kk, 0) && ir::validate(&q, regions).is_ok() && neon::compile(&q).is_some() && fails(&q) {
+            if remove(&mut q.body, &mut kk, 0) && ir::validate(&q, regions).is_ok() && native_vec::compile(&q).is_some() && fails(&q) {
                 p = q;
                 shrunk = true;
             } else {
@@ -130,13 +131,13 @@ fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regi
 }
 
 #[test]
-fn neon_equals_scalar_and_interpreter_on_random_kernels() {
-    // NEON_FUZZ_SEED / NEON_FUZZ_ROUNDS for longer runs.
+fn x4_equals_scalar_and_interpreter_on_random_kernels() {
+    // X4_FUZZ_SEED / X4_FUZZ_ROUNDS for longer runs.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-    let mut r = Rng(env("NEON_FUZZ_SEED", 0xC0FF_EE12_3456_789B));
+    let mut r = Rng(env("X4_FUZZ_SEED", 0xC0FF_EE12_3456_789B));
     let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
     let (mut tried, mut vectorized) = (0, 0);
-    let rounds = env("NEON_FUZZ_ROUNDS", 30_000);
+    let rounds = env("X4_FUZZ_ROUNDS", 30_000);
     for round in 0..rounds {
         let p = random_kernel(&mut r);
         if let Err(e) = ir::validate(&p, &regions) {
@@ -149,12 +150,12 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
             continue;
         }
         tried += 1;
-        let Some(vcode) = neon::compile(&p) else { continue };
-        // NEON_FUZZ_TRACE: the program about to run (a crash leaves it).
-        if let Ok(path) = std::env::var("NEON_FUZZ_TRACE") {
+        let Some(vcode) = native_vec::compile(&p) else { continue };
+        // X4_FUZZ_TRACE: the program about to run (a crash leaves it).
+        if let Ok(path) = std::env::var("X4_FUZZ_TRACE") {
             std::fs::write(path, format!("round {}\n{:?}", round, p.body)).ok();
         }
-        let scode = arm64::compile(&p).expect("scalar code");
+        let scode = native::compile(&p).expect("scalar code");
         vectorized += 1;
         let n = [1usize, 3, 4, 5, 8, 13, 16, 31][r.below(8) as usize];
         let ctx0 = params(&mut r);
@@ -188,7 +189,7 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
         let mut state = [0u32; 1];
         let shared = SHARED;
         unsafe { scode.run_kernel(sctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), n as u32) };
-        // NEON for n & !3, the rest scalar (as the runtime does).
+        // x4 for n & !3, the rest scalar (as the runtime does).
         let mut vb = Bufs::new(&mut Rng(seed), n);
         let mut vctx = ctx0.clone();
         let t = vb.table();
@@ -209,8 +210,12 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
         }
         if vb.words != sb.words || vctx != sctx {
             let min = minimize(p.clone(), n, &ctx0, seed, &regions);
+            // X4_FUZZ_DUMP=<dir>: the minimized program's RIR and code (kernel<k>.rir/.bin)
+            if let Ok(dir) = std::env::var("X4_FUZZ_DUMP") {
+                std::env::set_var("COMPUTE_NATIVE_DUMP", dir);
+            }
             let [_, s, v] = run3(&min, n, &ctx0, seed).unwrap();
-            panic!("minimized: {:?}\nneon {:x?}\nscalar {:x?}\n", min.body, v, s);
+            panic!("minimized: {:?}\nx4 {:x?}\nscalar {:x?}\n", min.body, v, s);
         }
     }
     eprintln!("{} random kernels, {} vectorized, all bit-equal", tried, vectorized);
@@ -223,11 +228,11 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
-/// Runs a one-output kernel natively with and without NEON and on the
+/// Runs a one-output kernel natively with and without x4 code and on the
 /// interpreter, at sizes around multiples of 4, single and multi-thread.
 fn same_everywhere(src: &str, out: &str, words: usize) {
     let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
-    assert!(k.simd(), "expected NEON code for:\n{}", src);
+    assert!(k.simd(), "expected x4 code for:\n{}", src);
     let ki = compile_with(src, &[], Backend::Interp).unwrap();
     for n in [1usize, 4, 7, 4096 + 5, 20_003] {
         let run = |k: &makepad_script_compute::kernel::Kernel, simd: bool, threads: usize| {
@@ -240,14 +245,14 @@ fn same_everywhere(src: &str, out: &str, words: usize) {
             bits(&o)
         };
         let v = run(&k, true, 1);
-        assert_eq!(v, run(&k, false, 1), "NEON != scalar, n {}:\n{}", n, src);
-        assert_eq!(v, run(&ki, false, 1), "NEON != interpreter, n {}:\n{}", n, src);
-        assert_eq!(v, run(&k, true, 4), "NEON x4 threads != one thread, n {}:\n{}", n, src);
+        assert_eq!(v, run(&k, false, 1), "x4 != scalar, n {}:\n{}", n, src);
+        assert_eq!(v, run(&ki, false, 1), "x4 != interpreter, n {}:\n{}", n, src);
+        assert_eq!(v, run(&k, true, 4), "x4 on 4 threads != one thread, n {}:\n{}", n, src);
     }
 }
 
 #[test]
-fn kernels_from_source_agree_with_neon() {
+fn kernels_from_source_agree_with_x4() {
     same_everywhere(
         "let W = 97\nlet pos = output(vec3)\nlet amp = param(8.0)\nfn vertex(i) { let x = float(i % W)\n let z = float(i / W)\n pos[i] = vec3(x, fbm2(vec2(x, z) * 0.02, 5, 2.0, 0.5) * amp + ridged2(vec2(z, x) * 0.01, 3), z) }",
         "pos",
@@ -290,7 +295,7 @@ fn kernels_from_source_agree_with_neon() {
 }
 
 #[test]
-fn emit_kernels_agree_with_neon() {
+fn emit_kernels_agree_with_x4() {
     let src = "let seg = emit_buffer(3, 4)\nfn primitive(i) { for k in 0..(i % 5) { if hash01(i, k) > 0.3 { emit(seg, float(i), float(k), hash01(i, k)) } } }";
     let k = compile(src).unwrap();
     assert!(k.simd());
@@ -311,7 +316,7 @@ fn emit_kernels_agree_with_neon() {
 }
 
 #[test]
-fn what_neon_declines_still_runs_scalar() {
+fn what_x4_declines_still_runs_scalar() {
     // A reduction reads and writes its accumulator per element.
     let k = compile("let v = input(f32)\nfn reduce_sum(i) { v[i] * 2.0 }").unwrap();
     assert!(!k.simd());
@@ -356,9 +361,34 @@ fn optimized_random_kernels_give_the_same_bits() {
         }
         if let Some([fi, fs, fv]) = run3(&f, n, &ctx0, seed) {
             if fi != fs || fi != fv {
-                panic!("round {}: fused backends differ\n{:?}\ninterp {:x?}\nscalar {:x?}\nneon {:x?}", round, f.body, fi, fs, fv);
+                panic!("round {}: fused backends differ\n{:?}\ninterp {:x?}\nscalar {:x?}\nx4 {:x?}", round, f.body, fi, fs, fv);
             }
         }
     }
     eprintln!("{} optimized random kernels bit-equal on every backend", ran);
+}
+
+// -- the shared x4 path's features, shown present in the RIR it makes --------------
+
+/// The x4 RIR of a kernel source (before the back end's passes).
+fn x4_rir(src: &str) -> String {
+    let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
+    native_vec::rir_of(k.program()).expect("x4 code").dump()
+}
+
+#[test]
+fn x4_store_groups_check_once_and_store_lane_records() {
+    // a record of consecutive words at one varying offset, under divergence and with every
+    // lane running: one range check on the largest lane offset (MaxAcrossU), then each lane's
+    // words without clamps; the results are the scalar code's
+    let srcs = [
+        "let o = output(vec4)\nfn element(i) { o[i] = vec4(float(i), 2.0, float(i * 3), -1.0) }",
+        "let o = output(vec3)\nfn element(i) { if hash01(i, 3) > 0.4 { o[i] = vec3(float(i), sqrt(float(i)), 0.5) } }",
+        "let seg = emit_buffer(3, 4)\nfn primitive(i) { for k in 0..(i % 5) { if hash01(i, k) > 0.3 { emit(seg, float(i), float(k), hash01(i, k)) } } }",
+    ];
+    for src in srcs {
+        assert!(x4_rir(src).contains("MaxAcrossU"), "no store group in the x4 code of:\n{}", src);
+    }
+    same_everywhere(srcs[0], "o", 4);
+    same_everywhere(srcs[1], "o", 3);
 }

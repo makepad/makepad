@@ -88,8 +88,17 @@ fn same_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
 }
 
 /// The loader's command line: `std::env::args` of this process.
+/// The compute crate's compiled kernels go to the Relax disk store (relax_compiler::kernel_store).
+fn install_kernel_store() {
+    makepad_script_compute::kcache::install(makepad_script_compute::kcache::Hook {
+        get: relax_compiler::kernel_store::get,
+        put: relax_compiler::kernel_store::put,
+    });
+}
+
 pub fn main() {
     relax_compiler::memstat::tune_malloc();
+    install_kernel_store();
     run(relax_compiler::os::proc::args_bytes())
 }
 
@@ -98,6 +107,7 @@ pub fn main() {
 /// executable, which build scripts and `MAKEPAD_RUN_LOADER` programs run as.
 pub fn init_embedded(exe: &std::path::Path) {
     relax_compiler::memstat::tune_malloc();
+    install_kernel_store();
     relax_compiler::unitgraph::set_self_exe(exe.to_path_buf());
     // the program's argv[0] / current_exe: the embedder has no command line of its own
     relax_compiler::os::proc::set_args(vec![exe.as_os_str().as_encoded_bytes().to_vec()]);

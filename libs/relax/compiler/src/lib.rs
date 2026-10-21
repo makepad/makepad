@@ -79,6 +79,7 @@ mod valtrees;
 pub mod syms;
 pub mod pack;
 pub mod store;
+pub mod kernel_store;
 pub mod cache;
 pub mod clean;
 pub mod mainprof;

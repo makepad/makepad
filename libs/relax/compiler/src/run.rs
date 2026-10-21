@@ -2652,6 +2652,8 @@ fn collected_skip(why: &'static str) {
 /// `wait`: the warm record's writes (after first present, at a quit) wait for the owner thread to
 /// complete its work (which a cold run's compiles fill nearly all the time); other writes skip a busy unit.
 fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
+    // the compiled kernels offered so far
+    crate::kernel_store::flush();
     // the first write comes after the start: the mapped front images are checksummed now
     crate::cache::verify_front_images();
     let up = unsafe { RUN_UNIT };

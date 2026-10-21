@@ -28,6 +28,7 @@ use makepad_relax_api::relax_api;
 pub mod cost;
 pub mod boundary;
 pub mod host;
+pub mod kcache;
 pub mod ir;
 pub mod js;
 pub mod kernel;

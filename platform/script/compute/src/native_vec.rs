@@ -18,7 +18,7 @@
 use crate::ir::{Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Un, Val, Var};
 use crate::native::Code;
 use crate::spmd::{analyse, id, shape, steps, supported, Info};
-use makepad_codegen::rir::{self, Cls, Cond, Conv, Func, IOp, Inst, IntTy, Mem, Term, VOp, VReg, VUn};
+use relax_backend::rir::{self, Cls, Cond, Conv, Func, IOp, Inst, IntTy, Mem, NanBits, RoundTo, Term, VReg, VW, VX};
 
 
 const I32: IntTy = IntTy { bits: 32, signed: true };
@@ -42,12 +42,25 @@ pub fn compile(p: &Program) -> Option<Code> {
     if !cpu_ok() {
         return None;
     }
+    let flat = crate::ir::flat(p);
+    let key = crate::kcache::key("x4", &flat, 0);
+    if let Some(code) = key.and_then(crate::native::load) {
+        if crate::kcache::verify() {
+            let fresh = compile_fresh(p, None).expect("a stored kernel compiles");
+            crate::kcache::same("x4", code.bytes(), fresh.bytes());
+        }
+        return Some(code);
+    }
+    compile_fresh(p, key)
+}
+
+fn compile_fresh(p: &Program, key: Option<u128>) -> Option<Code> {
     let mut f = rir_of(p)?;
     crate::native::optimise_for_codegen(&mut f);
     if f.verify().is_err() {
         return None;
     }
-    crate::native::emit(&f)
+    crate::native::emit_keyed(&f, key)
 }
 
 /// The vector RIR of a kernel (None when declined), before optimisation.
@@ -229,16 +242,15 @@ impl<'a> Vx<'a> {
         d
     }
 
-    fn vbin(&mut self, op: VOp, a: VReg, b: VReg) -> VReg {
+    fn vbin(&mut self, op: VX, a: VReg, b: VReg) -> VReg {
         let d = self.f.vreg(Cls::V128);
-        self.emit(Inst::VBin(op, d, a, b));
+        self.emit(Inst::VX(op, d, a, b));
         d
     }
 
-    fn vshift(&mut self, op: VOp, a: VReg, k: u8) -> VReg {
-        let d = self.f.vreg(Cls::V128);
-        self.emit(Inst::VShift(op, d, a, k));
-        d
+    /// `a` shifted by the immediate `k` (op: one of `VX::ShlI`, `ShrSI`, `ShrUI` of 32-bit lanes)
+    fn vshift(&mut self, op: fn(VW, u8) -> VX, a: VReg, k: u8) -> VReg {
+        self.vbin(op(VW::S, k), a, a)
     }
 
     fn extract_i(&mut self, v: VReg, lane: u8) -> VReg {
@@ -255,6 +267,24 @@ impl<'a> Vx<'a> {
         }
     }
 
+    /// Lane `l` of value `x` as a scalar of class `scls` (an I lane sign-extended, as `VExtract`
+    /// reads it). A constant is the scalar constant itself: an extract of its splat is no constant
+    /// to the back end, so LICM hoisted every such extract to the entry and the values stayed live
+    /// through every per-lane block after it (Stage's largest kernel: ~4.8k of ~6.9k values live
+    /// at each of its 14k blocks); a constant is rematerialised and sunk to its uses instead.
+    fn lane(&mut self, x: Val, l: u8, scls: Cls) -> VReg {
+        let d = self.f.vreg(scls);
+        match self.consts[x.0 as usize] {
+            Some(bits) if scls == Cls::F32 => self.emit(Inst::Fconst(d, bits as u64, false)),
+            Some(bits) => self.emit(Inst::Iconst(d, bits as i32 as i64)),
+            None => {
+                let v = self.vals[x.0 as usize];
+                self.emit(Inst::VExtract(d, v, l));
+            }
+        }
+        d
+    }
+
     fn uniform(&self, x: Val) -> bool {
         !self.info.vval[x.0 as usize]
     }
@@ -262,7 +292,7 @@ impl<'a> Vx<'a> {
     /// A lane mask -> the scalar code's 0/1 word.
     fn mask_to_word(&mut self, m: VReg) -> VReg {
         let one = self.splat_const(1);
-        self.vbin(VOp::And, m, one)
+        self.vbin(VX::And, m, one)
     }
 
     /// The lane mask of `x != 0` (the compare's own mask when `x` is one).
@@ -277,7 +307,7 @@ impl<'a> Vx<'a> {
     /// A word (any bits) -> lane mask of `word != 0`.
     fn word_to_mask(&mut self, w: VReg) -> VReg {
         let z = self.splat_const(0);
-        self.vbin(VOp::ICmp(Cond::Ne), w, z)
+        self.vbin(VX::ICmp(Cond::Ne, VW::S), w, z)
     }
 
     // -- memory --------------------------------------------------------------
@@ -431,7 +461,7 @@ impl<'a> Vx<'a> {
                 let lim = self.ibini(IOp::Sub, I64, last, base as i64);
                 let limv = self.f.vreg(Cls::V128);
                 self.emit(Inst::VSplat(limv, lim));
-                let idx = self.vbin(VOp::UMin, ov, limv);
+                let idx = self.vbin(VX::MinU(VW::S), ov, limv);
                 let b0 = self.ibini(IOp::Add, I64, ptr, 4 * base as i64);
                 self.emit(Inst::VGather(d, b0, idx));
                 self.term(Term::Jump(join));
@@ -447,9 +477,9 @@ impl<'a> Vx<'a> {
             Region::Frame => {
                 // word w of lane l: frame + 16 w + 4 l -> gather index 4 clamp(o) + l
                 let idx = self.vclamp(o, ov, extent);
-                let i4 = self.vshift(VOp::Shl, idx, 2);
+                let i4 = self.vshift(VX::ShlI, idx, 2);
                 let ids = self.lane_ids();
-                let il = self.vbin(VOp::IAdd, i4, ids);
+                let il = self.vbin(VX::Add(VW::S), i4, ids);
                 let fr = self.f.vreg(Cls::I);
                 self.emit(Inst::SlotAddr(fr, self.frame.unwrap_or(0)));
                 let b0 = self.ibini(IOp::Add, I64, fr, 16 * base as i64);
@@ -475,7 +505,7 @@ impl<'a> Vx<'a> {
             return ov;
         }
         let top = self.splat_const(extent.saturating_sub(1));
-        self.vbin(VOp::UMin, ov, top)
+        self.vbin(VX::MinU(VW::S), ov, top)
     }
 
     /// The vector [0, 1, 2, 3].
@@ -577,8 +607,7 @@ impl<'a> Vx<'a> {
                     let sc = self.ibini(IOp::Shl, I64, idx, 2);
                     let a = self.ibin(IOp::Add, I64, ptr, sc);
                     for l in 0..4u8 {
-                        let sv = self.f.vreg(scls);
-                        self.emit(Inst::VExtract(sv, rv, l));
+                        let sv = self.lane(val, l, scls);
                         self.emit(Inst::Store(m, a, (4 * st * l as i64) as i32, sv));
                     }
                     self.term(Term::Jump(join));
@@ -595,8 +624,7 @@ impl<'a> Vx<'a> {
                 self.term(Term::Branch(ml, run, next));
                 self.cur = run;
             }
-            let s = self.f.vreg(scls);
-            self.emit(Inst::VExtract(s, rv, l));
+            let s = self.lane(val, l, scls);
             let lo = self.lane_off(off, l);
             match region {
                 Region::Buf(_) => {
@@ -623,12 +651,84 @@ impl<'a> Vx<'a> {
     // -- statements ------------------------------------------------------------
 
     fn block(&mut self, b: &Block) {
-        for s in b {
-            self.stmt(s);
-            if self.info.escapes.contains(&id(s)) {
+        let mut k = 0;
+        while k < b.len() {
+            // a group of stores handles statements that never escape
+            let n = self.store_group(&b[k..]).max(1);
+            if n == 1 {
+                self.stmt(&b[k]);
+            }
+            if b[k..k + n].iter().any(|s| self.info.escapes.contains(&id(s))) {
                 self.full = false;
             }
+            k += n;
         }
+    }
+
+    /// Consecutive stores of words `base .. base + n` (n >= 2) of a host buffer at one varying
+    /// offset (a record's fields, an emitted record): when every lane's words lie inside the
+    /// buffer (checked once, on the largest lane offset), each running lane writes its n words
+    /// in lane order, without clamps; else the stores one by one. Kernels that run four wide
+    /// are element-local and their lanes' records never overlap, so the words end as the scalar
+    /// code leaves them. Returns the stores handled (0: none).
+    fn store_group(&mut self, b: &[Stmt]) -> usize {
+        let Some(Stmt::Store { region: Region::Buf(kb), base, off: Some(o), .. }) = b.first() else { return 0 };
+        let (kb, base, o) = (*kb, *base, *o);
+        if self.uniform(o) {
+            return 0;
+        }
+        let mut n = 1;
+        while n < b.len() {
+            match &b[n] {
+                Stmt::Store { region: Region::Buf(r), base: bn, off: Some(on), .. } if *r == kb && *on == o && *bn == base + n as u32 => n += 1,
+                _ => break,
+            }
+        }
+        let last = base as u64 + n as u64 - 1;
+        if n < 2 || last >= 1 << 31 {
+            return 0;
+        }
+        let (ptr, last_w) = self.buf_regs(kb);
+        let ov = self.v(o);
+        // every lane inside: max(zext offset) + last <= the buffer's last word (64 bits)
+        let mx = self.f.vreg(Cls::I);
+        self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, ov, ov));
+        let end = self.ibini(IOp::Add, I64, mx, last as i64);
+        let inside = self.icmp(Cond::Le, false, end, last_w);
+        let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
+        self.term(Term::Branch(inside, fast, slow));
+        self.cur = fast;
+        for l in 0..4u8 {
+            let next = self.block_new();
+            if !self.full {
+                let ml = self.extract_i(self.vm, l);
+                let run = self.block_new();
+                self.term(Term::Branch(ml, run, next));
+                self.cur = run;
+            }
+            let so = self.extract_i(ov, l);
+            let z = self.conv(Conv::IntToInt(U32), so);
+            let idx = if base > 0 { self.ibini(IOp::Add, I64, z, base as i64) } else { z };
+            let sc = self.ibini(IOp::Shl, I64, idx, 2);
+            let a = self.ibin(IOp::Add, I64, ptr, sc);
+            for (w, st) in b[..n].iter().enumerate() {
+                let Stmt::Store { val, .. } = st else { unreachable!() };
+                let fp = self.p.vals[val.0 as usize] == crate::ir::Ty::F32;
+                let (m, scls) = if fp { (Mem::F32, Cls::F32) } else { (W32, Cls::I) };
+                let sv = self.lane(*val, l, scls);
+                self.emit(Inst::Store(m, a, 4 * w as i32, sv));
+            }
+            self.term(Term::Jump(next));
+            self.cur = next;
+        }
+        self.term(Term::Jump(join));
+        self.cur = slow;
+        for st in &b[..n] {
+            self.stmt(st);
+        }
+        self.term(Term::Jump(join));
+        self.cur = join;
+        n
     }
 
     /// Branches to `skip` when no lane of the mask `m` is set, else to a new block.
@@ -648,7 +748,7 @@ impl<'a> Vx<'a> {
                 if *var == self.i {
                     let four = self.splat_const(4);
                     let iv = self.vars[var.0 as usize];
-                    self.emit(Inst::VBin(VOp::IAdd, d, iv, four));
+                    self.emit(Inst::VX(VX::Add(VW::S), d, iv, four));
                     return;
                 }
                 let r = self.v(*x);
@@ -683,8 +783,8 @@ impl<'a> Vx<'a> {
                 }
                 // divergent: both sides under masks, then the union
                 let cm = self.mask(*c);
-                let else_m = self.vbin(VOp::AndNot, self.vm, cm);
-                self.emit(Inst::VBin(VOp::And, self.vm, self.vm, cm));
+                let else_m = self.vbin(VX::AndNot, self.vm, cm);
+                self.emit(Inst::VX(VX::And, self.vm, self.vm, cm));
                 let full = self.full;
                 self.full = false;
                 let skip_t = self.block_new();
@@ -701,7 +801,7 @@ impl<'a> Vx<'a> {
                 self.block(e);
                 self.term(Term::Jump(skip_e));
                 self.cur = skip_e;
-                self.emit(Inst::VBin(VOp::Or, self.vm, self.vm, then_m));
+                self.emit(Inst::VX(VX::Or, self.vm, self.vm, then_m));
                 self.full = full;
             }
             Stmt::Loop { cap, body } => {
@@ -738,14 +838,14 @@ impl<'a> Vx<'a> {
                 self.term(Term::Jump(iter_end));
                 self.cur = iter_end;
                 if masked {
-                    self.emit(Inst::VBin(VOp::Or, self.vm, self.vm, cont));
+                    self.emit(Inst::VX(VX::Or, self.vm, self.vm, cont));
                     // a continued lane may be the only one left running
                     self.full = false;
                 }
                 self.term(Term::Jump(top));
                 self.cur = exit;
                 if masked {
-                    self.emit(Inst::VBin(VOp::Or, self.vm, self.vm, brk));
+                    self.emit(Inst::VX(VX::Or, self.vm, self.vm, brk));
                 }
                 self.full = full;
             }
@@ -758,7 +858,7 @@ impl<'a> Vx<'a> {
                 };
                 if masked {
                     let slot = if is_break { brk } else { cont };
-                    self.emit(Inst::VBin(VOp::Or, slot, slot, self.vm));
+                    self.emit(Inst::VX(VX::Or, slot, slot, self.vm));
                 }
                 if self.info.jump.contains(&id(s)) {
                     // every running lane leaves together
@@ -809,27 +909,27 @@ impl<'a> Vx<'a> {
             Op::Un(u, a) => {
                 let a = self.v(a);
                 let vu = match u {
-                    Un::NegF => Some(VUn::FNeg),
-                    Un::AbsF => Some(VUn::FAbs),
-                    Un::SqrtF => Some(VUn::FSqrt),
-                    Un::FloorF => Some(VUn::FFloor),
-                    Un::CeilF => Some(VUn::FCeil),
-                    Un::TruncF => Some(VUn::FTrunc),
-                    Un::RoundF => Some(VUn::FRoundAway),
-                    Un::F2I => Some(VUn::FToI),
-                    Un::I2F => Some(VUn::IToF),
-                    Un::NegI => Some(VUn::INeg),
+                    Un::NegF => Some(VX::FNeg(VW::S)),
+                    Un::AbsF => Some(VX::FAbs(VW::S)),
+                    Un::SqrtF => Some(VX::FSqrt(VW::S, NanBits::Host)),
+                    Un::FloorF => Some(VX::FRound(VW::S, RoundTo::Floor)),
+                    Un::CeilF => Some(VX::FRound(VW::S, RoundTo::Ceil)),
+                    Un::TruncF => Some(VX::FRound(VW::S, RoundTo::Trunc)),
+                    Un::RoundF => Some(VX::FRound(VW::S, RoundTo::Away)),
+                    Un::F2I => Some(VX::FToI(VW::S)),
+                    Un::I2F => Some(VX::IToF(VW::S)),
+                    Un::NegI => Some(VX::Neg(VW::S)),
                     _ => None,
                 };
                 match (vu, u) {
-                    (Some(o), _) => self.emit(Inst::VUn(o, d, a)),
+                    (Some(o), _) => self.emit(Inst::VX(o, d, a, a)),
                     (None, Un::BitsFI | Un::BitsIF) => self.emit(Inst::Mov(d, a)),
                     (None, Un::NotB) => {
                         let z = self.splat_const(0);
-                        let m = self.vbin(VOp::ICmp(Cond::Eq), a, z);
+                        let m = self.vbin(VX::ICmp(Cond::Eq, VW::S), a, z);
                         self.masks[v.0 as usize] = Some(m);
                         let one = self.splat_const(1);
-                        self.emit(Inst::VBin(VOp::And, d, m, one));
+                        self.emit(Inst::VX(VX::And, d, m, one));
                     }
                     _ => unreachable!("f64 is declined"),
                 }
@@ -837,22 +937,22 @@ impl<'a> Vx<'a> {
             Op::Bin(b, x, y) => {
                 let (xv, yv) = (self.v(x), self.v(y));
                 let vop = match b {
-                    Bin::AddF => Some(VOp::FAdd),
-                    Bin::SubF => Some(VOp::FSub),
-                    Bin::MulF => Some(VOp::FMul),
-                    Bin::DivF => Some(VOp::FDiv),
-                    Bin::MinF => Some(VOp::FMinLt),
-                    Bin::MaxF => Some(VOp::FMaxGt),
-                    Bin::AddI => Some(VOp::IAdd),
-                    Bin::SubI => Some(VOp::ISub),
-                    Bin::MulI => Some(VOp::IMul),
-                    Bin::AndI | Bin::AndB => Some(VOp::And),
-                    Bin::OrI | Bin::OrB => Some(VOp::Or),
-                    Bin::XorI => Some(VOp::Xor),
+                    Bin::AddF => Some(VX::FAdd(VW::S, NanBits::Host)),
+                    Bin::SubF => Some(VX::FSub(VW::S, NanBits::Host)),
+                    Bin::MulF => Some(VX::FMul(VW::S, NanBits::Host)),
+                    Bin::DivF => Some(VX::FDiv(VW::S, NanBits::Host)),
+                    Bin::MinF => Some(VX::FMinLt(VW::S)),
+                    Bin::MaxF => Some(VX::FMaxGt(VW::S)),
+                    Bin::AddI => Some(VX::Add(VW::S)),
+                    Bin::SubI => Some(VX::Sub(VW::S)),
+                    Bin::MulI => Some(VX::MulLo(VW::S)),
+                    Bin::AndI | Bin::AndB => Some(VX::And),
+                    Bin::OrI | Bin::OrB => Some(VX::Or),
+                    Bin::XorI => Some(VX::Xor),
                     _ => None,
                 };
                 if let Some(o) = vop {
-                    self.emit(Inst::VBin(o, d, xv, yv));
+                    self.emit(Inst::VX(o, d, xv, yv));
                     if matches!(b, Bin::AndB | Bin::OrB) {
                         if let (Some(mx), Some(my)) = (self.masks[x.0 as usize], self.masks[y.0 as usize]) {
                             self.masks[v.0 as usize] = Some(self.vbin(o, mx, my));
@@ -864,35 +964,40 @@ impl<'a> Vx<'a> {
                     Bin::ShlI | Bin::ShrI | Bin::ShrUI if self.consts[y.0 as usize].is_some() => {
                         let k = (self.consts[y.0 as usize].unwrap() & 31) as u8;
                         let o = match b {
-                            Bin::ShlI => VOp::Shl,
-                            Bin::ShrI => VOp::ShrS,
-                            _ => VOp::ShrU,
+                            Bin::ShlI => VX::ShlI(VW::S, k),
+                            Bin::ShrI => VX::ShrSI(VW::S, k),
+                            _ => VX::ShrUI(VW::S, k),
                         };
-                        self.emit(Inst::VShift(o, d, xv, k));
+                        self.emit(Inst::VX(o, d, xv, xv));
                     }
                     Bin::ShlI | Bin::ShrI | Bin::ShrUI => {
-                        let m31 = self.splat_const(31);
-                        let k = self.vbin(VOp::And, yv, m31);
-                        let o = match b {
-                            Bin::ShlI => VOp::Shl,
-                            Bin::ShrI => VOp::ShrS,
-                            _ => VOp::ShrU,
+                        // the amount masked to 31 (as AIR), unless proven below 32 already
+                        let k = if self.bounds[y.0 as usize].is_some_and(|b| b < 32) {
+                            yv
+                        } else {
+                            let m31 = self.splat_const(31);
+                            self.vbin(VX::And, yv, m31)
                         };
-                        self.emit(Inst::VBin(o, d, xv, k));
+                        let o = match b {
+                            Bin::ShlI => VX::ShlV(VW::S),
+                            Bin::ShrI => VX::ShrSV(VW::S),
+                            _ => VX::ShrUV(VW::S),
+                        };
+                        self.emit(Inst::VX(o, d, xv, k));
                     }
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some_and(|c| c > 1 && c < 1 << 31 && c.is_power_of_two()) => {
                         // by 2^k, lane-wise: q = (x + ((x >> 31) >>> (32 - k))) >> k, r = x - (q << k)
                         let c = self.consts[y.0 as usize].unwrap();
                         let k = c.trailing_zeros();
-                        let sg = self.vshift(VOp::ShrS, xv, 31);
-                        let bias = self.vshift(VOp::ShrU, sg, (32 - k) as u8);
-                        let t = self.vbin(VOp::IAdd, xv, bias);
+                        let sg = self.vshift(VX::ShrSI, xv, 31);
+                        let bias = self.vshift(VX::ShrUI, sg, (32 - k) as u8);
+                        let t = self.vbin(VX::Add(VW::S), xv, bias);
                         if b == Bin::DivI {
-                            self.emit(Inst::VShift(VOp::ShrS, d, t, k as u8));
+                            self.emit(Inst::VX(VX::ShrSI(VW::S, k as u8), d, t, t));
                         } else {
-                            let q = self.vshift(VOp::ShrS, t, k as u8);
-                            let qk = self.vshift(VOp::Shl, q, k as u8);
-                            self.emit(Inst::VBin(VOp::ISub, d, xv, qk));
+                            let q = self.vshift(VX::ShrSI, t, k as u8);
+                            let qk = self.vshift(VX::ShlI, q, k as u8);
+                            self.emit(Inst::VX(VX::Sub(VW::S), d, xv, qk));
                         }
                     }
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some() => {
@@ -931,7 +1036,7 @@ impl<'a> Vx<'a> {
                     Cmp::Eq => Cond::Eq,
                     Cmp::Ne => Cond::Ne,
                 };
-                let o = if matches!(op, Op::CmpF(..)) { VOp::FCmp(cc) } else { VOp::ICmp(cc) };
+                let o = if matches!(op, Op::CmpF(..)) { VX::FCmp(cc, VW::S) } else { VX::ICmp(cc, VW::S) };
                 let m = self.vbin(o, xv, yv);
                 self.masks[v.0 as usize] = Some(m);
                 let w = self.mask_to_word(m);
@@ -944,8 +1049,8 @@ impl<'a> Vx<'a> {
             }
             Op::Fma(Fma::MulAddI, a, b, c) => {
                 let (av, bv, cv) = (self.v(a), self.v(b), self.v(c));
-                let m = self.vbin(VOp::IMul, av, bv);
-                self.emit(Inst::VBin(VOp::IAdd, d, m, cv));
+                let m = self.vbin(VX::MulLo(VW::S), av, bv);
+                self.emit(Inst::VX(VX::Add(VW::S), d, m, cv));
             }
             Op::Fma(k, a, b, c) => {
                 let (np, na) = match k {
@@ -960,7 +1065,7 @@ impl<'a> Vx<'a> {
                 let xv = self.v(x);
                 if len.is_power_of_two() {
                     let mk = self.splat_const(len - 1);
-                    self.emit(Inst::VBin(VOp::And, d, xv, mk));
+                    self.emit(Inst::VX(VX::And, d, xv, mk));
                 } else {
                     let lk = len as i32 as i64;
                     for l in 0..4u8 {
