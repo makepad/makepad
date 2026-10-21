@@ -2,7 +2,20 @@ use crate::makepad_platform::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
-    mod.widgets.View =  mod.widgets.ViewBase {}
+    mod.widgets.View =  mod.widgets.ViewBase {
+        // The pointer glass (see View::field_reach), off; stated here so a
+        // sheet switch puts back a view a sheet had turned it on for. Clear
+        // until a sheet or a page gives it a face.
+        field_reach: 0.0
+        trail_spacing: 6.0
+        trail_life: 1.3
+        glass_backdrop: false
+        draw_glass +: {
+            pixel: fn() {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+        }
+    }
 
     mod.widgets.Hr = mod.widgets.View {
         width: Fill

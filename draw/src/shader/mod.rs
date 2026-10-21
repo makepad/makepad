@@ -13,4 +13,5 @@ pub mod draw_vector;
 pub mod sdf;
 pub mod video_color;
 pub mod finish;
+pub mod ripple;
 pub mod surface;
