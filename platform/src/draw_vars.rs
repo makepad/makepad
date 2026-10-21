@@ -1243,6 +1243,11 @@ impl DrawVars {
 
             #[cfg(not(makepad_precompiled_shaders))]
             {
+                // A web build recording a shader pack (a trace host's pass 1): every shader that
+                // compiles here, the shaders the run really compiles, whatever made them.
+                if vm.host.cx().draw_shaders.packs.is_recording() {
+                    DrawVars::record_shader_pack_entry(vm, io_self);
+                }
                 let Some((output, code)) = Self::compile_glsl(vm, io_self, const_table) else {
                     return;
                 };

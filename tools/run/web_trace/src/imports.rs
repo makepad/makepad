@@ -89,8 +89,54 @@ fn queue(q: Queued) {
 pub struct WorkerState {
     /// request id -> (sleeping until (virtual s), or running)
     pub sleeping: std::collections::BTreeMap<u32, Option<f64>>,
+    /// request id -> the worker's OS thread (a mach port on macOS, a tid on Linux): whether it
+    /// runs or waits (a lock, a channel, a condition) is the scheduler's to say.
+    pub native: std::collections::BTreeMap<u32, u64>,
 }
-pub static WORKERS: Mutex<WorkerState> = Mutex::new(WorkerState { sleeping: std::collections::BTreeMap::new() });
+
+/// The calling thread, as [`blocked`] asks about it.
+pub fn native_thread() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn pthread_self() -> usize;
+            fn pthread_mach_thread_np(thread: usize) -> u32;
+        }
+        unsafe { pthread_mach_thread_np(pthread_self()) as u64 }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn gettid() -> i32;
+        }
+        unsafe { gettid() as u64 }
+    }
+}
+
+/// Whether the OS thread waits (blocked on a lock, a condition, a channel): it cannot move
+/// until something else does. False when it runs or cannot be asked.
+pub fn blocked(thread: u64) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // thread_basic_info: user and system time (2 x 2 i32), cpu_usage, policy, run_state,
+        // flags, suspend_count, sleep_time; TH_STATE_WAITING = 3
+        extern "C" {
+            fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        }
+        let mut info = [0i32; 10];
+        let mut count = 10u32;
+        let r = unsafe { thread_info(thread as u32, 3, info.as_mut_ptr(), &mut count) };
+        r == 0 && info[6] == 3
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // /proc/self/task/<tid>/stat: `pid (comm) S ...`, S (sleeping) or D (disk)
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/self/task/{}/stat", thread)) else { return false };
+        let state = stat.rsplit_once(')').and_then(|(_, rest)| rest.trim_start().chars().next());
+        matches!(state, Some('S') | Some('D'))
+    }
+}
+pub static WORKERS: Mutex<WorkerState> = Mutex::new(WorkerState { sleeping: std::collections::BTreeMap::new(), native: std::collections::BTreeMap::new() });
 pub static WORKER_CLOCK: Condvar = Condvar::new();
 
 std::thread_local! {
@@ -109,6 +155,23 @@ pub const NAMES: [&str; 16] = [
 pub static CALLS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// Panics the program reported (js_console_error's panic marker).
 pub static PANICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// `--until <text>`: the run ends at the first console line holding it.
+pub static UNTIL: Mutex<Option<String>> = Mutex::new(None);
+pub static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Draw shaders a run with a shader pack installed did not find in it (the platform's
+/// `not in pack: draw shader '<name>' (<where>, key <hex>)` line): stub hits of that build.
+pub static PACK_MISSES: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
+
+fn watch(line: &str) {
+    if let Some(at) = line.find("not in pack: draw shader ") {
+        let rest = &line[at + "not in pack: draw shader ".len()..];
+        let shader = rest.split_once(';').map_or(rest, |(s, _)| s).trim();
+        PACK_MISSES.lock().unwrap().insert(shader.to_string());
+    }
+    if UNTIL.lock().unwrap().as_deref().is_some_and(|until| line.contains(until)) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+}
 
 fn count(i: usize) {
     CALLS[i].fetch_add(1, Ordering::Relaxed);
@@ -116,12 +179,15 @@ fn count(i: usize) {
 
 extern "C" fn js_console_log(ptr: u32, len: u32) {
     count(0);
-    println!("[page] {}", read_str(ptr, len));
+    let line = read_str(ptr, len);
+    println!("[page] {}", line);
+    watch(&line);
 }
 
 extern "C" fn js_console_error(ptr: u32, len: u32) {
     count(1);
     let raw = read_str(ptr, len);
+    watch(&raw);
     match raw.strip_prefix("__MAKEPAD_WASM_PANIC__:") {
         Some(p) => {
             eprintln!("[page] PANIC {}", p);

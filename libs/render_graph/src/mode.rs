@@ -147,6 +147,15 @@ pub struct AdaptiveSampling {
     pub tol: f32,
 }
 
+/// A process-wide cap on an adaptive frame's sub-frames (0: none): a coverage run (a web trace)
+/// takes every path of the schedule (its levels, its measurements) in fewer paints.
+static MAX_SUBFRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Caps every adaptive schedule made from now on at `n` sub-frames (0: no cap).
+pub fn set_max_subframes(n: u32) {
+    MAX_SUBFRAMES.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Default for AdaptiveSampling {
     fn default() -> Self {
         Self { min: 4, max: 324, tol: 3.0 }
@@ -209,6 +218,10 @@ fn lg3_quarter(x: u32) -> f64 {
 
 impl Schedule {
     pub fn new(sampling: Sampling) -> Self {
+        let sampling = match (sampling, MAX_SUBFRAMES.load(std::sync::atomic::Ordering::Relaxed)) {
+            (Sampling::Adaptive(a), cap) if cap != 0 => Sampling::Adaptive(AdaptiveSampling { max: a.max.min(cap).max(a.min), ..a }),
+            (s, _) => s,
+        };
         match sampling {
             Sampling::Fixed(n) => {
                 let n = n.max(1);
@@ -288,6 +301,13 @@ impl Schedule {
             self.done = true;
         }
         self.done
+    }
+
+    /// Steps taken so far (sub-frames handed out and measurements taken):
+    /// it moves on every step, so a host can tell a frame that progresses
+    /// from one that is stuck.
+    pub fn progress(&self) -> u32 {
+        self.k + self.errors.len() as u32
     }
 
     /// Sub-frames converged so far.

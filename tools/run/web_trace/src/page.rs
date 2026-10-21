@@ -28,6 +28,7 @@ use std::collections::HashMap;
 type F0 = extern "C" fn() -> u32;
 type F1 = extern "C" fn(u32) -> u32;
 type F2 = extern "C" fn(u32, u32) -> u32;
+type F3 = extern "C" fn(u32, u32, u32) -> u32;
 type V1 = extern "C" fn(u32);
 type V2 = extern "C" fn(u32, u32);
 type V3 = extern "C" fn(u32, u32, u32);
@@ -56,6 +57,65 @@ impl Exports {
     }
     pub fn has(&self, name: &str) -> bool {
         self.addrs.contains_key(name)
+    }
+    /// The trace's own switch of the glyph records (draw's layouts, 3D type), where the program
+    /// has them: not the page's calls, so not counted.
+    pub fn record_glyphs(&self, on: bool) {
+        for name in ["wasm_record_glyphs", "wasm_record_text3d_glyphs", "wasm_record_outline_glyphs"] {
+            if let Some(&a) = self.addrs.get(name) {
+                let f = unsafe { std::mem::transmute::<usize, V1>(a) };
+                f(on as u32);
+            }
+        }
+    }
+    /// A trace-only switch `name(on)` (stress modes), when the program has it: whether it had.
+    pub fn switch(&self, name: &str, on: bool) -> bool {
+        let Some(&a) = self.addrs.get(name) else { return false };
+        let f = unsafe { std::mem::transmute::<usize, V1>(a) };
+        f(on as u32);
+        true
+    }
+    /// The recorded shader pack (`wasm_take_shader_pack`).
+    pub fn take_shader_pack(&self, app: u32) -> Option<Vec<u8>> {
+        let &a = self.addrs.get("wasm_take_shader_pack")?;
+        let f = unsafe { std::mem::transmute::<usize, F1>(a) };
+        let p = mem(f(app)) as *const u64;
+        let len = unsafe { p.read() } as usize;
+        Some(unsafe { std::slice::from_raw_parts(p.add(1) as *const u8, len) }.to_vec())
+    }
+    /// The trace's Splash record switch (platform splash_trace.rs), before the app is made.
+    pub fn record_splash(&self, on: bool) {
+        if let Some(&a) = self.addrs.get("wasm_record_splash") {
+            let f = unsafe { std::mem::transmute::<usize, V1>(a) };
+            f(on as u32);
+        }
+    }
+    /// The program's Splash record (JSON), when it has the export.
+    pub fn take_splash_use(&self, app: u32) -> Option<String> {
+        let &a = self.addrs.get("wasm_take_splash_use")?;
+        let f = unsafe { std::mem::transmute::<usize, F1>(a) };
+        let p = mem(f(app)) as *const u64;
+        let len = unsafe { p.read() } as usize;
+        let bytes = unsafe { std::slice::from_raw_parts(p.add(1) as *const u8, len) };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+    /// The glyph records: (font file hash, glyph ids) from every recorder the program has.
+    pub fn take_glyphs(&self) -> Vec<(u64, Vec<u64>)> {
+        let mut out = Vec::new();
+        for name in ["wasm_take_recorded_glyphs", "wasm_take_text3d_glyphs", "wasm_take_outline_glyphs"] {
+            let Some(&a) = self.addrs.get(name) else { continue };
+            let f = unsafe { std::mem::transmute::<usize, F0>(a) };
+            let p = mem(f()) as *const u64;
+            let len = unsafe { p.read() } as usize;
+            let words = unsafe { std::slice::from_raw_parts(p, len.max(2)) };
+            let mut at = 2;
+            for _ in 0..words[1] {
+                let (hash, n) = (words[at], words[at + 1] as usize);
+                out.push((hash, words[at + 2..at + 2 + n].to_vec()));
+                at += 2 + n;
+            }
+        }
+        out
     }
     pub fn init_panic_hook(&self) { export!(self, "wasm_init_panic_hook", extern "C" fn())() }
     pub fn create_app(&self) -> u32 { export!(self, "wasm_create_app", F0)() }
@@ -145,12 +205,22 @@ pub struct Page {
     pub gl: Gl,
     pub cov: Coverage,
     crate_dirs: HashMap<String, String>,
+    /// `--serve /<prefix>=<dir>`: the page's own files, longest prefix first.
+    serves: Vec<(String, String)>,
+    /// `--query`: the page's `location.search`.
+    query: String,
     workers: HashMap<u32, std::thread::JoinHandle<()>>,
     thread_stacks: Vec<(u32, u32)>,
     audio: Option<Audio>,
     from_names: HashMap<u64, &'static str>,
     unhandled: std::collections::BTreeSet<&'static str>,
     pub frames: u64,
+    pack_record: bool,
+    pack_install: Vec<Vec<u8>>,
+    /// The FNV-1a 64 hash of every file served, to its URL (what a glyph record names a font by).
+    pub file_hashes: HashMap<u64, String>,
+    /// The linear memory's most committed and most live bytes, sampled each frame.
+    pub peak_memory: (usize, usize),
     /// IndexedDB's `values` store (web.js storage_*): a fresh profile, empty at start
     storage: std::collections::BTreeMap<(String, String), Vec<u8>>,
     bridge_code_len: usize,
@@ -195,7 +265,8 @@ fn log_on() -> bool {
 const ORIGIN: &str = "http://localhost";
 
 impl Page {
-    pub fn new(x: &'static Exports, window: Window, crate_dirs: Vec<(String, String)>) -> Self {
+    pub fn new(x: &'static Exports, window: Window, crate_dirs: Vec<(String, String)>, mut serves: Vec<(String, String)>, query: String) -> Self {
+        serves.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
         Page {
             x,
             app: 0,
@@ -208,12 +279,18 @@ impl Page {
             gl: Gl::new(),
             cov: Coverage::default(),
             crate_dirs: crate_dirs.into_iter().collect(),
+            serves,
+            query,
             workers: HashMap::new(),
             thread_stacks: Vec::new(),
             audio: None,
             from_names: from_wasm_names(),
             unhandled: Default::default(),
             frames: 0,
+            pack_record: false,
+            pack_install: Vec::new(),
+            file_hashes: HashMap::new(),
+            peak_memory: (0, 0),
             storage: Default::default(),
             bridge_code_len: 0,
             title: String::new(),
@@ -244,10 +321,34 @@ impl Page {
 
     // ---- start (WasmBridge / WasmWebBrowser constructors, load_deps)
 
+    /// What runs as the app is made, before its first message: the shader pack recorded
+    /// (`--record-pack`) or installed (`--pack`).
+    pub fn with_pack(&mut self, record: bool, install: Vec<Vec<u8>>) {
+        self.pack_record = record;
+        self.pack_install = install;
+    }
+
+    /// The app the page made (`wasm_create_app`).
+    pub fn app(&self) -> u32 {
+        self.app
+    }
+
     pub fn start(&mut self) {
         let x = self.x;
         x.init_panic_hook();
         self.app = x.create_app();
+        if self.pack_record {
+            let Some(&a) = x.addrs.get("wasm_record_shader_pack") else { panic!("--record-pack: the program has no wasm_record_shader_pack (a build without the compiler?)") };
+            let f = unsafe { std::mem::transmute::<usize, V2>(a) };
+            f(self.app, 1);
+        }
+        for pack in std::mem::take(&mut self.pack_install) {
+            let Some(&a) = x.addrs.get("wasm_install_shader_pack") else { panic!("--pack: the program has no wasm_install_shader_pack") };
+            let p = x.data_u8(&pack);
+            let f = unsafe { std::mem::transmute::<usize, F3>(a) };
+            let n = f(self.app, p, pack.len() as u32);
+            eprintln!("makepad-web-trace: shader pack installed: {} entries", n);
+        }
         // create_js_message_bridge: the page's message code (a string message), then freed
         let code = x.get_js_message_bridge(self.app);
         let words = self.msg_words(code);
@@ -269,7 +370,7 @@ impl Page {
                 hostname: "localhost".into(),
                 host: "localhost".into(),
                 pathname: "/index.html".into(),
-                search: String::new(),
+                search: self.query.clone(),
                 hash: String::new(),
                 has_thread_support: true,
                 is_phone: false,
@@ -388,7 +489,7 @@ impl Page {
                 if !self.raf {
                     self.raf = true;
                     let now = imports::now();
-                    self.next_vsync = ((now / FRAME_S).floor() + 1.0) * FRAME_S;
+                    self.next_vsync = ((now / FRAME_S + 1e-6).floor() + 1.0) * FRAME_S;
                 }
             }
             "FromWasmSetDocumentTitle" => self.title = read!(FromWasmSetDocumentTitle).title,
@@ -524,27 +625,72 @@ impl Page {
     fn request_frame(&mut self) {
         if !self.raf {
             self.raf = true;
-            self.next_vsync = ((imports::now() / FRAME_S).floor() + 1.0) * FRAME_S;
+            self.next_vsync = ((imports::now() / FRAME_S + 1e-6).floor() + 1.0) * FRAME_S;
         }
     }
 
-    // ---- resources: `/<crate>/<path>` of the program's crates
+    // ---- resources: the page's files (`--serve`), `/<crate>/<path>` of the program's crates
+
+    /// The file a page path names: a `--serve` prefix's, else a crate's.
+    fn local_file(&self, path: &str) -> Option<String> {
+        for (prefix, dir) in &self.serves {
+            let prefix = prefix.trim_matches('/');
+            if prefix.is_empty() {
+                return Some(format!("{}/{}", dir, path));
+            }
+            if path == prefix {
+                return Some(dir.clone());
+            }
+            if let Some(rest) = path.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('/')) {
+                return Some(format!("{}/{}", dir, rest));
+            }
+        }
+        let (krate, rest) = path.split_once('/').unwrap_or((path, ""));
+        let dir = self.crate_dirs.get(krate).or_else(|| self.crate_dirs.get(&krate.replace('-', "_")))?;
+        Some(format!("{}/{}", dir, rest))
+    }
 
     /// A fetch of the page: (status, `key: value\r\n` headers, body), recorded as an asset.
+    /// A URL resolves against the page (`/index.html`), as `fetch` resolves it. A directory
+    /// (a trailing `/`) answers with its listing: `f <size> <name>` / `d - <name>` lines.
     fn serve(&mut self, url: &str, method: &str, req_headers: &str) -> (u32, String, Vec<u8>) {
         let path = url.strip_prefix(ORIGIN).unwrap_or(url);
         if path.contains("://") {
             return (502, String::new(), format!("no network in the trace host: {}", url).into_bytes());
         }
-        let path = path.split(['?', '#']).next().unwrap_or("").trim_start_matches('/');
-        let (krate, rest) = path.split_once('/').unwrap_or((path, ""));
-        let Some(dir) = self.crate_dirs.get(krate).or_else(|| self.crate_dirs.get(&krate.replace('-', "_"))) else {
+        let path = path.split(['?', '#']).next().unwrap_or("");
+        let mut parts: Vec<&str> = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => { parts.pop(); }
+                part => parts.push(part),
+            }
+        }
+        let is_dir = path.is_empty() || path.ends_with('/');
+        let path = parts.join("/");
+        let Some(file) = self.local_file(&path) else {
             return (404, String::new(), Vec::new());
         };
-        let file = format!("{}/{}", dir, rest);
-        let Ok(data) = std::fs::read(&file) else {
-            return (404, String::new(), Vec::new());
+        let data = if is_dir {
+            let Ok(entries) = std::fs::read_dir(&file) else {
+                return (404, String::new(), Vec::new());
+            };
+            let mut lines: Vec<String> = entries.filter_map(|e| {
+                let e = e.ok()?;
+                let ty = e.file_type().ok()?;
+                let name = e.file_name().into_string().ok()?;
+                if ty.is_dir() { Some(format!("d - {}", name)) } else if ty.is_file() { Some(format!("f {} {}", e.metadata().ok()?.len(), name)) } else { None }
+            }).collect();
+            lines.sort();
+            lines.into_iter().map(|l| l + "\n").collect::<String>().into_bytes()
+        } else {
+            match std::fs::read(&file) {
+                Ok(data) if std::path::Path::new(&file).is_file() => data,
+                _ => return (404, String::new(), Vec::new()),
+            }
         };
+        let path = if is_dir && !path.is_empty() { format!("{}/", path) } else { path };
         let size = data.len() as u64;
         // `Range: bytes=lo-hi` (streaming): the part, 206
         let range = req_headers.split("\r\n").find_map(|l| {
@@ -559,6 +705,10 @@ impl Page {
             Some((lo.min(size), (hi + 1).min(size)))
         });
         let key = format!("/{}", path);
+        if !is_dir && !self.cov.assets.contains_key(&key) {
+            let hash = data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+            self.file_hashes.insert(hash, key.clone());
+        }
         let a = self.cov.assets.entry(key).or_insert_with(|| Asset { path: file.clone(), size, ..Default::default() });
         a.fetches += 1;
         if method == "HEAD" {
@@ -657,9 +807,14 @@ impl Page {
             .stack_size((stack as usize).max(16 << 20))
             .spawn(move || {
                 imports::WORKER.with(|w| w.set(Some(request_id)));
+                imports::WORKERS.lock().unwrap().native.insert(request_id, imports::native_thread());
                 imports::QUEUE.lock().unwrap().push(Queued::WorkerStarted(request_id));
                 x.thread_entrypoint(request_id, context_ptr);
-                imports::WORKERS.lock().unwrap().sleeping.remove(&request_id);
+                {
+                    let mut g = imports::WORKERS.lock().unwrap();
+                    g.sleeping.remove(&request_id);
+                    g.native.remove(&request_id);
+                }
                 imports::WORKER_CLOCK.notify_all();
                 imports::QUEUE.lock().unwrap().push(Queued::WorkerFinished(request_id));
             })
@@ -667,18 +822,32 @@ impl Page {
         self.workers.insert(request_id, h);
     }
 
-    /// Waits until every worker sleeps (js_worker_wait) or has finished, so the clock moves only
-    /// when nothing runs: what workers do lands in the same frame from run to run. A worker that
-    /// waits on the UI thread (a lock, a channel) never sleeps: after 250 ms of real time without
-    /// a change the page goes on (noted once).
+    /// Waits until every worker sleeps (js_worker_wait), waits on something (the scheduler says
+    /// its thread is blocked: a lock, a condition, a channel, a file the page must fetch first) or
+    /// has finished, so the clock moves only when nothing runs: what workers do lands in the same
+    /// frame from run to run. Blocked means blocked in three looks 1 ms apart. After 250 ms of
+    /// real time without that the page goes on (noted once).
     fn settle(&mut self) {
         let start = std::time::Instant::now();
         let mut g = imports::WORKERS.lock().unwrap();
+        let mut still = 0;
         loop {
             let now = imports::now();
-            if g.sleeping.values().all(|s| matches!(s, Some(until) if *until > now)) {
+            let running: Vec<u64> = g.sleeping.iter().filter(|(_, s)| !matches!(s, Some(until) if *until > now)).map(|(id, _)| g.native.get(id).copied().unwrap_or(0)).collect();
+            if running.is_empty() {
                 return;
             }
+            if running.iter().all(|&t| t != 0 && imports::blocked(t)) {
+                still += 1;
+                if still >= 3 {
+                    return;
+                }
+                drop(g);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                g = imports::WORKERS.lock().unwrap();
+                continue;
+            }
+            still = 0;
             let (ng, _) = imports::WORKER_CLOCK.wait_timeout(g, std::time::Duration::from_millis(10)).unwrap();
             g = ng;
             if !imports::QUEUE.lock().unwrap().is_empty() {
@@ -700,6 +869,9 @@ impl Page {
     pub fn run(&mut self, inputs: &[(f64, Input)], end: f64) {
         let mut next_input = 0;
         loop {
+            if imports::STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             self.drain();
             self.settle();
             self.drain();
@@ -786,6 +958,13 @@ impl Page {
         self.pump();
         self.gl.end_frame();
         self.frames += 1;
+        let (committed, live) = relax_compiler::zone_alloc::web::stats();
+        if committed > self.peak_memory.0 && std::env::var_os("MAKEPAD_WEB_TRACE_MEM").is_some() {
+            let (touched, slots, large, listed) = relax_compiler::zone_alloc::web::detail();
+            eprintln!("[page] memory: {} MB committed, {} MB live; touched {} MB, slots {} MB, large {} MB, {} partial chunks",
+                committed >> 20, live >> 20, touched >> 20, slots >> 20, large >> 20, listed);
+        }
+        self.peak_memory = (self.peak_memory.0.max(committed), self.peak_memory.1.max(live));
         if self.gl.first_draws_deferred {
             self.gl.first_draws_deferred = false;
             self.send(ToWasmRedrawAll {});
@@ -813,7 +992,7 @@ impl Page {
     }
 
     pub fn summary(&self) -> String {
-        format!("frames {}, draw calls {}, shaders {}, title {:?}, bridge code {} chars, unhandled {:?}",
-            self.frames, self.gl.frames.iter().map(|f| f.draw_calls as u64).sum::<u64>(), self.gl.shaders_compiled, self.title, self.bridge_code_len, self.unhandled)
+        format!("frames {}, peak memory {} MB committed / {} MB live, live GPU textures peak {} MB / at the end {} MB, draw calls {}, shaders {}, title {:?}, bridge code {} chars, unhandled {:?}",
+            self.frames, self.peak_memory.0 >> 20, self.peak_memory.1 >> 20, self.gl.peak_texture_bytes >> 20, self.gl.live_textures.values().sum::<u64>() >> 20, self.gl.frames.iter().map(|f| f.draw_calls as u64).sum::<u64>(), self.gl.shaders_compiled, self.title, self.bridge_code_len, self.unhandled)
     }
 }

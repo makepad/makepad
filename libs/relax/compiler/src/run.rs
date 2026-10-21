@@ -433,6 +433,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // fns whose names start with one of these, then return to the caller instead of running `main`
     // (the Android host: the Activity's JNI natives are these fns, `exports()`)
     let mut export_names: Vec<String> = Vec::new();
+    // `--no-live`: a working tree's run that is no live session (a trace host: what it runs must
+    // be the sources it started with, never a hot reload of an edit made meanwhile)
+    let mut no_live = false;
     let mut check = false;
     let mut watch = session.is_some();
     let mut deep = false;
@@ -487,6 +490,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 i += 1;
             }
             "--quiet" => QUIET.store(true, Ordering::Relaxed),
+            "--no-live" => no_live = true,
             // non-lazy Gandalf: no body runs before the borrow checker accepted it (jit::CHECK_FIRST)
             "--check-first" => jit::CHECK_FIRST.store(true, Ordering::Relaxed),
             // the parent run's relax dir (dirs.rs): a build script it runs shares it
@@ -559,7 +563,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // `makepad run` of a working tree is a live session (watcher + hot reload); sources served from
     // a store (`makepad run <git url>`, mounted bundles) are not, and neither are checks and the
     // build scripts / self re-runs a program starts.
-    if !check && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() && !SILENT.load(Ordering::Relaxed)
+    if !check && !no_live && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() && !SILENT.load(Ordering::Relaxed)
         && !crate::vfs::is_virtual(&workspace_dir()) {
         driver_options.live = true;
     }

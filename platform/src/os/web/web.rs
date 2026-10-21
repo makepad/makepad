@@ -1027,6 +1027,13 @@ impl Cx {
             self.retire_webgl_resources();
             self.handle_repaint(time);
             self.poll_texture_lifetimes();
+            // The script heap's collection, once a frame when it is due, as
+            // the desktop loop runs it (the web loop never collected).
+            self.with_vm(|vm| {
+                if vm.heap().needs_gc() {
+                    vm.gc();
+                }
+            });
         }
 
         if network_responses.len() != 0 {

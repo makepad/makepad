@@ -70,6 +70,8 @@ mod frame_build;
 pub mod shader_pack;
 pub mod collect;
 pub mod splash_blank;
+/// The Splash use record (a web trace host's, or `MAKEPAD_SPLASH_TRACE=<file>` natively).
+pub mod splash_trace;
 
 // Native Linux services are owned by the HAL.
 #[cfg(target_os = "linux")]

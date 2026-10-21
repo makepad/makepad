@@ -324,7 +324,7 @@ impl CompiledShader {
     ) -> Option<ScriptObject> {
         self.state.find_vertex_buffer_object(vm, shader)
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     pub(crate) fn reached_functions(&self) -> impl Iterator<Item = ScriptObject> + '_ {
         self.state
             .ir

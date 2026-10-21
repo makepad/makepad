@@ -240,6 +240,59 @@ impl Workspace {
         out.retain(|d| !self.excludes.iter().any(|e| d == e || d.starts_with(&format!("{}/", e))));
         out
     }
+
+    fn excluded(&self, dir: &str) -> bool {
+        self.excludes.iter().any(|e| dir == e || dir.starts_with(&format!("{}/", e)))
+    }
+
+    /// Is `dir` a member? Cargo's members are the listed ones plus every path dependency of a
+    /// member that lies inside the workspace root and is not excluded, transitively, through any
+    /// dependency table (normal, dev, build, `[target.*]`; `workspace = true` entries by the
+    /// workspace's own path): apps/commercial names Stage's and Sandbox's crates that way.
+    fn has_member(&self, dir: &str) -> bool {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut todo = self.member_dirs();
+        while let Some(m) = todo.pop() {
+            let m = normalize(&m);
+            if !seen.insert(m.clone()) {
+                continue;
+            }
+            if m == dir {
+                return true;
+            }
+            let Ok(t) = read_toml(&format!("{}/Cargo.toml", m)) else { continue };
+            let mut tables: Vec<&TomlTable> = Vec::new();
+            for k in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                tables.extend(table(&t, k));
+            }
+            if let Some(targets) = table(&t, "target") {
+                for (_, tt) in targets {
+                    if let Some(tt) = tt.as_table() {
+                        for k in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                            tables.extend(table(tt, k));
+                        }
+                    }
+                }
+            }
+            for tbl in tables {
+                for (key, spec) in tbl {
+                    let Some(spec) = spec.as_table() else { continue };
+                    let path = if b(spec, "workspace") == Some(true) {
+                        self.ws_deps.get(key).and_then(|w| w.as_table()).and_then(|w| s(w, "path")).map(|p| join(&self.root, &p))
+                    } else {
+                        s(spec, "path").map(|p| join(&m, &p))
+                    };
+                    if let Some(p) = path {
+                        let p = normalize(&p);
+                        if (p == self.root || p.starts_with(&format!("{}/", self.root))) && !self.excluded(&p) {
+                            todo.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl Resolver {
@@ -707,8 +760,7 @@ pub fn find_root(dir: &str) -> Result<String, String> {
                         return Ok(d);
                     }
                     if let Ok(ws) = Workspace::load(&d) {
-                        let excluded = ws.excludes.iter().any(|e| current == *e || current.starts_with(&format!("{}/", e)));
-                        if !excluded && ws.member_dirs().iter().any(|m| normalize(m) == current) {
+                        if !ws.excluded(&current) && ws.has_member(&current) {
                             return Ok(d);
                         }
                     }
@@ -1240,8 +1292,17 @@ mod root_tests {
                 // a package with no workspace at all, outside the workspace's members
                 ("solo/Cargo.toml", "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
                 ("solo/src/main.rs", "fn main() {}\n"),
+                // a members package naming a crate only as a never-built path dependency (apps/commercial
+                // and Sandbox): cargo makes that crate a member, so the workspace's inherited deps apply
+                ("hub/Cargo.toml", "[package]\nname = \"hub\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[target.'cfg(any())'.dependencies]\ngame = { path = \"game\" }\n"),
+                ("hub/src/lib.rs", ""),
+                ("hub/game/Cargo.toml", "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nlib = { workspace = true }\n"),
+                ("hub/game/src/main.rs", "fn main() {}\n"),
             ],
         );
+        let _ = std::fs::write(format!("{root}/Cargo.toml"), "[workspace]\nmembers = [\"app\", \"lib\", \"hub\"]\nexclude = [\"bench\"]\n[workspace.dependencies]\nlib = { path = \"lib\" }\n");
+        assert_eq!(find_root(&format!("{root}/hub/game")).unwrap(), normalize(&root));
+        assert!(units(sess, &format!("{root}/hub/game"), "game").iter().any(|n| n == "lib"));
         // from the workspace root and from inside a member's folder
         assert!(units(sess, &root, "app").iter().any(|n| n == "app"));
         assert_eq!(find_root(&format!("{root}/app/src")).unwrap(), normalize(&root));

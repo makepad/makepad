@@ -853,6 +853,9 @@ impl ScriptHeap {
     }
 
     pub(crate) fn needs_gc_impl(&self) -> bool {
+        if GC_STRESS.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
         // Minimum thresholds before GC can trigger (avoid thrashing on small heaps)
         const MIN_OBJECTS: usize = 1024;
         const MIN_STRINGS: usize = 256;
@@ -1045,4 +1048,20 @@ mod tests {
         let v: ScriptValue = from_a.into();
         assert_eq!(v.as_object(), Some(from_a));
     }
+}
+
+/// Stress mode (a trace host's run that must reach the collector's paths):
+/// every safepoint collects ([`set_gc_stress`]).
+static GC_STRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Collect at every safepoint from now on (`on`), or by the growth rule again.
+pub fn set_gc_stress(on: bool) {
+    GC_STRESS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The trace host's stress switch (`makepad-web-trace --stress`).
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_script_gc_stress(on: u32) {
+    set_gc_stress(on != 0);
 }

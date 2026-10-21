@@ -1468,6 +1468,10 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(event, Event::Shutdown) {
+            self.splash_trace_exit();
+        }
         // Under `makepad run` with an agent watching (makepad inspect), the dispatch is a retry
         // boundary: a panic in it parks for the agent, and when the agent resumes it with
         // `retry` (after a hot patch) the event is dispatched again with the patched code.

@@ -3452,12 +3452,6 @@ impl Widget for PortalList {
             _ => {}
         }
         for (abs, digit) in presses {
-            // The bar overlays the rows, but its press belongs to the bar.
-            // Tracking the row underneath would cancel the bar's capture as
-            // soon as that row scrolls out of view and is recycled.
-            if cx.fingers.is_digit_captured_by(digit, self.scroll_bar.area()) {
-                continue;
-            }
             let row = self
                 .items
                 .iter()

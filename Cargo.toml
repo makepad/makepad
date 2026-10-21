@@ -226,6 +226,7 @@ workspace.members = [
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
     "tools/run/boot",
+    "tools/run/fixture/diffpkg",
     "tools/run/android_host",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",

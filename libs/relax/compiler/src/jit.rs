@@ -4265,7 +4265,10 @@ impl Unit {
             // its initializer needed a module the post-boot loader has loaded since: run it
             // again into the same storage (its symbol already names that address)
             if DEFERRED_STATICS.lock().unwrap_or_else(|e| e.into_inner()).remove(&d.0) {
-                if self.run_init(d, Vec::new(), a).is_none() {
+                let pending = PendingInit::arm(d);
+                let r = self.run_init(d, Vec::new(), a);
+                pending.disarm();
+                if r.is_none() {
                     if DEFERRED_ABORT.with(|f| f.get()) { crate::zone_alloc::kept_with(|| DEFERRED_STATICS.lock().unwrap_or_else(|e| e.into_inner()).insert(d.0)); }
                     return a;
                 }
@@ -4296,9 +4299,15 @@ impl Unit {
         // object is an immutable snapshot taken immediately after pure CTFE,
         // never the static's later (possibly mutated) contents.
         let cached = unsafe { crate::cache::const_value(self.self_ptr.0, d, &[]) };
+        let ran = cached.is_none().then(|| {
+            let pending = PendingInit::arm(d);
+            let r = self.run_init(d, Vec::new(), buf);
+            pending.disarm();
+            r
+        });
         if let Some(initial) = cached {
             unsafe { std::ptr::copy_nonoverlapping(initial as *const u8, buf as *mut u8, l.size as usize); }
-        } else if self.run_init(d, Vec::new(), buf).is_none() {
+        } else if ran.flatten().is_none() {
             // needs a skipped module: evaluated again (same storage) once the outer compile
             // loaded it; the build using it fails meanwhile (DEFERRED_ABORT)
             if DEFERRED_ABORT.with(|a| a.get()) {
@@ -8451,6 +8460,29 @@ static DEFERRED_MISSING: relax_session::sync::Mutex<Vec<(u32, (u32, String))>> =
 /// Statics whose initializer failed for a module not loaded yet (by DefId): their storage
 /// stays; static_addr runs the initializer again.
 static DEFERRED_STATICS: relax_session::sync::Mutex<std::collections::BTreeSet<u32>> = relax_session::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A static's initializer in progress. The static's address is recorded before it runs (statics
+/// may name each other cyclically), so an initializer that unwinds -- a nested owner request
+/// cancelled with OwnerBusy and posted again, a preemption -- would leave the address with no
+/// value, and the retried request would read the zeroed storage as the static (Sandbox's race
+/// kit read every slice of its `static RACE_DEF` as empty). Unwinding marks it like a deferred
+/// static instead: the next static_addr runs the initializer again into the same storage.
+struct PendingInit(u32);
+
+impl PendingInit {
+    fn arm(d: DefId) -> PendingInit {
+        PendingInit(d.0)
+    }
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for PendingInit {
+    fn drop(&mut self) {
+        crate::zone_alloc::kept_with(|| DEFERRED_STATICS.lock().unwrap_or_else(|e| e.into_inner()).insert(self.0));
+    }
+}
 
 /// Whether static `d`'s initializer is waiting for a module the post-boot loader has still to
 /// load (its storage holds no value yet). A cached entry naming it is not linked: the slot is

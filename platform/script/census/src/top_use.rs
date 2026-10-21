@@ -226,6 +226,9 @@ fn head_path(text: &str) -> Vec<String> {
 /// One block's statements and whether each defined object was reached.
 #[derive(Debug)]
 pub struct BlockUse {
+    /// The registering `module_path!()` (`makepad_widgets::button`): with a
+    /// statement's path, the stable name of a definition.
+    pub module_path: String,
     pub file: String,
     pub line: usize,
     pub column: usize,
@@ -240,6 +243,7 @@ impl Clone for BlockUse {
     #[inline(always)]
     fn clone(&self) -> Self {
         Self {
+            module_path: self.module_path.clone(),
             file: self.file.clone(),
             line: self.line,
             column: self.column,
@@ -256,14 +260,15 @@ impl Clone for BlockUse {
 #[repr(C)]
 pub struct BlockReachOut<'a> {
     ctx: *mut u8,
-    block: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, usize, usize, *const u8, usize, *const u8, usize),
+    block: unsafe extern "C-unwind" fn(*mut u8, *const u8, usize, *const u8, usize, usize, usize, *const u8, usize, *const u8, usize),
     _out: std::marker::PhantomData<&'a mut u8>,
 }
 
 impl<'a> BlockReachOut<'a> {
     #[inline(always)]
     pub fn new(out: &'a mut Vec<BlockUse>) -> Self {
-        unsafe extern "C-unwind" fn block(ctx: *mut u8, file: *const u8, file_len: usize, line: usize, column: usize, code: *const u8, code_len: usize, reach: *const u8, reach_len: usize) {
+        #[allow(clippy::too_many_arguments)]
+        unsafe extern "C-unwind" fn block(ctx: *mut u8, module: *const u8, module_len: usize, file: *const u8, file_len: usize, line: usize, column: usize, code: *const u8, code_len: usize, reach: *const u8, reach_len: usize) {
             let out = &mut *(ctx as *mut Vec<BlockUse>);
             let text = |p: *const u8, n: usize| std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n)).to_string();
             let code = text(code, code_len);
@@ -273,13 +278,13 @@ impl<'a> BlockReachOut<'a> {
                 .zip(reach.iter())
                 .map(|(s, r)| (s, match r { 0 => None, 1 => Some(false), _ => Some(true) }))
                 .collect();
-            out.push(BlockUse { file: text(file, file_len), line, column, code, statements });
+            out.push(BlockUse { module_path: text(module, module_len), file: text(file, file_len), line, column, code, statements });
         }
         Self { ctx: out as *mut Vec<BlockUse> as *mut u8, block, _out: std::marker::PhantomData }
     }
 
-    fn block(&mut self, file: &str, line: usize, column: usize, code: &str, reach: &[u8]) {
-        unsafe { (self.block)(self.ctx, file.as_ptr(), file.len(), line, column, code.as_ptr(), code.len(), reach.as_ptr(), reach.len()) }
+    fn block(&mut self, module: &str, file: &str, line: usize, column: usize, code: &str, reach: &[u8]) {
+        unsafe { (self.block)(self.ctx, module.as_ptr(), module.len(), file.as_ptr(), file.len(), line, column, code.as_ptr(), code.len(), reach.as_ptr(), reach.len()) }
     }
 }
 
@@ -388,7 +393,7 @@ pub fn top_use_into(vm: &mut ScriptVm, out: &mut BlockReachOut) {
                 match used { None => 0u8, Some(false) => 1, Some(true) => 2 }
             })
             .collect::<Vec<u8>>();
-        out.block(&script_mod.file, script_mod.line, script_mod.column, &script_mod.code, &statements);
+        out.block(&script_mod.module_path, &script_mod.file, script_mod.line, script_mod.column, &script_mod.code, &statements);
     }
 }
 

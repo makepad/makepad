@@ -4,7 +4,10 @@ use std::marker::PhantomData;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-pub const CHUNK: usize = 2 << 20;
+/// A chunk holds one thread's blocks of one size class. The web target's linear memory takes
+/// 512 KB chunks: every thread keeps a current chunk per class, and at 2 MB the program's few
+/// threads committed 1.5 GB of the 2 GB for 250 MB live (P(DOOM) in the trace host).
+pub const CHUNK: usize = if WEB_AT != 0 { 512 << 10 } else { 2 << 20 };
 const MAX_SHIFT: usize = 18; // 16 B .. 256 KB; >256 KB gets an exclusive mapping
                              // Size classes. The burst arena keeps powers of two. The compiler arena holds its blocks for a
                              // long time, so rounding every one up to a power of two would waste a quarter of its pages:
@@ -61,9 +64,9 @@ const PLATFORM_MAX_ORDER: usize = 15; // 64 GB of virtual address space, not res
 const PLATFORM_MAX_ORDER: usize = 12;
 #[cfg(not(target_pointer_width = "64"))]
 const PLATFORM_MAX_ORDER: usize = 7; // 256 MB on 32-bit; exhaustion falls back to the heap
-// The web target's linear memory (zone_alloc/web.rs): 2 GB at a fixed address inside one 4 GB
-// window, so a pointer's low 32 bits are its wasm address.
-const MAX_ORDER: usize = if WEB_AT != 0 { 10 } else { PLATFORM_MAX_ORDER };
+// The web target's linear memory (zone_alloc/web.rs): 2 GB (4096 chunks of 512 KB) at a fixed
+// address inside one 4 GB window, so a pointer's low 32 bits are its wasm address.
+const MAX_ORDER: usize = if WEB_AT != 0 { 12 } else { PLATFORM_MAX_ORDER };
 const N: usize = 1 << MAX_ORDER;
 const RESERVE: usize = N * CHUNK;
 const NONE: usize = usize::MAX;

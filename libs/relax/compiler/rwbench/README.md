@@ -22,6 +22,16 @@ in-repo inputs; no UI, GPU or window. The micro-kernels live in `../bench_rt`.
 | `audio_mix` | makepad-audio-synth `SynthBus` (the game mixer): recipe voices placed around the listener, a tone, two engines with tyres moving past, room send and master dynamics, 40 blocks of 512 |
 | `splash_eval` | makepad-script VM calling a compute-heavy Splash fn (recursion, loops, array and object access, arithmetic); parsed and evaluated once in setup |
 | `csg_boolean` | makepad-csg: primitives meshed at fixed resolution, intersection / difference / union / `union_all` |
+| `box3d_physics` | makepad-box3d (single precision, serial solver, sleeping off): `src/box3d_scene.rs` built fresh per iteration (a hull-box pyramid, a revolute plank bridge with a motor and limits, a spherical-joint sphere rope ending in a capsule, a distance-joint spring pendulum, a rain of spheres, capsules and rocks), 90 steps of 1/60 s with 4 substeps; checksum = every body's transform and velocity bits plus the contact count at steps 30/60/90. The same scene at its small size is the diff_fast package program `relax-diffpkg box3d` (tools/run/fixture/diffpkg) |
+
+### Commercial set
+
+With the commercial checkout at `apps/commercial`, `run.py` also runs the workloads of `apps/commercial/relax_tests/src/bench.rs`
+(package `relax-commercial-tests`, binary `relax-rwbench-commercial`, this crate's `src/harness.rs` included by path), after the
+OSS ones and in the same rounds and tables: `sandbox_sim` (Sandbox's game sim over box3d f64: a crate stack and a capsule-mover
+scene, 300 ticks each, plus a vehicle lap), `level_walk` (nav grid build and seeded walker tours), `model_build` (a props program
+and a character preset built to GLB through the model-script registry and libs/model). `RW_COMMERCIAL=0` leaves them out;
+`NATIVE_COMMERCIAL` names a prebuilt rustc binary of it. The same package's default binary is diff_fast's commercial package program set.
 
 Not here: an Amp program (there is no `apps/commercial/amp` in the tree), whisper. Build with `MAKEPAD_GGML_NO_CUDA=1` (the submit scripts set it) so the llm crate's CUDA store does not run nvcc.
 
@@ -62,7 +72,7 @@ compile). Setup (reading inputs, building archives) counts towards time-to-stead
 ```
 python3 run.py <target dir> <name=makepad binary>...
 ```
-builds the rustc side (or uses `NATIVE=<binary>`) and runs every workload (`WORKLOADS="a b"` picks some) under rustc and
+builds the rustc side (or uses `NATIVE=<binary>`; the commercial set `NATIVE_COMMERCIAL`) and runs every workload (`WORKLOADS="a b"` picks some) under rustc and
 under each Relax binary, `ROUNDS` (default 4) interleaved rounds: each round runs every workload once, rustc first, then
 the binaries in alternating order (base, new / new, base / ...). Per name it prints, per workload, the median over rounds
 of the steady ms with the [min..max] spread, the Relax/rustc ratio (median of the per-round ratios, so drift hits both

@@ -32,3 +32,4 @@ makepad-audio-decode = { workspace = true }
 makepad-audio-synth = { workspace = true }
 makepad-script = { workspace = true }
 makepad-csg = { workspace = true }
+makepad-box3d = { path = "../../../box3d" }

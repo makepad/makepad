@@ -263,6 +263,11 @@ impl Accumulator {
         self.schedule.is_some()
     }
 
+    /// The frame's steps so far ([`Schedule::progress`]), while one is in progress.
+    pub fn progress(&self) -> Option<u32> {
+        self.schedule.as_ref().map(Schedule::progress)
+    }
+
     /// What to do this paint. Polls a pending measurement.
     pub fn step(&mut self, cx: &mut Cx) -> Step {
         if let Some(ticket) = self.ticket {

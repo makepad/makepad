@@ -74,7 +74,11 @@ impl RenderTarget {
         self.texture = match format {
             RenderTargetFormat::Bgra8 => Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: fixed, initial: true }),
             RenderTargetFormat::Rgba16f => Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: fixed, initial: true }),
+            #[cfg(not(target_arch = "wasm32"))]
             RenderTargetFormat::SharedBgra8 => cx.create_shared_texture(size.0.max(1) as usize, size.1.max(1) as usize),
+            // the browser shares no textures with another renderer: a plain target
+            #[cfg(target_arch = "wasm32")]
+            RenderTargetFormat::SharedBgra8 => Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: fixed, initial: true }),
         }.label(cx, self.name);
         if format != RenderTargetFormat::SharedBgra8 {
             self.texture.set_transient(cx, true);

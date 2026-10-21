@@ -48,6 +48,12 @@ pub fn stats() -> (usize, usize) {
     (committed, requested)
 }
 
+/// (bytes touched, bytes in live slots, bytes in large blocks, chunks in the partial list): where
+/// the committed bytes are (arena.rs `detail`).
+pub fn detail() -> (usize, usize, usize, usize) {
+    arena::detail()
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Header {

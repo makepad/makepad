@@ -11,6 +11,11 @@
 # Env: TARGET (default target/release), DIFF_CACHE (native binaries; default $TMPDIR/diff_fast_cache),
 # DIFF_PROGRAMS ("floats tls": only those), DIFF_SLEEP_MS (O3 round gap, default 250), DIFF_JOBS (default 4).
 # Each makepad run gets a fresh home/cache dir, hidden and muted, and deleted afterwards.
+# Package programs (library-backed, e.g. box3d): every package dir in DIFF_PKG_DIRS (default
+# tools/run/fixture/diffpkg, plus apps/commercial/relax_tests when the commercial checkout is there) is
+# built once with cargo --release (its default bin is named like the package); `<bin> --list` names its
+# programs, each runs natively and as `makepad run <package> -- <program>` at the same three tiers, and
+# its D lines and exit status must match. They show as `<package>~<program>`. DIFF_PKG_DIRS=none skips them.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 T=${TARGET:-$root/target/release}
@@ -25,10 +30,11 @@ mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
 known=${DIFF_KNOWN:-$(cd "$here/known" && ls *.rs | sed 's/\.rs$//')}
 rv=$(rustc -V)
-export M here cache work sleepms rv
+export M here root cache work sleepms rv
 # one job: native build (cached) + native run, or a tier run. $1 = program, $2 = native|base|o3
 job() {
     p=$1; k=$2; src=$here/diff/$p.rs; [ -f "$src" ] || src=$here/known/$p.rs; out=$work/$p.$k
+    case $p in *~*) pkgjob "${p%%~*}" "${p#*~}" "$k"; return ;; esac
     case $k in
     native)
         h=$(printf '%s' "$rv" | cat - "$src" | cksum | tr -d " ")
@@ -57,8 +63,46 @@ job() {
         rm -r "$d" ;;
     esac
 }
+# one package-program job: $1 package, $2 program, $3 native|o1|base|o3 (the native binary is built already)
+pkgjob() {
+    pkg=$1; prog=$2; k=$3; out=$work/$pkg~$prog.$k
+    case $k in
+    native)
+        DIFF_SLEEP_MS=0 "$pkgtarget/release/$pkg" "$prog" > "$out.raw" 2> "$out.err"
+        echo $? > "$out.rc" ;;
+    *)
+        d=$work/$pkg~$prog.$k.home; mkdir -p "$d/home" "$d/tmp"
+        case $k in
+        o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
+        base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
+        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        esac
+        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms MAKEPAD_HAL_BACKEND=headless \
+            MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
+            MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
+            nice -n 10 "$M" run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
+        echo $? > "$out.rc"
+        rm -r "$d" ;;
+    esac
+}
+pkgtarget=${DIFF_PKG_TARGET:-$root/target}
+case $pkgtarget in /*) ;; *) pkgtarget=$PWD/$pkgtarget ;; esac
+export pkgtarget
 if [ "$1" = "--job" ]; then work=$2; job "$3" "$4"; exit 0; fi
-for p in $progs $known; do for k in native o1 base o3; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+# package programs: build each package (one cargo run per package, the workspace target dir), list its programs
+pkgdirs=${DIFF_PKG_DIRS:-$here/diffpkg $root/apps/commercial/relax_tests}
+[ "$pkgdirs" = none ] && pkgdirs=
+pkgprogs=; pkgfail=
+for dir in $pkgdirs; do
+    [ -f "$dir/Cargo.toml" ] || continue
+    pkg=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$dir/Cargo.toml" | head -1)
+    if ! (cd "$root" && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$pkgtarget nice -n 10 cargo build --release -q -p "$pkg" --bin "$pkg" -j "${DIFF_CARGO_JOBS:-6}") > "$work/$pkg.build" 2>&1; then
+        pkgfail="$pkgfail$pkg: native build failed: $(grep -m3 '^error' "$work/$pkg.build")
+"; continue
+    fi
+    for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
+done
+for p in $progs $known $pkgprogs; do for k in native o1 base o3; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
 check() {
     p=$1; fail=
     sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.native.raw" > "$work/$p.native.d"
@@ -71,13 +115,14 @@ check() {
         if ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
             fail="$p at tier $k: stdout differs from rustc (cksum native $sum, $k $(cksum < "$work/$p.$k.d"))
 $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
-        elif [ "$rc" != "$nrc" ] || ! grep -aq '[1-9][0-9]* passed; 0 failed' "$work/$p.$k.raw"; then
+        elif [ "$rc" != "$nrc" ] || { case $p in *~*) false ;; *) ! grep -aq '[1-9][0-9]* passed; 0 failed' "$work/$p.$k.raw" ;; esac; }; then
             fail="$p at tier $k: exit status $rc (native $nrc) or test failed: $(grep -a 'test result\|panicked' "$work/$p.$k.raw" | head -2 | cut -c1-200)"
         fi
     done
 }
-ok=0; n=0; bad=; kfail=0; kfixed=
-for p in $progs; do
+ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=
+[ -n "$pkgfail" ] && n=$(printf '%s' "$pkgfail" | grep -c .)
+for p in $progs $pkgprogs; do
     n=$((n + 1)); check "$p"
     if [ -z "$fail" ]; then ok=$((ok + 1)); else bad="$bad$fail
 "; fi

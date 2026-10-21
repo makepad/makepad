@@ -57,6 +57,8 @@ pub struct Frame {
     pub passes: u32,
     pub upload_bytes: u64,
     pub digest: u64,
+    /// GPU bytes of the live textures and render targets at the frame's end (a leak grows it).
+    pub texture_bytes: u64,
 }
 
 pub struct Gl {
@@ -70,8 +72,14 @@ pub struct Gl {
     pub frames: Vec<Frame>,
     /// totals over the run
     pub shaders_compiled: u32,
+    /// Every program's GLSL the page compiled (vertex, fragment): what a shader pack must hold.
+    pub glsl: std::collections::HashSet<(String, String)>,
     pub texture_bytes: u64,
     pub buffer_bytes: u64,
+    /// Live textures and render targets: id -> GPU bytes (an upload's, or a target's size times
+    /// its format's), until freed.
+    pub live_textures: std::collections::HashMap<usize, u64>,
+    pub peak_texture_bytes: u64,
 }
 
 /// What the page sends back for a GL message.
@@ -85,15 +93,18 @@ pub enum Reply {
 impl Gl {
     pub fn new() -> Self {
         Gl {
+            glsl: Default::default(),
             shaders: Vec::new(),
             first_draw_spread: false,
             first_draw_this_frame: false,
             first_draws_deferred: false,
-            frame: Frame { draw_calls: 0, passes: 0, upload_bytes: 0, digest: 0 },
+            frame: Frame { draw_calls: 0, passes: 0, upload_bytes: 0, digest: 0, texture_bytes: 0 },
             hash: Digest::new(),
             frames: Vec::new(),
             shaders_compiled: 0,
             texture_bytes: 0,
+            live_textures: Default::default(),
+            peak_texture_bytes: 0,
             buffer_bytes: 0,
         }
     }
@@ -109,10 +120,12 @@ impl Gl {
     /// The frame's work so far ends (the page's animation frame returned).
     pub fn end_frame(&mut self) {
         self.frame.digest = self.hash.0;
+        self.frame.texture_bytes = self.live_textures.values().sum();
+        self.peak_texture_bytes = self.peak_texture_bytes.max(self.frame.texture_bytes);
         if self.frame.draw_calls != 0 || self.frame.upload_bytes != 0 || self.frame.passes != 0 {
             self.frames.push(self.frame.clone());
         }
-        self.frame = Frame { draw_calls: 0, passes: 0, upload_bytes: 0, digest: 0 };
+        self.frame = Frame { draw_calls: 0, passes: 0, upload_bytes: 0, digest: 0, texture_bytes: 0 };
         self.hash = Digest::new();
         self.first_draw_this_frame = false;
     }
@@ -147,6 +160,7 @@ impl Gl {
         let waiting = self.first_draw_spread;
         self.shaders[m.shader_id] = Some(Shader { first_draw_waiting: waiting });
         self.shaders_compiled += 1;
+        self.glsl.insert((m.vertex.clone(), m.pixel.clone()));
         out.push(if waiting { Reply::ShadersLinked { count: 1 } } else { Reply::ShadersDone { count: 1, waited: 0 } });
     }
 
@@ -194,6 +208,9 @@ impl Gl {
     }
     pub fn free(&mut self, m: FromWasmFreeWebGLResources) {
         self.hash.u64(8);
+        for id in &m.texture_ids {
+            self.live_textures.remove(id);
+        }
         for l in [&m.array_buffer_ids, &m.index_buffer_ids, &m.vao_ids, &m.texture_ids, &m.framebuffer_ids] {
             self.hash.u64(l.len() as u64);
             for v in l {
@@ -205,6 +222,7 @@ impl Gl {
         self.hash.u64(w as u64);
         self.hash.u64(h as u64);
         self.texture_bytes += bytes.len() as u64;
+        self.live_textures.insert(id, bytes.len() as u64);
         self.upload(kind, id, &bytes);
     }
     pub fn texture_bgra(&mut self, m: FromWasmAllocTextureImage2D_BGRAu8_32) {
@@ -230,6 +248,9 @@ impl Gl {
         self.hash.u64(m.width as u64);
         self.hash.u64(m.height as u64);
         for c in &m.color_targets {
+            // 0 RGBA8, 1 R32F, 2 RGBA32F, 3 RGBA16F
+            let bpp = match c.format { 2 => 16, 3 => 8, _ => 4 };
+            self.live_textures.insert(c.texture_id, m.width as u64 * m.height as u64 * bpp);
             self.hash.u64(c.texture_id as u64);
             self.hash.u64(c.init_only as u64);
             self.hash.u64(c.format as u64);
@@ -238,6 +259,9 @@ impl Gl {
             }
         }
         let d = &m.depth_target;
+        if d.attached {
+            self.live_textures.insert(d.texture_id, m.width as u64 * m.height as u64 * 4);
+        }
         self.hash.u64(d.attached as u64);
         self.hash.u64(d.texture_id as u64);
         self.hash.u64(d.clear_depth.to_bits() as u64);

@@ -6863,7 +6863,7 @@ impl<'a> Lcx<'a> {
                 }
             }
         }
-        if root.is_none() {
+        if root.is_none() && !self.base_is_borrowed_place(bx) {
             // a temporary base: its fields that were not taken are dropped with it
             // (the base temporary itself is not dropped as a whole: its taken fields moved)
             let ba = self.place_addr(&bp, bt);
@@ -8470,6 +8470,27 @@ impl<'a> Lcx<'a> {
         match self.box_inner(self.body_ty(x)) {
             Some(inner) => self.needs_drop_glue(inner),
             None => false,
+        }
+    }
+
+    /// A struct update base that names memory the update does not own: a place reached through a
+    /// reference or raw pointer (`..*self`, `..self.layout`, `..v[i]`) or a static. Its remaining
+    /// fields are copied out (typeck requires them Copy: moving out of a borrow is E0507) and nothing
+    /// of it is dropped; only a value expression's temporary owns what the update leaves behind.
+    fn base_is_borrowed_place(&self, e: ExprId) -> bool {
+        match &self.ast().expr(e).kind {
+            ExprKind::Paren(x) => self.base_is_borrowed_place(*x),
+            ExprKind::Path(_) => self.is_place_expr(e),
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                // auto-deref through a reference makes the projection a borrowed place
+                let derefs = self.b.field_idx.get(&e.0).map_or(0, |&(d, _)| d);
+                (derefs > 0 && self.box_inner(self.body_ty(*x)).is_none()) || self.base_is_borrowed_place(*x)
+            }
+            // `v[i]` through the Index trait is `*v.index(i)`: borrowed; an array's element is part of the array
+            ExprKind::Index(x, _) => self.base_is_borrowed_place(*x) || !matches!(self.kind_ref(self.body_ty(*x)), TyKind::Array(..)),
+            // `*r` of a reference or pointer: borrowed; `*b` of a Box temporary owns its contents
+            ExprKind::Unary(UnOp::Deref, x) => self.box_inner(self.body_ty(*x)).is_none() || self.base_is_borrowed_place(*x),
+            _ => false,
         }
     }
 

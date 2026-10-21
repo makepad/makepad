@@ -3216,65 +3216,8 @@ mod.widgets.ScreenView.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     return fe_housing(p, self.rect_size, self.rect_pos, px, self.border_radius, fe_frame(self.bezel), self.scan)
 }
-// The lens's glass over a display at `p`, the lens the box `c`, `hc`, `rc`
-// (`dc` and `n` its distance and normal at `p`, `k` its half height): the
-// case's shadow falling in under the well's upper rim, the lens's rim and
-// its light, as on the knobs.
-let fe_lens_glass = fn(p: vec2, c: vec2, hc: vec2, rc: float, dc: float, n: vec2, k: float, px: float) -> vec4 {
-    var out = vec4(0.0, 0.0, 0.0, fk_rim_shade(p, c, hc, rc, k, 0.0, 0.0) * fk_aa(dc, px))
-    out = Finish.over(out, fk_lens_rim(dc, n, k, px, 0.0))
-    return Finish.over(out, fk_lens_light(p, c - hc, dc, n, k, px, 0.0, 0.0, 0.0))
-}
-
-// WATER UNDER THE LENS, on his word ('Ferrofluid screens too'): the
-// pointer glass (`Ripple`) on the screens, so on every readout set in one,
-// and on the needle meter. The pointer leaves drops as it moves across the
-// lens, each sends a ring out, and the floor, the figures, the scale and
-// the needle under the lens bend through the rings; the lens itself, its
-// rim, its light and the case's shadow in it, stays still over the water.
-// Its light is the sheet's: from the upper left, a crisp line of light on
-// the flanks that face it with the lens rim's faint cool fringe beside it,
-// a soft shade on the flanks away, its faint warm fringe. Nothing glows.
-// At rest nothing is drawn for it and the lens is as it was.
-
-// The water at a point, premultiplied: `under` the floor and what lies on
-// it read through the water (when `seen` is 1; without it, the light and
-// shade alone), `slope` the water's slope there, `cov` the lens's coverage.
-let fe_water = fn(under: vec3, seen: float, slope: vec2, cov: float) -> vec4 {
-    let lit = dot(slope, vec2(-0.524, -0.852)) * 0.25
-    let crest = smoothstep(0.2, 0.7, lit) * 0.42
-    let cool = (smoothstep(0.04, 0.2, lit) - smoothstep(0.2, 0.7, lit)) * 0.12
-    let shade = smoothstep(0.05, 0.8, 0.0 - lit) * 0.3
-    let warm = smoothstep(0.3, 0.9, 0.0 - lit) * 0.1
-    var out = vec4(0.0, 0.0, 0.0, 0.0)
-    if seen > 0.5 {
-        out = vec4(under, 1.0)
-    }
-    out = Finish.over(out, vec4(0.0, 0.0, 0.0, shade))
-    out = Finish.over(out, vec4(vec3(0.80, 0.52, 0.38) * warm, warm))
-    out = Finish.over(out, vec4(vec3(0.42, 0.60, 0.85) * cool, cool))
-    out = Finish.over(out, vec4(crest, crest, crest, crest))
-    return out * cov
-}
-
-mod.widgets.ScreenView.field_reach = 2.0
-mod.widgets.ScreenView.trail_life = 1.6
-mod.widgets.ScreenView.glass_backdrop = true
-mod.widgets.ScreenView.draw_glass.trail_0 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_1 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_2 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_3 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_4 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_5 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_6 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_7 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.ScreenView.draw_glass.trail_life = uniform(1.6)
-mod.widgets.ScreenView.draw_glass.scene_texture = texture_2d(float)
-mod.widgets.ScreenView.draw_glass.has_gauss = uniform(0.0)
-mod.widgets.ScreenView.draw_glass.source_size = uniform(vec2(1.0, 1.0))
-mod.widgets.ScreenView.draw_glass.source_y_flip = uniform(0.0)
-// The screen's glass, over the figures: the water under the lens, and
-// over it the lens's glass.
+// The screen's glass, over the figures: the case's shadow falling in under
+// the well's upper rim, the lens's rim and its light, as on the knobs.
 mod.widgets.ScreenView.draw_glass.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     let p = self.pos * self.rect_size
@@ -3286,16 +3229,9 @@ mod.widgets.ScreenView.draw_glass.pixel = fn() {
     let dc = fk_rbox(p, c, hc, rc)
     let n = fk_rbox_n(p, c, hc, rc)
     let k = min(hc.x, hc.y)
-    let w = Ripple.sum(p, dc, self.trail_life, self.trail_0, self.trail_1, self.trail_2, self.trail_3, self.trail_4, self.trail_5, self.trail_6, self.trail_7)
-    var under = vec3(0.0, 0.0, 0.0)
-    if self.has_gauss > 0.5 {
-        // The floor and the figures, read through the water, never from
-        // past the lens.
-        let q = clamp(p + w.xy, c - hc, c + hc)
-        let sq = (self.rect_pos + q) / max(self.source_size, vec2(1.0, 1.0))
-        under = self.scene_texture.sample(vec2(sq.x, mix(sq.y, 1.0 - sq.y, self.source_y_flip))).rgb
-    }
-    return Finish.over(fe_water(under, self.has_gauss, w.zw, fk_aa(dc, px)), fe_lens_glass(p, c, hc, rc, dc, n, k, px))
+    var out = vec4(0.0, 0.0, 0.0, fk_rim_shade(p, c, hc, rc, k, 0.0, 0.0) * fk_aa(dc, px))
+    out = Finish.over(out, fk_lens_rim(dc, n, k, px, 0.0))
+    return Finish.over(out, fk_lens_light(p, c - hc, dc, n, k, px, 0.0, 0.0, 0.0))
 }
 
 // THE NEEDLE METER, a display in the knobs' material: the case curves down
@@ -3346,50 +3282,6 @@ mod.widgets.NeedleMeter.draw_bg.pixel = fn() {
     out = Finish.over(out, vec4(0.0, 0.0, 0.0, fk_rim_shade(p, c, hc, rc, k, 0.0, 0.0) * a))
     out = Finish.over(out, fk_lens_rim(dc, n, k, px, 0.0))
     return Finish.over(out, fk_lens_light(p, c - hc, dc, n, k, px, 0.0, 0.0, 0.0)) * self.opacity
-}
-
-mod.widgets.NeedleMeter.field_reach = 2.0
-mod.widgets.NeedleMeter.trail_life = 1.6
-mod.widgets.NeedleMeter.glass_backdrop = true
-mod.widgets.NeedleMeter.draw_glass.trail_0 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_1 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_2 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_3 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_4 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_5 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_6 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_7 = instance(vec3(0.0, 0.0, -1.0))
-mod.widgets.NeedleMeter.draw_glass.trail_life = uniform(1.6)
-mod.widgets.NeedleMeter.draw_glass.scene_texture = texture_2d(float)
-mod.widgets.NeedleMeter.draw_glass.has_gauss = uniform(0.0)
-mod.widgets.NeedleMeter.draw_glass.source_size = uniform(vec2(1.0, 1.0))
-mod.widgets.NeedleMeter.draw_glass.source_y_flip = uniform(0.0)
-// The meter's water. Its face already carries the lens's glass, so what
-// the water reads has that glass taken off again (the face is the floor
-// with the lens laid over it), and the lens is laid back over the water
-// where it is, still; at rest the glass draws nothing.
-mod.widgets.NeedleMeter.draw_glass.pixel = fn() {
-    let p = self.pos * self.rect_size
-    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let fs = Finish.snap(3.0, px)
-    let lb = fe_lens_box(self.rect_size, self.rect_pos, px, fs)
-    let c = lb.xy
-    let hc = lb.zw
-    let rc = fe_cell_radius(clamp(self.face_radius, 0.0, min(hc.x, hc.y) + fs), fs, hc)
-    let dc = fk_rbox(p, c, hc, rc)
-    let k = min(hc.x, hc.y)
-    let cov = fk_aa(dc, px)
-    let w = Ripple.sum(p, dc, self.trail_life, self.trail_0, self.trail_1, self.trail_2, self.trail_3, self.trail_4, self.trail_5, self.trail_6, self.trail_7)
-    if self.has_gauss > 0.5 {
-        let q = clamp(p + w.xy, c - hc, c + hc)
-        let sq = (self.rect_pos + q) / max(self.source_size, vec2(1.0, 1.0))
-        let seen = self.scene_texture.sample(vec2(sq.x, mix(sq.y, 1.0 - sq.y, self.source_y_flip))).rgb
-        let lq = fe_lens_glass(q, c, hc, rc, fk_rbox(q, c, hc, rc), fk_rbox_n(q, c, hc, rc), k, px)
-        let under = clamp((seen - lq.rgb) / max(1.0 - lq.a, 0.05), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
-        let lens = fe_lens_glass(p, c, hc, rc, dc, fk_rbox_n(p, c, hc, rc), k, px)
-        return Finish.over(fe_water(under, 1.0, w.zw, 1.0), lens) * cov
-    }
-    return fe_water(vec3(0.0, 0.0, 0.0), 0.0, w.zw, cov)
 }
 
 // THE LIQUID FIGURES. Distances in digit heights, y down, negative inside.

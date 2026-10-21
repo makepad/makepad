@@ -5,7 +5,8 @@
 //! path builds the shader's mapping from), serialised into versioned bytes
 //! and keyed by a hash of the shader's source.
 //!
-//! - Recording (native): [`ShaderPacks::record_enabled`] makes every draw shader
+//! - Recording (any build with the compiler: native, or the web build a
+//!   trace host runs): [`ShaderPacks::record_enabled`] makes every draw shader
 //!   that is applied also run the web build's GLSL compile and keep the
 //!   result; [`ShaderPacks::take_recording`] serialises it.
 //! - Use: [`ShaderPacks::install`]. The web build's draw-shader compile
@@ -739,7 +740,7 @@ fn pod_structure(name: Option<LiveId>, ty: &ScriptPodTy) -> Option<(Vec<PackPodT
 
 /// A compile's reflection as a pack entry: scope uniform sources become
 /// paths from the shader object.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pack_entry_from_desc(
     vm: &ScriptVm,
@@ -830,7 +831,7 @@ pub(crate) fn pack_entry_from_desc(
 /// Paths of names from a shader object to the objects its scope uniforms
 /// are read from: a breadth-first search over scope lookups of the names
 /// its functions use.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 struct ScopePaths<'a> {
     heap: &'a ScriptHeap,
     names: Vec<LiveId>,
@@ -841,7 +842,7 @@ struct ScopePaths<'a> {
     expanded: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 impl<'a> ScopePaths<'a> {
     /// Paths at most this many names long.
     const MAX_DEPTH: usize = 8;
@@ -1421,7 +1422,7 @@ pub struct ShaderPacks {
     index: HashMap<u64, (usize, usize)>,
     error: String,
     installed_count: usize,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     recorder: Option<ShaderPackRecorder>,
 }
 /// What ShaderPacks::view answers.
@@ -1443,9 +1444,9 @@ impl ShaderPacks {
     pub fn is_empty(&self) -> bool { self.index.is_empty() }
     #[relax_api]
     pub fn view(&self) -> ShaderPacksView<'_> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
         let recording = self.recorder.is_some();
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", makepad_precompiled_shaders))]
         let recording = false;
         ShaderPacksView { error: &self.error, installed_count: self.installed_count, recording }
     }
@@ -1453,12 +1454,12 @@ impl ShaderPacks {
     pub fn error(&self) -> &str { self.view().error }
     #[inline]
     pub fn installed_count(&self) -> usize { self.view().installed_count }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     #[inline]
     pub fn is_recording(&self) -> bool { self.view().recording }
     #[inline]
     pub fn install(&mut self, bytes: &[u8]) -> bool { self.control(SHADER_PACKS_INSTALL, bytes, false) }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     #[inline]
     pub fn record_enabled(&mut self, on: bool) { self.control(SHADER_PACKS_RECORD_ENABLED, &[], on); }
     /// Changes the packs by `mode`: SHADER_PACKS_INSTALL adds the pack `bytes` (false: it does not
@@ -1466,13 +1467,13 @@ impl ShaderPacks {
     #[relax_api]
     pub fn control(&mut self, mode: u32, bytes: &[u8], on: bool) -> bool {
         if mode == SHADER_PACKS_RECORD_ENABLED {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
             match (on, self.recorder.is_some()) {
                 (true, false) => self.recorder = Some(ShaderPackRecorder::default()),
                 (false, true) => self.recorder = None,
                 _ => {}
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", makepad_precompiled_shaders))]
             let _ = on;
             return true;
         }
@@ -1497,7 +1498,7 @@ impl ShaderPacks {
         })();
         ShaderPackLookup(entry)
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     #[relax_api]
     pub fn take_recording(&mut self) -> ShaderPackBytes {
         let entries = match &mut self.recorder {
@@ -1506,7 +1507,7 @@ impl ShaderPacks {
         };
         ShaderPackBytes(write_shader_pack(&entries))
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
     #[relax_api]
     pub fn record(&mut self, vm: &mut ScriptVm, shader: ScriptObject) {
         self.error.clear();
@@ -1525,7 +1526,7 @@ impl ShaderPacks {
         }
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 #[derive(Default)]
 struct ShaderPackRecorder {
     entries: Vec<ShaderPackEntry>, keys: HashSet<u64>, objects: HashSet<(usize, ScriptObject)>, epoch: u64,
@@ -1563,14 +1564,14 @@ impl ShaderPackRecord {
         ShaderPackBytes(match self.0.as_ref().ok() { Some(entry) => write_shader_pack(std::slice::from_ref(entry)), None => Vec::new() })
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 #[relax_api]
 pub fn record_shader(vm: &mut ScriptVm, shader: ScriptObject) -> ShaderPackRecord {
     let walk = shader_key_walk(&vm.bx, shader, false);
     let key = walk.h.0;
     record_shader_with_key(vm, shader, key, walk.fns)
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn record_shader_with_key(vm: &mut ScriptVm, shader: ScriptObject, key: u64, mut fns: Vec<ScriptObject>) -> ShaderPackRecord {
     use crate::shader_compile::{compile_shader, ShaderCompileOptions};
     let opts = ShaderCompileOptions::new(crate::shader_backend::ShaderBackend::Glsl, false, false, true, false);
@@ -1640,7 +1641,7 @@ impl ShaderPackContents {
 #[relax_api]
 pub fn inspect_shader_pack(bytes: &[u8]) -> ShaderPackContents { ShaderPackContents(read_shader_pack(bytes)) }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn write_value_to_f32_slots(
         heap: &ScriptHeap,
         value: ScriptValue,
@@ -1875,7 +1876,7 @@ fn write_value_to_f32_slots(
             output[offset + i] = 0.0;
         }
     }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 fn write_pack_value(heap: &ScriptHeap, value: ScriptValue, output: &mut [f32]) { write_value_to_f32_slots(heap, value, output, 0, output.len()); }
 
 /// Compare reflected POD layouts without exporting the pack serialization model.
