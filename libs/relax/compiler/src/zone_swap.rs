@@ -262,6 +262,12 @@ pub(crate) fn swapped() -> bool {
     SWAPS.load(Ordering::Relaxed) > 0
 }
 
+/// Loader symbol `relax_zone_swaps`: the swaps done so far. A test program (diffpkg `zone_swap`)
+/// waits on it to first use statics after the swap; a rustc build has no such symbol.
+pub(crate) extern "C" fn relax_zone_swaps() -> u32 {
+    SWAPS.load(Ordering::Acquire)
+}
+
 pub(crate) static LAST_SWAP_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Runs the swap. Called by the monitor thread once the settle is done and this run's collected
@@ -473,7 +479,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     crate::memstat::trim();
     crate::pack::release_resident();
     let rss1 = crate::memstat::resident();
-    SWAPS.fetch_add(1, Ordering::Relaxed);
+    SWAPS.fetch_add(1, Ordering::Release);
     LAST_SWAP_MS.store(wall_ns() / 1_000_000, Ordering::Relaxed);
     crate::boot_stats::swap_done(tl.chunks, rss0, rss1);
     eprintln!("makepad-run zone: swap {}->{} at t={:.0} ms (attempt {}): quiesce {:.1} ms, front images {:.1} ms, encode {:.1} ms, store {:.1} ms, restore {:.1} ms (cache {:.1} ms), commit {:.1} ms, total {:.1} ms; destroyed {} chunks ({:.1} MB touched); {} speculative codes moved to the kept heap ({:.1} MB); rss {:.0} -> {:.0} MB",

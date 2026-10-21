@@ -13711,6 +13711,7 @@ fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_allocator_swap" => Some(relax_allocator_swap as *const () as usize),
         b"relax_first_present" => Some(relax_first_present as *const () as usize),
         b"relax_frame_done" => Some(crate::postframe::relax_frame_done as *const () as usize),
+        b"relax_zone_swaps" => Some(zone_swap::relax_zone_swaps as *const () as usize),
         b"relax_quit_requested" => Some(crate::run::relax_quit_requested as *const () as usize),
         b"relax_quit_started" => Some(crate::run::relax_quit_started as *const () as usize),
         b"__relax_main_hosted" => Some(crate::run::relax_main_hosted as *const () as usize),

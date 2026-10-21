@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("zone_swap", zone_swap)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -78,4 +78,63 @@ fn font() {
         }
         Err(e) => d!("font parse error {:?}", e),
     }
+}
+
+/// include_bytes!/include_str! statics first used after the compiler-zone swap (2026-10-21: the
+/// swap's restore had no payload table, so FONT's slice was the 36-byte payload marker and
+/// Sandbox's vector font failed with UnknownMagic). Under Relax the program reports its first
+/// present (loader symbol `relax_first_present`; the swap waits for it) and waits for the swap
+/// (`relax_zone_swaps`) before anything reads the tables; natively both symbols are absent.
+fn zone_swap() {
+    static WAITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WAITED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        wait_for_swap();
+    }
+    after_swap();
+}
+
+#[inline(never)]
+fn after_swap() {
+    use relax_diffpkg_tables as t;
+    let sum = |b: &[u8]| b.iter().map(|&x| x as u64).sum::<u64>();
+    d!("zone font {} {:?} sum {}", t::FONT.len(), &t::FONT[..8], sum(t::FONT));
+    d!("zone inc {} {:?} sum {}", t::INC.len(), &t::INC[..8], sum(t::INC));
+    d!("zone text {} {:?} same {}", t::TEXT.len(), &t::TEXT[..12], t::TEXT.as_bytes() == t::INC);
+    d!("zone const {} arr {} same {}", t::CINC.len(), t::ARR.len(), &t::ARR[..] == t::CINC && t::CINC == t::INC);
+    match ttf_parser::Face::parse(t::FONT, 0) {
+        Ok(f) => d!("zone font glyphs {} units {}", f.number_of_glyphs(), f.units_per_em()),
+        Err(e) => d!("zone font parse error {:?}", e),
+    }
+}
+
+fn host_symbol(name: &std::ffi::CStr) -> *mut std::ffi::c_void {
+    extern "C" {
+        fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    }
+    #[cfg(target_os = "macos")]
+    let default = -2isize as *mut std::ffi::c_void;
+    #[cfg(not(target_os = "macos"))]
+    let default = std::ptr::null_mut();
+    unsafe { dlsym(default, name.as_ptr()) }
+}
+
+fn wait_for_swap() {
+    let present = host_symbol(c"relax_first_present");
+    if present.is_null() {
+        return;
+    }
+    unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(present)() };
+    let swaps = host_symbol(c"relax_zone_swaps");
+    if swaps.is_null() {
+        d!("zone: the loader has no relax_zone_swaps");
+        return;
+    }
+    let swaps = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> u32>(swaps) };
+    for _ in 0..1800 {
+        if swaps() > 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    d!("zone: no swap within 180 s");
 }

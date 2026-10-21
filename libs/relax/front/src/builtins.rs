@@ -223,7 +223,12 @@ fn line_col(src: &[u8], ls: &[u32], pos: u32) -> LineColumn {
 
 // ---------------------------------------------------------------- byte payloads
 
-/// Marker prefix of an `include_bytes!` literal whose bytes live in the payload table.
+/// Marker prefix of an `include_bytes!` literal whose bytes live in the payload table. The whole
+/// marker is `\0relax-include:<key>:<path in hex>`: the key (content hash and length) names the
+/// payload, the path names the file it was read from. The marker is part of the expansion text, so
+/// it lives on in front images (a warm start's, the compiler-zone swap's restore) while the table
+/// is per compiler generation: a key the table does not hold is read again from its file
+/// (`payload_of`), checked against the key, and registered in the current generation.
 pub const PAYLOAD_MARK: &str = "\\0relax-include:";
 
 static PAYLOADS: relax_session::sync::Mutex<Option<crate::fxhash::HashMap<String, std::sync::Arc<Vec<u8>>>>> = relax_session::sync::Mutex::new(None);
@@ -249,13 +254,19 @@ pub(crate) fn zone_put_back(taken: ZoneTaken) {
     std::mem::forget(std::mem::replace(&mut *dirs, taken.dirs));
 }
 
-/// The payload's key: its hash and length (the same text whichever thread or order includes it;
-/// files parse in parallel), disambiguated in the unlikely case two contents collide.
-fn register_payload(data: Vec<u8>) -> String {
+/// The content part of a payload key: its hash and length (the same text whichever thread or order
+/// includes it; files parse in parallel).
+fn payload_base(data: &[u8]) -> String {
     use std::hash::Hasher;
     let mut h = crate::fxhash::FxHasher::default();
-    h.write(&data);
-    let base = format!("{:016x}{:x}", h.finish(), data.len());
+    h.write(data);
+    format!("{:016x}{:x}", h.finish(), data.len())
+}
+
+/// Registers `data` (read from `path`) and returns the marker's text after PAYLOAD_MARK. The key is
+/// disambiguated in the unlikely case two contents collide.
+fn register_payload(path: &str, data: Vec<u8>) -> String {
+    let base = payload_base(&data);
     let mut g = PAYLOADS.lock().unwrap();
     let p = g.get_or_insert_with(Default::default);
     let mut key = base.clone();
@@ -263,24 +274,58 @@ fn register_payload(data: Vec<u8>) -> String {
     loop {
         match p.get(&key) {
             // the same file included twice is one payload
-            Some(x) if **x == data => return key,
+            Some(x) if **x == data => break,
             Some(_) => {
                 k += 1;
                 key = format!("{}_{}", base, k);
             }
             None => {
                 p.insert(key.clone(), std::sync::Arc::new(data));
-                return key;
+                break;
             }
         }
     }
+    let mut out = key;
+    out.push(':');
+    for b in path.as_bytes() {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
 }
 
-/// The bytes of a payload marker (`\0relax-include:KEY` after unescaping), if `b` is one.
+/// The bytes of a payload marker (`\0relax-include:KEY:PATH` after unescaping), if `b` is one.
+/// A marker always resolves: a key this generation has not registered (the marker came from a
+/// front image) is read again from its file. A marker that resolves to nothing is an internal
+/// error that names the key, never data (the marker text became a font's bytes once: 2026-10-21).
 pub fn payload_of(b: &[u8]) -> Option<std::sync::Arc<Vec<u8>>> {
     let rest = b.strip_prefix(b"\0relax-include:")?;
-    let key = std::str::from_utf8(rest).ok()?;
-    PAYLOADS.lock().ok()?.as_ref()?.get(key).cloned()
+    let marker = String::from_utf8_lossy(rest);
+    let fail = |why: &str| -> ! { panic!("relax internal error: include_bytes! payload `{marker}`: {why}") };
+    let (key, hex) = marker.split_once(':').unwrap_or_else(|| fail("no source path in the marker"));
+    if let Some(x) = PAYLOADS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(key)) {
+        return Some(x.clone());
+    }
+    let path = (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()
+        .filter(|_| hex.len() % 2 == 0).and_then(|v| String::from_utf8(v).ok())
+        .unwrap_or_else(|| fail("the source path is not hex-encoded UTF-8"));
+    let data = crate::vfs::read(&path).unwrap_or_else(|e| fail(&format!("not registered, and `{path}` could not be read again: {e}")));
+    if key.split('_').next() != Some(payload_base(&data).as_str()) {
+        fail(&format!("not registered, and `{path}` changed since it was included"));
+    }
+    let mut g = PAYLOADS.lock().unwrap_or_else(|e| e.into_inner());
+    let p = g.get_or_insert_with(Default::default);
+    match p.get(key) {
+        Some(x) if **x == data => Some(x.clone()),
+        Some(_) => fail(&format!("not registered, and `{path}` collides with another payload's key")),
+        None => {
+            if std::env::var_os("MAKEPAD_RUN_ZONE_TRACE").is_some() {
+                eprintln!("makepad-run zone: include_bytes! payload {key} read again from `{path}`");
+            }
+            let x = std::sync::Arc::new(data);
+            p.insert(key.to_string(), x.clone());
+            Some(x)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- the built-in table
@@ -954,7 +999,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u8, lo: usize, hi: usize, call_lo: 
                 // the bytes travel as a payload behind a short marker literal (escaping a
                 // font into `b"\x.."` text and lexing / unescaping it again cost ~4 bytes of
                 // work per byte, three times): lower::unescape_bytes resolves the marker
-                Ok(one(T::ByteStr, &format!("b\"{}{}\"", PAYLOAD_MARK, register_payload(data))))
+                Ok(one(T::ByteStr, &format!("b\"{}{}\"", PAYLOAD_MARK, register_payload(&path, data))))
             };
         }
         _ => {}
@@ -2560,5 +2605,51 @@ mod pm_input_tests {
         let start = expand_lexed(&mut p, "\n(\"é中🦀\", x)", u32::MAX);
         p.exp_map.clear();
         compare(&p, start, p.toks.len(), p.toks.at(start).lo, p.toks.last().unwrap().hi);
+    }
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    fn marker_bytes(text: &str) -> Vec<u8> {
+        let mut b = b"\0relax-include:".to_vec();
+        b.extend_from_slice(text.as_bytes());
+        b
+    }
+
+    fn forget(key_text: &str) {
+        let key = key_text.split_once(':').unwrap().0;
+        PAYLOADS.lock().unwrap().as_mut().unwrap().remove(key);
+    }
+
+    /// A marker from an older compiler generation (or a front image) resolves although the table
+    /// lost its key: the file is read again and checked against the key.
+    #[test]
+    fn marker_resolves_after_the_table_lost_it() {
+        let dir = std::env::temp_dir().join(format!("relax-payload-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data \"q\" \u{e9}.bin");
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+        std::fs::write(&path, &data).unwrap();
+        let p = path.to_str().unwrap();
+        let text = register_payload(p, data.clone());
+        assert_eq!(*payload_of(&marker_bytes(&text)).unwrap(), data);
+        forget(&text);
+        assert_eq!(*payload_of(&marker_bytes(&text)).unwrap(), data);
+        // the escaped literal the expansion emits unescapes to the same marker
+        assert_eq!(crate::lit::unescape_bytes(&format!("b\"{}{}\"", PAYLOAD_MARK, text)), data);
+        // a lost key whose file changed (or is gone) is an internal error naming the key
+        forget(&text);
+        std::fs::write(&path, b"other").unwrap();
+        let e = std::panic::catch_unwind(|| payload_of(&marker_bytes(&text))).unwrap_err();
+        let msg = e.downcast_ref::<String>().unwrap();
+        assert!(msg.contains("internal error") && msg.contains(text.split_once(':').unwrap().0) && msg.contains("changed"), "{msg}");
+        std::fs::remove_file(&path).unwrap();
+        let e = std::panic::catch_unwind(|| payload_of(&marker_bytes(&text))).unwrap_err();
+        assert!(e.downcast_ref::<String>().unwrap().contains("could not be read"));
+        let _ = std::fs::remove_dir(&dir);
+        // a plain literal that only starts like a marker is not one
+        assert!(payload_of(b"\0relax").is_none());
     }
 }
