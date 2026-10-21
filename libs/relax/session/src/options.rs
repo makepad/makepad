@@ -84,6 +84,9 @@ pub struct CpuFeatures {
     pub fma: bool,
     /// AVX2 next to AVX: per-lane variable vector shifts (vpsllv*, vpsrlv*, vpsravd)
     pub avx2: bool,
+    /// AVX-512F + AVX-512VL (OS-enabled): EVEX encodings reach xmm16..xmm31, so the register
+    /// allocator gets 16 more float/vector registers (x64 reg_config)
+    pub avx512: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +109,8 @@ pub struct Options {
     pub memconst: bool,
     /// `MAKEPAD_RUN_NO_AVX`; default `false`.
     pub no_avx: bool,
+    /// `MAKEPAD_RUN_NO_AVX512`; default `false`: no xmm16..31 (CpuFeatures::avx512).
+    pub no_avx512: bool,
     /// `MAKEPAD_RUN_NO_BITOPS`; default `false`.
     pub no_bitops: bool,
     /// `MAKEPAD_RUN_NO_BLOCK_FREQ`; default `false`.
@@ -292,6 +297,7 @@ impl Default for Options {
             gather: false,
             memconst: false,
             no_avx: false,
+            no_avx512: false,
             no_bitops: false,
             no_block_freq: false,
             no_bmi2: false,
@@ -399,6 +405,7 @@ impl Options {
             gather: { let os = get("MAKEPAD_RUN_GATHER"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             memconst: { let os = get("MAKEPAD_RUN_MEMCONST"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_avx: { let os = get("MAKEPAD_RUN_NO_AVX"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
+            no_avx512: { let os = get("MAKEPAD_RUN_NO_AVX512"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bitops: { let os = get("MAKEPAD_RUN_NO_BITOPS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_block_freq: { let os = get("MAKEPAD_RUN_NO_BLOCK_FREQ"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bmi2: { let os = get("MAKEPAD_RUN_NO_BMI2"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
@@ -504,6 +511,7 @@ impl Options {
             gather,
             memconst,
             no_avx,
+            no_avx512,
             no_bitops,
             no_block_freq,
             no_bmi2,
@@ -595,6 +603,8 @@ impl Options {
         h.u8(*memconst as u8);
         h.str("no_avx");
         h.u8(*no_avx as u8);
+        h.str("no_avx512");
+        h.u8(*no_avx512 as u8);
         h.str("no_bitops");
         h.u8(*no_bitops as u8);
         h.str("no_block_freq");
@@ -753,8 +763,8 @@ impl Options {
         match tier1_profile { Some(v) => { h.u8(1); h.u64(v.as_encoded_bytes().len() as u64); h.write(v.as_encoded_bytes()); }, None => h.u8(0) }
         match tier1_profile_data { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str(target);
-        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2 } = cpu;
-        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2] { h.u8(*b as u8); }
+        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512 } = cpu;
+        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512] { h.u8(*b as u8); }
         h.finish128()
     }
 }

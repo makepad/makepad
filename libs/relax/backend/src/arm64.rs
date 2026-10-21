@@ -98,7 +98,7 @@ pub fn reg_config() -> RegConfig {
 
 /// Registers an instruction overwrites while it runs (RegConfig::clobbers): only an asm! block
 /// (every register it names; regalloc also keeps its results out of them).
-fn arm64_clobbers(_options: &relax_session::Options, i: &Inst) -> u64 {
+fn arm64_clobbers(_options: &relax_session::Options, _f: &Func, i: &Inst) -> u64 {
     match i {
         Inst::Call(Callee::Asm(b), _, _) => b.regs,
         _ => 0,

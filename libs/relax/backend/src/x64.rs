@@ -139,6 +139,8 @@ impl Asm {
             Some((ix, _)) => ix,
             None => x,
         };
+        // xmm16..31 need EVEX (evex_*): a legacy encoding would silently name xmm(n & 15)
+        assert!(r < 16 && x < 16 && b < 16, "x64: register {} {} {} in a REX encoding", r, x, b);
         let v = 0x40 | ((w as u8) << 3) | (((r >> 3) & 1) << 2) | (((x >> 3) & 1) << 1) | ((b >> 3) & 1);
         if v != 0x40 || force {
             self.byte(v);
@@ -147,11 +149,13 @@ impl Asm {
 
     /// ModRM for register-register.
     fn modrm_rr(&mut self, reg: u8, rm: u8) {
+        assert!(reg < 16 && rm < 16, "x64: register {} {} in a legacy/VEX ModRM", reg, rm);
         self.byte(0xc0 | ((reg & 7) << 3) | (rm & 7));
     }
 
     /// ModRM + SIB + disp for [base + disp].
     fn modrm_mem(&mut self, reg: u8, base: u8, disp: i32) {
+        assert!(reg < 16 && base < 16, "x64: register {} {} in a legacy/VEX ModRM", reg, base);
         if let Some((ix, sh)) = self.sib.take() {
             // [base + index << sh + disp]: rm = 100, SIB follows
             let r = (reg & 7) << 3;
@@ -501,6 +505,13 @@ impl Asm {
         self.modrm_rr(dst, src);
     }
     fn sse_rm(&mut self, pfx: u8, op: u8, reg: u8, base: u8, disp: i32) {
+        if reg >= 16 {
+            // movups / movss / movsd load and store: vmovups / vmovss / vmovsd (EVEX)
+            assert!(matches!(op, 0x10 | 0x11), "x64: sse op {:#x} with xmm{}", op, reg);
+            let (pp, w) = match pfx { 0 => (0, false), 0xf3 => (2, false), 0xf2 => (3, true), _ => panic!("x64: sse prefix {:#x} with xmm{}", pfx, reg) };
+            self.evex_m(pp, 1, w, false, op, reg, 0, base, disp);
+            return;
+        }
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -553,6 +564,11 @@ impl Asm {
     }
     /// VEX (3-byte) register form, 128-bit: map 1 = 0F, 2 = 0F38, 3 = 0F3A; pp 1 = 66
     fn vex_rr(&mut self, pp: u8, map: u8, w: bool, op: u8, reg: u8, vvvv: u8, rm: u8) {
+        if reg >= 16 || vvvv >= 16 || rm >= 16 {
+            let ew = evex_direct(pp, map, op).unwrap_or_else(|| panic!("x64: vex op {:#x} (pp {} map {}) with xmm{} {} {}", op, pp, map, reg, vvvv, rm));
+            self.evex_rr(pp, map, ew, false, op, reg, vvvv, rm);
+            return;
+        }
         self.byte(0xc4);
         self.byte(((!(reg >> 3) & 1) << 7) | (1 << 6) | ((!(rm >> 3) & 1) << 5) | map);
         self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | pp);
@@ -561,6 +577,12 @@ impl Asm {
     }
     /// VEX (3-byte) register form with the vector length: `y` = 256-bit (L = 1)
     fn vex_l(&mut self, pp: u8, map: u8, w: bool, y: bool, op: u8, reg: u8, vvvv: u8, rm: u8) {
+        if (reg >= 16 || rm >= 16) && pp == 0 && map == 1 && op == 0x28 && vvvv == 0 {
+            // vmovaps ymm, ymm (EVEX)
+            self.evex_rr(0, 1, w, y, 0x28, reg, 0, rm);
+            return;
+        }
+        assert!(vvvv < 16, "x64: vvvv {}", vvvv);
         self.byte(0xc4);
         self.byte(((!(reg >> 3) & 1) << 7) | (1 << 6) | ((!(rm >> 3) & 1) << 5) | map);
         self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | ((y as u8) << 2) | pp);
@@ -569,10 +591,30 @@ impl Asm {
     }
     /// VEX (3-byte) [base + disp] form with the vector length (an index from `sib` too)
     fn vex_lm(&mut self, pp: u8, map: u8, w: bool, y: bool, op: u8, reg: u8, vvvv: u8, base: u8, disp: i32) {
+        if reg >= 16 {
+            // vmovups ymm/xmm load and store (EVEX)
+            assert!(pp == 0 && map == 1 && vvvv == 0 && matches!(op, 0x10 | 0x11), "x64: vex op {:#x} with xmm{}", op, reg);
+            self.evex_m(0, 1, w, y, op, reg, 0, base, disp);
+            return;
+        }
+        assert!(vvvv < 16, "x64: vvvv {}", vvvv);
         let x = self.sib.map_or(0, |s| s.0);
         self.byte(0xc4);
         self.byte(((!(reg >> 3) & 1) << 7) | ((!(x >> 3) & 1) << 6) | ((!(base >> 3) & 1) << 5) | map);
         self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | ((y as u8) << 2) | pp);
+        self.byte(op);
+        self.modrm_mem(reg, base, disp);
+    }
+    /// VEX.LIG.66.0F38.W{0,1} op reg, vvvv, [base + disp]: the scalar FMA with c from memory
+    fn vex_m_fma(&mut self, w: bool, op: u8, reg: u8, vvvv: u8, base: u8, disp: i32) {
+        if reg >= 16 || vvvv >= 16 {
+            self.evex_m(1, 2, w, false, op, reg, vvvv, base, disp);
+            return;
+        }
+        let x = self.sib.map_or(0, |s| s.0);
+        self.byte(0xc4);
+        self.byte(((!(reg >> 3) & 1) << 7) | ((!(x >> 3) & 1) << 6) | ((!(base >> 3) & 1) << 5) | 2);
+        self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | 1);
         self.byte(op);
         self.modrm_mem(reg, base, disp);
     }
@@ -584,6 +626,7 @@ impl Asm {
     }
     /// VEX (3-byte) [rip + disp32] form, 128-bit; returns the disp32 patch position
     fn vex_rip(&mut self, pp: u8, map: u8, w: bool, op: u8, reg: u8, vvvv: u8) -> usize {
+        assert!(reg < 16 && vvvv < 16, "x64: register {} {} in a VEX encoding", reg, vvvv);
         self.byte(0xc4);
         self.byte(((!(reg >> 3) & 1) << 7) | (1 << 6) | (1 << 5) | map);
         self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | pp);
@@ -595,10 +638,73 @@ impl Asm {
     }
     fn movf_rr(&mut self, f64_: bool, dst: u8, src: u8) {
         if dst != src {
-            // movaps xmm, xmm (full register copy)
-            self.sse_rr(0, 0x28, dst, src, false);
+            if dst >= 16 || src >= 16 {
+                // vmovaps xmm, xmm (EVEX: xmm16..31)
+                self.evex_rr(0, 1, false, false, 0x28, dst, 0, src);
+            } else {
+                // movaps xmm, xmm (full register copy)
+                self.sse_rr(0, 0x28, dst, src, false);
+            }
         }
         let _ = f64_;
+    }
+    /// EVEX prefix (62 P0 P1 P2), no masking, no broadcast: `reg` and `vvvv` up to 31; `rm_hi` = bit
+    /// 4 of a register rm (EVEX.X), `x3` / `b3` = bit 3 of the index / base (or of rm).
+    fn evex_prefix(&mut self, pp: u8, map: u8, w: bool, y: bool, reg: u8, vvvv: u8, x: u8, b: u8) {
+        self.byte(0x62);
+        self.byte(((!(reg >> 3) & 1) << 7) | ((!(x >> 3) & 1) << 6) | ((!(b >> 3) & 1) << 5) | ((!(reg >> 4) & 1) << 4) | map);
+        self.byte(((w as u8) << 7) | ((!vvvv & 15) << 3) | (1 << 2) | pp);
+        self.byte(((y as u8) << 5) | ((!(vvvv >> 4) & 1) << 3));
+    }
+    /// EVEX register form: op reg, [vvvv,] rm (each 0..31)
+    fn evex_rr(&mut self, pp: u8, map: u8, w: bool, y: bool, op: u8, reg: u8, vvvv: u8, rm: u8) {
+        // for a register rm, EVEX.X carries its bit 4 and EVEX.B its bit 3
+        self.evex_prefix(pp, map, w, y, reg, vvvv, (rm >> 4) << 3, rm);
+        self.byte(op);
+        self.byte(0xc0 | ((reg & 7) << 3) | (rm & 7));
+    }
+    /// EVEX [rip + disp32] form; returns the disp32 patch position
+    fn evex_rip(&mut self, pp: u8, map: u8, w: bool, op: u8, reg: u8, vvvv: u8) -> usize {
+        assert!(self.sib.is_none());
+        self.evex_prefix(pp, map, w, false, reg, vvvv, 0, 0);
+        self.byte(op);
+        self.byte(((reg & 7) << 3) | 5);
+        let at = self.pos();
+        self.u32(0);
+        at
+    }
+    /// EVEX [base + disp] form (an index from `sib` too). The displacement is always a disp32 (or
+    /// none): EVEX's disp8 is scaled by the operand size (disp8*N), which this encoder does not track.
+    fn evex_m(&mut self, pp: u8, map: u8, w: bool, y: bool, op: u8, reg: u8, vvvv: u8, base: u8, disp: i32) {
+        let ix = self.sib.map_or(0, |s| s.0);
+        assert!(base < 16 && ix < 16, "x64: evex base {} index {}", base, ix);
+        self.evex_prefix(pp, map, w, y, reg, vvvv, ix, base);
+        self.byte(op);
+        let r = (reg & 7) << 3;
+        if let Some((ix, sh)) = self.sib.take() {
+            let sib = (sh << 6) | ((ix & 7) << 3) | (base & 7);
+            if disp == 0 && base & 7 != 5 {
+                self.byte(r | 4);
+                self.byte(sib);
+            } else {
+                self.byte(0x80 | r | 4);
+                self.byte(sib);
+                self.u32(disp as u32);
+            }
+            return;
+        }
+        let bb = base & 7;
+        if disp == 0 && bb != 5 {
+            self.byte(r | bb);
+        } else {
+            self.byte(0x80 | r | bb);
+        }
+        if bb == 4 {
+            self.byte(0x24);
+        }
+        if !(disp == 0 && bb != 5) {
+            self.u32(disp as u32);
+        }
     }
     fn loadf(&mut self, f64_: bool, dst: u8, base: u8, disp: i32) {
         self.sse_rm(if f64_ { 0xf2 } else { 0xf3 }, 0x10, dst, base, disp);
@@ -608,10 +714,20 @@ impl Asm {
     }
     /// movq xmm, r64 (or movd for 32 bits)
     fn movq_xr(&mut self, x: u8, r: u8, w: bool) {
+        if x >= 16 {
+            // vmovq / vmovd xmm, r (EVEX.128.66.0F.W{1,0} 6E /r)
+            self.evex_rr(1, 1, w, false, 0x6e, x, 0, r);
+            return;
+        }
         self.sse_rr(0x66, 0x6e, x, r, w);
     }
     /// movq r64, xmm (or movd)
     fn movq_rx(&mut self, r: u8, x: u8, w: bool) {
+        if x >= 16 {
+            // vmovq / vmovd r, xmm (EVEX.128.66.0F.W{1,0} 7E /r: reg = xmm, rm = gpr)
+            self.evex_rr(1, 1, w, false, 0x7e, x, 0, r);
+            return;
+        }
         // 66 REX.W 0F 7E /r : reg = xmm, rm = gpr
         self.byte(0x66);
         self.rex(w, x, 0, r, false);
@@ -668,9 +784,59 @@ fn icc(c: Cond, signed: bool) -> u8 {
     }
 }
 
+/// The 128-bit / scalar VEX three-operand ops whose EVEX form (AVX-512F / VL, same opcode) the
+/// emitter writes when an operand is in xmm16..31: Some(EVEX.W). Float add/mul/sub/div/min/max
+/// (ps/pd/ss/sd: W1 for the double forms) and the dword/qword integer and/add/sub/or/xor/andn.
+fn evex_direct(pp: u8, map: u8, op: u8) -> Option<bool> {
+    match (map, pp, op) {
+        (1, _, 0x58 | 0x59 | 0x5c | 0x5e | 0x5d | 0x5f) => Some(pp == 1 || pp == 3),
+        (1, 1, 0xfe | 0xfa | 0xdb | 0xdf | 0xeb | 0xef) => Some(false),
+        (1, 1, 0xd4 | 0xfb) => Some(true),
+        _ => None,
+    }
+}
+
 /// rcx and rdx as an instruction's own scratch: divisions and multiply-high (rdx:rax), variable
 /// shifts (cl), conversions, cmpxchg loops. Values live there go to other registers.
-fn x64_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
+/// xmm0 / xmm1 (bits 32, 33) likewise for every instruction whose emitter may use them as fixed
+/// temporaries: all but `keeps_xmm01`. The allocator keeps a float value out of a clobbered
+/// register over the whole instruction (its operands and results included).
+fn x64_clobbers(options: &relax_session::Options, f: &Func, i: &Inst) -> u64 {
+    let xmm01 = if keeps_xmm01(options, f, i) { 0 } else { (1 << 32) | (1 << 33) };
+    xmm01 | x64_int_clobbers(options, i)
+}
+
+/// The instructions whose emitter arms (and the helpers they call) never name xmm0 / xmm1: they
+/// reach float registers only through use_f / def_f / fin_f and the scratch registers XS / XS2.
+/// Checked against `Gen::inst` arm by arm; anything not listed clobbers xmm0 / xmm1.
+fn keeps_xmm01(options: &relax_session::Options, f: &Func, i: &Inst) -> bool {
+    let y = |v: &VReg| f.vregs[v.0 as usize] == Cls::V256;
+    match i {
+        Inst::Iconst(..) | Inst::IBinI(..) | Inst::ICmpI(..) | Inst::ICmp(..) | Inst::IBin(..) | Inst::IBit(..) | Inst::INeg(..) | Inst::INot(..) => true,
+        Inst::SlotAddr(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::Mov(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) => true,
+        Inst::Fconst(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VConst(..) => true,
+        // the NaN-correct min / max uses xmm0 / xmm1 (and the constant-operand form is chosen later)
+        Inst::FBin(op, ..) => !matches!(op, FOp::Min | FOp::Max),
+        // round-half-away builds its addend in xmm0; the sign masks, sqrt and roundss do not
+        Inst::FUnary(op, ..) => *op != FUn::RoundAway,
+        Inst::FCmp(..) => true,
+        // Gen::fma's VEX / EVEX form (the destination register or XS takes a)
+        Inst::FMulAdd(..) => options.cpu.avx,
+        // the 128-bit float lane ops that go straight to v3's VEX / EVEX three-operand form
+        Inst::VX(op, d, ..) if options.cpu.avx && !y(d) => matches!(
+            op,
+            VX::FAdd(VW::S | VW::D, NanBits::Host | NanBits::Intel)
+                | VX::FSub(VW::S | VW::D, NanBits::Host | NanBits::Intel)
+                | VX::FMul(VW::S | VW::D, NanBits::Host | NanBits::Intel)
+                | VX::FDiv(VW::S | VW::D, NanBits::Host | NanBits::Intel)
+                | VX::FMinLt(VW::S | VW::D)
+                | VX::FMaxGt(VW::S | VW::D)
+        ),
+        _ => false,
+    }
+}
+
+fn x64_int_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
     match i {
         Inst::IBin(IOp::Shl | IOp::Shr, _, _, _, _) if host_bmi2(options) => 0,
         // of the conversions only u64 -> float works in rcx / rdx (halve with a sticky bit); a
@@ -699,6 +865,19 @@ pub fn reg_config(options: &relax_session::Options) -> RegConfig {
     let mut flt = Vec::new();
     for x in 2..14u8 {
         flt.push(x);
+    }
+    // xmm0 / xmm1: allocatable except over the instructions that use them as temporaries
+    // (x64_clobbers); last among the low registers, which those instructions leave alone
+    flt.push(0);
+    flt.push(1);
+    // AVX-512VL: xmm16..31 (caller-saved in both ABIs). Only EVEX reaches them, so the emitter
+    // treats a value there like a spilled one (use_f / def_f / fin_f move it through the
+    // instruction's scratch register with an EVEX vmovaps) except for the moves, loads and stores
+    // that have EVEX forms here (movf_rr, loadf / storef, movups, vmovups ymm, movq).
+    if options.cpu.avx512 {
+        for x in 16..32u8 {
+            flt.push(x);
+        }
     }
     let mut int_caller = CALLER_SAVED_ALLOC.to_vec();
     if !options.no_rcx {
@@ -991,8 +1170,39 @@ impl<'a> Gen<'a> {
         }
         self.a.load64(dst, RBP, disp);
     }
+    /// A full register copy of v's class between any two of xmm0..31 (ymm for V256).
+    fn mov_cls(&mut self, v: VReg, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
+        if self.f.vregs[v.0 as usize] == Cls::V256 {
+            self.a.vex_l(0, 1, false, true, 0x28, dst, 0, src); // vmovaps ymm, ymm
+        } else {
+            self.a.movf_rr(true, dst, src);
+        }
+    }
+    /// use_f for an instruction with an EVEX form here (evex_direct): xmm16..31 read in place.
+    fn use_fx(&mut self, v: VReg, scratch: u8) -> u8 {
+        match self.al.loc[v.0 as usize] {
+            Loc::Flt(x) if x >= 16 => x,
+            _ => self.use_f(v, scratch),
+        }
+    }
+    /// def_f for an instruction with an EVEX form here: xmm16..31 written in place (fin_f then
+    /// moves nothing).
+    fn def_fx(&self, v: VReg, scratch: u8) -> u8 {
+        match self.al.loc[v.0 as usize] {
+            Loc::Flt(x) => x,
+            _ => scratch,
+        }
+    }
     fn use_f(&mut self, v: VReg, scratch: u8) -> u8 {
         match self.al.loc[v.0 as usize] {
+            // xmm16..31 (AVX-512VL, reg_config): read like a spill, through the scratch register
+            Loc::Flt(x) if x >= 16 => {
+                self.mov_cls(v, scratch, x);
+                scratch
+            }
             Loc::Flt(x) => x,
             Loc::Stack(o) if self.f.vregs[v.0 as usize] == Cls::V256 => {
                 let d = self.spill_disp(o);
@@ -1037,11 +1247,17 @@ impl<'a> Gen<'a> {
     }
     fn def_f(&self, v: VReg, scratch: u8) -> u8 {
         match self.al.loc[v.0 as usize] {
-            Loc::Flt(x) => x,
+            Loc::Flt(x) if x < 16 => x,
             _ => scratch,
         }
     }
     fn fin_f(&mut self, v: VReg, x: u8) {
+        if let Loc::Flt(h) = self.al.loc[v.0 as usize] {
+            if h >= 16 {
+                self.mov_cls(v, h, x);
+            }
+            return;
+        }
         if let Loc::Stack(o) = self.al.loc[v.0 as usize] {
             let d = self.spill_disp(o);
             if self.f.vregs[v.0 as usize] == Cls::V256 {
@@ -2549,6 +2765,17 @@ impl<'a> Gen<'a> {
                 self.a.mov_ri(r, *v);
                 self.fin_i(*d, r);
             }
+            Inst::Fconst(d, bits, f64_) if matches!(self.al.loc[d.0 as usize], Loc::Flt(x) if x >= 16) => {
+                let x = self.def_fx(*d, XS);
+                if *bits == 0 {
+                    self.a.evex_rr(1, 1, false, false, 0xef, x, x, x); // vpxord x, x, x
+                } else {
+                    // vmovss / vmovsd x, [rip + pool]
+                    let at = self.a.evex_rip(if *f64_ { 3 } else { 2 }, 1, *f64_, 0x10, x, 0);
+                    self.fpool.push((at, *bits));
+                }
+                self.fin_f(*d, x);
+            }
             Inst::Fconst(d, bits, f64_) => {
                 let x = self.def_f(*d, XS);
                 if *bits == 0 {
@@ -2596,8 +2823,8 @@ impl<'a> Gen<'a> {
                     self.fin_f(*d, xd);
                 }
                 c => {
-                    let xs = self.use_f(*s, XS);
-                    let xd = self.def_f(*d, XS);
+                    let xs = self.use_fx(*s, XS);
+                    let xd = self.def_fx(*d, XS);
                     self.a.movf_rr(c == Cls::F64, xd, xs);
                     self.fin_f(*d, xd);
                 }
@@ -2733,9 +2960,12 @@ impl<'a> Gen<'a> {
                 self.fin_f(*d, xd);
             }
             Inst::FBin(op, f64_, d, a, b) => {
-                let xa = self.use_f(*a, XS);
-                let xb = self.use_f(*b, XS2);
-                let xd = self.def_f(*d, XS);
+                // AVX: the VEX / EVEX three-operand form reads and writes xmm16..31 in place
+                let (xa, xb, xd) = if self.avx {
+                    (self.use_fx(*a, XS), self.use_fx(*b, XS2), self.def_fx(*d, XS))
+                } else {
+                    (self.use_f(*a, XS), self.use_f(*b, XS2), self.def_f(*d, XS))
+                };
                 let pfx = if *f64_ { 0xf2 } else { 0xf3 };
                 let opc = match op {
                     FOp::Add => 0x58,
@@ -2763,8 +2993,8 @@ impl<'a> Gen<'a> {
                 self.fin_f(*d, xd);
             }
             Inst::FUnary(op, f64_, d, a) => {
-                let xa = self.use_f(*a, XS);
-                let xd = self.def_f(*d, XS);
+                // the AVX sign masks have EVEX forms: xmm16..31 in place
+                let (xa, xd) = if self.avx && matches!(op, FUn::Neg | FUn::Abs) { (self.use_fx(*a, XS), self.def_fx(*d, XS)) } else { (self.use_f(*a, XS), self.def_f(*d, XS)) };
                 match op {
                     FUn::Neg | FUn::Abs if self.avx => {
                         let mask: u64 = match (op, f64_) {
@@ -2773,7 +3003,14 @@ impl<'a> Gen<'a> {
                             (_, true) => 0x7fff_ffff_ffff_ffff,
                             (_, false) => 0x7fff_ffff,
                         };
-                        self.vex_pool(1, if *op == FUn::Neg { 0x57 } else { 0x54 }, xd, xa, mask);
+                        if xa >= 16 || xd >= 16 {
+                            // vpxorq / vpandq x, a, [rip + mask] (EVEX.128.66.0F.W1 EF / DB: the
+                            // same bits as xorpd / andpd, AVX-512F)
+                            let at = self.a.evex_rip(1, 1, true, if *op == FUn::Neg { 0xef } else { 0xdb }, xd, xa);
+                            self.fpool.push((at, mask));
+                        } else {
+                            self.vex_pool(1, if *op == FUn::Neg { 0x57 } else { 0x54 }, xd, xa, mask);
+                        }
                     }
                     FUn::Neg | FUn::Abs => {
                         let mask: u64 = match (op, f64_) {
@@ -2855,7 +3092,7 @@ impl<'a> Gen<'a> {
                         self.fin_i(*d, rd);
                     }
                     Mem::F32 | Mem::F64 => {
-                        let xd = self.def_f(*d, XS);
+                        let xd = self.def_fx(*d, XS);
                         self.a.sib = Some((ri, *sh));
                         self.a.loadf(*m == Mem::F64, xd, rb, off);
                         self.fin_f(*d, xd);
@@ -2883,7 +3120,7 @@ impl<'a> Gen<'a> {
                         }
                     }
                     Mem::F32 | Mem::F64 => {
-                        let xs = self.use_f(*src, XS);
+                        let xs = self.use_fx(*src, XS);
                         self.a.sib = Some((ri, *sh));
                         self.a.storef(*m == Mem::F64, rb, off, xs);
                     }
@@ -2898,7 +3135,7 @@ impl<'a> Gen<'a> {
                         self.fin_i(*d, rd);
                     }
                     Mem::F32 | Mem::F64 => {
-                        let xd = self.def_f(*d, XS);
+                        let xd = self.def_fx(*d, XS);
                         self.a.loadf(*m == Mem::F64, xd, rb, off);
                         self.fin_f(*d, xd);
                     }
@@ -2916,7 +3153,7 @@ impl<'a> Gen<'a> {
                         }
                     }
                     Mem::F32 | Mem::F64 => {
-                        let xs = self.use_f(*src, XS);
+                        let xs = self.use_fx(*src, XS);
                         self.a.storef(*m == Mem::F64, rb, off, xs);
                     }
                 }
@@ -3043,9 +3280,12 @@ impl<'a> Gen<'a> {
     /// form. pp: 0 none / 1 66; map: 1 0F / 2 0F38 / 3 0F3A; imm for compares.
     fn v3(&mut self, d: VReg, a: VReg, b: VReg, pp: u8, map: u8, op: u8, imm: Option<u8>) {
         if self.avx {
-            let xa = self.use_f(a, XS);
-            let xb = self.use_f(b, XS2);
-            let xd = self.def_f(d, XS);
+            let direct = imm.is_none() && evex_direct(pp, map, op).is_some() && self.f.vregs[d.0 as usize] != Cls::V256;
+            let (xa, xb, xd) = if direct {
+                (self.use_fx(a, XS), self.use_fx(b, XS2), self.def_fx(d, XS))
+            } else {
+                (self.use_f(a, XS), self.use_f(b, XS2), self.def_f(d, XS))
+            };
             self.a.vex_rr(pp, map, false, op, xd, xa, xb);
             if let Some(k) = imm {
                 self.a.byte(k);
@@ -4112,13 +4352,13 @@ impl<'a> Gen<'a> {
             }
             Inst::VLoad(d, base, off) => {
                 let rb = self.use_i(options, base, R11);
-                let xd = self.def_f(d, XS);
+                let xd = self.def_fx(d, XS);
                 self.a.sse_rm(0, 0x10, xd, rb, off);
                 self.fin_f(d, xd);
             }
             Inst::VStore(base, off, v) => {
                 let rb = self.use_i(options, base, R11);
-                let xv = self.use_f(v, XS);
+                let xv = self.use_fx(v, XS);
                 self.a.sse_rm(0, 0x11, xv, rb, off);
             }
             // a constant without a register is made at its uses (Alloc::remat)
@@ -4338,6 +4578,48 @@ impl<'a> Gen<'a> {
     /// Fused multiply-add (FMA3, one rounding): xmm0 = c, then vf[n]m{add,sub}231 xmm0, a, b.
     #[allow(clippy::too_many_arguments)]
     fn fma(&mut self, neg_prod: bool, neg_add: bool, w: bool, d: VReg, a: VReg, b: VReg, c: VReg) {
+        let op = match (neg_prod, neg_add) {
+            (false, false) => 0xa9, // vfmadd213
+            (false, true) => 0xab,  // vfmsub213
+            (true, false) => 0xad,  // vfnmadd213
+            (true, true) => 0xaf,   // vfnmsub213
+        };
+        if self.avx {
+            // the same operand placement as below (a in the destination, b in vvvv, c in r/m), with
+            // the destination register t = d's own (unless that is b's or c's) or XS: no xmm0 /
+            // xmm1 (keeps_xmm01). b reads xmm16..31 in place (EVEX), c too or straight from its
+            // spill slot.
+            let xa = self.use_fx(a, XS);
+            let xb = self.use_fx(b, XS2);
+            let mc = match self.al.loc[c.0 as usize] {
+                Loc::Stack(o) => Some(self.spill_disp(o)),
+                _ => None,
+            };
+            // c's register: its own (any of xmm0..31)
+            let xc = match self.al.loc[c.0 as usize] {
+                _ if mc.is_some() => 0,
+                Loc::Flt(x) => x,
+                // a scalar float value is in a register or a slot (only V128 constants are remat'd)
+                l => panic!("x64 fma: c at {:?}", l),
+            };
+            let xd = self.def_fx(d, XS);
+            let t = if xd == xa || (xd != xb && (mc.is_some() || xd != xc)) { xd } else { XS };
+            // t is written with a first: it must not hold b or c unless it holds a (the same value)
+            assert!(t == xa || (t != xb && (mc.is_some() || t != xc)), "x64 fma: destination {} vs a {} b {} c {}", t, xa, xb, xc);
+            self.a.movf_rr(true, t, xa);
+            if let Some(disp) = mc {
+                self.a.vex_m_fma(w, op, t, xb, RBP, disp);
+            } else if t >= 16 || xb >= 16 || xc >= 16 {
+                self.a.evex_rr(1, 2, w, false, op, t, xb, xc);
+            } else {
+                self.a.vex_rr(1, 2, w, op, t, xb, xc);
+            }
+            if t != xd {
+                self.a.movf_rr(true, xd, t);
+            }
+            self.fin_f(d, xd);
+            return;
+        }
         let xa = self.use_f(a, XS);
         let xb = self.use_f(b, XS2);
         let xc = self.use_f(c, 1);
@@ -4345,12 +4627,6 @@ impl<'a> Gen<'a> {
         // y in vvvv, z in r/m), what rustc's code calls without the fma target feature: a NaN
         // result takes the first NaN of vvvv, the destination, then r/m -- b, a, c
         self.a.movf_rr(true, 0, xa);
-        let op = match (neg_prod, neg_add) {
-            (false, false) => 0xa9, // vfmadd213
-            (false, true) => 0xab,  // vfmsub213
-            (true, false) => 0xad,  // vfnmadd213
-            (true, true) => 0xaf,   // vfnmsub213
-        };
         // VEX.LIG.66.0F38.W{0,1} op /r: reg = xmm0 (a), vvvv = xb, rm = xc
         let r = 0u8;
         self.a.byte(0xc4);
@@ -5742,6 +6018,7 @@ pub fn detect_cpu(options: &relax_session::Options) -> relax_session::options::C
         cpu.bmi1 = !options.no_bitops && std::is_x86_feature_detected!("bmi1");
         cpu.fma = cpu.avx && std::is_x86_feature_detected!("fma");
         cpu.avx2 = cpu.avx && std::is_x86_feature_detected!("avx2");
+        cpu.avx512 = cpu.avx && !options.no_avx512 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
         cpu
     }
     #[cfg(not(target_arch = "x86_64"))]

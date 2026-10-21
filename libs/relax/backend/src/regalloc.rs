@@ -22,7 +22,7 @@ pub struct RegConfig {
     /// registers an instruction overwrites while it runs (backend scratch use, e.g. x64 rcx for
     /// variable shifts): bit r = int register r, bit 32 + x = float register x. No value live at
     /// such an instruction (operands, result, or live across) is placed in them.
-    pub clobbers: Option<fn(&relax_session::Options, &Inst) -> u64>,
+    pub clobbers: Option<fn(&relax_session::Options, &Func, &Inst) -> u64>,
     /// `Env::sym_class` (0: none): an address of a domain symbol is a thread-local block read
     /// and an add, not a constant, so it is never rematerialised
     pub sym_class: u64,
@@ -1095,7 +1095,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 continue;
             }
             for (ii, i) in b.insts.iter().enumerate() {
-                let mut m = cl(options, i);
+                let mut m = cl(options, f, i);
                 if m == 0 {
                     continue;
                 }
@@ -1109,7 +1109,11 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                     if occ[r].is_empty() {
                         occ[r].resize(pos_words, 0);
                     }
-                    bits_fill(&mut occ[r], p, p + w);
+                    // a float register is the instruction's temporary from before it reads its
+                    // operands until after it writes its results (x64 xmm0 / xmm1): its operands
+                    // and results stay out too; an integer one only after the operands are read.
+                    // An asm! block's registers also hold its results (w = 2).
+                    bits_fill(&mut occ[r], p, p + if r >= 32 { 2 } else { w });
                 }
             }
         }
@@ -1971,7 +1975,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
                 for_defs(i, |d| call_res.push((p, d.0)));
             }
             if let Some(cl) = cfg.clobbers {
-                let mut m = cl(options, i);
+                let mut m = cl(options, f, i);
                 while m != 0 {
                     let r = m.trailing_zeros() as usize;
                     m &= m - 1;
