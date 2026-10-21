@@ -1720,7 +1720,7 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
         let mut groups: Vec<(Vec<usize>, VReg, i32, VReg)> = Vec::new();
         let mut cur: Option<(Vec<usize>, VReg, i32, VReg)> = None;
         for (k, i) in insts.iter().enumerate() {
-            let touches = matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..)) || crate::opt::is_mem_effect_pub(i);
+            let touches = matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::VTbl(..)) || crate::opt::is_mem_effect_pub(i);
             if let Inst::Store(Mem::Int(1, _), p, off, v) = *i {
                 let (x, sh) = source(v);
                 let cont = match &cur {

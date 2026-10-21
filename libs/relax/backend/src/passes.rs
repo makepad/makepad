@@ -85,6 +85,7 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::VAny(d, a) => Inst::VAny(m(*d), m(*a)),
         Inst::VConst(d, k) => Inst::VConst(m(*d), *k),
         Inst::VGather(d, b, i) => Inst::VGather(m(*d), m(*b), m(*i)),
+        Inst::VTbl(d, b, i, n) => Inst::VTbl(m(*d), m(*b), m(*i), *n),
         Inst::VShuffle(d, x, y, k) => Inst::VShuffle(m(*d), m(*x), m(*y), *k),
         Inst::VX(op, d, a, b) => Inst::VX(*op, m(*d), m(*a), m(*b)),
         Inst::VX3(op, d, a, b, c) => Inst::VX3(*op, m(*d), m(*a), m(*b), m(*c)),
@@ -2188,7 +2189,7 @@ pub fn sink_to_successor(f: &mut Func) -> bool {
         for (ii, i) in b.insts.iter().enumerate().rev() {
             uses_defs(i, &mut uses, &mut defs);
             let load = matches!(i, Inst::Load(..));
-            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::TlsAddr(..));
+            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::TlsAddr(..));
             if movable && !fp_env && (!load || !memory_effect) && defs.len() == 1 && ndef[defs[0].0 as usize] == 1 {
                 let s = use_block[defs[0].0 as usize];
                 if s < nb && s != bi && s != 0 && npred[s] == 1 && b.term.succs().any(|t| t as usize == s)
@@ -2489,6 +2490,7 @@ pub fn rename(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
         Inst::VStore(b, o, v) => Inst::VStore(a(*b), *o, a(*v)),
         Inst::VAny(d, x) => Inst::VAny(*d, a(*x)),
         Inst::VGather(d, b, i) => Inst::VGather(*d, a(*b), a(*i)),
+        Inst::VTbl(d, b, i, n) => Inst::VTbl(*d, a(*b), a(*i), *n),
         Inst::VShuffle(d, x, y, k) => Inst::VShuffle(*d, a(*x), a(*y), *k),
         Inst::VX(op, d, x, y) => Inst::VX(*op, *d, a(*x), a(*y)),
         Inst::VX3(op, d, x, y, z) => Inst::VX3(*op, *d, a(*x), a(*y), a(*z)),
@@ -4431,7 +4433,9 @@ pub fn load_key_size(k0: u64) -> i64 {
 /// and sunk to their uses. For generated code with long runs of repeated pure values: a Splash
 /// kernel's lane extracts, which LICM gathers in the element loop's preheader (Stage's largest x4
 /// kernel extracted each lane of one product 216 times, all live through its 14k blocks).
-/// Returns whether anything changed.
+/// Vector ops (VX, VX3, VFma, VSel, VShuffle) are numbered too, their constant operands by value
+/// (each use has its own constant: a table's byte indices `h * splat(0x04040404) + splat(..)` of
+/// two lookups were made twice). Returns whether anything changed.
 pub fn gvn_pure(f: &mut Func) -> bool {
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
@@ -4443,11 +4447,26 @@ pub fn gvn_pure(f: &mut Func) -> bool {
             for_defs(i, |d| ndef[d.0 as usize] += 1);
         }
     }
+    // vector ops are numbered with their constant operands by value: each use has its own
+    // (rematerialised) constant, so `x * splat(k)` made twice reads two equal constants
+    let mut konst: Vec<Option<u64>> = vec![None; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            match *i {
+                Inst::VConst(d, k) if ndef[d.0 as usize] == 1 => konst[d.0 as usize] = Some(1 << 62 | k as u64),
+                Inst::Iconst(d, k) if ndef[d.0 as usize] == 1 => konst[d.0 as usize] = Some(k as u64),
+                _ => {}
+            }
+        }
+    }
     let idom = idoms(f);
     let (_, _, kids) = dom_numbers(&idom);
     let (blocks, vregs) = (&mut f.blocks, &f.vregs);
-    let mut table: std::collections::HashMap<([u64; 3], Cls), VReg> = std::collections::HashMap::new();
-    let mut undo: Vec<([u64; 3], Cls)> = Vec::new();
+    let mut table: std::collections::HashMap<(GvnKey, Cls), VReg> = std::collections::HashMap::new();
+    let mut undo: Vec<(GvnKey, Cls)> = Vec::new();
+    // a numbered value's equal: its uses (all below it in the dominator tree) read the leader, so
+    // the values made from it number equal too (`h * k` then `h * k + c`, twice)
+    let mut leader: Vec<u32> = (0..nv as u32).collect();
     let mut marks: Vec<usize> = Vec::new();
     let (mut uses, mut defs) = (Vec::new(), Vec::new());
     let mut changed = false;
@@ -4465,11 +4484,32 @@ pub fn gvn_pure(f: &mut Func) -> bool {
         work.push((bi, false));
         let b = &mut blocks[bi as usize];
         for k in 0..b.insts.len() {
+            let mut stale = false;
+            for_uses(&b.insts[k], |u| stale |= leader[u.0 as usize] != u.0);
+            if stale {
+                b.insts[k] = rename(&b.insts[k], &|r| VReg(leader[r.0 as usize]));
+                changed = true;
+            }
             let i = &b.insts[k];
             if matches!(i, Inst::Load(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::VConst(..) | Inst::Addr(..) | Inst::FnAddr(..)) {
                 continue;
             }
-            let Some(key) = cse_key(i) else { continue };
+            // an operand: its constant (Iconst / VConst operands differ by value: tagged) or its vreg
+            let o = |r: VReg| match konst[r.0 as usize] {
+                Some(k) if vregs[r.0 as usize] == Cls::V128 => (1u64 << 63) | k,
+                _ => r.0 as u64,
+            };
+            let key = match *i {
+                Inst::VX(op, _, a, b) => GvnKey::X(op, o(a), o(b), 0),
+                Inst::VX3(op, _, a, b, c) => GvnKey::X(op, o(a), o(b), o(c)),
+                Inst::VFma(np, na, _, a, b, c) => GvnKey::Fma(np, na, o(a), o(b), o(c)),
+                Inst::VSel(_, m, a, b) => GvnKey::Sel(o(m), o(a), o(b)),
+                Inst::VShuffle(_, a, b, k) => GvnKey::Shuf(o(a), o(b), k),
+                _ => match cse_key(i) {
+                    Some(k) => GvnKey::K(k),
+                    None => continue,
+                },
+            };
             uses_defs(i, &mut uses, &mut defs);
             if defs.len() != 1 {
                 continue;
@@ -4482,6 +4522,7 @@ pub fn gvn_pure(f: &mut Func) -> bool {
             match table.get(&(key, cls)) {
                 Some(&e) => {
                     b.insts[k] = Inst::Mov(d, e);
+                    leader[d.0 as usize] = e.0;
                     changed = true;
                 }
                 None => {
@@ -4495,6 +4536,16 @@ pub fn gvn_pure(f: &mut Func) -> bool {
         }
     }
     changed
+}
+
+/// gvn_pure's value key: cse_key's, or a vector op with its operands (constants by value)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum GvnKey {
+    K([u64; 3]),
+    X(VX, u64, u64, u64),
+    Fma(bool, bool, u64, u64, u64),
+    Sel(u64, u64, u64),
+    Shuf(u64, u64, [u8; 16]),
 }
 
 pub fn cse_key(i: &Inst) -> Option<[u64; 3]> {
@@ -5673,7 +5724,7 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
                         {
                             true
                         }
-                        Inst::Load(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::Mov(..) => false,
+                        Inst::Load(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::Mov(..) => false,
                         i if is_mem_effect(i) => false,
                         _ => true,
                     };

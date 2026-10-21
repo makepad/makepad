@@ -509,6 +509,17 @@ impl Asm {
         self.byte(op);
         self.modrm_mem(reg, base, disp);
     }
+    /// [pfx] [rex] 0F esc op /r (esc 0x38 / 0x3A), memory form [base + disp] (or the pending SIB)
+    fn sse_ext_m(&mut self, pfx: u8, esc: u8, op: u8, reg: u8, base: u8, disp: i32) {
+        if pfx != 0 {
+            self.byte(pfx);
+        }
+        self.rex(false, reg, 0, base, false);
+        self.byte(0x0f);
+        self.byte(esc);
+        self.byte(op);
+        self.modrm_mem(reg, base, disp);
+    }
     /// [pfx] [rex] 0F esc op /r (esc 0x38 / 0x3A), register form
     fn sse_ext(&mut self, pfx: u8, esc: u8, op: u8, reg: u8, rm: u8) {
         if pfx != 0 {
@@ -905,6 +916,7 @@ impl<'a> Gen<'a> {
             Remat::Addr(a) => self.mov_reloc(r, Reloc::Sym(a)),
             Remat::FnAddr(id) => self.mov_reloc(r, Reloc::Thunk(id)),
             Remat::Offset(..) => unreachable!("base + k moves through use_i"),
+            Remat::VConst(_) => unreachable!("a vector constant is made by use_f"),
             _ => self.a.mov_ri_nf(r, 0),
         }
     }
@@ -969,8 +981,30 @@ impl<'a> Gen<'a> {
                 self.a.loadf(f64_, scratch, RBP, d);
                 scratch
             }
+            // recomputed at each use (Alloc::remat)
+            Loc::None => {
+                if let Remat::VConst(bits) = self.al.remat[v.0 as usize] {
+                    self.vconst_into(scratch, bits);
+                }
+                scratch
+            }
             _ => scratch,
         }
+    }
+    /// xmm xd = every lane `bits`: xorps for zero, else movups from the code's constant pool
+    fn vconst_into(&mut self, xd: u8, bits: u32) {
+        if bits == 0 {
+            self.a.sse_rr(0, 0x57, xd, xd, false); // xorps xd, xd
+            return;
+        }
+        // movups xd, [rip + entry]
+        self.a.rex(false, xd, 0, 0, false);
+        self.a.byte(0x0f);
+        self.a.byte(0x10);
+        self.a.byte(((xd & 7) << 3) | 5);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
     }
     fn def_f(&self, v: VReg, scratch: u8) -> u8 {
         match self.al.loc[v.0 as usize] {
@@ -2379,7 +2413,7 @@ impl<'a> Gen<'a> {
             Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(IOp::Add, _, d, _, _) if self.al.remat[d.0 as usize].is_some() => {}
             Inst::Sel(d, c, a, b) => self.sel(options, *d, *c, *a, *b),
             _ if self.ymm && y_inst(self.f, i) => self.y(options, i),
-            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(options, i),
+            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::VConst(..) => self.vinst(options, i),
             Inst::VLoadX(d, base, idx, sh, off) => {
                 let (ri, rb, off) = self.index_operands(options, *base, *idx, *off);
                 let xd = self.def_f(*d, XS);
@@ -3995,38 +4029,52 @@ impl<'a> Gen<'a> {
                 let xv = self.use_f(v, XS);
                 self.a.sse_rm(0, 0x11, xv, rb, off);
             }
-            Inst::VConst(d, 0) => {
+            // a constant without a register is made at its uses (Alloc::remat)
+            Inst::VConst(d, _) if self.al.loc[d.0 as usize] == Loc::None => {}
+            Inst::VConst(d, bits) => {
                 let xd = self.def_f(d, XS);
-                self.a.sse_rr(0, 0x57, xd, xd, false); // xorps xd, xd
+                self.vconst_into(xd, bits);
                 self.fin_f(d, xd);
             }
-            Inst::VConst(d, bits) => {
-                // movups xd, [rip + entry]
+            Inst::VTbl(d, base, bidx, n) => {
+                // per 16-byte quarter q of the table: t = bidx - 16q (wrapping), then + 0x70 with
+                // unsigned saturation (the quarter's bytes 0..15 keep their low nibble with bit 7
+                // clear, every other byte gets bit 7), pshufb of the quarter by t (bit 7: zero), or-ed
+                let rb = self.use_i(options, base, R11);
+                let xi = self.use_f(bidx, XS2);
+                self.a.sse_rr(0x66, 0xef, XS, XS, false); // pxor acc, acc
+                for q in 0..(n as u32).div_ceil(4) {
+                    self.a.movf_rr(true, 1, xi);
+                    if q > 0 {
+                        self.vconst128(0, (16 * q as u128) * 0x0101_0101_0101_0101_0101_0101_0101_0101);
+                        self.a.sse_rr(0x66, 0xf8, 1, 0, false); // psubb xmm1, xmm0
+                    }
+                    self.vconst128(0, 0x7070_7070_7070_7070_7070_7070_7070_7070);
+                    self.a.sse_rr(0x66, 0xdc, 1, 0, false); // paddusb xmm1, xmm0
+                    self.a.sse_rm(0, 0x10, 0, rb, 16 * q as i32); // movups xmm0, [rb + 16q]
+                    self.a.sse_ext(0x66, 0x38, 0x00, 0, 1); // pshufb xmm0, xmm1
+                    self.a.sse_rr(0x66, 0xeb, XS, 0, false); // por acc, xmm0
+                }
                 let xd = self.def_f(d, XS);
-                self.a.rex(false, xd, 0, 0, false);
-                self.a.byte(0x0f);
-                self.a.byte(0x10);
-                self.a.byte(((xd & 7) << 3) | 5);
-                let at = self.a.pos();
-                self.a.u32(0);
-                self.vpool.push((at, bits as u128 * 0x0000_0001_0000_0001_0000_0001_0000_0001));
+                self.a.movf_rr(true, xd, XS);
                 self.fin_f(d, xd);
             }
             Inst::VGather(d, base, idx) if !use_gather(options) => {
-                // per lane: pextrd / mov / pinsrd (faster than vpgatherdd for four lanes on the
-                // CPUs measured; MAKEPAD_RUN_GATHER=1 selects the gather)
+                // per lane: pextrd + a load into the lane (faster than vpgatherdd for four lanes on
+                // the CPUs measured; MAKEPAD_RUN_GATHER=1 selects the gather). Lane 0 is a movd load,
+                // which writes the whole register: no dependency on xmm1's last (unrelated) value.
                 let rb = self.use_i(options, base, R11);
                 let xi = self.use_f(idx, XS2);
                 for l in 0..4u8 {
                     self.a.sse_ext(0x66, 0x3a, 0x16, xi, RAX); // pextrd eax, xi, l
                     self.a.byte(l);
-                    // mov eax, [rb + rax*4]
                     self.a.sib = Some((RAX, 2));
-                    self.a.rex(false, RAX, 0, rb, false);
-                    self.a.byte(0x8b);
-                    self.a.modrm_mem(RAX, rb, 0);
-                    self.a.sse_ext(0x66, 0x3a, 0x22, 1, RAX); // pinsrd xmm1, eax, l
-                    self.a.byte(l);
+                    if l == 0 {
+                        self.a.sse_rm(0x66, 0x6e, 1, rb, 0); // movd xmm1, [rb + rax*4]
+                    } else {
+                        self.a.sse_ext_m(0x66, 0x3a, 0x22, 1, rb, 0); // pinsrd xmm1, [rb + rax*4], l
+                        self.a.byte(l);
+                    }
                 }
                 let xd = self.def_f(d, XS);
                 self.a.movf_rr(true, xd, 1);

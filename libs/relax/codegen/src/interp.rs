@@ -1951,6 +1951,24 @@ unsafe extern "C" fn h_vgather(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     next!(pc.add(2), fp, cx)
 }
 
+/// VTbl: each byte from the table at base by its byte index
+unsafe extern "C" fn h_vtbl(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
+    let w = *pc.add(1);
+    let base = *c(fp, w, 1);
+    let idx = vget(c(fp, w, 2));
+    let mut r = [0u32; 4];
+    for i in 0..4 {
+        let mut x = 0u32;
+        for k in 0..4 {
+            let b = (idx[i] >> (8 * k)) & 0xff;
+            x |= (std::ptr::read((base + b as u64) as *const u8) as u32) << (8 * k);
+        }
+        r[i] = x;
+    }
+    vput(c(fp, w, 0), r);
+    next!(pc.add(2), fp, cx)
+}
+
 // ---- control
 
 unsafe extern "C" fn h_jump(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
@@ -3197,6 +3215,10 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w3(*d, *base, *idx);
             l.emit(h_vgather, &[w]);
         }
+        Inst::VTbl(d, base, idx, _) => {
+            let w = l.w3(*d, *base, *idx);
+            l.emit(h_vtbl, &[w]);
+        }
         #[cfg(target_arch = "aarch64")]
         Inst::VX(op, d, a, b) => {
             let w = l.w3(*d, *a, *b);
@@ -3231,7 +3253,7 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::Cpuid(ds, _, _) => out.extend_from_slice(ds),
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => out.push(*d),
         Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
-        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
+        Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
         Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }

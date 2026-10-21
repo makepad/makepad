@@ -191,12 +191,19 @@ pub(crate) fn load(key: u128) -> Option<Code> {
 static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The back end's options, read once per process from the environment (`MAKEPAD_RUN_OPT`,
-/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features.
+/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features. Kernels allocate registers by
+/// weighted references over the square root of the live range's length (unless
+/// MAKEPAD_RUN_RA_PRIO says otherwise): by references alone (Relax's default) a kernel's
+/// long-lived values took every register and its short temporaries -- a noise hash, x64's 12
+/// vector registers -- went through spill slots (x64 cycles per element: one-pass heightfield
+/// x4 -23%, instances scalar -12%, x4 -13%; no kernel slower).
 pub(crate) fn options() -> &'static relax_session::Options {
     static O: std::sync::OnceLock<relax_session::Options> = std::sync::OnceLock::new();
     O.get_or_init(|| {
-        #[allow(unused_mut)]
         let mut o = relax_session::Options::from_env();
+        if std::env::var_os("MAKEPAD_RUN_RA_PRIO").is_none() {
+            o.ra_prio = relax_session::options::Priority::Sqrt;
+        }
         #[cfg(target_arch = "x86_64")]
         {
             o.cpu = relax_backend::x64::detect_cpu(&o);

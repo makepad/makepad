@@ -181,7 +181,7 @@ impl Cx {
             if (load || store) && is_mem_effect(i) {
                 return None;
             }
-            if store && matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..)) {
+            if store && matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::VTbl(..)) {
                 return None;
             }
         }

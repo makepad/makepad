@@ -1436,7 +1436,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                     emit(Inst::Iconst(d, sbthunk(t) as i64), &mut insts, &mut pos);
                 }
                 Inst::TlsAddr(..) => return Err(format!("{}: thread-local storage is not available to sandboxed modules", f.name)),
-                Inst::VGather(..) => return Err(format!("{}: vector gathers are not available to sandboxed modules", f.name)),
+                Inst::VGather(..) | Inst::VTbl(..) => return Err(format!("{}: vector gathers are not available to sandboxed modules", f.name)),
                 Inst::Load(mm, d, base, off) => {
                     let (b2, o2) = mask(f, &mut insts, &mut pos, &mut cache, base, off);
                     emit(Inst::Load(mm, d, b2, o2), &mut insts, &mut pos);

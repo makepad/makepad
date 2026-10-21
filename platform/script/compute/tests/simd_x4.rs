@@ -392,3 +392,94 @@ fn x4_store_groups_check_once_and_store_lane_records() {
     same_everywhere(srcs[0], "o", 4);
     same_everywhere(srcs[1], "o", 3);
 }
+
+/// Runs a kernel with input `inp` (`inp_words` words per element, run sizes around multiples
+/// of 4, inputs as long as the run and shorter: a short input clamps) and one output natively
+/// with and without x4 code and on the interpreter: the output words must agree.
+fn same_with_input(src: &str, inp: &str, inp_words: usize, out: &str, words: usize) {
+    let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
+    assert!(k.simd(), "expected x4 code for:\n{}", src);
+    let ki = compile_with(src, &[], Backend::Interp).unwrap();
+    for n in [1usize, 4, 7, 64, 4096 + 5] {
+        for short in [0usize, 1, 3, 5, 13] {
+            let len = (n * inp_words).saturating_sub(short).max(1);
+            let data: Vec<f32> = (0..len).map(|j| ((j * 7919) % 1000) as f32 * 0.01 - 3.0).collect();
+            let run = |k: &makepad_script_compute::kernel::Kernel, simd: bool, threads: usize| {
+                let mut o = vec![0.0f32; n * words];
+                let mut c = k.call();
+                c.set_simd(simd);
+                c.set_param("t", 0.75);
+                c.input(inp, &data).unwrap();
+                c.output(out, &mut o).unwrap();
+                if threads > 1 { c.run_parallel(n, threads).unwrap() } else { c.run(n).unwrap() };
+                bits(&o)
+            };
+            let v = run(&k, true, 1);
+            assert_eq!(v, run(&k, false, 1), "x4 != scalar, n {} short {}:\n{}", n, short, src);
+            assert_eq!(v, run(&ki, false, 1), "x4 != interpreter, n {} short {}:\n{}", n, short, src);
+            assert_eq!(v, run(&k, true, 4), "x4 on 4 threads != one thread, n {} short {}:\n{}", n, short, src);
+        }
+    }
+}
+
+#[test]
+fn x4_record_loads_are_lane_rows_and_a_transpose() {
+    // a record's fields read per lane at root + c: four words a 16-byte load per lane and a
+    // transpose (ZipLo of D lanes), checked once on the largest lane root; inputs shorter than
+    // the run take the clamped gathers. Records 8 words apart (two chunks), 5 apart (overlapping
+    // reads), fields read out of order, under divergence.
+    let srcs = [
+        "let src = input(f32)\nlet o = output(vec4)\nlet t = param(0.0)\nfn element(i) {\n let p = vec3(src[i * 8], src[i * 8 + 1], src[i * 8 + 2])\n let q = vec4(src[i * 8 + 3], src[i * 8 + 4], src[i * 8 + 5], src[i * 8 + 6])\n o[i] = vec4(p.x + q.w, p.y * q.z, p.z - q.y + src[i * 8 + 7], q.x + t) }",
+        "let src = input(f32)\nlet o = output(vec4)\nlet t = param(0.0)\nfn element(i) {\n let b = i * 5\n o[i] = vec4(src[b + 3], src[b], src[b + 1] * t, src[b + 2] + src[b + 4]) }",
+        "let src = input(f32)\nlet o = output(vec2)\nlet t = param(0.0)\nfn element(i) {\n var a = 0.0\n var b = 1.0\n if hash01(i, 2) > 0.5 { a = src[i * 6 + 1] + src[i * 6 + 2]\n b = src[i * 6] } \n o[i] = vec2(a, b * t) }",
+    ];
+    for (src, w) in srcs.iter().zip([8usize, 5, 6]) {
+        let rir = x4_rir(src);
+        assert!(rir.contains("ZipLo(D)"), "no load group in the x4 code of:\n{}", src);
+        let words = if src.contains("output(vec2)") { 2 } else { 4 };
+        same_with_input(src, "src", w, "o", words);
+    }
+}
+
+#[test]
+fn x4_store_groups_of_four_words_are_a_transpose_and_lane_stores() {
+    // records of 4+ words at one varying offset: rows of four words (a transpose) stored per lane,
+    // the rest word by word; disjoint records (24 words apart) four words of all lanes at a time,
+    // overlapping ones (offsets 2 words apart) lane after lane, and under divergence
+    let srcs = [
+        ("let xf = output(mat4, 24, 0, inst)\nlet col = output(vec4, 24, 16, inst)\nlet t = param(0.0)\nfn instance(i) {\n let a = float(i) * 0.5\n xf[i] = mat4(a, 1.0, 2.0, a * a, -a, 3.0, t, 4.0, a + 1.0, 5.0, 6.0, 7.0, 8.0, a - t, 9.0, 10.0)\n col[i] = vec4(hash01(i, 1), hash01(i, 2), a, 1.0) }", "inst", 24),
+        ("let o = output(vec4)\nfn element(i) { if hash01(i, 5) > 0.3 { o[i] = vec4(float(i), float(i * 2), sqrt(float(i)), -2.0) } }", "o", 4),
+    ];
+    for (src, out, words) in srcs {
+        let rir = x4_rir(src);
+        assert!(rir.contains("ZipLo(D)") && rir.contains("VStore"), "no transposed store group in the x4 code of:\n{}", src);
+        same_everywhere(src, out, words);
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn x4_small_tables_are_one_tbl() {
+    // tables of up to 16 words (noise gradients, small lookup rows) read at varying indices: on
+    // NEON one ld1 of the table and one TBL by byte indices (neon.rs small_table), not a gather
+    let src = "let A8 = [0.5, -1.0, 2.0, 3.5, -4.25, 5.0, 6.125, -7.0]\nlet C12 = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]\nlet o = output(vec4)\nfn element(i) {\n let h = hash(i)\n o[i] = vec4(A8[h & 7], C12[h % 12], gradient_noise2(vec2(float(i) * 0.37, float(h & 255) * 0.11)), A8[i]) }";
+    let rir = x4_rir(src);
+    assert!(rir.contains("VTbl"), "no table lookup in the x4 code of:\n{}", src);
+    same_everywhere(src, "o", 4);
+}
+
+#[test]
+fn x4_table_rows_are_lane_rows_and_a_transpose() {
+    // rows of a constant table read per lane at hashed (scattered) and consecutive rows: one
+    // 16-byte load per lane and a transpose when no lane's row clamps and the loads stay inside the
+    // table (the last vec3 row takes the gathers), the scalar code's words either way
+    let srcs = [
+        "let P = [vec4(1.0, 2.0, 3.0, 4.0), vec4(5.0, 6.0, 7.0, 8.0), vec4(-1.5, 2.5, -3.5, 4.5), vec4(0.25, 0.5, 0.75, 1.0), vec4(9.0, 8.0, 7.0, 6.0), vec4(-9.0, -8.0, -7.0, -6.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(3.0, 1.0, 4.0, 1.5), vec4(2.0, 7.0, 1.0, 8.0)]\nlet o = output(f32)\nfn element(i) {\n let a = P[hash(i) % 9]\n o[i] = a.x * a.w + a.y - a.z }",
+        "let T3 = [vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0), vec3(7.0, 8.0, 9.0), vec3(10.0, 11.0, 12.0), vec3(13.0, 14.0, 15.0), vec3(-1.0, -2.0, -3.0)]\nlet o = output(f32)\nfn element(i) {\n let b = T3[i % 6]\n let c = T3[(i * 5) % 6]\n o[i] = b.x - b.y * c.z + c.x * b.z }",
+    ];
+    for src in srcs {
+        let rir = x4_rir(src);
+        assert!(rir.contains("ZipLo(D)"), "no table row group in the x4 code of:\n{}", src);
+        same_everywhere(src, "o", 1);
+    }
+}

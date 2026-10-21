@@ -616,14 +616,38 @@ pub fn clamp_off(off: u32, extent: u32) -> u32 {
 /// shifts and constant arithmetic: `Some(b)` means the value, read as
 /// u32, is at most b (so it is also a non-negative i32 when b < 2^31).
 pub fn bounds(p: &Program) -> Vec<Option<u32>> {
+    // a variable is bounded by the largest bound of the values set into it (variables start at 0);
+    // rounds: each round's variable bounds come from the previous round's values, starting with
+    // none (a variable that feeds itself, a counter, never gets one)
+    let mut var_b: Vec<Option<u32>> = vec![None; p.vars.len()];
     let mut out = vec![None; p.vals.len()];
-    let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
-    fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>) {
+    for _ in 0..4 {
+        out = vec![None; p.vals.len()];
+        let mut consts: Vec<Option<i32>> = vec![None; p.vals.len()];
+        // per variable: the max bound of its sets, or None when one set has none
+        let mut sets: Vec<Option<Option<u32>>> = vec![None; p.vars.len()];
+        walk(&p.body, &mut out, &mut consts, &var_b, &mut sets);
+        let next: Vec<Option<u32>> = sets.iter().map(|s| s.flatten()).collect();
+        if next == var_b {
+            break;
+        }
+        var_b = next;
+    }
+    fn walk(b: &Block, out: &mut Vec<Option<u32>>, consts: &mut Vec<Option<i32>>, var_b: &[Option<u32>], sets: &mut Vec<Option<Option<u32>>>) {
         for s in b {
             match s {
+                Stmt::Set(var, x) => {
+                    let e = &mut sets[var.0 as usize];
+                    *e = Some(match (*e, out[x.0 as usize]) {
+                        (None, b) => b,
+                        (Some(Some(a)), Some(b)) => Some(a.max(b)),
+                        _ => None,
+                    });
+                }
                 Stmt::Def(v, op) => {
                     let pos = |c: Option<i32>| c.filter(|c| *c >= 0).map(|c| c as u32);
                     let r = match *op {
+                        Op::Get(var) => var_b[var.0 as usize],
                         Op::ConstI(c) => {
                             consts[v.0 as usize] = Some(c);
                             pos(Some(c))
@@ -659,15 +683,14 @@ pub fn bounds(p: &Program) -> Vec<Option<u32>> {
                     out[v.0 as usize] = r;
                 }
                 Stmt::If(_, t, e) => {
-                    walk(t, out, consts);
-                    walk(e, out, consts);
+                    walk(t, out, consts, var_b, sets);
+                    walk(e, out, consts, var_b, sets);
                 }
-                Stmt::Loop { body, .. } => walk(body, out, consts),
+                Stmt::Loop { body, .. } => walk(body, out, consts, var_b, sets),
                 _ => {}
             }
         }
     }
-    walk(&p.body, &mut out, &mut consts);
     out
 }
 

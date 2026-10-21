@@ -115,6 +115,9 @@ pub enum Remat {
     Const(i64),
     /// the address of stack slot n
     Slot(u32),
+    /// a V128 constant: every lane `bits` (`Inst::VConst`): one movi / literal load at a use beats a
+    /// spill store at the definition and a reload at each use
+    VConst(u32),
     /// a symbol's value (relocated: loaded from the address pool)
     Addr(Sym),
     /// a function's table thunk
@@ -197,7 +200,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
         Inst::Cpuid(ds, a, b) => { uses.push(*a); uses.push(*b); defs.extend_from_slice(ds); }
         Inst::Xgetbv(d, a) => { uses.push(*a); defs.push(*d); }
         Inst::TlsAddr(d, _) => defs.push(*d),
-        Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) => {
+        Inst::VGather(d, a, b) | Inst::VTbl(d, a, b, _) | Inst::VShuffle(d, a, b, _) => {
             uses.push(*a);
             uses.push(*b);
             defs.push(*d);
@@ -306,7 +309,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
         Inst::Cpuid(_, a, b) => { uses(*a); uses(*b); }
         Inst::Xgetbv(_, a) => uses(*a),
         Inst::TlsAddr(d, _) => {}
-        Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) => {
+        Inst::VGather(d, a, b) | Inst::VTbl(d, a, b, _) | Inst::VShuffle(d, a, b, _) => {
             uses(*a);
             uses(*b);
         }
@@ -393,6 +396,7 @@ pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
         | Inst::LoadX(_, d, _, _, _, _)
         | Inst::VLoadX(d, _, _, _, _)
         | Inst::VGather(d, _, _)
+        | Inst::VTbl(d, _, _, _)
         | Inst::VShuffle(d, _, _, _)
         | Inst::VX(_, d, _, _)
         | Inst::VX3(_, d, _, _, _)
@@ -1243,16 +1247,19 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     // allocated values hold each register over its ranges
     if trace_on(f) {
         for v in 0..nv as usize {
-            if !matches!(loc[v], Loc::Stack(_)) || f.vregs[v] != Cls::I {
+            if !matches!(loc[v], Loc::Stack(_)) {
                 continue;
             }
+            let is_int = f.vregs[v] == Cls::I;
             let r = rng(v as u32);
             let len: u32 = r.iter().map(|(a, b)| b - a + 1).sum();
             let unit = unit_members(v as u32).map(|m| m.len()).unwrap_or(0);
             let mut by: Vec<String> = Vec::new();
-            for &c in cfg.int_caller.iter().chain(cfg.int_callee.iter()) {
-                let hold: Vec<String> = (0..nv as usize).filter(|&u| loc[u] == Loc::Reg(c) && ranges_meet(rng(u as u32), r)).map(|u| format!("v{}({:.3})", u, weight[u])).collect();
-                by.push(format!("r{}:{}", c, hold.join("+")));
+            let regs: Vec<u8> = if is_int { cfg.int_caller.iter().chain(cfg.int_callee.iter()).copied().collect() } else { cfg.flt_caller.iter().chain(cfg.flt_callee.iter()).copied().collect() };
+            for c in regs {
+                let at = if is_int { Loc::Reg(c) } else { Loc::Flt(c) };
+                let hold: Vec<String> = (0..nv as usize).filter(|&u| loc[u] == at && ranges_meet(rng(u as u32), r)).map(|u| format!("v{}({:.3})", u, weight[u])).collect();
+                by.push(format!("{}{}:{}", if is_int { "r" } else { "f" }, c, hold.join("+")));
             }
             eprintln!("ra-spill {} v{} w={:.3} refs={:.2} len={} unit={} ranges={} | {}", f.name, v, weight[v], refs[v], len, unit, r.len(), by.join(" "));
         }
@@ -2180,6 +2187,7 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
                     Inst::SlotAddr(d, n) => cand.push((d.0, Remat::Slot(*n))),
                     Inst::Addr(d, a) if crate::rir::SymClass::of(cfg.sym_class, a.id) != crate::rir::SymClass::Domain => cand.push((d.0, Remat::Addr(*a))),
                     Inst::FnAddr(d, n) => cand.push((d.0, Remat::FnAddr(*n))),
+                    Inst::VConst(d, bits) => cand.push((d.0, Remat::VConst(*bits))),
                     Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, b2, k) if *k == *k as i32 as i64 => cand.push((d.0, Remat::Offset(*b2, *k as i32))),
                     Inst::Mov(d, s2) => movs.push((d.0, s2.0)),
                     Inst::Call(c, a, _) => {
@@ -2250,7 +2258,11 @@ fn remat_values(options: &relax_session::Options, f: &Func, reach: &[bool], cfg:
             }
             // one definition, or every definition the same constant (built on several paths)
             let same_const = matches!(i, Remat::Const(_)) && kdefs[d].2 && kdefs[d].1 == ndef[d];
-            if (ndef[d] == 1 || same_const) && !bad[d] && f.vregs[d] == Cls::I {
+            let cls_ok = match i {
+                Remat::VConst(_) => f.vregs[d] == Cls::V128,
+                _ => f.vregs[d] == Cls::I,
+            };
+            if (ndef[d] == 1 || same_const) && !bad[d] && cls_ok {
                 base_only[d] = !nonbase[d] && matches!(i, Remat::Slot(..));
                 remat[d] = i;
             }

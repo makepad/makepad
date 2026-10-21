@@ -880,7 +880,7 @@ pub fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
                             }
                         }
                     }
-                    Inst::Load(_, _, a, _) | Inst::LoadX(_, _, a, ..) | Inst::VLoad(_, a, _) | Inst::VLoadX(_, a, ..) | Inst::VGather(_, a, _) | Inst::AtomicLoad(_, _, _, a) | Inst::AtomicRmw(_, _, _, _, a, _) | Inst::AtomicCas(_, _, _, _, a, _, _) | Inst::Copy(_, a, _) => {
+                    Inst::Load(_, _, a, _) | Inst::LoadX(_, _, a, ..) | Inst::VLoad(_, a, _) | Inst::VLoadX(_, a, ..) | Inst::VGather(_, a, _) | Inst::VTbl(_, a, _, _) | Inst::AtomicLoad(_, _, _, a) | Inst::AtomicRmw(_, _, _, _, a, _) | Inst::AtomicCas(_, _, _, _, a, _, _) | Inst::Copy(_, a, _) => {
                         for &d in &der[a.0 as usize] {
                             arg_ok[d as usize] = false;
                         }

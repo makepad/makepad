@@ -61,7 +61,7 @@ fn compile_fresh(p: &Program, key: Option<u128>) -> Option<Code> {
         return None;
     }
     // one quick allocation round (see emit_keyed)
-    crate::native::emit_keyed(&f, key, false)
+    crate::native::emit_keyed(&f, key, std::env::var("VEC6_THOROUGH").is_ok())
 }
 
 /// The vector RIR of a kernel (None when declined), before optimisation.
@@ -107,7 +107,23 @@ pub fn rir_of(p: &Program) -> Option<Func> {
         consts: vec![None; p.vals.len()],
         masks: vec![None; p.vals.len()],
         bufs: Vec::new(),
+        defs: vec![None; p.vals.len()],
+        grouped: Default::default(),
     };
+    fn walk(b: &Block, defs: &mut Vec<Option<Op>>) {
+        for s in b {
+            match s {
+                Stmt::Def(v, op) => defs[v.0 as usize] = Some(*op),
+                Stmt::If(_, t, e) => {
+                    walk(t, defs);
+                    walk(e, defs);
+                }
+                Stmt::Loop { body, .. } => walk(body, defs),
+                _ => {}
+            }
+        }
+    }
+    walk(&p.body, &mut lx.defs);
     let nu = lx.conv(Conv::IntToInt(U32), n_raw);
     lx.n_i32 = lx.conv(Conv::IntToInt(I32), nu);
     let ones = lx.iconst(-1);
@@ -185,6 +201,10 @@ struct Vx<'a> {
     masks: Vec<Option<VReg>>,
     /// per host buffer: (base pointer, last word index), loaded once at entry
     bufs: Vec<(VReg, VReg)>,
+    /// per value: its defining op
+    defs: Vec<Option<Op>>,
+    /// loads a load group already made (statement ids)
+    grouped: std::collections::HashSet<usize>,
 }
 
 impl<'a> Vx<'a> {
@@ -252,6 +272,17 @@ impl<'a> Vx<'a> {
     /// `a` shifted by the immediate `k` (op: one of `VX::ShlI`, `ShrSI`, `ShrUI` of 32-bit lanes)
     fn vshift(&mut self, op: fn(VW, u8) -> VX, a: VReg, k: u8) -> VReg {
         self.vbin(op(VW::S, k), a, a)
+    }
+
+    /// Lane `l` of `d` = scalar `s`, building `d` lane by lane from lane 0: lane 0 splats (a
+    /// whole-register write: the build does not depend on d's last value, e.g. the previous
+    /// element's), the others insert.
+    fn put_lane(&mut self, d: VReg, l: u8, s: VReg) {
+        if l == 0 {
+            self.emit(Inst::VSplat(d, s));
+        } else {
+            self.emit(Inst::VInsert(d, d, l, s));
+        }
     }
 
     fn extract_i(&mut self, v: VReg, lane: u8) -> VReg {
@@ -441,7 +472,7 @@ impl<'a> Vx<'a> {
                 let a = self.buf_addr(ptr, last, base, Some(so));
                 let s = self.f.vreg(scls);
                 self.emit(Inst::Load(m, s, a, 0));
-                self.emit(Inst::VInsert(d, d, l, s));
+                self.put_lane(d, l, s);
             }
             self.term(Term::Jump(join));
             self.cur = join;
@@ -451,30 +482,7 @@ impl<'a> Vx<'a> {
         let o = off.unwrap();
         let ov = self.v(o);
         match region {
-            Region::Buf(k) => {
-                // index = min(base + o, last) = base + umin(o, last - base) when last >= base
-                let (ptr, last) = self.buf_regs(k);
-                let bk = self.iconst(base as i64);
-                let ok = self.icmp(Cond::Ge, true, last, bk);
-                let (gath, low, join) = (self.block_new(), self.block_new(), self.block_new());
-                self.term(Term::Branch(ok, gath, low));
-                self.cur = gath;
-                let lim = self.ibini(IOp::Sub, I64, last, base as i64);
-                let limv = self.f.vreg(Cls::V128);
-                self.emit(Inst::VSplat(limv, lim));
-                let idx = self.vbin(VX::MinU(VW::S), ov, limv);
-                let b0 = self.ibini(IOp::Add, I64, ptr, 4 * base as i64);
-                self.emit(Inst::VGather(d, b0, idx));
-                self.term(Term::Jump(join));
-                self.cur = low;
-                // every lane clamps to the last word
-                let a = self.buf_addr(ptr, last, base, None);
-                let s = self.f.vreg(scls);
-                self.emit(Inst::Load(m, s, a, 0));
-                self.emit(Inst::VSplat(d, s));
-                self.term(Term::Jump(join));
-                self.cur = join;
-            }
+            Region::Buf(k) => self.buf_gather(d, k, base, ov, m, scls),
             Region::Frame => {
                 // word w of lane l: frame + 16 w + 4 l -> gather index 4 clamp(o) + l
                 let idx = self.vclamp(o, ov, extent);
@@ -493,11 +501,57 @@ impl<'a> Vx<'a> {
                     _ => self.regions[2],
                 };
                 let idx = self.vclamp(o, ov, extent);
-                let b0 = self.ibini(IOp::Add, I64, rb, 4 * base as i64);
-                self.emit(Inst::VGather(d, b0, idx));
+                if region == Region::Shared {
+                    self.table_gather(d, base, extent, idx);
+                } else {
+                    let b0 = self.ibini(IOp::Add, I64, rb, 4 * base as i64);
+                    self.emit(Inst::VGather(d, b0, idx));
+                }
             }
         }
         let _ = (m, scls);
+    }
+
+    /// d = per lane word `base + idx_l` of the shared tables (idx below extent): a small table
+    /// (noise gradients, lookup rows: up to 16 words) on NEON is one TBL by byte indices (word i =
+    /// bytes 4i .. 4i + 3; neon.rs small_table), else a gather.
+    fn table_gather(&mut self, d: VReg, base: u32, extent: u32, idx: VReg) {
+        let b0 = self.ibini(IOp::Add, I64, self.regions[2], 4 * base as i64);
+        if cfg!(target_arch = "aarch64") && extent <= 16 {
+            let k1 = self.splat_const(0x0404_0404);
+            let b4 = self.vbin(VX::MulLo(VW::S), idx, k1);
+            let k2 = self.splat_const(0x0302_0100);
+            let bi = self.vbin(VX::Add(VW::S), b4, k2);
+            self.emit(Inst::VTbl(d, b0, bi, extent as u8));
+        } else {
+            self.emit(Inst::VGather(d, b0, idx));
+        }
+    }
+
+    /// d = per lane word `min(base + zext(ov_l), last)` of host buffer k: a gather of clamped indices.
+    fn buf_gather(&mut self, d: VReg, k: u8, base: u32, ov: VReg, m: Mem, scls: Cls) {
+        // index = min(base + o, last) = base + umin(o, last - base) when last >= base
+        let (ptr, last) = self.buf_regs(k);
+        let bk = self.iconst(base as i64);
+        let ok = self.icmp(Cond::Ge, true, last, bk);
+        let (gath, low, join) = (self.block_new(), self.block_new(), self.block_new());
+        self.term(Term::Branch(ok, gath, low));
+        self.cur = gath;
+        let lim = self.ibini(IOp::Sub, I64, last, base as i64);
+        let limv = self.f.vreg(Cls::V128);
+        self.emit(Inst::VSplat(limv, lim));
+        let idx = self.vbin(VX::MinU(VW::S), ov, limv);
+        let b0 = self.ibini(IOp::Add, I64, ptr, 4 * base as i64);
+        self.emit(Inst::VGather(d, b0, idx));
+        self.term(Term::Jump(join));
+        self.cur = low;
+        // every lane clamps to the last word
+        let a = self.buf_addr(ptr, last, base, None);
+        let s = self.f.vreg(scls);
+        self.emit(Inst::Load(m, s, a, 0));
+        self.emit(Inst::VSplat(d, s));
+        self.term(Term::Jump(join));
+        self.cur = join;
     }
 
     /// Lanes `min(o as u32, extent - 1)` unless the offset is proven in range.
@@ -542,7 +596,7 @@ impl<'a> Vx<'a> {
                     self.emit(Inst::Load(m, s, a, k));
                 }
             }
-            self.emit(Inst::VInsert(d, d, l, s));
+            self.put_lane(d, l, s);
         }
     }
 
@@ -654,6 +708,15 @@ impl<'a> Vx<'a> {
     fn block(&mut self, b: &Block) {
         let mut k = 0;
         while k < b.len() {
+            if self.grouped.contains(&id(&b[k])) {
+                k += 1;
+                continue;
+            }
+            self.load_group(&b[k..]);
+            if self.grouped.contains(&id(&b[k])) {
+                k += 1;
+                continue;
+            }
             // a group of stores handles statements that never escape
             let n = self.store_group(&b[k..]).max(1);
             if n == 1 {
@@ -666,12 +729,177 @@ impl<'a> Vx<'a> {
         }
     }
 
+    /// A varying offset as `root + c` (c >= 0 a constant; c = 0: the offset itself).
+    fn root_of(&self, o: Val) -> (Val, u32) {
+        let k = |x: Val| self.consts[x.0 as usize].filter(|c| *c < 1 << 16);
+        match self.defs[o.0 as usize] {
+            Some(Op::Bin(Bin::AddI, x, y)) if k(y).is_some() && !self.uniform(x) => (x, k(y).unwrap()),
+            Some(Op::Bin(Bin::AddI, x, y)) if k(x).is_some() && !self.uniform(y) => (y, k(x).unwrap()),
+            _ => (o, 0),
+        }
+    }
+
+    /// Loads of one region (a host buffer, or the shared tables) at varying offsets `root + c`
+    /// (a record's fields read per lane: `src[i * 8]`, `src[i * 8 + 1]`, ...; a table's rows:
+    /// `T4[i].x`, `T4[i].y`, ...) among the definitions that follow `b[0]` (up to the first
+    /// statement that is not a definition): every four consecutive words holding at least two
+    /// of them are one 16-byte load per lane and a 4x4 transpose, when every lane's words lie
+    /// inside (checked once, on the largest lane root): a buffer's length; for tables, no load
+    /// clamps and each 16-byte load stays inside its table (neon.rs gather_group, which took
+    /// only consecutive rows). Else the loads one by one, as clamped gathers. Made at b[0]; the
+    /// loads it made are in `grouped`.
+    fn load_group(&mut self, b: &[Stmt]) {
+        let Some(Stmt::Def(_, Op::Load { region, off: Some(o0), .. })) = b.first() else { return };
+        let region = *region;
+        if !matches!(region, Region::Buf(_) | Region::Shared) || self.uniform(*o0) {
+            return;
+        }
+        let (r, _) = self.root_of(*o0);
+        if self.step[r.0 as usize].is_some_and(|st| st.abs() < 4) {
+            // consecutive lanes: a vector load each (load's fast path)
+            return;
+        }
+        // (word, value, statement id, last word of its table) of the loads of root r
+        let mut ls: Vec<(u32, Val, usize, u32)> = Vec::new();
+        for st in b.iter().take(64) {
+            match st {
+                // (a small table is one TBL per read on NEON: cheaper than the rows)
+                Stmt::Def(v, Op::Load { region: r2, base, extent, off: Some(o) }) if *r2 == region && !self.uniform(*o) && !(region == Region::Shared && cfg!(target_arch = "aarch64") && *extent <= 16) => {
+                    let (root, c) = self.root_of(*o);
+                    if root == r && (*base as u64 + c as u64) < 1 << 30 && (region != Region::Shared || c < *extent) {
+                        ls.push((base + c, *v, id(st), (base + extent).saturating_sub(1)));
+                    }
+                }
+                Stmt::Def(..) => {}
+                _ => break,
+            }
+        }
+        // chunks: four words from the lowest word not yet covered, kept when two loads fall in it
+        let mut words: Vec<u32> = ls.iter().map(|x| x.0).collect();
+        words.sort_unstable();
+        words.dedup();
+        let mut chunks: Vec<u32> = Vec::new();
+        let mut j = 0;
+        while j < words.len() {
+            let w0 = words[j];
+            let n = ls.iter().filter(|x| x.0 >= w0 && x.0 < w0 + 4).count();
+            let mut e = j;
+            while e < words.len() && words[e] < w0 + 4 {
+                e += 1;
+            }
+            if n >= 2 {
+                chunks.push(w0);
+            }
+            j = e;
+        }
+        let mine: Vec<(u32, Val, usize, u32)> = ls.iter().filter_map(|&(w, v, sid, _)| chunks.iter().find(|&&c| w >= c && w < c + 4).map(|&c| (w, v, sid, c))).collect();
+        let rv = self.v(r);
+        let mx = self.f.vreg(Cls::I);
+        let inside = match region {
+            Region::Buf(kb) => {
+                if chunks.is_empty() {
+                    return;
+                }
+                let lim = chunks.iter().map(|c| c + 3).max().unwrap();
+                let (_, last) = self.buf_regs(kb);
+                // every lane inside: max(zext root) + lim <= min(last, 2^31 - 1) (no root + c wraps)
+                self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, rv, rv));
+                let end = self.ibini(IOp::Add, I64, mx, lim as i64);
+                let top = self.iconst(i32::MAX as i64);
+                let small = self.icmp(Cond::Le, false, last, top);
+                let cap = self.sel(small, last, top);
+                self.icmp(Cond::Le, false, end, cap)
+            }
+            _ => {
+                // no load clamps (root + c <= the table's last word - base) and every 16-byte load
+                // stays inside a table of its chunk: max(zext root) <= lim
+                let mut lim = i64::MAX;
+                for &(w, v, _, c) in &mine {
+                    let (base, end) = match self.defs[v.0 as usize] {
+                        Some(Op::Load { base, extent, .. }) => (base, (base + extent) as i64 - 1),
+                        _ => unreachable!("a load"),
+                    };
+                    lim = lim.min(end - w as i64).min(end - c as i64 - 3);
+                    let _ = base;
+                }
+                if chunks.is_empty() || lim < 0 {
+                    return;
+                }
+                self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, rv, rv));
+                let k = self.iconst(lim);
+                self.icmp(Cond::Le, false, mx, k)
+            }
+        };
+        let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
+        self.term(Term::Branch(inside, fast, slow));
+        self.cur = fast;
+        let rb = match region {
+            Region::Buf(kb) => self.buf_regs(kb).0,
+            _ => self.regions[2],
+        };
+        let mut addr = [VReg(0); 4];
+        for l in 0..4u8 {
+            let so = self.extract_i(rv, l);
+            let z = self.conv(Conv::IntToInt(U32), so);
+            let sc = self.ibini(IOp::Shl, I64, z, 2);
+            addr[l as usize] = self.ibin(IOp::Add, I64, rb, sc);
+        }
+        for &c in &chunks {
+            let mut rows = [VReg(0); 4];
+            for l in 0..4 {
+                rows[l] = self.f.vreg(Cls::V128);
+                self.emit(Inst::VLoad(rows[l], addr[l], 4 * c as i32));
+            }
+            let cols = self.transpose4_regs(rows);
+            for &(w, v, _, cc) in &mine {
+                if cc == c {
+                    let d = self.vals[v.0 as usize];
+                    self.emit(Inst::Mov(d, cols[(w - c) as usize]));
+                }
+            }
+        }
+        self.term(Term::Jump(join));
+        self.cur = slow;
+        for &(w, v, _, _) in &mine {
+            // word w = base + c of lane l, as the load itself reads it: a clamped gather
+            let d = self.vals[v.0 as usize];
+            let fp = self.p.vals[v.0 as usize] == crate::ir::Ty::F32;
+            let (m, scls) = if fp { (Mem::F32, Cls::F32) } else { (W32, Cls::I) };
+            let (base, extent) = match self.defs[v.0 as usize] {
+                Some(Op::Load { base, extent, .. }) => (base, extent),
+                _ => unreachable!("a load"),
+            };
+            let c = w - base;
+            let ov = if c == 0 {
+                rv
+            } else {
+                let kv = self.splat_const(c);
+                self.vbin(VX::Add(VW::S), rv, kv)
+            };
+            match region {
+                Region::Buf(kb) => self.buf_gather(d, kb, base, ov, m, scls),
+                _ => {
+                    let top = self.splat_const(extent.saturating_sub(1));
+                    let idx = self.vbin(VX::MinU(VW::S), ov, top);
+                    self.table_gather(d, base, extent, idx);
+                }
+            }
+        }
+        self.term(Term::Jump(join));
+        self.cur = join;
+        for &(_, _, sid, _) in &mine {
+            self.grouped.insert(sid);
+        }
+    }
+
     /// Consecutive stores of words `base .. base + n` (n >= 2) of a host buffer at one varying
     /// offset (a record's fields, an emitted record): when every lane's words lie inside the
     /// buffer (checked once, on the largest lane offset), each running lane writes its n words
-    /// in lane order, without clamps; else the stores one by one. Kernels that run four wide
-    /// are element-local and their lanes' records never overlap, so the words end as the scalar
-    /// code leaves them. Returns the stores handled (0: none).
+    /// without clamps; else the stores one by one. Four consecutive words are a 4x4 transpose
+    /// (eight zips) and one 16-byte store per lane, the rest of the words one per lane. Words go
+    /// in lane order (a word two lanes store ends as the later lane's) unless the lanes' records
+    /// are disjoint (offsets `st >= n` words apart): then four words of all lanes at a time, which
+    /// keeps four rows live instead of all of them. Returns the stores handled (0: none).
     fn store_group(&mut self, b: &[Stmt]) -> usize {
         let Some(Stmt::Store { region: Region::Buf(kb), base, off: Some(o), .. }) = b.first() else { return 0 };
         let (kb, base, o) = (*kb, *base, *o);
@@ -699,28 +927,42 @@ impl<'a> Vx<'a> {
         let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
         self.term(Term::Branch(inside, fast, slow));
         self.cur = fast;
+        let vals: Vec<Val> = b[..n].iter().map(|st| if let Stmt::Store { val, .. } = st { *val } else { unreachable!() }).collect();
+        // each lane's record address, and (not every lane running) whether it runs
+        let mut addr = [VReg(0); 4];
+        let mut runs = [None; 4];
         for l in 0..4u8 {
-            let next = self.block_new();
-            if !self.full {
-                let ml = self.extract_i(self.vm, l);
-                let run = self.block_new();
-                self.term(Term::Branch(ml, run, next));
-                self.cur = run;
-            }
             let so = self.extract_i(ov, l);
             let z = self.conv(Conv::IntToInt(U32), so);
             let idx = if base > 0 { self.ibini(IOp::Add, I64, z, base as i64) } else { z };
             let sc = self.ibini(IOp::Shl, I64, idx, 2);
-            let a = self.ibin(IOp::Add, I64, ptr, sc);
-            for (w, st) in b[..n].iter().enumerate() {
-                let Stmt::Store { val, .. } = st else { unreachable!() };
-                let fp = self.p.vals[val.0 as usize] == crate::ir::Ty::F32;
-                let (m, scls) = if fp { (Mem::F32, Cls::F32) } else { (W32, Cls::I) };
-                let sv = self.lane(*val, l, scls);
-                self.emit(Inst::Store(m, a, 4 * w as i32, sv));
+            addr[l as usize] = self.ibin(IOp::Add, I64, ptr, sc);
+            if !self.full {
+                runs[l as usize] = Some(self.extract_i(self.vm, l));
             }
-            self.term(Term::Jump(next));
-            self.cur = next;
+        }
+        let nq = n / 4;
+        let disjoint = self.step[o.0 as usize].is_some_and(|st| st >= n as i64);
+        if disjoint {
+            for c in 0..nq {
+                let rows = self.transpose4(&vals[4 * c..4 * c + 4]);
+                for l in 0..4 {
+                    self.lane_run(runs[l], |x| x.emit(Inst::VStore(addr[l], 16 * c as i32, rows[l])));
+                }
+            }
+            for l in 0..4 {
+                self.lane_run(runs[l], |x| x.lane_words(&vals, 4 * nq, addr[l], l as u8));
+            }
+        } else {
+            let rows: Vec<[VReg; 4]> = (0..nq).map(|c| self.transpose4(&vals[4 * c..4 * c + 4])).collect();
+            for l in 0..4 {
+                self.lane_run(runs[l], |x| {
+                    for (c, r) in rows.iter().enumerate() {
+                        x.emit(Inst::VStore(addr[l], 16 * c as i32, r[l]));
+                    }
+                    x.lane_words(&vals, 4 * nq, addr[l], l as u8);
+                });
+            }
         }
         self.term(Term::Jump(join));
         self.cur = slow;
@@ -730,6 +972,43 @@ impl<'a> Vx<'a> {
         self.term(Term::Jump(join));
         self.cur = join;
         n
+    }
+
+    /// `f` in a block of its own that runs when `run` (a lane's 0/1 running flag) is set; `f`
+    /// straight in the current block when it is None (every lane runs).
+    fn lane_run(&mut self, run: Option<VReg>, f: impl FnOnce(&mut Self)) {
+        let Some(r) = run else { return f(self) };
+        let (go, next) = (self.block_new(), self.block_new());
+        self.term(Term::Branch(r, go, next));
+        self.cur = go;
+        f(self);
+        self.term(Term::Jump(next));
+        self.cur = next;
+    }
+
+    /// Lane `l` of values `vals[from..]` stored as the words `from..` of the record at `a`.
+    fn lane_words(&mut self, vals: &[Val], from: usize, a: VReg, l: u8) {
+        for (w, val) in vals.iter().enumerate().skip(from) {
+            let fp = self.p.vals[val.0 as usize] == crate::ir::Ty::F32;
+            let (m, scls) = if fp { (Mem::F32, Cls::F32) } else { (W32, Cls::I) };
+            let sv = self.lane(*val, l, scls);
+            self.emit(Inst::Store(m, a, 4 * w as i32, sv));
+        }
+    }
+
+    /// The 4x4 transpose of four values' vectors (row l = lane l of each): eight zips.
+    fn transpose4(&mut self, vals: &[Val]) -> [VReg; 4] {
+        let w: Vec<VReg> = vals.iter().map(|v| self.v(*v)).collect();
+        self.transpose4_regs([w[0], w[1], w[2], w[3]])
+    }
+
+    fn transpose4_regs(&mut self, w: [VReg; 4]) -> [VReg; 4] {
+        // t0 = a0 b0 a1 b1, t1 = a2 b2 a3 b3, t2 = c0 d0 c1 d1, t3 = c2 d2 c3 d3
+        let t0 = self.vbin(VX::ZipLo(VW::S), w[0], w[1]);
+        let t1 = self.vbin(VX::ZipHi(VW::S), w[0], w[1]);
+        let t2 = self.vbin(VX::ZipLo(VW::S), w[2], w[3]);
+        let t3 = self.vbin(VX::ZipHi(VW::S), w[2], w[3]);
+        [self.vbin(VX::ZipLo(VW::D), t0, t2), self.vbin(VX::ZipHi(VW::D), t0, t2), self.vbin(VX::ZipLo(VW::D), t1, t3), self.vbin(VX::ZipHi(VW::D), t1, t3)]
     }
 
     /// Branches to `skip` when no lane of the mask `m` is set, else to a new block.
@@ -1007,7 +1286,7 @@ impl<'a> Vx<'a> {
                             let a = self.extract_i(xv, l);
                             let cur = self.cur;
                             let r = crate::native::Emitter { f: &mut self.f, cur }.div_const(a, c, b == Bin::RemI);
-                            self.emit(Inst::VInsert(d, d, l, r));
+                            self.put_lane(d, l, r);
                         }
                     }
                     Bin::DivI | Bin::RemI => {
@@ -1021,7 +1300,7 @@ impl<'a> Vx<'a> {
                             let q = self.ibin(if b == Bin::DivI { IOp::Div } else { IOp::Rem }, I32, a, safe);
                             let zc = if b == Bin::DivI { self.iconst(0) } else { a };
                             let r = self.sel(z, zc, q);
-                            self.emit(Inst::VInsert(d, d, l, r));
+                            self.put_lane(d, l, r);
                         }
                     }
                     _ => unreachable!("f64 is declined"),
@@ -1076,7 +1355,7 @@ impl<'a> Vx<'a> {
                         let neg = self.icmpi_lt0(r);
                         let up = self.ibini(IOp::Add, I32, r, lk);
                         let w = self.sel(neg, up, r);
-                        self.emit(Inst::VInsert(d, d, l, w));
+                        self.put_lane(d, l, w);
                     }
                 }
             }

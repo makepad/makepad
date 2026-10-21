@@ -768,6 +768,7 @@ impl<'a> Gen<'a> {
             Remat::Addr(a) => self.ldr_reloc(r, Reloc::Sym(a)),
             Remat::FnAddr(id) => self.ldr_reloc(r, Reloc::Thunk(id)),
             Remat::Offset(..) => unreachable!("base + k moves through use_i"),
+            Remat::VConst(_) => unreachable!("a vector constant is made by use_f"),
             Remat::No => self.a.mov_imm(r, 0),
         }
     }
@@ -847,6 +848,13 @@ impl<'a> Gen<'a> {
             Loc::Stack(o) => {
                 let off = self.spill_sp(o);
                 self.a.ldst(LDRD, 8, scratch, SP, off);
+                scratch
+            }
+            // recomputed at each use (Alloc::remat)
+            Loc::None => {
+                if let Remat::VConst(bits) = self.al.remat[v.0 as usize] {
+                    self.vconst_into(scratch, bits);
+                }
                 scratch
             }
             _ => scratch,
@@ -1837,6 +1845,22 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// q register xd = every lane `bits`: movi / mvni / fmov when it encodes, else a literal load
+    fn vconst_into(&mut self, xd: u8, bits: u32) {
+        if let Some(w) = vimm(bits) {
+            self.a.e(w | xd as u32);
+        } else if self.long {
+            // dup vd.4s, w16
+            self.a.mov_imm(IP0, bits as i64);
+            self.a.e(0x4E04_0C00 | (IP0 as u32) << 5 | xd as u32);
+        } else {
+            // ldr qd, =bits x4 (vector literal pool after the code)
+            let at = self.a.pos();
+            self.a.e(0x9C00_0000 | xd as u32);
+            self.vpool.push((at, bits));
+        }
+    }
+
     fn vldst(&mut self, load: bool, t: u8, n: u8, off: i64) {
         if off >= 0 && off % 16 == 0 && off / 16 < 4096 {
             self.a.e(if load { 0x3DC0_0000 } else { 0x3D80_0000 } | ((off / 16) as u32) << 10 | (n as u32) << 5 | t as u32);
@@ -2606,34 +2630,47 @@ impl<'a> Gen<'a> {
                 let xv = self.use_f(v, FS0);
                 self.vldst(false, xv, S1, off as i64);
             }
+            // a constant without a register is made at its uses (Alloc::remat)
+            Inst::VConst(d, _) if self.al.loc[d.0 as usize] == Loc::None => {}
             Inst::VConst(d, bits) => {
                 let xd = self.def_f(d, FS0);
-                if let Some(w) = vimm(bits) {
-                    self.a.e(w | xd as u32);
-                } else if self.long {
-                    // dup vd.4s, w16
-                    self.a.mov_imm(IP0, bits as i64);
-                    self.a.e(0x4E04_0C00 | (IP0 as u32) << 5 | xd as u32);
-                } else {
-                    // ldr qd, =bits x4 (vector literal pool after the code)
-                    let at = self.a.pos();
-                    self.a.e(0x9C00_0000 | xd as u32);
-                    self.vpool.push((at, bits));
-                }
+                self.vconst_into(xd, bits);
                 self.fin_f(d, xd);
             }
             Inst::VGather(d, base, idx) => {
-                // per lane: umov w17, vi.s[l]; ldr w16, [base, x17, lsl #2]; ins v.s[l], w16
+                // per lane: umov w17, vi.s[l]; then lane 0 ldr s, [base, x17, lsl #2] (a whole-register
+                // write: no dependency on the target's last value), lanes 1-3 ldr w16 + ins v.s[l], w16.
+                // Built in d's own register unless that is the index.
                 let rb = self.use_i(base, S1);
                 let xi = self.use_f(idx, FS0);
+                let t = match self.al.loc[d.0 as usize] {
+                    Loc::Flt(x) if x != xi => x,
+                    _ => FS2,
+                };
                 for l in 0..4u32 {
                     let imm5 = (l << 3) | 4;
                     self.a.e(0x0E00_3C00 | imm5 << 16 | (xi as u32) << 5 | IP1 as u32);
-                    self.a.e(0xB860_7800 | (IP1 as u32) << 16 | (rb as u32) << 5 | IP0 as u32);
-                    self.a.e(0x4E00_1C00 | imm5 << 16 | (IP0 as u32) << 5 | FS2 as u32);
+                    if l == 0 {
+                        self.a.e(0xBC60_7800 | (IP1 as u32) << 16 | (rb as u32) << 5 | t as u32);
+                    } else {
+                        self.a.e(0xB860_7800 | (IP1 as u32) << 16 | (rb as u32) << 5 | IP0 as u32);
+                        self.a.e(0x4E00_1C00 | imm5 << 16 | (IP0 as u32) << 5 | t as u32);
+                    }
                 }
-                let xd = self.def_f(d, FS0);
-                self.vmov(xd, FS2);
+                let xd = self.def_f(d, t);
+                self.vmov(xd, t);
+                self.fin_f(d, xd);
+            }
+            Inst::VTbl(d, base, bidx, n) => {
+                // ld1 {v4.16b - v(3 + k).16b}, [base] (k = the table's 16-byte registers; v4-v7 are
+                // unallocated scratch), tbl d.16b, {v4 ..}, bidx.16b
+                let rb = self.use_i(base, S1);
+                let k = (n as u32).div_ceil(4).clamp(1, 4);
+                let op = [0b0111u32, 0b1010, 0b0110, 0b0010][k as usize - 1];
+                self.a.e(0x4C40_0000 | op << 12 | (rb as u32) << 5 | 4);
+                let xi = self.use_f(bidx, FS0);
+                let xd = self.def_f(d, FS1);
+                self.a.e(0x4E00_0000 | (xi as u32) << 16 | (k - 1) << 13 | 4 << 5 | xd as u32);
                 self.fin_f(d, xd);
             }
             Inst::VAny(d, v) => {
@@ -3252,7 +3289,7 @@ impl<'a> Gen<'a> {
                 self.a.e(0xD53B_4400 | rd as u32);
                 self.fin_i(*d, rd);
             }
-            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(i),
+            Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VLoadX(..) | Inst::VStoreX(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::VConst(..) => self.vinst(i),
             Inst::VX(op, d, a, b) => self.vx(*op, *d, *a, *b),
             Inst::VX3(op, d, a, b, c) => self.vx3(*op, *d, *a, *b, *c),
             Inst::Sel(d, c, a, b) => {
@@ -3703,7 +3740,13 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // indexed accesses with displacements on one base and index: one address register
     let shared = regalloc::share_index_bases(f);
     let f = shared.as_ref().unwrap_or(f);
-    let (split, mut al0) = regalloc::allocate_split(options, f, &RegConfig { sym_class: env.sym_class, ..reg_config() }, env.opt_regs || f.full, freq);
+    // a function that calls nothing and returns no float may keep values in v0-v3 too (they
+    // carry float arguments and results, and calls' aggregate results, only around calls)
+    let mut cfg = RegConfig { sym_class: env.sym_class, ..reg_config() };
+    if f.rets.iter().all(|c| *c == Cls::I) && f.blocks.iter().all(|b| !b.insts.iter().any(|i| matches!(i, Inst::Call(..)))) {
+        cfg.flt_caller.extend_from_slice(&[0, 1, 2, 3]);
+    }
+    let (split, mut al0) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);

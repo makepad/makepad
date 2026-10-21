@@ -830,6 +830,10 @@ pub enum Inst {
     VAny(VReg, VReg),
     /// lane l = the 32-bit word at [base + 4 * idx.lane(l)] (idx lanes as u32, in range)
     VGather(VReg, VReg, VReg), // d, base, idx
+    /// d byte k = the byte at [base + bidx.byte(k)] of a small table: n words (n <= 16) at base,
+    /// every byte index below 4n (a kernel's constant table read at varying word indices i: bytes
+    /// 4i .. 4i + 3; NEON: one ld1 of the table and one TBL)
+    VTbl(VReg, VReg, VReg, u8), // d, base, bidx, n
     /// d byte i = (a ++ b) byte idx[i] for idx[i] < 32, else 0 (a constant two-source shuffle;
     /// lane shuffles are their byte indices)
     VShuffle(VReg, VReg, VReg, [u8; 16]), // d, a, b, idx
@@ -923,7 +927,7 @@ impl Inst {
         match self {
             Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(*d),
             Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
-            Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
+            Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
             Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
             Inst::VInsert(d, _, _, _) => f(*d),
             Inst::Call(_, _, rets) => rets.iter().for_each(|r| f(*r)),
@@ -946,7 +950,7 @@ impl Inst {
                 f(a);
                 f(b);
             }
-            Inst::IBin(_, _, d, a, b) | Inst::ICmp(_, _, d, a, b) | Inst::FBin(_, _, d, a, b) | Inst::FCmp(_, _, d, a, b) | Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) | Inst::VX(_, d, a, b) | Inst::AtomicRmw(_, _, _, d, a, b) | Inst::LoadX(_, d, a, b, _, _) | Inst::VLoadX(d, a, b, _, _) => {
+            Inst::IBin(_, _, d, a, b) | Inst::ICmp(_, _, d, a, b) | Inst::FBin(_, _, d, a, b) | Inst::FCmp(_, _, d, a, b) | Inst::VGather(d, a, b) | Inst::VTbl(d, a, b, _) | Inst::VShuffle(d, a, b, _) | Inst::VX(_, d, a, b) | Inst::AtomicRmw(_, _, _, d, a, b) | Inst::LoadX(_, d, a, b, _, _) | Inst::VLoadX(d, a, b, _, _) => {
                 f(d);
                 f(a);
                 f(b);
@@ -1233,7 +1237,7 @@ impl Func {
                         regs.push(*d);
                         regs.push(*a);
                     }
-                    Inst::VGather(d, a, b) | Inst::VShuffle(d, a, b, _) => {
+                    Inst::VGather(d, a, b) | Inst::VTbl(d, a, b, _) | Inst::VShuffle(d, a, b, _) => {
                         regs.push(*d);
                         regs.push(*a);
                         regs.push(*b);

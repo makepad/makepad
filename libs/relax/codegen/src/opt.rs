@@ -1382,7 +1382,7 @@ fn promote_in_loop(f: &mut Func, preds: &[Vec<u32>], h: u32, body: &[bool]) -> b
                     }
                     Inst::Call(_, args, _) => bad |= args.iter().any(|a| based[a.0 as usize]),
                     // any other dereference of a based-on pointer
-                    Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) | Inst::VLoad(_, base, _) | Inst::VStore(base, _, _) | Inst::VGather(_, base, _) => bad |= based[base.0 as usize],
+                    Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) | Inst::VLoad(_, base, _) | Inst::VStore(base, _, _) | Inst::VGather(_, base, _) | Inst::VTbl(_, base, _, _) => bad |= based[base.0 as usize],
                     Inst::Copy(d, s, _) => bad |= based[d.0 as usize] || based[s.0 as usize],
                     _ => {}
                 }
@@ -2203,7 +2203,7 @@ pub fn forward_const_slots(f: &mut Func, ro: Option<RoReader>) -> bool {
                     return;
                 };
                 let read = match *i {
-                    Inst::Load(_, _, base, _) | Inst::VLoad(_, base, _) | Inst::VGather(_, base, _) => v == base,
+                    Inst::Load(_, _, base, _) | Inst::VLoad(_, base, _) | Inst::VGather(_, base, _) | Inst::VTbl(_, base, _, _) => v == base,
                     Inst::LoadX(_, _, base, idx, ..) => v == base && v != idx,
                     Inst::Copy(d, src, _) => v == src && v != d,
                     _ => false,
