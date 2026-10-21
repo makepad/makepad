@@ -1,8 +1,9 @@
-//! The domain-base read of a function that names domain statics sits in the nearest block that
-//! dominates every use. A jump table (`Term::Switch`) enters its case blocks straight from the
-//! dispatching block: the table's targets are its successors, so the read is placed in the
-//! dispatching block and not in a case block the other cases skip (a warm-cached `match` in
-//! Stage's parser once faulted at a small address because a read sat in a skipped link block).
+//! The domain-base reads of a function that names domain statics dominate every use and sit on
+//! the paths that use it. A jump table (`Term::Switch`) enters its case blocks straight from the
+//! dispatching block: the table's targets are its successors, so each case that names a domain
+//! static reads the base itself and no read sits in a block the other cases skip (a warm-cached
+//! `match` in Stage's parser once faulted at a small address because a read sat in a skipped link
+//! block).
 use relax_backend::regalloc;
 use relax_backend::rir::*;
 use std::sync::Arc;
@@ -31,5 +32,5 @@ fn switch_edges_count_for_the_domain_base_block() {
     static CLASS: [u8; 2] = [0, 3];
     let reach = regalloc::reachable(&f);
     assert!(reach[5] && reach[7]);
-    assert_eq!(regalloc::domain_base_block(&f, CLASS.as_ptr() as u64, &reach), Some(1));
+    assert_eq!(regalloc::domain_base_blocks(&f, CLASS.as_ptr() as u64, &reach), vec![5, 7]);
 }

@@ -9296,6 +9296,12 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         verify_pass(func, "vector slot cleanup");
     }
     relax_codegen::opt::compact_slots(func);
+    // stores into slot bytes nobody reads back: the forwarding passes above left them behind
+    // (a `[0u8; 8]` buffer filled by copy_from_slice and read by from_le_bytes, the load
+    // forwarded from the source: zero-fill and copy stores, every refill)
+    if cfg.sroa && relax_codegen::opt::drop_unread_slot_stores(func) {
+        relax_backend::passes::live_dce(func);
+    }
     if cfg.licm && !relax_backend::stats::opt_off(options, "-promote") && relax_codegen::opt::promote_loop_memory(func) {
         verify_pass(func, "promote_loop_memory");
     }

@@ -381,6 +381,23 @@ impl Asm {
             _ => self.load64(dst, base, disp),
         }
     }
+    /// mov [base + disp], imm (imm32 sign-extended for 8 bytes)
+    fn store_imm(&mut self, base: u8, disp: i32, k: i64, bytes: u8) {
+        if bytes == 2 {
+            self.byte(0x66);
+        }
+        self.rex(bytes == 8, 0, 0, base, false);
+        self.byte(if bytes == 1 { 0xc6 } else { 0xc7 });
+        self.modrm_mem(0, base, disp);
+        match bytes {
+            1 => self.byte(k as u8),
+            2 => {
+                self.byte(k as u8);
+                self.byte((k >> 8) as u8);
+            }
+            _ => self.u32(k as i32 as u32),
+        }
+    }
     fn store_n(&mut self, base: u8, disp: i32, src: u8, bytes: u8) {
         match bytes {
             1 => {
@@ -640,7 +657,11 @@ fn icc(c: Cond, signed: bool) -> u8 {
 fn x64_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
     match i {
         Inst::IBin(IOp::Shl | IOp::Shr, _, _, _, _) if host_bmi2(options) => 0,
-        Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr | IOp::Rotl | IOp::MulHi, _, _, _, _) | Inst::Conv(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) => (1 << RCX) | (1 << RDX),
+        // of the conversions only u64 -> float works in rcx / rdx (halve with a sticky bit); a
+        // movzx / movsx clobbering them pushed byte casts out of rcx / rdx and into spill slots
+        Inst::Conv(Conv::IntToF(from, _), _, _) if from.bits == 64 && !from.signed => (1 << RCX) | (1 << RDX),
+        Inst::Conv(..) => 0,
+        Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr | IOp::Rotl | IOp::MulHi, _, _, _, _) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) => (1 << RCX) | (1 << RDX),
         _ => 0,
     }
 }
@@ -666,7 +687,7 @@ pub fn reg_config(options: &relax_session::Options) -> RegConfig {
         int_caller.push(RCX);
         int_caller.push(RDX);
     }
-    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0 }
+    RegConfig { int_caller, int_callee: CALLEE_SAVED.to_vec(), flt_caller: flt, flt_callee: Vec::new(), slot_index_free: true, clobbers: Some(x64_clobbers), sym_class: 0, store_imm: |k| k == k as i32 as i64 }
 }
 
 // ------------------------------------------------------------ code generation
@@ -695,8 +716,9 @@ struct Gen<'a> {
     sym_class: u64,
     /// rbp offset of the frame word holding the domain base (0: the function names no domain symbol)
     dom_slot: i32,
-    /// the block whose start reads the domain base into that slot (usize::MAX: none; 0: the prologue)
-    dom_block: usize,
+    /// per block: whether its start reads the domain base into that slot (block 0: the prologue;
+    /// empty: the function names no domain symbol)
+    dom_read: Vec<bool>,
     relocs: Vec<RelocAt>,
     /// emission order successor of each block (u32::MAX for the last)
     next_block: Vec<u32>,
@@ -721,6 +743,10 @@ struct Gen<'a> {
     /// loads to emit before the instruction at a position
     win: std::collections::HashMap<u32, Vec<(u32, u32, u8)>>,
     win_start: std::collections::HashMap<u32, Vec<(u32, u8)>>,
+    /// passes::low_bits_only: narrow results whose re-extension nobody reads
+    low_only: Vec<bool>,
+    /// passes::zero_above: values whose register is zero above that many bits
+    zero_above: Vec<u8>,
     rir_map: Vec<(u32, u32, u32)>,
     rir_map_on: bool,
     /// (register, code position right after it): the last instruction emitted was an integer ALU op
@@ -834,28 +860,62 @@ impl<'a> Gen<'a> {
                 scratch
             }
             _ => {
-                // flags-preserving: a fused compare may have set them for the next jcc / cmov
-                match self.al.remat[v.0 as usize] {
-                    Remat::Const(k) => self.a.mov_ri_nf(scratch, k),
-                    Remat::Slot(s) => {
-                        let off = self.slot_off[s as usize];
-                        self.a.lea(scratch, RBP, -(self.saved + off));
-                    }
-                    // mov r, [rip + pool] leaves the flags alone
-                    Remat::Addr(a) => self.mov_reloc(scratch, Reloc::Sym(a)),
-                    Remat::FnAddr(id) => self.mov_reloc(scratch, Reloc::Thunk(id)),
-                    _ => self.a.mov_ri_nf(scratch, 0),
+                if let Some(r) = self.win_reg(v) {
+                    return r;
+                }
+                if let Remat::Offset(b, k) = self.al.remat[v.0 as usize] {
+                    let (rb, d) = self.base_disp(options, b, scratch, k);
+                    self.a.lea(scratch, rb, d);
+                } else {
+                    self.remat_into(scratch, v);
                 }
                 scratch
             }
         }
     }
+    /// The register of a window (Alloc::windows) holding v at the current position.
+    fn win_reg(&self, v: VReg) -> Option<u8> {
+        let p = self.cur_pos;
+        self.win.get(&v.0)?.iter().find(|(a, z, _)| *a <= p && p <= *z).map(|w| w.2)
+    }
+    /// A store's value that is a recomputed constant the store can write as an immediate.
+    fn store_const(&self, v: VReg) -> Option<i64> {
+        match (self.al.loc[v.0 as usize], self.al.remat[v.0 as usize]) {
+            (Loc::None, Remat::Const(k)) if k == k as i32 as i64 && self.win_reg(v).is_none() => Some(k),
+            _ => None,
+        }
+    }
+    /// Recomputes a value without a location (Alloc::remat) into r, flags-preserving: a fused
+    /// compare may have set them for the next jcc / cmov.
+    fn remat_into(&mut self, r: u8, v: VReg) {
+        match self.al.remat[v.0 as usize] {
+            Remat::Const(k) => self.a.mov_ri_nf(r, k),
+            Remat::Slot(s) => {
+                let off = self.slot_off[s as usize];
+                self.a.lea(r, RBP, -(self.saved + off));
+            }
+            // mov r, [rip + pool] leaves the flags alone
+            Remat::Addr(a) => self.mov_reloc(r, Reloc::Sym(a)),
+            Remat::FnAddr(id) => self.mov_reloc(r, Reloc::Thunk(id)),
+            Remat::Offset(..) => unreachable!("base + k moves through use_i"),
+            _ => self.a.mov_ri_nf(r, 0),
+        }
+    }
     /// A load/store base and displacement: a stack-slot address that has no register (see
     /// Alloc::remat) folds into [rbp + disp].
     fn base_disp(&mut self, options: &relax_session::Options, base: VReg, scratch: u8, off: i32) -> (u8, i32) {
-        if let (Loc::None, Remat::Slot(s)) = (self.al.loc[base.0 as usize], self.al.remat[base.0 as usize]) {
-            let so = self.slot_off[s as usize];
-            return (RBP, off - (self.saved + so));
+        match (self.al.loc[base.0 as usize], self.al.remat[base.0 as usize]) {
+            (Loc::None, Remat::Slot(s)) => {
+                let so = self.slot_off[s as usize];
+                return (RBP, off - (self.saved + so));
+            }
+            // base + k without a register: k folds into the displacement
+            (Loc::None, Remat::Offset(b, k)) => {
+                if let Some(o) = off.checked_add(k) {
+                    return self.base_disp(options, b, scratch, o);
+                }
+            }
+            _ => {}
         }
         (self.use_i(options, base, scratch), off)
     }
@@ -931,6 +991,7 @@ impl<'a> Gen<'a> {
             Loc::Reg(r) => Some(MLoc::R(r)),
             Loc::Flt(x) => Some(MLoc::F(x)),
             Loc::Stack(o) => Some(MLoc::M(self.spill_disp(o))),
+            Loc::None if self.al.remat[v.0 as usize].is_some() => Some(MLoc::K(v.0)),
             Loc::None => None,
         }
     }
@@ -950,6 +1011,12 @@ impl<'a> Gen<'a> {
             }
             (MLoc::R(a), MLoc::F(b)) => self.a.movq_rx(a, b, true),
             (MLoc::F(a), MLoc::R(b)) => self.a.movq_xr(a, b, true),
+            (MLoc::R(a), MLoc::K(v)) => self.remat_into(a, VReg(v)),
+            (MLoc::M(o), MLoc::K(v)) => {
+                self.remat_into(R10, VReg(v));
+                self.a.store64(RBP, o, R10);
+            }
+            (MLoc::F(_) | MLoc::K(_), _) => unreachable!("move {:?} <- {:?}", d, s),
         }
     }
 
@@ -1020,10 +1087,14 @@ impl<'a> Gen<'a> {
         self.stage = -(self.saved + off);
         // the domain base, read once (where regalloc::domain_base_block puts it) when the function
         // names a domain static
-        if let Some(b) = regalloc::domain_base_block(self.f, self.sym_class, &reach) {
+        let reads = regalloc::domain_base_blocks(self.f, self.sym_class, &reach);
+        if !reads.is_empty() {
             off += 8;
             self.dom_slot = -(self.saved + off);
-            self.dom_block = b;
+            self.dom_read = vec![false; self.f.blocks.len()];
+            for b in reads {
+                self.dom_read[b] = true;
+            }
         }
         let mut frame = (off + 7) / 8 * 8;
         // keep rsp 16-aligned at calls
@@ -1033,7 +1104,7 @@ impl<'a> Gen<'a> {
         self.frame = frame;
         self.stack_probe(frame);
         self.a.sub_rsp(frame as u32);
-        if self.dom_block == 0 {
+        if self.dom_read.first() == Some(&true) {
             self.dom_base();
         }
         if self.cplan.is_some() {
@@ -1096,7 +1167,7 @@ impl<'a> Gen<'a> {
                 continue;
             }
             self.block_pos[bi] = self.a.pos();
-            if bi == self.dom_block && bi != 0 {
+            if bi != 0 && self.dom_read.get(bi) == Some(&true) {
                 self.dom_base();
             }
             let b = &self.f.blocks[bi];
@@ -1115,9 +1186,11 @@ impl<'a> Gen<'a> {
             self.test_fuse = None;
             if fused && n >= 2 {
                 if let (Inst::IBinI(IOp::And, it, t, x, k), Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, t2, 0)) = (&b.insts[n - 2], &b.insts[n - 1]) {
-                    // imm32 is sign-extended: a narrower value's mask must not reach its upper bits
-                    let lo = if it.bits == 64 { i32::MIN as i64 } else { 0 };
-                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && (lo..=i32::MAX as i64).contains(k) {
+                    // a mask within 32 bits tests the low half (test r32, imm32: any of its bits); a
+                    // negative imm32 is sign-extended by the 64-bit form, so only for 64-bit values
+                    // (a narrower value's mask must not reach its upper bits)
+                    let ok = (0..=u32::MAX as i64).contains(k) || (it.bits == 64 && (i32::MIN as i64..0).contains(k));
+                    if t == t2 && *x != *t && self.al.uses[t.0 as usize] == 1 && ok {
                         self.test_fuse = Some((*x, *k));
                     }
                 }
@@ -1165,6 +1238,8 @@ impl<'a> Gen<'a> {
                         if let Loc::Stack(o) = self.al.loc[v as usize] {
                             let d = self.spill_disp(o);
                             self.load_spill(r, d);
+                        } else {
+                            self.remat_into(r, VReg(v));
                         }
                     }
                 }
@@ -1534,7 +1609,10 @@ impl<'a> Gen<'a> {
         let int_args = c_int_args(target);
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
-            self.save_restore(*v, *slot, true);
+            // Alloc::save_skip: the slot already holds it / nobody reads the register
+            if !self.al.save_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, true);
+            }
         }
         let has_ret = sig.ret.is_some();
         let cargs: Vec<VReg> = if has_ret { args[1..].to_vec() } else { args.to_vec() };
@@ -1669,7 +1747,10 @@ impl<'a> Gen<'a> {
             self.mv(d, s2);
         }
         for (v, slot) in &saves {
-            self.save_restore(*v, *slot, false);
+            // Alloc::restore_skip: the slot already holds it / nobody reads the register
+            if !self.al.restore_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, false);
+            }
         }
         if let RetPlan::Parts(parts) = &plan.ret {
             self.a.load64(R10, RBP, st);
@@ -1988,7 +2069,7 @@ impl<'a> Gen<'a> {
             let b = &self.f.blocks[bi];
             let Term::Jump(t) = b.term else { continue };
             // the block that reads the domain base is not skipped, whatever else it holds
-            if !reach[bi] || t as usize == bi || bi == self.dom_block {
+            if !reach[bi] || t as usize == bi || self.dom_read.get(bi) == Some(&true) {
                 continue;
             }
             let silent = b.insts.iter().enumerate().all(|(ii, i)| match *i {
@@ -2130,9 +2211,10 @@ impl<'a> Gen<'a> {
                     }
                     Some(Inst::ICmpI(cond, signed, _, x, k)) => match self.test_fuse.take() {
                         Some((src, mask)) => {
-                            // test src, imm32 (REX.W F7 /0 id)
+                            // test src, imm32 (F7 /0 id): 32-bit for a mask within 32 bits, REX.W
+                            // for a negative one (sign-extended to 64)
                             let rs = self.use_i(options, src, R10);
-                            self.a.rex(true, 0, 0, rs, false);
+                            self.a.rex(mask < 0, 0, 0, rs, false);
                             self.a.byte(0xf7);
                             self.a.modrm_rr(0, rs);
                             self.a.u32(mask as i32 as u32);
@@ -2286,7 +2368,7 @@ impl<'a> Gen<'a> {
     fn inst(&mut self, options: &relax_session::Options, i: &Inst) {
         match i {
             // recomputed at each use (Alloc::remat)
-            Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) if self.al.remat[d.0 as usize].is_some() => {}
+            Inst::Iconst(d, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::Mov(d, _) | Inst::IBinI(IOp::Add, _, d, _, _) if self.al.remat[d.0 as usize].is_some() => {}
             Inst::Sel(d, c, a, b) => self.sel(options, *d, *c, *a, *b),
             _ if self.ymm && y_inst(self.f, i) => self.y(options, i),
             Inst::VShuffle(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VLoad(..) | Inst::VStore(..) | Inst::VAny(..) | Inst::VGather(..) | Inst::VConst(..) => self.vinst(options, i),
@@ -2408,7 +2490,9 @@ impl<'a> Gen<'a> {
                 self.a.mov_rr(rd, ra);
                 let ext = if matches!(i, Inst::INeg(..)) { 3 } else { 2 };
                 self.a.grp3(ext, rd);
-                self.a.extend(rd, it.bits, it.signed);
+                if !self.low_only[d.0 as usize] {
+                    self.a.extend(rd, it.bits, it.signed);
+                }
                 self.fin_i(*d, rd);
             }
             Inst::ICmp(c, signed, d, a, b) => {
@@ -2655,9 +2739,14 @@ impl<'a> Gen<'a> {
                 let (rb, off) = self.base_disp(options, *base, R11, *off);
                 match m {
                     Mem::Int(n, _) => {
-                        let rs = self.use_i(options, *src, R10);
-                        self.a.sib = Some((ri, *sh));
-                        self.a.store_n(rb, off, rs, *n);
+                        if let Some(k) = self.store_const(*src) {
+                            self.a.sib = Some((ri, *sh));
+                            self.a.store_imm(rb, off, k, *n);
+                        } else {
+                            let rs = self.use_i(options, *src, R10);
+                            self.a.sib = Some((ri, *sh));
+                            self.a.store_n(rb, off, rs, *n);
+                        }
                     }
                     Mem::F32 | Mem::F64 => {
                         let xs = self.use_f(*src, XS);
@@ -2685,8 +2774,12 @@ impl<'a> Gen<'a> {
                 let (rb, off) = self.base_disp(options, *base, R11, *off);
                 match m {
                     Mem::Int(n, _) => {
-                        let rs = self.use_i(options, *src, R10);
-                        self.a.store_n(rb, off, rs, *n);
+                        if let Some(k) = self.store_const(*src) {
+                            self.a.store_imm(rb, off, k, *n);
+                        } else {
+                            let rs = self.use_i(options, *src, R10);
+                            self.a.store_n(rb, off, rs, *n);
+                        }
                     }
                     Mem::F32 | Mem::F64 => {
                         let xs = self.use_f(*src, XS);
@@ -4170,7 +4263,7 @@ impl<'a> Gen<'a> {
                 _ => self.a.byte(0x33),
             }
             self.a.modrm_mem(rd, RBP, disp);
-            if w && it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) {
+            if w && it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) && !self.low_only[d.0 as usize] {
                 self.a.extend(rd, it.bits, it.signed);
             }
             self.fin_i(d, rd);
@@ -4222,7 +4315,7 @@ impl<'a> Gen<'a> {
                     _ => 3,
                 };
                 self.a.vex_rr(pp, 2, w, 0xf7, rd, rb, ra);
-                if w {
+                if w && !self.low_only[d.0 as usize] {
                     self.a.extend(rd, it.bits, it.signed);
                 }
                 self.fin_i(d, rd);
@@ -4313,7 +4406,7 @@ impl<'a> Gen<'a> {
             IOp::Mul => self.a.imul_rr(work, rb),
             _ => {}
         }
-        if it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) {
+        if it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) && !self.low_only[d.0 as usize] {
             self.a.extend(work, it.bits, it.signed);
         }
         self.a.mov_rr(rd, work);
@@ -4326,7 +4419,11 @@ impl<'a> Gen<'a> {
                 let rs = self.use_i(options, s, R10);
                 let rd = self.def_i(d, R10);
                 self.a.mov_rr(rd, rs);
-                self.a.extend(rd, it.bits, it.signed);
+                // zero above fewer bits than the target: the extension is the value itself
+                let z = self.zero_above[s.0 as usize];
+                if !self.low_only[d.0 as usize] && !(z > 0 && z < it.bits) {
+                    self.a.extend(rd, it.bits, it.signed);
+                }
                 self.fin_i(d, rd);
             }
             Conv::IntToF(from, to64) => {
@@ -4504,7 +4601,10 @@ impl<'a> Gen<'a> {
         // values in caller-saved registers that live across this call
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
-            self.save_restore(*v, *slot, true);
+            // Alloc::save_skip: the slot already holds it / nobody reads the register
+            if !self.al.save_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, true);
+            }
         }
         if let Callee::Indirect(v) = c {
             let r = self.use_i(options, *v, R11);
@@ -4543,6 +4643,10 @@ impl<'a> Gen<'a> {
                     Some(MLoc::F(x)) => self.a.storef(true, RSP, 8 * k as i32, x),
                     Some(MLoc::M(o)) => {
                         self.a.load64(R10, RBP, o);
+                        self.a.store64(RSP, 8 * k as i32, R10);
+                    }
+                    Some(MLoc::K(v)) => {
+                        self.remat_into(R10, VReg(v));
                         self.a.store64(RSP, 8 * k as i32, R10);
                     }
                     None => {}
@@ -4598,7 +4702,10 @@ impl<'a> Gen<'a> {
             self.mv(d, s2);
         }
         for (v, slot) in &saves {
-            self.save_restore(*v, *slot, false);
+            // Alloc::restore_skip: the slot already holds it / nobody reads the register
+            if !self.al.restore_skip.contains(&(self.cur_pos, v.0)) {
+                self.save_restore(*v, *slot, false);
+            }
         }
     }
 
@@ -4717,7 +4824,9 @@ impl<'a> Gen<'a> {
         }
         let used_lea = matches!(op, IOp::Add | IOp::Sub) && rd != ra && (if op == IOp::Add { k } else { k.wrapping_neg() }) as i32 as i64 == (if op == IOp::Add { k } else { k.wrapping_neg() });
         if it.bits < 64 && !matches!(op, IOp::And | IOp::Or | IOp::Xor) {
-            self.a.extend(rd, it.bits, it.signed);
+            if !self.low_only[d.0 as usize] {
+                self.a.extend(rd, it.bits, it.signed);
+            }
         } else if matches!(op, IOp::Add | IOp::Sub | IOp::And | IOp::Or | IOp::Xor) && !used_lea && (-(1i64 << 31)..(1i64 << 31)).contains(&k) {
             self.last_alu = Some((rd, self.a.pos()));
         }
@@ -4834,8 +4943,11 @@ fn imm_fits(i: &Inst) -> bool {
     let imm32 = |v: i64| (i32::MIN as i64..=i32::MAX as i64).contains(&v);
     match *i {
         Inst::ICmpI(_, _, _, _, v) => imm32(v),
-        Inst::IBinI(op, _, _, _, v) => match op {
+        Inst::IBinI(op, it, _, _, v) => match op {
             IOp::Shl | IOp::Shr | IOp::Rotl => true,
+            // u32 takes the 32-bit forms: the immediate is the constant's bit pattern (a mask
+            // with bit 31 set, 0x8000_0000, is one instruction, not a constant register)
+            IOp::Add | IOp::Sub | IOp::Mul | IOp::And | IOp::Or | IOp::Xor if it == U32 => (i32::MIN as i64..=u32::MAX as i64).contains(&v),
             IOp::Add | IOp::Sub | IOp::Mul | IOp::And | IOp::Or | IOp::Xor => imm32(v),
             _ => false,
         },
@@ -4922,6 +5034,10 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
             w.entry(v).or_default().push((a, z, r));
             ws.entry(a).or_default().push((v, r));
         }
+        // entered with the value in the register: no load
+        for &(v, a, z, r) in &al.chained {
+            w.entry(v).or_default().push((a, z, r));
+        }
         (w, ws)
     };
     let mut g = Gen {
@@ -4950,6 +5066,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         last_spill: None,
         win,
         win_start,
+        low_only: crate::passes::low_bits_only(options, f),
+        zero_above: Vec::new(),
         fconsts: {
             let mut nd: std::collections::HashMap<u32, (u32, u64, bool)> = std::collections::HashMap::new();
             for b in &f.blocks {
@@ -4978,7 +5096,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         apool: Vec::new(),
         sym_class: env.sym_class,
         dom_slot: 0,
-        dom_block: usize::MAX,
+        dom_read: Vec::new(),
         relocs: Vec::new(),
         cplan: None,
         cbuf: Vec::new(),
@@ -4991,6 +5109,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         pads: Vec::new(),
         unwind_tab: Vec::new(),
     };
+    g.zero_above = crate::passes::zero_above(options, g.f, &g.low_only);
     g.gen(options);
     // unwind info for the runtime's frame walk (rir::unwind_info_words), 4-byte aligned
     while g.a.b.len() % 4 != 0 {

@@ -373,6 +373,118 @@ pub fn const_inst(d: VReg, k: K) -> Inst {
 /// Folding, copy propagation, immediates, branch folding and DCE.
 /// `ro` answers constant loads (symbol + offset) from immutable data: they fold to their value,
 /// or to a symbolic address for a pointer word (`RoReader`).
+/// Narrow integer results whose upper register bits nobody reads: per vreg, whether it has one
+/// definition by a narrow (< 64-bit) Add / Sub / Mul / And / Or / Xor / Neg / Not / shift-left or
+/// integer cast, and every use reads only its low `bits`: a store of at most that width, a narrow
+/// wrapping operation (add, sub, mul, neg, not -- re-extended -- or an and / or / xor whose own
+/// result reads only its low bits) of at most that width -- whose result's low bits depend only
+/// on its operands' low bits --, a cast to at most that width, or (with at least 8
+/// bits) the count of a 64-bit shift (the hardware reads the count's low 6 bits). The backends then skip the
+/// result's re-extension (movzx / sxtw after every u8 / i32 operation): the bit reader's
+/// `bits_left -= n` (u8, stored back as a byte) and its `entry as u8` (a shift count).
+/// MAKEPAD_RUN_OPT=-lowbits: none (bisection).
+pub fn low_bits_only(options: &relax_session::Options, f: &Func) -> Vec<bool> {
+    let nv = f.vregs.len();
+    if crate::stats::opt_off(options, "-lowbits") {
+        return vec![false; nv];
+    }
+    let mut bits = vec![0u8; nv];
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 2;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            crate::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+            match *i {
+                Inst::IBin(IOp::Add | IOp::Sub | IOp::Mul | IOp::Shl | IOp::And | IOp::Or | IOp::Xor, it, d, _, _) | Inst::IBinI(IOp::Add | IOp::Sub | IOp::Mul | IOp::Shl | IOp::And | IOp::Or | IOp::Xor, it, d, _, _) | Inst::INeg(it, d, _) | Inst::INot(it, d, _) | Inst::Conv(Conv::IntToInt(it), d, _) if it.bits < 64 => bits[d.0 as usize] = it.bits,
+                _ => {}
+            }
+        }
+    }
+    let mut ok: Vec<bool> = (0..nv).map(|v| bits[v] != 0 && ndef[v] == 1 && f.vregs[v] == Cls::I).collect();
+    let narrow_wrap = |op: IOp| matches!(op, IOp::Add | IOp::Sub | IOp::Mul);
+    // And / Or / Xor results are never re-extended (their operands' upper bits pass through to
+    // the result: 64-bit forms on x64): an operand of one reads only its low bits when the result
+    // does -- a fixed point, since clearing one result can clear its operands
+    let bitwise = |op: IOp| matches!(op, IOp::And | IOp::Or | IOp::Xor);
+    let mut tu = Vec::new();
+    loop {
+        let mut changed = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                // the uses that read only low bits: (vreg, how many)
+                let mut low: [(u32, u8); 2] = [(u32::MAX, 0); 2];
+                match *i {
+                    Inst::Store(Mem::Int(n, _), base, _, v) if base != v => low[0] = (v.0, 8 * n),
+                    Inst::StoreX(Mem::Int(n, _), base, idx, _, _, v) if base != v && idx != v => low[0] = (v.0, 8 * n),
+                    Inst::IBin(op, it, d, x, y) if it.bits < 64 && (narrow_wrap(op) || bitwise(op) && ok[d.0 as usize]) => {
+                        low[0] = (x.0, it.bits);
+                        low[1] = (y.0, it.bits);
+                    }
+                    Inst::IBinI(op, it, d, x, _) if it.bits < 64 && (narrow_wrap(op) || bitwise(op) && ok[d.0 as usize]) => low[0] = (x.0, it.bits),
+                    Inst::INeg(it, _, x) | Inst::INot(it, _, x) if it.bits < 64 => low[0] = (x.0, it.bits),
+                    Inst::Conv(Conv::IntToInt(it), _, x) => low[0] = (x.0, it.bits),
+                    // a 64-bit shift's count: the hardware reads its low 6 bits
+                    Inst::IBin(IOp::Shl | IOp::Shr, IntTy { bits: 64, .. }, _, x, y) if x != y => low[0] = (y.0, 8),
+                    _ => {}
+                }
+                crate::regalloc::for_uses(i, |u| {
+                    let u = u.0 as usize;
+                    if ok[u] && !low.iter().any(|&(v, n)| v as usize == u && n > 0 && n <= bits[u]) {
+                        ok[u] = false;
+                        changed = true;
+                    }
+                });
+            }
+            crate::regalloc::term_uses(&b.term, &mut tu);
+            for u in &tu {
+                ok[u.0 as usize] = false;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ok
+}
+
+/// Values whose register is known zero above some bit: per vreg (one definition), that bit count
+/// (0: unknown): an unsigned narrow load (`ldrb` / movzx), an And with a non-negative mask, an
+/// unsigned cast that keeps its extension (`low`: passes::low_bits_only, whose casts leave the
+/// upper bits as they were). A cast of such a value to a wider type is a plain move: zero- and
+/// sign-extension of a value whose upper bits are zero are the value itself (Paeth's
+/// `i32::from(u8)` was ldrb + sxtw per pixel byte).
+/// MAKEPAD_RUN_OPT=-zeroabove: none (bisection).
+pub fn zero_above(options: &relax_session::Options, f: &Func, low: &[bool]) -> Vec<u8> {
+    let nv = f.vregs.len();
+    if crate::stats::opt_off(options, "-zeroabove") {
+        return vec![0; nv];
+    }
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 2;
+    }
+    let mut z = vec![0u8; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            crate::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+            match *i {
+                Inst::Load(Mem::Int(n, false), d, _, _) | Inst::LoadX(Mem::Int(n, false), d, _, _, _, _) if n < 8 => z[d.0 as usize] = 8 * n,
+                Inst::IBinI(IOp::And, _, d, _, m) if m >= 0 => z[d.0 as usize] = (64 - (m as u64).leading_zeros()) as u8,
+                Inst::Conv(Conv::IntToInt(IntTy { bits, signed: false }), d, _) if bits < 64 && !low[d.0 as usize] => z[d.0 as usize] = bits,
+                _ => {}
+            }
+        }
+    }
+    for v in 0..nv {
+        if ndef[v] != 1 || f.vregs[v] != Cls::I {
+            z[v] = 0;
+        }
+    }
+    z
+}
+
 /// Renumbers the vregs a function still mentions densely (0..n): lowering allocates many that
 /// later passes delete, and every pass sizes its per-vreg tables by `f.vregs.len()` -- at
 /// twice the instruction count that table work dominated the optimiser.
