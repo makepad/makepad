@@ -4,7 +4,7 @@
 //! their crate is parsed; O3 installs ignite gold stars with a cross flare; the compiler-zone
 //! swap clears the dust with an expanding ring. Every function compiled glints its star (a short
 //! white sparkle), in the boot window and over the running app (the window layer: the warm-up
-//! after the first present, the JIT activity of a later wait).
+//! after the first present, the veil of a later stall on JIT compiles).
 //!
 //! Every number is the loader's own (`relax_base::boot_stats`, read once per frame). The picture
 //! is ONE draw of ONE retained instance buffer that only ever grows: the frame appends the
@@ -271,8 +271,8 @@ impl Field {
         region: [f32; 4],
         reduce_motion: bool,
         halted: bool,
-        fit: bool,
         resolve: f32,
+        scatter: bool,
     ) -> Frame {
         use std::sync::atomic::Ordering::Relaxed;
         if self.pipe != Some(pipe.id) {
@@ -353,7 +353,7 @@ impl Field {
         let added = self.floats.len() / self.stride;
         self.count += added;
         self.upload(writer, first);
-        self.glint(writer, pipe, time);
+        self.glint(writer, pipe, time, scatter);
         self.hud.fns = total;
         self.hud.hot = best.1;
         self.hud.o3 = installed;
@@ -365,7 +365,7 @@ impl Field {
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let (radius, cy) = if halted || fit {
+        let (radius, cy) = if halted {
             // the whole galaxy, scatter included, inside the region
             ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
         } else {
@@ -419,9 +419,11 @@ impl Field {
     }
 
     /// Every function installed since the last frame glints its star: function `i` of an arm
-    /// belongs to its star `i / FNS_PER_STAR` (the newest star while that one is not born yet).
-    /// The stars' records are written again with the glint's time.
-    fn glint(&mut self, writer: &mut CmdWriter, pipe: &Pipeline, time: f32) {
+    /// belongs to its star `i / FNS_PER_STAR` (the newest star while that one is not born yet),
+    /// or with `scatter` (over the running app) to a star of the arm picked by its hash, so the
+    /// compiles of a stall sparkle across the galaxy. The stars' records are written again with
+    /// the glint's time.
+    fn glint(&mut self, writer: &mut CmdWriter, pipe: &Pipeline, time: f32, scatter: bool) {
         self.touched.clear();
         for arm in 0..ARMS {
             let fns = stats::fns(arm).saturating_sub(self.base_fns[arm]);
@@ -434,7 +436,11 @@ impl Field {
             let from = self.glinted[arm].max(fns.saturating_sub(TWINKLES as u32 * FNS_PER_STAR));
             let mut last = u32::MAX;
             for i in from..fns {
-                let rank = (i / FNS_PER_STAR).min(stars - 1);
+                let rank = if scatter {
+                    (hash(i, arm as u32 + 7) * stars as f32) as u32 % stars
+                } else {
+                    (i / FNS_PER_STAR).min(stars - 1)
+                };
                 if rank != last {
                     self.touched.push(self.stars_of[arm][rank as usize]);
                     last = rank;

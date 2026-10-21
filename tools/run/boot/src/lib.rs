@@ -853,8 +853,8 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
-            false,
             -1.0,
+            false,
         );
         let max_scroll = (renderer.layout.content_height - renderer.layout.clip[3]).max(0.0);
         renderer.scroll = renderer.scroll.min(max_scroll);
@@ -1092,7 +1092,7 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// The layer has faded out (the ready lift, an activity's fade): the run may take it away.
+    /// The layer has faded out (the ready lift, a stall's veil): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
             .as_mut()
@@ -1113,27 +1113,20 @@ impl Boot {
         let time = renderer.began.elapsed().as_secs_f32();
         let layered = renderer.layer.on && program.layer.is_some();
         let look = layered.then(|| renderer.layer.look(reduce_motion));
-        let corner = look.is_some_and(|l| l.corner);
-        // a JIT wait's galaxy: small, in the bottom right corner
-        let region = if corner {
-            let side = (viewport[0].min(viewport[1]) * 0.22).clamp(72.0, 150.0);
-            [viewport[0] - side - 12.0, viewport[1] - side - 12.0, side, side]
-        } else {
-            [0.0, 0.0, viewport[0], viewport[1]]
-        };
+        let hud = look.is_none_or(|l| l.hud);
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
             &program.pipes[FIELD],
             &self.state,
             time,
-            region,
+            [0.0, 0.0, viewport[0], viewport[1]],
             reduce_motion,
             false,
-            corner,
             look.map_or(-1.0, |l| l.resolve),
+            renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
         );
-        if corner {
+        if !hud {
             renderer.layout.fixed_text.clear();
             renderer.layout.cards.clear();
         } else {
@@ -1189,7 +1182,7 @@ impl Boot {
             return;
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
-        let field_layer = look.map_or([0.0; 4], |l| [if l.corner { 2.0 } else { 1.0 }, l.galaxy, l.backdrop, l.progress]);
+        let field_layer = look.map_or([0.0; 4], |l| [if l.hud { 1.0 } else { 2.0 }, l.galaxy, l.backdrop, l.progress]);
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
@@ -1305,13 +1298,8 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if let Some(look) = look {
-            if look.sharp_under {
-                app(&mut writer, layer::APP, look.sharp, 0.0);
-            }
-            if look.blur {
-                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
-            }
+        if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
             program.pipes[FIELD].draw_buffer(
@@ -1329,7 +1317,7 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
-        if let Some(look) = look.filter(|l| !l.sharp_under) {
+        if let Some(look) = look {
             app(&mut writer, layer::APP, look.sharp, 0.0);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());

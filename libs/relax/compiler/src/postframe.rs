@@ -43,6 +43,8 @@ static UI_WAITING: AtomicU64 = AtomicU64::new(0);
 static UI_WAIT_START: AtomicU64 = AtomicU64::new(0);
 /// wall ns the last UI-thread JIT wait ended
 static UI_WAIT_END: AtomicU64 = AtomicU64::new(0);
+/// ns of the UI thread's ended outermost JIT waits after the first present, all together
+static UI_WAITED: AtomicU64 = AtomicU64::new(0);
 /// builds ahead (speculative / prepared) finished after the first present, and running now
 pub(crate) static AHEAD_DONE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AHEAD_RUNNING: AtomicU64 = AtomicU64::new(0);
@@ -71,7 +73,11 @@ pub fn on_ui_wait(hook: fn()) {
     UI_WAIT_HOOK.store(hook as *mut (), Relaxed);
 }
 pub(crate) fn ui_wait_end() {
-    UI_WAIT_END.store(wall_ns(), Relaxed);
+    let now = wall_ns();
+    if UI_WAITING.load(Relaxed) == 1 && present_ns() != 0 {
+        UI_WAITED.fetch_add(now.saturating_sub(UI_WAIT_START.load(Relaxed)), Relaxed);
+    }
+    UI_WAIT_END.store(now, Relaxed);
     UI_WAITING.fetch_sub(1, Relaxed);
 }
 
@@ -88,13 +94,15 @@ pub fn ui_idle_ns() -> u64 {
     wall_ns().saturating_sub(UI_WAIT_END.load(Relaxed).max(fp))
 }
 
-/// How long the UI thread's current JIT wait (a lazy compile, an owner request) has lasted; 0
-/// while it does not wait. Atomics only.
-pub fn ui_wait_ns() -> u64 {
-    if UI_WAITING.load(Relaxed) == 0 {
-        return 0;
-    }
-    wall_ns().saturating_sub(UI_WAIT_START.load(Relaxed))
+/// How long the UI thread has waited on the JIT after the first present, all together (its open
+/// wait included): the host measures a stall's waiting between two reads. Atomics only.
+pub fn ui_waited_ns() -> u64 {
+    let open = if UI_WAITING.load(Relaxed) > 0 && present_ns() != 0 {
+        wall_ns().saturating_sub(UI_WAIT_START.load(Relaxed))
+    } else {
+        0
+    };
+    UI_WAITED.load(Relaxed) + open
 }
 
 /// Functions built ahead since the first present, and those still queued or building (the

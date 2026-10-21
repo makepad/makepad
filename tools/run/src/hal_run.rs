@@ -69,10 +69,13 @@ static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
-/// wakes, and shows the wait's activity once it lasts ACTIVITY_AFTER.
+/// wakes, and veils the app once the stall's waiting adds up to STALL_AFTER.
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// A UI-thread JIT wait this long shows the activity galaxy (shorter ones never flicker it in).
-const ACTIVITY_AFTER: Duration = Duration::from_millis(120);
+/// A UI-thread stall with this much JIT waiting veils the app (shorter ones never flicker it in).
+const STALL_AFTER: Duration = Duration::from_millis(120);
+/// JIT waits of the UI thread further apart than this (with no app frame between) are separate
+/// stalls.
+const STALL_GAP_NS: u64 = 100_000_000;
 /// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
 /// the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
@@ -86,7 +89,7 @@ fn ui_wait_began() {
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer, or a JIT wait's activity
+    /// no layer, or a JIT stall's veil
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -735,7 +738,10 @@ fn pump(
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
-    let mut activity = false;
+    let mut stall = false;
+    // the stall's start: the app's presented frames and the UI thread's JIT waiting until then (a
+    // new frame or an idle gap begins the next one)
+    let mut stall_from = (0u64, 0u64);
     let mut warm_up_at: Option<Instant> = None;
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
@@ -772,7 +778,7 @@ fn pump(
             match update {
                 Update::Begin { warm } => {
                     stage = Stage::Running;
-                    activity = false;
+                    stall = false;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -1041,8 +1047,8 @@ fn pump(
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
-        // after its first present (until the JIT's readiness signal), then a later UI-thread JIT
-        // wait's activity. An opaque overlay, a failure or a stop takes it away.
+        // after its first present (until the JIT's readiness signal), then the veil of a later
+        // UI-thread stall on JIT compiles. An opaque overlay, a failure or a stop takes it away.
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
@@ -1081,27 +1087,32 @@ fn pump(
             }
             Stage::Lift => Some(LayerWant::Ready),
             Stage::Running if layers && lent_to_app && !active => {
-                let wait = Duration::from_nanos(relax_compiler::postframe::ui_wait_ns());
-                if wait >= ACTIVITY_AFTER {
-                    activity = true;
+                // the stall's JIT waiting so far; it ends when the app presents again
+                let total = relax_compiler::postframe::ui_waited_ns();
+                if stall_from.0 != app_frames || relax_compiler::postframe::ui_idle_ns() > STALL_GAP_NS {
+                    stall_from = (app_frames, total);
+                }
+                let waited = Duration::from_nanos(total.saturating_sub(stall_from.1));
+                if waited >= STALL_AFTER {
+                    stall = true;
                 } else if UI_WAIT_ARMED.load(Ordering::Acquire) {
-                    // look again when this wait would show; a wait that is already over keeps
-                    // the window armed one interval (bursts of short waits wake it rarely)
-                    wake_in = Some(ACTIVITY_AFTER.saturating_sub(wait));
-                    if wait.is_zero() && !activity {
+                    // look again when this stall would show; once the UI thread is not waiting
+                    // the window disarms (the next wait's hook wakes it)
+                    if relax_compiler::postframe::ui_idle_ns() > 0 {
                         UI_WAIT_ARMED.store(false, Ordering::Release);
-                        wake_in = Some(ACTIVITY_AFTER);
+                    } else {
+                        wake_in = Some(STALL_AFTER - waited);
                     }
                 }
-                if activity && wait.is_zero() && host.layer_done() {
-                    activity = false;
+                if stall && waited.is_zero() && host.layer_done() {
+                    stall = false;
                 }
-                activity.then_some(LayerWant::Activity {
-                    waiting: !wait.is_zero(),
+                stall.then_some(LayerWant::Stall {
+                    stalled: !waited.is_zero(),
                 })
             }
             Stage::Running => {
-                activity = false;
+                stall = false;
                 None
             }
         };
