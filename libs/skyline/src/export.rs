@@ -182,7 +182,7 @@ fn half_table() -> &'static [f32] {
 
 /// Below this many items `par` stays on the calling thread: a held strip's 23 552 texels decode in a fraction of what
 /// starting a thread per core costs (plan hdri-5 Task 8 measured 2.6 ms from the read to the texels, most of it that).
-const PAR_MIN: usize = 1 << 17;
+pub(crate) const PAR_MIN: usize = 1 << 17;
 
 /// `f` of every item of `t`, in order, the work split over every core (decoding and toning millions of texels).
 fn par<T: Sync, U: Send + Copy + Default>(t: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U> {

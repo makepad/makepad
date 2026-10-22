@@ -186,10 +186,32 @@ fn bands_match_the_pre_move_baseline() {
 /// The bands of `requests` in turn on one Cx, each from a single draw: the rig draws when a band is asked for and never
 /// again for the job (`follow` false), so the tile's read is asked for by `job_event` once that draw's frame is built, not
 /// by a second draw a frame later. Each band with its time from the request (ms); None for one that did not come in 5 s.
-fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64)>> {
+fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64, usize)>> {
     let (cx, rig, hal, info, _one) = open_rig(false);
     let turn = || assert!(cx.borrow_mut().hal_session_turn(1_000_000, true));
     let mut out = vec![];
+    // warm up first: a fresh Cx (a cold shader cache after a shader change, tens of seconds) answers NotRendered until
+    // its pipelines are built; the first request is asked again until it comes, and the list is measured after
+    let warm_until = Cx::monotonic_now() + 120.0;
+    let (mut warm, mut tries) = (false, 0);
+    while !warm && Cx::monotonic_now() < warm_until {
+        tries += 1;
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut c = cx.borrow_mut();
+            rig.borrow_mut().as_mut().unwrap().sky.request_band(&mut c, &requests[0].0, &SkyLight::example(), requests[0].1, Box::new(move |b| { let _ = tx.send(b); }));
+            c.redraw_all();
+        }
+        let t0 = Cx::monotonic_now();
+        loop {
+            turn();
+            if let Ok(b) = rx.try_recv() { warm = b.is_ok(); break; }
+            if Cx::monotonic_now() - t0 > 5.0 { break; }
+        }
+        let t1 = Cx::monotonic_now();
+        while rig.borrow().as_ref().unwrap().sky.busy() && Cx::monotonic_now() - t1 < 5.0 { turn(); }
+    }
+    println!("warm after {tries} request(s)");
     for (p, w) in requests {
         let (tx, rx) = mpsc::channel();
         {
@@ -203,11 +225,12 @@ fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64)>>
             if let Ok(b) = rx.try_recv() { break b.ok().map(|b| (b, (Cx::monotonic_now() - t0) * 1000.0)); }
             if Cx::monotonic_now() - t0 > 5.0 { break None; }
         };
-        println!("band {} x {}: {} in {} draw(s)", w, got.as_ref().map_or(0, |(b, _)| b.h), got.as_ref().map_or("none".into(), |(_, ms)| format!("{ms:.1} ms")), rig.borrow().as_ref().unwrap().draws - draws);
+        let drew = rig.borrow().as_ref().unwrap().draws - draws;
+        println!("band {} x {}: {} in {drew} draw(s)", w, got.as_ref().map_or(0, |(b, _)| b.h), got.as_ref().map_or("none".into(), |(_, ms)| format!("{ms:.1} ms")));
         // the job ends with its Done message, after the band: the next request waits for it
         let t1 = Cx::monotonic_now();
         while rig.borrow().as_ref().unwrap().sky.busy() && Cx::monotonic_now() - t1 < 5.0 { turn(); }
-        out.push(got);
+        out.push(got.map(|(b, ms)| (b, ms, drew)));
     }
     hal.close(info.session);
     out
@@ -220,10 +243,10 @@ fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64)>>
 #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn a_band_is_read_back_from_the_frame_that_drew_it() {
     let (a, b) = (Params::default(), city_params());
+    // after the rig's warm-up (`bands_from_one_draw`) every band must come, each from its single draw
     let got = bands_from_one_draw(&[(a.clone(), 512), (a.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
-    // the first ones may fail (NotRendered) or come back partial while the pipelines compile (a cold shader cache
-    // takes longer); from the fourth on they are warm, and every one must come from its single draw
-    assert!(got[3..].iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
+    assert!(got.iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
+    assert!(got.iter().all(|g| g.as_ref().is_some_and(|g| g.2 == 1)), "a band took more than its one draw: {:?}", got.iter().map(|g| g.as_ref().map(|g| g.2)).collect::<Vec<_>>());
     let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![] }, |g| g.0)).collect();
     let (want_a, want_b) = (render_band(&a, 512), render_band(&b, 512));
     assert!(got[4].texels == want_a.texels && got[6].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
@@ -509,6 +532,78 @@ fn the_decoded_night_looks_like_the_example() {
     assert!(f_host < 1.5 * f_ex && f_host > f_ex / 1.5, "facades: host {f_host}, example {f_ex}");
     assert!((h_host - h_ex).abs() < 10.0, "window hue: host {h_host}, example {h_ex}");
     assert!(l_host < 1.5 * l_ex && l_host > l_ex / 1.5, "windows' light: host {l_host}, example {l_ex}");
+}
+
+/// The city's facades (the darkest half of the city's texels as the example draws them, all opaque there): indices.
+fn facades(p: &Params, example: &Band) -> Vec<usize> {
+    let lum3 = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+    let mut city: Vec<usize> = city_rows(p, example).into_iter().filter(|i| example.texels[*i][3] >= 1.0).collect();
+    city.sort_by(|a, b| lum3(example.texels[*a]).total_cmp(&lum3(example.texels[*b])));
+    city.truncate(city.len() / 2);
+    city
+}
+
+fn median_of(mut v: Vec<f32>) -> f32 { v.sort_by(f32::total_cmp); v[v.len() / 2] }
+
+/// Fix round 1 of Task 8 (review, Important 1): with `decode` a host's own light (here its ambient: moonlight, twilight)
+/// reaches the map in the host's units at night and at dusk, not through the decode. The light is split
+/// (`SkyLight::split`): the designed part in codes, decoded, plus the host's light rendered alone; so on the facades the
+/// light the ambient adds is about their albedo x the ambient (0.28 x the street canyon's 0.5..1, less what the night's
+/// fog takes), as it is without `decode`. One render with the ambient in codes, as before the fix, decoded it to about a
+/// thousandth of that at night. Tolerances: the ambient's share within 0.05..0.5 x its luminance, and the unsplit one
+/// under a tenth of the split one.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_hosts_ambient_reaches_the_facades_in_its_own_units() {
+    let g = 0.0264f32;
+    let p = city_params();
+    let example = render_band(&p, 1024);
+    let wall = facades(&p, &example);
+    let lum3 = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+    let ambient = [0.0020f32, 0.0022, 0.0030];
+    let amb = 0.2126 * ambient[0] + 0.7152 * ambient[1] + 0.0722 * ambient[2];
+    for el in [-20.0f32, -4.0] {
+        let ring = [0.0022, 0.0027, 0.0038];
+        let light = SkyLight { ambient_rgb: ambient, sun_el_deg: el, ring_high: [ring.map(|c| 1.8 * c); RING], ..decoded_night(g, ring) };
+        let (designed, host) = light.split().expect("an ambient by night or at dusk splits the light");
+        let (bd, bh, one) = (render_band_lit(&p, 1024, &designed), render_band_lit(&p, 1024, &host), render_band_lit(&p, 1024, &light));
+        let mut full = bd.texels.clone();
+        makepad_skyline::add_light(&mut full, &bh.texels);
+        let share = median_of(wall.iter().map(|i| lum3(full[*i]) - lum3(bd.texels[*i])).collect());
+        let unsplit = median_of(wall.iter().map(|i| lum3(one.texels[*i]) - lum3(bd.texels[*i])).collect());
+        println!("sun {el}: on the facades the ambient adds {share:.3e} split ({:.3} x its luminance), {unsplit:.3e} in one render", share / amb);
+        assert!(share > 0.05 * amb && share < 0.5 * amb, "sun {el}: the ambient adds {share} to the facades, its luminance {amb}");
+        assert!(unsplit < 0.1 * share, "sun {el}: one render gave {unsplit}, the split {share}");
+    }
+}
+
+/// Fix round 1 of Task 8 (review, Important 2): the night like the example over a sky that is not the example's backdrop
+/// (a generator-like night ring, blue and brighter at +15 degrees, as `Env::skyline_light` records at -20 degrees). What it
+/// rests on: the facades' light is g x the example's as its display shows it (within a factor 1.5 either way: the haze
+/// follows the host's sky), and the lit windows' hue (within 10 degrees). The facades against the sky are printed: that
+/// ratio follows the sky behind, which differs.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_decoded_night_matches_the_example_over_another_sky() {
+    use makepad_skyline::{srgb_decode, BACKDROP_HORIZON};
+    let g = 0.0264f32;
+    let ring = [0.0024f32, 0.0029, 0.0041];
+    let light = SkyLight { ring_high: [ring.map(|c| 1.7 * c); RING], ..decoded_night(g, ring) };
+    let p = city_params();
+    let (example, host) = (render_band(&p, 1024), render_band_lit(&p, 1024, &light));
+    let lum3 = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let rgb = |t: [f32; 4]| [t[0], t[1], t[2]];
+    let shown = |t: [f32; 4]| -> [f32; 3] { std::array::from_fn(|c| srgb_decode(t[c] + (1.0 - t[3]) * BACKDROP_HORIZON[c])) };
+    let wall = facades(&p, &example);
+    let (f_ex, f_host) = (median_of(wall.iter().map(|i| g * lum3(shown(example.texels[*i]))).collect()), median_of(wall.iter().map(|i| lum3(rgb(host.texels[*i]))).collect()));
+    let mut city = city_rows(&p, &example);
+    city.sort_by(|a, b| lum3(shown(example.texels[*a])).total_cmp(&lum3(shown(example.texels[*b]))));
+    let lit = &city[city.len() - (city.len() * 3 / 100).max(10)..];
+    let mean = |f: &dyn Fn(usize) -> [f32; 3]| { let s = lit.iter().fold([0.0f32; 3], |s, i| { let c = f(*i); [s[0] + c[0], s[1] + c[1], s[2] + c[2]] }); s.map(|x| x / lit.len() as f32) };
+    let (h_ex, h_host) = (hue(mean(&|i| shown(example.texels[i]))), hue(mean(&|i| rgb(host.texels[i]))));
+    let (sky_ex, sky_host) = (lum3(BACKDROP_HORIZON.map(srgb_decode)), lum3(ring));
+    println!("facades: host {f_host:.3e}, g x the example's as displayed {f_ex:.3e} (x{:.2}); against the sky: example {:.4}, host {:.4}; window hue example {h_ex:.1}, host {h_host:.1}",
+        f_host / f_ex, f_ex / g / sky_ex, f_host / sky_host);
+    assert!(f_host < 1.5 * f_ex && f_host > f_ex / 1.5, "facades: host {f_host}, g x the example's {f_ex}");
+    assert!((h_host - h_ex).abs() < 10.0, "window hue: host {h_host}, example {h_ex}");
 }
 
 /// Night, noon and a sunset over the city, toned PNGs into `SKYLINE_VISUAL_DIR` (the whole strip and the city's sector).

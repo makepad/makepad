@@ -204,7 +204,8 @@ pub struct Skyline {
     #[rust] pub zones: Option<(u64, Zones)>,
     #[rust] pub cols: Option<ColumnCache>,
     #[rust] blank: Option<Texture>,
-    /// The sky's horizon rings (`SkyLight::ring_texels`) and the hash of the light they were written for.
+    /// The sky's horizon rings and the host's ground (`SkyLight::ring_texels`) and, with `host_ground`, the coast
+    /// (`coast_ring`), and the hash of the light and the zones they were written for.
     #[rust] ring_tex: Option<(u64, Texture)>,
     /// The key of the picture the targets hold.
     #[rust] pub drawn: Option<u64>,
@@ -280,9 +281,13 @@ impl Skyline {
         if self.blank.is_none() {
             self.blank = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 { width: 1, height: 1, data: Some(vec![0.0; 4]), updated: TextureUpdated::Full }));
         }
-        let lkey = light.hash();
+        let lkey = light.hash() ^ zkey.rotate_left(17);
         if self.ring_tex.as_ref().map(|r| r.0) != Some(lkey) {
-            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 3, data: Some(light.ring_texels()), updated: TextureUpdated::Full };
+            let mut texels = light.ring_texels();
+            // row 3: the coast, which only a host's ground reads
+            let coast = if light.host_ground { crate::light::coast_ring(|u| z.land(u)) } else { [0.0; crate::light::RING] };
+            texels.extend(coast.iter().flat_map(|c| [*c, 0.0, 0.0, 1.0]));
+            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 4, data: Some(texels), updated: TextureUpdated::Full };
             let tex = match self.ring_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
             self.ring_tex = Some((lkey, tex));
         }

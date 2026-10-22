@@ -133,15 +133,32 @@ impl SkyLight {
         1.0 + (self.night_haze - 1.0) * self.night_share()
     }
 
-    /// A host colour as the strip's shaders take it (`to_code`), the haze's share applied first when `haze`.
-    fn gpu_colour(&self, c: [f32; 3], haze: bool) -> [f32; 3] {
-        if !self.decode || self.night_share() <= 0.0 || self.design_gain <= 0.0 { return c; }
-        let k = if haze { self.haze_share() } else { 1.0 };
-        c.map(|x| self.to_code(k * x))
+    /// The host's rings in codes (`to_code`): the sky rings as the haze (x the haze's share) and as the sky behind
+    /// (without it), and the ground; built once per light (`hash`) and kept, as twilight's inverse curve is a search.
+    fn codes(&self) -> std::sync::Arc<Codes> {
+        static LAST: std::sync::Mutex<Option<(u64, std::sync::Arc<Codes>)>> = std::sync::Mutex::new(None);
+        let key = self.hash();
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, c)) = last.as_ref() {
+            if *k == key { return c.clone(); }
+        }
+        let k = self.haze_share();
+        let code = |ring: &[[f32; 3]; RING], share: f32| ring.map(|c| c.map(|x| self.to_code(share * x)));
+        let c = std::sync::Arc::new(Codes {
+            haze_low: code(&self.ring_low, k), haze_high: code(&self.ring_high, k),
+            low: code(&self.ring_low, 1.0), high: code(&self.ring_high, 1.0), ground: code(&self.ground, 1.0),
+        });
+        *last = Some((key, c.clone()));
+        c
     }
 
-    /// The host's sky at strip u and elevation `el` (rad) in codes (`to_code`, without the haze's share): its rings
-    /// so turned, the low one toward the high one by +15 degrees, as the shaders' `sky_at` reads its texture.
+    /// Whether the rings go to the shaders as codes (`decode` by night, `design_gain` above 0).
+    fn coded(&self) -> bool {
+        self.decode && self.night_share() > 0.0 && self.design_gain > 0.0
+    }
+
+    /// The host's sky at strip u and elevation `el` (rad) from its rings `low` and `high`: the low ring toward the
+    /// high one by +15 degrees, as the shaders' `sky_at` reads its texture.
     fn sky_code(low: &[[f32; 3]; RING], high: &[[f32; 3]; RING], u: f32, el: f32) -> [f32; 3] {
         let at = |ring: &[[f32; 3]; RING]| -> [f32; 3] {
             let x = u.rem_euclid(1.0) * RING as f32 - 0.5;
@@ -156,31 +173,52 @@ impl SkyLight {
         std::array::from_fn(|c| a[c] + (b[c] - a[c]) * t)
     }
 
+    /// The light the strip is rendered with, split in two when its host's own light would otherwise go through the
+    /// decode (`decode`, by night or dusk, with a sun or an ambient): the designed part and the haze, the sky and the
+    /// ground in codes (`sun_rgb` and `ambient_rgb` 0, handed back by `to_host`), and the host's light alone, in its
+    /// own units (no decode, the designed colours and the rings 0), whose band is added to the first (`add_light`):
+    /// the strip is linear in its lights, so the two make the whole. None when one render is the whole.
+    pub fn split(&self) -> Option<(SkyLight, SkyLight)> {
+        let lit = self.sun_rgb.iter().chain(&self.ambient_rgb).any(|c| *c != 0.0);
+        if !self.coded() || !lit { return None; }
+        let designed = SkyLight { sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ..self.clone() };
+        let host = SkyLight { design_gain: 0.0, decode: false, ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], ..self.clone() };
+        Some((designed, host))
+    }
+
     /// The strip as the host takes it (`decode`): each texel laid over the host's sky in codes, turned back into
     /// the host's light (`from_code`: by night the sRGB decode, as the example's display decodes its window, times
     /// design_gain), less that sky, so laid over the host's own sky the host sees the example's look. `w` x `h`
     /// texels of the full turn, top row first, the horizon `horizon` of the way down (`ViewSpec::strip`). A no-op
     /// without `decode`, or by day.
     pub fn to_host(&self, texels: &mut [[f32; 4]], w: usize, h: usize, horizon: f64) {
-        let (n, g) = (self.night_share(), self.design_gain);
-        if !self.decode || n <= 0.0 || g <= 0.0 || w == 0 || texels.len() < w * h { return; }
-        let (low, high) = (self.ring_low.map(|c| self.gpu_colour(c, false)), self.ring_high.map(|c| self.gpu_colour(c, false)));
+        if !self.coded() || w == 0 || texels.len() < w * h { return; }
+        let codes = self.codes();
         let px = std::f64::consts::TAU / w as f64;
         let rows = |y0: usize, chunk: &mut [[f32; 4]]| {
             for (k, t) in chunk.iter_mut().enumerate() {
+                let behind = 1.0 - t[3].clamp(0.0, 1.0);
+                if behind <= 0.0 {
+                    // opaque: the sky behind does not count
+                    for c in 0..3 { t[c] = self.from_code(t[c]).max(0.0); }
+                    continue;
+                }
                 let (x, y) = (k % w, y0 + k / w);
                 let el = ((horizon * h as f64 - (y as f64 + 0.5)) * px) as f32;
-                let sky = Self::sky_code(&low, &high, (x as f32 + 0.5) / w as f32, el);
-                let behind = 1.0 - t[3].clamp(0.0, 1.0);
+                let sky = Self::sky_code(&codes.low, &codes.high, (x as f32 + 0.5) / w as f32, el);
                 for c in 0..3 {
                     t[c] = (self.from_code(t[c] + behind * sky[c]) - behind * self.from_code(sky[c])).max(0.0);
                 }
             }
         };
+        let texels = &mut texels[..w * h];
+        if w * h < crate::export::PAR_MIN {
+            return rows(0, texels);
+        }
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).max(1);
         let per = h.div_ceil(threads).max(1);
         std::thread::scope(|s| {
-            for (i, chunk) in texels[..w * h].chunks_mut(per * w).enumerate() {
+            for (i, chunk) in texels.chunks_mut(per * w).enumerate() {
                 let rows = &rows;
                 s.spawn(move || rows(i * per, chunk));
             }
@@ -201,14 +239,59 @@ impl SkyLight {
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64]))
     }
 
-    /// The rings as the texels of a `RING` x 3 RGBA float texture: row 0 `ring_low`, row 1 `ring_high`, row 2
-    /// `ground`, alpha 1; with `decode`, as the shaders take them (`gpu_colour`; the two sky rings are the haze).
+    /// The rings as the first three rows of the shaders' ring texture (`RING` wide, RGBA): row 0 `ring_low`, row 1
+    /// `ring_high`, row 2 `ground`, alpha 1; with `decode` by night, in codes (`codes`; the two sky rings are the haze).
     pub fn ring_texels(&self) -> Vec<f32> {
-        let sky = self.ring_low.iter().chain(&self.ring_high).map(|c| self.gpu_colour(*c, true));
-        let ground = self.ground.iter().map(|c| self.gpu_colour(*c, false));
-        sky.chain(ground).flat_map(|c| [c[0], c[1], c[2], 1.0]).collect()
+        let rows: Vec<[f32; 3]> = if self.coded() {
+            let c = self.codes();
+            c.haze_low.iter().chain(&c.haze_high).chain(&c.ground).copied().collect()
+        } else {
+            self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).copied().collect()
+        };
+        rows.into_iter().flat_map(|c| [c[0], c[1], c[2], 1.0]).collect()
     }
 }
+
+/// The host's rings in codes (`SkyLight::codes`).
+struct Codes { haze_low: [[f32; 3]; RING], haze_high: [[f32; 3]; RING], low: [[f32; 3]; RING], high: [[f32; 3]; RING], ground: [[f32; 3]; RING] }
+
+/// Adds the host light's band (`SkyLight::split`) to the designed one, texel by texel, its light only: the two are the
+/// same scene, so their coverage is the same.
+pub fn add_light(designed: &mut [[f32; 4]], host: &[[f32; 4]]) {
+    for (d, h) in designed.iter_mut().zip(host) {
+        for c in 0..3 { d[c] += h[c]; }
+    }
+}
+
+/// The coast ring: at each ring sample (u = (i + 0.5) / RING) 1 on land and fading to 0 at SHORE_DEG out to sea
+/// (smooth), by the land envelope (`Zones::land`; sea where the water shader's `sea` passes a half). The shaders blend
+/// a host's ground and fade the day's water by it, so the land meets the sea without an edge across azimuth.
+pub fn coast_ring(land: impl Fn(f64) -> f64) -> [f32; RING] {
+    const N: usize = 1440;
+    let on: Vec<bool> = (0..N).map(|i| land((i as f64 + 0.5) / N as f64) >= 0.175).collect();
+    let mut out = [0.0f32; RING];
+    if !on.iter().any(|x| *x) { return out; }
+    // the circular distance (samples) to the nearest land sample, both ways round
+    let mut dist = vec![f64::INFINITY; N];
+    for pass in 0..2 {
+        let mut last = f64::INFINITY;
+        for k in 0..2 * N {
+            let i = if pass == 0 { k % N } else { (2 * N - 1 - k) % N };
+            last = if on[i] { 0.0 } else { last + 1.0 };
+            dist[i] = dist[i].min(last);
+        }
+    }
+    for (j, o) in out.iter_mut().enumerate() {
+        let i = ((j as f64 + 0.5) / RING as f64 * N as f64) as usize % N;
+        let deg = dist[i] * 360.0 / N as f64;
+        let t = (1.0 - deg / SHORE_DEG).clamp(0.0, 1.0);
+        *o = (t * t * (3.0 - 2.0 * t)) as f32;
+    }
+    out
+}
+
+/// How far out to sea a host's ground runs on and the day's water fades in from the coast (`coast_ring`), degrees.
+pub const SHORE_DEG: f64 = 15.0;
 
 #[cfg(test)]
 mod tests {
@@ -292,6 +375,36 @@ mod tests {
         assert!((night.to_code(0.0035) - srgb_encode(0.0035 / g)).abs() < 1e-5);
         let day = SkyLight { sun_el_deg: 20.0, ..night.clone() };
         assert_eq!(day.to_code(0.0035), 0.0035);
+    }
+    /// The host's own light is split off where it would go through the decode (by night or dusk, with a sun or an
+    /// ambient), and only there; the halves add up to the light.
+    #[test]
+    fn the_hosts_light_is_split_off_the_decode() {
+        assert!(SkyLight::example().split().is_none());
+        let night = SkyLight { design_gain: 0.0264, decode: true, sun_el_deg: -20.0, ..SkyLight::example() };
+        assert!(night.split().is_none(), "no host light: one render");
+        let lit = SkyLight { ambient_rgb: [0.002, 0.002, 0.003], ..night.clone() };
+        let (designed, host) = lit.split().expect("an ambient by night");
+        assert_eq!((designed.sun_rgb, designed.ambient_rgb, designed.decode), ([0.0; 3], [0.0; 3], true));
+        assert_eq!((host.ambient_rgb, host.decode, host.design_gain), (lit.ambient_rgb, false, 0.0));
+        assert!(host.ring_low.iter().chain(&host.ring_high).chain(&host.ground).all(|c| *c == [0.0; 3]));
+        assert!(SkyLight { sun_el_deg: 20.0, ..lit.clone() }.split().is_none(), "by day nothing is decoded");
+        assert!(SkyLight { sun_el_deg: -4.0, ..lit }.split().is_some(), "at dusk the decode has a share");
+        let mut a = vec![[0.1, 0.2, 0.3, 1.0]];
+        add_light(&mut a, &[[0.01, 0.02, 0.03, 1.0]]);
+        assert_eq!(a, vec![[0.11, 0.22, 0.33, 1.0]]);
+    }
+    /// The coast ring: 1 on land, falling smoothly to 0 SHORE_DEG out to sea.
+    #[test]
+    fn the_coast_ring_falls_off_out_to_sea() {
+        let land = |u: f64| if (0.25..0.75).contains(&u) { 1.0 } else { 0.0 };
+        let c = coast_ring(land);
+        assert_eq!(c[RING / 2], 1.0);
+        assert_eq!(c[0], 0.0, "a quarter turn out to sea");
+        let i = (0.75 * RING as f64) as usize; // the first sample past the coast at 0.75 (2.8 degrees out)
+        assert!(c[i] > 0.5 && c[i] < 1.0, "{}", c[i]);
+        assert!(c[i + 3] == 0.0, "more than SHORE_DEG out: {}", c[i + 3]);
+        assert!(coast_ring(|_| 0.0).iter().all(|x| *x == 0.0));
     }
     #[test]
     fn the_hash_sees_every_field() {

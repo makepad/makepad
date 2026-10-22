@@ -68,7 +68,9 @@ script_mod! {
         refl_h: fn(c: float, j: float, ly: float) -> float { return self.rnd(c, j + 8192.0, ly) }
         pixel: fn(){
             let e = self.scene_light.sample_nearest(self.pos); let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
-            let g = self.col_row(pp.x, 6.0); let sea = 1.0 - smoothstep(0.0, 0.35, g.x); let al = 0.0 - v.y; let rip = self.pr_ripple
+            let g = self.col_row(pp.x, 6.0); var sea = 1.0 - smoothstep(0.0, 0.35, g.x); let al = 0.0 - v.y; let rip = self.pr_ripple
+            // over a host's ground the day's water fades in from the coast (the lights it mirrors at night stay)
+            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
             if al <= 0.0 || sea < 0.01 { return e }
             let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0); let a0 = 0.004; let kz = mix(22.0, 13.0, rip)
             // by day the sea mirrors the sky at the mirrored elevation, by its Fresnel term, where nothing mirrored stands in
