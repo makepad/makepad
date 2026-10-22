@@ -354,7 +354,7 @@ impl Skyline {
 struct ScenePainter<'a> { glow: &'a mut DrawSkyGlow, range: &'a mut DrawSkyRange, ground: &'a mut DrawSkyGround }
 
 /// The scene list in painter's order (far to near). The mirror run leaves out what stands below
-/// the eye's own horizon: the front treeline and the ground band.
+/// the eye's own horizon: the front treeline and the ground band; under a wet light it keeps them above the horizon.
 fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainter, &mut Props, &mut City)) {
     let (v, p) = (sc.view, sc.p);
     let px0 = v.px0();
@@ -384,13 +384,18 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     props.draw(cx, sc, Bucket::BehindCity);
     city.draw_blit(cx, sc);
     props.draw(cx, sc, Bucket::FrontOfCity);
-    if sc.mirror { return; }
+    // the reflection run ends here for the sea and the lakes. A wet ground (`SkyLight::wet`) lies in front of the near rise,
+    // so under a wet light it goes on with the front treeline and the rise as they stand above it (to the ranges' two
+    // pixels under the horizon), which the sea and the lakes then mirror too
+    let wet = sc.mirror && sc.light.wet > 0.0;
+    if sc.mirror && !wet { return; }
     if let Some(r) = sc.band(band_top(sc, 5), -2.0 * px0) { sp.range.k = 5.0; sp.range.draw_abs(cx, r); }
     // the ground band: from the top of the near rise (raw elevation) down; the sea is all below the horizon
-    if let Some(r) = sc.band(sc.rise() + 2.0 * px0, -10.0) {
+    if let Some(r) = sc.band(sc.rise() + 2.0 * px0, if wet { -2.0 * px0 } else { -10.0 }) {
         sc.set_uniforms(cx, &mut sp.ground.draw_vars);
         sp.ground.draw_abs(cx, r);
     }
+    if wet { return; }
     props.draw(cx, sc, Bucket::OverSea);
 }
 

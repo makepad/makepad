@@ -1411,7 +1411,8 @@ fn lakes_are_the_cpus_at(size: f64) {
 /// Plan hdri-6 §5: the strip's own ground turns to water with the host's wetness. At night (the example's light) wet land
 /// mirrors the city's lights below the horizon. In the city's columns, all land, the light in the rows 0.3 to 3 degrees
 /// down grows with `wet`:
-/// - at wet 1 it is above wet 0's by at least a tenth of the light 0.3 to 3 degrees up;
+/// - at wet 1 it is above wet 0's by at least a tenth of the light 0.3 to 2 degrees up, the elevations those rows mirror
+///   (at the default ripple 3 degrees down mirrors about 2 up; the lights the front treeline hides are not mirrored);
 /// - at 0.5 it is half way (the water's share is linear).
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn a_wet_ground_mirrors_the_city_in_step_with_its_wetness() {
@@ -1431,9 +1432,74 @@ fn a_wet_ground_mirrors_the_city_in_step_with_its_wetness() {
         }
         s
     };
-    let up = light_in(&full, 0.3, 3.0);
+    let up = light_in(&full, 0.3, 2.0);
     let (d0, d5, d1) = (light_in(&dry, -3.0, -0.3), light_in(&half, -3.0, -0.3), light_in(&full, -3.0, -0.3));
     println!("above {up}; below: wet 0 {d0}, 0.5 {d5}, 1 {d1}");
     assert!(up > 0.0 && d1 - d0 > 0.1 * up, "a wet ground mirrors the city: {d0} -> {d1} against {up} above");
     assert!(((d5 - d0) / (d1 - d0) - 0.5).abs() < 0.1, "in step with the wetness: {d0}, {d5}, {d1}");
+}
+
+/// Plan hdri-6 §5, "a puddle shows what stands above it on the horizon" (review of Task 3, Important 1). Wet land lies in
+/// front of the near rise and its treeline, so it mirrors them too: a light or a pale city foot they hide above is hidden
+/// in the water as well. All land with the city, no ripple (the water's mirrored elevation is `mirrored_el`, in the same
+/// column, give or take its vertical noise), wet 1 against wet 0 at 2048 px, at night and at noon. Every texel 0.3 to 3
+/// degrees down is at most the ground seen through the water (0.35 (1 - F) of the dry ground and 0.5 F of the silhouettes'
+/// colour) plus F times the brightest that stands at its mirrored elevation in the dry band (with the sky behind it by
+/// day), within WET_MIRROR_EPS; and the water mirrors: by day the texels over solid ground carry at least WET_DAY_SHARE
+/// of it on average. Before: lights and the city's pale foot behind the treeline showed in the water, and props on land
+/// seen from the mirrored eye stood over the mirrored treeline.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_wet_ground_mirrors_only_what_stands_above_it() {
+    const WET_MIRROR_EPS: f32 = 2e-3;
+    const WET_DAY_SHARE: f32 = 0.75;
+    use makepad_skyline::rng::smooth;
+    let mut p = city_params();
+    for (k, v) in [(P::Land, 1.0), (P::PrRipple, 0.0)] { p.set(k as usize, v); }
+    let w = 2048;
+    let px = std::f64::consts::TAU / w as f64;
+    let sil = lum(&[makepad_skyline::params::SIL[0], makepad_skyline::params::SIL[1], makepad_skyline::params::SIL[2], 1.0]);
+    let mut out = vec![];
+    for (name, light) in [("night", SkyLight::example()), ("noon", noon([0.55, 0.7, 1.0]))] {
+        let (dry, wet) = (render_band_lit(&p, w, &light), render_band_lit(&p, w, &SkyLight { wet: 1.0, ..light.clone() }));
+        let day = light.night_share() < 1.0;
+        let sky = |el: f64| -> [f32; 3] { let a = (el / 15f64.to_radians()).min(1.0) as f32; std::array::from_fn(|c| light.ring_low[0][c] + (light.ring_high[0][c] - light.ring_low[0][c]) * a) };
+        // the worst excess over the bound (and where), the mean share mirrored over solid ground, how many texels
+        let (mut worst, mut at, mut got, mut want, mut n) = (f32::MIN, (0usize, 0usize), 0f64, 0f64, 0usize);
+        for y in 0..dry.h {
+            let al = -row_el(&p, &dry, y);
+            if al < 0.3f64.to_radians() || al > 3f64.to_radians() { continue; }
+            // the water's vertical noise at no ripple, +-amp (`DrawSkyWater`: 0.004 sm.y sm.z, sm.z once the wave rows are
+            // over half a pixel apart), so the mirrored row is any of yf(el -+ amp)
+            let (el, amp) = (mirrored_el(al), 0.004 * smooth(0.0, 0.012, al) * smooth(0.5, 1.4, (al + 0.004) / (22.0 * px)));
+            if el - amp - px <= 0.0 { continue; }
+            let fr = (0.02 + 0.98 * (1.0 - al).clamp(0.0, 1.0).powi(5)) as f32;
+            let yf = |e: f64| p[P::Horizon] * dry.h as f64 - e / px - 0.5;
+            let (ya, yb) = (yf(el + amp), yf(el - amp));
+            let ys: Vec<f64> = [ya, yf(el), yb].into_iter().chain((ya.ceil() as usize..=yb.floor() as usize).map(|r| r as f64)).collect();
+            let s = if day { sky(al) } else { [0.0; 3] };
+            for x in 0..w {
+                // what stands at the mirrored elevation (with the sky behind it by day), the brightest of the noise's reach
+                let seen = |yf: f64| -> (f32, f32) {
+                    let (y0, t) = (yf.floor() as usize, (yf - yf.floor()) as f32);
+                    let (a, b) = (dry.texels[y0 * w + x], dry.texels[(y0 + 1) * w + x]);
+                    let up: [f32; 4] = std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t);
+                    (lum(&[up[0] + (1.0 - up[3]) * s[0], up[1] + (1.0 - up[3]) * s[1], up[2] + (1.0 - up[3]) * s[2], 1.0]), up[3])
+                };
+                let (mirrored, solid) = ys.iter().map(|&y| seen(y)).fold((0f32, 1f32), |(m, a), (l, c)| (m.max(l), a.min(c)));
+                let i = y * w + x;
+                let ground = 0.35 * (1.0 - fr) * lum(&dry.texels[i]) + 0.5 * fr * sil;
+                let e = lum(&wet.texels[i]) - ground - fr * mirrored;
+                if e > worst { (worst, at) = (e, (x, y)); }
+                if day && solid > 0.9 { got += (lum(&wet.texels[i]) - ground) as f64; want += (fr * seen(yf(el)).0) as f64; n += 1; }
+            }
+        }
+        let (x, y) = at;
+        println!("{name}: the worst texel {worst:.2e} over what it mirrors (x {x}, row {y}: wet {:?}, dry {:?})", wet.texels[y * w + x], dry.texels[y * w + x]);
+        if day { println!("{name}: over solid ground {n} texels mirror {:.3} of it", got / want.max(1e-9)); }
+        out.push((name, worst, at, day, got, want, n));
+    }
+    for (name, worst, at, day, got, want, n) in out {
+        assert!(worst <= WET_MIRROR_EPS, "{name}: the wet ground shows {worst} more than stands above it (x {}, row {})", at.0, at.1);
+        if day { assert!(n > 500 && got >= WET_DAY_SHARE as f64 * want, "{name}: the wet ground mirrors {got} of {want} ({n} texels)"); }
+    }
 }

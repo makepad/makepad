@@ -87,6 +87,17 @@ fn line_range(i: &Instance) -> ([f64; 2], f64, f64, f64, f64) {
     (t, sf, if sf > s0 && sf < s1 { p } else { dist(s0).min(dist(s1)) }, dist(s0).max(dist(s1)), p)
 }
 
+/// Whether the reflection run sees instance `i` from the mirrored eye (the eye as far under the water as it is over it):
+/// the props layer (slot 2) as the sea and the lakes mirror it, standing on the water. Under a wet light
+/// (`SkyLight::wet`) a prop on land is seen from the eye itself: the wet ground lies in front of the near rise, behind
+/// which the props on land stand, and mirrors them at the mirrored angle with the rise and the treeline (`draw_scene`).
+fn mirrored_eye(sc: &SceneCtx, i: &Instance) -> bool {
+    if !sc.mirror || i.slot != 2 { return false; }
+    // the land share where the prop stands (a plane's bearing, a line's middle); from 0.35 up no sea (`water_at`)
+    let u = if i.line { let m = 0.5 * i.len; fract((i.o[1] + m * i.ang.sin()).atan2(i.o[0] + m * i.ang.cos()) / TAU) } else { i.uc };
+    !(sc.light.wet > 0.0) || sc.z.land(u) < 0.35
+}
+
 /// The pass rects of instance i's draw in window `win`: its azimuth extent (the page's bucket extent) and its height band
 /// from row ymin down; a rect per side of a line's nearest point, and per turn where it wraps round the strip. Its top,
 /// half-width and glow are in size units (`kit`): Size m each.
@@ -97,7 +108,7 @@ fn place(sc: &SceneCtx, i: &Instance, win: [f64; 2], ymin: f64, mut out: impl Fn
     // the scenery's azimuth u as the raw view sees it, and the off-centre camera's scale there
     let raw = |u: f64| if warp { ((u * TAU).sin() - oc[1]).atan2((u * TAU).cos() - oc[0]) / TAU } else { u };
     let scale = |u: f64| { let cd = oc[0] * (u * TAU).cos() + oc[1] * (u * TAU).sin(); -cd + (cd * cd - oc[0] * oc[0] - oc[1] * oc[1] + 1.0).max(1e-4).sqrt() };
-    let (eye, base) = ((if sc.mirror && i.slot == 2 { -EYE } else { EYE }) * p[P::Size], if i.line { 0.0 } else { i.base + EYE * p[P::Size] / i.d });
+    let (eye, base) = ((if mirrored_eye(sc, i) { -EYE } else { EYE }) * p[P::Size], if i.line { 0.0 } else { i.base + EYE * p[P::Size] / i.d });
     let mut piece = |ua: f64, ub: f64, d0: f64, d1: f64| {
         let (mut a, b) = (raw(ua), raw(ub));
         let mut w = fract(b - a);
@@ -199,7 +210,9 @@ impl Props {
         dp.draw_vars.set_uniform(cx, live_id!(parts_geom), &[TW as f32, *rows as f32, if sc.city.is_some() { 1.0 } else { 0.0 }, if pl { 1.0 } else { 0.0 }]);
         for it in &self.items[r] {
             let i = &self.set.inst[it.i];
-            let fl = (i.slot as u32 + 4 * i.view as u32 + 8 * i.hide_c as u32 + 16 * i.line as u32 + 32 * i.hide_m as u32) as f32;
+            // the shader takes the mirrored eye for slot 2 in the reflection run: a prop seen from the eye itself goes as slot 0
+            let slot = if sc.mirror && i.slot == 2 && !mirrored_eye(sc, i) { 0 } else { i.slot };
+            let fl = (slot as u32 + 4 * i.view as u32 + 8 * i.hide_c as u32 + 16 * i.line as u32 + 32 * i.hide_m as u32) as f32;
             (dp.h0, dp.h2) = if i.line { (vec4(0.0, i.smar as f32, 0.0, fl), vec4(i.o[0] as f32, i.o[1] as f32, i.ang as f32, i.len as f32)) }
                 else { (vec4(i.uc as f32, i.d as f32, (i.base + EYE * k / i.d) as f32, fl), vec4((i.hw * k) as f32, 0.0, 0.0, 0.0)) };
             (dp.h1, dp.h3) = (vec4((3 * i.p0) as f32, i.np as f32, (i.top * k) as f32, i.td as f32), vec4(it.win[0] as f32, it.win[1] as f32, (i.seed & 8191) as f32, 0.0));
