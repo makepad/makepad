@@ -249,6 +249,8 @@ workspace.members = [
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     "libs/relax/compiler/rwbench",
+    # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
+    "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     "widgets/feedback",
     # === tests ===

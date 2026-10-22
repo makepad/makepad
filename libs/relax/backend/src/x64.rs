@@ -2659,9 +2659,16 @@ impl<'a> Gen<'a> {
                     }
                 };
                 let cc = icond.unwrap();
+                // a target laid out at or before this block: a loop's back edge (taken while it runs)
+                let back = |s: &Self, b: u32| s.block_pos.get(s.thru(b) as usize).map_or(false, |p| *p != usize::MAX);
                 if self.thru(*tt) == self.thru(next) {
                     // fall into the true block: branch on the inverted condition
                     self.jcc_to(cc ^ 1, *ff);
+                } else if self.thru(*ff) != self.thru(next) && back(self, *ff) && (!back(self, *tt) || (self.thru(*ff) == bi as u32 && self.thru(*tt) != bi as u32)) {
+                    // neither falls through and the false edge loops: the conditional jump takes the
+                    // back edge (one taken branch per iteration instead of a not-taken jcc + jmp)
+                    self.jcc_to(cc ^ 1, *ff);
+                    self.jump_to(*tt, bi);
                 } else {
                     self.jcc_to(cc, *tt);
                     self.jump_to(*ff, bi);

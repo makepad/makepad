@@ -297,26 +297,62 @@ impl<T> Vec<T> {
         self.retain_mut(|x| f(x));
     }
 
+    /// Port of real alloc's `Vec::retain_mut` (library/alloc/src/vec/mod.rs): a first loop that only
+    /// reads until the first removed element, then the compacting loop; a panic guard that, if the
+    /// predicate or a drop panics, shifts the unchecked tail over the holes and sets the length
+    /// (the elements not yet visited stay in the Vec, as in real std).
     pub fn retain_mut<F: FnMut(&mut T) -> bool>(&mut self, f: F) {
         let mut f = f;
-        let len = self.len;
-        // elements are dropped in order, survivors moved down (same observable order as core)
-        self.len = 0;
-        let mut deleted = 0;
-        let mut i = 0;
-        while i < len {
-            unsafe {
-                let cur = im::ptr_add_mut(self.ptr.as_ptr(), i);
-                if !f(&mut *cur) {
-                    deleted += 1;
-                    im::drop_in_place(cur);
-                } else if deleted > 0 {
-                    im::copy_nonoverlapping(cur as *const T, im::ptr_add_mut(self.ptr.as_ptr(), i - deleted), 1);
+        let original_len = self.len;
+        if original_len == 0 {
+            return;
+        }
+        struct PanicGuard<'a, T> {
+            v: &'a mut Vec<T>,
+            read: usize,
+            write: usize,
+            original_len: usize,
+        }
+        impl<T> Drop for PanicGuard<'_, T> {
+            #[cold]
+            fn drop(&mut self) {
+                let remaining = self.original_len - self.read;
+                unsafe {
+                    im::copy(im::ptr_add(self.v.ptr.as_ptr() as *const T, self.read), im::ptr_add_mut(self.v.ptr.as_ptr(), self.write), remaining);
+                    self.v.set_len(self.write + remaining);
                 }
             }
-            i += 1;
         }
-        self.len = len - deleted;
+        let mut read = 0;
+        loop {
+            // read < original_len
+            let cur = unsafe { &mut *im::ptr_add_mut(self.ptr.as_ptr(), read) };
+            if !f(cur) {
+                break;
+            }
+            read += 1;
+            if read == original_len {
+                // every element kept
+                return;
+            }
+        }
+        // at least one element goes; `read` advances before the drop (a panicking drop is not
+        // dropped twice)
+        let mut g = PanicGuard { v: self, read: read + 1, write: read, original_len };
+        unsafe { im::drop_in_place(im::ptr_add_mut(g.v.ptr.as_ptr(), read)) };
+        while g.read < g.original_len {
+            let cur = unsafe { im::ptr_add_mut(g.v.ptr.as_ptr(), g.read) };
+            if !f(unsafe { &mut *cur }) {
+                g.read += 1;
+                unsafe { im::drop_in_place(cur) };
+            } else {
+                unsafe { im::copy_nonoverlapping(cur as *const T, im::ptr_add_mut(g.v.ptr.as_ptr(), g.write), 1) };
+                g.write += 1;
+                g.read += 1;
+            }
+        }
+        unsafe { g.v.set_len(g.write) };
+        crate::mem::forget(g);
     }
 
     pub fn dedup_by_key<K: PartialEq, F: FnMut(&mut T) -> K>(&mut self, key: F) {

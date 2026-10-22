@@ -551,6 +551,17 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                         wops.push(WOp::Int(o, x, c));
                         sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                     }
+                    // 32-bit shifts by a constant below 32: the lane shift (immediate forms)
+                    Inst::IBinI(op @ (IOp::Shl | IOp::Shr), it, d, a, k) if store.is_none() && kind == Some(Lane::I32) && it.bits == 32 && (1..32).contains(&k) => {
+                        let x = operand!(a, Lane::I32);
+                        let o = match (op, it.signed) {
+                            (IOp::Shl, _) => VX::ShlI(VW::S, k as u8),
+                            (_, false) => VX::ShrUI(VW::S, k as u8),
+                            _ => VX::ShrSI(VW::S, k as u8),
+                        };
+                        wops.push(WOp::Un(o, x));
+                        sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
+                    }
                     Inst::FBin(op, false, d, a, b2) if store.is_none() && kind == Some(Lane::F32) => {
                         let o = match op { FOp::Add => VX::FAdd(VW::S, NanBits::Host), FOp::Sub => VX::FSub(VW::S, NanBits::Host), FOp::Mul => VX::FMul(VW::S, NanBits::Host), FOp::Div => VX::FDiv(VW::S, NanBits::Host), FOp::MinLt => VX::FMinLt(VW::S), FOp::MaxGt => VX::FMaxGt(VW::S), _ => continue 'candidate };
                         let (x, y) = (operand!(a, Lane::F32), operand!(b2, Lane::F32));

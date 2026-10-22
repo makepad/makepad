@@ -9592,6 +9592,12 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
             relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
         }
     }
+    // a copy of a stepped pointer's previous value (partition's gap, insertion's hole) read as
+    // the pointer minus its step: accesses through both share one base (load forwarding)
+    if cfg.fold && relax_codegen::version::prev_iv_copies(options, func) {
+        verify_pass(func, "prev_iv_copies");
+        relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
+    }
     // iterator steps: the element pointer's accesses read the advanced cursor, one register
     if cfg.fold {
         relax_codegen::opt::fold_post_increments(func);
@@ -9602,6 +9608,17 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     }
     // compares value ranges decide (bounds checks of masked / branch-limited indices)
     if cfg.fold && relax_codegen::ranges::fold_ranges(options, func) {
+        relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
+    }
+    // bounds checks the counted loop's range implies once a guard in front of it holds: a
+    // check-free clone (rotation, unrolling, vectorisation take it), the original as fallback
+    if cfg.fold && relax_codegen::version::version_bounds_loops(options, func) {
+        verify_pass(func, "version_bounds_loops");
+        relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
+    }
+    // a branch on a loop-invariant condition: one small loop per outcome, chosen once in front
+    if cfg.fold && relax_codegen::version::unswitch_loops(options, func) {
+        verify_pass(func, "unswitch_loops");
         relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
     }
     // Run after both inlining rounds and before small slots share storage:
@@ -9657,6 +9674,11 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         }
         // reads of a temporary a variable was copied from read the variable: one register
         relax_codegen::opt::reuse_copied_variables(options, func);
+        // copies the late folds left unread (an unrolled pointer's per-copy values once address
+        // modes read the base: `lea rcx,[rdi+1]; mov r8,rcx` before r8 is loaded over)
+        if !relax_backend::stats::opt_off(options, "-latedce") {
+            relax_backend::passes::live_dce(func);
+        }
     }
     if let Some(stats) = inline_stats { stats.report(name); }
     inlined
@@ -12425,6 +12447,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             );
         }
         if let Some(base) = dump_base(&name) {
+            // MAKEPAD_RUN_DUMP_EACH=1: one set of files per O3 build, named by its code size too
+            // (the instances of a generic fn share a name; the perf map's sizes tell them apart)
+            static EACH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let base = if *EACH.get_or_init(|| std::env::var("MAKEPAD_RUN_DUMP_EACH").is_ok()) { format!("{}_{}", base, c.text_len) } else { base };
             let _ = std::fs::write(format!("{}.t1.bin", base), &c.code[..c.text_len as usize]);
             let _ = std::fs::write(format!("{}.t1.frame", base), format!("frame {} slot-area {} of {}\n", c.frame_size, relax_backend::frame::slot_layout(&func, 0, true).1, slot_bytes(&func)));
             let _ = std::fs::write(format!("{}.t1.rir", base), func.dump());
