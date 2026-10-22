@@ -21,6 +21,7 @@ pub mod regalloc;
 pub mod rir;
 pub mod stats;
 pub mod switch;
+pub mod tail;
 pub mod wasm;
 pub mod x64;
 

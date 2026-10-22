@@ -868,6 +868,11 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
             f.sret_callees.push(*c);
         }
     }
+    for c in &callee.nocapture {
+        if !f.nocapture.contains(c) {
+            f.nocapture.push(c.clone());
+        }
+    }
     // split the block after the call
     let blk = &mut f.blocks[bi];
     let tail = blk.insts.split_off(ii + 1);
@@ -1167,6 +1172,59 @@ pub fn param_nocapture(f: &Func, k: usize, sub: &dyn Fn(&Callee, usize) -> bool)
         }
     }
     true
+}
+
+/// How `f` uses the pointer it gets as parameter `k`, as LLVM's capture tracking with `returned`:
+/// None when it may keep a copy (a derived value stored to memory, used as an indirect callee, or
+/// passed to a call `sub` cannot vouch for); Some(r) when it keeps none, `r` when a value derived
+/// from it may be returned. `sub(callee, arg)` answers the same for the calls it is passed to: a
+/// call that may return it gives a derived result. Loads, stores and copies through it are fine.
+pub fn param_escape(f: &Func, k: usize, sub: &dyn Fn(&Callee, usize) -> Option<bool>) -> Option<bool> {
+    let &p = f.params.get(k)?;
+    let mut t = vec![false; f.vregs.len()];
+    t[p.0 as usize] = true;
+    let mut returned = false;
+    for _ in 0..16 {
+        let mut more = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let from = match i {
+                    Inst::Mov(_, x) | Inst::IBinI(_, _, _, x, _) | Inst::Conv(_, _, x) => t[x.0 as usize],
+                    Inst::IBin(_, _, _, x, y) | Inst::Sel(_, _, x, y) => t[x.0 as usize] || t[y.0 as usize],
+                    Inst::Store(_, _, _, v) | Inst::StoreX(_, _, _, _, _, v) | Inst::VStore(_, _, v) | Inst::AtomicStore(_, _, _, v) | Inst::AtomicRmw(_, _, _, _, _, v) if t[v.0 as usize] => return None,
+                    Inst::AtomicCas(_, _, _, _, _, e, n) if t[e.0 as usize] || t[n.0 as usize] => return None,
+                    Inst::Call(c, args, _) => {
+                        if matches!(c, Callee::Indirect(v) | Callee::CIndirect(v, _) if t[v.0 as usize]) || matches!(c, Callee::Asm(_)) && args.iter().any(|a| t[a.0 as usize]) {
+                            return None;
+                        }
+                        let mut r = false;
+                        for (j, a) in args.iter().enumerate() {
+                            if t[a.0 as usize] {
+                                r |= sub(c, j)?;
+                            }
+                        }
+                        r
+                    }
+                    _ => false,
+                };
+                if from {
+                    i.defs(|d| {
+                        if !t[d.0 as usize] {
+                            t[d.0 as usize] = true;
+                            more = true;
+                        }
+                    });
+                }
+            }
+            if let Term::Ret(vals) = &b.term {
+                returned |= vals.iter().any(|v| t[v.0 as usize]);
+            }
+        }
+        if !more {
+            return Some(returned);
+        }
+    }
+    None
 }
 
 /// Keep addressable 16-byte SIMD values in vector registers, including the
@@ -2247,6 +2305,101 @@ pub fn forward_slot_copies(f: &mut Func) -> bool {
             }
         }
         any = true;
+    }
+    any
+}
+
+/// Copies of a value the same block just stored into a temporary: `Copy(d, t, n)` out of a
+/// non-escaping slot whose copied bytes the stores in front of it (same block) cover exactly
+/// becomes those stores' values stored at `d` (a value built in a temporary and moved into
+/// place: `[SimplexVertex::default(); 4]`, `vs[i] = Vertex { .. }`, a struct literal assigned
+/// to a field). The bytes are no longer read back through memory -- each 16-byte piece of the
+/// copy, read behind the narrower stores that just wrote it, failed store forwarding -- and the
+/// temporary's stores are left for dead_slot_stores. At most 16 stores per copy; a store
+/// reaching outside the copied bytes, an indexed or unknown write of the temporary, a value
+/// redefined before the copy, or a byte not stored in the block keeps the copy.
+pub fn stores_for_copies(f: &mut Func) -> bool {
+    if f.slots.is_empty() {
+        return false;
+    }
+    let SlotScan { vs, esc, .. } = slot_scan(f);
+    const NONE: u32 = u32::MAX;
+    const MAX_STORES: usize = 16;
+    let sl = |v: VReg| vs[v.0 as usize].0;
+    let mut any = false;
+    for bi in 0..f.blocks.len() {
+        let mut ii = 0;
+        while ii < f.blocks[bi].insts.len() {
+            let Inst::Copy(d, t, n) = f.blocks[bi].insts[ii] else { ii += 1; continue };
+            let ts = sl(t);
+            if ts == NONE || esc[ts as usize] || sl(d) == ts || n == 0 || n > 4096 {
+                ii += 1;
+                continue;
+            }
+            let (lo, hi) = (vs[t.0 as usize].1, vs[t.0 as usize].1 + n as i64);
+            // backwards from the copy: the latest store of every copied byte
+            let mut covered = vec![false; n as usize];
+            let mut left = n as usize;
+            let mut taken: Vec<(i64, Inst)> = Vec::new();
+            let mut defs: Vec<VReg> = Vec::new();
+            let mut ok = false;
+            for j in (0..ii).rev() {
+                let i = &f.blocks[bi].insts[j];
+                let st = match *i {
+                    Inst::Store(m, base, off, v) if sl(base) == ts => Some((vs[base.0 as usize].1 + off as i64, mem_size(m) as i64, v)),
+                    Inst::VStore(base, off, v) if sl(base) == ts => Some((vs[base.0 as usize].1 + off as i64, if f.vregs[v.0 as usize] == Cls::V256 { 32 } else { 16 }, v)),
+                    Inst::StoreX(_, base, ..) | Inst::VStoreX(base, ..) if sl(base) == ts => break,
+                    Inst::Copy(d2, _, _) if sl(d2) == ts => break,
+                    _ => None,
+                };
+                if let Some((a, sz, v)) = st {
+                    let b = a + sz;
+                    if b <= lo || a >= hi {
+                        // outside the copied bytes
+                    } else if a < lo || b > hi {
+                        break;
+                    } else {
+                        let r = (a - lo) as usize..(b - lo) as usize;
+                        let fresh = covered[r.clone()].iter().filter(|c| !**c).count();
+                        if fresh == r.len() {
+                            if defs.contains(&v) || taken.len() == MAX_STORES {
+                                break;
+                            }
+                            let rel = (a - lo) as i32;
+                            let ni = match *i {
+                                Inst::Store(m, ..) => Inst::Store(m, d, rel, v),
+                                _ => Inst::VStore(d, rel, v),
+                            };
+                            taken.push((a, ni));
+                            covered[r].iter_mut().for_each(|c| *c = true);
+                            left -= fresh;
+                            if left == 0 {
+                                ok = true;
+                                break;
+                            }
+                        } else if fresh != 0 {
+                            // partly overwritten by a later store
+                            break;
+                        }
+                    }
+                }
+                for_defs(i, |x| defs.push(x));
+            }
+            if !ok {
+                ii += 1;
+                continue;
+            }
+            taken.sort_by_key(|x| x.0);
+            let k = taken.len();
+            let pos = f.blocks[bi].pos.get(ii).copied();
+            let blk = &mut f.blocks[bi];
+            blk.insts.splice(ii..ii + 1, taken.into_iter().map(|x| x.1));
+            if let Some(p) = pos {
+                blk.pos.splice(ii..ii + 1, std::iter::repeat(p).take(k));
+            }
+            ii += k;
+            any = true;
+        }
     }
     any
 }
@@ -3503,7 +3656,7 @@ fn slot_derivation(f: &Func) -> Option<(Vec<u32>, Vec<bool>)> {
             for i in &b.insts {
                 let src = match i {
                     Inst::SlotAddr(_, s) => *s,
-                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => NONE,
+                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::VConst(..) => NONE,
                     // stores, copies: no result (their operands are not joined)
                     _ => {
                         let mut has_def = false;
@@ -6815,6 +6968,261 @@ pub fn dead_slot_stores(f: &mut Func) -> bool {
         }
     }
     true
+}
+
+/// Slot coalescing along whole copies (O3): `Copy(C <- B)` of one slot's bytes into an equal slot
+/// joins B and C into one slot when they do not interfere -- at every write of B the written bytes of
+/// C are dead, and at every write of C those of B are, by backward byte liveness over the CFG (the
+/// copy itself writes C with B's bytes and is exempt). The copy then vanishes. LLVM's SROA and
+/// stack colouring reach this through SSA values; here the slots meet directly, also around
+/// loops, where the block-reachability tests of forward_slot_dests_x always see an access
+/// "after" the copy. pulldown-cmark's parse loop moved each 80-byte `Item` through three slots
+/// (call result -> peek slot -> current slot -> match scrutinee) on every item.
+/// A slot handed to calls only as the result buffer of an sret callee counts as fully written there
+/// (the callee writes the value; bytes it leaves are padding or an inactive variant's, which Rust
+/// leaves undefined). Returns whether any copy went.
+pub fn coalesce_slot_copies(f: &mut Func) -> bool {
+    const NONE: u32 = u32::MAX;
+    let mut any = false;
+    for _round in 0..8 {
+        let ns = f.slots.len();
+        if ns < 2 {
+            return any;
+        }
+        let sc = slot_scan(f);
+        let vs = &sc.vs;
+        let sl = |v: VReg| vs[v.0 as usize].0;
+        // a result buffer written by one sret call and accessed otherwise only by loads, stores and
+        // copies: tracked, with the call as a whole write
+        let mut sret_call: Vec<Option<(usize, usize)>> = vec![None; ns];
+        for s2 in 0..ns {
+            if let Some((bi, ii)) = sc.ret_call[s2] {
+                if bi == usize::MAX {
+                    continue;
+                }
+                if let Inst::Call(Callee::Fn(id), args, _) = &f.blocks[bi].insts[ii] {
+                    let ok = f.sret_callees.contains(id) && args.first().map_or(false, |a| vs[a.0 as usize] == (s2 as u32, 0)) && !args[1..].iter().any(|a| sl(*a) == s2 as u32);
+                    if ok {
+                        sret_call[s2] = Some((bi, ii));
+                    }
+                }
+            }
+        }
+        let tracked: Vec<bool> = (0..ns).map(|s2| f.slots[s2].size > 0 && (!sc.esc[s2] || sret_call[s2].is_some())).collect();
+        // candidate copies: whole equal-size slots, both tracked
+        let mut cands: Vec<(usize, usize, u32, u32)> = Vec::new();
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, i) in b.insts.iter().enumerate() {
+                if let Inst::Copy(d, s2, n) = *i {
+                    let (cs, bs) = (sl(d), sl(s2));
+                    if cs != NONE && bs != NONE && cs != bs && vs[d.0 as usize].1 == 0 && vs[s2.0 as usize].1 == 0 && tracked[cs as usize] && tracked[bs as usize] {
+                        let (zc, zb) = (f.slots[cs as usize].size, f.slots[bs as usize].size);
+                        if n == zc && n == zb {
+                            cands.push((bi, ii, bs, cs));
+                        }
+                    }
+                }
+            }
+        }
+        if cands.is_empty() {
+            return any;
+        }
+        // byte liveness of the tracked slots (bits of up to 256 per slot, as dead_slot_stores)
+        let mut base = vec![NONE; ns];
+        let mut gran = vec![1i64; ns];
+        let mut nbits = vec![0i64; ns];
+        let mut tot = 0usize;
+        for s2 in 0..ns {
+            if !tracked[s2] {
+                continue;
+            }
+            let size = f.slots[s2].size as i64;
+            let g = (size + 255) / 256;
+            base[s2] = tot as u32;
+            gran[s2] = g;
+            nbits[s2] = (size + g - 1) / g;
+            tot += nbits[s2] as usize;
+        }
+        let w = (tot + 63) / 64;
+        // (slot, lo, hi) read / written by an instruction; hi = i64::MAX: anywhere in the slot
+        let acc = |i: &Inst, bi: usize, ii: usize| -> (Option<(u32, i64, i64)>, Option<(u32, i64, i64)>) {
+            let at = |v: VReg| vs[v.0 as usize].1;
+            let tr = |v: VReg| sl(v) != NONE && tracked[sl(v) as usize];
+            let vw = |v: VReg| if f.vregs[v.0 as usize] == Cls::V256 { 32 } else { 16 };
+            match *i {
+                Inst::Load(m, _, b, o) if tr(b) => (Some((sl(b), at(b) + o as i64, at(b) + o as i64 + mem_size(m) as i64)), None),
+                Inst::VLoad(d, b, o) if tr(b) => (Some((sl(b), at(b) + o as i64, at(b) + o as i64 + vw(d))), None),
+                Inst::LoadX(_, _, b, ..) | Inst::VLoadX(_, b, ..) if tr(b) => (Some((sl(b), 0, i64::MAX)), None),
+                Inst::Store(m, b, o, _) if tr(b) => (None, Some((sl(b), at(b) + o as i64, at(b) + o as i64 + mem_size(m) as i64))),
+                Inst::VStore(b, o, v) if tr(b) => (None, Some((sl(b), at(b) + o as i64, at(b) + o as i64 + vw(v)))),
+                Inst::StoreX(_, b, ..) | Inst::VStoreX(b, ..) if tr(b) => (None, Some((sl(b), 0, i64::MAX))),
+                Inst::Copy(d, s2, n) => (
+                    if tr(s2) { Some((sl(s2), at(s2), at(s2) + n as i64)) } else { None },
+                    if tr(d) { Some((sl(d), at(d), at(d) + n as i64)) } else { None },
+                ),
+                Inst::Call(..) => {
+                    let mut wr = None;
+                    for s2 in 0..ns {
+                        if sret_call[s2] == Some((bi, ii)) {
+                            wr = Some((s2 as u32, 0, f.slots[s2].size as i64));
+                        }
+                    }
+                    (None, wr)
+                }
+                _ => (None, None),
+            }
+        };
+        // a byte range as bits: (overlapping, fully covered); None: unknown offset (whole slot)
+        let bits = |s2: u32, lo: i64, hi: i64| -> Option<((usize, usize), (usize, usize))> {
+            let s2 = s2 as usize;
+            let (b0, g, n) = (base[s2] as i64, gran[s2], nbits[s2]);
+            if hi == i64::MAX || lo < 0 || hi > f.slots[s2].size as i64 || lo >= hi {
+                return None;
+            }
+            let over = ((b0 + lo / g) as usize, (b0 + (hi + g - 1) / g).min(b0 + n) as usize);
+            let full_hi = if hi == f.slots[s2].size as i64 { n } else { hi / g };
+            let cov = ((b0 + (lo + g - 1) / g) as usize, (b0 + full_hi) as usize);
+            Some((over, if cov.0 < cov.1 { cov } else { (0, 0) }))
+        };
+        let whole = |s2: u32| (base[s2 as usize] as usize, (base[s2 as usize] as i64 + nbits[s2 as usize]) as usize);
+        fn setb(s: &mut [u64], a: usize, b: usize) {
+            for i in a..b {
+                s[i / 64] |= 1 << (i % 64);
+            }
+        }
+        fn clrb(s: &mut [u64], a: usize, b: usize) {
+            for i in a..b {
+                s[i / 64] &= !(1 << (i % 64));
+            }
+        }
+        fn anyb(s: &[u64], a: usize, b: usize) -> bool {
+            (a..b).any(|i| s[i / 64] >> (i % 64) & 1 != 0)
+        }
+        let xfer = |live: &mut [u64], rd: Option<(u32, i64, i64)>, wr: Option<(u32, i64, i64)>| {
+            if let Some((s2, lo, hi)) = wr {
+                if let Some((_, cov)) = bits(s2, lo, hi) {
+                    clrb(live, cov.0, cov.1);
+                }
+            }
+            if let Some((s2, lo, hi)) = rd {
+                match bits(s2, lo, hi) {
+                    Some((over, _)) => setb(live, over.0, over.1),
+                    None => {
+                        let (x, y) = whole(s2);
+                        setb(live, x, y);
+                    }
+                }
+            }
+        };
+        let nb = f.blocks.len();
+        let reach = reachable(f);
+        let mut order = relax_backend::frame::block_rpo(f);
+        order.reverse();
+        let mut live_in = vec![0u64; nb * w];
+        let mut cur = vec![0u64; w];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &b in &order {
+                let bi = b as usize;
+                if !reach[bi] {
+                    continue;
+                }
+                cur.iter_mut().for_each(|x| *x = 0);
+                for t in f.blocks[bi].term.succs() {
+                    for j in 0..w {
+                        cur[j] |= live_in[t as usize * w + j];
+                    }
+                }
+                for (ii, i) in f.blocks[bi].insts.iter().enumerate().rev() {
+                    let (rd, wr) = acc(i, bi, ii);
+                    xfer(&mut cur, rd, wr);
+                }
+                if live_in[bi * w..bi * w + w] != cur[..] {
+                    live_in[bi * w..bi * w + w].copy_from_slice(&cur);
+                    changed = true;
+                }
+            }
+        }
+        // per candidate: interference found
+        let mut bad = vec![false; cands.len()];
+        // slot -> candidates it is in
+        let mut of_slot: Vec<Vec<usize>> = vec![Vec::new(); ns];
+        for (k, &(_, _, bs, cs)) in cands.iter().enumerate() {
+            of_slot[bs as usize].push(k);
+            of_slot[cs as usize].push(k);
+        }
+        for bi in 0..nb {
+            if !reach[bi] {
+                continue;
+            }
+            cur.iter_mut().for_each(|x| *x = 0);
+            for t in f.blocks[bi].term.succs() {
+                for j in 0..w {
+                    cur[j] |= live_in[t as usize * w + j];
+                }
+            }
+            for ii in (0..f.blocks[bi].insts.len()).rev() {
+                let (rd, wr) = acc(&f.blocks[bi].insts[ii], bi, ii);
+                // `cur` is live after this instruction: a write of one candidate slot needs the
+                // partner's same bytes dead here
+                if let Some((s2, lo, hi)) = wr {
+                    for &k in &of_slot[s2 as usize] {
+                        let (cb, ci, bs, cs) = cands[k];
+                        if (cb, ci) == (bi, ii) || bad[k] {
+                            continue;
+                        }
+                        let other = if s2 == bs { cs } else { bs };
+                        let hit = match bits(other, lo, hi) {
+                            Some((over, _)) => anyb(&cur, over.0, over.1),
+                            None => {
+                                let (x, y) = whole(other);
+                                anyb(&cur, x, y)
+                            }
+                        };
+                        if hit {
+                            bad[k] = true;
+                        }
+                    }
+                }
+                xfer(&mut cur, rd, wr);
+            }
+        }
+        // join the first good candidate per slot pair (slots may sit in several candidates)
+        let mut used = vec![false; ns];
+        let mut to: Vec<u32> = (0..ns as u32).collect();
+        let mut dels: Vec<(usize, usize)> = Vec::new();
+        for (k, &(cb, ci, bs, cs)) in cands.iter().enumerate() {
+            if bad[k] || used[bs as usize] || used[cs as usize] {
+                continue;
+            }
+            used[bs as usize] = true;
+            used[cs as usize] = true;
+            to[bs as usize] = cs;
+            let al = f.slots[bs as usize].align.max(f.slots[cs as usize].align);
+            f.slots[cs as usize].align = al;
+            dels.push((cb, ci));
+        }
+        if dels.is_empty() {
+            return any;
+        }
+        dels.sort_unstable_by(|x, y| y.cmp(x));
+        for (cb, ci) in dels {
+            f.blocks[cb].insts.remove(ci);
+            if ci < f.blocks[cb].pos.len() {
+                f.blocks[cb].pos.remove(ci);
+            }
+        }
+        for b in f.blocks.iter_mut() {
+            for i in b.insts.iter_mut() {
+                if let Inst::SlotAddr(_, s2) = i {
+                    *s2 = to[*s2 as usize];
+                }
+            }
+        }
+        any = true;
+    }
+    any
 }
 
 #[cfg(test)]

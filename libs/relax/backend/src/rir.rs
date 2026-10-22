@@ -884,6 +884,10 @@ pub enum Inst {
     Xgetbv(VReg, VReg),
     /// d = address of this thread's copy of the thread-local block at the offset a symbol holds
     TlsAddr(VReg, Sym),
+    /// d = the thread pointer + the symbol's value: a variable in the executable's static TLS
+    /// (x86-64 Linux: fs:0 + offset, rustc's local-exec model). Pure within a thread, like TlsAddr
+    /// never moved (a coroutine may resume on another thread).
+    TlsStatic(VReg, Sym),
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
@@ -1003,7 +1007,7 @@ impl Inst {
     /// counts as written.
     pub fn defs(&self, mut f: impl FnMut(VReg)) {
         match self {
-            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(*d),
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(*d),
             Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
             Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
             Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
@@ -1019,7 +1023,7 @@ impl Inst {
     /// Every vreg operand and result, in place (renaming without rebuilding the instruction).
     pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
         match self {
-            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(d),
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(d),
             Inst::Mov(d, a) | Inst::INeg(_, d, a) | Inst::INot(_, d, a) | Inst::IBit(_, d, a) | Inst::FUnary(_, _, d, a) | Inst::Conv(_, d, a) | Inst::IBinI(_, _, d, a, _) | Inst::ICmpI(_, _, d, a, _) | Inst::Load(_, d, a, _) | Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::AtomicLoad(_, _, d, a) => {
                 f(d);
                 f(a);
@@ -1161,6 +1165,11 @@ pub struct Func {
     /// slot passed there is written by the call, not read (forward_slot_dests_x builds such a
     /// result straight where it is copied to)
     pub sret_callees: Vec<u32>,
+    /// (callee, argument index, may return it) of calls whose callee keeps no copy of that
+    /// pointer argument (codegen opt::param_escape over its body): a frame address passed there
+    /// does not escape for sibling calls (tail.rs), the call's result is one when it may be
+    /// returned. Filled by the front end for bodies with tail-shaped calls.
+    pub nocapture: Vec<(Callee, u32, bool)>,
     /// Nounwind query answers consulted by this body's optimization, including false.
     /// They travel with the immutable O1 body, not with a mutable function slot.
     pub nounwind_inputs: Vec<(u32, bool)>,
@@ -1195,7 +1204,7 @@ pub struct Func {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
@@ -1319,7 +1328,7 @@ impl Func {
                     Inst::FpEnv(_, v) => regs.push(*v),
                     Inst::Cpuid(ds, a, b) => { regs.extend_from_slice(ds); regs.push(*a); regs.push(*b); }
                     Inst::Xgetbv(d, a) => { regs.push(*d); regs.push(*a); }
-                    Inst::TlsAddr(d, _) => regs.push(*d),
+                    Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) => regs.push(*d),
                     Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VStore(d, _, a) | Inst::VAny(d, a) => {
                         regs.push(*d);
                         regs.push(*a);

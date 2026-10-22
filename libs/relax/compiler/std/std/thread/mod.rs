@@ -20,7 +20,7 @@ use crate::sys;
 
 mod local;
 
-pub use self::local::{AccessError, LocalKey};
+pub use self::local::{AccessError, LazyKey, LocalKey};
 
 pub type Result<T> = core::result::Result<T, Box<dyn Any + Send + 'static>>;
 
@@ -97,10 +97,8 @@ impl fmt::Debug for Thread {
 }
 
 /// The current thread's Thread handle (set by thread_start, created lazily otherwise).
-static CURRENT: LocalKey<UnsafeCell<Option<Thread>>> = LocalKey::new(current_cell_init);
-
-fn current_cell_init() -> UnsafeCell<Option<Thread>> {
-    UnsafeCell::new(None)
+thread_local! {
+    static CURRENT: UnsafeCell<Option<Thread>> = const { UnsafeCell::new(None) };
 }
 
 fn set_current(thread: Thread) {

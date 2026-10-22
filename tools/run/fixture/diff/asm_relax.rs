@@ -117,7 +117,11 @@ fn pool_entry(k: usize) -> extern "C" fn(u64) -> u64 {
 // ---- arena.rs / tls.rs: the thread pointer
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 fn thread_ptr() -> usize { let tp: usize; unsafe { asm!("mov {}, qword ptr fs:[0]", out(reg) tp, options(pure, readonly, nostack, preserves_flags)) }; tp }
-#[cfg(target_arch = "aarch64")]
+// Darwin's user thread pointer is TPIDRRO_EL0 (the TSD base, cpu number in its low 3 bits);
+// TPIDR_EL0 there is not per-thread state a program owns. Linux / Android: TPIDR_EL0.
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+fn thread_ptr() -> usize { let tp: usize; unsafe { asm!("mrs {}, tpidrro_el0", out(reg) tp, options(nomem, nostack, preserves_flags)) }; tp & !7 }
+#[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
 fn thread_ptr() -> usize { let tp: usize; unsafe { asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags)) }; tp }
 #[cfg(not(any(all(target_arch = "x86_64", target_os = "linux"), target_arch = "aarch64")))]
 fn thread_ptr() -> usize { 1 }

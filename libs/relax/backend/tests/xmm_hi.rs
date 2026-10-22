@@ -115,6 +115,55 @@ fn many_live_vectors_use_the_upper_registers() {
     }
 }
 
+/// fn(src, dst): x[i] = load src[i]; s[i] = shuffle(x[i], K[i % 4]) + x[(i + 5) % N], every x and s
+/// live until the end; dst[i] = s[i] - x[i]: the lane shuffles (vpshufd) read and write xmm16..31 in
+/// place on an AVX-512VL host.
+#[test]
+fn many_live_shuffles() {
+    const K: [u8; 4] = [0b11_00_10_01, 0b11_01_00_10, 0b00_01_10_11, 0b01_01_01_01];
+    let mut f = Func::new("xmm_hi_shuf".into(), 0);
+    let (ps, pd) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params = vec![ps, pd];
+    f.block();
+    let mut insts = Vec::new();
+    let xs: Vec<VReg> = (0..N).map(|_| f.vreg(Cls::V128)).collect();
+    for (i, x) in xs.iter().enumerate() {
+        insts.push(Inst::VLoad(*x, ps, i as i32 * 16));
+    }
+    let mut ss = Vec::new();
+    for i in 0..N {
+        let (t, s) = (f.vreg(Cls::V128), f.vreg(Cls::V128));
+        insts.push(Inst::VX(VX::ShufS(K[i % 4]), t, xs[i], xs[i]));
+        insts.push(Inst::VX(VX::FAdd(VW::S, NanBits::Host), s, t, xs[(i + 5) % N]));
+        ss.push(s);
+    }
+    for i in 0..N {
+        let r = f.vreg(Cls::V128);
+        insts.push(Inst::VX(VX::FSub(VW::S, NanBits::Host), r, ss[i], xs[i]));
+        insts.push(Inst::VStore(pd, i as i32 * 16, r));
+    }
+    f.blocks[0].pos = vec![0; insts.len()];
+    f.blocks[0].insts = insts;
+    f.blocks[0].term = Term::Ret(vec![]);
+    f.verify().unwrap();
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+    for o in [options(), { let mut o = relax_session::Options::default(); o.no_avx = true; o.cpu = relax_backend::x64::detect_cpu(&o); o }] {
+        let c = relax_backend::x64::compile(&o, &f, &env).unwrap();
+        let code = Code::new(&c.code).unwrap();
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        let x: Vec<f32> = (0..N * 4).map(|i| 1.0 + i as f32 * 0.13 - (i % 7) as f32).collect();
+        let mut out = vec![0f32; N * 4];
+        run(x.as_ptr() as *const u8, out.as_mut_ptr() as *mut u8);
+        for i in 0..N {
+            for lane in 0..4 {
+                let src = (K[i % 4] as usize >> (2 * lane)) & 3;
+                let want = (x[i * 4 + src] + x[((i + 5) % N) * 4 + lane]) - x[i * 4 + lane];
+                assert_eq!(out[i * 4 + lane].to_bits(), want.to_bits(), "no_avx {} vector {} lane {}", o.no_avx, i, lane);
+            }
+        }
+    }
+}
+
 /// fn(src, dst) for F32 / F64: dst[i] = (fma(-x[i], x[i+1], x[i+7]) + 2.5) + x[i], every x live until
 /// the end (FUnary, FMulAdd and Fconst in the upper registers too).
 fn build_fma(f64_: bool) -> Code {

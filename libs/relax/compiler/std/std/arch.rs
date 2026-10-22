@@ -58,6 +58,9 @@ pub mod detect {
         Avx512bf16 = 39,
         Avx512fp16 = 40,
         Aesni = 41,
+        Avx512vl = 42,
+        Avx512dq = 43,
+        Avx512cd = 44,
     }
 
     /// bit 63 = initialised
@@ -169,6 +172,9 @@ pub mod detect {
             | bit(Feature::Ermsb, e.ebx & (1 << 9) != 0)
             | bit(Feature::Avx512f, avx512 && e.ebx & (1 << 16) != 0)
             | bit(Feature::Avx512bw, avx512 && e.ebx & (1 << 30) != 0)
+            | bit(Feature::Avx512vl, avx512 && e.ebx & (1 << 31) != 0)
+            | bit(Feature::Avx512dq, avx512 && e.ebx & (1 << 17) != 0)
+            | bit(Feature::Avx512cd, avx512 && e.ebx & (1 << 28) != 0)
             | bit(Feature::Avx512bf16, avx512 && e1.eax & (1 << 5) != 0)
             | bit(Feature::Avx512fp16, avx512 && e.edx & (1 << 23) != 0)
     }
@@ -271,6 +277,9 @@ macro_rules! is_x86_feature_detected {
     ("aes") => { cfg!(target_feature = "aes") || $crate::arch::detect::check($crate::arch::detect::Feature::Aesni) };
     ("avx512f") => { cfg!(target_feature = "avx512f") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512f) };
     ("avx512bw") => { cfg!(target_feature = "avx512bw") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512bw) };
+    ("avx512vl") => { cfg!(target_feature = "avx512vl") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512vl) };
+    ("avx512dq") => { cfg!(target_feature = "avx512dq") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512dq) };
+    ("avx512cd") => { cfg!(target_feature = "avx512cd") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512cd) };
     ("avx512bf16") => { cfg!(target_feature = "avx512bf16") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512bf16) };
     ("avx512fp16") => { cfg!(target_feature = "avx512fp16") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512fp16) };
     ($t:tt,) => { $crate::is_x86_feature_detected!($t) };

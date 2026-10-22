@@ -968,7 +968,7 @@ pub unsafe fn _mm_min_epi16(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline(always)]
 pub unsafe fn _mm_movemask_epi8(a: __m128i) -> i32 {
-    vx::vx_mask(a)
+    vx::vx_mask(a, 8)
 }
 
 #[inline(always)]
@@ -1247,14 +1247,10 @@ pub unsafe fn _mm_movehl_ps(a: __m128, b: __m128) -> __m128 {
     vx::vx_binary(b, a, 18, 64)
 }
 
+// the sign bit of each f32 lane, lane i at bit i (movmskps)
+#[inline(always)]
 pub unsafe fn _mm_movemask_ps(a: __m128) -> i32 {
-    let mut r = 0;
-    let mut i = 0;
-    while i < 4 {
-        r |= ((a.0[i].to_bits() >> 31) as i32) << i;
-        i += 1;
-    }
-    r
+    vx::vx_mask(a, 32)
 }
 
 #[inline(always)]

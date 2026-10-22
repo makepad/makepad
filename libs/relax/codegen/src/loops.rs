@@ -1746,6 +1746,10 @@ pub fn merge_lane_stores(options: &relax_session::Options, f: &mut Func) -> bool
                         out.push(l);
                         pos.push(pq);
                     }
+                    // the splat already holds lane 0's value in every lane (a zeroed vector)
+                    if vs[j] == vs[0] {
+                        continue;
+                    }
                     let t2 = f.vreg(Cls::V128);
                     out.push(Inst::VInsert(t2, t, j as u8, vs[j]));
                     pos.push(p);
@@ -1776,7 +1780,10 @@ fn merge_stores_on(options: &relax_session::Options) -> bool {
 /// memory access between them, become `[p + off] = x` as 8, 4 or 2 bytes (little-endian: byte j
 /// of the wide store is bits 8j.. of x). Frontends split `[u8; N]` copies and byte-wise writes
 /// this way (inflate's match copy: 8 byte stores of one u64 load, whose byte temporaries also
-/// spilled). Shifts and truncations left without uses go. Returns whether anything changed.
+/// spilled). Byte stores of constants (an unrolled `[0u8; 8]` fill) become 8-, 4- and 2-byte
+/// stores of the combined constant (LLVM: memset formation / MergeConsecutiveStores): a slot
+/// filled byte-wise and read as a word is then one cell for sroa. Shifts and truncations left
+/// without uses go. Returns whether anything changed.
 pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
     if !merge_stores_on(options) {
         return false;
@@ -1795,6 +1802,20 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             _ => {}
         }
     }
+    // single-definition integer constants (stored bytes of a fill)
+    let mut kconst: Vec<Option<i64>> = vec![None; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::Iconst(d, k) = *i {
+                if ndef[d.0 as usize] == 1 {
+                    kconst[d.0 as usize] = Some(k);
+                }
+            }
+        }
+    }
+    // merged constants: one definition each, at the top of the entry block
+    let mut consts: std::collections::HashMap<i64, VReg> = std::collections::HashMap::new();
+    let mut new_consts: Vec<(VReg, i64)> = Vec::new();
     let mut changed = false;
     for bi in 0..f.blocks.len() {
         let n = f.blocks[bi].insts.len();
@@ -1830,9 +1851,32 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
         // groups: (store indices, base, start offset, x)
         let mut groups: Vec<(Vec<usize>, VReg, i32, VReg)> = Vec::new();
         let mut cur: Option<(Vec<usize>, VReg, i32, VReg)> = None;
+        // runs of constant byte stores: (store indices, base, start offset, bytes)
+        let mut cgroups: Vec<(Vec<usize>, VReg, i32, Vec<u8>)> = Vec::new();
+        let mut ccur: Option<(Vec<usize>, VReg, i32, Vec<u8>)> = None;
         for (k, i) in insts.iter().enumerate() {
             let touches = matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::VTbl(..)) || crate::opt::is_mem_effect_pub(i);
             if let Inst::Store(Mem::Int(1, _), p, off, v) = *i {
+                if let Some(c) = kconst[v.0 as usize].filter(|_| !relax_backend::stats::opt_off(options, "-cstores")) {
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    let cont = matches!(&ccur, Some((ks, bp, st, _)) if *bp == p && off == st + ks.len() as i32);
+                    if cont {
+                        let g = ccur.as_mut().unwrap();
+                        g.0.push(k);
+                        g.3.push(c as u8);
+                    } else {
+                        if let Some(g) = ccur.take() {
+                            cgroups.push(g);
+                        }
+                        ccur = Some((vec![k], p, off, vec![c as u8]));
+                    }
+                    continue;
+                }
+                if let Some(g) = ccur.take() {
+                    cgroups.push(g);
+                }
                 let (x, sh) = source(v);
                 let cont = match &cur {
                     Some((ks, bp, st, cx)) => *bp == p && *cx == x && off == st + ks.len() as i32 && sh == 8 * ks.len() as i64,
@@ -1855,6 +1899,9 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
                 if let Some(g) = cur.take() {
                     groups.push(g);
                 }
+                if let Some(g) = ccur.take() {
+                    cgroups.push(g);
+                }
             } else {
                 // the base or x redefined in between: the group ends
                 let mut redef = false;
@@ -1864,10 +1911,20 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
                 if redef {
                     groups.push(cur.take().unwrap());
                 }
+                let mut redef = false;
+                if let Some((_, bp, _, _)) = &ccur {
+                    for_defs(i, |d| redef |= d == *bp);
+                }
+                if redef {
+                    cgroups.push(ccur.take().unwrap());
+                }
             }
         }
         if let Some(g) = cur.take() {
             groups.push(g);
+        }
+        if let Some(g) = ccur.take() {
+            cgroups.push(g);
         }
         let mut remove: Vec<usize> = Vec::new();
         let mut replace: Vec<(usize, Inst)> = Vec::new();
@@ -1876,6 +1933,32 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             let last = ks[w - 1];
             replace.push((last, Inst::Store(Mem::Int(w as u8, false), p, st, x)));
             remove.extend_from_slice(&ks[..w - 1]);
+        }
+        for (ks, p, st, bytes) in cgroups {
+            let mut j = 0;
+            while ks.len() - j >= 2 {
+                let w = if ks.len() - j >= 8 { 8 } else if ks.len() - j >= 4 { 4 } else { 2 };
+                let mut val = 0u64;
+                for (b, &x) in bytes[j..j + w].iter().enumerate() {
+                    val |= (x as u64) << (8 * b);
+                }
+                // sign-extended to the register: the store writes the low w bytes
+                let val = ((val << (64 - 8 * w)) as i64) >> (64 - 8 * w);
+                let kv = match consts.get(&val) {
+                    Some(v) => *v,
+                    None => {
+                        let v = f.vreg(Cls::I);
+                        nuse.push(0);
+                        ndef.push(1);
+                        new_consts.push((v, val));
+                        consts.insert(val, v);
+                        v
+                    }
+                };
+                replace.push((ks[j + w - 1], Inst::Store(Mem::Int(w as u8, false), p, st + j as i32, kv)));
+                remove.extend_from_slice(&ks[j..j + w - 1]);
+                j += w;
+            }
         }
         if replace.is_empty() {
             continue;
@@ -1922,6 +2005,17 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             k2 += 1;
             !dead[k2 - 1]
         });
+    }
+    if !new_consts.is_empty() {
+        let b0 = &mut f.blocks[0];
+        let has_pos = b0.pos.len() == b0.insts.len();
+        let p0 = b0.pos.first().copied().unwrap_or(b0.term_pos);
+        for (k, (v, val)) in new_consts.into_iter().enumerate() {
+            b0.insts.insert(k, Inst::Iconst(v, val));
+            if has_pos {
+                b0.pos.insert(k, p0);
+            }
+        }
     }
     changed
 }

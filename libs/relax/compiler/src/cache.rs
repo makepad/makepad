@@ -353,6 +353,11 @@ fn pending_current(u: &Unit, p: &PendingRecord) -> bool {
 
 /// The slots whose RIR the code of `id` took in (`Unit::body_deps` from `id` and `extra`,
 /// transitively), without `id` itself.
+/// What code addressing a `#[thread_local]` static depends on of its place.
+fn tls_shape(pl: &crate::jit::TlsPlace) -> u8 {
+    pl.fixed as u8 | (pl.init.is_some() as u8) << 1
+}
+
 fn record_deps(u: &Unit, id: u32, extra: &[u32]) -> Vec<u32> {
     let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&id).into_iter().flatten().copied()).collect();
     let mut deps = Vec::new();
@@ -2104,6 +2109,15 @@ impl Cache {
             SymKind::Provided(n) => {
                 e.u8(9);
                 e.str(&n);
+            }
+            // a `#[thread_local]` static's offset: placed again by the linking run, which must
+            // give the code's shape (static TLS or the block, the first-access copy or not)
+            SymKind::ThreadLocal(d) => {
+                let pl = u.tls_places.get(&d).copied()?;
+                e.u8(11);
+                e.u8(tls_shape(&pl));
+                let mut cr = Vec::new();
+                self.enc_def(u, d, e, &mut cr);
             }
         }
         e.u64(s.off as u64);
@@ -6522,6 +6536,18 @@ impl Linker {
                     rw.push(u.rw_sym(sz, al, None));
                 }
                 *rw.get(ord)?
+            }
+            11 => {
+                let shape = d.u8()?;
+                let def = self.cache().dec_def(u, d)?;
+                if u.prog.def(def).kind != DefKind::Static {
+                    return None;
+                }
+                let pl = u.thread_local_place(def)?;
+                if tls_shape(&pl) != shape {
+                    return None;
+                }
+                pl.sym
             }
             // the per-domain copy of constant data object `k` (domain.rs const_copy): one copy
             // per object this run, as the cold run had one per constant

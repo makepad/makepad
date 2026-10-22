@@ -776,10 +776,6 @@ prfm pldl1keep, [x0, :lo12:sym]
     );
 }
 
-fn gen(template: &str, subs: &[&str]) -> String {
-    subs.iter().map(|s| template.replace('@', s)).collect::<Vec<_>>().join("\n")
-}
-
 fn fp_corpus() -> String {
     let mut src = String::new();
     src += r#"

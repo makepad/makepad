@@ -736,7 +736,7 @@ pub fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
                 src.clear();
                 match i {
                     Inst::SlotAddr(_, s) => src.push(*s),
-                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => continue,
+                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::VConst(..) => continue,
                     // a call's results do not point into its own memory (a result buffer, an
                     // argument copy: see below; a copy that turns out not to be one escapes)
                     Inst::Call(c, args, rets) => {

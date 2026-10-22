@@ -1,7 +1,9 @@
-//! Thread-local storage over Relax runtime keys. `thread_local! { static K: T = e; }` is lowered
-//! by Relax's frontend to `static K: LocalKey<T> = LocalKey::new(<fn returning e>);`
-//! (coord.md F-OS2). Each key lazily creates one domain-local runtime key; a thread's value lives in a
-//! heap slot whose destructor runs before the runtime deregisters its domain thread.
+//! Thread-local storage. `thread_local!` (Relax's frontend, base/thread_local_mac.rs) makes each
+//! key a `const LocalKey<T>` whose fn returns the calling thread's value, as std's expansion does:
+//! a `const` initialiser of a type without drop glue is a `#[thread_local]` static (the compiler
+//! places it at a fixed offset from the thread pointer where the platform has static TLS);
+//! every other key lazily creates one domain-local runtime key (`LazyKey`), and a thread's value
+//! lives in a heap slot whose destructor runs before the runtime deregisters its domain thread.
 
 use alloc::alloc::{handle_alloc_error, GlobalAlloc, Layout, System};
 use core::cell::{Cell, RefCell};
@@ -13,10 +15,22 @@ use core::sync::atomic::Ordering::{AcqRel, Acquire};
 
 use crate::sys;
 
+/// A thread-local's handle: the fn the expansion made for this key returns the calling thread's
+/// value (None: destroyed), as std's `LocalKey { inner }` (library/std/src/thread/local.rs). The key
+/// is a `const`, so a `with` reaches that fn directly (a constant).
 pub struct LocalKey<T: 'static> {
-    key: AtomicUsize, // runtime key + 1; 0 = not created yet
-    init: fn() -> T,
+    inner: fn() -> Option<*const T>,
 }
+
+/// The lazily created runtime key of a thread-local that needs one (lazy initialisation or
+/// drop glue): its `get` is what `LocalKey`'s fn calls. One per key (a `static` in that fn).
+pub struct LazyKey<T: 'static> {
+    key: AtomicUsize, // runtime key + 1; 0 = not created yet
+    _t: core::marker::PhantomData<*const T>,
+}
+
+// the key word is shared by all threads; the values are each thread's own
+unsafe impl<T: 'static> Sync for LazyKey<T> {}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
@@ -99,9 +113,9 @@ fn key_value(key: sys::Key) -> usize {
     sys::key_get(key) as usize
 }
 
-impl<T: 'static> LocalKey<T> {
-    pub const fn new(init: fn() -> T) -> LocalKey<T> {
-        LocalKey { key: AtomicUsize::new(0), init }
+impl<T: 'static> LazyKey<T> {
+    pub const fn new() -> LazyKey<T> {
+        LazyKey { key: AtomicUsize::new(0), _t: core::marker::PhantomData }
     }
 
     fn os_key(&self) -> sys::Key {
@@ -124,7 +138,9 @@ impl<T: 'static> LocalKey<T> {
         }
     }
 
-    fn slot(&'static self) -> Option<*const T> {
+    /// The calling thread's value, initialised by `init` on its first access; None once it is
+    /// being destroyed.
+    pub fn get(&'static self, init: fn() -> T) -> Option<*const T> {
         let key = self.os_key();
         let p = key_value(key);
         if p == DESTROYED {
@@ -133,7 +149,7 @@ impl<T: 'static> LocalKey<T> {
         if p != 0 {
             return Some(unsafe { &(*(p as *const Slot<T>)).value as *const T });
         }
-        let value = (self.init)();
+        let value = init();
         // init may have initialized this key itself (init-on-init): as std's lazy storage,
         // the outer value replaces the inner one, which is dropped after the replacement
         // (so its destructor already sees the new value).
@@ -161,6 +177,13 @@ impl<T: 'static> LocalKey<T> {
             Some(&(*slot).value as *const T)
         }
     }
+}
+
+impl<T: 'static> LocalKey<T> {
+    /// `inner` returns the calling thread's value (None: destroyed); the expansion's.
+    pub const fn new(inner: fn() -> Option<*const T>) -> LocalKey<T> {
+        LocalKey { inner }
+    }
 
     pub fn with<F: FnOnce(&T) -> R, R>(&'static self, f: F) -> R {
         match self.try_with(f) {
@@ -169,8 +192,9 @@ impl<T: 'static> LocalKey<T> {
         }
     }
 
+    #[inline]
     pub fn try_with<F: FnOnce(&T) -> R, R>(&'static self, f: F) -> Result<R, AccessError> {
-        match self.slot() {
+        match (self.inner)() {
             Some(p) => Ok(f(unsafe { &*p })),
             None => Err(AccessError),
         }

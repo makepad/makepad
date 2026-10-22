@@ -453,7 +453,7 @@ impl Session {
                 match self.unit.prog.recollect_check_crate(krate, files) {
                     Ok(defs) => {
                         self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, f)| self.unit.prog.file_crate[*f as usize] == krate && e.starts_with(p)));
-                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear();
+                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear(); self.unit.tls_places.clear();
                         self.unit.tcx.collect_check(&self.unit.prog, &defs);
                     }
                     Err(e) => { self.parse_errors.insert(String::new(), crate::diag::from_legacy(&e, "resolve")); }

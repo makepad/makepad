@@ -73,6 +73,7 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::Cpuid(ds, a, b) => Inst::Cpuid(ds.map(m), m(*a), m(*b)),
         Inst::Xgetbv(d, a) => Inst::Xgetbv(m(*d), m(*a)),
         Inst::TlsAddr(d, off) => Inst::TlsAddr(m(*d), *off),
+        Inst::TlsStatic(d, off) => Inst::TlsStatic(m(*d), *off),
         Inst::Sel(d, c, a, b) => Inst::Sel(m(*d), m(*c), m(*a), m(*b)),
         Inst::VSel(d, k, a, b) => Inst::VSel(m(*d), m(*k), m(*a), m(*b)),
         Inst::VFma(np, na, d, a, b, c) => Inst::VFma(*np, *na, m(*d), m(*a), m(*b), m(*c)),
@@ -740,6 +741,18 @@ pub fn vx_peep(f: &mut Func, ndef: &[u32]) {
                     VX::ZipLo(VW::D) => {
                         *a = low(*a);
                         *bb = low(*bb);
+                        // the low halves of two lane shuffles of one vector: one shuffle
+                        // (`_mm_shuffle_ps(a, a, m)` = pshufd a, m; cross products, dot splats)
+                        let src = |v: VReg| match def[v.0 as usize] {
+                            Some((VX::ShufS(k), x)) => (x, k),
+                            _ => (v, 0b11_10_01_00),
+                        };
+                        let ((x, k1), (y, k2)) = (src(*a), src(*bb));
+                        if x == y {
+                            *op = VX::ShufS((k1 & 0x0f) | ((k2 & 0x0f) << 4));
+                            *a = x;
+                            *bb = x;
+                        }
                     }
                     VX::Extract(w, lane) if (lane as u32 + 1) * w.bits() <= 64 => {
                         *a = low(*a);
@@ -1409,6 +1422,25 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                         }
                         other => other,
                     };
+                    // (x + k) - x -> k and x - (x + k) -> -k (wrapping 64-bit arithmetic, x one
+                    // value; LLVM InstSimplify): `data[i..i + 8]` is 8 long, so `try_into::<[u8; 8]>`
+                    // is always Ok -- the Err path, its tag store and reload and the default's fill
+                    // stayed in every BitReader::peek
+                    if ic && !opt_off(options, "-subk") {
+                        if let Inst::IBin(IOp::Sub, it, d, a, b) = new {
+                            let off = |s: VReg, x: VReg| match bin_def[s.0 as usize] {
+                                Some((op @ (IOp::Add | IOp::Sub), t, y, k, _, _)) if y == x && t.bits == 64 && single(x, &ndef) => Some(if op == IOp::Add { k } else { k.wrapping_neg() }),
+                                _ => None,
+                            };
+                            let k = if it.bits != 64 { None } else if let Some(k) = off(a, b) { Some(k) } else { off(b, a).map(|k| k.wrapping_neg()) };
+                            if let Some(k) = k {
+                                new = Inst::Iconst(d, k);
+                                if single(d, &ndef) {
+                                    kn[d.0 as usize] = Some(K::I(k));
+                                }
+                            }
+                        }
+                    }
                     // x * 1.0, 1.0 * x, x / 1.0, x - 0.0, x + -0.0, -0.0 + x: x itself (exact in
                     // IEEE arithmetic, a NaN's payload aside, which Rust leaves unspecified;
                     // LLVM's instsimplify does the same) -- `Vec4 { w: 1.0, .. }` through a matrix
@@ -2510,7 +2542,7 @@ pub fn sink_to_successor(f: &mut Func) -> bool {
         for (ii, i) in b.insts.iter().enumerate().rev() {
             uses_defs(i, &mut uses, &mut defs);
             let load = matches!(i, Inst::Load(..));
-            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::TlsAddr(..));
+            let movable = is_pure(i) && !matches!(i, Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::VGather(..) | Inst::VTbl(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..));
             if movable && !fp_env && (!load || !memory_effect) && defs.len() == 1 && ndef[defs[0].0 as usize] == 1 {
                 let s = use_block[defs[0].0 as usize];
                 if s < nb && s != bi && s != 0 && npred[s] == 1 && b.term.succs().any(|t| t as usize == s)
@@ -3668,7 +3700,10 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
             for_defs(i, |d| defs.push(d));
             let temp = defs.len() == 1 && {
                 let d = defs[0];
-                ndef[d.0 as usize] == 1 && nuse[d.0 as usize] > 0 && local_uses.iter().any(|e| e.0 == d && e.1 == nuse[d.0 as usize])
+                // temporaries this pass made for an earlier conversion (the block is now another
+                // branch's arm) are past the counts: one def, one use in their block
+                let (nd, nu) = (ndef.get(d.0 as usize).copied().unwrap_or(1), nuse.get(d.0 as usize).copied().unwrap_or(1));
+                nd == 1 && nu > 0 && local_uses.iter().any(|e| e.0 == d && e.1 == nu)
             };
             match i {
                 _ if temp && speculatable(i) && mv.is_empty() => spec.push(i.clone()),
@@ -4902,7 +4937,7 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
                     uses_defs(&b.insts[k], &mut uses, &mut defs);
                 }
             }
-            let is_load = matches!(b.insts[k], Inst::Load(..));
+            let is_load = matches!(b.insts[k], Inst::Load(..) | Inst::VLoad(..));
             ops.clear();
             ops.extend_from_slice(&uses);
             let cand = match &b.insts[k] {
@@ -5097,6 +5132,8 @@ pub fn load_key_size(k0: u64) -> i64 {
         4
     } else if mk & (2 << 16) != 0 {
         8
+    } else if mk & (4 << 16) != 0 {
+        32
     } else {
         (mk & 0xff) as i64
     }
@@ -5168,7 +5205,7 @@ pub fn gvn_pure(f: &mut Func) -> bool {
                 changed = true;
             }
             let i = &b.insts[k];
-            if matches!(i, Inst::Load(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::VConst(..) | Inst::Addr(..) | Inst::FnAddr(..)) {
+            if matches!(i, Inst::Load(..) | Inst::VLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::VConst(..) | Inst::Addr(..) | Inst::FnAddr(..)) {
                 continue;
             }
             // an operand: its constant (Iconst / VConst operands differ by value: tagged) or its vreg
@@ -5266,6 +5303,9 @@ pub fn cse_key(i: &Inst) -> Option<[u64; 3]> {
             };
             [13 | (mk << 8), v(b), *o as i64 as u64]
         }
+        // a vector load (16 or 32 bytes: load_key_size takes 32); the result class tells V128 and
+        // V256 apart where local_cse matches keys
+        Inst::VLoad(_, b, o) => [13 | ((4 << 16) << 8), v(b), *o as i64 as u64],
         Inst::Addr(_, x) => [14, x.id as u64, x.off as u64],
         Inst::FnAddr(_, x) => [15, *x as u64, 0],
         Inst::VExtract(_, a, l) => [16 | ((*l as u64) << 8), v(a), 0],
@@ -6392,7 +6432,10 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
     // check's verdict are not in `f.noalias`, so they hoist nothing.
     let mut na = if f.noalias.is_empty() || no_noalias(options) { None } else { Some(noalias_roots(f, &ndef)) };
     // a param handed to a call anywhere in the function may be kept by it (then reached later through a
-    // loaded pointer, which the roots take as not derived from the param): captured for the hoist
+    // loaded pointer, which the roots take as not derived from the param): captured for the hoist,
+    // unless the callee provably keeps no pointer it gets there (O3's param_nocapture oracle, as
+    // LLVM's `nocapture`: `f1.decode(&mut r, &self.setup.codebooks, y)` left every `self.spectra`
+    // load in decode_spectra's loops)
     if let Some((_, cap, taint)) = na.as_mut() {
         for b in &f.blocks {
             for i in &b.insts {
@@ -6401,8 +6444,14 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
                         Callee::Indirect(x) | Callee::CIndirect(x, _) => Some(*x),
                         _ => None,
                     };
-                    for a in args.iter().copied().chain(ind) {
+                    for (k, a) in args.iter().copied().enumerate() {
                         let t = taint[a.0 as usize];
+                        if t != u32::MAX && !cap.contains(&t) && !(sroa_nocapture(c, k) && !opt_off(options, "-licmnocap")) {
+                            cap.push(t);
+                        }
+                    }
+                    if let Some(x) = ind {
+                        let t = taint[x.0 as usize];
                         if t != u32::MAX && !cap.contains(&t) {
                             cap.push(t);
                         }

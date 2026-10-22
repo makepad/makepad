@@ -407,6 +407,47 @@ const BOX_STEP: u32 = u32::MAX;
 /// a move-path step into element i of a fixed-length array: (ARRAY_STEP, i)
 const ARRAY_STEP: u32 = u32::MAX - 1;
 
+/// A value the block `insts` defines from constants (SIMD selectors, `str_eq` lengths): an Iconst,
+/// copies/int casts of one, or and/or/xor/shift/add/sub with an immediate or another
+/// constant (`MASK & 0x0f` of a const generic), or a product of constants (a slice length in bytes)
+fn const_of(insts: &[Inst], upto: usize, r: VReg) -> Option<i64> {
+    for (at, i) in insts[..upto].iter().enumerate().rev() {
+        match i {
+            Inst::Iconst(d, x) if *d == r => return Some(*x),
+            Inst::Mov(d, a) | Inst::Conv(Conv::IntToInt(_), d, a) if *d == r => return const_of(insts, at, *a),
+            Inst::IBinI(op, _, d, a, imm) if *d == r => {
+                let x = const_of(insts, at, *a)?;
+                return match op {
+                    IOp::And => Some(x & imm),
+                    IOp::Or => Some(x | imm),
+                    IOp::Xor => Some(x ^ imm),
+                    IOp::Shl => Some(x.wrapping_shl(*imm as u32)),
+                    IOp::Shr => Some(((x as u64) >> (*imm as u32 & 63)) as i64),
+                    IOp::Add => Some(x.wrapping_add(*imm)),
+                    IOp::Sub => Some(x.wrapping_sub(*imm)),
+                    _ => None,
+                };
+            }
+            Inst::IBin(op, _, d, a, b) if *d == r => {
+                let (x, y) = (const_of(insts, at, *a)?, const_of(insts, at, *b)?);
+                return match op {
+                    IOp::And => Some(x & y),
+                    IOp::Or => Some(x | y),
+                    IOp::Xor => Some(x ^ y),
+                    IOp::Shl => Some(x.wrapping_shl(y as u32)),
+                    IOp::Shr => Some(((x as u64) >> (y as u32 & 63)) as i64),
+                    IOp::Add => Some(x.wrapping_add(y)),
+                    IOp::Sub => Some(x.wrapping_sub(y)),
+                    IOp::Mul => Some(x.wrapping_mul(y)),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl<'a> Lcx<'a> {
     /// `cur_fn`: the slot this body is built for (its closures' parent).
     pub fn new(u: &'a Unit, b: &'a Body, name: String, cur_fn: u32) -> Lcx<'a> {
@@ -5229,6 +5270,65 @@ impl<'a> Lcx<'a> {
         self.switch(ok);
     }
 
+    /// Byte equality of `la` bytes at `pa` and `lb` bytes at `pb` (`str` / byte-slice / byte-array
+    /// patterns and `==`), inline where it is cheap: unequal lengths are unequal without a call (most
+    /// arms of a `match s { "lit" => .. }`), a length known here of up to 16 bytes compares one or two
+    /// overlapping words of each side (the literal's words fold to immediates from read-only data), and
+    /// only equal lengths beyond that, or unknown ones, call `rt_str_eq`.
+    fn bytes_eq(&mut self, pa: VReg, la: VReg, pb: VReg, lb: VReg) -> VReg {
+        let (ka, kb) = {
+            let insts = &self.f.blocks[self.cur as usize].insts;
+            (const_of(insts, insts.len(), la), const_of(insts, insts.len(), lb))
+        };
+        let n = match (ka, kb) {
+            (Some(x), Some(y)) if x != y => return self.iconst(0),
+            (Some(x), _) | (_, Some(x)) => Some(x),
+            _ => None,
+        };
+        let res = self.f.vreg(Cls::I);
+        let same_len = match (ka, kb) {
+            (Some(_), Some(_)) => None,
+            _ => Some(self.icmp(Cond::Eq, false, la, lb)),
+        };
+        let join = self.f.block();
+        if let Some(c) = same_len {
+            self.emit(Inst::Iconst(res, 0));
+            let eq = self.f.block();
+            self.term(Term::Branch(c, eq, join));
+            self.switch(eq);
+        }
+        let r = match n {
+            Some(0) => self.iconst(1),
+            Some(n @ 1..=16) => {
+                let w: i64 = if n >= 8 { 8 } else if n >= 4 { 4 } else if n >= 2 { 2 } else { 1 };
+                let word = |s: &mut Self, off: i64| {
+                    let x = s.f.vreg(Cls::I);
+                    let y = s.f.vreg(Cls::I);
+                    s.emit(Inst::Load(Mem::Int(w as u8, false), x, pa, off as i32));
+                    s.emit(Inst::Load(Mem::Int(w as u8, false), y, pb, off as i32));
+                    s.icmp(Cond::Eq, false, x, y)
+                };
+                let e0 = word(self, 0);
+                if n > w {
+                    let e1 = word(self, n - w);
+                    self.ibin(IOp::And, false, e0, e1)
+                } else {
+                    e0
+                }
+            }
+            _ => {
+                let rt = self.u.rs.str_eq;
+                let c = self.f.vreg(Cls::I);
+                self.emit(Inst::Call(Callee::Host(rt), vec![pa, la, pb, lb], vec![c]));
+                c
+            }
+        };
+        self.emit(Inst::Mov(res, r));
+        self.goto(join);
+        self.switch(join);
+        res
+    }
+
     fn eq_vals(&mut self, a: Val, b: Val, t: TyId) -> VReg {
         let k = self.kind(t);
         match k {
@@ -5252,10 +5352,7 @@ impl<'a> Lcx<'a> {
                 let k = self.iconst(es);
                 let la = self.ibin(IOp::Mul, false, a[1], k);
                 let lb = self.ibin(IOp::Mul, false, b[1], k);
-                let rt = self.u.rs.str_eq;
-                let c = self.f.vreg(Cls::I);
-                self.emit(Inst::Call(Callee::Host(rt), vec![a[0], la, b[0], lb], vec![c]));
-                c
+                self.bytes_eq(a[0], la, b[0], lb)
             }
             // `&[u8; N]` against a byte-string pattern (`match &tag { b"head" => .. }`): the bytes
             // (Reference patterns.md [patterns.literal]: compared by value; it compared pointers)
@@ -5264,18 +5361,12 @@ impl<'a> Lcx<'a> {
                 let a = self.to_leaves(a, t);
                 let b = self.to_leaves(b, t);
                 let n = self.iconst(size);
-                let rt = self.u.rs.str_eq;
-                let c = self.f.vreg(Cls::I);
-                self.emit(Inst::Call(Callee::Host(rt), vec![a[0], n, b[0], n], vec![c]));
-                c
+                self.bytes_eq(a[0], n, b[0], n)
             }
             TyKind::Ref(_, inner, _) if matches!(self.kind_ref(inner), TyKind::Str) => {
                 let a = self.to_leaves(a, t);
                 let b = self.to_leaves(b, t);
-                let rt = self.u.rs.str_eq;
-                let c = self.f.vreg(Cls::I);
-                self.emit(Inst::Call(Callee::Host(rt), vec![a[0], a[1], b[0], b[1]], vec![c]));
-                c
+                self.bytes_eq(a[0], a[1], b[0], b[1])
             }
             _ => {
                 let a = self.to_leaves(a, t);
@@ -6795,10 +6886,7 @@ impl<'a> Lcx<'a> {
                 if !self.u.provided.is_empty() {
                     self.check_provided_static(d, t);
                 }
-                let addr = self.static_addr(d);
-                let addr = self.u.syms.intern(crate::syms::SymKind::Static(d), addr);
-                let p = self.f.vreg(Cls::I);
-                self.emit(Inst::Addr(p, addr));
+                let p = self.static_ptr(d);
                 self.read_place(&Place::Mem(p, 0), t)
             }
             DefKind::ForeignStatic => match self.u.foreign_sym(d) {
@@ -6827,6 +6915,46 @@ impl<'a> Lcx<'a> {
             // fn items are zero-sized values; calls resolve them directly
             _ => self.unit(),
         }
+    }
+
+    /// The address of static `d`: the calling thread's copy of a `#[thread_local]` one
+    /// (Unit::thread_local_place), any other's storage in the running domain.
+    fn static_ptr(&mut self, d: DefId) -> VReg {
+        let p = self.f.vreg(Cls::I);
+        let def = self.u.prog.def(d);
+        let ast = &self.u.prog.files[def.file as usize].ast;
+        if crate::lang_items::has_attr(&self.u.prog, def.file, ast.list(ast.item(def.item).attrs), "thread_local") {
+            let Some(pl) = self.u.thread_local_place_shared(d) else {
+                self.err(self.pos, format!("could not evaluate static {} -- see its own error", self.u.prog.def_path(d)));
+                self.emit(Inst::Iconst(p, 0));
+                return p;
+            };
+            self.emit(if pl.fixed { Inst::TlsStatic(p, pl.sym) } else { Inst::TlsAddr(p, pl.sym) });
+            if let Some(size) = pl.init {
+                // the thread's first access: its copy starts as the static's value (the image in
+                // the static's own storage, rebased for the running domain), then the flag is set
+                let flag = self.f.vreg(Cls::I);
+                self.emit(Inst::Load(Mem::Int(1, false), flag, p, size as i32));
+                let init = self.f.block();
+                let done = self.f.block();
+                self.term(Term::Branch(flag, done, init));
+                self.switch(init);
+                let image = self.static_addr(d);
+                let image = self.u.syms.intern(crate::syms::SymKind::Static(d), image);
+                let src = self.f.vreg(Cls::I);
+                self.emit(Inst::Addr(src, image));
+                self.emit(Inst::Copy(p, src, size));
+                let one = self.iconst(1);
+                self.emit(Inst::Store(Mem::Int(1, false), p, size as i32, one));
+                self.goto(done);
+                self.switch(done);
+            }
+            return p;
+        }
+        let addr = self.static_addr(d);
+        let addr = self.u.syms.intern(crate::syms::SymKind::Static(d), addr);
+        self.emit(Inst::Addr(p, addr));
+        p
     }
 
     /// Static `d`'s storage. Its initializer failed (address 0, reported as its own error):
@@ -7090,10 +7218,7 @@ impl<'a> Lcx<'a> {
                     if !self.u.provided.is_empty() {
                         self.check_provided_static(d, t);
                     }
-                    let addr = self.static_addr(d);
-                    let addr = self.u.syms.intern(crate::syms::SymKind::Static(d), addr);
-                    let p = self.f.vreg(Cls::I);
-                    self.emit(Inst::Addr(p, addr));
+                    let p = self.static_ptr(d);
                     (Place::Mem(p, 0), t)
                 }
                 Some(Res::Def(d)) if self.u.prog.def(d).kind == DefKind::ForeignStatic => match self.u.foreign_sym(d) {
@@ -10327,8 +10452,8 @@ impl<'a> Lcx<'a> {
     fn vx_intrinsic(&mut self, name: &str, vals: &[(Val, TyId)], t: TyId) -> Val {
         let arity = match name {
             "vx_binary" | "vx_unary" | "vx_ternary" => 4,
-            "vx_splat" | "vx_store" | "vx_narrow" | "vx_table" => 2,
-            "vx_load" | "vx_mask" | "vx_sha1h" => 1,
+            "vx_splat" | "vx_store" | "vx_narrow" | "vx_table" | "vx_mask" => 2,
+            "vx_load" | "vx_sha1h" => 1,
             "vx_blend" | "vx_sha1rnds4" => 3,
             _ => {
                 self.err(self.pos, "unknown SIMD intrinsic".into());
@@ -10344,45 +10469,6 @@ impl<'a> Lcx<'a> {
             return self.dummy_val(t);
         }
         let scalar = |s: &mut Self, k: usize| s.to_leaves(vals[k].0.clone(), vals[k].1)[0];
-        // the selector's value when the current block defines it from constants: an Iconst,
-        // copies/int casts of one, or and/or/xor/shift/add/sub with an immediate or another
-        // constant (`MASK & 0x0f` of a const generic)
-        fn const_of(insts: &[Inst], upto: usize, r: VReg) -> Option<i64> {
-            for (at, i) in insts[..upto].iter().enumerate().rev() {
-                match i {
-                    Inst::Iconst(d, x) if *d == r => return Some(*x),
-                    Inst::Mov(d, a) | Inst::Conv(Conv::IntToInt(_), d, a) if *d == r => return const_of(insts, at, *a),
-                    Inst::IBinI(op, _, d, a, imm) if *d == r => {
-                        let x = const_of(insts, at, *a)?;
-                        return match op {
-                            IOp::And => Some(x & imm),
-                            IOp::Or => Some(x | imm),
-                            IOp::Xor => Some(x ^ imm),
-                            IOp::Shl => Some(x.wrapping_shl(*imm as u32)),
-                            IOp::Shr => Some(((x as u64) >> (*imm as u32 & 63)) as i64),
-                            IOp::Add => Some(x.wrapping_add(*imm)),
-                            IOp::Sub => Some(x.wrapping_sub(*imm)),
-                            _ => None,
-                        };
-                    }
-                    Inst::IBin(op, _, d, a, b) if *d == r => {
-                        let (x, y) = (const_of(insts, at, *a)?, const_of(insts, at, *b)?);
-                        return match op {
-                            IOp::And => Some(x & y),
-                            IOp::Or => Some(x | y),
-                            IOp::Xor => Some(x ^ y),
-                            IOp::Shl => Some(x.wrapping_shl(y as u32)),
-                            IOp::Shr => Some(((x as u64) >> (y as u32 & 63)) as i64),
-                            IOp::Add => Some(x.wrapping_add(y)),
-                            IOp::Sub => Some(x.wrapping_sub(y)),
-                            _ => None,
-                        };
-                    }
-                    _ => {}
-                }
-            }
-            None
-        }
         let constant = |s: &mut Self, k: usize| -> i64 {
             let r = scalar(s, k);
             let insts = &s.f.blocks[s.cur as usize].insts;
@@ -10500,9 +10586,19 @@ impl<'a> Lcx<'a> {
             self.emit(Inst::VX(VX::Or, indices, b, bad));
             self.emit(Inst::VX(VX::ByteShuffle, d, a, indices));
         } else if name == "vx_mask" {
+            // the top bit of each lane of the given width (pmovmskb / movmskps / movmskpd)
+            let op = match constant(self, 1) {
+                8 => VX::MoveMaskB,
+                32 => VX::MoveMask(VW::S),
+                64 => VX::MoveMask(VW::D),
+                _ => {
+                    self.err(self.pos, "invalid SIMD mask lane width".into());
+                    return self.dummy_val(t);
+                }
+            };
             let a = vector(self, 0);
             let r = self.f.vreg(Cls::I);
-            self.emit(Inst::VX(VX::MoveMaskB, r, a, a));
+            self.emit(Inst::VX(op, r, a, a));
             return Val::L(vec![r]);
         } else if name == "vx_blend" {
             let a = vector(self, 0);

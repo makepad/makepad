@@ -806,6 +806,8 @@ fn evex_direct(pp: u8, map: u8, op: u8) -> Option<bool> {
         (1, 1, 0xd4 | 0xfb) => Some(true),
         // vinsertps (EVEX.128.66.0F3A.W0 21)
         (3, 1, 0x21) => Some(false),
+        // vpshufd (EVEX.128.66.0F.W0 70 /r ib; no vvvv operand)
+        (1, 1, 0x70) => Some(false),
         _ => None,
     }
 }
@@ -947,6 +949,8 @@ struct Gen<'a> {
     frame: i32,
     /// no rbp frame at all (frameless_leaf)
     frameless: bool,
+    /// per block: the index of its sibling call (tail::sibling_calls; empty: none)
+    tail: Vec<Option<usize>>,
     text_len: u32,
     /// a single-use float constant whose use (the next FBin) reads it from the pool
     mem_const: Option<(VReg, u64)>,
@@ -1074,7 +1078,8 @@ impl<'a> Gen<'a> {
                 if let Some(ws) = self.win.get(&v.0) {
                     let p = self.cur_pos;
                     if let Some(&(_, _, r)) = ws.iter().find(|(a, z, _)| *a <= p && p <= *z) {
-                        if check_windows(options) {
+                        // (a value with dead stores home has a stale slot: not checked)
+                        if check_windows(options) && !self.al.store_skip.iter().any(|x| x.1 == v.0) {
                             // the slot stays the value's home: the register must still equal it
                             // (pushfq; cmp r, [rbp+d]; je +2; ud2; popfq -- flags kept)
                             let d = self.spill_disp(o);
@@ -1178,14 +1183,30 @@ impl<'a> Gen<'a> {
     fn def_i(&self, v: VReg, scratch: u8) -> u8 {
         match self.al.loc[v.0 as usize] {
             Loc::Reg(r) => r,
+            // a window that starts at this definition (regalloc def windows): computed into its
+            // register, which keeps the value after fin_i stores it home
+            Loc::Stack(_) => self.win.get(&v.0).and_then(|ws| ws.iter().find(|w| w.0 == self.cur_pos + 1)).map_or(scratch, |w| w.2),
             _ => scratch,
         }
     }
     fn fin_i(&mut self, v: VReg, r: u8) {
         if let Loc::Stack(o) = self.al.loc[v.0 as usize] {
+            // nobody reads this store home (Alloc::store_skip): the window's register only
+            if self.al.store_skip.contains(&(self.cur_pos, v.0)) {
+                self.def_win_copy(v, r);
+                return;
+            }
             let d = self.spill_disp(o);
             self.a.store64(RBP, d, r);
             self.last_spill = Some((d, r, self.a.pos()));
+            self.def_win_copy(v, r);
+        }
+    }
+    /// A window that starts at this definition (def windows, regions over redefining blocks)
+    /// holds the result: computed elsewhere (a scratch), it is copied there.
+    fn def_win_copy(&mut self, v: VReg, r: u8) {
+        if let Some(c) = self.win.get(&v.0).and_then(|ws| ws.iter().find(|w| w.0 == self.cur_pos + 1)).map(|w| w.2) {
+            self.a.mov_rr(c, r);
         }
     }
     /// dst = the spill slot at disp: a register move (or nothing) when the slot was stored from a
@@ -1419,6 +1440,7 @@ impl<'a> Gen<'a> {
         }
         self.frame = frame;
         self.frameless = frame == 0 && self.frameless_leaf(options, &reach);
+        self.tail = crate::tail::sibling_calls(options, self.f, &reach, crate::tail::Arch::X64);
         if !self.frameless {
             self.a.push(RBP);
             self.a.mov_rr(RBP, RSP);
@@ -1551,6 +1573,9 @@ impl<'a> Gen<'a> {
             // the flags of the ALU op that ended the block above (a jump arrives with other ones)
             self.last_spill = None;
             self.last_alu = None;
+            // window lookups of this block never see the previous block's last position (an empty
+            // block's terminator reads at its start: no window there, the slot is read)
+            self.cur_pos = self.al.block_start[bi];
             for (ii, inst) in b.insts.iter().enumerate() {
                 self.pc_map.push((self.a.pos() as u32, b.pos[ii]));
                 if self.rir_map_on {
@@ -1605,6 +1630,14 @@ impl<'a> Gen<'a> {
                             if let Inst::ICmp(cc, sg, ..) | Inst::ICmpI(cc, sg, ..) = inst {
                                 self.inst(options, inst);
                                 self.sel_flags = Some((cd, icc(*cc, *sg)));
+                                continue;
+                            }
+                            // an ordered float compare (ucomis[sd], operands swapped for Lt / Le:
+                            // `a` / `ae`, false when unordered): an argmax's index select
+                            if let Inst::FCmp(cc @ (Cond::Lt | Cond::Le | Cond::Gt | Cond::Ge), ..) = inst {
+                                let fcc = if matches!(cc, Cond::Lt | Cond::Gt) { CC_A } else { CC_AE };
+                                self.inst(options, inst);
+                                self.sel_flags = Some((cd, fcc));
                                 continue;
                             }
                         }
@@ -1663,11 +1696,33 @@ impl<'a> Gen<'a> {
                         }
                     }
                 }
+                if self.tail.get(bi) == Some(&Some(ii)) {
+                    if let Inst::Call(c, args, _) = inst {
+                        self.tail_call(options, c, args);
+                    }
+                    break;
+                }
                 self.inst(options, inst);
+            }
+            // a sibling call ended the block: its Ret is the callee's
+            if self.tail.get(bi).is_some_and(|t| t.is_some()) {
+                continue;
             }
             self.pc_map.push((self.a.pos() as u32, b.term_pos));
             if self.rir_map_on {
                 self.rir_map.push((self.a.pos() as u32, bi as u32, u32::MAX));
+            }
+            // region windows entered from here: loaded before the terminator (regalloc edge loads)
+            if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
+                let tp = self.al.block_end[bi] - 1;
+                if let Some(ls) = self.win_start.get(&tp).cloned() {
+                    for (v, r) in ls {
+                        if let Loc::Stack(o) = self.al.loc[v as usize] {
+                            let d = self.spill_disp(o);
+                            self.load_spill(r, d);
+                        }
+                    }
+                }
             }
             let fuse_inst = if fused { Some(b.insts[n - 1].clone()) } else { None };
             self.term(options, &b.term, bi, fuse_inst);
@@ -2364,6 +2419,27 @@ impl<'a> Gen<'a> {
         self.fin_i(d, rd);
     }
 
+    /// d = the thread pointer + off: `mov rd, fs:[0]` (the TCB's self pointer is the thread
+    /// pointer, x86-64 TLS ABI) then `lea rd, [rd + off]` (off a symbol: assigned per process).
+    fn tls_static(&mut self, d: VReg, off: Sym) {
+        let rd = self.def_i(d, R10);
+        // mov rd, fs:[0] (absolute disp32 through a SIB with no base and no index)
+        self.a.byte(0x64);
+        self.a.rex(true, rd, 0, 0, false);
+        self.a.b.extend_from_slice(&[0x8b, 0x04 | ((rd & 7) << 3), 0x25, 0, 0, 0, 0]);
+        // lea rd, [rd + disp32] (rsp / r12 as a base take a SIB)
+        self.a.rex(true, rd, 0, rd, false);
+        self.a.byte(0x8d);
+        self.a.byte(0x80 | ((rd & 7) << 3) | (rd & 7));
+        if rd & 7 == 4 {
+            self.a.byte(0x24);
+        }
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::Imm32, target: Reloc::Sym(off) });
+        self.fin_i(d, rd);
+    }
+
     /// The running thread's domain base (slot 0 of its thread-local block) into the frame's domain
     /// slot: the inline TLS read, the shared routine only for a thread that has no block yet.
     fn dom_base(&mut self) {
@@ -2465,6 +2541,12 @@ impl<'a> Gen<'a> {
     }
 
     fn epilogue(&mut self) {
+        self.frame_exit();
+        self.a.ret();
+    }
+
+    /// The epilogue up to its `ret`: the frame gone, callee-saved registers back.
+    fn frame_exit(&mut self) {
         self.win64_saves(false);
         if self.frame != 0 {
             self.a.lea(RSP, RBP, -self.saved);
@@ -2481,7 +2563,65 @@ impl<'a> Gen<'a> {
         if self.ymm {
             self.a.vzeroupper();
         }
-        self.a.ret();
+    }
+
+    /// A sibling call (tail::sibling_calls): the arguments into the callee's registers, this
+    /// frame gone, then a jump: the callee returns to this function's caller.
+    fn tail_call(&mut self, options: &relax_session::Options, c: &Callee, args: &[VReg]) {
+        if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
+            let r = self.use_i(options, *v, R11);
+            self.a.mov_rr(R11, r);
+        }
+        let mut moves = Vec::new();
+        let mut n_flt = 0;
+        match c {
+            Callee::CFn(_, sig) | Callee::CIndirect(_, sig) => {
+                let plan = cabi::plan(sig, sig.conv.target());
+                n_flt = plan.n_flt;
+                for (k, ap) in plan.args.iter().enumerate() {
+                    let dst = match ap {
+                        ArgPlan::Scalar(PLoc::Int(r), _) => MLoc::R(INT_ARGS[*r as usize]),
+                        ArgPlan::Scalar(PLoc::Flt(x), _) => MLoc::F(*x),
+                        _ => unreachable!("tail call with a memory argument"),
+                    };
+                    if let Some(s2) = self.mloc(args[k]) {
+                        moves.push((dst, s2));
+                    }
+                }
+            }
+            _ => {
+                let (mut ni, mut nf) = (0, 0);
+                for a in args {
+                    let dst = if self.f.vregs[a.0 as usize] == Cls::I {
+                        ni += 1;
+                        MLoc::R(INT_ARGS[ni - 1])
+                    } else {
+                        nf += 1;
+                        MLoc::F(nf as u8 - 1)
+                    };
+                    if let Some(s2) = self.mloc(*a) {
+                        moves.push((dst, s2));
+                    }
+                }
+            }
+        }
+        for (d, s2) in regalloc::seq_moves(&moves, R10, XS) {
+            self.mv(d, s2);
+        }
+        if matches!(c, Callee::CIndirect(..)) {
+            // SysV: al = vector registers used (as the call sets it)
+            self.a.mov_ri(RAX, n_flt as i64);
+        }
+        self.frame_exit();
+        match c {
+            Callee::Fn(id) | Callee::CFn(id, _) => {
+                self.a.byte(0xe9);
+                let at = self.a.pos();
+                self.a.u32(0);
+                self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::X64Branch32, target: Reloc::Call(*id) });
+            }
+            _ => self.a.jmp_r(R11),
+        }
     }
 
     /// Blocks whose code is only their `jmp`: a block (not the entry) of moves the allocator
@@ -2494,7 +2634,8 @@ impl<'a> Gen<'a> {
             let b = &self.f.blocks[bi];
             let Term::Jump(t) = b.term else { continue };
             // the block that reads the domain base is not skipped, whatever else it holds
-            if !reach[bi] || t as usize == bi || self.dom_read.get(bi) == Some(&true) {
+            // nor a block that loads a region window before its jump
+            if !reach[bi] || t as usize == bi || self.dom_read.get(bi) == Some(&true) || self.win_start.contains_key(&(self.al.block_end[bi] - 1)) {
                 continue;
             }
             let silent = b.insts.iter().enumerate().all(|(ii, i)| match *i {
@@ -2742,8 +2883,11 @@ impl<'a> Gen<'a> {
             }
             Term::Switch(x, tab) => {
                 // rax = x - min; if rax >u len - 1 { default }; jump through the table
-                let r = self.use_i(options, *x, R10);
-                self.a.mov_rr(RAX, r);
+                // a spilled value loads straight into rax
+                let r = self.use_i(options, *x, RAX);
+                if r != RAX {
+                    self.a.mov_rr(RAX, r);
+                }
                 if tab.min == 0 {
                 } else if tab.min as i32 as i64 == tab.min {
                     // sub rax, imm32
@@ -2852,6 +2996,7 @@ impl<'a> Gen<'a> {
             Inst::FMulAdd(np, na, w, d, a, b, c) => self.fma(options, *np, *na, *w, *d, *a, *b, *c),
             Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(options, i),
             Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
+            Inst::TlsStatic(d, off) => self.tls_static(*d, *off),
             Inst::FpEnv(set, v) => self.fp_env(options, *set, *v),
             Inst::Cpuid(ds, a, b) => self.cpuid(options, *ds, *a, *b),
             Inst::Xgetbv(d, a) => self.xgetbv(options, *d, *a),
@@ -2904,8 +3049,11 @@ impl<'a> Gen<'a> {
                 Cls::I => match (self.al.loc[d.0 as usize], self.uloc(*s)) {
                     // straight between a register and a spill slot
                     (Loc::Stack(o), Loc::Reg(r)) => {
-                        let disp = self.spill_disp(o);
-                        self.a.store64(RBP, disp, r);
+                        if !self.al.store_skip.contains(&(self.cur_pos, d.0)) {
+                            let disp = self.spill_disp(o);
+                            self.a.store64(RBP, disp, r);
+                        }
+                        self.def_win_copy(*d, r);
                     }
                     (Loc::Reg(r), Loc::Stack(o)) => {
                         let disp = self.spill_disp(o);
@@ -3225,13 +3373,8 @@ impl<'a> Gen<'a> {
             }
             Inst::Conv(c, d, s) => self.conv(options, *c, *d, *s),
             Inst::LoadX(m, d, base, idx, sh, off) => {
-                let ri = self.use_i(options, *idx, R10);
-                let ri = if ri == R10 {
-                    self.a.mov_rr(RAX, R10);
-                    RAX
-                } else {
-                    ri
-                };
+                // a spilled index loads straight into rax (base: r11, value: r10)
+                let ri = self.use_i(options, *idx, RAX);
                 let (rb, off) = self.base_disp(options, *base, R11, *off);
                 match m {
                     Mem::Int(n, signed) => {
@@ -3249,13 +3392,8 @@ impl<'a> Gen<'a> {
                 }
             }
             Inst::StoreX(m, base, idx, sh, off, src) => {
-                let ri = self.use_i(options, *idx, R10);
-                let ri = if ri == R10 {
-                    self.a.mov_rr(RAX, R10);
-                    RAX
-                } else {
-                    ri
-                };
+                // a spilled index loads straight into rax (base: r11, value: r10)
+                let ri = self.use_i(options, *idx, RAX);
                 let (rb, off) = self.base_disp(options, *base, R11, *off);
                 match m {
                     Mem::Int(n, _) => {
@@ -4021,11 +4159,20 @@ impl<'a> Gen<'a> {
                 self.fin_f(d, xd);
             }
             VX::ShufS(k) => {
-                let xa = self.use_f(a, XS);
-                let xd = self.def_f(d, XS);
-                self.a.sse_rr(0x66, 0x70, xd, xa, false);
-                self.a.byte(k);
-                self.fin_f(d, xd);
+                if self.avx {
+                    // vpshufd (VEX, or EVEX for xmm16..31: no trip through the scratch register)
+                    let xa = self.use_fx(a, XS);
+                    let xd = self.def_fx(d, XS);
+                    self.a.vex_rr(1, 1, false, 0x70, xd, 0, xa);
+                    self.a.byte(k);
+                    self.fin_f(d, xd);
+                } else {
+                    let xa = self.use_f(a, XS);
+                    let xd = self.def_f(d, XS);
+                    self.a.sse_rr(0x66, 0x70, xd, xa, false);
+                    self.a.byte(k);
+                    self.fin_f(d, xd);
+                }
             }
             VX::BytesShrI(k) | VX::BytesShlI(k) => {
                 let xa = self.use_f(a, XS);
@@ -4248,13 +4395,7 @@ impl<'a> Gen<'a> {
     /// The index and base registers (and displacement) of an indexed access, as LoadX takes them:
     /// a spilled index in rax (r10 is the base's scratch).
     fn index_operands(&mut self, options: &relax_session::Options, base: VReg, idx: VReg, off: i32) -> (u8, u8, i32) {
-        let ri = self.use_i(options, idx, R10);
-        let ri = if ri == R10 {
-            self.a.mov_rr(RAX, R10);
-            RAX
-        } else {
-            ri
-        };
+        let ri = self.use_i(options, idx, RAX);
         let (rb, off) = self.base_disp(options, base, R11, off);
         (ri, rb, off)
     }
@@ -5112,12 +5253,15 @@ impl<'a> Gen<'a> {
                 self.fin_i(d, rd);
             }
             Conv::IntToF(from, to64) => {
-                let rs = self.use_i(options, s, R10);
+                // a spilled value loads straight into rax (the u64 path works there)
+                let rs = self.use_i(options, s, RAX);
                 let xd = self.def_f(d, XS);
                 let pfx = if to64 { 0xf2 } else { 0xf3 };
                 if from.bits == 64 && !from.signed {
                     // u64 -> float: if negative as i64, halve with sticky bit, convert, double
-                    self.a.mov_rr(RAX, rs);
+                    if rs != RAX {
+                        self.a.mov_rr(RAX, rs);
+                    }
                     self.a.test_rr(RAX, RAX);
                     let p = self.a.jcc32(0x8); // js
                     self.a.break_dep(xd, 0xff);
@@ -5847,6 +5991,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         thru: Vec::new(),
         frame: 0,
         frameless: false,
+        tail: Vec::new(),
         text_len: 0,
         mem_const: None,
         mem_load: None,

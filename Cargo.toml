@@ -465,6 +465,17 @@ debug = "line-tables-only"
 incremental = true
 lto = "off"
 
+# host: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine that runs it.
+# Output goes to target/host/ (or target/<triple>/host/), never over target/release: release stays the
+# distributable build and the build every gate, A/B and timing series uses.
+# local/agent_state/relax-campaign/build-host.sh adds -Ctarget-cpu=native and the PGO profile.
+[profile.host]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+incremental = false
+
 [profile.small]
 inherits = "release"
 incremental = false

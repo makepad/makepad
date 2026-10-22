@@ -46,6 +46,9 @@ pub enum SymKind {
     /// an entry of a provided (host-built) crate: `shim:<key>`, `last_panic:<crate>`,
     /// `drop:<type def path>`
     Provided(String),
+    /// a `#[thread_local]` static's offset (jit.rs Unit::thread_local_place): from the thread
+    /// pointer, or in the thread-local block
+    ThreadLocal(DefId),
 }
 
 /// What the bytes of a data object hold.
@@ -910,6 +913,7 @@ pub fn describe(u: &Unit, s: Sym) -> String {
         None => format!("?{}", s.id),
         Some(SymKind::Rt(n)) => format!("rt:{}", n),
         Some(SymKind::Static(d)) => format!("static:{}", u.prog.def_path(d)),
+        Some(SymKind::ThreadLocal(d)) => format!("thread_local:{}", u.prog.def_path(d)),
         Some(SymKind::Foreign(n)) => format!("c:{}", n),
         Some(SymKind::Missing(n)) => format!("missing:{}", n),
         Some(SymKind::StaticAddr(d)) => format!("static-addr:{}", u.prog.def_path(d)),
@@ -1168,6 +1172,6 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         SymKind::Static(_) | SymKind::Rw(_) => SymClass::Domain,
         SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Missing(_) => SymClass::Near,
         SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) => SymClass::Far,
-        SymKind::Site(_) => SymClass::Imm,
+        SymKind::Site(_) | SymKind::ThreadLocal(_) => SymClass::Imm,
     }
 }

@@ -28,3 +28,7 @@ makepad-gpu-trace = { workspace = true }
 # registry packages a program needs that are neither vendored nor in $CARGO_HOME (registry_net.rs)
 relax-light-http = { workspace = true }
 relax-native-macros = { workspace = true }
+
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }

@@ -1287,7 +1287,7 @@ fn inv(c: Cond) -> Cond {
 fn tree_def(i: &Inst) -> Option<VReg> {
     match i {
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::Mov(d, _) | Inst::IBin(_, _, d, _, _) | Inst::IBinI(_, _, d, _, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) => Some(*d),
-        Inst::FBin(_, _, d, _, _) | Inst::FUnary(_, _, d, _) | Inst::FCmp(_, _, d, _, _) | Inst::Conv(_, d, _) | Inst::Load(_, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) => Some(*d),
+        Inst::FBin(_, _, d, _, _) | Inst::FUnary(_, _, d, _) | Inst::FCmp(_, _, d, _, _) | Inst::Conv(_, d, _) | Inst::Load(_, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) => Some(*d),
         Inst::Sel(d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicLoad(_, _, d, _) => Some(*d),
         Inst::VConst(d, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VInsert(d, _, _, _) | Inst::VLoad(d, _, _) | Inst::VLoadX(d, _, _, _, _) | Inst::VAny(d, _) | Inst::VSel(d, _, _, _) | Inst::VShuffle(d, _, _, _) => Some(*d),
         Inst::VX(op, d, _, _) if simd_op(*op).is_some() || matches!(op, VX::Splat(_) | VX::Extract(..) | VX::Insert(..) | VX::FromLo64) => Some(*d),
