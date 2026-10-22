@@ -78,24 +78,26 @@ script_mod! {
 
     // The march (the page's `city3`): fb0 premultiplied body colour + alpha, fb1 window / beacon light + depth (m). 1 block is
     // 70 m and 20 floors, the eye 0.09 above the street; the walk finds the next lot the ray can meet, then its hull and parts.
+    // At Size k a block is k x 70 m: the buildings (and the eye) are k times as large and as many over k a row, while the
+    // city keeps its place in metres (its distance, the camera's offset, its profile and districts) and its haze by distance.
     mod.draw.DrawSkyCity = mod.std.set_type_default() do #(DrawSkyCity::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
         alpha_blend: false
-        ct_h: uniform(1.0), ct_d: uniform(0.7), ct_w: uniform(0.3), win_d: uniform(0.45), lights: uniform(3.0), temp: uniform(3200.0)
+        ct_h: uniform(1.0), ct_d: uniform(0.7), ct_w: uniform(0.3), win_d: uniform(0.45), lights: uniform(3.0), temp: uniform(3200.0), size: uniform(1.0)
         // the page's `box1`: a box-filtered pulse on [a, b] over footprint w; wide footprints fall back to its mean
         box1: fn(f: float, a: float, b: float, w0: float) -> float {
             let w = max(w0, 0.004)
             return mix(clamp((f - a) / w + 0.5, 0.0, 1.0) * clamp((b - f) / w + 0.5, 0.0, 1.0), b - a, smoothstep(0.7, 1.6, w))
         }
         fragment: fn(){
-            let vr = self.view_raw(); let u = vr.x; let ang = vr.y; let px = vr.z; let hz = self.haze_at(u); let tau = 6.2831853; let cf = 0.05; let cey = 0.09
+            let vr = self.view_raw(); let u = vr.x; let ang = vr.y; let px = vr.z; let hz = self.haze_at(u); let tau = 6.2831853; let cf = 0.05; let sz = self.size; let cey = 0.09
             // the sun in the march's world frame (x, up, z; azimuth u along (cos, sin) of x, z), and the glass's sky
             let sw = vec3(cos(self.sun_el) * cos(self.sun_u * tau), sin(self.sun_el), cos(self.sun_el) * sin(self.sun_u * tau)); let sky10 = self.sky_at(u, 0.1745329)
-            let dd = self.city_d(); let r0 = 0.5 * dd; let r1 = 1.55 * dd; let tf = 6.0 + 44.0 * self.ct_h; let tf2 = tf - 2.0
+            let dd = self.city_d() / sz; let r0 = 0.5 * dd; let r1 = 1.55 * dd; let tf = 6.0 + 44.0 * self.ct_h; let tf2 = tf - 2.0
             var hcap = tf * cf + 0.9
             let aw = vec2(step(0.999, self.ct_w), smoothstep(0.0, 0.02, self.ct_w))
-            let hl = cos(ang); let oh = self.city_cam(); let dh = vec2(cos(u * tau), sin(u * tau)); let tan_a = sin(ang) / hl
+            let hl = cos(ang); let oh = self.city_cam() / sz; let dh = vec2(cos(u * tau), sin(u * tau)); let tan_a = sin(ang) / hl
             var ray = CityRay.at(vec3(oh.x, cey, oh.y), vec3(hl * dh.x, sin(ang), hl * dh.y), px); let sg = sign(ray.d)
             // the ray's horizontal range inside the city band, clipped to heights that can hold a building and to the street
             let bo = dot(oh, dh); let co = dot(oh, oh); let ds = bo * bo - (co - r1 * r1)
@@ -103,7 +105,7 @@ script_mod! {
             if ds < 0.0 || self.ct_w < 0.001 { s1 = -1.0 }
             if co < r0 * r0 { s0 = max(s0, -bo + sqrt(bo * bo - (co - r0 * r0))) }
             // the city's shape: a sector about downtown, tallest in the middle, thinning to low blocks at its rim
-            let dc = self.city_dir(); let hsec = self.ct_w * 0.5; let al = (hsec + 0.045) * tau; let m28 = max(dd / 28.0, 1.0); let mh = max(hsec, 0.02)
+            let dc = self.city_dir(); let hsec = self.ct_w * 0.5; let al = (hsec + 0.045) * tau; let m28 = max(self.city_d() / 28.0, 1.0); let mh = max(hsec, 0.02)
             if self.off < 0.001 {
                 // centred camera: every block on the ray has the ray's own azimuth, so the fall-off toward the rim bounds the heights
                 let dz = abs(fract(u - self.ct_c + 0.5) - 0.5)
@@ -123,7 +125,7 @@ script_mod! {
             if s0 < s1 {
                 let t1 = s1 / hl; var cell = floor(oh + dh * (s0 + 1e-4)); var tm = (cell + max(sg.xz, vec2(0.0)) - oh) * ray.i.xz; let td = abs(ray.i.xz)
                 var tcur = s0 / hl; var cos_max = cos(al); if hsec + 0.045 >= 0.5 { cos_max = -2.0 }
-                let hw = min(0.45 * dd, 12.6); let pd = clamp(0.03 + self.ct_d, 0.0, 0.98) * 1.15
+                let hw = min(0.45 * self.city_d(), 12.6) / sz; let pd = clamp(0.03 + self.ct_d, 0.0, 0.98) * 1.15
                 // real hits, hulls met (24 at most), walk steps left; the candidate lot (cell centre, tall, floors), its hash and padding
                 var hits = 0.0; var nb = 0.0; var left = 120.0; var lot = vec4(0.0); var h1 = 0u; var pad = 0.0
                 loop {
@@ -137,7 +139,7 @@ script_mod! {
                         if r2 > r0 * r0 && r2 < r1 * r1 && dot(cc, dc) > cos_max * r && yr <= (2.0 + tf2 * mix(0.15, 1.0, hr)) * cf + 0.9 {
                             // the sector's edge, the camera's clear surroundings, the fall-off from downtown, the band's inner edge
                             let da = abs(fract(atan2(cc.y, cc.x) / tau - self.ct_c + 0.5) - 0.5)
-                            let sm = smoothstep(vec4(hsec - 0.04, 3.0, 0.0, 0.5), vec4(hsec + 0.04, 9.0, 1.0, 0.75), vec4(da, length(cc - oh), min(da * m28 / mh, 1.0), rr))
+                            let sm = smoothstep(vec4(hsec - 0.04, 3.0 / sz, 0.0, 0.5), vec4(hsec + 0.04, 9.0 / sz, 1.0, 0.75), vec4(da, length(cc - oh), min(da * m28 / mh, 1.0), rr))
                             let mc = mix(0.4, 1.0, sm.y); let w = (1.0 - 0.74 * sm.z) * hr; let mw = mix(0.15, 1.0, w)
                             let pmax = pd * max(1.0 - sm.x, aw.x) * aw.y * sm.w * (1.0 - smoothstep(1.2, 1.55, rr)) * sm.y
                             ray.td = max(0.5 * (tcur + min(tm.x, tm.y)), 0.01)
@@ -145,7 +147,7 @@ script_mod! {
                                 let hh = self.hcell(cell, 1.0); let h = self.hb4(hh)
                                 if h.x < pmax {
                                     // the district noise (smooth 2-channel value noise over ~5 blocks): each row in x, then the rows in y
-                                    let q = cc * 0.2; let qi = floor(q); let f0 = q - qi; let f = f0 * f0 * (3.0 - 2.0 * f0); var a = vec2(0.0); var dn = vec2(0.0)
+                                    let q = cc * (0.2 * sz); let qi = floor(q); let f0 = q - qi; let f = f0 * f0 * (3.0 - 2.0 * f0); var a = vec2(0.0); var dn = vec2(0.0)
                                     for k in 0..4 {
                                         let b = self.hb4(self.hcell(qi + vec2(f32(k & 1u), f32(k >> 1u)), 70.0)).xy
                                         if (k & 1u) == 0u { dn = b } else { dn = mix(dn, b, f.x); if k == 1u { a = dn } }
@@ -207,7 +209,7 @@ script_mod! {
                         var pb = vec3(ctr.x + off.x, ytop + ha, ctr.y + off.y); if mast > 0.5 { pb = vec3(mp.x, ytop + hm, mp.z) }
                         pb = pb - ray.o; let tb2 = dot(pb, ray.d); let bd = length(pb - ray.d * tb2) / (max(tb2, 0.01) * px)
                         // it burns day and night
-                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * (0.004 + 0.0185 * self.haze))) * self.design_gain)
+                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * sz * (0.004 + 0.0185 * self.haze))) * self.design_gain)
                     }
                     if ray.sa.y > 0.0 {
                         // the nearest surface, then (where it only partly covers the pixel) the next two: the page's `shadeCity`
@@ -223,7 +225,7 @@ script_mod! {
                                 n = mix(n, vec3(rn.x, 0.0, rn.y), cyls)
                                 if id > 5.5 { n = -ray.d } else if id > 4.5 { n = normalize(p - vec3(ctr.x, ytop, ctr.y)) }
                                 // night haze by distance only: a tower's base is never lighter than its top
-                                let fog = 1.0 - exp(-t * (0.0015 + 0.0075 * self.haze))
+                                let fog = 1.0 - exp(-t * sz * (0.0015 + 0.0075 * self.haze))
                                 var yb = 0.0; if id > 2.5 { yb = ytop } else if id > 1.5 { yb = y1 } else if id > 0.5 { yb = y0 }
                                 let sy = smoothstep(vec3(0.0, 0.0, 0.05), vec3(0.45, 0.12, 1.8), vec3(y, y - yb, y))
                                 // street canyon, the crease where a section meets what it stands on, walls toward downtown, the sky
@@ -281,7 +283,7 @@ script_mod! {
                         }
                         pc += tr * bc; em += tr * ec; tr *= 1.0 - cacc
                         // props behind the city's nearest surface are hidden by it (`city_hide`)
-                        if hits == 0.0 { depth = min(min(ray.sa.x, 1e6) * hl * 70.0, 6e4) }
+                        if hits == 0.0 { depth = min(min(ray.sa.x, 1e6) * hl * (70.0 * sz), 6e4) }
                         hits += 1.0; if hits >= 8.0 { break }
                     }
                     nb += 1.0; if nb >= 24.0 { break }
@@ -313,18 +315,19 @@ script_mod! {
 #[derive(Script, ScriptHook)] #[repr(C)] pub struct DrawSkyCityBlit { #[deref] pub draw_super: DrawQuad }
 
 /// The parameters the march reads (with the seed and the view).
-const CITY_KEYS: &[P] = &[P::CtH, P::CtD, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir, P::Haze, P::Glow, P::Lights, P::WinD, P::Temp];
+const CITY_KEYS: &[P] = &[P::CtH, P::CtD, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir, P::Haze, P::Glow, P::Lights, P::WinD, P::Temp, P::Size];
 
 /// The march's shaders, its two targets and the key of what they hold.
 #[derive(Script, ScriptHook)]
 pub struct City { #[live] pub draw_city: DrawSkyCity, #[live] pub draw_blit: DrawSkyCityBlit, #[rust] target: Option<SceneTarget>, #[rust] pub key: Option<u64> }
 
 /// The raw elevations (rad) the city can reach, top and bottom: from its tallest roof, mast and beacon over the nearest
-/// lot down to the street there. Lots stand beyond the band's inner edge (half downtown's distance) and 3 blocks clear of
-/// the camera; a building keeps within 0.65 blocks of its lot's centre.
+/// lot down to the street there. Lots stand beyond the band's inner edge (half downtown's distance) and 3 blocks of the
+/// base's clear of the camera; a building keeps within 0.65 blocks of its lot's centre. At Size k a block is k times the
+/// base's (in blocks: the distances over k; the eye, k times as high too, still 0.09 above the street).
 pub fn reach(p: &Params) -> Option<(f64, f64)> {
-    let d = 28.0 * p[P::CtR];
-    let near = (0.5 * d - 0.8 * p[P::Off] * d).max(3.0) - 0.65;
+    let (d, k) = (28.0 * p[P::CtR], p[P::Size]);
+    let near = (0.5 * d - 0.8 * p[P::Off] * d).max(3.0) / k - 0.65;
     (p[P::CtW] >= 0.001).then(|| (((6.0 + 44.0 * p[P::CtH]) * 0.05 + 0.81).atan2(near), -(0.09f64.atan2(near))))
 }
 

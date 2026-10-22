@@ -19,20 +19,21 @@ pub fn build(c: &mut Ctx) {
     let ty = if wat > 0.0 { if r[0] < 0.28 { 0 } else if r[0] < 0.52 { 1 } else if r[0] < 0.78 { 3 } else { 2 } } else if r[0] < 0.35 { 1 } else if r[0] < 0.7 { 3 } else { 2 };
     let d0 = 2500.0 + 1100.0 * r[1]; // mostly lateral: far decks read level
     let beta = (if r[3] < 0.5 { -1.0 } else { 1.0 }) * 0.0174533 * if ty == 0 { mix(10.0, 22.0, r[2]) } else if ty == 1 { mix(3.0, 16.0, r[2]) } else { mix(0.0, 12.0, r[2]) };
-    // the axis: s (m) along it from its middle (bearing z[0], d0 away), toward larger bearings; lf toward the camera
-    let (u0, sb, cb) = (z[0] * TAU, beta.sin(), beta.cos());
+    // the axis: s (size units: Size m each, so the whole bridge is laid out in them, its ends where the zone's are) along it
+    // from its middle (bearing z[0], d0 m away), toward larger bearings; lf toward the camera
+    let (u0, sb, cb, sz) = (z[0] * TAU, beta.sin(), beta.cos(), c.k);
     let (er, et) = ([u0.cos(), u0.sin()], [-u0.sin(), u0.cos()]);
     let tv = [sb * er[0] + cb * et[0], sb * er[1] + cb * et[1]];
-    let (lf, ang, pp, xs) = ([-tv[1], tv[0]], tv[1].atan2(tv[0]), d0 * cb, |s: f64| [d0 * er[0] + s * tv[0], d0 * er[1] + s * tv[1]]);
+    let (lf, ang, pp, xs) = ([-tv[1], tv[0]], tv[1].atan2(tv[0]), d0 * cb, |s: f64| [d0 * er[0] + s * sz * tv[0], d0 * er[1] + s * sz * tv[1]]);
     // the view at s: cv (a length along the axis shows x cv), sv; a part n m beside the axis at s0 is seen where the axis has s0 - n tph
     let fr = |s: f64| { let x = xs(s); let dd = hypot(x[0], x[1]); let sv = (x[0] * tv[0] + x[1] * tv[1]) / dd; (pp / dd, sv, sv.abs(), sv / (pp / dd)) };
     // the layout along the axis: hills at both ends, the water (or valley) between their feet; the land end straddles the shore
     let a = z[1] * TAU;
-    let (sl, sr) = (-d0 * a.sin() / (beta - a).cos(), d0 * a.sin() / (beta + a).cos());
+    let (sl, sr) = (-d0 * a.sin() / (beta - a).cos() / sz, d0 * a.sin() / (beta + a).cos() / sz);
     let (lt, mut wfl, mut wfr) = (sr - sl, if wat > 0.0 { 0.14 } else { 0.2 }, if wat > 0.0 { 0.14 } else { 0.2 });
     if wat > 0.0 {
         let tsh = wd(zx[1], z[0]) * TAU;
-        let ssh = d0 * tsh.sin() / (tsh + beta).cos();
+        let ssh = d0 * tsh.sin() / (tsh + beta).cos() / sz;
         if zx[2] > 0.0 { wfl = clamp((ssh - sl) / lt + 0.03, 0.12, 0.34); } else { wfr = clamp((sr - ssh) / lt + 0.03, 0.12, 0.34); }
     }
     let (sfl, sfr) = (sl + wfl * mix(0.85, 1.15, r[4]) * lt, sr - wfr * mix(0.85, 1.15, r[5]) * lt);
@@ -240,10 +241,11 @@ pub fn build(c: &mut Ctx) {
             spine.push((PBand, [a0, lo[0], b0, lo[1]], [lo[2], hi[0], hi[1], hi[2]], [0., -pan, 0.6]));
         }
     }
-    // the instances: one line along the axis (lat m toward the camera) from s0 to s1, the parts rebased to it
+    // the instances: one line along the axis (lat size units toward the camera) from s0 to s1, the parts rebased to it; the
+    // line's plan in metres
     let emit = |c: &mut Ctx, s0: f64, s1: f64, top: f64, list: &[Pa], lat: f64| {
         let o = xs(s0);
-        c.add(Instance { line: true, o: [o[0] + lat * lf[0], o[1] + lat * lf[1]], ang, len: (s1 - s0).max(1.0), smar: 15.0, top, hide_i: true, seed: 1803, ..I0 });
+        c.add(Instance { line: true, o: [o[0] + lat * sz * lf[0], o[1] + lat * sz * lf[1]], ang, len: (s1 - s0).max(1.0) * sz, smar: 15.0 * sz, top, hide_i: true, seed: 1803, ..I0 });
         for &(t, mut a, b, mut cc) in list { if matches!(t, Arc | Band | LRow | PBand | Slr | Fan) { a[0] -= s0; a[2] -= s0; } else { cc[1] -= s0; } cc[0] -= lat; c.part_c(t, a, b, cc); }
     };
     for (h0, h1) in [(sl, sfl), (sfr, sr)] { // the hills: profiles of 8 samples, 6 profiles per instance

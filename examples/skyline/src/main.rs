@@ -127,7 +127,7 @@ impl Widget for SkylineView {
         let dpi = cx.current_dpi_factor();
         let avail = cx.turtle().max_width(walk).unwrap_or(800.0).max(64.0);
         let span = if self.detail { self.params[P::Zoom] } else { 1.0 };
-        let aspect = self.params[P::Vfov] / (span * 360.0);
+        let aspect = makepad_skyline::band_geom(&self.params).deg / (span * 360.0);
         // the page's budget: at most 4096 px wide and 1.6 (strip) / 2 (detail) megapixels
         let budget = if self.detail { 2.0e6 } else { 1.6e6 };
         let w = self.fixed_px.unwrap_or((avail * dpi).round() as usize).min(4096).min((budget / aspect).sqrt() as usize).max(64);

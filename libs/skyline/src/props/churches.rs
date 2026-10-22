@@ -8,7 +8,8 @@ use crate::rng::{fract, mix, wd};
 pub fn build(c: &mut Ctx) {
     let z = c.z.church;
     if c.p[P::PrChurch] <= 0.0 || z[1] <= 0.0 { return; }
-    let (s, sty, n_c) = (c.town_site(), c.rnd(5.0, 1.0, 1600.0), if c.p[P::PrChurch] >= 0.55 { 2 } else { 1 });
+    // one or two, as many over Size
+    let (s, sty, n_c) = (c.town_site(), c.rnd(5.0, 1.0, 1600.0), ((if c.p[P::PrChurch] >= 0.55 { 2.0 } else { 1.0 }) / c.k).round().clamp(1.0, 2.0) as usize);
     let (ra, rb, rt0) = (c.rnd(1.0, 1.0, 1500.0), c.rnd(2.0, 1.0, 1500.0), c.rnd(3.0, 1.0, 1500.0));
     let t0 = if sty < 0.5 { if rt0 < 0.45 { 1 } else if rt0 < 0.8 { 2 } else { 0 } } else if rt0 < 0.7 { 0 } else if rt0 < 0.85 { 1 } else { 2 };
     // offsets from the town's centre within the smallest town, so the Town slider does not move the churches

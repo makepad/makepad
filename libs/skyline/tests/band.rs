@@ -74,6 +74,9 @@ fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
     band
 }
 
+/// One GPU session at a time (the tests of this file run on parallel threads).
+static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 type RigCx = Rc<RefCell<Cx>>;
 type RigRef = Rc<RefCell<Option<Rig>>>;
 
@@ -81,8 +84,6 @@ type RigRef = Rc<RefCell<Option<Rig>>>;
 /// the caller's to close (`hal.close(info.session)`). One session at a time: the guard keeps the others out until it is dropped.
 fn open_rig(follow: bool) -> (RigCx, RigRef, &'static makepad_platform::makepad_hal::Hal, makepad_platform::makepad_hal::HalInfo, std::sync::MutexGuard<'static, ()>) {
     use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
-    // one GPU session at a time (the tests of this file run on parallel threads)
-    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let rig: Rc<RefCell<Option<Rig>>> = Rc::new(RefCell::new(None));
     let handler = rig.clone();
@@ -163,9 +164,13 @@ fn max_abs_diff(got: &[[f32; 4]], want: &[[f32; 4]]) -> f32 {
 /// the move (local/agent_state/hdri/skyline-baseline, Task 1 step 1).
 #[test]
 #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
-fn bands_match_the_pre_move_baseline() {
+fn bands_match_the_pre_move_baseline() { the_baselines_hold(|_| {}); }
+
+/// Each baseline's band at its parameters (changed by `with`) is the baseline bit for bit.
+fn the_baselines_hold(with: impl Fn(&mut Params)) {
     for name in ["default", "props_heavy", "offcentre"] {
-        let Some((p, want)) = baseline(name) else { eprintln!("no baseline {name}, skipped"); continue };
+        let Some((mut p, want)) = baseline(name) else { eprintln!("no baseline {name}, skipped"); continue };
+        with(&mut p);
         let got = render_band(&p, 1024);
         assert_eq!((got.w, got.h), (want.w, want.h), "{name}");
         let worst = max_abs_diff(&got.texels, &want.texels);
@@ -784,4 +789,298 @@ fn the_sun_lights_the_flanks_that_face_it() {
     assert!(r_f > 1.6 * r_r, "{r_f} {r_r}");
     // the flanks face the camera: the sun behind it lights them more than the sun beyond the ridge
     assert!(be > 3.0 * ah, "{be} {ah}");
+}
+
+// ---- Size (plan hdri-5 Task 9): every element's angular size x k, the zones kept, the counts x 1/k, the haze unchanged ----
+
+/// `p` at Size k.
+fn sized(p: &Params, k: f64) -> Params { let mut q = p.clone(); q.set(P::Size as usize, k); q }
+
+/// At Size 1 the three baselines are still exact, bit for bit.
+#[test]
+#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn size_one_is_bit_identical() { the_baselines_hold(|p| { p.set(P::Size as usize, 1.0); }); }
+
+/// The tallest summit of the strip (`terrain::columns`, the whole turn in `w` columns): its angular height (rad) and its
+/// width (rad) at half that height, in its own range.
+fn tallest_summit(p: &Params, w: usize) -> (f64, f64) {
+    let z = Zones::new(p);
+    let m = terrain::margin(p, 1.0, w);
+    let cols = terrain::columns(&z, p, 0.0, 1.0, w, m);
+    let ridge = |x: usize, k: usize| cols[(x % w + m) * terrain::ROWS + k][0] as f64;
+    let (mut best, mut at) = (0.0, (0, 0));
+    for k in 0..5 { for x in 0..w { if ridge(x, k) > best { (best, at) = (ridge(x, k), (x, k)); } } }
+    let (x0, k) = at;
+    let (mut l, mut r) = (0, 0);
+    while l < w && ridge(x0 + w - l - 1, k) > 0.5 * best { l += 1; }
+    while r < w && ridge(x0 + r + 1, k) > 0.5 * best { r += 1; }
+    (best, (l + r + 1) as f64 * std::f64::consts::TAU / w as f64)
+}
+
+/// The single trees of the front treeline (layer 3) at raw pixel size `px0`: their count, mean height and mean width (rad;
+/// each tree's vertices less the coverage margin of 0.79 px a side, `terrain::tree`).
+fn front_trees(p: &Params, px0: f64) -> (usize, f64, f64) {
+    let mesh = terrain::trees(&makepad_skyline::rng::Rng::new(p.seed), p, px0, None);
+    let mut trees: std::collections::BTreeMap<u32, (f64, f64, f64)> = Default::default();
+    for v in mesh.v.chunks(9).filter(|v| (v[8] * 0.25 + 0.25).floor() == 3.0) {
+        let e = trees.entry(v[0].to_bits()).or_insert((f64::MAX, f64::MIN, 0.0));
+        *e = (e.0.min(v[1] as f64), e.1.max(v[1] as f64), e.2.max(v[2] as f64));
+    }
+    let n = trees.len() as f64;
+    (trees.len(), trees.values().map(|t| t.2).sum::<f64>() / n, trees.values().map(|t| t.1 - t.0 - 1.58 * px0).sum::<f64>() / n)
+}
+
+/// The city march alone (`DrawSkyCity` over the city's rows, as `City::draw_pass` records it) for view `v` at `p`, under
+/// the example's night: its colour + alpha and its light + depth (m) texels, top row first, and the view. Drawn
+/// until two reads agree (the first draws into a new layout can be skipped while the pipeline builds).
+fn march_city(p: &Params, v: render::ViewSpec) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, render::ViewSpec) {
+    use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
+    use makepad_skyline::{city, export::f16_to_f32};
+    struct M { _window: WindowHandle, window_pass: DrawPass, root: DrawList2d, target: render::SceneTarget, draw: city::DrawSkyCity, ring: Texture }
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let (pc, (top, bottom)) = (p.clone(), city::reach(p).expect("a city"));
+    let rows = ((v.row_of(top) - 4.0).floor().max(0.0), (v.row_of(bottom) + 4.0).ceil().min(v.h as f64));
+    let m: Rc<RefCell<Option<M>>> = Rc::new(RefCell::new(None));
+    let handler = m.clone();
+    let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
+        if matches!(event, Event::Startup) {
+            let draw = cx.with_vm(|vm| { register(vm); let d = vm.eval(script! { mod.draw.DrawSkyCity{} }); city::DrawSkyCity::script_from_value(vm, d) });
+            let mut window = WindowHandle::new(cx);
+            window.configure_window(cx, dvec2(64.0, 64.0), dvec2(0.0, 0.0), false, "City march".into());
+            let window_pass = DrawPass::new(cx);
+            window.set_pass(cx, &window_pass);
+            let target = render::SceneTarget::new(cx, "city_march", true);
+            let mut texels = SkyLight::example().ring_texels();
+            texels.resize(RING * 4 * 4, 0.0);
+            let ring = Texture::new_with_format(cx, TextureFormat::VecRGBAf32 { width: RING, height: 4, data: Some(texels), updated: TextureUpdated::Full });
+            *handler.borrow_mut() = Some(M { _window: window, window_pass, root: DrawList2d::new(cx), target, draw, ring });
+            cx.redraw_all();
+        }
+        if let Event::Draw(event) = event {
+            let mut draw = CxDraw::new(cx, event);
+            let mut cx = Cx2d::new(&mut draw);
+            let mut m = handler.borrow_mut();
+            let M { window_pass, root, target, draw, ring, .. } = m.as_mut().unwrap();
+            cx.begin_pass(window_pass, None);
+            root.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::flow_overlay());
+            cx.make_child_pass(&target.pass);
+            target.record(&mut cx, v.w, v.h, |cx| {
+                let vars = &mut draw.draw_vars;
+                pc.set_uniforms(cx, vars);
+                vars.set_uniform(cx, live_id!(view_size), &[v.w as f32, v.h as f32]);
+                vars.set_uniform(cx, live_id!(view_span), &[v.u0 as f32, v.span as f32]);
+                vars.set_uniform(cx, live_id!(view_horizon), &[v.horizon as f32]);
+                vars.set_uniform(cx, live_id!(sil), &makepad_skyline::params::SIL);
+                render::bind_texture(cx, vars, live_id!(ring_tex), ring);
+                draw.draw_abs(cx, Rect { pos: dvec2(0.0, rows.0), size: dvec2(v.w as f64, rows.1 - rows.0) });
+            });
+            cx.end_pass_sized_turtle();
+            root.end(&mut cx);
+            cx.end_pass(window_pass);
+        }
+    }))));
+    cx.borrow_mut().init_cx_os();
+    let hal = Hal::global();
+    let mut req = OpenReq::from_env(0, open_flags::OFFSCREEN_WINDOWS, 1.0);
+    req.flags |= open_flags::OFFSCREEN_WINDOWS | open_flags::RETAIN_WINDOWS;
+    let info = hal.open(&req);
+    assert_ne!(info.backend, hal_api::backend_id::HEADLESS, "the march needs a GPU backend");
+    cx.borrow_mut().hal_attach_session(info);
+    while m.borrow().is_none() { assert!(cx.borrow_mut().hal_session_turn(1_000_000, true)); }
+    let read = |tex: Texture| -> Vec<[f32; 4]> {
+        let got: std::sync::Arc<std::sync::Mutex<Option<Vec<[f32; 4]>>>> = Default::default();
+        let slot = got.clone();
+        cx.borrow_mut().read_render_texture(&tex, move |r| {
+            let (_, _, b) = r.expect("readback");
+            let f = |b: &[u8]| f16_to_f32(u16::from_le_bytes([b[0], b[1]]));
+            *slot.lock().unwrap() = Some(b.as_chunks::<8>().0.iter().map(|t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])]).collect());
+        }).expect("readback request");
+        while got.lock().unwrap().is_none() { assert!(cx.borrow_mut().hal_session_turn(1_000_000, true)); }
+        let out = got.lock().unwrap().take().unwrap();
+        out
+    };
+    let mut last: Option<(Vec<[f32; 4]>, Vec<[f32; 4]>)> = None;
+    for _ in 0..8 {
+        {
+            let mut c = cx.borrow_mut();
+            let after = c.frame_submission_serial();
+            c.redraw_all();
+            loop {
+                assert!(c.hal_session_turn(1_000_000, true));
+                let submitted = c.frame_submission_serial();
+                if submitted > after && c.frame_completion_serial() == submitted && c.pipelines_pending() == 0 { break; }
+            }
+        }
+        let (col, lit) = { let b = m.borrow(); let t = &b.as_ref().unwrap().target; (t.color.clone(), t.light.clone()) };
+        let got = (read(col), read(lit));
+        if last.as_ref() == Some(&got) && got.0.iter().any(|t| t[3] > 0.5) { hal.close(info.session); return (got.0, got.1, v); }
+        last = Some(got);
+    }
+    panic!("the march never settled");
+}
+
+/// The city as the march draws it in view `v`: the highest elevation (rad) its city reaches (texels more than half
+/// covered); the visible buildings, 4-connected components of covered texels whose depth changes by under 3 % a step; and
+/// the front faces along the row just above the horizon (runs of covered columns whose depth changes by under 3 % from one
+/// column to the next), their count and mean width (rad).
+struct CityLook { top: f64, tops: Vec<f64>, buildings: usize, faces: usize, cols: usize }
+
+fn city_measure(p: &Params, v: render::ViewSpec) -> CityLook {
+    let (col, lit, v) = march_city(p, v);
+    let (px, n, covered) = (v.px0(), v.w * v.h, |i: usize| col[i][3] > 0.5);
+    let near = |a: f32, b: f32| (a - b).abs() <= 0.03 * a.min(b);
+    let el = |i: usize| (v.horizon * v.h as f64 - ((i / v.w) as f64 + 0.5)) * px;
+    let top = (0..n).filter(|&i| covered(i)).map(el).fold(f64::MIN, f64::max);
+    let tops = (0..v.w).filter_map(|x| (0..v.h).map(|y| y * v.w + x).find(|&i| covered(i)).map(el)).collect();
+    let (mut seen, mut buildings) = (vec![false; n], 0);
+    for s in (0..n).filter(|&i| covered(i)) {
+        if seen[s] { continue; }
+        let mut stack = vec![s];
+        (seen[s], buildings) = (true, buildings + 1);
+        while let Some(i) = stack.pop() {
+            let (x, y) = (i % v.w, i / v.w);
+            for j in [(x > 0).then(|| i - 1), (x + 1 < v.w).then(|| i + 1), (y > 0).then(|| i - v.w), (y + 1 < v.h).then(|| i + v.w)].into_iter().flatten() {
+                if !seen[j] && covered(j) && near(lit[j][3], lit[i][3]) { seen[j] = true; stack.push(j); }
+            }
+        }
+    }
+    let y = (v.horizon * v.h as f64).round() as usize - 1;
+    let (mut faces, mut cols, mut prev): (usize, usize, Option<f32>) = (0, 0, None);
+    for x in 0..v.w {
+        let cur = covered(y * v.w + x).then_some(lit[y * v.w + x][3]);
+        if let Some(d) = cur { cols += 1; if prev.is_none_or(|q| !near(d, q)) { faces += 1; } }
+        prev = cur;
+    }
+    CityLook { top, tops, buildings, faces, cols }
+}
+
+/// The `q` quantile of `v` (0..1).
+fn quantile(v: &[f64], q: f64) -> f64 { let mut v = v.to_vec(); v.sort_by(f64::total_cmp); v[((v.len() - 1) as f64 * q).round() as usize] }
+
+/// The view of the city's sector the city measures use: 0.4 of the turn about downtown, 4096 px (2.5 times a 4096 px
+/// strip's detail, so the buildings of Size 0.5 are some pixels wide).
+fn city_view(p: &Params) -> render::ViewSpec { render::ViewSpec::new(p, p[P::CtC] - 0.2, 0.4, 4096) }
+
+/// At k = 2 every element's angular size is 2x k = 1's: the tallest summit's height (+-10 %) and its width at half its
+/// height (+-15 %); the front treeline's trees (height +-10 %, width +-15 %); the city's tall buildings (+-10 %) and its
+/// front faces' width (+-15 %). The city's lots are cells of its grid, which Size scales, so its k = 2 buildings are others
+/// than k = 1's: its measures are taken over three seeds, the tall buildings as the 95th percentile of the columns' city
+/// tops (the 90th and 99th and the highest top are printed: the 99th is about one tower a seed, of heavy-tailed heights,
+/// and a mast a few texels wide, resolved or not, decides the highest).
+#[test]
+#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn size_scales_every_element() {
+    let p = Params::default();
+    let (one, two) = (p.clone(), sized(&p, 2.0));
+    let ratio = |a: f64, b: f64| b / a;
+    let (m1, m2) = (tallest_summit(&one, 4096), tallest_summit(&two, 4096));
+    let (t1, t2) = (front_trees(&one, std::f64::consts::TAU / 16384.0), front_trees(&two, std::f64::consts::TAU / 16384.0));
+    // the city over three seeds: the tops' 99th and 95th percentiles (each seed's, summed), the highest top, the faces' width
+    let city = |p: &Params| {
+        let looks: Vec<CityLook> = [7, 11, 23].map(|seed| { let mut q = p.clone(); q.set_seed(seed); city_measure(&q, city_view(&q)) }).into();
+        let px = city_view(p).px0();
+        let sum = |f: &dyn Fn(&CityLook) -> f64| looks.iter().map(f).sum::<f64>();
+        (sum(&|c| quantile(&c.tops, 0.99)), sum(&|c| quantile(&c.tops, 0.95)), looks.iter().map(|c| c.top).fold(f64::MIN, f64::max),
+            sum(&|c| c.cols as f64) * px / sum(&|c| c.faces as f64), sum(&|c| quantile(&c.tops, 0.90)))
+    };
+    let (c1, c2) = (city(&one), city(&two));
+    println!("summit: height {:.4} -> {:.4} rad (x{:.3}), width {:.4} -> {:.4} (x{:.3})", m1.0, m2.0, ratio(m1.0, m2.0), m1.1, m2.1, ratio(m1.1, m2.1));
+    println!("front trees: {} -> {}; height {:.5} -> {:.5} (x{:.3}), width {:.5} -> {:.5} (x{:.3})", t1.0, t2.0, t1.1, t2.1, ratio(t1.1, t2.1), t1.2, t2.2, ratio(t1.2, t2.2));
+    println!("city (3 seeds): tops' 95th percentile {:.4} -> {:.4} rad (x{:.3}; 90th x{:.3}, 99th x{:.3}), highest top {:.4} -> {:.4} (x{:.3}); front faces' mean width {:.5} -> {:.5} (x{:.3})",
+        c1.1 / 3.0, c2.1 / 3.0, ratio(c1.1, c2.1), ratio(c1.4, c2.4), ratio(c1.0, c2.0), c1.2, c2.2, ratio(c1.2, c2.2), c1.3, c2.3, ratio(c1.3, c2.3));
+    let near = |x: f64, tol: f64| (x / 2.0 - 1.0).abs() <= tol;
+    assert!(near(ratio(m1.0, m2.0), 0.10) && near(ratio(m1.1, m2.1), 0.15), "the summit: {m1:?} -> {m2:?}");
+    assert!(near(ratio(t1.1, t2.1), 0.10) && near(ratio(t1.2, t2.2), 0.15), "the trees: {t1:?} -> {t2:?}");
+    assert!(near(ratio(c1.1, c2.1), 0.10) && near(ratio(c1.3, c2.3), 0.15), "the city: {c1:?} -> {c2:?}");
+}
+
+/// The zones keep their place: at k = 0.5, 1 and 2 the city's, the sea's and the mountains' azimuth spans (1024 columns:
+/// the city's sector, the columns at sea, the massif's columns) are equal within one column, and the placement zones are
+/// the same zones.
+#[test]
+fn size_keeps_the_zones() {
+    let w = 1024;
+    let spans = |p: &Params| {
+        let z = Zones::new(p);
+        let m = terrain::margin(p, 1.0, w);
+        let cols = terrain::columns(&z, p, 0.0, 1.0, w, m);
+        let u = |x: usize| (x as f64 + 0.5) / w as f64;
+        let city = (0..w).filter(|&x| Zones::in_z(u(x), &z.city) > 0.5).count();
+        let sea = (0..w).filter(|&x| cols[(x + m) * terrain::ROWS + 6][0] < 0.5).count();
+        let mtn = (0..w).filter(|&x| z.ridge.menv(2, z.ridge.envelopes(&z.rng, u(x))) > 0.05).count();
+        (city, sea, mtn, [z.city, z.core, z.shore, z.town, z.bridge, z.fair, z.ind])
+    };
+    let base = spans(&Params::default());
+    println!("Size 1: city {} columns, sea {}, mountains {}", base.0, base.1, base.2);
+    assert!(base.0 > 50 && base.1 > 50 && base.2 > 50);
+    for k in [0.5, 2.0] {
+        let s = spans(&sized(&Params::default(), k));
+        println!("Size {k}: city {}, sea {}, mountains {}", s.0, s.1, s.2);
+        for (a, b, what) in [(s.0, base.0, "city"), (s.1, base.1, "sea"), (s.2, base.2, "mountains")] { assert!(a.abs_diff(b) <= 1, "Size {k}: the {what} spans {a} columns, {b} at Size 1"); }
+        assert_eq!(s.3, base.3, "Size {k}: the placement zones moved");
+    }
+}
+
+/// Bigger means fewer: at k = 2 the discrete elements are 0.5x k = 1's (+-20 %), at k = 0.5 2x (+-20 %, or held at their
+/// caps): the front treeline's single trees, and the props, every prop at 1 (instances per generator, the distant lights by
+/// their lamps; the bridge, the fair, the churches, the masts and the coast are a few each and are printed only, and the
+/// industry's rows hold at most twelve lots). The city's buildings: `bigger_means_fewer_buildings`.
+#[test]
+fn bigger_means_fewer() {
+    use makepad_skyline::props::{self, kit::{Ctx, PropSet, Pt}};
+    let mut all = Params::default();
+    for (i, d) in makepad_skyline::params::PARAMS.iter().enumerate() { if d.group == "Props" && i != P::PrRefl as usize && i != P::PrRipple as usize { all.v[i] = 1.0; } }
+    let few = ["bridge", "fair", "churches", "masts", "coast"];
+    let counts = |p: &Params| -> Vec<(&'static str, usize)> {
+        let z = Zones::new(p);
+        props::GENERATORS.iter().map(|(name, g)| {
+            let mut set = PropSet::default();
+            g(&mut Ctx::new(&z, p, &mut set));
+            (*name, if *name == "far" { set.parts.iter().filter(|q| q.t == Pt::Light).count() } else { set.inst.len() })
+        }).collect()
+    };
+    let scaled = |c: &[(&str, usize)]| c.iter().filter(|q| !few.contains(&q.0)).map(|q| q.1).sum::<usize>() as f64;
+    let trees = |p: &Params| front_trees(p, std::f64::consts::TAU / 16384.0).0;
+    let (c1, t1) = (counts(&all), trees(&all));
+    println!("Size 1: props {c1:?}, front trees {t1}");
+    for (k, want) in [(2.0, 0.5), (0.5, 2.0)] {
+        let (ck, tk) = (counts(&sized(&all, k)), trees(&sized(&all, k)));
+        let per: Vec<String> = ck.iter().zip(&c1).map(|(a, b)| format!("{} {} -> {} (x{:.2})", a.0, b.1, a.1, a.1 as f64 / b.1.max(1) as f64)).collect();
+        let (rp, rt) = (scaled(&ck) / scaled(&c1), tk as f64 / t1 as f64);
+        println!("Size {k}: {}; the props that scale x{rp:.3}, front trees {t1} -> {tk} (x{rt:.3})", per.join(", "));
+        for (r, what) in [(rp, "props"), (rt, "trees")] { assert!((r / want - 1.0).abs() <= 0.2, "Size {k}: the {what} x{r}, not x{want}"); }
+    }
+}
+
+/// Bigger means fewer, the city: its visible buildings (`city_measure`, three seeds) at k = 2 are 0.5x k = 1's (+-20 %),
+/// at k = 0.5 2x (+-20 %). The front faces along the horizon are printed too.
+#[test]
+#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn bigger_means_fewer_buildings() {
+    let count = |k: f64| -> (usize, usize) {
+        let n: Vec<(usize, usize)> = [7, 11, 23].map(|seed| { let mut p = sized(&Params::default(), k); p.set_seed(seed); let c = city_measure(&p, city_view(&p)); (c.buildings, c.faces) }).into();
+        println!("Size {k}: the city's visible buildings (and front faces) by seed {n:?}");
+        (n.iter().map(|q| q.0).sum(), n.iter().map(|q| q.1).sum())
+    };
+    let one = count(1.0);
+    for (k, want) in [(2.0, 0.5), (0.5, 2.0)] {
+        let c = count(k);
+        let (r, rf) = (c.0 as f64 / one.0 as f64, c.1 as f64 / one.1 as f64);
+        println!("Size {k}: visible buildings {} -> {} (x{r:.3}), front faces {} -> {} (x{rf:.3})", one.0, c.0, one.1, c.1);
+        assert!((r / want - 1.0).abs() <= 0.2, "Size {k}: the buildings x{r}, not x{want}");
+    }
+}
+
+/// The haze is unchanged: the farthest range's own texels (noon, a sunset ring, Haze 1: `the_far_haze_takes_the_ring_colour`)
+/// have the same mean colour at k = 0.5, 1 and 2 within 10 % a channel.
+#[test]
+#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn size_keeps_the_haze() {
+    let mut p = Params::default(); p.set(P::Haze as usize, 1.0);
+    let light = noon([0.9, 0.4, 0.2]);
+    let mean = |k: f64| { let q = sized(&p, k); let b = render_band_lit(&q, 4096, &light); let far = farthest_range_texels(&q, &b); (far.len(), mean_unpremultiplied(&b, &far)) };
+    let (one, half, two) = (mean(1.0), mean(0.5), mean(2.0));
+    println!("the farthest range's mean colour: Size 1 {one:?}, 0.5 {half:?}, 2 {two:?}");
+    for (k, (_, c)) in [(0.5, half), (2.0, two)] { for ch in 0..3 { assert!((c[ch] / one.1[ch] - 1.0).abs() <= 0.10, "Size {k}: channel {ch} {} against {}", c[ch], one.1[ch]); } }
 }

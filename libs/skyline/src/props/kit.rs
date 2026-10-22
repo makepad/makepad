@@ -6,12 +6,18 @@
 //! pixel function is the page's instance frame and `ppDraw` over its own parts, read from a data texture. So the page's
 //! per-instance rules hold as they are (parts merge by max, an instance's bodies never dim its own lights, REP / CLIP /
 //! WASH act on their neighbouring parts), and the cost follows the covered pixels.
+//!
+//! Size: at Size k a prop is k times as large and stands where it stood. Its parts, half-width, top and glow are in size
+//! units (k m each; at Size 1 metres), and so are the generators' spacings, so k times as large means as many over k, and
+//! the eye's height over the plain (`EYE` size units), so what stands on the plain is the base's view k times as large;
+//! its bearing, distance and the plan of a line stay in metres, and so do its haze and tone (by distance). A generator
+//! turns a size-unit offset beside a prop d m away into an angle over d / k, and a foot of f size units into f k m.
 use crate::params::{Params, P};
 use crate::rng::{fract, mix, smooth, wd, TAU};
 use crate::zones::Zones;
 use makepad_widgets::makepad_draw::*;
 
-/// The props' eye height above the ground (m).
+/// The props' eye height above the ground (m at Size 1; size units: at Size k it is k times as high, `Ctx::eye`).
 pub const EYE: f64 = 6.3;
 
 /// Part types (the page's `PT`, documented there).
@@ -67,19 +73,21 @@ pub fn town_td(d: f64, f: f64) -> f64 {
 }
 
 /// What a generator gets (the page's `ctx`): the zones, the parameters and the emitters, plus the town kit's state
-/// while one of its instances is open (foot, lateral offset, the extent so far).
-pub struct Ctx<'a> { pub z: &'a Zones, pub p: &'a Params, pub set: &'a mut PropSet, kit: Option<[f64; 4]> }
+/// while one of its instances is open (foot, lateral offset, the extent so far); `k` the Size (m a size unit).
+pub struct Ctx<'a> { pub z: &'a Zones, pub p: &'a Params, pub set: &'a mut PropSet, kit: Option<[f64; 4]>, pub k: f64 }
 
 impl<'a> Ctx<'a> {
-    pub fn new(z: &'a Zones, p: &'a Params, set: &'a mut PropSet) -> Self { Self { z, p, set, kit: None } }
+    pub fn new(z: &'a Zones, p: &'a Params, set: &'a mut PropSet) -> Self { Self { z, p, set, kit: None, k: p[P::Size] } }
     pub fn rnd(&self, id: f64, st: f64, ly: f64) -> f64 { self.z.rnd(id, st, ly) }
     /// Starts an instance; the parts that follow are its own.
     pub fn add(&mut self, mut i: Instance) {
-        if !i.line && i.base.is_nan() { i.base = -EYE / i.d; }
+        if !i.line && i.base.is_nan() { i.base = -EYE * self.k / i.d; }
         (i.p0, i.np, self.kit) = (self.set.parts.len(), 0, None);
         self.set.inst.push(i);
     }
     pub fn last(&mut self) -> &mut Instance { self.set.inst.last_mut().unwrap() }
+    /// The eye's height above the plain (m): Size times the base's.
+    pub fn eye(&self) -> f64 { EYE * self.k }
     pub fn part(&mut self, t: Pt, a: [f64; 4], b: [f64; 4]) { self.part_c(t, a, b, [0.0, 0.0, 1.0]); }
     /// A part with its line-frame placement `c`; in a town-kit instance y is m above the plain and x in the caller's
     /// frame, and the part grows the instance's extent (the page's `townKit().p`).
@@ -104,10 +112,11 @@ impl<'a> Ctx<'a> {
         self.set.parts.push(Part { t, c, a, b });
         self.last().np += 1;
     }
-    /// The town kit (`townKit`): an instance on a foot (m above the plain), centred xo m to the side of its bearing.
+    /// The town kit (`townKit`): an instance on a foot (size units above the plain), centred xo size units to the side of
+    /// its bearing.
     pub fn begin(&mut self, mut i: Instance, foot: f64, xo: f64) {
-        if foot != 0.0 { i.base = (foot - EYE) / i.d; }
-        if xo != 0.0 { i.uc = fract(i.uc + xo / (TAU * i.d)); }
+        if foot != 0.0 { i.base = (foot - EYE) * self.k / i.d; }
+        if xo != 0.0 { i.uc = fract(i.uc + xo * self.k / (TAU * i.d)); }
         self.add(i);
         self.kit = Some([foot, xo, 0.0, 0.0]);
     }
@@ -153,7 +162,9 @@ script_mod! {
     // offset, s0, cv0), a, b), merged by max into its body coverage m and its light em; the body takes the night tone of
     // its distance. Instance fields (Rust): h0 plane (bearing, distance, foot above the flat ground rad, flags) or line
     // (0, margin, 0, flags), flags slot + 4 view + 8 hideC + 16 line + 32 hideM; h1 (first texel, part count, top m, tone
-    // distance m); h2 plane (half-width) or line (origin xy, direction angle, length); h3 (distance window m, seed).
+    // distance m); h2 plane (half-width) or line (origin xy, direction angle, length); h3 (distance window m, seed). The
+    // instance's frame is in metres (its half-width and top come in metres too); its parts are in size units (`size` m each:
+    // their frame's lengths over `size`), its haze and tone by its distance in metres.
     mod.draw.DrawSkyPart = mod.std.set_type_default() do #(DrawSkyPart::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..mod.draw.SkyScene,
@@ -163,6 +174,7 @@ script_mod! {
         parts_geom: uniform(vec4(1024.0, 1.0, 0.0, 0.0))
         lights: uniform(3.0)
         temp: uniform(3200.0)
+        size: uniform(1.0)
         texel: fn(i: float) -> vec4 {
             let y = floor(i / self.parts_geom.x)
             return self.parts.sample_nearest(vec2((i - y * self.parts_geom.x + 0.5) / self.parts_geom.x, (y + 0.5) / self.parts_geom.y))
@@ -189,9 +201,9 @@ script_mod! {
         }
         fragment: fn(){
             let vr = self.view_raw(); let h0 = self.h0; let h1 = self.h1; let h2 = self.h2; let h3 = self.h3; let fl = u32(h0.w); let line = (fl & 16u) != 0u
-            var w = vr; var eye = 6.3
+            var w = vr; var eye = 6.3 * self.size
             if (fl & 4u) == 0u { w = self.pix_view(vr) }
-            if (fl & 3u) == 2u && self.mirror > 0.5 { eye = -6.3 }
+            if (fl & 3u) == 2u && self.mirror > 0.5 { eye = -6.3 * self.size }
             let e2 = vec2(cos(w.x * 6.2831853), sin(w.x * 6.2831853)); let dl = vec2(cos(h2.z), sin(h2.z)); let den = dl.x * e2.y - dl.y * e2.x
             // the haze at the pixel's azimuth; the gate on the instance's lights (`lit`: the city's lights, by day off), its beacons' (on)
             let hzc = self.haze_at(vr.x); let gate = vec2(self.lit * self.design_gain, self.design_gain)
@@ -201,7 +213,7 @@ script_mod! {
                 fs = (e2.x * h2.y - e2.y * h2.x) / den; let x = h2.xy + fs * dl; fd = length(x); fp = abs(h2.x * dl.y - h2.y * dl.x); fsf = dot(x, dl) / fd
                 fy = w.y * fd + eye; cut = cut || abs(den) < 0.000001 || dot(x, e2) <= 0.0 || fs < 0.0 - h0.y || fs > h2.w + h0.y
             } else { fs = (fract(w.x - h0.x + 0.5) - 0.5) * 6.2831853 * fd; fy = (w.y - h0.z) * fd + eye; cut = cut || abs(fs) > h2.x + 3.0 * w.z * fd }
-            let px0 = w.z * fd; var m = 0.0; var em = vec3(0.0)
+            let px0 = w.z * fd; var m = 0.0; var em = vec3(0.0); let sz = self.size; let eyk = eye / sz
             if !(cut || fy < -2.0 * px0 || fy > h1.z + 3.0 * px0 || fd <= h3.x || fd > h3.y) {
                 let fog = (1.0 - 0.6 * (1.0 - exp(0.0 - fd / 70.0 * (0.0015 + 0.0075 * self.haze)))) * self.cover(fy, px0); let hs = u32(h3.z) * 2654435761u
                 var rn = 0.0; var ro = vec2(0.0); var rm = vec2(1.0, 0.0); var cn = 0.0; var ck = 0.0
@@ -211,9 +223,11 @@ script_mod! {
                     // the part's frame: a part on its own parallel line c.y m to the left
                     var gs = fs; var gy = fy; var gd = fd; var gp = fp; var gsf = fsf
                     if line && c.y != 0.0 {
-                        let o = h2.xy + c.y * vec2(0.0 - dl.y, dl.x); gs = (e2.x * o.y - e2.y * o.x) / den; let x = o + gs * dl
+                        let o = h2.xy + (c.y * sz) * vec2(0.0 - dl.y, dl.x); gs = (e2.x * o.y - e2.y * o.x) / den; let x = o + gs * dl
                         gd = length(x); gp = abs(o.x * dl.y - o.y * dl.x); gsf = dot(x, dl) / gd; gy = w.y * gd + eye
                     }
+                    // into the parts' size units (the beacons' haze keeps the distance in metres, gr)
+                    let gr = gd; gs = gs / sz; gy = gy / sz; gd = gd / sz; gp = gp / sz
                     let pxm = w.z * gd; var q = vec2((gs - c.z) * c.w, gy); let clp = cn > 0.0; let m0 = m
                     if rn > 0.0 { rn = rn - 1.0; q = q - ro; q = vec2(dot(q, rm), q.y * rm.x - q.x * rm.y) }
                     if clp { cn = cn - 1.0 }
@@ -253,7 +267,7 @@ script_mod! {
                             let hv = self.hu(hs ^ ((u32(i32(cl.x)) + 512u) * 2654435761u) ^ ((u32(i32(cl.y)) + 512u) * 2246822507u))
                             li = g.x * g.y * mix(step(f32(hv & 255u) / 255.0, b.z), b.z * 0.5, sm.z) * (0.4 + 0.6 * f32((hv >> 8u) & 255u) / 255.0) * 0.5
                         } else if t == 8.0 {
-                            let sl = ((a.w - a.y - 4.0 * b.x * (1.0 - 2.0 * u)) / ll * gd - (y0 - eye) * gsf) / gp; da = (q.y - y0) / sqrt(1.0 + sl * sl); wa = b.y; k = inx * b.z
+                            let sl = ((a.w - a.y - 4.0 * b.x * (1.0 - 2.0 * u)) / ll * gd - (y0 - eyk) * gsf) / gp; da = (q.y - y0) / sqrt(1.0 + sl * sl); wa = b.y; k = inx * b.z
                         } else if t == 9.0 {
                             dd.x = min(a.w - (a.w - a.y) * (1.0 - clamp(r.x / max(b.x, 0.001), 0.0, 1.0) * clamp((a.z - q.x) / max(b.y, 0.001), 0.0, 1.0)) - q.y, r.y); k = inx * b.z
                         } else if t == 10.0 {
@@ -361,7 +375,7 @@ script_mod! {
                         if la > 0.0 { // a red aviation light: the city's tower beacons' size and strength
                             // a beacon (`Ctx::beacon`'s core radius 0, or the aviation light below) burns day and night
                             bcn = lr <= 0.0
-                            if lr < 0.0 { la = la * 0.07 * (1.0 - 0.6 * (1.0 - exp(0.0 - gd / 70.0 * (0.004 + 0.0185 * self.haze)))); col = vec3(1.0, 0.08, 0.03); lfog = 1.0 }
+                            if lr < 0.0 { la = la * 0.07 * (1.0 - 0.6 * (1.0 - exp(0.0 - gr / 70.0 * (0.004 + 0.0185 * self.haze)))); col = vec3(1.0, 0.08, 0.03); lfog = 1.0 }
                             li = la * (if lr > 0.0 { self.glow_pt(lq, lr, pxm) } else { exp(0.0 - dot(lq, lq) / (3.0 * pxm * pxm)) })
                         }
                         if clp { m = max(m0, m * ck); li = li * ck }

@@ -6,7 +6,7 @@
 //! seam. Metal leaves out the first draw into a new target layout while it builds the pipeline (and a tile can be the first
 //! to draw the water or a props layer), so there every tile is read until two reads agree.
 use crate::light::SkyLight;
-use crate::params::{Params, P};
+use crate::params::Params;
 use crate::render::{SceneTarget, Skyline, ViewSpec};
 use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, *};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -53,7 +53,7 @@ impl Job {
     /// Tile i's view: its share of the turn.
     fn view(&self, i: usize) -> ViewSpec {
         let (cw, w) = (TILE.min(self.w - i * TILE), self.w as f64);
-        ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: self.p[P::Horizon], pad: 0 }
+        ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: crate::band_geom(&self.p).horizon, pad: 0 }
     }
 
     /// Asks for the read of the tile drawn last; its texels come back on a worker as `News::Tile`.
@@ -150,7 +150,7 @@ impl Skyline {
                     for (y, row) in t.chunks(cw).enumerate() { job.out[y * job.w + i * TILE..][..cw].copy_from_slice(row); }
                     if job.done < job.tiles() { continue; }
                     let (w, h, mut out, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), job.sink.take(), job.tx.clone());
-                    let (light, horizon) = (job.light.clone(), job.p[P::Horizon]);
+                    let (light, horizon) = (job.light.clone(), crate::band_geom(&job.p).horizon);
                     std::thread::spawn(move || send(&tx, News::Done(match sink {
                         Some(Sink::File(kind, path)) => if kind == ExportKind::Png { png(w, h, &out) } else { Ok(exr(w, h, &out)) }
                             .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())).map(|_| format!("Saved {}", path.display())),

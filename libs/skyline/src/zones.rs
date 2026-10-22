@@ -12,6 +12,9 @@ const Z0: Zone = [0.0; 4];
 pub fn mt_scale(k: usize) -> f64 { [0.85, 1.15, 1.25, 0.85, 0.50][k] }
 fn mt_alp(k: usize) -> f64 { [1.15, 1.25, 1.1, 0.7, 0.25][k] }
 fn mt_cells(k: usize) -> f64 { [30.0, 24.0, 20.0, 24.0, 34.0][k] }
+/// Range k's summit cells at Size `size`: the base's count over Size, whole (at least one), so its summits are Size times
+/// as wide and as many over Size.
+fn cells_at(k: usize, size: f64) -> f64 { (mt_cells(k) / size).round().max(1.0) }
 /// Nominal distance (m) of range k: 30 km (0) .. 5 km (4).
 pub fn mt_dist(k: f64) -> f64 { 5000.0 * 6f64.powf((4.0 - k) * 0.25) }
 /// The zones' ridge footprint: roughness octaves down to a 16k export's pixel.
@@ -24,17 +27,30 @@ fn argmax<T: Default>(n: usize, mut f: impl FnMut(f64) -> (f64, T)) -> T {
     out
 }
 
-/// The ridge model of one parameter set: per range its peak height, ruggedness and summit table
+/// The ridge model of one parameter set: per range its peak height, ruggedness, summit cells and summit table
 /// (per summit cell: height bound r1^1.5, slope, lean, offset), so a summit costs no hashing.
-pub struct Ridges { hk: [f64; 5], rk: [f64; 5], tab: [Vec<[f64; 4]>; 5], menv_s: f64, w_a: f64, mt_c: f64, mt_w: f64 }
+pub struct Ridges { hk: [f64; 5], rk: [f64; 5], cells: [f64; 5], tab: [Vec<[f64; 4]>; 5], menv_s: f64, w_a: f64, mt_c: f64, mt_w: f64 }
 
 impl Ridges {
+    /// At Size k the peaks are k times as high and their cells k times as wide: each base cell's summit goes to the cell
+    /// that holds its centre, the tallest where several meet (so the highest peak stands near its place), and a cell none
+    /// reaches (k under 1) draws a summit of its own.
     pub fn new(p: &Params, rng: &Rng) -> Self {
-        let tab = std::array::from_fn(|k| (0..mt_cells(k) as usize).map(|c| {
-            let (r1, r2) = (rng.rnd(c as f64, 2.0, 20.0 + k as f64 * 10.0), rng.rnd(c as f64, 3.0, 20.0 + k as f64 * 10.0));
+        let cells = std::array::from_fn(|k| cells_at(k, p[P::Size]));
+        let row = |c: f64, st: f64, k: usize| {
+            let (r1, r2) = (rng.rnd(c, st, 20.0 + k as f64 * 10.0), rng.rnd(c, st + 1.0, 20.0 + k as f64 * 10.0));
             [r1 * r1.sqrt(), 0.28 + 0.32 * fract(r1 * 37.7), 0.65 + 0.7 * fract(r2 * 53.1), 0.8 * r2]
-        }).collect());
-        Self { hk: std::array::from_fn(|k| p[P::MtH] * mt_scale(k)), rk: std::array::from_fn(|k| clamp(p[P::MtRug] * mt_alp(k), 0.0, 1.0)), tab,
+        };
+        let tab = std::array::from_fn(|k| {
+            let n: f64 = cells[k];
+            let mut t: Vec<Option<[f64; 4]>> = vec![None; n as usize];
+            for c in 0..mt_cells(k) as usize {
+                let (i, r) = ((((c as f64 + 0.5) * n / mt_cells(k)).floor() as usize).min(n as usize - 1), row(c as f64, 2.0, k));
+                if t[i].is_none_or(|q| r[0] > q[0]) { t[i] = Some(r); }
+            }
+            t.into_iter().enumerate().map(|(i, r)| r.unwrap_or_else(|| row(i as f64, 4.0, k))).collect()
+        });
+        Self { hk: std::array::from_fn(|k| p[P::MtH] * mt_scale(k) * p[P::Size]), rk: std::array::from_fn(|k| clamp(p[P::MtRug] * mt_alp(k), 0.0, 1.0)), cells, tab,
             menv_s: smooth(0.0, 0.04, p[P::MtW]), w_a: clamp(p[P::MtW] * 1.3, 0.0, 1.0), mt_c: p[P::MtC], mt_w: p[P::MtW] }
     }
     /// Peak height (rad) of range k.
@@ -48,7 +64,7 @@ impl Ridges {
     }
     /// The highest summit of cells ci-2 ..= ci+2 at x (a cell whose height bound cannot beat the best is skipped).
     fn summits(&self, k: usize, x: f64, q: f64, sh: f64) -> f64 {
-        let (cells, ci, hgm, rr) = (mt_cells(k), x.floor(), mix(0.4, 1.0, sh), mix(0.05, 0.004, sh));
+        let (cells, ci, hgm, rr) = (self.cells[k], x.floor(), mix(0.4, 1.0, sh), mix(0.05, 0.004, sh));
         let mut best: f64 = 0.0;
         for c in [ci, ci + 1.0, ci - 1.0, ci + 2.0, ci - 2.0] {
             let row = self.tab[k][(c - cells * (c / cells).floor()) as usize];
@@ -64,7 +80,7 @@ impl Ridges {
     /// The page's `mtnH`: range k's height factor at u (times `hk * menv`), roughness octaves down to
     /// the pixel footprint `px`; and the second octave's value, which the range's tree line follows.
     pub fn mtn_h(&self, rng: &Rng, u: f64, k: usize, menv: f64, px: f64) -> (f64, f64) {
-        let (ly, b, rk, cells) = (20.0 + k as f64 * 10.0, 2.0 + k as f64, self.rk[k], mt_cells(k));
+        let (ly, b, rk, cells) = (20.0 + k as f64 * 10.0, 2.0 + k as f64, self.rk[k], self.cells[k]);
         let n = 0.667 * rng.pn(u * b, b, ly + 8.0) + 0.333 * rng.pn(u * b * 2.0, b * 2.0, ly + 11.0);
         let alp = smooth(-0.25, 0.25, (n - 0.5) * 1.9 + rk * 1.75 - 0.7 + (menv - 0.5) * 0.9 * (0.4 + rk));
         let (swell, q) = (smooth(0.3, 0.7, n), self.hk[k] * cells / TAU);
@@ -146,14 +162,14 @@ impl Zones {
     /// Ridge elevations of the five ranges at u (the zones' footprint).
     pub fn ridges(&self, u: f64) -> [f64; 5] { self.ridge.heights(&self.rng, u, MPX) }
     /// The near ground rise at u (rad, the ground band's top); with the front treeline, what hides the foot of something far.
-    pub fn rise(&self, u: f64) -> f64 { let u = fract(u); (0.0035 + 0.0025 * self.rng.fbm(u, 24.0, 500.0)) * self.land(u) }
-    fn near_cover(&self, u: f64) -> f64 { self.rise(u) + 0.6 * self.p[P::TrH] * self.tr_n(u) }
+    pub fn rise(&self, u: f64) -> f64 { let u = fract(u); (0.0035 + 0.0025 * self.rng.fbm(u, 24.0, 500.0)) * self.land(u) * self.p[P::Size] }
+    fn near_cover(&self, u: f64) -> f64 { self.rise(u) + 0.6 * self.p[P::TrH] * self.p[P::Size] * self.tr_n(u) }
     /// Gentle ground on the lower half of range k at u (the crest 180 m to each side within ~12 degrees),
     /// where a wind turbine may stand; h0 is range k's ridge at u, d its distance.
     pub fn turb_ok(&self, u: f64, k: usize, d: f64, h0: f64) -> bool {
         let du = 180.0 / (TAU * d);
         let (ha, hb) = (self.ridges(u + du)[k], self.ridges(u - du)[k]);
-        (ha - h0).abs().max((h0 - hb).abs()) <= 0.21 * TAU * du && h0 <= 0.5 * self.p[P::MtH] * mt_scale(k)
+        (ha - h0).abs().max((h0 - hb).abs()) <= 0.21 * TAU * du && h0 <= 0.5 * self.p[P::MtH] * mt_scale(k) * self.p[P::Size]
     }
 
     fn place(&mut self) {
@@ -237,7 +253,7 @@ impl Zones {
         // a taller farther one), on open flat land 4.5 km out or offshore 8 km out
         let (hw_w, mt) = (0.015 + 0.03 * p[P::PrTurb], p[P::MtW] >= 0.04);
         // a farm's top (hub + half rotor) over its distance
-        let top = |f: f64, dist: f64| { let h0 = 85.0 + 35.0 * self.rnd(f, 1.0, 1200.0); (h0 + 0.5 * (h0 * (0.47 + 0.08 * self.rnd(f, 2.0, 1200.0)))) / dist };
+        let top = |f: f64, dist: f64| { let h0 = 85.0 + 35.0 * self.rnd(f, 1.0, 1200.0); (h0 + 0.5 * (h0 * (0.47 + 0.08 * self.rnd(f, 2.0, 1200.0)))) * p[P::Size] / dist };
         // the visible share of a farm on range k around c (the part of its turbines above every other ridge, the
         // near ground rise and the front treeline, where a turbine may stand), and range k's mean ridge there
         let farm_vis = |f: f64, c: f64, k: usize| {
@@ -296,7 +312,8 @@ impl Zones {
         let f1 = turb_site(1.0, f0[0]);
         self.turb = [[f0[0], hw_w, f0[1], f0[2]], [f1[0], hw_w, f1[1], f1[2]]];
         // radio / TV masts: on the skyline ridge (range 3 or 4 where it is the front range) or on open treeless land
-        let n_m = if p[P::PrMast] > 0.0 { 1 + (p[P::PrMast] * 3.99).floor() as usize } else { 0 };
+        // as many over Size (one to four)
+        let n_m = if p[P::PrMast] > 0.0 { ((1.0 + (p[P::PrMast] * 3.99).floor()) / p[P::Size]).round().clamp(1.0, 4.0) as usize } else { 0 };
         for i in 0..n_m {
             let fi = i as f64;
             let (c, k) = argmax(16, |j| {
@@ -325,5 +342,31 @@ impl Zones {
             ("uZFairX", self.fair_x), ("uZLampT", self.lamp_t), ("uZLampC", self.lamp_c), ("uZPyl0", self.pyl[0]), ("uZPyl1", self.pyl[1]),
             ("uZPyl2", self.pyl[2]), ("uZTurb0", self.turb[0]), ("uZTurb1", self.turb[1]), ("uZMastU", self.mast_u), ("uZMastK", self.mast_k),
             ("uZMastD", self.mast_d), ("uZMastH", self.mast_h)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// At Size 1 the summit table is the base's (a summit a cell, the page's draws); at Size 2 each range has half its cells
+    /// (rounded), keeps its highest summit and stands twice as high; at Size 0.5 twice the cells, every base summit kept
+    /// and one drawn afresh between each two.
+    #[test]
+    fn the_summits_follow_size() {
+        let p = Params::default();
+        let rng = Rng::new(p.seed);
+        let at = |k: f64| { let mut q = p.clone(); q.set(P::Size as usize, k); Ridges::new(&q, &rng) };
+        let (one, two, half) = (at(1.0), at(2.0), at(0.5));
+        let top = |r: &Ridges, k: usize| r.tab[k].iter().map(|t| t[0]).fold(0.0, f64::max);
+        for k in 0..5 {
+            let r1 = rng.rnd(3.0, 2.0, 20.0 + k as f64 * 10.0);
+            assert_eq!((one.tab[k].len(), one.tab[k][3][0]), (mt_cells(k) as usize, r1 * r1.sqrt()), "range {k} at Size 1");
+            assert_eq!((two.tab[k].len(), half.tab[k].len()), ((mt_cells(k) / 2.0).round() as usize, 2 * mt_cells(k) as usize), "range {k}");
+            assert_eq!(top(&two, k), top(&one, k), "range {k} keeps its highest summit");
+            assert!(top(&half, k) >= top(&one, k), "range {k}: Size 0.5 keeps it among more");
+            assert!(one.tab[k].iter().all(|r| half.tab[k].contains(r)), "range {k}: Size 0.5 keeps every summit");
+            assert_eq!((two.hk(k), half.hk(k)), (2.0 * one.hk(k), 0.5 * one.hk(k)));
+        }
     }
 }

@@ -8,18 +8,19 @@ use crate::rng::{fract, mix, smooth, wd, TAU};
 pub fn build(c: &mut Ctx) {
     let (am, z, p, zs) = (c.p[P::PrCrane], c.z.crane, c.p, c.z);
     if am <= 0.0 || z[1] <= 0.0 { return; }
-    let (cd, hsec) = (28.0 * p[P::CtR], p[P::CtW] * 0.5);
-    let dd = cd * 70.0;
+    // the city's lots: blocks of bl m (Size times the base's 70), downtown cdk of them out (`city.rs`)
+    let (cd, hsec, sz) = (28.0 * p[P::CtR], p[P::CtW] * 0.5, c.k);
+    let (dd, bl, cdk) = (cd * 70.0, 70.0 * sz, cd / sz);
     let cam = [0.8 * p[P::Off] * dd * (p[P::OffDir] * TAU).cos(), 0.8 * p[P::Off] * dd * (p[P::OffDir] * TAU).sin()];
     let (hb, hc) = (|h: u32, k: u32| ((h >> (8 * k)) & 255) as f64 * 0.003921569, |x: f64, y: f64, k: i32| zs.rng.hcell(x as i32, y as i32, k));
     let empty = |cx: f64, cy: f64, bu: f64| { // the city never builds on lot (cx, cy)
-        let (rr, da) = (hypot(cx + 0.5, cy + 0.5) / cd, wd(bu, p[P::CtC]).abs());
+        let (rr, da) = (hypot(cx + 0.5, cy + 0.5) / cdk, wd(bu, p[P::CtC]).abs());
         let aenv = (1.0 - smooth(hsec - 0.04, hsec + 0.04, da)).max(if p[P::CtW] >= 0.999 { 1.0 } else { 0.0 }) * smooth(0.0, 0.02, p[P::CtW]);
         hb(hc(cx, cy, 1), 0) >= clamp(0.03 + p[P::CtD], 0.0, 0.98) * 1.15 * aenv * (smooth(0.5, 0.75, rr) * (1.0 - smooth(1.2, 1.55, rr)))
     };
     // a world point from the city camera: bearing, distance, the ray and its tangent
     let view = |w: [f64; 2]| { let q = [w[0] - cam[0], w[1] - cam[1]]; let th = q[1].atan2(q[0]); (fract(th / TAU), hypot(q[0], q[1]), [th.cos(), th.sin()], [-th.sin(), th.cos()]) };
-    for fi in (0..1.max((0.5 + 12.0 * am).floor() as i32)).map(|f| f as f64) {
+    for fi in (0..1.max(((0.5 + 12.0 * am) / sz).floor() as i32)).map(|f| f as f64) { // Size times as large: as many over Size
         let h0 = hc(fi, 0.0, 1300);
         let (r1, r2, r3) = (hb(h0, 0), hb(h0, 1), hb(h0, 2));
         let b = if r1 <= 0.55 { z[0] + if r2 < 0.5 { -1.0 } else { 1.0 } * (hsec + (fract(r2 * 7.31) - 0.6) * 0.05) } else { z[0] + (2.0 * r2 - 1.0) * hsec * 0.85 };
@@ -27,16 +28,17 @@ pub fn build(c: &mut Ctx) {
         let (near, w) = (rad <= 1.25 * dd, [rad * (b * TAU).cos(), rad * (b * TAU).sin()]);
         if view(w).1 < 150.0 { continue; }
         let cell = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], // the site: here or next door
-            [0.0, -1.0]].into_iter().map(|o| [(w[0] / 70.0).floor() + o[0], (w[1] / 70.0).floor() + o[1]])
-            .find(|&[cx, cy]| { let cm = [(cx + 0.5) * 70.0, (cy + 0.5) * 70.0]; empty(cx, cy, b + (w[0] * cm[1] - w[1] * cm[0]) / ((w[0] * w[0] + w[1] * w[1]) * TAU)) });
+            [0.0, -1.0]].into_iter().map(|o| [(w[0] / bl).floor() + o[0], (w[1] / bl).floor() + o[1]])
+            .find(|&[cx, cy]| { let cm = [(cx + 0.5) * bl, (cy + 0.5) * bl]; empty(cx, cy, b + (w[0] * cm[1] - w[1] * cm[0]) / ((w[0] * w[0] + w[1] * w[1]) * TAU)) });
         let on_land = if wd(b, p[P::LandC]).abs() < p[P::Land] * 0.5 - 0.11 && p[P::Land] > 0.04 { 1.0 } else { c.z.land(fract(b)) };
         let Some(cell) = cell.filter(|_| on_land >= 0.5) else { continue }; // no free lot, or the water
         let (h1, h2, h3, h4) = (hc(fi, 1.0, 1300), hc(fi, 2.0, 1300), hc(fi, 3.0, 1300), hc(fi, 4.0, 1300));
-        let (s, has_f, hx, hz) = ([(cell[0] + 0.5) * 70.0, (cell[1] + 0.5) * 70.0], hb(h0, 3) <= 0.65, 10.0 + 13.0 * hb(h1, 0), 10.0 + 13.0 * hb(h1, 1));
-        let (nf, f) = ((4.0 + 12.0 * hb(h1, 2).powf(1.4)).floor(), [s[0] + (hb(h1, 3) - 0.5) * (26.0 - hx), s[1] + (hb(h2, 0) - 0.5) * (26.0 - hz)]);
+        // the site (m); on it, in size units times Size, the frame and the mast
+        let (s, has_f, hx, hz) = ([(cell[0] + 0.5) * bl, (cell[1] + 0.5) * bl], hb(h0, 3) <= 0.65, 10.0 + 13.0 * hb(h1, 0), 10.0 + 13.0 * hb(h1, 1));
+        let (nf, f) = ((4.0 + 12.0 * hb(h1, 2).powf(1.4)).floor(), [s[0] + (hb(h1, 3) - 0.5) * (26.0 - hx) * sz, s[1] + (hb(h2, 0) - 0.5) * (26.0 - hz) * sz]);
         let (k4, jt) = ((hb(h2, 1) * 3.99).floor() as usize, hb(h2, 2) - 0.5);
-        let m = if has_f { [f[0] + [hx + 3.5, -hx - 3.5, jt * hx, jt * hx][k4],
-            f[1] + [jt * hz, jt * hz, hz + 3.5, -hz - 3.5][k4]] } else { [s[0] + (hb(h0, 1) - 0.5) * 30.0, s[1] + (hb(h0, 2) - 0.5) * 30.0] };
+        let m = if has_f { [f[0] + [hx + 3.5, -hx - 3.5, jt * hx, jt * hx][k4] * sz,
+            f[1] + [jt * hz, jt * hz, hz + 3.5, -hz - 3.5][k4] * sz] } else { [s[0] + (hb(h0, 1) - 0.5) * 30.0 * sz, s[1] + (hb(h0, 2) - 0.5) * 30.0 * sz] };
         let ty = if hb(h2, 3) < 0.5 { 0 } else if hb(h2, 3) < 0.85 { 1 } else { 2 }; // hammerhead, flat-top, luffing
         let hm = (if has_f { clamp(nf * 3.5 + 16.0 + 14.0 * hb(h3, 0), 38.0, 85.0) } else { 38.0 + 40.0 * hb(h3, 0) }).min(if ty == 2 { 55.0 } else { f64::MAX });
         let (ln, ph, al, at) = (50.0 + 20.0 * hb(h3, 1), hb(h3, 2) * TAU, mix(0.45, 1.1, hb(h3, 3)), 0.25 + 0.65 * hb(h4, 1));
@@ -80,7 +82,7 @@ pub fn build(c: &mut Ctx) {
         let (ww, de) = (hx * tx + hz * tz, hx * vf.2[0].abs() + hz * vf.2[1].abs());
         let i1 = Instance { slot: if near { 2 } else { 1 }, view: 1, uc: vf.0, d: vf.1, hide_c: near, td: town_td(vf.1, 1.08), glow: 1.0, ..I0 };
         c.begin(i1.clone(), 0.0, 0.0);
-        for ys in (1..=nf as i32).map(|fl| fl as f64 * 3.5) { bx(c, 0.0, ys, ww, 0.2 + (ys - EYE).max(0.0) * de / vf.1); }
+        for ys in (1..=nf as i32).map(|fl| fl as f64 * 3.5) { bx(c, 0.0, ys, ww, 0.2 + (ys - EYE).max(0.0) * de * sz / vf.1); }
         let x = (c.rnd(fi, 30.0, 1301.0) - 0.5) * ww * 0.8;
         c.trap(x, 0.0, 3.2 * (tx + tz), 3.2 * (tx + tz), ht + 3.5, 1.0);
         if c.rnd(fi, 31.0, 1301.0) < 0.45 { c.trap(0.0, ht - 6.0, ww + 0.4, ww + 0.4, 7.5, 0.92); }

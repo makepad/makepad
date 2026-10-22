@@ -24,11 +24,14 @@ pub fn build(c: &mut Ctx) {
     };
     for k in (0..4).rev() {
         let kf = k as f64;
+        // the row d m out; its houses, lamps and ground in size units, which subtend over dk = d / Size what metres do over d
         let (d, ly) = (s[0] + kf * s[1], kf * 8.0);
-        let (xx, xu) = (z[1] * TAU * d, |x: f64| z[0] + x / (TAU * d));
-        // the row's band of ground: columns between samples every 1/1680 turn, eight per instance
-        let gs: Vec<[f64; 2]> = (((z[0] - z[1]) * 1680.0).floor() as i64..=((z[0] + z[1]) * 1680.0).ceil() as i64)
-            .map(|j| { let u = (j as f64 / 1680.0).max(z[0] - z[1]).min(z[0] + z[1]); [(u - z[0]) * TAU * d, c.town_ground(u, kf, &s)] }).collect();
+        let dk = d / c.k;
+        let (xx, xu) = (z[1] * TAU * dk, |x: f64| z[0] + x / (TAU * dk));
+        // the row's band of ground: columns between samples every 1/1680 turn (Size times that), eight per instance
+        let gn = 1680.0 / c.k;
+        let gs: Vec<[f64; 2]> = (((z[0] - z[1]) * gn).floor() as i64..=((z[0] + z[1]) * gn).ceil() as i64)
+            .map(|j| { let u = (j as f64 / gn).max(z[0] - z[1]).min(z[0] + z[1]); [(u - z[0]) * TAU * dk, c.town_ground(u, kf, &s)] }).collect();
         for seg in (0..gs.len().saturating_sub(1)).step_by(8).map(|j| &gs[j..(j + 9).min(gs.len())]).filter(|q| q.iter().any(|q| q[1] >= 0.02)) {
             let xc = 0.5 * (seg[0][0] + seg[seg.len() - 1][0]);
             c.begin(Instance { uc: fract(xu(xc)), d, td: town_td(d, 0.9), ..I0 }, 0.0, 0.0);
@@ -42,7 +45,7 @@ pub fn build(c: &mut Ctx) {
         let mut jl = ((offl - 0.94 * xx) / ls).ceil();
         while jl * ls - offl <= 0.94 * xx {
             let xl = jl * ls - offl;
-            let (ul, cn) = (xu(xl), 1.0 - smooth(0.0, z[1].max(0.03), (xl / (TAU * d)).abs()));
+            let (ul, cn) = (xu(xl), 1.0 - smooth(0.0, z[1].max(0.03), (xl / (TAU * dk)).abs()));
             let quay = k == 0 && inland(ul) <= 0.5;
             if quay || rnd(jl, 4.0 * kf + 20.0, 1612.0) <= 0.75 * mix(0.5, 1.0, cn) {
                 lamps.push(Lamp { xl, ul, gl: c.town_ground(ul, kf - 0.12, &s), quay, kw: if quay || sod < 1.0 { 0.75 } else { sod } });
@@ -62,9 +65,9 @@ pub fn build(c: &mut Ctx) {
                 let hw = 0.5 * cc * mix(mix(0.55, 0.85, wfc), 1.0, rw * rw * (3.0 - 2.0 * rw));
                 (hw, (cf + 0.5) * cc + (rj - 0.5) * (cc - 2.0 * hw))
             };
-            let (xh, duh) = (xh - off, (xh - off) / (TAU * d));
+            let (xh, duh) = (xh - off, (xh - off) / (TAU * dk));
             let (cn, wf) = (1.0 - smooth(0.0, z[1].max(0.03), duh.abs()), if k == 0 { 1.0 - inland(xu(xh)) } else { 0.0 });
-            if rnd(hid, ly + 6.0, 1611.0) <= dens * mix(0.35, 1.0, cn.sqrt()) + 0.4 * wf && duh.abs() + (hw + 1.0) / (TAU * d) <= z[1] {
+            if rnd(hid, ly + 6.0, 1611.0) <= dens * mix(0.35, 1.0, cn.sqrt()) + 0.4 * wf && duh.abs() + (hw + 1.0) / (TAU * dk) <= z[1] {
                 hs.push(House { blk, hid, hw, xh, cn, wf, lamps: vec![] });
             }
         }

@@ -38,7 +38,7 @@ pub fn build(c: &mut Ctx) {
     let wind = |uc: f64| wa.cos() * -(uc * TAU).sin() + wa.sin() * (uc * TAU).cos();
     for fr in (0..3).map(|f| f as f64) {
         let rr = mix(z[3], z[2], (fr + 0.5) / 3.0);
-        let cbu = 95.0 / (rr * TAU); // row distance (far to near), lot width (u)
+        let cbu = 95.0 * c.k / (rr * TAU); // row distance (far to near), lot width (u; 95 size units, so as many over Size)
         let (jct, jfl) = ((-0.62 * zsd * z[1] / cbu).floor(), (0.62 * zsd * z[1] / cbu).floor());
         let jct2 = jct + if (jct + 1.5).abs() * cbu < z[1] { 1.0 } else { -1.0 };
         for j in (-6..=5).map(|j| j as f64) {
@@ -95,7 +95,7 @@ pub fn build(c: &mut Ctx) {
                     let (yt, rt, rtt) = (0.79 * hh, 0.585 * rb, 0.635 * rb);
                     let (bl, bu) = (yt / (rb * rb / (rt * rt) - 1.0).sqrt(), (hh - yt) / (rtt * rtt / (rt * rt) - 1.0).sqrt());
                     let r = |y: f64| rt * (1.0 + (y - yt) * (y - yt) / (if y < yt { bl } else { bu }).powi(2)).sqrt();
-                    let ov = 3f64.max(0.004 * d);
+                    let ov = 3f64.max(0.004 * d / c.k);
                     for (y0, y1) in [(0.0, 0.5 * yt + ov), (0.5 * yt, yt + ov), (yt, hh)] {
                         l.pt(Trap, [0., y0, r(y0), r(y1)], [y1 - y0, 0.5 * (r(y0) + r(y1)) - r(0.5 * (y0 + y1)), 1., 0.], r(y0).max(r(y1)), y0 + (y1 - y0), false);
                     }
@@ -186,7 +186,7 @@ pub fn build(c: &mut Ctx) {
                 let (lo, hi) = ((-1.6 * w0).min((aw - 0.256) * s1 - 1.6 * w0), (aw + 0.256) * s1 + 1.6 * w0);
                 let (xa, xb) = (ex + if sg > 0.0 { lo } else { -hi }, ex + if sg > 0.0 { hi } else { -lo });
                 let (xm, dp) = (0.5 * (xa + xb), d + 0.5);
-                c.add(Instance { slot: 1, view: 1, uc: fract(uc + xm / (TAU * dp)), d: dp, hw: 0.5 * (xb - xa) + 2.0, top: ey + r + 0.06 * s1 + 1.6 * (w0 + 0.16 * s1) + 2.0, seed, ..I0 });
+                c.add(Instance { slot: 1, view: 1, uc: fract(uc + xm * c.k / (TAU * dp)), d: dp, hw: 0.5 * (xb - xa) + 2.0, top: ey + r + 0.06 * s1 + 1.6 * (w0 + 0.16 * s1) + 2.0, seed, ..I0 });
                 c.part_c(Plume, [ex - xm, ey, w0, r], [lp, k, fd, sg * aw], [sh, 0., 1.]);
             }
         }

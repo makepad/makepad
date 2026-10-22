@@ -27,6 +27,7 @@ pub const PROP_KEYS: &[P] = &[
     P::Land, P::LandC, P::MtH, P::MtW, P::MtC, P::MtRug, P::CtH, P::CtD, P::CtW, P::CtC, P::CtR, P::TrD, P::TrH, P::TrCon, P::TrW,
     P::TrC, P::Treeline, P::PrPyl, P::PrTurb, P::PrCrane, P::PrInd, P::PrChurch, P::PrTown, P::PrLamp, P::PrBridge, P::PrFair,
     P::PrRefl, P::PrRipple, P::PrMast, P::PrFar, P::PrFarm, P::PrCoast, P::Lights, P::Temp, P::WinD, P::Glow, P::Haze, P::Off, P::OffDir,
+    P::Size,
 ];
 
 /// Where in the scene's painter's order a group of instances is drawn.
@@ -87,21 +88,23 @@ fn line_range(i: &Instance) -> ([f64; 2], f64, f64, f64, f64) {
 }
 
 /// The pass rects of instance i's draw in window `win`: its azimuth extent (the page's bucket extent) and its height band
-/// from row ymin down; a rect per side of a line's nearest point, and per turn where it wraps round the strip.
+/// from row ymin down; a rect per side of a line's nearest point, and per turn where it wraps round the strip. Its top,
+/// half-width and glow are in size units (`kit`): Size m each.
 fn place(sc: &SceneCtx, i: &Instance, win: [f64; 2], ymin: f64, mut out: impl FnMut(Rect)) {
     let (v, p, warp) = (sc.view, sc.p, i.view == 0);
+    let (top, hw) = (i.top * p[P::Size], (i.hw + i.glow) * p[P::Size]);
     let oc = [p[P::Off] * (p[P::OffDir] * TAU).cos(), p[P::Off] * (p[P::OffDir] * TAU).sin()];
     // the scenery's azimuth u as the raw view sees it, and the off-centre camera's scale there
     let raw = |u: f64| if warp { ((u * TAU).sin() - oc[1]).atan2((u * TAU).cos() - oc[0]) / TAU } else { u };
     let scale = |u: f64| { let cd = oc[0] * (u * TAU).cos() + oc[1] * (u * TAU).sin(); -cd + (cd * cd - oc[0] * oc[0] - oc[1] * oc[1] + 1.0).max(1e-4).sqrt() };
-    let (eye, base) = (if sc.mirror && i.slot == 2 { -EYE } else { EYE }, if i.line { 0.0 } else { i.base + EYE / i.d });
+    let (eye, base) = ((if sc.mirror && i.slot == 2 { -EYE } else { EYE }) * p[P::Size], if i.line { 0.0 } else { i.base + EYE * p[P::Size] / i.d });
     let mut piece = |ua: f64, ub: f64, d0: f64, d1: f64| {
         let (mut a, b) = (raw(ua), raw(ub));
         let mut w = fract(b - a);
         if w > 0.5 { (a, w) = (b, 1.0 - w); }
         let (a, w, pad) = (a - 0.001, w + 0.002, 3.0 * v.px0());
         let (tn, tx) = (0..5).map(|k| if warp { scale(a + w * k as f64 / 4.0) } else { 1.0 }).fold((f64::MAX, 0.0f64), |(n, x), t| (n.min(t), x.max(t)));
-        let (lo, hi) = [-eye / d0, -eye / d1, (i.top - eye) / d0, (i.top - eye) / d1].map(|e| e + base).iter().fold((f64::MAX, f64::MIN), |(n, x), &e| (n.min(e), x.max(e)));
+        let (lo, hi) = [-eye / d0, -eye / d1, (top - eye) / d0, (top - eye) / d1].map(|e| e + base).iter().fold((f64::MAX, f64::MIN), |(n, x), &e| (n.min(e), x.max(e)));
         let (lo, hi) = (lo / if lo < 0.0 { tn } else { tx } - pad, hi / if hi > 0.0 { tn } else { tx } + pad);
         let (ya, yb) = if sc.mirror { (v.row_of(-lo).max(v.row_of(0.0)), v.row_of(-hi)) } else { (v.row_of(hi), v.row_of(lo)) }; // the mirror only looks up
         let (y0, y1) = (ya.floor().max(ymin), yb.ceil().min(v.h as f64));
@@ -111,7 +114,7 @@ fn place(sc: &SceneCtx, i: &Instance, win: [f64; 2], ymin: f64, mut out: impl Fn
             if x1 > x0 { out(Rect { pos: dvec2(x0, y0), size: dvec2(x1 - x0, y1 - y0) }); }
         }
     };
-    if !i.line { let h = (i.hw + i.glow) / (TAU * i.d); return piece(i.uc - h, i.uc + h, i.d, i.d); }
+    if !i.line { let h = hw / (TAU * i.d); return piece(i.uc - h, i.uc + h, i.d, i.d); }
     let (t, sf, dmin, dmax, pd) = line_range(i);
     let at = |s: f64| [i.o[0] + s * t[0], i.o[1] + s * t[1]];
     let (az, dist) = (|s: f64| { let q = at(s); q[1].atan2(q[0]) / TAU }, |s: f64| { let q = at(s); q[0].hypot(q[1]) });
@@ -187,8 +190,9 @@ impl Props {
     }
 
     /// Draws `self.items[r]` from pass row `y0` down, hidden by nearer city surfaces (`pl`: into the props layer's pass).
+    /// The shader gets an instance's top and half-width in metres (`kit`'s size units times Size).
     fn instances(&mut self, cx: &mut Cx2d, sc: &SceneCtx, r: std::ops::Range<usize>, y0: f64, pl: bool) {
-        let ((tex, rows), dp) = (self.tex.as_ref().unwrap(), &mut self.draw_part);
+        let ((tex, rows), dp, k) = (self.tex.as_ref().unwrap(), &mut self.draw_part, sc.p[P::Size]);
         sc.set_uniforms(cx, &mut dp.draw_vars);
         bind_texture(cx, &mut dp.draw_vars, live_id!(parts), tex);
         crate::city::bind_city(cx, &mut dp.draw_vars, sc);
@@ -197,8 +201,8 @@ impl Props {
             let i = &self.set.inst[it.i];
             let fl = (i.slot as u32 + 4 * i.view as u32 + 8 * i.hide_c as u32 + 16 * i.line as u32 + 32 * i.hide_m as u32) as f32;
             (dp.h0, dp.h2) = if i.line { (vec4(0.0, i.smar as f32, 0.0, fl), vec4(i.o[0] as f32, i.o[1] as f32, i.ang as f32, i.len as f32)) }
-                else { (vec4(i.uc as f32, i.d as f32, (i.base + EYE / i.d) as f32, fl), vec4(i.hw as f32, 0.0, 0.0, 0.0)) };
-            (dp.h1, dp.h3) = (vec4((3 * i.p0) as f32, i.np as f32, i.top as f32, i.td as f32), vec4(it.win[0] as f32, it.win[1] as f32, (i.seed & 8191) as f32, 0.0));
+                else { (vec4(i.uc as f32, i.d as f32, (i.base + EYE * k / i.d) as f32, fl), vec4((i.hw * k) as f32, 0.0, 0.0, 0.0)) };
+            (dp.h1, dp.h3) = (vec4((3 * i.p0) as f32, i.np as f32, (i.top * k) as f32, i.td as f32), vec4(it.win[0] as f32, it.win[1] as f32, (i.seed & 8191) as f32, 0.0));
             place(sc, i, it.win, y0, |r| dp.draw_abs(cx, r));
         }
     }

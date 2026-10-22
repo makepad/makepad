@@ -34,8 +34,10 @@ pub fn build(c: &mut Ctx) {
     if am <= 0.0 || z[1] <= 0.0 { return; }
     let (r, pier, fs): (Vec<f64>, bool, f64) = ((0..16).map(|i| if i == 0 { 0.0 } else { c.rnd(i as f64, 1.0, 1900.0) }).collect(),
         c.z.fair_x[0] > 0.5, if c.z.fair_x[1] < 0.0 { -1.0 } else { 1.0 });
+    // d m out; its rides and booths in size units, which subtend over dk = d / Size what metres do over d
     let d = 1150.0 + 700.0 * r[1];
-    let (w, yg, dw, ton, kon) = (z[1] * TAU * d, if pier { 6.5 } else { 0.0 }, // half-width, the pier deck or the ground
+    let dk = d / c.k;
+    let (w, yg, dw, ton, kon) = (z[1] * TAU * dk, if pier { 6.5 } else { 0.0 }, // half-width, the pier deck or the ground
         30.0 + 25.0 * r[2], am >= 0.5 + 0.25 * r[4], am >= 0.2 + 0.25 * r[5]);
     // the layout along x: wheel, coaster and drop tower in a seed order, booths and a carousel in the gaps
     let rw = 0.5 * dw;
@@ -48,7 +50,7 @@ pub fn build(c: &mut Ctx) {
         else { (x0 + wt + 0.5 * ww, x0 + wt + ww, x0 + 0.5 * wt) };
     let (xc0, s) = (xc0 + 5.0, |xc: f64| move |v: f64| fs * (v - xc)); // fair x -> part x in the instance centred at xc
     // the ground band (pier, booths) and its lights in x chunks of ~100 m: (top, parts) each
-    let xe = if pier { -w - 0.0065 * TAU * d } else { -w };
+    let xe = if pier { -w - 0.0065 * TAU * dk } else { -w };
     let nf = 1f64.max(((w - xe) / 100.0 + 0.5).floor()) as usize;
     let (cf, mut body) = ((w - xe) / nf as f64, vec![]);
     let (chunk_of, xcj) = (|x: f64| clamp(((x - xe) / cf).floor(), 0.0, nf as f64 - 1.0) as usize, |j: usize| xe + (j as f64 + 0.5) * cf);
@@ -115,7 +117,7 @@ pub fn build(c: &mut Ctx) {
     }
     let chunks = |v: Vec<Chunk>| v.into_iter().enumerate().filter(|q| !q.1 .1.is_empty()).map(|(j, (top, p))| Fi { x: xcj(j), hw: 0.5 * cf + 5.0, top, p }).collect::<Vec<_>>();
     for f in chunks(gb).into_iter().chain(body).chain(chunks(fl)) {
-        c.add(Instance { uc: fract(z[0] + fs * f.x / (TAU * d)), d, hw: f.hw, top: f.top, glow: 1.0, ..I0 });
+        c.add(Instance { uc: fract(z[0] + fs * f.x / (TAU * dk)), d, hw: f.hw, top: f.top, glow: 1.0, ..I0 });
         for q in f.p { c.part_c(q.0, q.1, q.2, q.3); }
     }
 }

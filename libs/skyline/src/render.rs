@@ -57,10 +57,11 @@ impl ViewSpec {
     pub fn strip(p: &Params, w: usize) -> Self { Self::new(p, 0.0, 1.0, w) }
     /// The detail view: `zoom` of the turn centred on `pan`.
     pub fn detail(p: &Params, w: usize) -> Self { Self::new(p, p[P::Pan] - p[P::Zoom] / 2.0, p[P::Zoom], w) }
+    /// The rows: the field of view times Size (`crate::band_geom`).
     pub fn new(p: &Params, u0: f64, span: f64, w: usize) -> Self {
-        let w = w.max(8);
-        let h = ((w as f64 * p[P::Vfov] / (span * 360.0)).round() as usize).max(8);
-        Self { u0, span, w, h, horizon: p[P::Horizon], pad: 0 }
+        let (w, g) = (w.max(8), crate::band_geom(p));
+        let h = ((w as f64 * g.deg / (span * 360.0)).round() as usize).max(8);
+        Self { u0, span, w, h, horizon: g.horizon, pad: 0 }
     }
     /// Radians per pixel of the raw view.
     pub fn px0(&self) -> f64 { self.span * TAU / self.w as f64 }
@@ -187,7 +188,7 @@ pub struct ColumnCache { key: u64, m: usize, data: Vec<[f32; 4]>, tex: Texture, 
 /// The parameters the zones depend on (with the seed).
 const ZONE_KEYS: &[P] = &[
     P::CtC, P::CtW, P::CtR, P::Land, P::LandC, P::PrInd, P::PrTown, P::PrBridge, P::PrFair, P::PrTurb, P::PrMast, P::MtH, P::MtW, P::MtC,
-    P::MtRug, P::TrC, P::TrW, P::TrH,
+    P::MtRug, P::TrC, P::TrW, P::TrH, P::Size,
 ];
 
 #[derive(Script, ScriptHook)]
@@ -339,7 +340,8 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     let c_d = 28.0 * p[P::CtR];
     let dx = (p[P::CtC] * TAU).cos() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).cos();
     let dy = (p[P::CtC] * TAU).sin() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).sin();
-    let dome_k = (dx * dx + dy * dy).sqrt() / c_d / (0.0147 * (6.0 + 44.0 * p[P::CtH]) * 0.05);
+    // (the towers Size times as tall: a dome Size times as high)
+    let dome_k = (dx * dx + dy * dy).sqrt() / c_d / (0.0147 * (6.0 + 44.0 * p[P::CtH]) * 0.05) / p[P::Size];
     if p[P::Glow] > 0.0 && p[P::CtW] >= 0.001 {
         if let Some(r) = sc.band(9.0 / dome_k, -0.012 - px0) {
             sc.set_uniforms(cx, &mut sp.glow.draw_vars);
@@ -352,7 +354,8 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     for k in 0..5 {
         props.draw(cx, sc, Bucket::Range(k));
         if let Some(r) = sc.band(band_top(sc, k), -2.0 * px0) {
-            (sp.range.k, sp.range.hk) = (k as f32, (p[P::MtH] * mt_scale(k)) as f32);
+            // the range's own height (Size times the base's): its valley haze keeps to the same share of it
+            (sp.range.k, sp.range.hk) = (k as f32, (p[P::MtH] * mt_scale(k) * p[P::Size]) as f32);
             sp.range.draw_abs(cx, r);
         }
     }

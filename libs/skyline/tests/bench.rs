@@ -70,7 +70,6 @@ type Row = ((f64, f64, f64), f64, f64);
 #[test]
 #[ignore = "requires a native HAL GPU release build"]
 fn gpu_view_times() {
-    use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
     let (def, soft, heavy, off) = (preset("default"), preset("soft"), preset("props_heavy"), preset("offcentre"));
     let strip = |p: &params::Params, w| render::ViewSpec::strip(p, w);
     let detail = |p: &params::Params| render::ViewSpec::detail(p, 1600);
@@ -82,6 +81,30 @@ fn gpu_view_times() {
         ("props_heavy strip 4096", &heavy, strip(&heavy, 4096)), ("offcentre strip 4096", &off, strip(&off, 4096))] {
         cases.push((format!("{name} Passes"), Mode::Passes, p.clone(), v));
     }
+    time_cases(cases);
+}
+
+/// The strip's GPU time at Size 0.5, 1 and 2 (the defaults, 1024 px, every pass again): at 0.5, the most elements,
+/// within 1.5x of Size 1's (plan hdri-5 Task 9).
+#[test]
+#[ignore = "requires a native HAL GPU release build"]
+fn gpu_size_times() {
+    // every pass again (asserted), then cold (the zones, columns, trees and props rebuilt too: a Size drag; printed)
+    let cases: Vec<(String, Mode, params::Params, render::ViewSpec)> = [(1.0, Mode::Passes), (0.5, Mode::Passes), (2.0, Mode::Passes), (1.0, Mode::Cold), (0.5, Mode::Cold), (2.0, Mode::Cold)]
+        .into_iter().map(|(k, mode)| {
+            let mut p = params::Params::default();
+            p.set(params::P::Size as usize, k);
+            let v = render::ViewSpec::strip(&p, 1024);
+            (format!("size {k} strip 1024 {mode:?}"), mode, p, v)
+        }).collect();
+    let t = time_cases(cases);
+    let (one, half) = (t[0].1, t[1].1);
+    assert!(half <= 1.5 * one, "Size 0.5: {half:.3} ms of GPU, Size 1 {one:.3} ms");
+}
+
+/// Times each case (`gpu_view_times`'s frames); the medians of their GPU ms, by name.
+fn time_cases(cases: Vec<(String, Mode, params::Params, render::ViewSpec)>) -> Vec<(String, f64)> {
+    use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
     let bench: Rc<RefCell<Option<Bench>>> = Rc::new(RefCell::new(None));
     let handler = bench.clone();
     let first = (cases[0].2.clone(), cases[0].3);
@@ -139,6 +162,7 @@ fn gpu_view_times() {
     while bench.borrow().is_none() { assert!(cx.borrow_mut().hal_session_turn(1_000_000, true)); }
     let heat = |on: bool| bench.borrow_mut().as_mut().unwrap().heat = on;
     println!("{:<30} {:>8} {:>8} {:>8}  (medians of 20 view frames, ms)", "case", "GPU", "draw", "heater");
+    let mut out = vec![];
     for (name, mode, p, v) in cases {
         { let mut b = bench.borrow_mut(); let b = b.as_mut().unwrap(); b.core.1.release(); (b.case, b.mode) = ((p.clone(), v), mode); }
         let mut cx = cx.borrow_mut();
@@ -152,6 +176,8 @@ fn gpu_view_times() {
         hal_api::profile::set(false);
         let m = |f: &dyn Fn(&Row) -> f64| median(rows.iter().map(f).collect());
         println!("{name:<30} {:>8.3} {:>8.3} {:>8.2}  ({}x{})", m(&|r| r.0 .2), m(&|r| r.1), m(&|r| r.2), v.w, v.h);
+        out.push((name, m(&|r| r.0 .2)));
     }
     hal.close(info.session);
+    out
 }

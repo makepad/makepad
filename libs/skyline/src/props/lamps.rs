@@ -6,7 +6,7 @@ use crate::params::P;
 use crate::rng::{fract, mix, TAU};
 
 pub fn build(c: &mut Ctx) {
-    let (am, z) = (c.p[P::PrLamp], c.z);
+    let (am, z, sz) = (c.p[P::PrLamp], c.z, c.k);
     if am <= 0.0 { return; }
     let (rr, sx, sea) = (|i: f64, k: f64| z.rnd(i, k, 1700.0), mix(1250.0, 1800.0, z.rnd(1.0, 1.0, 1600.0)), z.town_x[1]);
     let at = |d: f64, u: f64| [d * (u * TAU).cos(), d * (u * TAU).sin()];
@@ -38,21 +38,23 @@ pub fn build(c: &mut Ctx) {
             (pp, q) = if i == 1 { ([0.0, mix(10.0, 12.0, r4), mix(32.0, 38.0, r3), mix(4.0, 7.0, r2)], [kq, 1.8, mix(1.6, 2.2, r1)]) }
                 else { ([1.0, mix(20.0, 24.0, r4), mix(45.0, 52.0, r3), mix(0.0, 2.0, r5)], [kq, 2.4, 2.4]) };
         }
+        // the road's plan in metres; its lamps in size units, one every spr = sp x Size m (the line's parts: s over Size)
         let len = hypot(b[0] - a[0], b[1] - a[1]);
         let (t, sp, hl, em, wet) = ([(b[0] - a[0]) / len, (b[1] - a[1]) / len], pp[2], pp[1], pp[3].abs(), pp[3] < 0.0);
-        let nmax = (len / sp).floor() as i64;
-        let on_land = |k: i64| { let (x, y) = (a[0] + k as f64 * sp * t[0], a[1] + k as f64 * sp * t[1]); wet || z.land(fract(y.atan2(x) / TAU)) > 0.5 }; // a land road stops at the shore
+        let spr = sp * sz;
+        let nmax = (len / spr).floor() as i64;
+        let on_land = |k: i64| { let (x, y) = (a[0] + k as f64 * spr * t[0], a[1] + k as f64 * spr * t[1]); wet || z.land(fract(y.atan2(x) / TAU)) > 0.5 }; // a land road stops at the shore
         let mut k0 = 0;
         while k0 <= nmax && !on_land(k0) { k0 += 1; }
         let mut k1 = k0;
         while k1 < nmax && on_land(k1 + 1) { k1 += 1; }
         if k0 > nmax { continue; }
-        let (hide_c, tw, s0, s1) = ((i == 1 || i == 3) && z.lamp_c[1] > 0.0, pp[0] != 0.0, k0 as f64 * sp, k1 as f64 * sp);
-        c.add(Instance { line: true, o: a, ang: t[1].atan2(t[0]), len, smar: 80.0, top: em + 4.0, hide_c, ..I0 }); // the embankment, the lamps' light pools
-        if em > 0.0 { c.part(Band, [if wet { -70.0 } else { s0 - 20.0 }, 0., if wet { len + 10.0 } else { s1 + 20.0 }, em], [30., if wet { 1e-3 } else { 25.0 }, 1., 0.]); }
-        c.part(LRow, [if wet { 0.0 } else { s0 }, em + 0.05, if wet { len } else { s1 }, 3.], [sp, 0., if wet { 0.04 } else { 0.03 } * q[1], q[0]]);
+        let (hide_c, tw, s0, s1) = ((i == 1 || i == 3) && z.lamp_c[1] > 0.0, pp[0] != 0.0, k0 as f64 * spr, k1 as f64 * spr);
+        c.add(Instance { line: true, o: a, ang: t[1].atan2(t[0]), len, smar: 80.0 * sz, top: em + 4.0, hide_c, ..I0 }); // the embankment, the lamps' light pools
+        if em > 0.0 { c.part(Band, [if wet { -70.0 } else { s0 / sz - 20.0 }, 0., if wet { len / sz + 10.0 } else { s1 / sz + 20.0 }, em], [30., if wet { 1e-3 } else { 25.0 }, 1., 0.]); }
+        c.part(LRow, [if wet { 0.0 } else { s0 / sz }, em + 0.05, if wet { len / sz } else { s1 / sz }, 3.], [sp, 0., if wet { 0.04 } else { 0.03 } * q[1], q[0]]);
         for k in k0..=k1 {
-            let pl = [a[0] + k as f64 * sp * t[0], a[1] + k as f64 * sp * t[1]];
+            let pl = [a[0] + k as f64 * spr * t[0], a[1] + k as f64 * spr * t[1]];
             let (dl, ul) = (hypot(pl[0], pl[1]), fract(pl[1].atan2(pl[0]) / TAU));
             if dl < 420.0 { continue; }
             let mut nr = [-t[1], t[0]];

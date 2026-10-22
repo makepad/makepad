@@ -1,6 +1,6 @@
 //! The coast (the page's `pkCoast`): a lighthouse on a headland 40 m inland of a real shoreline (lantern, a faint beam in
 //! the haze), and ships with their lights out at sea, one per 10 degree cell of open sea at most, 2.5-11 km out.
-use super::kit::{Ctx, Pt::*, I0, Instance, EYE};
+use super::kit::{Ctx, Pt::*, I0, Instance};
 use crate::params::P;
 use crate::rng::{fract, mix, TAU};
 use crate::zones::Zones;
@@ -11,8 +11,8 @@ pub fn build(c: &mut Ctx) {
     if z.shore[2] > 0.5 { // land lies toward smaller u from shore[0]
         let (us, side) = if c.rnd(1.0, 1.0, 1930.0) >= 0.5 { (z.shore[0], -1.0) } else { (z.shore[1], 1.0) };
         let d = mix(1800.0, 3200.0, c.rnd(2.0, 1.0, 1930.0));
-        let (uc, h, bd) = (fract(us + side * 40.0 / (TAU * d)), mix(24.0, 40.0, c.rnd(3.0, 1.0, 1930.0)), if c.rnd(4.0, 1.0, 1930.0) < 0.5 { -1.0 } else { 1.0 });
-        c.add(Instance { uc, d, base: (-EYE / d).max(0.6 * z.rise(uc)) - 1.0 / d, hw: 800.0, top: h + 80.0, hide_c: true, ..I0 });
+        let (uc, h, bd) = (fract(us + side * 40.0 * c.k / (TAU * d)), mix(24.0, 40.0, c.rnd(3.0, 1.0, 1930.0)), if c.rnd(4.0, 1.0, 1930.0) < 0.5 { -1.0 } else { 1.0 });
+        c.add(Instance { uc, d, base: (-c.eye() / d).max(0.6 * z.rise(uc)) - c.k / d, hw: 800.0, top: h + 80.0, hide_c: true, ..I0 });
         c.trap(0.0, 0.0, 3.6, 2.2, h, 1.0); c.bx(0.0, h - 0.3, h + 1.0, 3.3); c.trap(0.0, h + 0.8, 1.9, 1.9, h + 4.7 - (h + 0.8), 0.55); // tower, gallery, lantern room, cap
         c.part(Ell, [0., h + 4.6, 2.1, 1.5], [0., 1., 1., 0.]);
         c.gable(-side * 9.0, 9.0, 4.0, 7.0); c.light(0.0, h + 2.8, 1.0, 7.0, 1.25); // the keeper's house, the lantern, a beam frozen mid-sweep
@@ -21,7 +21,8 @@ pub fn build(c: &mut Ctx) {
     for cf in (0..36).map(|ci| ci as f64) {
         let [s1, s2, s3, s4, s5, s6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map(|k| c.rnd(cf, k, 1931.0));
         let uc = fract((cf + 0.5 + (s2 - 0.5) * 0.5) / 36.0);
-        if s1 >= am * 0.6 * (1.0 - z.land(uc)) * (1.0 - Zones::in_z(uc, &z.bridge)) * (1.0 - Zones::in_z(uc, &z.fair)) { continue; }
+        // Size times as large: as many over Size
+        if s1 >= am * 0.6 * (1.0 - z.land(uc)) * (1.0 - Zones::in_z(uc, &z.bridge)) * (1.0 - Zones::in_z(uc, &z.fair)) / c.k { continue; }
         let (d, ty) = (mix(2500.0, 11000.0, s3 * s3), if s4 < 0.45 { 0 } else if s4 < 0.8 { 1 } else { 2 }); // cargo / tanker, ferry / cruise ship, small boat
         let ln = [mix(120.0, 240.0, s5), mix(140.0, 280.0, s5), mix(14.0, 30.0, s5)][ty] * mix(0.35, 1.0, s6); // foreshortened by its heading
         let (fb, g, o) = ([mix(8.0, 13.0, s2), 10.0, 2.5][ty], if s6 < 0.5 { -1.0 } else { 1.0 }, 0.5); // g: the bow toward +x or -x

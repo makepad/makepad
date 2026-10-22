@@ -18,11 +18,11 @@ pub const TEX_W: usize = 8192;
 
 /// The parameters the columns depend on (with the seed and the view).
 pub const COLUMN_KEYS: &[P] =
-    &[P::MtH, P::MtW, P::MtC, P::MtRug, P::Land, P::LandC, P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Treeline, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir];
+    &[P::MtH, P::MtW, P::MtC, P::MtRug, P::Land, P::LandC, P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Treeline, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir, P::Size];
 
-/// Columns beyond the view on each side: the feet of trees reaching in.
+/// Columns beyond the view on each side: the feet of trees reaching in (Size times as far at a larger Size).
 pub fn margin(p: &Params, span: f64, w: usize) -> usize {
-    (((0.045 / (span * TAU / w as f64 * (1.0 - p[P::Off]).max(0.1))).ceil() as usize) + 2).min(2048)
+    (((0.045 * p[P::Size].max(1.0) / (span * TAU / w as f64 * (1.0 - p[P::Off]).max(0.1))).ceil() as usize) + 2).min(2048)
 }
 
 /// The off-centre camera (the page's `sgWarp`, bit-exact): the world azimuth the raw view azimuth `ur`
@@ -65,29 +65,33 @@ pub fn columns(z: &Zones, p: &Params, u0: f64, span: f64, w: usize, m: usize) ->
         let (uw, px) = (fract((cy + t * dy).atan2(cx + t * dx) / TAU), px0 * t);
         let (env, lenv) = (z.ridge.envelopes(rng, uw), rng.region(uw, p[P::LandC], p[P::Land], 600.0));
         let freg = rng.region(uw, p[P::TrC], p[P::TrW], 450.0) * smooth(0.25, 0.6, lenv); let cenv = rng.region(ur, city_b, p[P::CtW], 270.0);
-        let gh = (0.0035 + 0.0025 * rng.fbm(uw, 24.0, 500.0)) * lenv; let o = &mut out[i * ROWS..(i + 1) * ROWS];
+        let gh = (0.0035 + 0.0025 * rng.fbm(uw, 24.0, 500.0)) * lenv * p[P::Size]; let o = &mut out[i * ROWS..(i + 1) * ROWS];
         for k in 0..5 {
             let menv = z.ridge.menv(k, env); let (h, nz) = z.ridge.mtn_h(rng, uw, k, menv, px); let hr = hk[k] * menv * h;
             let mut row = [hr, 0.0, 0.0, 0.0];
             if k >= 2 {
                 let kk = (k - 2) as f64; let t_reg = rng.region(uw, p[P::TrC], p[P::TrW], 400.0 + kk * 10.0);
-                let base = hr.min(p[P::Treeline] * (0.55 + 0.9 * rng.pn(uw * 17.0, 17.0, 20.0 + k as f64 * 10.0 + 5.0)) * (0.8 + 0.4 * nz));
-                let c = canopy(uw, px, 260.0 + 130.0 * kk, 410.0 + kk * 10.0, p[P::TrH] * (0.7 + 0.3 * kk), base, t_reg);
+                let base = hr.min(p[P::Treeline] * p[P::Size] * (0.55 + 0.9 * rng.pn(uw * 17.0, 17.0, 20.0 + k as f64 * 10.0 + 5.0)) * (0.8 + 0.4 * nz));
+                let c = canopy(uw, px, tree_cells(p, k - 2), 410.0 + kk * 10.0, tree_hmax(p, k - 2), base, t_reg);
                 row = [hr, c[0], c[1], c[2]];
             }
             o[k] = row.map(|v| v as f32);
         }
-        let c = canopy(uw, px, 520.0, 400.0, p[P::TrH], gh, freg); o[5] = [0.0, c[0] as f32, c[1] as f32, c[2] as f32];
+        let c = canopy(uw, px, tree_cells(p, 3), 400.0, tree_hmax(p, 3), gh, freg); o[5] = [0.0, c[0] as f32, c[1] as f32, c[2] as f32];
         o[6] = [lenv as f32, gh as f32, t as f32, ((0.55 + 0.45 * smooth(0.3, 0.7, rng.fbm(ur, 3.0, 50.0))) * cenv) as f32];
     }
     out
 }
 
-/// The tallest single tree of tree layer `l` (0-2 ranges 2-4, 3 the front treeline), rad above its foot.
-pub fn tree_hmax(p: &Params, l: usize) -> f64 { if l < 3 { p[P::TrH] * (0.7 + 0.3 * l as f64) } else { p[P::TrH] } }
+/// The tallest single tree of tree layer `l` (0-2 ranges 2-4, 3 the front treeline), rad above its foot: Size times the base's.
+pub fn tree_hmax(p: &Params, l: usize) -> f64 { (if l < 3 { p[P::TrH] * (0.7 + 0.3 * l as f64) } else { p[P::TrH] }) * p[P::Size] }
+
+/// Tree layer `l`'s cells round the turn (a single tree each, at most, a row): the base's over Size, whole, so its trees are
+/// Size times as wide and as many over Size; the canopy's roughness follows them.
+pub fn tree_cells(p: &Params, l: usize) -> f64 { ((if l < 3 { 260.0 + 130.0 * l as f64 } else { 520.0 }) / p[P::Size]).round().max(1.0) }
 
 /// The parameters the trees depend on (with the seed and the pixel size).
-const TREE_KEYS: &[P] = &[P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Land, P::LandC, P::Off, P::OffDir];
+const TREE_KEYS: &[P] = &[P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Land, P::LandC, P::Off, P::OffDir, P::Size];
 
 /// The single trees' mesh in the page's vertex layout ([`TreeVertex`], 9 floats), and how many trees.
 #[derive(Default)] pub struct TreeMesh { pub v: Vec<f32>, pub i: Vec<u32>, pub trees: usize }
@@ -113,7 +117,7 @@ pub fn trees(rng: &Rng, p: &Params, px0: f64, arc: Option<(f64, f64)>) -> TreeMe
     let (cx, cy, mut mesh) = (p[P::Off] * (p[P::OffDir] * TAU).cos(), p[P::Off] * (p[P::OffDir] * TAU).sin(), TreeMesh::default());
     for l in 0..4 {
         let lf = l as f64;
-        let (cells, ly, rly) = if l < 3 { (260.0 + 130.0 * lf, 410.0 + lf * 10.0, 400.0 + lf * 10.0) } else { (520.0, 400.0, 450.0) };
+        let (cells, ly, rly) = if l < 3 { (tree_cells(p, l), 410.0 + lf * 10.0, 400.0 + lf * 10.0) } else { (tree_cells(p, 3), 400.0, 450.0) };
         let (hmax, dprob, mut list) = (tree_hmax(p, l), mix(0.06, 1.0, p[P::TrD] * p[P::TrD]), Vec::new());
         for (row, ci) in (0..2).flat_map(|r| (0..cells as u32).map(move |c| (r as f64, c as f64))) {
             let sd = ly + row * 11.0;
@@ -342,4 +346,30 @@ impl Trees {
     pub fn pass_id(&self) -> Option<DrawPassId> { self.target.as_ref().map(|t| t.pass.draw_pass_id()) }
     /// Lets go of the target (an export core between jobs; the mesh stays: it is small and slow to build).
     pub fn release(&mut self) { self.target = None; }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tree layer's cells and tallest tree follow Size (half the cells and twice the height at 2), the base's at Size 1;
+    /// the columns' canopy of the front treeline stands twice as high at Size 2 (its mean over the forest's columns, +-10 %).
+    #[test]
+    fn the_trees_follow_size() {
+        let mut p = Params::default();
+        assert_eq!([0, 1, 2, 3].map(|l| tree_cells(&p, l)), [260.0, 390.0, 520.0, 520.0]);
+        assert_eq!([0, 3].map(|l| tree_hmax(&p, l)), [p[P::TrH] * 0.7, p[P::TrH]]);
+        let canopy = |p: &Params| {
+            let z = Zones::new(p);
+            let c = columns(&z, p, 0.0, 1.0, 1024, margin(p, 1.0, 1024));
+            let rows: Vec<[f32; 4]> = c.chunks(ROWS).map(|r| r[5]).filter(|r| r[3] > 0.5).collect();
+            rows.iter().map(|r| (r[2] - r[1]) as f64).sum::<f64>() / rows.len() as f64
+        };
+        let one = canopy(&p);
+        p.set(P::Size as usize, 2.0);
+        assert_eq!([0, 1, 2, 3].map(|l| tree_cells(&p, l)), [130.0, 195.0, 260.0, 260.0]);
+        assert_eq!(tree_hmax(&p, 3), 2.0 * p[P::TrH]);
+        let two = canopy(&p);
+        assert!((two / one / 2.0 - 1.0).abs() < 0.1, "the front canopy x{}", two / one);
+    }
 }
