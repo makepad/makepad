@@ -542,23 +542,25 @@ impl Weather {
         // Standing water: fbm over the ground plane, an eye height below.
         let reach = EYE_M / down.max(1.0e-3);
         let puddle_noise = fbm2(d.x * reach / PUDDLE_M, d.z * reach / PUDDLE_M, 4, self.seed ^ 0x9d01_e5);
-        // More of the ground is under water the wetter it is (`puddle_threshold`).
+        // More of the ground is under water the wetter it is (`puddle_threshold`), and past 0.9 the water rises between
+        // the puddles (`puddle_flood`), as in their share.
         let threshold = puddle_threshold(wet);
-        let puddle = smooth(threshold, threshold + 0.06, puddle_noise);
+        let puddle = flooded(smooth(threshold, threshold + 0.06, puddle_noise), puddle_flood(wet));
         let distance = reach * (1.0 - down * down).max(0.0).sqrt();
         let detail = 1.0 - smooth(PUDDLE_FADE_START_M, PUDDLE_FADE_END_M, distance);
         share + (puddle - share) * detail
     }
 
-    /// The puddles' mean share (the far ground's), 0 on a dry ground, 1 at Wet ground 1.00.
+    /// The puddles' mean share (the far ground's), 0 on a dry ground, 1 at Wet ground 1.00 and only there.
     pub fn puddle_share(&self) -> f32 {
         let wet = self.effects.wet_ground;
         if wet <= 0.0 {
             return 0.0;
         }
-        // the fbm is near normal (mean 0.49, deviation 0.12): the share of it over the threshold, its edge's middle
+        // the fbm is near normal (mean 0.49, deviation 0.12): the share of it over the threshold, its edge's middle; then
+        // the water risen between them (`puddle_flood`)
         let threshold = puddle_threshold(wet);
-        smooth(-2.0, 2.0, (0.49 - (threshold + 0.03)) / 0.12)
+        flooded(smooth(-2.0, 2.0, (0.49 - (threshold + 0.03)) / 0.12), puddle_flood(wet))
     }
 
     /// The lightning along `d`: the bolt's channel and the flash around its
@@ -750,12 +752,26 @@ impl Weather {
 }
 
 /// The puddle noise's threshold at wetness `wet`. Up to 0.5 the old 0.72 - 0.34 wet, bit for bit (the fog kind's 0.2).
-/// Toward 0.9 it drops 0.04 more (a little more water under the rain and storm kinds). Then it falls to -0.10 at 1.00,
-/// where every look is under water (the noise is 0..1 and the puddle's edge 0.06 wide).
+/// Toward 0.9 it drops 0.04 more (a little more water under the rain and storm kinds). Past 0.9 the water rises between
+/// the puddles instead (`puddle_flood`).
 pub(crate) fn puddle_threshold(wet: f32) -> f32 {
+    // up to 0.5 the extra term is 0, and a - 0 is a: the old threshold bit for bit
+    0.72 - 0.34 * wet - 0.04 * smooth(0.5, 0.9, wet)
+}
+
+/// How far the water has risen over the ground between the puddles at wetness `wet`: 0 up to 0.9, all of it at 1.00,
+/// growing with each step between (((wet - 0.9) / 0.1)^2: a quarter at 0.95, 0.81 at 0.99). The puddles' share then
+/// grows step by step to the whole floor, reached only at 1.00 (plan hdri-6 §5); the threshold alone would cover the
+/// floor from about 0.96 (its noise share saturates there), and the slider's last steps would change nothing.
+pub(crate) fn puddle_flood(wet: f32) -> f32 {
     let top = ((wet - 0.9) / 0.1).clamp(0.0, 1.0);
-    // up to 0.5 both extra terms are 0, and a - 0 is a: the old threshold bit for bit
-    0.72 - 0.34 * wet - 0.04 * smooth(0.5, 0.9, wet) - 0.44 * top * top
+    top * top
+}
+
+/// A cover `cover` with the water risen by `flood` (`puddle_flood`) over the rest: `cover` itself at 0 (bit for bit),
+/// exactly 1 at 1.
+fn flooded(cover: f32, flood: f32) -> f32 {
+    if flood > 0.0 { 1.0 - (1.0 - cover) * (1.0 - flood) } else { cover }
 }
 
 /// How a wet ground's puddles are read: their field (the map's own), their mean share everywhere (`ground_even`), or none (`ground_damp`).
@@ -1269,14 +1285,42 @@ mod tests {
         println!("rain {rain_old:.3} -> {rain:.3}, storm {storm_old:.3} -> {storm:.3}");
         assert!(rain > rain_old && rain < rain_old + 0.1, "rain: {rain_old} -> {rain}");
         assert!(storm > storm_old && storm < storm_old + 0.15, "storm: {storm_old} -> {storm}");
-        assert!(puddle_threshold(1.0) + 0.06 <= 0.0, "every look is under water at 1.00");
-        assert!(puddle_threshold(0.99) + 0.06 > 0.0, "and only there");
+        // past the storm's 0.9 the water rises between the puddles, over all of the ground at 1.00
+        assert_eq!((puddle_flood(0.9), puddle_flood(1.0)), (0.0, 1.0));
+        assert_eq!((flooded(0.37, 0.0).to_bits(), flooded(0.37, 1.0)), (0.37f32.to_bits(), 1.0));
         let mut last = f32::MAX;
         for i in 0..=100 {
             let t = puddle_threshold(i as f32 / 100.0);
             assert!(t < last);
             last = t;
         }
+    }
+
+    /// Plan hdri-6 §5, "reaching full cover only at 1.00": the slider's last steps still add water. Up to 0.99 the far
+    /// ground (the puddles' mean share, which the skyline's strip takes as its wetness) keeps some ground between the
+    /// puddles, each step from 0.95 on adds at least a hundredth of the floor, and near the feet some looks are still
+    /// visibly less than water; at 1.00 it is all water.
+    #[test]
+    fn the_floor_fills_step_by_step_and_is_full_only_at_one() {
+        let at = |w: f32| {
+            let mut sky = sky_with("clear");
+            sky.weather.as_mut().unwrap().wet_ground = w;
+            Weather::new(&sky, sun()).unwrap()
+        };
+        let mut last = at(0.94).puddle_share();
+        for i in 95..=99 {
+            let share = at(i as f32 / 100.0).puddle_share();
+            println!("Wet ground 0.{i}: the far share {share:.4}");
+            assert!(share >= last + 0.01 && share <= 0.98, "Wet ground 0.{i}: the far share {last} -> {share}");
+            last = share;
+        }
+        assert_eq!(at(1.0).puddle_share(), 1.0);
+        // near looks, where the puddles are drawn in full (closer than PUDDLE_FADE_START_M)
+        let near = at(0.99);
+        let covers: Vec<f32> = (0..720).map(|i| near.puddle_cover(dir_from_az_el(i as f32 * 0.5, -20.0 - (i % 7) as f32 * 5.0), Puddles::Field)).collect();
+        let (least, mean) = (covers.iter().cloned().fold(1.0, f32::min), covers.iter().sum::<f32>() / covers.len() as f32);
+        println!("Wet ground 0.99 near the feet: the least cover {least:.3}, the mean {mean:.4}");
+        assert!(least < 0.9 && mean < 0.99, "Wet ground 0.99 is all water near the feet: the least cover {least}, the mean {mean}");
     }
 
     /// At Wet ground 1.00 no direction below the horizon is dry ground: near and far it is under water, and the ground
