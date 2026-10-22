@@ -392,6 +392,11 @@ pub struct SkylineLight {
     /// ground takes in the app, so the band's ground, veiled, is this map's and runs into it without
     /// an edge.
     pub ground_ring: [[f32; 3]; RING],
+    /// The sky round the horizon at 1 and 15 degrees as the map shows it, through its weather's veil (the bolt
+    /// aside, as the rings): what the strip's sea mirrors by day, since the light a far sea mirrors has come through
+    /// the rain and fog to the water. Without a weather, `ring_low` and `ring_high` exactly.
+    pub sea_low: [[f32; 3]; RING],
+    pub sea_high: [[f32; 3]; RING],
 }
 
 /// The ground ring's elevation, degrees below the horizon: inside the strip's own ground (its bottom is
@@ -1048,7 +1053,19 @@ mod tests {
                     assert!(close3(seen, want, 1e-5), "{name}: {i} at {el}: veiled {seen:?} vs the map's {want:?}");
                 }
             }
-            println!("{name}: the veiled ring against the map, worst relative error {worst:.1e}; ring_low[0] {:?}", l.ring_low[0]);
+            // the sky the strip's sea mirrors: the map's own, as it shows it (its veil and bolt included); without a weather
+            // the rings themselves, bit for bit
+            for i in 0..RING {
+                let u = (i as f32 + 0.5) / RING as f32;
+                for (el, sea, ring) in [(1.0, &l.sea_low, &l.ring_low), (15.0, &l.sea_high, &l.ring_high)] {
+                    let map = env.radiance(dir_at_u(u, el)) / env.scale();
+                    assert!(close3(vec(sea[i]), map, 1e-6), "{name}: the sea's sky {i} at {el}: {:?} vs the map's {map:?}", sea[i]);
+                    if env.weather.is_none() {
+                        assert!(sea[i] == ring[i], "{name}: without a weather the sea's sky is the ring");
+                    }
+                }
+            }
+            println!("{name}: the veiled ring against the map, worst relative error {worst:.1e}; ring_low[0] {:?}, sea_low[0] {:?}", l.ring_low[0], l.sea_low[0]);
         }
         // the premise: under fog the veil changes the ring (the ring is not the visible horizon)
         let fog = Env::new(&skies()[1].1);

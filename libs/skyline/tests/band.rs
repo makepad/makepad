@@ -1107,3 +1107,47 @@ fn size_keeps_the_haze() {
     println!("the farthest range's mean colour: Size 1 {one:?}, 0.5 {half:?}, 2 {two:?}");
     for (k, (_, c)) in [(0.5, half), (2.0, two)] { for ch in 0..3 { assert!((c[ch] / one.1[ch] - 1.0).abs() <= 0.10, "Size {k}: channel {ch} {} against {}", c[ch], one.1[ch]); } }
 }
+
+/// The final review (the rain sea patch): a host under rain hands rings that are the sky behind the rain (here 1.4 at
+/// +1 degree, 0.37 at +15, the generator's rain kind at noon) and the sky as it shows it for the sea (0.47 and 0.40,
+/// `SkyLight::sea_sky`). By day no sea texel is brighter than the sky it mirrors there (the sea's sky at its mirrored
+/// elevation) plus the water's own daylight (albedo 0.1 x the ambient), or than the host's ground it blends into at the
+/// coast, within SEA_SLACK. Before: the sea mirrored the rings, 2x the sky it showed (0.955 at -2 degrees).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_sea_mirrors_the_sky_it_is_handed() {
+    const SEA_SLACK: f32 = 0.02;
+    let p = Params::default();
+    let grey = |v: f32| [[v; 3]; RING];
+    let light = SkyLight {
+        sun_u: 0.7, sun_el_deg: 25.0, sun_rgb: [0.0; 3], ambient_rgb: [0.44, 0.42, 0.41],
+        ring_low: grey(1.4), ring_high: grey(0.37), ground: grey(0.235), host_ground: true,
+        design_gain: 0.0264, decode: true, night_haze: makepad_skyline::example_haze_share(), night_light_share: 0.1,
+        sea_sky: Some((grey(0.47), grey(0.40))),
+        ..SkyLight::example()
+    };
+    let b = render_band_lit(&p, 1024, &light);
+    let z = Zones::new(&p);
+    let (mut checked, mut worst) = (0usize, 0.0f32);
+    let daylight = 0.1 * lum(&[0.44, 0.42, 0.41, 1.0]);
+    for x in 0..b.w {
+        let u = (x as f64 + 0.5) / b.w as f64;
+        if z.land(u) >= 0.175 { continue; }
+        for y in 0..b.h {
+            let el = row_el(&p, &b, y).to_degrees() as f32;
+            if el > -0.2 { continue; }
+            let a = (-el / 15.0).min(1.0);
+            let sky = 0.47 + (0.40 - 0.47) * a;
+            let most = (sky + daylight).max(0.235);
+            let got = lum(&b.texels[y * b.w + x]);
+            worst = worst.max(got / most - 1.0);
+            checked += 1;
+            assert!(got <= most * (1.0 + SEA_SLACK), "x {x}, el {el:.2}: the sea {got} over the sky it mirrors {sky} (+ its daylight {daylight}, the ground 0.235)");
+        }
+    }
+    println!("{checked} sea texels, at most {:.2} % over the sky they mirror", 100.0 * worst);
+    assert!(checked > 100, "the premise: the band shows sea ({checked} texels)");
+    // without a sea sky the sea mirrors the rings, and a sea sky equal to the rings is the same band, texel for texel
+    let none = SkyLight { sea_sky: None, ..light.clone() };
+    let same = SkyLight { sea_sky: Some((light.ring_low, light.ring_high)), ..light.clone() };
+    assert!(render_band_lit(&p, 512, &none).texels == render_band_lit(&p, 512, &same).texels, "a sea sky equal to the rings changes the band");
+}

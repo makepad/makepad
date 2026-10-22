@@ -55,6 +55,11 @@ pub struct SkyLight {
     /// the night's buildings near the example's dark (the owner's ruling, plan hdri-5 Task 8: "a share";
     /// `HOST_LIGHT_NIGHT_SHARE`). 1 in the example (its light is 0 anyway).
     pub night_light_share: f32,
+    /// The sky the day's sea mirrors, at +1 and +15 degrees (`RING` samples like the rings), when it is not the rings:
+    /// a host whose rings are the sky behind its weather (its rain and fog in front of the strip, laid over it by the
+    /// host) hands the sky as it shows it, since the light a far sea mirrors has come through the weather to the water.
+    /// None (the example, a clear sky): the sea mirrors the rings.
+    pub sea_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
 }
 
 /// The share of a host's own light the buildings take by night (`SkyLight::night_light_share`): on the generator's
@@ -101,7 +106,8 @@ impl SkyLight {
     /// Today's look: night, the fixed HAZE_COL ring, no sun, no ambient, design gain 1.
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
-            lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0 }
+            lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0,
+            sea_sky: None }
     }
 
     /// The night's share of the look (`decode`): 0 above +2 degrees sun, 1 below -6, smooth between (the shaders'
@@ -166,9 +172,11 @@ impl SkyLight {
         }
         let k = self.haze_share();
         let code = |ring: &[[f32; 3]; RING], share: f32| ring.map(|c| c.map(|x| self.to_code(share * x)));
+        let (sea_low, sea_high) = self.sea_rings();
         let c = std::sync::Arc::new(Codes {
             haze_low: code(&self.ring_low, k), haze_high: code(&self.ring_high, k),
             low: code(&self.ring_low, 1.0), high: code(&self.ring_high, 1.0), ground: code(&self.ground, 1.0),
+            sea_low: code(sea_low, k), sea_high: code(sea_high, k),
         });
         *last = Some((key, c.clone()));
         c
@@ -212,7 +220,7 @@ impl SkyLight {
         let designed = SkyLight { sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ..self.clone() };
         let host_only = |sun: [f32; 3], ambient: [f32; 3]| SkyLight {
             sun_rgb: sun, ambient_rgb: ambient, design_gain: 0.0, decode: false, night_haze: 1.0, night_light_share: 1.0, lights_by_day: 0.0,
-            ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], ..self.clone()
+            ring_low: [[0.0; 3]; RING], ring_high: [[0.0; 3]; RING], ground: [[0.0; 3]; RING], sea_sky: None, ..self.clone()
         };
         if self.night_share() >= 1.0 && self.sun_rgb == [0.0; 3] {
             // the sun's height does not reach the host's part by full night (the shaders' day() is 0): one unit for any
@@ -270,7 +278,9 @@ impl SkyLight {
 
     /// A hash of every field's bits, for cache keys.
     pub fn hash(&self) -> u64 {
-        let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten();
+        // (the sea's sky only when it is handed: a light without it hashes as it did)
+        let sea = self.sea_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten();
+        let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten().chain(sea);
         let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze, &self.night_light_share]);
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64]))
     }
@@ -286,10 +296,36 @@ impl SkyLight {
         };
         rows.into_iter().flat_map(|c| [c[0], c[1], c[2], 1.0]).collect()
     }
+
+    /// The sky the day's sea mirrors: `sea_sky`, else the rings.
+    fn sea_rings(&self) -> (&[[f32; 3]; RING], &[[f32; 3]; RING]) {
+        match &self.sea_sky {
+            Some((low, high)) => (low, high),
+            None => (&self.ring_low, &self.ring_high),
+        }
+    }
+
+    /// The sea's sky as the water shader's sea texture (`RING` wide, two rows, RGBA): row 0 at +1 degree, row 1 at +15,
+    /// alpha 1, coded as `ring_texels` codes its sky rows. Without `sea_sky` these are `ring_texels`' first two rows
+    /// exactly, so the sea mirrors what it did.
+    pub fn sea_texels(&self) -> Vec<f32> {
+        let rows: Vec<[f32; 3]> = if self.coded() {
+            let c = self.codes();
+            c.sea_low.iter().chain(&c.sea_high).copied().collect()
+        } else {
+            let (low, high) = self.sea_rings();
+            low.iter().chain(high).copied().collect()
+        };
+        rows.into_iter().flat_map(|c| [c[0], c[1], c[2], 1.0]).collect()
+    }
 }
 
 /// The host's rings in codes (`SkyLight::codes`).
-struct Codes { haze_low: [[f32; 3]; RING], haze_high: [[f32; 3]; RING], low: [[f32; 3]; RING], high: [[f32; 3]; RING], ground: [[f32; 3]; RING] }
+struct Codes {
+    haze_low: [[f32; 3]; RING], haze_high: [[f32; 3]; RING], low: [[f32; 3]; RING], high: [[f32; 3]; RING], ground: [[f32; 3]; RING],
+    /// The sea's sky (`SkyLight::sea_sky`, else the rings) as the haze rows are coded.
+    sea_low: [[f32; 3]; RING], sea_high: [[f32; 3]; RING],
+}
 
 /// Adds the host light's band (`StripPlan::Split`) to the designed one, texel by texel, its light only: the two are the
 /// same scene, so their coverage is the same.

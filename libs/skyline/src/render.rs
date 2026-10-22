@@ -106,8 +106,8 @@ impl SceneTarget {
 /// What every scene drawer gets: the view, the parameters, the zones and the shared inputs.
 pub struct SceneCtx<'a> {
     pub view: &'a ViewSpec, pub p: &'a Params,
-    /// The sky's light, and its rings as a texture (`Skyline::ring_tex`).
-    pub light: &'a SkyLight, pub ring: &'a Texture,
+    /// The sky's light, and its rings as a texture (`Skyline::ring_tex`); the sky the day's sea mirrors (`Skyline::sea_tex`).
+    pub light: &'a SkyLight, pub ring: &'a Texture, pub sea: &'a Texture,
     /// The placement zones (the city and the props read them).
     pub z: &'a Zones,
     /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
@@ -208,6 +208,8 @@ pub struct Skyline {
     /// The sky's horizon rings and the host's ground (`SkyLight::ring_texels`) and, with `host_ground`, the coast
     /// (`coast_ring`), and the hash of the light and the zones they were written for.
     #[rust] ring_tex: Option<(u64, Texture)>,
+    /// The sky the day's sea mirrors (`SkyLight::sea_texels`), written with `ring_tex`.
+    #[rust] sea_tex: Option<Texture>,
     /// The key of the picture the targets hold.
     #[rust] pub drawn: Option<u64>,
     #[rust] pub stats: Stats,
@@ -291,6 +293,9 @@ impl Skyline {
             let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 4, data: Some(texels), updated: TextureUpdated::Full };
             let tex = match self.ring_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
             self.ring_tex = Some((lkey, tex));
+            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(light.sea_texels()), updated: TextureUpdated::Full };
+            let sea = match self.sea_tex.take() { Some(t) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
+            self.sea_tex = Some(sea);
         }
     }
 
@@ -301,10 +306,11 @@ impl Skyline {
         debug_assert_eq!(cols.m, cols.geom[2] as usize);
         let blank = self.blank.as_ref().unwrap();
         let ring = &self.ring_tex.as_ref().unwrap().1;
+        let sea = self.sea_tex.as_ref().unwrap();
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
         let mv = view.mirrored();
-        let mut sc = SceneCtx { view, p, light, ring, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
+        let mut sc = SceneCtx { view, p, light, ring, sea, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);

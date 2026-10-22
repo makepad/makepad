@@ -503,7 +503,9 @@ impl Env {
     ///   the ring's few looks cannot sample; the sun's reaches the strip as
     ///   `sun_rgb`), and before the weather's veil and its bolt: the map veils
     ///   the strip in front of it (`base_at`), so a texel the strip hazes to
-    ///   the ring is, veiled once, the map's own horizon. A wet ground is read
+    ///   the ring is, veiled once, the map's own horizon (`sea_low`,
+    ///   `sea_high`: the sky the strip's sea mirrors, as the map shows it,
+    ///   through its weather; without one the rings). A wet ground is read
     ///   with its puddles at their mean share (`Weather::ground_even`, the
     ///   owner's ruling): the ground ring's 64 looks would otherwise land on a
     ///   puddle or between them, and the strip's near ground would be striped.
@@ -521,7 +523,7 @@ impl Env {
         use skyline::RING;
         let turn = self.params.skyline.as_ref().map_or(0.0, |block| block.turn_deg);
         let at = Sampling { bare: true, unveiled: true, even_ground: true, ..Sampling::default() };
-        let ring = |el_deg: f32| -> [[f32; 3]; RING] {
+        let ring_seen = |el_deg: f32, at: Sampling| -> [[f32; 3]; RING] {
             let mut ring = [[0.0; 3]; RING];
             for (i, entry) in ring.iter_mut().enumerate() {
                 let u = ((i as f32 + 0.5) / RING as f32 + turn / 360.0).rem_euclid(1.0);
@@ -530,9 +532,19 @@ impl Env {
             }
             ring
         };
+        let ring = |el_deg: f32| ring_seen(el_deg, at);
         let (ring_low, ring_high, ground_ring) = (ring(skyline::RING_LOW_DEG), ring(skyline::RING_HIGH_DEG), ring(-skyline::GROUND_RING_DEG));
+        // The sky the strip's sea mirrors: as the map shows it, through its weather (the light a far sea mirrors has
+        // come through the rain and fog to the water); without a weather the rings themselves.
+        let (sea_low, sea_high) = match self.weather {
+            Some(_) => {
+                let seen = Sampling { bare: true, ..Sampling::default() };
+                (ring_seen(skyline::RING_LOW_DEG, seen), ring_seen(skyline::RING_HIGH_DEG, seen))
+            }
+            None => (ring_low, ring_high),
+        };
         let Some(atmo) = &self.atmo else {
-            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring };
+            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring, sea_low, sea_high };
         };
         let pi = std::f32::consts::PI;
         let sun = atmo.sun_dir();
@@ -555,6 +567,8 @@ impl Env {
             ring_low,
             ring_high,
             ground_ring,
+            sea_low,
+            sea_high,
         }
     }
 

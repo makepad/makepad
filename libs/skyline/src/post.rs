@@ -61,11 +61,23 @@ script_mod! {
         ..mod.draw.SkyScene,
         scene_light: texture_2d(float)
         mirror_light: texture_2d(float)
+        // the sky the day's sea mirrors (`SkyLight::sea_texels`: row 0 at +1 degree, row 1 at +15), the rings' first two
+        // rows unless the host hands the sky as its weather shows it (`SkyLight::sea_sky`)
+        sea_tex: texture_2d(float)
         // the mirror target's horizon (`ViewSpec::mirrored`)
         mirror_horizon: uniform(0.8)
         pr_refl: uniform(0.6)
         pr_ripple: uniform(0.4)
         refl_h: fn(c: float, j: float, ly: float) -> float { return self.rnd(c, j + 8192.0, ly) }
+        // the sea's sky row v (1/4 at +1 degree, 3/4 at +15) at azimuth u, as `ring_at` reads the rings
+        sea_ring: fn(u: float, v: float) -> vec3 {
+            let n = self.sea_tex.size().x; let x = fract(u) * n - 0.5; let i0 = floor(x); let i1 = i0 + 1.0
+            let a = self.sea_tex.sample_nearest(vec2((i0 - n * floor(i0 / n) + 0.5) / n, v)).xyz
+            let b = self.sea_tex.sample_nearest(vec2((i1 - n * floor(i1 / n) + 0.5) / n, v)).xyz
+            return a + (b - a) * (x - i0)
+        }
+        // the sky the sea mirrors at azimuth u, elevation el (rad), as `sky_at` reads the rings
+        sea_sky_at: fn(u: float, el: float) -> vec3 { let a = self.sea_ring(u, 0.25); return a + (self.sea_ring(u, 0.75) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         pixel: fn(){
             let e = self.scene_light.sample_nearest(self.pos); let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
             let g = self.col_row(pp.x, 6.0); var sea = 1.0 - smoothstep(0.0, 0.35, g.x); let al = 0.0 - v.y; let rip = self.pr_ripple
@@ -75,7 +87,7 @@ script_mod! {
             let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0); let a0 = 0.004; let kz = mix(22.0, 13.0, rip)
             // by day the sea mirrors the sky at the mirrored elevation, by its Fresnel term, where nothing mirrored stands in
             // front of it (the mirror's coverage, below); 0 at night (`day`), where the sea mirrors only the lights
-            let sky = self.sky_at(vr.x, al) * (fr * self.day() * sea * self.cover(g.y - v.y, v.z))
+            let sky = self.sea_sky_at(vr.x, al) * (fr * self.day() * sea * self.cover(g.y - v.y, v.z))
             if al >= 0.35 { return vec4(e.xyz + sky, e.w) }
             let sm = smoothstep(vec3(0.1, 0.0, 0.5), vec3(0.2, 0.012, 1.4), vec3(al, al, (al + a0) / (kz * v.z))); let w = self.pr_refl * fr * (1.0 - sm.x)
             if w * sea < 0.003 { return vec4(e.xyz + sky, e.w) }
@@ -165,7 +177,7 @@ impl Post {
             let (t, d) = (self.water.get_or_insert_with(|| SceneTarget::new(cx, "skyline_water", false)), &mut self.draw_water);
             sc.set_uniforms(cx, &mut d.draw_vars);
             d.draw_vars.set_uniform(cx, live_id!(mirror_horizon), &[v.mirrored().horizon as f32]);
-            for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light)] { bind_texture(cx, &mut d.draw_vars, name, tex); }
+            for (name, tex) in [(live_id!(scene_light), &light), (live_id!(mirror_light), &mirror.light), (live_id!(sea_tex), sc.sea)] { bind_texture(cx, &mut d.draw_vars, name, tex); }
             t.record(cx, v.w, v.h, |cx| d.draw_abs(cx, full));
             for child in [head, mirror.pass.draw_pass_id()] { cx.attach_child_pass(child, t.pass.draw_pass_id(), None); }
             (head, light) = (t.pass.draw_pass_id(), t.light.clone());
