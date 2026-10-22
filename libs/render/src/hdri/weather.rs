@@ -675,6 +675,17 @@ impl Weather {
     /// the veil as the map draws it, the clouds and their light included
     /// (`Env` measures it once per map).
     pub fn veil(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
+        self.veil_with(d, c, sun_irradiance, ambient, true)
+    }
+
+    /// `veil` without the rain's shafts: the rain haze and the fog only. What stands in front of the shafts, the skyline's
+    /// strip, is veiled by it (plan hdri-6 §5b).
+    pub fn veil_without_virga(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
+        self.veil_with(d, c, sun_irradiance, ambient, false)
+    }
+
+    /// `veil`'s body; `shafts` lays the rain's virga over the haze.
+    fn veil_with(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f, shafts: bool) -> Vec3f {
         let mut c = c;
         // The air under a deck is lit by what that deck passes down, as the
         // clouds' own undersides are: `ambient` is that deck's light, the
@@ -686,7 +697,9 @@ impl Weather {
             c = c * through + vec3f(haze, haze, haze) * (1.0 - through);
             // Shafts of rain under the deck are denser curtains of it: they
             // darken the distance and the rain haze before it alike.
-            c = c * (1.0 - self.virga(d));
+            if shafts {
+                c = c * (1.0 - self.virga(d));
+            }
         }
         if self.effects.fog > 0.0 {
             let through = (-self.fog_depth(d)).exp();
@@ -736,7 +749,7 @@ impl Weather {
     /// How much a shaft of virga darkens along `d`: 0..VIRGA_DARKEN. Shafts
     /// are a function of the azimuth alone (leaned a little by the wind), so
     /// they hang straight; they show between the horizon and the deck.
-    fn virga(&self, d: Vec3f) -> f32 {
+    pub(super) fn virga(&self, d: Vec3f) -> f32 {
         if self.effects.rain <= 0.0 || !(d.y > 0.0) {
             return 0.0;
         }
@@ -1375,6 +1388,22 @@ mod tests {
             assert!((rain.transmittance_toward(d) - through).abs() < 1.0e-6, "{through} through the veil, {} toward the key", rain.transmittance_toward(d));
         }
         assert!(rain.transmittance_toward(shaft) < (-(rain.fog_depth(shaft) + rain.rain_depth(shaft))).exp() * 0.95);
+    }
+
+    /// Plan hdri-6 §5b: the veil without the shafts is the veil wherever no shaft hangs (below the horizon, high up, under
+    /// fog alone), and only the shafts differ.
+    #[test]
+    fn the_veil_without_virga_is_the_veil_where_no_shaft_hangs() {
+        let (sun_light, dome) = (vec3f(3.0, 2.8, 2.5), vec3f(0.3, 0.35, 0.5));
+        let c = vec3f(0.7, 0.5, 0.3);
+        let rain = weather("rain");
+        for d in [dir_from_az_el(30.0, -5.0), dir_from_az_el(30.0, 40.0)] {
+            assert_eq!(rain.veil_without_virga(d, c, sun_light, dome), rain.veil(d, c, sun_light, dome), "{d:?}");
+        }
+        let fog = weather("fog");
+        for az in 0..36 { let d = dir_from_az_el(az as f32 * 10.0, 8.0); assert_eq!(fog.veil_without_virga(d, c, sun_light, dome), fog.veil(d, c, sun_light, dome)); }
+        let differ = (0..360).any(|az| { let d = dir_from_az_el(az as f32, 8.0); rain.virga(d) > 0.05 && rain.veil_without_virga(d, c, sun_light, dome) != rain.veil(d, c, sun_light, dome) });
+        assert!(differ, "the premise: a shaft hangs at 8 degrees and only the veil with it darkens there");
     }
 }
 

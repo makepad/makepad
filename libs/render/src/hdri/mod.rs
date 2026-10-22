@@ -628,7 +628,8 @@ impl Env {
     /// The base under the lights along `d`, in the map's own frame: the
     /// mode's own base layer, a base image, or both through the image's mask;
     /// then the skyline over all of it, the weather's veil in front of the
-    /// city as it is in front of the sky (`skyline::over_veiled`). The city
+    /// city as it is in front of the sky, the rain's shafts apart, which hang
+    /// behind it (`city_veil`, `skyline::over_veiled`). The city
     /// hides what stands behind it, a storm's bolt included. Without a
     /// skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
@@ -658,9 +659,11 @@ impl Env {
         }
     }
 
-    /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`).
+    /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`): the rain haze and the fog, not the rain's
+    /// shafts, which hang far off behind the city (plan hdri-6 §5b). The base behind the strip keeps them (`over_veiled`
+    /// lays the strip over the base as the map veils it), and so does the key's cover.
     fn city_veil(&self, weather: &weather::Weather, d: Vec3f, x: Vec3f) -> Vec3f {
-        weather.veil(d, x, self.weather_sun, self.dome)
+        weather.veil_without_virga(d, x, self.weather_sun, self.dome)
     }
 
     /// [`Self::base_at`] without the skyline.

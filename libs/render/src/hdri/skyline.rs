@@ -346,7 +346,9 @@ impl BandPeaks {
 /// `veil` is the weather's veil at d (identity when there is no weather). Exact because
 /// every veil is affine in its input at a fixed direction: veil(x) = M·x + k, so this is
 /// veil((1-a)·c + s) for the base's own unveiled c, and what the base added after its
-/// veil (a storm's bolt) is covered by the city as the sky is.
+/// veil (a storm's bolt) is covered by the city as the sky is. A host may pass a veil
+/// without the rain's shafts (`Env::city_veil`); the base is then the fully veiled one,
+/// and the result is veil_nv(s) + (1-a)·(base - veil_nv(0)).
 pub fn over_veiled(s: [f32; 4], base: Vec3f, veil: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
     let behind = 1.0 - s[3];
     let lit = veil(vec3f(s[0], s[1], s[2]));
@@ -644,7 +646,9 @@ mod tests {
         // dry ground; and the fog and rain kinds and a wet ground alone, whose puddles change finer than the hold's
         // looks: the hold reads the wet ground's mean (the owner's ruling), so below the band nothing is brighter than
         // the brighter of the map's ground there (a puddle showing through the skirt's fade is the map's own), the wet
-        // ground's mean there and the band's land, within WET_SLACK.
+        // ground's mean there and the band's land, within WET_SLACK. The map's ground is the band-free map's, or the
+        // floor the banded map draws there without the band and its skirt: its puddles mirror the city, which stands in
+        // front of the rain's shafts (plan hdri-6 §5b), so under a shaft they can be brighter than the band-free sky's.
         let weather = |w: WeatherParams| {
             let mut p = HdriParams::default();
             p.sky.weather = Some(w);
@@ -674,13 +678,14 @@ mod tests {
                     let (got, ground) = (light(with.radiance(dir(az, el))), light(plain.radiance(dir(az, el))));
                     let land_light = light(veil_of(&with, dir(az, el), land)) * with.scale();
                     let mean = light(plain.base_under_skyline(dir(az, el), None, even)) * plain.scale();
-                    let most = ground.max(mean).max(land_light);
+                    let floor = light(with.base_under_skyline(dir(az, el), None, Sampling::default())) * with.scale();
+                    let most = ground.max(floor).max(mean).max(land_light);
                     let slack = if plain.weather.is_some() { WET_SLACK } else { 1e-4 };
                     if got > most * (1.0 + 1e-4) + 1e-7 {
                         over += 1;
                         worst = worst.max(got / most - 1.0);
                     }
-                    assert!(!held || got <= most * (1.0 + slack) + 1e-7, "{name}: az {az}, el {el}: {got} under the band, the ground {ground} (its mean {mean}), its land {land_light}");
+                    assert!(!held || got <= most * (1.0 + slack) + 1e-7, "{name}: az {az}, el {el}: {got} under the band, the ground {ground} (its mean {mean}, the banded floor {floor}), its land {land_light}");
                 }
             }
             println!("{name}: below the band, {over} of {} looks brighter than the ground, at most by {:.1} %", (8 * (SKIRT_DEG as usize + 2) + 1) * 180, 100.0 * worst);
@@ -819,6 +824,10 @@ mod tests {
                 let lhs = veil(d, x * a + y * b);
                 let rhs = veil(d, x) * a + veil(d, y) * b - veil(d, Vec3f::default()) * (a + b - 1.0);
                 assert!((lhs - rhs).length() <= 1e-5 * (1.0 + lhs.length().max(rhs.length())), "{name} at {d:?}: {lhs:?} vs {rhs:?}");
+                // and the veil the skyline's strip gets, the shafts left out (plan hdri-6 §5b)
+                let bare = |c: Vec3f| w.veil_without_virga(d, c, sun_light, dome);
+                let (lhs, rhs) = (bare(x * a + y * b), bare(x) * a + bare(y) * b - bare(Vec3f::default()) * (a + b - 1.0));
+                assert!((lhs - rhs).length() <= 1e-5 * (1.0 + lhs.length().max(rhs.length())), "{name} without its shafts at {d:?}: {lhs:?} vs {rhs:?}");
             }
         }
         // The virga is in that test: the rain's depth is a level slab (the elevation alone), so a
@@ -1231,7 +1240,8 @@ mod tests {
     /// The map under `weather` (fog, rain), the sun at 25 degrees: a band built as the app's strip is, from the map's own
     /// light (`skyline_light`): its far rows a fully hazed ridge (the low ring itself, opaque), its near rows the map's
     /// ground (the ground ring, opaque), both read at a column's centre. Veiled once by the map, the ridge is the map's
-    /// sky there and the band's ground the map's ground, within 1e-4 (a wet ground's at its puddles' mean share, the
+    /// sky there (where a rain shaft hangs, that sky without the shaft: the ridge stands in front of it, plan hdri-6 §5b)
+    /// and the band's ground the map's ground, within 1e-4 (a wet ground's at its puddles' mean share, the
     /// owner's ruling: then the band's ground is also even round the turn within COLUMN_STEP, and its mean round the
     /// turn the map's own wet ground's, looked up, within MEAN_TOL); and the skirt held to the ground is no brighter
     /// than it (`held_to`, against the unveiled ground, so it holds under the veil too). With `dry` (no wet ground,
@@ -1270,8 +1280,13 @@ mod tests {
         let (mut band_sum, mut looked_sum) = (0.0f64, 0.0f64);
         for i in 0..RING {
             let u = (i as f32 + 0.5) / RING as f32;
-            // a fully hazed far texel and the map's sky beside it (the same direction, without the city)
-            let (far, sky) = (city.radiance(dir_at_u(u, 1.0)), plain.radiance(dir_at_u(u, 1.0)));
+            // a fully hazed far texel and the map's sky beside it (the same direction, without the city); where a rain shaft
+            // hangs, the ridge stands in front of it (plan hdri-6 §5b): the ring veiled without the shafts
+            let d = dir_at_u(u, 1.0);
+            let (far, sky) = match &plain.weather {
+                Some(w) if w.virga(d) > 0.0 => (city.radiance(d), w.veil_without_virga(d, vec(l.ring_low[i]), plain.weather_sun, plain.dome) * k),
+                _ => (city.radiance(d), plain.radiance(d)),
+            };
             worst_far = worst_far.max((far - sky).length() / sky.length());
             assert!(close3(far, sky, 1e-4), "{name}: u {u}: the hazed ridge {far:?}, the map's sky {sky:?}");
             // the band's ground where the ground ring was read, and the map's ground there, a wet ground's puddles at their
@@ -1341,6 +1356,37 @@ mod tests {
     fn under_rain_the_band_is_the_maps_own() {
         the_band_under_weather_is_the_maps_own("rain", WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() }, false);
         the_band_under_weather_is_the_maps_own("dry rain", WeatherParams { rain: 0.6, fog: 0.1, ..WeatherParams::default() }, true);
+    }
+
+    /// Plan hdri-6 §5b: the rain's shafts hang behind the skyline. The rain kind, two opaque bands of other greys. The rain haze
+    /// depends on the elevation alone, and the fog's glow is added, so their difference is the same at every azimuth when no
+    /// shaft is in front of the city (before: the shafts' diagonal dashes across it). Each band reads as the shaft-free veil
+    /// of its texel, and the sky above the band keeps its shafts.
+    #[test]
+    fn the_rain_shafts_hang_behind_the_skyline() {
+        let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+        sun_at(&mut p, 25.0, 180.0);
+        p.sky.weather = Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() });
+        let (a, b) = ([0.30, 0.30, 0.30, 1.0], [0.10, 0.10, 0.10, 1.0]);
+        let env = |p: &HdriParams, s: [f32; 4]| { let (q, images) = with_band(p, band(20.0, -5.0, s)); Env::new_with(&q, &images) };
+        let (ea, eb) = (env(&p, a), env(&p, b));
+        let rain = ea.weather.as_ref().expect("rain draws");
+        let diffs: Vec<f32> = (0..72).map(|i| { let d = dir(i as f32 * 5.0, 8.0); (ea.radiance(d) - eb.radiance(d)).x }).collect();
+        let (lo, hi) = diffs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert!(hi - lo <= 1e-5 * hi.abs().max(1e-6), "a shaft crosses the city: {lo}..{hi}");
+        for i in 0..72 {
+            let d = dir(i as f32 * 5.0, 8.0);
+            let want = rain.veil_without_virga(d, rgb(a), ea.weather_sun, ea.dome) * ea.scale();
+            assert!(close3(ea.radiance(d), want, 1e-5), "az {}: {:?} vs {want:?}", i * 5, ea.radiance(d));
+        }
+        // the premise: shafts hang at 8 degrees (they darken the sky behind)
+        assert!((0..72).any(|i| rain.virga(dir(i as f32 * 5.0, 8.0)) > 0.05));
+        // and the wet ground's mirror of the city has no shafts in front of it either (rain with a full water floor)
+        p.sky.weather = Some(WeatherParams { kind: "rain".to_string(), wet_ground: 1.0, ..WeatherParams::default() });
+        let (ea, eb) = (env(&p, a), env(&p, b));
+        let mirrored: Vec<f32> = (0..72).map(|i| { let d = dir(i as f32 * 5.0, -12.0); (ea.radiance(d) - eb.radiance(d)).x }).collect();
+        let (lo, hi) = mirrored.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert!(hi > 0.0 && hi - lo <= 1e-4 * hi, "the puddles show shafts across the city: {lo}..{hi}");
     }
 
     #[test]
