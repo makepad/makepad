@@ -254,13 +254,14 @@ impl ScriptHook for Dock {
         //
         // Content templates follow both LiveEdit and style reapplication.
         // Dock items describe the layout, which may no longer contain its
-        // initial panes or tabs. ScriptReapply must not reintroduce those
+        // initial panes or tabs. ScriptReapply and Rebake (a re-run of the
+        // same DSL, e.g. on an Android rotation) must not reintroduce those
         // missing IDs: a merged-away pane would become an orphan containing
         // duplicate tabs, and a closed tab could reappear. Only a true
         // LiveEdit reload may add new default layout items; existing runtime
         // items remain unchanged as before.
         let is_reload = apply.is_reload();
-        let collect_layout = !apply.is_script_reapply();
+        let collect_layout = !apply.preserves_runtime_state();
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
@@ -3723,29 +3724,32 @@ mod tests {
             (DesktopStyle::Macos, true),
             (DesktopStyle::Macos, false),
         ] {
-            cx.with_vm(|vm| {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
-                vm.with_reload(crate::script_mod);
-                let value = initial_style_test_dock(vm);
-                dock.borrow_mut().unwrap().script_apply(
-                    vm,
-                    &Apply::ScriptReapply,
-                    &mut Scope::empty(),
-                    value,
-                );
-                assert!(vm.take_errors().is_empty());
-            });
-            assert_eq!(layout_fingerprint(&dock), layout, "{}", style.id());
-            assert_intact(&dock, &bodies, id!(runtime_tab));
-            assert!(!dock.check_and_clear_need_save());
-            assert!(dock.item(id!(second)).is_empty());
-            assert_eq!(dock.item(id!(first)).text(), "unsaved live content");
-            assert_eq!(dock.item(id!(runtime_tab)).text(), "runtime tab content");
-            let dock = dock.borrow().unwrap();
-            assert!(!dock.dock_items.contains_key(&id!(project_tabs)));
-            assert!(!dock.dock_items.contains_key(&id!(work_tabs)));
-            assert!(!dock.dock_items.contains_key(&id!(second)));
-            assert!(dock.templates.contains_key(&id!(Body)));
+            // A rebake re-runs the same DSL, like an Android rotation does.
+            for (apply, kind) in [(Apply::ScriptReapply, "reapply"), (Apply::Rebake, "rebake")] {
+                cx.with_vm(|vm| {
+                    install(vm, StyleSheet::load_with_appearance(style, dark));
+                    vm.with_reload(crate::script_mod);
+                    let value = initial_style_test_dock(vm);
+                    dock.borrow_mut().unwrap().script_apply(
+                        vm,
+                        &apply,
+                        &mut Scope::empty(),
+                        value,
+                    );
+                    assert!(vm.take_errors().is_empty());
+                });
+                assert_eq!(layout_fingerprint(&dock), layout, "{} {kind}", style.id());
+                assert_intact(&dock, &bodies, id!(runtime_tab));
+                assert!(!dock.check_and_clear_need_save());
+                assert!(dock.item(id!(second)).is_empty());
+                assert_eq!(dock.item(id!(first)).text(), "unsaved live content");
+                assert_eq!(dock.item(id!(runtime_tab)).text(), "runtime tab content");
+                let dock = dock.borrow().unwrap();
+                assert!(!dock.dock_items.contains_key(&id!(project_tabs)));
+                assert!(!dock.dock_items.contains_key(&id!(work_tabs)));
+                assert!(!dock.dock_items.contains_key(&id!(second)));
+                assert!(dock.templates.contains_key(&id!(Body)));
+            }
         }
     }
 
