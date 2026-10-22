@@ -128,6 +128,28 @@ let backdrop_px = fn(d: vec2, half: vec2, rel: vec2, view: vec4, fault: float, c
     let cover = clamp(0.5 - rounded(d + half, half * 2.0, corner) * dp, 0.0, 1.0)
     return vec4((c.rgb + vec3(dither(px))) * cover, cover)
 }
+// a window button of the caption, drawn as the stock caption's (widgets' DesktopButton): the
+// glyph a one-pixel line in a 9-point square, the face lit on hover and press; close lights red.
+// glyph: 0 minimise, 1 maximise / restore, 2 close
+let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, dp: float, px: vec2) -> vec4 {
+    let d = p - s * 0.5
+    let h = 4.5
+    let minimise = bar(d, h, dp)
+    let q = abs(d)
+    let outline = clamp((0.5 - abs(max(q.x, q.y) - h)) * dp + 0.5, 0.0, 1.0) * box_cov(d, h + 1.0, dp)
+    let r = vec2(d.x + d.y, d.x - d.y) * 0.70710678
+    let cross = max(bar(r, h * 1.41421356, dp), bar(vec2(r.y, r.x), h * 1.41421356, dp))
+    let close = step(1.5, glyph)
+    let g = mix(mix(minimise, outline, step(0.5, glyph)), cross, close)
+    let face_a = mix(mix(0.0, 0.10, hover), 0.18, down) * (1.0 - close) + mix(mix(0.0, 1.0, hover), 0.75, down) * close
+    let face = mix(#ece6ff, mix(#e81123, #f1707a, down), close)
+    let ink = mix(#ece6ff * 0.85, #ffffff, close * max(hover, down))
+    var col = face.rgb * face_a
+    var alpha = face_a
+    col = col * (1.0 - g) + ink.rgb * g
+    alpha = alpha * (1.0 - g) + g
+    return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
+}
 let Quad = {
     geom: vertex_buffer(vec2f)
     rect: instance(vec4(0.0))
@@ -194,8 +216,9 @@ let Quad = {
         return_value: "Return value: "
         submit: "Enter submit · Esc cancel"
     }
-    // a card of the halted view, a row of a collapsed group, or a touch button.
-    // accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button
+    // a card of the halted view, a row of a collapsed group, a touch button, or a window button
+    // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
+    // 4 caption window button (action: its glyph, selected: hover)
     error_band: Quad{
         selected: instance(0.0)
         action: instance(0.0)
@@ -206,6 +229,9 @@ let Quad = {
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
+            if self.accent > 3.5 {
+                return caption_button_px(p, s, self.action, self.selected, self.pressed, dp, px)
+            }
             let row = step(1.5, self.accent) * (1.0 - step(2.5, self.accent))
             let button = step(2.5, self.accent)
             let root = step(0.5, self.accent) * (1.0 - step(1.5, self.accent))
@@ -246,7 +272,7 @@ let Quad = {
         field_params: uniform(vec4(0.0))
         field_fall: uniform(vec4(0.0))
         // the frame the backdrop and brackets fill (points; zero: the window) and
-        // (fault, corner radius, 0, 0)
+        // (fault, corner radius, caption strip height, 0)
         field_frame: uniform(vec4(0.0))
         field_fault: uniform(vec4(0.0))
         // over a running app (the window layer): (on: 1, or 2 for the corner JIT loader without
@@ -309,7 +335,9 @@ let Quad = {
             } else if k < 4.5 {
                 ring_px(self.d, self.field_params.w, self.view, self.px)
             } else if k < 5.5 {
-                brackets_px(self.d, half, dp, fault)
+                // the frame's brackets start below the caption strip (field_fault.z points)
+                let below = vec2(0.0, self.field_fault.z * 0.5)
+                brackets_px(self.d - below, half - below, dp, fault)
             } else if k < 6.5 {
                 backdrop_px(self.d, half, frame.xy + half + self.d - self.view.xy, self.view, fault, self.field_fault.y, dp, self.px)
             } else {

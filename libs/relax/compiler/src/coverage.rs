@@ -113,7 +113,7 @@ pub unsafe fn functions(up: *const Unit) -> Vec<FnCoverage> {
             continue;
         }
         let lc = |p: u64| -> (String, usize, usize) {
-            let (file, off) = ((p >> 32) as usize, (p & 0xffff_ffff) as u32);
+            let (file, off) = (relax_backend::rir::pos_file(p) as usize, (p & 0xffff_ffff) as u32);
             match (u.prog.file_paths.get(file), u.prog.files.get(file)) {
                 (Some(path), Some(f)) if p != 0 => {
                     let (l, c) = f.line_col(off);

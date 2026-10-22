@@ -35,6 +35,11 @@ path = "src/guard.rs"
 name = "relax-unwind-probe"
 path = "src/unwind_probe.rs"
 
+# makepad inspect's code versions, inlined copies and tier pins against a live program (inspect_tiers.sh)
+[[bin]]
+name = "relax-inspect-tiers"
+path = "src/inspect_tiers.rs"
+
 # makepad inspect probes / eval / static / locals against a live program (inspect_probe.sh)
 [[bin]]
 name = "relax-inspect-probe"

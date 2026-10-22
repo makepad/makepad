@@ -856,12 +856,12 @@ fn keeps_xmm01(options: &relax_session::Options, f: &Func, i: &Inst) -> bool {
 
 fn x64_int_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
     match i {
-        Inst::IBin(IOp::Shl | IOp::Shr, _, _, _, _) if host_bmi2(options) => 0,
+        Inst::IBin(IOp::Shl | IOp::Shr | IOp::Bzhi, _, _, _, _) if host_bmi2(options) => 0,
         // of the conversions only u64 -> float works in rcx / rdx (halve with a sticky bit); a
         // movzx / movsx clobbering them pushed byte casts out of rcx / rdx and into spill slots
         Inst::Conv(Conv::IntToF(from, _), _, _) if from.bits == 64 && !from.signed => (1 << RCX) | (1 << RDX),
         Inst::Conv(..) => 0,
-        Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr | IOp::Rotl | IOp::MulHi, _, _, _, _) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) => (1 << RCX) | (1 << RDX),
+        Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr | IOp::Rotl | IOp::MulHi | IOp::Bzhi, _, _, _, _) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) => (1 << RCX) | (1 << RDX),
         // an asm! block: every register it names (regalloc also keeps its results out of them)
         Inst::Call(Callee::Asm(b), _, _) => b.regs,
         _ => 0,
@@ -5130,6 +5130,31 @@ impl<'a> Gen<'a> {
                 self.fin_i(d, rd);
                 return;
             }
+            IOp::Bzhi if host_bmi2(options) => {
+                // the count mod 64 in r11 (bzhi takes its low byte: 64..255 would keep every bit)
+                if rb != R11 {
+                    self.a.mov_rr(R11, rb);
+                }
+                self.a.rex(false, 0, 0, R11, false);
+                self.a.byte(0x83);
+                self.a.modrm_rr(4, R11);
+                self.a.byte(63);
+                self.a.vex_rr(0, 2, true, 0xf5, rd, R11, ra);
+                self.fin_i(d, rd);
+                return;
+            }
+            IOp::Bzhi => {
+                // rax = !(-1 << (b mod 64)) & a (a kept in r11: it may sit in rcx)
+                self.a.mov_rr(R11, ra);
+                self.a.mov_rr(RCX, rb);
+                self.a.mov_ri(RAX, -1);
+                self.a.shift_cl(4, RAX);
+                self.a.grp3(2, RAX);
+                self.a.alu_rr(0x21, RAX, R11);
+                self.a.mov_rr(rd, RAX);
+                self.fin_i(d, rd);
+                return;
+            }
             IOp::Rotl => {
                 // rol by cl (32-bit form for u32: zero-extends)
                 self.a.mov_rr(RCX, rb);
@@ -5619,6 +5644,21 @@ impl<'a> Gen<'a> {
     }
 
     fn ibin_imm(&mut self, options: &relax_session::Options, op: IOp, it: IntTy, d: VReg, a: VReg, k: i64) {
+        if op == IOp::Bzhi {
+            // a constant count is a constant mask
+            let n = (k & 63) as u32;
+            let m = if n == 0 { 0 } else { (u64::MAX >> (64 - n)) as i64 };
+            if (i32::MIN as i64..=i32::MAX as i64).contains(&m) {
+                return self.ibin_imm(options, IOp::And, it, d, a, m);
+            }
+            let ra = self.use_i(options, a, R10);
+            let rd = self.def_i(d, R10);
+            self.a.mov_ri(R11, m);
+            self.a.mov_rr(rd, ra);
+            self.a.alu_rr(0x21, rd, R11);
+            self.fin_i(d, rd);
+            return;
+        }
         // a spilled operand of a register result loads straight into it (no scratch + copy)
         let ra = match (self.uloc(a), self.al.loc[d.0 as usize]) {
             (Loc::Stack(o), Loc::Reg(r)) if !matches!(op, IOp::Div | IOp::Rem | IOp::MulHi) => {

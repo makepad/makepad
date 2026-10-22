@@ -732,6 +732,7 @@ const OP_DIV: u8 = 8;
 const OP_REM: u8 = 9;
 const OP_MULHI: u8 = 10;
 const OP_ROTL: u8 = 11;
+const OP_BZHI: u8 = 12;
 
 fn iop_code(op: IOp) -> u8 {
     match op {
@@ -747,6 +748,7 @@ fn iop_code(op: IOp) -> u8 {
         IOp::Rem => OP_REM,
         IOp::MulHi => OP_MULHI,
         IOp::Rotl => OP_ROTL,
+        IOp::Bzhi => OP_BZHI,
     }
 }
 
@@ -754,6 +756,10 @@ fn iop_code(op: IOp) -> u8 {
 /// u32: shift amounts mod 32), division by zero gives 0, remainder by zero the dividend.
 #[inline(always)]
 fn ibin(op: u8, bits: u8, s: bool, a: u64, b: u64) -> u64 {
+    if op == OP_BZHI {
+        let n = (b & 63) as u32;
+        return if n == 0 { 0 } else { a & (u64::MAX >> (64 - n)) };
+    }
     if op == OP_ROTL {
         return if bits == 32 { (a as u32).rotate_left(b as u32 & 31) as u64 } else { a.rotate_left(b as u32 & 63) };
     }
@@ -852,6 +858,7 @@ fn pick_ibin<const B: u8, const S: bool>(op: u8, imm: bool) -> H {
         OP_DIV => p!(OP_DIV),
         OP_REM => p!(OP_REM),
         OP_MULHI => p!(OP_MULHI),
+        OP_BZHI => p!(OP_BZHI),
         _ => p!(OP_ROTL),
     }
 }

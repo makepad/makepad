@@ -1198,6 +1198,11 @@ impl World {
         if let Some(crate::HalEvent::Geom { window, x, y, w, h, dpi, state }) = event.decode(payload) {
             self.window_geom(sid, window, [x as f32, y as f32, w as f32, h as f32], dpi, state);
         }
+        // the window buttons' rect goes to the host too, like the geometry: the host draws its
+        // run-state view (a caption strip that leaves the native buttons room) in the lent window
+        if let (Some(crate::HalEvent::Chrome { x, y, w, h, topmost, .. }), Some(hid)) = (event.decode(payload), alias) {
+            self.to_session(HOST, |q| q.chrome(hid, x, y, w, h, topmost));
+        }
         if let Some(crate::HalEvent::Display { window, dpi, .. }) = event.decode(payload) {
             if let Some(w) = self.session(sid).and_then(|s| s.windows.get(sid, window).ok()) {
                 let (geom, state) = (w.val.geom, w.val.state);

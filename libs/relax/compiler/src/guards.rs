@@ -114,6 +114,8 @@ fn trace() -> bool {
 static SITES: relax_session::sync::Mutex<Option<HashMap<u32, Vec<&'static SiteRec>>>> = relax_session::sync::Mutex::new(None);
 
 fn site(slot: u32, pos: u64) -> &'static SiteRec {
+    // (a source place: the inline context does not split a site)
+    let pos = relax_backend::rir::pos_plain(pos);
     let mut g = SITES.lock().unwrap_or_else(|e| e.into_inner());
     crate::zone_alloc::kept_with(|| {
         let v = g.get_or_insert_with(HashMap::new).entry(slot).or_default();

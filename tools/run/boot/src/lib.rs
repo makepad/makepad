@@ -1,4 +1,5 @@
 //! Session 0's text/pass renderer. No platform client, draw tree, widgets or Cx.
+mod caption;
 mod document;
 mod dump;
 mod field;
@@ -15,7 +16,7 @@ pub use icon::Icon;
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
-    pass_load, session::HOST, target, usage, window_kind, Attr, CmdWriter, EventBuf, EventQueue,
+    pass_load, session::HOST, target, usage, window_kind, window_state, Attr, CmdWriter, EventBuf, EventQueue,
     FrameMeta, Hal, HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
@@ -61,6 +62,10 @@ pub enum Action {
     Select(usize),
     /// The window's close button: the run ends, as when the window is asked to close.
     Close,
+    /// The caption's minimise button (`Boot::window_control`).
+    Minimize,
+    /// The caption's maximise / restore button (`Boot::window_control`).
+    Maximize,
 }
 
 #[derive(Clone)]
@@ -126,7 +131,7 @@ struct Card {
     rect: [f32; 4],
     action: Action,
     /// the card's look (document `error_band.accent`): 0 follow-on, 1 root cause or panic,
-    /// 2 a member row of a folded group, 3 a button, 4 the close button
+    /// 2 a member row of a folded group, 3 a button, 4 a window button of the caption
     accent: f32,
     /// the list entries the card shows: it is drawn selected while one of them is
     members: std::ops::Range<usize>,
@@ -168,6 +173,8 @@ struct Renderer {
     clear_errors_on_install: bool,
     icon_aspect: Option<f32>,
     pressed: Option<Action>,
+    /// the caption's window button under the pointer
+    hovered: Option<Action>,
     layout_revision: u64,
     presented_revision: u64,
     presented_scroll: f32,
@@ -198,6 +205,8 @@ pub struct Boot {
     gpu: bool,
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
+    /// the window's chrome as the platform reports it: the caption strip follows it
+    chrome: caption::Chrome,
 }
 
 impl Boot {
@@ -228,7 +237,14 @@ impl Boot {
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
+            chrome: caption::Chrome {
+                client: info.flags & info_flags::CLIENT_CHROME != 0,
+                ..Default::default()
+            },
         };
+        if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
+            boot.chrome = chrome;
+        }
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
         if info.backend == backend_id::HEADLESS || info.dialect == dialect::NONE {
@@ -304,6 +320,7 @@ impl Boot {
             clear_errors_on_install,
             icon_aspect: None,
             pressed: None,
+            hovered: None,
             layout_revision: 0,
             presented_revision: 0,
             presented_scroll: 0.0,
@@ -420,6 +437,38 @@ impl Boot {
                 renderer.redraw = true;
             }
         }
+    }
+
+    /// The pointer is at `point` (`None`: it left the window): the caption's window button under
+    /// it shows its hover.
+    pub fn hover(&mut self, point: Option<[f32; 2]>) {
+        let caption = self.caption();
+        if let Some(renderer) = &mut self.renderer {
+            let hovered = point.and_then(|p| caption.button_at(p));
+            if renderer.hovered != hovered {
+                renderer.hovered = hovered;
+                renderer.redraw = true;
+            }
+        }
+    }
+
+    /// The caption's minimise and maximise / restore buttons: the window's state changes.
+    pub fn window_control(&mut self, action: Action) {
+        let Some(window) = self.window else { return };
+        let state = match action {
+            Action::Minimize => window_state::MINIMIZE,
+            Action::Maximize if self.chrome.state == window_state::MAXIMIZE => window_state::RESTORE,
+            Action::Maximize => window_state::MAXIMIZE,
+            _ => return,
+        };
+        let mut writer = CmdWriter::new(HOST);
+        writer.window_state(window, state);
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The caption strip the window has now.
+    fn caption(&self) -> caption::Caption {
+        self.chrome.caption(self.geometry[2], self.environment.touch)
     }
 
     pub fn reload(&mut self, document: Document) {
@@ -668,14 +717,29 @@ impl Boot {
                     w,
                     h,
                     dpi,
-                    ..
+                    state,
                 } if Some(window) == self.window => {
                     self.geometry = [x as f32, y as f32, w as f32, h as f32];
+                    self.chrome.state = state;
                     if dpi.is_finite() && dpi > 0.0 {
                         self.dpi = dpi;
                     }
                     if let Some(renderer) = &mut self.renderer {
                         renderer.dirty = true;
+                    }
+                }
+                HalEvent::Chrome { window, x, y, w, h, .. } if Some(window) == self.window => {
+                    let native = [x as f32, y as f32, w as f32, h as f32];
+                    let native = if native.iter().all(|v| v.is_finite()) { native } else { [0.0; 4] };
+                    let fixed = self.dump.as_ref().is_some_and(|d| d.chrome.is_some());
+                    if self.chrome.native != native && !fixed {
+                        if self.dump.is_some() {
+                            eprintln!("makepad-run: boot window chrome: native window buttons at {native:?}");
+                        }
+                        self.chrome.native = native;
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.dirty = true;
+                        }
                     }
                 }
                 HalEvent::Display { window, dpi, .. } if Some(window) == self.window => {
@@ -828,11 +892,13 @@ impl Boot {
         if !renderer.redraw && !renderer.dirty {
             return;
         }
+        let caption = self.chrome.caption(self.geometry[2], self.environment.touch);
         if renderer.dirty {
             renderer.layout(
                 &self.state,
                 [self.geometry[2], self.geometry[3]],
                 self.environment,
+                &caption,
             );
             renderer.dirty = false;
         }
@@ -879,13 +945,15 @@ impl Boot {
             if !card.fixed {
                 rect[1] -= scroll;
             }
-            let selected = !card.fixed && card.members.contains(&renderer.selected);
+            let selected = (!card.fixed && card.members.contains(&renderer.selected))
+                || (card.accent == CAPTION_BUTTON && renderer.hovered == Some(card.action));
             program.pipes[ERROR_BAND].instances.write(
                 &[
                     (id!(rect), &rect),
                     (id!(clip_rect), &bounds),
                     (id!(selected), &[selected as u8 as f32]),
                     (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action)]),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -923,7 +991,7 @@ impl Boot {
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_frame = frame;
-        let fault = [1.0, 0.0, 0.0, 0.0];
+        let fault = [1.0, 0.0, caption.height, 0.0];
         let mut uniforms = vec![Vec::new(); program.pipes.len()];
         for (i, pipe) in program.pipes.iter().enumerate() {
             pipe.uniforms.write(
@@ -1105,8 +1173,8 @@ impl Boot {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
-        let touch = self.environment.touch;
         let reduce_motion = self.environment.reduce_motion;
+        let caption = self.caption();
         let build_start_ns = makepad_hal::clock_ns();
         let renderer = self.renderer.as_mut().unwrap();
         let program = renderer.active.as_ref().unwrap();
@@ -1116,6 +1184,8 @@ impl Boot {
         let look = layered.then(|| renderer.layer.look(reduce_motion));
         let hud = look.is_none_or(|l| l.hud);
         let corner = look.is_some_and(|l| l.corner);
+        // the JIT loader in its corner over the app has no caption of its own: the app's shows
+        let caption = if hud { caption } else { caption::Caption::default() };
         // the JIT loader: the whole galaxy in a square at the bottom-right corner
         let region = if corner {
             let side = layer::LOADER_SIDE.min(viewport[0].min(viewport[1]) * 0.4);
@@ -1156,7 +1226,7 @@ impl Boot {
                 frame.view,
                 frame.params[0],
                 time,
-                !touch && look.is_none(),
+                &caption,
                 self.offscreen,
                 &mut renderer.layout,
             );
@@ -1194,6 +1264,7 @@ impl Boot {
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_layer = look.map_or([0.0; 4], |l| [if l.hud { 1.0 } else { 2.0 }, l.galaxy, l.backdrop, l.progress]);
+        let field_fault = [0.0, 0.0, caption.height, 0.0];
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
@@ -1206,6 +1277,7 @@ impl Boot {
                     (id!(field_params), &frame.params),
                     (id!(field_fall), &frame.fall),
                     (id!(field_layer), &field_layer),
+                    (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
                     (id!(cutoff), &[sdf.cutoff]),
                 ],
@@ -1216,6 +1288,22 @@ impl Boot {
         common(&program.pipes[FIELD], &mut field_uniforms);
         let mut glyph_uniforms = Vec::new();
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
+        // the caption's window buttons (the field's only cards)
+        let mut buttons = Vec::new();
+        for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &card.rect),
+                    (id!(selected), &[(renderer.hovered == Some(card.action)) as u8 as f32]),
+                    (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action)]),
+                    (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
+                ],
+                &mut buttons,
+            );
+        }
+        let mut band_uniforms = Vec::new();
+        common(&program.pipes[ERROR_BAND], &mut band_uniforms);
         self.frame += 1;
         let offscreen = if self.offscreen && !layered {
             let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
@@ -1332,6 +1420,15 @@ impl Boot {
                 field_scissor,
             );
         }
+        if !buttons.is_empty() {
+            program.pipes[ERROR_BAND].draw(
+                &mut writer,
+                &buttons,
+                &band_uniforms,
+                renderer.text.atlas(),
+                scissor,
+            );
+        }
         program.pipes[GLYPH].draw(
             &mut writer,
             &glyphs,
@@ -1419,6 +1516,19 @@ impl Layout {
         self.cards
             .iter()
             .filter(move |c| c.fixed || (c.rect[1] + c.rect[3] >= top && c.rect[1] <= bottom))
+    }
+}
+
+/// `Card::accent` of a window button of the caption.
+const CAPTION_BUTTON: f32 = 4.0;
+
+/// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
+/// 1 maximise / restore, 2 close.
+fn button_glyph(action: Action) -> f32 {
+    match action {
+        Action::Minimize => 0.0,
+        Action::Maximize => 1.0,
+        _ => 2.0,
     }
 }
 

@@ -476,6 +476,9 @@ pub fn version_bounds_loops(options: &relax_session::Options, f: &mut Func) -> b
                 }
             });
         }
+        // symbolic offsets bounded so far: (offset, its end n + o)
+        let mut ends: Vec<(Vec<Off>, VReg)> = Vec::new();
+        let mut stepped = false;
         for (len, off) in &conds {
             let len = *len;
             let konly = off.iter().all(|t| matches!(t, Off::K(_)));
@@ -494,25 +497,26 @@ pub fn version_bounds_loops(options: &relax_session::Options, f: &mut Func) -> b
                     and_in(&mut guard, f, &mut acc, g1);
                 }
                 and_in(&mut guard, f, &mut acc, g2);
-            } else if konly && (-(1i64 << 32)..0).contains(&k) {
+            } else if konly && (-(1i64 << 32)..0).contains(&k) && cnt.step == 1 {
                 // n <= len && i >= -k (the counter's entry value; step 1, so no wrap)
-                if cnt.step != 1 {
-                    let z = f.vreg(Cls::I);
-                    guard.push(Inst::Iconst(z, 0));
-                    and_in(&mut guard, f, &mut acc, z);
-                    continue;
-                }
                 let g1 = f.vreg(Cls::I);
                 let g2 = f.vreg(Cls::I);
                 guard.push(Inst::ICmp(Cond::Le, false, g1, cnt.n, len));
                 guard.push(Inst::ICmpI(Cond::Ge, false, g2, cnt.iv, -k));
                 and_in(&mut guard, f, &mut acc, g1);
                 and_in(&mut guard, f, &mut acc, g2);
+            } else if let Some(&(_, e)) = ends.iter().find(|x| x.0 == *off) {
+                // an offset already bounded for another length: only e <= len
+                let a2 = f.vreg(Cls::I);
+                guard.push(Inst::ICmp(Cond::Le, false, a2, e, len));
+                and_in(&mut guard, f, &mut acc, a2);
             } else {
-                // o = the offset's value (wrapping, as in the loop: x == t + o mod 2^64). Read as a
-                // signed number: o >= 0 needs o <= len && n <= len - o (then t + o < len, no wrap);
-                // o < 0 needs i >= -o at entry (step 1: every t >= it, so t + o = t - |o| >= 0)
-                // and n <= len (then t - |o| < n <= len).
+                // o = the offset's value (wrapping, as in the loop: x == t + o mod 2^64). Every
+                // tested t is in [i0, n) (i0 the counter's entry value), so x = first + (t - i0)
+                // with first = i0 + o and t - i0 < d = n - i0; with end = n + o = first + d (mod
+                // 2^64), first <= end (unsigned) means first + d does not wrap, so x < end; and
+                // end <= len bounds every x. Signs of o and of the terms do not matter. A step
+                // above 1 may carry t past 2^64 back below i0: n <= MAX - step rules that out.
                 let o = f.vreg(Cls::I);
                 guard.push(Inst::Iconst(o, 0));
                 for t in off {
@@ -524,26 +528,20 @@ pub fn version_bounds_loops(options: &relax_session::Options, f: &mut Func) -> b
                     });
                     guard.push(Inst::Mov(o, o2));
                 }
-                let (pos, a1, lim, a2, a, b) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
-                guard.push(Inst::ICmpI(Cond::Ge, true, pos, o, 0));
-                guard.push(Inst::ICmp(Cond::Le, false, a1, o, len));
-                guard.push(Inst::IBin(IOp::Sub, U64_TY, lim, len, o));
-                guard.push(Inst::ICmp(Cond::Le, false, a2, cnt.n, lim));
-                guard.push(Inst::IBin(IOp::And, U64_TY, a, a1, a2));
-                if cnt.step == 1 {
-                    let (no, b1, b2) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
-                    let zero = f.vreg(Cls::I);
-                    guard.push(Inst::Iconst(zero, 0));
-                    guard.push(Inst::IBin(IOp::Sub, U64_TY, no, zero, o));
-                    guard.push(Inst::ICmp(Cond::Ge, false, b1, cnt.iv, no));
-                    guard.push(Inst::ICmp(Cond::Le, false, b2, cnt.n, len));
-                    guard.push(Inst::IBin(IOp::And, U64_TY, b, b1, b2));
-                } else {
-                    guard.push(Inst::Iconst(b, 0));
+                let (first, e, a1, a2) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+                guard.push(Inst::IBin(IOp::Add, U64_TY, first, cnt.iv, o));
+                guard.push(Inst::IBin(IOp::Add, U64_TY, e, cnt.n, o));
+                guard.push(Inst::ICmp(Cond::Le, false, a1, first, e));
+                guard.push(Inst::ICmp(Cond::Le, false, a2, e, len));
+                and_in(&mut guard, f, &mut acc, a1);
+                and_in(&mut guard, f, &mut acc, a2);
+                if cnt.step > 1 && !stepped {
+                    let a3 = f.vreg(Cls::I);
+                    guard.push(Inst::ICmpI(Cond::Le, false, a3, cnt.n, -1 - cnt.step));
+                    and_in(&mut guard, f, &mut acc, a3);
+                    stepped = true;
                 }
-                let g = f.vreg(Cls::I);
-                guard.push(Inst::Sel(g, pos, a, b));
-                and_in(&mut guard, f, &mut acc, g);
+                ends.push((off.clone(), e));
             }
         }
         let g = acc.unwrap();

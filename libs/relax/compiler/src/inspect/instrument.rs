@@ -354,16 +354,27 @@ pub fn park_here(i: u64, site_tag: &str, label: &str, extra: &str) {
 
 // ------------------------------------------------------------------ finding slots
 
+/// A slot a probe can target: it has code, or (`find_all`) it only runs as inlined copies in
+/// other slots' code (its instrumented build is its first own code; the inliners are rebuilt to
+/// call it).
+fn targetable(f: &crate::jit::FnEntry, inlined_too: bool) -> bool {
+    f.compiled || inlined_too && (!f.history().inlined_into.is_empty() || f.rir.is_some())
+}
+
 /// Slots matching a fn query (exact display name, else a suffix of it, else a substring) that
-/// have code, at most `max`; or the slots of `file:line` whose RIR has an instruction on that
-/// line. Run on the owner.
-pub(super) fn find(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u32, Option<u32>, String)> {
+/// have code -- or only run inlined into other code -- at most `max`; or the slots of `file:line`
+/// whose fn spans that line. Run on the owner.
+pub(super) fn find_all(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u32, Option<u32>, String)> {
+    find_in(u, query, max, true)
+}
+
+fn find_in(u: &crate::jit::Unit, query: &str, max: usize, inlined_too: bool) -> Vec<(u32, Option<u32>, String)> {
     if let Some((file, line)) = query.rsplit_once(':').and_then(|(f, l)| l.parse::<u32>().ok().map(|l| (f, l))) {
         let files: Vec<u32> = u.prog.file_paths.iter().enumerate().filter(|(_, p)| p.ends_with(file)).map(|(i, _)| i as u32).collect();
         let mut out = Vec::new();
         for id in 0..u.fns.len() {
             let f = &u.fns[id];
-            if !f.compiled || !files.contains(&f.file) {
+            if !targetable(f, inlined_too) || !files.contains(&f.file) {
                 continue;
             }
             // the fn whose item spans the line (its RIR, built for the instrumented build when it
@@ -387,7 +398,7 @@ pub(super) fn find(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u32, O
     let mut loose = Vec::new();
     for id in 0..u.fns.len() {
         let f = &u.fns[id];
-        if !f.compiled || f.name.is_empty() {
+        if !targetable(f, inlined_too) || f.name.is_empty() {
             continue;
         }
         match name_match(&f.name, query) {
@@ -487,20 +498,15 @@ pub(super) fn name_match(name: &str, query: &str) -> Match {
     best
 }
 
-/// The line of a RIR position ((file << 32) | byte offset).
-pub(super) fn pos_line(u: &crate::jit::Unit, p: u64) -> Option<u32> {
-    if p == 0 {
-        return None;
-    }
-    let s = u.pos_str((p >> 32) as u32, p as u32);
-    let mut parts = s.rsplitn(3, ':');
-    let _col = parts.next()?;
-    parts.next()?.parse().ok()
+/// Whether RIR position `p` is on `line` of `file` (any loaded version of the file's path: an
+/// inlined callee of another file has its own line numbers).
+pub(super) fn on_line(u: &crate::jit::Unit, p: u64, (file, line): (u32, u32)) -> bool {
+    matches!(super::codever::pos_line(u, p), Some((f, l)) if l == line && super::codever::same_file(u, f, file))
 }
 
 /// Adds the probe calls to slot `id`'s RIR: `enter` (Some) at the entry or before the first
-/// instruction on `line`, `exit` before every return.
-fn edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64, enter: (&'static str, u64), exit: Option<u64>, line: Option<u32>, with_args: bool, hit: &mut bool) {
+/// instruction on `line` (file, line), `exit` before every return.
+fn edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64, enter: (&'static str, u64), exit: Option<u64>, line: Option<(u32, u32)>, with_args: bool, hit: &mut bool) {
     use relax_backend::rir::{Callee, Inst, Term};
     let sym = |name: &'static str, addr: u64| u.syms.intern(crate::syms::SymKind::Rt(name), addr);
     let enter_sym = sym(enter.0, enter.1);
@@ -539,7 +545,7 @@ fn edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, site: u64, enter
             'found: for b in 0..f.blocks.len() {
                 for k in 0..f.blocks[b].insts.len() {
                     let p = f.blocks[b].pos[k];
-                    if pos_line(u, p) == Some(l) {
+                    if on_line(u, p, l) {
                         call(f, b, k, enter_sym, p, &words);
                         *hit = true;
                         break 'found;
@@ -600,7 +606,7 @@ pub fn auto_restartable(frames: &[u64]) {
     { let _k = crate::zone_alloc::kept();
     let _ = std::thread::Builder::new().name("run-inspect-restartable".into()).spawn(move || {
         super::heap::exclude_this_thread();
-        let _ = add_to(Kind::Restart, Target::Slot(slot), false);
+        let _ = add_to(Kind::Restart, Target::Slot(slot), false, false);
     });
     }
 }
@@ -800,7 +806,7 @@ pub(super) fn edit_count(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit,
 }
 
 /// `break`'s edit: the parking call with the fn's argument words at the entry or a line.
-pub(super) fn edit_break(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32, site: u64, line: Option<u32>) -> bool {
+pub(super) fn edit_break(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32, site: u64, line: Option<(u32, u32)>) -> bool {
     if let Some(s) = self::site(site) {
         // kept state (the site outlives the compiler arena); this edit runs inside a compile
         let _ = s.args.set(crate::zone_alloc::kept_with(|| arg_plan(u, slot, f)));
@@ -837,8 +843,8 @@ fn register_group(group: u32, slots: Vec<u32>, query: &str) {
 }
 
 /// Installs probes of `kind` for `query` (on the owner, within `ms`): (group, sites).
-fn add(kind: Kind, query: &str, time: bool) -> Result<(u32, Vec<(u64, String, u32)>), String> {
-    add_to(kind, Target::Query(query.to_string()), time)
+fn add(kind: Kind, query: &str, time: bool, low: bool) -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
+    add_to(kind, Target::Query(query.to_string()), time, low)
 }
 
 enum Target {
@@ -846,7 +852,7 @@ enum Target {
     Slot(u32),
 }
 
-fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, String, u32)>), String> {
+fn add_to(kind: Kind, target: Target, time: bool, low: bool) -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
     let up = crate::jit::current_unit();
     if up.is_null() {
         return Err("no running unit".into());
@@ -856,14 +862,15 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
         Target::Slot(id) => format!("slot#{}", id),
     };
     let group = NEXT_GROUP.fetch_add(1, SeqCst) as u32;
-    let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || -> Result<(u32, Vec<(u64, String, u32)>), String> {
+    let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
         // the sites, groups and patch edits are kept state (the instrumented code calls into them
         // after a settle swap destroyed the compiler arena); patches::rebuild compiles in the
         // compiler phase
         let _kept = crate::zone_alloc::kept();
+        super::patches::with_low_tier(low, || {
         let u = unsafe { &mut *up };
         let found = match target {
-            Target::Query(ref q) => find(u, q, if kind == Kind::Break { 4 } else { 32 }),
+            Target::Query(ref q) => find_all(u, q, if kind == Kind::Break { 4 } else { 32 }),
             Target::Slot(id) => vec![(id, None, u.fns[id as usize].name.to_string())],
         };
         if found.is_empty() {
@@ -884,27 +891,42 @@ fn add_to(kind: Kind, target: Target, time: bool) -> Result<(u32, Vec<(u64, Stri
             }
         }
         let mut out = Vec::new();
-        for (id, line, name) in found {
+        let owner = super::patches::Owner::Group(group);
+        for (id, line, name) in found.iter().cloned() {
             let si = register_site(kind, id, match line { Some(l) => format!("{} (line {})", name, l), None => name.clone() }, group);
+            let file = super::codever::fn_lines(u, id).map_or(u32::MAX, |x| x.0);
             let e = match kind {
                 Kind::Count => super::patches::Edit::Count { site: si, time },
-                Kind::Break => super::patches::Edit::Break { site: si, line },
+                Kind::Break => super::patches::Edit::Break { site: si, line: line.map(|l| (file, l)) },
                 Kind::Restart => super::patches::Edit::Restart { site: si },
             };
-            match unsafe { super::patches::add(up, id, super::patches::Owner::Group(group), e) } {
-                Ok(true) => out.push((si, name, id)),
-                Ok(false) => out.push((si, format!("{} (line not found in its code)", name), id)),
-                Err(e) => out.push((si, format!("{}: not instrumented: {}", name, e), id)),
+            let before = super::codever::snapshot(u, id);
+            let r = unsafe { super::patches::add(up, id, owner, e) };
+            let u = unsafe { &*up };
+            let row = super::codever::patched_row(u, id, &before, &r);
+            match r {
+                Ok(true) => out.push((si, name, id, row)),
+                Ok(false) => out.push((si, format!("{} (line not found in its code)", name), id, row)),
+                Err(e) => out.push((si, format!("{}: not instrumented: {}", name, e), id, row)),
             }
         }
+        // a restart landing is about the slot's own frames: inlined copies need not change
+        let inliners = if kind == Kind::Restart {
+            Vec::new()
+        } else {
+            let t: Vec<(u32, Option<u32>)> = found.iter().map(|x| (x.0, x.1)).collect();
+            unsafe { super::codever::cover_inliners(up, owner, &t, false) }
+        };
         register_group(group, out.iter().map(|x| x.2).collect(), &query);
-        Ok((group, out))
+        Ok((group, out, inliners))
+        })
     });
     r.unwrap_or_else(|| Err(format!("the owner did not take the request in 10 s ({})", crate::owner::serving_note())))
 }
 
-/// Removes probe group `group` (all groups with None): the code they replaced comes back.
-fn remove(group: Option<u32>) -> Result<usize, String> {
+/// Removes probe group `group` (all groups with None): the code they replaced comes back; a row
+/// per slot says which code is back.
+fn remove_rows(group: Option<u32>) -> Result<(usize, Vec<String>), String> {
     let _k = crate::zone_alloc::kept();
     let up = crate::jit::current_unit();
     let groups: Vec<(u32, u32, Vec<u32>, String)> = {
@@ -936,11 +958,34 @@ fn remove(group: Option<u32>) -> Result<usize, String> {
     let ids: Vec<u32> = groups.iter().map(|g| g.0).collect();
     let r = crate::owner::call_within(crate::owner::Class::App, 10_000, move || {
         let _kept = crate::zone_alloc::kept();
+        let mut rows = Vec::new();
         for g in ids {
-            unsafe { super::patches::remove_owner(up, super::patches::Owner::Group(g)) };
+            let owner = super::patches::Owner::Group(g);
+            let slots = super::patches::owner_slots(owner);
+            unsafe { super::patches::remove_owner(up, owner) };
+            let u = unsafe { &*up };
+            for (slot, role, _) in slots {
+                rows.push(format!("{{\"removed\":\"G{}\",\"slot\":{},\"role\":\"{}\",\"back\":{}}}", g, slot, role, super::codever::installed_json(u, slot)));
+            }
         }
+        rows
     });
-    r.map(|_| n).ok_or_else(|| format!("the owner did not take the request in 10 s ({}); the probes are off but still in the code", crate::owner::serving_note()))
+    r.map(|rows| (n, rows)).ok_or_else(|| format!("the owner did not take the request in 10 s ({}); the probes are off but still in the code", crate::owner::serving_note()))
+}
+
+#[cfg(test)]
+pub(crate) fn count_for_test(query: &str) -> Result<(u32, Vec<(u64, String, u32, String)>, Vec<String>), String> {
+    add(Kind::Count, query, false, false)
+}
+
+#[cfg(test)]
+pub(crate) fn site_hits_for_test(si: u64) -> u64 {
+    site(si).map_or(0, |s| s.hits.load(Relaxed))
+}
+
+#[cfg(test)]
+pub(crate) fn remove_for_test(group: u32) -> Result<usize, String> {
+    remove_rows(Some(group)).map(|r| r.0)
 }
 
 // ------------------------------------------------------------------ pause
@@ -1118,11 +1163,14 @@ pub fn cmd(req: &Req, out: &mut Out) {
                 "break" => Kind::Break,
                 _ => Kind::Restart,
             };
-            match add(kind, q, req.get("time") == Some("1")) {
-                Ok((group, sites)) => {
-                    out.measured(&format!("probe group G{} installed ({} slot(s))", group, sites.len()), "owner: instrumented builds", &[]);
-                    for (si, name, slot) in sites {
-                        out.line(&format!("{{\"site\":\"{}{}\",\"slot\":{},\"fn\":{}}}", site_letter(kind), si, slot, json_str(&short(&name, 160))));
+            match add(kind, q, req.get("time") == Some("1"), req.get("tier").is_some_and(|t| t.eq_ignore_ascii_case("o1"))) {
+                Ok((group, sites, inliners)) => {
+                    out.measured(&format!("probe group G{} installed ({} slot(s), {} inliner(s) rebuilt)", group, sites.len(), inliners.len()), "owner: instrumented builds", &[]);
+                    for (si, name, slot, row) in sites {
+                        out.line(&format!("{{\"site\":\"{}{}\",\"slot\":{},\"fn\":{},{}}}", site_letter(kind), si, slot, json_str(&short(&name, 160)), row));
+                    }
+                    for r in inliners {
+                        out.line(&r);
                     }
                     out.line(&format!("{{\"more\":[\"probes\",\"rm G{}\"{}]}}", group, if kind == Kind::Break { ",\"watch on=break\",\"continue all\"" } else { "" }));
                 }
@@ -1165,6 +1213,18 @@ pub fn cmd(req: &Req, out: &mut Out) {
             for (k, h, ns) in injected.iter().filter(|x| !x.0.contains(" count ")) {
                 out.line(&format!("{{\"probe\":{},\"hits\":{}{}}}", json_str(&short(k, 160)), h, if *ns > 0 { format!(",\"est_ms\":{:.3}", *ns as f64 / 1e6) } else { String::new() }));
             }
+            // which code versions each one is on
+            let mut owners: Vec<(super::patches::Owner, String)> = GROUPS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|g| (super::patches::Owner::Group(g.0), g.3.clone())).collect();
+            owners.extend(super::probes::live().into_iter().map(|(id, hook)| (super::patches::Owner::Probe(id), hook)));
+            owners.extend(super::codever::pin_owners());
+            match super::codever::owner_rows(owners) {
+                Some(rows) => {
+                    for r in rows {
+                        out.line(&r);
+                    }
+                }
+                None => out.line(&format!("{{\"versions\":{}}}", json_str(&format!("the owner is busy ({}): code versions not listed", crate::owner::serving_note())))),
+            }
             out.line(&format!("{{\"paused\":{},\"seq\":{},\"rearm\":\"probes since={}\"}}", PAUSED.load(Relaxed), seq, seq));
         }
         "rm" => {
@@ -1174,8 +1234,13 @@ pub fn cmd(req: &Req, out: &mut Out) {
                 out.err("usage: rm <G<n>|all>");
                 return;
             }
-            match remove(g) {
-                Ok(n) => out.line(&format!("{{\"removed_groups\":{}}}", n)),
+            match remove_rows(g) {
+                Ok((n, rows)) => {
+                    for r in rows {
+                        out.line(&r);
+                    }
+                    out.line(&format!("{{\"removed_groups\":{}}}", n));
+                }
                 Err(e) => out.err(&e),
             }
         }

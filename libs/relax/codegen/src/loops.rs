@@ -1714,6 +1714,27 @@ pub fn merge_lane_stores(options: &relax_session::Options, f: &mut Func) -> bool
                 Some((base, o, vs))
             }).flatten();
             let p = old_pos.get(k).copied().unwrap_or(0);
+            // only when it saves instructions (LLVM SLP's build-vector cost): 4 stores (+ the m
+            // single-use lane loads right before) against splat + inserts + 1 store, the m loads
+            // folded into their inserts and lanes equal to lane 0 needing none. Lanes computed in
+            // registers gain nothing and cost twice: the store waits for the whole insert chain,
+            // and scalar reloads of its lanes forward from a 128-bit store slowly (sdfer esdt1d
+            // pushes a CriticalMinimum whose four f32 the next iteration rereads as scalars:
+            // sdf_glyphs 1.27x slower on x64 at equal instruction counts)
+            let lanes = lanes.filter(|(base, _, vs)| {
+                let mut back = out.len();
+                while back > 0 && matches!(out[back - 1], Inst::Load(..)) {
+                    back -= 1;
+                }
+                let folded = (1..4)
+                    .filter(|&j| {
+                        vs[j] == vs[0]
+                            || (vs[1..j].iter().all(|v| *v != vs[j])
+                                && out[back..].iter().any(|i| matches!(i, Inst::Load(Mem::F32, d, ..) if *d == vs[j] && nuse[d.0 as usize] == 1 && ndef[d.0 as usize] == 1 && base != d)))
+                    })
+                    .count();
+                folded >= 2
+            });
             if let Some((base, o, vs)) = lanes {
                 // the loads of v1..v3 among the instructions right before (only loads there):
                 // each goes next to its insert

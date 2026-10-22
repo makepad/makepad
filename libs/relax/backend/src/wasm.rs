@@ -2425,6 +2425,22 @@ impl<'a> Fx<'a> {
     }
 
     fn ibin(&mut self, b: u32, op: IOp, it: IntTy, a: VReg, x: Option<VReg>, imm: i64) -> Result<(), String> {
+        if op == IOp::Bzhi {
+            // a & !(-1 << (x mod 64))
+            self.value(b, a, Want::Nat)?;
+            self.i64c(-1);
+            match x {
+                Some(x) => {
+                    self.value(b, x, Want::Nat)?;
+                }
+                None => self.i64c(imm),
+            }
+            self.op(I64_SHL);
+            self.i64c(-1);
+            self.op(I64_XOR);
+            self.op(I64_AND);
+            return Ok(());
+        }
         let narrow32 = it.bits == 32 && !it.signed && matches!(op, IOp::Shl | IOp::Shr | IOp::Rotl);
         self.value(b, a, Want::Nat)?;
         if narrow32 {
@@ -2478,6 +2494,7 @@ impl<'a> Fx<'a> {
                 self.helper(Helper::MulHi(it.signed));
                 return Ok(());
             }
+            IOp::Bzhi => unreachable!("bzhi handled above"),
             IOp::Rotl => {
                 if it.bits != 64 {
                     return Err(format!("rotate of {}-bit {}", it.bits, if it.signed { "signed" } else { "unsigned" }));

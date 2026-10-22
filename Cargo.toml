@@ -472,8 +472,8 @@ lto = "off"
 [profile.host]
 inherits = "release"
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 incremental = false
 
 [profile.small]

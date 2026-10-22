@@ -598,7 +598,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     }
     // the pc map as this run's maps hold it (jit.rs PcMap), positions naming image files
     let mut pc = Vec::with_capacity(raw.len() * 3);
-    crate::jit::PcMap::encode_to(&mut pc, raw.into_iter().map(|(o, p)| (o, (files.get((p >> 32) as usize).copied().unwrap_or(u32::MAX) as u64) << 32 | (p & 0xffff_ffff))));
+    crate::jit::PcMap::encode_to(&mut pc, raw.into_iter().map(|(o, p)| (o, (files.get(relax_backend::rir::pos_file(p) as usize).copied().unwrap_or(u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)))));
     e.bytes(&pc);
     blob.extend_from_slice(code);
     out.0.extend_from_slice(&e.0);

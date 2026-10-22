@@ -1810,6 +1810,11 @@ impl Cache {
         }
     }
 
+    /// makepad inspect (`versions`): the cache key of slot `id`'s code entry.
+    pub(crate) fn inspect_key(&mut self, u: &Unit, id: u32) -> Option<u128> {
+        self.slot_key(u, id)
+    }
+
     /// The cache key of slot `id`'s O1 code, and the function's identity bytes.
     fn slot_key(&mut self, u: &Unit, id: u32) -> Option<u128> {
         if let Some(k) = self.slot_keys.get(&id) {
@@ -2532,7 +2537,7 @@ impl Cache {
         let mut files: Vec<u32> = Vec::new();
         let mut local = Vec::with_capacity(pc_map.len());
         for (o, pos) in pc_map {
-            let f = (pos >> 32) as u32;
+            let f = relax_backend::rir::pos_file(*pos);
             let fi = match files.iter().position(|x| *x == f) {
                 Some(i) => i,
                 None => {
@@ -2540,7 +2545,8 @@ impl Cache {
                     files.len() - 1
                 }
             };
-            local.push((*o, (fi as u64) << 32 | (*pos & 0xffff_ffff)));
+            // (the inline context in the top bits stays)
+            local.push((*o, (fi as u64) << 32 | (*pos & 0xffff_ffff) | (*pos & !relax_backend::rir::pos_plain(u64::MAX))));
         }
         let mut pcb = Vec::new();
         crate::jit::PcMap::encode_to(&mut pcb, local.into_iter());
@@ -6815,7 +6821,7 @@ impl Linker {
             // never another file's (file 0 printed std's cmp.rs:1:1 for inlined code)
             files.push(self.cache().dec_file(u, &mut d).unwrap_or(u32::MAX));
         }
-        let pc = raw.into_iter().map(|(o, p)| (o, (*files.get((p >> 32) as usize).unwrap_or(&u32::MAX) as u64) << 32 | (p & 0xffff_ffff))).collect();
+        let pc = raw.into_iter().map(|(o, p)| (o, (*files.get(relax_backend::rir::pos_file(p) as usize).unwrap_or(&u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)))).collect();
         self.cache().last_callees = callees;
         self.cache().last_thunks = thunks;
         self.cache().last_data = data;

@@ -38,10 +38,7 @@
 //! font units, y-up — the same space ttf_parser outlines use.
 
 use {
-    super::{
-        geom::{Point, Rect},
-        glyph_outline::{Builder, GlyphOutline},
-    },
+    super::glyph_outline::{Builder, GlyphOutline},
     rustybuzz,
     rustybuzz::ttf_parser,
     rustybuzz::ttf_parser::OutlineBuilder,
@@ -59,18 +56,6 @@ type CFIndex = isize;
 struct CGPoint {
     x: CGFloat,
     y: CGFloat,
-}
-
-#[repr(C)]
-struct CGSize {
-    width: CGFloat,
-    height: CGFloat,
-}
-
-#[repr(C)]
-struct CGRect {
-    origin: CGPoint,
-    size: CGSize,
 }
 
 #[repr(C)]
@@ -141,7 +126,6 @@ extern "C" {
         info: *mut c_void,
         function: extern "C" fn(*mut c_void, *const CGPathElement),
     );
-    fn CGPathGetBoundingBox(path: *const c_void) -> CGRect;
 }
 
 #[link(name = "CoreText", kind = "framework")]
@@ -468,15 +452,9 @@ impl CoreTextFace {
             }
             CGPathApply(path, &mut builder as *mut Builder as *mut c_void, apply);
 
-            let bbox = CGPathGetBoundingBox(path);
             CFRelease(path);
 
-            let min = Point::new(bbox.origin.x as f32, bbox.origin.y as f32);
-            let max = Point::new(
-                (bbox.origin.x + bbox.size.width) as f32,
-                (bbox.origin.y + bbox.size.height) as f32,
-            );
-            Some(builder.finish(Rect::new(min, max - min), units_per_em))
+            builder.finish(units_per_em)
         }
     }
 }

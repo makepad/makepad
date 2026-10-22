@@ -11,6 +11,7 @@
 pub mod client;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod cfi;
+pub mod codever;
 pub mod eval;
 pub mod events;
 pub mod gpuprof;
@@ -40,6 +41,7 @@ pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
     instrument::scan_kept(a);
     patches::scan_kept(a);
     probes::scan_kept(a);
+    codever::scan_kept(a);
 }
 
 /// The inspect thread runs (a socket is listening).
@@ -117,10 +119,12 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("top", "by=time|alloc|bytes|live [s=3] [n=15]", "the top functions by CPU time (prof) or allocation sites by allocated / live bytes (heap)"),
     ("frame", "<n|slowest>", "one frame of the last timeline: UI phases, critical path, waits and who ended them (alias of timeline frame)"),
     ("path", "<H<n>|R<n>>", "the full stack of a heap site id"),
-    ("count", "<fn> [time=1]", "exact call counts (and inclusive time) of every slot of a fn: its code is rebuilt with probes and installed as a probe group G<n>"),
-    ("break", "<fn>|<file>:<line>", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
+    ("count", "<fn> [time=1] [tier=o1]", "exact call counts (and inclusive time) of every slot of a fn: its code is rebuilt with probes at the tier of the code it replaces (O3 code gets an O3 instrumented build; tier=o1 asks for O1) and installed as a probe group G<n>; every slot whose code holds an inlined copy of the fn is rebuilt at its tier without that inlining, so it calls the counted code; each row names the code version replaced and the one now, later installs with an inlined copy are rebuilt too (a `probe` event)"),
+    ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
+    ("tier", "<fn|file:line> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
+    ("break", "<fn>|<file>:<line> [tier=o1]", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
-    ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook, compiled as a child module of the hooked fn's module (its private items, `use`s and `crate::` paths are in scope); std::relax::probe::{emit, count, hist, sample, pause} record for it. A fn is named by its path: `krate::Type::method`, `Type::method`, `crate::Type::method`, `<Type as Trait>::method`"),
+    ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] [tier=o1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook, compiled as a child module of the hooked fn's module (its private items, `use`s and `crate::` paths are in scope); std::relax::probe::{emit, count, hist, sample, pause} record for it. A fn is named by its path: `krate::Type::method`, `Type::method`, `crate::Type::method`, `<Type as Trait>::method`"),
     ("eval", "[in=<krate::module>] [panic=P<n>] [mutate=1] <expr>", "evaluates a Rust expression in a module's scope (default: a parked panic's innermost program frame) in the app's domain: its type and {:#?} (bytes when not Debug); reads only unless mutate=1"),
     ("static", "<krate::module::NAME> [debug=1]", "a static's address, type and bytes in the app's domain; a reference or pointer is followed to its target allocation, with whether what it describes fits there"),
     ("locals", "[panic=P<n>] [frame=N]", "a parked panic's frames; frame N's fn, line and named locals with their types, and the by-name probe that reads their values"),
@@ -186,6 +190,8 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "diff" => mem::cmd_diff(req, out),
         "heap" => heap::cmd_heap(req, out),
         "vms" => cmd_vms(out),
+        "versions" => codever::cmd_versions(req, out),
+        "tier" => codever::cmd_tier(req, out),
         // Host-native providers outlive app domains and never enter program code.
         _ if cmd_host_provided(req, out) => {},
         // Commands the program registered (`relax_register_inspect`), scoped to its domain.
@@ -498,8 +504,10 @@ pub struct Frame {
     pub name: String,
     /// file:line:col for JIT frames
     pub at: String,
-    /// "jit" (with its tier) or the host image's file name
+    /// "jit/<tier> <origin>" (and "inlined into <slot>") or the host image's file name
     pub module: String,
+    /// JIT frames: the code version as a JSON object (codever::frame_fields); else empty
+    pub code: String,
 }
 
 /// Names for raw pcs: JIT frames by the unit (one owner Job request; on timeout `slot#id+off`),
@@ -531,12 +539,12 @@ pub fn symbolise_within(frames: &[Vec<u64>], partial: &mut Vec<String>, ms: u64)
                 .map(|(i, &pc)| {
                     let look = if i == 0 { pc } else { pc.wrapping_sub(1) };
                     if let Ok(k) = jit_pcs.binary_search(&look) {
-                        let (name, at, tier) = names[k].clone();
-                        Frame { pc, name, at, module: tier }
+                        let (name, at, tier, code) = names[k].clone();
+                        Frame { pc, name, at, module: tier, code }
                     } else {
                         match symbols::host_symbol(look) {
-                            Some((name, module, _)) => Frame { pc, name, at: String::new(), module },
-                            None => Frame { pc, name: format!("{:#x}", pc), at: String::new(), module: "?".into() },
+                            Some((name, module, _)) => Frame { pc, name, at: String::new(), module, code: String::new() },
+                            None => Frame { pc, name: format!("{:#x}", pc), at: String::new(), module: "?".into(), code: String::new() },
                         }
                     }
                 })
@@ -545,35 +553,25 @@ pub fn symbolise_within(frames: &[Vec<u64>], partial: &mut Vec<String>, ms: u64)
         .collect()
 }
 
-/// (name, file:line:col, tier) of JIT pcs.
-fn jit_names(pcs: &[u64], partial: &mut Vec<String>, ms: u64) -> Vec<(String, String, String)> {
+/// (name, file:line:col, module label, code version JSON) of JIT pcs: the code version (slot,
+/// tier, origin, address, installed / replaced / retired) and, for a pc in an inlined copy, the
+/// inlined fn's name with "inlined into <slot>".
+fn jit_names(pcs: &[u64], partial: &mut Vec<String>, ms: u64) -> Vec<(String, String, String, String)> {
     let up = crate::jit::current_unit();
     if pcs.is_empty() || up.is_null() {
-        return pcs.iter().map(|pc| (format!("jit {:#x}", pc), String::new(), "jit".into())).collect();
+        return pcs.iter().map(|pc| (format!("jit {:#x}", pc), String::new(), "jit".into(), String::new())).collect();
     }
     let pcs_v = pcs.to_vec();
     activity::phase("waiting for the owner", 0);
     let _back = PhaseBack;
     let r = crate::owner::call_within(crate::owner::Class::Job, ms, move || {
         let u = unsafe { &*up };
+        let mut res = codever::Resolver::new();
         pcs_v
             .iter()
-            .map(|&pc| match u.pc_to_src(pc) {
-                Some((id, at)) => {
-                    let f = &u.fns[id as usize];
-                    let cur = pc >= f.code && pc < f.code + f.code_len as u64;
-                    let tier = if !cur && f.history().retired.iter().any(|r| pc >= r.0 && pc < r.0 + r.1 as u64) {
-                        "jit/retired"
-                    } else if !cur {
-                        "jit/old"
-                    } else if f.o3.load(Relaxed) {
-                        "jit/O3"
-                    } else {
-                        "jit"
-                    };
-                    (display_name(u, id, 0), at, tier.to_string())
-                }
-                None => (format!("jit {:#x}", pc), String::new(), "jit".into()),
+            .map(|&pc| match codever::describe_pc(u, &mut res, pc) {
+                Some(c) => codever::frame_fields(u, &c),
+                None => (format!("jit {:#x}", pc), String::new(), "jit".into(), String::new()),
             })
             .collect::<Vec<_>>()
     });
@@ -581,13 +579,10 @@ fn jit_names(pcs: &[u64], partial: &mut Vec<String>, ms: u64) -> Vec<(String, St
         Some(v) => v,
         None => {
             partial.push(format!("jit names: owner busy ({})", crate::owner::serving_note()));
-            // the code index is a leaf lock: slot ids without the owner
+            // the code index is a leaf lock: slot ids and code versions without the owner
             let u = unsafe { &*up };
             pcs.iter()
-                .map(|&pc| match u.code.try_read().ok().and_then(|t| t.entry_at(pc)) {
-                    Some((start, _, id)) => (format!("slot#{}+{:#x}", id, pc - start), String::new(), "jit".into()),
-                    None => (format!("jit {:#x}", pc), String::new(), "jit".into()),
-                })
+                .map(|&pc| codever::frame_fields_no_owner(u, pc).unwrap_or_else(|| (format!("jit {:#x}", pc), String::new(), "jit".into(), String::new())))
                 .collect()
         }
     }
@@ -631,10 +626,11 @@ pub(crate) fn staged_path(name: &str) -> String {
 
 /// One frame as a short JSON object.
 pub fn frame_json(f: &Frame) -> String {
+    let code = if f.code.is_empty() { String::new() } else { format!(",\"code\":{}", f.code) };
     if f.at.is_empty() {
-        format!("{{\"fn\":{},\"in\":{}}}", json_str(&short(&f.name, 140)), json_str(&f.module))
+        format!("{{\"fn\":{},\"in\":{}{}}}", json_str(&short(&f.name, 140)), json_str(&f.module), code)
     } else {
-        format!("{{\"fn\":{},\"at\":{},\"in\":{}}}", json_str(&short(&f.name, 140)), json_str(&f.at), json_str(&f.module))
+        format!("{{\"fn\":{},\"at\":{},\"in\":{}{}}}", json_str(&short(&f.name, 140)), json_str(&f.at), json_str(&f.module), code)
     }
 }
 

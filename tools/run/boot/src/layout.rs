@@ -4,13 +4,11 @@
 //! repeated errors folded into groups. Logical points (dp on Android).
 use crate::{
     document::{Line, Role},
-    groups, Action, Card, Environment, Layout, Mode, Renderer, State, TextLine,
+    caption::Caption, groups, Action, Card, Environment, Layout, Mode, Renderer, State, TextLine,
 };
 
 use makepad_script::{id, LiveId};
 
-/// The close button's side, in points.
-const CLOSE_SIZE: f32 = 28.0;
 /// The HUD's margin inside the frame (the field's corner brackets sit at 10).
 const MARGIN: f32 = 22.0;
 /// Member rows of a group shown before "+N more".
@@ -77,8 +75,10 @@ impl Renderer {
         height
     }
 
-    pub(super) fn layout(&mut self, state: &State, size: [f32; 2], env: Environment) {
+    pub(super) fn layout(&mut self, state: &State, size: [f32; 2], env: Environment, caption: &Caption) {
         let [left, top, right, bottom] = env.insets;
+        // the caption strip is the window's: the view starts below it
+        let top = top.max(caption.height);
         let program = self.active.as_ref().unwrap();
         let sizes = program.layout(state.mode);
         let app_style = program.line(Role::App);
@@ -131,31 +131,52 @@ impl Renderer {
         self.text.begin_layout();
         let tiny = width < 260.0 || inner_box[3] < 240.0;
 
-        // ---- header (fixed): app, what halted, the headline, the count line
-        let close_reserve = if env.touch { 0.0 } else { CLOSE_SIZE + 6.0 };
+        // ---- the caption's title (the app, what halted) and window buttons
+        let status = if state.parked.is_some() {
+            paused_label.clone()
+        } else if !state.diagnostics.is_empty() {
+            halted_label.clone()
+        } else {
+            state.domain.clone()
+        };
+        if caption.height > 0.0 {
+            let app = Line { size: 10.0, height: 13.0, color: crate::caption::TITLE, ..app_style };
+            let what = Line { size: 10.0, height: 13.0, ..status_style };
+            let dot = Line { color: crate::caption::TITLE, ..what };
+            let parts = [(state.app.clone(), app), ("·".to_string(), dot), (status.clone(), what)];
+            layout.fixed_text.extend(crate::caption::title(&mut self.text, caption, size[0], &parts));
+            for (action, rect) in &caption.buttons {
+                layout.cards.push(Card {
+                    rect: *rect,
+                    action: *action,
+                    accent: crate::CAPTION_BUTTON,
+                    members: 0..0,
+                    fixed: true,
+                });
+            }
+        }
+
+        // ---- header (fixed): app and what halted (without a caption), the headline, the
+        // count line
         let mut y = y_top;
-        let icon_w = if has_icon && !tiny { 22.0 } else { 0.0 };
+        // the app's icon heads the name; with a caption the name is the caption's title
+        let icon_w = if has_icon && !tiny && caption.height <= 0.0 { 22.0 } else { 0.0 };
         if icon_w > 0.0 {
             layout.icon = Some([x0, y, icon_w, icon_w]);
             layout.icon_fixed = true;
         }
         let tx = x0 + if icon_w > 0.0 { icon_w + 8.0 } else { 0.0 };
-        let tw = (width - (tx - x0) - close_reserve).max(1.0);
-        let app = self.label(&state.app.to_uppercase(), app_style, [tx, y, tw, 0.0], true);
-        y += app.run.rows as f32 * app_style.height;
-        layout.fixed_text.push(app);
+        let tw = (width - (tx - x0)).max(1.0);
+        if caption.height <= 0.0 {
+            let app = self.label(&state.app.to_uppercase(), app_style, [tx, y, tw, 0.0], true);
+            y += app.run.rows as f32 * app_style.height;
+            layout.fixed_text.push(app);
+            let line = self.label(&status.to_uppercase(), status_style, [tx, y, tw, 0.0], true);
+            y = y.max(y_top + icon_w) + line.run.rows as f32 * status_style.height + status_style.gap;
+            layout.fixed_text.push(line);
+        }
         let errors = state.diagnostics.len();
         let groups = groups::groups(&state.diagnostics);
-        let status = if state.parked.is_some() {
-            paused_label.to_uppercase()
-        } else if errors > 0 {
-            halted_label.to_uppercase()
-        } else {
-            state.domain.to_uppercase()
-        };
-        let line = self.label(&status, status_style, [tx, y, tw, 0.0], true);
-        y = y.max(y_top + icon_w) + line.run.rows as f32 * status_style.height + status_style.gap;
-        layout.fixed_text.push(line);
         let headline = if let Some(panic) = &state.parked {
             format!("Panicked at {}", short_path(&panic.location))
         } else if errors > 0 {
@@ -167,7 +188,7 @@ impl Renderer {
         if tiny {
             headline_style = style_size(headline_style, 16.0);
         }
-        let line = self.label(&headline, headline_style, [x0, y, width - close_reserve * 0.5, 0.0], true);
+        let line = self.label(&headline, headline_style, [x0, y, width, 0.0], true);
         let rows = line.run.rows.min(2);
         y += rows as f32 * headline_style.height;
         layout.fixed_text.push(line);
@@ -421,17 +442,6 @@ impl Renderer {
         if let Some(input) = self.input.clone() {
             let text = format!("{input_label}\n{input}│");
             y += self.flow(&mut layout, &text, error_style, text_x, y, text_w) + 16.0;
-        }
-        if !env.touch {
-            // the close button in the frame's top right corner: the window has no caption of its
-            // own (it drags from anywhere else, `Boot::drag_answer`)
-            let rect = [frame[0] + frame[2] - CLOSE_SIZE - 14.0, frame[1] + 14.0, CLOSE_SIZE, CLOSE_SIZE];
-            let mut s = style(button_base, 16.0, DIM);
-            s.height = CLOSE_SIZE;
-            s.align = 0.5;
-            let line = self.label("\u{00d7}", s, [rect[0], rect[1], rect[2], 0.0], true);
-            layout.fixed_text.push(line);
-            layout.cards.push(Card { rect, action: Action::Close, accent: 4.0, members: 0..0, fixed: true });
         }
         layout.clip = clip;
         layout.content_height = (y - list_top).max(0.0);

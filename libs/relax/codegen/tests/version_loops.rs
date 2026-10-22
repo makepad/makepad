@@ -23,6 +23,9 @@ enum Out {
     Panic(u64, u64, Vec<u8>, usize),
 }
 
+// Blocks executed past the original function's 8 (axpy shapes): the clone ran.
+thread_local! { static CLONE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Integer-only evaluator: memory is one byte vector, pointers are offsets into it. A Host call
 /// is the bounds panic (index, len). Returns the result, the memory and the number of stores.
 fn eval(f: &Func, args: &[u64], mem0: &[u8]) -> Out {
@@ -37,6 +40,10 @@ fn eval(f: &Func, args: &[u64], mem0: &[u8]) -> Out {
     loop {
         steps += 1;
         assert!(steps < 10_000_000, "runaway");
+        if b > 8 {
+            // past axpy's 8 blocks and the guard: a block the versioning added (the clone) ran
+            CLONE_STEPS.with(|c| c.set(c.get() + 1));
+        }
         for i in &f.blocks[b].insts {
             match *i {
                 Inst::Iconst(d, k) => r[d.0 as usize] = k as u64,
@@ -313,6 +320,27 @@ fn symbolic_offsets() {
         let (orig, new) = versioned(axpy_sym(k, true, true));
         let mws: Vec<(u64, u64)> = vec![(0, 0), (5, 0), (0, 5), (5, 5), (8, 3), (3, 8), (0, 1), (1, 0), (40, 2), (u64::MAX, 0), (0, u64::MAX), (u64::MAX - 3, 0)];
         run_cases_mw(&orig, &new, &mws);
+    }
+}
+
+/// A counter stepping by 2 (or 3): negative constant and symbolic offsets get the end-based guard
+/// (`i0 + o <= n + o <= len`, `n <= MAX - step`), the results equal the checked loop's.
+#[test]
+fn stepped_counter_offsets() {
+    for step in [2i64, 3] {
+        for (k, sym) in [(-1i64, false), (-2, false), (0, true), (-1, true), (2, true)] {
+            let mut f = axpy_sym(k, true, sym);
+            for i in f.blocks[2].insts.iter_mut() {
+                if let Inst::IBinI(IOp::Add, _, _, _, s) = i {
+                    *s = step;
+                }
+            }
+            let (orig, new) = versioned(f);
+            let mws: Vec<(u64, u64)> = if sym { vec![(0, 0), (5, 0), (0, 5), (5, 5), (8, 3), (3, 8), (u64::MAX, 0), (0, u64::MAX)] } else { vec![(0, 0)] };
+            let before = CLONE_STEPS.with(|c| c.get());
+            run_cases_mw(&orig, &new, &mws);
+            assert!(CLONE_STEPS.with(|c| c.get()) > before, "the guard never chose the clone (step {step} k {k} sym {sym})");
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use {
     super::{
         font_face::{FontData, FontFace},
-        geom::{Point, Rect},
+        geom::Rect,
         glyph_outline,
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
@@ -154,10 +154,8 @@ impl Font {
         let outline = self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
             let mut builder = glyph_outline::Builder::new();
-            let bounds = face.outline_glyph(glyph_id, &mut builder)?;
-            let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
-            let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
-            Some(Rc::new(builder.finish(Rect::new(min, max - min), units_per_em)))
+            face.outline_glyph(glyph_id, &mut builder)?;
+            builder.finish(units_per_em).map(Rc::new)
         });
 
         // Fonts whose outlines live in Apple's proprietary `hvgl` table

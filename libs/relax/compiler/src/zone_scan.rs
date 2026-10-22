@@ -204,6 +204,10 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     if let Ok(c) = u.code.try_read() {
         a.field("code.index");
         a.vec(&c.index);
+        a.field("code.kinds");
+        a.vec(&c.kinds);
+        a.field("code.inlined");
+        a.map(&c.inlined, |a, _, v| a.boxed(v));
         a.field("code.unwind");
         a.map(&c.unwind, |a, _, v| {
             a.vec(&v.saved);

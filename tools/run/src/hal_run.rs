@@ -1400,6 +1400,7 @@ fn pump(
                     host.choose(selected);
                 }
                 Some(Action::Close) => close = true,
+                Some(action @ (Action::Minimize | Action::Maximize)) => host.window_control(action),
                 Some(Action::Cancel) if return_entry.is_some() => {
                     return_entry = None;
                     host.input(None);

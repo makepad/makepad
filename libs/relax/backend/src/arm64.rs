@@ -1166,6 +1166,7 @@ impl<'a> Gen<'a> {
                 }
             }
             let mut skip_next = false;
+            let mut deferred: Option<usize> = None;
             // a block start can be a jump target: no spill store before it carries over
             self.last_spill = None;
             // nor flags: the previous block's terminator (a fused cmp + b.cond) or another
@@ -1202,17 +1203,23 @@ impl<'a> Gen<'a> {
                     skip_next = false;
                     continue;
                 }
-                // a shift by a constant feeding only the next add/sub/and/or/xor: the shifted
-                // register operand form (`eor d, a, b, lsl #13`)
+                // the second instruction of a deferred pair: both are emitted here, at its position
+                // (after its window loads): its result's def window starts after it, its store_skip
+                // is keyed by it, and the register allocator keeps the first one's operands
+                // readable at the next instruction (deferred reads)
+                if let Some(k) = deferred.take() {
+                    let first = &b.insts[k];
+                    let done = self.shifted_operand(options, first, inst, true).is_some() || self.narrow_bswap(options, first, inst, true).is_some();
+                    debug_assert!(done, "a deferred pair no longer matches");
+                    continue;
+                }
                 if ii + 1 < n && !(fused && ii + 1 == n - 1) {
-                    if let Some(()) = self.shifted_operand(options, inst, &b.insts[ii + 1]) {
-                        skip_next = true;
-                        continue;
-                    }
-                    // a 64-bit byte swap whose only use shifts the low half back down: the 32-bit
-                    // forms (u32 / u16 from_be_bytes: rev w; rev16 w)
-                    if let Some(()) = self.narrow_bswap(options, inst, &b.insts[ii + 1]) {
-                        skip_next = true;
+                    // a shift by a constant feeding only the next add/sub/and/or/xor: the shifted
+                    // register operand form (`eor d, a, b, lsl #13`); a 64-bit byte swap whose only
+                    // use shifts the low half back down: the 32-bit forms (u32 / u16
+                    // from_be_bytes: rev w; rev16 w). Emitted with the next instruction (above).
+                    if self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() {
+                        deferred = Some(ii);
                         continue;
                     }
                     // two accesses of adjacent words off one base: ldp / stp
@@ -2975,7 +2982,8 @@ impl<'a> Gen<'a> {
     }
 
     /// `t = a <<|>> k; d = x op t` (t used once) as one shifted-register instruction. None: no match.
-    fn shifted_operand(&mut self, options: &relax_session::Options, sh: &Inst, next: &Inst) -> Option<()> {
+    /// `emit` false: only whether the pair matches (the loop defers it to the next instruction).
+    fn shifted_operand(&mut self, options: &relax_session::Options, sh: &Inst, next: &Inst, emit: bool) -> Option<()> {
         let (t, a, k, kind) = match sh {
             Inst::IBinI(IOp::Shl, it, t, a, k) if it.bits == 64 && (1..64).contains(k) => (*t, *a, *k as u32, 0u32),
             Inst::IBinI(IOp::Shr, it, t, a, k) if it.bits == 64 && (1..64).contains(k) => (*t, *a, *k as u32, if it.signed { 2 } else { 1 }),
@@ -2996,6 +3004,9 @@ impl<'a> Gen<'a> {
             IOp::Or => 0xAA00_0000,
             _ => 0xCA00_0000,
         };
+        if !emit {
+            return Some(());
+        }
         let rx = self.use_i(x, S0);
         let ra = self.use_i(a, S1);
         let rd = self.def_i(d, S0);
@@ -3007,7 +3018,7 @@ impl<'a> Gen<'a> {
     /// `t = bswap64(a); d = t >> 32` is `rev wd, wa` (the byte-reversed low word, zero-extended);
     /// `d = t >> 48` with a zero above 16 bits is `rev16 wd, wa`; `t = bitrev64(a); d = t >> 32`
     /// is `rbit wd, wa` (t used once). None: no match.
-    fn narrow_bswap(&mut self, options: &relax_session::Options, sw: &Inst, next: &Inst) -> Option<()> {
+    fn narrow_bswap(&mut self, options: &relax_session::Options, sw: &Inst, next: &Inst, emit: bool) -> Option<()> {
         let (t, a, bits) = match sw {
             Inst::IBit(BitOp::Bswap, t, a) => (*t, *a, true),
             Inst::IBit(BitOp::Rev, t, a) => (*t, *a, false),
@@ -3023,6 +3034,9 @@ impl<'a> Gen<'a> {
             Inst::IBinI(IOp::Shr, it, d, x, 48) if bits && *x == t && it.bits == 64 && !it.signed && self.zero_above.get(a.0 as usize).is_some_and(|z| (1..=16).contains(z)) => (*d, 0x5AC0_0400),
             _ => return None,
         };
+        if !emit {
+            return Some(());
+        }
         let ra = self.use_i(a, S0);
         let rd = self.def_i(d, S0);
         self.a.e(op | (ra as u32) << 5 | rd as u32);
@@ -3782,6 +3796,13 @@ impl<'a> Gen<'a> {
 
     /// `ext`: re-extend a narrow result (false: nobody reads its upper bits, passes::low_bits_only)
     fn ibin_rr(&mut self, op: IOp, it: IntTy, rd: u8, ra: u8, rb: u8, ext: bool) {
+        if op == IOp::Bzhi {
+            // ip0 = -1 << (b mod 64); rd = a & !ip0 (movn, lslv, bic)
+            self.a.e(0x9280_0000 | IP0 as u32);
+            self.a.rrr(0x9AC0_2000, IP0, IP0, rb);
+            self.a.rrr(0x8A20_0000, rd, ra, IP0);
+            return;
+        }
         if op == IOp::Rotl {
             // rotate left by b = rorv by -b (rorv takes the count mod the width; W form for u32)
             self.a.e(0xCB00_03E0 | (rb as u32) << 16 | IP0 as u32);
@@ -3816,7 +3837,7 @@ impl<'a> Gen<'a> {
             // smulh / umulh
             IOp::MulHi => self.a.rrr(if it.signed { 0x9B40_7C00 } else { 0x9BC0_7C00 }, rd, ra, rb),
             // handled at the top
-            IOp::Rotl => {}
+            IOp::Rotl | IOp::Bzhi => {}
             IOp::Rem => {
                 // q = a / b; d = a - q * b  (rd may alias ra or rb: compute q in IP0)
                 self.a.rrr(if it.signed { 0x9AC0_0C00 } else { 0x9AC0_0800 }, IP0, ra, rb);
@@ -3830,6 +3851,11 @@ impl<'a> Gen<'a> {
     }
 
     fn ibin_imm(&mut self, op: IOp, it: IntTy, d: VReg, a: VReg, imm: i64) {
+        if op == IOp::Bzhi {
+            // a constant count is a constant mask
+            let n = (imm & 63) as u32;
+            return self.ibin_imm(IOp::And, it, d, a, if n == 0 { 0 } else { (u64::MAX >> (64 - n)) as i64 });
+        }
         let ra = self.use_i(a, S0);
         let rd = self.def_i(d, S0);
         if op == IOp::Rotl {

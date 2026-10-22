@@ -16,6 +16,10 @@ pub struct Dump {
     target: Option<[u32; 2]>,
     /// `MAKEPAD_RUN_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
     pub hold: bool,
+    /// `MAKEPAD_RUN_BOOT_CHROME=client|<x>,<y>,<w>,<h>`: the window chrome a hidden run (which has
+    /// no window system, so no window buttons) lays its caption out for: app-drawn buttons, or
+    /// native ones at that rect (points)
+    pub chrome: Option<crate::caption::Chrome>,
 }
 
 impl Dump {
@@ -35,6 +39,14 @@ impl Dump {
             pending: Vec::new(),
             target: None,
             hold: std::env::var_os("MAKEPAD_RUN_BOOT_HOLD").is_some(),
+            chrome: std::env::var("MAKEPAD_RUN_BOOT_CHROME").ok().and_then(|spec| {
+                if spec == "client" {
+                    return Some(crate::caption::Chrome { client: true, ..Default::default() });
+                }
+                let v: Vec<f32> = spec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let native: [f32; 4] = v.try_into().ok()?;
+                Some(crate::caption::Chrome { native, client: false, state: 0 })
+            }),
         })
     }
 

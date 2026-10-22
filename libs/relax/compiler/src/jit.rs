@@ -532,11 +532,105 @@ pub struct Stats {
 /// The code address tables (JIT_THREADS.md §2.10): which slot's code holds a pc and how its
 /// frames unwind. A leaf lock: installs write it for a few instructions, panics, unwinding,
 /// faults and the sampler read it on their own thread.
+/// What a code body is (makepad inspect names it in every frame, probe and `versions` answer):
+/// the optimisation tier it was made at and where it came from. Packed into the code tables
+/// beside the body's index entry (two bytes per body).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct CodeKind {
+    pub tier: u8,
+    pub origin: u8,
+}
+
+/// Tiers (CodeKind::tier).
+pub mod tier {
+    pub const UNKNOWN: u8 = 0;
+    /// baseline code (no inlining of program fns; built before the first present)
+    pub const BASELINE: u8 = 1;
+    pub const O1: u8 = 2;
+    pub const O2: u8 = 3;
+    pub const O3: u8 = 4;
+    /// O3 code with speculative guards (crate::guards): guessed call targets inlined behind checks
+    pub const GUARDED: u8 = 5;
+    /// makepad inspect's instrumented build: O1 code generation of the slot's RIR with probe calls
+    pub const INSTRUMENTED: u8 = 6;
+    /// a compile error's stub (the call panics)
+    pub const STUB: u8 = 7;
+    /// makepad inspect's instrumented build at O3: the probes are in the fn's RIR before the O3
+    /// pipeline (the same tier as the O3 code it replaced)
+    pub const INSTRUMENTED_O3: u8 = 8;
+    pub const NAMES: [&str; 9] = ["?", "baseline", "O1", "O2", "O3", "O3-guarded", "instrumented", "error-stub", "O3-instrumented"];
+}
+
+/// Origins (CodeKind::origin).
+pub mod origin {
+    pub const UNKNOWN: u8 = 0;
+    /// compiled in this run (a lazy compile, a speculative build ahead, a tier-up)
+    pub const FRESH: u8 = 1;
+    /// linked from the disk cache (an earlier run's code: the warm cache)
+    pub const CACHE: u8 = 2;
+    /// placed from the disk cache's startup image before main (warm cache too)
+    pub const IMAGE: u8 = 3;
+    /// a live patch (hot reload) of this run
+    pub const PATCH: u8 = 4;
+    /// built by makepad inspect (probes, counters, breakpoints, `tier` pins)
+    pub const INSPECT: u8 = 5;
+    pub const NAMES: [&str; 6] = ["?", "fresh", "warm-cache", "warm-image", "live-patch", "inspect"];
+}
+
+impl CodeKind {
+    pub const fn new(tier: u8, origin: u8) -> CodeKind {
+        CodeKind { tier, origin }
+    }
+    pub fn tier_name(&self) -> &'static str {
+        tier::NAMES.get(self.tier as usize).copied().unwrap_or("?")
+    }
+    pub fn origin_name(&self) -> &'static str {
+        origin::NAMES.get(self.origin as usize).copied().unwrap_or("?")
+    }
+    fn pack(self) -> u16 {
+        self.tier as u16 | (self.origin as u16) << 8
+    }
+    fn unpack(v: u16) -> CodeKind {
+        CodeKind { tier: v as u8, origin: (v >> 8) as u8 }
+    }
+}
+
+thread_local! {
+    /// The kind of the code this thread installs next (set by the install path that knows it:
+    /// `code_as`); index_code records it with the body.
+    static CODE_AS: std::cell::Cell<Option<CodeKind>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets the kind of the code this thread installs while the guard lives (an outer setting wins:
+/// a path that knows more, e.g. O3-always's first code, wraps the generic install).
+pub(crate) struct CodeAs(Option<CodeKind>);
+pub(crate) fn code_as(k: CodeKind) -> CodeAs {
+    let prev = CODE_AS.try_with(|c| c.get()).ok().flatten();
+    if prev.is_none() {
+        let _ = CODE_AS.try_with(|c| c.set(Some(k)));
+    }
+    CodeAs(prev)
+}
+impl Drop for CodeAs {
+    fn drop(&mut self) {
+        let p = self.0;
+        let _ = CODE_AS.try_with(|c| c.set(p));
+    }
+}
+fn code_as_now() -> Option<CodeKind> {
+    CODE_AS.try_with(|c| c.get()).ok().flatten()
+}
+
 #[derive(Default)]
 pub struct CodeTables {
     /// (code start, code len, slot) of every code body ever installed, in address order
     /// (emit_code allocates upward; sandbox code spaces lie below later unit code)
     pub index: Vec<(u64, u32, u32)>,
+    /// per `index` entry (same position): its CodeKind, packed
+    kinds: Vec<u16>,
+    /// the slots an O3 body inlined (fresh or from the cache), by code start: an inlined frame
+    /// names its fn, `versions` its inliners
+    inlined: HashMap<u64, Box<[u32]>>,
     /// unwind info (callee-saved register saves, frame size, landing stubs) by code start
     pub unwind: HashMap<u64, relax_backend::rir::UnwindInfo>,
     /// unwind trailers of code installed from the startup image, read in place there (code
@@ -547,7 +641,7 @@ pub struct CodeTables {
 }
 
 impl CodeTables {
-    fn add(&mut self, at: u64, len: u32, id: u32, unwind: Option<relax_backend::rir::UnwindInfo>) {
+    fn add(&mut self, at: u64, len: u32, id: u32, unwind: Option<relax_backend::rir::UnwindInfo>, kind: CodeKind) {
         // identity state (panics and faults walk it): the tables are the program's
         let _k = crate::zone_alloc::kept();
         if let Some(i) = unwind {
@@ -556,16 +650,44 @@ impl CodeTables {
         }
         if self.index.last().map_or(true, |l| l.0 < at) {
             self.index.push((at, len, id));
+            self.kinds.push(kind.pack());
         } else {
             let k = self.index.partition_point(|x| x.0 < at);
             self.index.insert(k, (at, len, id));
+            self.kinds.insert(k, kind.pack());
         }
     }
 
     fn reserve(&mut self, n: usize) {
         let _k = crate::zone_alloc::kept();
         self.index.reserve(n);
+        self.kinds.reserve(n);
         self.image_unwind.reserve(n);
+    }
+
+    /// The kind of the code body that starts at `start`.
+    pub fn kind_of(&self, start: u64) -> CodeKind {
+        let k = self.index.partition_point(|x| x.0 < start);
+        match self.index.get(k) {
+            Some(e) if e.0 == start => self.kinds.get(k).map_or(CodeKind::default(), |v| CodeKind::unpack(*v)),
+            _ => CodeKind::default(),
+        }
+    }
+
+    /// The slots the O3 body at `start` inlined (None: not recorded: O1 / O2 / baseline code,
+    /// whose inlined slots are the slot's body_deps).
+    pub fn inlined_at(&self, start: u64) -> Option<&[u32]> {
+        self.inlined.get(&start).map(|b| &b[..])
+    }
+
+    fn note_inlined(&mut self, start: u64, inlined: &[u32]) {
+        let _k = crate::zone_alloc::kept();
+        self.inlined.insert(start, inlined.into());
+    }
+
+    /// Every code body of slot `id` in the index: (start, len, kind), in address order.
+    pub fn bodies_of(&self, id: u32) -> Vec<(u64, u32, CodeKind)> {
+        self.index.iter().zip(&self.kinds).filter(|(e, _)| e.2 == id).map(|(e, k)| (e.0, e.1, CodeKind::unpack(*k))).collect()
     }
 
     fn add_image_unwind(&mut self, at: u64, trailer: &'static [u8], pc_map: &PcMap) {
@@ -889,7 +1011,14 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
             ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
         }
     }
-    u.install_prelinked(s.id, s.at, s.len, s.trailer, s.pc);
+    {
+        let t = if tier1 { tier::O3 } else if s.base { tier::BASELINE } else if s.o2 { tier::O2 } else { tier::O1 };
+        let _as = code_as(CodeKind::new(t, origin::IMAGE));
+        u.install_prelinked(s.id, s.at, s.len, s.trailer, s.pc);
+    }
+    if let Some(inl) = &s.inlined {
+        u.code.write().unwrap_or_else(|e| e.into_inner()).note_inlined(s.at, inl);
+    }
     // (perf maps and the cache trace name the slot: prelink_startup decoded the identities first)
     if perf_map_on() {
         let tier = if tier1 { " [O3]" } else if s.base { " [B]" } else if s.o2 { " [O2]" } else { " [O1]" };
@@ -2823,14 +2952,32 @@ impl Unit {
     /// Records code at `at` in the address-ordered index (sandbox code spaces lie below later
     /// unit code: inserted in order).
     pub(crate) fn index_code(&mut self, at: u64, len: u32, id: u32, unwind: Option<relax_backend::rir::UnwindInfo>) {
-        self.code.write().unwrap_or_else(|e| e.into_inner()).add(at, len, id, unwind);
+        let kind = code_as_now().unwrap_or_else(|| self.default_code_kind(id));
+        self.code.write().unwrap_or_else(|e| e.into_inner()).add(at, len, id, unwind, kind);
+    }
+
+    /// The kind of new code for slot `id` when its install path did not say (`code_as`): what
+    /// the slot's state tells (its O3 mark, its RIR's tier).
+    fn default_code_kind(&self, id: u32) -> CodeKind {
+        // (not the O3 mark: it stays set over later installs; O3 installs say what they are)
+        let f = &self.fns[id as usize];
+        let t = if f.rir.as_ref().is_some_and(|r| r.baseline) { tier::BASELINE } else { tier::O1 };
+        CodeKind::new(t, origin::FRESH)
     }
 
     /// Drops the index entries of code in [lo, hi) (a recycled sandbox code space).
     pub(crate) fn unindex_range(&mut self, lo: u64, hi: u64) {
         let mut t = self.code.write().unwrap_or_else(|e| e.into_inner());
+        let t = &mut *t;
+        let keep: Vec<bool> = t.index.iter().map(|x| x.0 < lo || x.0 >= hi).collect();
+        let mut k = 0;
+        t.kinds.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
         t.index.retain(|x| x.0 < lo || x.0 >= hi);
         t.unwind.retain(|a, _| *a < lo || *a >= hi);
+        t.inlined.retain(|a, _| *a < lo || *a >= hi);
     }
 
     /// Reserves code memory without writing it (sandbox code spaces).
@@ -3259,6 +3406,9 @@ impl Unit {
     /// closures over them) answer false: the safe side for noalias.
     pub fn is_unpin(&self, t: TyId) -> bool {
         let t = self.tcx.tys.erase_regions(t);
+        // a field's associated-type projection (`<A as Allocator<u8>>::AllocatedMemory`) names
+        // the type it normalises to, as rustc's auto-trait selection sees it
+        let t = self.tcx.try_normalize_erasing_regions(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), t).unwrap_or(t);
         if let Some(b) = self.unpin_cache.get(&t) {
             return b;
         }
@@ -4798,7 +4948,7 @@ impl Unit {
         let Some(pos) = map.lookup(off) else {
             return Some((id, self.prog.file_paths.get(f.file as usize).cloned().unwrap_or_else(|| "source position unknown".to_string())));
         };
-        Some((id, self.pos_str((pos >> 32) as u32, pos as u32)))
+        Some((id, self.pos_str(relax_backend::rir::pos_file(pos), pos as u32)))
     }
 
     /// Structured JSON crash report for a panic/fault/hang.
@@ -4823,7 +4973,12 @@ impl Unit {
                     let fe = &self.fns[id as usize];
                     let t1 = !fe.history().retired.is_empty() && *f >= fe.code && *f < fe.code + fe.code_len as u64;
                     let fr = FRAMES.lock().unwrap_or_else(|e| e.into_inner()).get(id as usize).map_or(0, |x| if t1 { x.1 } else { x.0 });
-                    s.push_str(&format!("{{\"fn\":{:?},\"at\":{:?},\"off\":{},\"patch_gen\":{},\"tier\":{},\"frame\":{}}}", fe.name, loc, f.wrapping_sub(fe.code), fe.patch_gen, t1 as u8, fr))
+                    // the code version the pc is in (tier, origin, start): which optimised code ran
+                    let (start, kind) = match self.code.try_read().ok().and_then(|t| t.entry_at(*f).map(|e| (e.0, t.kind_of(e.0)))) {
+                        Some(x) => x,
+                        None => (fe.code, CodeKind::default()),
+                    };
+                    s.push_str(&format!("{{\"fn\":{:?},\"at\":{:?},\"off\":{},\"patch_gen\":{},\"tier\":{},\"code\":\"{} {} {:#x}\",\"frame\":{}}}", fe.name, loc, f.wrapping_sub(start), fe.patch_gen, t1 as u8, kind.tier_name(), kind.origin_name(), start, fr))
                 }
                 None => s.push_str(&format!("{{\"pc\":\"{:#x}\"}}", f)),
             }
@@ -4994,6 +5149,8 @@ impl Unit {
         f.code = at;
         f.code_len = code.len() as u32;
         f.pc_map = PcMap::new(&pc_map);
+        crate::inspect::patches::code_installed(self, id);
+        let f = &mut self.fns[id as usize];
         let first = !f.compiled;
         f.compiled = true;
         f.version += 1;
@@ -5186,7 +5343,8 @@ impl Unit {
             if !trailer.is_empty() {
                 t.add_image_unwind(at, trailer, &pc_map);
             }
-            t.add(at, len, id, None);
+            let kind = code_as_now().unwrap_or(CodeKind::new(tier::O1, origin::IMAGE));
+            t.add(at, len, id, None, kind);
         }
         let f = &mut self.fns[id as usize];
         f.code = at;
@@ -5194,6 +5352,7 @@ impl Unit {
         f.pc_map = pc_map;
         f.compiled = true;
         f.version += 1;
+        crate::inspect::patches::code_installed(self, id);
         SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
         if !self.cold_users.is_empty() {
             if let Some(users) = self.cold_users.remove(&id) {
@@ -5212,6 +5371,14 @@ impl Unit {
     /// `first` (the installs since then are popped off its saved versions).
     pub fn restore_before(&mut self, id: u32, first: u32) {
         let mut changed = false;
+        // the code it replaces stays findable by pc (a thread may still be in it)
+        {
+            let f = &mut self.fns[id as usize];
+            if f.patch_gen >= first && f.patch_gen > 0 && f.code_len > 0 {
+                let m = f.pc_map.clone();
+                crate::zone_alloc::kept_with(|| f.history.get_or_insert_with(Default::default).retired.push((f.code, f.code_len, m)));
+            }
+        }
         loop {
             let f = &mut self.fns[id as usize];
             if f.patch_gen < first || f.patch_gen == 0 {
@@ -5836,6 +6003,11 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
             o2_cached(up, id);
         }
         let a = install_compiled(up, id, &code, map, &crelocs, false);
+        if let Some(inl) = &t1 {
+            let u = &*up;
+            let at = u.fns[id as usize].code;
+            u.code.write().unwrap_or_else(|e| e.into_inner()).note_inlined(at, inl);
+        }
         spec_enqueue_cached(up, &callees, 0);
         return Some(a);
     }
@@ -5995,6 +6167,8 @@ fn drain_cache_records() {
 /// stores it -- false for code that came from the cache).
 unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u64)>, relocs: &[relax_backend::rir::RelocAt], record: bool) -> u64 {
     let _cost_install = relax_codegen::fncost::phase(6);
+    // made in this run (recorded or not) vs linked from the disk cache
+    let fresh = record;
     // check-before-run (Unit::install), before the code is recorded: a refused body's code
     // never reaches the disk cache or the startup image (a warm start would run it unchecked)
     if CHECK_FIRST.load(Ordering::Relaxed) && (&*up).fns[id as usize].patch_gen == 0 && !(&*up).fns[id as usize].compiled {
@@ -6061,6 +6235,22 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                 }
             }
             let linked_from_cache = !record && !u.fns[id as usize].compiled && !u.fns[id as usize].o3.load(Ordering::Relaxed);
+            // makepad inspect: what this code is (O3-always's first code says so itself)
+            let kind = if fresh {
+                CodeKind::new(if base { tier::BASELINE } else { tier::O1 }, origin::FRESH)
+            } else {
+                let t = if u.fns[id as usize].o3.load(Ordering::Relaxed) {
+                    tier::O3
+                } else if base {
+                    tier::BASELINE
+                } else if O2_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.contains(&(up as usize, id))) {
+                    tier::O2
+                } else {
+                    tier::O1
+                };
+                CodeKind::new(t, origin::CACHE)
+            };
+            let _as = code_as(kind);
             let a = match u.install_unchecked(id, code, relocs, map, 0) {
                 Ok(a) => a,
                 Err(e) => return install_error(up, id, &format!("link: {}", e)),
@@ -6169,6 +6359,8 @@ pub(crate) unsafe fn install_failed(up: *mut Unit, id: u32, e: &str) -> u64 {
 /// with a fresh O3 counter.
 pub(crate) unsafe fn install_patched(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u64)>, relocs: &[relax_backend::rir::RelocAt], gen: u32) -> Result<u64, String> {
     let u = &mut *up;
+    let t = if u.fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline) { tier::BASELINE } else { tier::O1 };
+    let _as = code_as(CodeKind::new(t, origin::PATCH));
     let a = u.install(id, code, relocs, map, gen)?;
     if matches!(u.fns[id as usize].key, FnKey::Sandbox(_)) {
         u.rearm_sandbox_counter(id, a);
@@ -6205,6 +6397,7 @@ unsafe fn install_error(up: *mut Unit, id: u32, e: &str) -> u64 {
             // a body that failed to compile panics when called, with the error's first line
             let msg = format!("compile error in {}: {}", name, e.lines().next().unwrap_or(""));
             let (code, relocs) = error_stub(u, &msg);
+            let _as = code_as(CodeKind::new(tier::STUB, origin::FRESH));
             u.install_unchecked(id, &code, &relocs, Vec::new(), 0).expect("error stub links")
         }
     }
@@ -6356,7 +6549,7 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
 /// (probe calls added), then installed as part of patch group `gen` -- `rollback_gen(gen)`
 /// restores the code it replaced. Nothing is recorded in the disk cache and the slot's RIR stays
 /// the plain one (O3 and O2 installs skip instrumented slots: inspect::instrument::active).
-pub(crate) unsafe fn install_instrumented(up: *mut Unit, id: u32, gen: u32, base: Option<relax_backend::rir::Func>, edit: &mut dyn FnMut(&mut relax_backend::rir::Func, &Unit)) -> Result<u64, String> {
+pub(crate) unsafe fn install_instrumented(up: *mut Unit, id: u32, gen: u32, base: Option<relax_backend::rir::Func>, kind: CodeKind, edit: &mut dyn FnMut(&mut relax_backend::rir::Func, &Unit)) -> Result<u64, String> {
     let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
     let options = &session.options;
     let runtime = &session.runtime;
@@ -6367,6 +6560,16 @@ pub(crate) unsafe fn install_instrumented(up: *mut Unit, id: u32, gen: u32, base
     }
     if (&*up).fns[id as usize].rir.is_none() {
         build_rir(up, id)?;
+    }
+    // a `tier <fn> o1` pin is O1 code: baseline RIR is built again at O1 first
+    let mut kind = kind;
+    if kind.tier == tier::O1 && base.is_none() {
+        if (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| upgradable(r)) {
+            let _ = build_rir_mode(up, id, RirMode::Normal);
+        }
+        if (&*up).fns[id as usize].rir.as_ref().is_some_and(|r| r.baseline) {
+            kind.tier = tier::BASELINE;
+        }
     }
     let u = &mut *up;
     let mut f: relax_backend::rir::Func = match base {
@@ -6383,6 +6586,7 @@ pub(crate) unsafe fn install_instrumented(up: *mut Unit, id: u32, gen: u32, base
         relax_codegen::native::compile(options, &cg, &u.env)
     }?;
     note_frame(id, c.frame_size, slot_bytes(&cg), false);
+    let _as = code_as(kind);
     u.install(id, &c.code, &c.relocs, c.pc_map, gen)
 }
 
@@ -6625,6 +6829,11 @@ fn callee_attrs(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, fns: &cra
     }
     // SPEC-V: unverified code is never inlined into other code
     if fns[c as usize].unverified.load(Ordering::Relaxed) {
+        return None;
+    }
+    // makepad inspect: an instrumented or pinned fn runs as its own code (a copy would run
+    // unprobed, or at another tier than its pin)
+    if crate::inspect::patches::no_inline(c) {
         return None;
     }
     Some(match &fns[c as usize].key {
@@ -7233,6 +7442,7 @@ unsafe fn o2_finish(up: *mut Unit, d: O2Done) {
     }
     let first = !u.fns[id as usize].compiled;
     let len = c.code.len();
+    let _as = code_as(CodeKind::new(tier::O2, origin::FRESH));
     match u.install(id, &c.code, &c.relocs, c.pc_map, 0) {
         Ok(a) => {
             if first {
@@ -9935,6 +10145,10 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     if cfg.fold && relax_codegen::ranges::fold_ranges(options, func) {
         relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
     }
+    // compares a small set of possible operand values decides (tuple `lt` through Ordering)
+    if cfg.fold && !relax_backend::stats::opt_off(options, "-smallsets") && relax_codegen::opt::fold_small_sets(func) {
+        relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
+    }
     // bounds checks the counted loop's range implies once a guard in front of it holds: a
     // check-free clone (rotation, unrolling, vectorisation take it), the original as fallback
     if cfg.fold && relax_codegen::version::version_bounds_loops(options, func) {
@@ -10006,6 +10220,10 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
         }
         // reads of a temporary a variable was copied from read the variable: one register
         relax_codegen::opt::reuse_copied_variables(options, func);
+        // bit readers' `x & ((1 << n) - 1)`: one bzhi (x64 BMI2) / bic of a shifted -1 (arm64)
+        if relax_codegen::opt::form_bzhi(options, func) {
+            relax_backend::passes::dce(func);
+        }
         // copies the late folds left unread (an unrolled pointer's per-copy values once address
         // modes read the base: `lea rcx,[rdi+1]; mov r8,rcx` before r8 is loaded over)
         if !relax_backend::stats::opt_off(options, "-latedce") {
@@ -10573,7 +10791,7 @@ fn inline_structural_freqs(f: &relax_backend::rir::Func) -> Vec<f32> {
 fn sampled_freqs(f: &relax_backend::rir::Func, h: &HashMap<u64, u32>) -> Vec<f32> {
     let counts: Vec<u32> = f.blocks.iter().map(|b| {
         b.pos.iter().chain(std::iter::once(&b.term_pos))
-            .map(|p| h.get(p).copied().unwrap_or(0)).max().unwrap_or(0)
+            .map(|p| h.get(&relax_backend::rir::pos_plain(*p)).copied().unwrap_or(0)).max().unwrap_or(0)
     }).collect();
     // The allocator expects 0..=1 relative to the hottest block. Entry PCs are
     // too short to give a reliable denominator; never divide by a noisy entry.
@@ -10595,7 +10813,8 @@ fn pc_source_pos(u: &Unit, pc: u64) -> Option<u64> {
         &f.history().retired.iter().find(|r| pc >= r.0 && pc < r.0 + r.1 as u64)?.2
     };
     let off = (pc - start) as u32;
-    map.lookup(off)
+    // profiles key source places: without the inline context (positions matched as before it)
+    map.lookup(off).map(relax_backend::rir::pos_plain)
 }
 
 /// MAKEPAD_RUN_FIELD_PROF=<path> (with MAKEPAD_RUN_PROFILE, steady from MAKEPAD_RUN_PROFILE_FROM_MS): every struct
@@ -11127,6 +11346,62 @@ const T_COUNTING: u64 = 1;
 const T_QUEUED: u64 = 2;
 // The sampler cannot queue a recorded instance before its first call.
 const T_REPLAY: u64 = 3;
+
+thread_local! {
+    /// makepad inspect's O3 build on this thread (compile_tier1_inspect): the edit putting its
+    /// probes into the root RIR (None: an inliner's plain O3 build), and whether one runs
+    static INSPECT_O3: std::cell::Cell<(bool, Option<*mut (dyn FnMut(&mut relax_backend::rir::Func, &Unit) + 'static)>)> = const { std::cell::Cell::new((false, None)) };
+}
+
+fn inspect_o3_on() -> bool {
+    INSPECT_O3.try_with(|c| c.get().0).unwrap_or(false)
+}
+
+fn inspect_o3_kind() -> Option<CodeKind> {
+    let (on, e) = INSPECT_O3.try_with(|c| c.get()).ok()?;
+    on.then(|| CodeKind::new(if e.is_some() { tier::INSTRUMENTED_O3 } else { tier::O3 }, origin::INSPECT))
+}
+
+fn inspect_o3_edit(f: &mut relax_backend::rir::Func, u: &Unit) {
+    if let Ok((true, Some(e))) = INSPECT_O3.try_with(|c| c.get()) {
+        unsafe { (*e)(f, u) };
+    }
+}
+
+/// makepad inspect: an O3 build of slot `id` now (on this thread), with `edit` applied to its RIR
+/// before the O3 pipeline; installed although the slot is instrumented, never cached. True: installed.
+pub(crate) unsafe fn compile_tier1_inspect(up: *mut Unit, id: u32, edit: Option<&mut dyn FnMut(&mut relax_backend::rir::Func, &Unit)>) -> bool {
+    if (&*up).tier1.is_none() {
+        return false;
+    }
+    let e: Option<*mut (dyn FnMut(&mut relax_backend::rir::Func, &Unit) + 'static)> = edit.map(|e| std::mem::transmute::<*mut dyn FnMut(&mut relax_backend::rir::Func, &Unit), *mut (dyn FnMut(&mut relax_backend::rir::Func, &Unit) + 'static)>(e as *mut _));
+    let prev = INSPECT_O3.try_with(|c| c.replace((true, e))).unwrap_or((false, None));
+    struct Back((bool, Option<*mut (dyn FnMut(&mut relax_backend::rir::Func, &Unit) + 'static)>));
+    impl Drop for Back {
+        fn drop(&mut self) {
+            let p = self.0;
+            let _ = INSPECT_O3.try_with(|c| c.set(p));
+        }
+    }
+    let _back = Back(prev);
+    compile_tier1(up, id)
+}
+
+/// makepad inspect: slot `id`'s RIR built again at O1 (an inliner of an instrumented fn: the
+/// fn is not inlined this time, callee_attrs refuses it).
+pub(crate) unsafe fn rebuild_rir_for_inspect(up: *mut Unit, id: u32) -> Result<(), String> {
+    (&mut *up).fns[id as usize].rir = None;
+    build_rir_mode(up, id, RirMode::Normal)?;
+    if (&*up).fns[id as usize].rir.is_none() {
+        return Err("no RIR".into());
+    }
+    Ok(())
+}
+
+/// makepad inspect: slot `id`'s table word (where its calls go now).
+pub(crate) fn slot_word(u: &Unit, id: u32) -> u64 {
+    SlotWord::of(&u.slots, id).load(Ordering::SeqCst)
+}
 
 /// Slot `id`'s table word: what a call of the slot runs. Every write goes through `store` /
 /// `compare_exchange`, which bring the slot's thunk head in step (calls.DESIGN.md): calls go
@@ -12708,6 +12983,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_, String> {
         let _scratch = crate::zone_alloc::scratch(runtime);
         let mut func = (*rir).clone();
+        // makepad inspect's O3 build of an instrumented slot: its probes go in before the pipeline
+        inspect_o3_edit(&mut func, &*up);
         let get = |c: u32| snap.iter().find(|x| x.0 == c).map(|x| (&*x.1 as *const relax_backend::rir::Func, x.2));
         let single = |owner: u32, c: u32| singles.get(&c) == Some(&owner);
         let trace = tier1_trace();
@@ -12841,7 +13118,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 }
                 let pos = c.pc_map.get(pi).map_or(0, |x| x.1);
                 // (a debug dump: the program's files, read off the unit)
-                let src = unsafe { (&*up).pos_str((pos >> 32) as u32, pos as u32) };
+                let src = unsafe { (&*up).pos_str(relax_backend::rir::pos_file(pos), pos as u32) };
                 let ins = if i == u32::MAX { "-".to_string() } else { i.to_string() };
                 m.push_str(&format!("{:x}\t{}\t{}\t{}\n", off, b, ins, src));
             }
@@ -12889,7 +13166,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         u.stats.tier1_locked_ns += owner_ns.get();
         u.stats.tier1_free_ns += t2 - t1;
         let ok = match built {
-            Ok(Ok((code, map, relocs, (inlined, left_calls, cold_left, frame_size, self_call, nounwind_used, profile_entry)))) if PATCH_EPOCH.load(Ordering::SeqCst) == epoch && !PATCH_OPEN.load(Ordering::SeqCst) && u.fns[id as usize].version == version && !crate::inspect::instrument::active(id) && {
+            Ok(Ok((code, map, relocs, (inlined, left_calls, cold_left, frame_size, self_call, nounwind_used, profile_entry)))) if PATCH_EPOCH.load(Ordering::SeqCst) == epoch && !PATCH_OPEN.load(Ordering::SeqCst) && u.fns[id as usize].version == version && (!crate::inspect::instrument::active(id) || inspect_o3_on()) && {
                 let n = if relax_codegen::interp::blob::is_blob(&code) { code.len() } else { relax_backend::rir::split_unwind_info(&code).0 };
                 u.link_check(&code[..n], &relocs)
             } => {
@@ -12911,7 +13188,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 let unverified = u.fns[id as usize].unverified.load(Ordering::Relaxed);
                 // speculative code holds this run's site records (crate::guards): never cached
                 let speculative = spec_ctx.as_ref().is_some_and(|c| c.emitted.get());
-                if frame_size <= frame_max && !unverified && !speculative {
+                // (inspect's builds are this session's: never cached)
+                if frame_size <= frame_max && !unverified && !speculative && !inspect_o3_on() {
                     if let Some(mut c) = u.cache.take() {
                         c.record_o3(u, id, &code, &relocs, &map, &inlined, &nounwind_used);
                         u.cache = Some(c);
@@ -12934,7 +13212,15 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     u.stats.tier1_installed += 1;
                     TIER1_INSTALLS.fetch_add(1, Ordering::Relaxed);
                     crate::boot_stats::o3_installed(boot_arm(u, id), id);
-                    let a = install_compiled(up, id, &code, map, &relocs, false);
+                    let a = {
+                        let _as = code_as(CodeKind::new(if speculative { tier::GUARDED } else { tier::O3 }, origin::FRESH));
+                        install_compiled(up, id, &code, map, &relocs, false)
+                    };
+                    {
+                        let u = &*up;
+                        let at = u.fns[id as usize].code;
+                        u.code.write().unwrap_or_else(|e| e.into_inner()).note_inlined(at, &inlined);
+                    }
                     O3_FIRST_AT.with(|c| c.set(a));
                     true
                 } else {
@@ -12956,7 +13242,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 }
                 // Twin spaces can precede the last host code in the address index.
                 if !blob {
+                    let _as = code_as(inspect_o3_kind().unwrap_or(CodeKind::new(if speculative { tier::GUARDED } else { tier::O3 }, origin::FRESH)));
                     u.index_code(at, code.len() as u32, id, info);
+                    u.code.write().unwrap_or_else(|e| e.into_inner()).note_inlined(at, &inlined);
                 }
                 if perf_map_on() {
                     perf_map(at, code.len(), &format!("{} [O3]", u.fns[id as usize].name));
@@ -12968,6 +13256,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 f.code_len = code.len() as u32;
                 f.pc_map = PcMap::new(&map);
                 f.version += 1;
+                crate::inspect::patches::code_installed(u, id);
                 let slot = SlotWord::of(&u.slots, id);
                 slot.store(at, Ordering::SeqCst);
                 // a patch of an inlined callee recompiles this slot (live.rs)
@@ -16507,6 +16796,11 @@ impl PcMap {
         PcMap(PcBytes::Mapped(b, files))
     }
 
+    /// Every (code offset, position) entry in order, until `f` answers false.
+    pub fn each(&self, f: impl FnMut(u32, u64) -> bool) {
+        self.for_each(f)
+    }
+
     fn for_each(&self, mut f: impl FnMut(u32, u64) -> bool) {
         let (b, files): (&[u8], Option<&PcFiles>) = match &self.0 {
             PcBytes::Own(b) => (b, None),
@@ -16533,7 +16827,8 @@ impl PcMap {
             let z = get(&mut i);
             p = p.wrapping_add((((z >> 1) as i64) ^ -((z & 1) as i64)) as u64);
             let q = match files {
-                Some(t) => (t.files.get((p >> 32) as usize).copied().unwrap_or(u32::MAX) as u64) << 32 | (p & 0xffff_ffff),
+                // (the inline context in the top bits stays)
+                Some(t) => (t.files.get(relax_backend::rir::pos_file(p) as usize).copied().unwrap_or(u32::MAX) as u64) << 32 | (p & 0xffff_ffff) | (p & !relax_backend::rir::pos_plain(u64::MAX)),
                 None => p,
             };
             if !f(o, q) {
@@ -16576,6 +16871,10 @@ impl PcMap {
 #[cfg(test)]
 #[path = "settle_tests.rs"]
 mod settle_tests;
+
+#[cfg(test)]
+#[path = "inspect_tiers_tests.rs"]
+mod inspect_tiers_tests;
 
 #[cfg(test)]
 mod allocator_swap_tests {
