@@ -3,7 +3,7 @@
 //! (coord.md F-OS2). Each key lazily creates one domain-local runtime key; a thread's value lives in a
 //! heap slot whose destructor runs before the runtime deregisters its domain thread.
 
-use alloc::boxed::Box;
+use alloc::alloc::{handle_alloc_error, GlobalAlloc, Layout, System};
 use core::cell::{Cell, RefCell};
 use core::error::Error;
 use core::ffi::c_void;
@@ -53,8 +53,12 @@ struct SlotHeader {
 /// Stored in the key while a slot is being destroyed (and after): access fails.
 const DESTROYED: usize = 1;
 
+/// A slot is the thread's storage of the value, which std keeps in the thread's own TLS block
+/// (sys/thread_local/native): it comes from System, never from the program's global allocator
+/// (a `#[global_allocator]` may use thread-locals itself).
 unsafe fn drop_slot<T>(p: *mut u8) {
-    drop(Box::from_raw(p as *mut Slot<T>));
+    core::ptr::drop_in_place(p as *mut Slot<T>);
+    System.dealloc(p, Layout::new::<Slot<T>>());
 }
 
 extern "C" fn key_dtor(p: *mut c_void) {
@@ -146,8 +150,13 @@ impl<T: 'static> LocalKey<T> {
                 return Some(&(*slot).value as *const T);
             }
         }
-        let slot = Box::into_raw(Box::new(Slot { drop_slot: drop_slot::<T>, key, value }));
+        let layout = Layout::new::<Slot<T>>();
+        let slot = unsafe { System.alloc(layout) } as *mut Slot<T>;
+        if slot.is_null() {
+            handle_alloc_error(layout);
+        }
         unsafe {
+            slot.write(Slot { drop_slot: drop_slot::<T>, key, value });
             sys::key_set(key, slot as *const c_void);
             Some(&(*slot).value as *const T)
         }

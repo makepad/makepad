@@ -1012,12 +1012,14 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
     for rl in relocs {
         let (off, r) = (&rl.at, &rl.target);
         let o = *off as usize;
-        if o + 8 <= c.len() {
-            c[o..o + 8].fill(0);
+        let w = if rl.kind == relax_backend::rir::RelocKind::Pool64 { 8 } else { 4 };
+        if o + w <= c.len() {
+            c[o..o + w].fill(0);
         }
         let d = match r {
             relax_backend::rir::Reloc::Sym(s) => describe(u, *s),
             relax_backend::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Call(id) => format!("call:{}", stable_fn_name(u, *id)),
             relax_backend::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
             other => format!("{:?}", other),
         };

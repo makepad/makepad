@@ -1104,8 +1104,10 @@ impl CrateScope {
                             if may_macro && !sc.mnon.get(m).map_or(false, |t| t.contains_key(b)) {
                                 let d = match u.path.split_last() {
                                     Some((last, prefix)) if prefix.is_empty() || (prefix.len() == 1 && prefix[0].is_empty()) => {
-                                        // `use name;` of a macro in scope (2018 `pub use mac;`)
-                                        table.defs.get(last).and_then(|ds| ds.iter().rev().find(|d| d.krate == krate_name(k)).cloned())
+                                        // `use name;` of a macro in scope (2018 `pub use mac;`): the latest
+                                        // macro_rules of the name in this module's textual scope (one of
+                                        // the same name in another module is another macro)
+                                        table.defs.get(last).and_then(|ds| ds.iter().rev().find(|d| d.krate == krate_name(k) && cm.in_textual_scope(d, m, None)).cloned())
                                     }
                                     Some((last, prefix)) => {
                                         let t = resolve_path(&r, k, m, prefix, &|kk, mm, n| sc.lookup_type(&r, k, kk, mm, n));

@@ -24,12 +24,12 @@ fn compile(f: &Func, opt_regs: bool) -> Code {
     f.verify().unwrap();
     #[cfg(target_arch = "x86_64")]
     let c = {
-        let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0 };
+        let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0, near: false };
         relax_backend::x64::compile(&options(), f, &env).unwrap()
     };
     #[cfg(target_arch = "aarch64")]
     let c = {
-        let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0 };
+        let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs, syms: 0, sym_class: 0, near: false };
         relax_backend::arm64::compile(&options(), f, &env).unwrap()
     };
     assert!(c.relocs.is_empty());

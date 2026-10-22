@@ -247,13 +247,7 @@ pub struct Site {
     pub msg: String,
 }
 
-#[cfg(not(target_arch = "aarch64"))]
-const THUNK_SIZE: usize = 16;
-#[cfg(not(target_arch = "aarch64"))]
-const STUB_SIZE: usize = 32;
-#[cfg(target_arch = "aarch64")]
 const THUNK_SIZE: usize = x64::THUNK_SIZE;
-#[cfg(target_arch = "aarch64")]
 const STUB_SIZE: usize = x64::STUB_SIZE;
 
 /// Reverse slot identities, maintained at slot creation (including lazy/background slots).
@@ -455,6 +449,8 @@ pub struct Unit {
     /// bump allocators of code / read-only data / static memory (lock-free: lowering threads
     /// allocate too)
     code_next: AtomicU64,
+    /// branch veneers in the code area by target (`Unit::veneer`): the last one placed for each
+    veneers: relax_session::sync::Mutex<HashMap<u64, u64>>,
     data_next: AtomicU64,
     /// (bytes, align) of str / byte-string / C-string literals and promoted constants -> their
     /// one read-only copy
@@ -2543,6 +2539,7 @@ impl Unit {
             enter: 0,
             leave: 0,
             code_next: AtomicU64::new(misc),
+            veneers: Default::default(),
             data_next: AtomicU64::new(data_base),
             lit_data: Default::default(),
             data_end: data_base + data_size,
@@ -2551,7 +2548,7 @@ impl Unit {
             rw_next: AtomicU64::new(rw_base + 64),
             rw_end: rw_base + rw_size,
             opt: relax_codegen::opt::OptCfg::from_options(options),
-            env: x64::Env { slots: slots_ptr, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0 },
+            env: x64::Env { slots: slots_ptr, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0, near: true },
             stats: Stats::default(),
             patch_log: Vec::new(),
             patch_gen: 0,
@@ -2791,7 +2788,29 @@ impl Unit {
     pub fn link_check(&self, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> bool {
         let mut c = code.to_vec();
         let lo = self.code_next.load(Ordering::Relaxed);
-        relax_backend::rir::link(&mut c, lo, relocs, &|r| self.env.reloc_value(r)).is_ok() && relax_backend::rir::link(&mut c, self.exec_base + self.exec_size - 16, relocs, &|r| self.env.reloc_value(r)).is_ok()
+        // a branch out of reach gets a veneer next to the code when it is placed
+        let near = |_: relax_backend::rir::RelocKind, _: u64, pc: u64| Some(pc);
+        relax_backend::rir::link_with(&mut c, lo, relocs, &|r| self.env.reloc_value(r), &near).is_ok() && relax_backend::rir::link_with(&mut c, self.exec_base + self.exec_size - 16, relocs, &|r| self.env.reloc_value(r), &near).is_ok()
+    }
+
+    /// Links `code` to run at `at`, branches out of reach through veneers (`veneer`).
+    pub(crate) fn link_code(&self, code: &mut [u8], at: u64, relocs: &[relax_backend::rir::RelocAt]) -> Result<(), String> {
+        relax_backend::rir::link_with(code, at, relocs, &|r| self.env.reloc_value(r), &|k, t, pc| self.veneer(k, t, pc))
+    }
+
+    /// Code in reach of the branch at `pc` that jumps to `target` (a host function, a runtime
+    /// entry, a thunk past an arm64 `bl`'s 128 MB): the last veneer placed for `target` while it is
+    /// in reach, else a new one from the code area, which is next to the code being linked.
+    pub(crate) fn veneer(&self, kind: relax_backend::rir::RelocKind, target: u64, pc: u64) -> Option<u64> {
+        let mut m = self.veneers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&v) = m.get(&target) {
+            if relax_backend::rir::branch_reaches(kind, pc, v) {
+                return Some(v);
+            }
+        }
+        let v = self.emit_code(&x64::veneer(target));
+        crate::zone_alloc::kept_with(|| m.insert(target, v));
+        Some(v)
     }
 
     /// Records code at `at` in the address-ordered index (sandbox code spaces lie below later
@@ -2815,7 +2834,7 @@ impl Unit {
     /// Links code for `at` (the caller placed it there).
     pub(crate) fn link_at(&self, at: u64, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<Vec<u8>, String> {
         let mut c = code.to_vec();
-        relax_backend::rir::link(&mut c, at, relocs, &|r| self.env.reloc_value(r))?;
+        self.link_code(&mut c, at, relocs)?;
         Ok(c)
     }
 
@@ -2852,7 +2871,7 @@ impl Unit {
     fn emit_linked(&self, code: &[u8], relocs: &[relax_backend::rir::RelocAt]) -> Result<u64, String> {
         let at = bump(&self.code_next, code.len() as u64, 16, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
         let mut c = code.to_vec();
-        relax_backend::rir::link(&mut c, at, relocs, &|r| self.env.reloc_value(r))?;
+        self.link_code(&mut c, at, relocs)?;
         unsafe { os::mem::write_code(at, &c) };
         Ok(at)
     }
@@ -3229,6 +3248,38 @@ impl Unit {
             self.unpin_cache.insert(t, r);
         }
         r
+    }
+
+    /// The program's `#[global_allocator]` static and its type (rustc_metadata creader
+    /// inject_allocator_crate: at most one per program, item_checks reports a second), which the
+    /// allocator shim (intrinsics_rt::rust_alloc & co) calls; None: the default allocator. Files
+    /// with the attribute are global roots of the demand plan (front lazy.rs), so the static is
+    /// loaded before any code allocates.
+    pub fn global_allocator(&self) -> Option<(DefId, TyId)> {
+        let prog = &self.prog;
+        let d = self.global_allocator_static()?;
+        let t = self.tcx.const_ty(prog, d)?;
+        Some((d, self.tcx.normalize_erasing_regions(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), t)))
+    }
+
+    /// The `#[global_allocator]` static (global_allocator without its type).
+    pub fn global_allocator_static(&self) -> Option<DefId> {
+        let prog = &self.prog;
+        (0..prog.defs.len() as u32).map(DefId).find(|&d| {
+            let def = prog.def(d);
+            def.kind == DefKind::Static && prog.item_defs.get(&(def.file, def.item.0)) == Some(&d) && {
+                let ast = &prog.files[def.file as usize].ast;
+                crate::lang_items::has_attr(prog, def.file, ast.list(ast.item(def.item).attrs), "global_allocator")
+            }
+        })
+    }
+
+    /// Whether `d` is one of the fns whose bodies call the allocator shim (core::heap's alloc,
+    /// alloc_zeroed, dealloc, realloc): their code depends on the program's global allocator.
+    pub fn calls_allocator_shim(&self, d: DefId) -> bool {
+        let def = self.prog.def(d);
+        def.krate == self.core_crate && def.kind == DefKind::Fn && matches!(self.prog.name(d), "alloc" | "alloc_zeroed" | "dealloc" | "realloc")
+            && ["alloc", "alloc_zeroed", "dealloc", "realloc"].iter().any(|n| self.core_path(&["heap", n]) == Some(d))
     }
 
     /// Deferred diagnostic items and Relax runtime helpers, not language-item identities.
@@ -3738,7 +3789,7 @@ impl Unit {
         unsafe {
             // (no-codegen: the precompiled pools already hold slot `id`'s thunk and stub)
             if !self.prog.session.options.no_codegen {
-                let thunk = x64::thunk(slot_addr, THUNK_SIZE);
+                let thunk = x64::thunk(slot_addr);
                 os::mem::write_code(stub_addr, &stub);
                 os::mem::write_code(self.slots.thunk(id), &thunk);
             }
@@ -3865,15 +3916,21 @@ impl Unit {
                 continue;
             }
             let count = relax_backend::rir::SlotTable::seg_slots(seg);
-            let code = count * (THUNK_SIZE + STUB_SIZE);
-            let base = if self.prog.ptr_bytes == 4 {
-                crate::web32::reserve_slots(code, count * (8 + TIER_REC))
+            let (thunk, stub, table) = if self.prog.ptr_bytes == 4 {
+                // the 32-bit web target: thunks are what function pointers name, so thunks, stubs,
+                // table words and tier records all live in the program's 4 GB window
+                let code = count * (THUNK_SIZE + STUB_SIZE);
+                let base = crate::web32::reserve_slots(code, count * (8 + TIER_REC));
+                (base, base + (count * THUNK_SIZE) as u64, base + code as u64)
             } else {
-                os::mem::reserve(code, count * (8 + TIER_REC))
+                // the thunks are in the unit's code area, so calls reach them with a direct branch
+                // and their heads reach the code (calls.DESIGN.md); the lazy stubs, table words and
+                // tier records are a reservation of their own
+                let thunk = bump(&self.code_next, (count * THUNK_SIZE) as u64, 1 << 16, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
+                let code = count * STUB_SIZE;
+                let stub = os::mem::reserve(code, count * (8 + TIER_REC));
+                (thunk, stub, stub + code as u64)
             };
-            let thunk = base;
-            let stub = thunk + (count * THUNK_SIZE) as u64;
-            let table = base + code as u64;
             let tier = table + (count * 8) as u64;
             self.slots.install(seg, thunk, stub, table, tier);
         }
@@ -3916,7 +3973,7 @@ impl Unit {
                 });
                 os::mem::fill_code(self.slots.thunk(id0), run * THUNK_SIZE, |buf| {
                     for i in 0..run {
-                        let b = x64::thunk(self.slots.table(id0 + i as u32), THUNK_SIZE);
+                        let b = x64::thunk(self.slots.table(id0 + i as u32));
                         buf[i * THUNK_SIZE..(i + 1) * THUNK_SIZE].copy_from_slice(&b);
                     }
                 });
@@ -4895,10 +4952,7 @@ impl Unit {
         if (first && gen == 0 || gen > 0) && crate::borrowck::lazy::gandalf_enabled(options) {
             self.note_first_borrowck(id, (gen > 0).then_some(0));
         }
-        unsafe {
-            let slot = self.slots.table(id) as *const AtomicU64;
-            (*slot).store(at, Ordering::SeqCst);
-        }
+        SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
         // its first run: O3 code that kept a call to it as never-run is built again
         if first && !self.cold_users.is_empty() {
             if let Some(users) = self.cold_users.remove(&id) {
@@ -5085,10 +5139,7 @@ impl Unit {
         f.pc_map = pc_map;
         f.compiled = true;
         f.version += 1;
-        unsafe {
-            let slot = self.slots.table(id) as *const AtomicU64;
-            (*slot).store(at, Ordering::SeqCst);
-        }
+        SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
         if !self.cold_users.is_empty() {
             if let Some(users) = self.cold_users.remove(&id) {
                 for t in users {
@@ -5125,10 +5176,7 @@ impl Unit {
             let f = &mut self.fns[id as usize];
             f.version += 1;
             let at = f.code;
-            unsafe {
-                let slot = self.slots.table(id) as *const AtomicU64;
-                (*slot).store(at, Ordering::SeqCst);
-            }
+            SlotWord::of(&self.slots, id).store(at, Ordering::SeqCst);
         }
     }
 
@@ -5157,10 +5205,7 @@ impl Unit {
             if prev.1 == 0 {
                 f.compiled = false;
             }
-            unsafe {
-                let slot = self.slots.table(id as u32) as *const AtomicU64;
-                (*slot).store(prev.0, Ordering::SeqCst);
-            }
+            SlotWord::of(&self.slots, id as u32).store(prev.0, Ordering::SeqCst);
             self.frequency_profiles.remove(&(id as u32));
             out.push(id as u32);
         }
@@ -6222,7 +6267,7 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
         &u.env
     } else {
         let e = &u.env;
-        env_full = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class };
+        env_full = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class, near: e.near };
         &env_full
     };
     compile_watch(Some((&format!("codegen {}", func.name), relax_codegen::opt::inst_count(func))));
@@ -7042,7 +7087,7 @@ unsafe fn o2_begin(up: *mut Unit, id: u32) -> Option<O2Work> {
     let u = &*up;
     let session = (*std::ptr::addr_of!(u.prog.session)).clone();
     let e = &u.env;
-    let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class };
+    let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: true, syms: e.syms, sym_class: e.sym_class, near: e.near };
     let (fold, layout) = (u.opt.fold, u.opt.layout);
     Some(O2Work { id, prep, epoch, snapshot, session, env, fold, layout, t0 })
 }
@@ -8088,7 +8133,7 @@ pub unsafe fn backend_bench(up: *mut Unit) {
     }
     let u = &*up;
     let full = !TIER1_ENABLED.load(Ordering::Relaxed);
-    let env = x64::Env { slots: u.env.slots, tls_key: u.env.tls_key, tls_slow: u.env.tls_slow, resume: u.env.resume, opt_regs: full, syms: u.env.syms, sym_class: u.env.sym_class };
+    let env = x64::Env { slots: u.env.slots, tls_key: u.env.tls_key, tls_slow: u.env.tls_slow, resume: u.env.resume, opt_regs: full, syms: u.env.syms, sym_class: u.env.sym_class, near: u.env.near };
     let bucket = |f: &relax_backend::rir::Func| -> usize {
         match f.blocks.iter().map(|b| b.insts.len()).sum::<usize>() {
             0..=15 => 0,
@@ -10599,11 +10644,12 @@ impl Drop for Unit {
         if self.retired {
             let rest = UNIT_DATA_SIZE + UNIT_RW_SIZE + (crate::syms::SYM_CAP * 8) as u64;
             os::mem::release(self.exec_base, self.exec_size as usize, rest as usize);
-            // the slot segments: thunks and stubs first, then the table words and tier records
+            // the slot segments: stubs first, then the table words and tier records (the thunks
+            // went with the code area)
             for seg in 0..relax_backend::rir::SLOT_SEGS {
                 if self.slots.has_seg(seg) {
                     let count = relax_backend::rir::SlotTable::seg_slots(seg);
-                    os::mem::release(self.slots.seg_base(0, seg), count * (THUNK_SIZE + STUB_SIZE), count * (8 + TIER_REC));
+                    os::mem::release(self.slots.seg_base(1, seg), count * STUB_SIZE, count * (8 + TIER_REC));
                 }
             }
         }
@@ -10670,8 +10716,8 @@ unsafe fn queue_marked(u: &Unit, id: u32) {
     let code = (*rec.add(1)).load(Ordering::Relaxed);
     let stub = (*rec.add(2)).load(Ordering::Relaxed);
     if (*rec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-        let s = u.slots.table(id) as *const AtomicU64;
-        let _ = (*s).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
+        let s = SlotWord::of(&u.slots, id);
+        let _ = s.compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
         TIER_QUEUED.fetch_add(1, Ordering::Relaxed);
         tier_push(id, Q_MARKED, 0);
         TIER_THREAD.call_once(|| spawn_tier1_threads(&u.prog.session.runtime, &u.prog.session.options));
@@ -10684,8 +10730,8 @@ unsafe fn queue_hot(u: &Unit, id: u32) {
     let code = (*rec.add(1)).load(Ordering::Relaxed);
     let stub = (*rec.add(2)).load(Ordering::Relaxed);
     if (*rec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-        let s = u.slots.table(id) as *const AtomicU64;
-        let _ = (*s).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
+        let s = SlotWord::of(&u.slots, id);
+        let _ = s.compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
         TIER_QUEUED.fetch_add(1, Ordering::Relaxed);
         churn_queued(id);
         tier_push(id, Q_SAMPLES, call_rate(rec, u.tier1.as_ref().map_or(0, |t| t.calls), wall_ns()));
@@ -10712,6 +10758,75 @@ const T_COUNTING: u64 = 1;
 const T_QUEUED: u64 = 2;
 // The sampler cannot queue a recorded instance before its first call.
 const T_REPLAY: u64 = 3;
+
+/// Slot `id`'s table word: what a call of the slot runs. Every write goes through `store` /
+/// `compare_exchange`, which bring the slot's thunk head in step (calls.DESIGN.md): calls go
+/// `call thunk` -> `jmp code`, direct both, whatever the word is set to (tier-up, patch,
+/// rollback, count stubs, twins).
+pub(crate) struct SlotWord<'a> {
+    slots: &'a relax_backend::rir::SlotTable,
+    id: u32,
+}
+
+impl<'a> SlotWord<'a> {
+    pub(crate) fn of(slots: &'a relax_backend::rir::SlotTable, id: u32) -> Self {
+        SlotWord { slots, id }
+    }
+    fn word(&self) -> &AtomicU64 {
+        unsafe { &*(self.slots.table(self.id) as *const AtomicU64) }
+    }
+    pub(crate) fn load(&self, o: Ordering) -> u64 {
+        self.word().load(o)
+    }
+    pub(crate) fn store(&self, v: u64, o: Ordering) {
+        self.word().store(v, o);
+        sync_thunk(self.slots, self.id);
+    }
+    pub(crate) fn compare_exchange(&self, cur: u64, new: u64, ok: Ordering, err: Ordering) -> Result<u64, u64> {
+        let r = self.word().compare_exchange(cur, new, ok, err);
+        if r.is_ok() {
+            sync_thunk(self.slots, self.id);
+        }
+        r
+    }
+}
+
+/// Slot `id`'s thunk head for its table word's value: a direct jump when in reach, else the
+/// thunk's table-word path. Racing writers converge: each writes the head for the value it read
+/// and reads the word again until the two agree, so the last head written is for the last value.
+/// A thread still running the old head reaches the old target, which stays valid code.
+fn sync_thunk(slots: &relax_backend::rir::SlotTable, id: u32) {
+    if os::mem::no_codegen() {
+        return;
+    }
+    let word = unsafe { &*(slots.table(id) as *const AtomicU64) };
+    let at = slots.thunk(id);
+    let mut v = word.load(Ordering::SeqCst);
+    loop {
+        // (the head as it is, read through the executable view: no write when it already fits)
+        unsafe {
+            #[cfg(target_arch = "aarch64")]
+            {
+                let h = x64::thunk_head(at, v);
+                if std::ptr::read_volatile(at as *const u32) != h {
+                    os::mem::patch_code_u32(at, h);
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let h = x64::thunk_head(at, v);
+                if std::ptr::read_volatile(at as *const u64) != h {
+                    os::mem::patch_code_u64(at, h);
+                }
+            }
+        }
+        let now = word.load(Ordering::SeqCst);
+        if now == v {
+            return;
+        }
+        v = now;
+    }
+}
 
 fn tier_rec(slots: &relax_backend::rir::SlotTable, id: u32) -> *const AtomicU64 {
     slots.tier(id) as *const AtomicU64
@@ -10919,9 +11034,9 @@ fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
             (*rec.add(4)).store(now, Ordering::Relaxed);
             (*rec.add(5)).store(len | REARMED, Ordering::Relaxed);
             (*rec.add(3)).store(T_COUNTING, Ordering::Release);
-            let s = u.slots.table(id) as *const AtomicU64;
+            let s = SlotWord::of(&u.slots, id);
             // other code was installed meanwhile (O2, a patch): the stub is not its entry; build it
-            if (*s).compare_exchange(code, stub, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            if s.compare_exchange(code, stub, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 (*rec.add(3)).store(T_QUEUED, Ordering::Release);
                 return true;
             }
@@ -11199,7 +11314,10 @@ impl Unit {
             return;
         }
         let now = wall_ns();
-        let mut buf = Vec::with_capacity(ids.len() * 48);
+        // the block's place first: each stub jumps to its O1 code pc-relatively
+        let cs = x64::COUNT_STUB_SIZE;
+        let at = bump(&self.code_next, (ids.len() * cs) as u64, 16, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
+        let mut buf = Vec::with_capacity(ids.len() * cs);
         let mut stubs = Vec::with_capacity(ids.len());
         unsafe {
             for &(id, code) in ids {
@@ -11211,20 +11329,21 @@ impl Unit {
                 (*rec.add(4)).store(now, Ordering::Relaxed);
                 (*rec.add(5)).store(self.fns[id as usize].code_len as u64, Ordering::Relaxed);
                 (*rec.add(1)).store(code, Ordering::Relaxed);
-                buf.resize((buf.len() + 15) & !15, 0xcc);
-                stubs.push((id, buf.len() as u64));
-                buf.extend_from_slice(&x64::count_stub(rec as u64, id, code, self.hot_entry));
+                let off = buf.len() as u64;
+                stubs.push((id, off));
+                buf.extend_from_slice(&x64::count_stub(at + off, rec as u64, id, code, self.hot_entry));
+                buf.resize(off as usize + cs, 0xcc);
             }
             if stubs.is_empty() {
                 return;
             }
-            let at = self.emit_code(&buf);
+            os::mem::write_code(at, &buf);
             for (id, off) in stubs {
                 let rec = tier_rec(&self.slots, id);
                 (*rec.add(2)).store(at + off, Ordering::Relaxed);
                 (*rec.add(3)).store(T_COUNTING, Ordering::Release);
-                let slot = self.slots.table(id) as *const AtomicU64;
-                (*slot).store(at + off, Ordering::SeqCst);
+                let slot = SlotWord::of(&self.slots, id);
+                slot.store(at + off, Ordering::SeqCst);
             }
         }
         let me = self as *mut Unit;
@@ -11262,12 +11381,12 @@ impl Unit {
             // Once the threshold-one stub has fired, another caller must also enter
             // rt_hot and wait for the build, rather than underflowing into O1.
             let fallback = if recorded { self.emit_code(&x64::stub(id, self.hot_entry)) } else { code };
-            let stub = x64::count_stub(rec as u64, id, fallback, self.hot_entry);
-            let at = self.emit_code(&stub);
+            let at = bump(&self.code_next, x64::COUNT_STUB_SIZE as u64, 16, self.exec_base + self.exec_size - os::mem::CODE_TAIL, "out of code memory");
+            os::mem::write_code(at, &x64::count_stub(at, rec as u64, id, fallback, self.hot_entry));
             (*rec.add(2)).store(at, Ordering::Relaxed);
             (*rec.add(3)).store(if recorded { T_REPLAY } else { T_COUNTING }, Ordering::Release);
-            let slot = self.slots.table(id) as *const AtomicU64;
-            (*slot).store(at, Ordering::SeqCst);
+            let slot = SlotWord::of(&self.slots, id);
+            slot.store(at, Ordering::SeqCst);
         }
         // tier-up state is process-wide (TIER_UNIT, the hot queue, the sampler: slot ids with
         // no unit attached): a second tiering unit would get its hot slots built against the
@@ -11312,12 +11431,12 @@ fn rt_hot(slot: u64) -> u64 {
         let rec = tier_rec(&u.slots, slot as u32);
         let code = (*rec.add(1)).load(Ordering::Relaxed);
         let stub = (*rec.add(2)).load(Ordering::Relaxed);
-        let s = u.slots.table(slot as u32) as *const AtomicU64;
+        let s = SlotWord::of(&u.slots, slot as u32);
         if (*rec.add(3)).load(Ordering::Acquire) == T_REPLAY {
             if startup_holds_tier1() {
                 if (*rec.add(3)).compare_exchange(T_REPLAY, T_QUEUED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                     TIER_QUEUED.fetch_add(1, Ordering::Relaxed);
-                    let _ = (*s).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
+                    let _ = s.compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
                     tier_push(slot as u32, Q_CALLS, 0);
                     TIER_THREAD.call_once(|| spawn_tier1_threads(&u.prog.session.runtime, &u.prog.session.options));
                 }
@@ -11335,17 +11454,17 @@ fn rt_hot(slot: u64) -> u64 {
                             // (a cancelled nested build too: the O1 code stays; never unwound
                             // through the JIT frames that called rt_hot)
                             t1prof_divergence("first-call-build", &t1_key(up, slot as u32));
-                            (*s).store(code, Ordering::SeqCst);
+                            s.store(code, Ordering::SeqCst);
                         } else if !matches!(ok, Ok(true)) {
                             t1prof_divergence("first-call-build", &t1_key(up, slot as u32));
-                            (*s).store(code, Ordering::SeqCst);
+                            s.store(code, Ordering::SeqCst);
                         }
                         (*rec.add(3)).store(T_QUEUED, Ordering::Release);
                         t1prof_finish_quiet();
                     }
                 });
             });
-            return (*s).load(Ordering::SeqCst);
+            return s.load(Ordering::SeqCst);
         }
         let now = wall_ns();
         // the sampler has not seen it lately: many calls, little CPU (a cheap function a
@@ -11365,14 +11484,14 @@ fn rt_hot(slot: u64) -> u64 {
             return code;
         }
         // a patch may have replaced the stub in the meantime: then that code runs
-        let _ = (*s).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
+        let _ = s.compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst);
         if (*rec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             TIER_QUEUED.fetch_add(1, Ordering::Relaxed);
             churn_queued(slot as u32);
             tier_push(slot as u32, Q_CALLS, call_rate(rec, u.tier1.as_ref().map_or(0, |t| t.calls), now));
             TIER_THREAD.call_once(|| spawn_tier1_threads(&u.prog.session.runtime, &u.prog.session.options));
         }
-        (*s).load(Ordering::SeqCst)
+        s.load(Ordering::SeqCst)
     }
 }
 }
@@ -12116,7 +12235,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         if p.replay { p.map.get(k).map(|e| e.inline_freq.clone()) } else { None }
     });
     let ro = u.ro_reader();
-    let env = x64::Env { slots: u.env.slots, tls_key: u.env.tls_key, tls_slow: u.env.tls_slow, resume: u.env.resume, opt_regs: !t1_quick_ra(options), syms: u.env.syms, sym_class: u.env.sym_class };
+    let env = x64::Env { slots: u.env.slots, tls_key: u.env.tls_key, tls_slow: u.env.tls_slow, resume: u.env.resume, opt_regs: !t1_quick_ra(options), syms: u.env.syms, sym_class: u.env.sym_class, near: u.env.near };
     let cfg = u.tier1.as_ref().unwrap().opt;
     let name = u.fns[id as usize].name.to_string();
     // One immutable sample input for register allocation. Both inlining rounds
@@ -12444,8 +12563,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 f.code_len = code.len() as u32;
                 f.pc_map = PcMap::new(&map);
                 f.version += 1;
-                let slot = u.slots.table(id) as *const AtomicU64;
-                (*slot).store(at, Ordering::SeqCst);
+                let slot = SlotWord::of(&u.slots, id);
+                slot.store(at, Ordering::SeqCst);
                 // a patch of an inlined callee recompiles this slot (live.rs)
                 let n_inl = inlined.len();
                 for c in inlined {
@@ -14210,7 +14329,7 @@ pub(crate) unsafe fn compile_batch_off_lock(up: *mut Unit, ids: &[u32], threads:
     let (env, fold, rotate) = {
         let u = &*up;
         let e = &u.env;
-        (x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: !TIER1_ENABLED.load(Ordering::Relaxed), syms: e.syms, sym_class: e.sym_class }, u.opt.fold, u.opt.layout)
+        (x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: !TIER1_ENABLED.load(Ordering::Relaxed), syms: e.syms, sym_class: e.sym_class, near: e.near }, u.opt.fold, u.opt.layout)
     };
     // back ends, off the unit (on helper threads; the owner serves requests meanwhile)
     type Built = (u32, Result<(Option<(std::sync::Arc<relax_backend::rir::Func>, Vec<(u32, usize)>, u64)>, Vec<u8>, Vec<(u32, u64)>, Vec<relax_backend::rir::RelocAt>), String>, Vec<Deferred>);
@@ -14255,7 +14374,7 @@ pub(crate) unsafe fn compile_batch_off_lock(up: *mut Unit, ids: &[u32], threads:
                         let cg = tier0_codegen_rir(options, &rir, fold, rotate);
                         crate::wasm_export::capture(id, &cg);
                         let e = &env;
-                        let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: e.opt_regs && !rir.baseline, syms: e.syms, sym_class: e.sym_class };
+                        let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: e.opt_regs && !rir.baseline, syms: e.syms, sym_class: e.sym_class, near: e.near };
                         let c = relax_codegen::native::compile(options, &cg, &env)?;
                         note_frame(id, c.frame_size, slot_bytes(&cg), false);
                         dump_o1(&cg, &c);
@@ -14463,7 +14582,7 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
         u.fns[x as usize].inflight = true;
     }
     let e = &u.env;
-    let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: !TIER1_ENABLED.load(Ordering::Relaxed), syms: e.syms, sym_class: e.sym_class };
+    let env = x64::Env { slots: e.slots, tls_key: e.tls_key, tls_slow: e.tls_slow, resume: e.resume, opt_regs: !TIER1_ENABLED.load(Ordering::Relaxed), syms: e.syms, sym_class: e.sym_class, near: e.near };
     let (fold, rotate) = (u.opt.fold, u.opt.layout);
     let name = u.fns[id as usize].name.to_string();
     let w1 = wall_ns();

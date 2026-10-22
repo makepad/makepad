@@ -17,7 +17,7 @@ fn options(pair: bool) -> relax_session::Options {
 }
 
 fn compile(options: &relax_session::Options, f: &Func) -> Code {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::x64::compile(options, f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()

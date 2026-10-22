@@ -238,6 +238,13 @@ pub mod intrinsics_rt {
         /// Writes this thread's floating-point control register (flush-to-zero,
         /// denormals-are-zero, rounding, ...).
         pub fn fp_env_set(x: u64);
+        /// The allocator shim (rustc_codegen_ssa allocator shim: `__rust_alloc` and the others):
+        /// a call of core::heap's `__rg_*::<A>(&STATIC, ..)` when the program has a
+        /// `#[global_allocator] static STATIC: A`, else of the default `__rdl_*` (System).
+        pub fn rust_alloc(size: usize, align: usize) -> *mut u8;
+        pub fn rust_alloc_zeroed(size: usize, align: usize) -> *mut u8;
+        pub fn rust_dealloc(ptr: *mut u8, size: usize, align: usize);
+        pub fn rust_realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8;
     }
 }
 

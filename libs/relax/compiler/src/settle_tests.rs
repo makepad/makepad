@@ -193,12 +193,12 @@ fn owner_front_write_serves_waiting_readers() {
         crate::owner::call(crate::owner::Class::Job, || {});
     });
     ready_rx.recv().unwrap();
-    let start = std::time::Instant::now();
+    // without the pump the two wait for each other forever (the test hangs, which the harness
+    // reports); how long the serving takes is the machine's (a JIT-run test compiles on first use)
     crate::owner::call(crate::owner::Class::App, || {
         let _writer = front_write();
     });
     reader.join().unwrap();
-    assert!(start.elapsed().as_secs() < 5, "the owner's front write waited for a reader waiting for the owner");
 }
 
 #[test]

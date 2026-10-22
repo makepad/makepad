@@ -48,6 +48,9 @@ const TLS_SEG: u8 = match cabi::HOST {
     _ => 0x64,
 };
 const CALLEE_SAVED: [u8; 5] = [RBX, R12, R13, R14, R15];
+/// bytes per slot thunk (`thunk`) and lazy stub (`stub`); a power of two (sandbox thunk masks)
+pub const THUNK_SIZE: usize = 32;
+pub const STUB_SIZE: usize = 32;
 const CALLER_SAVED_ALLOC: [u8; 4] = [RSI, RDI, R8, R9];
 const XS: u8 = 15; // float scratch
 const XS2: u8 = 14;
@@ -96,6 +99,10 @@ pub struct Env {
     pub syms: u64,
     /// how each symbol may be encoded (`SymClass` as u8 per `Sym::id`; 0 = no table: all Far)
     pub sym_class: u64,
+    /// the embedder links branch fields (`X64Branch32` / `A64Branch26`) with veneers for targets
+    /// out of reach (`rir::link_with`): host and runtime calls become direct `call`/`bl`. Off:
+    /// they call through pool words (position-independent code, e.g. stored compute kernels).
+    pub near: bool,
 }
 
 impl Env {
@@ -105,6 +112,7 @@ impl Env {
             Reloc::Sym(s) => unsafe { s.value(self.syms) },
             Reloc::Slot(id) => self.slots.table(id),
             Reloc::Thunk(id) => self.slots.callable(id),
+            Reloc::Call(id) => self.slots.thunk(id),
             // fs-relative offset of the block pointer cell (mov r11, fs:[rax])
             Reloc::TlsKey => self.tls_key,
             Reloc::TlsSlow => self.tls_slow,
@@ -449,11 +457,6 @@ impl Asm {
         self.rex(false, 0, 0, r, false);
         self.byte(0xff);
         self.modrm_rr(2, r);
-    }
-    fn call_mem(&mut self, base: u8, disp: i32) {
-        self.rex(false, 0, 0, base, false);
-        self.byte(0xff);
-        self.modrm_mem(2, base, disp);
     }
     fn jmp_mem(&mut self, base: u8, disp: i32) {
         self.rex(false, 0, 0, base, false);
@@ -915,6 +918,8 @@ struct Gen<'a> {
     asm_veneers: Vec<(usize, Sym)>,
     /// `Env::sym_class`: how each symbol is encoded (SymClass::Domain: an offset in the domain block)
     sym_class: u64,
+    /// `Env::near`: host and runtime calls are `call rel32` (the embedder places veneers)
+    near: bool,
     /// rbp offset of the frame word holding the domain base (0: the function names no domain symbol)
     dom_slot: i32,
     /// per block: whether its start reads the domain base into that slot (block 0: the prologue;
@@ -1996,17 +2001,20 @@ impl<'a> Gen<'a> {
             self.a.vzeroupper();
         }
         match c {
-            Callee::CFn(id, _) => {
-                self.mov_reloc(RAX, Reloc::Slot(*id));
-                self.a.call_mem(RAX, 0);
-            }
+            Callee::CFn(id, _) => self.call_reloc(Reloc::Call(*id)),
             Callee::CHost(sym, _) => {
-                self.mov_reloc(R11, Reloc::Sym(*sym));
+                if !self.near {
+                    self.mov_reloc(R11, Reloc::Sym(*sym));
+                }
                 if target == cabi::Target::SysV {
                     // SysV variadic calls: the number of vector registers used, in al
                     self.a.mov_ri(RAX, plan.n_flt as i64);
                 }
-                self.a.call_r(R11);
+                if self.near {
+                    self.call_reloc(Reloc::Sym(*sym));
+                } else {
+                    self.a.call_r(R11);
+                }
             }
             _ => {
                 if target == cabi::Target::SysV {
@@ -2291,8 +2299,12 @@ impl<'a> Gen<'a> {
         self.a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x18]);
         self.a.test_rr(R11, R11);
         let p = self.a.jcc32(CC_NE);
-        self.mov_reloc(RAX, Reloc::TlsSlow);
-        self.a.call_r(RAX);
+        if self.near {
+            self.call_reloc(Reloc::TlsSlow);
+        } else {
+            self.mov_reloc(RAX, Reloc::TlsSlow);
+            self.a.call_r(RAX);
+        }
         let skip = self.a.pos();
         self.a.patch(p, skip);
     }
@@ -2321,6 +2333,26 @@ impl<'a> Gen<'a> {
     fn dom_addr(&mut self, rd: u8, off: Sym) {
         self.mov_reloc(rd, Reloc::Sym(off));
         self.a.add_load64(rd, RBP, self.dom_slot);
+    }
+
+    /// `call rel32` to a relocated target (a slot's thunk, a near host or runtime entry): the
+    /// embedder links the field, through a veneer when the target is out of reach.
+    fn call_reloc(&mut self, r: Reloc) {
+        self.a.byte(0xe8);
+        let at = self.a.pos();
+        self.a.u32(0);
+        self.relocs.push(RelocAt { at: at as u32, kind: RelocKind::X64Branch32, target: r });
+    }
+
+    /// A call of a host / runtime entry `r` with no register argument of its own: `call rel32`
+    /// (near), else through r11 loaded from the pool.
+    fn call_far(&mut self, r: Reloc) {
+        if self.near {
+            self.call_reloc(r);
+        } else {
+            self.mov_reloc(R11, r);
+            self.a.call_r(R11);
+        }
     }
 
     /// `mov rd, [rip + pool]`: a relocated value from the address pool after the code.
@@ -2708,8 +2740,7 @@ impl<'a> Gen<'a> {
                 self.jump_to(*normal, bi);
             }
             Term::Resume => {
-                self.mov_reloc(R11, Reloc::Resume);
-                self.a.call_r(R11);
+                self.call_far(Reloc::Resume);
                 self.a.ud2();
             }
         }
@@ -5120,15 +5151,18 @@ impl<'a> Gen<'a> {
             self.a.vzeroupper();
         }
         match c {
-            Callee::Fn(id) => {
-                self.mov_reloc(RAX, Reloc::Slot(*id));
-                self.a.call_mem(RAX, 0);
-            }
+            Callee::Fn(id) => self.call_reloc(Reloc::Call(*id)),
             Callee::Indirect(_) => self.a.call_r(R11),
             Callee::Host(sym) => {
-                self.mov_reloc(R11, Reloc::Sym(*sym));
+                if !self.near {
+                    self.mov_reloc(R11, Reloc::Sym(*sym));
+                }
                 self.a.mov_ri(RAX, nf as i64);
-                self.a.call_r(R11);
+                if self.near {
+                    self.call_reloc(Reloc::Sym(*sym));
+                } else {
+                    self.a.call_r(R11);
+                }
             }
             Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) | Callee::Asm(..) => {}
         }
@@ -5657,6 +5691,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         apool: Vec::new(),
         asm_veneers: Vec::new(),
         sym_class: env.sym_class,
+        near: env.near,
         dom_slot: 0,
         dom_read: Vec::new(),
         relocs: Vec::new(),
@@ -5854,22 +5889,51 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
     a.b
 }
 
-/// Per-slot thunk: `jmp [table + slot*8]` (the permanent address of a function).
-pub fn thunk(slot_addr: u64, size: usize) -> Vec<u8> {
-    let mut a = Asm { b: Vec::with_capacity(48), sib: None };
+/// Per-slot thunk (the permanent address of a function, `THUNK_SIZE` bytes, 8-aligned): its
+/// head (`thunk_head`) is `jmp rel32` straight to the slot's code, or, when that is out of reach
+/// or not known, to `+8`: `mov rax, table_word; jmp [rax]`. Built with the head to `+8`.
+pub fn thunk(slot_addr: u64) -> Vec<u8> {
+    let mut a = Asm { b: Vec::with_capacity(THUNK_SIZE), sib: None };
+    a.u64(THUNK_HEAD_TABLE);
     a.mov_ri(RAX, slot_addr as i64);
     a.jmp_mem(RAX, 0);
-    while a.b.len() < size {
+    while a.b.len() < THUNK_SIZE {
         a.byte(0xcc);
     }
     a.b
 }
 
-/// Per-slot call counter (tier-up): while a function runs at O1 its table slot points
-/// here. `*counter -= 1`; on reaching 0 jumps to `hot` (lazy_entry-style glue: rax = slot,
-/// returns the address to continue at), else to the O1 code. Uses rax and r11 only.
-pub fn count_stub(counter: u64, slot: u32, code: u64, hot: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::with_capacity(48), sib: None };
+/// The thunk head that goes the table-word way: `jmp +3` (to +8), int3 x3.
+const THUNK_HEAD_TABLE: u64 = u64::from_le_bytes([0xe9, 3, 0, 0, 0, 0xcc, 0xcc, 0xcc]);
+
+/// The first 8 bytes of the thunk at `at` (one aligned atomic store patches them) for a slot
+/// whose table word holds `target`: a direct `jmp` when in reach, else the table-word path.
+pub fn thunk_head(at: u64, target: u64) -> u64 {
+    let d = target.wrapping_sub(at + 5) as i64;
+    if target == 0 || d < i32::MIN as i64 || d > i32::MAX as i64 {
+        return THUNK_HEAD_TABLE;
+    }
+    let r = (d as i32).to_le_bytes();
+    u64::from_le_bytes([0xe9, r[0], r[1], r[2], r[3], 0xcc, 0xcc, 0xcc])
+}
+
+/// A veneer: `jmp [rip + 0]; .quad target` (16 bytes; a near branch to a far target).
+pub fn veneer(target: u64) -> Vec<u8> {
+    let mut b = vec![0xff, 0x25, 0, 0, 0, 0];
+    b.extend_from_slice(&target.to_le_bytes());
+    b.extend_from_slice(&[0xcc, 0xcc]);
+    b
+}
+
+/// Bytes per count stub (`count_stub`; the stubs of a block are this far apart).
+pub const COUNT_STUB_SIZE: usize = 64;
+
+/// Per-slot call counter (tier-up) at `at` (0: not known yet): while a function runs at O1 its
+/// table slot points here. `*counter -= 1`; on reaching 0 jumps to `hot` (lazy_entry-style glue:
+/// rax = slot, returns the address to continue at), else to the O1 code: `jmp rel32` when in
+/// reach, else through r11. Uses rax and r11 only.
+pub fn count_stub(at: u64, counter: u64, slot: u32, code: u64, hot: u64) -> Vec<u8> {
+    let mut a = Asm { b: Vec::with_capacity(COUNT_STUB_SIZE), sib: None };
     a.mov_ri(RAX, counter as i64);
     // sub qword [rax], 1
     for x in [0x48u8, 0x83, 0x28, 0x01] {
@@ -5879,10 +5943,16 @@ pub fn count_stub(counter: u64, slot: u32, code: u64, hot: u64) -> Vec<u8> {
     a.byte(0x74);
     a.byte(0);
     let je = a.b.len();
-    a.mov_ri(R11, code as i64);
-    a.rex(false, 0, 0, R11, false);
-    a.byte(0xff);
-    a.modrm_rr(4, R11);
+    let d = code.wrapping_sub(at + je as u64 + 5) as i64;
+    if at != 0 && d >= i32::MIN as i64 && d <= i32::MAX as i64 {
+        a.byte(0xe9);
+        a.u32(d as i32 as u32);
+    } else {
+        a.mov_ri(R11, code as i64);
+        a.rex(false, 0, 0, R11, false);
+        a.byte(0xff);
+        a.modrm_rr(4, R11);
+    }
     let off = a.b.len() - je;
     assert!(off <= 127, "count stub: je rel8 out of range");
     a.b[je - 1] = off as u8;
@@ -5891,6 +5961,7 @@ pub fn count_stub(counter: u64, slot: u32, code: u64, hot: u64) -> Vec<u8> {
     a.rex(false, 0, 0, R11, false);
     a.byte(0xff);
     a.modrm_rr(4, R11);
+    assert!(a.b.len() <= COUNT_STUB_SIZE);
     a.b
 }
 
@@ -5998,7 +6069,7 @@ mod tests {
         push(&mut f, b4, Inst::Iconst(one, 1));
         f.blocks[b4 as usize].term = Term::Ret(vec![one]);
         f.blocks[b5 as usize].term = Term::Ret(vec![x]);
-        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
         let r = compile(options, &f, &env).expect("compiles");
         let code = &r.code[..r.text_len as usize];
         // add r64, 12: REX.W(+B) 83 /0 ib

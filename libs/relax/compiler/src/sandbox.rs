@@ -182,7 +182,7 @@ unsafe fn sb_init(up: *mut Unit) -> Result<(), String> {
     let trap_slot = u.fn_id(FnKey::Sandbox(u32::MAX));
     let s0 = u.reserve_code(SPACE);
     let s1 = u.reserve_code(SPACE);
-    let trap = tgt::thunk(u.slots.table(trap_slot), ts as usize);
+    let trap = tgt::thunk(u.slots.table(trap_slot));
     let mut all = Vec::with_capacity(bytes);
     for _ in 0..SBT_N {
         all.extend_from_slice(&trap);
@@ -387,8 +387,8 @@ unsafe fn recycle_locked(up: *mut Unit) -> Result<(usize, u64), String> {
         f.code_len = code.len() as u32;
         f.pc_map = crate::jit::PcMap::new(&map);
         f.version += 1;
-        let slot = u.slots.table(t) as *const std::sync::atomic::AtomicU64;
-        (*slot).store(at, std::sync::atomic::Ordering::SeqCst);
+        let slot = crate::jit::SlotWord::of(&u.slots, t);
+        slot.store(at, std::sync::atomic::Ordering::SeqCst);
         u.rearm_sandbox_counter(t, at);
     }
     for t in dead {
@@ -398,8 +398,8 @@ unsafe fn recycle_locked(up: *mut Unit) -> Result<(usize, u64), String> {
         f.rir = None;
         f.version += 1;
         if let Some(h) = &mut f.history { h.prev.clear(); }
-        let slot = u.slots.table(t) as *const std::sync::atomic::AtomicU64;
-        (*slot).store(stub, std::sync::atomic::Ordering::SeqCst);
+        let slot = crate::jit::SlotWord::of(&u.slots, t);
+        slot.store(stub, std::sync::atomic::Ordering::SeqCst);
     }
     let used = next - tbase;
     let n = live.len();
@@ -490,7 +490,7 @@ pub unsafe fn twin(up: *mut Unit, base: u32) -> u32 {
     if k >= SBT_N {
         panic!("makepad: sandbox thunk table full ({} functions)", SBT_N);
     }
-    crate::os::mem::write_code(sbt + k as u64 * ts, &tgt::thunk(u.slots.table(t), ts as usize));
+    crate::os::mem::write_code(sbt + k as u64 * ts, &tgt::thunk(u.slots.table(t)));
     t
 }
 

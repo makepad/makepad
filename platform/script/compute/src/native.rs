@@ -236,7 +236,7 @@ pub(crate) fn emit_keyed(f: &Func, key: Option<u128>, thorough: bool) -> Option<
         // MAKEPAD_RUN_NO_CODEGEN: no executable memory; the interpreter runs the program
         return None;
     }
-    let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0 };
+    let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0, near: false };
     let mut c = target::compile(options(), f, &env).ok()?;
     if c.relocs.iter().any(|r| !matches!(r.target, rir::Reloc::Sym(rir::Sym { id: HOST_TRAMPOLINE, .. }) | rir::Reloc::Value(_))) {
         return None;

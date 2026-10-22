@@ -160,8 +160,11 @@ pub fn provenance_of(path: &std::path::Path) -> Option<String> {
 /// script's RUSTC is Relax itself; asked `--version`, it answers this (relax_as_rustc).
 pub const RUSTC_VERSION: &str = "1.98.0";
 
-/// MAKEPAD_RUN_AS_RUSTC=1 and `--version` / `-vV` / `-V`: answer as a rustc of RUSTC_VERSION would (build
-/// scripts such as libc's read the minor version). Returns whether it answered.
+/// MAKEPAD_RUN_AS_RUSTC=1: a build script's RUSTC is Relax itself. `--version` / `-vV` / `-V` answer
+/// as a rustc of RUSTC_VERSION would (build scripts such as libc's read the minor version);
+/// `--print` requests about the target (cargo's target-info probe, which `cargo metadata
+/// --filter-platform` runs) answer from Relax's own target model (print_as_rustc). Returns whether
+/// it answered.
 pub fn relax_as_rustc() -> bool {
     if std::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_none() {
         return false;
@@ -179,22 +182,171 @@ pub fn relax_as_rustc() -> bool {
             println!("binary: rustc");
             println!("commit-hash: unknown");
             println!("commit-date: unknown");
-            println!("host: {}", crate::cfg::CfgSet::host(sess, &[]).triple());
+            println!("host: {}", crate::cfg::CfgSet::machine(sess, &[]).triple());
             println!("release: {}", RUSTC_VERSION);
         }
-        // anything else asked of RUSTC (a compile probe: autocfg, rustc_version's `--print`):
-        // Relax is not rustc. Fail the probe as a missing rustc would (the script decides); never
-        // run the script's program again.
-        other => {
-            // probes pipe a test program in (rustix, autocfg): read it all, as rustc would,
-            // so the writer sees a failed compile and not a broken pipe
-            let mut sink = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
-            eprintln!("makepad: not rustc: a build script asked RUSTC {:?}", other);
-            std::process::exit(1);
+        _ => {
+            // probes pipe a program in (cargo's target info, rustix, autocfg): read it all, as rustc
+            // would, so the writer never sees a broken pipe
+            let mut input = Vec::new();
+            if args.iter().any(|a| a == "-") {
+                let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input);
+            }
+            match print_as_rustc(sess, &args, &input) {
+                Ok(out) => {
+                    use std::io::Write;
+                    let mut o = std::io::stdout().lock();
+                    let _ = o.write_all(out.as_bytes());
+                    let _ = o.flush();
+                }
+                Err(e) => {
+                    // anything else asked of RUSTC (a compile probe: autocfg, rustc_version's
+                    // `--emit`): Relax is not rustc. Fail the probe as a missing rustc would (the
+                    // script decides); never run the script's program again.
+                    eprintln!("makepad: not rustc: a build script asked RUSTC {:?}: {}", args, e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
     true
+}
+
+/// The `--print` requests of a rustc command line, answered for Relax's target model the way
+/// rustc_driver_impl print_crate_info answers them (in command-line order, nothing compiled):
+/// `cfg` (CfgSet of `--target`, else of this machine, plus `--cfg`), `file-names` and `crate-name`
+/// (rustc_session output.rs filename_for_input with the target's affixes; a crate type the target
+/// cannot produce is dropped with rustc's warning), `sysroot` (Relax's std sources), `split-debuginfo`
+/// (the target's supported kinds), `host-tuple`. Err for anything else: any option outside those and
+/// lint levels, an input whose crate attributes would matter, an unknown target.
+pub fn print_as_rustc(sess: &std::sync::Arc<crate::Session>, args: &[String], input: &[u8]) -> Result<String, String> {
+    let (mut prints, mut crate_types, mut cfgs) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut target, mut crate_name, mut inputs): (Option<String>, Option<String>, Vec<String>) = (None, None, Vec::new());
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        // `--opt=value`, `--opt value`, and `-Xvalue` / `-X value` for the one-letter lint options
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
+            _ => (a, None),
+        };
+        let value = |i: &mut usize| -> Result<String, String> {
+            if let Some(v) = &inline {
+                return Ok(v.clone());
+            }
+            *i += 1;
+            args.get(*i).cloned().ok_or_else(|| format!("{name} needs a value"))
+        };
+        match name {
+            "--print" => prints.push(value(&mut i)?),
+            "--target" => target = Some(value(&mut i)?),
+            "--crate-type" => crate_types.extend(value(&mut i)?.split(',').map(str::to_string)),
+            "--crate-name" => crate_name = Some(value(&mut i)?),
+            "--cfg" => cfgs.push(value(&mut i)?),
+            // lint levels change no print
+            "--cap-lints" | "--check-cfg" => {
+                value(&mut i)?;
+            }
+            "-W" | "-A" | "-D" | "-F" => {
+                i += 1;
+            }
+            _ if a.len() > 2 && (a.starts_with("-W") || a.starts_with("-A") || a.starts_with("-D") || a.starts_with("-F")) => {}
+            "-" => inputs.push(a.to_string()),
+            _ if !a.starts_with('-') => inputs.push(a.to_string()),
+            _ => return Err(format!("`{a}` is not a print request")),
+        }
+        i += 1;
+    }
+    if prints.is_empty() {
+        return Err("no `--print` request".to_string());
+    }
+    let cs = match &target {
+        None => crate::cfg::CfgSet::machine(sess, &[]),
+        Some(t) => {
+            use crate::options::CheckTarget as C;
+            match C::from_triple(t).ok_or_else(|| format!("could not find specification for target \"{t}\""))? {
+                C::MacosArm64 => crate::cfg::CfgSet::macos_arm64(sess, &[]),
+                C::LinuxX64 => crate::cfg::CfgSet::linux_x64(sess, &[]),
+                C::WindowsX64 => crate::cfg::CfgSet::windows_x64(sess, &[]),
+                C::AndroidArm64 => crate::cfg::CfgSet::android_arm64(sess, &[]),
+                C::Web(w) => crate::cfg::CfgSet::web(sess, w, &[]),
+                C::Host => unreachable!("from_triple names a target"),
+            }
+        }
+    };
+    let triple = cs.triple();
+    let attrs_matter = prints.iter().any(|p| p == "file-names" || p == "crate-name");
+    if attrs_matter && (inputs.len() != 1 || inputs[0] != "-" || !input.iter().all(u8::is_ascii_whitespace)) {
+        // rustc reads #![crate_name] / #![crate_type] of the input here
+        return Err("file-names / crate-name of a source input".to_string());
+    }
+    let name = crate_name.unwrap_or_else(|| "rust_out".to_string());
+    if crate_types.is_empty() {
+        crate_types.push("bin".to_string());
+    }
+    // rustc_target spec: (dll prefix, dll suffix, exe suffix, staticlib prefix, staticlib suffix,
+    // split-debuginfo kinds, only_cdylib)
+    let (dll_pre, dll_suf, exe_suf, st_pre, st_suf, split, only_cdylib): (&str, &str, &str, &str, &str, &[&str], bool) = match triple {
+        "aarch64-apple-darwin" => ("lib", ".dylib", "", "lib", ".a", &["off", "packed", "unpacked"], false),
+        "x86_64-unknown-linux-gnu" | "aarch64-linux-android" => ("lib", ".so", "", "lib", ".a", &["off", "packed", "unpacked"], false),
+        "x86_64-pc-windows-gnu" => ("", ".dll", ".exe", "lib", ".a", &["off"], false),
+        "wasm32-unknown-unknown" | "wasm64-unknown-unknown" => ("", ".wasm", ".wasm", "lib", ".a", &["off"], true),
+        t => return Err(format!("no target model for {t}")),
+    };
+    let mut out = String::new();
+    for p in &prints {
+        match p.as_str() {
+            "cfg" => {
+                let mut v: Vec<String> = cs.set.iter().chain(cfgs.iter()).filter(|e| !e.starts_with("feature=")).map(|e| match e.split_once('=') {
+                    Some((k, val)) => format!("{k}=\"{}\"", val.trim_matches('"')),
+                    None => e.clone(),
+                }).collect();
+                v.sort();
+                v.dedup();
+                for c in v {
+                    out.push_str(&c);
+                    out.push('\n');
+                }
+            }
+            "file-names" => {
+                for t in &crate_types {
+                    let f = match t.as_str() {
+                        "rlib" | "lib" => format!("lib{name}.rlib"),
+                        "dylib" | "proc-macro" if only_cdylib => {
+                            eprintln!("warning: dropping unsupported crate type `{t}` for target `{triple}`");
+                            continue;
+                        }
+                        "dylib" | "cdylib" | "proc-macro" => format!("{dll_pre}{name}{dll_suf}"),
+                        "staticlib" => format!("{st_pre}{name}{st_suf}"),
+                        "bin" => format!("{name}{exe_suf}"),
+                        other => return Err(format!("unknown crate type: `{other}`")),
+                    };
+                    out.push_str(&f);
+                    out.push('\n');
+                }
+            }
+            "crate-name" => {
+                out.push_str(&name);
+                out.push('\n');
+            }
+            "sysroot" => {
+                out.push_str(&std_dir());
+                out.push('\n');
+            }
+            "split-debuginfo" => {
+                for k in split {
+                    out.push_str(k);
+                    out.push('\n');
+                }
+            }
+            "host-tuple" => {
+                out.push_str(crate::cfg::CfgSet::machine(sess, &[]).triple());
+                out.push('\n');
+            }
+            other => return Err(format!("`--print {other}`")),
+        }
+    }
+    Ok(out)
 }
 
 /// Construct the invocation inputs before parsing; CLI overrides replace environment values.
@@ -1004,6 +1156,9 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
 
 #[cfg(test)]
 mod lazy_reload_tests;
+
+#[cfg(test)]
+mod calls_tests;
 
 #[cfg(test)]
 mod vfs_bind_tests;

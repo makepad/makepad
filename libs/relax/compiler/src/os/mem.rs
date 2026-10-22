@@ -88,6 +88,22 @@ fn refuse_code(what: &str, addr: u64, len: usize) -> ! {
     panic!("makepad run: no-codegen mode: {} of {} bytes at {:#x} (machine code is not allowed in this mode)", what, len, addr)
 }
 
+/// Replaces the 8 code bytes at `addr` (8-aligned) with one atomic store: a thread executing
+/// them meanwhile runs the old or the new instruction, never a mix (x64 thunk heads).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub unsafe fn patch_code_u64(addr: u64, w: u64) {
+    debug_assert!(addr & 7 == 0, "patch_code_u64: unaligned {:#x}", addr);
+    fill_code(addr, 8, |b| (*(b.as_mut_ptr() as *const std::sync::atomic::AtomicU64)).store(w, std::sync::atomic::Ordering::Release));
+}
+
+/// Replaces the instruction at `addr` (4-aligned) with one atomic store, then makes the
+/// instruction cache see it (arm64 thunk heads: a `b` may be modified while it runs).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub unsafe fn patch_code_u32(addr: u64, w: u32) {
+    debug_assert!(addr & 3 == 0, "patch_code_u32: unaligned {:#x}", addr);
+    fill_code(addr, 4, |b| (*(b.as_mut_ptr() as *const std::sync::atomic::AtomicU32)).store(w, std::sync::atomic::Ordering::Release));
+}
+
 #[cfg(unix)]
 mod unix {
     extern "C" {

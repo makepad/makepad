@@ -1644,13 +1644,17 @@ impl<'a> Fcx<'a> {
             }
             return Some(x);
         }
-        if let (TyKind::Ref(m1, ia, region), TyKind::Ref(m2, ix, _), Some(ex)) = (&ka, &kx, e) {
+        if let (TyKind::Ref(m1, ia, ra), TyKind::Ref(m2, ix, rx), Some(ex)) = (&ka, &kx, e) {
             if *m1 || !*m2 {
                 let save = self.start_snapshot();
-                let reborrow = self.tcx.tys.intern(TyKind::Ref(*m2, *ia, *region));
+                // coercion.rs coerce_to_ref: the first autoderef step is borrowed again with the
+                // target's region (a LUB coercion: the source's)
+                let reborrow = self.tcx.tys.intern(TyKind::Ref(*m2, *ia, if use_lub { *ra } else { *rx }));
                 if let Some(target) = self.unify_coercion(reborrow, x, use_lub, false) {
                     self.commit_from(save);
-                    if *m1 { self.set_reborrow(ex.0, *m2, reborrow); }
+                    // coercion.rs:508: `&'a *x` of a shared `&'a T` is a total no-op (no adjustment);
+                    // any other reborrow is recorded (capture analysis captures `*x`, MIR borrows `&*x`)
+                    if *m1 || reborrow != a { self.set_reborrow(ex.0, *m2, reborrow); }
                     return Some(target);
                 }
                 self.rollback_to(save);

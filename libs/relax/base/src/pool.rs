@@ -42,6 +42,8 @@ struct Worker {
     /// (a native join also waits for the thread's TLS destructors, which walk the caches of the
     /// generation it last ran in).
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The pool the worker idles in.
+    pool: &'static Pool,
 }
 
 thread_local! {
@@ -60,11 +62,22 @@ struct Pool {
     alive: AtomicUsize,
 }
 
-static POOL: Pool = Pool { idle: Mutex::new(Vec::new()), dying: Mutex::new(Vec::new()), started: AtomicUsize::new(0), alive: AtomicUsize::new(0) };
+impl Pool {
+    const fn new() -> Pool {
+        Pool { idle: Mutex::new(Vec::new()), dying: Mutex::new(Vec::new()), started: AtomicUsize::new(0), alive: AtomicUsize::new(0) }
+    }
+    /// (workers started, workers alive) so far.
+    fn stats(&self) -> (usize, usize) {
+        (self.started.load(Ordering::Relaxed), self.alive.load(Ordering::Relaxed))
+    }
+}
+
+/// The process's pool (`scope`, `retire_idle`, `stats`).
+static POOL: Pool = Pool::new();
 
 /// (workers started, workers alive) so far.
 pub fn stats() -> (usize, usize) {
-    (POOL.started.load(Ordering::Relaxed), POOL.alive.load(Ordering::Relaxed))
+    POOL.stats()
 }
 
 impl Worker {
@@ -94,21 +107,21 @@ fn worker_main(w: Arc<Worker>) {
         if escaped || TASK_PANICKED.with(|p| p.replace(false)) {
             // end this worker: a fresh thread has none of the half-run task's thread-local state
             let _k = zone_alloc::kept();
-            POOL.dying.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+            w.pool.dying.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
             break;
         }
         // what the worker left in its chunks is for every thread to reuse, not held for its next task
         zone_alloc::compiler_hand_back();
         let _k = zone_alloc::kept();
-        POOL.idle.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
+        w.pool.idle.lock().unwrap_or_else(|e| e.into_inner()).push(w.clone());
     }
-    POOL.alive.fetch_sub(1, Ordering::Relaxed);
+    w.pool.alive.fetch_sub(1, Ordering::Relaxed);
 }
 
-fn dispatch(task: Task) -> Result<(), (Task, std::io::Error)> {
+fn dispatch(pool: &'static Pool, task: Task) -> Result<(), (Task, std::io::Error)> {
     let idle = {
         let _k = zone_alloc::kept();
-        POOL.idle.lock().unwrap_or_else(|e| e.into_inner()).pop()
+        pool.idle.lock().unwrap_or_else(|e| e.into_inner()).pop()
     };
     if let Some(w) = idle {
         w.give(Slot::Task(task));
@@ -117,9 +130,9 @@ fn dispatch(task: Task) -> Result<(), (Task, std::io::Error)> {
     // no idle worker: a new one, which starts with the task
     let _k = zone_alloc::kept();
     let (w, spawned) = {
-        let w = Arc::new(Worker { slot: Mutex::new(Slot::Task(task)), wake: Condvar::new(), handle: Mutex::new(None) });
-        let id = POOL.started.fetch_add(1, Ordering::Relaxed);
-        POOL.alive.fetch_add(1, Ordering::Relaxed);
+        let w = Arc::new(Worker { slot: Mutex::new(Slot::Task(task)), wake: Condvar::new(), handle: Mutex::new(None), pool });
+        let id = pool.started.fetch_add(1, Ordering::Relaxed);
+        pool.alive.fetch_add(1, Ordering::Relaxed);
         let w2 = w.clone();
         let spawned = std::thread::Builder::new().name(format!("run-pool-{id}")).spawn(move || worker_main(w2));
         (w, spawned)
@@ -130,7 +143,7 @@ fn dispatch(task: Task) -> Result<(), (Task, std::io::Error)> {
             Ok(())
         }
         Err(e) => {
-            POOL.alive.fetch_sub(1, Ordering::Relaxed);
+            pool.alive.fetch_sub(1, Ordering::Relaxed);
             let task = match std::mem::replace(&mut *w.slot.lock().unwrap_or_else(|e| e.into_inner()), Slot::Idle) {
                 Slot::Task(t) => t,
                 _ => unreachable!("the new worker never started"),
@@ -160,11 +173,15 @@ fn join_worker(w: &Worker) {
 /// this returns they are gone, TLS destructors included (each hands its arena chunks back as it
 /// goes). A worker that is running a task idles afterwards: call again. Returns how many ended.
 pub fn retire_idle() -> usize {
+    retire_idle_in(&POOL)
+}
+
+fn retire_idle_in(pool: &'static Pool) -> usize {
     let (idle, dying) = {
         let _k = zone_alloc::kept();
         (
-            std::mem::take(&mut *POOL.idle.lock().unwrap_or_else(|e| e.into_inner())),
-            std::mem::take(&mut *POOL.dying.lock().unwrap_or_else(|e| e.into_inner())),
+            std::mem::take(&mut *pool.idle.lock().unwrap_or_else(|e| e.into_inner())),
+            std::mem::take(&mut *pool.dying.lock().unwrap_or_else(|e| e.into_inner())),
         )
     };
     let n = idle.len() + dying.len();
@@ -222,6 +239,7 @@ impl<T> Drop for Packet<T> {
 /// Like `std::thread::Scope`.
 pub struct Scope<'scope, 'env: 'scope> {
     data: Arc<ScopeData>,
+    pool: &'static Pool,
     scope: PhantomData<&'scope mut &'scope ()>,
     env: PhantomData<&'env mut &'env ()>,
 }
@@ -238,7 +256,15 @@ pub fn scope<'env, F, T>(f: F) -> T
 where
     F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T,
 {
+    scope_in(&POOL, f)
+}
+
+fn scope_in<'env, F, T>(pool: &'static Pool, f: F) -> T
+where
+    F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T,
+{
     let scope = Scope {
+        pool,
         data: Arc::new(ScopeData {
             pending: AtomicUsize::new(0),
             panicked: AtomicBool::new(false),
@@ -290,7 +316,7 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         // its closure, and `main` decrements it only after it dropped `f`'s result handle; the
         // erased lifetime is never used past that point.
         let task: Task = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Task>(boxed) };
-        if let Err((task, e)) = dispatch(task) {
+        if let Err((task, e)) = dispatch(self.pool, task) {
             // like std::thread::scope: no thread, no task; the section must not wait for it
             drop(task);
             self.data.pending.fetch_sub(1, Ordering::Relaxed);
@@ -320,6 +346,7 @@ mod tests {
 
     #[test]
     fn tasks_borrow_the_callers_locals_and_the_scope_waits() {
+        let _s = crate::zone_alloc::test_serial();
         let mut data = vec![1u64; 64];
         let total = AtomicU64::new(0);
         scope(|s| {
@@ -339,6 +366,7 @@ mod tests {
 
     #[test]
     fn join_returns_the_value_or_the_panic() {
+        let _s = crate::zone_alloc::test_serial();
         let (a, b) = scope(|s| {
             let ok = s.spawn(|| 40 + 2);
             let bad = s.spawn(|| -> u32 { panic!("boom") });
@@ -351,6 +379,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a scoped thread panicked")]
     fn an_unjoined_panic_panics_the_scope_after_the_tasks_ended() {
+        let _s = crate::zone_alloc::test_serial();
         let done = AtomicBool::new(false);
         let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
             scope(|s| {
@@ -367,6 +396,7 @@ mod tests {
 
     #[test]
     fn a_panic_of_the_closure_still_waits_for_the_tasks() {
+        let _s = crate::zone_alloc::test_serial();
         let done = AtomicBool::new(false);
         let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
             scope(|s| {
@@ -383,6 +413,7 @@ mod tests {
 
     #[test]
     fn tasks_that_wait_for_each_other_all_run_at_once() {
+        let _s = crate::zone_alloc::test_serial();
         // a barrier of 6: with fewer than 6 running tasks this would never end
         let barrier = std::sync::Barrier::new(6);
         scope(|s| {
@@ -396,6 +427,7 @@ mod tests {
 
     #[test]
     fn sections_nest_in_tasks() {
+        let _s = crate::zone_alloc::test_serial();
         let n = AtomicUsize::new(0);
         scope(|s| {
             for _ in 0..8 {
@@ -415,21 +447,32 @@ mod tests {
 
     #[test]
     fn workers_are_reused_across_sections() {
-        let (before, _) = stats();
+        let _s = crate::zone_alloc::test_serial();
+        // a pool of its own: the tests running at the same time use the process pool
+        let pool: &'static Pool = Box::leak(Box::new(Pool::new()));
         for _ in 0..500 {
-            scope(|s| {
+            scope_in(pool, |s| {
                 for _ in 0..4 {
                     s.spawn(|| std::thread::yield_now());
                 }
             });
+            // a section ends when its tasks finished; the workers go idle right after (a task
+            // dispatched before that starts a worker, which is allowed): wait for all of them
+            while pool.idle.lock().unwrap_or_else(|e| e.into_inner()).len() != pool.stats().1 {
+                std::thread::yield_now();
+            }
         }
-        let (after, _) = stats();
-        // other tests run at the same time; 2000 tasks must not start 2000 threads
-        assert!(after - before < 200, "started {}", after - before);
+        // 2000 tasks in sections of 4 never need more than 4 workers (fewer when a task of the
+        // first section ended before the next spawn of that section)
+        let (started, alive) = pool.stats();
+        assert!((1..=4).contains(&started) && alive == started, "started {started}, alive {alive}");
+        assert_eq!(retire_idle_in(pool), started);
+        assert_eq!(pool.stats(), (started, 0));
     }
 
     #[test]
     fn sections_from_many_threads_at_once() {
+        let _s = crate::zone_alloc::test_serial();
         let total = AtomicUsize::new(0);
         std::thread::scope(|ts| {
             for _ in 0..8 {
@@ -451,6 +494,7 @@ mod tests {
 
     #[test]
     fn retired_workers_end_and_new_tasks_still_run() {
+        let _s = crate::zone_alloc::test_serial();
         scope(|s| {
             for _ in 0..4 {
                 s.spawn(|| {});
@@ -474,6 +518,7 @@ mod tests {
 
     #[test]
     fn a_worker_that_ran_a_panicking_task_ends_and_retire_joins_it() {
+        let _s = crate::zone_alloc::test_serial();
         thread_local! { static MARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
         let survived = AtomicUsize::new(0);
         for _ in 0..20 {

@@ -59,7 +59,7 @@ fn holds(c: Cond, signed: bool, a: i64, b: i64) -> bool {
 
 #[test]
 fn load_compare_branches_as_the_extended_value() {
-    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let vals: [u64; 9] = [0, 1, 2, 0x7f, 0x80, 0xff, 0x7fff_ffff, 0x8000_0000, u64::MAX];
     let ks: [i64; 13] = [0, 1, 2, -1, -2, 0x7f, 0x80, 0xff, -0x80, 0x7fff, 0xffff, 0x7fff_ffff, -0x8000_0000];
     let conds = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
@@ -108,7 +108,7 @@ fn branch_fn(sz: u8, sx: bool) -> Func {
 
 #[test]
 fn branch_on_a_loaded_value_tests_its_bytes() {
-    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     for sz in [1u8, 2, 4, 8] {
         for sx in [false, true] {
             let c = x64::compile(&relax_session::Options::default(), &branch_fn(sz, sx), &env).unwrap();

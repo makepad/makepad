@@ -8,14 +8,14 @@ use relax_backend::{exec::Code, rir::*, switch};
 
 #[cfg(target_arch = "x86_64")]
 fn compile(options: &relax_session::Options, f: &Func, regs: bool) -> Vec<u8> {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::x64::compile(options, f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }
 
 #[cfg(target_arch = "aarch64")]
 fn compile(options: &relax_session::Options, f: &Func, regs: bool) -> Vec<u8> {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::arm64::compile(options, f, &env).unwrap();
     c.code[..c.text_len as usize].to_vec()
 }

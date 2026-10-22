@@ -503,6 +503,7 @@ const IMG_SYM: u8 = 2;
 const IMG_TLS_KEY: u8 = 3;
 const IMG_TLS_SLOW: u8 = 4;
 const IMG_RESUME: u8 = 5;
+const IMG_CALL: u8 = 6;
 
 /// One slot of a startup image, from code entry `entry` (key `entry_key`, slot key encoding
 /// `key`): appended to `out` (its record) and `blob` (its code) unless the payload does not
@@ -545,9 +546,9 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
         kind_of(kind)?;
         let tag = d.b.get(d.p).copied()?;
         match tag {
-            20 | 21 => {
+            20 | 21 | 25 => {
                 d.u8()?;
-                rel.push((at, kind, if tag == 20 { IMG_SLOT } else { IMG_THUNK }, tab.keys.id(d.bytes()?)));
+                rel.push((at, kind, match tag { 20 => IMG_SLOT, 25 => IMG_CALL, _ => IMG_THUNK }, tab.keys.id(d.bytes()?)));
             }
             22..=24 => {
                 d.u8()?;
@@ -1392,7 +1393,7 @@ impl Linker {
         }
         for ri in (s.rel.0..s.rel.1).step_by(REL_SIZE) {
             match im.rel_at(ri) {
-                Some((_, _, IMG_SLOT | IMG_THUNK, ix)) => {
+                Some((_, _, IMG_SLOT | IMG_THUNK | IMG_CALL, ix)) => {
                     if !mark(ix) {
                         return false;
                     }
@@ -1436,7 +1437,7 @@ impl Linker {
                 return Resolved::Lazy;
             };
             let ok = match t {
-                IMG_SLOT | IMG_THUNK => im.slot_of(ix).is_some(),
+                IMG_SLOT | IMG_THUNK | IMG_CALL => im.slot_of(ix).is_some(),
                 IMG_SYM if !statics && im.syms.get(ix as usize).map_or(false, |b| is_static_sym(b)) => {
                     needs = true;
                     true
@@ -1499,7 +1500,7 @@ impl Linker {
                                 break;
                             };
                             let v = match t {
-                                IMG_SLOT | IMG_THUNK => im.slot_of(ix).map(|x| env.reloc_value(if t == IMG_SLOT { Reloc::Slot(x) } else { Reloc::Thunk(x) })),
+                                IMG_SLOT | IMG_THUNK | IMG_CALL => im.slot_of(ix).map(|x| env.reloc_value(match t { IMG_SLOT => Reloc::Slot(x), IMG_CALL => Reloc::Call(x), _ => Reloc::Thunk(x) })),
                                 IMG_SYM => im.fresh.get(&ri).copied().or_else(|| im.sym_sym.get(ix as usize).copied().flatten().flatten()).map(|s| syms.value(s)),
                                 IMG_TLS_KEY => Some(env.reloc_value(Reloc::TlsKey)),
                                 IMG_TLS_SLOW => Some(env.reloc_value(Reloc::TlsSlow)),
@@ -1513,7 +1514,7 @@ impl Linker {
                                 }
                             }
                         }
-                        linked[k] = ok && relax_backend::rir::link(&mut buf[off..off + n], at + off as u64, &rl, &|r| env.reloc_value(r)).is_ok();
+                        linked[k] = ok && u.link_code(&mut buf[off..off + n], at + off as u64, &rl).is_ok();
                     }
                 });
             }

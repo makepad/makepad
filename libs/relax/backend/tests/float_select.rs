@@ -56,6 +56,7 @@ fn compile(w: bool, cond: Option<Cond>, swap_cmp: bool, swap_select: bool, share
         opt_regs: regs,
         syms: 0,
         sym_class: 0,
+        near: false,
     };
     let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     assert!(c.relocs.is_empty());
@@ -170,6 +171,7 @@ fn unrelated_float_compare_and_redefined_input() {
                 opt_regs: true,
                 syms: 0,
                 sym_class: 0,
+                near: false,
             };
             let compiled = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
             let code = Code::new(&compiled.code).unwrap();
@@ -218,6 +220,7 @@ fn f64_compare_selects_f32() {
         opt_regs: true,
         syms: 0,
         sym_class: 0,
+        near: false,
     };
     let compiled = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     let code = Code::new(&compiled.code).unwrap();
