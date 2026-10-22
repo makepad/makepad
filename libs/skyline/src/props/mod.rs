@@ -87,6 +87,18 @@ fn line_range(i: &Instance) -> ([f64; 2], f64, f64, f64, f64) {
     (t, sf, if sf > s0 && sf < s1 { p } else { dist(s0).min(dist(s1)) }, dist(s0).max(dist(s1)), p)
 }
 
+/// The highest raw elevation (rad) any prop reaches over the off-centre camera's nearest (1 - Off). 0 without props.
+pub fn reach(set: &PropSet, p: &Params) -> f64 {
+    let (k, near) = (p[P::Size], (1.0 - p[P::Off]).max(0.1));
+    let top = set.inst.iter().map(|i| {
+        let (_, _, dmin, _, _) = line_range(i);
+        // as `place` puts its top row: (top - eye) / d + the foot's elevation over the plain, its glow above
+        let base = if i.line { 0.0 } else { i.base + EYE * k / i.d };
+        ((i.top + i.glow) * k - EYE * k) / dmin.max(1.0) + base
+    }).fold(0.0f64, f64::max);
+    top / near
+}
+
 /// Whether the reflection run sees instance `i` from the mirrored eye (the eye as far under the water as it is over it):
 /// the props layer (slot 2) as the sea and the lakes mirror it, standing on the water. Under a wet ground the strip draws
 /// itself (`SkyLight::own_wet`), a prop on land is seen from the eye itself: the wet ground lies in front of the near rise,

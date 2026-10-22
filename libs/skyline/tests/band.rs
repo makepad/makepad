@@ -1550,3 +1550,24 @@ fn over_a_hosts_wet_ground_the_band_leaves_its_land_to_the_host() {
         }
     }
 }
+
+/// Plan hdri-6 §1: the band a host fits to its content (`fit_band`) cuts nothing off at its top. At Size 2 with the
+/// tallest towers, the highest mountains and every prop, at Size 0.5, and at the defaults at Size 2, the band's top two
+/// rows hold no coverage and no light worth a hundredth of its brightest. A fit stopped at 85 degrees is the spec's
+/// limit and is only printed.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn nothing_is_cut_at_the_fitted_top() {
+    let mut tall = city_params();
+    for (i, d) in makepad_skyline::PARAMS.iter().enumerate() { if d.group == "Props" { tall.set(i, 1.0); } }
+    tall.set(P::CtH as usize, 2.4); tall.set(P::MtH as usize, 0.5); tall.set(P::Glow as usize, 2.0);
+    for (name, base, k) in [("tall, Size 2", tall.clone(), 2.0), ("tall, Size 0.5", tall.clone(), 0.5), ("defaults, Size 2", Params::default(), 2.0)] {
+        let mut p = sized(&base, k);
+        let fit = makepad_skyline::fit_band(&mut p);
+        let b = render_band(&p, 1024);
+        let most = b.texels.iter().map(lum).fold(0.0f32, f32::max);
+        let (alpha, light) = b.texels[..2 * b.w].iter().fold((0.0f32, 0.0f32), |(a, l), t| (a.max(t[3]), l.max(lum(t))));
+        println!("{name}: {fit:?}, {} x {}, the top rows: alpha {alpha}, light {light} of {most}", b.w, b.h);
+        if fit.top_deg >= makepad_skyline::fit::MAX_TOP_DEG - 1e-9 { println!("{name}: stopped at 85 degrees"); continue; }
+        assert!(alpha <= 0.02 && light <= 0.01 * most, "{name}: the top rows hold alpha {alpha}, light {light} (of {most})");
+    }
+}

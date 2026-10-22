@@ -361,11 +361,7 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     let (v, p) = (sc.view, sc.p);
     let px0 = v.px0();
     // the glow dome over downtown, behind everything
-    let c_d = 28.0 * p[P::CtR];
-    let dx = (p[P::CtC] * TAU).cos() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).cos();
-    let dy = (p[P::CtC] * TAU).sin() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).sin();
-    // (the towers Size times as tall: a dome Size times as high)
-    let dome_k = (dx * dx + dy * dy).sqrt() / c_d / (0.0147 * (6.0 + 44.0 * p[P::CtH]) * 0.05) / p[P::Size];
+    let dome_k = dome_k(p);
     if p[P::Glow] > 0.0 && p[P::CtW] >= 0.001 {
         if let Some(r) = sc.band(9.0 / dome_k, -0.012 - px0) {
             sc.set_uniforms(cx, &mut sp.glow.draw_vars);
@@ -402,14 +398,25 @@ fn draw_scene(cx: &mut Cx2d, sc: &SceneCtx, (sp, props, city): &mut (ScenePainte
     props.draw(cx, sc, Bucket::OverSea);
 }
 
-/// The highest raw elevation range k (5: the front treeline) reaches in this view: its ridge, its
-/// canopy, its tallest single tree, plus two pixels.
-fn band_top(sc: &SceneCtx, k: usize) -> f64 {
-    let hmax = if k >= 2 { terrain::tree_hmax(sc.p, k - 2) } else { 0.0 };
-    let top = (0..sc.view.w).fold(0.0f64, |top, x| {
-        let r = sc.col(x, k);
+/// The highest raw elevation (rad) range k (5: the front treeline) reaches over `w` columns (`col(x, r)`: column x's row
+/// r, `terrain::ROWS`): its ridge, its canopy, its tallest single tree, over the column's off-centre factor.
+pub(crate) fn range_top(p: &Params, w: usize, col: &dyn Fn(usize, usize) -> [f32; 4], k: usize) -> f64 {
+    let hmax = if k >= 2 { terrain::tree_hmax(p, k - 2) } else { 0.0 };
+    (0..w).fold(0.0f64, |top, x| {
+        let r = col(x, k);
         let h = if k >= 2 && r[3] > 0.0 { (r[0] as f64).max(r[2] as f64).max(r[1] as f64 + hmax) } else { r[0] as f64 };
-        top.max(h / (sc.col(x, 6)[2] as f64).max(1e-3))
-    });
-    top + 2.0 * sc.view.px0()
+        top.max(h / (col(x, 6)[2] as f64).max(1e-3))
+    })
+}
+
+/// The highest raw elevation range k reaches in this view (`range_top`), plus two pixels.
+fn band_top(sc: &SceneCtx, k: usize) -> f64 { range_top(sc.p, sc.view.w, &|x, r| sc.col(x, r), k) + 2.0 * sc.view.px0() }
+
+/// The glow dome's e-folding rate in elevation: the camera's distance to downtown over the tower height (the towers Size
+/// times as tall: a dome Size times as high).
+pub(crate) fn dome_k(p: &Params) -> f64 {
+    let c_d = 28.0 * p[P::CtR];
+    let dx = (p[P::CtC] * TAU).cos() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).cos();
+    let dy = (p[P::CtC] * TAU).sin() * c_d - 0.8 * p[P::Off] * c_d * (p[P::OffDir] * TAU).sin();
+    (dx * dx + dy * dy).sqrt() / c_d / (0.0147 * (6.0 + 44.0 * p[P::CtH]) * 0.05) / p[P::Size]
 }

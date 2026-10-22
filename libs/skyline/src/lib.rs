@@ -16,8 +16,10 @@ pub mod post;
 pub mod render;
 pub mod export;
 pub mod light;
+pub mod fit;
 
 pub use export::{Band, BandDone, ExportKind};
+pub use fit::{band_fit, fit_band, BandFit};
 pub use light::{add_light, add_scaled, coast_ring, example_haze_share, srgb_decode, srgb_encode, SkyLight, StripPlan, BACKDROP_HORIZON, HOST_LIGHT_NIGHT_SHARE, RING, SHORE_DEG};
 pub use params::{ParamDef, Params, COUNT, P, PARAMS, SEED_MAX};
 pub use render::{SceneTarget, Skyline, ViewSpec};
