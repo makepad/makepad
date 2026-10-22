@@ -108,6 +108,8 @@ pub struct SceneCtx<'a> {
     pub view: &'a ViewSpec, pub p: &'a Params,
     /// The sky's light, and its rings as a texture (`Skyline::ring_tex`); the sky the day's sea mirrors (`Skyline::sea_tex`).
     pub light: &'a SkyLight, pub ring: &'a Texture, pub sea: &'a Texture,
+    /// The lakes (`Skyline::lake_tex`).
+    pub lakes: &'a Texture,
     /// The placement zones (the city and the props read them).
     pub z: &'a Zones,
     /// The column data texture, its geometry (width, height, margin, count) and the data on the CPU (see [`terrain::ROWS`]).
@@ -146,6 +148,9 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(design_gain), &[l.gpu_gain()]);
         vars.set_uniform(cx, live_id!(host_ground), &[if l.host_ground { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
+        vars.set_uniform(cx, live_id!(lake_n), &[self.z.lakes.len() as f32]);
+        vars.set_uniform(cx, live_id!(lake_eye), &[(crate::props::kit::EYE * self.p[P::Size]) as f32]);
+        bind_texture(cx, vars, live_id!(lake_tex), self.lakes);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
         bind_texture(cx, vars, live_id!(tree_cov), &self.tree_cov);
@@ -189,7 +194,7 @@ pub struct ColumnCache { key: u64, m: usize, data: Vec<[f32; 4]>, tex: Texture, 
 /// The parameters the zones depend on (with the seed).
 const ZONE_KEYS: &[P] = &[
     P::CtC, P::CtW, P::CtR, P::Land, P::LandC, P::PrInd, P::PrTown, P::PrBridge, P::PrFair, P::PrTurb, P::PrMast, P::MtH, P::MtW, P::MtC,
-    P::MtRug, P::TrC, P::TrW, P::TrH, P::Size,
+    P::MtRug, P::TrC, P::TrW, P::TrH, P::Size, P::PrLake,
 ];
 
 #[derive(Script, ScriptHook)]
@@ -211,6 +216,8 @@ pub struct Skyline {
     #[rust] ring_tex: Option<(u64, Texture)>,
     /// The sky the day's sea mirrors (`SkyLight::sea_texels`), written with `ring_tex`.
     #[rust] sea_tex: Option<Texture>,
+    /// The lakes (`lakes::texels`), and the zones' key they were written for.
+    #[rust] lake_tex: Option<(u64, Texture)>,
     /// The key of the picture the targets hold.
     #[rust] pub drawn: Option<u64>,
     #[rust] pub stats: Stats,
@@ -261,6 +268,11 @@ impl Skyline {
             (self.zones, self.stats.zones_ms) = (Some((zkey, Zones::new(p))), ms_since(t));
         }
         let z = &self.zones.as_ref().unwrap().1;
+        if self.lake_tex.as_ref().map(|t| t.0) != Some(zkey) {
+            let format = TextureFormat::VecRGBAf32 { width: crate::lakes::LAKES_MAX, height: 1, data: Some(crate::lakes::texels(&z.lakes)), updated: TextureUpdated::Full };
+            let tex = match self.lake_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
+            self.lake_tex = Some((zkey, tex));
+        }
         let m = terrain::margin(p, view.span, view.w);
         let ckey = p.hash(terrain::COLUMN_KEYS, &[view.u0, view.span, view.w as f64, m as f64]);
         if self.cols.as_ref().map(|c| c.key) != Some(ckey) {
@@ -308,21 +320,22 @@ impl Skyline {
         let blank = self.blank.as_ref().unwrap();
         let ring = &self.ring_tex.as_ref().unwrap().1;
         let sea = self.sea_tex.as_ref().unwrap();
+        let lakes = &self.lake_tex.as_ref().unwrap().1;
         let mut scene = self.scene.take().unwrap();
         let scene_id = scene.pass.draw_pass_id();
         let mv = view.mirrored();
-        let mut sc = SceneCtx { view, p, light, ring, sea, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
+        let mut sc = SceneCtx { view, p, light, ring, sea, lakes, z, cols: &cols.tex, col_geom: cols.geom, col_data: &cols.data, tree_cov: blank.clone(), city: None, inputs: [None; 2], mirror: false, up_dy: 0.0 };
         // producers: children of the scene pass, which samples them
         self.trees.draw_pass(cx, &sc, scene_id);
         self.city.draw_pass(cx, &sc, scene_id);
         sc.tree_cov = self.trees.coverage().unwrap_or(blank).clone();
         (sc.city, sc.inputs) = (self.city.textures(), [self.trees.pass_id(), self.city.pass_id()]);
         self.props.update(z, p);
-        // the scene, and its mirror image when the water reflects it and the view shows sea
+        // the scene, and its mirror image when the water reflects it and the view shows sea (or there are lakes)
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35);
+        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty();
         self.mirror = (self.post.wants_mirror(p) && sea).then(|| {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
             (sc.mirror, sc.view, sc.up_dy) = (true, &mv, (view.horizon - mv.horizon) * view.h as f64);

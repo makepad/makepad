@@ -72,6 +72,7 @@ params! {
         PrFar pr_far "prFar" "Distant lights" 0. 1. 0.01 0.5;
         PrFarm pr_farm "prFarm" "Farms" 0. 1. 0.01 0.4;
         PrCoast pr_coast "prCoast" "Lighthouse, ships" 0. 1. 0.01 0.5;
+        PrLake pr_lake "prLake" "Lakes" 0. 1. 0.01 0.;
     }
     "Light" {
         Lights lights "lights" "Intensity" 0. 10. 0.1 3.;

@@ -161,9 +161,9 @@ pub struct Post {
 }
 
 impl Post {
-    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea (render.rs
-    /// also asks for sea in the view).
-    pub fn wants_mirror(&self, p: &Params) -> bool { p[P::PrRefl] > 0.0 && p[P::Land] < 0.999 }
+    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea, or lakes
+    /// (render.rs also asks for water in the view).
+    pub fn wants_mirror(&self, p: &Params) -> bool { p[P::PrRefl] > 0.0 && (p[P::Land] < 0.999 || p[P::PrLake] > 0.0) }
 
     /// The view to draw the scene at for `v`: widened by the blur's margin, so lights at its edges blur with their real
     /// neighbours as on the page, and by the water's when it reflects, so the ripple's sideways samples find the mirror

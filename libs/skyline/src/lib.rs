@@ -7,6 +7,7 @@ use makepad_widgets::*;
 pub mod params;
 pub mod rng;
 pub mod zones;
+pub mod lakes;
 pub mod terrain;
 pub mod city;
 pub mod props;

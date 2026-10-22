@@ -129,6 +129,8 @@ pub struct Zones {
     pub pyl: [Zone; 3], pub turb: [Zone; 2],
     /// Up to four masts: azimuth (-1 none), range k (-1 open land), distance m, height m.
     pub mast_u: Zone, pub mast_k: Zone, pub mast_d: Zone, pub mast_h: Zone,
+    /// The lakes on open land (`lakes::place`, after the zones).
+    pub lakes: Vec<crate::lakes::Lake>,
 }
 
 impl Zones {
@@ -137,8 +139,9 @@ impl Zones {
         let ridge = Ridges::new(p, &rng);
         let mut z = Zones { p: p.clone(), rng, ridge, core: Z0, city: Z0, crane: Z0, ind: Z0, ind_x: Z0, shore: Z0, town: Z0, town_x: Z0,
             church: Z0, bridge: Z0, bridge_x: Z0, fair: Z0, fair_x: Z0, lamp_t: Z0, lamp_c: Z0, pyl: [Z0; 3], turb: [Z0; 2],
-            mast_u: [-1.0; 4], mast_k: [-1.0; 4], mast_d: [3000.0; 4], mast_h: [150.0; 4] };
+            mast_u: [-1.0; 4], mast_k: [-1.0; 4], mast_d: [3000.0; 4], mast_h: [150.0; 4], lakes: Vec::new() };
         z.place();
+        z.lakes = crate::lakes::place(&z, p);
         z
     }
     pub fn rnd(&self, id: f64, st: f64, ly: f64) -> f64 { self.rng.rnd(id, st, ly) }

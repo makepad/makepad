@@ -735,6 +735,36 @@ fn visual_check_pngs() {
             write(&format!("shore_{name}_{x_sea}_sea.png"), 3 * cw, 3 * b.h, &crop);
         }
     }
+    // the lakes (plan hdri-6 §4): all land at Lakes 1, and the app's defaults (Lakes 0.3, Sea distance 0.3), by day and
+    // at night, the whole strip and each lake's sector (0.04 of the turn, 30 rows either side of the horizon) four times
+    // the size
+    let mut all_land = Params::default();
+    all_land.set(P::Land as usize, 1.0);
+    all_land.set(P::PrLake as usize, 1.0);
+    let mut app = Params::default();
+    app.set(P::PrLake as usize, 0.3);
+    app.set(P::SeaD as usize, 0.3);
+    for (set, p) in [("land", all_land), ("app", app)] {
+        let z = Zones::new(&p);
+        for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
+            let b = render_band_lit(&p, w, &l);
+            let rgb = toned(&p, &b, &l, exposure);
+            let write = |file: &str, w: usize, h: usize, px: &[u8]| {
+                let mut png = Vec::new();
+                let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
+                PngEncoder::new(px, o).encode(&mut png).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
+            };
+            write(&format!("lakes_{set}_{name}_strip.png"), b.w, b.h, &rgb);
+            let (hy, cw, rows) = ((p[P::Horizon] * b.h as f64) as usize, (0.04 * w as f64) as usize, 60usize);
+            for (k, lake) in z.lakes.iter().enumerate() {
+                let x0 = ((lake.u - 0.02).rem_euclid(1.0) * w as f64) as usize;
+                let crop: Vec<u8> = (0..4 * rows).flat_map(|y| (0..4 * cw).flat_map(move |x| { let o = ((hy - rows / 2 + y / 4).min(b.h - 1) * b.w + (x0 + x / 4) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
+                write(&format!("lakes_{set}_{name}_{k}.png"), 4 * cw, 4 * rows, &crop);
+            }
+            println!("{set} {name}: {} lakes {:?}", z.lakes.len(), z.lakes);
+        }
+    }
 }
 
 /// Noon's light with the sun at azimuth `sun_u` and of strength `sun` (x noon's).
@@ -1230,4 +1260,33 @@ fn the_shore_is_the_hosts_land() {
         }
     }
     assert!(n > 100, "the premise: the band shows shore ({n} texels)");
+}
+
+/// Plan hdri-6 §4: lakes mirror the sky (by day) and never come nearer than LAKE_MIN_M x Size. All land, so the water is
+/// the lakes': the band with Water reflections 0.6 less the band with 0 is nothing deeper than the nearest shore can be
+/// (atan(EYE / LAKE_MIN_M) plus 1.5 texels), and the sky's light in the lakes.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn lakes_mirror_the_sky_and_keep_their_distance() {
+    let light = noon([1.2, 1.3, 1.5]);
+    let mut p = Params::default();
+    p.set(P::Land as usize, 1.0);
+    p.set(P::PrLake as usize, 1.0);
+    let z = Zones::new(&p);
+    assert!(!z.lakes.is_empty(), "the premise: lakes at seed 7");
+    let mut dry = p.clone();
+    dry.set(P::PrRefl as usize, 0.0);
+    let (water, none) = (render_band_lit(&p, 1024, &light), render_band_lit(&dry, 1024, &light));
+    let (px, edge) = (std::f64::consts::TAU / 1024.0, (makepad_skyline::props::kit::EYE / makepad_skyline::lakes::LAKE_MIN_M).atan());
+    let mut most = 0.0f32;
+    for y in 0..water.h {
+        let el = row_el(&p, &water, y);
+        for x in 0..water.w {
+            let i = y * water.w + x;
+            let d = lum(&water.texels[i]) - lum(&none.texels[i]);
+            if -el > edge + 1.5 * px { assert!(d.abs() < 1e-6, "x {x}, {:.2} deg: water nearer than a lake may be", el.to_degrees()); }
+            else { most = most.max(d); }
+        }
+    }
+    println!("{} lakes; the water's most {most}", z.lakes.len());
+    assert!(most > 1e-2, "the lakes mirror the sky ({most})");
 }
