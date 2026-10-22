@@ -145,6 +145,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(lit), &[l.lights_factor()]);
         vars.set_uniform(cx, live_id!(design_gain), &[l.gpu_gain()]);
         vars.set_uniform(cx, live_id!(host_ground), &[if l.host_ground { 1.0 } else { 0.0 }]);
+        vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
         bind_texture(cx, vars, live_id!(tree_cov), &self.tree_cov);

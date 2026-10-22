@@ -49,6 +49,9 @@ script_mod! {
         design_gain: uniform(1.0)
         // 1: the near ground is the host's own (`SkyLight::host_ground`, the ring texture's third row)
         host_ground: uniform(0.0)
+        // the sea's near edge, rad below the horizon (`crate::sea_edge_rad`: the sea distance seen from the eye); nearer than
+        // it the shore, land. 10 (past every view): no shore, the sea reaches the viewer's feet (the example's)
+        sea_edge: uniform(10.0)
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
         ring_tex: texture_2d(float)
@@ -95,6 +98,14 @@ script_mod! {
         haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.125) }
         // a host's coast at azimuth u (`host_ground`): 1 on land, fading to 0 out to sea
         coast_at: fn(u: float) -> float { return clamp(self.ring_at(u, 0.875).x, 0.0, 1.0) }
+        // the shore's share of a pixel al rad below the horizon, px rad a side: the land nearer than the sea distance
+        shore_at: fn(al: float, px: float) -> float { if self.sea_edge > 1.5 { return 0.0 } return self.cover(al - self.sea_edge, px) }
+        // what is water at a pixel al rad below the horizon (world azimuth u, px rad a side) in column g: x the sea from its
+        // near edge out, y a lake on the land, z standing water on the land and the shore
+        water_at: fn(g: vec4, u: float, al: float, px: float) -> vec3 {
+            let sea = (1.0 - smoothstep(0.0, 0.35, g.x)) * (1.0 - self.shore_at(al, px))
+            return vec3(sea, 0.0, 0.0)
+        }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
         sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
@@ -235,10 +246,14 @@ script_mod! {
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
             // by day: lit from above (normal up)
             let day = self.day_lit(vec3(0.10, 0.10, 0.10), 1.0, max(sin(self.sun_el), 0.0))
-            var c = mix(self.sil * 0.5, self.sil * 1.6, g.x) + day
+            // the land: the column's, and the shore in front of the sea (nearer than the sea distance)
+            let al = 0.0 - self.ang_raw(pp.y) * g.z
+            var land = g.x
+            if al > 0.0 { land = max(land, self.shore_at(al, self.px0() * g.z)) }
+            var c = mix(self.sil * 0.5, self.sil * 1.6, land) + day
             // a host's own ground over the land and on out to sea from its coast, so the band's ground is the map's
             // and the land meets the sea without an edge (`SkyLight::host_ground`, `coast_ring`)
-            if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(g.x, self.coast_at(u))) }
+            if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
             return vec4(c * gm, gm)
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }

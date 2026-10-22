@@ -710,6 +710,31 @@ fn visual_check_pngs() {
         let crop: Vec<u8> = (0..2 * b.h).flat_map(|y| (0..2 * cw).flat_map(move |x| { let o = ((y / 2) * b.w + x0 + x / 2) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
         write(&format!("{name}_city.png"), 2 * cw, 2 * b.h, &crop);
     }
+    // the shore (plan hdri-6 §3): the defaults at Sea distance 0 (the sea at the feet), 0.3 and 0.6, by day and at night,
+    // the whole strip and the open sea's sector (the widest run of sea columns) three times the size
+    let z = Zones::new(&Params::default());
+    let sea: Vec<bool> = (0..w).map(|x| z.land((x as f64 + 0.5) / w as f64) < 0.05).collect();
+    let (mut best, mut run) = ((0usize, 0usize), 0usize);
+    for x in 0..2 * w { if sea[x % w] { run += 1; if run > best.1 && run <= w { best = ((x + 1 - run) % w, run); } } else { run = 0; } }
+    let cw = best.1.min(w / 6);
+    let x0 = best.0 + (best.1 - cw) / 2;
+    for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
+        for x_sea in [0.0, 0.3, 0.6] {
+            let mut p = Params::default();
+            p.set(P::SeaD as usize, x_sea);
+            let b = render_band_lit(&p, w, &l);
+            let rgb = toned(&p, &b, &l, exposure);
+            let write = |file: &str, w: usize, h: usize, px: &[u8]| {
+                let mut png = Vec::new();
+                let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
+                PngEncoder::new(px, o).encode(&mut png).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
+            };
+            write(&format!("shore_{name}_{x_sea}_strip.png"), b.w, b.h, &rgb);
+            let crop: Vec<u8> = (0..3 * b.h).flat_map(|y| (0..3 * cw).flat_map(move |x| { let o = ((y / 3) * b.w + (x0 + x / 3) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
+            write(&format!("shore_{name}_{x_sea}_sea.png"), 3 * cw, 3 * b.h, &crop);
+        }
+    }
 }
 
 /// Noon's light with the sun at azimuth `sun_u` and of strength `sun` (x noon's).
@@ -1151,4 +1176,58 @@ fn the_sea_mirrors_the_sky_it_is_handed() {
     let none = SkyLight { sea_sky: None, ..light.clone() };
     let same = SkyLight { sea_sky: Some((light.ring_low, light.ring_high)), ..light.clone() };
     assert!(render_band_lit(&p, 512, &none).texels == render_band_lit(&p, 512, &same).texels, "a sea sky equal to the rings changes the band");
+}
+
+/// Plan hdri-6 §3: the sea starts at its distance. By day (`noon`, no host ground) the water adds what it mirrors, the
+/// sky and the scene, and nothing else, so the band with Water reflections 0.6 less the band with 0 is the water's. In
+/// the sea's columns none of it lies nearer than the sea distance (deeper than its edge plus 1.5 texels), and some lies
+/// beyond it.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_sea_starts_at_its_distance() {
+    let light = noon([1.2, 1.3, 1.5]);
+    for x_sea in [0.3, 0.6] {
+        let mut p = Params::default();
+        p.set(P::SeaD as usize, x_sea);
+        let mut dry = p.clone();
+        dry.set(P::PrRefl as usize, 0.0);
+        let (water, none) = (render_band_lit(&p, 1024, &light), render_band_lit(&dry, 1024, &light));
+        let (z, edge, px) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), std::f64::consts::TAU / 1024.0);
+        let (mut near, mut far) = (0usize, 0.0f32);
+        for x in 0..water.w {
+            if z.land((x as f64 + 0.5) / water.w as f64) > 0.05 { continue; }
+            for y in 0..water.h {
+                let (el, i) = (row_el(&p, &water, y), y * water.w + x);
+                let d = lum(&water.texels[i]) - lum(&none.texels[i]);
+                if -el > edge + 1.5 * px {
+                    assert!(d.abs() < 1e-6, "sea_d {x_sea}: x {x}, {:.2} deg: the water shows {d} nearer than its distance", el.to_degrees());
+                    near += 1;
+                } else if el < 0.0 { far = far.max(d); }
+            }
+        }
+        println!("sea_d {x_sea}: edge {:.2} deg, {near} shore texels clear of water, the water's most {far}", edge.to_degrees());
+        assert!(near > 100 && far > 1e-3, "the premise: shore and water both show ({near}, {far})");
+    }
+}
+
+/// Plan hdri-6 §3: the shore is lit like the skyline's land. Over a host's ground (`host_ground`) the land takes the host's
+/// ground ring, and so does the shore in front of the sea.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_shore_is_the_hosts_land() {
+    let g = [0.30f32, 0.20, 0.10];
+    let light = SkyLight { host_ground: true, ground: [g; RING], ..noon([1.2, 1.3, 1.5]) };
+    let mut p = Params::default();
+    p.set(P::SeaD as usize, 0.3);
+    let b = render_band_lit(&p, 1024, &light);
+    let (z, edge, px) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), std::f64::consts::TAU / 1024.0);
+    let mut n = 0;
+    for x in 0..b.w {
+        if z.land((x as f64 + 0.5) / b.w as f64) > 0.05 { continue; }
+        for y in 0..b.h - 1 {
+            if -row_el(&p, &b, y) <= edge + 1.5 * px { continue; }
+            let t = b.texels[y * b.w + x];
+            assert!((0..3).all(|c| (t[c] - g[c]).abs() < 2e-3) && t[3] > 0.999, "x {x} y {y}: the shore {t:?} is not the host's land {g:?}");
+            n += 1;
+        }
+    }
+    assert!(n > 100, "the premise: the band shows shore ({n} texels)");
 }

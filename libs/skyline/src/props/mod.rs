@@ -27,7 +27,7 @@ pub const PROP_KEYS: &[P] = &[
     P::Land, P::LandC, P::MtH, P::MtW, P::MtC, P::MtRug, P::CtH, P::CtD, P::CtW, P::CtC, P::CtR, P::TrD, P::TrH, P::TrCon, P::TrW,
     P::TrC, P::Treeline, P::PrPyl, P::PrTurb, P::PrCrane, P::PrInd, P::PrChurch, P::PrTown, P::PrLamp, P::PrBridge, P::PrFair,
     P::PrRefl, P::PrRipple, P::PrMast, P::PrFar, P::PrFarm, P::PrCoast, P::Lights, P::Temp, P::WinD, P::Glow, P::Haze, P::Off, P::OffDir,
-    P::Size,
+    P::Size, P::SeaD,
 ];
 
 /// Where in the scene's painter's order a group of instances is drawn.

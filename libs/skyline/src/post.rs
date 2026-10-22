@@ -80,17 +80,24 @@ script_mod! {
         sea_sky_at: fn(u: float, el: float) -> vec3 { let a = self.sea_ring(u, 0.25); return a + (self.sea_ring(u, 0.75) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         pixel: fn(){
             let e = self.scene_light.sample_nearest(self.pos); let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
-            let g = self.col_row(pp.x, 6.0); var sea = 1.0 - smoothstep(0.0, 0.35, g.x); let al = 0.0 - v.y; let rip = self.pr_ripple
-            // over a host's ground the day's water fades in from the coast (the lights it mirrors at night stay)
+            let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y; let rip = self.pr_ripple
+            if al <= 0.0 { return e }
+            // the sea from its near edge out, a lake, standing water on the land (`water_at`)
+            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
+            // over a host's ground the day's sea fades in from the coast (the lights it mirrors at night stay)
             if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
-            if al <= 0.0 || sea < 0.01 { return e }
+            // open water (the sea, a lake) mirrors by the Water reflections strength, standing water on the land as a puddle does
+            let open = max(sea, ws.y); let water = max(open, ws.z)
+            if water < 0.01 { return e }
             let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0); let a0 = 0.004; let kz = mix(22.0, 13.0, rip)
-            // by day the sea mirrors the sky at the mirrored elevation, by its Fresnel term, where nothing mirrored stands in
-            // front of it (the mirror's coverage, below); 0 at night (`day`), where the sea mirrors only the lights
-            let sky = self.sea_sky_at(vr.x, al) * (fr * self.day() * sea * self.cover(g.y - v.y, v.z))
+            // by day the water mirrors the sky at the mirrored elevation, by its Fresnel term, where nothing mirrored stands in
+            // front of it (the mirror's coverage, below); 0 at night (`day`), where it mirrors only the lights
+            let sky = self.sea_sky_at(vr.x, al) * (fr * self.day() * water * self.cover(g.y - v.y, v.z))
             if al >= 0.35 { return vec4(e.xyz + sky, e.w) }
             let sm = smoothstep(vec3(0.1, 0.0, 0.5), vec3(0.2, 0.012, 1.4), vec3(al, al, (al + a0) / (kz * v.z))); let w = self.pr_refl * fr * (1.0 - sm.x)
-            if w * sea < 0.003 { return vec4(e.xyz + sky, e.w) }
+            var wk = w * open
+            if ws.z > 0.0 { wk = max(wk, fr * (1.0 - sm.x) * ws.z) }
+            if wk < 0.003 { return vec4(e.xyz + sky, e.w) }
             let j = floor(kz * log(al + a0)); let alj = exp((j + 0.5) / kz) - a0; let nu = floor(mix(160.0, 700.0, rip))
             let xc = v.x * nu + self.refl_h(j, 0.0, 2000.0); var ci = floor(xc); let fx = xc - ci; ci = ci - nu * floor(ci / nu)
             var c1 = ci + 1.0; if c1 >= nu { c1 = c1 - nu }
@@ -104,7 +111,7 @@ script_mod! {
             let x = ((fract(vr.x + du - self.view_span.x - 0.5 * self.view_span.y + 0.5) - 0.5) / self.view_span.y + 0.5) * self.view_in().x + self.view_pad
             let y = self.mirror_horizon * self.view_size.y - vr.y * el / max(al, 0.00001) / vr.z
             let m = self.mirror_light.sample(clamp(vec2(x, y), vec2(0.5, 0.5), self.view_size - vec2(0.5, 0.5)) / self.view_size)
-            return vec4(e.xyz + m.xyz * (w * sea * sqrt(dc) * mix(1.0, 0.85, rip) * self.cover(g.y - v.y, v.z)) + sky * (1.0 - m.w), e.w)
+            return vec4(e.xyz + m.xyz * (wk * sqrt(dc) * mix(1.0, 0.85, rip) * self.cover(g.y - v.y, v.z)) + sky * (1.0 - m.w), e.w)
         }
         // one target, but SkyScene declares a second output: written too, so no backend leaves it undefined
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = c }

@@ -33,6 +33,7 @@ params! {
         LandC land_c "landC" "Land at" 0. 1. 0.01 0.40;
         Horizon horizon "horizon" "Horizon" 0.3 0.95 0.01 0.80;
         Size size "size" "Size" 0.5 2. 0.05 1.;
+        SeaD sea_d "seaD" "Sea distance" 0. 1. 0.01 0.;
     }
     "Mountains" {
         MtH mt_h "mtH" "Height" 0.02 0.5 0.005 0.20;

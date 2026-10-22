@@ -407,7 +407,7 @@ script_mod! {
         fragment: fn(){
             let pp = self.frag(); let c = self.pl_c.sample_nearest(pp / self.view_size); let e = self.pl_e.sample_nearest(pp / self.view_size)
             let g = self.col_row(pp.x, 6.0); let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z
-            let wp = self.cover(g.y - ang, px) * (1.0 - self.cover(g.y - 0.03 * (1.0 - smoothstep(0.0, 0.35, g.x)) - ang, px))
+            let wp = self.cover(g.y - ang, px) * (1.0 - self.cover(g.y - min(0.03, self.sea_edge) * (1.0 - smoothstep(0.0, 0.35, g.x)) - ang, px))
             self.fb0 = c * wp; self.fb1 = vec4(e.xyz * wp, c.w * wp)
         }
     }
