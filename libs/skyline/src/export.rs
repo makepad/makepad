@@ -149,11 +149,16 @@ impl Skyline {
                     (job.first, job.rounds, job.done) = (None, 0, job.done + 1);
                     for (y, row) in t.chunks(cw).enumerate() { job.out[y * job.w + i * TILE..][..cw].copy_from_slice(row); }
                     if job.done < job.tiles() { continue; }
-                    let (w, h, out, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), job.sink.take(), job.tx.clone());
+                    let (w, h, mut out, sink, tx) = (job.w, job.h, std::mem::take(&mut job.out), job.sink.take(), job.tx.clone());
+                    let (light, horizon) = (job.light.clone(), job.p[P::Horizon]);
                     std::thread::spawn(move || send(&tx, News::Done(match sink {
                         Some(Sink::File(kind, path)) => if kind == ExportKind::Png { png(w, h, &out) } else { Ok(exr(w, h, &out)) }
                             .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())).map(|_| format!("Saved {}", path.display())),
-                        Some(Sink::Band(done)) => { done(Ok(Band { w, h, texels: out })); Ok(format!("Band {w} x {h} handed over")) }
+                        Some(Sink::Band(done)) => {
+                            // a host that shows the night as the example's display does gets it decoded (`SkyLight::to_host`)
+                            light.to_host(&mut out, w, h, horizon);
+                            done(Ok(Band { w, h, texels: out })); Ok(format!("Band {w} x {h} handed over"))
+                        }
                         None => Err("no destination".into()),
                     })));
                     continue;

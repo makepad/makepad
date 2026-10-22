@@ -136,13 +136,14 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(up_dy), &[self.up_dy as f32]);
         let l = self.light;
         // the night silhouettes' designed colour, in the host's units
-        vars.set_uniform(cx, live_id!(sil), &SIL.map(|c| c * l.design_gain));
+        vars.set_uniform(cx, live_id!(sil), &SIL.map(|c| c * l.gpu_gain()));
         vars.set_uniform(cx, live_id!(sun_u), &[l.sun_u]);
         vars.set_uniform(cx, live_id!(sun_el), &[l.sun_el_deg.to_radians()]);
         vars.set_uniform(cx, live_id!(sun_rgb), &l.sun_rgb);
         vars.set_uniform(cx, live_id!(ambient_rgb), &l.ambient_rgb);
         vars.set_uniform(cx, live_id!(lit), &[l.lights_factor()]);
-        vars.set_uniform(cx, live_id!(design_gain), &[l.design_gain]);
+        vars.set_uniform(cx, live_id!(design_gain), &[l.gpu_gain()]);
+        vars.set_uniform(cx, live_id!(host_ground), &[if l.host_ground { 1.0 } else { 0.0 }]);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
         bind_texture(cx, vars, live_id!(tree_cov), &self.tree_cov);
@@ -281,7 +282,7 @@ impl Skyline {
         }
         let lkey = light.hash();
         if self.ring_tex.as_ref().map(|r| r.0) != Some(lkey) {
-            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(light.ring_texels()), updated: TextureUpdated::Full };
+            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 3, data: Some(light.ring_texels()), updated: TextureUpdated::Full };
             let tex = match self.ring_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
             self.ring_tex = Some((lkey, tex));
         }

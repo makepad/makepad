@@ -47,7 +47,10 @@ script_mod! {
         ambient_rgb: uniform(vec3(0.0, 0.0, 0.0))
         lit: uniform(1.0)
         design_gain: uniform(1.0)
-        // the horizon rings, RING x 2 texels: row 0 the sky at +1 degree, row 1 at +15 degrees (`SkyLight::ring_texels`)
+        // 1: the near ground is the host's own (`SkyLight::host_ground`, the ring texture's third row)
+        host_ground: uniform(0.0)
+        // the horizon rings, RING x 3 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground
+        // (`SkyLight::ring_texels`)
         ring_tex: texture_2d(float)
         seed: uniform(7.0)
         ct_c: uniform(0.55)
@@ -80,7 +83,7 @@ script_mod! {
         }
         // coverage of a signed distance d over a pixel of size px
         cover: fn(d: float, px: float) -> float { return clamp(d / px + 0.5, 0.0, 1.0) }
-        // ring row v (0.25 the low ring, 0.75 the high one) at azimuth u: linear between its two nearest samples, wrapping
+        // ring row v (1/6 the low ring, 1/2 the high one, 5/6 the host's ground) at azimuth u: linear between its two nearest samples, wrapping
         // round the turn, as a + (b - a) f, so a ring of one colour gives that colour exactly (the example's night)
         ring_at: fn(u: float, v: float) -> vec3 {
             let n = self.ring_tex.size().x; let x = fract(u) * n - 0.5; let i0 = floor(x); let i1 = i0 + 1.0
@@ -89,9 +92,9 @@ script_mod! {
             return a + (b - a) * (x - i0)
         }
         // the haze at azimuth u: the sky just over the horizon there
-        haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.25) }
+        haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.16666667) }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
-        sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.25); return a + (self.ring_at(u, 0.75) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
+        sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.16666667); return a + (self.ring_at(u, 0.5) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
         sun_dir: fn(u: float) -> vec3 {
             let az = (self.sun_u - u) * 6.2831853
@@ -230,7 +233,10 @@ script_mod! {
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
             // by day: lit from above (normal up)
             let day = self.day_lit(vec3(0.10, 0.10, 0.10), 1.0, max(sin(self.sun_el), 0.0))
-            return vec4((mix(self.sil * 0.5, self.sil * 1.6, g.x) + day) * gm, gm)
+            var c = mix(self.sil * 0.5, self.sil * 1.6, g.x) + day
+            // a host's own ground over the land, so the band's ground is the map's (`SkyLight::host_ground`)
+            if self.host_ground > 0.5 { c = mix(c, self.ring_at(self.view_raw().x, 0.8333333), g.x) }
+            return vec4(c * gm, gm)
         }
         fragment: fn(){ let c = self.pixel(); self.fb0 = c; self.fb1 = vec4(0.0, 0.0, 0.0, c.w) }
     }

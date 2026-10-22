@@ -220,13 +220,14 @@ fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64)>>
 #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn a_band_is_read_back_from_the_frame_that_drew_it() {
     let (a, b) = (Params::default(), city_params());
-    let got = bands_from_one_draw(&[(a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
-    // the first may fail (NotRendered) or come back partial while the pipelines compile; from the third on they are warm
-    assert!(got[1..].iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
+    let got = bands_from_one_draw(&[(a.clone(), 512), (a.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
+    // the first ones may fail (NotRendered) or come back partial while the pipelines compile (a cold shader cache
+    // takes longer); from the fourth on they are warm, and every one must come from its single draw
+    assert!(got[3..].iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
     let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![] }, |g| g.0)).collect();
     let (want_a, want_b) = (render_band(&a, 512), render_band(&b, 512));
-    assert!(got[2].texels == want_a.texels && got[4].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
-    assert!(got[3].texels == want_b.texels, "the denser city's band read from one draw is not the rig's (a stale read?)");
+    assert!(got[4].texels == want_a.texels && got[6].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
+    assert!(got[3].texels == want_b.texels && got[5].texels == want_b.texels, "the denser city's band read from one draw is not the rig's (a stale read?)");
     assert!(want_a.texels != want_b.texels);
 }
 
@@ -431,6 +432,83 @@ fn a_night_band_scales_with_its_design_gain() {
         println!("{name}: band at design gain {g} = {g} x the example's: worst relative {worst_rel:.2e} over {normals} normal channels, worst absolute {worst_abs:.2e} below");
         assert!(normals > 100, "{name}: only {normals} channels to compare");
     }
+}
+
+/// A host's night light with `decode` (the owner's ruling, plan hdri-5 Task 8): design gain g, the example's haze share, the sun
+/// 20 degrees down, the rings `ring` all round.
+fn decoded_night(g: f32, ring: [f32; 3]) -> SkyLight {
+    SkyLight { design_gain: g, decode: true, night_haze: makepad_skyline::example_haze_share(), sun_el_deg: -20.0, ring_low: [ring; RING], ring_high: [ring; RING], ..SkyLight::example() }
+}
+
+/// With `decode` the design-gain premise changes (`a_night_band_scales_with_its_design_gain` keeps it for a host without
+/// `decode`): the night band is no longer g x the example's band but the example's band as its display shows it, laid over
+/// the host's sky in codes, x g, less that sky (`SkyLight::to_host`). Rings chosen so that the codes the shaders get are the
+/// example's own (x haze share / g, encoded: HAZE_COL): then the decoded band is `to_host` of the example's band, within the
+/// f16 target's precision and the rings' round trip through the curves.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_decoded_night_band_is_the_example_as_its_display_shows_it() {
+    use makepad_skyline::{params::HAZE_COL, srgb_decode};
+    let g = 0.0264f32;
+    let k = makepad_skyline::example_haze_share();
+    let ring = HAZE_COL.map(|c| g * srgb_decode(c) / k);
+    let light = decoded_night(g, ring);
+    for (name, p) in [("default", Params::default()), ("city", city_params())] {
+        let (example, host) = (render_band(&p, 1024), render_band_lit(&p, 1024, &light));
+        let mut want = example.texels.clone();
+        light.to_host(&mut want, example.w, example.h, p[P::Horizon]);
+        let (mut worst, mut n) = (0.0f32, 0usize);
+        for (a, b) in host.texels.iter().zip(&want) {
+            assert_eq!(a[3], b[3], "{name}: the coverage changed");
+            for c in 0..3 {
+                let err = (a[c] - b[c]).abs();
+                if b[c] > 1e-5 { worst = worst.max(err / b[c]); n += 1; }
+                assert!(err <= 4e-3 * b[c].abs() + 2e-6, "{name}: {} where the example as displayed x g is {}", a[c], b[c]);
+            }
+        }
+        println!("{name}: the decoded night band = to_host(the example's): worst relative {worst:.2e} over {n} channels");
+        assert!(n > 1000);
+    }
+}
+
+/// Hue (degrees) of a linear colour.
+fn hue(c: [f32; 3]) -> f32 { (3f32.sqrt() * (c[1] - c[2])).atan2(2.0 * c[0] - c[1] - c[2]).to_degrees() }
+
+/// The owner's ruling (plan hdri-5 Task 8): the night "like the example", measured as the night-vs-example comparison does,
+/// in linear light as a display shows it. The example: its band over its sky at the horizon (`BACKDROP_HORIZON`), the codes
+/// decoded. A host: the band with `decode` at design gain 0.0264 over a host sky of that backdrop's light x the gain (the
+/// generator's night horizon, as DESIGN_GAIN was measured), composited in the host's linear units. Over the city's texels:
+/// the dark facades (the example's darkest half) against the sky, and the lit windows' hue (the brightest 3 %).
+/// Before the ruling the app measured facades at 47 % of its sky against the example's 4 %, and windows cream.
+/// Tolerances: the facade-to-sky ratio within a factor 1.5 either way, the window hue within 10 degrees and their light
+/// against the sky within a factor 1.5.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_decoded_night_looks_like_the_example() {
+    use makepad_skyline::{srgb_decode, BACKDROP_HORIZON};
+    let g = 0.0264f32;
+    let sky = BACKDROP_HORIZON.map(|c| g * srgb_decode(c));
+    let p = city_params();
+    let example = render_band(&p, 1024);
+    let host = render_band_lit(&p, 1024, &decoded_night(g, sky));
+    let city = city_rows(&p, &example);
+    let shown_example = |i: usize| -> [f32; 3] { let t = example.texels[i]; std::array::from_fn(|c| srgb_decode(t[c] + (1.0 - t[3]) * BACKDROP_HORIZON[c])) };
+    let shown_host = |i: usize| -> [f32; 3] { let t = host.texels[i]; std::array::from_fn(|c| t[c] + (1.0 - t[3]) * sky[c]) };
+    let lum3 = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let (sky_ex, sky_host) = (lum3(BACKDROP_HORIZON.map(srgb_decode)), lum3(sky));
+    let mut order: Vec<usize> = city.clone();
+    order.sort_by(|a, b| lum3(shown_example(*a)).total_cmp(&lum3(shown_example(*b))));
+    let dark = &order[..order.len() / 2];
+    let lit = &order[order.len() - (order.len() * 3 / 100).max(10)..];
+    let median = |mut v: Vec<f32>| { v.sort_by(f32::total_cmp); v[v.len() / 2] };
+    let facade = |shown: &dyn Fn(usize) -> [f32; 3]| median(dark.iter().map(|i| lum3(shown(*i))).collect());
+    let (f_ex, f_host) = (facade(&shown_example) / sky_ex, facade(&shown_host) / sky_host);
+    let mean = |shown: &dyn Fn(usize) -> [f32; 3]| { let s = lit.iter().fold([0.0f32; 3], |s, i| { let c = shown(*i); [s[0] + c[0], s[1] + c[1], s[2] + c[2]] }); s.map(|x| x / lit.len() as f32) };
+    let (w_ex, w_host) = (mean(&shown_example), mean(&shown_host));
+    let (h_ex, h_host) = (hue(w_ex), hue(w_host));
+    let (l_ex, l_host) = (lum3(w_ex) / sky_ex, lum3(w_host) / sky_host);
+    println!("facades over the sky: example {f_ex:.4}, host {f_host:.4}; windows: hue example {h_ex:.1}, host {h_host:.1}; light over the sky example {l_ex:.2}, host {l_host:.2}");
+    assert!(f_host < 1.5 * f_ex && f_host > f_ex / 1.5, "facades: host {f_host}, example {f_ex}");
+    assert!((h_host - h_ex).abs() < 10.0, "window hue: host {h_host}, example {h_ex}");
+    assert!(l_host < 1.5 * l_ex && l_host > l_ex / 1.5, "windows' light: host {l_host}, example {l_ex}");
 }
 
 /// Night, noon and a sunset over the city, toned PNGs into `SKYLINE_VISUAL_DIR` (the whole strip and the city's sector).

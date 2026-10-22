@@ -17,7 +17,7 @@ pub mod export;
 pub mod light;
 
 pub use export::{Band, BandDone, ExportKind};
-pub use light::{SkyLight, RING};
+pub use light::{example_haze_share, srgb_decode, srgb_encode, SkyLight, BACKDROP_HORIZON, RING};
 pub use params::{ParamDef, Params, COUNT, P, PARAMS, SEED_MAX};
 pub use render::{SceneTarget, Skyline, ViewSpec};
 
