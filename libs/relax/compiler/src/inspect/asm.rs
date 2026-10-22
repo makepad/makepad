@@ -1071,14 +1071,25 @@ pub fn cmd_asm(req: &Req, out: &mut Out) {
     if q == "top" {
         return cmd_top(req, out);
     }
-    let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(2.0).clamp(0.0, 30.0);
+    // at=<code offset, hex>: the instructions around one offset (a fault's `off` from the panic
+    // report, a sample pc), the one at it marked; no sampling unless s= asks
+    // (decimal as a panic report's `off`, or 0x-prefixed hex as the listings print it)
+    let at = match req.get("at").map(|v| match v.strip_prefix("0x") {
+        Some(h) => u32::from_str_radix(h, 16),
+        None => v.parse::<u32>(),
+    }) {
+        Some(Ok(o)) => Some(o),
+        Some(Err(_)) => return out.err("at=<code offset>: decimal as a panic report's `off` (at=110970), or hex with 0x as the listings (at=0x1b17a)"),
+        None => None,
+    };
+    let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(if at.is_some() { 0.0 } else { 2.0 }).clamp(0.0, 30.0);
     let hz = req.num("hz", 1000).clamp(10, 4000);
     let ev = match super::prof::Ev::parse(req.get("ev").unwrap_or("cpu")) {
         Ok(e) => e,
         Err(e) => return out.err(&e),
     };
     let vs = req.get("vs").map_or(req.get("native").is_some(), |v| v == "rustc");
-    let view = req.get("view").unwrap_or("summary");
+    let view = if at.is_some() { "code" } else { req.get("view").unwrap_or("summary") };
     let n = req.num("n", 12) as usize;
     // ranges first (cheap), then samples, then the code again if it changed while sampling
     let (mut sides, mut notes) = match our_sides(&q, 32) {
@@ -1129,11 +1140,11 @@ pub fn cmd_asm(req: &Req, out: &mut Out) {
     } else {
         None
     };
-    render(out, slot, &a, b.as_ref(), view, req.get("line"), n, took, hz, ev, &pcs, others, others_samples, &notes, &snotes, &q);
+    render(out, slot, &a, b.as_ref(), view, req.get("line"), at.map(|o| (o, req.num("n", 24) as usize)), n, took, hz, ev, &pcs, others, others_samples, &notes, &snotes, &q);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line: Option<&str>, n: usize, took: f64, hz: u64, ev: super::prof::Ev, pcs: &[(u64, u64, u64)], others: usize, others_samples: u64, notes: &[String], snotes: &[String], q: &str) {
+fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line: Option<&str>, at: Option<(u32, usize)>, n: usize, took: f64, hz: u64, ev: super::prof::Ev, pcs: &[(u64, u64, u64)], others: usize, others_samples: u64, notes: &[String], snotes: &[String], q: &str) {
     let bytes = |s: &Side| s.insns.iter().map(|i| i.len as u32).sum::<u32>();
     let ts = a.total_samples();
     let unknown = a.insns.iter().filter(|i| i.class == Class::Unknown).count() + b.map_or(0, |b| b.insns.iter().filter(|i| i.class == Class::Unknown).count());
@@ -1222,9 +1233,17 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
         // our code in address order: the line where it changes, loop heads, samples per instruction
         let heads: std::collections::HashSet<usize> = a.loops().iter().map(|l| l.0).collect();
         let mut last = u32::MAX;
+        // at=: a window of instructions around the one that holds the offset
+        let range = match at {
+            Some((o, w)) => match a.insns.iter().position(|i| o >= i.off && o < i.off + i.len as u32) {
+                Some(x) => x.saturating_sub(w)..(x + w + 1).min(a.insns.len()),
+                None => return out.err(&format!("offset {:#x} is outside the code of @{} (0..{:#x})", o, slot, a.insns.last().map_or(0, |l| l.off + l.len as u32))),
+            },
+            None => 0..a.insns.len(),
+        };
         out.line("```");
         out.line(&format!("  off {:>7} instruction   (samples: self+below a call)", ev_unit(ev)));
-        for k in 0..a.insns.len() {
+        for k in range {
             if a.at[k] != last {
                 last = a.at[k];
                 let l = a.lines.get(last as usize).map_or("(no line)".to_string(), |l| l.show.clone());
@@ -1234,11 +1253,12 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
             if heads.contains(&k) {
                 out.line(&format!("; loop head @{:x}", a.insns[k].off));
             }
-            out.line(&format!("{:5x} {}", a.insns[k].off, listing_row(a, k, true)));
+            let here = at.is_some_and(|(o, _)| o >= a.insns[k].off && o < a.insns[k].off + a.insns[k].len as u32);
+            out.line(&format!("{:5x} {}{}", a.insns[k].off, listing_row(a, k, true), if here { "   <== at" } else { "" }));
         }
         out.line("```");
         if out.truncated {
-            out.always("(cut at the reply limit: full=1)");
+            out.always("(cut at the reply limit: full=1, or at=<offset> for a window)");
         }
     }
     if view == "listing" || view == "ours" {

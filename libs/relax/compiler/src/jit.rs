@@ -1428,6 +1428,13 @@ pub(crate) unsafe fn fault_policy(label: &str, info: &PanicInfo) -> bool {
     }
     let note = crate::zone_alloc::kept_with(|| format!("state may be corrupt after a {} at {:#x} on thread '{}' in {} (the frames it unwound ran no cleanups); restart recommended", info.kind, info.fault_addr, tname, at));
     eprintln!("makepad: POISONED: {}", note);
+    // the instructions around the fault in the live process (asm at= shows the slot's installed body)
+    if let Some(pc) = info.frames.first().copied() {
+        let t = u.code.read().unwrap_or_else(|e| e.into_inner());
+        if let (Some(slot), Some((start, _, _))) = (t.slot_at(pc), t.entry_at(pc)) {
+            eprintln!("  code: makepad inspect {} asm @{} at={}  (the faulting instruction and its neighbours)", std::process::id(), slot, pc - start);
+        }
+    }
     if let Ok(mut g) = POISONED.lock() {
         if g.is_none() {
             *g = Some(note);
@@ -10859,18 +10866,21 @@ fn sample_trace() -> bool {
 }
 
 /// MAKEPAD_RUN_DUMP=<suffix>[,<suffix>..]: machine code (.bin / O3 .t1.bin) and RIR (.rir) of the fns whose
-/// name ends with one of the suffixes go to <MAKEPAD_RUN_DUMP_DIR, default /tmp>/relax_dump_<suffix, :: -> _>.
+/// name ends with one of the suffixes go to <MAKEPAD_RUN_DUMP_DIR, default /tmp>/relax_dump_<suffix, :: -> _>
+/// (a SPEC-V twin's too: named `.<n>.twin` with MAKEPAD_RUN_DUMP_EACH, else it shares the fn's files).
 /// (tools: bench_rt/asmdiff.py)
 fn dump_base(name: &str) -> Option<String> {
     static DUMP: std::sync::OnceLock<Option<(Vec<String>, String)>> = std::sync::OnceLock::new();
     let (wants, dir) = DUMP.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_DUMP").ok().map(|w| (w.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect(), std::env::var("MAKEPAD_RUN_DUMP_DIR").unwrap_or_else(|_| "/tmp".to_string()))))).as_ref()?;
-    let w = wants.iter().find(|w| name.ends_with(w.as_str()))?;
+    // a SPEC-V twin (`<fn> [unverified]`, which runs first) dumps under its fn's suffix too
+    let plain = name.strip_suffix(" [unverified]").unwrap_or(name);
+    let w = wants.iter().find(|w| plain.ends_with(w.as_str()))?;
     // MAKEPAD_RUN_DUMP_EACH=1: every build its own files (instances of one generic share a name)
     static EACH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *EACH.get_or_init(|| std::env::var_os("MAKEPAD_RUN_DUMP_EACH").is_some()) {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(format!("{}/relax_dump_{}.{}", dir, w.replace("::", "_"), n));
+        return Some(format!("{}/relax_dump_{}.{}{}", dir, w.replace("::", "_"), n, if plain.len() < name.len() { ".twin" } else { "" }));
     }
     Some(format!("{}/relax_dump_{}", dir, w.replace("::", "_")))
 }
