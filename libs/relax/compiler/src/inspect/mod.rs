@@ -919,7 +919,7 @@ fn cmd_waits(out: &mut Out) {
 
 fn cmd_owner(out: &mut Out) {
     out.measured("owner thread", "owner counters (no owner)", &[]);
-    out.line(&format!("{{\"serving\":{},\"queued\":{}}}", json_str(&crate::owner::serving_note()), crate::owner::queued_note()));
+    out.line(&format!("{{\"serving\":{},\"queued\":{},\"pure_census\":{}}}", json_str(&crate::owner::serving_note()), crate::owner::queued_note(), crate::owner::pure_note_json()));
 }
 
 // ------------------------------------------------------------------ Splash VMs

@@ -435,7 +435,14 @@ pub fn is_sandboxed_slot(u: &Unit, id: u32) -> bool {
     }
     let g = SB.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = g.as_ref() else { return false };
-    let k = match &u.fns[id as usize].key {
+    // a lowering ahead's temporary callee identity (descending from u32::MAX) names its key there
+    let ahead = crate::jit::lower_ahead_fn_key(id);
+    let key = match &ahead {
+        Some(k) => k,
+        None if (id as usize) < u.fns.len() => &u.fns[id as usize].key,
+        None => return false,
+    };
+    let k = match key {
         FnKey::Inst(d, _) => u.prog.def(*d).krate,
         FnKey::Closure(f, _, _) => match u.prog.file_crate.get(*f as usize) {
             Some(k) => *k,

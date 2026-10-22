@@ -478,7 +478,7 @@ impl<'a> Lcx<'a> {
     pub fn new(u: &'a Unit, b: &'a Body, name: String, cur_fn: u32) -> Lcx<'a> {
         // SPEC-V: unverified code (no clean verdict yet, or an unverified-mode twin) sends its
         // aliasing-prone calls to unverified-mode twins
-        let plain_calls = crate::jit::PLAIN_LOWER.with(|c| c.get()) == Some(cur_fn) || ((cur_fn as usize) < u.fns.len() && !u.verdict_clean(cur_fn));
+        let plain_calls = crate::jit::PLAIN_LOWER.with(|c| c.get()).is_some_and(|p| p.0 == cur_fn) || ((cur_fn as usize) < u.fns.len() && !u.verdict_clean(cur_fn));
         let mut f = Func::new(name, b.file);
         let entry = f.block();
         let n = b.locals.len();
@@ -608,7 +608,9 @@ impl<'a> Lcx<'a> {
         if !args.is_empty() || !self.u.provided.iter().any(|(k, _)| *k == krate) {
             return;
         }
-        let crate::jit::FnKey::Inst(cd, cargs) = self.u.fns[callee as usize].key.clone() else { return };
+        // (a lowering ahead's temporary callee identity names its key there)
+        let ckey = crate::jit::lower_ahead_fn_key(callee).unwrap_or_else(|| self.u.fns[callee as usize].key.clone());
+        let crate::jit::FnKey::Inst(cd, cargs) = ckey else { return };
         let path = self.u.prog.def_path(cd);
         // a Box of a provided crate's opaque type is one owner: JIT code allocates it, rustc's
         // drop shim runs on the inner value, JIT code frees the box; wrapping and unwrapping it

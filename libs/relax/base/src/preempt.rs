@@ -87,12 +87,24 @@ pub struct NeedsUnit;
 /// cancelled, and its requester posts it again once the owner has moved on.
 pub struct OwnerBusy;
 
+/// The unwind payload of an operation a publish to the JIT's owner may not run (compiler/src/
+/// owner.rs `publish_or_bail`, rule I-PUB): a front, an initializer, JIT code, a wait. Like the
+/// others it is no result: a query it crosses records nothing, and the background build whose take
+/// it ends fronts `slots` off the owner (empty: no front can help) and takes again, or is dropped.
+/// A take collects every inline candidate needing a front before it bails (compiler jit.rs
+/// `fronts_or_bail`), so its rounds are the inline depth, not the candidate count.
+pub struct PublishBail {
+    pub what: &'static str,
+    pub slots: Vec<u32>,
+}
+
 /// Whether a caught unwind payload is work to be redone rather than a failure: a preemption,
 /// a build waiting for the post-boot loader (NeedsLoad), lowering ahead that needs the unit
-/// (NeedsUnit), or a request the owner thread could not serve yet (OwnerBusy). A query it
+/// (NeedsUnit), a request the owner thread could not serve yet (OwnerBusy), or a publish that bailed
+/// (PublishBail). A query it
 /// crosses is cancelled.
 pub fn is_cancelled(payload: &(dyn std::any::Any + Send)) -> bool {
-    payload.is::<Preempted>() || payload.is::<NeedsLoad>() || payload.is::<NeedsUnit>() || payload.is::<OwnerBusy>()
+    payload.is::<Preempted>() || payload.is::<NeedsLoad>() || payload.is::<NeedsUnit>() || payload.is::<OwnerBusy>() || payload.is::<PublishBail>()
 }
 
 #[cfg(test)]

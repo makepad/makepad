@@ -891,9 +891,9 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
                 let up = upv as *mut Unit;
                 let mut rows = Vec::new();
                 for id in list {
-                    let before = crate::owner::call(crate::owner::Class::Background, || snapshot(unsafe { &*up }, id));
+                    let before = crate::owner::call(crate::owner::Class::App, || snapshot(unsafe { &*up }, id));
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_tier1(up, id) })).unwrap_or(false);
-                    let row = crate::owner::call(crate::owner::Class::Background, || {
+                    let row = crate::owner::call(crate::owner::Class::App, || {
                         let u = unsafe { &*up };
                         let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: MAKEPAD_RUN_TIER1_TRACE=1 says why)".into()) };
                         let mut s = format!("{{\"o3\":{},\"slot\":{},\"installed\":{},{}", json_str(&short(&super::display_name(u, id, 0), 160)), id, ok, patched_row(u, id, &before, &r));

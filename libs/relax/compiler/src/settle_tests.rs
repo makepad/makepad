@@ -214,10 +214,8 @@ fn allocator_swap_serves_background_finish() {
         let _job = compile_job();
         began_tx.send(()).unwrap();
         go_rx.recv().unwrap();
-        crate::owner::call(crate::owner::Class::FinishBackground, || {});
-        for class in [crate::owner::Class::Finish, crate::owner::Class::Job] {
-            crate::owner::call(class, || {});
-        }
+        crate::owner::publish(|| {});
+        crate::owner::call(crate::owner::Class::Job, || {});
     });
     began_rx.recv().unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();

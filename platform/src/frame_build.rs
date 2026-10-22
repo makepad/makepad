@@ -30,7 +30,7 @@ use crate::{
 use makepad_hal::{
     format, pass_load as load, pipeline_binding as binding, pipeline_blend, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct TexRec {
     id: Id,
@@ -136,6 +136,8 @@ pub(crate) struct FrameBuilder {
     pub(crate) window_frames: Vec<Id>,
     window_submitted: HashMap<Id, u64>,
     window_completed: HashMap<Id, u64>,
+    /// Window frames (target, serial) handed to the HAL to present and not done yet.
+    window_presenting: HashSet<(Id, u64)>,
     /// Packet serial -> (window/repaint group, pass name, closes the presented frame).
     pub(crate) timings: HashMap<u64, (u64, String, bool)>,
     pub(crate) info: HalInfo,
@@ -229,16 +231,19 @@ impl FrameBuilder {
         self.window_completed.get(&window).copied().unwrap_or(0)
     }
 
-    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) {
+    /// Whether `serial` was a window frame submitted to `target` for presenting (a frame on the glass).
+    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) -> bool {
         // Texture targets may reuse a window's numeric id; only a submitted window frame counts.
         if self.window_submitted.get(&target) == Some(&serial) {
             self.window_completed.insert(target, serial);
         }
+        self.window_presenting.remove(&(target, serial))
     }
 
     pub(crate) fn window_closed(&mut self, window: Id) {
         self.window_submitted.remove(&window);
         self.window_completed.remove(&window);
+        self.window_presenting.retain(|(target, _)| *target != window);
     }
 
     /// Logs a gap in the HAL's command set once per reason.
@@ -409,6 +414,7 @@ impl FrameBuilder {
         for (window, serial) in &self.window_submitted {
             self.window_completed.insert(*window, *serial);
         }
+        self.window_presenting.clear();
         inst
     }
 
@@ -1247,6 +1253,9 @@ impl Cx {
             }
             fb.window_frames.push(target);
             fb.window_submitted.insert(target, serial);
+            if !picking {
+                fb.window_presenting.insert((target, serial));
+            }
             if let (Some(window), Some((index, _))) = (window, hosted_target) {
                 self.hal.hosted.as_mut().unwrap().submitted(window, index, serial, [tw as u32, th as u32]);
             }

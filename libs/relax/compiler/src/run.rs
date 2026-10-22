@@ -2019,10 +2019,7 @@ fn flush_errors(block: bool) {
     let to_report = if block {
         crate::owner::call(crate::owner::program_class(), body)
     } else {
-        match crate::owner::call_within(crate::owner::Class::Background, 0, body) {
-            Some(r) => r,
-            None => return,
-        }
+        crate::owner::publish(body)
     };
     for e in to_report {
         report("error", &e);
@@ -2040,13 +2037,13 @@ fn spill_cache() {
     if lim == 0 || up.is_null() {
         return;
     }
-    let Some(spill) = crate::owner::call_within(crate::owner::Class::Background, 0, || {
+    let Some(spill) = Some(crate::owner::publish(|| {
         let u = unsafe { &mut *up };
         match u.cache.as_mut() {
             Some(c) if c.pending_bytes() >= lim => c.spill_take(),
             _ => None,
         }
-    }) else { return };
+    })) else { return };
     if let Some(s) = spill {
         // its own thread: the monitor loop's other duties (errors, trims) do not wait for the disk
         { let _k = crate::zone_alloc::kept();
@@ -2126,7 +2123,9 @@ static SETTLE_WHY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::ne
 fn try_settle(compiled: u64, drops: &mut jit::SettleDrops, trim: bool) -> bool {
     let up = unsafe { RUN_UNIT };
     if up.is_null() { return false; }
-    let Some(Some((drops, pending, spill, at, landmark, retired))) = crate::owner::call_within(crate::owner::Class::Background, 0, || {
+    // a front write and the whole pending cache: structural work, a program-class request (rule
+    // I-PUB: no publish; its records go in bounded publishes with step 4 of OWNERARCH.DESIGN.md)
+    let Some(Some((drops, pending, spill, at, landmark, retired))) = Some(crate::owner::call(crate::owner::Class::App, || {
         if jit::COMPILED_FNS.load(Ordering::Relaxed) != compiled {
             SETTLE_WHY.store(1, Ordering::Relaxed);
             return None;
@@ -2149,7 +2148,7 @@ fn try_settle(compiled: u64, drops: &mut jit::SettleDrops, trim: bool) -> bool {
             format!("latest first present +{:.0} ms", jit::wall_ns().saturating_sub(present) as f64 / 1e6)
         };
         Some((drops, pending, spill, at, landmark, retired))
-    }) else { return false };
+    })) else { return false };
     { let _k = crate::zone_alloc::kept();
     std::thread::spawn(move || { let _z = crate::zone_alloc::compiler_thread();
         let result = spill.map(|s| s.write());
@@ -2332,7 +2331,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 let settled_d = if (FIRST_PRESENT_WALL.load(Ordering::Acquire) != 0 || reclaim_requested)
                     && (reclaimed != Some(n) && now_ns.saturating_sub(last_drop_ns) >= SETTLE_DROP_EVERY_NS || reclaim_requested) {
                     last_drop_ns = now_ns;
-                    crate::owner::call_within(crate::owner::Class::Background, 0, || unsafe { jit::settle_drop(RUN_UNIT) })
+                    Some(crate::owner::publish(|| unsafe { jit::settle_drop(RUN_UNIT) }))
                 } else { None };
                 if let Some(mut d) = settled_d {
                     d.release_rir();
@@ -2666,13 +2665,14 @@ fn adopt_collected_tables() -> bool {
     let mut notes: Vec<(&'static str, crate::collected::Adopt)> = Vec::new();
     let before = crate::memstat::live_total();
     let t = Instant::now();
-    let Some(done) = crate::owner::call_within(crate::owner::Class::Background, 0, || {
+    // a front write (try only): structural, a program-class request
+    let Some(done) = crate::owner::call(crate::owner::Class::App, || {
         let Ok(_front) = jit::FRONT_RW.try_write() else { return None };
         let u = unsafe { &mut *up };
         if !front_recordable() { return Some(None); }
         let cache = u.cache.as_ref()?;
         Some(cache.adopt_collected(&mut u.prog, &mut u.tcx, &written, &mut retired, |name, how| notes.push((name, how))))
-    }).flatten() else { return false };
+    }) else { return false };
     let held = t.elapsed().as_secs_f64() * 1e3;
     drop(retired);
     let after = crate::memstat::live_total();
@@ -2701,13 +2701,14 @@ fn drop_program_memos() -> bool {
     let mut retired: Vec<Box<dyn Send>> = Vec::new();
     let before = crate::memstat::live_total();
     let t = Instant::now();
-    let Some(()) = crate::owner::call_within(crate::owner::Class::Background, 0, || {
+    // a front write (try only): structural, a program-class request
+    let Some(()) = crate::owner::call(crate::owner::Class::App, || {
         let Ok(_front) = jit::FRONT_RW.try_write() else { return None };
         let u = unsafe { &mut *up };
         unsafe { u.prog.detach_caches(&mut retired) };
         retired.push(u.tcx.retire_solver_cache());
         Some(())
-    }).flatten() else { return false };
+    }) else { return false };
     let held = t.elapsed().as_secs_f64() * 1e3;
     drop(retired);
     verbose!("makepad-run mem: dropped the name-resolution memos and solver caches at t={:.0} ms: counted heap {:.1} -> {:.1} MB; locks held {:.1} ms",
@@ -2867,8 +2868,10 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     let up = unsafe { RUN_UNIT };
     // one unit call: waits for the unit when `wait`, else only if it is free now
     fn unit_call<R>(wait: bool, f: impl FnOnce() -> R) -> Option<R> {
-        // (the writer is a background thread: a program thread's request goes first either way)
-        if wait { Some(crate::owner::call(crate::owner::Class::Background, f)) } else { crate::owner::call_within(crate::owner::Class::Background, 0, f) }
+        // (front writes and whole-cache encodes: structural, a program-class request -- the main
+        // thread's requests go first; bounded record publishes are step 4 of OWNERARCH.DESIGN.md)
+        let _ = wait;
+        Some(crate::owner::call(crate::owner::Class::App, f))
     }
     if up.is_null() {
         return None;
@@ -3192,17 +3195,30 @@ fn summary_inner(why: &str) {
             }
             if built > 0 || n[0] > 0.0 {
                 verbose!(
-                    "makepad-run: pipelined compile: callers front {:.0} ms locked, back {:.0} ms unlocked, relock wait {:.0} ms, in-flight waits {:.0} ms; speculative {} built ({} called, {} unused; {} expired after MAKEPAD_RUN_SPEC_TTL_MS, {:.0} MB freed), workers front {:.0} ms back {:.0} ms, {} yields, {} cold calls skipped{}",
-                    n[0], n[1], n[2], n[3], built, used, built - used, jit::SPEC_EXPIRED[0].load(Ordering::Relaxed), jit::SPEC_EXPIRED[1].load(Ordering::Relaxed) as f64 / 1048576.0, n[4], n[5], jit::SPEC_YIELDS.load(Ordering::Relaxed), jit::SPEC_COLD_SKIPPED.load(Ordering::Relaxed), if jit::spec_hot_only(options) { " (fall-through only)" } else { "" }
+                    "makepad-run: pipelined compile: callers front {:.0} ms locked, back {:.0} ms unlocked, relock wait {:.0} ms, in-flight waits {:.0} ms; speculative {} built ({} called, {} unused; {} expired after MAKEPAD_RUN_SPEC_TTL_MS, {:.0} MB freed), workers front {:.0} ms back {:.0} ms, {} cold calls skipped{}",
+                    n[0], n[1], n[2], n[3], built, used, built - used, jit::SPEC_EXPIRED[0].load(Ordering::Relaxed), jit::SPEC_EXPIRED[1].load(Ordering::Relaxed) as f64 / 1048576.0, n[4], n[5], jit::SPEC_COLD_SKIPPED.load(Ordering::Relaxed), if jit::spec_hot_only(options) { " (fall-through only)" } else { "" }
                 );
             }
         }
         if !SILENT.load(Ordering::Relaxed) {
             let h = |i: usize| crate::owner::BUSY_NS[i].load(Ordering::Relaxed) as f64 / 1e6;
-            verbose!("makepad-run: owner thread busy: job {:.0} ms, finish {:.0} ms, main {:.0} ms, app {:.0} ms, background {:.0} ms (t={:.0} ms)", h(0), h(1), h(2), h(3), h(4), crate::clock::ms_since_start());
+            verbose!("makepad-run: owner thread busy: job {:.0} ms, publish {:.0} ms, main {:.0} ms, app {:.0} ms (t={:.0} ms)", h(0), h(1), h(2), h(3), crate::clock::ms_since_start());
+            let b = |i: usize| crate::owner::BAILS[i].load(Ordering::Relaxed);
+            let pf = |i: usize| jit::PREFRONTS[i].load(Ordering::Relaxed);
+            let fail: Vec<String> = (1..jit::PREFRONT_FAIL.len()).map(|i| format!("{} {}", jit::PREFRONT_FAIL_NAMES[i], jit::PREFRONT_FAIL[i].load(Ordering::Relaxed))).collect();
+            verbose!("makepad-run: background takes (rule I-PURE): {} fronts run off the owner ({:.0} ms cpu; made nothing: {}); bails: front {}, initializer {}, jit {}, wait {}; builds dropped {}",
+                pf(0), pf(1) as f64 / 1e6, fail.join(", "), b(0), b(1), b(2), b(3), b(crate::owner::BAIL_DROPPED));
             let m = |i: usize| crate::owner::MAIN_ACC[i].load(Ordering::Relaxed);
             verbose!("makepad-run: main thread's {} owner requests: waited {:.0} ms (queue delay before service {:.0} ms, wake delay after completion {:.0} ms); by wait length <20us {} ({:.0} ms), <200us {} ({:.0} ms), <2ms {} ({:.0} ms), longer {} ({:.0} ms)",
                 m(0), m(1) as f64 / 1e6, m(2) as f64 / 1e6, m(3) as f64 / 1e6, m(4), m(5) as f64 / 1e6, m(6), m(7) as f64 / 1e6, m(8), m(9) as f64 / 1e6, m(10), m(11) as f64 / 1e6);
+            verbose!("makepad-run: owner by site: {}", crate::owner::sites_summary(14));
+        }
+        if !SILENT.load(Ordering::Relaxed) {
+            let b = |i: usize| crate::owner::PURE_BAILS[i].load(Ordering::Relaxed);
+            let p = |i: usize| crate::owner::PURE_AT_PRESENT[i].load(Ordering::Relaxed);
+            use crate::owner::{PURE_AHEAD_BAIL, PURE_BG_EVAL, PURE_BG_FRONT, PURE_BG_JIT, PURE_BG_JOB};
+            verbose!("makepad-run: pure-or-bail census (total / before the present): background fronts on the owner {} / {}, background initializer runs {} / {}, background JIT calls {} / {}, const requests of Relax threads {} / {}, lowering-ahead NeedsUnit bails {} / {}",
+                b(PURE_BG_FRONT), p(PURE_BG_FRONT), b(PURE_BG_EVAL), p(PURE_BG_EVAL), b(PURE_BG_JIT), p(PURE_BG_JIT), b(PURE_BG_JOB), p(PURE_BG_JOB), b(PURE_AHEAD_BAIL), p(PURE_AHEAD_BAIL));
         }
         let ah = |i: usize| jit::AHEAD_STATS[i].load(Ordering::Relaxed);
         if ah(0) + ah(2) > 0 && !SILENT.load(Ordering::Relaxed) {

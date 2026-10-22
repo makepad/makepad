@@ -836,7 +836,7 @@ impl Cx {
                     }
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
-                self.hal.frames.frame_done(window, frame);
+                let window_frame = self.hal.frames.frame_done(window, frame);
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
                 let pool = self.task_pool();
@@ -846,11 +846,15 @@ impl Cx {
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
-                    Some(crate::os::hal::HostedDone::Publish(draw)) => Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw)),
+                    Some(crate::os::hal::HostedDone::Publish(draw)) => {
+                        if window_frame { crate::frame_trace::note_presented(); }
+                        Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
+                    }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
                     #[cfg(target_os = "linux")]
                     Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
-                    Some(crate::os::hal::HostedDone::Unknown) | None => {}
+                    // the HAL presented the window's frame itself (other targets' frames are passes)
+                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { crate::frame_trace::note_presented() },
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();

@@ -213,8 +213,6 @@ pub struct Options {
     pub sandbox_fuel: bool,
     /// `MAKEPAD_RUN_SPEC`; default `true`.
     pub spec: bool,
-    /// `MAKEPAD_RUN_SPEC_YIELD`; default `true`.
-    pub spec_yield: bool,
     /// `MAKEPAD_RUN_O3`; default `true`.
     pub tier1: bool,
     /// `MAKEPAD_RUN_TYCK_AHEAD`; default `true`.
@@ -363,7 +361,6 @@ impl Default for Options {
             pre_derives: true,
             sandbox_fuel: true,
             spec: true,
-            spec_yield: true,
             tier1: true,
             tyck_ahead: true,
             unwind: true,
@@ -481,7 +478,6 @@ impl Options {
             pre_derives: { let os = get("MAKEPAD_RUN_PRE_DERIVES"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             sandbox_fuel: { let os = get("MAKEPAD_RUN_SANDBOX_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             spec: { let os = get("MAKEPAD_RUN_SPEC"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            spec_yield: { let os = get("MAKEPAD_RUN_SPEC_YIELD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             tier1: { let os = get("MAKEPAD_RUN_O3"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") && !get("MAKEPAD_RUN_NO_CODEGEN").is_some_and(|v| !v.is_empty() && v != "0") },
             tyck_ahead: { let os = get("MAKEPAD_RUN_TYCK_AHEAD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             unwind: { let os = get("MAKEPAD_RUN_UNWIND"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
@@ -579,7 +575,6 @@ impl Options {
             pre_derives,
             sandbox_fuel,
             spec,
-            spec_yield,
             tier1,
             tyck_ahead,
             unwind,
@@ -709,8 +704,6 @@ impl Options {
         h.u8(*sandbox_fuel as u8);
         h.str("spec");
         h.u8(*spec as u8);
-        h.str("spec_yield");
-        h.u8(*spec_yield as u8);
         h.str("o3");
         h.u8(*tier1 as u8);
         h.str("tyck_ahead");

@@ -1789,7 +1789,7 @@ unsafe fn compile_guarded(up: *mut Unit, id: u32) -> Result<Code, String> {
         Ok(r) => r,
         Err(p) => {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".to_string());
-            if p.is::<crate::preempt::OwnerBusy>() {
+            if p.is::<crate::preempt::OwnerBusy>() || p.is::<crate::preempt::PublishBail>() {
                 std::panic::resume_unwind(p);
             }
             let u = &mut *up;

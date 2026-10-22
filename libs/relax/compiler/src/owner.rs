@@ -18,42 +18,42 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use relax_session::sync::{Condvar, Mutex};
 
-/// Request classes, in service order.
+/// Request classes (service order: SERVICE_ORDER).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Class {
     /// asked by a pure job that may hold what the owner waits for (a constant's value for a type
     /// check, a report): served also inside every pump
     Job = 0,
-    /// a back end's result (store, install): never opens a build; served also inside every pump
-    Finish = 1,
+    /// a bounded, guarded step (OWNERARCH.DESIGN.md rule I-PUB, `publish`): a back end's finish,
+    /// background bookkeeping, the take of a background build. It runs
+    /// no front, no initializer, no JIT code, no wait and no request, so it is never refused and is
+    /// served inside every pump. Served after the program's requests: a program thread waits for at
+    /// most the one publish running when it asks
+    Publish = 1,
     /// the program's main thread
     Main = 2,
-    /// other program threads, patches, the run's own foreground needs
+    /// other program threads, patches, structural steps (loads, adopts), inspect
     App = 3,
-    /// a background build's result (speculation, O2, O3 install): never opens a build; served
-    /// inside every pump (a wait for an in-flight slot needs it), at the top only after the
-    /// program threads' requests
-    FinishBackground = 4,
-    /// speculation, tiers, seeds, teardown, completion, monitors: only when nothing above waits
-    Background = 5,
 }
-pub const CLASSES: usize = 6;
-const CLASS_OF: [Class; CLASSES] = [Class::Job, Class::Finish, Class::Main, Class::App, Class::FinishBackground, Class::Background];
-pub const CLASS_NAMES: [&str; CLASSES] = ["job", "finish", "main", "app", "finish-background", "background"];
+pub const CLASSES: usize = 4;
+const CLASS_OF: [Class; CLASSES] = [Class::Job, Class::Publish, Class::Main, Class::App];
+/// The order the owner serves its lanes in (OWNERARCH.DESIGN.md §4: Job, Program, Publish)
+const SERVICE_ORDER: [usize; CLASSES] = [Class::Job as usize, Class::Main as usize, Class::App as usize, Class::Publish as usize];
+pub const CLASS_NAMES: [&str; CLASSES] = ["job", "publish", "main", "app"];
 /// makepad inspect's timeline span names of the owner's service, by class
-const SERVE_NAMES: [&str; CLASSES] = ["serve job", "serve finish", "serve main", "serve app", "serve finish background", "serve background"];
+const SERVE_NAMES: [&str; CLASSES] = ["serve job", "serve publish", "serve main", "serve app"];
 
 impl Class {
-    /// a back end's result: never refused, served inside pumps
+    /// a publish: never refused, served inside pumps
     pub fn is_finish(self) -> bool {
-        matches!(self, Class::Finish | Class::FinishBackground)
+        self == Class::Publish
     }
 
     /// The requester stays a running compile job while it waits (it holds front guards, queries,
     /// or slots in flight that only its finish releases). An allocator swap or fork waits for
     /// every running job, so these are the classes the owner serves for any thread while the jobs
     /// are paused: one predicate for both sides, so a swap never waits for a job whose request
-    /// the pause holds back (an O2/speculation/O3 finish queued as FinishBackground during a
+    /// the pause holds back (an O2/speculation/O3 finish queued as a background finish during a
     /// CEF-load swap hung Stage: "jobs active 1").
     pub fn keeps_job(self) -> bool {
         self == Class::Job || self.is_finish()
@@ -113,6 +113,9 @@ struct Req {
     site: &'static std::panic::Location<'static>,
     /// requester (os thread id)
     from: u64,
+    /// asked by background work (a Publish or Job of one of Relax's
+    /// own threads): the I-PURE census counts what it runs (`pure_note`)
+    bg: bool,
     /// the requester's query context
     ctx: *const (),
     /// the requester's compile record (jit::main_rec)
@@ -163,7 +166,7 @@ pub(crate) fn zone_put_back(taken: ZoneTaken) {
 
 static WAKE: Condvar = Condvar::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
-/// Main or App requests queued (background work gives way: `urgent`)
+/// Main or App requests queued (diagnostics)
 static FOREGROUND: AtomicU32 = AtomicU32::new(0);
 /// Main requests queued
 static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
@@ -200,6 +203,108 @@ static NOW_FROM: AtomicU64 = AtomicU64::new(0);
 static NOW_SITE: std::sync::atomic::AtomicPtr<std::panic::Location<'static>> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 /// when the request being served began (wall ns; 0: idle)
 static NOW_T0: AtomicU64 = AtomicU64::new(0);
+
+// ------------------------------------------------------------ owner time by request site (diagnostics)
+
+/// Owner time by request site (run summary `owner by site`): what each call site cost the owner,
+/// how much of it was O1 optimisation (optimize_rir on the owner), and how long the main thread's
+/// requests queued behind it after the first present. One lock-free table: a site is entered by a
+/// CAS on an empty row; a full table counts the rest in its last row.
+pub struct SiteAcc {
+    site: std::sync::atomic::AtomicPtr<std::panic::Location<'static>>,
+    class: AtomicU8,
+    /// [requests, owner ns, O1 optimisation ns on the owner, main's queue ns behind it, main waits behind it]
+    pub acc: [AtomicU64; 5],
+}
+
+const SITES_N: usize = 96;
+pub static SITES: [SiteAcc; SITES_N] = [const { SiteAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), class: AtomicU8::new(0), acc: [const { AtomicU64::new(0) }; 5] } }; SITES_N];
+pub const SITE_REQS: usize = 0;
+pub const SITE_NS: usize = 1;
+pub const SITE_OPT_NS: usize = 2;
+pub const SITE_BEHIND_NS: usize = 3;
+pub const SITE_BEHIND_N: usize = 4;
+/// main's queue delay (after the first present) by what the owner served when it asked: per class,
+/// and the owner idle (last row): [waits, ns]
+pub static MAIN_BEHIND: [[AtomicU64; 2]; CLASSES + 1] = [const { [const { AtomicU64::new(0) }; 2] }; CLASSES + 1];
+
+/// The table row of `site` (entered on first use).
+pub fn site_acc(site: *const std::panic::Location<'static>, class: Class) -> &'static SiteAcc {
+    let h = (site as usize >> 3).wrapping_mul(0x9e37_79b9) % (SITES_N - 1);
+    for k in 0..SITES_N - 1 {
+        let row = &SITES[(h + k) % (SITES_N - 1)];
+        let cur = row.site.load(Ordering::Acquire);
+        if cur as *const _ == site {
+            return row;
+        }
+        if cur.is_null() {
+            match row.site.compare_exchange(std::ptr::null_mut(), site as *mut _, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    row.class.store(class as u8, Ordering::Relaxed);
+                    return row;
+                }
+                Err(c) if c as *const _ == site => return row,
+                Err(_) => continue,
+            }
+        }
+    }
+    &SITES[SITES_N - 1]
+}
+
+/// (owner) O1 optimisation time spent inside the request being served: charged to its site.
+pub fn note_owner_opt(ns: u64) {
+    if !is_owner() {
+        return;
+    }
+    let site = NOW_SITE.load(Ordering::Relaxed);
+    if site.is_null() {
+        return;
+    }
+    let class = CLASS_OF[NOW_CLASS.load(Ordering::Relaxed).min(CLASSES as u8 - 1) as usize];
+    site_acc(site, class).acc[SITE_OPT_NS].fetch_add(ns, Ordering::Relaxed);
+}
+
+/// The run summary's `owner by site` rows: the `n` sites with the most owner time, plus the main
+/// thread's queue delay by what it was behind.
+pub fn sites_summary(n: usize) -> String {
+    let mut rows: Vec<(u64, String)> = Vec::new();
+    for row in SITES.iter() {
+        let site = row.site.load(Ordering::Acquire);
+        let a = |i: usize| row.acc[i].load(Ordering::Relaxed);
+        if a(SITE_REQS) == 0 {
+            continue;
+        }
+        // SAFETY: only &'static Locations are stored
+        let name = match unsafe { site.as_ref() } {
+            Some(l) => format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()),
+            None => "other".to_string(),
+        };
+        let c = CLASS_NAMES[row.class.load(Ordering::Relaxed) as usize % CLASSES];
+        rows.push((a(SITE_NS).max(a(SITE_BEHIND_NS)), format!("{} {} {}x {:.0} ms (O1 opt {:.0} ms), main behind it {}x {:.0} ms",
+            c, name, a(SITE_REQS), a(SITE_NS) as f64 / 1e6, a(SITE_OPT_NS) as f64 / 1e6, a(SITE_BEHIND_N), a(SITE_BEHIND_NS) as f64 / 1e6)));
+    }
+    let mut by_behind: Vec<(u64, String)> = Vec::new();
+    for row in SITES.iter() {
+        let site = row.site.load(Ordering::Acquire);
+        let ns = row.acc[SITE_BEHIND_NS].load(Ordering::Relaxed);
+        if ns == 0 {
+            continue;
+        }
+        // SAFETY: only &'static Locations are stored
+        let name = match unsafe { site.as_ref() } {
+            Some(l) => format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()),
+            None => "other".to_string(),
+        };
+        by_behind.push((ns, format!("{} {} {}x {:.0} ms", CLASS_NAMES[row.class.load(Ordering::Relaxed) as usize % CLASSES], name, row.acc[SITE_BEHIND_N].load(Ordering::Relaxed), ns as f64 / 1e6)));
+    }
+    by_behind.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let b = |c: usize| format!("{} {}x {:.0} ms", if c == CLASSES { "idle" } else { CLASS_NAMES[c] }, MAIN_BEHIND[c][0].load(Ordering::Relaxed), MAIN_BEHIND[c][1].load(Ordering::Relaxed) as f64 / 1e6);
+    format!("main's queue delay after the present by what the owner served: {}; most behind: {}; sites: {}",
+        (0..=CLASSES).map(b).collect::<Vec<_>>().join(", "),
+        by_behind.into_iter().take(8).map(|r| r.1).collect::<Vec<_>>().join("; "),
+        rows.into_iter().take(n).map(|r| r.1).collect::<Vec<_>>().join("; "))
+}
 
 // ------------------------------------------------------------ recent requests (diagnostics)
 
@@ -313,10 +418,234 @@ thread_local! {
     /// requests this thread waits for (0: none): a watchdog kick then is ignored
     static IN_CALL: Cell<u32> = const { Cell::new(0) };
     /// owner: the request being served (class, requester) and how many are open on its stack
-    static SERVING: Cell<(Class, u64)> = const { Cell::new((Class::Background, 0)) };
+    static SERVING: Cell<(Class, u64)> = const { Cell::new((Class::App, 0)) };
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     /// leaf locks this thread holds (`Leaf`)
     static LEAVES: Cell<u32> = const { Cell::new(0) };
+    /// owner: the request being served is background work (Req::bg)
+    static SERVING_BG: Cell<bool> = const { Cell::new(false) };
+    /// a publish runs on this thread (`publish`: PUB_STRICT, `publish_or_bail`: PUB_BAIL, 0: none)
+    static PUBLISHING: Cell<u8> = const { Cell::new(0) };
+    /// this thread is one of Relax's own (run-*, gandalf*), not the program's (None: not looked up)
+    static RELAX_THREAD: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+// ------------------------------------------------------------ I-PURE census
+
+/// What background work makes the owner do that pure-or-bail (OWNERARCH.DESIGN.md §3.2 rule 3)
+/// would refuse, counted before the rule exists so its bail rate is known (§4 risks):
+/// - `PURE_BG_FRONT`: a build opened (begin_build) while serving background work (a publish's
+///   take of RIR lowered off the owner opens one too);
+/// - `PURE_BG_EVAL`: a constant or static initializer evaluated (not memoised) while serving
+///   background work: background reading an unevaluated constant, a bail;
+/// - `PURE_BG_JIT`: JIT code run while serving background work (includes the code initializers
+///   of PURE_BG_EVAL): a bail;
+/// - `PURE_AHEAD_BAIL`: a lowering ahead that unwound with NeedsUnit (bails today already);
+/// - `PURE_BG_JOB`: Job requests from Relax's own threads (the denominator of their evaluations).
+/// Counts are events, totals over the run; `PURE_AT_PRESENT` keeps them at the first present.
+pub const PURE_BG_FRONT: usize = 0;
+pub const PURE_BG_EVAL: usize = 1;
+pub const PURE_BG_JIT: usize = 2;
+pub const PURE_AHEAD_BAIL: usize = 3;
+pub const PURE_BG_JOB: usize = 4;
+pub const PURE_N: usize = 5;
+pub const PURE_NAMES: [&str; PURE_N] = ["bg_fronts", "bg_evals", "bg_jit_calls", "ahead_needs_unit", "bg_jobs"];
+pub static PURE_BAILS: [AtomicU64; PURE_N] = [const { AtomicU64::new(0) }; PURE_N];
+pub static PURE_AT_PRESENT: [AtomicU64; PURE_N] = [const { AtomicU64::new(0) }; PURE_N];
+
+fn relax_thread() -> bool {
+    RELAX_THREAD
+        .try_with(|r| match r.get() {
+            Some(b) => b,
+            None => {
+                let name = crate::os::thread::name(me());
+                let b = name.starts_with("run-") || name.starts_with("gandalf");
+                r.set(Some(b));
+                b
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn is_background_request(class: Class) -> bool {
+    match class {
+        Class::Publish | Class::Job => relax_thread(),
+        _ => false,
+    }
+}
+
+// ------------------------------------------------------------ publish (rule I-PUB)
+
+const PUB_STRICT: u8 = 1;
+const PUB_BAIL: u8 = 2;
+
+pub use crate::preempt::PublishBail;
+
+/// The bail counts of `publish_or_bail`, by cause (run summary): a front, an initializer, JIT code,
+/// a wait (request, pump, front write), and builds dropped whole after their rounds
+pub static BAILS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+pub const BAIL_NAMES: [&str; 5] = ["front", "initializer", "jit", "wait", "dropped"];
+pub const BAIL_DROPPED: usize = 4;
+
+thread_local! {
+    /// the fronts the left-out candidates of the take being served needed (note_needs)
+    static TAKE_NEEDS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// (inside a take) a candidate it left out needed fronts for `slots`: its thread makes them for
+/// the next round (take_needs)
+pub fn note_needs(slots: Vec<u32>) {
+    let _ = TAKE_NEEDS.try_with(|n| {
+        let mut n = n.borrow_mut();
+        for s in slots {
+            if !n.contains(&s) {
+                n.push(s);
+            }
+        }
+    });
+}
+
+/// Drops the fronts a take noted when it ends (they are its own: a later request on the owner never
+/// sees them)
+struct ClearNeeds;
+impl Drop for ClearNeeds {
+    fn drop(&mut self) {
+        let _ = TAKE_NEEDS.try_with(|n| n.borrow_mut().clear());
+    }
+}
+
+/// (inside a take) the fronts noted so far
+pub fn take_needs() -> Vec<u32> {
+    TAKE_NEEDS.try_with(|n| std::mem::take(&mut *n.borrow_mut())).unwrap_or_default()
+}
+
+struct Publishing(u8);
+
+impl Publishing {
+    fn enter(mode: u8) -> Publishing {
+        Publishing(PUBLISHING.with(|p| p.replace(mode)))
+    }
+}
+
+impl Drop for Publishing {
+    fn drop(&mut self) {
+        let _ = PUBLISHING.try_with(|p| p.set(self.0));
+    }
+}
+
+/// Called by the operations a publish may not run (a front's type check and lowering, an
+/// initializer, JIT code, a request, a pump, a front write). Inside `publish` it is a bug (panic);
+/// inside `publish_or_bail` the publish ends (PublishBail) and its caller fronts `slot` off the
+/// owner or drops its build.
+#[inline]
+#[track_caller]
+pub fn forbid_in_publish(what: &'static str, slot: u32) {
+    match PUBLISHING.try_with(|p| p.get()).unwrap_or(0) {
+        0 => {}
+        PUB_BAIL => {
+            let cause = match what {
+                "front" => 0,
+                "initializer" => 1,
+                "jit" => 2,
+                _ => 3,
+            };
+            BAILS[cause].fetch_add(1, Ordering::Relaxed);
+            // MAKEPAD_RUN_BAIL_TRACE: where a background take bailed (diagnosis of the bail rate)
+            if std::env::var_os("MAKEPAD_RUN_BAIL_TRACE").is_some() {
+                eprintln!("makepad-run bail: {} (slot {}) at\n{}", what, slot, std::backtrace::Backtrace::force_capture());
+            }
+            std::panic::resume_unwind(Box::new(PublishBail { what, slots: if slot == u32::MAX { Vec::new() } else { vec![slot] } }))
+        }
+        _ => panic!("makepad: {} inside a publish to the compiler's owner (rule I-PUB: a publish is bounded and never runs a front, an initializer, JIT code or a wait)", what),
+    }
+}
+
+/// Inside the take of a background build (`publish_or_bail`): a front bails it.
+#[inline]
+pub fn bailing() -> bool {
+    PUBLISHING.try_with(|p| p.get()).unwrap_or(0) == PUB_BAIL
+}
+
+/// Runs `f` on the owner as a publish (rule I-PUB) and returns its result: bounded bookkeeping or
+/// an install. `f` may not run what `forbid_in_publish` guards; doing so panics.
+#[track_caller]
+pub fn publish<R>(f: impl FnOnce() -> R) -> R {
+    request(std::panic::Location::caller(), Class::Publish, false, None, move || {
+        let _p = Publishing::enter(PUB_STRICT);
+        f()
+    })
+    .unwrap()
+}
+
+/// Posts `f` as a publish (it runs later; nobody waits for it).
+#[track_caller]
+pub fn post_publish(f: impl FnOnce() + Send + 'static) {
+    post_queued(Class::Publish, move || {
+        let _p = Publishing::enter(PUB_STRICT);
+        f()
+    })
+}
+
+/// `publish` for the take of a background build (rule I-PURE): Err when `f` reached an operation
+/// a publish may not run (`PublishBail`: what, and the slot it needed a front for). On the owner
+/// itself `f` is the owner's own work (`#[relax(O3, always)]`'s first build, inspect served
+/// there): it runs as it is, unguarded.
+#[track_caller]
+pub fn publish_or_bail<R>(f: impl FnOnce() -> R) -> Result<R, PublishBail> {
+    if is_owner() || CHILD.load(Ordering::Relaxed) {
+        return Ok(f());
+    }
+    let site = std::panic::Location::caller();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        request(site, Class::Publish, false, None, move || {
+            let _p = Publishing::enter(PUB_BAIL);
+            let _ = take_needs();
+            let _clear = ClearNeeds;
+            f()
+        })
+        .unwrap()
+    }));
+    match r {
+        Ok(r) => Ok(r),
+        Err(p) => match p.downcast::<PublishBail>() {
+            Ok(b) => Err(*b),
+            Err(p) => std::panic::resume_unwind(p),
+        },
+    }
+}
+
+/// Counts census event `what` if the owner serves background work now (or, for `PURE_AHEAD_BAIL`,
+/// always). One thread-local read on the paths that call it (builds, evaluations, JIT calls).
+#[inline]
+pub fn pure_note(what: usize) {
+    if what == PURE_AHEAD_BAIL || SERVING_BG.try_with(|b| b.get()).unwrap_or(false) {
+        PURE_BAILS[what].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The request being served is background work: a publish or Job of one of Relax's own threads.
+pub fn serving_background() -> bool {
+    SERVING_BG.try_with(|b| b.get()).unwrap_or(false)
+}
+
+/// The census at the first present (jit's present hook).
+pub fn pure_mark_present() {
+    for i in 0..PURE_N {
+        PURE_AT_PRESENT[i].store(PURE_BAILS[i].load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
+/// The census as a JSON object (makepad inspect owner): totals and the part before the present.
+pub fn pure_note_json() -> String {
+    let mut out = String::from("{");
+    for i in 0..PURE_N {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("\"{}\":[{},{}]", PURE_NAMES[i], PURE_BAILS[i].load(Ordering::Relaxed), PURE_AT_PRESENT[i].load(Ordering::Relaxed)));
+    }
+    out.push('}');
+    out
 }
 
 /// Held with a leaf lock (a unit's `fn_create`): while it lives this thread may not wait for the
@@ -385,12 +714,6 @@ pub fn program_class() -> Class {
 pub fn for_main() -> bool {
     let main = crate::jit::MAIN_TID.load(Ordering::Relaxed);
     main != 0 && if is_owner() { serving().1 == main } else { me() == main }
-}
-
-/// Background work on the owner gives way when this is true (a program thread waits).
-#[inline]
-pub fn urgent() -> bool {
-    FOREGROUND.load(Ordering::Relaxed) > 0
 }
 
 /// The main thread waits for a request now.
@@ -479,13 +802,13 @@ pub fn start() {
 /// waits, so `f` may borrow its locals (as `std::thread::scope`'s threads do).
 #[track_caller]
 pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
-    request(class, false, None, f).unwrap()
+    request(std::panic::Location::caller(), class, false, None, f).unwrap()
 }
 
 /// `call` for work that reads no slot identity (the startup identities stay encoded).
 #[track_caller]
 pub fn call_quick<R>(class: Class, f: impl FnOnce() -> R) -> R {
-    request(class, true, None, f).unwrap()
+    request(std::panic::Location::caller(), class, true, None, f).unwrap()
 }
 
 /// `call`, unless the owner has not started it within `ms`: then it is withdrawn (None).
@@ -493,11 +816,11 @@ pub fn call_quick<R>(class: Class, f: impl FnOnce() -> R) -> R {
 pub fn call_within<R>(class: Class, ms: u64, f: impl FnOnce() -> R) -> Option<R> {
     // (at least 2 ms: an idle owner picks a request up in microseconds; 0 means "only if the
     // owner is free now")
-    request(class, false, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), f)
+    request(std::panic::Location::caller(), class, false, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), f)
 }
 
-#[track_caller]
-fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> Option<R> {
+fn request<R>(site: &'static std::panic::Location<'static>, class: Class, quick: bool, deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> Option<R> {
+    forbid_in_publish("a request", u32::MAX);
     if is_owner() || CHILD.load(Ordering::Relaxed) {
         return Some(f());
     }
@@ -525,8 +848,9 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
     let req = Req {
         run,
         class,
-        site: std::panic::Location::caller(),
+        site,
         from: me(),
+        bg: is_background_request(class),
         ctx: crate::query::context_ptr(),
         rec: crate::jit::main_rec_target(),
         quick,
@@ -570,7 +894,18 @@ fn request<R>(class: Class, quick: bool, deadline: Option<std::time::Instant>, f
         MAIN_ACC[b + 1].fetch_add(w, Ordering::Relaxed);
         let served = req.t_serve.load(Ordering::Relaxed);
         if served != 0 {
-            crate::jit::main_rec_behind(served.saturating_sub(req.t_push), behind, behind_from, behind_site);
+            let q = served.saturating_sub(req.t_push);
+            crate::jit::main_rec_behind(q, behind, behind_from, behind_site);
+            if main_wait {
+                let c = if behind == u8::MAX { CLASSES } else { (behind as usize).min(CLASSES - 1) };
+                MAIN_BEHIND[c][0].fetch_add(1, Ordering::Relaxed);
+                MAIN_BEHIND[c][1].fetch_add(q, Ordering::Relaxed);
+                if let Some(site) = behind_site {
+                    let row = site_acc(site, CLASS_OF[c.min(CLASSES - 1)]);
+                    row.acc[SITE_BEHIND_N].fetch_add(1, Ordering::Relaxed);
+                    row.acc[SITE_BEHIND_NS].fetch_add(q, Ordering::Relaxed);
+                }
+            }
         }
         crate::postframe::main_owner_wait(req.t_push, w);
     }
@@ -639,6 +974,7 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
         class,
         site: std::panic::Location::caller(),
         from: me(),
+        bg: is_background_request(class),
         ctx: std::ptr::null(),
         rec: std::ptr::null(),
         quick: false,
@@ -736,32 +1072,9 @@ fn wait(req: &Req, deadline: Option<std::time::Instant>) -> bool {
 enum Mode {
     /// the owner's idle loop: everything, in class order
     Top,
-    /// a wait inside a request: Job, Finish and FinishBackground only (Class::keeps_job: what
-    /// the awaited thread may be waiting for; a program thread's or a background request waits
-    /// for the owner's current one to end)
+    /// a wait inside a request: Job and Publish only (Class::keeps_job: what the awaited thread
+    /// may be waiting for; a program thread's request waits for the owner's current one to end)
     Pump,
-}
-
-/// Headroom for the program's threads after the first present: a Background request (a
-/// speculative front, an O3 snapshot, a cache batch) holds the owner until it ends, and a program
-/// thread's lazy compile makes several requests in a row with its own work in between (its back
-/// end, then the code it runs up to the next stub). So none starts while a program thread compiles
-/// or within BG_GAP_NS after its last compile ended -- unless background work has waited
-/// BG_STARVE_NS since the last one started (it always progresses; a program thread then waits for
-/// at most one background request in that time).
-const BG_GAP_NS: u64 = 2_000_000;
-const BG_STARVE_NS: u64 = 20_000_000;
-/// wall ns the last Background request started
-static BG_LAST_START: AtomicU64 = AtomicU64::new(0);
-/// pick held a Background request back: the idle owner looks again soon (nothing announces the
-/// end of a gap)
-static BG_HELD: AtomicBool = AtomicBool::new(false);
-
-fn background_held() -> bool {
-    if !crate::jit::FIRST_PRESENT.load(Ordering::Relaxed) || crate::jit::demand_quiet_ns() >= BG_GAP_NS {
-        return false;
-    }
-    crate::jit::wall_ns().saturating_sub(BG_LAST_START.load(Ordering::Relaxed)) < BG_STARVE_NS
 }
 
 fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
@@ -772,25 +1085,14 @@ fn pick(q: &mut Queue, mode: Mode) -> Option<usize> {
         e => (e, false),
     };
     let helper = EXIT_HELPER.load(Ordering::Acquire);
-    for c in 0..CLASSES {
+    for c in SERVICE_ORDER {
         // a pump serves only what the awaited thread may be waiting for: a job's request, a
-        // back end's finish. Never a program thread's request, never a Background one: those open
-        // builds of their own (a speculative build's split_begin) on top of the request that
-        // pumps -- which holds its own state open meanwhile -- and a program thread whose
-        // request the pump's request is would wait behind them (Sandbox's race game hung on a
-        // speculative build served inside a main-thread request's pump, 2026-10-21)
+        // publish. Never a program thread's request: it opens builds of its own on top of the
+        // request that pumps -- which holds its own state open meanwhile (Sandbox's race game hung
+        // on a speculative build served inside a main-thread request's pump, 2026-10-21; builds
+        // are no publishes since rule I-PUB)
         if mode == Mode::Pump && !CLASS_OF[c].keeps_job() {
             continue;
-        }
-        if c >= Class::Background as usize && FOREGROUND.load(Ordering::Relaxed) > 0 {
-            break;
-        }
-        if c == Class::Background as usize && mode == Mode::Top && !q.lanes[c].is_empty() {
-            if background_held() {
-                BG_HELD.store(true, Ordering::Relaxed);
-                break;
-            }
-            BG_LAST_START.store(crate::jit::wall_ns(), Ordering::Relaxed);
         }
         let lane = &mut q.lanes[c];
         // a pause serves every request that keeps its job running (Class::keeps_job)
@@ -825,6 +1127,10 @@ fn serve(r: usize) {
     }
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
+    let prev_bg = SERVING_BG.with(|b| b.replace(req.bg));
+    if req.class == Class::Job && req.bg {
+        PURE_BAILS[PURE_BG_JOB].fetch_add(1, Ordering::Relaxed);
+    }
     let prev_now = (NOW_CLASS.swap(req.class as u8, Ordering::Relaxed), NOW_FROM.swap(req.from, Ordering::Relaxed));
     let prev_site = NOW_SITE.swap(req.site as *const std::panic::Location<'static> as *mut _, Ordering::Relaxed);
     let prev_t0 = NOW_T0.swap(t0.max(1), Ordering::Relaxed);
@@ -865,10 +1171,14 @@ fn serve(r: usize) {
     NOW_SITE.store(prev_site, Ordering::Relaxed);
     NOW_T0.store(prev_t0, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
+    SERVING_BG.with(|b| b.set(prev_bg));
     unsafe { crate::query::swap_context(prev_ctx) };
     OWNER_SERVING.store(was_serving, Ordering::Relaxed);
     let t1 = crate::jit::wall_ns();
     BUSY_NS[req.class as usize].fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
+    let row = site_acc(req.site, req.class);
+    row.acc[SITE_REQS].fetch_add(1, Ordering::Relaxed);
+    row.acc[SITE_NS].fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
     note_served(req.class, req.from, req.site, t0, t1);
     crate::postframe::owner_served(req.class as usize, req.site, req.from, t0, t1, FOREGROUND.load(Ordering::Relaxed));
     // the process is ending on another thread: this request is never answered (its requester
@@ -933,16 +1243,11 @@ fn owner_loop() -> ! {
                     q = Q.lock().unwrap_or_else(|e| e.into_inner());
                     continue;
                 }
-                BG_HELD.store(false, Ordering::Relaxed);
                 if let Some(r) = pick(&mut q, Mode::Top) {
                     break r;
                 }
                 OWNER_ASLEEP.store(true, Ordering::SeqCst);
-                q = if BG_HELD.load(Ordering::Relaxed) {
-                    WAKE.wait_timeout(q, std::time::Duration::from_millis(1)).map(|x| x.0).unwrap_or_else(|e| e.into_inner().0)
-                } else {
-                    WAKE.wait(q).unwrap_or_else(|e| e.into_inner())
-                };
+                q = WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
                 OWNER_ASLEEP.store(false, Ordering::SeqCst);
             }
         };
@@ -967,6 +1272,7 @@ fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
         return;
     }
     assert_no_leaf("a wait that serves the owner's requests");
+    forbid_in_publish("a wait", u32::MAX);
     let _w = crate::waits::begin(crate::waits::Kind::Pump, 0, runner, "pump");
     if !is_owner() || CHILD.load(Ordering::Relaxed) {
         // a job waiting for another thread is not running meanwhile (jit::job_sleep's reason)
@@ -1128,19 +1434,18 @@ mod tests {
     use super::*;
 
     /// The Sandbox race-game hang (2026-10-21): the owner, serving a main-thread request, pumped
-    /// inside it (a query latch) and took a queued Background request -- a speculative build --
-    /// which reached the slot lock the outer request held. A pump serves Job and Finish
-    /// requests only; the Background one waits for the top of the owner loop.
+    /// inside it (a query latch) and took a queued background request -- a speculative build --
+    /// which reached the slot lock the outer request held. A pump serves Job and Publish requests
+    /// only; a program thread's request waits for the top of the owner loop.
     #[test]
-    fn a_pump_serves_jobs_but_no_background_request() {
-        isolated_test!(a_pump_serves_jobs_but_no_background_request);
-        static BACKGROUND_RAN: AtomicBool = AtomicBool::new(false);
+    fn a_pump_serves_jobs_but_no_program_request() {
+        isolated_test!(a_pump_serves_jobs_but_no_program_request);
+        static APP_RAN: AtomicBool = AtomicBool::new(false);
         static JOB_RAN: AtomicBool = AtomicBool::new(false);
         call(Class::App, || {
             assert!(is_owner());
-            post_queued(Class::Background, || BACKGROUND_RAN.store(true, Ordering::SeqCst));
-            // the job comes only once the pump has looked at the queue and gone to sleep: before
-            // the fix the pump took the background request at its first look
+            post_queued(Class::App, || APP_RAN.store(true, Ordering::SeqCst));
+            // the job comes only once the pump has looked at the queue and gone to sleep
             let job = std::thread::spawn(|| {
                 while !OWNER_ASLEEP.load(Ordering::SeqCst) {
                     std::thread::yield_now();
@@ -1148,12 +1453,31 @@ mod tests {
                 call(Class::Job, || JOB_RAN.store(true, Ordering::SeqCst));
             });
             pump_wait(&|| JOB_RAN.load(Ordering::SeqCst));
-            assert!(!BACKGROUND_RAN.load(Ordering::SeqCst), "a background request was served inside a pump");
+            assert!(!APP_RAN.load(Ordering::SeqCst), "a program request was served inside a pump");
             job.join().unwrap();
         });
         // the owner's top loop serves it once the request ended
-        call(Class::Background, || {});
-        assert!(BACKGROUND_RAN.load(Ordering::SeqCst));
+        call(Class::App, || {});
+        assert!(APP_RAN.load(Ordering::SeqCst));
+    }
+
+    /// Rule I-PUB: a publish that asks the owner (or pumps) is a bug and panics; under
+    /// publish_or_bail it is a bail naming the slot, and the owner serves on.
+    #[test]
+    fn a_publish_never_waits() {
+        isolated_test!(a_publish_never_waits);
+        let r = std::thread::spawn(|| publish(|| call(Class::App, || {}))).join();
+        let p = r.expect_err("a request inside a publish panics");
+        let msg = p.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains("inside a publish"), "{msg}");
+        let b = std::thread::spawn(|| publish_or_bail(|| forbid_in_publish("front", 7))).join().unwrap();
+        assert_eq!(b.err().map(|b| b.slots), Some(vec![7]));
+        let b = std::thread::spawn(|| publish_or_bail(|| pump_wait(&|| false))).join().unwrap();
+        assert_eq!(b.err().map(|b| (b.slots, b.what)), Some((Vec::new(), "a wait")));
+        // on the owner it is the owner's own work: no guard
+        assert_eq!(call(Class::App, || publish_or_bail(|| 4).ok()), Some(4));
+        assert_eq!(publish(|| 5), 5);
+        assert_eq!(call(Class::App, || 6), 6);
     }
 
     /// The served-request rings name what the owner served during a wait (hitch events).
