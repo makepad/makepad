@@ -107,19 +107,22 @@ script_mod! {
         shore_at: fn(al: float, px: float) -> float { if self.sea_edge > 1.5 { return 0.0 } return self.cover(al - self.sea_edge, px) }
         // the lakes' share of a pixel al rad down at world azimuth u, px rad a side: each lake's depth at the pixel's place
         // across it as depressions (its far and near shore there), boxed over the pixel's al -+ px / 2, times its share
-        // across (`lakes::cover`, the same on the CPU)
+        // across; the lakes never overlap, so their shares add, and one whose sides the pixel is past adds none
+        // (`lakes::cover`, the same on the CPU)
         lake_at: fn(u: float, al: float, px: float) -> float {
             if self.lake_n < 0.5 || al <= 0.0 { return 0.0 }
             var m = 0.0
             for i in 0..u32(self.lake_n) {
                 let l = self.lake_tex.sample_nearest(vec2((float(i) + 0.5) / self.lake_tex.size().x, 0.5))
-                let x = (fract(u - l.x + 0.5) - 0.5) / l.z; let hy = sqrt(max(1.0 - x * x, 0.0))
-                let a0 = atan(self.lake_eye / (l.y + hy * l.w)); let a1 = atan(self.lake_eye / (l.y - hy * l.w))
-                let cy = (clamp(al + 0.5 * px, a0, a1) - clamp(al - 0.5 * px, a0, a1)) / px
-                let cx = clamp((1.0 - abs(x)) / (px / 6.2831853 / l.z) + 0.5, 0.0, 1.0)
-                m = max(m, cx * cy)
+                let x = (fract(u - l.x + 0.5) - 0.5) / l.z
+                if abs(x) < 1.0 {
+                    let hy = sqrt(1.0 - x * x)
+                    let a0 = atan(self.lake_eye / (l.y + hy * l.w)); let a1 = atan(self.lake_eye / (l.y - hy * l.w))
+                    let cy = (clamp(al + 0.5 * px, a0, a1) - clamp(al - 0.5 * px, a0, a1)) / px
+                    m = m + clamp((1.0 - abs(x)) / (px / 6.2831853 / l.z) + 0.5, 0.0, 1.0) * cy
+                }
             }
-            return m
+            return min(m, 1.0)
         }
         // what is water at a pixel al rad below the horizon (world azimuth u, px rad a side) in column g: x the sea from its
         // near edge out, y a lake on the land, z standing water on the land and the shore
@@ -276,12 +279,12 @@ script_mod! {
             // a host's own ground over the land and on out to sea from its coast, so the band's ground is the map's
             // and the land meets the sea without an edge (`SkyLight::host_ground`, `coast_ring`)
             if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
-            // water standing on the land (a lake): the ground shows through it darkened as through a puddle (the water
-            // shader adds what it mirrors)
+            // water standing on the land (a lake): (1 - Fresnel) of the ground shows through it, darkened as through a
+            // puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil); the water shader adds what it mirrors
             if al > 0.0 && self.lake_n > 0.5 {
                 let v = self.pix_view(self.view_raw()); let ws = self.water_at(g, v.x, al, self.px0() * g.z)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
-                c = c + (c * (0.35 * (1.0 - fr)) - c) * max(ws.y, ws.z)
+                c = c + (c * (0.35 * (1.0 - fr)) + self.sil * (0.5 * fr) - c) * max(ws.y, ws.z)
             }
             return vec4(c * gm, gm)
         }

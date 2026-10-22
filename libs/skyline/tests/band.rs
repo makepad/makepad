@@ -735,14 +735,14 @@ fn visual_check_pngs() {
             write(&format!("shore_{name}_{x_sea}_sea.png"), 3 * cw, 3 * b.h, &crop);
         }
     }
-    // the lakes (plan hdri-6 §4): all land at Lakes 1, and the app's defaults (Lakes 0.3, Sea distance 0.3), by day and
+    // the lakes (plan hdri-6 §4): all land at Lakes 1, and the app's defaults (Lakes 0.6, Sea distance 0.3), by day and
     // at night, the whole strip and each lake's sector (0.04 of the turn, 30 rows either side of the horizon) four times
     // the size
     let mut all_land = Params::default();
     all_land.set(P::Land as usize, 1.0);
     all_land.set(P::PrLake as usize, 1.0);
     let mut app = Params::default();
-    app.set(P::PrLake as usize, 0.3);
+    app.set(P::PrLake as usize, 0.6);
     app.set(P::SeaD as usize, 0.3);
     for (set, p) in [("land", all_land), ("app", app)] {
         let z = Zones::new(&p);
@@ -1289,4 +1289,111 @@ fn lakes_mirror_the_sky_and_keep_their_distance() {
     }
     println!("{} lakes; the water's most {most}", z.lakes.len());
     assert!(most > 1e-2, "the lakes mirror the sky ({most})");
+}
+
+/// The water's mirrored elevation (rad) at depression `al` with no ripple (`DrawSkyWater`: the wave row j holding al, the
+/// row's compression q; ripple 0 adds no vertical noise and no sideways shift).
+fn mirrored_el(al: f64) -> f64 {
+    let (kz, a0) = (22.0, 0.004);
+    let alj = (((kz * (al + a0).ln()).floor() + 0.5) / kz).exp() - a0;
+    let q = 1.0 + alj / 0.07;
+    alj / q + (al - alj) / (q * q)
+}
+
+/// Plan hdri-6 §4 and the controller's ruling (Task 2): by day a lake mirrors what stands behind it in its colour, the
+/// land as well as the sky. All land with no front treeline (the mirror leaves it out, as it leaves out the ground) and
+/// no ripple, Lakes 1 against Lakes 0 at noon, 4096 px. In the texels a lake covers by half or more (`lakes::cover`), the
+/// lake's own colour (the band without lakes plus the difference over the cover) against what it mirrors there: the band
+/// without lakes at the water's mirrored elevation over the sky, where that stands clear of the near ground rise. Where
+/// it mirrors land and where it mirrors sky the lake is no darker than LAKE_DAY_SHARE of it (its Fresnel term is about
+/// 0.95 this near the horizon) and no brighter than it, and of its hue within 15 degrees. Before: the land mirrored in its
+/// lights alone, near black.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_lake_by_day_mirrors_the_land_and_the_sky_in_their_colour() {
+    const LAKE_DAY_SHARE: f32 = 0.75;
+    let light = noon([0.55, 0.7, 1.0]);
+    let mut p = Params::default();
+    for (k, v) in [(P::Land, 1.0), (P::PrLake, 1.0), (P::TrW, 0.0), (P::PrRipple, 0.0)] { p.set(k as usize, v); }
+    let mut dry = p.clone();
+    dry.set(P::PrLake as usize, 0.0);
+    let w = 4096;
+    let (wet, none) = (render_band_lit(&p, w, &light), render_band_lit(&dry, w, &light));
+    let z = Zones::new(&p);
+    let (m, px, eye) = (terrain::margin(&p, 1.0, w), std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
+    let cols = terrain::columns(&z, &p, 0.0, 1.0, w, m);
+    let sky = |el: f64| -> [f32; 3] { let a = (el / 15f64.to_radians()).min(1.0) as f32; std::array::from_fn(|c| light.ring_low[0][c] + (light.ring_high[0][c] - light.ring_low[0][c]) * a) };
+    // per set (land, sky): the lakes' summed colour, what they mirror, how many texels
+    let mut sets = [([0f64; 3], [0f64; 3], 0usize); 2];
+    for y in 0..none.h {
+        let al = -row_el(&p, &none, y);
+        if al <= 0.0 { continue; }
+        let el = mirrored_el(al);
+        let yf = p[P::Horizon] * none.h as f64 - el / px - 0.5;
+        let (y0, t) = (yf.floor() as usize, (yf - yf.floor()) as f32);
+        for x in 0..none.w {
+            let c = makepad_skyline::lakes::cover(&z.lakes, (x as f64 + 0.5) / w as f64, al, px, eye);
+            // the mirrored point's two rows clear of the near ground rise (the ground covers to half a pixel over it)
+            if c < 0.5 || el - px <= cols[(x + m) * terrain::ROWS + 6][1] as f64 + 0.5 * px { continue; }
+            let (i, a, b) = (y * w + x, none.texels[y0 * w + x], none.texels[(y0 + 1) * w + x]);
+            let up: [f32; 4] = std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t);
+            let s = sky(el);
+            let set = if up[3] > 0.9 { &mut sets[0] } else if up[3] < 0.1 { &mut sets[1] } else { continue };
+            for k in 0..3 {
+                set.0[k] += (none.texels[i][k] + (wet.texels[i][k] - none.texels[i][k]) / c as f32) as f64;
+                set.1[k] += (up[k] + (1.0 - up[3]) * s[k]) as f64;
+            }
+            set.2 += 1;
+        }
+    }
+    println!("{} lakes", z.lakes.len());
+    for (name, (l, r, n)) in ["land", "sky"].into_iter().zip(sets) {
+        let mean = |v: [f64; 3]| -> [f32; 3] { v.map(|x| (x / n.max(1) as f64) as f32) };
+        let (l, r) = (mean(l), mean(r));
+        let (ll, lr) = (lum(&[l[0], l[1], l[2], 1.0]), lum(&[r[0], r[1], r[2], 1.0]));
+        let dh = (hue(l) - hue(r) + 540.0).rem_euclid(360.0) - 180.0;
+        println!("{name}: {n} texels; the lake {l:?} (lum {ll:.4}, hue {:.1}) mirrors {r:?} (lum {lr:.4}, hue {:.1}): x{:.3}, {dh:.1} deg", hue(l), hue(r), ll / lr);
+        assert!(n >= 20, "the premise: lakes mirror {name} ({n} texels)");
+        assert!(ll >= LAKE_DAY_SHARE * lr && ll <= lr, "{name}: the lake {ll} against the {lr} it mirrors");
+        assert!(dh.abs() <= 15.0, "{name}: the lake's hue {} against {}", hue(l), hue(r));
+    }
+}
+
+/// The controller's ruling (Task 2): a lake's own water is not black, and the shader's lakes are the CPU's (`lake_at` is
+/// `lakes::cover`, held to it here). Under a lake the ground shows as through water: (1 - Fresnel) of it darkened as
+/// through a puddle (x 0.35), and by Fresnel the dark water the night sea shows (the silhouettes' colour x 0.5). At night
+/// with no reflections (the water shader does not run), all land, Lakes 1 against Lakes 0, 1024 px, at Size 1 and 2 (the
+/// eye twice as high): every texel below the horizon is the band without lakes moved toward that water by the CPU's
+/// cover, within 2 % of the whole step, and the lakes' own water is no darker than 0.9 of the night sea. Before: 0.35
+/// (1 - Fresnel) of the ground alone, a twentieth.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn the_shaders_lakes_are_the_cpus() { for k in [1.0, 2.0] { lakes_are_the_cpus_at(k); } }
+
+fn lakes_are_the_cpus_at(size: f64) {
+    let mut p = Params::default();
+    for (k, v) in [(P::Land, 1.0), (P::PrLake, 1.0), (P::PrRefl, 0.0), (P::Size, size)] { p.set(k as usize, v); }
+    let mut dry = p.clone();
+    dry.set(P::PrLake as usize, 0.0);
+    let (wet, none) = (render_band(&p, 1024), render_band(&dry, 1024));
+    let z = Zones::new(&p);
+    let (px, eye, sil) = (std::f64::consts::TAU / 1024.0, makepad_skyline::props::kit::EYE * p[P::Size], makepad_skyline::params::SIL);
+    let l3 = |c: [f32; 3]| lum(&[c[0], c[1], c[2], 1.0]);
+    let sea = l3(sil.map(|s| 0.5 * s));
+    let (mut worst, mut n, mut darkest) = (0.0f32, 0usize, f32::MAX);
+    for y in 0..none.h {
+        let al = -row_el(&p, &none, y);
+        if al <= 0.0 { continue; }
+        let fr = (0.02 + 0.98 * (1.0 - al).clamp(0.0, 1.0).powi(5)) as f32;
+        for x in 0..none.w {
+            let (i, c) = (y * none.w + x, makepad_skyline::lakes::cover(&z.lakes, (x as f64 + 0.5) / 1024.0, al, px, eye) as f32);
+            let g = none.texels[i];
+            let water: [f32; 3] = std::array::from_fn(|k| g[k] * 0.35 * (1.0 - fr) + sil[k] * 0.5 * fr);
+            let (lg, lw, got) = (lum(&g), l3(water), lum(&wet.texels[i]));
+            worst = worst.max((got - (lg + (lw - lg) * c)).abs() / (lw - lg).abs());
+            if c >= 0.5 { n += 1; darkest = darkest.min(lg + (got - lg) / c); }
+        }
+    }
+    println!("Size {size}: {} lakes, {n} texels half covered or more; the worst texel {:.2} % of the step off the CPU's cover; the darkest water {darkest:.3e} against the night sea's {sea:.3e}", z.lakes.len(), 100.0 * worst);
+    assert!(n > 20, "Size {size}, the premise: lakes show ({n} texels)");
+    assert!(worst <= 0.02, "Size {size}: the shader's lakes are not the CPU's, a texel {:.1} % of the step off", 100.0 * worst);
+    assert!(darkest >= 0.9 * sea, "Size {size}: a lake's water at night {darkest} against the night sea's {sea}");
 }

@@ -1,12 +1,12 @@
-//! Lakes (plan hdri-6 §4): ellipses on the ground plane over open land, at least LAKE_MIN_M x Size from the eye, a few a
-//! turn (as many over Size: each is Size times as large). The water shader mirrors them as it mirrors the sea; `cover`
-//! is its `lake_at` on the CPU (the tests hold the shader's formula to it).
+//! Lakes (plan hdri-6 §4): ellipses in bearing and distance over open land, at least LAKE_MIN_M x Size from the eye, a
+//! few a turn (as many over Size: each is Size times as large). The water shader mirrors them as it mirrors the sea;
+//! `cover` is its `lake_at` on the CPU (`band::the_shaders_lakes_are_the_cpus` holds the shader's formula to it).
 use crate::params::{Params, P};
 use crate::rng::{fract, mix, wd, TAU};
 use crate::zones::Zones;
 
 pub const LAKES_MAX: usize = 12;
-/// The nearest a lake's shore comes to the eye, and the farthest its centre lies at, size units (m at Size 1).
+/// The nearest a lake's shore comes to the eye, and the farthest its near shore lies at, size units (m at Size 1).
 pub const LAKE_MIN_M: f64 = 300.0;
 pub const LAKE_FAR_M: f64 = 3000.0;
 
@@ -15,27 +15,40 @@ pub const LAKE_FAR_M: f64 = 3000.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lake { pub u: f64, pub d: f64, pub half_u: f64, pub half_d: f64 }
 
-/// The lakes of `p` around `z` (`Zones::new` keeps them): one chance in each of 24 cells of the turn, every draw taken
-/// before a lake is turned down, so a lake does not move when another one does.
+/// The cells of the turn a lake may stand in (10 degrees each), and the places a cell tries for its lake.
+const CELLS: usize = 36;
+const TRIES: usize = 3;
+
+/// The lakes of `p` around `z` (`Zones::new` keeps them): a share of the 36 cells of the turn (the slider's, as many over
+/// Size) each tries up to three places for a lake and keeps the first that fits. Every draw is a hash of its cell and
+/// stream (layer 1950), so the zones' other layers never move, and a lake moves only when an earlier one takes its place.
+/// Dense enough to be seen: at Lakes 0.6 and the default land the median of 40 seeds has two to three lakes at least
+/// half a texel deep (`depth`) in a strip 1024 texels round the turn.
 pub fn place(z: &Zones, p: &Params) -> Vec<Lake> {
     let (amount, k) = (p[P::PrLake], p[P::Size]);
     let mut out: Vec<Lake> = Vec::new();
     if amount <= 0.0 { return out; }
-    for j in 0..24 {
+    for j in 0..CELLS {
         let jf = j as f64;
-        let [r1, r2, r3, r4, r5] = [1.0, 2.0, 3.0, 4.0, 5.0].map(|s| z.rnd(jf, s, 1950.0));
-        // a share of the 15-degree cells, as many over Size
-        if r1 >= amount * 0.5 / k { continue; }
-        let u = fract((jf + 0.2 + 0.6 * r2) / 24.0);
-        let half_d = mix(60.0, 220.0, r3) * k;
-        let d = LAKE_MIN_M * k + half_d + (LAKE_FAR_M - LAKE_MIN_M) * k * r5 * r5;
-        let half_u = mix(150.0, 500.0, r4) * k / (TAU * d);
-        // the whole of it on open land (outside the city, the town, the industry, the fair and the bridge), off the
-        // power lines' nearest bearings, clear of the other lakes
-        let on_land = (0..5).all(|i| z.open_n(fract(u + (i as f64 / 2.0 - 1.0) * half_u)) > 0.6);
-        let off_lines = z.pyl.iter().all(|q| q[3] <= 0.0 || wd(u, q[0]).abs() > half_u + 0.01);
-        if !on_land || !off_lines || out.iter().any(|o| wd(o.u, u).abs() < o.half_u + half_u + 0.01) { continue; }
-        out.push(Lake { u, d, half_u, half_d });
+        if z.rnd(jf, 1.0, 1950.0) >= amount / k { continue; }
+        let fits = |t: usize| {
+            let [r2, r3, r4, r5] = [2.0, 3.0, 4.0, 5.0].map(|s| z.rnd(jf, s + 10.0 * t as f64, 1950.0));
+            let u = fract((jf + 0.2 + 0.6 * r2) / CELLS as f64);
+            // up to a kilometre deep along the view, nearer ones more often, 200-600 m across
+            let half_d = mix(100.0, 500.0, r3) * k;
+            let d = LAKE_MIN_M * k + half_d + (LAKE_FAR_M - LAKE_MIN_M) * k * r5 * r5 * r5;
+            let half_u = mix(100.0, 300.0, r4) * k / (TAU * d);
+            // the whole of it on open land (outside the city core, the town, the industry, the fair and the bridge)
+            let on_land = (0..5).all(|i| z.open_n(fract(u + (i as f64 / 2.0 - 1.0) * half_u)) > 0.6);
+            // clear of the power lines (straight, nearest q[1] m out at bearing q[0]: the lake's centre lies d cos(the
+            // bearing between) along the line's normal) by its own reach and 50 m
+            let reach = half_d.max(half_u * TAU * d) + 50.0 * k;
+            let off_lines = z.pyl.iter().all(|q| q[3] <= 0.0 || (d * (wd(u, q[0]) * TAU).cos() - q[1]).abs() > reach);
+            // clear of the other lakes: apart in bearing, or (one behind the other) in distance
+            let clear = out.iter().all(|o| wd(o.u, u).abs() >= o.half_u + half_u + 0.01 || (o.d - d).abs() >= o.half_d + half_d + 50.0 * k);
+            (on_land && off_lines && clear).then_some(Lake { u, d, half_u, half_d })
+        };
+        if let Some(l) = (0..TRIES).find_map(fits) { out.push(l); }
         if out.len() == LAKES_MAX { break; }
     }
     out
@@ -51,19 +64,24 @@ pub fn inside(l: &Lake, u: f64, al: f64, eye: f64) -> bool {
 /// The lakes' share of a pixel px rad a side, al rad down at u: the shader's `lake_at`, on the CPU.
 /// The lake's depth at the pixel's place across it is a range of depressions (its far and near shore there); the pixel
 /// covers al - px / 2 .. al + px / 2 of them. Boxed in depression, not on the ground: most lakes are thinner than a texel,
-/// and near the horizon a texel's ground depth is far from dist^2 / eye x px.
+/// and near the horizon a texel's ground depth is far from dist^2 / eye x px. The lakes never overlap (`place`), so their
+/// shares add, also where one lies behind another in the same pixel; a lake whose sides the pixel is past adds none.
 pub fn cover(lakes: &[Lake], u: f64, al: f64, px: f64, eye: f64) -> f64 {
     if al <= 0.0 { return 0.0; }
     lakes.iter().fold(0.0f64, |m, l| {
         let x = wd(u, l.u) / l.half_u;
-        let hy = (1.0 - x * x).max(0.0).sqrt();
+        if x.abs() >= 1.0 { return m; }
+        let hy = (1.0 - x * x).sqrt();
         // the far and the near shore at x (rad down), the pixel's share between them, times its share across
         let (a0, a1) = ((eye / (l.d + hy * l.half_d)).atan(), (eye / (l.d - hy * l.half_d)).atan());
         let cy = ((al + 0.5 * px).clamp(a0, a1) - (al - 0.5 * px).clamp(a0, a1)) / px;
         let cx = ((1.0 - x.abs()) / (px / TAU / l.half_u) + 0.5).clamp(0.0, 1.0);
-        m.max(cx * cy)
-    })
+        m + cx * cy
+    }).min(1.0)
 }
+
+/// How deep lake `l` looks across its middle from an eye `eye` m up: its near shore's depression less its far shore's (rad).
+pub fn depth(l: &Lake, eye: f64) -> f64 { (eye / (l.d - l.half_d)).atan() - (eye / (l.d + l.half_d)).atan() }
 
 /// The lake texture's texels: LAKES_MAX x 1 RGBA (u, d, half_u, half_d), zeros past the last lake.
 pub fn texels(lakes: &[Lake]) -> Vec<f32> {
