@@ -15,6 +15,8 @@ pub mod intrinsics {
         pub fn trunc_f32(x: f32) -> f32;
         pub fn rint_f64(x: f64) -> f64;
         pub fn rint_f32(x: f32) -> f32;
+        pub fn round_f64(x: f64) -> f64;
+        pub fn round_f32(x: f32) -> f32;
         pub fn fabs_f64(x: f64) -> f64;
         pub fn fabs_f32(x: f32) -> f32;
         pub fn fmin_f64(x: f64, y: f64) -> f64;

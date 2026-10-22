@@ -9654,6 +9654,8 @@ fn tier1_optimize(options: &crate::options::Options, func: &mut relax_backend::r
     relax_codegen::loops::unroll_loops(options, func);
     // byte stores of one value's bytes -> one wide store (before address modes)
     relax_codegen::loops::merge_stores(options, func);
+    // f32 lane stores of one 16 bytes -> one vector store
+    relax_codegen::loops::merge_lane_stores(options, func);
     if cfg.fold {
         // steps of an unrolled copy hang off the first value (offsets fold into address modes)
         if relax_codegen::loops::flatten_step_chains(func) {
@@ -10000,6 +10002,11 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
         // the code must not depend on the order the sites were taken in
         relax_backend::passes::renumber_rpo(func);
         relax_backend::stats::pass_time(5, ti);
+    }
+    // speculation (the root build only): probes / guards on the indirect calls the first round
+    // left or exposed; the second round inlines the guarded direct calls
+    if inlined_only.is_none() {
+        crate::guards::apply(func, id);
     }
     if let Some(raw) = inlined_only {
         *raw = (func.clone(), inlined.clone());
@@ -10617,6 +10624,7 @@ fn sampler_thread() {
 /// holding the lock from here on (never released: the process is ending) stops them.
 impl Drop for Unit {
     fn drop(&mut self) {
+        crate::guards::dump(&|id| if (id as usize) < self.fns.len() { self.fns[id as usize].name.to_string() } else { String::new() });
         crate::domain::forget_tls_keys(self.syms.dom0());
         let options = &self.prog.session.clone().options;
         if !self.retired {
@@ -11072,6 +11080,16 @@ fn tier_revalidate(q: &mut Vec<(u32, u8, u64, u64)>) {
             eprintln!("O3q @{:.3} {} cold entries counted again, q={}", now as f64 / 1e9, n, q.len());
         }
     }
+}
+
+/// A speculation site of slot `id` changed state (crate::guards): rebuild its O3 code. Called
+/// from program threads (no unit lock), as rt_hot queues.
+pub(crate) fn guard_relink(id: u32) {
+    // one rebuild decides every ready site of the slot: no second entry while one waits
+    if TIER_QUEUE.lock().unwrap().iter().any(|e| e.0 == id && e.1 == Q_RETIER) {
+        return;
+    }
+    tier_push(id, Q_RETIER, 0);
 }
 
 fn tier_push(id: u32, why: u8, rate: u64) {
@@ -11936,6 +11954,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         }
     }
     let gave_way = std::cell::Cell::new(false);
+    let mut spec_ctx: Option<crate::guards::Ctx> = None;
     // The inline candidates' front ends (type check, lowering) run on this thread, not on the
     // owner: a snapshot that meets a candidate without RIR whose front this build has not run
     // yet hands it back (`fronts`) instead of building it; this thread checks and lowers those
@@ -12017,6 +12036,18 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     }
                 }
             }
+        }
+        // speculation: sites of this slot that finished profiling are decided now; the guessed
+        // targets join the snapshot (their RIR inlines into the guarded call)
+        if crate::guards::enabled() && !sandboxed && !(&*up).fns[id as usize].unverified.load(Ordering::Relaxed) {
+            let u = &*up;
+            let slots = crate::guards::decide(id, &|a| u.thunk_slot(a));
+            for &(_, s) in &slots {
+                if s != id && !callees.contains(&s) {
+                    callees.push(s);
+                }
+            }
+            spec_ctx = Some(crate::guards::Ctx { root: id, syms: crate::guards::syms(u), slots, emitted: std::cell::Cell::new(false) });
         }
         // callees the O3 policy wants inlinable get their RIR built, one per lock hold;
         // then their callees (outside cold blocks), 16 levels (a binary search closure sits ~10 deep), built the same way: an inlined
@@ -12366,10 +12397,17 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             freq
         };
         let queries = crate::nounwind::QueryCx::new(&snap);
-        let (optimized, inline_rules) = queries.optimize(id, func, &mut |func, nounwind| {
+        let optimize = || queries.optimize(id, func, &mut |func, nounwind| {
             Ok(tier1_optimize(options, func, id, &name, &snap, &get, &single, ro, &cfg, nounwind, &mut frequencies, hot_root))
-        })?;
+        });
+        let (optimized, inline_rules) = match &spec_ctx {
+            Some(ctx) => crate::guards::with_ctx(ctx, optimize),
+            None => optimize(),
+        }?;
         func = optimized;
+        if let Some(ctx) = &spec_ctx {
+            crate::guards::probe(ctx, &mut func);
+        }
         let mut inlined = Vec::with_capacity(inline_rules.len());
         for (c, _) in inline_rules { inlined.push(c); }
         let nounwind_used = func.nounwind_inputs.clone();
@@ -12532,7 +12570,9 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 let frame_max = if recursive { TIER1_CACHE_FRAME_MAX } else { TIER1_CACHE_FRAME_MAX_FLAT };
                 // SPEC-V: unverified O3 code is never the slot's entry (it is built again once verified)
                 let unverified = u.fns[id as usize].unverified.load(Ordering::Relaxed);
-                if frame_size <= frame_max && !unverified {
+                // speculative code holds this run's site records (crate::guards): never cached
+                let speculative = spec_ctx.as_ref().is_some_and(|c| c.emitted.get());
+                if frame_size <= frame_max && !unverified && !speculative {
                     if let Some(mut c) = u.cache.take() {
                         c.record_o3(u, id, &code, &relocs, &map, &inlined, &nounwind_used);
                         u.cache = Some(c);

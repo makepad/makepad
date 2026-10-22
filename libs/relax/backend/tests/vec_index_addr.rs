@@ -12,7 +12,7 @@ type Entry = extern "C" fn(*const u8, *mut u8, u64);
 #[cfg(target_arch = "x86_64")]
 fn compile(f: &Func) -> Code {
     let options = &relax_session::Options::default();
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::x64::compile(options, f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()
@@ -21,7 +21,7 @@ fn compile(f: &Func) -> Code {
 #[cfg(target_arch = "aarch64")]
 fn compile(f: &Func) -> Code {
     let options = &relax_session::Options::default();
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::arm64::compile(options, f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()

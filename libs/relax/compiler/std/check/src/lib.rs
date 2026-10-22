@@ -44,6 +44,8 @@ pub mod intrinsics {
     pub unsafe fn trunc_f32(x: f32) -> f32 { x.trunc() }
     pub unsafe fn rint_f64(x: f64) -> f64 { x.round_ties_even() }
     pub unsafe fn rint_f32(x: f32) -> f32 { x.round_ties_even() }
+    pub unsafe fn round_f64(x: f64) -> f64 { x.round() }
+    pub unsafe fn round_f32(x: f32) -> f32 { x.round() }
     pub unsafe fn fabs_f64(x: f64) -> f64 { x.abs() }
     pub unsafe fn fabs_f32(x: f32) -> f32 { x.abs() }
     pub unsafe fn fmin_f64(x: f64, y: f64) -> f64 { x.min(y) }

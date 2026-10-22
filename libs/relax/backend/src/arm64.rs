@@ -4665,7 +4665,7 @@ mod tests {
     #[test]
     fn single_bit_branches_use_tbz_and_fall_back_past_its_range() {
         let options = &relax_session::Options::default();
-        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
         for (bit, filler) in [(0u32, 0usize), (13, 0), (31, 0), (32, 0), (63, 0), (5, 12_000), (40, 12_000)] {
             let mut f = Func::new("tbz".to_string(), 0);
             let p = f.vreg(Cls::I);

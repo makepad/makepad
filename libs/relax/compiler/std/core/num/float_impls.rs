@@ -45,7 +45,7 @@ impl f64 {
     pub const fn ceil(self) -> f64 { unsafe { intrinsics::ceil_f64(self) } }
     pub const fn trunc(self) -> f64 { unsafe { intrinsics::trunc_f64(self) } }
     pub const fn round_ties_even(self) -> f64 { unsafe { intrinsics::rint_f64(self) } }
-    pub const fn round(self) -> f64 { unsafe { libm::round(self) } }
+    pub const fn round(self) -> f64 { unsafe { intrinsics::round_f64(self) } }
     pub const fn fract(self) -> f64 { self - self.trunc() }
     pub const fn min(self, other: f64) -> f64 { unsafe { intrinsics::fmin_f64(self, other) } }
     pub const fn max(self, other: f64) -> f64 { unsafe { intrinsics::fmax_f64(self, other) } }
@@ -133,7 +133,7 @@ impl f32 {
     pub const fn ceil(self) -> f32 { unsafe { intrinsics::ceil_f32(self) } }
     pub const fn trunc(self) -> f32 { unsafe { intrinsics::trunc_f32(self) } }
     pub const fn round_ties_even(self) -> f32 { unsafe { intrinsics::rint_f32(self) } }
-    pub const fn round(self) -> f32 { unsafe { libm::roundf(self) } }
+    pub const fn round(self) -> f32 { unsafe { intrinsics::round_f32(self) } }
     pub const fn fract(self) -> f32 { self - self.trunc() }
     pub const fn min(self, other: f32) -> f32 { unsafe { intrinsics::fmin_f32(self, other) } }
     pub const fn max(self, other: f32) -> f32 { unsafe { intrinsics::fmax_f32(self, other) } }

@@ -2751,6 +2751,71 @@ pub fn forward_slot_loads(f: &mut Func) -> bool {
 
 /// Vregs defined once, as a parameter or by moves and constant offsets of one (pointers into
 /// memory that existed before this frame did).
+/// The vregs holding addresses into slot `s` (its SlotAddr and moves / adds of it, constant or
+/// variable offsets), when every use of them is the address of a load, store or copy or makes
+/// another such address: None when the address leaks (stored, passed, returned, compared, ...).
+fn slot_derived(f: &Func, s: u32) -> Option<Vec<bool>> {
+    let nv = f.vregs.len();
+    let mut der = vec![false; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::SlotAddr(d, s2) = i {
+                if *s2 == s {
+                    der[d.0 as usize] = true;
+                }
+            }
+        }
+    }
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, a, b2) = match *i {
+                    Inst::Mov(d, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, a, _) => (d, a, None),
+                    Inst::IBin(IOp::Add, _, d, a, b2) => (d, a, Some(b2)),
+                    _ => continue,
+                };
+                let from = der[a.0 as usize] || b2.map_or(false, |x| der[x.0 as usize]);
+                if from && !der[d.0 as usize] {
+                    der[d.0 as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            let ok = match *i {
+                Inst::Mov(..) | Inst::IBinI(IOp::Add | IOp::Sub, ..) => true,
+                Inst::IBin(IOp::Add, _, _, a, b2) => !(der[a.0 as usize] && der[b2.0 as usize]),
+                Inst::Load(..) | Inst::VLoad(..) => true,
+                Inst::LoadX(_, _, _, x, _, _) | Inst::VLoadX(_, _, x, _, _) => !der[x.0 as usize],
+                Inst::Store(_, _, _, v) | Inst::VStore(_, _, v) => !der[v.0 as usize],
+                Inst::StoreX(_, _, x, _, _, v) | Inst::VStoreX(_, x, _, _, v) => !der[x.0 as usize] && !der[v.0 as usize],
+                Inst::Copy(..) | Inst::SlotAddr(..) => true,
+                _ => {
+                    let mut bad = false;
+                    for_uses(i, |u| bad |= der[u.0 as usize]);
+                    !bad
+                }
+            };
+            if !ok {
+                return None;
+            }
+        }
+        tu.clear();
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        if tu.iter().any(|v| der[v.0 as usize]) {
+            return None;
+        }
+    }
+    Some(der)
+}
+
 fn param_based_vregs(f: &Func) -> Vec<bool> {
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
@@ -2859,7 +2924,11 @@ pub fn forward_slot_dests(f: &mut Func) -> bool {
             if sc.esc[c as usize] && relax_backend::stats::opt_env_off("-fwdesc") {
                 continue;
             }
-            if sc.esc[c as usize] {
+            // C "escapes" only through address arithmetic slot_scan does not follow (a variable
+            // index: `simd_body.v.x.get(lane)` in a loop) and never leaks to memory, a call or a
+            // return: no other pointer can see it, only the derived addresses (checked below)
+            let derived = if sc.esc[c as usize] { slot_derived(f, c) } else { None };
+            if sc.esc[c as usize] && derived.is_none() {
                 let pb = param_based.get_or_insert_with(|| param_based_vregs(f));
                 let unseen = f.blocks[cb].insts[first..ci].iter().all(|i| match i {
                     Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) | Inst::VLoad(_, base, _) | Inst::VStore(base, _, _) | Inst::LoadX(_, _, base, ..) | Inst::StoreX(_, base, ..) => sl(*base) != NONE || pb[base.0 as usize],
@@ -2876,7 +2945,11 @@ pub fn forward_slot_dests(f: &mut Func) -> bool {
                     let (s, so) = vs[v.0 as usize];
                     s == c && so + off < o + n as i64 && o < so + off + k
                 };
+                // an access through a derived address of unknown offset may touch any byte of C
+                let unknown = |v: VReg| derived.as_ref().map_or(false, |dv| dv[v.0 as usize] && vs[v.0 as usize].0 != c);
                 clash |= match i {
+                    Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) | Inst::VLoad(_, base, _) | Inst::VStore(base, _, _) | Inst::LoadX(_, _, base, ..) | Inst::StoreX(_, base, ..) | Inst::VLoadX(_, base, ..) | Inst::VStoreX(base, ..) if unknown(*base) => true,
+                    Inst::Copy(d, s2, _) if unknown(*d) || unknown(*s2) => true,
                     Inst::Load(m, _, base, off) | Inst::Store(m, base, off, _) => hit(*base, *off as i64, mem_size(*m) as i64),
                     Inst::VLoad(_, base, off) | Inst::VStore(base, off, _) => hit(*base, *off as i64, 16),
                     Inst::LoadX(_, _, base, ..) | Inst::StoreX(_, base, ..) => sl(*base) == c,

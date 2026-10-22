@@ -5304,6 +5304,10 @@ pub struct SroaCell {
     pub mem: Mem,
     // Different kinds at the same offset and size share unsigned integer bits.
     pub widened: bool,
+    // A 16-byte vector cell also accessed as its 32-bit lanes (f32 / 4-byte integer loads and
+    // stores at lane offsets): those become VExtract / VInsert of the vector (LLVM SROA's vector
+    // promotion; core::arch `_mm_setr_ps` / lane setters build a vector through memory).
+    pub lanes: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -5616,7 +5620,8 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         let mut has_in = vec![false; ns];
         let mut has_out = vec![false; ns];
         let mut access_depth = vec![0u32; ns];
-        let mut copies: Vec<(u32, i64, i64, u32)> = Vec::new(); // (group, lo, hi, loop depth)
+        // (group, lo, hi, loop depth, internal: both ends in the group, so promoted it is register moves)
+        let mut copies: Vec<(u32, i64, i64, u32, bool)> = Vec::new();
         let okat = |v: VReg| -> Option<(u32, i64)> {
             let (sl, o) = at(v);
             if sl != u32::MAX && ok[sl as usize] {
@@ -5642,16 +5647,17 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                     }
                     Inst::Copy(d, s2, n) => {
                         let (ga, gc) = (okat(*d), okat(*s2));
+                        let internal = matches!((ga, gc), (Some((x, _)), Some((y, _))) if root[x as usize] == root[y as usize]);
                         if let Some((sl, o)) = ga {
                             let lo = o + delta[sl as usize];
-                            copies.push((root[sl as usize], lo, lo + *n as i64, depth[bi as usize]));
+                            copies.push((root[sl as usize], lo, lo + *n as i64, depth[bi as usize], internal));
                             if gc.is_none() {
                                 has_in[root[sl as usize] as usize] = true;
                             }
                         }
                         if let Some((sl, o)) = gc {
                             let lo = o + delta[sl as usize];
-                            copies.push((root[sl as usize], lo, lo + *n as i64, depth[bi as usize]));
+                            copies.push((root[sl as usize], lo, lo + *n as i64, depth[bi as usize], internal));
                             if ga.is_none() {
                                 has_out[root[sl as usize] as usize] = true;
                             }
@@ -5681,10 +5687,17 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
             let size = hi - lo;
             // pure: every access is at lo with the cell's size (only the kind differs: bitcasts)
             let pure = cells[start..end].iter().all(|c| c.1 == lo && mem_size(c.2) as i64 == size);
-            if !pure {
+            // lanes: one 16-byte vector access at lo, every other access a 32-bit lane of it
+            let lanes = !pure
+                && size == 16
+                && cells[start..end].iter().any(|c| c.1 == lo && c.2 == SROA_V128)
+                && cells[start..end].iter().all(|c| (c.1 == lo && c.2 == SROA_V128) || ((c.1 - lo) % 4 == 0 && matches!(c.2, Mem::F32 | Mem::Int(4, _))));
+            if lanes {
+                gcells[g as usize].push(SroaCell { off: lo, mem: SROA_V128, widened: false, lanes: true });
+            } else if !pure {
                 bad[g as usize].get_or_insert(if kind_mix { SroaReject::KindMix } else { SroaReject::Overlap });
             } else {
-                gcells[g as usize].push(SroaCell { off: lo, mem: if widened { Mem::Int(size as u8, false) } else { m }, widened });
+                gcells[g as usize].push(SroaCell { off: lo, mem: if widened { Mem::Int(size as u8, false) } else { m }, widened, lanes: false });
             }
             start = end;
         }
@@ -5736,7 +5749,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                                 while off % n as i64 != 0 || off + n as i64 > end {
                                     n /= 2;
                                 }
-                                gaps.push(SroaCell { off, mem: Mem::Int(n, false), widened: false });
+                                gaps.push(SroaCell { off, mem: Mem::Int(n, false), widened: false, lanes: false });
                                 off += n as i64;
                             }
                         }
@@ -5748,7 +5761,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                     // moves per copy (brotli ProcessCommandsInternal: +28% instructions). Keep
                     // the group in memory unless every copied range has at most two cells per
                     // 8-byte word (plus two for an unaligned tail).
-                    let dense = copies[ci..ce].iter().all(|&(_, lo, hi, _)| {
+                    let dense = copies[ci..ce].iter().all(|&(_, lo, hi, _, _)| {
                         let n = gcells[g].iter().filter(|c| c.off >= lo && c.off < hi).count() as i64;
                         n <= (hi - lo + 7) / 8 * 2 + 2
                     });
@@ -5762,7 +5775,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         // A copy may not cut a cell in two. Keep large copies intact unless
         // promotion removes accesses in a deeper loop: initialization of a
         // compound iterator should not keep its state in memory per element.
-        for &(g, lo, hi, copy_depth) in &copies {
+        for &(g, lo, hi, copy_depth, internal) in &copies {
             let g = g as usize;
             let mut cnt = 0;
             for c in &gcells[g] {
@@ -5775,7 +5788,9 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 }
             }
             let limit = if has_in[g] && has_out[g] { SROA_COPY_IN_OUT_CELLS } else { SROA_COPY_CELLS };
-            if cnt > limit && copy_depth >= access_depth[g] {
+            // a copy inside the group becomes one register move per cell (coalesced away mostly):
+            // only copies to or from memory cost a load / store per cell
+            if !internal && cnt > limit && copy_depth >= access_depth[g] {
                 bad[g].get_or_insert(SroaReject::CopyCells);
             }
         }
@@ -5969,7 +5984,12 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     // Every promoted access names an entire cell, including mixed-kind scalar accesses.
     let cell_at = |sl: u32, roff: i64| -> (VReg, SroaCell) {
         let g = root[sl as usize] as usize;
-        let k = gcells[g].binary_search_by_key(&roff, |c| c.off).expect("sroa cell");
+        // a lane access names the vector cell that contains it
+        let k = match gcells[g].binary_search_by_key(&roff, |c| c.off) {
+            Ok(k) => k,
+            Err(k) if k > 0 && gcells[g][k - 1].lanes && roff < gcells[g][k - 1].off + 16 => k - 1,
+            Err(_) => panic!("sroa cell"),
+        };
         let c = gcells[g][k];
         let r = slot_regs[sl as usize][k];
         assert!(r != u32::MAX, "sroa cell outside its slot");
@@ -6020,7 +6040,14 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 Inst::Load(m, d, base, off) if okat(*base).is_some() => {
                     let (sl, o) = okat(*base).unwrap();
                     let (r, c) = cell_at(sl, o + *off as i64);
-                    if c.widened {
+                    if c.lanes {
+                        let lane = ((o + *off as i64 - c.off) / 4) as u8;
+                        out.push(Inst::VExtract(*d, r, lane));
+                        if *m == Mem::Int(4, false) {
+                            pos.push(p);
+                            out.push(Inst::Conv(Conv::IntToInt(IntTy { bits: 32, signed: false }), *d, *d));
+                        }
+                    } else if c.widened {
                         out.push(match *m {
                             Mem::Int(n, signed) if n < 8 => Inst::Conv(Conv::IntToInt(IntTy { bits: n * 8, signed }), *d, r),
                             Mem::Int(..) => Inst::Mov(*d, r),
@@ -6044,7 +6071,9 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 Inst::Store(m, base, off, v) if okat(*base).is_some() => {
                     let (sl, o) = okat(*base).unwrap();
                     let (r, c) = cell_at(sl, o + *off as i64);
-                    if c.widened {
+                    if c.lanes {
+                        out.push(Inst::VInsert(r, r, ((o + *off as i64 - c.off) / 4) as u8, *v));
+                    } else if c.widened {
                         out.push(match m {
                             Mem::F32 | Mem::F64 => Inst::Conv(Conv::FToBits(*m == Mem::F64), r, *v),
                             Mem::Int(..) => Inst::Mov(r, *v),

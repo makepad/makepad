@@ -38,7 +38,7 @@ fn interleaved_load_and_store_runs_each_share_one_address() {
     let g = relax_backend::regalloc::share_index_bases(&f).expect("both runs share an address");
     let indexed = g.blocks[1].insts.iter().filter(|i| matches!(i, Inst::LoadX(..) | Inst::StoreX(..))).count();
     assert_eq!(indexed, 0, "{}", g.dump());
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::arm64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     let code = Code::new(&c.code).unwrap();
     let run: extern "C" fn(*mut u8, u64, u64, u64) = unsafe { std::mem::transmute(code.ptr()) };

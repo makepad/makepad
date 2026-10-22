@@ -13,7 +13,7 @@ type Entry = extern "C" fn(*const f32, *const f32, *const f32, *mut f32);
 fn compile(f: &Func) -> Code {
     let mut options = relax_session::Options::default();
     options.cpu = relax_backend::x64::detect_cpu(&options);
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::x64::compile(&options, f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }
@@ -21,7 +21,7 @@ fn compile(f: &Func) -> Code {
 #[cfg(target_arch = "aarch64")]
 fn compile(f: &Func) -> Code {
     let options = relax_session::Options::default();
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::arm64::compile(&options, f, &env).unwrap();
     Code::new(&c.code).unwrap()
 }

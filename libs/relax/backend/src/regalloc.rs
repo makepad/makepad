@@ -1934,6 +1934,8 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
     let mut end = vec![0u32; nv];
     let mut use_count = vec![0u32; nv];
     let mut hint = vec![u32::MAX; nv];
+    // (FMA result, a, b): second and third register hints after the accumulator c
+    let mut fma_alt: Vec<(u32, u32, u32)> = Vec::new();
     // definitions per vreg (uses are added below)
     let mut refs = vec![0u32; nv];
     let mut call_pos: Vec<u32> = Vec::new();
@@ -1966,6 +1968,13 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
             if let Some((d, a)) = src {
                 if d != a && hint[d.0 as usize] == u32::MAX {
                     hint[d.0 as usize] = a.0;
+                }
+            }
+            // an FMA's result: the accumulator's register (x64 vfmadd231), else a's or b's (213)
+            if let Inst::FMulAdd(_, _, _, d, a, b2, c) = *i {
+                if hint[d.0 as usize] == u32::MAX && d != c {
+                    hint[d.0 as usize] = c.0;
+                    fma_alt.push((d.0, a.0, b2.0));
                 }
             }
             // a call that never returns (panic path: last inst before Unreachable) clobbers
@@ -2008,6 +2017,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
             live_out.each(bi, |v| touch(&mut start, &mut end, v, block_end[bi]));
         }
     }
+    fma_alt.sort_unstable();
     let (mut remat, base_only) = remat_values(options, f, &reach, cfg);
     // base + k: only inside the base's hull (it holds its one value there)
     for v in 0..nv {
@@ -2071,13 +2081,17 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
             let r = base + c as usize;
             (owner[r] == u32::MAX || busy[r] < s) && usable(c)
         };
-        let hinted = match hint[v] {
+        let try_hint = |h: u32| match h {
             h if h == u32::MAX || f.vregs[h as usize] != f.vregs[v] => None,
             h => match loc[h as usize] {
                 Loc::Reg(c) | Loc::Flt(c) if cands.contains(&c) && (!crossing || callee.is_empty() || callee.contains(&c)) && free(c) => Some(c),
                 _ => None,
             },
         };
+        let hinted = try_hint(hint[v]).or_else(|| {
+            let k = fma_alt.binary_search_by_key(&(v as u32), |x| x.0).ok()?;
+            try_hint(fma_alt[k].1).or_else(|| try_hint(fma_alt[k].2))
+        });
         let mut chosen = hinted.or_else(|| cands.iter().copied().find(|&c| free(c)));
         if chosen.is_none() && !remat[v].is_some() {
             // the interval ending last gives up its register (spilled everywhere)
@@ -2535,6 +2549,16 @@ fn affinities(f: &Func, reach: &[bool], block_start: &[u32], ranges: &Ranges, wt
                     if d != c && dies_at(ranges, c.0, p) {
                         edges.push((d.0, c.0, w));
                         edges.push((c.0, d.0, w));
+                    }
+                    continue;
+                }
+                // scalar FMA: x64 writes the result in place over c (vfmadd231), a (213) or b (213
+                // with a and b swapped), arm64 fmadd has a separate destination: the operand that
+                // dies here, addend first
+                Inst::FMulAdd(_, _, _, d, a, b2, c) => {
+                    if let Some(s2) = [*c, *a, *b2].into_iter().find(|s2| *s2 != *d && dies_at(ranges, s2.0, p)) {
+                        edges.push((d.0, s2.0, w));
+                        edges.push((s2.0, d.0, w));
                     }
                     continue;
                 }

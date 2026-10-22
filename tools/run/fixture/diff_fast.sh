@@ -4,7 +4,8 @@
 # iterators, async, panics/unwinding, integer overflow) is built once natively with `rustc -O --test` (cached by
 # source hash + rustc version) and run under `makepad test` at O1 (MAKEPAD_RUN_O1=always: the baseline code and its quick register allocator, no O3), at the default
 # O3=0 tier (O2 pipeline) and at O3
-# (MAKEPAD_RUN_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds).
+# (MAKEPAD_RUN_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds;
+# guards (libs/relax/compiler/src/guards.rs) on with small thresholds so every guard, guard failure and relink path runs; DIFF_GUARDS=0 turns them off).
 # stdout lines `D ...`, the exit status and a checksum of them must equal the native run's.
 # Prints `diff: N/N equal`, or per failing program a minimal diff, and exits 1.
 # Usage (workspace root, after `cargo build --release -p makepad-run`): tools/run/fixture/diff_fast.sh
@@ -56,7 +57,7 @@ job() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
         env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
@@ -78,7 +79,7 @@ pkgjob() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
         (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms MAKEPAD_HAL_BACKEND=headless \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
