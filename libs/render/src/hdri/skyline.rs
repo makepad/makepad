@@ -14,9 +14,16 @@ use makepad_draw::*;
 use makepad_render_material::ibl;
 use super::arr;
 
-/// The band's lowest FADE_DEG degrees fade its alpha (and, premultiplied, its
-/// light) to 0, so the generated ground takes over below it without a seam.
+/// Over the band's lowest FADE_DEG degrees its sharp texels blend into its skirt (`BandSkirt`), so
+/// the strip's ground runs on below it without a seam.
 pub const FADE_DEG: f32 = 1.0;
+
+/// How far below the band its skirt reaches, degrees: its alpha (and, premultiplied, its light)
+/// fades from the bottom row's to 0 over this, and the generated ground takes over.
+pub const SKIRT_DEG: f32 = 30.0;
+
+/// The skirt is the bottom row box-blurred over this many degrees of azimuth either side.
+pub const SKIRT_BLUR_DEG: f32 = 15.0;
 
 /// The skyline's strip, as the app rendered it.
 #[derive(Clone, PartialEq)]
@@ -39,21 +46,58 @@ impl std::fmt::Debug for SkylineBand {
 
 impl SkylineBand {
     /// Bilinear premultiplied sample at map direction `d`, turned by `turn_deg`; 0 outside the band.
-    /// Below the horizon the alpha fades to 0 over the band's lowest FADE_DEG so the generator's
-    /// ground takes over without a seam. A positive turn moves the city toward a larger u
-    /// (clockwise seen from above, the compass azimuth rising).
+    /// The band alone, sharp to its bottom edge: the map reads it through `sample_skirted`. A
+    /// positive turn moves the city toward a larger u (clockwise seen from above, the compass
+    /// azimuth rising).
     pub fn sample(&self, d: Vec3f, turn_deg: f32) -> [f32; 4] {
-        let (w, h) = (self.w, self.h);
-        let span = self.top_deg - self.bottom_deg;
-        if w == 0 || h == 0 || self.texels.len() < w * h || !(span > 0.0) {
-            return [0.0; 4];
-        }
-        let el = d.y.clamp(-1.0, 1.0).asin().to_degrees();
-        // The negated test also turns a NaN direction away.
+        let Some((el, u)) = self.place(d, turn_deg) else { return [0.0; 4] };
         if !(el >= self.bottom_deg && el <= self.top_deg) {
             return [0.0; 4];
         }
-        let u = (ibl::dir_to_equirect_uv(arr(d))[0] - turn_deg / 360.0).rem_euclid(1.0);
+        self.bilinear(el, u)
+    }
+
+    /// What the map draws at `d`: the band, its lowest FADE_DEG blending into the skirt, and below
+    /// it the skirt fading out over SKIRT_DEG (smoothstep), continuous across the band's bottom
+    /// edge. `skirt` is this band's own (`skirt()`).
+    pub fn sample_skirted(&self, skirt: &BandSkirt, d: Vec3f, turn_deg: f32) -> [f32; 4] {
+        let Some((el, u)) = self.place(d, turn_deg) else { return [0.0; 4] };
+        let bottom = self.bottom_deg;
+        // The negated tests also turn a NaN direction away.
+        if !(el <= self.top_deg && el >= bottom - SKIRT_DEG) {
+            return [0.0; 4];
+        }
+        if el >= bottom + FADE_DEG {
+            return self.bilinear(el, u);
+        }
+        let ground = skirt.at(u);
+        if el >= bottom {
+            let sharp = self.bilinear(el, u);
+            let t = smooth((el - bottom) / FADE_DEG);
+            return std::array::from_fn(|c| ground[c] + (sharp[c] - ground[c]) * t);
+        }
+        let fade = smooth((el - (bottom - SKIRT_DEG)) / SKIRT_DEG);
+        ground.map(|c| c * fade)
+    }
+
+    /// The band's skirt: its bottom row blurred (`BandSkirt`), built once with the map.
+    pub fn skirt(&self) -> BandSkirt {
+        BandSkirt::new(self)
+    }
+
+    /// `d`'s elevation (degrees) and the strip's u; None for a band that draws nothing.
+    fn place(&self, d: Vec3f, turn_deg: f32) -> Option<(f32, f32)> {
+        if self.w == 0 || self.h == 0 || self.texels.len() < self.w * self.h || !(self.top_deg - self.bottom_deg > 0.0) {
+            return None;
+        }
+        let el = d.y.clamp(-1.0, 1.0).asin().to_degrees();
+        Some((el, (ibl::dir_to_equirect_uv(arr(d))[0] - turn_deg / 360.0).rem_euclid(1.0)))
+    }
+
+    /// The bilinear read at elevation `el` (inside the band) and strip u.
+    fn bilinear(&self, el: f32, u: f32) -> [f32; 4] {
+        let (w, h) = (self.w, self.h);
+        let span = self.top_deg - self.bottom_deg;
         let x = u * w as f32 - 0.5;
         let y = ((self.top_deg - el) / span * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
         let (x0, y0) = (x.floor(), y.floor());
@@ -63,15 +107,7 @@ impl SkylineBand {
         let (r0, r1) = (y0 as usize, (y0 as usize + 1).min(h - 1));
         let texel = |r: usize, c: usize| self.texels[r * w + c];
         // Lerps, not weights: four equal texels give exactly that texel back.
-        let lerp = |a: [f32; 4], b: [f32; 4], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
-        let mut s = lerp(lerp(texel(r0, c0), texel(r0, c1), fx), lerp(texel(r1, c0), texel(r1, c1), fx), fy);
-        if el < self.bottom_deg + FADE_DEG {
-            let fade = smooth((el - self.bottom_deg) / FADE_DEG);
-            for channel in &mut s {
-                *channel *= fade;
-            }
-        }
-        s
+        lerp4(lerp4(texel(r0, c0), texel(r0, c1), fx), lerp4(texel(r1, c0), texel(r1, c1), fx), fy)
     }
 
     /// The largest RGB value in the band (for bloom's base_peak).
@@ -83,6 +119,59 @@ impl SkylineBand {
     /// once per map.
     pub fn peaks(&self) -> BandPeaks {
         BandPeaks::new(self)
+    }
+}
+
+/// `a + (b - a) t` per channel.
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
+}
+
+/// The ground a band runs on into below its bottom row: that row (premultiplied), box-blurred over
+/// SKIRT_BLUR_DEG of azimuth either side, wrapping round the turn. Built once per map, beside the
+/// band's `BandPeaks`, so a map built with the band and one it is attached to later read the same.
+pub struct BandSkirt {
+    row: Vec<[f32; 4]>,
+    /// The brightest channel of the row, for a caster's bloom (`BandPeaks::near`).
+    peak: f32,
+}
+
+impl BandSkirt {
+    fn new(band: &SkylineBand) -> BandSkirt {
+        let (w, h) = (band.w, band.h);
+        if w == 0 || h == 0 || band.texels.len() < w * h {
+            return BandSkirt { row: Vec::new(), peak: 0.0 };
+        }
+        let bottom = &band.texels[(h - 1) * w..h * w];
+        // Texels either side: SKIRT_BLUR_DEG of the turn, at least the texel itself, at most the turn.
+        let half = ((SKIRT_BLUR_DEG / 360.0 * w as f32).round() as usize).min((w - 1) / 2);
+        let n = (2 * half + 1) as f64;
+        // A running sum in f64 round the wrapped row.
+        let mut sum = [0.0f64; 4];
+        for i in 0..=2 * half {
+            let t = bottom[(i + w - half) % w];
+            for c in 0..4 { sum[c] += t[c] as f64; }
+        }
+        let mut row = Vec::with_capacity(w);
+        for x in 0..w {
+            row.push(sum.map(|c| (c / n) as f32));
+            let (out, inn) = (bottom[(x + w - half) % w], bottom[(x + half + 1) % w]);
+            for c in 0..4 { sum[c] += inn[c] as f64 - out[c] as f64; }
+        }
+        let peak = row.iter().fold(0.0f32, |peak, t| peak.max(t[0]).max(t[1]).max(t[2]));
+        BandSkirt { row, peak }
+    }
+
+    /// The skirt at strip u: linear between its two nearest texels, wrapping.
+    fn at(&self, u: f32) -> [f32; 4] {
+        let w = self.row.len();
+        if w == 0 {
+            return [0.0; 4];
+        }
+        let x = u * w as f32 - 0.5;
+        let x0 = x.floor();
+        let column = |i: f32| (i as i64).rem_euclid(w as i64) as usize;
+        lerp4(self.row[column(x0)], self.row[column(x0 + 1.0)], x - x0)
     }
 }
 
@@ -99,6 +188,8 @@ const PEAK_BLOCK: usize = 4;
 pub struct BandPeaks {
     /// (blocks a row, rows of blocks, the most of each block, row by row) per level.
     levels: Vec<(usize, usize, Vec<f32>)>,
+    /// The skirt's brightest channel (`BandSkirt`), which draws below the band.
+    skirt_peak: f32,
     w: usize,
     h: usize,
     top_deg: f32,
@@ -108,7 +199,7 @@ pub struct BandPeaks {
 impl BandPeaks {
     fn new(band: &SkylineBand) -> BandPeaks {
         let (w, h) = (band.w, band.h);
-        let mut peaks = BandPeaks { levels: Vec::new(), w, h, top_deg: band.top_deg, bottom_deg: band.bottom_deg };
+        let mut peaks = BandPeaks { levels: Vec::new(), skirt_peak: 0.0, w, h, top_deg: band.top_deg, bottom_deg: band.bottom_deg };
         if w == 0 || h == 0 || band.texels.len() < w * h || !(band.top_deg - band.bottom_deg > 0.0) {
             return peaks;
         }
@@ -123,6 +214,7 @@ impl BandPeaks {
             }
         }
         peaks.levels.push((gw, gh, top));
+        peaks.skirt_peak = BandSkirt::new(band).peak;
         while let Some((lw, lh, below)) = peaks.levels.last().filter(|(lw, lh, _)| *lw > 1 || *lh > 1) {
             let (nw, nh) = (lw.div_ceil(2), lh.div_ceil(2));
             let mut next = vec![0.0f32; nw * nh];
@@ -141,7 +233,9 @@ impl BandPeaks {
     /// `turn_deg` as `SkylineBand::sample` turns it), a bilinear read's reach included: the
     /// most any channel of its texels there holds, never less than a read there returns, and
     /// the spacing its detail asks for (radians), half its texel, as `BaseImage::peak` asks.
-    /// None where no row of the band is within reach, or nothing there is lit.
+    /// None where no row of the band is within reach, or nothing there is lit. Below the band (its
+    /// lowest FADE_DEG and its skirt's SKIRT_DEG) the skirt's brightest channel counts too, at the
+    /// spacing of a quarter of its blur: the skirt is a box-blurred row, smooth but for its edges.
     pub fn near(&self, d: Vec3f, turn_deg: f32, radius: f32) -> Option<(f32, f32)> {
         let (tau, w, h) = (std::f32::consts::TAU, self.w as i64, self.h as i64);
         if self.levels.is_empty() {
@@ -152,8 +246,10 @@ impl BandPeaks {
         let r = radius.max(0.0) + 1.5 * texel;
         let el = d.y.clamp(-1.0, 1.0).asin();
         let (top, bottom) = (self.top_deg.to_radians(), self.bottom_deg.to_radians());
+        let skirt = (self.skirt_peak > 0.0 && el - r <= bottom + FADE_DEG.to_radians() && el + r >= bottom - SKIRT_DEG.to_radians())
+            .then_some((self.skirt_peak, 0.25 * SKIRT_BLUR_DEG.to_radians()));
         if !(el - r <= top && el + r >= bottom) {
-            return None;
+            return skirt;
         }
         let row = |e: f32| (((top - e) / span * self.h as f32).floor() as i64).clamp(0, h - 1);
         let (y0, y1) = (row(el + r), row(el - r));
@@ -190,7 +286,11 @@ impl BandPeaks {
                 }
             }
         }
-        (most > 0.0).then_some((most, 0.5 * (tau / self.w as f32).min(span / self.h as f32)))
+        let band = (most > 0.0).then_some((most, 0.5 * (tau / self.w as f32).min(span / self.h as f32)));
+        match (band, skirt) {
+            (Some((a, step)), Some((b, _))) => Some((a.max(b), step)),
+            (band, skirt) => band.or(skirt),
+        }
     }
 }
 
@@ -311,7 +411,12 @@ mod tests {
         let inside = b.radiance(dir(30.0, 10.0));
         assert!((inside - Vec3f { x: 0.25, y: 0.5, z: 0.75 } * b.scale()).length() < 1e-4);
         assert_eq!(a.radiance(dir(30.0, 40.0)), b.radiance(dir(30.0, 40.0)));   // above the band
-        assert_eq!(a.radiance(dir(30.0, -30.0)), b.radiance(dir(30.0, -30.0))); // below the band
+        assert_eq!(a.radiance(dir(30.0, -40.0)), b.radiance(dir(30.0, -40.0))); // below the band and its skirt
+        // in the skirt (a band of one colour blurs to itself): the colour, fading toward the sky beneath
+        let skirt = b.radiance(dir(30.0, -20.0));
+        let (sky, t) = (a.radiance(dir(30.0, -20.0)), smooth(15.0 / SKIRT_DEG));
+        let want = Vec3f { x: 0.25, y: 0.5, z: 0.75 } * (t * b.scale()) + sky * (1.0 - t);
+        assert!((skirt - want).length() < 1e-4 * (1.0 + want.length()), "{skirt:?} {want:?}");
     }
 
     #[test]
@@ -327,11 +432,96 @@ mod tests {
         assert!((got - want).length() < 1e-4 * (1.0 + want.length()));
     }
 
+    /// A band whose bottom row varies along the turn (one lit texel in eight, half transparent between), the rest of it
+    /// another colour: what the skirt tests read.
+    fn a_band_with_a_lit_bottom_row(w: usize) -> SkylineBand {
+        let h = 6;
+        let texels = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                if y < h - 1 { [0.1, 0.2, 0.3, 1.0] } else if x % 8 == 0 { [4.0, 3.0, 2.0, 1.0] } else { [0.05, 0.05, 0.1, 0.5] }
+            })
+            .collect();
+        SkylineBand { w, h, texels, top_deg: 12.0, bottom_deg: -4.0 }
+    }
+
+    /// The band runs on into its skirt: over its lowest FADE_DEG its texels blend into the skirt, which below the band's
+    /// bottom fades out over SKIRT_DEG; nothing is drawn at or below bottom - SKIRT_DEG.
     #[test]
-    fn the_band_fades_into_the_ground_at_its_bottom() {
+    fn the_band_runs_on_into_its_skirt_at_its_bottom() {
         let b = band(20.0, -5.0, [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(b.sample(dir(0.0, -5.0 + FADE_DEG + 0.01), 0.0)[3], 1.0);
-        assert!(b.sample(dir(0.0, -5.0 + 0.05), 0.0)[3] < 0.1);
+        let skirt = b.skirt();
+        assert_eq!(b.sample_skirted(&skirt, dir(0.0, -5.0 + FADE_DEG + 0.01), 0.0), [1.0; 4], "above the blend, the band");
+        // a band of one colour blurs to itself: no change across the bottom edge, then the fade
+        assert_eq!(b.sample_skirted(&skirt, dir(0.0, -5.0 + 0.05), 0.0), [1.0; 4]);
+        assert!((b.sample_skirted(&skirt, dir(0.0, -5.0 - 0.05), 0.0)[3] - 1.0).abs() < 1e-5);
+        let mid = b.sample_skirted(&skirt, dir(0.0, -5.0 - 0.5 * SKIRT_DEG), 0.0);
+        assert!((mid[3] - 0.5).abs() < 1e-5 && mid[0] == mid[3], "half way down, half its alpha (premultiplied): {mid:?}");
+        for el in [-5.0 - SKIRT_DEG, -5.0 - SKIRT_DEG - 0.01, -60.0, -90.0] {
+            assert_eq!(b.sample_skirted(&skirt, dir(0.0, el), 0.0), [0.0; 4], "at {el}");
+        }
+        // the band alone still stops at its edge
+        assert_eq!(b.sample(dir(0.0, -5.0 - 0.05), 0.0), [0.0; 4]);
+    }
+
+    /// No seam: with a bottom row that varies, the map just above the band's bottom edge and just below it differ by
+    /// less than 1e-4 (of a texel of 4), everywhere round the turn.
+    #[test]
+    fn the_skirt_meets_the_band_without_a_seam() {
+        let b = a_band_with_a_lit_bottom_row(64);
+        let skirt = b.skirt();
+        let eps = 1e-3;
+        for i in 0..640 {
+            let u = (i as f32 + 0.37) / 640.0;
+            let (above, below) = (b.sample_skirted(&skirt, dir_at_u(u, -4.0 + eps), 0.0), b.sample_skirted(&skirt, dir_at_u(u, -4.0 - eps), 0.0));
+            for c in 0..4 {
+                assert!((above[c] - below[c]).abs() < 1e-4, "u {u}, channel {c}: {} above, {} below", above[c], below[c]);
+            }
+            // and the sharp bottom row itself does differ from it there (the premise)
+        }
+        let sharp = b.sample(dir_at_u(0.5 / 64.0, -4.0 + 0.01), 0.0);
+        assert!((sharp[0] - b.sample_skirted(&skirt, dir_at_u(0.5 / 64.0, -4.0 - eps), 0.0)[0]).abs() > 0.5, "the bottom row is not blurred: nothing to test");
+    }
+
+    /// The skirt is the bottom row box-blurred over SKIRT_BLUR_DEG either side (wrapping), premultiplied: read just below
+    /// the band at a texel's centre, it is the mean of that texel's neighbours.
+    #[test]
+    fn the_skirt_is_the_blurred_bottom_row() {
+        let w = 96;
+        let b = a_band_with_a_lit_bottom_row(w);
+        let skirt = b.skirt();
+        let half = (SKIRT_BLUR_DEG / 360.0 * w as f32).round() as i64;
+        let bottom = &b.texels[(b.h - 1) * w..];
+        for x in [0usize, 1, 5, 47, 95] {
+            let mut want = [0.0f64; 4];
+            for k in -half..=half {
+                let t = bottom[(x as i64 + k).rem_euclid(w as i64) as usize];
+                for c in 0..4 { want[c] += t[c] as f64 / (2 * half + 1) as f64; }
+            }
+            let got = b.sample_skirted(&skirt, dir_at_u((x as f32 + 0.5) / w as f32, -4.0 - 1e-4), 0.0);
+            for c in 0..4 {
+                assert!((got[c] as f64 - want[c]).abs() < 1e-5, "x {x}, channel {c}: {} not {}", got[c], want[c]);
+            }
+        }
+    }
+
+    /// In the map: below the band the skirt lies over the generated ground, the two paths (built with the band, attached
+    /// later) draw it the same, and below bottom - SKIRT_DEG the ground is the sky's own.
+    #[test]
+    fn the_map_draws_the_skirt_under_the_band() {
+        let p = HdriParams::default();
+        let (q, images) = with_band(&p, a_band_with_a_lit_bottom_row(64));
+        let (plain, with) = (Env::new(&p), Env::new_with(&q, &images));
+        let later = Env::new(&q).with_skyline(images.skyline.clone().unwrap());
+        for el in [-4.5, -10.0, -25.0] {
+            let d = dir(33.0, el);
+            assert!(with.radiance(d) != plain.radiance(d), "no skirt at {el}");
+            assert_eq!(with.radiance(d), later.radiance(d));
+        }
+        for el in [-4.0 - SKIRT_DEG - 0.01, -50.0] {
+            assert_eq!(with.radiance(dir(33.0, el)), plain.radiance(dir(33.0, el)), "a skirt at {el}");
+        }
+        assert!(with.bake(64) == later.bake(64), "attached later, the skirt is the one built with");
     }
 
     #[test]
@@ -616,9 +806,10 @@ mod tests {
             })
             .collect();
         let b = SkylineBand { w, h, texels, top_deg: 12.0, bottom_deg: -3.0 };
-        let peaks = b.peaks();
+        let (peaks, skirt) = (b.peaks(), b.skirt());
         for _ in 0..300 {
-            let centre = dir(360.0 * next(&mut state), -10.0 + 30.0 * next(&mut state));
+            // the band and its skirt: -40 to +20 degrees
+            let centre = dir(360.0 * next(&mut state), -40.0 + 60.0 * next(&mut state));
             let radius = (0.2 + 8.0 * next(&mut state)).to_radians();
             let turn = -180.0 + 360.0 * next(&mut state);
             let bound = peaks.near(centre, turn, radius);
@@ -628,7 +819,7 @@ mod tests {
             for _ in 0..40 {
                 let (a, r) = (std::f32::consts::TAU * next(&mut state), radius * next(&mut state).sqrt());
                 let d = (centre * r.cos() + (side * a.cos() + up * a.sin()) * r.sin()).normalize();
-                let s = b.sample(d, turn);
+                let s = b.sample_skirted(&skirt, d, turn);
                 let most = s[0].max(s[1]).max(s[2]);
                 match bound {
                     Some((peak, step)) => assert!(most <= peak * (1.0 + 1e-6) && step > 0.0, "{most} drawn under a bound of {peak}"),
@@ -638,7 +829,7 @@ mod tests {
         }
         // Far from the band's rows there is nothing to report.
         assert!(peaks.near(dir(0.0, 40.0), 0.0, 1f32.to_radians()).is_none());
-        assert!(peaks.near(dir(0.0, -20.0), 0.0, 1f32.to_radians()).is_none());
+        assert!(peaks.near(dir(0.0, -3.0 - SKIRT_DEG - 15.0), 0.0, 1f32.to_radians()).is_none(), "below the skirt (a texel of this band is 3.7 degrees)");
     }
 
     fn skyline_on() -> SkylineParams {

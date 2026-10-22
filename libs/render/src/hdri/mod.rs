@@ -164,6 +164,9 @@ pub struct Env {
     /// The skyline's lights by region (`skyline::BandPeaks`), for a caster's
     /// bloom (`base_peak`): built once, with the band.
     city_peaks: Option<skyline::BandPeaks>,
+    /// The ground the strip runs on into below it (`skyline::BandSkirt`),
+    /// built once, with the band; Some exactly with `skyline`.
+    city_skirt: Option<skyline::BandSkirt>,
     /// The width the casters' bloom was rastered for (`new_for_width`), so
     /// [`Self::with_skyline`] rasters it again as the build did.
     bloom_width: usize,
@@ -347,6 +350,7 @@ impl Env {
             ground_gain: Vec3f::all(1.0),
             base_image: None,
             city_peaks: skyline.as_ref().map(|(band, _)| band.peaks()),
+            city_skirt: skyline.as_ref().map(|(band, _)| band.skirt()),
             skyline,
             bloom_width: width,
             measured_key: OnceLock::new(),
@@ -389,6 +393,13 @@ impl Env {
         self.skyline.is_some()
     }
 
+    /// What the skyline draws at `d` (premultiplied; its skirt below it), or
+    /// None without a skyline.
+    fn city_at(&self, d: Vec3f) -> Option<[f32; 4]> {
+        let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
+        Some(band.sample_skirted(skirt, d, *turn))
+    }
+
     /// The band and its turn, by the rule the ImageSet path keeps: Sky mode
     /// and `params.skyline` on (`params` clamped).
     fn skyline_of(params: &HdriParams, band: &std::sync::Arc<skyline::SkylineBand>) -> Option<(std::sync::Arc<skyline::SkylineBand>, f32)> {
@@ -420,6 +431,7 @@ impl Env {
             return Some(self);
         };
         self.city_peaks = Some(skyline.0.peaks());
+        self.city_skirt = Some(skyline.0.skirt());
         self.skyline = Some(skyline);
         // The bloom read the base without the city: it is rastered again from
         // nothing, in list order, as the build rastered it.
@@ -533,10 +545,9 @@ impl Env {
     /// skyline the base is drawn exactly as before.
     fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         let c = self.base_under_skyline(d, without, at);
-        let Some((band, turn)) = &self.skyline else {
+        let Some(s) = self.city_at(d) else {
             return c;
         };
-        let s = band.sample(d, *turn);
         if s == [0.0; 4] {
             return c;
         }
@@ -1057,8 +1068,8 @@ impl Env {
             };
             // The skyline hides what of the disc its alpha covers; its own
             // light is the city's, never the sun's.
-            if let Some((band, turn)) = &self.skyline {
-                base *= 1.0 - band.sample(d, *turn)[3];
+            if let Some(s) = self.city_at(d) {
+                base *= 1.0 - s[3];
             }
             self.lights_over(d, base, false, Sampling::default())
         };
