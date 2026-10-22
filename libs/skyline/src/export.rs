@@ -1,8 +1,8 @@
 //! Export of the strip, and the strip as data: tiles at most 4096 px wide, each a view of its own drawn by
 //! [`Skyline::draw_view`] into an RGBA16F target and read back as it is, then written as PNG (toned, un-premultiplied
 //! 8-bit) or EXR (linear float32, premultiplied), or handed over as a [`Band`] (the HDRI generator's skyline layer).
-//! A job runs on a `Skyline` of its own, so the views are never disturbed. Tile k is drawn in frame k and read in frame
-//! k + 1 (two targets in turn); its scene has the blur's and the water's margins (`draw_view`), so tiles meet without a
+//! A job runs on a `Skyline` of its own, so the views are never disturbed. Tile k is drawn in frame k and read as soon
+//! as that frame has been built (the next event, `job_event`; at the latest the next frame's draw), two targets in turn; its scene has the blur's and the water's margins (`draw_view`), so tiles meet without a
 //! seam. Metal leaves out the first draw into a new target layout while it builds the pipeline (and a tile can be the first
 //! to draw the water or a props layer), so there every tile is read until two reads agree.
 use crate::light::SkyLight;
@@ -40,10 +40,11 @@ enum Sink { File(ExportKind, std::path::PathBuf), Band(BandDone) }
 /// From the workers: tile i's texels, or the job's end (its message).
 enum News { Tile(usize, Result<Texels, String>), Done(Result<String, String>) }
 
-/// A running job: the strip `w` x `h` at `p`, lit by `light`; the next tile to draw, the one drawn last frame,
-/// the reads in flight, the tiles done; whether each tile is read until two reads agree (`first`: its last read, `rounds`).
+/// A running job: the strip `w` x `h` at `p`, lit by `light`; the next tile to draw, the one drawn and not yet read
+/// (with `Cx::frame_submission_serial` as it was when it was drawn), the reads in flight, the tiles done; whether each
+/// tile is read until two reads agree (`first`: its last read, `rounds`).
 pub struct Job {
-    p: Params, light: SkyLight, w: usize, h: usize, next: usize, drawn: Option<usize>, reads: usize, done: usize, check: bool,
+    p: Params, light: SkyLight, w: usize, h: usize, next: usize, drawn: Option<usize>, drawn_serial: u64, reads: usize, done: usize, check: bool,
     first: Option<Texels>, rounds: usize, out: Texels, sink: Option<Sink>, t0: f64, targets: Vec<SceneTarget>, tx: Sender<News>, rx: Receiver<News>,
 }
 
@@ -53,6 +54,21 @@ impl Job {
     fn view(&self, i: usize) -> ViewSpec {
         let (cw, w) = (TILE.min(self.w - i * TILE), self.w as f64);
         ViewSpec { u0: (i * TILE) as f64 / w, span: cw as f64 / w, w: cw, h: self.h, horizon: self.p[P::Horizon], pad: 0 }
+    }
+
+    /// Asks for the read of the tile drawn last; its texels come back on a worker as `News::Tile`.
+    fn read_drawn(&mut self, cx: &mut Cx) {
+        let Some(i) = self.drawn.take() else { return };
+        let (tx, size) = (self.tx.clone(), (self.view(i).w, self.h));
+        let read = cx.read_render_texture(&self.targets[i % 2].color, move |r| {
+            let lut = half_table();
+            let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
+            let decode = |(w, h, b): (usize, usize, std::sync::Arc<[u8]>)| if (w, h) != size { Err(format!("tile {i} read back {w} x {h}, not {} x {}", size.0, size.1)) }
+                else { Ok(par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])])) };
+            send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).and_then(decode)));
+        });
+        if let Err(e) = read { send(&self.tx, News::Tile(i, Err(format!("{e:?}")))); }
+        self.reads += 1;
     }
 }
 
@@ -86,26 +102,16 @@ impl Skyline {
         let out = vec![[0.0; 4]; v.w * v.h];
         let t0 = Cx::monotonic_now();
         let (p, light, sink) = (p.clone(), light.clone(), Some(sink));
-        self.job = Some(Job { p, light, w: v.w, h: v.h, next: 0, drawn: None, reads: 0, done: 0, check, first: None, rounds: 0, out, sink, t0, targets: vec![], tx, rx });
+        self.job = Some(Job { p, light, w: v.w, h: v.h, next: 0, drawn: None, drawn_serial: 0, reads: 0, done: 0, check, first: None, rounds: 0, out, sink, t0, targets: vec![], tx, rx });
         Ok(())
     }
 
-    /// Inside a Draw event: asks for the read of the tile drawn last frame, and draws the next tile into its own pass
-    /// (attached to the current one). True while the job needs frames: the caller draws again the next frame.
+    /// Inside a Draw event: asks for the read of the tile drawn last frame if [`Skyline::job_event`] has not yet, and
+    /// draws the next tile into its own pass (attached to the current one). True while the job needs frames: the caller
+    /// draws again the next frame.
     pub fn draw_job(&mut self, cx: &mut Cx2d) -> bool {
         let Some(mut job) = self.job.take() else { return false };
-        if let Some(i) = job.drawn.take() {
-            let (tx, size) = (job.tx.clone(), (job.view(i).w, job.h));
-            let read = cx.read_render_texture(&job.targets[i % 2].color, move |r| {
-                let lut: Vec<f32> = (0..=u16::MAX).map(f16_to_f32).collect();
-                let f = |b: &[u8]| lut[u16::from_le_bytes([b[0], b[1]]) as usize];
-                let decode = |(w, h, b): (usize, usize, std::sync::Arc<[u8]>)| if (w, h) != size { Err(format!("tile {i} read back {w} x {h}, not {} x {}", size.0, size.1)) }
-                    else { Ok(par(b.as_chunks::<8>().0, |t| [f(&t[0..]), f(&t[2..]), f(&t[4..]), f(&t[6..])])) };
-                send(&tx, News::Tile(i, r.map_err(|e| format!("{e:?}")).and_then(decode)));
-            });
-            if let Err(e) = read { send(&job.tx, News::Tile(i, Err(format!("{e:?}")))); }
-            job.reads += 1;
-        }
+        job.read_drawn(cx);
         if job.next < job.tiles() && (!job.check || job.reads == 0) {
             let (i, view) = (job.next, job.view(job.next));
             if job.targets.len() <= i % 2 { job.targets.push(SceneTarget::new(cx, "skyline_export", false)); }
@@ -114,17 +120,23 @@ impl Skyline {
             let t = &mut job.targets[i % 2];
             cx.make_child_pass(&t.pass);
             t.record(cx, view.w, view.h, |cx| self.draw_view(cx, rect, &view, &job.p, tone, &job.light));
-            (job.drawn, job.next) = (Some(i), i + 1);
+            (job.drawn, job.drawn_serial, job.next) = (Some(i), cx.frame_submission_serial(), i + 1);
+            // The tile's pass is built into this frame's commands after the Draw event: the next event (this signal
+            // is its wake) finds the submission serial past `drawn_serial` and asks for the read then, ordered after
+            // the pass, rather than a frame later (`job_event`).
+            SignalToUI::set_ui_signal();
         }
         let more = job.sink.is_some();
         self.job = Some(job);
         more
     }
 
-    /// Takes the workers' news: a tile read back, the file written or the band handed over, or a failure; returns the
-    /// message for the message line, when there is one.
-    pub fn job_event(&mut self, _cx: &mut Cx, _event: &Event) -> Option<String> {
+    /// Asks for the read of the tile drawn last as soon as its frame has been built (its pass is then in the commands
+    /// ahead of the read), and takes the workers' news: a tile read back, the file written or the band handed over, or a
+    /// failure; returns the message for the message line, when there is one.
+    pub fn job_event(&mut self, cx: &mut Cx, _event: &Event) -> Option<String> {
         let job = self.job.as_mut()?;
+        if job.drawn.is_some() && cx.frame_submission_serial() > job.drawn_serial { job.read_drawn(cx); }
         while let Ok(news) = job.rx.try_recv() {
             let e = match news {
                 News::Tile(i, Ok(t)) => {
@@ -157,8 +169,19 @@ impl Skyline {
     }
 }
 
+/// Every half's value (`f16_to_f32`), built once.
+fn half_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| (0..=u16::MAX).map(f16_to_f32).collect())
+}
+
+/// Below this many items `par` stays on the calling thread: a held strip's 23 552 texels decode in a fraction of what
+/// starting a thread per core costs (plan hdri-5 Task 8 measured 2.6 ms from the read to the texels, most of it that).
+const PAR_MIN: usize = 1 << 17;
+
 /// `f` of every item of `t`, in order, the work split over every core (decoding and toning millions of texels).
 fn par<T: Sync, U: Send + Copy + Default>(t: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    if t.len() < PAR_MIN { return t.iter().map(f).collect(); }
     let (n, mut out, f) = (t.len().div_ceil(std::thread::available_parallelism().map_or(4, |n| n.get())).max(1), vec![U::default(); t.len()], &f);
     std::thread::scope(|s| for (o, c) in out.chunks_mut(n).zip(t.chunks(n)) { s.spawn(move || for (o, x) in o.iter_mut().zip(c) { *o = f(x) }); });
     out
@@ -206,7 +229,19 @@ fn exr(w: usize, h: usize, t: &[[f32; 4]]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::f16_to_f32;
+    use super::{f16_to_f32, half_table, par, PAR_MIN};
+
+    #[test]
+    fn a_small_read_decodes_on_the_calling_thread() {
+        let here = std::thread::current().id();
+        let small = vec![0x3c00u16; PAR_MIN - 1];
+        assert!(par(&small, |_| std::thread::current().id() == here).iter().all(|&on_caller| on_caller));
+        let big = vec![0x3c00u16; PAR_MIN * 2];
+        let decoded = par(&big, |h| half_table()[*h as usize]);
+        assert!(decoded.iter().all(|&v| v == 1.0));
+        assert!(par(&big, |_| std::thread::current().id() == here).iter().any(|&on_caller| !on_caller), "a big one is spread");
+        assert!(std::ptr::eq(half_table(), half_table()), "the table is built once");
+    }
     use makepad_widgets::makepad_draw::makepad_script::pod_heap::f16_to_f32 as platform_f16;
 
     #[test]

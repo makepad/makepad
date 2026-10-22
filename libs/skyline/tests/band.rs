@@ -14,6 +14,8 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc};
 
 struct Rig {
     _window: WindowHandle, window_pass: DrawPass, root: DrawList2d, sky: render::Skyline, next: NextFrame, more: bool, draws: usize,
+    /// Draws again the next frame while the job asks for it (`draw_job`'s answer); false: only when the rig redraws.
+    follow: bool,
 }
 
 fn register(vm: &mut ScriptVm) {
@@ -26,52 +28,7 @@ fn render_band(p: &Params, w: usize) -> Band { render_band_lit(p, w, &SkyLight::
 
 /// The band at `p`, `w` px wide, lit by `light`, on a fresh Cx and GPU session.
 fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
-    use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
-    // one GPU session at a time (the tests of this file run on parallel threads)
-    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-    let rig: Rc<RefCell<Option<Rig>>> = Rc::new(RefCell::new(None));
-    let handler = rig.clone();
-    let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
-        if matches!(event, Event::Startup) {
-            let sky = cx.with_vm(|vm| {
-                register(vm);
-                let v = vm.eval(script! { mod.draw.Skyline{} });
-                render::Skyline::script_from_value(vm, v)
-            });
-            let mut window = WindowHandle::new(cx);
-            window.configure_window(cx, dvec2(64.0, 64.0), dvec2(0.0, 0.0), false, "Skyline band".into());
-            let window_pass = DrawPass::new(cx);
-            window.set_pass(cx, &window_pass);
-            *handler.borrow_mut() = Some(Rig { _window: window, window_pass, root: DrawList2d::new(cx), sky, next: NextFrame::default(), more: false, draws: 0 });
-            cx.redraw_all();
-        }
-        let mut rig = handler.borrow_mut();
-        let Some(r) = rig.as_mut() else { return };
-        r.sky.job_event(cx, event);
-        if r.next.is_event(event).is_some() { cx.redraw_all(); }
-        if let Event::Draw(event) = event {
-            let mut draw = CxDraw::new(cx, event);
-            let mut cx = Cx2d::new(&mut draw);
-            cx.begin_pass(&r.window_pass, None);
-            r.root.begin_always(&mut cx);
-            cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::flow_overlay());
-            r.more = r.sky.draw_job(&mut cx);
-            r.draws += 1;
-            if r.more { r.next = cx.new_next_frame(); }
-            cx.end_pass_sized_turtle();
-            r.root.end(&mut cx);
-            cx.end_pass(&r.window_pass);
-        }
-    }))));
-    cx.borrow_mut().init_cx_os();
-    let hal = Hal::global();
-    let mut req = OpenReq::from_env(0, open_flags::OFFSCREEN_WINDOWS, 1.0);
-    req.flags |= open_flags::OFFSCREEN_WINDOWS | open_flags::RETAIN_WINDOWS;
-    let info = hal.open(&req);
-    assert_ne!(info.backend, hal_api::backend_id::HEADLESS, "the band needs a GPU backend");
-    cx.borrow_mut().hal_attach_session(info);
-    while rig.borrow().is_none() { assert!(cx.borrow_mut().hal_session_turn(1_000_000, true)); }
+    let (cx, rig, hal, info, _one) = open_rig(true);
     // Pipelines compile on first use and the first draws into a new layout can be skipped, so the band is
     // requested again until two successive bands agree (the first ones may fail or come back partial).
     let mut last: Option<Band> = None;
@@ -115,6 +72,61 @@ fn render_band_lit(p: &Params, w: usize, light: &SkyLight) -> Band {
     };
     hal.close(info.session);
     band
+}
+
+type RigCx = Rc<RefCell<Cx>>;
+type RigRef = Rc<RefCell<Option<Rig>>>;
+
+/// A fresh Cx on its own GPU session with the rig's window drawing the Skyline's job (`follow`: see [`Rig`]); the session is
+/// the caller's to close (`hal.close(info.session)`). One session at a time: the guard keeps the others out until it is dropped.
+fn open_rig(follow: bool) -> (RigCx, RigRef, &'static makepad_platform::makepad_hal::Hal, makepad_platform::makepad_hal::HalInfo, std::sync::MutexGuard<'static, ()>) {
+    use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
+    // one GPU session at a time (the tests of this file run on parallel threads)
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let rig: Rc<RefCell<Option<Rig>>> = Rc::new(RefCell::new(None));
+    let handler = rig.clone();
+    let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
+        if matches!(event, Event::Startup) {
+            let sky = cx.with_vm(|vm| {
+                register(vm);
+                let v = vm.eval(script! { mod.draw.Skyline{} });
+                render::Skyline::script_from_value(vm, v)
+            });
+            let mut window = WindowHandle::new(cx);
+            window.configure_window(cx, dvec2(64.0, 64.0), dvec2(0.0, 0.0), false, "Skyline band".into());
+            let window_pass = DrawPass::new(cx);
+            window.set_pass(cx, &window_pass);
+            *handler.borrow_mut() = Some(Rig { _window: window, window_pass, root: DrawList2d::new(cx), sky, next: NextFrame::default(), more: false, draws: 0, follow });
+            cx.redraw_all();
+        }
+        let mut rig = handler.borrow_mut();
+        let Some(r) = rig.as_mut() else { return };
+        r.sky.job_event(cx, event);
+        if r.next.is_event(event).is_some() { cx.redraw_all(); }
+        if let Event::Draw(event) = event {
+            let mut draw = CxDraw::new(cx, event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&r.window_pass, None);
+            r.root.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(64.0, 64.0), Layout::flow_overlay());
+            r.more = r.sky.draw_job(&mut cx);
+            r.draws += 1;
+            if r.more && r.follow { r.next = cx.new_next_frame(); }
+            cx.end_pass_sized_turtle();
+            r.root.end(&mut cx);
+            cx.end_pass(&r.window_pass);
+        }
+    }))));
+    cx.borrow_mut().init_cx_os();
+    let hal = Hal::global();
+    let mut req = OpenReq::from_env(0, open_flags::OFFSCREEN_WINDOWS, 1.0);
+    req.flags |= open_flags::OFFSCREEN_WINDOWS | open_flags::RETAIN_WINDOWS;
+    let info = hal.open(&req);
+    assert_ne!(info.backend, hal_api::backend_id::HEADLESS, "the band needs a GPU backend");
+    cx.borrow_mut().hal_attach_session(info);
+    while rig.borrow().is_none() { assert!(cx.borrow_mut().hal_session_turn(1_000_000, true)); }
+    (cx, rig, hal, info, one)
 }
 
 /// The recorded band and its parameters, or None when `local/` has no baseline `name`.
@@ -169,6 +181,53 @@ fn bands_match_the_pre_move_baseline() {
         assert!(worst <= 1e-3, "{name}: worst texel difference {worst}");
         assert!(exact, "{name}: the band is not the baseline bit for bit");
     }
+}
+
+/// The bands of `requests` in turn on one Cx, each from a single draw: the rig draws when a band is asked for and never
+/// again for the job (`follow` false), so the tile's read is asked for by `job_event` once that draw's frame is built, not
+/// by a second draw a frame later. Each band with its time from the request (ms); None for one that did not come in 5 s.
+fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64)>> {
+    let (cx, rig, hal, info, _one) = open_rig(false);
+    let turn = || assert!(cx.borrow_mut().hal_session_turn(1_000_000, true));
+    let mut out = vec![];
+    for (p, w) in requests {
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut c = cx.borrow_mut();
+            rig.borrow_mut().as_mut().unwrap().sky.request_band(&mut c, p, &SkyLight::example(), *w, Box::new(move |b| { let _ = tx.send(b); }));
+            c.redraw_all();
+        }
+        let (t0, draws) = (Cx::monotonic_now(), rig.borrow().as_ref().unwrap().draws);
+        let got = loop {
+            turn();
+            if let Ok(b) = rx.try_recv() { break b.ok().map(|b| (b, (Cx::monotonic_now() - t0) * 1000.0)); }
+            if Cx::monotonic_now() - t0 > 5.0 { break None; }
+        };
+        println!("band {} x {}: {} in {} draw(s)", w, got.as_ref().map_or(0, |(b, _)| b.h), got.as_ref().map_or("none".into(), |(_, ms)| format!("{ms:.1} ms")), rig.borrow().as_ref().unwrap().draws - draws);
+        // the job ends with its Done message, after the band: the next request waits for it
+        let t1 = Cx::monotonic_now();
+        while rig.borrow().as_ref().unwrap().sky.busy() && Cx::monotonic_now() - t1 < 5.0 { turn(); }
+        out.push(got);
+    }
+    hal.close(info.session);
+    out
+}
+
+/// A band is read back from the frame that drew it (plan hdri-5 Task 8: a held drag of the sun waited a frame more for
+/// every strip, 21-26 ms a strip, because the read was asked for only in the next draw). With no second draw the bands
+/// still come, and they are the right ones: two different strips in turn, each the band the usual rig renders for it.
+#[test]
+#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_band_is_read_back_from_the_frame_that_drew_it() {
+    let (a, b) = (Params::default(), city_params());
+    let got = bands_from_one_draw(&[(a.clone(), 512), (b.clone(), 512), (a.clone(), 512), (b.clone(), 512), (a.clone(), 512)]);
+    // the first may fail (NotRendered) or come back partial while the pipelines compile; from the third on they are warm
+    assert!(got[1..].iter().all(Option::is_some), "a band waited for a second draw: {:?}", got.iter().map(Option::is_some).collect::<Vec<_>>());
+    let got: Vec<Band> = got.into_iter().map(|g| g.map_or(Band { w: 0, h: 0, texels: vec![] }, |g| g.0)).collect();
+    let (want_a, want_b) = (render_band(&a, 512), render_band(&b, 512));
+    assert!(got[2].texels == want_a.texels && got[4].texels == want_a.texels, "the defaults' band read from one draw is not the rig's");
+    assert!(got[3].texels == want_b.texels, "the denser city's band read from one draw is not the rig's (a stale read?)");
+    assert!(want_a.texels != want_b.texels);
 }
 
 fn noon(ring: [f32; 3]) -> SkyLight {
