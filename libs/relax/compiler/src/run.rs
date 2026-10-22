@@ -51,6 +51,13 @@ static REPORT_PATH: relax_session::sync::Mutex<String> = relax_session::sync::Mu
 /// The package's root crate and manifest dir (MAKEPAD_RUN_MAIN_COMPILE_LOG's header).
 static ROOT_DIR: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
 
+/// The running program's root crate name and package dir (makepad inspect `asm`'s native build).
+pub(crate) fn root_package() -> Option<(String, String)> {
+    let g = ROOT_DIR.lock().unwrap();
+    let (n, d) = g.split_once(' ')?;
+    Some((n.to_string(), d.to_string()))
+}
+
 fn phase(name: &str, t: Instant) {
     phase_ms(name, t.elapsed().as_secs_f64() * 1e3);
 }
@@ -2980,6 +2987,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         }
     }
     if std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() { verbose!("makepad-run cache: mid write held the unit lock {:.1} ms (manifest to {:.1}, front images to {:.1}, crate records to {:.1}, then spill)", held1, parts[0], parts[1], parts[2]); }
+    crate::inspect::flightrec::event("cache.write", &format!("mid write: {} records, {} images; held the owner {:.1} ms (manifest {:.1}, front images {:.1}, crate records {:.1})", n, n_imgs, held1, parts[0], parts[1], parts[2]), (held1 * 1e6) as u64, 0);
     // All temporary encoders and retired boot arrays are now outside compiler locks.
     crate::memstat::trim();
     Some((n, n_imgs))

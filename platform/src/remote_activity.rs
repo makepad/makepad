@@ -119,6 +119,12 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         return;
     }
     let remote = cx.remote_activity.remote_input.get();
+    if !remote {
+        super::input_rec::note(event);
+    }
+    if crate::makepad_error_log::flight::on() {
+        super::input_rec::flight(event, remote);
+    }
     let cancel_taken_away = matches!(event, Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id));
     let activity = &mut cx.remote_activity;
     if remote {

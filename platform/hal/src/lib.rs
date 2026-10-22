@@ -9,6 +9,11 @@
 //! [`types`], the command and event tables in [`cmds`] and [`events`], the GPU ledger in
 //! [`ledger`]. This crate ships the headless backend; the platform backends come with their phases.
 
+/// The HAL's maps of objects, keyed by small ids ((session, index) pairs, string ids): hashed
+/// with the in-tree FxHash. The per-draw path looks textures, buffers and pipelines up in them
+/// many times a frame, where std's SipHash was ~4% of the main thread's encode samples.
+pub type FastMap<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
+
 pub mod backend;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
@@ -43,6 +48,8 @@ pub mod events;
 pub mod font;
 pub mod ledger;
 pub mod gpu_limits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gpu_prof;
 pub mod gpu_pressure;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod framecap;

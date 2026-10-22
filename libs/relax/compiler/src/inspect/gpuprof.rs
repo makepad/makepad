@@ -31,6 +31,12 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
         Recording::decode(&bytes)
     };
     match query::run(&rec, &Args::parse(&w), &load) {
+        Ok(a) if w.iter().any(|x| x == "as=md") => {
+            for l in query::markdown(&a) {
+                println!("{l}");
+            }
+            0
+        }
         Ok(a) => {
             println!("{{\"measured\":{},\"source\":{}}}", json_str(&a.measured), json_str(&format!("file {path}")));
             for l in a.lines {

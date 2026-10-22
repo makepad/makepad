@@ -158,6 +158,8 @@ pub trait Gpu {
     fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64);
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
+    /// The window system composites session 0's badges (`window_kind::BADGE`) over its windows.
+    fn badges(&self) -> bool { false }
     /// A command for the window system, validated against the tables. True when the backend's
     /// window system took it and reports the outcome itself (events from the OS).
     fn os(&mut self, _sid: u32, _cmd: OsCmd) -> bool {
@@ -245,6 +247,8 @@ pub fn submit(gpu: &mut dyn Gpu, world: &mut World, sid: u32, view: &CmdView) {
     if let Some(s) = world.session_mut(sid) {
         s.events.set_time(now);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let prof = crate::gpu_prof::submit_begin(sid);
     for cmd in view.cmds {
         match cmd.decode(view.arena) {
             Some(c) => exec(gpu, world, sid, c, view, now),
@@ -255,6 +259,8 @@ pub fn submit(gpu: &mut dyn Gpu, world: &mut World, sid: u32, view: &CmdView) {
             }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::gpu_prof::submit_end(prof);
 }
 
 /// Fires the due timers of a session (a late pump fires once and re-arms from now).
@@ -401,6 +407,20 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 // The external compositor supplies the first geometry and every frame beat.
                 return;
             }
+            if kind & 0xff == window_kind::BADGE {
+                // session 0's, on one of its windows, where the window system composites badges
+                let Some(s) = world.session_mut(sid) else { return };
+                if sid != HOST || !gpu.badges() || s.windows.get(HOST, parent).is_err() {
+                    s.bad();
+                    return;
+                }
+                if s.windows.insert(sid, id, sid, WindowObj { kind, parent, geom, dpi: Some(s.dpi), ..Default::default() }).is_err() {
+                    s.stale();
+                    return;
+                }
+                gpu.os(sid, OsCmd::WindowCreate { id, kind, parent, geom });
+                return;
+            }
             // a child domain's window is a render target lent to its parent, never an OS window
             if world.session(sid).is_some_and(|s| s.parent != 0) {
                 let geom = unplaced_at_origin(geom);
@@ -537,17 +557,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 if s.windows.get(sid, id).is_ok_and(|w| w.val.is_hosted()) {
                     return;
                 }
-                let text = world.titled(s.string(title).unwrap_or(""));
+                let text = s.string(title).unwrap_or("").to_string();
                 gpu.os(sid, OsCmd::WindowTitle { id, title: text });
-            }
-            return;
-        }
-        HalCmd::TitleStatus { text } => {
-            if sid != HOST { deny(world, sid); return; }
-            let Some(s) = world.session(HOST) else { return };
-            let text = s.string(text).unwrap_or("").to_string();
-            for (wsid, id, title) in world.set_title_status(&text) {
-                gpu.os(wsid, OsCmd::WindowTitle { id, title });
             }
             return;
         }
@@ -770,7 +781,6 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         | HalCmd::ChildDragReply { .. }
         | HalCmd::ParentMessage { .. }
         | HalCmd::WindowOverlay { .. }
-        | HalCmd::TitleStatus { .. }
         | HalCmd::Frame { .. }
         | HalCmd::ChildGeom { .. }
         | HalCmd::Forward { .. }

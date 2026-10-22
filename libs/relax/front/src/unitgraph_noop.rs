@@ -213,7 +213,7 @@ mod tests {
             std::fs::write(dir.join("helper/Cargo.toml"),
                 "[package]\nname = \"renamed-helper\"\n[package.metadata.makepad-run]\nbuild-script-noop = [\"build\", \"empty\"]\n").unwrap();
             let mut f = Self {
-                script: BuildScript { krate: 0, src_path: dir.join("build.rs").display().to_string(), edition: 2021,
+                script: BuildScript { krate: 0, also: Vec::new(), src_path: dir.join("build.rs").display().to_string(), edition: 2021,
                     features: Vec::new(), build_deps: vec![(0, "helper".into())] },
                 dir, units: Vec::new(),
             };

@@ -399,6 +399,8 @@ impl ReadSource {
 pub struct Store {
     /// the store's generation 0 path (its identity; the file read is its current generation)
     pub path: PathBuf,
+    /// the generation file mapped
+    file: PathBuf,
     pub index: crate::arena::Arena<Ix>,
     pub(crate) generation: u64,
     data: Bytes,
@@ -408,8 +410,21 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens `path` (None: missing, unreadable or not a valid store).
+    /// Opens `path` (None: missing, unreadable or not a valid store), as used by this run.
     pub fn open(path: &Path) -> Option<Store> {
+        let st = Self::open_unmarked(path)?;
+        st.mark_used();
+        Some(st)
+    }
+
+    /// Records this store as used by this run (mark_live): the cap and the replaced-variant
+    /// retirement keep it, other runs see it stamped.
+    pub fn mark_used(&self) {
+        mark_live(&self.path, &self.file, true);
+    }
+
+    /// Opens `path` without marking it used: a scan that may reject it (cache.rs candidate).
+    pub fn open_unmarked(path: &Path) -> Option<Store> {
         let base = base_path(path);
         let file = current(&base);
         let mut f = std::fs::File::open(&file).ok()?;
@@ -432,14 +447,11 @@ impl Store {
             if (data.len() as u64) < end {
                 return None;
             }
-            Some(Store { path: base.clone(), index: decode_index(&ib).into(), generation: sum64(&hb), data,
+            Some(Store { path: base.clone(), file: file.clone(), index: decode_index(&ib).into(), generation: sum64(&hb), data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
                 data_end: end })
         })();
         let _ = f.unlock();
-        if r.is_some() {
-            mark_live(&base, &file, true);
-        }
         r
     }
 
@@ -458,12 +470,12 @@ impl Store {
             if sum64(hb) != generation { return None; }
             let (n, end, _) = h.slots[h.active as usize];
             if n != index.len() as u64 || n > h.cap as u64 || end > data.len() as u64 { return None; }
-            Some(Self { path: base.clone(), index: crate::arena::Arena::Mapped(index), generation, data,
+            Some(Self { path: base.clone(), file: file.clone(), index: crate::arena::Arena::Mapped(index), generation, data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
                 data_end: end })
         })();
         let _ = f.unlock();
-        if result.is_some() { mark_live(&base, &file, true); }
+        if let Some(st) = &result { st.mark_used(); }
         result
     }
 
@@ -1049,6 +1061,59 @@ pub fn retire_build(dir: &Path, build: u64, retire: impl FnOnce()) -> bool {
     let _ = std::fs::remove_file(&p);
     let _ = f.unlock();
     true
+}
+
+/// The programs this process runs (each one's root crate identity, cache.rs open) with the
+/// store each of their roles uses (role -> store file name: a crate's front or code store, the
+/// program's graph stores): their store sets (cache.rs write_sets).
+static PROGRAMS: relax_session::sync::Mutex<Option<std::collections::BTreeMap<u64, std::collections::BTreeMap<String, String>>>> = relax_session::sync::Mutex::new(None);
+
+/// Records the stores program `key` uses, by role (a later call for the same program, after a
+/// live edit, replaces them).
+pub fn note_program(key: u64, roles: &std::collections::BTreeMap<String, String>) {
+    // copied on the kept heap: the caller's (a compiler zone's) is destroyed by a zone swap
+    let _k = crate::zone_alloc::kept();
+    let roles: std::collections::BTreeMap<String, String> = roles.iter().map(|(r, n)| (r.as_str().to_owned(), n.as_str().to_owned())).collect();
+    PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key, roles);
+}
+
+/// The programs this process runs, with their stores by role.
+pub fn programs() -> Vec<(u64, std::collections::BTreeMap<String, String>)> {
+    PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).iter().flatten().map(|(k, v)| (*k, v.clone())).collect()
+}
+
+/// The payloads of the entries of `kind` in the store file `p`, read (not mapped, and not marking
+/// the store as used by this run); None when it is unreadable or locked by a writer right now.
+pub fn peek(p: &Path, kind: u32) -> Option<Vec<Vec<u8>>> {
+    let mut f = std::fs::File::open(p).ok()?;
+    f.try_lock_shared().ok()?;
+    let r = (|| -> Option<Vec<Vec<u8>>> {
+        let mut hb = [0u8; HEADER];
+        f.read_exact(&mut hb).ok()?;
+        let h = Header::parse(&hb)?;
+        let (n, end, sum) = h.slots[h.active as usize];
+        if n > h.cap as u64 {
+            return None;
+        }
+        let mut ib = vec![0u8; n as usize * INDEX_ENTRY];
+        f.seek(SeekFrom::Start(h.slot_off(h.active))).ok()?;
+        f.read_exact(&mut ib).ok()?;
+        if sum64(&ib) != sum {
+            return None;
+        }
+        let mut out = Vec::new();
+        for e in decode_index(&ib).into_iter().filter(|e| e.kind == kind && e.off + e.len as u64 <= end) {
+            let mut b = vec![0u8; e.len as usize];
+            f.seek(SeekFrom::Start(e.off)).ok()?;
+            f.read_exact(&mut b).ok()?;
+            if sum64(&b) == e.sum {
+                out.push(b);
+            }
+        }
+        Some(out)
+    })();
+    let _ = f.unlock();
+    r
 }
 
 /// Test only: rewrites `p`'s header as if `build` had written it.

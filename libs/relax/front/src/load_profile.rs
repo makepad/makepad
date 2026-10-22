@@ -16,9 +16,12 @@ struct Buffer { thread: std::thread::ThreadId, worker: String, events: Vec<Event
 static BUFFERS: Mutex<Vec<Arc<Mutex<Buffer>>>> = Mutex::new(Vec::new());
 
 /// Registers the calling thread's new generation of timeline events for flush().
+/// The registry, the buffers and their events are kept-heap state: they outlive the compiler
+/// generation of the span that wrote them (the settle swap destroys it; flush reads them later).
 struct LocalBuffer(Arc<Mutex<Buffer>>);
 impl Default for LocalBuffer {
     fn default() -> Self {
+        let _k = crate::zone_alloc::kept();
         let thread = std::thread::current();
         let buffer = Arc::new(Mutex::new(Buffer { thread: thread.id(), worker: thread.name().unwrap_or("unnamed").into(), events: Vec::new() }));
         BUFFERS.lock().unwrap().push(buffer.clone());
@@ -40,7 +43,7 @@ pub fn span(enabled: bool, phase: &'static str, subject: &str) -> Option<Span> {
             _ => None,
         };
         if file_cost.is_some() { FILE_CHILD_CPU.with(|s| s.borrow_mut().push(0)); }
-        Span { start: Instant::now(), phase, subject: subject.into(), file_cost }
+        Span { start: Instant::now(), phase, subject: crate::zone_alloc::kept_with(|| subject.into()), file_cost }
     })
 }
 
@@ -63,6 +66,7 @@ impl Drop for Span {
             if !self.phase.is_empty() { file.cost(*lower, own); }
         }
         if self.phase.is_empty() { return; }
+        let _k = crate::zone_alloc::kept();
         BUFFER.with(|buffer| buffer.0.lock().unwrap().events.push(Event {
             start_us: self.start.duration_since(epoch()).as_micros(),
             dur_us: end.duration_since(self.start).as_micros(), phase: self.phase,

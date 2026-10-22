@@ -99,6 +99,27 @@ pub struct View {
     #[live(false)]
     pub backdrop: bool,
 
+    /// True with `show_bg`, the background is rendered into a texture of its
+    /// own and drawn back from it with one texture read per pixel: for an
+    /// expensive background shader (a procedural window ground) that does not
+    /// change from frame to frame. It is rendered again only when one of its
+    /// inputs changes: its size, density or shader, an instance or uniform
+    /// value, a bound texture. A shader that reads `draw_pass.time` renders
+    /// again at most `cache_bg_hz` times a second (0: every frame). The
+    /// picture is opaque when the background is (`alpha_blend: false`), so
+    /// hidden-surface removal still skips it under opaque draws. A pane of
+    /// glass (`backdrop`) and a cached view (`texture_caching`) are not
+    /// cached this way. False, the default, draws the background directly.
+    #[live(false)]
+    pub cache_bg: bool,
+    #[live(0.0)]
+    pub cache_bg_hz: f64,
+    #[rust]
+    bg_cache: Option<Box<BgCache>>,
+    /// This draw's background goes through `bg_cache`.
+    #[rust]
+    bg_cached: bool,
+
     #[layout]
     pub layout: Layout,
 
@@ -224,6 +245,78 @@ pub struct View {
 
     #[apply_default]
     animator: Animator,
+}
+
+/// `cache_bg`: the background's own pass and texture, the quad that draws the
+/// texture back, and the inputs the texture was rendered from.
+struct BgCache {
+    pass: DrawPass,
+    list: DrawList2d,
+    texture: Texture,
+    blit: DrawCachedQuad,
+    /// The rendered inputs: shader, density, instance and uniform values (as
+    /// bits; empty: nothing rendered yet), and the bound textures.
+    key: Vec<u32>,
+    textures: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
+    /// When a clock-reading background was last rendered.
+    rendered_at: f64,
+}
+
+impl BgCache {
+    fn new(vm: &mut ScriptVm) -> Self {
+        let blit = DrawCachedQuad::script_new_with_default(vm);
+        let list = DrawList2d::script_new(vm);
+        let cx = vm.cx_mut();
+        let pass = DrawPass::new(cx);
+        let texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true });
+        pass.set_color_texture(cx, &texture, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
+        Self { pass, list, texture, blit, key: Vec::new(), textures: [None; DRAW_CALL_TEXTURE_SLOTS], rendered_at: f64::NEG_INFINITY }
+    }
+
+    /// Draws the picture's quad over the view's rect (`begin`), in place of the background.
+    fn begin(&mut self, cx: &mut Cx2d, bg: &DrawQuad, walk: Walk, layout: Layout) {
+        self.blit.draw_vars.set_texture(0, &self.texture);
+        self.blit.draw_vars.options.alpha_blend = bg.draw_vars.options.alpha_blend;
+        self.blit.draw_vars.options.depth_write = bg.draw_vars.options.depth_write;
+        // the picture lies where the background would: same paint-order depth
+        self.blit.draw_depth = bg.draw_depth;
+        self.blit.begin(cx, walk, layout);
+    }
+
+    /// Closes the quad (`end`) and renders the background into the texture when its inputs
+    /// changed since the last render. Returns the quad's area.
+    fn end(&mut self, cx: &mut Cx2d, bg: &mut DrawQuad, hz: f64) -> Area {
+        self.blit.end(cx);
+        let area = self.blit.area();
+        let size = area.rect(cx).size;
+        // rendered at the texture's origin: its pixels do not depend on where the view is
+        bg.rect_pos = vec2(0.0, 0.0);
+        bg.rect_size = vec2(size.x as f32, size.y as f32);
+        let mut key = Vec::with_capacity(self.key.len().max(64));
+        key.push(bg.draw_vars.draw_shader_id.map_or(u32::MAX, |s| s.index as u32));
+        key.push((cx.current_dpi_factor() as f32).to_bits());
+        key.extend(bg.draw_vars.as_slice().iter().map(|v| v.to_bits()));
+        key.extend(bg.draw_vars.dyn_uniforms.iter().map(|v| v.to_bits()));
+        let textures = bg.draw_vars.texture_slots.each_ref().map(|t| t.as_ref().map(|t| t.texture_id()));
+        let clock = bg.draw_vars.draw_shader_id.is_some_and(|s| cx.cx.draw_shaders[s.index].mapping.uses_time);
+        let now = cx.cx.seconds_since_app_start();
+        let due = clock && (hz <= 0.0 || now - self.rendered_at >= 1.0 / hz);
+        cx.make_child_pass(&self.pass);
+        if key != self.key || textures != self.textures || due {
+            self.key = key;
+            self.textures = textures;
+            self.rendered_at = now;
+            cx.begin_pass(&self.pass, None);
+            self.list.begin_always(cx);
+            cx.begin_root_turtle(size, Layout::default());
+            bg.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size });
+            cx.end_pass_sized_turtle();
+            self.list.end(cx);
+            cx.end_pass(&self.pass);
+        }
+        cx.set_pass_area_with_origin(&self.pass, area, dvec2(0.0, 0.0));
+        area
+    }
 }
 
 struct ViewTextureCache {
@@ -355,6 +448,11 @@ impl ScriptHook for View {
 
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
+        }
+        if self.cache_bg && self.show_bg && self.bg_cache.is_none() {
+            self.bg_cache = Some(Box::new(BgCache::new(vm)));
+        } else if !self.cache_bg {
+            self.bg_cache = None;
         }
         if !self.scroll_bars.is_zero() {
             if let Some(bars) = self.scroll_bars_obj.as_mut() {
@@ -1919,8 +2017,13 @@ impl Widget for View {
                     let snapshot = request_window_gauss(cx);
                     bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
                 }
-                self.draw_bg
-                    .begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                self.bg_cached = !self.backdrop && !self.optimize.is_texture() && self.bg_cache.is_some();
+                if let Some(cache) = self.bg_cache.as_mut().filter(|_| self.bg_cached) {
+                    cache.begin(cx, &self.draw_bg, walk, self.layout.with_scroll(scroll));
+                } else {
+                    self.draw_bg
+                        .begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
+                }
             } else {
                 cx.begin_turtle(walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             }
@@ -1975,8 +2078,12 @@ impl Widget for View {
                     if self.optimize.is_texture() {
                         panic!("dont use show_bg and texture caching at the same time");
                     }
-                    self.draw_bg.end(cx);
-                    self.area = self.draw_bg.area();
+                    if let Some(cache) = self.bg_cache.as_mut().filter(|_| self.bg_cached) {
+                        self.area = cache.end(cx, &mut self.draw_bg, self.cache_bg_hz);
+                    } else {
+                        self.draw_bg.end(cx);
+                        self.area = self.draw_bg.area();
+                    }
                 } else {
                     cx.end_turtle_with_area(&mut self.area);
                     if self.bg_invisible {

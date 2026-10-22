@@ -1782,6 +1782,7 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::KeyUp(ke) if takes_input && is_activation_key(ke.key_code) => {
+                crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}` (key)", self.text.as_ref());
                 cx.widget_action_with_data(
                     &self.action_data,
                     uid,
@@ -1843,6 +1844,7 @@ impl Widget for Button {
                         true
                     };
                 if was_clicked {
+                    crate::makepad_platform::makepad_error_log::flight_mark!("ui.click", uid.0, 0, "button `{}`", self.text.as_ref());
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,

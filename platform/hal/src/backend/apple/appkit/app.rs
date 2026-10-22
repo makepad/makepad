@@ -94,6 +94,8 @@ pub struct App {
     /// every window ever made, in order; closed ones stay allocated (the view and delegate keep
     /// pointers to them past `windowWillClose:`) and are flagged retired
     windows: RefCell<Vec<&'static Win>>,
+    /// the windows' badges (`window_kind::BADGE`)
+    badges: RefCell<Vec<super::badge::Badge>>,
     ime: RefCell<ImeKeyboard>,
     last_key_mod: Cell<u32>,
     /// the main menu consumed the key event being dispatched (`menuAction:` ran)
@@ -133,6 +135,7 @@ pub fn app() -> &'static App {
         MainOnly(App {
             classes: OnceCell::new(),
             windows: RefCell::new(Vec::new()),
+            badges: RefCell::new(Vec::new()),
             ime: RefCell::new(ImeKeyboard::default()),
             last_key_mod: Cell::new(0),
             menu_command_fired: Cell::new(false),
@@ -606,6 +609,7 @@ impl App {
 
     /// A window is gone (closing or closed): its display link and fallback timer go with it.
     pub fn window_gone(&self, win: &Win) {
+        self.remove_badges(|b| std::ptr::eq(b.parent, win));
         unsafe {
             let link = win.link.replace(nil);
             if link != nil {
@@ -618,6 +622,18 @@ impl App {
             }
         }
         win.want_frame.set(false);
+    }
+
+    fn remove_badges(&self, which: impl Fn(&super::badge::Badge) -> bool) {
+        let mut badges = self.badges.borrow_mut();
+        let mut i = 0;
+        while i < badges.len() {
+            if which(&badges[i]) {
+                badges.swap_remove(i).remove();
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub(super) fn window_view(&self, sid: u32, id: Id) -> Option<ObjcId> {
@@ -1042,6 +1058,7 @@ fn apply(op: Op) {
             }
         }
         Op::CloseSession(sid) => {
+            app().remove_badges(|b| b.sid == sid);
             let windows: Vec<&'static Win> = app().windows.borrow().iter().copied().filter(|w| w.sid.get() == sid).collect();
             for win in windows {
                 win.close_silently();
@@ -1058,6 +1075,19 @@ fn command(sid: u32, cmd: OsCmd) {
     let a = app();
     let window_of = |id: Id| a.find(sid, id);
     match cmd {
+        OsCmd::WindowCreate { id, kind, parent, geom } if kind & 0xff == window_kind::BADGE => {
+            if let Some(parent) = window_of(parent) {
+                a.badges.borrow_mut().push(super::badge::Badge::create(sid, id, parent, geom));
+            }
+        }
+        OsCmd::WindowClose { id } if a.badges.borrow().iter().any(|b| b.sid == sid && b.id == id) => {
+            a.remove_badges(|b| b.sid == sid && b.id == id);
+        }
+        OsCmd::WindowGeom { id, geom } if a.badges.borrow().iter().any(|b| b.sid == sid && b.id == id) => {
+            for b in a.badges.borrow().iter().filter(|b| b.sid == sid && b.id == id) {
+                b.set_geom(geom);
+            }
+        }
         OsCmd::WindowCreate { id, kind, parent, geom } => {
             let parent = if parent.is_none() { None } else { window_of(parent) };
             let win = Win::create(sid, id, kind, parent, geom);

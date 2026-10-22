@@ -18,6 +18,9 @@
 //! relocations, a global block is linked where it is placed).
 
 pub mod arm64;
+pub mod dis;
+pub mod dis_arm64;
+pub mod dis_x64;
 pub mod x64;
 
 use std::collections::HashMap;
@@ -1417,3 +1420,7 @@ mod tests;
 mod tests_x64;
 #[cfg(test)]
 mod tests_arm64;
+#[cfg(test)]
+mod tests_dis_x64;
+#[cfg(test)]
+mod tests_dis_arm64;

@@ -183,6 +183,14 @@ impl DemandPart {
         Self { key, inputs: self.inputs.clone(), probes: self.probes.clone(),
             late_inputs: self.late_inputs.clone(), ..Self::default() }
     }
+    /// The crate store a part's payload takes its images from (its sources, tokens, macro
+    /// definitions): the front store it was encoded against.
+    pub fn image_store(bytes: &[u8]) -> Option<String> {
+        let mut r = Decode::new(bytes);
+        if u32::get(&mut r)? != PART_VERSION { return None; }
+        let _: Self = Self { inputs: Codec::get(&mut r)?, probes: Codec::get(&mut r)?, late_inputs: Codec::get(&mut r)?, ..Self::default() };
+        String::get(&mut r)
+    }
     pub fn read_header(key: u128, bytes: &[u8]) -> Option<Self> {
         let mut r = Decode::new(bytes);
         if u32::get(&mut r)? != PART_VERSION { return None; }

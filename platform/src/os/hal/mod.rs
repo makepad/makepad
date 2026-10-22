@@ -142,6 +142,9 @@ pub struct HalClient {
     /// The frame profile (`makepad_hal::profile`): the last beat, input intake since it.
     pub(crate) profile_beat: u64,
     pub(crate) profile_input_ns: u64,
+    /// this beat's CPU phases (`FrameMeta::phases`): start, end of dispatch, next-frame
+    /// callbacks, draw, then build / submit / spare (unused)
+    pub(crate) beat_phases: [[u64; 2]; 6],
     /// the HAL said the GPU device is lost and has not reset it yet: no frames are built
     pub(crate) device_lost: bool,
     /// another thread woke the loop (`Wake`)
@@ -209,6 +212,7 @@ impl Default for HalClient {
             beat: false,
             profile_beat: 0,
             profile_input_ns: 0,
+            beat_phases: [[0; 2]; 6],
             device_lost: false,
             wake: false,
             focused: None,

@@ -133,6 +133,9 @@ mod disabled {
     pub fn points_into(_: usize, _: u64) -> bool {
         false
     }
+    pub fn points_into_range(_: usize, _: u64, _: u64) -> bool {
+        false
+    }
     pub fn internal_ranges() -> [(usize, usize); 2] {
         [(0, 0); 2]
     }
@@ -235,6 +238,12 @@ pub fn compiler_tombstone_frees() -> usize {
 /// static scan's test.)
 pub fn compiler_points_into(p: usize, g: u64) -> bool {
     compiler::points_into(p, g)
+}
+
+/// `compiler_points_into` for any generation in [lo, hi) (the stale scan before a destroy of
+/// every older generation, aborted swaps' included).
+pub fn compiler_points_into_range(p: usize, lo: u64, hi: u64) -> bool {
+    compiler::points_into_range(p, lo, hi)
 }
 
 /// The arena's own statics (address ranges): its free lists and base address are not roots.

@@ -271,7 +271,6 @@ impl Field {
         region: [f32; 4],
         reduce_motion: bool,
         halted: bool,
-        fit: bool,
         resolve: f32,
         scatter: bool,
     ) -> Frame {
@@ -366,7 +365,7 @@ impl Field {
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let (radius, cy) = if halted || fit {
+        let (radius, cy) = if halted {
             // the whole galaxy, scatter included, inside the region
             ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
         } else {

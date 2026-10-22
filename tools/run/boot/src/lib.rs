@@ -1,4 +1,5 @@
 //! Session 0's text/pass renderer. No platform client, draw tree, widgets or Cx.
+mod activity;
 mod caption;
 mod document;
 mod dump;
@@ -13,6 +14,7 @@ mod text;
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
+pub use activity::Want as ActivityWant;
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
@@ -24,7 +26,11 @@ pub use relax_base::{
     diag::Diagnostic,
     run_state::{Mode, State},
 };
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub const DEFAULT_DOCUMENT: &str = include_str!("../resources/boot.splash");
 
@@ -205,6 +211,10 @@ pub struct Boot {
     gpu: bool,
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
+    /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
+    badges: bool,
+    /// the JIT activity badge
+    activity: activity::Activity,
     /// the window's chrome as the platform reports it: the caption strip follows it
     chrome: caption::Chrome,
 }
@@ -237,6 +247,8 @@ impl Boot {
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
+            badges: info.flags & info_flags::WINDOW_BADGES != 0,
+            activity: activity::Activity::new(),
             chrome: caption::Chrome {
                 client: info.flags & info_flags::CLIENT_CHROME != 0,
                 ..Default::default()
@@ -919,7 +931,6 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
-            false,
             -1.0,
             false,
         );
@@ -1161,16 +1172,144 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// The status every app window's title carries after its own (the HAL's `TitleStatus`;
-    /// empty: none), e.g. "optimizing 62%".
-    pub fn title_status(&mut self, text: &str) {
+    /// Whether frames are dumped (`MAKEPAD_RUN_BOOT_DUMP`): the run looks in at the dump's pace.
+    pub fn dumping(&self) -> bool {
+        self.dump.is_some()
+    }
+
+    /// A dump keeps the running app's frames while no badge and no layer is over them (the HAL's
+    /// snapshot of the window), at the dump's pace.
+    pub fn dump_app(&mut self) {
+        let (Some(window), None, false) = (self.window, self.activity.window, self.layer_on()) else { return };
+        if let Some(req) = self.dump.as_mut().and_then(|d| d.due()) {
+            let mut writer = CmdWriter::new(HOST);
+            writer.snapshot(window, req);
+            Hal::global().submit(&writer.buf());
+        }
+    }
+
+    /// ms on the dump's clock (its frames' file names), when frames are dumped.
+    pub fn dump_ms(&self) -> Option<u128> {
+        self.dump.as_ref().map(|d| d.ms())
+    }
+
+    /// Whether this window can show the JIT activity badge (the window system composites badges).
+    pub fn badges(&self) -> bool {
+        self.badges && self.window.is_some() && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
+    }
+
+    /// The run's wish for the JIT activity badge this turn (`None`: the JIT is idle; a shown badge
+    /// fades out, then goes). Draws the badge's frame when one is due; returns how long until the
+    /// next (`None`: no badge).
+    pub fn activity(&mut self, want: Option<ActivityWant>) -> Option<Duration> {
+        let want = want.filter(|_| self.badges());
+        let window = self.window?;
+        self.activity.set(want);
         let mut writer = CmdWriter::new(HOST);
-        writer.str_def(TITLE_STATUS_SID, text.as_bytes());
-        writer.title_status(TITLE_STATUS_SID);
+        let place = activity::Activity::place([self.geometry[2], self.geometry[3]]);
+        let badge = match self.activity.window {
+            Some(badge) if self.activity.done() || !self.badges() => {
+                writer.window_close(badge);
+                Hal::global().submit(&writer.buf());
+                self.activity.window = None;
+                return None;
+            }
+            Some(badge) => {
+                if self.activity.placed != place {
+                    writer.window_geom(badge, place);
+                    self.activity.placed = place;
+                }
+                badge
+            }
+            None if self.activity.wanted() => {
+                // one slot for the run's badges, a new generation each time one is made
+                let slot = *self
+                    .activity
+                    .slot
+                    .get_or_insert_with(|| Hal::global().with_world(|w| w.host_window_id()));
+                let badge = Id::new(slot.index, slot.gen);
+                self.activity.slot = Some(Id::new(slot.index, slot.gen.wrapping_add(1).max(1)));
+                writer.window_create(badge, window_kind::BADGE, window, place, false);
+                self.activity.window = Some(badge);
+                self.activity.placed = place;
+                badge
+            }
+            None => return None,
+        };
+        Hal::global().submit(&writer.buf());
+        let now = Instant::now();
+        if now >= self.activity.next_frame {
+            self.present_badge(badge);
+            self.activity.next_frame = now + activity::FRAME;
+        }
+        Some(self.activity.next_frame.saturating_duration_since(Instant::now()))
+    }
+
+    /// One frame of the activity badge: its galaxy, one quad over transparent pixels.
+    fn present_badge(&mut self, badge: Id) {
+        let reduce_motion = self.environment.reduce_motion;
+        let dpi = self.dpi;
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(program) = renderer.active.as_ref() else { return };
+        let pipe = &program.pipes[ERROR_BAND];
+        let look = self.activity.look(reduce_motion);
+        let side = activity::SIDE;
+        let viewport = [side, side];
+        let mut uniforms = Vec::new();
+        pipe.uniforms.write(
+            &[
+                (id!(viewport), &viewport),
+                (id!(dpi), &[dpi]),
+                (id!(reduce_motion), &[reduce_motion as u8 as f32]),
+            ],
+            &mut uniforms,
+        );
+        let mut data = Vec::new();
+        pipe.instances.write(
+            &[
+                (id!(rect), &look.rect),
+                (id!(accent), &[ACTIVITY_GALAXY]),
+                (id!(selected), &[look.level]),
+                (id!(block), &[look.block]),
+                (id!(pressed), &[look.opacity]),
+                (id!(action), &[look.spin]),
+                (id!(beat), &[look.beat]),
+            ],
+            &mut data,
+        );
+        self.frame += 1;
+        let mut writer = CmdWriter::new(HOST);
+        writer.frame_begin(
+            self.frame,
+            FrameMeta {
+                build_start_ns: makepad_hal::clock_ns(),
+                ..Default::default()
+            },
+        );
+        writer.pass(Pass {
+            color: [Id::NONE; 4],
+            load: [pass_load::CLEAR; 5],
+            clear: [[0.0; 4]; 4],
+            viewport: [0.0, 0.0, side * dpi, side * dpi],
+            dpi,
+            ..Default::default()
+        });
+        pipe.draw(&mut writer, &data, &uniforms, renderer.text.atlas(), [0.0, 0.0, side * dpi, side * dpi]);
+        writer.frame_set_build_end(makepad_hal::clock_ns());
+        // a dump keeps the app's frame with the badge over it (both read back, put together)
+        let snapshot = match (&mut self.dump, self.window) {
+            (Some(dump), Some(window)) => dump.due().map(|req| (window, req, dump.badge(self.activity.placed, dpi))),
+            _ => None,
+        };
+        writer.frame_end(badge, target::WINDOW | if snapshot.is_some() { target::SNAPSHOT } else { 0 });
+        if let Some((window, app, over)) = snapshot {
+            writer.snapshot(window, app);
+            writer.snapshot(badge, over);
+        }
         Hal::global().submit(&writer.buf());
     }
 
-    /// The layer has faded out (the ready lift, the JIT loader): the run may take it away.
+    /// The layer has faded out (the ready lift): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
             .as_mut()
@@ -1191,18 +1330,7 @@ impl Boot {
         let time = renderer.began.elapsed().as_secs_f32();
         let layered = renderer.layer.on && program.layer.is_some();
         let look = layered.then(|| renderer.layer.look(reduce_motion));
-        let hud = look.is_none_or(|l| l.hud);
-        let corner = look.is_some_and(|l| l.corner);
-        // the JIT loader in its corner over the app has no caption of its own: the app's shows
-        let caption = if hud { caption } else { caption::Caption::default() };
-        // the JIT loader: the whole galaxy in a square at the bottom-right corner
-        let region = if corner {
-            let side = layer::LOADER_SIDE.min(viewport[0].min(viewport[1]) * 0.4);
-            let margin = layer::LOADER_MARGIN;
-            [viewport[0] - side - margin, viewport[1] - side - margin, side, side]
-        } else {
-            [0.0, 0.0, viewport[0], viewport[1]]
-        };
+        let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
@@ -1212,40 +1340,28 @@ impl Boot {
             region,
             reduce_motion,
             false,
-            corner,
             look.map_or(-1.0, |l| l.resolve),
             renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
         );
-        if !hud {
-            renderer.layout.fixed_text.clear();
-            renderer.layout.cards.clear();
-        } else {
-            let mut hint = program.label(layout::phase_key(self.state.phase));
-            let mut status = None;
-            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
-                hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
-                status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
-            }
-            renderer.field.hud(
-                &mut renderer.text,
-                &self.state,
-                &hint,
-                status,
-                viewport,
-                frame.view,
-                frame.params[0],
-                time,
-                &caption,
-                self.offscreen,
-                &mut renderer.layout,
-            );
+        let mut hint = program.label(layout::phase_key(self.state.phase));
+        let mut status = None;
+        if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+            hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
+            status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
         }
-        // the JIT loader's small galaxy (the UI stalls on the JIT) at the bottom-right corner
-        let stall = look.filter(|l| l.stall > 0.0).map(|l| {
-            let side = layer::LOADER_SIDE;
-            let margin = layer::LOADER_MARGIN;
-            ([viewport[0] - side - margin, viewport[1] - side - margin, side, side], l.stall)
-        });
+        renderer.field.hud(
+            &mut renderer.text,
+            &self.state,
+            &hint,
+            status,
+            viewport,
+            frame.view,
+            frame.params[0],
+            time,
+            &caption,
+            self.offscreen,
+            &mut renderer.layout,
+        );
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
@@ -1278,7 +1394,7 @@ impl Boot {
             return;
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
-        let field_layer = look.map_or([0.0; 4], |l| [if l.hud { 1.0 } else { 2.0 }, l.galaxy, l.backdrop, l.progress]);
+        let field_layer = look.map_or([0.0; 4], |l| [1.0, l.galaxy, l.backdrop, l.progress]);
         let field_fault = [0.0, 0.0, caption.height, 0.0];
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
@@ -1313,18 +1429,6 @@ impl Boot {
                     (id!(accent), &[card.accent]),
                     (id!(action), &[button_glyph(card.action)]),
                     (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
-                ],
-                &mut buttons,
-            );
-        }
-        if let Some((rect, opacity)) = stall {
-            program.pipes[ERROR_BAND].instances.write(
-                &[
-                    (id!(rect), &rect),
-                    (id!(selected), &[1.0]),
-                    (id!(accent), &[STALL_GALAXY]),
-                    (id!(action), &[0.0]),
-                    (id!(pressed), &[opacity]),
                 ],
                 &mut buttons,
             );
@@ -1424,27 +1528,16 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if let Some(look) = look {
-            if look.corner {
-                app(&mut writer, layer::APP, look.sharp, 0.0);
-            }
-            if look.blur {
-                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
-            }
+        if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
-            // the JIT loader's galaxy stays inside its square
-            let field_scissor = if corner {
-                region.map(|v| v * dpi)
-            } else {
-                scissor
-            };
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
                 field::INSTANCES,
                 frame.count,
                 &field_uniforms,
-                field_scissor,
+                scissor,
             );
         }
         if !buttons.is_empty() {
@@ -1463,7 +1556,7 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
-        if let Some(look) = look.filter(|l| !l.corner) {
+        if let Some(look) = look {
             app(&mut writer, layer::APP, look.sharp, 0.0);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
@@ -1548,10 +1641,8 @@ impl Layout {
 
 /// `Card::accent` of a window button of the caption.
 const CAPTION_BUTTON: f32 = 4.0;
-/// The host session's string id of the title status (1 is the boot window's title).
-const TITLE_STATUS_SID: u32 = 2;
-/// `error_band.accent` of the JIT loader's small galaxy (layer::Want::Loader).
-const STALL_GALAXY: f32 = 5.0;
+/// `error_band.accent` of the activity badge's galaxy (activity.rs).
+const ACTIVITY_GALAXY: f32 = 5.0;
 
 /// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
 /// 1 maximise / restore, 2 close.

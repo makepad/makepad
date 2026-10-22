@@ -113,6 +113,13 @@ impl DeclarationQueries {
             for def in gone { if let Some(cell) = cells.get_mut(def.0 as usize) { cell.take(); } }
         }
     }
+    /// Cells for the defs added since the table was made: a body edit's new closures, anonymous
+    /// constants and opaque types (def_collector, at the commit) and items added inside a body.
+    pub(super) fn grow(&mut self, defs: usize) {
+        if let Some(cells) = self.cells.get_mut() {
+            if cells.len() < defs { cells.resize_with(defs, OnceLock::new); }
+        }
+    }
     pub(super) fn retain_prefix(&mut self, first: usize) {
         if let Some(cells) = self.cells.get_mut() { cells.truncate(first); }
     }

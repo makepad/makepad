@@ -160,7 +160,9 @@ pub fn crate_begin(name: &str) {
         return;
     }
     crate_end();
-    *LOADING.lock().unwrap() = (name.to_string(), crate::clock::ms_since_process_start());
+    // process state (the status line reads it in any phase, across the settle swap)
+    let name = crate::zone_alloc::kept_with(|| name.to_string());
+    *LOADING.lock().unwrap() = (name, crate::clock::ms_since_process_start());
 }
 
 pub fn crate_end() {
@@ -173,7 +175,8 @@ pub fn crate_end() {
         if VERBOSE_LIST.load(Ordering::Relaxed) {
             SLOW.lock().unwrap().push(("crate", std::mem::take(&mut g.0), ms));
         }
-        g.0.clear();
+        // (the buffer goes: no capacity of an old generation stays behind)
+        g.0 = String::new();
     }
 }
 

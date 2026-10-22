@@ -76,12 +76,45 @@ pub struct Frame {
     /// the present call / vsync (0: not reported)
     pub present: u64,
     pub vsync: u64,
+    /// the flight recorder's frame summary (0 where not reported): idle gaps inside the frame
+    /// (the UI thread waiting for events), lazy compile time and count, wait time (of it on the
+    /// owner) and count
+    pub idle: u64,
+    pub compile_ns: u64,
+    pub compiles: u32,
+    pub wait_ns: u64,
+    pub owner_ns: u64,
+    pub waits: u32,
 }
 
 impl Frame {
+    /// The frame's time without the idle gaps inside it (what the app's hitch detector counts).
     pub fn dur(&self) -> u64 {
-        self.t1.saturating_sub(self.t0)
+        self.t1.saturating_sub(self.t0).saturating_sub(self.idle)
     }
+}
+
+/// An EVENT record entry: an app mark, a log line, a panic, a hitch, a zone swap, ...
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Event {
+    pub t: u64,
+    pub tid: u32,
+    /// string id of the category (`log`, `panic`, `hitch`, an app's `game.spawn`)
+    pub cat: u32,
+    pub a: u64,
+    pub b: u64,
+    pub text: String,
+}
+
+/// An INPUT record entry: one input event as the remote command that injects it again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Input {
+    pub t: u64,
+    /// the program's UI frame (draw events since its start) it arrived in
+    pub frame: u64,
+    /// injected by makepad remote (an agent's click), not the person's
+    pub injected: bool,
+    pub command: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -107,6 +140,8 @@ pub struct Info {
     pub device: String,
     pub refresh_mhz: u64,
     pub flags: u64,
+    /// the process's start on the stream clock (0: unknown)
+    pub start_mono: u64,
 }
 
 #[derive(Default)]
@@ -128,6 +163,13 @@ pub struct Profile {
     /// records lost by lane (DROP)
     pub dropped: Vec<(u32, u64)>,
     pub marks: Vec<(u64, u32)>,
+    /// flight recorder events and input, in time order
+    pub events: Vec<Event>,
+    pub inputs: Vec<Input>,
+    /// CPU stack samples (SAMPLES): (stream tid, event, sample)
+    pub samples: Vec<(u32, u8, crate::SampleRec)>,
+    /// counter values (COUNTERS)
+    pub counters: Vec<crate::CounterRec>,
     /// the earliest and latest time seen
     pub t_min: u64,
     pub t_max: u64,
@@ -211,7 +253,10 @@ impl Profile {
         let mut d = Dec::new(payload);
         match k {
             kind::HELLO => {
-                self.info = Info { app: d.s()?, host: d.s()?, pid: d.u()?, build: d.s()?, device: d.s()?, refresh_mhz: d.u()?, flags: d.u()? };
+                self.info = Info { app: d.s()?, host: d.s()?, pid: d.u()?, build: d.s()?, device: d.s()?, refresh_mhz: d.u()?, flags: d.u()?, start_mono: 0 };
+                if !d.done() {
+                    self.info.start_mono = d.u()?;
+                }
             }
             kind::CLOCK => {
                 let (m, u) = (d.u()?, d.u()?);
@@ -241,14 +286,49 @@ impl Profile {
             }
             kind::SPANS => self.apply_spans(&mut d)?,
             kind::FRAME => {
-                self.explicit_frames = true;
+                // frames the producer reports replace the ones derived from the main lane
+                if !self.explicit_frames {
+                    self.explicit_frames = true;
+                    self.frames.clear();
+                }
                 let id = self.frames.last().map_or(0, |f| f.id).wrapping_add(d.u()?);
                 let t0 = d.d(self.frames.last().map_or(0, |f| f.t0))?;
                 let dur = d.u()?;
                 let (po, vo) = (d.u()?, d.u()?);
                 let _flags = d.u()?;
-                self.frames.push(Frame { id, t0, t1: t0 + dur, present: if po == 0 { 0 } else { t0 + po }, vsync: if vo == 0 { 0 } else { t0 + vo } });
+                let mut f = Frame { id, t0, t1: t0 + dur, present: if po == 0 { 0 } else { t0 + po }, vsync: if vo == 0 { 0 } else { t0 + vo }, ..Default::default() };
+                // the flight recorder's summary
+                if !d.done() {
+                    f.idle = d.u()?;
+                    f.compile_ns = d.u()?;
+                    f.compiles = d.u()? as u32;
+                    f.wait_ns = d.u()?;
+                    f.owner_ns = d.u()?;
+                    f.waits = d.u()? as u32;
+                }
+                self.frames.push(f);
                 self.see(t0 + dur);
+            }
+            kind::EVENT => {
+                let n = d.n()?;
+                let mut t = d.u()?;
+                for _ in 0..n {
+                    t = d.d(t)?;
+                    let e = Event { t, tid: d.u()? as u32, cat: d.u()? as u32, a: d.u()?, b: d.u()?, text: d.s()? };
+                    self.see(t);
+                    let at = self.events.partition_point(|x| x.t <= t);
+                    self.events.insert(at, e);
+                }
+            }
+            kind::INPUT => {
+                let n = d.n()?;
+                let mut t = d.u()?;
+                for _ in 0..n {
+                    t = d.d(t)?;
+                    let e = Input { t, frame: d.u()?, injected: d.u()? & 1 != 0, command: d.s()? };
+                    self.see(t);
+                    self.inputs.push(e);
+                }
             }
             kind::JIT => {
                 let n = d.n()?;
@@ -283,6 +363,20 @@ impl Profile {
                 let (t, name) = (d.u()?, d.u()? as u32);
                 self.see(t);
                 self.marks.push((t, name));
+            }
+            kind::SAMPLES => {
+                let (tid, ev, v) = crate::decode_samples(payload)?;
+                self.lane_of(tid);
+                for r in v {
+                    self.see(r.t);
+                    self.samples.push((tid, ev, r));
+                }
+            }
+            kind::COUNTERS => {
+                for c in crate::decode_counters(payload)? {
+                    self.see(c.t);
+                    self.counters.push(c);
+                }
             }
             _ => {}
         }

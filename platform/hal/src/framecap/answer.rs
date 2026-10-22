@@ -608,7 +608,7 @@ fn draw_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     t.push_str(&format!("| instances | {inst}{} |\n", if d.inst_ranges.is_empty() { String::new() } else { format!(" in {} ranges", d.inst_ranges.len()) }));
     t.push_str(&format!("| indices | {} from {} |\n", d.index[1], d.index[0]));
     let mut flags = Vec::new();
-    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::CULL, "cull"), (Draw::INDEX_U32, "u32 indices")] {
+    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
         if d.flags & bit != 0 {
             flags.push(name);
         }
@@ -720,6 +720,36 @@ fn mesh_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
         t.push_str(&format!("\nvertices ({} floats each):\n\n| vtx | values |\n|---|---|\n", vstride));
         for i in 0..(v.len() / vstride).min(n) {
             t.push_str(&format!("| {i} | {} |\n", v[i * vstride..(i + 1) * vstride].iter().map(|f| sig(*f as f64)).collect::<Vec<_>>().join(" ")));
+        }
+        // Winding, from the captured inputs alone: the signed volume of the indexed triangles
+        // with each vertex's first three floats as its position. On a closed mesh it is > 0
+        // when the counter-clockwise fronts face outward (what back-face culling keeps) and
+        // < 0 when the mesh draws inside-out.
+        if vstride >= 3 {
+            if let Some(ib) = c.buffer(d.ib).and_then(|b| b.contents.as_ref()) {
+                let wide = d.flags & Draw::INDEX_U32 != 0;
+                let at = |i: usize| -> Option<usize> {
+                    let i = d.index[0] as usize + i;
+                    if wide {
+                        ib.get(i * 4..i * 4 + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize)
+                    } else {
+                        ib.get(i * 2..i * 2 + 2).map(|x| u16::from_le_bytes([x[0], x[1]]) as usize)
+                    }
+                };
+                let pos = |i: usize| v.get(i * vstride..i * vstride + 3).map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]);
+                let (mut volume, mut tris, mut outside) = (0.0f64, 0usize, 0usize);
+                for tri in 0..d.index[1] as usize / 3 {
+                    let corners = [at(tri * 3), at(tri * 3 + 1), at(tri * 3 + 2)];
+                    let (Some(p), Some(q), Some(r)) = (corners[0].and_then(pos), corners[1].and_then(pos), corners[2].and_then(pos)) else {
+                        outside += 1;
+                        continue;
+                    };
+                    volume += (p[0] * (q[1] * r[2] - q[2] * r[1]) + p[1] * (q[2] * r[0] - q[0] * r[2]) + p[2] * (q[0] * r[1] - q[1] * r[0])) / 6.0;
+                    tris += 1;
+                }
+                let verdict = if volume > 0.0 { "fronts face outward" } else if volume < 0.0 { "INSIDE-OUT: fronts face inward" } else { "flat or open" };
+                t.push_str(&format!("\nwinding: object-space signed volume {} over {tris} triangles ({verdict}, if the mesh is closed and vertex floats 0..3 are its position){}\n", sig(volume), if outside > 0 { format!("; {outside} triangles index past the captured vertex bytes") } else { String::new() }));
+            }
         }
     }
     t.push_str("\nnot shown: vertex shader outputs (needs a shader-side capture point)");

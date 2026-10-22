@@ -36,6 +36,10 @@ pub fn main(args: &[String]) -> i32 {
     let Some(target) = args.first() else { return usage() };
     // `file=<x.mkgp> gpu prof <query>`: a saved GPU recording, no app
     if let Some(path) = target.strip_prefix("file=") {
+        // a flight recorder recording replayed into a hidden instance
+        if args.get(1).map(String::as_str) == Some("rec") && args.get(2).map(String::as_str) == Some("replay") {
+            return super::replay::file_main(path, &args[3..]);
+        }
         // a profile recording (`file=<x.mkpf> pf ...`)
         if path.ends_with(".mkpf") || args.get(1).map(String::as_str) == Some("pf") {
             return super::pf::file_main(path, &args[1..]);

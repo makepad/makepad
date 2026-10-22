@@ -25,6 +25,7 @@ pub mod colorhex;
 mod clock;
 pub mod docs;
 pub mod inspect_registry;
+pub mod inspect_query;
 pub mod equality;
 pub mod gen_index;
 pub mod heap;

@@ -376,6 +376,14 @@ impl Session {
             // The edited versions' body inputs, as reload.rs publish_reload.
             self.unit.tcx.queries.register_files(self.unit.prog.files.len());
             self.unit.tcx.publish_file_bodies(&body_files);
+            // the commits' new defs (closures of the edited bodies) have declaration cells
+            self.unit.tcx.grow_to(&self.unit.prog);
+            // items added inside an edited body (a `use` in a closure) got defs at the commit
+            let body_added = self.unit.prog.take_body_added();
+            if !body_added.is_empty() {
+                // (its errors stay in tcx.errors, where collect_added put them)
+                let _ = self.unit.tcx.collect_added(&self.unit.prog, &body_added, false);
+            }
             self.refresh_front();
             // Include callers before invalidating hidden opaque types: an unchanged
             // caller's inferred return can change when its callee's body changes.

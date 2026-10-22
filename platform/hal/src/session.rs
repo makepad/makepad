@@ -17,7 +17,8 @@ use crate::buffers::{pack_strs, unpack_forward, DomainInfo, EventQueue};
 use crate::codec::ArenaSink;
 use crate::ledger::{Kind, Ledger, LedgerEntry};
 use crate::types::*;
-use std::collections::{BTreeMap, HashMap};
+use crate::FastMap;
+use std::collections::BTreeMap;
 
 /// Session 0: the host.
 pub const HOST: u32 = 0;
@@ -36,14 +37,14 @@ pub struct Entry<T> {
 /// Objects of one kind, keyed by (session, index).
 #[derive(Debug)]
 pub struct Table<T> {
-    map: HashMap<(u32, u32), Entry<T>>,
+    map: FastMap<(u32, u32), Entry<T>>,
     /// last destroyed generation per slot: a create or use with an older one is stale
-    retired: HashMap<(u32, u32), u32>,
+    retired: FastMap<(u32, u32), u32>,
 }
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
-        Table { map: HashMap::new(), retired: HashMap::new() }
+        Table { map: FastMap::default(), retired: FastMap::default() }
     }
 }
 
@@ -290,12 +291,12 @@ pub struct Session {
     pub app_key: u64,
     /// the dpi factor the backend reported for this session's windows
     pub dpi: f32,
-    pub strings: HashMap<StrId, String>,
+    pub strings: FastMap<StrId, String>,
     pub textures: Table<TextureObj>,
     pub buffers: Table<BufferObj>,
     pub pipelines: Table<PipelineObj>,
     pub windows: Table<WindowObj>,
-    pub timers: HashMap<u32, TimerObj>,
+    pub timers: FastMap<u32, TimerObj>,
     pub ledger: Ledger,
     pub events: EventQueue,
     pub stats: Stats,
@@ -343,12 +344,12 @@ impl Session {
             dpi: 1.0,
             attached: true,
             closing: false,
-            strings: HashMap::new(),
+            strings: FastMap::default(),
             textures: Table::default(),
             buffers: Table::default(),
             pipelines: Table::default(),
             windows: Table::default(),
-            timers: HashMap::new(),
+            timers: FastMap::default(),
             ledger: Ledger::default(),
             events: EventQueue::new(),
             stats: Stats::default(),
@@ -396,7 +397,7 @@ impl Clock {
 
 /// All sessions.
 pub struct World {
-    sessions: HashMap<u32, Session>,
+    sessions: FastMap<u32, Session>,
     next_session: u32,
     next_host_window: u32,
     pub clock: Clock,
@@ -415,7 +416,7 @@ pub struct World {
     /// who hears of a session's window frames besides itself (its parent for an embedded window,
     /// the host for a window lent by the host): a completion thread wakes them with the owner,
     /// so the news is drained at once and not at the owner's next pump
-    pub listeners: std::sync::Arc<std::sync::Mutex<HashMap<u32, Vec<u32>>>>,
+    pub listeners: std::sync::Arc<std::sync::Mutex<FastMap<u32, Vec<u32>>>>,
     /// sessions to close, children before their parent
     close_queue: Vec<(u32, CloseAs)>,
     /// calls to the registered `DomainHost`, made after the command batch (no lock held)
@@ -425,8 +426,6 @@ pub struct World {
     pub exec_log: Vec<ExecRecord>,
     /// the current GPU device, from 1; a device reset makes the next
     pub device_generation: u32,
-    /// session 0's title status (`TitleStatus`): app window titles carry it after their own
-    pub title_status: String,
 }
 
 /// How a session ends.
@@ -496,7 +495,7 @@ impl Default for World {
 
 impl World {
     pub fn new() -> World {
-        let mut sessions = HashMap::new();
+        let mut sessions = FastMap::default();
         sessions.insert(HOST, Session::new(HOST, 0));
         World {
             sessions,
@@ -506,7 +505,6 @@ impl World {
             domains: BTreeMap::new(),
             ended: Vec::new(),
             next_lent: 0,
-            title_status: String::new(),
             fonts: None,
             font_notify: None,
             next_key: 1,
@@ -1141,6 +1139,13 @@ impl World {
     }
 
     /// Creates a window owned by the host that an app may adopt (the spinner window).
+    /// A fresh id for a window of session 0 the session makes itself (a badge: `window_kind::BADGE`).
+    pub fn host_window_id(&mut self) -> Id {
+        let id = Id::new(self.next_host_window, 1);
+        self.next_host_window += 1;
+        id
+    }
+
     pub fn host_window(&mut self, geom: [f32; 4]) -> Id {
         let id = Id::new(self.next_host_window, 1);
         self.next_host_window += 1;
@@ -1183,42 +1188,6 @@ impl World {
                 }
             }
         }
-    }
-
-    /// `title` as an app window shows it: with session 0's title status after it.
-    pub fn titled(&self, title: &str) -> String {
-        if self.title_status.is_empty() { title.to_string() } else if title.is_empty() { self.title_status.clone() } else { format!("{} \u{2014} {}", title, self.title_status) }
-    }
-
-    /// Sets session 0's title status: every app window (not embedded, not hosted) gets a
-    /// `TitleStatus` event; returns the (session, window, OS title) to retitle.
-    pub fn set_title_status(&mut self, text: &str) -> Vec<(u32, Id, String)> {
-        if self.title_status == text {
-            return Vec::new();
-        }
-        self.title_status = text.to_string();
-        let mut out = Vec::new();
-        let mut sids: Vec<u32> = self.sessions.keys().copied().filter(|&s| s != HOST).collect();
-        sids.sort();
-        for sid in sids {
-            let Some(s) = self.sessions.get(&sid) else { continue };
-            for id in s.windows.keys_of(sid) {
-                let Ok(w) = s.windows.get(sid, id) else { continue };
-                if w.val.embedded.is_some() || w.val.is_hosted() {
-                    continue;
-                }
-                let base = s.string(w.val.title).unwrap_or("").to_string();
-                out.push((sid, id, base));
-            }
-        }
-        let mut retitle = Vec::new();
-        for (sid, id, base) in out {
-            self.to_session(sid, |q| q.title_status(id, text.as_bytes()));
-            if !base.is_empty() {
-                retitle.push((sid, id, self.titled(&base)));
-            }
-        }
-        retitle
     }
 
     /// Whether the host window `id` is lent, and to whom.

@@ -85,6 +85,17 @@ impl ScriptVm<'_> {
         req.text = message;
         self.bx.vm_errors(&mut req);
     }
+    /// A non-fatal script diagnostic raised by host code at the current script ip (a
+    /// wrong-typed option, a verb naming an id that has no entity): the active capture gets it
+    /// (once), the log once per site, and `makepad inspect <app> script errors` lists it per site
+    /// with its count. Never aborts the evaluation. The text says what was wrong and what to write;
+    /// the script location is added.
+    #[inline(always)]
+    pub fn push_diagnostic(&mut self, message: &str) {
+        let mut req = ScriptErrorsReq::new(ERR_PUSH_DIAGNOSTIC);
+        req.text = message;
+        self.bx.vm_errors(&mut req);
+    }
     /// Captures a message only if the active capture does not already contain it.
     #[inline(always)]
     pub fn push_captured_error_once(&mut self, message: &str) {

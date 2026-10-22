@@ -93,6 +93,9 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if req.cmd != "gpu" {
         return false;
     }
+    if crate::gpu_prof::dispatch(req, out) {
+        return true;
+    }
     let sub = req.pos.first().map(String::as_str).unwrap_or("");
     if sub == "diff" {
         diff(req, out);
@@ -177,7 +180,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             ));
             snaps.push((name.clone(), Arc::new(snap)));
         }
-        _ => out.err("gpu | gpu top | gpu idle | gpu snap | gpu diff | gpu path"),
+        _ => out.err("gpu | gpu top | gpu idle | gpu snap | gpu diff | gpu path | gpu prof start|stop|status|frames|frame|lanes|top|util|diff"),
     }
     true
 }

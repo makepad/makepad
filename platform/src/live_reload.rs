@@ -641,6 +641,58 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
     candidates
 }
 
+/// Under `makepad run` a source edit is a compiler patch: the `script_mod!` fns of the edited
+/// file are installed again, but the VM keeps the design it evaluated at startup. After each
+/// patch, every `script_mod!` file of the VM that changed on disk since the last look goes the
+/// same way as a hot-reload file change (overrides, then the LiveEdit that re-runs the modules
+/// and re-applies them to the live widgets), so a design edit shows up live.
+#[cfg(all(relax, any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+impl Cx {
+    pub(crate) fn queue_patched_script_mod_files(&mut self) {
+        use std::sync::Mutex;
+        use std::time::SystemTime;
+        // when the files were last looked at (the first look: the process's first patch poll, the
+        // build already holds every edit made before it)
+        static SEEN: Mutex<Option<SystemTime>> = Mutex::new(None);
+        let now = SystemTime::now();
+        let since = {
+            let mut s = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            let since = *s;
+            *s = Some(now);
+            since
+        };
+        let Some(since) = since else { return };
+        let Some(script_vm) = self.script_vm.as_ref() else { return };
+        let excluded = excluded_hot_reload_manifest_paths();
+        let mut files: Vec<String> = Vec::new();
+        for index in 0..script_vm.body_count() {
+            let body = script_vm.body_module_read(index);
+            let Some(script_mod) = body.module() else { continue };
+            if hot_reload_root_for_script_mod(script_mod, &excluded).is_none() {
+                continue;
+            }
+            if let Some(file) = resolve_script_mod_file_for_watch(script_mod) {
+                if !files.contains(&file) {
+                    files.push(file);
+                }
+            }
+        }
+        for file in files {
+            let changed = std::fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|t| t >= since);
+            if !changed {
+                continue;
+            }
+            match std::fs::read_to_string(&file) {
+                Ok(content) => {
+                    crate::log!("live design: {} changed under a patch: its script_mod! design is re-applied", file);
+                    self.script_data.live_reload.queue_file_change(file, content);
+                }
+                Err(e) => crate::error!("live design: cannot read {}: {}", file, e),
+            }
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn hot_reload_requested_from_args() -> bool {
     std::env::args().any(|arg| arg == "--hot")

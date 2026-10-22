@@ -17,9 +17,9 @@
 
 use crate::{
     cx::Cx,
-    draw_list::DrawListId,
+    draw_list::{CxDrawItem, DrawListId, DrawListUniforms},
     draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-    draw_shader::{CxDrawShaderCode, DrawShaderBlendOp, DrawShaderColorFormat},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderBlendOp, DrawShaderColorFormat},
     geometry::GeometryId,
     gpu_ledger::GpuOrigin,
     makepad_live_id::*,
@@ -164,10 +164,47 @@ pub(crate) struct FrameBuilder {
     tex_ids: Vec<Id>,
     /// the owner (string id) of the draw list being walked
     owner: StrId,
+    /// the pass being built: its origin (logical px) and dpi, mapping instance rects to target
+    /// pixels (`Draw::bounds`)
+    pass_px: (f32, f32, f32),
     warned: std::collections::HashSet<&'static str>,
     /// textures already reported as sampled by a pass that draws into them
     feedback_warned: std::collections::HashSet<usize>,
     pub(crate) stats: BuildStats,
+}
+
+/// The target pixels a 2D draw's instances cover (x, y, w, h): the union of their clipped rects
+/// (`rect_pos` / `rect_size` / `draw_clip`), shifted by the list's scroll. NaN (unknown) for a
+/// shader without a rect, a list with a view transform (3D), or no instance data at hand.
+fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, (ox, oy, dpi): (f32, f32, f32)) -> [f32; 4] {
+    let unknown = [f32::NAN; 4];
+    let (Some(rp), Some(rs)) = (m.rect_pos, m.rect_size) else { return unknown };
+    if list.view_transform != crate::makepad_math::Mat4f::identity() || slots == 0 {
+        return unknown;
+    }
+    let Some(data) = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()) else { return unknown };
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for inst in data.chunks_exact(slots).take(instances) {
+        let (mut a, mut b) = (inst[rp], inst[rp + 1]);
+        let (mut c, mut d) = (a + inst[rs], b + inst[rs + 1]);
+        if let Some(k) = m.draw_clip {
+            a = a.max(inst[k]);
+            b = b.max(inst[k + 1]);
+            c = c.min(inst[k + 2]);
+            d = d.min(inst[k + 3]);
+        }
+        if c > a && d > b {
+            x0 = x0.min(a);
+            y0 = y0.min(b);
+            x1 = x1.max(c);
+            y1 = y1.max(d);
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return unknown;
+    }
+    let (sx, sy) = (list.view_shift.x - ox, list.view_shift.y - oy);
+    [(x0 + sx) * dpi, (y0 + sy) * dpi, (x1 - x0) * dpi, (y1 - y0) * dpi]
 }
 
 impl FrameBuilder {
@@ -761,10 +798,10 @@ impl Cx {
         if fb.geo.get(&slot).is_some_and(|r| r.gen != gen) {
             fb.geometry_destroy(slot);
         }
+        let attr = fb.attr(&self.geometries[gid].origin, 0);
         let rec = fb.geo.entry(slot).or_insert(GeoRec { gen, vb: Id::NONE, ib: Id::NONE, vb_bytes: 0, ib_bytes: 0 });
-        let g = &mut self.geometries[gid];
-        let attr = Attr::default();
         let (mut vb, mut ib, mut vb_bytes, mut ib_bytes) = (rec.vb, rec.ib, rec.vb_bytes, rec.ib_bytes);
+        let g = &mut self.geometries[gid];
         if g.dirty_vertices || vb.is_none() {
             let bytes = g.vertices.as_bytes();
             if bytes.is_empty() {
@@ -1095,6 +1132,7 @@ impl Cx {
             self.passes[pass_id].paint_dirty = false;
             return None;
         }
+        fb.pass_px = (pass_rect.pos.x as f32, pass_rect.pos.y as f32, dpi as f32);
         // A window's target is its surface: exactly round(inner size * dpi), the size the HAL made it
         // (the pass rect is ceiled in points, which at a fractional scale is up to 2 px more than the surface).
         let size = match window {
@@ -1172,7 +1210,7 @@ impl Cx {
         pass.name = fb.intern(&self.passes[pass_id].debug_name);
         pass.owner = self.draw_lists[list_id].owner.map_or(0, |o| fb.intern(o));
 
-        fb.w.frame_begin(serial, FrameMeta { build_start_ns: build_start, input_ns, ..Default::default() });
+        fb.w.frame_begin(serial, FrameMeta { build_start_ns: build_start, input_ns, phases: self.hal.beat_phases, ..Default::default() });
         if let Some(o) = self.draw_owners.as_mut().filter(|_| !picking) {
             o.begin_packet(serial);
         }
@@ -1517,7 +1555,7 @@ impl Cx {
             list: list_id.index() as u32,
             item: item_id as u32,
             list_name,
-            bounds: [f32::NAN; 4],
+            bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);

@@ -54,6 +54,9 @@ const RING_MAX: usize = 4096;
 
 /// A detector tick: the resident size now (every `RING_STEP`-th tick once the ring halved).
 pub fn tick(n: u64, rss: u64) {
+    if n % 4 == 0 {
+        super::flightrec::counter("rss", rss as i64);
+    }
     let step = RING_STEP.load(std::sync::atomic::Ordering::Relaxed);
     if n % step != 0 {
         return;

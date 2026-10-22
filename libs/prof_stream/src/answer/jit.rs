@@ -84,3 +84,75 @@ pub fn probes(a: &mut Answer) {
         }
     }
 }
+
+/// `probe read P<n>`: the latest emitted values first, one table per emit (its expression's
+/// elements are the columns), then the counts / hists / samples (generic rows).
+pub fn probe_read(a: &mut Answer) {
+    let emits = a.take("emit");
+    let hidden = a.take1("emits_not_shown");
+    let totals = a.take1("emitted");
+    let id = a.req.pos.get(1).cloned().unwrap_or_default();
+    let hits = a.measured.split('(').nth(1).and_then(|x| x.split_whitespace().next()).unwrap_or("?").to_string();
+    if emits.is_empty() {
+        a.head = format!("{} ran {} times and emitted nothing (std::relax::probe::emit sends values; count / hist / sample aggregate)", id, hits);
+    } else {
+        a.head = format!("{} ran {} times; its latest {} emitted value{} (oldest first):", id, hits, emits.len(), if emits.len() == 1 { "" } else { "s" });
+    }
+    // one table per emit line
+    let mut lines: Vec<f64> = Vec::new();
+    for e in &emits {
+        let l = f(e, "line");
+        if !lines.contains(&l) {
+            lines.push(l);
+        }
+    }
+    for l in lines {
+        let rows: Vec<&Value> = emits.iter().filter(|e| f(e, "line") == l).collect();
+        let names: Option<Vec<String>> = rows.iter().find_map(|e| match e.get("fields") {
+            Some(Value::Obj(kv)) => Some(kv.iter().map(|(k, _)| k.clone()).collect()),
+            _ => None,
+        });
+        if lines_len_gt1(&emits) {
+            a.line(&format!("emit at probe line {}:", l));
+        }
+        let mut head: Vec<String> = vec!["ago s".into()];
+        match &names {
+            Some(n) => head.extend(n.iter().cloned()),
+            None => head.push("value".into()),
+        }
+        let hr: Vec<&str> = head.iter().map(String::as_str).collect();
+        let mut t = super::Table::new(&hr);
+        for e in rows {
+            let mut cells = vec![super::sig(f(e, "ago_ms") / 1000.0)];
+            match (&names, e.get("fields")) {
+                (Some(n), Some(Value::Obj(kv))) => {
+                    for k in n {
+                        cells.push(kv.iter().find(|x| &x.0 == k).map(|x| super::cell_of(&x.1)).unwrap_or_default());
+                    }
+                }
+                _ => {
+                    cells.push(s(e, "emit").to_string());
+                    for _ in 1..hr.len().saturating_sub(1) {
+                        cells.push(String::new());
+                    }
+                }
+            }
+            t.row(cells);
+        }
+        a.line(&t.md());
+    }
+    if let Some(h) = hidden {
+        a.line(&format!("+{} older emitted values kept (n= shows more, up to {})", f(&h, "emits_not_shown"), f(&h, "kept")));
+    }
+    if let Some(t) = totals {
+        if f(&t, "emit_dropped") > 0.0 {
+            a.line(&format!("{} emits sent as events, {} not sent (over 20/s; all are kept here)", f(&t, "emitted"), f(&t, "emit_dropped")));
+        }
+    }
+    a.more(format!("probe read {} n=50", id));
+    a.more(format!("probe rm {}", id));
+}
+
+fn lines_len_gt1(emits: &[Value]) -> bool {
+    emits.iter().any(|e| f(e, "line") != emits.first().map_or(0.0, |x| f(x, "line")))
+}

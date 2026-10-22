@@ -32,7 +32,7 @@ use device::{Device, Done, Mailbox};
 pub use pipeline::compile_msl;
 use makepad_apple_sys::*;
 use resources::*;
-use std::collections::HashMap;
+use crate::FastMap;
 use std::sync::Arc;
 
 /// How long a transient render target may sit unbound before its GPU storage goes.
@@ -75,17 +75,17 @@ struct Win {
 pub struct Metal {
     dev: Device,
     info: HalInfo,
-    tex: HashMap<(u32, u32), Tex>,
-    buf: HashMap<(u32, u32), Buf>,
-    pipe: HashMap<(u32, u32), pipeline::Pipe>,
-    win: HashMap<(u32, u32), Win>,
+    tex: FastMap<(u32, u32), Tex>,
+    buf: FastMap<(u32, u32), Buf>,
+    pipe: FastMap<(u32, u32), pipeline::Pipe>,
+    win: FastMap<(u32, u32), Win>,
     /// App aliases resolve to host storage; lending never moves or frees that storage.
-    window_aliases: HashMap<(u32, Id), Id>,
-    overlays: HashMap<Id, frame::Overlay>,
+    window_aliases: FastMap<(u32, Id), Id>,
+    overlays: FastMap<Id, frame::Overlay>,
     /// Dismissal retries when AppKit temporarily has no drawable.
-    restores: HashMap<Id, Win>,
+    restores: FastMap<Id, Win>,
     /// per window: the id texture the newest pick frame drew into (`Pick` reads it back)
-    pick_ids: HashMap<(u32, u32), Id>,
+    pick_ids: FastMap<(u32, u32), Id>,
     /// Pick targets whose latest replay skipped a not-yet-ready draw.
     pick_pending: std::collections::HashSet<(u32, Id)>,
     batch: Option<frame::Batch>,
@@ -98,7 +98,7 @@ pub struct Metal {
     /// the drawable the window frame being encoded renders into
     frame_drawable: Option<frame::FrameDrawable>,
     /// the size the ledger last saw of each real window's drawables
-    layer_sizes: HashMap<(u32, u32), (u32, u32, u32)>,
+    layer_sizes: FastMap<(u32, u32), (u32, u32, u32)>,
     /// video playback, audio, camera ...: everything of os/apple that is not Metal or AppKit
     media: Media,
     /// the pool of capture buffers a recorder's frames are copied into, and when it was last used
@@ -106,6 +106,10 @@ pub struct Metal {
     capture_ns: u64,
     /// `frame::depth_only`'s scratch: the (pipeline, blend) pairs of a pass already asked
     depth_only_seen: Vec<(u32, bool)>,
+    /// the GPU profiler's encoders of the frame being encoded (moved into its ticket)
+    prof: Vec<frame::ProfPass>,
+    /// the profiled frame being encoded
+    prof_key: Option<crate::gpu_prof::FrameKey>,
     /// Draws left out so far for a pipeline variant still compiling (a frame that adds to it is
     /// partial, `FramePartial`).
     pending_draws: u64,
@@ -144,7 +148,9 @@ impl Metal {
             session: 0,
             backend: backend_id::METAL,
             dialect: dialect::MSL,
-            flags: info_flags::WINDOW_LAYERS | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 },
+            flags: info_flags::WINDOW_LAYERS
+                | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 }
+                | if shell.is_some() && cfg!(target_os = "macos") { info_flags::WINDOW_BADGES } else { 0 },
             formats,
             msaa: 1,
             dpi: shell.map_or(1.0, |s| s.dpi()),
@@ -156,14 +162,14 @@ impl Metal {
         Some(Metal {
             dev,
             info,
-            tex: HashMap::new(),
-            buf: HashMap::new(),
-            pipe: HashMap::new(),
-            win: HashMap::new(),
-            window_aliases: HashMap::new(),
-            overlays: HashMap::new(),
-            restores: HashMap::new(),
-            pick_ids: HashMap::new(),
+            tex: FastMap::default(),
+            buf: FastMap::default(),
+            pipe: FastMap::default(),
+            win: FastMap::default(),
+            window_aliases: FastMap::default(),
+            overlays: FastMap::default(),
+            restores: FastMap::default(),
+            pick_ids: FastMap::default(),
             pick_pending: Default::default(),
             batch: None,
             uploads: Vec::new(),
@@ -171,11 +177,13 @@ impl Metal {
             shell,
             retain: flags & open_flags::RETAIN_WINDOWS != 0,
             frame_drawable: None,
-            layer_sizes: HashMap::new(),
+            layer_sizes: FastMap::default(),
             media: Media::new(),
             capture: None,
             capture_ns: 0,
             depth_only_seen: Vec::new(),
+            prof: Vec::new(),
+            prof_key: None,
             pending_draws: 0,
         })
     }
@@ -204,7 +212,7 @@ impl Metal {
     }
 
     /// The first outcome of a pipeline's compile ends its pending count.
-    fn announce(pipes: &mut HashMap<(u32, u32), pipeline::Pipe>, s: &mut Session, id: Id) {
+    fn announce(pipes: &mut FastMap<(u32, u32), pipeline::Pipe>, s: &mut Session, id: Id) {
         if let Some(p) = pipes.get_mut(&(s.id, id.index)).filter(|p| p.gen == id.gen) {
             if !std::mem::replace(&mut p.announced, true) {
                 s.pipelines_pending = s.pipelines_pending.saturating_sub(1);
@@ -583,7 +591,9 @@ impl Gpu for Metal {
         }
         let Ok(source) = std::str::from_utf8(blob.code) else { return PipeStatus::Failed("the pipeline source is not utf8".into()) };
         let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc);
-        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, bindings: blob.bindings.as_slice().into(), announced: false });
+        let stats = crate::gpu_prof::source_stats(source).into();
+        let kept = crate::gpu_prof::keep_sources().then(|| source.into());
+        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, bindings: blob.bindings.as_slice().into(), announced: false, stats, source: kept });
         PipeStatus::Pending
     }
 
@@ -621,6 +631,10 @@ impl Gpu for Metal {
 
     fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64) {
         self.set_overlay(s, id, rect, layer, now);
+    }
+
+    fn badges(&self) -> bool {
+        self.shell.is_some() && cfg!(target_os = "macos")
     }
 
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

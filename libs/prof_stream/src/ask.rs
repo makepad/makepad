@@ -80,21 +80,56 @@ impl Ans {
     }
 }
 
-/// A short answer from text: line 1 the finding, `more: ` the drill-downs, other lines notes.
+/// An answer from its text (a short message, or a rendered [`crate::answer`]): line 1 the
+/// finding, `more: ` the drill-downs, markdown tables (a header row, then a `|---|` rule) as
+/// tables, other lines notes.
 impl From<String> for Ans {
     fn from(s: String) -> Ans {
         let mut a = Ans::default();
-        for (i, l) in s.lines().enumerate() {
+        let lines: Vec<&str> = s.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let l = lines[i];
             if i == 0 {
                 a.finding = l.to_string();
             } else if let Some(m) = l.strip_prefix("more: ") {
-                a.more(m);
+                // queries separated by two spaces (ask) or ` · ` (inspect's answers)
+                m.split(" · ").for_each(|q| a.more(q));
+            } else if let (Some(head), Some(true)) = (md_cells(l), lines.get(i + 1).map(|r| is_md_rule(r))) {
+                let mut t = Table::new(&head.iter().map(String::as_str).collect::<Vec<_>>());
+                i += 2;
+                while let Some(cells) = lines.get(i).and_then(|r| md_cells(r)) {
+                    t.row(cells);
+                    i += 1;
+                }
+                a.table(t);
+                continue;
             } else {
                 a.note(l);
             }
+            i += 1;
         }
         a
     }
+}
+
+/// The cells of a markdown table row (`| a | b\|c |`), unescaped and trimmed.
+fn md_cells(l: &str) -> Option<Vec<String>> {
+    let inner = l.strip_prefix('|')?.strip_suffix('|')?;
+    let mut cells = vec![String::new()];
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => cells.last_mut()?.push(chars.next()?),
+            '|' => cells.push(String::new()),
+            c => cells.last_mut()?.push(c),
+        }
+    }
+    Some(cells.into_iter().map(|c| c.trim().to_string()).collect())
+}
+
+fn is_md_rule(l: &str) -> bool {
+    l.starts_with('|') && l.contains('-') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
 impl From<&str> for Ans {
@@ -128,13 +163,13 @@ impl Q {
     }
 }
 
-pub const HELP: &str = "compare two recordings: `diff` with base=<A.mkpf> (B is the one asked). `brief`: the starting point of an analysis (findings, slowest frame, JIT, how to test a fix). queries: summary | frames [n=10] [sort=slow|time] | frame F<n> | top [cpu|jit|gpu] [lane=main|all|T<n>] [range=R<a>-<b>] [n=12] | hitches [ms=<n>] | timeline F<n>|R<a>-<b> [width=100] | lanes | why-slow [F<n>|R<a>-<b>] | diff (needs a baseline: B) | gpu <frames|frame F<n>|top by=shader|owner|pass|util>  (ids: F<n> frame, T<n> lane, R<a>-<b> ms range from the start)";
+pub const HELP: &str = "compare two recordings: `diff` with base=<A.mkpf> (B is the one asked). `brief`: the starting point of an analysis (findings, slowest frame, JIT, how to test a fix). queries: summary | frames [n=10] [sort=slow|time] | frame F<n> | top [cpu|jit|gpu] [lane=main|all|T<n>] [range=R<a>-<b>] [n=12] | hitches [ms=<n>] | timeline F<n>|R<a>-<b> [width=100] | lanes | why-slow [F<n>|R<a>-<b>] | diff (needs a baseline: B) | gpu <frames|frame F<n>|top by=shader|owner|pass|util> | stall [F<n>|slowest] (a hitch from both sides: what the UI waited on and what that lane did) | events [cat=<prefix>] [app=1] [text=] [a=] [range=R<a>-<b>] [n=30] | log | marks (the app's own events) | input [n=] | at <s of the run>|R<ms>|F<n> (every lane at one moment) | memory (resident size and the app heap over time)  (ids: F<n> frame, T<n> lane, R<a>-<b> ms range from the start)";
 
 /// Answers `query` on `p` (`base`: the baseline recording of a diff).
 pub fn ask(p: &Profile, query: &str, base: Option<&Profile>) -> Ans {
     let q = Q::parse(query);
     let cmd = q.pos.first().map(String::as_str).unwrap_or("summary");
-    if p.lanes.is_empty() && p.gpu.frames.is_empty() && cmd != "help" {
+    if p.lanes.is_empty() && p.gpu.frames.is_empty() && p.events.is_empty() && cmd != "help" {
         return "empty profile: nothing was recorded (is the app drawing? under makepad run the main lane needs the platform's phase markers)\nmore: help".into();
     }
     match cmd {
@@ -155,6 +190,13 @@ pub fn ask(p: &Profile, query: &str, base: Option<&Profile>) -> Ans {
         },
         "gpu" => gpu(p, &q),
         "brief" => brief(p),
+        "stall" => stall(p, &q),
+        "events" => events(p, &q, None),
+        "log" => events(p, &q, Some("log")),
+        "marks" => events(p, &Q::parse(&format!("{query} app=1")), None),
+        "input" => input(p, &q),
+        "at" => at_time(p, &q),
+        "memory" => memory(p),
         "help" => Ans::new(HELP),
         other => format!("unknown query `{other}`\n{HELP}").into(),
     }
@@ -231,7 +273,15 @@ fn run_parts(p: &Profile, lane: usize, t0: u64, t1: u64) -> Vec<(String, u64)> {
     let covered: u64 = p.lanes[lane].segs_in(0, t0, t1).iter().filter(|s| !s.wait).map(|s| s.t1.min(t1).saturating_sub(s.t0.max(t0))).sum();
     let gap = (t1 - t0).saturating_sub(covered);
     if gap > 0 {
-        v.push((if main { "idle".to_string() } else { "busy outside its marked spans".to_string() }, gap));
+        let what = if main {
+            "idle"
+        } else if p.lanes[lane].thread.role == role::OWNER {
+            // the owner's own loop: taking the next request, waking the requester
+            "between requests"
+        } else {
+            "busy outside its marked spans"
+        };
+        v.push((what.to_string(), gap));
     }
     if !main {
         let ln = p.lane_name(lane);
@@ -564,9 +614,77 @@ fn top(p: &Profile, q: &Q) -> Ans {
             out
         }
         "jit" => top_jit(p, t0, t1, &wname, n),
+        "fn" | "samples" => {
+            let tids: Option<Vec<u32>> = match q.get("lane") {
+                Some(l) => match pick_lanes(p, Some(l)) {
+                    Ok(v) => Some(v.iter().map(|&i| p.lanes[i].thread.tid).collect()),
+                    Err(e) => return e.into(),
+                },
+                None => None,
+            };
+            top_fn(p, t0, t1, &wname, n, tids.as_deref(), q.get("lane").unwrap_or("all lanes"))
+        }
         "gpu" => gpu(p, &Q::parse(&format!("gpu top {}", q.kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")))),
-        other => format!("top {other}? top cpu | top jit | top gpu").into(),
+        other => format!("top {other}? top cpu | top fn | top jit | top gpu").into(),
     }
+}
+
+/// `top fn`: the CPU stack samples (SAMPLES, the producer's `hz=` sampler): fns by self and
+/// inclusive weight, each with the tier it ran at (JIT inline levels are frames of their own).
+fn top_fn(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize, tids: Option<&[u32]>, lname: &str) -> Ans {
+    let v: Vec<&(u32, u8, crate::SampleRec)> = p.samples.iter().filter(|s| s.2.t >= t0 && s.2.t < t1 && tids.map_or(true, |t| t.contains(&s.0))).collect();
+    if v.is_empty() {
+        return format!("no CPU samples in {wname}: the stream samples stacks only when opened with hz=N (`pf ... hz=1000`)\nmore: top cpu  summary").into();
+    }
+    let tier = |t: u8| match t {
+        crate::tier::NATIVE => "native",
+        crate::tier::BASELINE => "baseline",
+        crate::tier::O1 => "O1",
+        crate::tier::O2 => "O2",
+        crate::tier::O3 => "O3",
+        crate::tier::INLINED => "inl",
+        _ => "other",
+    };
+    let total: u64 = v.iter().map(|s| s.2.weight.max(1)).sum();
+    let mut selfw: HashMap<(u32, u8), u64> = HashMap::new();
+    let mut incl: HashMap<u32, u64> = HashMap::new();
+    for s in &v {
+        let w = s.2.weight.max(1);
+        if let Some(&(f, t)) = s.2.frames.last() {
+            *selfw.entry((f, t)).or_default() += w;
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        for &(f, _) in &s.2.frames {
+            if !seen.contains(&f) {
+                seen.push(f);
+                *incl.entry(f).or_default() += w;
+            }
+        }
+    }
+    let mut rows: Vec<((u32, u8), u64)> = selfw.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut lg = Legend::default();
+    let first = &rows[0];
+    let ev = match v[0].1 {
+        0 => "CPU",
+        1 => "cycles",
+        2 => "instructions",
+        3 => "branch-miss",
+        _ => "cache-miss",
+    };
+    let mut out = Ans::new(format!("hottest fn on {} in {} ({} samples, {} weighted): {} [{}] {}% self", lname, wname, v.len(), ev, lg.name(p.s(first.0 .0)), tier(first.0 .1), pct(first.1, total)));
+    let mut t = Table::new(&["fn", "tier", "self %", "incl %"]);
+    for ((f, tr), w) in rows.iter().take(n) {
+        t.row(vec![lg.name(p.s(*f)), tier(*tr).to_string(), pct(*w, total), pct(incl.get(f).copied().unwrap_or(0), total)]);
+    }
+    out.table(t);
+    if rows.len() > n {
+        let rest: u64 = rows[n..].iter().map(|x| x.1).sum();
+        out.note(format!("+{} smaller, {}% self", rows.len() - n, pct(rest, total)));
+    }
+    out.note(lg.render());
+    out.more("top fn lane=main  top cpu  top jit  summary");
+    out
 }
 
 fn top_jit(p: &Profile, t0: u64, t1: u64, wname: &str, n: usize) -> Ans {
@@ -663,7 +781,13 @@ fn hitches(p: &Profile, q: &Q) -> Ans {
     if sorted.len() > n {
         out.note(format!("+{} hitches not shown", sorted.len() - n));
     }
-    out.more(format!("frame F{}  why-slow", sorted[0].id));
+    // the worst hitches read from both sides (what the UI waited on, what that lane did)
+    for f in sorted.iter().take(3) {
+        if let Some((s, _)) = hitch_sides(p, f) {
+            out.note(format!("F{}: {}", f.id, s));
+        }
+    }
+    out.more(format!("stall F{}  frame F{}  why-slow", sorted[0].id, sorted[0].id));
     out
 }
 
@@ -906,6 +1030,26 @@ fn brief(p: &Profile) -> Ans {
     if out.text().contains("busy outside its marked spans") {
         out.note("busy outside its marked spans = a lane working where it has no profiler span (no phase marker covers it); name it by sampling that lane's CPU (see the commands below)");
     }
+    if let Some(f) = p.frames.iter().max_by_key(|f| f.dur()) {
+        if let Some((s, _)) = hitch_sides(p, f) {
+            out.note(format!("slowest frame F{} ({} ms): {}", f.id, ms(f.dur()), s));
+        }
+    }
+    if !p.events.is_empty() {
+        let mut by: Vec<(&str, usize)> = Vec::new();
+        for e in &p.events {
+            let c = p.s(e.cat);
+            match by.iter_mut().find(|x| x.0 == c) {
+                Some(x) => x.1 += 1,
+                None => by.push((c, 1)),
+            }
+        }
+        by.sort_by(|a, b| b.1.cmp(&a.1));
+        out.note(format!("events: {} ({}); input: {} events", p.events.len(), by.iter().take(8).map(|(c, n)| format!("{c} {n}")).collect::<Vec<_>>().join(", "), p.inputs.len()));
+        for e in p.events.iter().filter(|e| matches!(p.s(e.cat), "panic" | "fault" | "log.error" | "scripterr")).rev().take(3) {
+            out.note(format!("{} at {} s: {}", p.s(e.cat), run_s(p, e.t), cut(&e.text, 140)));
+        }
+    }
     if let Some(id) = p.frames.iter().max_by_key(|f| f.dur()).map(|f| f.id) {
         let fr = frame(p, &format!("F{id}"));
         out.title(format!("slowest frame: {}", fr.finding));
@@ -927,6 +1071,396 @@ fn brief(p: &Profile) -> Ans {
     t.row(vec!["code versions of a fn".into(), format!("makepad inspect {app} versions <fn>")]);
     t.row(vec!["sample a lane's CPU (unmarked work)".into(), format!("makepad inspect {app} prof s=3 threads=<owner|main|compiler>")]);
     out.table(t);
-    out.more("frames  hitches  top cpu lane=all  top jit  timeline slowest");
+    out.more("frames  hitches  stall slowest  events  top cpu lane=all  top jit  timeline slowest");
+    out
+}
+
+// ------------------------------------------------------------------ flight recorder queries
+
+/// `t` as seconds of the run (the process's start; else of the recording), 3 digits.
+fn run_s(p: &Profile, t: u64) -> String {
+    let base = if p.info.start_mono > 0 && p.info.start_mono <= t { p.info.start_mono } else { p.t_min };
+    sig(t.saturating_sub(base) as f64 / 1e9)
+}
+
+/// A time a query names: `<s>` (seconds of the run), `<s>s`, `R<ms>` (ms from the recording's
+/// start), `F<n>` (the frame's end).
+fn time_arg(p: &Profile, w: &str) -> Result<u64, String> {
+    if let Some(r) = w.strip_prefix('R') {
+        let v: f64 = r.parse().map_err(|_| format!("`{w}`: R<ms from the start>"))?;
+        return Ok(p.t_min + (v * 1e6) as u64);
+    }
+    if w.starts_with('F') {
+        let id = frame_id(p, w)?;
+        return Ok(p.frame(id).map_or(p.t_max, |f| f.t1));
+    }
+    let v: f64 = w.trim_end_matches('s').parse().map_err(|_| format!("`{w}`: a time is <s of the run>, R<ms from the start> or F<n>"))?;
+    let base = if p.info.start_mono > 0 { p.info.start_mono } else { p.t_min };
+    Ok(base + (v * 1e9) as u64)
+}
+
+/// The host's and the platform's own event categories (everything else is the app's).
+fn is_host_cat(c: &str) -> bool {
+    const PREFIXES: &[&str] = &["run.", "log", "panic", "window.", "seed.", "replay.", "zone.", "cache.", "fault", "script."];
+    const KINDS: &[&str] = &["hitch", "mark", "hang", "deadlock", "mem", "spike", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
+    PREFIXES.iter().any(|p| c.starts_with(p)) || KINDS.contains(&c)
+}
+
+/// What lane `other` did during the waits `ws` (intervals) of another lane: the one sentence
+/// that names the other side of a UI stall.
+fn other_side(p: &Profile, other: usize, ws: &[(u64, u64)]) -> String {
+    let lane = &p.lanes[other];
+    let total: u64 = ws.iter().map(|w| w.1.saturating_sub(w.0)).sum();
+    // its root spans in the waits, by overlap
+    let mut roots: Vec<(u32, u64)> = Vec::new();
+    let mut inner: HashMap<u32, u64> = HashMap::new();
+    let mut busy = 0u64;
+    let mut waiting = 0u64;
+    for &(t0, t1) in ws {
+        for s in lane.segs_in(0, t0, t1).iter().filter(|s| !s.wait) {
+            let o = s.t1.min(t1).saturating_sub(s.t0.max(t0));
+            match roots.iter_mut().find(|x| x.0 == s.name) {
+                Some(x) => x.1 += o,
+                None => roots.push((s.name, o)),
+            }
+        }
+        for (n, w, ns) in p.exclusive(other, t0, t1) {
+            if !w {
+                *inner.entry(n).or_default() += ns;
+            }
+        }
+        let (b, w) = p.busy_in(other, t0, t1);
+        busy += b;
+        waiting += w;
+    }
+    roots.sort_by(|a, b| b.1.cmp(&a.1));
+    let covered: u64 = roots.iter().map(|r| r.1).sum();
+    let mut parts: Vec<String> = roots.iter().take(2).map(|(nm, ns)| format!("`{}` {} ms", p.s(*nm), ms(*ns))).collect();
+    if roots.len() > 2 {
+        parts.push(format!("+{} other requests {} ms", roots.len() - 2, ms(roots.iter().skip(2).map(|r| r.1).sum())));
+    }
+    let gap = total.saturating_sub(covered);
+    let mut doing = if parts.is_empty() {
+        if waiting > total / 2 {
+            "itself waiting".to_string()
+        } else if busy == 0 {
+            "outside its marked spans (no span covers it)".to_string()
+        } else {
+            format!("busy {} ms", ms(busy))
+        }
+    } else {
+        let own = if roots.first().is_some_and(|r| p.s(r.0).contains(" for main at ")) { " (the UI's own requests: its lazy compiles and links)" } else { "" };
+        format!("serving {}{}", parts.join(", "), own)
+    };
+    if !parts.is_empty() && gap > total / 10 {
+        let what = if lane.thread.role == role::OWNER { "between requests (taking the next one, wakes)" } else { "outside its marked spans" };
+        doing.push_str(&format!("; {} ms {}", ms(gap), what));
+    }
+    let mut inn: Vec<(u32, u64)> = inner.into_iter().filter(|x| !roots.iter().take(2).any(|r| r.0 == x.0)).collect();
+    inn.sort_by(|a, b| b.1.cmp(&a.1));
+    let inner_s: Vec<String> = inn.iter().take(2).filter(|x| x.1 > total / 50).map(|(n, ns)| format!("{} {} ms", p.s(*n), ms(*ns))).collect();
+    // stall samples of that lane in the waits (the recorder samples both sides of a long stall)
+    let tid = lane.thread.tid;
+    let mut by_fn: HashMap<u32, u64> = HashMap::new();
+    let mut sw = 0u64;
+    for (_, _, s) in p.samples.iter().filter(|x| x.0 == tid && ws.iter().any(|w| x.2.t >= w.0 && x.2.t <= w.1)) {
+        if let Some(&(f, _)) = s.frames.last() {
+            *by_fn.entry(f).or_default() += s.weight;
+            sw += s.weight;
+        }
+    }
+    let mut hot: Vec<(u32, u64)> = by_fn.into_iter().collect();
+    hot.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut lg = Legend::default();
+    let hot_s: Vec<String> = hot.iter().take(3).map(|(f, w)| format!("{} {}%", lg.name(p.s(*f)), pct(*w, sw))).collect();
+    let mut s = format!("{} was {}", p.lane_name(other), doing);
+    if !inner_s.is_empty() {
+        s.push_str(&format!("; inside: {}", inner_s.join(", ")));
+    }
+    if !hot_s.is_empty() {
+        s.push_str(&format!("; its stack samples: {}", hot_s.join(", ")));
+    }
+    s
+}
+
+/// The main lane's waits on the critical path of frame `f`, grouped by the lane that ended them,
+/// the largest group with both sides: (sentence, wait ns).
+fn hitch_sides(p: &Profile, f: &Frame) -> Option<(String, u64)> {
+    let main = p.main_lane()?;
+    let owner = p.lanes.iter().position(|l| l.thread.role == role::OWNER);
+    // the main lane's waits in the frame by (the lane that ended them, wait name)
+    let mut groups: Vec<((usize, u32), Vec<(u64, u64)>)> = Vec::new();
+    let lane = &p.lanes[main];
+    for d in 0..lane.rows.len() {
+        for w in lane.segs_in(d, f.t0, f.t1).iter().filter(|s| s.wait) {
+            // a wait no wake ended (cut, or its wake not recorded): an owner wait reads the owner
+            let other = match p.woke_by(main, w).map(|x| x.0) {
+                Some(o) => o,
+                None if p.s(w.name).starts_with("owner") => match owner {
+                    Some(o) => o,
+                    None => continue,
+                },
+                None => continue,
+            };
+            let iv = (w.t0.max(f.t0), w.t1.min(f.t1));
+            match groups.iter_mut().find(|g| g.0 == (other, w.name)) {
+                Some(g) => g.1.push(iv),
+                None => groups.push(((other, w.name), vec![iv])),
+            }
+        }
+    }
+    let sum = |v: &Vec<(u64, u64)>| v.iter().map(|w| w.1.saturating_sub(w.0)).sum::<u64>();
+    let ((other, wname), mut ws) = groups.into_iter().max_by_key(|g| sum(&g.1))?;
+    ws.sort_unstable();
+    let wait_ns = sum(&ws);
+    if wait_ns < f.dur() / 4 {
+        return None;
+    }
+    let longest = ws.iter().max_by_key(|w| w.1 - w.0).copied().unwrap_or((0, 0));
+    let how = if ws.len() == 1 { String::new() } else { format!(" in {} waits (longest {} ms at {} s)", ws.len(), ms(longest.1 - longest.0), run_s(p, longest.0)) };
+    Some((format!("at {} s of the run the UI waited {} ms on {}{}: {}", run_s(p, ws[0].0), ms(wait_ns), p.s(wname), how, other_side(p, other, &ws)), wait_ns))
+}
+
+/// `stall [F<n>|slowest]`: a hitch read from both sides.
+fn stall(p: &Profile, q: &Q) -> Ans {
+    let w = q.pos.get(1).map(String::as_str).unwrap_or("slowest");
+    let id = match frame_id(p, w) {
+        Ok(id) => id,
+        Err(e) => return e.into(),
+    };
+    let f = *p.frame(id).unwrap();
+    let mut out = match hitch_sides(p, &f) {
+        Some((s, _)) => Ans::new(format!("F{} ({} ms): {}", id, ms(f.dur()), s)),
+        None => Ans::new(format!("F{} ({} ms) waited on no other lane for most of its time: {}", id, ms(f.dur()), cause(p, &f))),
+    };
+    if f.waits > 0 || f.compiles > 0 {
+        out.note(format!("frame summary: {} waits {} ms (on the owner {} ms), {} lazy compiles {} ms, idle {} ms", f.waits, ms(f.wait_ns), ms(f.owner_ns), f.compiles, ms(f.compile_ns), ms(f.idle)));
+    }
+    // events in and around the frame
+    let evs: Vec<&crate::model::Event> = p.events.iter().filter(|e| e.t + 500_000_000 >= f.t0 && e.t <= f.t1 + 100_000_000).collect();
+    if !evs.is_empty() {
+        let mut t = Table::new(&["at s", "lane", "event", "what"]);
+        for e in evs.iter().take(12) {
+            t.row(vec![run_s(p, e.t), lane_label(p, e.tid), p.s(e.cat).to_string(), cut(&e.text.replace('\u{1f}', " "), 100)]);
+        }
+        out.title("events around it".to_string());
+        out.table(t);
+    }
+    out.more(format!("frame F{id}  timeline F{id}  at F{id}  events range=R{}-{}", sig(f.t0.saturating_sub(p.t_min) as f64 / 1e6 - 2000.0).trim_start_matches('-'), sig(f.t1.saturating_sub(p.t_min) as f64 / 1e6 + 500.0)));
+    out
+}
+
+fn lane_label(p: &Profile, tid: u32) -> String {
+    match p.lane_by_tid(tid) {
+        Some(l) => {
+            let i = p.lanes.iter().position(|x| x.thread.tid == l.thread.tid).unwrap_or(0);
+            if p.main_lane() == Some(i) { "main".into() } else { cut(&p.lane_name(i), 24) }
+        }
+        None => "-".into(),
+    }
+}
+
+/// `events [cat=<prefix>] [app=1] [text=<word>] [a=<n>] [range=R<a>-<b>] [n=30]`.
+fn events(p: &Profile, q: &Q, cat_default: Option<&str>) -> Ans {
+    if p.events.is_empty() {
+        return "no events recorded (app marks, logs, panics, hitches: the flight recorder's; a live stream only has those since it attached)\nmore: summary".into();
+    }
+    let cat = q.get("cat").or(cat_default);
+    let app_only = q.get("app").is_some_and(|v| v == "1");
+    let needle = q.get("text");
+    let a = q.get("a").and_then(|v| v.parse::<u64>().ok());
+    let (t0, t1) = match q.get("range") {
+        Some(r) => match window(p, r) {
+            Ok(w) => (w.0, w.1),
+            Err(e) => return e.into(),
+        },
+        None => (0, u64::MAX),
+    };
+    let sel: Vec<&crate::model::Event> = p
+        .events
+        .iter()
+        .filter(|e| e.t >= t0 && e.t < t1)
+        .filter(|e| cat.map_or(true, |c| p.s(e.cat).starts_with(c)))
+        .filter(|e| !app_only || !is_host_cat(p.s(e.cat)))
+        .filter(|e| needle.map_or(true, |n| e.text.contains(n)))
+        .filter(|e| a.map_or(true, |a| e.a == a))
+        .collect();
+    let mut by: Vec<(&str, usize)> = Vec::new();
+    for e in &p.events {
+        let c = p.s(e.cat);
+        match by.iter_mut().find(|x| x.0 == c) {
+            Some(x) => x.1 += 1,
+            None => by.push((c, 1)),
+        }
+    }
+    by.sort_by(|a, b| b.1.cmp(&a.1));
+    let cats: Vec<String> = by.iter().take(10).map(|(c, n)| format!("{c} {n}")).collect();
+    if sel.is_empty() {
+        return format!("no events match (have {}: {})\nmore: events", p.events.len(), cats.join(", ")).into();
+    }
+    let n = q.num("n", 30) as usize;
+    let mut by_sel: Vec<(&str, usize)> = Vec::new();
+    for e in &sel {
+        let c = p.s(e.cat);
+        match by_sel.iter_mut().find(|x| x.0 == c) {
+            Some(x) => x.1 += 1,
+            None => by_sel.push((c, 1)),
+        }
+    }
+    by_sel.sort_by(|a, b| b.1.cmp(&a.1));
+    let cats: Vec<String> = by_sel.iter().take(10).map(|(c, n)| format!("{c} {n}")).collect();
+    let mut out = Ans::new(format!(
+        "{} events{} from {} s to {} s of the run; by kind: {}",
+        sel.len(),
+        cat.map_or(String::new(), |c| format!(" of `{c}`")),
+        run_s(p, sel[0].t),
+        run_s(p, sel[sel.len() - 1].t),
+        cats.join(", ")
+    ));
+    let mut t = Table::new(&["at s", "lane", "event", "a", "what"]);
+    // the last n (the moments before a bug are the interesting ones)
+    let from = sel.len().saturating_sub(n);
+    for e in &sel[from..] {
+        t.row(vec![run_s(p, e.t), lane_label(p, e.tid), p.s(e.cat).to_string(), if e.a == 0 { String::new() } else { e.a.to_string() }, cut(&e.text.replace('\u{1f}', " "), 110)]);
+    }
+    out.table(t);
+    if from > 0 {
+        out.note(format!("+{} earlier events not shown (n=, range=R<a>-<b>, cat=, text=, a=)", from));
+    }
+    out.more("events app=1  events cat=log.error  events cat=panic  stall slowest  input");
+    out
+}
+
+/// `input [n=20]`: the recorded input (what a replay feeds back).
+fn input(p: &Profile, q: &Q) -> Ans {
+    if p.inputs.is_empty() {
+        return "no input recorded (the program records its input under makepad run with the flight recorder on)\nmore: events".into();
+    }
+    let mut by: Vec<(String, usize)> = Vec::new();
+    for i in &p.inputs {
+        let mut w = i.command.split_whitespace();
+        let k = format!("{} {}", w.next().unwrap_or(""), w.next().unwrap_or(""));
+        match by.iter_mut().find(|x| x.0 == k) {
+            Some(x) => x.1 += 1,
+            None => by.push((k, 1)),
+        }
+    }
+    by.sort_by(|a, b| b.1.cmp(&a.1));
+    let first = &p.inputs[0];
+    let last = &p.inputs[p.inputs.len() - 1];
+    let mut out = Ans::new(format!(
+        "{} input events from {} s (frame {}) to {} s (frame {}): {}",
+        p.inputs.len(),
+        run_s(p, first.t),
+        first.frame,
+        run_s(p, last.t),
+        last.frame,
+        by.iter().take(8).map(|(k, n)| format!("{} {}", k.trim(), n)).collect::<Vec<_>>().join(", ")
+    ));
+    let n = q.num("n", 20) as usize;
+    let mut t = Table::new(&["at s", "frame", "command"]);
+    let from = p.inputs.len().saturating_sub(n);
+    for i in &p.inputs[from..] {
+        t.row(vec![run_s(p, i.t), i.frame.to_string(), cut(&i.command, 100)]);
+    }
+    out.table(t);
+    if from > 0 {
+        out.note(format!("+{} earlier input events not shown (n=)", from));
+    }
+    out.more("rec replay (makepad inspect file=<this file> rec replay [until=<s>])  events");
+    out
+}
+
+/// `at <s>|R<ms>|F<n>`: what every lane was doing at one moment, the frame it was in and the
+/// events just before.
+fn at_time(p: &Profile, q: &Q) -> Ans {
+    let Some(w) = q.pos.get(1) else { return "at <s of the run> | R<ms> | F<n>\nmore: events".into() };
+    let t = match time_arg(p, w) {
+        Ok(t) => t,
+        Err(e) => return e.into(),
+    };
+    let frame = p.frames.iter().find(|f| f.t0 <= t && t <= f.t1);
+    let mut out = Ans::new(format!(
+        "at {} s of the run{}",
+        run_s(p, t),
+        match frame {
+            Some(f) => format!(" (inside F{}, {} ms)", f.id, ms(f.dur())),
+            None => String::new(),
+        }
+    ));
+    let mut tab = Table::new(&["lane", "role", "doing", "since s"]);
+    for (i, l) in p.lanes.iter().enumerate() {
+        // the innermost open record at t, waits included
+        let mut found: Option<crate::model::Seg> = None;
+        for row in &l.rows {
+            let k = row.partition_point(|s| s.t0 <= t);
+            if k > 0 && row[k - 1].t1 >= t {
+                found = Some(row[k - 1]);
+            }
+        }
+        let Some(s) = found else { continue };
+        tab.row(vec![p.lane_name(i), role::NAMES.get(l.thread.role as usize).unwrap_or(&"?").to_string(), format!("{}{}", if s.wait { "wait " } else { "" }, cut(p.s(s.name), 80)), run_s(p, s.t0)]);
+    }
+    if tab.rows.is_empty() {
+        out.note("no lane had an open span then (idle)");
+    } else {
+        out.table(tab);
+    }
+    let before: Vec<&crate::model::Event> = p.events.iter().filter(|e| e.t <= t && e.t + 5_000_000_000 >= t).collect();
+    if !before.is_empty() {
+        let mut et = Table::new(&["at s", "event", "what"]);
+        for e in before.iter().rev().take(8).rev() {
+            et.row(vec![run_s(p, e.t), p.s(e.cat).to_string(), cut(&e.text, 100)]);
+        }
+        out.title("events in the 5 s before".to_string());
+        out.table(et);
+    }
+    if let Some(i) = p.inputs.iter().rposition(|x| x.t <= t) {
+        out.note(format!("last input before: {} s frame {}: {}", run_s(p, p.inputs[i].t), p.inputs[i].frame, p.inputs[i].command));
+    }
+    out.more("events  stall slowest  timeline slowest");
+    out
+}
+
+/// `s` cut to `n` chars (an ellipsis says so).
+fn cut(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let mut o: String = s.chars().take(n.saturating_sub(1)).collect();
+    o.push('…');
+    o
+}
+
+/// `memory`: the recorder's memory counters over time (resident size, the app's heap): first,
+/// last, peak, growth and a sparkline each.
+fn memory(p: &Profile) -> Ans {
+    let mut names: Vec<u32> = Vec::new();
+    for c in &p.counters {
+        if c.tid == 0 && !names.contains(&c.counter) {
+            names.push(c.counter);
+        }
+    }
+    if names.is_empty() {
+        return "no memory counters recorded (the flight recorder writes rss and app_heap once a second)\nmore: summary".into();
+    }
+    let mb = |v: i64| sig(v as f64 / (1 << 20) as f64);
+    let mut t = Table::new(&["counter", "first MB", "last MB", "peak MB", "growth MB", "over s", "trend"]);
+    let mut finding = String::new();
+    for n in names {
+        let v: Vec<&crate::CounterRec> = p.counters.iter().filter(|c| c.counter == n && c.tid == 0).collect();
+        let (first, last) = (v[0], v[v.len() - 1]);
+        let peak = v.iter().map(|c| c.value).max().unwrap_or(0);
+        let vals: Vec<u64> = v.iter().map(|c| c.value.max(0) as u64).collect();
+        let secs = last.t.saturating_sub(first.t) as f64 / 1e9;
+        if finding.is_empty() {
+            finding = format!("{} {} MB -> {} MB over {} s (peak {} MB)", p.s(n), mb(first.value), mb(last.value), sig(secs), mb(peak));
+        }
+        t.row(vec![p.s(n).to_string(), mb(first.value), mb(last.value), mb(peak), mb(last.value - first.value), sig(secs), text::sparkline(&vals, 40)]);
+    }
+    let mut out = Ans::new(finding);
+    out.table(t);
+    out.note("counters: rss = the process's resident size; app_heap = live bytes of the app domain's heap (app_heap_committed: its pages)");
+    out.more("events cat=script.gc  events cat=zone.swap  summary");
     out
 }

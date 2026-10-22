@@ -10,7 +10,9 @@
 //! - [`model::Profile`] is the profile built from the records (lanes, spans, waits, frames, JIT
 //!   events, GPU frames), live or loaded; [`ask`] answers queries on it as compact text, and
 //!   [`text`] renders the tables, timelines and sparklines those answers use.
+//! - [`answer`] renders `makepad inspect`'s JSON answers as text (the inspect client and Scope).
 
+pub mod answer;
 pub mod ask;
 pub mod model;
 pub mod text;
@@ -38,6 +40,12 @@ pub mod kind {
     pub const COUNTERS: u16 = 12;
     pub const DROP: u16 = 13;
     pub const MARK: u16 = 14;
+    /// (15: FRAMECAP, proposed) events: `u n, u base_t, n * { d t, u tid, u cat_sid, u a, u b,
+    /// str text }` -- app marks, log lines, panics, script errors, zone swaps, hitches, ...
+    pub const EVENT: u16 = 16;
+    /// the program's input events as the remote commands that inject them again: `u n, u base_t,
+    /// n * { d t, u frame, u flags (bit0: injected by makepad remote), str command }`
+    pub const INPUT: u16 = 17;
 }
 
 /// Span record kinds inside a SPANS batch.
@@ -339,6 +347,104 @@ pub fn jit_payload(recs: &[JitRec]) -> Vec<u8> {
     e.0
 }
 
+/// Frame tiers of a SAMPLES record (profproto.md: CPUPROF's proposal, kinds 11/12).
+pub mod tier {
+    pub const NATIVE: u8 = 0;
+    pub const BASELINE: u8 = 1;
+    pub const O1: u8 = 2;
+    pub const O2: u8 = 3;
+    pub const O3: u8 = 4;
+    /// a level the JIT inlined (its own frame)
+    pub const INLINED: u8 = 5;
+    pub const OTHER: u8 = 6;
+}
+
+/// One CPU stack sample: frames outermost first, each (fn string id, tier); `weight` = the
+/// events it stands for (CPU time: ns; a hardware event: its sampling period).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SampleRec {
+    pub t: u64,
+    pub weight: u64,
+    pub frames: Vec<(u32, u8)>,
+}
+
+/// The SAMPLES payload of one lane's batch: `u tid, u ev, u n, u base_t, n * { d t, u weight,
+/// u depth, depth * { u fn_sid, u tier } }` (ev: 0 cpu time, 1 cycles, 2 instructions, 3 branch
+/// misses, 4 cache misses).
+pub fn samples_payload(tid: u32, ev: u8, recs: &[SampleRec]) -> Vec<u8> {
+    let mut e = Enc::default();
+    let base = recs.first().map_or(0, |r| r.t);
+    e.u(tid as u64).u(ev as u64).u(recs.len() as u64).u(base);
+    let mut prev = base;
+    for r in recs {
+        e.d(r.t, prev).u(r.weight).u(r.frames.len() as u64);
+        for &(f, t) in &r.frames {
+            e.u(f as u64).u(t as u64);
+        }
+        prev = r.t;
+    }
+    e.0
+}
+
+/// Decodes a SAMPLES payload: (tid, ev, samples).
+pub fn decode_samples(p: &[u8]) -> Result<(u32, u8, Vec<SampleRec>), String> {
+    let mut d = Dec::new(p);
+    let tid = d.u()? as u32;
+    let ev = d.u()? as u8;
+    let n = d.n()?;
+    let mut prev = d.u()?;
+    let mut v = Vec::with_capacity(n.min(1 << 16));
+    for _ in 0..n {
+        let t = d.d(prev)?;
+        prev = t;
+        let weight = d.u()?;
+        let depth = d.n()?;
+        let mut frames = Vec::with_capacity(depth.min(256));
+        for _ in 0..depth {
+            frames.push((d.u()? as u32, d.u()? as u8));
+        }
+        v.push(SampleRec { t, weight, frames });
+    }
+    Ok((tid, ev, v))
+}
+
+/// One counter value of a COUNTERS batch: `tid` 0 = the whole process.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct CounterRec {
+    pub t: u64,
+    pub tid: u32,
+    pub counter: u32,
+    pub value: i64,
+}
+
+/// The COUNTERS payload: `u n, u base_t, n * { d t, u tid, u counter_sid, i value }` (values are
+/// deltas over the batch interval).
+pub fn counters_payload(recs: &[CounterRec]) -> Vec<u8> {
+    let mut e = Enc::default();
+    let base = recs.first().map_or(0, |r| r.t);
+    e.u(recs.len() as u64).u(base);
+    let mut prev = base;
+    for r in recs {
+        e.d(r.t, prev).u(r.tid as u64).u(r.counter as u64).i(r.value);
+        prev = r.t;
+    }
+    e.0
+}
+
+/// Decodes a COUNTERS payload.
+pub fn decode_counters(p: &[u8]) -> Result<Vec<CounterRec>, String> {
+    let mut d = Dec::new(p);
+    let n = d.n()?;
+    let mut prev = d.u()?;
+    let mut v = Vec::with_capacity(n.min(1 << 16));
+    for _ in 0..n {
+        let t = d.d(prev)?;
+        prev = t;
+        v.push(CounterRec { t, tid: d.u()? as u32, counter: d.u()? as u32, value: d.i()? });
+    }
+    Ok(v)
+}
+
 /// A THREAD payload.
 pub fn thread_payload(tid: u32, os_id: u64, handle: u64, role: u8, name: u32) -> Vec<u8> {
     let mut e = Enc::default();
@@ -356,12 +462,14 @@ pub struct Hello {
     pub refresh_mhz: u64,
     /// bit0: a JIT (makepad run) app; bit1: a native build
     pub flags: u64,
+    /// the process's start on the stream clock (0: unknown): answers say "at 896 s of the run"
+    pub start_mono: u64,
 }
 
 impl Hello {
     pub fn payload(&self) -> Vec<u8> {
         let mut e = Enc::default();
-        e.s(&self.app).s(&self.host).u(self.pid).s(&self.build).s(&self.device).u(self.refresh_mhz).u(self.flags);
+        e.s(&self.app).s(&self.host).u(self.pid).s(&self.build).s(&self.device).u(self.refresh_mhz).u(self.flags).u(self.start_mono);
         e.0
     }
 }
@@ -443,4 +551,19 @@ pub fn gpu_records(msg: &[u8]) -> Vec<u8> {
         record(&mut out, k, payload);
     }
     out
+}
+
+#[cfg(test)]
+mod samples_tests {
+    #[test]
+    fn samples_and_counters_round_trip() {
+        let v = vec![
+            super::SampleRec { t: 1000, weight: 5, frames: vec![(1, super::tier::NATIVE), (7, super::tier::O3), (9, super::tier::INLINED)] },
+            super::SampleRec { t: 1500, weight: 1, frames: vec![] },
+        ];
+        let p = super::samples_payload(3, 1, &v);
+        assert_eq!(super::decode_samples(&p).unwrap(), (3, 1, v));
+        let c = vec![super::CounterRec { t: 10, tid: 0, counter: 4, value: -3 }, super::CounterRec { t: 20, tid: 2, counter: 5, value: 1 << 40 }];
+        assert_eq!(super::decode_counters(&super::counters_payload(&c)).unwrap(), c);
+    }
 }

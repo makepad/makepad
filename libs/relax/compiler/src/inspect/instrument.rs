@@ -235,10 +235,20 @@ enum Shape {
     Other,
 }
 
+/// A slot's fn key, through a SPEC-V twin (`FnKey::Plain`, named `[unverified]`) to the slot it
+/// twins: the twin is the same fn body, so its item, scope and signature are the base's. (Probes
+/// and line hooks of unverified code -- most of a relaxed app -- refused "not a fn instance".)
+pub(super) fn base_key(u: &crate::jit::Unit, id: u32) -> &crate::jit::FnKey {
+    match &u.fns[id as usize].key {
+        crate::jit::FnKey::Plain(b) => &u.fns[*b as usize].key,
+        k => k,
+    }
+}
+
 /// The parameters of slot `id` (on the owner) and how they map onto `f`'s integer parameter words.
 fn arg_plan(u: &crate::jit::Unit, id: u32, f: &relax_backend::rir::Func) -> ArgPlan {
     use crate::types::TyKind;
-    let crate::jit::FnKey::Inst(d, gargs) = &u.fns[id as usize].key else { return ArgPlan::default() };
+    let crate::jit::FnKey::Inst(d, gargs) = base_key(u, id) else { return ArgPlan::default() };
     let Some(sig) = u.tcx.fn_sig(&u.prog, *d) else { return ArgPlan::default() };
     let mut names: Vec<String> = Vec::new();
     {
@@ -401,6 +411,31 @@ fn targetable(f: &crate::jit::FnEntry, inlined_too: bool) -> bool {
 /// Slots matching a fn query (exact display name, else a suffix of it, else a substring) that
 /// have code -- or only run inlined into other code -- at most `max`; or the slots of `file:line`
 /// whose fn spans that line. Run on the owner.
+/// Does slot `id`'s fn span `line` of its file? A fn instance by its item, a closure by its
+/// own expression, a twin (SPEC-V `[unverified]`, sandbox) by its base's fn: a twin is often the
+/// only slot with code (unverified callers run it), so it is the one a line probe must reach.
+pub(super) fn fn_spans_line(u: &crate::jit::Unit, id: u32, line: u32) -> bool {
+    let mut id = id;
+    for _ in 0..8 {
+        if id as usize >= u.fns.len() {
+            return false;
+        }
+        let f = &u.fns[id as usize];
+        match &f.key {
+            crate::jit::FnKey::Plain(b) | crate::jit::FnKey::Sandbox(b) if *b != u32::MAX => id = *b,
+            crate::jit::FnKey::Closure(file, e, _) => {
+                let Some(pf) = u.prog.files.get(*file as usize) else { return false };
+                let x = pf.ast.expr(crate::ast::ExprId(*e));
+                let (lo, hi) = (pf.line_col(x.lo).0 as u32, pf.line_col(x.hi).0 as u32);
+                return lo <= line && line <= hi;
+            }
+            crate::jit::FnKey::Inst(..) => return matches!(super::codever::fn_lines(u, id), Some((_, lo, hi)) if lo <= line && line <= hi),
+            _ => return false,
+        }
+    }
+    false
+}
+
 pub(super) fn find_all(u: &crate::jit::Unit, query: &str, max: usize) -> Vec<(u32, Option<u32>, String)> {
     find_in(u, query, max, true)
 }
@@ -423,12 +458,7 @@ fn find_in(u: &crate::jit::Unit, query: &str, max: usize, inlined_too: bool) -> 
             }
             // the fn whose item spans the line (its RIR, built for the instrumented build when it
             // is gone -- code from the disk cache has none -- places the hook)
-            let crate::jit::FnKey::Inst(d, _) = &f.key else { continue };
-            let def = u.prog.def(*d);
-            let file = &u.prog.files[def.file as usize];
-            let item = file.ast.item(def.item);
-            let (lo, hi) = (file.line_col(item.lo).0 as u32, file.line_col(item.hi).0 as u32);
-            if lo <= line && line <= hi && matches!(item.kind, crate::ast::ItemKind::Fn(..)) {
+            if fn_spans_line(u, id as u32, line) {
                 out.push((id as u32, Some(line), f.name.to_string()));
             }
             if out.len() >= max {
@@ -461,6 +491,93 @@ fn find_in(u: &crate::jit::Unit, query: &str, max: usize, inlined_too: bool) -> 
         }
     }
     Vec::new()
+}
+
+/// What a fn query that matched nothing could have meant: `; closest: a, b (not called yet)`
+/// (empty when nothing is close). Fns are ranked by their last path segment (equal, then edit
+/// distance <= 2), then by the segment before it (the type), so `ActorSystem::follower_travel`
+/// finds `ActorKit::follower_travel`; a `file:line` query lists the files of that name. Run on
+/// the owner.
+pub(super) fn closest(u: &crate::jit::Unit, query: &str) -> String {
+    let q = query.trim();
+    if let Some((file, _)) = q.rsplit_once(':').filter(|(f, l)| !f.ends_with(':') && l.parse::<u32>().is_ok()) {
+        let base = file.rsplit('/').next().unwrap_or(file);
+        let mut files: Vec<String> = u.prog.file_paths.iter().filter(|p| p.ends_with(base)).map(|p| p.to_string()).collect();
+        files.sort();
+        files.dedup();
+        if files.iter().any(|p| p.ends_with(file)) {
+            return "; the file is loaded but no fn with code spans that line (a fn not called yet has none)".into();
+        }
+        files.truncate(5);
+        return if files.is_empty() { format!("; no loaded file ends with `{}`", base) } else { format!("; files of that name: {}", files.join(", ")) };
+    }
+    let segs = |s: &str| -> Vec<String> { collapse_qself(s).split("::").map(|x| x.split('<').next().unwrap_or(x).trim().to_string()).filter(|x| !x.is_empty()).collect() };
+    let qs = segs(q);
+    let Some(q_last) = qs.last().cloned() else { return String::new() };
+    let q_ty = if qs.len() >= 2 { qs[qs.len() - 2].clone() } else { String::new() };
+    let mut best: Vec<(usize, usize, String, bool)> = Vec::new();
+    for f in u.fns.iter() {
+        if f.name.is_empty() {
+            continue;
+        }
+        let ns = segs(&f.name);
+        let Some(n_last) = ns.last() else { continue };
+        let d = if *n_last == q_last { 0 } else { edit_distance(n_last, &q_last) };
+        if d > 2 || (d > 0 && q_last.len() < 4) {
+            continue;
+        }
+        let ty = if ns.len() >= 2 { edit_distance(&ns[ns.len() - 2], &q_ty).min(9) } else { 9 };
+        if best.iter().any(|b| b.2 == *f.name) {
+            continue;
+        }
+        best.push((d, ty, f.name.to_string(), targetable(f, true)));
+    }
+    // fns never called have no slot: the program's fn definitions by name (display path only for
+    // the few whose name is close)
+    for k in 0..u.prog.defs.len() {
+        let d = crate::program::DefId(k as u32);
+        let def = u.prog.def(d);
+        if !matches!(def.kind, crate::program::DefKind::Fn | crate::program::DefKind::AssocFn) {
+            continue;
+        }
+        let n = u.prog.syms.str(def.name);
+        let dd = if n == q_last { 0 } else if n.len().abs_diff(q_last.len()) > 2 { 9 } else { edit_distance(n, &q_last) };
+        if dd > 2 || (dd > 0 && q_last.len() < 4) {
+            continue;
+        }
+        let path = crate::lower::display_path(&u.prog, d);
+        if best.iter().any(|b| b.2 == path) {
+            continue;
+        }
+        let ns = segs(&path);
+        let ty = if ns.len() >= 2 { edit_distance(&ns[ns.len() - 2], &q_ty).min(9) } else { 9 };
+        best.push((dd, ty, path, false));
+        if best.len() > 400 {
+            break;
+        }
+    }
+    best.sort_by(|a, b| (a.0, a.1, !a.3).cmp(&(b.0, b.1, !b.3)).then(a.2.len().cmp(&b.2.len())));
+    let n = best.len();
+    let shown: Vec<String> = best.iter().take(6).map(|(_, _, name, live)| if *live { name.clone() } else { format!("{} (not called yet: no code)", name) }).collect();
+    if shown.is_empty() {
+        return "; nothing close by name (try a shorter `Type::method`, or `top` for the hot fns)".into();
+    }
+    format!("; closest: {}{}", shown.join(", "), if n > 6 { format!(" (+{} more)", n - 6) } else { String::new() })
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 #[derive(PartialEq, Debug)]
@@ -923,7 +1040,7 @@ fn add_to(kind: Kind, target: Target, time: bool, low: bool) -> Result<(u32, Vec
             Target::Slot(id) => vec![(id, None, u.fns[id as usize].name.to_string())],
         };
         if found.is_empty() {
-            return Err(format!("no compiled fn or line matches `{}` (a fn not called yet has no code to patch)", query));
+            return Err(format!("no compiled fn or line matches `{}` (a fn not called yet has no code to patch){}", query, closest(u, &query)));
         }
         // a slot and its SPEC-V twin run the same fn (unverified callers call the twin): both are
         // instrumented, into one site each (a twin compiled later joins on its first install)
@@ -1020,6 +1137,22 @@ fn remove_rows(group: Option<u32>) -> Result<(usize, Vec<String>), String> {
         rows
     });
     r.map(|rows| (n, rows)).ok_or_else(|| format!("the owner did not take the request in 10 s ({}); the probes are off but still in the code", crate::owner::serving_note()))
+}
+
+/// `ab per=call`: a timed count group on slot `id` (its code rebuilt with entry/exit probes at
+/// the tier of the code it replaces): (group, site ids).
+pub(crate) fn count_slot(id: u32) -> Result<(u32, Vec<u64>), String> {
+    add_to(Kind::Count, Target::Slot(id), true, false).map(|(g, rows, _)| (g, rows.iter().map(|r| r.0).collect()))
+}
+
+/// (hits, inclusive ns) of count sites `sites` together.
+pub(crate) fn site_totals(sites: &[u64]) -> (u64, u64) {
+    sites.iter().filter_map(|&si| site(si)).fold((0, 0), |a, s| (a.0 + s.hits.load(Relaxed), a.1 + s.ns.load(Relaxed)))
+}
+
+/// Removes count group `group` (the code it replaced comes back).
+pub(crate) fn remove_group(group: u32) -> Result<usize, String> {
+    remove_rows(Some(group)).map(|r| r.0)
 }
 
 #[cfg(test)]

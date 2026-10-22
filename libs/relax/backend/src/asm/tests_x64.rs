@@ -152,7 +152,7 @@ fn imms(bits: u16) -> Vec<&'static str> {
     }
 }
 
-fn corpus() -> Vec<String> {
+pub(super) fn corpus() -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     let mut p = |s: String| v.push(s);
     // ---- two-operand integer ALU
@@ -422,7 +422,7 @@ fn corpus() -> Vec<String> {
     v
 }
 
-fn sse_corpus() -> Vec<String> {
+pub(super) fn sse_corpus() -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     let mut p = |s: String| v.push(s);
     let xs = ["xmm0", "xmm1", "xmm7", "xmm8", "xmm15"];

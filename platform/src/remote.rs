@@ -70,6 +70,10 @@ mod activity;
 mod capture;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "remote_input_rec.rs"]
+mod input_rec;
+
+#[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use super::activity;
     use super::app_clock;
@@ -105,6 +109,13 @@ mod imp {
     /// Commands built by the platform-side routes; they travel through the
     /// core queue as `Cmd::Platform`.
     enum PlatformCmd {
+        /// A command the app registered (`register_app_query`), answered on the UI thread.
+        AppQuery {
+            f: AppQueryFn,
+            words: Vec<String>,
+            kv: Vec<(String, String)>,
+            tx: Sender<Reply>,
+        },
         CapStart {
             window: usize,
             config: capture::CaptureConfig,
@@ -303,6 +314,10 @@ mod imp {
             "cap start" => route_capture_start(p),
             "cap stop" => route_capture_stop(p),
             "cursor" => route_cursor(p),
+            "input record" => super::input_rec::record(p),
+            "input replay" => super::input_rec::replay(p),
+            "input stop" => super::input_rec::stop(),
+            "input status" => super::input_rec::status(),
             _ => return None,
         })
     }
@@ -526,6 +541,9 @@ mod imp {
         {
             let _ = driven;
             register_with_host();
+            for (name, _, _, _) in APP_QUERIES.lock().unwrap().iter() {
+                super::host_registration::register_with_host(name);
+            }
             // held until ACTIVE is set, so a service registered meanwhile is not lost
             let mut pending = PENDING_SERVICES.lock().unwrap();
             if serves_own_app() {
@@ -535,6 +553,8 @@ mod imp {
                 super::host_registration::register_service_with_host(&name, version, open, close);
             }
             ACTIVE.store(true, Ordering::SeqCst);
+            drop(pending);
+            super::input_rec::replay_at_start();
         }
         #[cfg(not(relax))]
         {
@@ -545,6 +565,7 @@ mod imp {
             // the profiler stream (Scope's Live, `makepad inspect <app> pf`)
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             endpoint.register("prof", 1, crate::prof_native::service(app.clone()));
+            endpoint.register("gpuprof", 1, makepad_hal::gpu_prof::stream_service());
             // held until ACTIVE is set, so a service registered meanwhile is not lost
             let mut pending = PENDING_SERVICES.lock().unwrap();
             if serves_own_app() {
@@ -560,6 +581,7 @@ mod imp {
                     if driven {
                         println!("[makepad-remote] pid={pid} app={app} socket={}", socket.display());
                     }
+                    super::input_rec::replay_at_start();
                 }
                 Err(err) => println!("[makepad-remote] cannot listen: {err}"),
             }
@@ -582,6 +604,7 @@ mod imp {
         makepad_hal::inspect::COMMANDS
             .iter()
             .chain(makepad_hal::framecap::COMMANDS.iter())
+            .chain(makepad_hal::gpu_prof::COMMANDS.iter())
             .map(|(words, args, answers)| crate::remote_schema::Command {
                 words,
                 args,
@@ -682,6 +705,31 @@ mod imp {
         }
     }
 
+    /// An app's own inspect command: `f(cx, words, kv)` runs on the UI thread and returns the
+    /// answer's JSON lines (an `{"err":..}` line for an error); words[0] is the command.
+    pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
+
+    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryFn)>> = Mutex::new(Vec::new());
+
+    /// Registers the app's inspect command `name` (`makepad inspect <app> game actors`): what a
+    /// person or an agent asks the live app about its own state (a game's entities and actors).
+    /// `args` and `answers` are its `help` line. Read-only by convention; a later registration of
+    /// the same name replaces the earlier one.
+    pub fn register_app_query(name: &'static str, args: &'static str, answers: &'static str, f: AppQueryFn) {
+        let mut q = APP_QUERIES.lock().unwrap();
+        q.retain(|x| x.0 != name);
+        q.push((name, args, answers, f));
+        drop(q);
+        #[cfg(relax)]
+        if ACTIVE.load(Ordering::SeqCst) {
+            super::host_registration::register_with_host(name);
+        }
+    }
+
+    fn app_query(name: &str) -> Option<AppQueryFn> {
+        APP_QUERIES.lock().unwrap().iter().find(|x| x.0 == name).map(|x| x.3)
+    }
+
     extern "C" fn no_app_close(_handle: usize) {}
     static PENDING_SERVICES: Mutex<Vec<(String, u32, makepad_remote::program::ServiceOpen, makepad_remote::program::ServiceClose)>> = Mutex::new(Vec::new());
 
@@ -723,6 +771,15 @@ mod imp {
             )),
             "help" => {
                 out.measured("commands", "static", &[]);
+                for (name, args, answers, _) in APP_QUERIES.lock().unwrap().iter() {
+                    out.line(&format!(
+                        "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"Read\"}}",
+                        json_str(name),
+                        json_str(args),
+                        json_str(answers),
+                        json_str(&format!("app.{}", name))
+                    ));
+                }
                 for c in COMMANDS.iter().chain(gpu_commands().iter()) {
                     out.line(&format!(
                         "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"{:?}\"}}",
@@ -735,6 +792,22 @@ mod imp {
                 }
             }
             "" => out.err("empty request"),
+            c if app_query(c).is_some() => {
+                let f = app_query(c).unwrap();
+                let mut words = vec![req.cmd.clone()];
+                words.extend(req.pos.iter().cloned());
+                let kv = req.kv.clone();
+                out.limit = usize::MAX;
+                match ask(move |tx| Cmd::Platform(Box::new(PlatformCmd::AppQuery { f, words, kv, tx })), 6) {
+                    Reply::Text(t) => {
+                        for l in t.lines() {
+                            out.line(l);
+                        }
+                    }
+                    Reply::Err(e) | Reply::Conflict(e) => out.err(&e),
+                    Reply::Ok => out.line("{\"ok\":1}"),
+                }
+            }
             _ => {
                 // Relax dispatches GPU queries in its host; program code only serves UI commands.
                 #[cfg(not(relax))]
@@ -2203,6 +2276,10 @@ mod imp {
                 .downcast::<PlatformCmd>()
                 .expect("remote: a platform command from another platform")
             {
+                PlatformCmd::AppQuery { f, words, kv, tx } => {
+                    let lines = f(cx, &words, &kv);
+                    let _ = tx.send(Reply::Text(lines.join("\n")));
+                }
                 PlatformCmd::CapStart {
                     window,
                     config,
@@ -3102,6 +3179,10 @@ mod imp {
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use crate::cx::Cx;
+
+    pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
+    /// No remote endpoint on the web: nothing asks.
+    pub fn register_app_query(_name: &'static str, _args: &'static str, _answers: &'static str, _f: AppQueryFn) {}
 
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.

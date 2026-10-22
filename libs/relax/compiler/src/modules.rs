@@ -269,9 +269,11 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| mine.iter().any(|p| e.starts_with(p.as_str()))).cloned().collect();
     u.prog.errors.truncate(e0);
     u.prog.errors.extend(errs.iter().cloned());
-    // imports of the module that did not resolve
-    for im in u.prog.imports.iter().skip(i0) {
-        if !im.done {
+    // imports of the module that did not resolve (a macro import stays open by design: macros
+    // resolve by name at the call)
+    for i in u.prog.open_reportable_imports(i0) {
+        let im = &u.prog.imports[i];
+        {
             let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
             errs.push(format!("{}:{}:{}: unresolved import -- name a crate the module depends on", u.prog.file_paths[im.file as usize], l, c));
         }

@@ -1,4 +1,6 @@
 use makepad_micro_serde::*;
+
+pub mod flight;
 use std::fmt::Write;
 use std::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -338,6 +340,16 @@ pub fn log_with_level(
     message: String,
     level: LogLevel,
 ) {
+    // the flight recorder keeps the session's log lines with everything else it records
+    if flight::on() {
+        let cat = match level {
+            LogLevel::Error | LogLevel::Panic => "log.error",
+            LogLevel::Warning => "log.warn",
+            _ => "log",
+        };
+        let file = file_name.rsplit_once("/src/").map_or(file_name, |x| x.1);
+        flight::mark(cat, &format!("{}:{}: {}", file, line_start, message));
+    }
     let tap = LOG_TAP.load(std::sync::atomic::Ordering::Acquire);
     if !tap.is_null() {
         // Only set_log_tap writes this pointer, with this exact signature.

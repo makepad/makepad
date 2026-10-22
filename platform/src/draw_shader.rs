@@ -1099,7 +1099,9 @@ impl CxDrawShaderMapping {
             vm.object_method(object, name).as_object().and_then(|f| vm.heap().fn_script_ip(f))
         }
         if cfg!(not(target_arch = "wasm32")) {
-            [id!(fragment), id!(pixel), id!(vertex)]
+            // `pixel` first: every DrawQuad derivative inherits DrawQuad's `fragment`, so its
+            // location named them all draw_quad.rs:62; the pixel fn is the shader's own code
+            [id!(pixel), id!(fragment), id!(vertex)]
                 .iter()
                 .find_map(|m| vm.ip_to_loc(fn_ip(vm, object, *m)?).map(|loc| loc.to_string()))
         } else {

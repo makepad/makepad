@@ -151,10 +151,6 @@ hal_events! {
     /// The window's chrome: the rect of the window buttons (x, y, w, h in window points) and
     /// whether the window floats above others. Sent ahead of a `Geom`.
     Chrome = 31, chrome { window: obj, x: f64, y: f64, w: f64, h: f64, topmost: bool };
-    /// The status the window's title carries after the app's own (`TitleStatus` of session 0;
-    /// empty: none): the OS title shows `<title> — <text>` already; an app-drawn caption does the same.
-    TitleStatus = 69, title_status { window: obj, text: rng };
-
     /// Safe-area insets in window points, accompanying Display and Geom notifications.
     SafeArea = 32, safe_area { window: obj, top: f64, right: f64, bottom: f64, left: f64 };
 

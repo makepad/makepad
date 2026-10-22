@@ -360,9 +360,70 @@ pub struct InlineStats {
     pub rejected: std::collections::BTreeMap<(String, &'static str), usize>,
     /// calls left in hot blocks (not cold, not panic paths): name, reason, callee size
     pub hot_rejected: std::collections::BTreeMap<(String, &'static str, usize), usize>,
+    /// optimisation remarks (makepad inspect `asm`, `remarks`): every call site the queue kept as
+    /// a call, at its source position, with the refusal and its numbers
+    pub remarks: Vec<SiteRemark>,
+    /// record only `remarks` (every O3 build): the end-of-pass census reads callee bodies, which
+    /// would add to the build's recorded reads
+    pub remarks_only: bool,
+}
+
+/// Why the inliner kept one call site a call (an O3 optimisation remark).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SiteRemark {
+    /// the call's source position (RIR `Block::pos`, inline context bits included)
+    pub pos: u64,
+    pub callee: u32,
+    pub why: u8,
+    /// the site is in a hot block (loop / sampled hot)
+    pub hot: bool,
+    /// the callee's size as priced (instructions)
+    pub size: u32,
+    pub a: u32,
+    pub b: u32,
+}
+
+/// `SiteRemark::why` values.
+pub const WHY_NO_BODY: u8 = 1;
+pub const WHY_RECURSIVE: u8 = 2;
+pub const WHY_NO_RULE: u8 = 3;
+pub const WHY_COLD_ATTR: u8 = 4;
+pub const WHY_ARITY: u8 = 5;
+pub const WHY_FREE_SPENT: u8 = 6;
+pub const WHY_GROWTH: u8 = 7;
+pub const WHY_BUDGET: u8 = 8;
+/// an inspect experiment forbade it (`-inl@<slot>`)
+pub const WHY_FORBIDDEN: u8 = 9;
+
+impl SiteRemark {
+    /// The refusal in words, with its numbers.
+    pub fn describe(&self) -> String {
+        match self.why {
+            WHY_NO_BODY => "no optimised body of the callee yet (not compiled, or no RIR: a host / foreign fn)".into(),
+            WHY_RECURSIVE => "recursive: the callee is already being inlined on this path".into(),
+            WHY_NO_RULE => format!(
+                "no inline rule admits it: callee {} insts{}{} (rules: tiny <= call, #[inline]/always within their limits, small leaf, rustc cost model, single caller)",
+                self.size,
+                if self.a as u8 & ATTR_ALWAYS != 0 { ", #[inline(always)]" } else if self.a as u8 & ATTR_HINT != 0 { ", #[inline]" } else { ", no #[inline]" },
+                if self.hot { ", hot site" } else { ", site not hot" }
+            ),
+            WHY_COLD_ATTR => format!("callee is #[cold] and {} insts (above the free size)", self.size),
+            WHY_ARITY => "the call's arguments/results do not match the callee's signature (an ABI-lowered call)".into(),
+            WHY_FREE_SPENT => format!("the free-size allowance is spent: callee {} insts, {} left", self.size, self.a),
+            WHY_GROWTH => format!("growth ceiling: the caller would grow to {} insts, ceiling {} (callee {} insts)", self.a, self.b, self.size),
+            WHY_BUDGET => format!("inline budget spent: callee costs {} insts, {} left", self.a, self.b),
+            WHY_FORBIDDEN => "forbidden by an inspect experiment (noinline)".into(),
+            _ => "kept a call".into(),
+        }
+    }
 }
 
 impl InlineStats {
+    /// Stats that record only the optimisation remarks (every O3 build).
+    pub fn remarks() -> InlineStats {
+        InlineStats { remarks_only: true, ..Default::default() }
+    }
+
     fn reject(&mut self, name: String, reason: usize, hot: Option<usize>) {
         const REASONS: [&str; 5] = ["cold", "no-rir", "no-rule", "budget", "arity"];
         if let Some(size) = hot {
@@ -605,6 +666,10 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         s.rejected.clear();
         s.hot_rejected.clear();
     }
+    // remarks of this round (a later round sees the calls the first one kept again)
+    if let Some(s) = stats.as_deref_mut() {
+        s.remarks.clear();
+    }
     // Scalar closure combinators do not carry a per-element call penalty.
     // Look through adapter forwarding bodies for an actual loop before giving
     // a chain priority over equally hot ordinary calls.
@@ -693,6 +758,9 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         let mut tries: Vec<(bool, bool, *const Func, *const Func)> = plain.iter().map(|&(u, b, s)| (u, false, b, s)).collect();
         let any_const = consts.iter().any(|c| c.is_some());
         let mut k = 0;
+        // the first try's refusal (the body as written): the site's remark when nothing is taken
+        let mut why: Option<SiteRemark> = None;
+        let want_why = stats.is_some();
         loop {
             if k == plain.len() && any_const {
                 for &(bottom_up, body, shape) in &plain {
@@ -736,6 +804,49 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             if !refused {
                 pick = Some((callee, rule.unwrap(), growth, size, cost, free, no_growth, in_context));
                 break;
+            }
+            if want_why && why.is_none() {
+                let mk = |why: u8, a: usize, b: usize| SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why, hot: priorities[bi].1, size: size as u32, a: a.min(u32::MAX as usize) as u32, b: b.min(u32::MAX as usize) as u32 };
+                why = Some(if ancestry[bi].contains(&id) {
+                    mk(WHY_RECURSIVE, 0, 0)
+                } else if rule.is_none() {
+                    mk(WHY_NO_RULE, attrs as usize, 0)
+                } else if attrs & ATTR_COLD != 0 && !free && rule != Some(RULE_COST) {
+                    mk(WHY_COLD_ATTR, 0, 0)
+                } else if callee.params.len() != args.len() || callee.rets.len() != rets.len() {
+                    mk(WHY_ARITY, 0, 0)
+                } else {
+                    match rule.unwrap() {
+                        RULE_COST if size > free_budget => mk(WHY_FREE_SPENT, free_budget, 0),
+                        RULE_COST | RULE_SINGLE => mk(WHY_GROWTH, priced.saturating_add(growth), growth_limit),
+                        _ if cost > budget => mk(WHY_BUDGET, cost, budget),
+                        _ => mk(WHY_GROWTH, priced, growth_limit),
+                    }
+                });
+            }
+        }
+        // makepad inspect experiments (`ab <fn> b=inline:<callee>` / `noinline:`): MAKEPAD_RUN_OPT
+        // tokens `+inl@<slot>` / `-inl@<slot>` force or forbid this callee's sites
+        if !options.opt.is_empty() {
+            let tok = |p: &str| options.opt.iter().any(|t| t.strip_prefix(p).and_then(|x| x.parse::<u32>().ok()) == Some(id));
+            if tok("-inl@") {
+                pick = None;
+                why = Some(SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why: WHY_FORBIDDEN, hot: priorities[bi].1, size: 0, a: 0, b: 0 });
+            } else if pick.is_none() && tok("+inl@") && !ancestry[bi].contains(&id) {
+                if let Some((p, _)) = found {
+                    let callee: &Func = unsafe { &*p };
+                    if callee.params.len() == args.len() && callee.rets.len() == rets.len() && callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
+                        let size = inline_inst_count(callee);
+                        let growth = size.saturating_add(args.len()).saturating_sub(1);
+                        pick = Some((callee, RULE_ALWAYS, growth, size, size.saturating_sub(args.len() + rets.len() + 3), false, true, false));
+                    }
+                }
+            }
+        }
+        if pick.is_none() {
+            if let Some(s) = stats.as_deref_mut() {
+                let r = why.unwrap_or(SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why: WHY_NO_BODY, hot: priorities[bi].1, size: 0, a: 0, b: 0 });
+                s.remarks.push(r);
             }
         }
         let Some((callee, rule, growth, size, cost, free, no_growth, in_context)) = pick else { continue };
@@ -793,7 +904,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         }
         enqueue(f, start, &priorities, &loop_sites, &mut queue);
     }
-    if let Some(s) = stats.as_deref_mut() {
+    if let Some(s) = stats.as_deref_mut().filter(|s| !s.remarks_only) {
         s.growth_after = inst_count;
         for (bi, block) in f.blocks.iter().enumerate() {
             for inst in &block.insts {

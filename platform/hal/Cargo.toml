@@ -13,6 +13,8 @@ makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
 makepad-key-code = { path = "../key_code", version = "0.1.0" }
 # The font service rasterises glyphs with the same tables and outlines the text layout shapes.
 makepad-font-core = { path = "../../libs/font_core", version = "1.0.0" }
+# FastMap (lib.rs): the object maps of the per-draw path
+fxhash = { path = "../../libs/fxhash", version = "0.2.1" }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 makepad-vulkan = { path = "../../libs/vulkan", version = "0.1.0" }
@@ -47,6 +49,7 @@ makepad-shader = { path = "../shader", version = "1.0.0" }
 # Native inspection reads the HAL ledger directly, including when Cx runs under Relax.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../../libs/remote", version = "0.1.0" }
+makepad-gpu-trace = { path = "../../libs/gpu_trace", version = "1.0.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 makepad-jni-sys = { path = "../../libs/jni-sys", version = "0.4.0" }

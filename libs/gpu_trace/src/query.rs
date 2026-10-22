@@ -62,12 +62,16 @@ pub fn json_str(s: &str) -> String {
 }
 
 pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("gpu prof start", "[s=60] [split=16]", "start recording frames (ring of s seconds); every split-th recorded frame is a split frame for per-shader GPU time (0: none)"),
-    ("gpu prof stop", "[save=<path>]", "stop recording and write the .mkgp file (default local/gpuprof/<app>-<unix_s>.mkgp)"),
-    ("gpu prof status", "", "recording state, frames held, size, what the device can sample"),
+    ("gpu prof start", "[s=60] [split=16] [hz=<display Hz>] [ablate=<shader> every=8]", "record every session's frames (ring of s seconds); every split-th frame cuts its passes per shader, for shader shares only (0: none; split encoders lose hidden-surface removal, so a shader hidden under opaque draws reads too high: confirm with ablate=)"),
+    ("gpu prof stop", "[save=<path>] [sid=]", "stop; save= writes the busiest (or sid=) session's .mkgp"),
+    ("gpu prof status", "", "recording state, sessions and frames held, what the device can sample"),
+    ("gpu prof shader", "<name> [save=<path>]", "a shader's cost hints and (MAKEPAD_GPU_PROF=1 at launch) its generated source"),
     ("gpu prof frames", "[n=10]", "frame time stats, hitch zones with their class (gpu/cpu/present-bound) and the dominant shader or CPU phase"),
     ("gpu prof frame", "F<n>", "one frame: CPU phases, GPU passes, shaders drawn, nearest split-frame attribution"),
-    ("gpu prof top", "by=shader|owner|pass|draw [frames=a-b] [n=15]", "GPU time (estimated for shaders / owners from split frames), draws, instances, vertices"),
+    ("gpu prof top", "by=shader|owner|list|pass|draw [frames=a-b] [n=15]", "GPU time (measured per pass; shared out to shaders / owners / draw lists by split-frame shares), draws, instances, triangles, bytes read"),
+    ("gpu prof ablate", "", "the result of `gpu prof start ablate=<shader>`: GPU time per pass with that shader's draws left out vs neighbouring normal frames (the true cost, hidden-surface removal and bandwidth included)"),
+    ("gpu prof runs", "[F<n>|last] [pass=<name>] [n=20]", "a split frame's runs of draws (one shader each), slowest first, with their draws' lists and owners: the per-draw drill-down"),
+    ("gpu prof lanes", "F<n> [width=100]", "one frame's GPU timeline: vertex / fragment / compute / blit lanes per encoder, overlap and idle gaps"),
     ("gpu prof util", "[frames=a-b]", "GPU busy / idle / overlap with the CPU / bubbles, frames by class"),
     ("gpu prof diff", "<a.mkgp> <b.mkgp|live>", "frame stats and shaders / owners / passes that grew between two recordings"),
 ];
@@ -81,12 +85,136 @@ pub fn run(rec: &Recording, args: &Args, load: &dyn Fn(&str) -> Result<Recording
         "frame" => frame(rec, args),
         "top" => top(rec, args),
         "util" => Ok(util(rec, args)),
+        "lanes" => lanes(rec, args),
+        "runs" => runs(rec, args),
+        "ablate" => Ok(ablate(rec)),
         "diff" => {
             let (Some(a), Some(b)) = (args.pos.get(1), args.pos.get(2)) else { return Err("gpu prof diff <a.mkgp> <b.mkgp|live>".into()) };
             Ok(diff(&load(a)?, &load(b)?))
         }
-        s => Err(format!("gpu prof {s}: frames | frame F<n> | top by=shader|owner|pass|draw | util | diff <a> <b>")),
+        s => Err(format!("gpu prof {s}: frames | frame F<n> | lanes F<n> | top by=shader|owner|list|pass|draw | util | diff <a> <b>")),
     }
+}
+
+// ------------------------------------------------------------------ text rendering
+
+/// One JSON-object answer line as (key path, value text) pairs; nested objects flatten to
+/// `outer.inner`. `None` for a line that is not an object of scalars.
+fn flat(line: &str) -> Option<Vec<(String, String)>> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    fn ws(b: &[u8], i: &mut usize) {
+        while *i < b.len() && (b[*i] as char).is_whitespace() {
+            *i += 1;
+        }
+    }
+    fn string(b: &[u8], i: &mut usize) -> Option<String> {
+        if b.get(*i) != Some(&b'"') {
+            return None;
+        }
+        *i += 1;
+        let mut o = Vec::new();
+        while *i < b.len() {
+            match b[*i] {
+                b'"' => {
+                    *i += 1;
+                    return String::from_utf8(o).ok();
+                }
+                b'\\' => {
+                    *i += 1;
+                    match b.get(*i)? {
+                        b'n' => o.push(b' '),
+                        b't' => o.push(b' '),
+                        c => o.push(*c),
+                    }
+                }
+                c => o.push(c),
+            }
+            *i += 1;
+        }
+        None
+    }
+    fn object(b: &[u8], i: &mut usize, prefix: &str, out: &mut Vec<(String, String)>) -> Option<()> {
+        ws(b, i);
+        if b.get(*i) != Some(&b'{') {
+            return None;
+        }
+        *i += 1;
+        loop {
+            ws(b, i);
+            if b.get(*i) == Some(&b'}') {
+                *i += 1;
+                return Some(());
+            }
+            let k = string(b, i)?;
+            ws(b, i);
+            if b.get(*i) != Some(&b':') {
+                return None;
+            }
+            *i += 1;
+            ws(b, i);
+            let key = if prefix.is_empty() { k } else { format!("{prefix}.{k}") };
+            match b.get(*i)? {
+                b'{' => object(b, i, &key, out)?,
+                b'"' => {
+                    let v = string(b, i)?;
+                    out.push((key, v));
+                }
+                _ => {
+                    let st = *i;
+                    while *i < b.len() && !matches!(b[*i], b',' | b'}') {
+                        *i += 1;
+                    }
+                    out.push((key, String::from_utf8_lossy(&b[st..*i]).trim().to_string()));
+                }
+            }
+            ws(b, i);
+            if b.get(*i) == Some(&b',') {
+                *i += 1;
+            }
+        }
+    }
+    object(b, &mut i, "", &mut out)?;
+    Some(out)
+}
+
+/// An answer as markdown: runs of lines with the same keys become one table (header once, then
+/// rows), other lines stay as they are, findings become a list.
+pub fn markdown(a: &Answer) -> Vec<String> {
+    let mut out = vec![format!("## {}", a.measured)];
+    let mut i = 0;
+    while i < a.lines.len() {
+        let Some(row) = flat(&a.lines[i]) else {
+            out.push(a.lines[i].clone());
+            i += 1;
+            continue;
+        };
+        let keys: Vec<String> = row.iter().map(|(k, _)| k.clone()).collect();
+        if keys.len() == 1 && keys[0] == "text" {
+            // pre-rendered text (a lanes chart): a code block
+            out.push("```".into());
+            while let Some(r) = a.lines.get(i).and_then(|l| flat(l)).filter(|r| r.len() == 1 && r[0].0 == "text") {
+                out.push(r[0].1.clone());
+                i += 1;
+            }
+            out.push("```".into());
+            continue;
+        }
+        out.push(format!("| {} |", keys.join(" | ")));
+        out.push(format!("|{}", "---|".repeat(keys.len())));
+        while let Some(r) = a.lines.get(i).and_then(|l| flat(l)).filter(|r| r.iter().map(|(k, _)| k).eq(keys.iter())) {
+            out.push(format!("| {} |", r.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" | ")));
+            i += 1;
+        }
+    }
+    if !a.findings.is_empty() {
+        out.push(String::new());
+        for f in &a.findings {
+            out.push(format!("- {f}"));
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ analysis
@@ -157,6 +285,16 @@ fn f3(v: f64) -> String {
     format!("{v:.3}")
 }
 
+/// Three significant digits (no exponent): 0.0123, 1.23, 123, 12300.
+pub fn g3(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return "0".into();
+    }
+    let digits = (2 - v.abs().log10().floor() as i32).max(0) as usize;
+    let s = format!("{v:.digits$}");
+    if digits >= 3 && s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
 fn analyze(rec: &Recording) -> Analysis {
     // 0: the display refresh is unknown, so a hitch is judged against the median alone
     let budget = if rec.header.refresh_hz > 1.0 { (1e9 / rec.header.refresh_hz as f64) as u64 } else { 0 };
@@ -192,13 +330,13 @@ fn analyze(rec: &Recording) -> Analysis {
         let gpu_wait = union(f.cpu.iter().filter(|c| gpu_wait_name(c.name)).map(|c| (c.start, c.end)).collect()).iter().map(|s| s.1 - s.0).sum();
         stats.push(Stat { idx, interval, busy, owned, cpu_busy, gpu_wait, bubbles, bubble_count, class: Class::Ok, hitch: false });
     }
-    let mut ivs: Vec<u64> = stats.iter().filter(|s| !rec.frames[s.idx].split && s.interval > 0).map(|s| s.interval).collect();
+    let mut ivs: Vec<u64> = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| s.interval).collect();
     ivs.sort();
     let median = percentile(&ivs, 0.5);
     let p95 = percentile(&ivs, 0.95);
     let max = ivs.last().copied().unwrap_or(0);
     for s in stats.iter_mut() {
-        if rec.frames[s.idx].split || s.interval == 0 {
+        if rec.frames[s.idx].special() || s.interval == 0 {
             continue;
         }
         let iv = s.interval as f64;
@@ -213,6 +351,24 @@ fn analyze(rec: &Recording) -> Analysis {
             Class::Ok
         };
         s.hitch = s.interval as f64 > 1.5 * median as f64 && s.interval > budget;
+    }
+    // a hitch is classed by what grew: the part of its excess over the median frame that the
+    // CPU or the GPU took longer than in a median frame
+    let (mut cpus, mut busys): (Vec<u64>, Vec<u64>) = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| (s.cpu_busy, s.busy)).unzip();
+    cpus.sort();
+    busys.sort();
+    let (cpu_med, busy_med) = (percentile(&cpus, 0.5), percentile(&busys, 0.5));
+    for s in stats.iter_mut().filter(|s| s.hitch) {
+        let excess = s.interval.saturating_sub(median) as f64;
+        let cpu_grew = s.cpu_busy.saturating_sub(cpu_med) as f64;
+        let gpu_grew = s.busy.saturating_sub(busy_med) as f64;
+        s.class = if cpu_grew >= 0.5 * excess && cpu_grew >= gpu_grew {
+            Class::Cpu
+        } else if gpu_grew >= 0.5 * excess {
+            Class::Gpu
+        } else {
+            Class::Present
+        };
     }
     // shader shares of each pass from the split frames
     let mut sums: HashMap<(u32, u32, u32), HashMap<u32, u64>> = HashMap::new();
@@ -337,6 +493,9 @@ struct Agg {
     draws: u64,
     instances: u64,
     verts: u64,
+    tris: u64,
+    geo_bytes: u64,
+    tex_bytes: u64,
     methods: Vec<&'static str>,
 }
 
@@ -354,28 +513,34 @@ impl Agg {
     }
 }
 
-/// Aggregates over frames in `r`: by key -> Agg. Time only from non-split frames; counts from all.
+/// Aggregates over the normal (non-split) frames in `r`: by key -> Agg.
 fn aggregate(rec: &Recording, an: &Analysis, r: (u64, u64), by: &str) -> (Vec<(String, Agg)>, usize, f64) {
     let mut m: HashMap<String, Agg> = HashMap::new();
     let (mut frames, mut total) = (0usize, 0.0f64);
     for st in an.stats.iter().filter(|s| in_range(rec, s, r)) {
         let f = &rec.frames[st.idx];
-        let counted = !f.split;
-        if counted {
-            frames += 1;
+        // split frames only lend their shader shares: no time and no counts from them
+        if f.special() {
+            continue;
         }
+        let counted = true;
+        frames += 1;
         let name_shader = |s: u32| if s == UNSPLIT { "(unsplit passes)".to_string() } else { rec.s(s).to_string() };
         for d in &f.draws {
             let key = match by {
                 "shader" => rec.s(d.shader).to_string(),
                 "owner" => rec.s(d.owner).to_string(),
                 "pass" => f.passes.get(d.pass as usize).map_or("?", |p| rec.s(p.name)).to_string(),
+                "list" => rec.s(d.list).to_string(),
                 _ => format!("{} / {} / {}", f.passes.get(d.pass as usize).map_or("?", |p| rec.s(p.name)), rec.s(d.shader), rec.s(d.owner)),
             };
             let a = m.entry(key).or_default();
             a.draws += 1;
             a.instances += d.instances as u64;
             a.verts += d.instances as u64 * d.indices as u64;
+            a.tris += d.instances as u64 * (d.indices / 3) as u64;
+            a.geo_bytes += d.geo_bytes;
+            a.tex_bytes += d.tex_bytes;
         }
         if !counted {
             continue;
@@ -408,6 +573,8 @@ fn aggregate(rec: &Recording, an: &Analysis, r: (u64, u64), by: &str) -> (Vec<(S
             for d in ds {
                 let key = if by == "owner" {
                     rec.s(d.owner).to_string()
+                } else if by == "list" {
+                    rec.s(d.list).to_string()
                 } else {
                     format!("{} / {} / {}", f.passes.get(d.pass as usize).map_or("?", |p| rec.s(p.name)), rec.s(d.shader), rec.s(d.owner))
                 };
@@ -428,7 +595,7 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
     let n = args.num("n", 10) as usize;
     let an = analyze(rec);
     let mut a = Answer::new("GPU frame profile");
-    let normal: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].split && s.interval > 0).collect();
+    let normal: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
     let mut busy: Vec<u64> = normal.iter().map(|s| s.busy).collect();
     let mut cpu: Vec<u64> = normal.iter().map(|s| s.cpu_busy).collect();
     busy.sort();
@@ -511,7 +678,7 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
             match class {
                 Class::Gpu => "GPU-bound",
                 Class::Cpu => "CPU-bound",
-                Class::Present => "present-bound (neither GPU nor CPU busy: vsync miss or the compositor)",
+                Class::Present => "present-bound (neither CPU nor GPU work grew: a wait on the display, the compositor or another process)",
                 Class::Ok => "not clearly bound",
             },
             if why.is_empty() { String::new() } else { format!(", {why}") }
@@ -537,7 +704,55 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
         ));
     }
     if an.split_frames > 0 {
-        a.findings.push(format!("{} split frames are left out of these statistics (they cost more than a normal frame)", an.split_frames));
+        // what cutting the passes cost: each split frame's GPU busy against the median of the
+        // normal frames around it (the split frames' times are only used as shares)
+        let mut ratios: Vec<f64> = Vec::new();
+        for (i, st) in an.stats.iter().enumerate().filter(|(_, s)| rec.frames[s.idx].split && s.busy > 0) {
+            let mut near: Vec<u64> = an.stats[i.saturating_sub(8)..(i + 9).min(an.stats.len())].iter().filter(|s| !rec.frames[s.idx].special() && s.busy > 0).map(|s| s.busy).collect();
+            near.sort();
+            if !near.is_empty() {
+                ratios.push(st.busy as f64 / percentile(&near, 0.5).max(1) as f64);
+            }
+        }
+        ratios.sort_by(|x, y| x.total_cmp(y));
+        let mid = ratios.get(ratios.len() / 2).copied();
+        a.lines.push(format!("{{\"split_frames\":{},\"split_gpu_busy_vs_neighbours\":{}}}", an.split_frames, mid.map_or("null".into(), |m| format!("{m:.2}"))));
+        a.findings.push(format!(
+            "{} split frames are left out of these statistics; they only give each shader's share of its pass{}",
+            an.split_frames,
+            mid.map_or(String::new(), |m| format!(" (cutting the passes cost {:+.0}% GPU time against neighbouring frames)", (m - 1.0) * 100.0))
+        ));
+    }
+    // on glass: the display's own times, when the backend gets them
+    let mut shown: Vec<u64> = Vec::new();
+    let mut prev = 0u64;
+    for f in rec.frames.iter().filter(|f| f.shown != 0) {
+        if prev != 0 && f.shown > prev {
+            shown.push(f.shown - prev);
+        }
+        prev = f.shown;
+    }
+    if !shown.is_empty() {
+        let mut sorted = shown.clone();
+        sorted.sort();
+        let vsync = if rec.header.refresh_hz > 1.0 { (1e9 / rec.header.refresh_hz as f64) as u64 } else { sorted[0].max(1) };
+        let missed = shown.iter().filter(|v| **v as f64 > 1.5 * vsync as f64).count();
+        a.lines.push(format!(
+            "{{\"on_glass_interval_ms\":{{\"median\":{},\"p95\":{},\"max\":{}}},\"vsync_ms\":{},\"missed_vsyncs\":{}}}",
+            f3(ms(percentile(&sorted, 0.5))),
+            f3(ms(percentile(&sorted, 0.95))),
+            f3(ms(*sorted.last().unwrap())),
+            f3(ms(vsync)),
+            missed
+        ));
+        a.findings.push(format!(
+            "on glass: median {:.1} ms between frames shown ({:.0} fps), {} of {} intervals missed a vsync of {:.2} ms",
+            ms(percentile(&sorted, 0.5)),
+            1e9 / percentile(&sorted, 0.5).max(1) as f64,
+            missed,
+            shown.len(),
+            ms(vsync)
+        ));
     }
     for note in &rec.header.notes {
         a.findings.push(format!("note: {note}"));
@@ -563,6 +778,9 @@ fn zone_reason(rec: &Recording, an: &Analysis, z: &[&Stat], class: Class) -> Str
             .filter(|_| total > 0)
             .map(|(n, ns)| format!("{:.0}% of the CPU time in phase {n}", 100.0 * ns as f64 / total as f64))
             .unwrap_or_default();
+    }
+    if class != Class::Gpu {
+        return String::new();
     }
     let mut by: HashMap<u32, f64> = HashMap::new();
     let mut total = 0.0;
@@ -609,9 +827,28 @@ fn quad_shape(rec: &Recording, z: &[&Stat], shader: u32) -> Option<String> {
 
 // ------------------------------------------------------------------ frame
 
+/// `F<n>` / `<n>`, or a normal frame by rank: `last`, `median` (by interval), `slowest`.
+fn pick_frame(rec: &Recording, want: &str) -> Option<u64> {
+    if let Ok(id) = want.trim_start_matches('F').parse() {
+        return Some(id);
+    }
+    let an = analyze(rec);
+    let mut normal: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
+    let st = match want {
+        "last" => normal.last().copied(),
+        "slowest" => normal.iter().max_by_key(|s| s.interval).copied(),
+        "median" => {
+            normal.sort_by_key(|s| s.interval);
+            normal.get(normal.len() / 2).copied()
+        }
+        _ => None,
+    }?;
+    Some(rec.frames[st.idx].id)
+}
+
 fn frame(rec: &Recording, args: &Args) -> Result<Answer, String> {
     let want = args.pos.get(1).ok_or("gpu prof frame F<n>")?;
-    let id: u64 = want.trim_start_matches('F').parse().map_err(|_| format!("gpu prof frame {want}: want F<n>"))?;
+    let id = pick_frame(rec, want).ok_or_else(|| format!("gpu prof frame {want}: want F<n>, last, median or slowest"))?;
     let an = analyze(rec);
     let Some(st) = an.stats.iter().find(|s| rec.frames[s.idx].id == id) else {
         let (lo, hi) = (rec.frames.first().map_or(0, |f| f.id), rec.frames.last().map_or(0, |f| f.id));
@@ -636,16 +873,21 @@ fn frame(rec: &Recording, args: &Args) -> Result<Answer, String> {
     }
     for (pi, p) in f.passes.iter().enumerate() {
         let draws = f.draws.iter().filter(|d| d.pass as usize == pi).count();
-        let groups = f.groups.iter().filter(|g| g.pass as usize == pi).count();
+        let kind = match p.kind {
+            crate::kind::COMPUTE => "compute",
+            crate::kind::BLIT => "blit",
+            _ => "render",
+        };
         a.lines.push(format!(
-            "{{\"pass\":{},\"size\":\"{}x{}\",\"gpu_ms\":{},\"span_ms\":{},\"vertex_ms\":{},\"fragment_ms\":{},\"draws\":{draws},\"split_groups\":{groups}}}",
+            "{{\"pass\":{},\"kind\":\"{kind}\",\"size\":\"{}x{}\",\"gpu_ms\":{},\"vertex_ms\":{},\"fragment_ms\":{},\"draws\":{draws},\"attach_mb\":{},\"attachments\":{}}}",
             json_str(rec.s(p.name)),
             p.w,
             p.h,
-            f3(ms(st.owned[pi])),
-            f3(ms(p.end.saturating_sub(p.start))),
-            f3(ms(p.vs.1.saturating_sub(p.vs.0))),
-            f3(ms(p.fs.1.saturating_sub(p.fs.0)))
+            g3(ms(st.owned[pi])),
+            g3(ms(p.vs.1.saturating_sub(p.vs.0))),
+            g3(ms(p.fs.1.saturating_sub(p.fs.0))),
+            g3(p.bytes as f64 / 1e6),
+            json_str(rec.s(p.attach))
         ));
     }
     let mut by: HashMap<u32, (u64, u64)> = HashMap::new();
@@ -695,9 +937,13 @@ fn frame(rec: &Recording, args: &Args) -> Result<Answer, String> {
 // ------------------------------------------------------------------ top
 
 fn top(rec: &Recording, args: &Args) -> Result<Answer, String> {
-    let by = args.get("by").unwrap_or("shader");
-    if !matches!(by, "shader" | "owner" | "pass" | "draw") {
-        return Err(format!("gpu prof top by={by}: shader | owner | pass | draw"));
+    let by = match args.get("by").unwrap_or("shader") {
+        // a model is drawn as its own draw list
+        "model" => "list",
+        b => b,
+    };
+    if !matches!(by, "shader" | "owner" | "list" | "pass" | "draw") {
+        return Err(format!("gpu prof top by={by}: shader | owner | list (model) | pass | draw"));
     }
     let n = args.num("n", 15) as usize;
     let r = range_of(args)?;
@@ -706,18 +952,28 @@ fn top(rec: &Recording, args: &Args) -> Result<Answer, String> {
     let mut a = Answer::new(format!("GPU time by {by}, {frames} frames"));
     let total_ms = ms(total as u64);
     let per_frame = |ns: f64| if frames > 0 { ns / 1e6 / frames as f64 } else { 0.0 };
+    // per frame, 3 significant digits: what one frame costs and carries
+    let pf = |v: f64| if frames > 0 { v / frames as f64 } else { 0.0 };
     for (k, g) in rows.iter().take(n) {
         a.lines.push(format!(
-            "{{\"{by}\":{},\"ms_est\":{},\"ms_per_frame\":{},\"share\":{:.3},\"draws\":{},\"instances\":{},\"vertices\":{},\"method\":{}}}",
+            "{{\"{by}\":{},\"gpu_ms\":{},\"share_pct\":{},\"draws\":{},\"instances\":{},\"tris_k\":{},\"geo_mb\":{},\"tex_bound_mb\":{},\"method\":{}{}}}",
             json_str(k),
-            f3(g.ns / 1e6),
-            f3(per_frame(g.ns)),
-            if total > 0.0 { g.ns / total } else { 0.0 },
-            g.draws,
-            g.instances,
-            g.verts,
-            json_str(&g.method_str())
+            g3(per_frame(g.ns)),
+            g3(if total > 0.0 { 100.0 * g.ns / total } else { 0.0 }),
+            g3(pf(g.draws as f64)),
+            g3(pf(g.instances as f64)),
+            g3(pf(g.tris as f64) / 1e3),
+            g3(pf(g.geo_bytes as f64) / 1e6),
+            g3(pf(g.tex_bytes as f64) / 1e6),
+            json_str(&g.method_str()),
+            if by == "shader" { shader_info(rec, k).map_or(String::new(), |i| format!(",\"cost\":{}", json_str(i))) } else { String::new() }
         ));
+    }
+    if rows.len() > n {
+        let rest: f64 = rows[n..].iter().map(|(_, g)| g.ns).sum();
+        a.lines.push(format!("{{\"{by}\":{},\"gpu_ms\":{},\"share_pct\":{},\"draws\":\"\",\"instances\":\"\",\"tris_k\":\"\",\"geo_mb\":\"\",\"tex_bound_mb\":\"\",\"method\":\"\"{}}}",
+            json_str(&format!("({} more)", rows.len() - n)), g3(per_frame(rest)), g3(if total > 0.0 { 100.0 * rest / total } else { 0.0 }),
+            if by == "shader" { ",\"cost\":\"\"" } else { "" }));
     }
     if frames == 0 {
         a.findings.push("no normal (non-split) frames in that range".into());
@@ -739,7 +995,7 @@ fn top(rec: &Recording, args: &Args) -> Result<Answer, String> {
     if by != "pass" && unsplit > 0.1 * total {
         // which passes they are
         let mut passes: HashMap<String, f64> = HashMap::new();
-        for st in an.stats.iter().filter(|s| !rec.frames[s.idx].split && in_range(rec, s, r)) {
+        for st in an.stats.iter().filter(|s| !rec.frames[s.idx].special() && in_range(rec, s, r)) {
             let f = &rec.frames[st.idx];
             for at in attribute(rec, &an, st).iter().filter(|x| x.shader == UNSPLIT) {
                 *passes.entry(format!("{} {}x{}", rec.s(f.passes[at.pass].name), f.passes[at.pass].w, f.passes[at.pass].h)).or_default() += at.ns;
@@ -758,6 +1014,233 @@ fn top(rec: &Recording, args: &Args) -> Result<Answer, String> {
     Ok(a)
 }
 
+/// The compiler's cost hints of the shader named `name`.
+fn shader_info<'a>(rec: &'a Recording, name: &str) -> Option<&'a str> {
+    rec.header.shader_info.iter().find(|(id, _)| rec.s(*id) == name).map(|(_, i)| i.as_str())
+}
+
+// ------------------------------------------------------------------ ablation
+
+fn ablate(rec: &Recording) -> Answer {
+    let an = analyze(rec);
+    let mut a = Answer::new("ablation: GPU ms per frame with a shader's draws left out, vs the normal frames around them");
+    let mut shaders: Vec<u32> = rec.frames.iter().map(|f| f.ablated).filter(|s| *s != 0).collect();
+    shaders.sort();
+    shaders.dedup();
+    if shaders.is_empty() {
+        a.findings.push("no ablation frames: `gpu prof start ablate=<shader> [every=8]` (names from `gpu prof top by=shader`)".into());
+        return a;
+    }
+    for sh in shaders {
+        // per pass name: (ablated own times, normal own times near them)
+        let mut per: Vec<(u32, Vec<u64>, Vec<u64>)> = Vec::new();
+        let (mut busy_a, mut busy_n) = (Vec::new(), Vec::new());
+        for (i, st) in an.stats.iter().enumerate().filter(|(_, s)| rec.frames[s.idx].ablated == sh) {
+            busy_a.push(st.busy);
+            let f = &rec.frames[st.idx];
+            let near: Vec<&Stat> = an.stats[i.saturating_sub(6)..(i + 7).min(an.stats.len())].iter().filter(|s| !rec.frames[s.idx].special()).collect();
+            busy_n.extend(near.iter().map(|s| s.busy));
+            for (pi, p) in f.passes.iter().enumerate() {
+                let e = match per.iter_mut().position(|x| x.0 == p.name) {
+                    Some(k) => &mut per[k],
+                    None => {
+                        per.push((p.name, Vec::new(), Vec::new()));
+                        per.last_mut().unwrap()
+                    }
+                };
+                e.1.push(st.owned[pi]);
+                for n in &near {
+                    let g = &rec.frames[n.idx];
+                    let t: u64 = g.passes.iter().enumerate().filter(|(_, q)| q.name == p.name).map(|(k, _)| n.owned[k]).sum();
+                    e.2.push(t);
+                }
+            }
+        }
+        let med = |mut v: Vec<u64>| {
+            v.sort();
+            percentile(&v, 0.5)
+        };
+        let (ba, bn) = (med(busy_a.clone()), med(busy_n));
+        a.lines.push(format!(
+            "{{\"shader\":{},\"frames\":{},\"gpu_ms_normal\":{},\"gpu_ms_without\":{},\"saved_ms\":{}}}",
+            json_str(rec.s(sh)),
+            busy_a.len(),
+            g3(ms(bn)),
+            g3(ms(ba)),
+            g3(ms(bn) - ms(ba))
+        ));
+        let mut rows: Vec<(u32, f64, f64)> = per.into_iter().map(|(n, x, y)| (n, ms(med(y)), ms(med(x)))).filter(|r| (r.1 - r.2).abs() > 0.005).collect();
+        rows.sort_by(|x, y| (y.1 - y.2).total_cmp(&(x.1 - x.2)));
+        for (n, normal, without) in rows.iter().take(6) {
+            a.lines.push(format!("{{\"pass\":{},\"ms_normal\":{},\"ms_without\":{},\"saved_ms\":{}}}", json_str(rec.s(*n)), g3(*normal), g3(*without), g3(normal - without)));
+        }
+        a.findings.push(format!(
+            "leaving out shader {} saves {:.2} ms of GPU time per frame ({:.1} -> {:.1} ms; medians of {} ablation frames vs their neighbours)",
+            rec.s(sh),
+            ms(bn) - ms(ba),
+            ms(bn),
+            ms(ba),
+            busy_a.len()
+        ));
+    }
+    a
+}
+
+// ------------------------------------------------------------------ runs
+
+fn runs(rec: &Recording, args: &Args) -> Result<Answer, String> {
+    let want = args.pos.get(1).map(String::as_str).unwrap_or("last");
+    let f = if want == "last" {
+        rec.frames.iter().rev().find(|f| f.split && !f.groups.is_empty())
+    } else {
+        let id: u64 = want.trim_start_matches('F').parse().map_err(|_| format!("gpu prof runs {want}: want F<n> or last"))?;
+        rec.frames.iter().find(|f| f.id == id)
+    }
+    .ok_or("no split frame with runs in the recording (gpu prof start split=16)")?;
+    let pass_filter = args.get("pass");
+    let n = args.num("n", 20) as usize;
+    let mut rows: Vec<(&crate::Group, u64)> = f
+        .groups
+        .iter()
+        .filter(|g| pass_filter.map_or(true, |p| f.passes.get(g.pass as usize).is_some_and(|x| rec.s(x.name) == p)))
+        .map(|g| (g, g.ns.saturating_sub(f.passes.get(g.pass as usize).map_or(0, |p| p.baseline))))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let total: u64 = rows.iter().map(|r| r.1).sum();
+    let mut a = Answer::new(format!("runs of split frame {} ({} runs, times minus each pass's empty-encoder baseline; shares, not frame times)", f.id, rows.len()));
+    for (g, ns) in rows.iter().take(n) {
+        let ds = f.draws.get(g.first as usize..(g.first + g.count) as usize).unwrap_or(&[]);
+        let inst: u64 = ds.iter().map(|d| d.instances as u64).sum();
+        let tris: u64 = ds.iter().map(|d| d.instances as u64 * (d.indices / 3) as u64).sum();
+        // the lists and owners of the run, most draws first
+        let mut names: Vec<(String, usize)> = Vec::new();
+        for d in ds {
+            let k = match (rec.s(d.owner), rec.s(d.list)) {
+                ("", l) => l.to_string(),
+                (o, "") => o.to_string(),
+                (o, l) => format!("{o}/{l}"),
+            };
+            match names.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += 1,
+                None => names.push((k, 1)),
+            }
+        }
+        names.sort_by(|x, y| y.1.cmp(&x.1));
+        let mut who: Vec<String> = names.iter().take(3).map(|(k, c)| if *c > 1 { format!("{k} x{c}") } else { k.clone() }).collect();
+        if names.len() > 3 {
+            who.push(format!("+{} more", names.len() - 3));
+        }
+        let p = f.passes.get(g.pass as usize);
+        let fl = ds.iter().fold(0u8, |a, d| a | d.flags);
+        let mode = format!(
+            "{}{}",
+            if fl & crate::draw_flags::BLEND != 0 { "blend" } else { "opaque" },
+            if fl & crate::draw_flags::DEPTH_WRITE != 0 { "+zwrite" } else { "" }
+        );
+        a.lines.push(format!(
+            "{{\"pass\":{},\"shader\":{},\"ms\":{},\"share_pct\":{},\"draws\":{},\"instances\":{},\"tris_k\":{},\"mode\":\"{mode}\",\"lists\":{}}}",
+            json_str(p.map_or("?", |p| rec.s(p.name))),
+            json_str(rec.s(g.shader)),
+            g3(ms(*ns)),
+            g3(if total > 0 { 100.0 * *ns as f64 / total as f64 } else { 0.0 }),
+            g.count,
+            inst,
+            g3(tris as f64 / 1e3),
+            json_str(&who.join(", "))
+        ));
+    }
+    if rows.len() > n {
+        a.findings.push(format!("{} more runs (n=)", rows.len() - n));
+    }
+    Ok(a)
+}
+
+// ------------------------------------------------------------------ lanes
+
+const LANES: [&str; 4] = ["vertex", "fragment", "compute", "blit"];
+
+/// The stage spans of one encoder: (lane index, start, end).
+fn stage_spans(p: &crate::Pass) -> Vec<(usize, u64, u64)> {
+    let mut v = Vec::new();
+    match p.kind {
+        crate::kind::COMPUTE if p.gpu_ok() => v.push((2, p.start, p.end)),
+        crate::kind::BLIT if p.gpu_ok() => v.push((3, p.start, p.end)),
+        crate::kind::RENDER => {
+            if p.vs.1 > p.vs.0 {
+                v.push((0, p.vs.0, p.vs.1));
+            }
+            if p.fs.1 > p.fs.0 {
+                v.push((1, p.fs.0, p.fs.1));
+            }
+            if v.is_empty() && p.gpu_ok() {
+                // encoder samples only (no stage boundaries): the whole pass on the fragment lane
+                v.push((1, p.start, p.end));
+            }
+        }
+        _ => {}
+    }
+    v
+}
+
+fn lanes(rec: &Recording, args: &Args) -> Result<Answer, String> {
+    let want = args.pos.get(1).ok_or("gpu prof lanes F<n>")?;
+    let id = pick_frame(rec, want).ok_or_else(|| format!("gpu prof lanes {want}: want F<n>, last, median or slowest"))?;
+    let f = rec.frames.iter().find(|f| f.id == id).ok_or_else(|| format!("no frame {id} in the recording"))?;
+    let width = args.num("width", 100).clamp(20, 400) as usize;
+    let spans: Vec<(usize, usize, u64, u64)> = f.passes.iter().enumerate().flat_map(|(i, p)| stage_spans(p).into_iter().map(move |(l, a, b)| (i, l, a, b))).collect();
+    let mut a = Answer::new(format!("GPU lanes of frame {id}"));
+    let (Some(t0), Some(t1)) = (spans.iter().map(|s| s.2).min(), spans.iter().map(|s| s.3).max()) else {
+        a.findings.push("no GPU stage times in this frame".into());
+        return Ok(a);
+    };
+    let total = (t1 - t0).max(1);
+    let col = |t: u64| (((t - t0) as f64 / total as f64) * width as f64).floor().min(width as f64 - 1.0) as usize;
+    for (i, l, s, e) in &spans {
+        let p = &f.passes[*i];
+        a.lines.push(format!(
+            "{{\"pass\":{},\"index\":{i},\"lane\":\"{}\",\"start_ms\":{},\"end_ms\":{},\"ms\":{}}}",
+            json_str(rec.s(p.name)),
+            LANES[*l],
+            f3(ms(s - t0)),
+            f3(ms(e - t0)),
+            f3(ms(e - s))
+        ));
+    }
+    // one text row per encoder and stage: the span drawn over the frame's GPU time
+    let mut text = Vec::new();
+    text.push(format!("0 ms {:>w$} {:.2} ms", "", ms(total), w = width.saturating_sub(5)));
+    for (i, l, s, e) in &spans {
+        let mut row = vec![b'.'; width];
+        for c in col(*s)..=col((*e).max(*s)) {
+            row[c] = if *l == 0 { b'v' } else if *l == 1 { b'#' } else if *l == 2 { b'c' } else { b'b' };
+        }
+        text.push(format!("{} {:<8} {:>3} {}", String::from_utf8(row).unwrap_or_default(), LANES[*l], i, rec.s(f.passes[*i].name)));
+    }
+    for t in text {
+        a.lines.push(format!("{{\"text\":{}}}", json_str(&t)));
+    }
+    // overlap: time two encoders' stages run at once; gaps: no stage running
+    let mut edges: Vec<(u64, i32)> = spans.iter().flat_map(|s| [(s.2, 1), (s.3, -1)]).collect();
+    edges.sort();
+    let (mut depth, mut last, mut overlap, mut idle) = (0i32, t0, 0u64, 0u64);
+    for (t, d) in edges {
+        if depth >= 2 {
+            overlap += t - last;
+        } else if depth == 0 {
+            idle += t - last;
+        }
+        depth += d;
+        last = t;
+    }
+    a.findings.push(format!(
+        "frame {id}: GPU from first to last stage {:.2} ms; {:.2} ms with two or more stages running at once, {:.2} ms with nothing running",
+        ms(total),
+        ms(overlap),
+        ms(idle)
+    ));
+    Ok(a)
+}
+
 // ------------------------------------------------------------------ util
 
 fn util(rec: &Recording, args: &Args) -> Answer {
@@ -770,7 +1253,7 @@ fn util(rec: &Recording, args: &Args) -> Answer {
         }
     };
     let an = analyze(rec);
-    let sel: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].split && s.interval > 0 && in_range(rec, s, r)).collect();
+    let sel: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0 && in_range(rec, s, r)).collect();
     let mut a = Answer::new(format!("GPU utilisation, {} frames", sel.len()));
     if sel.is_empty() {
         a.findings.push("no normal frames in that range".into());
@@ -844,8 +1327,8 @@ fn diff(a: &Recording, b: &Recording) -> Answer {
     let (aa, ab) = (analyze(a), analyze(b));
     let mut out = Answer::new("difference between two recordings");
     let summary = |an: &Analysis, rec: &Recording| {
-        let n = an.stats.iter().filter(|s| !rec.frames[s.idx].split && s.interval > 0).count();
-        let mut busy: Vec<u64> = an.stats.iter().filter(|s| !rec.frames[s.idx].split && s.interval > 0).map(|s| s.busy).collect();
+        let n = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).count();
+        let mut busy: Vec<u64> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| s.busy).collect();
         busy.sort();
         (n, an.median, an.p95, percentile(&busy, 0.5), an.stats.iter().filter(|s| s.hitch).count())
     };
@@ -910,13 +1393,13 @@ mod tests {
             }
             f.passes.push(Pass { name: scene, w: 3840, h: 2160, start, end: start + gpu_scene, ..Default::default() });
             f.passes.push(Pass { name: window, w: 1920, h: 1080, start: start + gpu_scene, end: start + gpu_scene + MS, ..Default::default() });
-            f.draws.push(Draw { pass: 0, shader: feedback, owner: owner_a, instances: 1, indices: 6 });
-            f.draws.push(Draw { pass: 0, shader: ui, owner: owner_a, instances: 40, indices: 6 });
-            f.draws.push(Draw { pass: 1, shader: ui, owner: owner_b, instances: 200, indices: 6 });
+            f.draws.push(Draw { pass: 0, shader: feedback, owner: owner_a, instances: 1, indices: 6, ..Default::default() });
+            f.draws.push(Draw { pass: 0, shader: ui, owner: owner_a, instances: 40, indices: 6, ..Default::default() });
+            f.draws.push(Draw { pass: 1, shader: ui, owner: owner_b, instances: 200, indices: 6, ..Default::default() });
             if split {
                 f.passes[0].baseline = MS / 10;
-                f.groups.push(Group { pass: 0, shader: feedback, ns: 9 * MS });
-                f.groups.push(Group { pass: 0, shader: ui, ns: MS });
+                f.groups.push(Group { pass: 0, shader: feedback, ns: 9 * MS, first: 0, count: 1 });
+                f.groups.push(Group { pass: 0, shader: ui, ns: MS, first: 1, count: 1 });
             }
             rec.frames.push(f);
         }
@@ -987,6 +1470,39 @@ mod tests {
         assert!(run(&rec, &Args::parse(&["frame".into(), "F9999".into()]), &|_| Err("".into())).is_err());
         let u = run_q(&rec, "util");
         assert!(u.findings[0].contains("GPU busy"), "{:?}", u.findings);
+    }
+
+    #[test]
+    fn markdown_tables_and_digits() {
+        assert_eq!(g3(1234.6), "1235");
+        assert_eq!(g3(12.345), "12.3");
+        assert_eq!(g3(0.012345), "0.0123");
+        assert_eq!(g3(0.0), "0");
+        let md = markdown(&run_q(&synth(), "top by=pass"));
+        assert!(md[1].starts_with("| pass | gpu_ms |"), "{md:?}");
+        assert!(md[2].starts_with("|---|"));
+        assert!(md.iter().any(|l| l.starts_with("| scene |")));
+    }
+
+    #[test]
+    fn ablation_measures_the_left_out_shader() {
+        let mut rec = synth();
+        let feedback = rec.strings.iter().position(|s| s == "feedback#4").unwrap() as u32;
+        // every 5th normal frame leaves feedback out: its scene pass shrinks by 2 ms
+        for (i, f) in rec.frames.iter_mut().enumerate().filter(|(_, f)| !f.split) {
+            if i % 5 == 0 && !(30..33).contains(&(f.id - 100)) {
+                f.ablated = feedback;
+                f.passes[0].end -= 2 * MS;
+                f.passes[1].start -= 2 * MS;
+                f.passes[1].end -= 2 * MS;
+            }
+        }
+        let a = run_q(&rec, "ablate");
+        assert!(a.lines[0].contains("\"shader\":\"feedback#4\""), "{:?}", a.lines);
+        assert!(a.lines[0].contains("\"saved_ms\":\"2.00\"") || a.lines[0].contains("\"saved_ms\":2.00"), "{:?}", a.lines);
+        // ablation frames are not frame-time samples
+        let f = run_q(&rec, "top by=pass");
+        assert!(f.findings[0].starts_with("4"), "{:?}", f.findings);
     }
 
     #[test]

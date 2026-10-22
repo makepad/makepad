@@ -694,6 +694,10 @@ pub struct Program {
     // Current ownership; old versions keep only entities not paired into the new file.
     /// Entities by file, for reloads. A restored program builds it on first use.
     reload: std::sync::OnceLock<ReloadFiles>,
+    /// Hot reload: the defs the last commits gave items added inside a paired item's body
+    /// (collect_new_body_blocks); the reload takes them (take_body_added) into the added defs
+    /// the type context collects, as it collects every added item's
+    body_added: Vec<DefId>,
     pub node_id_to_def_id: crate::collected::ImageMap<(u32, crate::def_collector::NodeId), DefId>,
     pub legacy_const_args: crate::collected::ImageMap<DefId, std::sync::Arc<crate::def_collector::LegacyOwner>>,
     pub(crate) legacy_const_attrs: std::sync::Arc<HashMap<DefId, Vec<u32>>>,
@@ -870,6 +874,7 @@ impl Program {
             block_owner: Default::default(),
             item_defs: Default::default(),
             reload: std::sync::OnceLock::from(ReloadFiles::default()),
+            body_added: Vec::new(),
             node_id_to_def_id: Default::default(),
             legacy_const_args: Default::default(),
             legacy_const_attrs: Default::default(),
@@ -2102,6 +2107,14 @@ impl Program {
         self.file_crate.push(krate);
         self.file_blocks.push(v.blocks);
         self.retarget_file(old, new, pairs);
+        // items added inside a body a paired item already has (`use` in a fn or closure body,
+        // a nested fn or const): their blocks get anonymous modules as at load
+        let body_added = self.body_added.len();
+        if let Err(error) = self.collect_new_body_blocks(new, pairs) {
+            self.body_added.truncate(body_added);
+            self.revert_version(old, new, pairs);
+            return Err(error);
+        }
         self.declaration_versions.insert(new, declarations);
         let t_collect = std::time::Instant::now();
         let collected = self.collect_version_definitions(new, !same_scopes, true, visible);
@@ -2109,6 +2122,7 @@ impl Program {
             eprintln!("commit-trace: save {:.2} ms, collect definitions {:.2} ms, rest {:.2} ms", save_ms, t_collect.elapsed().as_secs_f64() * 1e3, t_save.elapsed().as_secs_f64() * 1e3 - save_ms - t_collect.elapsed().as_secs_f64() * 1e3);
         }
         if let Err(error) = collected {
+            self.body_added.truncate(body_added);
             self.revert_version(old, new, pairs);
             return Err(error);
         }
@@ -3023,6 +3037,72 @@ impl Program {
         Ok(Some(d))
     }
 
+    /// Hot reload: the body blocks of `file`'s paired items that hold items but have no block
+    /// module yet (a `use` or a fn added in a body) get one, under the block module or item
+    /// module around them, as collect_body_items gives at load. Blocks already mapped keep theirs.
+    fn collect_new_body_blocks(&mut self, file: u32, pairs: &[(u32, u32)]) -> Result<(), String> {
+        let first = self.defs.len() as u32;
+        let r = self.collect_new_body_blocks_in(file, pairs);
+        let last = self.defs.len() as u32;
+        self.body_added.extend((first..last).map(DefId));
+        r
+    }
+
+    /// The defs commits gave items added inside bodies since the last call (collect_new_body_blocks).
+    pub fn take_body_added(&mut self) -> Vec<DefId> {
+        std::mem::take(&mut self.body_added)
+    }
+
+    fn collect_new_body_blocks_in(&mut self, file: u32, pairs: &[(u32, u32)]) -> Result<(), String> {
+        for &(_, n) in pairs {
+            let Some(&d) = self.item_defs.get(&(file, n)) else { continue };
+            let def = self.def(d);
+            if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) {
+                continue;
+            }
+            let module = def.scope;
+            let mut blocks = Vec::new();
+            {
+                let ast = &self.files[file as usize].ast;
+                let kind = &ast.item(ItemId(n)).kind;
+                blocks_in_item_signature(ast, kind, &mut blocks);
+                match kind {
+                    ItemKind::Fn(_, Some(b), _) => blocks.push(*b),
+                    ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { blocks_in_expr(ast, e, &mut blocks) },
+                    _ => {}
+                }
+            }
+            for b in blocks {
+                self.collect_new_block_items(file, b, module, Some(d))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_new_block_items(&mut self, file: u32, b: BlockId, module: u32, owner: Option<DefId>) -> Result<(), String> {
+        let Some((items, subs)) = self.file_blocks[file as usize].get(&b.0).cloned() else { return Ok(()) };
+        let inner = match self.block_mods.get(&(file, b.0)).copied() {
+            Some(m) => m,
+            None if !items.is_empty() => {
+                let krate = self.mods[module as usize].krate;
+                let mdef = self.mods[module as usize].def;
+                let inner = self.new_module(mdef, Some(module), Some(module), krate, file);
+                self.block_mods.insert((file, b.0), inner);
+                if let Some(o) = owner {
+                    self.block_owner.insert(inner, o);
+                }
+                let (dir, mod_rs) = self.mod_dirs.get(&module).cloned().unwrap_or_else(|| (".".to_string(), true));
+                self.collect_items(file, &items, inner, &dir, mod_rs)?;
+                inner
+            }
+            None => module,
+        };
+        for sb in subs {
+            self.collect_new_block_items(file, sb, inner, owner)?;
+        }
+        Ok(())
+    }
+
     /// Items declared inside a fn/const body get anonymous block modules.
     fn collect_body_items(&mut self, file: u32, iid: ItemId, module: u32, owner: Option<DefId>) -> Result<(), String> {
         let mut blocks = Vec::new();
@@ -3733,6 +3813,13 @@ impl Program {
         true
     }
 
+    /// The imports from `i0` that are still open and name something an unresolved import is an
+    /// error for (import_reportable: not a macro, not bound in the other namespace).
+    pub fn open_reportable_imports(&self, i0: usize) -> Vec<usize> {
+        let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
+        (i0..self.imports.len()).filter(|&i| !self.imports[i].done && self.import_reportable(i, &mut macro_binds)).collect()
+    }
+
     /// Unresolved imports (from `i0`) become errors.
     fn report_unresolved_imports(&mut self, i0: usize) {
         let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
@@ -4288,13 +4375,34 @@ impl Program {
         }
         // `$crate` from another crate's macro: `::__relax_crate_<name>` is that crate by identity
         if let Some(cn) = self.syms.str(name).strip_prefix("__relax_crate_") {
-            for (i, c) in self.crates.iter().enumerate() {
-                if self.syms.str(c.name) == cn {
-                    return Some(i as u32);
+            return self.dollar_crate(krate, cn);
+        }
+        None
+    }
+
+    /// The crate `$crate` of a macro defined in crate `name` denotes in code of crate `krate`
+    /// (rustc: the macro's defining crate, carried by hygiene). The expansion spells it by name,
+    /// and the program can hold two crates of one name: a domain relaunched after a Cargo graph
+    /// change loads new revisions of changed crates next to the old ones (domain.rs load_graph).
+    /// The defining crate is the one `krate` depends on (a macro reaches code only through the
+    /// dependency graph), nearest first; outside that graph, the newest crate of the name (the
+    /// macro table resolves a name to its newest definition).
+    fn dollar_crate(&self, krate: u32, name: &str) -> Option<u32> {
+        let named = |k: u32| self.syms.str(self.crates[k as usize].name) == name;
+        let mut seen = vec![false; self.crates.len()];
+        let mut queue = std::collections::VecDeque::from([krate]);
+        seen[krate as usize] = true;
+        while let Some(k) = queue.pop_front() {
+            if named(k) {
+                return Some(k);
+            }
+            for &(_, d) in &self.crates[k as usize].deps {
+                if !std::mem::replace(&mut seen[d as usize], true) {
+                    queue.push_back(d);
                 }
             }
         }
-        None
+        (0..self.crates.len() as u32).rev().find(|&k| named(k))
     }
 
     /// Resolves a path to a container (module, enum, trait, type). `from_root`: 2015-style

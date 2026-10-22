@@ -471,6 +471,8 @@ impl Cx {
     /// The frame beat (what macOS ran on its paint clock): services, next-frame callbacks, the
     /// draw event, shader compiles, then the passes into commands.
     pub(super) fn hal_beat(&mut self) -> bool {
+        self.hal.beat_phases = [[0; 2]; 6];
+        self.hal.beat_phases[0][0] = makepad_hal::clock_ns();
         frame_log::beat();
         crate::frame_sources::beat();
         if makepad_hal::profile::on() {
@@ -544,9 +546,13 @@ impl Cx {
         }
         let time_now = self.hal_now();
         let draw_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
+        let next_start = makepad_hal::clock_ns();
+        self.hal.beat_phases[0][1] = next_start;
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
+            self.hal.beat_phases[1] = [next_start, makepad_hal::clock_ns()];
         }
+        let walk_start = makepad_hal::clock_ns();
         let mut deadline = None;
         loop {
             // A control-channel visibility message may arrive during the glyph wait.
@@ -609,6 +615,7 @@ impl Cx {
             // Rebuild even on timeout, so every glyph that arrived within the budget is used.
             self.redraw_all();
         }
+        self.hal.beat_phases[2] = [walk_start, makepad_hal::clock_ns()];
         let build_start = draw_start.map(|start| {
             let now = makepad_hal::clock_ns();
             makepad_hal::profile::record(makepad_hal::profile::Metric::CpuDraw, now - start);

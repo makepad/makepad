@@ -16,6 +16,57 @@ use super::{frame_json, json_str, now_ms, short, Out, Req};
 pub struct Sample {
     pub os_id: u64,
     pub frames: Vec<u64>,
+    /// events this sample stands for (hardware events: the period the kernel sampled at; CPU
+    /// time: 1)
+    pub weight: u64,
+    /// when it was taken (clock::wall_ns; Linux: when its ring was drained, within 10 ms)
+    pub t: u64,
+}
+
+/// What a sample counts. CPU time works everywhere; the hardware events need Linux perf_event
+/// (macOS gives an unprivileged process no per-thread hardware sampling).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ev {
+    Cpu,
+    Cycles,
+    Instructions,
+    BranchMisses,
+    CacheMisses,
+}
+
+impl Ev {
+    pub fn parse(s: &str) -> Result<Ev, String> {
+        Ok(match s {
+            "cpu" | "time" | "task-clock" => Ev::Cpu,
+            "cycles" => Ev::Cycles,
+            "instructions" | "ins" => Ev::Instructions,
+            "branch-misses" | "branches" => Ev::BranchMisses,
+            "cache-misses" | "cache" => Ev::CacheMisses,
+            _ => return Err(format!("ev={}: cpu | cycles | instructions | branch-misses | cache-misses", s)),
+        })
+    }
+    /// The sampling period of a hardware event for about `hz` samples per second of a busy
+    /// thread (~4 G cycles or instructions a second; misses far fewer). Linux only (perf_event).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn period(self, hz: u64) -> u64 {
+        let per_s: u64 = match self {
+            Ev::Cpu => 1_000_000_000,
+            Ev::Cycles | Ev::Instructions => 4_000_000_000,
+            Ev::BranchMisses => 40_000_000,
+            Ev::CacheMisses => 4_000_000,
+        };
+        (per_s / hz.max(1)).max(1)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Ev::Cpu => "CPU time",
+            Ev::Cycles => "cycles",
+            Ev::Instructions => "instructions",
+            Ev::BranchMisses => "branch misses",
+            Ev::CacheMisses => "cache misses",
+        }
+    }
 }
 
 pub struct Run {
@@ -26,18 +77,26 @@ pub struct Run {
     pub lost: u64,
     /// why sampling stopped early or skipped rounds (client gone, capture lock busy)
     pub notes: Vec<String>,
+    /// what the samples count (a hardware event falls back to CPU time where it cannot be opened)
+    pub ev: Ev,
 }
 
 /// Collects samples for `secs` at `hz` per thread of CPU time, from the threads `want` picks
 /// (never inspect's own: the caller would suspend itself). Stops early once `cancel` says the
 /// client is gone.
 pub fn collect(secs: f64, hz: u64, want: &dyn Fn(&super::threads::Thread) -> bool, cancel: &dyn Fn() -> bool) -> Run {
+    collect_ev(secs, hz, Ev::Cpu, want, cancel)
+}
+
+/// `collect` counting `ev`: hardware events are sampled about `hz` times a second per thread
+/// (the kernel adapts the period), each sample weighted by its period.
+pub fn collect_ev(secs: f64, hz: u64, ev: Ev, want: &dyn Fn(&super::threads::Thread) -> bool, cancel: &dyn Fn() -> bool) -> Run {
     super::cfi::refresh();
     let skip = super::SERVER_TIDS.lock().unwrap().clone();
     let mut threads = super::threads::list();
     super::name_handles(&mut threads);
     threads.retain(|t| !super::is_inspect_thread(t, &skip) && want(t));
-    let mut run = imp::collect(threads, secs, hz, cancel);
+    let mut run = imp::collect(threads, secs, hz, ev, cancel);
     if cancel() {
         run.notes.push(format!("stopped after {:.1} s: the client went away", run.secs));
     }
@@ -56,7 +115,10 @@ mod imp {
         fn close(fd: i32) -> i32;
     }
     const PAGE: usize = 4096;
+    /// data pages of a ring (a power of two): at most, and the least a ring is opened with (one
+    /// sample with its stack copy is ~16.5 KB)
     const RING_PAGES: usize = 256;
+    const MIN_PAGES: usize = 16;
     const STACK_COPY: u32 = 16384;
     /// perf regs (x86): bx 1, bp 6, sp 7, ip 8, r12..r15 20..23 -- ascending order in a sample
     const REGS_MASK: u64 = (1 << 1) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
@@ -65,36 +127,93 @@ mod imp {
         fd: i32,
         base: usize,
         os_id: u64,
+        pages: usize,
     }
 
-    fn open(tid: u64, hz: u64) -> Option<Ring> {
+    /// Why a ring did not open: the perf_event_open errno, or the mmap's (the locked-memory
+    /// budget: RLIMIT_MEMLOCK plus the user's perf_event_mlock_kb x CPUs, shared with every perf
+    /// user of this uid -- 165 ran out at ~8-24 rings of 1 MB with ~100 program threads, and the
+    /// busy UI thread got none: no JIT samples).
+    enum OpenErr {
+        Event(i64),
+        Map,
+    }
+
+    fn open(tid: u64, hz: u64, ev: super::Ev, pages: usize) -> Result<Ring, OpenErr> {
         let mut attr = [0u8; 128];
         let put = |a: &mut [u8; 128], off: usize, v: &[u8]| a[off..off + v.len()].copy_from_slice(v);
-        put(&mut attr, 0, &1u32.to_ne_bytes()); // PERF_TYPE_SOFTWARE
+        // exclude_kernel | exclude_hv
+        let flags = (1u64 << 5) | (1u64 << 6);
+        match ev {
+            super::Ev::Cpu => {
+                put(&mut attr, 0, &1u32.to_ne_bytes()); // PERF_TYPE_SOFTWARE
+                put(&mut attr, 8, &1u64.to_ne_bytes()); // PERF_COUNT_SW_TASK_CLOCK
+                put(&mut attr, 16, &(1_000_000_000 / hz.max(1)).to_ne_bytes()); // period, ns of CPU time
+            }
+            hw => {
+                put(&mut attr, 0, &0u32.to_ne_bytes()); // PERF_TYPE_HARDWARE
+                let config: u64 = match hw {
+                    super::Ev::Cycles => 0,
+                    super::Ev::Instructions => 1,
+                    super::Ev::CacheMisses => 3,
+                    _ => 5, // branch misses
+                };
+                put(&mut attr, 8, &config.to_ne_bytes());
+                // a fixed period (each sample stands for exactly that many events: weights stay
+                // exact when the kernel throttles the stack-copying samples, which freq mode's
+                // adapted periods do not), about `hz` samples a second of a busy thread
+                put(&mut attr, 16, &super::Ev::period(hw, hz).to_ne_bytes());
+            }
+        }
         put(&mut attr, 4, &128u32.to_ne_bytes());
-        put(&mut attr, 8, &1u64.to_ne_bytes()); // PERF_COUNT_SW_TASK_CLOCK
-        put(&mut attr, 16, &(1_000_000_000 / hz.max(1)).to_ne_bytes()); // period, ns of CPU time
-        put(&mut attr, 24, &(1u64 | 2 | 0x1000 | 0x2000).to_ne_bytes()); // IP | TID | REGS_USER | STACK_USER
-        put(&mut attr, 40, &((1u64 << 5) | (1u64 << 6)).to_ne_bytes()); // exclude_kernel | exclude_hv
+        put(&mut attr, 24, &(1u64 | 2 | 0x100 | 0x1000 | 0x2000).to_ne_bytes()); // IP | TID | PERIOD | REGS_USER | STACK_USER
+        put(&mut attr, 40, &flags.to_ne_bytes());
         put(&mut attr, 80, &REGS_MASK.to_ne_bytes());
         put(&mut attr, 88, &STACK_COPY.to_ne_bytes());
         let fd = unsafe { syscall(298, attr.as_ptr(), tid as i32, -1i32, -1i32, 0u64) } as i32;
         if fd < 0 {
-            return None;
+            return Err(OpenErr::Event(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as i64));
         }
-        let len = (1 + RING_PAGES) * PAGE;
-        let p = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd, 0) };
-        if p as isize == -1 {
-            unsafe { close(fd) };
-            return None;
+        // the largest ring the locked-memory budget still gives (halved until it maps)
+        let mut pages = pages;
+        loop {
+            let len = (1 + pages) * PAGE;
+            let p = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd, 0) };
+            if p as isize != -1 {
+                return Ok(Ring { fd, base: p as usize, os_id: tid, pages });
+            }
+            if pages <= MIN_PAGES {
+                unsafe { close(fd) };
+                return Err(OpenErr::Map);
+            }
+            pages /= 2;
         }
-        Some(Ring { fd, base: p as usize, os_id: tid })
+    }
+
+    /// The threads worth a ring, busiest first: those whose CPU time moved in a 30-ms look (a
+    /// thread idle then is very likely idle in the run), then the rest by CPU so far. Every thread
+    /// gets one while the budget lasts; the busy ones are opened first, so a short budget is spent
+    /// on them.
+    fn by_activity(threads: &[crate::inspect::threads::Thread]) -> Vec<usize> {
+        let before: Vec<(u64, u64)> = threads.iter().map(|t| (t.os_id, t.cpu_ns)).collect();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let now = crate::inspect::threads::list();
+        let mut order: Vec<(u64, u64, usize)> = before
+            .iter()
+            .enumerate()
+            .map(|(k, &(id, c0))| {
+                let c1 = now.iter().find(|t| t.os_id == id).map_or(c0, |t| t.cpu_ns);
+                (c1.saturating_sub(c0), c1, k)
+            })
+            .collect();
+        order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        order.into_iter().map(|x| x.2).collect()
     }
 
     fn drain(r: &Ring, out: &mut Vec<Sample>, lost: &mut u64) {
         use std::sync::atomic::{AtomicU64, Ordering};
         let data = r.base + PAGE;
-        let size = (RING_PAGES * PAGE) as u64;
+        let size = (r.pages * PAGE) as u64;
         let head = unsafe { (*((r.base + 1024) as *const AtomicU64)).load(Ordering::Acquire) };
         let tail_p = (r.base + 1032) as *const AtomicU64;
         let mut tail = unsafe { (*tail_p).load(Ordering::Relaxed) };
@@ -121,11 +240,13 @@ mod imp {
         unsafe { (*tail_p).store(tail, Ordering::Release) };
     }
 
-    /// One PERF_RECORD_SAMPLE: header, ip, pid/tid, regs (abi + 8 regs), stack (size, bytes,
-    /// dyn_size); walked on the copied stack.
+    /// One PERF_RECORD_SAMPLE: header, ip, pid/tid, period, regs (abi + 8 regs), stack (size,
+    /// bytes, dyn_size); walked on the copied stack.
     fn parse(rec: &[u8], os_id: u64) -> Option<Sample> {
         let u = |o: usize| -> Option<u64> { Some(u64::from_ne_bytes(rec.get(o..o + 8)?.try_into().ok()?)) };
         let mut o = 8 + 8 + 8;
+        let weight = u(o)?;
+        o += 8;
         let abi = u(o)?;
         o += 8;
         if abi == 0 {
@@ -147,17 +268,60 @@ mod imp {
         };
         let mut buf = [0u64; 96];
         let n = crate::inspect::threads::walk_regs_with(&mut regs, &mut buf, &read);
-        Some(Sample { os_id, frames: buf[..n].to_vec() })
+        Some(Sample { os_id, frames: buf[..n].to_vec(), weight, t: crate::clock::wall_ns() })
     }
 
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, cancel: &dyn Fn() -> bool) -> Run {
-        let rings: Vec<Ring> = threads.iter().filter_map(|t| open(t.os_id, hz)).collect();
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, cancel: &dyn Fn() -> bool) -> Run {
+        let mut notes = Vec::new();
+        let mut ev = ev;
+        let order = by_activity(&threads);
+        let open_all = |ev: super::Ev, notes: &mut Vec<String>| -> Vec<Ring> {
+            let mut rings = Vec::new();
+            let (mut no_event, mut no_map) = (Vec::new(), Vec::new());
+            let mut errno = 0;
+            let mut pages = RING_PAGES;
+            for &k in &order {
+                let t = &threads[k];
+                // once a ring had to shrink, the next ones start at its size
+                match open(t.os_id, hz, ev, pages) {
+                    Ok(r) => {
+                        pages = r.pages;
+                        rings.push(r);
+                    }
+                    Err(OpenErr::Event(e)) => {
+                        errno = e;
+                        no_event.push(t.name.clone());
+                    }
+                    Err(OpenErr::Map) => no_map.push(t.name.clone()),
+                }
+            }
+            let list = |v: &[String]| v.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+            if !no_map.is_empty() && !rings.is_empty() {
+                notes.push(format!("{} of {} threads not sampled (the busiest {} were): the perf locked-memory budget is spent (RLIMIT_MEMLOCK + perf_event_mlock_kb, shared with this user's other perf jobs; rings of {} KB); not sampled: {}", no_map.len(), threads.len(), rings.len(), pages * PAGE / 1024, list(&no_map)));
+            } else if !no_map.is_empty() {
+                notes.push(format!("no thread could be sampled: no perf ring maps (locked-memory budget spent: RLIMIT_MEMLOCK + perf_event_mlock_kb, shared with this user's other perf jobs)"));
+            }
+            if !no_event.is_empty() && rings.is_empty() && ev == super::Ev::Cpu {
+                notes.push(format!("no thread could be sampled: perf_event_open failed (errno {}; perf_event_paranoid, seccomp or a container)", errno));
+            } else if !no_event.is_empty() && !rings.is_empty() {
+                notes.push(format!("{} threads not sampled (perf_event_open errno {}: they exited?): {}", no_event.len(), errno, list(&no_event)));
+            }
+            rings
+        };
+        let mut rings = open_all(ev, &mut notes);
+        if rings.is_empty() && ev != super::Ev::Cpu && !threads.is_empty() {
+            notes.push(format!("{} cannot be sampled here (no hardware PMU access for this process: perf_event_paranoid, a VM); CPU time instead", ev.name()));
+            ev = super::Ev::Cpu;
+            rings = open_all(ev, &mut notes);
+        }
         let mut samples = Vec::new();
         let mut lost = 0u64;
+        // small rings hold a few samples: drained more often
+        let tick = if rings.iter().any(|r| r.pages < 64) { 2 } else { 10 };
         let t0 = std::time::Instant::now();
         crate::inspect::activity::phase("sampling (perf rings)", 0);
         while t0.elapsed().as_secs_f64() < secs && !cancel() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(tick));
             for r in &rings {
                 drain(r, &mut samples, &mut lost);
             }
@@ -165,13 +329,18 @@ mod imp {
         for r in &rings {
             drain(r, &mut samples, &mut lost);
             unsafe {
-                munmap(r.base as *mut u8, (1 + RING_PAGES) * PAGE);
+                munmap(r.base as *mut u8, (1 + r.pages) * PAGE);
                 close(r.fd);
             }
         }
         let secs = t0.elapsed().as_secs_f64().min(secs);
         crate::inspect::activity::phase("running", 0);
-        Run { samples, threads, secs, hz, lost, notes: Vec::new() }
+        if ev == super::Ev::Cpu {
+            for s in samples.iter_mut() {
+                s.weight = 1;
+            }
+        }
+        Run { samples, threads, secs, hz, lost, notes, ev }
     }
 }
 
@@ -183,8 +352,11 @@ mod imp {
     /// fixed array and resumes it before anything is allocated or locked (a suspended thread may
     /// hold malloc's lock). The capture lock is taken per round, so `stacks` and `why-hung` get
     /// in between.
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, cancel: &dyn Fn() -> bool) -> Run {
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, ev: super::Ev, cancel: &dyn Fn() -> bool) -> Run {
         let mut notes = Vec::new();
+        if ev != super::Ev::Cpu {
+            notes.push(format!("{} cannot be sampled on macOS without root (per-thread hardware sampling is privileged); CPU time instead -- `counters` gives this process's total instructions and cycles", ev.name()));
+        }
         let mut busy_rounds = 0u64;
         let mut samples = Vec::with_capacity(((secs * hz as f64) as usize).min(1 << 16));
         let mut raw = crate::inspect::threads::Raw::new();
@@ -228,7 +400,7 @@ mod imp {
                     continue;
                 }
                 if crate::inspect::threads::capture(now, &mut raw).is_ok() && raw.n > 0 {
-                    samples.push(Sample { os_id: t.os_id, frames: raw.frames().to_vec() });
+                    samples.push(Sample { os_id: t.os_id, frames: raw.frames().to_vec(), weight: 1, t: crate::clock::wall_ns() });
                 }
             }
             drop(_g);
@@ -243,15 +415,15 @@ mod imp {
         }
         crate::inspect::activity::phase("running", 0);
         let secs = t0.elapsed().as_secs_f64().min(secs);
-        Run { samples, threads, secs, hz, lost: 0, notes }
+        Run { samples, threads, secs, hz, lost: 0, notes, ev: super::Ev::Cpu }
     }
 }
 
 #[cfg(any(windows, target_os = "android"))]
 mod imp {
     use super::Run;
-    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _cancel: &dyn Fn() -> bool) -> Run {
-        Run { samples: Vec::new(), threads, secs, hz, lost: 0, notes: vec!["no CPU sampler on this target".into()] }
+    pub fn collect(threads: Vec<crate::inspect::threads::Thread>, secs: f64, hz: u64, _ev: super::Ev, _cancel: &dyn Fn() -> bool) -> Run {
+        Run { samples: Vec::new(), threads, secs, hz, lost: 0, notes: vec!["no CPU sampler on this target".into()], ev: super::Ev::Cpu }
     }
 }
 
@@ -310,10 +482,17 @@ pub fn cmd_prof(req: &Req, out: &mut Out) {
     let secs = (req.num("s", 3) as f64).clamp(0.2, 30.0);
     let hz = req.num("hz", 200).clamp(10, 2000);
     let n = req.num("n", 15) as usize;
+    let ev = match Ev::parse(req.get("ev").unwrap_or("cpu")) {
+        Ok(e) => e,
+        Err(e) => return out.err(&e),
+    };
     let gone = out.gone();
-    let run = collect(secs, hz, &*pick(req.get("threads").unwrap_or("all")), &*gone);
+    let run = collect_ev(secs, hz, ev, &*pick(req.get("threads").unwrap_or("all")), &*gone);
     if gone() {
         return;
+    }
+    if matches!(req.get("view"), Some("tree" | "callers" | "flame")) {
+        return super::calltree::report(&run, req, out);
     }
     report(&run, n, req.get("save") == Some("1"), out);
 }

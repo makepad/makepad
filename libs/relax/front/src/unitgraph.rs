@@ -21,11 +21,19 @@ mod platform_gen;
 pub struct BuildScript {
     /// crate index (into `Graph::crates`) of the lib the script belongs to
     pub krate: usize,
+    /// the package's other crates that depend on the same run of the script (its bins): cargo runs
+    /// a package's script once, every target of the package gets its output
+    pub also: Vec<usize>,
     pub src_path: String,
     pub edition: u16,
     pub features: Vec<String>,
     /// build-dependencies: (raw unit index, extern crate name), compiled with the host rustc
     pub build_deps: Vec<(usize, String)>,
+}
+
+impl BuildScript {
+    /// every crate the script's output goes to
+    pub fn krates(&self) -> Vec<usize> { std::iter::once(self.krate).chain(self.also.iter().copied()).collect() }
 }
 
 /// A unit as cargo lists it (for compiling build-dependencies with the host rustc).
@@ -233,7 +241,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         }
     }
     // dependency edges: crates keep crate deps; a run-custom-build dep becomes the crate's script
-    let mut build_scripts = Vec::new();
+    let mut build_scripts: Vec<BuildScript> = Vec::new();
+    // run-custom-build unit -> its script (lib and bins of a package depend on one run)
+    let mut script_of_run: std::collections::HashMap<usize, usize> = Default::default();
     for (ci, c) in crates.iter_mut().enumerate() {
         let mut nd = Vec::new();
         for (i, n) in &c.deps {
@@ -241,8 +251,13 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
                 nd.push((map[*i], n.clone()));
             } else if let Some(Some((p, ed, f, bu))) = run_build.get(*i) {
                 c.build_script = true;
+                if let Some(&s) = script_of_run.get(i) {
+                    build_scripts[s].also.push(ci);
+                    continue;
+                }
                 let build_deps = raw.get(*bu).map(|r| r.deps.clone()).unwrap_or_default();
-                build_scripts.push(BuildScript { krate: ci, src_path: p.clone(), edition: *ed, features: f.clone(), build_deps });
+                script_of_run.insert(*i, build_scripts.len());
+                build_scripts.push(BuildScript { krate: ci, also: Vec::new(), src_path: p.clone(), edition: *ed, features: f.clone(), build_deps });
             }
         }
         c.deps = nd;
@@ -357,7 +372,7 @@ pub fn script_role(pkg: &str, features: &[String]) -> ScriptRole {
 pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>) -> Result<(), String> {
-    let results: Mutex<Vec<(usize, Result<String, String>, String)>> = Mutex::new(Vec::new());
+    let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
     // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
     // an error naming the flag without it; Relax runs the other scripts
     let mut native_seeds: Vec<usize> = Vec::new();
@@ -385,9 +400,12 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         let built = crate::native::build(g, &native_seeds, req)?;
         g.native = built.lib;
         for n in built.scripts {
-            g.cfgs[n.krate].extend(n.cfgs);
-            g.env[n.krate].extend(n.env);
-            g.env[n.krate].push(("OUT_DIR".to_string(), n.out_dir));
+            let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
+            for &k in std::iter::once(&n.krate).chain(&also) {
+                g.cfgs[k].extend(n.cfgs.iter().cloned());
+                g.env[k].extend(n.env.iter().cloned());
+                g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
+            }
             for l in n.system {
                 if !g.link_libs.contains(&l) {
                     g.link_libs.push(l);
@@ -428,7 +446,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
                     // cargo sets OUT_DIR for every package with a build script
                     let out_dir = format!("{}/build/{}-answered/out", target_dir, name);
                     let _ = std::fs::create_dir_all(&out_dir);
-                    results.lock().unwrap().push((bs.krate, Ok(lines.join("\n")), out_dir));
+                    results.lock().unwrap().push((bs.krates(), Ok(lines.join("\n")), out_dir));
                     continue;
                 }
                 ScriptRole::ToRemove => {
@@ -440,14 +458,14 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
                 ScriptRole::Platform => {
                     let out_dir = format!("{}/build/{}-answered/out", target_dir, name);
                     let r = std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {}", out_dir, e)).and_then(|_| platform_answer(sess, &out_dir));
-                    results.lock().unwrap().push((bs.krate, r.map(|l| l.join("\n")), out_dir));
+                    results.lock().unwrap().push((bs.krates(), r.map(|l| l.join("\n")), out_dir));
                     continue;
                 }
                 ScriptRole::Artefact => {}
             }
             s.spawn(move || {
                 let r = run_one(sess, bs, raw, &cenv, &dir, &pname, &ver, &name, target_dir);
-                results.lock().unwrap().push((bs.krate, r.0, r.1));
+                results.lock().unwrap().push((bs.krates(), r.0, r.1));
             });
         }
     });
@@ -455,36 +473,42 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
 }
 
 /// The scripts' `cargo:` lines into the graph: cfgs, link libraries, env (OUT_DIR included).
-fn apply_script_results(g: &mut Graph, results: Vec<(usize, Result<String, String>, String)>) -> Result<(), String> {
-    for (k, r, out_dir) in results {
+fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, String>, String)>) -> Result<(), String> {
+    for (krates, r, out_dir) in results {
         let stdout = r?;
-        g.env[k].push(("OUT_DIR".to_string(), out_dir));
-        for line in stdout.lines() {
-            let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
-                Some(r) => r,
-                None => continue,
+        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone())?; }
+    }
+    Ok(())
+}
+
+/// One crate's share of a script's output (`stdout`, its OUT_DIR).
+fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String) -> Result<(), String> {
+    g.env[k].push(("OUT_DIR".to_string(), out_dir));
+    for line in stdout.lines() {
+        let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
+            Some(r) => r,
+            None => continue,
+        };
+        if let Some(c) = rest.strip_prefix("rustc-cfg=") {
+            g.cfgs[k].push(c.to_string());
+        } else if let Some(l) = rest.strip_prefix("rustc-link-lib=") {
+            // [kind=]name[:rename]
+            let (kind, name) = match l.find('=') {
+                Some(i) => (&l[..i], &l[i + 1..]),
+                None => ("", l),
             };
-            if let Some(c) = rest.strip_prefix("rustc-cfg=") {
-                g.cfgs[k].push(c.to_string());
-            } else if let Some(l) = rest.strip_prefix("rustc-link-lib=") {
-                // [kind=]name[:rename]
-                let (kind, name) = match l.find('=') {
-                    Some(i) => (&l[..i], &l[i + 1..]),
-                    None => ("", l),
-                };
-                let name = name.split(':').next().unwrap_or(name).to_string();
-                // a static library a script built (C, assembly): only `--allow-c` links one
-                if kind == "static" {
-                    return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
-                }
-                let fw = kind == "framework";
-                if !g.link_libs.contains(&(name.clone(), fw)) {
-                    g.link_libs.push((name, fw));
-                }
-            } else if let Some(e) = rest.strip_prefix("rustc-env=") {
-                if let Some(i) = e.find('=') {
-                    g.env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
-                }
+            let name = name.split(':').next().unwrap_or(name).to_string();
+            // a static library a script built (C, assembly): only `--allow-c` links one
+            if kind == "static" {
+                return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
+            }
+            let fw = kind == "framework";
+            if !g.link_libs.contains(&(name.clone(), fw)) {
+                g.link_libs.push((name, fw));
+            }
+        } else if let Some(e) = rest.strip_prefix("rustc-env=") {
+            if let Some(i) = e.find('=') {
+                g.env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
             }
         }
     }
@@ -894,8 +918,13 @@ fn newest_mtime(p: &std::path::Path) -> u128 {
     t
 }
 
-/// At most SCRIPT_SLOTS build scripts run at once (each is a whole Relax process).
-const SCRIPT_SLOTS: usize = 4;
+/// At most this many build scripts run at once (each is a whole Relax process, most of its time a
+/// cold boot of std on a few threads): half the cores, 2..=8. Four slots queued two of Stage's six
+/// scripts behind the others.
+fn script_slots() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| (std::thread::available_parallelism().map_or(4, |n| n.get()) / 2).clamp(2, 8))
+}
 static SCRIPT_RUNNING: Mutex<usize> = Mutex::new(0);
 static SCRIPT_FREE: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
 
@@ -909,7 +938,7 @@ impl Drop for ScriptSlot {
 
 fn script_slot() -> ScriptSlot {
     let mut n = SCRIPT_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    while *n >= SCRIPT_SLOTS {
+    while *n >= script_slots() {
         n = SCRIPT_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
     }
     *n += 1;

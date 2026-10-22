@@ -237,6 +237,8 @@ fn assert_no_leaf(what: &str) {
 }
 
 fn me() -> u64 {
+    // a request's thread may be named later, after it ended (os::thread::name)
+    crate::os::thread::note_current();
     crate::os::thread::current()
 }
 
@@ -605,9 +607,18 @@ fn wait(req: &Req, deadline: Option<std::time::Instant>) -> bool {
         }
     }
     drop(done);
-    // the owner's last touch follows its unlock
+    // The owner's last touch follows its unlock. The unlock's wake can put this thread on the
+    // owner's CPU and preempt it right there, before that store: spinning then holds the CPU the
+    // owner needs to make it (Linux, cold Stage: 8 s of the app thread's CPU in this loop, most of
+    // it after the wait). A few spins, then yield.
+    let mut spins = 0u32;
     while req.state.load(Ordering::Acquire) != RELEASED {
-        std::hint::spin_loop();
+        if spins < 64 {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
     }
     false
 }
@@ -712,7 +723,7 @@ fn serve(r: usize) {
     // makepad inspect's timeline: the owner's service of this request is a span
     let traced = crate::inspect::timeline::recording();
     if traced {
-        crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanBegin, SERVE_NAMES[req.class as usize], req.from, 0);
+        crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanBegin, SERVE_NAMES[req.class as usize], req.from, crate::inspect::pstream::SITE | (req.site as *const std::panic::Location<'static> as u64));
     }
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if !req.quick {

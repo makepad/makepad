@@ -6029,6 +6029,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let t_ra = crate::stats::pass_clock();
     let (split, al) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
+    crate::remark::note_spills(f, &al);
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al);

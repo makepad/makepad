@@ -170,7 +170,7 @@ fn oracle_x(name: &str, src: &str, rejects: bool) {
     panic!("{}: {} of {} lines differ (sizes ours {} clang {}):\n{}", name, bad.len(), lines.len(), got.len(), want.len(), bad.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
 }
 
-const CORE: &str = r#"
+pub(super) const CORE: &str = r#"
 add x0, x1, x2
 add w0, w1, w2
 add x0, x1, x2, lsl #3
@@ -401,7 +401,7 @@ fn oracle_core() {
     oracle("core", &format!("Lb:\nnop\n{}\nLf:\nnop\n", CORE));
 }
 
-const BRANCH: &str = r#"
+pub(super) const BRANCH: &str = r#"
 b Lf
 b Lb
 bl Lf
@@ -529,7 +529,7 @@ fn oracle_branch_sys() {
     oracle("branch_sys", &format!("Lb:\nnop\n{}\nLf:\nnop\n", BRANCH));
 }
 
-const MEM: &str = r#"
+pub(super) const MEM: &str = r#"
 ldr x0, [x1]
 ldr x0, [x1, #8]
 ldr x0, [x1, #32760]
@@ -776,7 +776,7 @@ prfm pldl1keep, [x0, :lo12:sym]
     );
 }
 
-fn fp_corpus() -> String {
+pub(super) fn fp_corpus() -> String {
     let mut src = String::new();
     src += r#"
 fmov d0, d1
@@ -871,7 +871,7 @@ fn oracle_fp() {
     oracle("fp", &fp_corpus());
 }
 
-fn neon_corpus() -> String {
+pub(super) fn neon_corpus() -> String {
     let mut src = String::new();
     src += r#"
 add d0, d1, d2

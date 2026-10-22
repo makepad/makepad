@@ -837,7 +837,10 @@ impl ScriptHeap {
         // A collection is the one point where retained capacity can shrink;
         // re-derive the retained-heap cap's headroom from the swept state.
         self.reconcile_heap_bytes_if_limited();
-        crate::inspect_registry::gc_done(self, ((crate::clock::monotonic_now() - start) * 1e9) as u64);
+        let gc_ns = ((crate::clock::monotonic_now() - start) * 1e9) as u64;
+        // the flight recorder's trace of the script VM's collections (makepad run)
+        makepad_error_log::flight_mark!("script.gc", gc_ns, obj_removed + arr_removed + str_removed, "GC {} us: objects {} alive {} removed, arrays {} / {}, strings {} / {}", gc_ns / 1000, obj_alive, obj_removed, arr_alive, arr_removed, str_alive, str_removed);
+        crate::inspect_registry::gc_done(self, gc_ns);
     }
 
     /// Check if garbage collection should be triggered.

@@ -266,6 +266,67 @@ mod tests {
     use super::*;
     use crate::types::BoundVar;
 
+    /// CALCE0277: a domain relaunched after a Cargo graph change loads new revisions of the
+    /// changed crates next to the old ones (domain.rs load_graph), so the program holds two crates
+    /// of one name. `$crate` in a macro of that name is the revision the expanding crate depends
+    /// on (rustc: the defining crate); the first crate of the name made `$crate::configure` the
+    /// old revision's fn, whose `FnMut(&mut Cx)` bound names the old `Cx`, and the hosted
+    /// Calculator's `app_main!` failed with "E0277: the trait bound `closure#90: FnMut<(&mut Cx,)>`
+    /// is not satisfied".
+    #[test]
+    fn dollar_crate_names_the_revision_the_caller_depends_on() {
+        let core = br#"
+            #![no_std]
+            #[lang = "sized"] pub trait Sized {}
+            #[lang = "tuple_trait"] pub trait Tuple {}
+            #[lang = "fn_once"] pub trait FnOnce<Args: Tuple> { #[lang = "fn_once_output"] type Output; }
+            #[lang = "fn_mut"] pub trait FnMut<Args: Tuple>: FnOnce<Args> {}
+            #[lang = "fn"] pub trait Fn<Args: Tuple>: FnMut<Args> {}
+            pub mod prelude { pub use crate::{Sized, FnOnce, FnMut, Fn}; }
+        "#;
+        let platform = br#"
+            #![no_std]
+            pub struct Cx;
+            pub fn configure<F: FnMut(&mut Cx)>(f: F) -> F { f }
+            #[macro_export]
+            macro_rules! app_main {
+                () => { pub fn app_main() { let _configure = $crate::configure(|_cx: &mut Cx| {}); } };
+            }
+        "#;
+        let app = br#"
+            #![no_std]
+            use platform::*;
+            app_main!();
+        "#;
+        let dir = std::env::temp_dir().join(format!("relax-dollar-crate-{}-{}", std::process::id(), crate::unique_test_suffix()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = |name: &str, src: &[u8]| { let p = dir.join(name); std::fs::write(&p, src).unwrap(); p.to_str().unwrap().to_string() };
+        let (core_path, platform_path, app_path) = (file("core.rs", core), file("platform.rs", platform), file("app.rs", app));
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let mut prog = Program::new(sess);
+        let core = prog.load_crate("core0", &core_path, 2021, cfg.clone(), Vec::new()).unwrap();
+        prog.prelude_crate = Some(core);
+        let core_dep = (prog.syms.intern("core0"), core);
+        // the boot's revision, then the relaunch's revision of the same package
+        let old = prog.load_crate("platform", &platform_path, 2021, cfg.clone(), vec![core_dep]).unwrap();
+        let new = prog.load_crate("platform", &platform_path, 2021, cfg.clone(), vec![core_dep]).unwrap();
+        assert_ne!(old, new);
+        let platform_dep = (prog.syms.intern("platform"), new);
+        let app = prog.load_crate("app", &app_path, 2021, cfg.clone(), vec![core_dep, platform_dep]).unwrap();
+        prog.resolve_imports();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let app_root = prog.crates[app as usize].root_mod;
+        let dollar = prog.syms.intern("__relax_crate_platform");
+        assert_eq!(prog.extern_crate(app_root, dollar), Some(new));
+        let mut tcx = Tcx::new();
+        tcx.collect(&prog);
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        let entry = (0..prog.defs.len() as u32).map(DefId).find(|&d| prog.def(d).krate == app && prog.name(d) == "app_main").unwrap();
+        let body = tcx.typeck(&prog, entry);
+        assert!(body.errors.is_empty(), "{:?}", body.errors);
+    }
+
     // The UI suite still consumes AST-reconstructed regions in A2, so it cannot
     // observe incorrect region metadata. Check the actual collected item types.
     #[test]

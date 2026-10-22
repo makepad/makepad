@@ -69,6 +69,9 @@ pub fn emit(kind: &'static str, key: &str, fields: &str) -> u64 {
 
 fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::Arc<str>) {
     let _k = crate::zone_alloc::kept();
+    if kind != "panic" {
+        super::flightrec::inspect_event(kind, key);
+    }
     let mut q = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(e) = q.iter().rev().find(|e| e.kind == kind && e.key == key) {
         if e.at.elapsed().as_secs() < 30 {
@@ -336,6 +339,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let watched = WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed)
         || (RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some() && domain == crate::run::app_domain());
     let key = format!("{}|{}|{}", info.site, info.location, info.message);
+    super::flightrec::panic(&super::short(&info.message, 120), if info.location.is_empty() { "?" } else { &info.location });
     if !watched {
         let mut seen = SITES_SEEN.lock().unwrap_or_else(|e| e.into_inner());
         if park_secs_unwatched() == 0 || seen.iter().any(|s| s.1 == key) {
@@ -417,6 +421,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     drop(list);
     parked_changed();
     let decision = p.decision.load(SeqCst);
+    super::flightrec::panic_decided(id, ["timed out: unwinds", "panic", "retry", "restart", "return"].get(decision as usize).copied().unwrap_or("?"));
     if decision == 2 && boundary.is_some() {
         let _ = RETRY.try_with(|r| r.set(true));
     }

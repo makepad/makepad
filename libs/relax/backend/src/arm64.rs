@@ -792,6 +792,8 @@ struct Gen<'a> {
     slot_pos: Vec<i64>,
     block_pos: Vec<usize>,
     next_block: Vec<u32>,
+    /// the function carries PGO block counts (the direction of two-way branches follows them)
+    counted: bool,
     fixups: Vec<(usize, u32)>,
     /// float literal pool: (ldr word index, bits)
     fpool: Vec<(usize, u64)>,
@@ -1228,6 +1230,7 @@ impl<'a> Gen<'a> {
         let nb = self.f.blocks.len();
         self.block_pos = vec![0; nb];
         self.next_block = vec![u32::MAX; nb];
+        self.counted = crate::profile::has_counts(self.f);
         let mut prev: Option<usize> = None;
         for bi in 0..nb {
             if reach[bi] {
@@ -3608,6 +3611,33 @@ impl<'a> Gen<'a> {
         self.a.patch(skip, here);
     }
 
+    /// A two-way branch: `yes` branches when the condition holds (to `tt`), `no` when it does not
+    /// (to `ff`). A target that is the next block falls through. When neither is, the conditional
+    /// branch takes the loop's back edge (a target laid out at or before this block) and the
+    /// unconditional one the other: one taken branch per iteration instead of a not-taken b.cond
+    /// plus a taken b.
+    fn branch_pair(&mut self, yes: CondBr, no: CondBr, tt: u32, ff: u32, bi: usize) {
+        let next = self.next_block[bi];
+        // neither falls through: the conditional branch goes where the code goes more often (a
+        // taken b.cond is one instruction, a not-taken one plus the b two). Counted code follows
+        // the counts of the two targets when both have one (the estimates of uncounted blocks,
+        // inlined callees, are worse than the lowering's then-first order: +0.7% instructions on
+        // rust_tokenize); static code takes the back edge, and of two targets laid out before
+        // the nearer one (the innermost loop's header; an exit placed before the loop is further
+        // back). (MAKEPAD_RUN_OPT=-a64backedge: off, A/B)
+        let on = !crate::stats::opt_env_off("-a64backedge");
+        let back = |b: u32| b as usize <= bi;
+        let (ct, cf) = (self.f.blocks[tt as usize].count, self.f.blocks[ff as usize].count);
+        let ff_cond = on && if self.counted { ct >= 0.0 && cf >= 0.0 && cf > ct } else { back(ff) && (!back(tt) || ff > tt) };
+        if tt == next || ff != next && ff_cond {
+            self.cond_branch(no, ff);
+            self.jump_to(tt, bi);
+        } else {
+            self.cond_branch(yes, tt);
+            self.jump_to(ff, bi);
+        }
+    }
+
     fn jump_to(&mut self, target: u32, bi: usize) {
         if self.next_block[bi] != target {
             let p = self.a.b();
@@ -3705,7 +3735,6 @@ impl<'a> Gen<'a> {
         match t {
             Term::Jump(target) => self.jump_to(*target, bi),
             Term::Branch(c, tt, ff) => {
-                let next = self.next_block[bi];
                 match fused {
                     // and with a bitmask immediate, compared with zero: tst + b.cond
                     Some(ref fi @ (Inst::ICmpI(Cond::Eq | Cond::Ne, _, _, _, 0) | Inst::IBinI(IOp::And, ..))) if self.test_fuse.is_some() => {
@@ -3720,55 +3749,32 @@ impl<'a> Gen<'a> {
                             // one bit: tbz / tbnz (branch to tt when the bit is zero == Eq)
                             let bit = (mask as u64).trailing_zeros();
                             let zero_to_tt = cnd == Cond::Eq;
-                            if *tt == next {
-                                self.cond_branch(if zero_to_tt { CondBr::Tnz(rs, bit) } else { CondBr::Tz(rs, bit) }, *ff);
-                            } else {
-                                self.cond_branch(if zero_to_tt { CondBr::Tz(rs, bit) } else { CondBr::Tnz(rs, bit) }, *tt);
-                                self.jump_to(*ff, bi);
-                            }
+                            let (yes, no) = if zero_to_tt { (CondBr::Tz(rs, bit), CondBr::Tnz(rs, bit)) } else { (CondBr::Tnz(rs, bit), CondBr::Tz(rs, bit)) };
+                            self.branch_pair(yes, no, *tt, *ff, bi);
                             return;
                         }
                         let (nn, immr, imms) = bitmask_imm(mask as u64).unwrap();
                         // ANDS xzr, xs, #mask
                         self.a.e(0xF200_001F | nn << 22 | immr << 16 | imms << 10 | (rs as u32) << 5);
                         let cc = if cnd == Cond::Eq { EQ } else { NE };
-                        if *tt == next {
-                            self.cond_branch(CondBr::B(cc ^ 1), *ff);
-                        } else {
-                            self.cond_branch(CondBr::B(cc), *tt);
-                            self.jump_to(*ff, bi);
-                        }
+                        self.branch_pair(CondBr::B(cc), CondBr::B(cc ^ 1), *tt, *ff, bi);
                     }
                     // compare with zero for (in)equality: cbz / cbnz, no flags
                     Some(Inst::ICmpI(cnd @ (Cond::Eq | Cond::Ne), _, _, a, 0)) => {
                         let r = self.use_i(a, S0);
                         // branch to tt when (r == 0) == (cnd == Eq)
                         let zero_to_tt = cnd == Cond::Eq;
-                        if *tt == next {
-                            self.cond_branch(if zero_to_tt { CondBr::Nz(r) } else { CondBr::Z(r) }, *ff);
-                        } else {
-                            self.cond_branch(if zero_to_tt { CondBr::Z(r) } else { CondBr::Nz(r) }, *tt);
-                            self.jump_to(*ff, bi);
-                        }
+                        let (yes, no) = if zero_to_tt { (CondBr::Z(r), CondBr::Nz(r)) } else { (CondBr::Nz(r), CondBr::Z(r)) };
+                        self.branch_pair(yes, no, *tt, *ff, bi);
                     }
                     Some(i) => {
                         let cc = self.cmp_flags(&i);
-                        if *tt == next {
-                            // the condition codes come in true/false pairs: cc ^ 1 negates
-                            self.cond_branch(CondBr::B(cc ^ 1), *ff);
-                        } else {
-                            self.cond_branch(CondBr::B(cc), *tt);
-                            self.jump_to(*ff, bi);
-                        }
+                        // the condition codes come in true/false pairs: cc ^ 1 negates
+                        self.branch_pair(CondBr::B(cc), CondBr::B(cc ^ 1), *tt, *ff, bi);
                     }
                     None => {
                         let r = self.use_i(*c, S0);
-                        if *tt == next {
-                            self.cond_branch(CondBr::Z(r), *ff);
-                        } else {
-                            self.cond_branch(CondBr::Nz(r), *tt);
-                            self.jump_to(*ff, bi);
-                        }
+                        self.branch_pair(CondBr::Nz(r), CondBr::Z(r), *tt, *ff, bi);
                     }
                 }
             }
@@ -5265,6 +5271,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     }
     let (split, mut al0) = regalloc::allocate_split(options, f, &cfg, env.opt_regs || f.full, freq);
     let f = split.as_ref().unwrap_or(f);
+    crate::remark::note_spills(f, &al0);
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al0);
@@ -5316,6 +5323,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         slot_pos: Vec::new(),
         block_pos: Vec::new(),
         next_block: Vec::new(),
+        counted: false,
         fixups: Vec::new(),
         fconst_isel: isel_flags(options) & A64_FCONST != 0,
         qcopy: isel_flags(options) & A64_QCOPY != 0,

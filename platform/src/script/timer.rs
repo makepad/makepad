@@ -131,9 +131,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
     fn ensure_seeded(cx: &mut Cx) {
         if cx.script_data.random_seed == 0 {
-            cx.script_data.random_seed = crate::remote::app_clock::seed()
-                .map(|seed| next_hash(&seed.to_le_bytes()).max(1))
+            // a flight-recorder replay starts from the recorded seed (`seed.script` event)
+            let replay = std::env::var("MAKEPAD_FLIGHT_SEED").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v != 0);
+            cx.script_data.random_seed = replay.or_else(|| crate::remote::app_clock::seed()
+                .map(|seed| next_hash(&seed.to_le_bytes()).max(1)))
                 .unwrap_or_else(fresh_seed);
+            crate::makepad_error_log::flight_mark!("seed.script", cx.script_data.random_seed, 0, "script random seed {}", cx.script_data.random_seed);
         }
     }
 

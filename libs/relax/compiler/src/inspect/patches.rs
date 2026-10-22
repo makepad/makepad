@@ -20,6 +20,8 @@ pub enum Owner {
     Probe(u32),
     /// a `tier <fn> o1` pin
     Pin(u32),
+    /// a field watch (`writes`)
+    Watch(u32),
 }
 
 impl Owner {
@@ -28,6 +30,7 @@ impl Owner {
             Owner::Group(g) => format!("G{}", g),
             Owner::Probe(p) => format!("P{}", p),
             Owner::Pin(n) => format!("pin{}", n),
+            Owner::Watch(w) => format!("W{}", w),
         }
     }
 }
@@ -47,6 +50,8 @@ pub enum Edit {
     Pin,
     /// a by-name probe: its call is lowered into the body (lower.rs ProbePoint), then guarded
     ProbeLocals { idx: u64, point: std::sync::Arc<crate::lower::ProbePoint> },
+    /// a field watch: the body is lowered again with the watch hit after each write of the field
+    Watch { field: std::sync::Arc<crate::lower::WatchField> },
 }
 
 struct SlotState {
@@ -85,9 +90,6 @@ pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
     if let Ok(v) = NOTES.try_lock() {
         a.field("inspect.patch_notes");
         a.vec(&v);
-        for x in v.iter() {
-            a.string(&x.1);
-        }
     }
     if let Ok(v) = ACTIVE.try_lock() {
         a.field("inspect.patch_active");
@@ -107,6 +109,9 @@ pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
     a.map(m, |a, _, s| {
         a.vec(&s.edits);
         for (_, e) in &s.edits {
+            if let Edit::Watch { field } = e {
+                a.arc(field);
+            }
             if let Edit::ProbeLocals { point, .. } = e {
                 a.arc(point);
                 a.vec(&point.params);
@@ -200,7 +205,13 @@ fn unwatch(owner: Owner) {
 /// inlined copy of a watched target is rebuilt on the owner (an event says so). Cheap when
 /// nothing is watched.
 pub fn code_installed(u: &crate::jit::Unit, id: u32) {
-    if WATCHING.load(std::sync::atomic::Ordering::Acquire) == 0 || INSTRUMENTING.try_with(|c| c.get()).unwrap_or(false) {
+    let watching = WATCHING.load(std::sync::atomic::Ordering::Acquire) != 0;
+    if !watching && !super::watch::waiting() || INSTRUMENTING.try_with(|c| c.get()).unwrap_or(false) {
+        return;
+    }
+    // a field watch waiting for a writer that had no code yet
+    super::watch::code_installed(u, id);
+    if !watching {
         return;
     }
     let hits: Vec<(Owner, bool)> = {
@@ -302,7 +313,7 @@ unsafe fn reinstrument_replaced(up: *mut crate::jit::Unit) {
     let Some(m) = g.as_mut() else { return };
     for (id, from) in ids {
         // a twin takes its sibling's edits, except by-name probes (their points name a slot)
-        let Some(edits) = m.get(&from).map(|s| s.edits.iter().filter(|e| from == id || !matches!(e.1, Edit::ProbeLocals { .. })).cloned().collect::<Vec<_>>()) else { continue };
+        let Some(edits) = m.get(&from).map(|s| s.edits.iter().filter(|e| from == id || !matches!(e.1, Edit::ProbeLocals { .. } | Edit::Watch { .. })).cloned().collect::<Vec<_>>()) else { continue };
         if edits.is_empty() {
             continue;
         }
@@ -331,6 +342,8 @@ fn apply_edit(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit, slot: u32,
         Edit::Restart { site } => super::instrument::edit_restart_site(f, u, site),
         Edit::Probe { idx, probe_slot, line } => super::probes::edit(f, u, idx, probe_slot, line),
         Edit::ProbeLocals { idx, point } => super::probes::wrap_calls(f, u, idx, point.probe_slot),
+        // placed by the relowering (lower.rs watch_write); `rebuild` says whether it hit
+        Edit::Watch { .. } => true,
         Edit::Uninline | Edit::Pin => true,
     }
 }
@@ -372,6 +385,10 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
         Edit::ProbeLocals { point, .. } => Some((**point).clone()),
         _ => None,
     }).collect();
+    let watches: Vec<crate::lower::WatchField> = edits.iter().filter_map(|e| match &e.1 {
+        Edit::Watch { field } => Some((**field).clone()),
+        _ => None,
+    }).collect();
     let uninline = edits.iter().any(|e| matches!(e.1, Edit::Uninline));
     // the tier of the code under inspection: an inspect build keeps it (an O3 fn gets an O3
     // instrumented build) unless the agent asked for the lower tier (`tier=o1`)
@@ -385,11 +402,13 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
         uninline_base = true;
     }
     let mut placed: Vec<(u32, Result<(), String>)> = Vec::new();
-    let base = if points.is_empty() && !uninline_base {
+    let mut watched: Vec<(u32, u64)> = Vec::new();
+    let base = if points.is_empty() && watches.is_empty() && !uninline_base {
         None
     } else {
-        let (f, r) = crate::jit::relower_with_probes(up, id, points)?;
+        let (f, r, w) = crate::jit::relower_with_probes(up, id, points, watches)?;
         placed = r;
+        watched = w;
         Some(f)
     };
     if let Some((_, Err(e))) = placed.iter().find(|r| r.1.is_err()) {
@@ -404,6 +423,13 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
             hits[k] = apply_edit(f, u, id, edits[k].1.clone());
         }
     })?;
+    // a watch hit when its field is written in this body
+    for k in 0..edits.len() {
+        if let Edit::Watch { field } = &edits[k].1 {
+            hits[k] = watched.iter().any(|w| w.0 == id);
+            super::watch::note_sites(field.idx, id, &watched);
+        }
+    }
     // the same tier as the code it replaced: an O3 build with the edits in its RIR before the O3
     // pipeline (by-name probes and restart landings are built at O1 only: their RIR is relowered /
     // reshaped for O1)
@@ -413,7 +439,7 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
         if pinned {
             None
         } else if !o3able {
-            Some("a by-name probe or restart landing is built at O1 only: the O3 code it replaced does not run while it is installed".to_string())
+            Some("a by-name probe or restart landing is built at O1 only: the O3 code it replaced does not run while it is installed")
         } else {
             let plain = edits.iter().all(|e| matches!(e.1, Edit::Uninline));
             let mut ed = |f: &mut relax_backend::rir::Func, u: &crate::jit::Unit| {
@@ -425,14 +451,15 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
             if ok {
                 None
             } else {
-                Some("its O3 instrumented build was dropped (not verified, outdated, or it failed): it runs the O1 instrumented build, and the O3 code it replaced does not run while it is installed".to_string())
+                Some("its O3 instrumented build was dropped (not verified, outdated, or it failed): it runs the O1 instrumented build, and the O3 code it replaced does not run while it is installed")
             }
         }
     } else if o3_under && low {
-        Some("tier=o1 asked: built at O1; the O3 code it replaced does not run while it is installed".to_string())
+        Some("tier=o1 asked: built at O1; the O3 code it replaced does not run while it is installed")
     } else {
         None
     };
+    // (static text: the note outlives the compiler generation this build ran in)
     let _k = crate::zone_alloc::kept();
     let mut n = NOTES.lock().unwrap_or_else(|e| e.into_inner());
     n.retain(|x| x.0 != id);
@@ -443,10 +470,10 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
 }
 
 /// Why a slot's inspect build is not at the tier of the code it replaced (patched_row says it).
-static NOTES: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+static NOTES: Mutex<Vec<(u32, &'static str)>> = Mutex::new(Vec::new());
 
 pub(crate) fn tier_note(id: u32) -> Option<String> {
-    NOTES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == id).map(|x| x.1.clone())
+    NOTES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == id).map(|x| x.1.to_string())
 }
 
 thread_local! {

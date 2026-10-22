@@ -178,6 +178,10 @@ pub const ERR_DRAIN: u32 = 7;
 pub const ERR_FORMAT_ENUM_VARIANT: u32 = 8;
 /// `value`: an object, written to `out` briefly (its proto chain and key properties).
 pub const ERR_FORMAT_OBJECT: u32 = 9;
+/// `text`: a non-fatal host diagnostic at the current script ip (a wrong-typed option, a verb on
+/// an id that has no entity): into the active capture (once), logged once per site, counted and
+/// kept per site in the inspect registry (`makepad inspect <app> script errors`). Never aborts.
+pub const ERR_PUSH_DIAGNOSTIC: u32 = 10;
 
 pub type ScriptErrorPush = unsafe extern "C-unwind" fn(*mut u8, *const ScriptErrorRecord);
 
@@ -576,6 +580,32 @@ impl ScriptVmBase {
                 }
             }
             ERR_DRAIN => self.drain_errors(),
+            ERR_PUSH_DIAGNOSTIC => {
+                let ip = self.threads.cur_ref().trap.ip;
+                let loc = self.code.ip_to_loc(ip);
+                let full = match &loc {
+                    Some(l) => format!("{}: {}", l, req.text),
+                    None => req.text.to_string(),
+                };
+                if let Some(sink) = &mut self.captured_errors {
+                    if !sink.iter().any(|error| error.text == full) {
+                        sink.push(ScriptErrorRecord::plain_str(&full));
+                    }
+                }
+                let first = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (ip.body, ip.index, req.text).hash(&mut h);
+                    self.logged_errors.len() >= 4096 || self.logged_errors.insert(h.finish())
+                };
+                crate::inspect_registry::diagnostic(self, loc.as_ref().map(|l| (l.file.as_str(), l.line)), req.text, first);
+                if first && !self.silence_errors && self.captured_errors.is_none() {
+                    match &loc {
+                        Some(l) => crate::makepad_error_log::log_with_level(&l.file, l.line, l.col, l.line, l.col, req.text.to_string(), crate::makepad_error_log::LogLevel::Warning),
+                        None => crate::makepad_error_log::log_with_level("script", 0, 0, 0, 0, req.text.to_string(), crate::makepad_error_log::LogLevel::Warning),
+                    }
+                }
+            }
             ERR_FORMAT_ENUM_VARIANT => req.out.push(&crate::suggest::format_enum_variant_error(&self.heap, req.value)),
             ERR_FORMAT_OBJECT => {
                 let mut text = String::new();

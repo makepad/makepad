@@ -30,6 +30,10 @@ static RINGS_ON: AtomicBool = AtomicBool::new(false);
 /// frame spikes are watched (`watch`, `events follow=1`, `--agent`)
 static FRAME_WATCH: AtomicBool = AtomicBool::new(false);
 
+/// UI frames finished (a frame's Draw dispatch ended) while frame markers are on (hitch
+/// detection, on by default): the per-frame denominator of `heap frame` and other rates
+pub static FRAMES: AtomicU64 = AtomicU64::new(0);
+
 /// frames slower than this are `hitch` events (ns; 0: off): always on, MAKEPAD_RUN_HITCH_MS
 /// (default 50) or `hitch ms=<n>|off`
 static HITCH_NS: AtomicU64 = AtomicU64::new(0);
@@ -210,6 +214,14 @@ struct FrameLog {
     compiles: u32,
     /// probe / count values at the frame's start (only while probes are installed)
     probes0: Vec<(String, u64, u64)>,
+    /// the frame's waits (outermost): open depth, the open one's start and whether it is on the
+    /// owner, their time (of it on the owner) and count (the flight recorder's frame summary)
+    wait_depth: u32,
+    wait_t0: u64,
+    wait_owner: bool,
+    wait_ns: u64,
+    owner_ns: u64,
+    waits: u32,
 }
 
 thread_local! {
@@ -236,7 +248,7 @@ fn frame_watch(begin: bool, name: &'static str) {
     let done = FL.try_with(|c| {
         let Ok(mut g) = c.try_borrow_mut() else { return None };
         let l = g.get_or_insert_with(|| {
-            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new() })
+            Box::new(FrameLog { depth: 0, start: 0, avg: 0, last_root_end: 0, idle: 0, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0 })
         });
         if begin {
             if l.start == 0 {
@@ -247,11 +259,20 @@ fn frame_watch(begin: bool, name: &'static str) {
                 l.compile_ns = 0;
                 l.compiles = 0;
                 l.probes0.clear();
+                l.wait_ns = 0;
+                l.owner_ns = 0;
+                l.waits = 0;
+                if l.wait_depth > 0 {
+                    l.wait_t0 = now;
+                }
                 if HITCH_NS.load(Relaxed) > 0 && super::instrument::any_counters() {
                     l.probes0 = super::instrument::counters();
                 }
             } else if l.depth == 0 && l.last_root_end > l.start && now.saturating_sub(l.last_root_end) > GAP_NS {
                 l.idle += now - l.last_root_end;
+            }
+            if l.depth == 0 {
+                super::flightrec::ui_root(now);
             }
             l.depth += 1;
             frame_rec(l, 1, name, "");
@@ -263,11 +284,16 @@ fn frame_watch(begin: bool, name: &'static str) {
         }
         if l.depth == 0 {
             l.last_root_end = now;
+            super::flightrec::ui_root(0);
         }
         if name != "Draw" || l.start == 0 {
             return None;
         }
+        FRAMES.fetch_add(1, Relaxed);
         let ms = now.saturating_sub(l.start).saturating_sub(l.idle);
+        // a wait still open at the frame's end counts up to it
+        let (open_w, open_o) = if l.wait_depth > 0 { let w = now.saturating_sub(l.wait_t0.max(l.start)); (w, if l.wait_owner { w } else { 0 }) } else { (0, 0) };
+        super::flightrec::frame(l.start, now, l.idle, l.compile_ns, l.compiles, l.wait_ns + open_w, l.owner_ns + open_o, l.waits);
         let avg = l.avg;
         l.avg = if avg == 0 { ms } else { (avg * 15 + ms) / 16 };
         let start = l.start;
@@ -285,6 +311,9 @@ fn frame_watch(begin: bool, name: &'static str) {
         Some((spike, ms, avg, analysis))
     });
     let Ok(Some((spike, ms, avg, analysis))) = done else { return };
+    if analysis.is_some() {
+        super::flightrec::hitch(ms, avg);
+    }
     if spike {
         super::events::emit(
             "spike",
@@ -537,6 +566,24 @@ fn wait_trace(begin: bool, kind: &'static str, detail: &'static str, object: u64
                 if l.start != 0 {
                     frame_rec(l, if begin { 3 } else { 4 }, kind, detail);
                 }
+                // the frame summary's waits (outermost only)
+                if begin {
+                    if l.wait_depth == 0 {
+                        l.wait_t0 = crate::clock::wall_ns();
+                        l.wait_owner = kind == "owner";
+                    }
+                    l.wait_depth += 1;
+                } else if l.wait_depth > 0 {
+                    l.wait_depth -= 1;
+                    if l.wait_depth == 0 && l.start != 0 {
+                        let w = crate::clock::wall_ns().saturating_sub(l.wait_t0.max(l.start));
+                        l.wait_ns += w;
+                        if l.wait_owner {
+                            l.owner_ns += w;
+                        }
+                        l.waits += 1;
+                    }
+                }
             }
         });
     }
@@ -599,7 +646,7 @@ pub extern "C" fn relax_gpu_span(name: *const u8, len: usize, begin: u64, end: u
         return;
     }
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
-    if super::pstream::on() {
+    if super::pstream::viewing() {
         super::pstream::gpu_span(name, begin, end);
     }
     if !RINGS_ON.load(Relaxed) {
@@ -756,7 +803,8 @@ pub fn cmd_timeline(req: &Req, out: &mut Out) {
         "frames" => frames_cmd(req, out),
         "frame" => frame_cmd(req, out),
         "save" => save_cmd(out),
-        _ => out.err("usage: timeline start [max_s=30] | stop | frames [n=30] | frame <n|slowest> | save"),
+        "waits" | "contention" => waits_cmd(req, out),
+        _ => out.err("usage: timeline start [max_s=30] | stop | frames [n=30] | frame <n|slowest> | waits [s=3] [n=15] | save"),
     }
 }
 use std::sync::atomic::Ordering::AcqRel;
@@ -895,6 +943,111 @@ fn frames_cmd(req: &Req, out: &mut Out) {
             i
         ));
     }
+}
+
+/// `timeline waits [s=3] [n=15]` (alias `contention`): lock / condvar / park / owner waits of a
+/// capture grouped by what was waited on: count, total and longest wait, per frame, which threads
+/// waited and who ended the waits most. `s=`: record that long first (else the last capture).
+fn waits_cmd(req: &Req, out: &mut Out) {
+    if let Some(sv) = req.get("s").and_then(|v| v.parse::<f64>().ok()) {
+        if recording() {
+            return out.err("a timeline capture is running: `timeline stop` first (or ask without s=)");
+        }
+        EPOCH.fetch_add(1, AcqRel);
+        STARTED_NS.store(crate::clock::wall_ns(), Relaxed);
+        STOPPED_NS.store(0, Relaxed);
+        RINGS_ON.store(true, Release);
+        flag_update();
+        let gone = out.gone();
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs_f64() < sv.clamp(0.2, 30.0) && !gone() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        stop();
+    }
+    let stop_t = stopped_or_now();
+    let ths = build(collect(), stop_t);
+    if ths.is_empty() {
+        return out.err("no capture: `timeline waits s=3` records 3 s first");
+    }
+    let wall = stop_t.saturating_sub(STARTED_NS.load(Relaxed)).max(1);
+    let frames = ui_thread(&ths).map_or(0, |ui| frames_of(&ths[ui]).len());
+    let tname = |h: u64| -> String {
+        let all = super::threads::list();
+        match ths.iter().find(|t| t.handle == h) {
+            Some(t) => all.iter().find(|x| x.os_id == t.os_id).map(|x| if x.name.is_empty() { format!("T{}", x.os_id) } else { x.name.clone() }).unwrap_or_else(|| format!("T{}", t.os_id)),
+            None => "?".into(),
+        }
+    };
+    // (what, total ns, max ns, count, waiting threads, wakers)
+    let mut groups: Vec<(String, u64, u64, u64, Vec<u64>, Vec<(u64, u64)>)> = Vec::new();
+    for th in &ths {
+        for sg in th.segs.iter().filter(|s| s.wait) {
+            let d = sg.t1.saturating_sub(sg.t0);
+            let what = sg.what.trim_start_matches("wait: ").to_string();
+            let k = match groups.iter().position(|g| g.0 == what) {
+                Some(k) => k,
+                None => {
+                    groups.push((what, 0, 0, 0, Vec::new(), Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            let g = &mut groups[k];
+            g.1 += d;
+            g.2 = g.2.max(d);
+            g.3 += 1;
+            if !g.4.contains(&th.handle) {
+                g.4.push(th.handle);
+            }
+            if let Some((w, _)) = sg.woke_by.filter(|w| w.0 != 0) {
+                match g.5.iter_mut().find(|x| x.0 == w) {
+                    Some(x) => x.1 += 1,
+                    None => g.5.push((w, 1)),
+                }
+            }
+        }
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let total: u64 = groups.iter().map(|g| g.1).sum();
+    let Some(top) = groups.first() else {
+        out.always(&format!("no waits in {:.1} s ({} threads recorded): nothing blocked", wall as f64 / 1e9, ths.len()));
+        return;
+    };
+    out.always(&format!(
+        "waits took {:.1} ms of thread time in {:.1} s{}; most: `{}` {:.1} ms in {} waits (longest {:.2} ms)",
+        total as f64 / 1e6,
+        wall as f64 / 1e9,
+        if frames > 0 { format!(" ({} frames)", frames) } else { String::new() },
+        short(&top.0, 80),
+        top.1 as f64 / 1e6,
+        top.3,
+        top.2 as f64 / 1e6
+    ));
+    out.line("");
+    out.line("| waited on | total ms | waits | longest ms | per frame ms | waiting threads | ended by |");
+    out.line("|---|---:|---:|---:|---:|---|---|");
+    let n = req.num("n", 15) as usize;
+    for g in groups.iter().take(n) {
+        let mut wk = g.5.clone();
+        wk.sort_by(|a, b| b.1.cmp(&a.1));
+        out.line(&format!(
+            "| {} | {:.2} | {} | {:.2} | {} | {} | {} |",
+            short(&g.0.replace('|', "/"), 70),
+            g.1 as f64 / 1e6,
+            g.3,
+            g.2 as f64 / 1e6,
+            if frames > 0 { format!("{:.3}", g.1 as f64 / 1e6 / frames as f64) } else { "-".into() },
+            g.4.iter().take(3).map(|h| tname(*h)).collect::<Vec<_>>().join(", "),
+            wk.iter().take(2).map(|(h, c)| format!("{} ({})", tname(*h), c)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if groups.len() > n {
+        let rest: u64 = groups[n..].iter().map(|g| g.1).sum();
+        out.line(&format!("+{} more waited-on objects, {:.2} ms", groups.len() - n, rest as f64 / 1e6));
+    }
+    out.always("note: waits the registry sees (program Mutex / Condvar / park / once / join, owner requests, query latches); a wait's waker is the futex wake or owner reply that ended it");
+    out.always(&format!("note: {}", super::reliability::line(true)));
+    out.always("more: timeline frames  timeline frame slowest  why-hung  waits");
 }
 
 fn frame_cmd(req: &Req, out: &mut Out) {
@@ -1044,7 +1197,7 @@ fn save_cmd(out: &mut Out) {
     let gpu_sid = strings.id("GPU");
     let mut file = ps::prelude().to_vec();
     let app = super::APP.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let hello = ps::Hello { app, host: String::new(), pid: std::process::id() as u64, build: crate::jit::PROVENANCE.to_string(), device: String::new(), refresh_mhz: 0, flags: 1 };
+    let hello = ps::Hello { app, host: String::new(), pid: std::process::id() as u64, build: crate::jit::PROVENANCE.to_string(), device: String::new(), refresh_mhz: 0, flags: 1, start_mono: (ps::mono_ns() as i128 - crate::clock::wall_ns() as i128).max(0) as u64 };
     ps::record(&mut file, ps::kind::HELLO, &hello.payload());
     let unix_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     ps::record(&mut file, ps::kind::CLOCK, &ps::clock_payload(ps::mono_ns(), unix_now));

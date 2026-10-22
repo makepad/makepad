@@ -12,7 +12,7 @@ fn split(words: &[String]) -> (String, Vec<(String, String)>) {
     let mut own = Vec::new();
     for w in words {
         match w.split_once('=') {
-            Some((k, v)) if matches!(k, "s" | "save" | "base") => own.push((k.to_string(), v.to_string())),
+            Some((k, v)) if matches!(k, "s" | "save" | "base" | "hz" | "ev") => own.push((k.to_string(), v.to_string())),
             _ => q.push(w.clone()),
         }
     }
@@ -68,7 +68,14 @@ pub fn live_main(app: &super::client::App, words: &[String]) -> i32 {
             return 2;
         }
     };
-    let ch = match client.open("prof", "") {
+    // hz=N: the stream samples CPU stacks too (`top fn`); `top fn` alone asks for 1000 Hz
+    let hz = opt(&own, "hz").map(str::to_string).or_else(|| query.split_whitespace().nth(1).filter(|w| *w == "fn" || *w == "samples").map(|_| "1000".to_string()));
+    let open_args = match (hz, opt(&own, "ev")) {
+        (Some(h), Some(e)) => format!("hz={} ev={}", h, e),
+        (Some(h), None) => format!("hz={}", h),
+        _ => String::new(),
+    };
+    let ch = match client.open("prof", &open_args) {
         Ok(c) => c,
         Err(e) => {
             println!("the app does not serve the profiler stream (an older build?): {e:?}");

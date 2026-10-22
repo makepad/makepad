@@ -493,6 +493,37 @@ mod tests {
     }
 
     #[test]
+    fn ended_threads_hand_their_chunks_back() {
+        // A program thread that ends inside its domain heap (no leave) gives its chunks back
+        // from its thread-local destructors (DomainExitGuard). Before, each ended thread kept
+        // one 2 MB chunk per size class it had used: Sandbox's thread churn used up the heap's
+        // reservation (exit -6 in a thread start on macOS).
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        let addr = &*heap as *const DomainHeap as usize;
+        let sizes = [16usize, 48, 100, 300, 1000, 4000, 20_000, 100_000];
+        for _ in 0..64 {
+            std::thread::spawn(move || unsafe {
+                enter(addr as *const DomainHeap);
+                let blocks: Vec<*mut u8> = sizes.iter().map(|&n| program_alloc(n, 8)).collect();
+                for (p, &n) in blocks.into_iter().zip(&sizes) {
+                    std::ptr::write_bytes(p, 1, n);
+                    program_dealloc(p, n, 8);
+                }
+                // one block stays live: its chunk must go back to the shared lists, not stay
+                // attached to a thread that is gone
+                let _live = program_alloc(64, 8);
+            })
+            .join()
+            .unwrap();
+        }
+        // 64 threads x 8 classes kept attached would be ~1 GB committed; handed back, the
+        // live blocks share a few chunks and the emptied ones sit on the bounded warm list
+        let committed = heap.stats().1;
+        assert!(committed <= 64 << 20, "ended threads kept their chunks: {} MB committed", committed >> 20);
+    }
+
+    #[test]
     fn cross_thread_free_realloc_and_native_state() {
         symbol(b"relax_alloc");
         let first = DomainHeap::new().unwrap();
@@ -518,6 +549,90 @@ mod tests {
             std::thread::spawn(move || program_free(address as *mut u8)).join().unwrap();
             assert_eq!(first.stats().0, 0);
             drop(native);
+        }
+    }
+
+    /// Runs this test binary again with MAKEPAD_RUN_HEAP_CHECK set, as child `mode` of
+    /// `heap_check_child` (the check is read once per process).
+    fn heap_check_run(mode: &str) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "zone_alloc::domain::tests::heap_check_child", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("MAKEPAD_RUN_HEAP_CHECK", "1")
+            .env("RELAX_HEAP_CHECK_CHILD", mode)
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "run by heap_check_* in a child process"]
+    fn heap_check_child() {
+        let Ok(mode) = std::env::var("RELAX_HEAP_CHECK_CHILD") else { return };
+        assert!(compiler::heap_check_on());
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*heap);
+            match mode.as_str() {
+                "double" => {
+                    let keep = program_alloc(2048, 1);
+                    let p = program_alloc(2048, 1);
+                    program_dealloc(p, 2048, 1);
+                    program_dealloc(p, 2048, 1);
+                    program_dealloc(keep, 2048, 1);
+                }
+                "interior" => {
+                    let p = program_alloc(2048, 1);
+                    program_dealloc(p.add(16), 2048, 1);
+                }
+                _ => {
+                    // every size class, large runs and cross-thread frees pass the check
+                    let mut live = Vec::new();
+                    for round in 0..4 {
+                        for &(size, align) in &[(1, 1), (24, 8), (129, 8), (2048, 1), (4097, 8), (300_000, 8), (64, 64), (5000, 4096)] {
+                            for _ in 0..200 {
+                                let p = program_alloc(size, align);
+                                std::ptr::write_bytes(p, round as u8, size.min(64));
+                                live.push((p as usize, size, align));
+                            }
+                        }
+                    }
+                    let half: Vec<(usize, usize, usize)> = live.drain(..live.len() / 2).collect();
+                    let h = &*heap as *const DomainHeap as usize;
+                    std::thread::spawn(move || {
+                        enter(h as *const DomainHeap);
+                        for (p, s, a) in half {
+                            program_dealloc(p as *mut u8, s, a);
+                        }
+                        enter(std::ptr::null());
+                    })
+                    .join()
+                    .unwrap();
+                    for (p, s, a) in live.drain(..) {
+                        let q = program_resize(p as *mut u8, s, a, s + 100);
+                        program_dealloc(q, s + 100, a);
+                    }
+                    assert_eq!(heap.stats().0, 0);
+                    println!("heap check: clean");
+                }
+            }
+            enter(std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn heap_check_passes_clean_use() {
+        let out = heap_check_run("clean");
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("heap check: clean"), "{text}");
+    }
+
+    #[test]
+    fn heap_check_names_a_double_free_and_an_interior_free() {
+        for mode in ["double", "interior"] {
+            let out = heap_check_run(mode);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "{mode}: the child ended normally: {err}");
+            assert!(err.contains("makepad-run heap check: free of a block that is not live"), "{mode}: {err}");
         }
     }
 }

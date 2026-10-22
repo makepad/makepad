@@ -378,6 +378,9 @@ unsafe fn recycle_locked(up: *mut Unit) -> Result<(usize, u64), String> {
     for (t, at, code, map, info) in built {
         crate::os::mem::write_code(at, &code);
         u.index_code(at, code.len() as u32, t, info);
+        if jit::perf_map_on() {
+            jit::perf_map(at, code.len(), &format!("{} [sandbox]", jit::perf_name(u, t)));
+        }
         let f = &mut u.fns[t as usize];
         let old = (f.code, f.code_len, std::mem::take(&mut f.pc_map), f.patch_gen);
         crate::zone_alloc::kept_with(|| {

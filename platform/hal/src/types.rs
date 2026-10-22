@@ -228,10 +228,12 @@ pub mod info_flags {
     /// The backend composes session 0's window layer over a lent window (`window_overlay`
     /// with a layer texture).
     pub const WINDOW_LAYERS: u32 = 64;
+    /// Session 0 may put badges on its windows (`window_kind::BADGE`).
+    pub const WINDOW_BADGES: u32 = 128;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -627,6 +629,12 @@ pub mod window_kind {
     /// The host supplies geometry and ticks; each frame names its imported image in
     /// `Pass::color[0]`. Completion is reported against the window as usual.
     pub const HOSTED: u32 = 3;
+    /// Session 0 only (`info_flags::WINDOW_BADGES`): a small transparent surface over a window of
+    /// session 0 (`parent`) at `geom`, in the parent's points (top left). The window system
+    /// composites it over the parent's content, whoever draws that (a lent window's app too):
+    /// the app's frames neither wait for it nor carry its cost. It takes no input and is never
+    /// adopted. Its frames are window frames of premultiplied pixels (cleared transparent).
+    pub const BADGE: u32 = 4;
 }
 
 /// `TextureImport::kind`.
@@ -918,7 +926,9 @@ pub struct FrameMeta {
     pub build_end_ns: u64,
     /// the causing (oldest consumed) input event
     pub input_ns: u64,
-    /// start, end per CPU phase: dispatch, draw, layout, build, submit, spare
+    /// start, end per CPU phase of the app's beat (0, 0: none): dispatch (services, timers),
+    /// next-frame callbacks, draw (the draw event walk, shader compiles), then build / submit /
+    /// spare (unused; the pass's build is `build_start_ns..build_end_ns`)
     pub phases: [[u64; 2]; 6],
 }
 

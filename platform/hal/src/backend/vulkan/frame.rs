@@ -154,7 +154,7 @@ impl Vulkan {
         self.flush(); // uploads, including the font service, precede this frame on the one queue
         let align = self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16);
         let mut reserve = 0u64;
-        let mut draw_counts = std::collections::HashMap::<usize, u32>::new();
+        let mut draw_counts = crate::FastMap::<usize, u32>::default();
         for pass in &view.passes[pr.clone()] {
             for d in &view.draws[slice(pass.draws, view.draws.len()).unwrap()] {
                 if let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) {

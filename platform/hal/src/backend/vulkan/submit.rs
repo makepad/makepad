@@ -8,7 +8,8 @@ use super::surface::{Present, Shown};
 use crate::font::FrameProgress;
 use crate::types::*;
 use makepad_vulkan::vk;
-use std::collections::{HashMap, HashSet};
+use crate::FastMap;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -83,7 +84,7 @@ pub(super) struct Slot {
     fence: vk::Fence,
     query: vk::QueryPool,
     /// Per layout: the pool and how many sets it holds.
-    descriptors: HashMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32)>,
+    descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32)>,
 }
 
 impl Drop for Slot {
@@ -188,7 +189,7 @@ pub(super) struct Batch {
     pub framebuffers: Vec<vk::Framebuffer>,
     /// Per layout: the pool, how many sets it holds, and whether this batch sized it (a reused
     /// pool is checked against this batch's draws once).
-    descriptors: HashMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32, bool)>,
+    descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32, bool)>,
     pub tickets: Vec<Ticket>,
     pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64)>,
     pub present: Option<Present>,
@@ -200,7 +201,7 @@ pub(super) struct Batch {
     reserve: u64,
     /// arenas this batch had to allocate (none in steady frames): the frame stats' `arena_allocs`
     pub allocs: u64,
-    pub draw_counts: HashMap<usize, u32>,
+    pub draw_counts: FastMap<usize, u32>,
     #[cfg(target_os = "linux")]
     pub external_waits: Vec<(Arc<super::share::sync::Semaphore>, u64)>,
     #[cfg(target_os = "linux")]
@@ -240,7 +241,7 @@ impl Batch {
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
             query: vk::QueryPool::null(), idle_query: vk::QueryPool::null(),
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
-            descriptors: HashMap::new(), tickets: Vec::new(), scanout: None, present: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: HashMap::new(),
+            descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
             #[cfg(target_os = "linux")] external_waits: Vec::new(),
             #[cfg(target_os = "linux")] external_signals: Vec::new(),
             #[cfg(target_os = "linux")] release_fence: None,
@@ -350,7 +351,7 @@ impl Batch {
         }
         let pool = if let Some((pool, _, _)) = self.descriptors.get(&p.descriptors) { *pool } else {
             let draws = *self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?;
-            let mut counts: HashMap<vk::DescriptorType, u32> = HashMap::new();
+            let mut counts: FastMap<vk::DescriptorType, u32> = FastMap::default();
             for (_, ty) in &p.descriptor_types { let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws); }
             let sizes: Vec<_> = counts.into_iter().map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count)).collect();
             let pool = unsafe { self.dev.raw.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(draws).pool_sizes(&sizes), None) }.map_err(error)?;

@@ -572,6 +572,13 @@ pub fn list() -> Vec<DomainInfo> {
     snapshots.into_iter().map(with_block_memory).collect()
 }
 
+/// The app domain's heap: (requested live bytes, committed bytes), without the block walk of
+/// `info` (the flight recorder's 1-s counter).
+pub fn app_heap_stats() -> Option<(usize, usize)> {
+    let id = crate::run::app_domain()?;
+    domains().iter().find(|d| d.info.id == id).and_then(|d| d.heap.as_ref().map(|h| h.stats()))
+}
+
 pub fn state(id: DomainId) -> Option<DomainState> {
     domains().iter().find(|d| d.info.id == id).map(|d| d.info.state.clone())
 }

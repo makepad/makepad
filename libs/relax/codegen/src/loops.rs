@@ -374,6 +374,8 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
     let mut transformed = vec![false; f.blocks.len()];
     'candidate: for (head, members) in loops {
         if members.iter().zip(&transformed).any(|(a, b)| *a && *b) { continue; }
+        // makepad inspect remarks: the last check passed (stages 1..4) or vectorised
+        relax_backend::remark::loop_try("stream-map", head_pos(f, head as usize));
         // Only a linear cycle: guards exit the loop, and the sole back edge follows
         // the store. No interior entries or nested control flow can be bypassed.
         let mut chain = Vec::new();
@@ -405,6 +407,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             }
         }
         if definitions.iter().any(|n| *n > 1) { continue; }
+        relax_backend::remark::loop_stage(1);
         let roots: Vec<_> = (0..nv).filter(|v| inputs[*v]).map(|v| VReg(v as u32)).collect();
         // Symbolically execute the body. Every address must be the current element of a
         // one-element-per-iteration recurrence; every length guard a -1 recurrence.
@@ -590,12 +593,14 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
         }
         let (Some((dst, value)), Some(kind)) = (store, kind) else { continue };
         if loads.is_empty() { continue; }
+        relax_backend::remark::loop_stage(2);
         let sz = kind.bytes();
         let lanes = 16 / sz;
         let shift = sz.trailing_zeros() as i64;
         let streams: Vec<Stream> = loads.iter().map(|x| x.0).chain(std::iter::once(dst)).collect();
         // indexed streams scale by the element size
         if streams.iter().any(|s| s.iv.is_some() && 1i64 << s.sh != sz) { continue; }
+        relax_backend::remark::loop_stage(3);
         let ptr_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_none()).map(|s| s.root).collect();
         let base_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_some()).map(|s| s.root).collect();
         let mut iv_roots: Vec<VReg> = streams.iter().filter_map(|s| s.iv).collect();
@@ -646,6 +651,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             if !(ivs.contains(&a) && oa >= 0 && match b2 { Bound::Reg(r) => !walkers.contains(&r) && !ivs.contains(&r) && !counts.contains(&r), Bound::Imm(_) => true }) { continue 'candidate; }
         }
         if counts.is_empty() && end_guards.is_empty() && lt_guards.is_empty() { continue; }
+        relax_backend::remark::loop_stage(4);
         // dependencies between the store and the loads that a vector would reorder, when their
         // distance is known
         for l in loads.iter().map(|x| x.0) {
@@ -864,9 +870,16 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
         f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos, count: -1.0 });
         f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos, count: -1.0 });
         for (done, member) in transformed.iter_mut().zip(&members) { *done |= *member; }
+        relax_backend::remark::loop_done();
         changed = true;
     }
     changed
+}
+
+/// A loop head's source position (makepad inspect remarks): its first instruction's, else its
+/// terminator's.
+fn head_pos(f: &Func, head: usize) -> u64 {
+    f.blocks.get(head).map_or(0, |b| b.pos.first().copied().unwrap_or(b.term_pos))
 }
 
 /// Integer sum reductions over a contiguous array, vectorised: a single-block counted loop
@@ -916,6 +929,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             Term::Branch(c, t, e) if e as usize == bi && t as usize != bi => (c, false, t),
             _ => continue,
         };
+        relax_backend::remark::loop_try("reduction", head_pos(f, bi));
         if f.blocks.iter().any(|x| matches!(x.term, Term::Invoke(_, w) if w as usize == bi)) {
             continue;
         }
@@ -934,6 +948,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             (Cond::Ne, true) | (Cond::Eq, false) => false,
             _ => continue,
         };
+        relax_backend::remark::loop_stage(1);
         let defined_in = |v: VReg| b.insts.iter().any(|i| {
             let mut d = false;
             for_defs(i, |x| d |= x == v);
@@ -1178,6 +1193,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         f.blocks.push(h2);
         f.blocks.push(vb_);
         f.blocks.push(veb);
+        relax_backend::remark::loop_done();
         changed = true;
     }
     changed

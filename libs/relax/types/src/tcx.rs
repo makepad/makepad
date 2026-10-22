@@ -1088,6 +1088,14 @@ impl Tcx {
         Box::new(std::mem::take(&mut self.queries.solver))
     }
 
+    /// A commit added defs (a body edit's closures, anonymous constants, opaque types: created by
+    /// def_collector at the commit, never "added items"): the per-def declaration table covers
+    /// them. Without it the borrow checker of the edited fn read past the table's end ("index
+    /// out of bounds: the len is N but the index is N+1": a closure added by a live patch).
+    pub fn grow_to(&mut self, prog: &Program) {
+        self.declarations.grow(prog.defs.len());
+    }
+
     pub fn invalidate_check(&mut self, gone: &[DefId]) {
         self.declarations.invalidate(gone);
         self.alias_tys.clear();

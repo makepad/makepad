@@ -411,14 +411,19 @@ fn print_hits(what: &str, hits: &[Hit], extra: &str) {
 
 /// The words of `[start, start+len)` that point into generation `g` (exact), skipping the
 /// arena's own header table.
-fn scan_words(start: usize, len: usize, g: u64, mut place: impl FnMut(usize) -> String, out: &mut Vec<Hit>) {
+fn scan_words(start: usize, len: usize, g: u64, place: impl FnMut(usize) -> String, out: &mut Vec<Hit>) {
+    scan_words_range(start, len, g, g + 1, place, out)
+}
+
+/// `scan_words` for any generation in [lo, hi).
+fn scan_words_range(start: usize, len: usize, lo: u64, hi: u64, mut place: impl FnMut(usize) -> String, out: &mut Vec<Hit>) {
     let skip = crate::zone_alloc::compiler_internal_ranges();
     let mut a = (start + 7) & !7;
     let end = start + len;
     while a + 8 <= end {
         if !skip.iter().any(|r| a >= r.0 && a < r.1) {
             let v = unsafe { *(a as *const usize) };
-            if crate::zone_alloc::compiler_owns(v as *const u8) && crate::zone_alloc::compiler_points_into(v, g) {
+            if crate::zone_alloc::compiler_owns(v as *const u8) && crate::zone_alloc::compiler_points_into_range(v, lo, hi) {
                 out.push(Hit { place: place(a), target: v });
             }
         }
@@ -438,18 +443,38 @@ pub(crate) fn static_scan() {
     tls_scan(g);
 }
 
-/// MAKEPAD_RUN_ZONE_CHECK=2, just before a swap destroys generation `old`: the statics already hold
-/// the new generation's values, so a word still pointing into `old` is a root the swap missed (the
-/// next use of it faults).
-pub(crate) fn stale_roots(old: u64) {
+/// MAKEPAD_RUN_ZONE_CHECK=2, just before a swap destroys every generation older than `current`
+/// (an aborted swap's too): the statics already hold the new generation's values, so a word still
+/// pointing into an older one is a root the swap missed (the next use of it faults).
+pub(crate) fn stale_roots(current: u64) {
+    stale_scan(current, "STALE statics before destroy");
+}
+
+/// MAKEPAD_RUN_ZONE_CHECK=2, right after the statics were taken (the same test as before the
+/// destroy: a word found here was missed by the take; one found only before the destroy was
+/// written again in between).
+pub(crate) fn stale_after_take(current: u64) {
+    stale_scan(current, "statics after the take");
+}
+
+fn stale_scan(current: u64, what: &str) {
     if level() < 2 {
         return;
     }
     let mut hits = Vec::new();
     for (name, base, start, len) in data_regions() {
-        scan_words(start, len, old, |a| format!("{name}+{:#x}", a - base), &mut hits);
+        scan_words_range(start, len, 0, current, |a| format!("{name}+{:#x}", a - base), &mut hits);
     }
-    print_hits("STALE statics before destroy", &hits, &format!(" (generation {old})"));
+    print_hits(what, &hits, &format!(" (generations before {current})"));
+    // what each stale word points at (the generation is still mapped): 32 bytes, so a string, a
+    // table or a box can be told apart and the static named
+    for h in hits.iter().take(64) {
+        let b = unsafe { std::slice::from_raw_parts(h.target as *const u8, 32) };
+        let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let text: String = b.iter().map(|&x| if (0x20..0x7f).contains(&x) { x as char } else { '.' }).collect();
+        let epoch = crate::zone_alloc::compiler_epoch_of(h.target as *const u8).map_or("-".to_string(), |e| e.to_string());
+        eprintln!("makepad-run zone:   {} (generation {epoch}) holds {hex} {text}", h.place);
+    }
 }
 
 /// (module, load base, start, len) of every writable data range of the executable and, when
@@ -491,7 +516,7 @@ struct Phdr {
     align: u64,
 }
 
-/// macOS: the __DATA segments of the main image (makepad binary or the library that contains it).
+/// macOS: the writable __DATA segments of the main image (makepad binary or the library that contains it).
 #[cfg(target_os = "macos")]
 fn data_regions() -> Vec<(String, usize, usize, usize)> {
     use std::ffi::c_char;
@@ -504,7 +529,9 @@ fn data_regions() -> Vec<(String, usize, usize, usize)> {
     if h.is_null() {
         return out;
     }
-    for seg in [c"__DATA", c"__DATA_CONST", c"__DATA_DIRTY"] {
+    // (__DATA_CONST is read-only once dyld has bound it: it holds no heap pointer, and its
+    // constant tables' integers that happen to look like arena addresses were false hits)
+    for seg in [c"__DATA", c"__DATA_DIRTY"] {
         let mut size = 0usize;
         let p = unsafe { getsegmentdata(h, seg.as_ptr(), &mut size) };
         if !p.is_null() && size > 0 {

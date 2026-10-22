@@ -81,6 +81,42 @@ pub(crate) fn resolve_lifetimes(tcx: &Tcx, prog: &Program, owner: DefId, parent:
     resolver.resolution
 }
 
+/// late.rs:2214-2296: the segments of `path` whose declaration's lifetimes are elided (no
+/// lifetime argument written), with how many: the resolved prefix (`proj_start`) picks the one
+/// segment that declares them.
+pub(super) fn elided_path_lifetimes(tcx: &Tcx, prog: &Program, owner: DefId, file: u32, module: u32, path: &ast::Path) -> Vec<(usize, u32)> {
+    let ast = &prog.files[file as usize].ast;
+    let segs = ast.segs(path.segs);
+    let mut out = Vec::new();
+    let mut proj_start = segs.len();
+    let base = loop {
+        if proj_start == 0 { return out; }
+        let prefix = ast::Path { segs: path.segs.prefix(proj_start), ..*path };
+        if let Some(def) = tcx.lifetime_path_def(prog, owner, file, module, &prefix) { break def; }
+        proj_start -= 1;
+    };
+    let has_generic_args = |i: usize| ast.gargs(segs[i].args()).is_some();
+    for (i, segment) in segs.iter().enumerate() {
+        if matches!(ast.gargs(segment.args()), Some(GenericArgs::Angle(args)) if ast.list(*args).iter().any(|a| matches!(a, GenericArg::Lifetime(_)))) { continue; }
+        let type_def = match prog.def(base).kind {
+            DefKind::AssocTy if i + 2 == proj_start => prog.def(base).parent,
+            DefKind::Variant if i + 2 == proj_start && has_generic_args(i) => prog.def(base).parent,
+            DefKind::Variant if i + 1 == proj_start && !(i > 0 && has_generic_args(i - 1)) => prog.def(base).parent,
+            DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait if i + 1 == proj_start => base,
+            _ => continue,
+        };
+        let d = prog.def(type_def);
+        let a = &prog.files[d.file as usize].ast;
+        let generics = match a.item(d.item).kind {
+            ItemKind::Fn(..) | ItemKind::Impl(_) => continue,
+            k => match a.kind_generics(&k) { Some(g) => *g, None => continue },
+        };
+        let count = a.list(generics.params).iter().filter(|param| matches!(param.kind, GenericParamKind::Lifetime(_))).count() as u32;
+        if count != 0 { out.push((i, count)); }
+    }
+    out
+}
+
 #[derive(Clone, Copy)]
 enum LifetimeRibKind {
     Item,
@@ -530,39 +566,18 @@ impl LifetimeResolver<'_> {
         }
     }
 
-    /// late.rs:2214-2296: the resolved prefix (`proj_start`) picks the one segment whose
-    /// declaration's lifetimes are elided; expression and pattern paths infer them.
+    /// late.rs:2214-2296. Expression and pattern paths (PathSource::Expr/Pat/Struct/TupleStruct)
+    /// infer their elided lifetimes: nothing is recorded for them (a use without an entry is an
+    /// inference variable to every reader, as a recorded Infer is), so their paths are not
+    /// resolved here at all -- most body paths are locals and calls, whose type-namespace lookup
+    /// only misses (cold Stage: 2.4% of all CPU was this lookup).
     fn resolve_elided_lifetimes_in_path(&mut self, path: &ast::Path, inferred: bool) {
-        let ast = &self.prog.files[self.file as usize].ast;
-        let segs = ast.segs(path.segs);
-        let mut proj_start = segs.len();
-        let base = loop {
-            if proj_start == 0 { return; }
-            let prefix = ast::Path { segs: path.segs.prefix(proj_start), ..*path };
-            if let Some(def) = self.tcx.lifetime_path_def(self.prog, self.owner, self.file, self.module, &prefix) { break def; }
-            proj_start -= 1;
-        };
-        let has_generic_args = |i: usize| ast.gargs(segs[i].args()).is_some();
-        for (i, segment) in segs.iter().enumerate() {
-            if matches!(ast.gargs(segment.args()), Some(GenericArgs::Angle(args)) if ast.list(*args).iter().any(|a| matches!(a, GenericArg::Lifetime(_)))) { continue; }
-            let type_def = match self.prog.def(base).kind {
-                DefKind::AssocTy if i + 2 == proj_start => self.prog.def(base).parent,
-                DefKind::Variant if i + 2 == proj_start && has_generic_args(i) => self.prog.def(base).parent,
-                DefKind::Variant if i + 1 == proj_start && !(i > 0 && has_generic_args(i - 1)) => self.prog.def(base).parent,
-                DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait if i + 1 == proj_start => base,
-                _ => continue,
-            };
-            let d = self.prog.def(type_def);
-            let a = &self.prog.files[d.file as usize].ast;
-            let generics = match a.item(d.item).kind {
-                ItemKind::Fn(..) | ItemKind::Impl(_) => continue,
-                k => match a.kind_generics(&k) { Some(g) => *g, None => continue },
-            };
-            let count = a.list(generics.params).iter().filter(|param| matches!(param.kind, GenericParamKind::Lifetime(_))).count() as u32;
+        if inferred { return; }
+        let segs = self.prog.files[self.file as usize].ast.segs(path.segs);
+        for (i, count) in elided_path_lifetimes(self.tcx, self.prog, self.owner, self.file, self.module, path) {
+            let name = segs[i].name.lo;
             for index in 0..count {
-                let key = LifetimeKey::Path(path.segs.lo + i as u32, index);
-                if inferred { self.record_lifetime_use(key, LifetimeRes::Infer); }
-                else { self.resolve_lifetime(key, None, segment.name.lo, true); }
+                self.resolve_lifetime(LifetimeKey::Path(path.segs.lo + i as u32, index), None, name, true);
             }
         }
     }

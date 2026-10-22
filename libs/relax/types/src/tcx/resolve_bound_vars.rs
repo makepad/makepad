@@ -719,7 +719,7 @@ impl BoundVarContext<'_> {
             ItemKind::TraitAlias(r) => self.visit_bounds(ast.row(r).bounds),
             ItemKind::Impl(r) => {
                 let ast::ImplItem { trait_, self_ty, .. } = *ast.row(r);
-                if let Some(path) = trait_ { self.visit_path(&path); }
+                if let Some(path) = trait_ { self.visit_path(&path, false); }
                 self.visit_ty(self_ty);
             }
             ItemKind::Const(ty, _) => {
@@ -786,7 +786,7 @@ impl BoundVarContext<'_> {
                             self.tcx.dcx.report(self.cause(param.name.lo), "non-lifetime binders are unstable".into());
                         }
                     }
-                    self.visit_path(&path);
+                    self.visit_path(&path, false);
                     self.scopes.pop();
                 }
                 ast::Bound::Use(args) => {
@@ -861,7 +861,7 @@ impl BoundVarContext<'_> {
                     self.scopes.push(Scope::TraitRefBoundary);
                     self.push_binder(BinderId::Trait(path.segs.lo), Vec::new(), BinderScopeType::Normal, false);
                 }
-                self.visit_path(&path);
+                self.visit_path(&path, false);
                 if trait_object {
                     self.scopes.pop(); self.scopes.pop();
                     self.resolve_object_lifetime_default(LifetimeKey::ObjectDefault(ty.0));
@@ -929,9 +929,9 @@ impl BoundVarContext<'_> {
             ast::Pat::Ident { sub: Some(p), .. } | ast::Pat::Ref(_, p) | ast::Pat::Paren(p) | ast::Pat::Box(p) => self.visit_pat(p),
             ast::Pat::Lit(e) => self.visit_expr(e),
             ast::Pat::Range(a, b, _) => { if let Some(e) = a { self.visit_expr(e); } if let Some(e) = b { self.visit_expr(e); } }
-            ast::Pat::Path(p) => self.visit_path(&p),
-            ast::Pat::TupleStruct(p, ps) => { self.visit_path(&p); for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); } }
-            ast::Pat::Struct(p, fs, _) => { self.visit_path(&p); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
+            ast::Pat::Path(p) => self.visit_path(&p, true),
+            ast::Pat::TupleStruct(p, ps) => { self.visit_path(&p, true); for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); } }
+            ast::Pat::Struct(p, fs, _) => { self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_pat(f.pat); } }
             ast::Pat::Tuple(ps) | ast::Pat::Slice(ps) | ast::Pat::Or(ps) => for p in self.prog.files[self.file as usize].ast.list(ps) { self.visit_pat(*p); },
             ast::Pat::Mac(m) => { let m = *self.prog.files[self.file as usize].ast.row(m); self.visit_mac(m) }
             ast::Pat::Wild | ast::Pat::Rest | ast::Pat::Ident { sub: None, .. } => {}
@@ -964,7 +964,7 @@ impl BoundVarContext<'_> {
                 self.scopes.push(Scope::Body(owner));
                 self.visit_block(b); self.scopes.pop(); self.scopes.pop();
             }
-            ast::ExprKind::Path(p) => self.visit_path(&p),
+            ast::ExprKind::Path(p) => self.visit_path(&p, true),
             ast::ExprKind::Unary(_, x) | ast::ExprKind::Field(x, _) | ast::ExprKind::TupleField(x, _) |
             ast::ExprKind::AddrOf(_, _, x) | ast::ExprKind::Try(x) | ast::ExprKind::Await(x) | ast::ExprKind::Paren(x) | ast::ExprKind::Box(x) => self.visit_expr(x),
             ast::ExprKind::Binary(_, a, b) | ast::ExprKind::Assign(a, b) | ast::ExprKind::AssignOp(_, a, b) | ast::ExprKind::Index(a, b) => { self.visit_expr(a); self.visit_expr(b); }
@@ -986,7 +986,7 @@ impl BoundVarContext<'_> {
             ast::ExprKind::Tuple(es) | ast::ExprKind::Array(es) => for e in self.prog.files[self.file as usize].ast.list(es) { self.visit_expr(*e); },
             ast::ExprKind::Struct(row) => {
                 let ast::StructRow { path: p, fields: fs, base, .. } = *self.prog.files[self.file as usize].ast.row(row);
-                self.visit_path(&p); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_expr(f.expr); }
+                self.visit_path(&p, true); for f in self.prog.files[self.file as usize].ast.list(fs) { self.visit_expr(f.expr); }
                 if let Some(e) = base.get() { self.visit_expr(e); }
             }
             ast::ExprKind::Range(a, b, _) => { if let Some(e) = a.get() { self.visit_expr(e); } if let Some(e) = b.get() { self.visit_expr(e); } }
@@ -1030,12 +1030,19 @@ impl BoundVarContext<'_> {
         }).unwrap_or(segs.len())
     }
 
-    fn visit_path(&mut self, path: &ast::Path) {
+    /// `inferred`: an expression or pattern path, whose elided lifetimes lifetime_resolve leaves
+    /// unrecorded (inferred).
+    fn visit_path(&mut self, path: &ast::Path, inferred: bool) {
         let ast = &self.prog.files[self.file as usize].ast;
-        let resolved_len = self.resolved_prefix_len(path);
+        // The resolved prefix only picks the containers whose bounds give the written arguments'
+        // object lifetime defaults: a path without arguments (most body paths) resolves nothing.
+        let angle_args = |s: &ast::PathSeg| matches!(ast.gargs(s.args()), Some(GenericArgs::Angle(a)) if !ast.list(*a).is_empty());
+        let resolved_len = if ast.qself(path).is_some() || ast.segs(path.segs).iter().any(angle_args) { self.resolved_prefix_len(path) } else { 0 };
         let resolved = ast::Path { segs: path.segs.prefix(resolved_len), ..*path };
+        // an inferred path's segments that elide lifetimes (asked only for a written constraint)
+        let mut elided: Option<Vec<(usize, u32)>> = None;
         if let Some(qself) = ast.qself(path) {
-            if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path); }
+            if let Some(trait_path) = qself.trait_path { self.visit_path(&trait_path, inferred); }
         }
         for (i, segment) in ast.segs(path.segs).iter().enumerate() {
             if let Some(GenericArgs::Paren(inputs, output)) = ast.gargs(segment.args()) {
@@ -1062,7 +1069,7 @@ impl BoundVarContext<'_> {
                 j += 1;
             }
             let prefix = ast::Path { segs: path.segs.prefix(i + 1), ..*path };
-            let container = if i < resolved_len { self.eligible_container(&resolved, i) } else { None };
+            let container = if !arguments.is_empty() && i < resolved_len { self.eligible_container(&resolved, i) } else { None };
             let defaults = container.map(|def| self.compute_object_lifetime_defaults(def, &prefix)).unwrap_or_default();
             let mut index = usize::from(container.is_some_and(|def| self.prog.def(def).kind == DefKind::Trait));
             for argument in arguments {
@@ -1087,7 +1094,11 @@ impl BoundVarContext<'_> {
                     _ => continue,
                 };
                 let own_has_lifetimes = matches!(ast.gargs(own_args), Some(GenericArgs::Angle(args)) if ast.list(*args).iter().any(|a| matches!(a, GenericArg::Lifetime(_))));
-                self.scopes.push(Scope::ObjectLifetimeDefault(if !lifetimes.is_empty() || own_has_lifetimes { None } else { Some(ResolvedArg::StaticLifetime) }));
+                // (rustc's segment arguments hold the elided lifetimes of an inferred path too)
+                let has_lifetimes = !lifetimes.is_empty() || inferred && elided
+                    .get_or_insert_with(|| super::lifetime_resolve::elided_path_lifetimes(self.tcx, self.prog, self.owner, self.file, self.module, path))
+                    .iter().any(|&(s, _)| s == i);
+                self.scopes.push(Scope::ObjectLifetimeDefault(if has_lifetimes || own_has_lifetimes { None } else { Some(ResolvedArg::StaticLifetime) }));
                 let supertrait_vars = container.map(|def| self.supertrait_hrtb_vars(def, name)).unwrap_or_default();
                 self.scopes.push(Scope::Supertrait(supertrait_vars));
                 self.visit_constraint_args(own_args);
@@ -1593,12 +1604,13 @@ mod tests {
     #[test]
     fn round33_lifetime_expression_and_pattern_paths_infer() {
         // late.rs:2271-2296 (PathSource) + resolve_params :4067-4077: implicit lifetimes of
-        // expression/pattern paths are inferred, also in closure parameter patterns; only the
-        // written `'_` of the parameter type creates a closure lifetime.
+        // expression/pattern paths are inferred (left unrecorded: no entry reads as Infer), also
+        // in closure parameter patterns; only the written `'_` of the parameter type creates a
+        // closure lifetime.
         let (prog, tcx) = source("#![no_std] struct W<'a>(&'a u8); fn f() { let c = |W(x): W<'_>| *x; }", 2021);
         let owner = named(&prog, "f");
         let names = tcx.resolve_lifetime_names(&prog, owner);
-        assert!(names.uses.iter().any(|(key, res)| matches!(key, LifetimeKey::Path(..)) && *res == LifetimeRes::Infer));
+        assert!(!names.uses.keys().any(|key| matches!(key, LifetimeKey::Path(..))));
         let closure_params: usize = names.binders.iter().filter(|(binder, _)| matches!(binder, BinderId::Closure(_))).map(|(_, ids)| ids.len()).sum();
         assert_eq!(closure_params, 1);
         assert_eq!(tcx.dcx.err_count(), 0);

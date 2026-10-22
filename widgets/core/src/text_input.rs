@@ -302,6 +302,9 @@ script_mod! {
 
         /** The selection band: one rounded quad per selected run, drawn behind the ink. */
         draw_selection +: {
+            // Its own draw-call layer: the band's draws cross the text and caret
+            // calls back to the call `draw_walk` opens before the text.
+            draw_call_group: @selection
             /** pointer-hover mix 0..1 step 0.01 */
             hover: instance(0.0)
             /** keyboard-focus mix 0..1 step 0.01 */
@@ -2861,9 +2864,10 @@ impl Widget for TextInput {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_selection.append_to_draw_call(cx);
-        self.draw_composition_underline.append_to_draw_call(cx);
-        self.draw_mark.append_to_draw_call(cx);
+        // The selection band's call goes in now, before the text: the band is
+        // drawn after the text and caret (it needs their layout) and lands here
+        // through its own draw_call_group, so it stays behind the glyphs.
+        self.draw_selection.new_draw_call(cx);
         // Push an inner clip rect to prevent scrolled text from bleeding into
         // the padding area. For multiline, this clips vertically-scrolled content.
         // For single-line, this clips horizontally-scrolled content that overflows.

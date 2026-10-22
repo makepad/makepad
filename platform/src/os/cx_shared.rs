@@ -1125,8 +1125,18 @@ impl Cx {
             CHANGED.store(true, Ordering::Release);
             crate::thread::SignalToUI::set_internal_signal();
         }
-        if !INSTALLED.swap(true, Ordering::Relaxed) { std::relax::on_patch(wake); }
-        if CHANGED.swap(false, Ordering::AcqRel) { self.redraw_all(); }
+        if !INSTALLED.swap(true, Ordering::Relaxed) {
+            std::relax::on_patch(wake);
+            // the first look at the design files' times
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            self.queue_patched_script_mod_files();
+        }
+        if CHANGED.swap(false, Ordering::AcqRel) {
+            // a design (script_mod!) edit is not re-run by the patch itself
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            self.queue_patched_script_mod_files();
+            self.redraw_all();
+        }
     }
 
     /// Drain the global control channel and dispatch each message as an event.
@@ -1140,6 +1150,8 @@ impl Cx {
         use crate::web_socket::CONTROL_CHANNEL;
         use crate::window::CxWindowPool;
         crate::remote::poll(self);
+        // makepad inspect's queries for a VM of this thread that is idle now (`src`, `vm get`)
+        crate::makepad_script::inspect_query::serve_idle();
         let msgs: Vec<StudioToApp> = {
             let lock = CONTROL_CHANNEL.lock().unwrap();
             if let Some(rx) = lock.as_ref() {
@@ -1621,6 +1633,13 @@ impl Cx {
     #[allow(dead_code)]
     pub(crate) fn recover_after_caught_panic(&mut self) {
         self.in_draw_event = false;
+        // contained at the turn: no dispatch is running any more. An unwind that skipped the
+        // dispatch guard (a fault turned into a panic in code without a landing pad for it) left
+        // the flag set, and every later event -- NextFrame, Draw, QuitRequested, Shutdown -- was
+        // rejected as re-entrant: the app looked alive but never drew again nor shut down (its
+        // pool threads leaked, so `session relaunch` was refused)
+        self.event_handler_dispatch_active.set(false);
+        self.perf_monitor.event_depth.set(0);
         if self.script_vm.is_none() {
             crate::error!(
                 "the script VM did not survive an unwound event handler: every later script entry will be refused as re-entrant"
@@ -1657,6 +1676,7 @@ impl Cx {
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
         self.in_draw_event = true;
+        crate::frame_trace::note_drawn();
         // The flag comes down whether the draw returned or unwound: a
         // platform that catches the panic and goes on must not have every
         // later `redraw` refused as "already drawing".

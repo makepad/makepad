@@ -37,6 +37,8 @@ struct Aggregates {
     samples: HashMap<String, (u64, Vec<String>)>,
     emitted: u64,
     emit_dropped: u64,
+    /// the latest emits, oldest first: (ms, the emit's line in the probe, the value's Debug form)
+    recent: std::collections::VecDeque<(u64, u32, String)>,
     /// emits in the current second (rate limit) and that second
     emit_window: (u64, u64),
 }
@@ -53,7 +55,12 @@ pub(super) struct Probe {
     timed: AtomicU64,
     failed: Mutex<Option<String>>,
     agg: Mutex<Aggregates>,
+    /// the probe's `emit(..)` calls: (line, the names of the emitted expression's elements)
+    emits: Vec<(u32, Vec<String>)>,
 }
+
+/// How many emitted values a probe keeps for `probe read`.
+const RECENT: usize = 256;
 
 static PROBES: Mutex<Vec<Arc<Probe>>> = Mutex::new(Vec::new());
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -127,12 +134,16 @@ fn text<'a>(p: *const u8, n: usize) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n)) }
 }
 
-pub extern "C" fn relax_probe_emit(t: *const u8, n: usize) {
+pub extern "C" fn relax_probe_emit(at: u32, t: *const u8, n: usize) {
     let _k = crate::zone_alloc::kept();
     let Some(p) = current() else { return };
     let line = short(text(t, n), 1000);
     let send = {
         let mut a = p.agg.lock().unwrap_or_else(|e| e.into_inner());
+        if a.recent.len() >= RECENT {
+            a.recent.pop_front();
+        }
+        a.recent.push_back((now_ms(), at, line.clone()));
         let sec = now_ms() / 1000;
         if a.emit_window.1 != sec {
             a.emit_window = (0, sec);
@@ -149,7 +160,7 @@ pub extern "C" fn relax_probe_emit(t: *const u8, n: usize) {
     if send {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Relaxed);
-        super::events::emit("probe", &format!("P{}|{}", p.id, seq), &format!("\"probe\":\"P{}\",\"value\":{}", p.id, json_str(&line)));
+        super::events::emit("probe", &format!("P{}|{}", p.id, seq), &format!("\"probe\":\"P{}\",\"value\":{}{}", p.id, json_str(&line), named_fields(&p, at, &line)));
     }
 }
 
@@ -200,6 +211,142 @@ pub extern "C" fn relax_probe_pause() {
     let saved = CURRENT.try_with(|c| c.get()).unwrap_or((usize::MAX, 0));
     super::instrument::park_here(u64::MAX, &format!("P{}", p.id), &format!("probe::pause in P{} at {}", p.id, p.hook), "");
     let _ = CURRENT.try_with(|c| c.set(saved));
+}
+
+
+// ------------------------------------------------------------------ emitted values, named
+
+/// The `emit(..)` calls of a probe's source: (line, the names of the emitted value's elements --
+/// the elements of a tuple expression `emit((a, b.c))` are `a`, `b.c`; any other expression is
+/// one name). Read from the agent's own text (comments and literals skipped), never rewritten.
+fn emit_exprs(src: &str) -> Vec<(u32, Vec<String>)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let (mut i, mut line) = (0usize, 1u32);
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    while i < b.len() {
+        match b[i] {
+            b'\n' => line += 1,
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    } else if b[i] == b'\n' {
+                        line += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'e' if src[i..].starts_with("emit") && (i == 0 || !ident(b[i - 1])) => {
+                let mut j = i + 4;
+                while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b'(') {
+                    if let Some(end) = close_of(b, j) {
+                        let inner = src[j + 1..end].trim();
+                        let names = match inner.strip_prefix('(').filter(|_| close_of(inner.as_bytes(), 0) == Some(inner.len() - 1)) {
+                            Some(t) => split_top(&t[..t.len() - 1]),
+                            None => vec![inner.to_string()],
+                        };
+                        out.push((line, names.into_iter().map(|n| n.split_whitespace().collect::<Vec<_>>().join(" ")).collect()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The index of the bracket closing the one at `open` (string literals skipped).
+fn close_of(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut k = open;
+    while k < b.len() {
+        match b[k] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            b'"' => {
+                k += 1;
+                while k < b.len() && b[k] != b'"' {
+                    if b[k] == b'\\' {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    None
+}
+
+/// `a, f(b, c), [d]` as its top-level elements (a trailing comma gives none).
+fn split_top(t: &str) -> Vec<String> {
+    let b = t.as_bytes();
+    let (mut out, mut depth, mut start, mut k) = (Vec::new(), 0i32, 0usize, 0usize);
+    while k < b.len() {
+        match b[k] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'<' if depth == 0 && k > 0 && b[k - 1] == b':' => depth += 1,
+            b'"' => {
+                k += 1;
+                while k < b.len() && b[k] != b'"' {
+                    if b[k] == b'\\' {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                out.push(t[start..k].trim().to_string());
+                start = k + 1;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if !t[start..].trim().is_empty() {
+        out.push(t[start..].trim().to_string());
+    }
+    out
+}
+
+/// The emitted value's elements under the emit expression's names: `,"fields":{"dist":"2.12",..}`
+/// when the emit at `line` named as many elements as the value has, else an empty string.
+fn named_fields(p: &Probe, line: u32, value: &str) -> String {
+    match fields_of(p, line, value) {
+        Some(f) => format!(",\"fields\":{{{}}}", f.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect::<Vec<_>>().join(",")),
+        None => String::new(),
+    }
+}
+
+fn fields_of(p: &Probe, line: u32, value: &str) -> Option<Vec<(String, String)>> {
+    let names = &p.emits.iter().find(|e| e.0 == line)?.1;
+    let v = value.trim();
+    let parts = if names.len() > 1 {
+        let inner = v.strip_prefix('(')?.strip_suffix(')')?;
+        split_top(inner)
+    } else {
+        vec![v.to_string()]
+    };
+    (parts.len() == names.len()).then(|| names.iter().cloned().zip(parts).collect())
 }
 
 // ------------------------------------------------------------------ adding a probe
@@ -330,7 +477,8 @@ fn by_name_params(u: &crate::jit::Unit, probe: crate::program::DefId) -> Option<
 /// type that needs dropping declared `ManuallyDrop<T>`, `&mut` only with `mutate`.
 fn check_params(u: &crate::jit::Unit, hooked: u32, probe: crate::program::DefId, mutate: bool) -> Result<(), String> {
     use crate::types::TyKind;
-    let crate::jit::FnKey::Inst(d, gargs) = &u.fns[hooked as usize].key else { return Err("the hooked slot is not a fn instance".into()) };
+    // a SPEC-V twin (`[unverified]`) runs its base slot's fn: same signature
+    let crate::jit::FnKey::Inst(d, gargs) = super::instrument::base_key(u, hooked) else { return Err("the hooked slot is not a fn instance".into()) };
     let hs = u.tcx.fn_sig(&u.prog, *d).ok_or("the hooked fn has no signature")?;
     let ps = u.tcx.fn_sig(&u.prog, probe).ok_or("the probe fn has no signature")?;
     if ps.n_generics != 0 {
@@ -390,15 +538,16 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
     // (on disk too: an error's line is the agent's own text)
     let _ = std::fs::write(&path, &src);
     let hook = hook.to_string();
+    let src_text = String::from_utf8_lossy(&src).into_owned();
     let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(Arc<Probe>, Vec<String>, Vec<String>), String> {
         let u = unsafe { &mut *up };
         let found = super::instrument::find_all(u, &hook, 8);
         if found.is_empty() {
-            return Err(format!("no compiled fn or line matches `{}`", hook));
+            return Err(format!("no compiled fn or line matches `{}`{}", hook, super::instrument::closest(u, &hook)));
         }
         // the probe is a child module of the hooked fn's module: its private items, its `use`s
         // and `crate::` paths are the probe's too
-        let scope = match &u.fns[found[0].0 as usize].key {
+        let scope = match super::instrument::base_key(u, found[0].0) {
             crate::jit::FnKey::Inst(d, _) => crate::modules::scope_of(u, *d),
             _ => return Err("the hooked slot is not a fn instance".into()),
         };
@@ -432,7 +581,7 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
         // the probe's record and the edits that name it are kept state: they outlive the
         // compiler arena (a settle swap destroys it; the probe code keeps calling in)
         let _kept = crate::zone_alloc::kept();
-        let (p, idx) = register_probe(id, &hook);
+        let (p, idx) = register_probe(id, &hook, emit_exprs(&src_text));
         super::patches::with_low_tier(low, || {
         let mut rows = Vec::new();
         let owner = super::patches::Owner::Probe(id);
@@ -481,7 +630,21 @@ pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
         if let Ok(s) = p.slots.try_lock() {
             a.vec(&s);
         }
+        a.vec(&p.emits);
+        for (_, names) in &p.emits {
+            a.vec(names);
+            for n in names {
+                a.string(n);
+            }
+        }
         if let Ok(g) = p.agg.try_lock() {
+            let (x, y) = g.recent.as_slices();
+            if g.recent.capacity() > 0 {
+                a.ptr(if x.is_empty() { y.as_ptr() } else { x.as_ptr() });
+            }
+            for (_, _, v) in g.recent.iter() {
+                a.string(v);
+            }
             a.map(&g.counts, |a, k, _| a.string(k));
             a.map(&g.hists, |a, k, _| a.string(k));
             a.map(&g.samples, |a, k, v| {
@@ -496,7 +659,7 @@ pub(crate) fn scan_kept(a: &mut crate::jit::zone_scan::Acc) {
 }
 
 /// A new probe's record (its index): kept state whatever the caller's phase.
-fn register_probe(id: u32, hook: &str) -> (Arc<Probe>, u64) {
+fn register_probe(id: u32, hook: &str, emits: Vec<(u32, Vec<String>)>) -> (Arc<Probe>, u64) {
     let _k = crate::zone_alloc::kept();
     let p = Arc::new(Probe {
         id,
@@ -508,6 +671,7 @@ fn register_probe(id: u32, hook: &str) -> (Arc<Probe>, u64) {
         timed: AtomicU64::new(0),
         failed: Mutex::new(None),
         agg: Mutex::new(Aggregates::default()),
+        emits,
     });
     let mut ps = PROBES.lock().unwrap_or_else(|e| e.into_inner());
     ps.push(p.clone());
@@ -516,7 +680,7 @@ fn register_probe(id: u32, hook: &str) -> (Arc<Probe>, u64) {
 
 #[cfg(test)]
 pub(super) fn register_probe_for_test(id: u32, hook: &str) -> (Arc<Probe>, u64) {
-    register_probe(id, hook)
+    register_probe(id, hook, Vec::new())
 }
 
 /// The live probes: (id, hook).
@@ -579,9 +743,18 @@ pub fn remove_all() {
     remove(None);
 }
 
-fn read_json(p: &Probe) -> Vec<String> {
+fn read_json(p: &Probe, n_recent: usize) -> Vec<String> {
     let a = p.agg.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
+    // the latest emitted values first (newest last), each with its fields when the emit named them
+    let now = now_ms();
+    let skip = a.recent.len().saturating_sub(n_recent);
+    for (t, line, v) in a.recent.iter().skip(skip) {
+        out.push(format!("{{\"emit\":{},\"ago_ms\":{},\"line\":{}{}}}", json_str(v), now.saturating_sub(*t), line, named_fields(p, *line, v)));
+    }
+    if skip > 0 {
+        out.push(format!("{{\"emits_not_shown\":{},\"kept\":{}}}", skip, a.recent.len()));
+    }
     let mut counts: Vec<(&String, &u64)> = a.counts.iter().collect();
     counts.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
     for (k, v) in counts.iter().take(30) {
@@ -608,7 +781,21 @@ fn read_json(p: &Probe) -> Vec<String> {
 /// `probe add <fn|file:line> <probe.rs | code> [mutate=1]` | `probe list` | `probe read P<n>` |
 /// `probe rm <P<n>|all>`
 pub fn cmd(req: &Req, out: &mut Out) {
-    match req.pos.first().map(String::as_str).unwrap_or("list") {
+    // a Splash line (`game.splash:76`) or a Splash probe (`SP3`): the script VM's line probes
+    let sub = req.pos.first().map(String::as_str).unwrap_or("list");
+    let target = req.pos.get(1).map(String::as_str).unwrap_or("");
+    let splash = match sub {
+        "add" => target.rsplit_once(':').is_some_and(|(f, _)| f.ends_with(".splash")),
+        "read" | "rm" => target.starts_with("SP"),
+        _ => false,
+    };
+    if splash {
+        if !super::host_query("sprobe", req, out) {
+            out.err("Splash line probes need a host with Splash VMs (makepad run of a makepad app)");
+        }
+        return;
+    }
+    match sub {
         "add" => {
             // the client sends the code (or a file's path) as `code`; a typed line has it as words
             let src = req.get("code").map(str::to_string).or_else(|| (req.pos.len() > 2).then(|| req.pos[2..].join(" ")));
@@ -634,6 +821,8 @@ pub fn cmd(req: &Req, out: &mut Out) {
         }
         "list" => {
             out.measured("probes", "probe counters", &[]);
+            // the Splash line probes (SP<n>) first
+            let _ = super::host_query("sprobe", req, out);
             for p in PROBES.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| !p.slots.lock().unwrap_or_else(|e| e.into_inner()).is_empty()) {
                 let (hits, ns, timed) = (p.hits.load(Relaxed), p.ns.load(Relaxed), p.timed.load(Relaxed));
                 let failed = p.failed.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -659,7 +848,8 @@ pub fn cmd(req: &Req, out: &mut Out) {
                 Some(p) => {
                     drop(ps);
                     out.measured(&format!("probe P{} aggregates ({} hits)", p.id, p.hits.load(Relaxed)), "probe tables", &[]);
-                    for l in read_json(&p) {
+                    let n = req.get("n").and_then(|v| v.parse::<usize>().ok()).unwrap_or(12).clamp(1, RECENT);
+                    for l in read_json(&p, n) {
                         out.line(&l);
                     }
                 }

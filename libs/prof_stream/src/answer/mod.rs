@@ -2,8 +2,9 @@
 //! prints the protocol's JSON lines instead (programs; Scope reads the binary `prof` stream).
 //!
 //! Rendered on the client from the answer's JSON lines, so every transport (local socket, hub,
-//! native apps' endpoints) answers in the same words. The rules (profproto.md §5), for LLM readers
-//! first, cheap in tokens and hard to misread:
+//! native apps' endpoints) answers in the same words. The one renderer: the inspect client
+//! (relax-compiler) and Scope's Live console both call [`render`]. The rules (profproto.md §5),
+//! for LLM readers first, cheap in tokens and hard to misread:
 //! - answer first: line 1 is the finding with its key number; evidence follows;
 //! - the smallest useful answer; `more:` at the end names the drill-down commands with the ids
 //!   this answer printed (T3 thread, S35 fn slot, H7 heap site, P1 panic, F140 frame, V2 VM);
@@ -18,6 +19,7 @@ mod cpu;
 mod frames;
 mod hang;
 mod jit;
+mod live;
 mod memory;
 mod misc;
 #[cfg(test)]
@@ -28,23 +30,22 @@ use std::fmt::Write as _;
 
 pub use frames::Frames;
 
-/// Whether `line` asks one of inspect's own commands (the JIT's and the GPU tracer's); the app's
-/// remote-control commands (`snap`, `dump`, `click`, ..) keep their own output.
-pub fn renders(line: &str) -> bool {
-    let req = makepad_remote::Req::parse(line);
-    let c = req.cmd.as_str();
-    matches!(c, "frames" | "frame" | "top" | "path" | "hang" | "panics" | "resume" | "rm" | "continue" | "pause")
-        || super::COMMANDS.iter().chain(makepad_gpu_trace::query::COMMANDS).any(|x| x.0 == c)
+/// A request as the client parsed it (makepad-remote's `Req`: `cmd word k=v ..`).
+pub struct Request {
+    pub cmd: String,
+    pub pos: Vec<String>,
+    pub kv: Vec<(String, String)>,
 }
 
-/// Renders the answer to request `line` from its JSON lines (the `end` line left out); lines of
-/// a command inspect does not own come back unchanged.
-pub fn render(line: &str, lines: &[String]) -> String {
-    if !renders(line) {
-        return lines.iter().map(|l| format!("{}\n", l)).collect();
+impl Request {
+    pub fn get(&self, k: &str) -> Option<&str> {
+        self.kv.iter().rev().find(|x| x.0 == k).map(|x| x.1.as_str())
     }
-    let req = makepad_remote::Req::parse(line);
-    let mut a = Answer::parse(&req, lines);
+}
+
+/// Renders the answer to request `req` from its JSON lines (the `end` line left out).
+pub fn render(req: &Request, lines: &[String]) -> String {
+    let mut a = Answer::parse(req, lines);
     let sub = req.pos.first().map(String::as_str).unwrap_or("");
     match (req.cmd.as_str(), sub) {
         _ if a.only_errors() => {}
@@ -68,6 +69,13 @@ pub fn render(line: &str, lines: &[String]) -> String {
         ("mem", "timeline") => memory::mem_timeline(&mut a),
         ("versions", _) => jit::versions(&mut a),
         ("probes", _) => jit::probes(&mut a),
+        ("probe", "read") => jit::probe_read(&mut a),
+        ("src", _) => live::src(&mut a),
+        ("script", _) => live::script_errors(&mut a),
+        ("vm", _) => live::vm(&mut a),
+        ("verbs", _) => live::verbs(&mut a),
+        ("game", _) => live::game(&mut a),
+        ("writes", _) => live::writes(&mut a),
         ("timeline" | "frames", "frames") | ("frames", _) => misc::frames(&mut a),
         ("timeline" | "frame", "frame") | ("frame", _) => misc::frame(&mut a),
         ("hitch", _) => misc::hitch(&mut a),
@@ -76,16 +84,10 @@ pub fn render(line: &str, lines: &[String]) -> String {
     a.finish()
 }
 
-/// One streamed line (`events follow=1`, `watch`, `all`): the line's own short text.
-pub fn render_streamed(line: &str, l: &str) -> String {
-    let out = render(line, &[l.to_string()]);
-    out.trim_end().to_string()
-}
-
 /// An answer being written: the parsed lines, which of them a renderer used, and the text.
 pub struct Answer {
     pub cmd: String,
-    pub req: makepad_remote::Req,
+    pub req: Request,
     /// the answer's lines, parsed (non-JSON lines as strings)
     pub lines: Vec<Value>,
     /// lines a renderer used (the rest go to the generic part)
@@ -103,10 +105,10 @@ pub struct Answer {
 }
 
 impl Answer {
-    fn parse(req: &makepad_remote::Req, lines: &[String]) -> Answer {
+    fn parse(req: &Request, lines: &[String]) -> Answer {
         let mut a = Answer {
             cmd: req.cmd.clone(),
-            req: makepad_remote::Req { cmd: req.cmd.clone(), pos: req.pos.clone(), kv: req.kv.clone() },
+            req: Request { cmd: req.cmd.clone(), pos: req.pos.clone(), kv: req.kv.clone() },
             lines: Vec::new(),
             used: Vec::new(),
             measured: String::new(),

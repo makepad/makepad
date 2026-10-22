@@ -2553,6 +2553,10 @@ mod.widgets.Window.show_bg = true
 // It is opaque (alpha 1): drawn without blending, the tile GPU's hidden-surface
 // removal skips it under every opaque draw above it (a game's 3D view).
 mod.widgets.Window.draw_bg.alpha_blend = false
+// Nothing in it moves (it reads no clock), and it is the costliest shader of
+// a frame (an 800-line procedural plate over every pixel): rendered once per
+// size into a texture and drawn back from it.
+mod.widgets.Window.cache_bg = true
 mod.widgets.Window.draw_bg.pixel = fn() {
     let px = cp_px(self.draw_pass.dpi_factor)
     return vec4(cp_hull(self.pos * self.rect_size, self.rect_size, px), 1.0)

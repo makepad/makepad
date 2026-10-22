@@ -144,11 +144,6 @@ hal_commands! {
 
     /// Whether the window draws its own caption, for an embedding parent.
     WindowChrome = 26, window_chrome { id: obj, own: bool };
-    /// Session 0 only: a status every app window's title carries after its own (`<title> — <text>`,
-    /// e.g. makepad run's "optimizing 62%" while the JIT still optimises); an empty `text` removes
-    /// it. The OS titles change, and each app window's session gets a `TitleStatus` event (its
-    /// app-drawn caption shows the same).
-    TitleStatus = 27, title_status { text: sid };
 
     // ---- text input
     ImeShow = 30, ime_show { id: obj, area: rect, config: u32 };

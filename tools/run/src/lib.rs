@@ -170,6 +170,11 @@ fn provided() {
     relax_compiler::inspect::set_vm_provider(makepad_script::inspect_registry::summaries);
     relax_compiler::inspect::set_script_stack_provider(makepad_script::inspect_registry::script_stack);
     makepad_script::inspect_registry::set_error_hook(relax_compiler::inspect::script_error_event);
+    // Splash VM queries (src, vm, verbs, script errors): answered on the VM's own thread
+    for (name, _, _) in makepad_script::inspect_query::COMMANDS {
+        relax_compiler::inspect::register_host_inspect(name, script_query);
+    }
+    relax_compiler::inspect::register_host_commands(makepad_script::inspect_query::COMMANDS);
     relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
         domain_zero: cfg!(target_os = "android"),
         run: hal_run::run,
@@ -177,4 +182,21 @@ fn provided() {
         start: hal_run::start,
         relaunch: hal_run::relaunch,
     });
+}
+
+/// makepad inspect's Splash VM commands (makepad_script::inspect_query).
+fn script_query(req: &relax_compiler::inspect::Req, out: &mut relax_compiler::inspect::Out) -> bool {
+    let mut words = vec![req.cmd.clone()];
+    words.extend(req.pos.iter().cloned());
+    let Some(lines) = makepad_script::inspect_query::query(&words, &req.kv) else { return false };
+    for l in lines {
+        if let Some(e) = l.strip_prefix("{\"err\":") {
+            let msg = e.strip_suffix('}').unwrap_or(e);
+            let msg = msg.strip_prefix('"').and_then(|m| m.strip_suffix('"')).unwrap_or(msg);
+            out.err(&msg.replace("\\\"", "\"").replace("\\\\", "\\"));
+        } else {
+            out.line(&l);
+        }
+    }
+    true
 }

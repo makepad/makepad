@@ -34,7 +34,7 @@ fn every_command_round_trips() {
     assert_eq!(media, 10);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1);
+    assert_eq!(CMD_TABLE.len(), 56 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));
@@ -51,7 +51,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 95, "56 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, TitleStatus, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) events");
+    assert_eq!(EVENT_TABLE.len(), 94, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) events");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();

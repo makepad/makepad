@@ -32,7 +32,8 @@ use device::Worker;
 use pipeline::{PassKey, RenderPass, State};
 use resources::{buffer_usage, Buffer};
 use submit::{Batch, Event, Mailbox, Token};
-use std::collections::{HashMap, HashSet};
+use crate::FastMap;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
@@ -53,7 +54,7 @@ pub struct Vulkan {
     #[cfg(target_os = "android")]
     media: super::android::media::AndroidMedia,
     #[cfg(target_os = "linux")]
-    capture_pool: HashMap<(u32, Id), Vec<Arc<Buffer>>>,
+    capture_pool: FastMap<(u32, Id), Vec<Arc<Buffer>>>,
     #[cfg(target_os = "linux")]
     shell: Option<&'static super::linux::Shared>,
     /// the Android shell (Activity surface, lifecycle, input)
@@ -61,23 +62,23 @@ pub struct Vulkan {
     shell: Option<Box<dyn Shell>>,
     dev: Arc<Device>,
     info: HalInfo,
-    tex: HashMap<(u32, u32), Texture>,
-    buf: HashMap<(u32, u32), Retained>,
-    pipe: HashMap<(u32, u32), Pipe>,
-    programs: HashMap<Vec<u8>, Weak<State>>,
+    tex: FastMap<(u32, u32), Texture>,
+    buf: FastMap<(u32, u32), Retained>,
+    pipe: FastMap<(u32, u32), Pipe>,
+    programs: FastMap<Vec<u8>, Weak<State>>,
     /// Scratch of `prepare`: one draw's buffer and image descriptors, cleared per draw.
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
-    passes: HashMap<PassKey, Arc<RenderPass>>,
-    win: HashMap<(u32, u32), Texture>,
+    passes: FastMap<PassKey, Arc<RenderPass>>,
+    win: FastMap<(u32, u32), Texture>,
     /// A hosted window's newest frame size: its host's shared image is allocated larger than
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
-    hosted_sizes: HashMap<(u32, u32), [u32; 2]>,
-    scanout_images: HashMap<(u32, Id), Vec<Arc<Image>>>,
-    aliases: HashMap<(u32, Id), Id>,
-    pick_ids: HashMap<(u32, Id), Id>,
+    hosted_sizes: FastMap<(u32, u32), [u32; 2]>,
+    scanout_images: FastMap<(u32, Id), Vec<Arc<Image>>>,
+    aliases: FastMap<(u32, Id), Id>,
+    pick_ids: FastMap<(u32, Id), Id>,
     pick_pending: HashSet<(u32, Id)>,
-    fallback: HashMap<u32, Arc<Image>>,
+    fallback: FastMap<u32, Arc<Image>>,
     windows: surface::Windows,
     sharing: Box<dyn VkExternalImages>,
     #[cfg(target_os = "linux")]
@@ -161,9 +162,9 @@ impl Vulkan {
             max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set, ..Default::default() };
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: HashMap::new(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: HashMap::new(), win: HashMap::new(), hosted_sizes: HashMap::new(), scanout_images: HashMap::new(), aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(),
-            fallback: HashMap::new(), windows: surface::Windows::new(source), sharing,
+        Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
@@ -365,7 +366,7 @@ impl Backend for Vulkan {
     fn work_ahead(&mut self, world: &World, sid: u32, view: &CmdView) -> Option<Box<dyn FnOnce() + Send>> {
         use crate::cmds::HalCmd;
         let s = world.session(sid)?;
-        let mut created = HashMap::new();
+        let mut created = FastMap::default();
         for cmd in view.cmds {
             if let Some(HalCmd::TextureCreate { id, format, .. }) = cmd.decode(view.arena) { created.insert(id, format); }
         }
@@ -618,7 +619,7 @@ impl exec::DeviceReset for Vulkan {
 
     fn rebuild_pipelines(&mut self, world: &mut World) {
         self.programs.clear();
-        let mut rebuilt: HashMap<*const State, Arc<State>> = HashMap::new();
+        let mut rebuilt: FastMap<*const State, Arc<State>> = FastMap::default();
         let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
         for key in keys {
             let old = self.pipe[&key].state.clone();

@@ -24,6 +24,67 @@ struct Entry {
     gc_ns_last: AtomicU64,
     errors: AtomicU64,
     evals: AtomicU64,
+    /// errors and host diagnostics by site (`script errors`)
+    diags: Mutex<Vec<Diag>>,
+}
+
+/// One error site of a VM: what it said, where, how often.
+struct Diag {
+    /// "error" (a script error the VM reported) or "diagnostic" (host code: a wrong-typed option, ..)
+    kind: &'static str,
+    file: String,
+    line: u32,
+    text: String,
+    n: u64,
+    first_ms: u64,
+    last_ms: u64,
+}
+
+/// distinct sites kept per VM
+const DIAG_SITES: usize = 256;
+
+pub(crate) fn now_ms_pub() -> u64 {
+    now_ms()
+}
+
+/// The registry id (V<n>) of VM `base`.
+pub(crate) fn vm_of(base: &ScriptVmBase) -> Option<u32> {
+    find(base as *const ScriptVmBase as usize, false).map(|e| e.id)
+}
+
+/// VMs owned by the current thread that it is not evaluating now: (id, base address).
+pub(crate) fn idle_here() -> Vec<(u32, usize)> {
+    let name = std::thread::current().name().unwrap_or("?").to_owned();
+    let key = thread_key();
+    let busy = EVALS.lock().map(|v| v.iter().any(|e| e.0 == key)).unwrap_or(true);
+    if busy {
+        return Vec::new();
+    }
+    REGISTRY.lock().map(|r| r.iter().filter(|e| e.thread == name).map(|e| (e.id, e.base)).collect()).unwrap_or_default()
+}
+
+/// Every live VM: (id, label, evaluations).
+pub(crate) fn vm_ids() -> Vec<(u32, &'static str, u64)> {
+    REGISTRY.lock().map(|r| r.iter().map(|e| (e.id, e.label, e.evals.load(Relaxed))).collect()).unwrap_or_default()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn note_diag(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str) {
+    let Ok(mut d) = e.diags.lock() else { return };
+    let (file, line) = at.unwrap_or(("", 0));
+    let t = now_ms();
+    if let Some(x) = d.iter_mut().find(|x| x.line == line && x.file == file && x.text == text) {
+        x.n += 1;
+        x.last_ms = t;
+        return;
+    }
+    if d.len() >= DIAG_SITES {
+        return;
+    }
+    d.push(Diag { kind, file: file.to_string(), line, text: text.to_string(), n: 1, first_ms: t, last_ms: t });
 }
 
 static REGISTRY: Mutex<Vec<Arc<Entry>>> = Mutex::new(Vec::new());
@@ -80,6 +141,7 @@ pub fn register(base: *const ScriptVmBase, label: &'static str) {
         gc_ns_last: AtomicU64::new(0),
         errors: AtomicU64::new(0),
         evals: AtomicU64::new(0),
+        diags: Mutex::new(Vec::new()),
     };
     store(&e, heap);
     reg.push(Arc::new(e));
@@ -132,14 +194,77 @@ pub(crate) fn error(base: &ScriptVmBase, line: impl FnOnce() -> String) {
     if !ENABLED.load(Relaxed) {
         return;
     }
+    let text = line();
     if let Some(e) = find(base as *const ScriptVmBase as usize, false) {
         e.errors.fetch_add(1, Relaxed);
+        note_diag(&e, "error", None, &text);
     }
     let f = ERROR_HOOK.load(Relaxed);
     if f != 0 {
         let f: fn(&str) = unsafe { std::mem::transmute::<usize, fn(&str)>(f) };
-        f(&line());
+        f(&text);
     }
+}
+
+/// A host diagnostic at script site `at` (vm_ctl ERR_PUSH_DIAGNOSTIC): counted on every call, the
+/// error hook (the `scripterr` event) only at a site's `first` report.
+pub(crate) fn diagnostic(base: &ScriptVmBase, at: Option<(&str, u32)>, text: &str, first: bool) {
+    if !ENABLED.load(Relaxed) {
+        return;
+    }
+    let addr = base as *const ScriptVmBase as usize;
+    let e = match find(addr, false) {
+        Some(e) => e,
+        None => {
+            register(base, "vm");
+            match find(addr, false) {
+                Some(e) => e,
+                None => return,
+            }
+        }
+    };
+    e.errors.fetch_add(1, Relaxed);
+    note_diag(&e, "diagnostic", at, text);
+    let f = ERROR_HOOK.load(Relaxed);
+    if f != 0 && first {
+        let f: fn(&str) = unsafe { std::mem::transmute::<usize, fn(&str)>(f) };
+        match at {
+            Some((file, line)) => f(&format!("{}:{}: {}", file, line, text)),
+            None => f(text),
+        }
+    }
+}
+
+/// `script errors [vm=V<n>]`: every VM's error sites, the most frequent first, one JSON line each.
+pub fn script_errors(vm: Option<u32>) -> Vec<String> {
+    let list: Vec<Arc<Entry>> = match REGISTRY.lock() {
+        Ok(r) => r.iter().filter(|e| vm.map_or(true, |v| v == e.id)).cloned().collect(),
+        Err(_) => return Vec::new(),
+    };
+    let t = now_ms();
+    let mut rows: Vec<(u64, String)> = Vec::new();
+    for e in &list {
+        let Ok(d) = e.diags.lock() else { continue };
+        for x in d.iter() {
+            let at = if x.file.is_empty() { String::new() } else { format!(",\"at\":{}", json_str(&format!("{}:{}", x.file, x.line))) };
+            rows.push((
+                x.n,
+                format!(
+                    "{{\"vm\":\"V{}\",\"label\":{},\"kind\":\"{}\"{},\"n\":{},\"first_s_ago\":{:.1},\"last_s_ago\":{:.1},\"text\":{}}}",
+                    e.id,
+                    json_str(e.label),
+                    x.kind,
+                    at,
+                    x.n,
+                    t.saturating_sub(x.first_ms) as f64 / 1000.0,
+                    t.saturating_sub(x.last_ms) as f64 / 1000.0,
+                    json_str(&x.text)
+                ),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.into_iter().map(|r| r.1).collect()
 }
 
 /// Every uncaught error that is reported or captured is passed to `f` as one formatted line.
@@ -149,7 +274,7 @@ pub fn set_error_hook(f: fn(&str)) {
     ENABLED.store(true, Relaxed);
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     o.push('"');
     for c in s.chars() {
@@ -218,6 +343,7 @@ pub(crate) struct EvalGuard {
 }
 
 pub(crate) fn eval_guard(base: &ScriptVmBase) -> EvalGuard {
+    crate::inspect_query::safe_point(base);
     eval_started(base);
     if !ENABLED.load(Relaxed) {
         return EvalGuard { key: 0 };

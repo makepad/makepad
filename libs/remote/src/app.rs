@@ -87,7 +87,8 @@ fn run_inner(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> boo
     let reply = match (first, second) {
         ("grab", _) | ("tweak", Some("grab")) => grab(client, &kv),
         ("gseq", _) => gseq(client, &kv),
-        ("rec", _) => rec(client, &kv),
+        // `rec save|status|mark|on|off` is the flight recorder (an app command); bare `rec` records frames
+        ("rec", s) if !matches!(s, Some("save" | "status" | "mark" | "on" | "off")) => rec(client, &kv),
         ("gq", _) => gq(client, &kv),
         ("tweak", Some("final")) => return tweak_final(client, &words, &kv, each),
         ("tools", _) => return app_request(client, "list", each),

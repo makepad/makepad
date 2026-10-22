@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// `cmd word k=v` (the inspect client parses it with makepad-remote's `Req`).
+fn render(line: &str, lines: &[String]) -> String {
+    let mut q = crate::ask::Q::parse(line);
+    let cmd = if q.pos.is_empty() { String::new() } else { q.pos.remove(0) };
+    super::render(&Request { cmd, pos: q.pos, kv: q.kv }, lines)
+}
+
 fn lines(s: &str) -> Vec<String> {
     s.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()
 }

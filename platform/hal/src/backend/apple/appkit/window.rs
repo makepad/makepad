@@ -65,6 +65,8 @@ pub struct Win {
     last_press: Cell<ObjcId>,
     /// the press whose caption answer is pending, and its click count
     caption_event: Cell<ObjcId>,
+    /// that press: its event timestamp (s) and its y (points below the window's top edge)
+    caption_press: Cell<[f64; 2]>,
     /// what the app said about the drag over the window the last time (`drag_response`)
     pub drag_answer: Cell<u32>,
     /// a drop was announced (the app accepts it iff it answered with an operation)
@@ -130,6 +132,7 @@ impl Win {
                 buttons_center_y: Cell::new(None),
                 last_press: Cell::new(nil),
                 caption_event: Cell::new(nil),
+                caption_press: Cell::new([0.0; 2]),
                 drag_answer: Cell::new(input::drag_response::NONE),
                 transparent: Cell::new(false),
             }));
@@ -500,7 +503,7 @@ impl Win {
             self.remember_press(event);
             // the caption question goes to the app; its answer (`caption_answer`) starts the
             // window drag, or the zoom on a double click
-            self.remember_caption(event);
+            self.remember_caption(event, y);
             self.push(|q| q.drag_query(self.id.get(), x, y));
         }
         self.push(|q| q.mouse_down(self.id.get(), x, y, button, mods));
@@ -549,6 +552,7 @@ impl Win {
         }
         if event_is_press_motion(event) {
             self.remember_press(event);
+            self.caption_drag_unanswered(event);
         }
         self.push(|q| q.mouse_move(self.id.get(), pos[0], pos[1], delta[0], delta[1], mods));
     }
@@ -622,16 +626,46 @@ impl Win {
         }
     }
 
-    fn remember_caption(&self, event: ObjcId) {
+    fn remember_caption(&self, event: ObjcId, y: f64) {
         if event == nil {
             return;
         }
         unsafe {
+            let at: f64 = msg_send![event, timestamp];
+            self.caption_press.set([at, y]);
             let () = msg_send![event, retain];
             let old = self.caption_event.replace(event);
             if old != nil {
                 let () = msg_send![old, release];
             }
+        }
+    }
+
+    /// A press in the caption strip that the app has not answered for CAPTION_HUNG_S while the
+    /// pointer is dragged: the app is not running its event loop (a long lazy compile, a level
+    /// load): the strip moves the window as a hung app's title bar does. A later answer finds
+    /// the press taken. The strip is the app's caption (twice the traffic lights' center it
+    /// asked for), else the native caption height; windows without native buttons have none.
+    fn caption_drag_unanswered(&self, event: ObjcId) {
+        const CAPTION_HUNG_S: f64 = 0.25;
+        let pending = self.caption_event.get();
+        if pending == nil || self.popup || self.fullscreen.get() {
+            return;
+        }
+        let [at, y] = self.caption_press.get();
+        let now: f64 = unsafe { msg_send![event, timestamp] };
+        if now - at < CAPTION_HUNG_S {
+            return;
+        }
+        let strip = match self.buttons_center_y.get() {
+            Some(center) => 2.0 * center,
+            None => match self.capture_default_window_buttons() {
+                Some(d) => d.caption_height,
+                None => return,
+            },
+        };
+        if y >= 0.0 && y < strip {
+            self.caption_answer(input::drag_query::CAPTION);
         }
     }
 

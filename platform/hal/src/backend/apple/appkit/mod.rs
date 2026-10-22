@@ -19,6 +19,7 @@
 //! `super::shell`, shared with the UIKit shell.
 
 mod app;
+mod badge;
 mod classes;
 mod clipboard;
 mod ime;

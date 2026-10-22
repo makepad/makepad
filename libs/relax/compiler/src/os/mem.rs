@@ -207,7 +207,26 @@ mod imp {
         if unsafe { mprotect(base as *mut u8, code, PROT_RWX) } != 0 {
             panic!("reservation: mprotect RWX failed");
         }
+        huge_code_pages(base, code);
         base
+    }
+
+    /// Code memory in 2-MB pages where the kernel gives them (MADV_HUGEPAGE: THP with direct
+    /// compaction for this range, khugepaged collapses the rest): the JIT's hot code is spread
+    /// over ~1.8x the 4-KB pages of a rustc binary's (installs land in time order, between cold
+    /// code), and the race's UI thread took 2.2x native's L1 iTLB misses (RACEPAR, Zen 5). With
+    /// THP `always` but defrag `madvise` the code region stayed all 4-KB pages. A no-op where THP
+    /// is off; costs up to one partly used 2-MB page per touched region in RSS.
+    /// MAKEPAD_RUN_HUGE_CODE=0 keeps 4-KB pages (A/B).
+    fn huge_code_pages(addr: u64, len: usize) {
+        if std::env::var_os("MAKEPAD_RUN_HUGE_CODE").is_some_and(|v| v == "0") {
+            return;
+        }
+        extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        const MADV_HUGEPAGE: i32 = 14;
+        unsafe { madvise(addr as *mut u8, len, MADV_HUGEPAGE) };
     }
 
     /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is

@@ -5,7 +5,7 @@
 
 use super::timing::*;
 use makepad_apple_sys::*;
-use std::collections::HashMap;
+use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -123,7 +123,7 @@ pub struct Device {
     pub clock: Option<Option<Arc<PassClock>>>,
     chunks: Vec<Chunk>,
     /// batch-local: where a (pointer, length) of the caller's memory already sits in the arena
-    pub dedup: HashMap<(usize, usize), Loc>,
+    pub dedup: FastMap<(usize, usize), Loc>,
     pub recommended_working_set: u64,
 }
 
@@ -213,7 +213,7 @@ impl Device {
             descriptor,
             clock: None,
             chunks: Vec::new(),
-            dedup: HashMap::new(),
+            dedup: FastMap::default(),
             recommended_working_set: crate::gpu_limits::gpu_working_set_bytes(),
         };
         // the first batches' uniforms: two chunks, touched now so no draw waits for a page fault

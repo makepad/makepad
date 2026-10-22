@@ -90,6 +90,25 @@ script_mod! {
         }
     }
 
+    // A quad's cached picture drawn back (View `cache_bg`): `image` holds the
+    // pixels the quad's own shader rendered over the same rect, at the same
+    // density, its top-left at the texture's origin. A rect that is not a
+    // whole number of pixels was rendered into the next whole pixel, so the
+    // quad samples the part it covers. One texture read per pixel.
+    mod.draw.DrawCachedQuad = mod.std.set_type_default() do #(DrawCachedQuad::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        image: texture_2d(float)
+        scale: varying(vec2f)
+        vertex: fn() {
+            let dpi = self.draw_pass.dpi_factor
+            self.scale = self.rect_size / (ceil(self.rect_size * dpi - vec2(0.01, 0.01)) / dpi)
+            self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
+        }
+        pixel: fn() {
+            return self.image.sample(self.pos * self.scale)
+        }
+    }
+
     mod.draw.DrawColor = mod.std.set_type_default() do #(DrawColor::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn(){
@@ -128,6 +147,14 @@ pub struct DrawColor {
     pub draw_super: DrawQuad,
     #[live]
     pub color: Vec4f,
+}
+
+/// Draws back the texture a View's `cache_bg` rendered its background into.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawCachedQuad {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 /// A quad of `affine_size` placed by the affine `affine_m` / `affine_t` (see

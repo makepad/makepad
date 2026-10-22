@@ -67,7 +67,7 @@ fn serve(app: &str, send: &dyn Fn(Vec<u8>) -> bool, closed: &dyn Fn() -> bool) {
     let mut strings = ps::Interner::default();
     let _ = strings.id("");
     let mut msg = ps::prelude().to_vec();
-    let hello = ps::Hello { app: app.to_string(), host: String::new(), pid: std::process::id() as u64, build: String::new(), device: String::new(), refresh_mhz: 0, flags: 2 };
+    let hello = ps::Hello { app: app.to_string(), host: String::new(), pid: std::process::id() as u64, build: String::new(), device: String::new(), refresh_mhz: 0, flags: 2, start_mono: 0 };
     ps::record(&mut msg, ps::kind::HELLO, &hello.payload());
     let unix_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     ps::record(&mut msg, ps::kind::CLOCK, &ps::clock_payload(ps::mono_ns(), unix_ms()));
