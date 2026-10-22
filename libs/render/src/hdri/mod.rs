@@ -186,19 +186,24 @@ pub struct Env {
 /// and the bolt it stands in front of: the base behind them, which the
 /// skyline's strip is lit and grounded by and the map then veils once
 /// (`base_at`, `skyline::over_veiled`). Without a weather it changes nothing.
+/// `even_ground` reads a wet ground with its puddles at their mean share
+/// (`Weather::ground_even`): the strip's ground ring and the skirt's hold, a
+/// few looks that would otherwise land on a puddle or between them. The map's
+/// own ground keeps its puddles. A dry ground is unchanged.
 #[derive(Clone, Copy, Default)]
 struct Sampling<'a> {
     cache: Option<&'a volumetric::CloudCache>,
     texel: f32,
     bare: bool,
     unveiled: bool,
+    even_ground: bool,
 }
 
 impl<'a> Sampling<'a> {
     /// The lookups of a bake `width` wide (2:1, so a texel is as tall as it
     /// is wide at the equator).
     fn bake(width: usize, cache: Option<&'a volumetric::CloudCache>) -> Sampling<'a> {
-        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false }
+        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false, even_ground: false }
     }
 }
 
@@ -416,9 +421,10 @@ impl Env {
     /// no bright patch under the sea by day). The base is the skyline's own lookup without it, before
     /// the weather's veil: the skirt is veiled with the band (`base_at`), and the veil is affine and
     /// grey (one transmittance for all channels), so a skirt no brighter than the unveiled ground is,
-    /// veiled, no brighter than the ground the map draws.
+    /// veiled, no brighter than the ground the map draws. A wet ground is held to its mean
+    /// (`Weather::ground_even`), which is smooth where the puddles change finer than these looks.
     fn skirt_for(&self, band: &skyline::SkylineBand, turn: f32) -> skyline::BandSkirt {
-        let at = Sampling { bare: true, unveiled: true, ..Sampling::default() };
+        let at = Sampling { bare: true, unveiled: true, even_ground: true, ..Sampling::default() };
         let ground = |u: f32, el: f32| {
             let d = vec(ibl::equirect_uv_to_dir([(u + turn / 360.0).rem_euclid(1.0), 0.5 - el / 180.0]));
             let c = self.base_under_skyline(d, None, at);
@@ -497,7 +503,10 @@ impl Env {
     ///   the ring's few looks cannot sample; the sun's reaches the strip as
     ///   `sun_rgb`), and before the weather's veil and its bolt: the map veils
     ///   the strip in front of it (`base_at`), so a texel the strip hazes to
-    ///   the ring is, veiled once, the map's own horizon.
+    ///   the ring is, veiled once, the map's own horizon. A wet ground is read
+    ///   with its puddles at their mean share (`Weather::ground_even`, the
+    ///   owner's ruling): the ground ring's 64 looks would otherwise land on a
+    ///   puddle or between them, and the strip's near ground would be striped.
     /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
     ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
     ///   so under a closed deck the strip is as unlit by the sun as the key.
@@ -511,7 +520,7 @@ impl Env {
     pub fn skyline_light(&self) -> skyline::SkylineLight {
         use skyline::RING;
         let turn = self.params.skyline.as_ref().map_or(0.0, |block| block.turn_deg);
-        let at = Sampling { bare: true, unveiled: true, ..Sampling::default() };
+        let at = Sampling { bare: true, unveiled: true, even_ground: true, ..Sampling::default() };
         let ring = |el_deg: f32| -> [[f32; 3]; RING] {
             let mut ring = [[0.0; 3]; RING];
             for (i, entry) in ring.iter_mut().enumerate() {
@@ -769,7 +778,7 @@ impl Env {
                         weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
                             + weather.lightning(v, at.texel)
                     };
-                    let c = weather.ground(d, dry(d), self.ground_gain, &seen);
+                    let c = if at.even_ground { weather.ground_even(d, dry(d), self.ground_gain, &seen) } else { weather.ground(d, dry(d), self.ground_gain, &seen) };
                     // The base behind the veil, for the skyline's strip, which the map veils once (`base_at`).
                     if at.unveiled {
                         return c;

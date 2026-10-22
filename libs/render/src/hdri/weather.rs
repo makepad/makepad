@@ -485,6 +485,21 @@ impl Weather {
     /// rain and fog and with the bolt, so the mirror is no brighter than the
     /// sky above it). Above the horizon `ground` passes unchanged.
     pub fn ground(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
+        self.ground_with(d, ground, gain, sky_at, false)
+    }
+
+    /// [`Self::ground`] with the puddles at their mean share everywhere (the
+    /// share the far ground already draws), so a few looks round the horizon
+    /// read the wet ground's mean, not whether they hit a puddle: what the
+    /// skyline's strip takes for its ground (`Env::skyline_light`'s ground
+    /// ring, the skirt's hold). The ground is linear in the puddles' weight,
+    /// so this is the mean of `ground` over the puddles. A dry ground is
+    /// `ground`'s, bit for bit.
+    pub fn ground_even(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
+        self.ground_with(d, ground, gain, sky_at, true)
+    }
+
+    fn ground_with(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f, even: bool) -> Vec3f {
         if !(d.y < 0.0) {
             return ground;
         }
@@ -508,7 +523,7 @@ impl Weather {
         // horizon does not sparkle.
         let share = smooth(-2.0, 2.0, (0.49 - (threshold + 0.03)) / 0.12);
         let distance = reach * (1.0 - down * down).max(0.0).sqrt();
-        let detail = 1.0 - smooth(PUDDLE_FADE_START_M, PUDDLE_FADE_END_M, distance);
+        let detail = if even { 0.0 } else { 1.0 - smooth(PUDDLE_FADE_START_M, PUDDLE_FADE_END_M, distance) };
         let puddle = share + (puddle - share) * detail;
         // Damp ground between the puddles: darker, with a dull sheen. A puddle:
         // a flat mirror over what shows of its bottom.

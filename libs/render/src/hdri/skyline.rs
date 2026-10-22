@@ -628,9 +628,10 @@ mod tests {
         night.sky.sun.elevation_deg = -20.0;
         // and under the weather's veil (the final review: the skirt is held to the ground before the veil, so veiled
         // once it is still no brighter than the veiled ground), the land then seen through the veil too: fog and rain on
-        // dry ground, held as strictly as the clear sky; and the fog and rain kinds, whose wet ground's puddles change
-        // finer than the 128 azimuths and three elevations the hold looks at (a known limit of the hold, not of the
-        // veil): measured and printed, not held.
+        // dry ground; and the fog and rain kinds and a wet ground alone, whose puddles change finer than the hold's
+        // looks: the hold reads the wet ground's mean (the owner's ruling), so below the band nothing is brighter than
+        // the brighter of the map's ground there (a puddle showing through the skirt's fade is the map's own), the wet
+        // ground's mean there and the band's land, within WET_SLACK.
         let weather = |w: WeatherParams| {
             let mut p = HdriParams::default();
             p.sky.weather = Some(w);
@@ -642,9 +643,12 @@ mod tests {
             ("night", night, true),
             ("dry fog", weather(WeatherParams { fog: 0.7, ..WeatherParams::default() }), true),
             ("dry rain", weather(WeatherParams { rain: 0.6, fog: 0.1, ..WeatherParams::default() }), true),
-            ("fog", weather(kind("fog")), false),
-            ("rain", weather(kind("rain")), false),
+            ("fog", weather(kind("fog")), true),
+            ("rain", weather(kind("rain")), true),
+            ("wet ground", weather(WeatherParams { wet_ground: 0.7, ..WeatherParams::default() }), true),
         ];
+        const WET_SLACK: f32 = 1e-3;
+        let even = Sampling { bare: true, even_ground: true, ..Sampling::default() };
         for (name, p, held) in skies {
             let (q, images) = with_band(&p, band.clone());
             let (plain, with) = (Env::new(&p), Env::new_with(&q, &images));
@@ -656,12 +660,14 @@ mod tests {
                     let az = k as f32 * 2.0 + 0.5;
                     let (got, ground) = (light(with.radiance(dir(az, el))), light(plain.radiance(dir(az, el))));
                     let land_light = light(veil_of(&with, dir(az, el), land)) * with.scale();
-                    let most = ground.max(land_light);
+                    let mean = light(plain.base_under_skyline(dir(az, el), None, even)) * plain.scale();
+                    let most = ground.max(mean).max(land_light);
+                    let slack = if plain.weather.is_some() { WET_SLACK } else { 1e-4 };
                     if got > most * (1.0 + 1e-4) + 1e-7 {
                         over += 1;
                         worst = worst.max(got / most - 1.0);
                     }
-                    assert!(!held || got <= most * (1.0 + 1e-4) + 1e-7, "{name}: az {az}, el {el}: {got} under the band, the ground {ground}, its land {land_light}");
+                    assert!(!held || got <= most * (1.0 + slack) + 1e-7, "{name}: az {az}, el {el}: {got} under the band, the ground {ground} (its mean {mean}), its land {land_light}");
                 }
             }
             println!("{name}: below the band, {over} of {} looks brighter than the ground, at most by {:.1} %", (8 * (SKIRT_DEG as usize + 2) + 1) * 180, 100.0 * worst);
@@ -1016,7 +1022,11 @@ mod tests {
         for (name, p) in skies() {
             let l = Env::new(&p).skyline_light();
             let env = Env::new(&HdriParams { lights: vec![], intensity_ev: 0.0, rotation_deg: 0.0, ..p.clone() });
-            let unveiled = Sampling { bare: true, unveiled: true, ..Sampling::default() };
+            let unveiled = Sampling { bare: true, unveiled: true, even_ground: true, ..Sampling::default() };
+            // the map's lookup with a wet ground's puddles at their mean share (the owner's ruling: the strip's ground
+            // is the wet ground's mean), veiled; without a wet ground the map's own lookup
+            let even = Sampling { bare: true, even_ground: true, ..Sampling::default() };
+            let dry = ["clear", "clouds", "overcast"].contains(&name);
             let mut worst = 0.0f32;
             for i in 0..RING {
                 let u = (i as f32 + 0.5) / RING as f32;
@@ -1025,7 +1035,12 @@ mod tests {
                     let got = vec(ring[i]);
                     assert!(got == env.base_under_skyline(d, None, unveiled), "{name}: {i} at {el}: {got:?} is not the unveiled base");
                     let bolt = env.weather.as_ref().map_or(Vec3f::default(), |weather| weather.lightning(d, 0.0));
-                    let (seen, want) = (veil_of(&env, d, got) + bolt, env.radiance(d) / env.scale());
+                    let map = env.radiance(d) / env.scale();
+                    let want = if el < 0.0 { env.base_under_skyline(d, None, even) } else { map };
+                    if dry || el > 0.0 {
+                        assert!(close3(want, map, 1e-6), "{name}: {i} at {el}: the even lookup {want:?} is not the map's {map:?}");
+                    }
+                    let seen = veil_of(&env, d, got) + bolt;
                     worst = worst.max((seen - want).length() / want.length().max(1e-30));
                     if env.weather.is_none() {
                         assert!(got == want, "{name}: {i} at {el}: {got:?} vs the map's {want:?}");
@@ -1041,10 +1056,36 @@ mod tests {
         assert!((vec(fog.skyline_light().ring_low[0]) - fog.radiance(d) / fog.scale()).length() > 1e-3 * vec(fog.skyline_light().ring_low[0]).length());
     }
 
+    /// The owner's ruling (wet ground): the ground ring reads a wet ground's mean, not its puddles, so the strip's near
+    /// ground is even round the turn. Under the rain, storm and fog kinds and a wet ground alone, adjacent entries differ
+    /// by at most RING_STEP of the brighter (before: the ring alternated damp and puddle, 0.163 and 0.330 under rain:
+    /// 51 %).
+    #[test]
+    fn the_ground_ring_is_even_under_a_wet_ground() {
+        // (the storm's mirror still shows its rain shafts and its flash, which do change round the turn: 3.3 %)
+        const RING_STEP: f32 = 0.05;
+        let light = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let mut clear = HdriParams::default();
+        sun_at(&mut clear, 25.0, 180.0);
+        let kind = |kind: &str| WeatherParams { kind: kind.to_string(), ..WeatherParams::default() };
+        for (name, weather) in [("rain", kind("rain")), ("storm", kind("storm")), ("fog", kind("fog")), ("wet ground", WeatherParams { wet_ground: 0.7, ..WeatherParams::default() })] {
+            let mut p = clear.clone();
+            p.sky.weather = Some(weather);
+            let l = Env::new(&p).skyline_light();
+            let lum: Vec<f32> = l.ground_ring.iter().map(|c| light(*c)).collect();
+            let worst = (0..RING).map(|i| (lum[i] - lum[(i + 1) % RING]).abs() / lum[i].max(lum[(i + 1) % RING])).fold(0.0f32, f32::max);
+            let (lo, hi) = (lum.iter().cloned().fold(f32::MAX, f32::min), lum.iter().cloned().fold(0.0f32, f32::max));
+            println!("{name}: the ground ring {lo:.3} .. {hi:.3}, adjacent entries at most {:.2} % apart", 100.0 * worst);
+            assert!(worst <= RING_STEP, "{name}: adjacent ground ring entries {:.1} % apart: {lum:?}", 100.0 * worst);
+        }
+    }
+
     /// The map under `weather` (fog, rain), the sun at 25 degrees: a band built as the app's strip is, from the map's own
     /// light (`skyline_light`): its far rows a fully hazed ridge (the low ring itself, opaque), its near rows the map's
     /// ground (the ground ring, opaque), both read at a column's centre. Veiled once by the map, the ridge is the map's
-    /// sky there and the band's ground the map's ground, within 1e-4; and the skirt held to the ground is no brighter
+    /// sky there and the band's ground the map's ground, within 1e-4 (a wet ground's at its puddles' mean share, the
+    /// owner's ruling: then the band's ground is also even round the turn within COLUMN_STEP, and its mean round the
+    /// turn the map's own wet ground's, looked up, within MEAN_TOL); and the skirt held to the ground is no brighter
     /// than it (`held_to`, against the unveiled ground, so it holds under the veil too). With `dry` (no wet ground,
     /// whose puddles change the ground from one look to the next) the band's ground just above its bottom is the map's
     /// ground there within GROUND_STEP (the ground ring is read 1.5 degrees higher; the skirt is held to the darkest
@@ -1052,6 +1093,14 @@ mod tests {
     /// veil(veil(sky)) and the ground veil(veil(ground)): under fog a lighter band at the horizon.
     fn the_band_under_weather_is_the_maps_own(name: &str, weather: WeatherParams, dry: bool) {
         const GROUND_STEP: f32 = 0.02;
+        // (a wet ground only) round the turn, the band's ground against the map's own wet ground looked up 256 times
+        // over each ring entry's span: the puddles' share is the fbm's mean taken as normal (`Weather::ground_even`),
+        // a few per cent off the field's own (measured: fog 4.7 %, rain 2.7 %); one entry's span holds only a few
+        // puddles, so entry by entry the look-ups scatter (up to 18 %) and only the turn's mean is held
+        const MEAN_TOL: f32 = 0.06;
+        // (a wet ground only) adjacent columns of the band's ground, as RING_STEP in `the_ground_ring_is_even_under_a_wet_ground`
+        const COLUMN_STEP: f32 = 0.05;
+        let mut columns = Vec::with_capacity(RING);
         let mut p = HdriParams::default();
         sun_at(&mut p, 25.0, 140.0);
         p.sky.weather = Some(weather);
@@ -1069,15 +1118,36 @@ mod tests {
         let city = Env::new_with(&q, &images);
         let k = plain.scale();
         let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
-        let (mut worst_far, mut worst_near, mut worst_step) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut worst_far, mut worst_near, mut worst_step, mut worst_mean) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let (mut band_sum, mut looked_sum) = (0.0f64, 0.0f64);
         for i in 0..RING {
             let u = (i as f32 + 0.5) / RING as f32;
             // a fully hazed far texel and the map's sky beside it (the same direction, without the city)
             let (far, sky) = (city.radiance(dir_at_u(u, 1.0)), plain.radiance(dir_at_u(u, 1.0)));
             worst_far = worst_far.max((far - sky).length() / sky.length());
             assert!(close3(far, sky, 1e-4), "{name}: u {u}: the hazed ridge {far:?}, the map's sky {sky:?}");
-            // the band's ground where the ground ring was read, and the map's ground there
-            let (near, ground) = (city.radiance(dir_at_u(u, -GROUND_RING_DEG)), plain.radiance(dir_at_u(u, -GROUND_RING_DEG)));
+            // the band's ground where the ground ring was read, and the map's ground there, a wet ground's puddles at their
+            // mean share (the owner's ruling; a dry ground's mean is its own)
+            let d = dir_at_u(u, -GROUND_RING_DEG);
+            let near = city.radiance(d);
+            columns.push(light(near));
+            let ground = plain.base_under_skyline(d, None, Sampling { bare: true, even_ground: true, ..Sampling::default() }) * k;
+            if dry {
+                assert!(close3(ground, plain.radiance(d), 1e-6), "{name}: u {u}: a dry ground's mean is not its own");
+            } else {
+                // and that mean is the map's own wet ground averaged over the ring entry's span (its 5.6 degrees of
+                // azimuth, a degree of elevation about -4): 16 x 16 looks
+                let mut sum = Vec3f::default();
+                for a in 0..16 {
+                    for b in 0..16 {
+                        let du = (a as f32 + 0.5) / 16.0 - 0.5;
+                        sum += plain.radiance(dir_at_u(u + du / RING as f32, -GROUND_RING_DEG - 0.5 + (b as f32 + 0.5) / 16.0));
+                    }
+                }
+                let looked = sum * (1.0 / 256.0);
+                worst_mean = worst_mean.max((light(near) - light(looked)).abs() / light(looked));
+                (band_sum, looked_sum) = (band_sum + light(near) as f64, looked_sum + light(looked) as f64);
+            }
             worst_near = worst_near.max((near - ground).length() / ground.length());
             assert!(close3(near, ground, 1e-4), "{name}: u {u}: the band's ground {near:?}, the map's {ground:?}");
             if dry {
@@ -1100,7 +1170,17 @@ mod tests {
                 assert!(light(city.radiance(d)) <= most * (1.0 + 1e-4) + 1e-7, "{name}: u {u}, el {el}: the skirt {:?} over the ground {most}", city.radiance(d));
             }
         }
-        println!("{name}: the ridge against the sky {worst_far:.1e}, the band's ground against the map's {worst_near:.1e}, across the bottom {worst_step:.4}");
+        println!("{name}: the ridge against the sky {worst_far:.1e}, the band's ground against the map's {worst_near:.1e}, across the bottom {worst_step:.4}, against the looked-up mean {worst_mean:.4} at worst");
+        if !dry {
+            // the band's ground is even round the turn: no stripes of puddle and damp ground
+            let step = (0..RING).map(|i| (columns[i] - columns[(i + 1) % RING]).abs() / columns[i].max(columns[(i + 1) % RING])).fold(0.0f32, f32::max);
+            println!("{name}: the band's ground, adjacent columns at most {:.2} % apart", 100.0 * step);
+            assert!(step <= COLUMN_STEP, "{name}: the band's ground has stripes: adjacent columns {:.1} % apart: {columns:?}", 100.0 * step);
+            // round the turn, the band's ground is the map's wet ground's mean
+            let off = ((band_sum - looked_sum) / looked_sum).abs() as f32;
+            println!("{name}: round the turn the band's ground {:.4}, the map's wet ground looked up {:.4}: {:.2} % apart", band_sum / RING as f64, looked_sum / RING as f64, 100.0 * off);
+            assert!(off <= MEAN_TOL, "{name}: round the turn the band's ground and the wet ground's mean are {:.1} % apart", 100.0 * off);
+        }
     }
 
     #[test]
