@@ -19,11 +19,15 @@ use super::arr;
 pub const FADE_DEG: f32 = 1.0;
 
 /// How far below the band its skirt reaches, degrees: its alpha (and, premultiplied, its light)
-/// fades from the bottom row's to 0 over this, and the generated ground takes over.
-pub const SKIRT_DEG: f32 = 30.0;
+/// fades from the bottom row's to 0 over this, and the generated ground takes over. A short fade
+/// (the owner's ruling, plan hdri-5 Task 8; 30 before): long enough that the band's ground meets
+/// the generated one without an edge, short enough that nothing of the strip runs on down.
+pub const SKIRT_DEG: f32 = 4.0;
 
-/// The skirt is the bottom row box-blurred over this many degrees of azimuth either side.
-pub const SKIRT_BLUR_DEG: f32 = 15.0;
+/// The skirt is the bottom row box-blurred over this many degrees of azimuth either side (15
+/// with the 30 degree skirt): over a few degrees, a little blur is enough to keep a single bright
+/// texel of the bottom row from drawing a streak down.
+pub const SKIRT_BLUR_DEG: f32 = 2.0;
 
 /// The skyline's strip, as the app rendered it.
 #[derive(Clone, PartialEq)]
@@ -168,6 +172,23 @@ impl BandSkirt {
         }
         let peak = row.iter().fold(0.0f32, |peak, t| peak.max(t[0]).max(t[1]).max(t[2]));
         BandSkirt { row, peak }
+    }
+
+    /// This skirt with each texel's light held to `bound(u)` times its alpha (luminance, Rec. 709),
+    /// the colour kept: a map holds it to its own ground (`Env::skirt_for`), so what the strip runs
+    /// on into is never brighter than the ground there, the sea's bright sky reflection included.
+    pub fn held_to(mut self, bound: impl Fn(f32) -> f32) -> BandSkirt {
+        let w = self.row.len();
+        for (x, t) in self.row.iter_mut().enumerate() {
+            let most = t[3] * bound((x as f32 + 0.5) / w as f32);
+            let light = 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+            if light > most {
+                let k = if most > 0.0 { most / light } else { 0.0 };
+                for c in 0..3 { t[c] *= k; }
+            }
+        }
+        self.peak = self.row.iter().fold(0.0f32, |peak, t| peak.max(t[0]).max(t[1]).max(t[2]));
+        self
     }
 
     /// The skirt at strip u: linear between its two nearest texels, wrapping.
@@ -346,7 +367,15 @@ pub struct SkylineLight {
     /// clouds, volume and weather veil included), without the discs and the stars.
     pub ring_low: [[f32; 3]; RING],
     pub ring_high: [[f32; 3]; RING],
+    /// The map's own ground round the turn at GROUND_RING_DEG below the horizon (its base as the map
+    /// draws it there, without the skyline): what the strip's near ground takes in the app, so the
+    /// band's ground is this map's and runs into it without an edge.
+    pub ground_ring: [[f32; 3]; RING],
 }
+
+/// The ground ring's elevation, degrees below the horizon: inside the strip's own ground (its bottom is
+/// -6.4 degrees at the defaults), where it meets the map's.
+pub(super) const GROUND_RING_DEG: f32 = 4.0;
 
 /// Smoothstep over 0..1.
 fn smooth(t: f32) -> f32 {
@@ -420,10 +449,16 @@ mod tests {
         assert!((inside - Vec3f { x: 0.25, y: 0.5, z: 0.75 } * b.scale()).length() < 1e-4);
         assert_eq!(a.radiance(dir(30.0, 40.0)), b.radiance(dir(30.0, 40.0)));   // above the band
         assert_eq!(a.radiance(dir(30.0, -40.0)), b.radiance(dir(30.0, -40.0))); // below the band and its skirt
-        // in the skirt (a band of one colour blurs to itself): the colour, fading toward the sky beneath
-        let skirt = b.radiance(dir(30.0, -20.0));
-        let (sky, t) = (a.radiance(dir(30.0, -20.0)), smooth(15.0 / SKIRT_DEG));
-        let want = Vec3f { x: 0.25, y: 0.5, z: 0.75 } * (t * b.scale()) + sky * (1.0 - t);
+        // in the skirt (a band of one colour blurs to itself): the colour, held to the ground's light at the band's
+        // bottom, half way and at the skirt's end (`Env::skirt_for`), fading toward the ground beneath
+        let el = -5.0 - 0.5 * SKIRT_DEG;
+        let skirt = b.radiance(dir(30.0, el));
+        let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+        let held = [-5.0, el, -5.0 - SKIRT_DEG].map(|e| light(a.radiance(dir(30.0, e))) / a.scale()).into_iter().fold(f32::INFINITY, f32::min);
+        let colour = Vec3f { x: 0.25, y: 0.5, z: 0.75 };
+        let colour = colour * (held / light(colour)).min(1.0);
+        let (sky, t) = (a.radiance(dir(30.0, el)), smooth(0.5));
+        let want = colour * (t * b.scale()) + sky * (1.0 - t);
         assert!((skirt - want).length() < 1e-4 * (1.0 + want.length()), "{skirt:?} {want:?}");
     }
 
@@ -462,7 +497,7 @@ mod tests {
         assert_eq!(b.sample_skirted(&skirt, dir(0.0, -5.0 + FADE_DEG + 0.01), 0.0), [1.0; 4], "above the blend, the band");
         // a band of one colour blurs to itself: no change across the bottom edge, then the fade
         assert_eq!(b.sample_skirted(&skirt, dir(0.0, -5.0 + 0.05), 0.0), [1.0; 4]);
-        assert!((b.sample_skirted(&skirt, dir(0.0, -5.0 - 0.05), 0.0)[3] - 1.0).abs() < 1e-5);
+        assert!((b.sample_skirted(&skirt, dir(0.0, -5.0 - 0.005), 0.0)[3] - 1.0).abs() < 1e-5);
         let mid = b.sample_skirted(&skirt, dir(0.0, -5.0 - 0.5 * SKIRT_DEG), 0.0);
         assert!((mid[3] - 0.5).abs() < 1e-5 && mid[0] == mid[3], "half way down, half its alpha (premultiplied): {mid:?}");
         for el in [-5.0 - SKIRT_DEG, -5.0 - SKIRT_DEG - 0.01, -60.0, -90.0] {
@@ -476,7 +511,8 @@ mod tests {
     /// less than 1e-4 (of a texel of 4), everywhere round the turn.
     #[test]
     fn the_skirt_meets_the_band_without_a_seam() {
-        let b = a_band_with_a_lit_bottom_row(64);
+        // 640 texels: the 2 degree blur spans 9 of them
+        let b = a_band_with_a_lit_bottom_row(640);
         let skirt = b.skirt();
         let eps = 1e-3;
         for i in 0..640 {
@@ -487,8 +523,8 @@ mod tests {
             }
             // and the sharp bottom row itself does differ from it there (the premise)
         }
-        let sharp = b.sample(dir_at_u(0.5 / 64.0, -4.0 + 0.01), 0.0);
-        assert!((sharp[0] - b.sample_skirted(&skirt, dir_at_u(0.5 / 64.0, -4.0 - eps), 0.0)[0]).abs() > 0.5, "the bottom row is not blurred: nothing to test");
+        let sharp = b.sample(dir_at_u(0.5 / 640.0, -4.0 + 0.01), 0.0);
+        assert!((sharp[0] - b.sample_skirted(&skirt, dir_at_u(0.5 / 640.0, -4.0 - eps), 0.0)[0]).abs() > 0.5, "the bottom row is not blurred: nothing to test");
     }
 
     /// The quick test on a direction's height (plan hdri-5 Task 8: most of a map's texels lie above the band or below
@@ -544,7 +580,7 @@ mod tests {
         let (q, images) = with_band(&p, a_band_with_a_lit_bottom_row(64));
         let (plain, with) = (Env::new(&p), Env::new_with(&q, &images));
         let later = Env::new(&q).with_skyline(images.skyline.clone().unwrap());
-        for el in [-4.5, -10.0, -25.0] {
+        for el in [-4.5, -4.0 - 0.5 * SKIRT_DEG, -4.0 - 0.9 * SKIRT_DEG] {
             let d = dir(33.0, el);
             assert!(with.radiance(d) != plain.radiance(d), "no skirt at {el}");
             assert_eq!(with.radiance(d), later.radiance(d));
@@ -553,6 +589,39 @@ mod tests {
             assert_eq!(with.radiance(dir(33.0, el)), plain.radiance(dir(33.0, el)), "a skirt at {el}");
         }
         assert!(with.bake(64) == later.bake(64), "attached later, the skirt is the one built with");
+    }
+
+    /// The owner's ruling (plan hdri-5 Task 8): below the band nothing is brighter than the brighter of the map's own
+    /// ground there and the band's land texels. A strip whose bottom row is a bright sea (its sky reflection) over a
+    /// fifth of the turn and dark land elsewhere, at noon and in the night: down from the band's bottom to under its
+    /// skirt, every direction round the turn; and the land's skirt still meets the band without an edge.
+    #[test]
+    fn nothing_below_the_band_is_brighter_than_the_ground_or_its_land() {
+        let (w, h) = (360, 8);
+        let land = [0.02, 0.02, 0.02, 1.0];
+        let texels = (0..w * h).map(|i| if i / w == h - 1 && (144..216).contains(&(i % w)) { [3.0, 3.2, 3.5, 1.0] } else { land }).collect();
+        let band = SkylineBand { w, h, texels, top_deg: 20.0, bottom_deg: -6.0 };
+        let light = |c: Vec3f| 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+        let mut night = HdriParams::default();
+        night.sky.sun.mode = "manual".to_string();
+        night.sky.sun.elevation_deg = -20.0;
+        for p in [HdriParams::default(), night] {
+            let (q, images) = with_band(&p, band.clone());
+            let (plain, with) = (Env::new(&p), Env::new_with(&q, &images));
+            let land_light = light(Vec3f { x: 0.02, y: 0.02, z: 0.02 }) * with.scale();
+            for i in 0..=8 * (SKIRT_DEG as usize + 2) {
+                let el = -6.0 - 0.01 - i as f32 * 0.125;
+                for k in 0..180 {
+                    let az = k as f32 * 2.0 + 0.5;
+                    let (got, ground) = (light(with.radiance(dir(az, el))), light(plain.radiance(dir(az, el))));
+                    let most = ground.max(land_light);
+                    assert!(got <= most * (1.0 + 1e-4) + 1e-7, "az {az}, el {el}: {got} under the band, the ground {ground}, its land {land_light}");
+                }
+            }
+            // the land's skirt meets the band: just above and just below its bottom, alike
+            let (above, below) = (with.radiance(dir(20.0, -6.0 + 1e-3)), with.radiance(dir(20.0, -6.0 - 1e-3)));
+            assert!((above - below).length() < 1e-4 * (1.0 + above.length()), "{above:?} {below:?}");
+        }
     }
 
     #[test]

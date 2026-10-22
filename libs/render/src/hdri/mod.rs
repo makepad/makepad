@@ -350,7 +350,8 @@ impl Env {
             ground_gain: Vec3f::all(1.0),
             base_image: None,
             city_peaks: skyline.as_ref().map(|(band, _)| band.peaks()),
-            city_skirt: skyline.as_ref().map(|(band, _)| band.skirt()),
+            // built once the ground it is held to is (`skirt_for`, below)
+            city_skirt: None,
             skyline,
             bloom_width: width,
             measured_key: OnceLock::new(),
@@ -372,6 +373,9 @@ impl Env {
             // still None here, so it meters the mode's own base).
             let sky_irradiance = if base.replace_sky { Some(env.base_irradiance()) } else { None };
             env.base_image = composite::BaseImage::new(&base, images, sky_irradiance);
+        }
+        if let Some((band, turn)) = env.skyline.clone() {
+            env.city_skirt = Some(env.skirt_for(&band, turn));
         }
         // A caster's bloom reads the finished layers behind it, so it comes
         // last; a newer request stops it as it stops the cloud noise (R5).
@@ -398,6 +402,22 @@ impl Env {
     fn city_at(&self, d: Vec3f) -> Option<[f32; 4]> {
         let ((band, turn), skirt) = (self.skyline.as_ref()?, self.city_skirt.as_ref()?);
         Some(band.sample_skirted(skirt, d, *turn))
+    }
+
+    /// The skirt this map draws under `band` (turned by `turn` degrees): its bottom row blurred
+    /// (`SkylineBand::skirt`), held at every azimuth to the darkest of this map's own base (the
+    /// generated ground, a photograph's) at the band's bottom, half way down the skirt and at its
+    /// end, so the strip never runs on brighter than the ground it fades into (the owner's ruling:
+    /// no bright patch under the sea by day). The base is the skyline's own lookup without it.
+    fn skirt_for(&self, band: &skyline::SkylineBand, turn: f32) -> skyline::BandSkirt {
+        let at = Sampling { bare: true, ..Sampling::default() };
+        let ground = |u: f32, el: f32| {
+            let d = vec(ibl::equirect_uv_to_dir([(u + turn / 360.0).rem_euclid(1.0), 0.5 - el / 180.0]));
+            let c = self.base_under_skyline(d, None, at);
+            0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+        };
+        let bottom = band.bottom_deg;
+        band.skirt().held_to(|u| [bottom, bottom - 0.5 * skyline::SKIRT_DEG, bottom - skyline::SKIRT_DEG].into_iter().map(|el| ground(u, el)).fold(f32::INFINITY, f32::min))
     }
 
     /// The band and its turn, by the rule the ImageSet path keeps: Sky mode
@@ -431,7 +451,7 @@ impl Env {
             return Some(self);
         };
         self.city_peaks = Some(skyline.0.peaks());
-        self.city_skirt = Some(skyline.0.skirt());
+        self.city_skirt = Some(self.skirt_for(&skyline.0, skyline.1));
         self.skyline = Some(skyline);
         // The bloom read the base without the city: it is rastered again from
         // nothing, in list order, as the build rastered it.
@@ -475,9 +495,9 @@ impl Env {
             }
             ring
         };
-        let (ring_low, ring_high) = (ring(skyline::RING_LOW_DEG), ring(skyline::RING_HIGH_DEG));
+        let (ring_low, ring_high, ground_ring) = (ring(skyline::RING_LOW_DEG), ring(skyline::RING_HIGH_DEG), ring(-skyline::GROUND_RING_DEG));
         let Some(atmo) = &self.atmo else {
-            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high };
+            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring };
         };
         let pi = std::f32::consts::PI;
         let sun = atmo.sun_dir();
@@ -499,6 +519,7 @@ impl Env {
             ambient_rgb: arr(ambient),
             ring_low,
             ring_high,
+            ground_ring,
         }
     }
 
