@@ -8,7 +8,7 @@
 use crate::light::SkyLight;
 use crate::params::{Params, P};
 use crate::render::{SceneTarget, Skyline, ViewSpec};
-use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, makepad_script::pod_heap::f16_to_f32, *};
+use makepad_widgets::makepad_draw::{makepad_platform::SignalToUI, *};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +21,19 @@ pub struct Band { pub w: usize, pub h: usize, pub texels: Vec<[f32; 4]> }
 pub type BandDone = Box<dyn FnOnce(Result<Band, String>) + Send>;
 
 const TILE: usize = 4096;
+
+/// An IEEE half's value. Written here rather than taken from `makepad_script::pod_heap::f16_to_f32`, whose subnormal branch
+/// keeps the implicit leading bit (it masks with 0x7FFFFF before the shift), so about half the subnormals (below 6.1e-5)
+/// come out twice their value: the strip's darkest texels, which a host's small `design_gain` makes common.
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let (e, m) = ((h >> 10) & 0x1f, (h & 0x3ff) as f32);
+    match e {
+        0 => sign * m * (1.0 / 16_777_216.0),
+        31 => if m == 0.0 { sign * f32::INFINITY } else { f32::NAN },
+        _ => sign * (1.0 + m / 1024.0) * 2f32.powi(e as i32 - 15),
+    }
+}
 type Texels = Vec<[f32; 4]>;
 /// Where a job's result goes.
 enum Sink { File(ExportKind, std::path::PathBuf), Band(BandDone) }
@@ -189,4 +202,28 @@ fn exr(w: usize, h: usize, t: &[[f32; 4]]) -> Vec<u8> {
         for c in [3, 2, 1, 0] { for px in row { o.extend(px[c].to_le_bytes()); } }
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f16_to_f32;
+    use makepad_widgets::makepad_draw::makepad_script::pod_heap::f16_to_f32 as platform_f16;
+
+    #[test]
+    fn halves_decode_exactly_subnormals_included() {
+        for m in 1..1024u16 {
+            assert_eq!(f16_to_f32(m), m as f32 / 16_777_216.0, "subnormal {m}");
+            assert_eq!(f16_to_f32(0x8000 | m), -(m as f32) / 16_777_216.0);
+        }
+        // the normals: (1 + m/1024) 2^(e-15), each exact in f32 (the platform's normal branch is right too, but in a debug
+        // build it panics below exponent 15: `exponent as u32 - 15` underflows)
+        for h in (0x0400..0x7c00u16).chain(0x8400..0xfc00) {
+            let (s, e, m) = (if h & 0x8000 != 0 { -1.0f64 } else { 1.0 }, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f64);
+            assert_eq!(f16_to_f32(h) as f64, s * (1.0 + m / 1024.0) * 2f64.powi(e - 15), "{h:#06x}");
+        }
+        assert_eq!((f16_to_f32(0), f16_to_f32(0x3c00), f16_to_f32(0x7c00)), (0.0, 1.0, f32::INFINITY));
+        assert!(f16_to_f32(0x7e00).is_nan());
+        // the platform's doubles a subnormal whose leading bit is odd (2^-23 for 2^-24 x 2); why this one is local
+        assert_eq!((f16_to_f32(2), platform_f16(2)), (2.0 / 16_777_216.0, 4.0 / 16_777_216.0));
+    }
 }

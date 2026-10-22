@@ -39,13 +39,14 @@ script_mod! {
         glow: uniform(0.5)
         sil: uniform(vec3(0.004, 0.006, 0.012))
         // the sky's light (`light.rs`): the sun's azimuth (a strip u) and elevation (rad), the sun's and the sky's ambient
-        // light (radiance off a white Lambertian surface), the share of the lights on, the gain on the skyline's own light
+        // light (radiance off a white Lambertian surface), the share of the lights on, the scale from the skyline's designed
+        // colours to the host's units (`SkyLight::design_gain`; `sil` comes scaled)
         sun_u: uniform(0.0)
         sun_el: uniform(-1.5707964)
         sun_rgb: uniform(vec3(0.0, 0.0, 0.0))
         ambient_rgb: uniform(vec3(0.0, 0.0, 0.0))
         lit: uniform(1.0)
-        emit_gain: uniform(1.0)
+        design_gain: uniform(1.0)
         // the horizon rings, RING x 2 texels: row 0 the sky at +1 degree, row 1 at +15 degrees (`SkyLight::ring_texels`)
         ring_tex: texture_2d(float)
         seed: uniform(7.0)
@@ -171,7 +172,7 @@ script_mod! {
             let a = self.ang_raw(pp.y)
             let dome = exp(0.0 - max(a, 0.0) * self.dome_k) * g.w * self.glow * smoothstep(0.0 - 0.012, 0.0, a)
             // the city's own light: fades with the lights by day
-            return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.emit_gain), 0.0)
+            return vec4(vec3(1.0, 0.55, 0.25) * (dome * 0.10) * (self.lit * self.design_gain), 0.0)
         }
         fragment: fn(){
             self.fb0 = vec4(0.0, 0.0, 0.0, 0.0)
@@ -211,7 +212,7 @@ script_mod! {
             let t = (4.0 - k) / 4.0; let hz = self.haze_at(u); let hz2 = self.haze * self.haze * 0.35; let m = self.cover(r.x - ang, px)
             let ftop = clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0)
             let fog = pow(1.0 - smoothstep(0.0, 0.55 * self.hk + 0.004, ang), 1.4)
-            let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
+            let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * (t * self.design_gain), hz2)
             let rock = mix(mix(sil + rday, fogc, ftop), fogc * (1.1 + 0.2 * t), fog * mix(0.1, 0.9, hz2) * (0.25 + 0.75 * t))
             let c = vec4(sil * (0.6 * tm) + tday * tm + rock * (m * (1.0 - tm)), tm + m * (1.0 - tm))
             // by day the air between: toward the haze by the range's distance (none at night, the night's haze is above)

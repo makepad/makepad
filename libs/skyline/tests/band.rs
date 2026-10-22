@@ -134,6 +134,14 @@ fn baseline(name: &str) -> Option<(Params, Band)> {
     Some((p, Band { w, h, texels }))
 }
 
+/// A half-exact value `v` as the platform's `pod_heap::f16_to_f32` decoded it when the baselines were recorded: a subnormal
+/// (m 2^-24, m < 1024) whose leading bit k is odd came out doubled (its leading bit kept, OR'ed into the exponent's lowest bit).
+fn recorded_decode(v: f32) -> f32 {
+    let m = (v.abs() * 16_777_216.0) as u32;
+    if v == 0.0 || v.abs() >= 6.1035156e-5 || m as f32 != v.abs() * 16_777_216.0 { return v; }
+    if (31 - m.leading_zeros()) % 2 == 1 { 2.0 * v } else { v }
+}
+
 /// The largest per-channel difference, relative to max(1, |want|).
 fn max_abs_diff(got: &[[f32; 4]], want: &[[f32; 4]]) -> f32 {
     got.iter().zip(want).flat_map(|(g, w)| (0..4).map(move |c| (g[c] - w[c]).abs() / w[c].abs().max(1.0))).fold(0.0, f32::max)
@@ -153,8 +161,13 @@ fn bands_match_the_pre_move_baseline() {
             let bytes: Vec<u8> = got.texels.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
             std::fs::write(std::path::Path::new(&dir).join(format!("{name}_1024.f32")), bytes).unwrap();
         }
-        println!("{name}: {} x {}, worst texel difference {worst}", got.w, got.h);
+        // the baseline was read back through the platform's half decode, which doubles about half the subnormals (export.rs
+        // `f16_to_f32`): put that back on what is read now, and the bands must agree bit for bit
+        let as_recorded: Vec<[f32; 4]> = got.texels.iter().map(|t| t.map(recorded_decode)).collect();
+        let exact = as_recorded == want.texels;
+        println!("{name}: {} x {}, worst texel difference {worst} (subnormals only), against the baseline as it was decoded: {}", got.w, got.h, if exact { "identical" } else { "DIFFERENT" });
         assert!(worst <= 1e-3, "{name}: worst texel difference {worst}");
+        assert!(exact, "{name}: the band is not the baseline bit for bit");
     }
 }
 
@@ -272,7 +285,7 @@ fn the_far_haze_takes_the_ring_colour() {
     assert!((c[0] / c[2] / 4.5 - 1.0).abs() < 0.3, "{c:?}");
 }
 
-// Measured: the noon facades' median 0.328; 4 beacon texels at noon (the brightest red 0.254), 0 with emit_gain 0.
+// Measured: the noon facades' median 0.328; 4 beacon texels at noon (the brightest red 0.254), 0 with design_gain 0.
 // Tuned once from "brighter than the facade median": a beacon (the city's: 0.07 x lights at its core, dimmed by the haze
 // with distance; a sub-pixel point at 1024 px) is about three quarters of the noon facades' median.
 #[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
@@ -280,7 +293,7 @@ fn beacons_burn_at_noon() {
     let p = city_params();
     let night = render_band_lit(&p, 1024, &SkyLight::example());
     let b = render_band_lit(&p, 1024, &noon([1.2, 1.3, 1.5]));
-    let dark = render_band_lit(&p, 1024, &SkyLight { emit_gain: 0.0, ..noon([1.2, 1.3, 1.5]) });
+    let dark = render_band_lit(&p, 1024, &SkyLight { design_gain: 0.0, ..noon([1.2, 1.3, 1.5]) });
     let facade = median(&b, &city_rows(&p, &night));
     println!("facade median at noon {facade}; beacon texels at noon {}, with the emission off {}", count_beacons(&b, facade), count_beacons(&dark, facade));
     // a beacon texel: red at least 4x green and blue and brighter than half the facade median; none without emission
@@ -329,6 +342,36 @@ fn toned(p: &Params, b: &Band, l: &SkyLight, exposure: f32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The night is the same at any host scale: with the example's light at design gain g and its rings at HAZE_COL x g, the
+/// band is g x the example's band (alpha unchanged), within the f16 target's precision. Every designed colour is scaled by the
+/// gain and the rings carry the host's own scale, so nothing in the strip stays at the example's absolute level.
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_night_band_scales_with_its_design_gain() {
+    let g = 0.01f32;
+    let hz = makepad_skyline::params::HAZE_COL.map(|c| c * g);
+    let scaled = SkyLight { design_gain: g, ring_low: [hz; RING], ring_high: [hz; RING], ..SkyLight::example() };
+    for (name, p) in [("default", Params::default()), ("city", city_params())] {
+        let (one, at_g) = (render_band(&p, 1024), render_band_lit(&p, 1024, &scaled));
+        assert_eq!((one.w, one.h), (at_g.w, at_g.h));
+        // f16 keeps 11 bits: relative 2^-11 over its normals (>= 6.1e-5); below that its subnormals step by 6e-8, and the
+        // strip's passes (scene, blur, water, final; each an RGBA16F target) quantise there each time. The floor, 1e-6, is
+        // 3e-4 of the generator's night horizon (0.0035): out of sight. Measured (default and city, 1024): worst relative 3.15e-3
+        // over about 77000 normal channels (a few f16 ulps through the passes, at the smallest normals), worst absolute 2.36e-7
+        // below; this needs export.rs's own half decode (the platform's doubled half the subnormals, a factor 2 here)
+        let (mut worst_rel, mut worst_abs, mut normals) = (0.0f32, 0.0f32, 0usize);
+        for (a, b) in at_g.texels.iter().zip(&one.texels) {
+            assert_eq!(a[3], b[3], "{name}: the coverage does not scale");
+            for c in 0..3 {
+                let (want, err) = (g * b[c], (a[c] - g * b[c]).abs());
+                if want >= 6.1e-5 { normals += 1; worst_rel = worst_rel.max(err / want); } else { worst_abs = worst_abs.max(err); }
+                assert!(err <= 2e-3 * want.abs() + 1e-6, "{name}: {} vs {} x {}", a[c], g, b[c]);
+            }
+        }
+        println!("{name}: band at design gain {g} = {g} x the example's: worst relative {worst_rel:.2e} over {normals} normal channels, worst absolute {worst_abs:.2e} below");
+        assert!(normals > 100, "{name}: only {normals} channels to compare");
+    }
 }
 
 /// Night, noon and a sunset over the city, toned PNGs into `SKYLINE_VISUAL_DIR` (the whole strip and the city's sector).

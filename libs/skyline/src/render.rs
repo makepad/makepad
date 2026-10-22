@@ -134,14 +134,15 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(col_geom), &self.col_geom);
         vars.set_uniform(cx, live_id!(mirror), &[if self.mirror { 1.0 } else { 0.0 }]);
         vars.set_uniform(cx, live_id!(up_dy), &[self.up_dy as f32]);
-        vars.set_uniform(cx, live_id!(sil), &SIL);
         let l = self.light;
+        // the night silhouettes' designed colour, in the host's units
+        vars.set_uniform(cx, live_id!(sil), &SIL.map(|c| c * l.design_gain));
         vars.set_uniform(cx, live_id!(sun_u), &[l.sun_u]);
         vars.set_uniform(cx, live_id!(sun_el), &[l.sun_el_deg.to_radians()]);
         vars.set_uniform(cx, live_id!(sun_rgb), &l.sun_rgb);
         vars.set_uniform(cx, live_id!(ambient_rgb), &l.ambient_rgb);
         vars.set_uniform(cx, live_id!(lit), &[l.lights_factor()]);
-        vars.set_uniform(cx, live_id!(emit_gain), &[l.emit_gain]);
+        vars.set_uniform(cx, live_id!(design_gain), &[l.design_gain]);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
         bind_texture(cx, vars, live_id!(tree_cov), &self.tree_cov);

@@ -171,7 +171,7 @@ script_mod! {
         // hz the haze at its azimuth, day its daylight (added before the haze)
         tone: fn(d: float, hz: vec3, day: vec3) -> vec3 {
             let t = clamp(log(d / 5000.0) / log(6.0), 0.0, 1.0); let nk = clamp(log(d / 400.0) / log(12.5), 0.0, 1.0); let hz2 = self.haze * self.haze * 0.35
-            let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * t, hz2)
+            let fogc = mix(hz * (0.7 + 0.25 * t), hz * (1.6 + 1.6 * t) + vec3(0.06, 0.07, 0.09) * (t * self.design_gain), hz2)
             let c = mix(self.sil * mix(0.6, 1.0, nk) + day, fogc, clamp(mix(0.012 + 0.01 * t, 0.30 * t * t + 0.06 * t + 0.02, hz2), 0.0, 1.0) * nk)
             // by day the air between, as the ranges' (`aerial`)
             return c + (hz - c) * self.aerial(d)
@@ -194,7 +194,7 @@ script_mod! {
             if (fl & 3u) == 2u && self.mirror > 0.5 { eye = -6.3 }
             let e2 = vec2(cos(w.x * 6.2831853), sin(w.x * 6.2831853)); let dl = vec2(cos(h2.z), sin(h2.z)); let den = dl.x * e2.y - dl.y * e2.x
             // the haze at the pixel's azimuth; the gate on the instance's lights (`lit`: the city's lights, by day off), its beacons' (on)
-            let hzc = self.haze_at(vr.x); let gate = vec2(self.lit * self.emit_gain, self.emit_gain)
+            let hzc = self.haze_at(vr.x); let gate = vec2(self.lit * self.design_gain, self.design_gain)
             // the instance's own frame: s, height y, distance, the line's distance p, d(dist)/ds
             var fs = 0.0; var fy = 0.0; var fd = h0.y; var fp = h0.y; var fsf = 0.0; var cut = self.mirror > 0.5 && vr.y <= 0.0
             if line {
@@ -280,7 +280,7 @@ script_mod! {
                                     vec3(sp, exp(0.0 - dn * dn / (wp * wp)) * (0.5 + 1.1 * n) - 0.12, r.y + a.z * 0.5))
                                 k = clamp(b.y * exp(0.0 - sp / abs(b.z)) * (1.0 - sm.x) * sm.y * sm.z, 0.0, 1.0)
                                 // the haze it stands in, the city's glow on it (fading with the lights) and the sky's ambient by day
-                                em = em + max(hzc * c.y + vec3(0.02, 0.013, 0.007) * self.glow * (0.5 + 0.53 * c.y) * self.lit + self.ambient_rgb * 0.5 - 0.8 * self.sil, vec3(0.0)) * k
+                                em = em + max(hzc * c.y + vec3(0.02, 0.013, 0.007) * self.glow * (0.5 + 0.53 * c.y) * (self.lit * self.design_gain) + self.ambient_rgb * 0.5 - 0.8 * self.sil, vec3(0.0)) * k
                                 if b.z < 0.0 { li = k * exp(0.0 - length(r) / 22.0) * 0.2; kw = 0.45 }
                             }
                         } else if t == 21.0 {

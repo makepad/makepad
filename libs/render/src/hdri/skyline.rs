@@ -218,7 +218,7 @@ pub(super) const RING_LOW_DEG: f32 = 1.0;
 pub(super) const RING_HIGH_DEG: f32 = 15.0;
 
 /// The sky's light on the city, as the skyline lights its strip by day (makepad_skyline's
-/// `SkyLight`, field by field, the app adding `lights_by_day` and `emit_gain`), from the map
+/// `SkyLight`, field by field, the app adding `lights_by_day` and `design_gain`), from the map
 /// itself (`Env::skyline_light`). In the strip's frame: u is the strip's x/w
 /// (`SkylineBand::sample`'s, turned by the block's turn_deg), and ring entry i stands at
 /// u = (i + 0.5) / RING. Map units before intensity.

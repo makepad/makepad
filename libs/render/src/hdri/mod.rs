@@ -432,7 +432,7 @@ impl Env {
     }
 
     /// The sky's light as the skyline needs it (`makepad_skyline::SkyLight`,
-    /// field by field, the app adding `lights_by_day` and `emit_gain`), taken
+    /// field by field, the app adding `lights_by_day` and `design_gain`), taken
     /// from this map itself, so the city follows the sky the map draws: in the
     /// strip's frame (turned by the skyline block's turn_deg; 0 without a
     /// block), map units before intensity.

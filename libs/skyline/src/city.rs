@@ -207,7 +207,7 @@ script_mod! {
                         var pb = vec3(ctr.x + off.x, ytop + ha, ctr.y + off.y); if mast > 0.5 { pb = vec3(mp.x, ytop + hm, mp.z) }
                         pb = pb - ray.o; let tb2 = dot(pb, ray.d); let bd = length(pb - ray.d * tb2) / (max(tb2, 0.01) * px)
                         // it burns day and night
-                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * (0.004 + 0.0185 * self.haze))) * self.emit_gain)
+                        em += tr * vec3(1.0, 0.08, 0.03) * (exp(-bd * bd / 3.0) * step(0.0, tb2) * self.lights * 0.07 * (0.4 + 0.6 * exp(-tb2 * (0.004 + 0.0185 * self.haze))) * self.design_gain)
                     }
                     if ray.sa.y > 0.0 {
                         // the nearest surface, then (where it only partly covers the pixel) the next two: the page's `shadeCity`
@@ -234,7 +234,7 @@ script_mod! {
                                 // below) and the mast, in the tower's tint
                                 var alb = 0.28; if id > 5.5 { alb = 0.20 } else if id > 2.5 { alb = 0.25 }
                                 let dayc = self.day_lit(vec3(0.92, 0.96, 1.04) * (1.0 + (ht.xyz - 0.5) * 0.35) * alb, aog, max(dot(n, sw), 0.0))
-                                let wall = tnt * (hz * 0.17 * face * mix(0.72, 1.0, sy.z) * aos * aog + vec3(1.0, 0.62, 0.32) * self.glow * 0.012 / (1.0 + 8.0 * y * y) * aos) + dayc
+                                let wall = tnt * (hz * 0.17 * face * mix(0.72, 1.0, sy.z) * aos * aog + vec3(1.0, 0.62, 0.32) * self.glow * (0.012 * self.design_gain) / (1.0 + 8.0 * y * y) * aos) + dayc
                                 var body = wall; var e = vec3(0.0)
                                 if id < 2.5 {
                                     // the facade: whole window cells only (columns divide the wall, half a pier at each corner)
@@ -264,8 +264,8 @@ script_mod! {
                                     let lit = mix(step(hfl.x + 1e-4, pfl * 0.95) * step(wing, 0.5 + 0.5 * occ) * step(hr.x, occ) * (1.0 - rf.x), pfl * 0.54 * occ, rf.y)
                                     // recessed windows: seen at a grazing angle the piers hide the glass
                                     let cosv = abs(dot(n, ray.d)); let reveal = clamp(1.0 - mix(0.3, 0.12, curt) * sqrt(max(1.0 - cosv * cosv, 0.0)) / max(cosv, 1e-3), 0.0, 1.0)
-                                    let ea = gm * lit * (0.4 + 0.8 * hr.y) * self.lights * 0.55 * mix(0.55, 1.0, cosv) * mix(1.0, 0.8, curt) * reveal * (self.lit * self.emit_gain)
-                                    if ea > 0.003 { e = mix(self.kelvin(mix(self.temp, min(self.temp * 1.9, 12000.0), step(0.62, hfl.y))), vec3(0.78, 1.0, 0.8) * 0.85, step(0.86, hfl.y)) * ea }
+                                    let ea = gm * lit * (0.4 + 0.8 * hr.y) * self.lights * 0.55 * mix(0.55, 1.0, cosv) * mix(1.0, 0.8, curt) * reveal * (self.lit * self.design_gain)
+                                    if ea > 0.003 * self.design_gain { e = mix(self.kelvin(mix(self.temp, min(self.temp * 1.9, 12000.0), step(0.62, hfl.y))), vec3(0.78, 1.0, 0.8) * 0.85, step(0.86, hfl.y)) * ea }
                                     // the glass mirrors the sky low over the horizon (10 degrees up; the haze at night), tinted per tower;
                                     // fall-off across the wall, occlusion at its corners
                                     let fc1 = max(1.0 - cosv, 0.0); let fres = 0.15 + 0.85 * fc1 * fc1 * fc1; let refl = 1.0 / (1.0 + 7.0 * max(ray.d.y, 0.0))

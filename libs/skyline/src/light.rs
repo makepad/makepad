@@ -2,7 +2,7 @@
 //! takes as inputs (`Skyline::draw_view`, `request_band`). [`SkyLight::example`] is the example's own night.
 //!
 //! On the GPU (`SceneCtx::set_uniforms`): `sun_u`, `sun_el` (rad), `sun_rgb`, `ambient_rgb`, `lit` ([`SkyLight::lights_factor`])
-//! and `emit_gain` as uniforms, the two rings as the texture `ring_tex` ([`SkyLight::ring_texels`]); the scene shaders read
+//! and `design_gain` as uniforms (and `sil` scaled by it), the two rings as the texture `ring_tex` ([`SkyLight::ring_texels`]); the scene shaders read
 //! them through `SkyScene`'s `haze_at`, `sky_at` and `sun_dir`.
 use crate::params::{hash_bits, HAZE_COL};
 
@@ -26,16 +26,18 @@ pub struct SkyLight {
     pub ring_high: [[f32; 3]; RING],
     /// Share of the lights kept on by day (0..1).
     pub lights_by_day: f32,
-    /// Gain on the skyline's own emission (windows, lamps, glow, beacons), so its
-    /// night lights sit against the host's sky as they do against the example's.
-    pub emit_gain: f32,
+    /// Scale from the skyline's designed colours to the host sky's units: every colour the
+    /// skyline was designed with (the night silhouettes, the night facade glow, every light,
+    /// the smoke's glow) is multiplied by it, so the night looks the same against any host
+    /// sky; the host's own light (the rings, the sun, the ambient) is not. 1 in the example.
+    pub design_gain: f32,
 }
 
 impl SkyLight {
-    /// Today's look: night, the fixed HAZE_COL ring, no sun, no ambient, gain 1.
+    /// Today's look: night, the fixed HAZE_COL ring, no sun, no ambient, design gain 1.
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
-            lights_by_day: 0.0, emit_gain: 1.0 }
+            lights_by_day: 0.0, design_gain: 1.0 }
     }
 
     /// How much of the city's lights are on: 0 above +2 degrees sun, 1 below -6, smooth between,
@@ -48,7 +50,7 @@ impl SkyLight {
     /// A hash of every field's bits, for cache keys.
     pub fn hash(&self) -> u64 {
         let rings = self.ring_low.iter().chain(&self.ring_high).flatten();
-        let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.emit_gain]);
+        let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain]);
         hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64))
     }
 
@@ -85,14 +87,14 @@ mod tests {
         assert_eq!(l.sun_rgb, [0.0; 3]);
         assert_eq!(l.ambient_rgb, [0.0; 3]);
         assert!(l.ring_low.iter().all(|c| *c == crate::params::HAZE_COL));
-        assert_eq!(l.emit_gain, 1.0);
+        assert_eq!(l.design_gain, 1.0);
     }
     #[test]
     fn the_hash_sees_every_field() {
         let a = SkyLight::example();
         let mut b = a.clone(); b.ring_low[17][1] += 1e-6;
         assert_ne!(a.hash(), b.hash());
-        let mut c = a.clone(); c.emit_gain = 2.0;
+        let mut c = a.clone(); c.design_gain = 2.0;
         assert_ne!(a.hash(), c.hash());
     }
 }
