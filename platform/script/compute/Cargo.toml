@@ -14,9 +14,6 @@ host-shims = []
 # (effect and Motion documents, runtime-compiled shaders). Off by default,
 # so the compiler itself stays dependency-free.
 vm = ["dep:makepad-script"]
-# AArch64 native code through the shared back end (makepad-codegen) instead of compute's own
-# arm64/NEON emitters (x86-64 always uses it). Step 3 of loader-core.md step 6 makes it the only path.
-shared-backend = []
 
 [dependencies]
 makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }

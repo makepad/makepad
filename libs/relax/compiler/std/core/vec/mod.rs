@@ -628,12 +628,28 @@ pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
     }
     let mut v = Vec::with_capacity(n);
     v.extend_with(n, elem);
+    // extend_with wrote all n elements (a panicking clone never gets here): the caller sees the
+    // length n, not a load after the call, so its bounds checks against `n` fold (LLVM inlines
+    // extend_with and knows the same)
+    v.len = n;
     v
 }
 
 fn all_zero_bytes<T>(v: &T) -> bool {
     let n = crate::mem::size_of::<T>();
     let p = v as *const T as *const u8;
+    // one compare of the value's bits for scalar sizes, as real alloc's IsZero impls do
+    // (`self.to_bits() == 0`, `*self == 0`): a constant element folds the whole test
+    unsafe {
+        match n {
+            1 => return im::ptr_read(p) == 0,
+            2 => return crate::ptr::read_unaligned(p as *const u16) == 0,
+            4 => return crate::ptr::read_unaligned(p as *const u32) == 0,
+            8 => return crate::ptr::read_unaligned(p as *const u64) == 0,
+            16 => return crate::ptr::read_unaligned(p as *const u128) == 0,
+            _ => {}
+        }
+    }
     let mut i = 0;
     while i < n {
         if unsafe { im::ptr_read(im::ptr_add(p, i)) } != 0 {

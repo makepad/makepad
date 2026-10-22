@@ -733,6 +733,8 @@ struct Gen<'a> {
     last_call_ret: usize,
     /// invoked calls: (return word index, caller-saved values to reload, cleanup pad block)
     pads: Vec<(usize, Vec<(VReg, i32)>, u32)>,
+    /// (instruction position, return offset in bytes) of every call: the variable table's sites (dbgloc)
+    var_calls: Vec<(u32, u32)>,
     /// branch relaxation (a function past imm19's +-1 MB): conditional block branches become
     /// an inverted short branch over a `b` (+-128 MB), constants are built in registers
     /// instead of loaded from the literal pools after the code
@@ -1753,6 +1755,7 @@ impl<'a> Gen<'a> {
         }
         // a C-unwind call is invoked like a Relax one: its landing stub is keyed by this address
         self.last_call_ret = self.a.pos();
+        self.var_calls.push((self.cur_pos, (self.a.pos() * 4) as u32));
         // C leaves a narrow integer result's upper bits undefined
         if let Some(it) = sig.ret_narrow {
             self.a.extend(0, 0, it.bits, it.signed);
@@ -2332,7 +2335,7 @@ impl<'a> Gen<'a> {
                 }
                 self.fin_f(d, xd);
             }
-            VX::ShlV(w) | VX::ShrSV(w) | VX::ShrUV(w) | VX::ICmp(_, w) | VX::UCmp(_, w) => {
+            VX::ShlV(w) | VX::ShrSV(w) | VX::ShrUV(w) | VX::ArmUShl(w) | VX::ArmSShl(w) | VX::ICmp(_, w) | VX::UCmp(_, w) => {
                 let xa = self.use_f(a, FS0);
                 let xb = self.use_f(b, FS1);
                 let xd = self.def_f(d, FS0);
@@ -2342,7 +2345,8 @@ impl<'a> Gen<'a> {
                     _ => (CMGT & s4 | s, CMGE & s4 | s, CMEQ & s4 | s),
                 };
                 match op {
-                    VX::ShlV(_) => self.v3(USHL & s4 | s, xd, xa, xb),
+                    VX::ShlV(_) | VX::ArmUShl(_) => self.v3(USHL & s4 | s, xd, xa, xb),
+                    VX::ArmSShl(_) => self.v3(SSHL & s4 | s, xd, xa, xb),
                     VX::ShrSV(_) | VX::ShrUV(_) => {
                         self.v2(NEG & s4 | s, FS2, xb);
                         self.v3(if let VX::ShrSV(_) = op { SSHL } else { USHL } & s4 | s, xd, xa, FS2);
@@ -4101,6 +4105,7 @@ impl<'a> Gen<'a> {
             Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) | Callee::Asm(..) => {}
         }
         self.last_call_ret = self.a.pos();
+        self.var_calls.push((self.cur_pos, (self.a.pos() * 4) as u32));
         let mut mv = Vec::new();
         let mut ri = 0u8;
         let mut rf = 0u8;
@@ -4155,9 +4160,113 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &Env) -> Result<
 /// A multiplicand that is a splat of an f32 vreg (`VSplat` of an F32 value, single def) is read as
 /// that scalar: `VFma(.., a, s, c)` / `VX(FMul(S, _), d, a, s)` with `s` of class F32 (backend-only
 /// form, made here just before register allocation) mean every lane times `s`, which the emitter
-/// encodes by element (`fmla vd.4s, vn.4s, vm.s[0]`). A splat whose every use is folded goes. The
-/// product of `VFma` commutes, so a splat first operand is swapped in; `FMul`'s operand order
-/// picks the NaN for the Neon flavour, so only its second operand is folded unless the NaN is the host's.
+/// encodes by element (`fmla vd.4s, vn.4s, vm.s[0]`). A splat whose every use is folded goes. Only
+/// `VFma`'s second factor folds: fmls negates Vn, and the NaN of a lane is c's, Vn's, then Vm's
+/// (rir::fma_nan_f32), so a splat first factor swapped into Vm would flip the wrong operand's NaN
+/// sign. `FMul`'s operand order picks the NaN for the Neon flavour, so only its second operand is
+/// folded unless the NaN is the host's.
+/// Right shifts by per-lane amounts (`ShrUV` / `ShrSV`, 32-bit lanes) are `neg` + `ushl` / `sshl`
+/// on NEON. Where the amount is `y + c` (`c` a constant splat, the sum read only by the shift: a
+/// hash's `x >> ((x >> 28) + 4)`), the amount becomes `-c - y` -- the add a `sub` from the
+/// constant `-c`, built next to `c` -- and the shift `ArmUShl` / `ArmSShl` by it; `y - c` becomes
+/// `c - y` (no new constant). One instruction fewer per shift.
+fn fold_shift_amounts(f: &Func) -> Option<Func> {
+    let n = f.vregs.len();
+    let mut ndef = vec![0u32; n];
+    let mut nuse = vec![0u32; n];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut any = false;
+    for b in &f.blocks {
+        for i in &b.insts {
+            i.defs(|d| ndef[d.0 as usize] += 1);
+            regalloc::for_uses(i, |u| nuse[u.0 as usize] += 1);
+            any |= matches!(i, Inst::VX(VX::ShrUV(VW::S) | VX::ShrSV(VW::S), ..));
+        }
+        let mut tu = Vec::new();
+        regalloc::term_uses(&b.term, &mut tu);
+        for u in tu {
+            nuse[u.0 as usize] += 1;
+        }
+    }
+    if !any {
+        return None;
+    }
+    // single-definition values: their defining instruction (block, index); constants' bits
+    let mut at: Vec<(u32, u32)> = vec![(u32::MAX, 0); n];
+    let mut konst: Vec<Option<u32>> = vec![None; n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (ii, i) in b.insts.iter().enumerate() {
+            i.defs(|d| {
+                if ndef[d.0 as usize] == 1 {
+                    at[d.0 as usize] = (bi as u32, ii as u32);
+                }
+            });
+            if let Inst::VConst(d, k) = i {
+                if ndef[d.0 as usize] == 1 {
+                    konst[d.0 as usize] = Some(*k);
+                }
+            }
+        }
+    }
+    let is_k = |v: VReg| konst[v.0 as usize].is_some();
+    let mut g = f.clone();
+    // constant vreg -> its negation's vreg (built right after it)
+    let mut neg: Vec<(VReg, VReg)> = Vec::new();
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        for ii in 0..f.blocks[bi].insts.len() {
+            let Inst::VX(op @ (VX::ShrUV(VW::S) | VX::ShrSV(VW::S)), d, x, a) = f.blocks[bi].insts[ii] else { continue };
+            if ndef[a.0 as usize] != 1 || nuse[a.0 as usize] != 1 || at[a.0 as usize].0 == u32::MAX {
+                continue;
+            }
+            let (ab, ai) = at[a.0 as usize];
+            let amount = match f.blocks[ab as usize].insts[ai as usize] {
+                // -(y + c) = (-c) - y
+                Inst::VX(VX::Add(VW::S), _, y, k) if is_k(k) && !is_k(y) => Some((y, k, true)),
+                Inst::VX(VX::Add(VW::S), _, k, y) if is_k(k) && !is_k(y) => Some((y, k, true)),
+                // -(y - c) = c - y
+                Inst::VX(VX::Sub(VW::S), _, y, k) if is_k(k) && !is_k(y) => Some((y, k, false)),
+                _ => None,
+            };
+            let Some((y, k, negate)) = amount else { continue };
+            let from = if negate {
+                match neg.iter().find(|e| e.0 == k) {
+                    Some(e) => e.1,
+                    None => {
+                        let m = g.vreg(Cls::V128);
+                        neg.push((k, m));
+                        m
+                    }
+                }
+            } else {
+                k
+            };
+            g.blocks[ab as usize].insts[ai as usize] = Inst::VX(VX::Sub(VW::S), a, from, y);
+            let sh = if let VX::ShrUV(_) = op { VX::ArmUShl(VW::S) } else { VX::ArmSShl(VW::S) };
+            g.blocks[bi].insts[ii] = Inst::VX(sh, d, x, a);
+            changed = true;
+        }
+    }
+    if !changed {
+        return None;
+    }
+    // the negated constants, each right after its constant (it dominates every use of that one);
+    // later positions of a block first, so earlier indices stay valid
+    let mut ins: Vec<(u32, u32, Inst)> = neg.iter().map(|&(k, m)| (at[k.0 as usize].0, at[k.0 as usize].1 + 1, Inst::VConst(m, konst[k.0 as usize].unwrap().wrapping_neg()))).collect();
+    ins.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    for (bi, ii, i) in ins {
+        let b = &mut g.blocks[bi as usize];
+        if b.pos.len() == b.insts.len() {
+            let p = b.pos[ii as usize - 1];
+            b.pos.insert(ii as usize, p);
+        }
+        b.insts.insert(ii as usize, i);
+    }
+    Some(g)
+}
+
 fn fold_lane_splats(f: &Func) -> Option<Func> {
     let n = f.vregs.len();
     let mut splat: Vec<Option<VReg>> = vec![None; n];
@@ -4187,12 +4296,8 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
     for b in &mut g.blocks {
         for i in &mut b.insts {
             match i {
-                Inst::VFma(_, _, _, a, bb, _) => {
+                Inst::VFma(_, _, _, _, bb, _) => {
                     if let Some(s) = of(*bb) {
-                        *bb = s;
-                        changed = true;
-                    } else if let Some(s) = of(*a) {
-                        *a = *bb;
                         *bb = s;
                         changed = true;
                     }
@@ -4308,12 +4413,21 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // f32 splats read only by multiplies: the by-element forms (fmla / fmls / fmul v, v, v.s[0])
     let lanes = fold_lane_splats(f);
     let f = lanes.as_ref().unwrap_or(f);
+    // right shifts by `y + c`: ushl / sshl by `-c - y` (no neg per shift)
+    let shifts = fold_shift_amounts(f);
+    let f = shifts.as_ref().unwrap_or(f);
     // immediates arm64 cannot encode and float constants, inside loops: registers set up once
     let hoisted = regalloc::hoist_loop_consts(f, &imm_fits, true, true, freq);
     let f = hoisted.as_ref().unwrap_or(f);
     // indexed accesses with displacements on one base and index: one address register
     let shared = regalloc::share_index_bases(f);
     let f = shared.as_ref().unwrap_or(f);
+    // counter steps after the last read of the old value (no copy per iteration)
+    let stepped = if env.opt_regs || f.full { regalloc::sink_increments(options, f) } else { None };
+    let f = stepped.as_ref().unwrap_or(f);
+    // branch compares at the end of their block (fused into cmp + b.cond)
+    let brs = if env.opt_regs || f.full { regalloc::sink_branch_compares(options, f) } else { None };
+    let f = brs.as_ref().unwrap_or(f);
     // a function that calls nothing and returns no float may keep values in v0-v3 too (they
     // carry float arguments and results, and calls' aggregate results, only around calls)
     let mut cfg = RegConfig { sym_class: env.sym_class, ..reg_config() };
@@ -4400,6 +4514,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         stage: 0,
         last_call_ret: 0,
         pads: Vec::new(),
+        var_calls: Vec::new(),
         long,
         tbz: tbz && !long,
     };
@@ -4434,7 +4549,22 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let text_len = (g.text_words * 4) as u32;
     crate::stats::pass_time(12, t_emit);
     crate::probe::code(code.len());
-    return Ok(Compiled { code, pc_map: g.pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_map: Vec::new(), rir_emitted: String::new() });
+    // where the named locals are at each call (makepad inspect `locals`; side metadata)
+    let mut pc_map = std::mem::take(&mut g.pc_map);
+    if !g.f.naked && !g.f.dbg.is_empty() {
+        let (saved, fsz, slot_off) = (g.saved, g.frame, &g.slot_off);
+        // sp = fp - frame in the body
+        let spill = |o: i32| -(saved as i32 + o);
+        let slot = |s: u32| (slot_off[s as usize] - fsz) as i32;
+        let fr = crate::dbgloc::Frame { callee_int: &cfg.int_callee, callee_flt: &cfg.flt_callee, arg_regs: &[0, 1, 2, 3, 4, 5, 6, 7], captured: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], call_writes: &[S0, S1, IP0, IP1], spill_fp: &spill, slot_fp: &slot };
+        let vars = crate::dbgloc::build(g.f, &g.al, &fr, &g.var_calls);
+        let e = crate::dbgloc::pc_entries(&vars, g.f.file);
+        crate::dbgloc::note_stats(&pc_map, &e, vars.len());
+        pc_map.extend(e);
+    } else {
+        crate::dbgloc::note_stats(&pc_map, &[], 0);
+    }
+    return Ok(Compiled { code, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_map: Vec::new(), rir_emitted: String::new() });
     }
 }
 
@@ -4606,13 +4736,12 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
     (words_to_bytes(&a.w), leave * 4)
 }
 
-/// JIT trampoline in front of a host panic function (or the unwinder's resume entry): stores
-/// the JIT caller's register state as a block on the stack -- [fp, return address, x19..x28,
-/// d8..d15] (20 words) -- passes its address as argument 6 (x6), then tail-jumps to `target`,
-/// which never returns. The unwinder starts its frame walk from the block.
-pub fn panic_tramp(target: u64) -> Vec<u8> {
-    let mut a = Asm { w: Vec::new() };
-    a.sub_imm(SP, SP, 160);
+/// Bytes of the register block the panic trampolines store (rir REG_BLOCK layout, arm64).
+pub const REG_BLOCK_BYTES: u32 = 288;
+
+/// Stores the register block [fp, lr, x19..x28, d8..d15, x0..x15] at sp (sp lowered first).
+fn store_reg_block(a: &mut Asm) {
+    a.sub_imm(SP, SP, REG_BLOCK_BYTES);
     a.stp(false, FP, LR, SP, 0);
     for k in 0..5u8 {
         a.stp(false, 19 + 2 * k, 20 + 2 * k, SP, 16 + 16 * k as i32);
@@ -4620,10 +4749,42 @@ pub fn panic_tramp(target: u64) -> Vec<u8> {
     for k in 0..4u8 {
         a.stp(true, 8 + 2 * k, 9 + 2 * k, SP, 96 + 16 * k as i32);
     }
+    // the caller-saved registers as the call began (makepad inspect `locals`: its arguments and
+    // the values the caller keeps there, at a stop's innermost call)
+    for k in 0..8u8 {
+        a.stp(false, 2 * k, 2 * k + 1, SP, 160 + 16 * k as i32);
+    }
+}
+
+/// JIT trampoline in front of a host panic function (or the unwinder's resume entry): stores
+/// the JIT caller's register state as a block on the stack -- [fp, return address, x19..x28,
+/// d8..d15, x0..x15] (36 words) -- passes its address as argument 6 (x6), then tail-jumps to
+/// `target`, which never returns. The unwinder starts its frame walk from the block.
+pub fn panic_tramp(target: u64) -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    store_reg_block(&mut a);
     a.mov_sp(6, SP);
     a.mov_imm(7, 0);
     a.mov_imm64_fixed(IP0, target);
     a.br(IP0);
+    words_to_bytes(&a.w)
+}
+
+/// JIT trampoline in front of a host function that returns (makepad inspect's breakpoint):
+/// stores the register block as `panic_tramp` does, makes it the frame record (x29 = its
+/// address: [fp, return address] lead it, so frame walks go on into the JIT caller), passes its
+/// address as argument 6 (x6, x7 = 0), calls `target` and returns to the JIT caller.
+pub fn regs_call_tramp(target: u64) -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    store_reg_block(&mut a);
+    a.mov_sp(FP, SP);
+    a.mov_sp(6, SP);
+    a.mov_imm(7, 0);
+    a.mov_imm64_fixed(IP0, target);
+    a.blr(IP0);
+    a.ldp(false, FP, LR, SP, 0);
+    a.add_imm(SP, SP, REG_BLOCK_BYTES);
+    a.ret();
     words_to_bytes(&a.w)
 }
 

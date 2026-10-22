@@ -1161,6 +1161,15 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
+    /// The status every app window's title carries after its own (the HAL's `TitleStatus`;
+    /// empty: none), e.g. "optimizing 62%".
+    pub fn title_status(&mut self, text: &str) {
+        let mut writer = CmdWriter::new(HOST);
+        writer.str_def(TITLE_STATUS_SID, text.as_bytes());
+        writer.title_status(TITLE_STATUS_SID);
+        Hal::global().submit(&writer.buf());
+    }
+
     /// The layer has faded out (the ready lift, the JIT loader): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
@@ -1231,6 +1240,12 @@ impl Boot {
                 &mut renderer.layout,
             );
         }
+        // the JIT loader's small galaxy (the UI stalls on the JIT) at the bottom-right corner
+        let stall = look.filter(|l| l.stall > 0.0).map(|l| {
+            let side = layer::LOADER_SIDE;
+            let margin = layer::LOADER_MARGIN;
+            ([viewport[0] - side - margin, viewport[1] - side - margin, side, side], l.stall)
+        });
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
@@ -1298,6 +1313,18 @@ impl Boot {
                     (id!(accent), &[card.accent]),
                     (id!(action), &[button_glyph(card.action)]),
                     (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
+                ],
+                &mut buttons,
+            );
+        }
+        if let Some((rect, opacity)) = stall {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &rect),
+                    (id!(selected), &[1.0]),
+                    (id!(accent), &[STALL_GALAXY]),
+                    (id!(action), &[0.0]),
+                    (id!(pressed), &[opacity]),
                 ],
                 &mut buttons,
             );
@@ -1521,6 +1548,10 @@ impl Layout {
 
 /// `Card::accent` of a window button of the caption.
 const CAPTION_BUTTON: f32 = 4.0;
+/// The host session's string id of the title status (1 is the boot window's title).
+const TITLE_STATUS_SID: u32 = 2;
+/// `error_band.accent` of the JIT loader's small galaxy (layer::Want::Loader).
+const STALL_GALAXY: f32 = 5.0;
 
 /// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
 /// 1 maximise / restore, 2 close.

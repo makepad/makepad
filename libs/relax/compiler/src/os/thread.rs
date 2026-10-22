@@ -9,6 +9,8 @@
 //! - `background()`: the OS background class (aot-min's compile workers: macOS QOS_CLASS_BACKGROUND,
 //!   Linux SCHED_IDLE, Windows EcoQoS).
 //! - `interactive()`: the sampler thread asks not to have its timers coalesced.
+//! - `performance_cores()`: logical CPUs of the performance class (macOS: hw.perflevel0; elsewhere
+//!   every CPU this process may run on).
 //! - `realtime()`: the calling thread runs under a real-time policy (an audio callback thread:
 //!   SCHED_FIFO/RR on Linux, a time-constraint policy on macOS).
 //! - `fork()`: the C library's fork (unix), for the fork the loader hands to programs.
@@ -84,6 +86,10 @@ mod imp {
 
     pub fn interactive() {}
 
+    pub fn performance_cores() -> usize {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
+
     pub fn realtime() -> bool {
         extern "C" {
             fn sched_getscheduler(pid: i32) -> i32;
@@ -129,6 +135,18 @@ mod imp {
         unsafe {
             pthread_set_qos_class_self_np(0x21, 0); // QOS_CLASS_USER_INTERACTIVE
         }
+    }
+
+    /// Performance-core logical CPUs (hw.perflevel0.logicalcpu; Intel Macs have no levels: every CPU).
+    pub fn performance_cores() -> usize {
+        extern "C" {
+            fn sysctlbyname(name: *const u8, old: *mut u8, oldlen: *mut usize, new: *const u8, newlen: usize) -> i32;
+        }
+        let mut n: i32 = 0;
+        let mut len = std::mem::size_of::<i32>();
+        let r = unsafe { sysctlbyname(b"hw.perflevel0.logicalcpu\0".as_ptr(), &mut n as *mut i32 as *mut u8, &mut len, std::ptr::null(), 0) };
+        let all = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if r == 0 && n > 0 { (n as usize).min(all) } else { all }
     }
 
     /// A thread with a time-constraint policy (CoreAudio's IO threads, audio workgroups).
@@ -206,6 +224,10 @@ mod imp {
     }
 
     pub fn interactive() {}
+
+    pub fn performance_cores() -> usize {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
 
     /// A time-critical thread (WASAPI render threads run at THREAD_PRIORITY_TIME_CRITICAL or
     /// in an MMCSS task, which raises the thread into the real-time range).

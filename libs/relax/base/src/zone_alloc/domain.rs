@@ -458,6 +458,41 @@ mod tests {
     }
 
     #[test]
+    fn large_runs_stay_warm_and_zeroed_allocs_stay_zero() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*heap);
+            // a per-frame large Vec: the freed run is parked committed and the next block of
+            // its order gets the same run back (no commit, no faults)
+            let p = program_alloc(600_000, 8);
+            std::ptr::write_bytes(p, 0xAB, 600_000);
+            let committed = heap.stats().1;
+            program_dealloc(p, 600_000, 8);
+            assert_eq!(heap.stats().0, 0);
+            assert_eq!(heap.stats().1, committed, "the run stays committed (warm)");
+            let q = program_alloc(500_000, 8);
+            assert_eq!(q, p, "the warm run serves the next large block of its order");
+            program_dealloc(q, 500_000, 8);
+            // a zeroed large block out of the warm list is zero (the run holds 0xAB)
+            let z = program_alloc_zeroed(600_000, 8);
+            assert_eq!(z, p);
+            assert!(std::slice::from_raw_parts(z, 600_000).iter().all(|b| *b == 0));
+            // growing past the parked commitment commits the rest; it reads as written
+            std::ptr::write_bytes(z, 7, 600_000);
+            let g = program_resize(z, 600_000, 8, 1_500_000);
+            assert!(std::slice::from_raw_parts(g, 600_000).iter().all(|b| *b == 7));
+            std::ptr::write_bytes(g.add(600_000), 9, 900_000);
+            program_dealloc(g, 1_500_000, 8);
+            assert_eq!(heap.stats().0, 0);
+            // the trim gives the warm runs back
+            heap.inner.arena.trim();
+            assert!(heap.stats().1 < committed, "trim decommits the warm large runs");
+            enter(std::ptr::null());
+        }
+    }
+
+    #[test]
     fn cross_thread_free_realloc_and_native_state() {
         symbol(b"relax_alloc");
         let first = DomainHeap::new().unwrap();

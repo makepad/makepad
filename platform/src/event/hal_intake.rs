@@ -557,6 +557,17 @@ impl Cx {
                     }
                 }
             }
+            HalEvent::TitleStatus { window, text } => {
+                let window_id = window_id(window);
+                if self.windows.is_valid(window_id) {
+                    let text = String::from_utf8_lossy(text).into_owned();
+                    if self.windows[window_id].title_status != text {
+                        self.windows[window_id].title_status = text;
+                        // an app-drawn caption shows it (the widgets' caption syncs at its draw)
+                        self.redraw_all();
+                    }
+                }
+            }
             HalEvent::CloseRequested { window } => {
                 let window_id = window_id(window);
                 if !self.windows.is_valid(window_id) {

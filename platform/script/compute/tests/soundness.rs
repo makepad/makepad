@@ -277,8 +277,8 @@ fn validator_fuzz_never_panics_and_valid_programs_run() {
             assert_eq!(b0, [0, 0], "a read-only buffer was written");
             // Native code on the same program: same memory, bit for bit, and
             // guard words around the buffers stay untouched.
-            #[cfg(target_arch = "aarch64")]
-            if let Some(code) = makepad_script_compute::arm64::compile(&p) {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            if let Some(code) = makepad_script_compute::native::compile(&p) {
                 let mut nctx = vec![0u32; 8];
                 let mut nstate = vec![0u32; 4];
                 let nshared = vec![0u32; 4];

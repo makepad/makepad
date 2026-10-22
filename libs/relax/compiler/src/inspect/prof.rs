@@ -192,13 +192,24 @@ mod imp {
         let t0 = std::time::Instant::now();
         let mut last_cpu: Vec<u64> = threads.iter().map(|t| t.cpu_ns).collect();
         let mut live = crate::inspect::threads::list();
+        // which threads ran in the last 50-ms look (CPU time moved, or on a CPU then): only those
+        // are checked each round. The check itself (`running`) is live: a filter on the look's
+        // own snapshot let a thread that runs in bursts (a UI thread: a few ms per frame) give
+        // one sample per look at most (52 samples in 8 s of a thread that used 1.7 s of CPU)
+        let mut ran: Vec<bool> = vec![true; threads.len()];
         let mut next_list = std::time::Instant::now();
         while t0.elapsed().as_secs_f64() < secs && !cancel() {
             let tick = std::time::Instant::now();
-            // which threads ran since the last look (every 50 ms): only those are suspended
             if tick >= next_list {
                 live = crate::inspect::threads::list();
                 next_list = tick + std::time::Duration::from_millis(50);
+                for (k, t) in threads.iter().enumerate() {
+                    ran[k] = live.iter().find(|x| x.os_id == t.os_id).is_some_and(|now| {
+                        let moved = now.cpu_ns != last_cpu[k] || now.state == "running";
+                        last_cpu[k] = now.cpu_ns;
+                        moved
+                    });
+                }
             }
             let _g = match crate::inspect::capture::lock("prof", 1000) {
                 Ok(g) => g,
@@ -213,11 +224,7 @@ mod imp {
             for (k, t) in threads.iter().enumerate() {
                 let Some(now) = live.iter().find(|x| x.os_id == t.os_id) else { continue };
                 // CPU samples only: a thread that ran lately and is on a CPU right now
-                if now.cpu_ns == last_cpu[k] && now.state != "running" {
-                    continue;
-                }
-                last_cpu[k] = now.cpu_ns;
-                if !crate::inspect::threads::running(now) {
+                if !ran[k] || !crate::inspect::threads::running(now) {
                     continue;
                 }
                 if crate::inspect::threads::capture(now, &mut raw).is_ok() && raw.n > 0 {

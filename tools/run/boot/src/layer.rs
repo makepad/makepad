@@ -8,8 +8,12 @@
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
 //! goes. Later, sustained JIT waiting of the UI thread (a tab switch's compiles) fades in the JIT
 //! loader: a small galaxy in the bottom-right corner over the sharp app, its stars glinting per
-//! compile, no blur. The run decides when it shows and goes (hysteresis); a fade is never
-//! reversed half-way. Every fade runs on this session's clock, never the app's.
+//! compile, no blur. Later, only while the whole UI stalls on the JIT (the UI thread waits on a
+//! lazy compile or an install, no frame), the JIT loader: a small quiet galaxy (a few particles,
+//! slow drift, muted) in the bottom-right corner over the sharp app, gone as soon as the UI thread
+//! runs again. (The JIT's background optimising shows in the window title, not here.) The run
+//! decides when it shows and goes; a fade is never reversed half-way. Every fade runs on this
+//! session's clock, never the app's.
 use makepad_hal::Id;
 use std::time::Instant;
 
@@ -27,11 +31,11 @@ pub const SIGMA: f32 = 4.0;
 const FADE_IN: f32 = 0.5;
 const LIFT: f32 = 1.1;
 /// the JIT loader's fades
-const LOADER_IN: f32 = 0.35;
-const LOADER_OUT: f32 = 0.6;
-/// the JIT loader's square side and its margin to the window's corner (points)
-pub const LOADER_SIDE: f32 = 200.0;
-pub const LOADER_MARGIN: f32 = 12.0;
+const LOADER_IN: f32 = 0.2;
+const LOADER_OUT: f32 = 0.25;
+/// the JIT loader's square side (its small galaxy) and its margin to the window's corner (points)
+pub const LOADER_SIDE: f32 = 28.0;
+pub const LOADER_MARGIN: f32 = 10.0;
 
 /// What the run asks the layer to show (hal_run, from the JIT's signals).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -64,6 +68,8 @@ pub struct Look {
     pub hud: bool,
     /// the JIT loader: the galaxy alone in the bottom-right corner, over the sharp app
     pub corner: bool,
+    /// the JIT loader's small galaxy: its opacity (0: none)
+    pub stall: f32,
     /// the layer has faded out: it can go
     pub done: bool,
 }
@@ -173,6 +179,7 @@ impl Layer {
             resolve: -1.0,
             hud: true,
             corner: false,
+            stall: 0.0,
             done: false,
         };
         match self.want {
@@ -204,11 +211,13 @@ impl Layer {
                     -dt / LOADER_OUT
                 };
                 self.loader = (self.loader + rate).clamp(0.0, 1.0);
+                // the sharp app with the small galaxy over it: no field, no backdrop, no HUD
                 look.backdrop = 0.0;
                 look.hud = false;
                 look.corner = true;
                 look.sharp = 1.0;
-                look.galaxy = smooth(0.0, 1.0, self.loader);
+                look.galaxy = 0.0;
+                look.stall = smooth(0.0, 1.0, self.loader);
                 look.done = !shown && self.loader <= 0.0;
             }
         }

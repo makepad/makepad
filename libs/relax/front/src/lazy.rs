@@ -220,7 +220,67 @@ impl Plan {
             // Shared like Program::macros: snapshots are Arc clones; a write copies
             // the table only while a snapshot still shares it.
             let mut table = Arc::new(crate::macros::MacroTable::default());
-            for (ci, scans, aliases, _) in &mut discovered {
+            // Crates expand on shared workers: a crate whose dependencies are all published
+            // starts expanding (against a copy of the table as its publication will see it)
+            // while earlier crates still publish. Publication stays in crate order and
+            // replays every surface against the real table.
+            let queue = OutlineQueue::default();
+            let newest_dep = (0..crates.len()).map(|ci| dependency_crates[ci].iter().copied().max()).collect::<Vec<_>>();
+            let mut started: Vec<Option<(Arc<OutlineJob>, Vec<Vec<crate::macros::MacroRef>>, Arc<crate::macros::CrateMods>)>> = (0..crates.len()).map(|_| None).collect();
+            crate::pool::scope(|workers| {
+            // (the workers end with the queue, also when publication panics)
+            let finish = OutlineFinish(&queue);
+            for _ in 0..jobs() {
+                let (queue, contexts) = (&queue, &contexts);
+                workers.spawn(move || {
+                    let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
+                    while let Some((job, i)) = queue.next() {
+                        let c = &crates[job.ci];
+                        let _reads = contexts[job.ci].bind_source_reads();
+                        let (path, module, scan) = job.inputs[i].lock().unwrap().take().expect("each input is expanded once");
+                        let _profile = crate::load_profile::span(profile, "rust-demand-outline-worker", &path);
+                        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&c.name, &path, &module, &c.cfg));
+                        let surface = {
+                            let src = &scan.src[..];
+                            let mut toks = crate::parser::lazy_bodies::Toks::from(&scan.toks[..]);
+                            if !toks.last().is_some_and(|t| t.kind == T::Eof) {
+                                toks.push(Tok { kind: T::Eof, lo: src.len() as u32, hi: src.len() as u32 });
+                            }
+                            Some(crate::parser::rs_expand::expand(src, toks, c.edition, ctx, job.base.clone()))
+                        };
+                        let surface = surface.map(|surface| OutlineIndexes::new(surface, &scan.src, profile, &path));
+                        drop(scan);
+                        job.ready.0.lock().unwrap().insert((path.clone(), module.clone()), surface);
+                        job.ready.1.notify_all();
+                    }
+                });
+            }
+            for k in 0..discovered.len() {
+                for j in k + 1..(k + 1 + OUTLINE_AHEAD).min(discovered.len()) {
+                    let ready = newest_dep[j].is_none_or(|d| d < k);
+                    if started[j].is_some() || !ready || saved.get(j).and_then(Option::as_ref).is_some() { continue; }
+                    let c = &crates[j];
+                    let scans = &mut discovered[j].1;
+                    let modules = Arc::new(crate_modules(c, scans));
+                    let mut base = table.clone();
+                    let mut defs = Vec::with_capacity(scans.len());
+                    {
+                        let t = Arc::make_mut(&mut base);
+                        for (_, _, _, scan, _, _) in scans.iter_mut() {
+                            let Some(scan) = scan else { defs.push(Vec::new()); continue; };
+                            let scan = Arc::make_mut(scan);
+                            let own: Vec<crate::macros::MacroRef> = std::mem::take(&mut scan.defs).into_iter().map(Arc::new).collect();
+                            publish_scan_names(t, &c.name, scan, &own);
+                            defs.push(own);
+                        }
+                        t.add_crate(c.name.clone(), modules.clone());
+                        if c.name == "core" { t.s2_fmt = crate::vfs::exists(format!("{}/fmt/mod.rs", crate::program::dir_of(&c.root))); }
+                    }
+                    let job = OutlineJob::new(j, base, scans);
+                    queue.push(job.clone());
+                    started[j] = Some((job, defs, modules));
+                }
+                let (ci, scans, aliases, _) = &mut discovered[k];
                 let c = &crates[*ci];
                 let _crate_profile = crate::load_profile::span(profile, "rust-demand-outline-crate", &c.name);
                 let dependencies = dependency_crates[*ci].iter().map(|&d| identities[d]).collect::<Vec<_>>();
@@ -260,74 +320,49 @@ impl Plan {
                 }
                 let files_start = prepared_files.len();
                 let mut namespace_restored: Option<Arc<DemandPart>> = None;
-                let mut modules = crate::macros::CrateMods { root: c.name.clone(), src: c.root.clone(), ..Default::default() };
-                modules.externs.extend(c.deps.iter().cloned());
-                for (_, _, _, scan, _, _) in scans.iter_mut() {
-                    let Some(scan) = scan else { continue; };
-                    let scan = Arc::make_mut(scan);
-                    for def in std::mem::take(&mut scan.defs) {
-                        let def = Arc::new(def);
-                        parts[*ci].macros.note_definition(&c.name, &def);
-                        Arc::make_mut(&mut table).push(def);
-                    }
-                    for (alias, qual, target) in &scan.aliases { Arc::make_mut(&mut table).add_alias(c.name.clone(), alias.clone(), (qual.clone(), target.clone())); }
-                    for name in &scan.macro_use { Arc::make_mut(&mut table).macro_use.entry(c.name.clone()).or_default().push(name.clone()); }
-                    modules.mods.extend(scan.mods.iter().cloned());
-                    modules.items.extend(scan.mod_items.iter().cloned());
-                    for u in &scan.uses {
-                        if let Some(bind) = &u.bind {
-                            if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
-                            if u.path == ["crate"] && u.module == c.name { modules.externs.insert(bind.clone(), c.name.clone()); }
+                let job = match started[*ci].take() {
+                    // expanding since its dependencies were published: the names it published
+                    // to its copy of the table go to the real one now, in the same order
+                    Some((job, defs, modules)) => {
+                        for ((_, _, _, scan, _, _), own) in scans.iter().zip(&defs) {
+                            let Some(scan) = scan else { continue; };
+                            for def in own { parts[*ci].macros.note_definition(&c.name, def); }
+                            publish_scan_names(Arc::make_mut(&mut table), &c.name, scan, own);
                         }
-                        modules.uses.entry(u.module.clone()).or_default().push(u.clone());
+                        Arc::make_mut(&mut table).add_crate(c.name.clone(), modules);
+                        if c.name == "core" { Arc::make_mut(&mut table).s2_fmt = crate::vfs::exists(format!("{}/fmt/mod.rs", crate::program::dir_of(&c.root))); }
+                        job
                     }
-                }
-                Arc::make_mut(&mut table).add_crate(c.name.clone(), Arc::new(modules));
-                if c.name == "core" { Arc::make_mut(&mut table).s2_fmt = crate::vfs::exists(format!("{}/fmt/mod.rs", crate::program::dir_of(&c.root))); }
-                // Expand against the prescanned environment on bounded workers.
-                // Publish in source order, replaying macro lookups before using
-                // a speculative surface, just as the real preload parser does.
-                let base = table.clone();
-                // Each worker reads its scan in place and lets go of it before handing back the
-                // surface: publication then owns the scan alone (Arc::make_mut, no copy).
-                let inputs = scans.iter().filter_map(|(path, module, _, scan, ..)| scan.as_ref().map(|scan|
-                    relax_session::sync::Mutex::new(Some((path.clone(), module.clone(), scan.clone()))))).collect::<Vec<_>>();
+                    None => {
+                        let modules = Arc::new(crate_modules(c, scans));
+                        for (_, _, _, scan, _, _) in scans.iter_mut() {
+                            let Some(scan) = scan else { continue; };
+                            let scan = Arc::make_mut(scan);
+                            let own: Vec<crate::macros::MacroRef> = std::mem::take(&mut scan.defs).into_iter().map(Arc::new).collect();
+                            for def in &own { parts[*ci].macros.note_definition(&c.name, def); }
+                            publish_scan_names(Arc::make_mut(&mut table), &c.name, scan, &own);
+                        }
+                        Arc::make_mut(&mut table).add_crate(c.name.clone(), modules);
+                        if c.name == "core" { Arc::make_mut(&mut table).s2_fmt = crate::vfs::exists(format!("{}/fmt/mod.rs", crate::program::dir_of(&c.root))); }
+                        // Expand against the prescanned environment on the shared workers.
+                        // Publish in source order, replaying macro lookups before using
+                        // a speculative surface, just as the real preload parser does.
+                        let job = OutlineJob::new(*ci, table.clone(), scans);
+                        queue.push(job.clone());
+                        job
+                    }
+                };
                 let expected = scans.iter().filter(|entry| entry.3.is_some()).map(|(path, module, ..)| (path.clone(), module.clone())).collect::<BTreeSet<_>>();
-                let ready = (relax_session::sync::Mutex::new(BTreeMap::new()), relax_session::sync::Condvar::new());
-                let next_input = std::sync::atomic::AtomicUsize::new(0);
-                crate::pool::scope(|scope| {
-                    for _ in 0..jobs().min(inputs.len()) {
-                        let (inputs, ready, next_input, base, context) = (&inputs, &ready, &next_input, &base, &contexts[*ci]);
-                        scope.spawn(move || {
-                            let _reads = context.bind_source_reads();
-                            while let Some(input) = inputs.get(next_input.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
-                                let (path, module, scan) = input.lock().unwrap().take().expect("each input is expanded once");
-                                let _profile = crate::load_profile::span(profile, "rust-demand-outline-worker", &path);
-                                let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&c.name, &path, &module, &c.cfg));
-                                let surface = {
-                                    let src = &scan.src[..];
-                                    let mut toks = crate::parser::lazy_bodies::Toks::from(&scan.toks[..]);
-                                    if !toks.last().is_some_and(|t| t.kind == T::Eof) {
-                                        toks.push(Tok { kind: T::Eof, lo: src.len() as u32, hi: src.len() as u32 });
-                                    }
-                                    Some(crate::parser::rs_expand::expand(src, toks, c.edition, ctx, base.clone()))
-                                };
-                                let surface = surface.map(|surface| OutlineIndexes::new(surface, &scan.src, profile, &path));
-                                drop(scan);
-                                ready.0.lock().unwrap().insert((path.clone(), module.clone()), surface);
-                                ready.1.notify_all();
-                            }
-                        });
-                    }
+                {
                     // Publish in source order as soon as each file's speculative
                     // surface exists, while later files of the crate still expand.
                     let take = |key: (String, String)| {
                         if !expected.contains(&key) { return None; }
                         let _profile = crate::load_profile::span(profile, "rust-demand-outline-wait", &key.0);
-                        let mut map = ready.0.lock().unwrap();
+                        let mut map = job.ready.0.lock().unwrap();
                         loop {
                             if let Some(surface) = map.remove(&key) { return surface; }
-                            map = ready.1.wait(map).unwrap();
+                            map = job.ready.1.wait(map).unwrap();
                         }
                     };
                     let mut directories = BTreeMap::new();
@@ -403,7 +438,7 @@ impl Plan {
                         }
                         scans.push(entry);
                     }
-                });
+                }
                 Arc::make_mut(&mut table).seal_crate(&c.name);
                 {
                     // The crate's declarations are final: bind them and evaluate its
@@ -490,6 +525,8 @@ impl Plan {
                     early.publish(eager_prefix);
                 }
             }
+            drop(finish);
+            });
         }
         for (ci, scans, _aliases, local_names) in discovered {
             use std::fmt::Write as _;
@@ -869,6 +906,92 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+/// Crates a dependency-ready crate may start expanding ahead of publication (`Plan::build`).
+const OUTLINE_AHEAD: usize = 32;
+
+/// One crate's outline expansion on the shared workers (`Plan::build`): its files expand against
+/// `base`, the table as the crate's publication will most likely see it, while earlier crates
+/// still publish; publication replays each surface against the real table (a miss expands again).
+struct OutlineJob {
+    ci: usize,
+    base: Arc<crate::macros::MacroTable>,
+    /// Each worker reads its scan in place and lets go of it before handing back the surface:
+    /// publication then owns the scan alone (Arc::make_mut, no copy).
+    inputs: Vec<relax_session::sync::Mutex<Option<(String, String, Arc<Scanned>)>>>,
+    next: std::sync::atomic::AtomicUsize,
+    ready: (relax_session::sync::Mutex<BTreeMap<(String, String), Option<OutlineIndexes>>>, relax_session::sync::Condvar),
+}
+impl OutlineJob {
+    fn new(ci: usize, base: Arc<crate::macros::MacroTable>, scans: &[part::Scan]) -> Arc<Self> {
+        let inputs = scans.iter().filter_map(|(path, module, _, scan, ..)| scan.as_ref().map(|scan|
+            relax_session::sync::Mutex::new(Some((path.clone(), module.clone(), scan.clone()))))).collect();
+        Arc::new(Self { ci, base, inputs, next: std::sync::atomic::AtomicUsize::new(0),
+            ready: (relax_session::sync::Mutex::new(BTreeMap::new()), relax_session::sync::Condvar::new()) })
+    }
+}
+
+/// The shared expansion workers' queue: the started crates' jobs (the lowest crate first: the
+/// one publication waits for), and whether the load is done.
+#[derive(Default)]
+struct OutlineQueue {
+    jobs: relax_session::sync::Mutex<(BTreeMap<usize, Arc<OutlineJob>>, bool)>,
+    wake: relax_session::sync::Condvar,
+}
+impl OutlineQueue {
+    fn push(&self, job: Arc<OutlineJob>) {
+        self.jobs.lock().unwrap().0.insert(job.ci, job);
+        self.wake.notify_all();
+    }
+    /// The next file to expand (lowest crate first); None once the load is done.
+    fn next(&self) -> Option<(Arc<OutlineJob>, usize)> {
+        let mut g = self.jobs.lock().unwrap();
+        loop {
+            while let Some((ci, job)) = g.0.iter().next().map(|(&ci, job)| (ci, job.clone())) {
+                let i = job.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i < job.inputs.len() { return Some((job, i)); }
+                g.0.remove(&ci);
+            }
+            if g.1 { return None; }
+            g = self.wake.wait(g).unwrap();
+        }
+    }
+}
+/// Ends the queue when dropped.
+struct OutlineFinish<'a>(&'a OutlineQueue);
+impl Drop for OutlineFinish<'_> {
+    fn drop(&mut self) {
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
+        self.0.wake.notify_all();
+    }
+}
+
+/// A crate's modules and imports as its scans declare them (MacroTable::add_crate).
+fn crate_modules(c: &PreCrate, scans: &[part::Scan]) -> crate::macros::CrateMods {
+    let mut modules = crate::macros::CrateMods { root: c.name.clone(), src: c.root.clone(), ..Default::default() };
+    modules.externs.extend(c.deps.iter().cloned());
+    for (_, _, _, scan, _, _) in scans {
+        let Some(scan) = scan else { continue; };
+        modules.mods.extend(scan.mods.iter().cloned());
+        modules.items.extend(scan.mod_items.iter().cloned());
+        for u in &scan.uses {
+            if let Some(bind) = &u.bind {
+                if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
+                if u.path == ["crate"] && u.module == c.name { modules.externs.insert(bind.clone(), c.name.clone()); }
+            }
+            modules.uses.entry(u.module.clone()).or_default().push(u.clone());
+        }
+    }
+    modules
+}
+
+/// One scanned file's macro definitions (`defs`, taken from the scan), aliases and macro_use
+/// crates into `table`, in the scan's order.
+fn publish_scan_names(table: &mut crate::macros::MacroTable, krate: &str, scan: &Scanned, defs: &[crate::macros::MacroRef]) {
+    for def in defs { table.push(def.clone()); }
+    for (alias, qual, target) in &scan.aliases { table.add_alias(krate.to_string(), alias.clone(), (qual.clone(), target.clone())); }
+    for name in &scan.macro_use { table.macro_use.entry(krate.to_string()).or_default().push(name.clone()); }
 }
 
 type RawFile = (usize, String, String, bool, BTreeSet<String>);

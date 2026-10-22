@@ -304,7 +304,6 @@ fn main() {}
             assert_eq!(u.stats.tier1_installed, 0, "warm linking must not rebuild O3");
             assert!(u.fns[id as usize].rir.is_none());
             assert_eq!(unsafe { (*tier_rec(&u.slots, id).add(3)).load(Ordering::Acquire) }, T_QUEUED);
-            assert!(u.frequency_profiles.contains_key(&id), "cached O3 keeps its training opportunity");
             assert!(TIER_QUEUE.lock().unwrap().is_empty());
             assert!(O2_QUEUE.lock().unwrap().is_empty());
         }
@@ -319,8 +318,7 @@ fn main() {}
         assert!(unsafe { compile_tier1(up, id) });
         let recorded = crate::owner::call(crate::owner::Class::App, || {
             let recorded = u.cache.as_ref().unwrap().stats.recorded;
-            // A frequency retier replaces the first O3 entry too.
-            u.frequency_profiles.get_mut(&id).unwrap().samples = FREQUENCY_SAMPLES;
+            // A retier replaces the first O3 entry too.
             recorded
         });
         assert!(unsafe { compile_tier1(up, id) });

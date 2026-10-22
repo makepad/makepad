@@ -346,6 +346,59 @@ pub fn owned_doc(n: u32, present: bool) -> Option<Doc> {
     Some(unsafe { Doc { name: string_from_words(raw.name), items: vec_from_words(raw.items), closure: raw.closure } })
 }
 
+/// A handle of owned values (Strings, Vecs, an `Option<String>`, a plain enum) that JIT code builds
+/// itself (a struct literal, a struct update over `Default::default()`) and hands to rustc's code,
+/// which reads, grows, frees or returns it: rustc's layout is makepad run's own on both sides
+/// (relax-compiler provided.rs same_layout_handles), so the bytes cross as they are.
+#[relax_api(handle)]
+#[derive(Debug)]
+pub struct Note {
+    pub title: String,
+    pub tags: Vec<String>,
+    pub items: Vec<Item>,
+    pub alias: Option<String>,
+    pub limit: Option<u32>,
+    pub kind: Kind,
+    pub weight: u32,
+}
+
+impl Default for Note {
+    fn default() -> Note {
+        Note { title: String::from("untitled"), tags: Vec::new(), items: Vec::new(), alias: None, limit: Some(3), kind: Kind::A, weight: 1 }
+    }
+}
+
+/// rustc reads every field of a Note JIT code built
+#[relax_api]
+pub fn note_digest(n: &Note) -> String {
+    format!("{}|{}|{}|{:?}|{:?}|{:?}|{}", n.title, n.tags.join(","), n.items.iter().map(|i| i.a as u64 + i.b).sum::<u64>(), n.alias, n.limit, n.kind, n.weight)
+}
+
+/// rustc takes a Note by value and frees what JIT code allocated
+#[relax_api]
+pub fn note_take(n: Note) -> usize {
+    n.title.len() + n.tags.iter().map(|t| t.len()).sum::<usize>() + n.items.len() + n.alias.map_or(0, |a| a.len())
+}
+
+/// rustc grows a Note past its capacities and hands it back: JIT code reads and frees what rustc allocated
+#[relax_api]
+pub fn note_grow(mut n: Note) -> Note {
+    n.title.push_str(" -- grown by rustc past its capacity");
+    n.tags.extend((0..20).map(|i| format!("t{i}")));
+    n.items.push(Item { a: 5, b: 6, c: true });
+    n.alias = n.alias.map(|a| a + "!").or_else(|| Some(String::from("named")));
+    n.limit = None;
+    n.kind = flip(n.kind);
+    n.weight *= 10;
+    n
+}
+
+/// rustc builds a Note
+#[relax_api]
+pub fn note_new(title: &str) -> Note {
+    Note { title: title.to_string(), tags: vec![String::from("x")], alias: None, ..Note::default() }
+}
+
 /// Peak resident size so far, in the OS's unit (bytes on macOS and Windows, KiB on Linux).
 #[cfg(unix)]
 pub fn peak_rss() -> i64 {

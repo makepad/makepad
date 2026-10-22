@@ -144,7 +144,7 @@ fn provided() {
                     }
                 }
                 makepad_relax_api::HANDLE => {
-                    types.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.drop));
+                    types.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.drop, e.offsets));
                 }
                 makepad_relax_api::PLAIN => {
                     layouts.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.offsets));

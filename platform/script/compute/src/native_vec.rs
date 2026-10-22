@@ -60,8 +60,8 @@ fn compile_fresh(p: &Program, key: Option<u128>) -> Option<Code> {
     if f.verify().is_err() {
         return None;
     }
-    // one quick allocation round (see emit_keyed)
-    crate::native::emit_keyed(&f, key, std::env::var("VEC6_THOROUGH").is_ok())
+    // one quick allocation round, with copy coalescing (see emit_keyed, native::options)
+    crate::native::emit_keyed(&f, key, false)
 }
 
 /// The vector RIR of a kernel (None when declined), before optimisation.
@@ -500,10 +500,11 @@ impl<'a> Vx<'a> {
                     Region::State => self.regions[1],
                     _ => self.regions[2],
                 };
-                let idx = self.vclamp(o, ov, extent);
                 if region == Region::Shared {
-                    self.table_gather(d, base, extent, idx);
+                    let (idx, k) = self.table_index(o, ov, extent);
+                    self.table_gather(d, base, extent, idx, k);
                 } else {
+                    let idx = self.vclamp(o, ov, extent);
                     let b0 = self.ibini(IOp::Add, I64, rb, 4 * base as i64);
                     self.emit(Inst::VGather(d, b0, idx));
                 }
@@ -512,18 +513,33 @@ impl<'a> Vx<'a> {
         let _ = (m, scls);
     }
 
-    /// d = per lane word `base + idx_l` of the shared tables (idx below extent): a small table
+    /// The in-range word index of shared-table load `o` (vector `ov`) as (x, k): word = x << k. An
+    /// index `x << k` known in range (a vec2 row's first word, `2 * h`) gives x itself, so the TBL
+    /// byte index multiplies x by `0x04040404 << k` (wrapping products agree) instead of shifting.
+    fn table_index(&mut self, o: Val, ov: VReg, extent: u32) -> (VReg, u8) {
+        if self.bounds[o.0 as usize].is_some_and(|b| b < extent) {
+            if let Some(Op::Bin(Bin::ShlI, x, y)) = self.defs[o.0 as usize] {
+                if let Some(k) = self.consts[y.0 as usize].filter(|k| *k < 8) {
+                    return (self.v(x), k as u8);
+                }
+            }
+        }
+        (self.vclamp(o, ov, extent), 0)
+    }
+
+    /// d = per lane word `base + (idx_l << k)` of the shared tables (in range): a small table
     /// (noise gradients, lookup rows: up to 16 words) on NEON is one TBL by byte indices (word i =
-    /// bytes 4i .. 4i + 3; neon.rs small_table), else a gather.
-    fn table_gather(&mut self, d: VReg, base: u32, extent: u32, idx: VReg) {
+    /// bytes 4i .. 4i + 3), else a gather.
+    fn table_gather(&mut self, d: VReg, base: u32, extent: u32, idx: VReg, k: u8) {
         let b0 = self.ibini(IOp::Add, I64, self.regions[2], 4 * base as i64);
         if cfg!(target_arch = "aarch64") && extent <= 16 {
-            let k1 = self.splat_const(0x0404_0404);
+            let k1 = self.splat_const(0x0404_0404u32 << k);
             let b4 = self.vbin(VX::MulLo(VW::S), idx, k1);
             let k2 = self.splat_const(0x0302_0100);
             let bi = self.vbin(VX::Add(VW::S), b4, k2);
             self.emit(Inst::VTbl(d, b0, bi, extent as u8));
         } else {
+            let idx = if k == 0 { idx } else { self.vshift(VX::ShlI, idx, k) };
             self.emit(Inst::VGather(d, b0, idx));
         }
     }
@@ -745,8 +761,8 @@ impl<'a> Vx<'a> {
     /// statement that is not a definition): every four consecutive words holding at least two
     /// of them are one 16-byte load per lane and a 4x4 transpose, when every lane's words lie
     /// inside (checked once, on the largest lane root): a buffer's length; for tables, no load
-    /// clamps and each 16-byte load stays inside its table (neon.rs gather_group, which took
-    /// only consecutive rows). Else the loads one by one, as clamped gathers. Made at b[0]; the
+    /// clamps and each 16-byte load stays inside its table (any rows, not only consecutive
+    /// ones). Else the loads one by one, as clamped gathers. Made at b[0]; the
     /// loads it made are in `grouped`.
     fn load_group(&mut self, b: &[Stmt]) {
         let Some(Stmt::Def(_, Op::Load { region, off: Some(o0), .. })) = b.first() else { return };
@@ -881,7 +897,7 @@ impl<'a> Vx<'a> {
                 _ => {
                     let top = self.splat_const(extent.saturating_sub(1));
                     let idx = self.vbin(VX::MinU(VW::S), ov, top);
-                    self.table_gather(d, base, extent, idx);
+                    self.table_gather(d, base, extent, idx, 0);
                 }
             }
         }

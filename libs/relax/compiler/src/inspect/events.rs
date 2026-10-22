@@ -239,6 +239,21 @@ struct Parked {
     what: (String, String, String),
     /// its frames, innermost first (lookup pcs): `eval`'s default scope, `locals`
     frames: Vec<u64>,
+    /// the panic trampoline's register block at the innermost frame's call (frame pointer,
+    /// return address, callee-saved registers; jit.rs REG_WORDS): `locals` reads the frames'
+    /// variables from it; empty for a stop without one (a fault)
+    regs: Vec<u64>,
+}
+
+/// Parked panic `id`'s (the newest with None) register block at its innermost frame's call
+/// (empty: none): (id, block).
+pub fn parked_regs(id: Option<u64>) -> Option<(u64, Vec<u64>)> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = match id {
+        Some(k) => list.iter().find(|p| p.id == k)?,
+        None => list.iter().max_by_key(|p| p.id)?,
+    };
+    Some((p.id, p.regs.clone()))
 }
 
 /// Parked panic `id` (the newest with None): (id, its domain, its frames as lookup pcs, its
@@ -311,7 +326,8 @@ pub fn release_domain(domain: crate::domain::DomainId) {
     RESUME.notify_all();
 }
 
-pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
+pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
+    let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
     if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
@@ -379,7 +395,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     // Do not park a new cleanup panic after that release.
     if domain.is_some_and(crate::domain::cancelled) { return; }
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect() });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() } });
     list.push(p.clone());
     parked_changed();
     if !watched {

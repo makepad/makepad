@@ -71,7 +71,7 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
     for b in f.blocks.iter_mut() {
         b.term.map_succs(|t| t + 1);
     }
-    let mut b0 = Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(1), term_pos: pos0 };
+    let mut b0 = Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(1), term_pos: pos0, count: -1.0 };
     let push0 = |b: &mut Block, i: Inst| {
         b.insts.push(i);
         b.pos.push(pos0);
@@ -99,8 +99,9 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
             pos: vec![pos0, pos0, pos0],
             term: Term::Jump(cont),
             term_pos: pos0,
+            count: -1.0,
         });
-        extra.push(Block { insts: vec![Inst::Store(Mem::Int(8, false), t_ss, 0, nsp)], pos: vec![pos0], term: Term::Jump(1), term_pos: pos0 });
+        extra.push(Block { insts: vec![Inst::Store(Mem::Int(8, false), t_ss, 0, nsp)], pos: vec![pos0], term: Term::Jump(1), term_pos: pos0, count: -1.0 });
     }
     let blocks = std::mem::take(&mut f.blocks);
     let mut out: Vec<Block> = Vec::with_capacity(blocks.len() + 3);
@@ -254,11 +255,13 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
                 pos.push(b.term_pos);
             }
         }
-        out.push(Block { insts, pos, term: b.term, term_pos: b.term_pos });
+        out.push(Block { insts, pos, term: b.term, term_pos: b.term_pos, count: -1.0 });
     }
     out.extend(extra);
     f.blocks = out;
     f.slots.clear();
+    // (the slots are gone into the shadow stack: no variable locations)
+    f.dbg.clear();
     // facts about the old (offset) values do not hold for native addresses
     f.deref.clear();
     f.noalias.clear();

@@ -48,6 +48,7 @@ pub mod gpu_pressure;
 pub mod inspect;
 pub mod media;
 pub mod profile;
+pub mod threadcpu;
 pub mod session;
 pub mod types;
 
@@ -1002,11 +1003,6 @@ pub struct ScreenInfo {
     pub is_primary: bool,
 }
 
-/// The displays attached right now, as the window system last saw them (readable from any
-/// thread): the first `out.len()` of them are written to `out`, the number attached is returned
-/// (a larger number: call again with room for all). None where there is no window system, or
-/// before it is up. An op: the list lives in the shell's state.
-#[relax_api]
 /// The identity a launcher gave this process (MAKEPAD_APP_ID, set by `makepad app <id>` for the
 /// OS entry of an app: its .desktop file names the same id): `nl.makepad.<id>`, which a Linux
 /// window takes as its Wayland app_id and X11 WM_CLASS so the desktop groups it with its entry.
@@ -1017,6 +1013,11 @@ pub fn app_identity() -> Option<String> {
     ok.then(|| format!("nl.makepad.{id}"))
 }
 
+/// The displays attached right now, as the window system last saw them (readable from any
+/// thread): the first `out.len()` of them are written to `out`, the number attached is returned
+/// (a larger number: call again with room for all). None where there is no window system, or
+/// before it is up. An op: the list lives in the shell's state.
+#[relax_api]
 pub fn hal_screens(out: &mut [ScreenInfo]) -> u32 {
     let all = main_loop::screens();
     for (o, s) in out.iter_mut().zip(&all) {

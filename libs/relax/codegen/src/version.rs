@@ -197,7 +197,7 @@ pub fn version_loop(f: &mut Func, l: &Loop, guard: Vec<Inst>, g: VReg, facts: &[
     let hc = to_clone(l.header);
     let pos = f.blocks[l.header as usize].term_pos;
     let n = guard.len();
-    f.blocks.push(Block { insts: guard, pos: vec![pos; n], term: Term::Branch(g, hc, l.header), term_pos: pos });
+    f.blocks.push(Block { insts: guard, pos: vec![pos; n], term: Term::Branch(g, hc, l.header), term_pos: pos, count: -1.0 });
     for bi in 0..base as usize {
         if !l.member.get(bi).copied().unwrap_or(false) {
             f.blocks[bi].term.map_succs(|s| if s == l.header { gb } else { s });

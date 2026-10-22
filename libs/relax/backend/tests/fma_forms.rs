@@ -1,7 +1,7 @@
 //! x64 scalar FMA operand forms: the result in the accumulator's register (vfmadd231), in b's
-//! (213 with a and b swapped) or in a's / elsewhere (213), for every negation form, over chains
-//! that keep many values live (xmm16..31 on AVX-512VL hosts). Every result must equal Rust's
-//! `mul_add` bit for bit (no NaN inputs).
+//! (132) or in a's / elsewhere (213), for every negation form, over chains that keep many values
+//! live (xmm16..31 on AVX-512VL hosts). Every result must equal Rust's `mul_add` bit for bit, and
+//! with NaN inputs (distinct payloads, both signs) the NaN rule (rir::fma_nan_f32 / f64).
 #![cfg(all(target_arch = "x86_64", unix))]
 use relax_backend::{exec::Code, rir::*};
 
@@ -62,14 +62,47 @@ fn fma<T: Copy + std::ops::Neg<Output = T>>(np: bool, na: bool, a: T, b: T, c: T
     m(if np { -a } else { a }, b, if na { -c } else { c })
 }
 
+/// mul_add with the NaN rule (Rust's own NaN bits are unspecified)
+fn mul_add64(a: f64, b: f64, c: f64) -> f64 {
+    fma_nan_f64(a, b, c).map_or_else(|| a.mul_add(b, c), f64::from_bits)
+}
+
+fn mul_add32(a: f32, b: f32, c: f32) -> f32 {
+    fma_nan_f32(a, b, c).map_or_else(|| a.mul_add(b, c), f32::from_bits)
+}
+
+/// The chain's inputs; with `nans`, every third one a NaN (payload i, signs alternating, some
+/// signaling)
+fn inputs(nans: bool) -> (Vec<f64>, Vec<f32>) {
+    let x64: Vec<f64> = (0..N)
+        .map(|i| match i % 3 {
+            1 if nans => {
+                let sign: u64 = if i % 2 == 0 { 1 << 63 } else { 0 };
+                let quiet: u64 = if i % 4 == 1 { 1 << 51 } else { 0 };
+                f64::from_bits(sign | 0x7ff0_0000_0000_0000 | quiet | (i as u64 + 1))
+            }
+            _ => 0.75 + i as f64 * 0.311 - (i % 7) as f64 * 0.5,
+        })
+        .collect();
+    let x32: Vec<f32> = x64
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let sign: u32 = if i % 2 == 0 { 1 << 31 } else { 0 };
+            let quiet: u32 = if i % 4 == 1 { 1 << 22 } else { 0 };
+            if v.is_nan() { f32::from_bits(sign | 0x7f80_0000 | quiet | (i as u32 + 1)) } else { v as f32 }
+        })
+        .collect();
+    (x64, x32)
+}
+
 #[test]
 fn every_fma_form_matches_mul_add() {
     if !options().cpu.fma {
         return;
     }
-    let x64: Vec<f64> = (0..N).map(|i| 0.75 + i as f64 * 0.311 - (i % 7) as f64 * 0.5).collect();
-    let x32: Vec<f32> = x64.iter().map(|&v| v as f32).collect();
-    for w in [true, false] {
+    for (w, nans) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (x64, x32) = inputs(nans);
         let code = build(w);
         let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
         if w {
@@ -78,11 +111,11 @@ fn every_fma_form_matches_mul_add() {
             let mut acc = x64[N - 1];
             for i in 0..N - 6 {
                 let (np, na) = FORMS[i % 4];
-                let a = fma(np, na, x64[i], x64[i + 1], acc, f64::mul_add);
+                let a = fma(np, na, x64[i], x64[i + 1], acc, mul_add64);
                 let (np2, na2) = FORMS[(i + 1) % 4];
-                let e = fma(np2, na2, x64[i + 5], x64[i], a, f64::mul_add);
-                assert_eq!(out[2 * i].to_bits(), a.to_bits(), "f64 acc {}", i);
-                assert_eq!(out[2 * i + 1].to_bits(), e.to_bits(), "f64 e {}", i);
+                let e = fma(np2, na2, x64[i + 5], x64[i], a, mul_add64);
+                assert_eq!(out[2 * i].to_bits(), a.to_bits(), "f64 acc {} nans {}", i, nans);
+                assert_eq!(out[2 * i + 1].to_bits(), e.to_bits(), "f64 e {} nans {}", i, nans);
                 acc = a;
             }
         } else {
@@ -91,11 +124,11 @@ fn every_fma_form_matches_mul_add() {
             let mut acc = x32[N - 1];
             for i in 0..N - 6 {
                 let (np, na) = FORMS[i % 4];
-                let a = fma(np, na, x32[i], x32[i + 1], acc, f32::mul_add);
+                let a = fma(np, na, x32[i], x32[i + 1], acc, mul_add32);
                 let (np2, na2) = FORMS[(i + 1) % 4];
-                let e = fma(np2, na2, x32[i + 5], x32[i], a, f32::mul_add);
-                assert_eq!(out[2 * i].to_bits(), a.to_bits(), "f32 acc {}", i);
-                assert_eq!(out[2 * i + 1].to_bits(), e.to_bits(), "f32 e {}", i);
+                let e = fma(np2, na2, x32[i + 5], x32[i], a, mul_add32);
+                assert_eq!(out[2 * i].to_bits(), a.to_bits(), "f32 acc {} nans {}", i, nans);
+                assert_eq!(out[2 * i + 1].to_bits(), e.to_bits(), "f32 e {} nans {}", i, nans);
                 acc = a;
             }
         }
@@ -168,20 +201,31 @@ fn folded_float_loads_compute_the_same_bits() {
     if !options().cpu.fma {
         return;
     }
-    let x64: Vec<f64> = (0..N).map(|i| 0.75 + i as f64 * 0.311 - (i % 7) as f64 * 0.5).collect();
-    let x32: Vec<f32> = x64.iter().map(|&v| v as f32).collect();
-    let code = build_loads(true);
-    let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
-    let mut out = vec![0f64; 2 * N];
-    run(x64.as_ptr() as *const u8, out.as_mut_ptr() as *mut u8);
-    for (i, want) in loads_ref(&x64, f64::mul_add).iter().enumerate() {
-        assert_eq!(out[i].to_bits(), want.to_bits(), "f64 {}", i);
-    }
-    let code = build_loads(false);
-    let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
-    let mut out = vec![0f32; 2 * N];
-    run(x32.as_ptr() as *const u8, out.as_mut_ptr() as *mut u8);
-    for (i, want) in loads_ref(&x32, f32::mul_add).iter().enumerate() {
-        assert_eq!(out[i].to_bits(), want.to_bits(), "f32 {}", i);
+    // with NaNs the FMAs give the rule's bits; an FBin's NaN only is one (its bits are the
+    // host instruction's, as Rust's)
+    for nans in [false, true] {
+        let (x64, x32) = inputs(nans);
+        let code = build_loads(true);
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        let mut out = vec![0f64; 2 * N];
+        run(x64.as_ptr() as *const u8, out.as_mut_ptr() as *mut u8);
+        for (i, want) in loads_ref(&x64, mul_add64).iter().enumerate() {
+            if i % 7 >= 4 || !want.is_nan() {
+                assert_eq!(out[i].to_bits(), want.to_bits(), "f64 {} nans {}", i, nans);
+            } else {
+                assert!(out[i].is_nan(), "f64 {} nans {}", i, nans);
+            }
+        }
+        let code = build_loads(false);
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        let mut out = vec![0f32; 2 * N];
+        run(x32.as_ptr() as *const u8, out.as_mut_ptr() as *mut u8);
+        for (i, want) in loads_ref(&x32, mul_add32).iter().enumerate() {
+            if i % 7 >= 4 || !want.is_nan() {
+                assert_eq!(out[i].to_bits(), want.to_bits(), "f32 {} nans {}", i, nans);
+            } else {
+                assert!(out[i].is_nan(), "f32 {} nans {}", i, nans);
+            }
+        }
     }
 }

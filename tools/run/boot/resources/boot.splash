@@ -150,6 +150,36 @@ let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: f
     alpha = alpha * (1.0 - g) + g
     return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
 }
+// the JIT loader over the running app (makepad run, while the UI stalls on the JIT): a small,
+// quiet galaxy -- a few particles on two trailing arms around a soft core, drifting slowly (the
+// outer ones slower, as the boot field's), muted. done 0..1: how many of its particles are lit and
+// how bright the core is; a: its opacity (its fade). GPU-only.
+let settle_galaxy_px = fn(p: vec2, s: vec2, done: float, a: float, t: float, dp: float, px: vec2) -> vec4 {
+    let rad = min(s.x, s.y) * 0.5
+    let d = (p - s * 0.5) / rad
+    let r = length(d)
+    let th = atan2(d.y, d.x) / 6.2831853
+    // two arms trailing their spin, the drift slower outside
+    let phi = th - 0.55 * r - t * 0.025 * (1.3 - r)
+    let rings = 3.0
+    let u = r * rings
+    let ring = floor(u)
+    let n = 3.0 + ring * 3.0
+    let cell = floor(fract(phi) * n)
+    let h = fract(sin(dot(vec2(cell, ring), vec2(12.9898, 78.233))) * 43758.5453)
+    let h2 = fract(h * 13.37 + 0.31)
+    // the particle's place in its cell (jittered), in points
+    let along = (fract(fract(phi) * n) - 0.5 - (h - 0.5) * 0.5) * 6.2831853 * max(r, 0.15) * rad / n
+    let across = (fract(u) - 0.5 - (h2 - 0.5) * 0.4) * rad / rings
+    let dot_a = clamp(1.0 - (length(vec2(along, across)) - 0.45) * dp, 0.0, 1.0) * step(ring, rings - 1.0)
+    let arm = 0.5 + 0.5 * cos(phi * 12.5663706)
+    let lit = mix(0.28, 1.0, step(h2, done))
+    let star = dot_a * mix(0.25, 1.0, arm) * lit * (1.0 - smoothstep(0.85, 1.0, r))
+    let core = exp(-r * r * 22.0) * (0.22 + 0.45 * done)
+    let alpha = clamp(max(star * 0.8, core), 0.0, 1.0) * a * 0.6
+    let col = mix(#8a7fb8, #ece6ff, core)
+    return vec4((col.rgb + vec3(dither(px) * step(0.001, alpha))) * alpha, alpha)
+}
 let Quad = {
     geom: vertex_buffer(vec2f)
     rect: instance(vec4(0.0))
@@ -218,8 +248,10 @@ let Quad = {
     }
     // a card of the halted view, a row of a collapsed group, a touch button, or a window button
     // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
-    // 4 caption window button (action: its glyph, selected: hover)
+    // 4 caption window button (action: its glyph, selected: hover), 5 the JIT loader's small
+    // galaxy (selected: particles lit, pressed: opacity)
     error_band: Quad{
+        time: uniform(0.0)
         selected: instance(0.0)
         action: instance(0.0)
         pressed: instance(0.0)
@@ -229,6 +261,9 @@ let Quad = {
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
+            if self.accent > 4.5 {
+                return settle_galaxy_px(p, s, self.selected, self.pressed, self.time, dp, px)
+            }
             if self.accent > 3.5 {
                 return caption_button_px(p, s, self.action, self.selected, self.pressed, dp, px)
             }

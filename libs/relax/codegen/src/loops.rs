@@ -159,12 +159,12 @@ pub fn unroll_loops(options: &relax_session::Options, f: &mut Func) -> bool {
             hi.push(Inst::Iconst(bvreg, kc));
         }
         hi.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g1, iv, bvreg));
-        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos };
+        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos, count: -1.0 };
         // H2: n - i >= K (unsigned; i < n, so no wrap)
         let (rem, g2, lim) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
         // lim = n - K: U runs while i <= lim (n - i >= K here, so n - K does not overflow)
         let h2i = vec![Inst::IBin(IOp::Sub, U64_TY, rem, bvreg, iv), Inst::IBinI(IOp::Sub, U64_TY, lim, bvreg, k), Inst::ICmpI(Cond::Ge, false, g2, rem, k)];
-        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos };
+        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos, count: -1.0 };
         // U: t_j = i + j up front; copy c of the body reads i as t_(c + increments so far);
         // the increments go; i += K; loop while n - i >= K
         let tv: Vec<VReg> = (0..=k).map(|j| if j == 0 { iv } else { f.vreg(Cls::I) }).collect();
@@ -254,11 +254,11 @@ pub fn unroll_loops(options: &relax_session::Options, f: &mut Func) -> bool {
         ui.push(Inst::IBinI(IOp::Add, it, iv, iv, k));
         ui.push(Inst::ICmp(Cond::Le, signed, g4, iv, lim));
         up.extend([pos, pos]);
-        let ub = Block { insts: ui, pos: up, term: Term::Branch(g4, h + 2, h + 3), term_pos: pos };
+        let ub = Block { insts: ui, pos: up, term: Term::Branch(g4, h + 2, h + 3), term_pos: pos, count: -1.0 };
         // HL: the rest (< K iterations) in B, or none
         let g3 = f.vreg(Cls::I);
         let hl = vec![Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g3, iv, bvreg)];
-        let hlb = Block { insts: hl, pos: vec![pos], term: Term::Branch(g3, bi as u32, exit), term_pos: pos };
+        let hlb = Block { insts: hl, pos: vec![pos], term: Term::Branch(g3, bi as u32, exit), term_pos: pos, count: -1.0 };
         // outside entries into B now enter H
         for pb in 0..nb0 {
             if pb != bi {
@@ -861,8 +861,8 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                 block.term.map_succs(|s| if s == head { entry } else { s });
             }
         }
-        f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos });
-        f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos });
+        f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos, count: -1.0 });
+        f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos, count: -1.0 });
         for (done, member) in transformed.iter_mut().zip(&members) { *done |= *member; }
         changed = true;
     }
@@ -1131,12 +1131,12 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             hi.push(Inst::Iconst(bvreg, kc));
         }
         hi.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g1, iv, bvreg));
-        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos };
+        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos, count: -1.0 };
         // H2
         let (rem, g2, va, vb, lim) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::I));
         // lim = n - K: the vector loop runs while i <= lim (n - i >= K here, so no wrap)
         let h2i = vec![Inst::VConst(va, 0), Inst::VConst(vb, 0), Inst::IBin(IOp::Sub, U64_TY, rem, bvreg, iv), Inst::IBinI(IOp::Sub, U64_TY, lim, bvreg, kk), Inst::ICmpI(Cond::Ge, false, g2, rem, kk)];
-        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos };
+        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos, count: -1.0 };
         // V
         let (s1, p, g3) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
         let mut vi = vec![Inst::IBinI(IOp::Shl, U64_TY, s1, iv, sh), Inst::IBin(IOp::Add, U64_TY, p, base, s1)];
@@ -1155,7 +1155,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         vi.push(Inst::IBinI(IOp::Add, it, iv, iv, kk));
         // the loop's own signedness (n - i >= K here: n - K does not overflow either way)
         vi.push(Inst::ICmp(Cond::Le, signed, g3, iv, lim));
-        let vb_ = Block { insts: vi.clone(), pos: vec![pos; vi.len()], term: Term::Branch(g3, h + 2, h + 3), term_pos: pos };
+        let vb_ = Block { insts: vi.clone(), pos: vec![pos; vi.len()], term: Term::Branch(g3, h + 2, h + 3), term_pos: pos, count: -1.0 };
         // VE
         let (vs, s, g4) = (f.vreg(Cls::V128), f.vreg(Cls::I), f.vreg(Cls::I));
         let mut ve = vec![Inst::VX(VX::Add(VW::D), vs, va, vb), Inst::VX(VX::AddAcross(VW::D), s, vs, vs)];
@@ -1168,7 +1168,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         };
         ve.push(Inst::IBin(IOp::Add, U64_TY, acc, acc, s_fin));
         ve.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g4, iv, bvreg));
-        let veb = Block { insts: ve.clone(), pos: vec![pos; ve.len()], term: Term::Branch(g4, bi as u32, exit), term_pos: pos };
+        let veb = Block { insts: ve.clone(), pos: vec![pos; ve.len()], term: Term::Branch(g4, bi as u32, exit), term_pos: pos, count: -1.0 };
         for pb in 0..nb0 {
             if pb != bi {
                 f.blocks[pb].term.map_succs(|s2| if s2 as usize == bi { h } else { s2 });
@@ -1644,7 +1644,7 @@ fn apply_lane_group(f: &mut Func, head: u32, members: &[bool], preds: &[Vec<u32>
         }
         let nb = f.blocks.len() as u32;
         let tp = f.blocks[head as usize].term_pos;
-        f.blocks.push(Block { insts: enter.clone(), pos: vec![tp; enter.len()], term: Term::Jump(head), term_pos: tp });
+        f.blocks.push(Block { insts: enter.clone(), pos: vec![tp; enter.len()], term: Term::Jump(head), term_pos: tp, count: -1.0 });
         f.blocks[p as usize].term.map_succs(|s| if s == head { nb } else { s });
     }
     // leaving it: back out of the vector on every exit edge
@@ -1661,7 +1661,7 @@ fn apply_lane_group(f: &mut Func, head: u32, members: &[bool], preds: &[Vec<u32>
         for x in exits {
             let nb = f.blocks.len() as u32;
             let tp = f.blocks[u].term_pos;
-            f.blocks.push(Block { insts: leave.clone(), pos: vec![tp; leave.len()], term: Term::Jump(x), term_pos: tp });
+            f.blocks.push(Block { insts: leave.clone(), pos: vec![tp; leave.len()], term: Term::Jump(x), term_pos: tp, count: -1.0 });
             f.blocks[u].term.map_succs(|s| if s == x { nb } else { s });
         }
     }

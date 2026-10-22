@@ -118,6 +118,30 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
     out.push(("slot names".to_string(), names));
     out.push(("slot histories".to_string(), history));
     out.push(("slot pc maps".to_string(), pcm));
+    // the variable tables in the installed bodies' pc maps (makepad inspect `locals`) and the
+    // debug tables the retained RIR carries
+    let (mut n_vars, mut var_bytes, mut dbg_bytes) = (0u64, 0u64, 0u64);
+    for f in u.fns.iter() {
+        let e = f.pc_map.entries();
+        let k = e.iter().position(|x| x.0 == relax_backend::dbgloc::PC_VARS);
+        if let Some(k) = k {
+            // its length entry, then its bytes as they are (PcMap::encode_to)
+            n_vars += 1;
+            var_bytes += relax_backend::dbgloc::varint_bytes(if k > 0 { e[k - 1] } else { (0, 0) }, &e[k..k + 1]) + e[k].1 as u32 as u64;
+        }
+        if let Some(r) = &f.rir {
+            dbg_bytes += vbytes(&r.dbg) + r.dbg.iter().map(|d| vbytes(&d.k) + match &d.loc { relax_backend::rir::DbgLoc::Regs(v) => vbytes(v), _ => 0 }).sum::<u64>();
+        }
+    }
+    out.push((format!("slot pc maps: of which variable tables ({} bodies)", n_vars), var_bytes));
+    out.push(("RIR debug tables (Func::dbg)".to_string(), dbg_bytes));
+    if relax_backend::dbgloc::stats_on() {
+        let st = &relax_backend::dbgloc::STATS;
+        let g = |k: usize| st[k].load(std::sync::atomic::Ordering::Relaxed);
+        out.push((format!("compiled: {} of {} bodies with a table; table bytes", g(0), g(1)), g(2)));
+        out.push(("compiled: the tables' pc-map bytes".to_string(), g(3)));
+        out.push(("compiled: the code entries' pc-map bytes".to_string(), g(4)));
+    }
     out.push((format!("slot RIR kept ({} fns; inst {} B, block {} B, func {} B)", n_rir, std::mem::size_of::<relax_backend::rir::Inst>(), std::mem::size_of::<relax_backend::rir::Block>(), std::mem::size_of::<relax_backend::rir::Func>()), rir));
     out.push((format!("  RIR insts used (of {:.1} MB capacity)", parts[1] as f64 / 1048576.0), parts[0]));
     out.push((format!("  RIR positions used (of {:.1} MB capacity)", parts[3] as f64 / 1048576.0), parts[2]));

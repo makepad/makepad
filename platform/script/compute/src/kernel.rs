@@ -242,10 +242,10 @@ pub struct KernelBody {
     /// (ctx `K_WORK`).
     element_work: u64,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    native: Option<crate::host_native::Code>,
+    native: Option<crate::native::Code>,
     /// Four elements per iteration (element-local kernels only).
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    neon: Option<crate::host_native::Code>,
+    x4: Option<crate::native::Code>,
     /// Admission's worst-case element estimate, computed on first admit
     /// (the job path stays allocation-free).
     pub(crate) admission: std::sync::OnceLock<crate::cost::ElementCost>,
@@ -390,12 +390,12 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native = if backend == Backend::Native {
         let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
-        crate::host_native::compile_with(&flat, writable)
+        crate::native::compile_with(&flat, writable)
     } else {
         None
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let neon = if native.is_some() && lowered.parallel_safe { crate::host_simd::compile(&flat) } else { None };
+    let x4 = if native.is_some() && lowered.parallel_safe { crate::native_vec::compile(&flat) } else { None };
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let _ = backend;
     let live_values: Box<[AtomicU32]> = lowered.live.iter().map(|p| AtomicU32::new(lowered.params[p.param as usize].default.to_bits())).collect();
@@ -407,7 +407,7 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     let param_views: Box<[ParamInfoView<'static>]> = params.iter().map(|p| ParamInfoView { name: unsafe { forever(p.name.as_str()) }, default: p.default, min: p.min, max: p.max }).collect();
     let buffer_views: Box<[BufferInfoView<'static>]> = buffers.iter().map(|b| BufferInfoView { name: unsafe { forever(b.name.as_str()) }, access: b.access, stride: b.stride }).collect();
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let simd = neon.is_some();
+    let simd = x4.is_some();
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let simd = false;
     let cells = Box::new(KernelCells { speed: AtomicU32::new(0), simd: AtomicU8::new(simd as u8) });
@@ -441,7 +441,7 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             native,
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            neon,
+            x4,
             admission: std::sync::OnceLock::new(),
             slice_ops: std::sync::OnceLock::new(),
             wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
@@ -681,11 +681,11 @@ impl KernelBody {
         &self.program
     }
 
-    /// The scalar and NEON ×4 machine code as instruction words (for
+    /// The scalar and four-wide machine code as instruction words (for
     /// disassembly; empty where the kernel has none).
     pub fn code_words(&self) -> (&[u32], &[u32]) {
         #[cfg(target_arch = "aarch64")]
-        return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.neon.as_ref().map_or(&[][..], |c| c.words()));
+        return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.x4.as_ref().map_or(&[][..], |c| c.words()));
         #[cfg(not(target_arch = "aarch64"))]
         (&[], &[])
     }
@@ -833,7 +833,7 @@ impl KernelBody {
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if mode == Mode::Vector && n >= 4 {
-            if let (Some(code), Some(_)) = (&self.neon, &self.native) {
+            if let (Some(code), Some(_)) = (&self.x4, &self.native) {
                 let mut state = [0u32; 1];
                 let n4 = n & !3;
                 // SAFETY: as below; the caller checked that the kernel is

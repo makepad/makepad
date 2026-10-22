@@ -71,18 +71,12 @@ static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
 /// wakes, and shows the JIT loader once the waiting is sustained (LOADER_AFTER in LOADER_WINDOW).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// The JIT loader shows for this much UI-thread JIT waiting within the sliding window (never for
-/// one short hiccup)...
-const LOADER_AFTER: Duration = Duration::from_millis(250);
-const LOADER_WINDOW_NS: u64 = 1_000_000_000;
-/// ...stays at least this long...
-const LOADER_MIN: Duration = Duration::from_millis(1000);
-/// ...and goes once the UI thread waited less than LOADER_TRICKLE in the last LOADER_QUIET_NS
-/// (the trickle of tiny waits a running app always has is quiet). Going, its fade-out holds while
-/// the UI thread waits that much in LOADER_BUSY_NS again (it never fades back in half-way).
-const LOADER_QUIET_NS: u64 = 700_000_000;
-const LOADER_BUSY_NS: u64 = 200_000_000;
-const LOADER_TRICKLE: Duration = Duration::from_millis(40);
+/// The JIT loader (a small galaxy in the corner) shows while the UI thread's open JIT wait has lasted
+/// this long (the whole UI stalls: no frame; never for a short hiccup)...
+const LOADER_AFTER: Duration = Duration::from_millis(200);
+/// ...and goes once the UI thread has run this long without a JIT wait (frames again). Going, its
+/// fade-out holds while the UI thread stalls again (it never fades back in half-way).
+const LOADER_RESUMED_NS: u64 = 50_000_000;
 /// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
 /// the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
@@ -90,6 +84,45 @@ const READY_QUIET_NS: u64 = 300_000_000;
 fn ui_wait_began() {
     if !UI_WAIT_ARMED.swap(true, Ordering::AcqRel) {
         Hal::global().wake_session(HOST);
+    }
+}
+
+/// The window title shows "optimizing N%" once this many O3 builds wait, for SETTLE_SHOW_AFTER
+/// (a warm app's short queue drains before it would)...
+const SETTLE_SHOW_QUEUE: u64 = 32;
+const SETTLE_SHOW_AFTER: Duration = Duration::from_millis(1500);
+/// ...and goes once at most SETTLE_QUIET_QUEUE wait for SETTLE_QUIET (the trickle of newly hot
+/// code a running app always has -- a few builds at a time, minutes long -- is settled); it reads
+/// 100% then.
+const SETTLE_QUIET_QUEUE: u64 = 8;
+const SETTLE_QUIET: Duration = Duration::from_millis(2000);
+/// the title changes at most this often
+const SETTLE_TITLE_EVERY: Duration = Duration::from_millis(500);
+/// how often the run looks at the O3 queue while builds wait
+const SETTLE_LOOK: Duration = Duration::from_millis(250);
+
+/// The window title's optimising status (the JIT still optimises the running app: a long O3 queue).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Settle {
+    /// not shown; the queue is long since
+    Hidden(Option<Instant>),
+    /// shown: O3 installs when it came in (its progress counts from there), and since when the
+    /// queue is short
+    Shown { base: u64, quiet: Option<Instant> },
+}
+
+/// Whether this run shows the optimising status in its window titles: `MAKEPAD_RUN_SETTLE_HUD=0`
+/// never, `=1` always, else not in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS,
+/// MAKEPAD_RUN_O3_PROGRESS, MAKEPAD_RUN_BOOT_DUMP).
+fn settle_hud_on() -> bool {
+    match std::env::var("MAKEPAD_RUN_SETTLE_HUD").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => {
+            std::env::var("MAKEPAD_HIDE_WINDOWS").as_deref() != Ok("1")
+                && std::env::var_os("MAKEPAD_RUN_O3_PROGRESS").is_none()
+                && std::env::var_os("MAKEPAD_RUN_BOOT_DUMP").is_none()
+        }
     }
 }
 
@@ -757,6 +790,11 @@ fn pump(
     let mut stage = Stage::Running;
     let mut loader = Loader::Hidden;
     let mut loader_shows = 0u32;
+    let settle_hud = settle_hud_on();
+    let mut settle = Settle::Hidden(None);
+    // the title status sent last, and when
+    let mut title_status = String::new();
+    let mut title_sent = Instant::now();
     let mut warm_up_at: Option<Instant> = None;
     // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT loader's comings and goings too
     let trace_loader = std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some();
@@ -1104,38 +1142,35 @@ fn pump(
             }
             Stage::Lift => Some(LayerWant::Ready),
             Stage::Running if layers && lent_to_app && !active => {
-                use relax_compiler::postframe::{ui_idle_ns, ui_waited_within};
-                let waited_in = |ns| Duration::from_nanos(ui_waited_within(ns));
+                use relax_compiler::postframe::{ui_idle_ns, ui_stall_ns};
                 loader = match loader {
                     Loader::Hidden => {
-                        let waited = waited_in(LOADER_WINDOW_NS);
-                        if waited >= LOADER_AFTER {
+                        let stalled = Duration::from_nanos(ui_stall_ns());
+                        if stalled >= LOADER_AFTER {
                             loader_shows += 1;
                             if trace_loader {
-                                eprintln!(
-                                    "makepad-run: jit loader #{} in ({:.0} ms waited in {} ms)",
-                                    loader_shows,
-                                    waited.as_secs_f64() * 1000.0,
-                                    LOADER_WINDOW_NS / 1_000_000
-                                );
+                                eprintln!("makepad-run: jit loader #{} in (the UI waited {:.0} ms on the JIT)", loader_shows, stalled.as_secs_f64() * 1000.0);
                             }
                             Loader::Shown(Instant::now())
                         } else {
                             if UI_WAIT_ARMED.load(Ordering::Acquire) {
-                                // look again when the waiting would be sustained; once the UI
+                                // look again when the stall would be long enough; once the UI
                                 // thread is not waiting the window disarms (the next wait's hook
                                 // wakes it)
                                 if ui_idle_ns() > 0 {
                                     UI_WAIT_ARMED.store(false, Ordering::Release);
                                 } else {
-                                    wake_in = Some(LOADER_AFTER - waited);
+                                    wake_in = Some(LOADER_AFTER - stalled);
                                 }
                             }
                             Loader::Hidden
                         }
                     }
-                    Loader::Shown(at) if at.elapsed() >= LOADER_MIN && waited_in(LOADER_QUIET_NS) < LOADER_TRICKLE => {
-                        Loader::Going(at)
+                    // the UI thread runs again: frames resume, the loader goes at once
+                    Loader::Shown(at) if ui_idle_ns() >= LOADER_RESUMED_NS => Loader::Going(at),
+                    Loader::Shown(at) => {
+                        wake_in = Some(Duration::from_nanos(LOADER_RESUMED_NS));
+                        Loader::Shown(at)
                     }
                     Loader::Going(at) if host.layer_done() => {
                         if trace_loader {
@@ -1157,7 +1192,7 @@ fn pump(
                     }),
                     Loader::Going(_) => Some(LayerWant::Loader {
                         shown: false,
-                        busy: waited_in(LOADER_BUSY_NS) >= LOADER_TRICKLE,
+                        busy: ui_stall_ns() > 0,
                     }),
                 }
             }
@@ -1167,6 +1202,44 @@ fn pump(
             }
         };
         host.layer(want, app_frames);
+        // the window title's optimising status while the app runs (the HAL puts it after every app
+        // window's title, OS and app-drawn caption alike)
+        if settle_hud {
+            let running = lent_to_app && !active && !failed && data.parked.is_none();
+            let (queued, installs) = relax_compiler::postframe::settle_progress();
+            let now = Instant::now();
+            let mut text = String::new();
+            settle = match settle {
+                _ if !running => Settle::Hidden(None),
+                Settle::Hidden(since) if queued >= SETTLE_SHOW_QUEUE => match since {
+                    Some(at) if now.duration_since(at) >= SETTLE_SHOW_AFTER => Settle::Shown { base: installs, quiet: None },
+                    Some(at) => Settle::Hidden(Some(at)),
+                    None => Settle::Hidden(Some(now)),
+                },
+                Settle::Hidden(_) => Settle::Hidden(None),
+                Settle::Shown { quiet: Some(at), .. } if queued <= SETTLE_QUIET_QUEUE && now.duration_since(at) >= SETTLE_QUIET => {
+                    Settle::Hidden(None)
+                }
+                Settle::Shown { base, quiet } => Settle::Shown { base, quiet: if queued <= SETTLE_QUIET_QUEUE { Some(quiet.unwrap_or(now)) } else { None } },
+            };
+            if let Settle::Shown { base, .. } = settle {
+                // built since it showed over those plus the ones still waiting; nothing left: 100%
+                let built = installs.saturating_sub(base);
+                let pct = if queued <= SETTLE_QUIET_QUEUE { 100 } else { (built * 100 / (built + queued).max(1)).min(99) };
+                text = format!("optimizing {}%", pct);
+            }
+            if text != title_status && (text.is_empty() || title_status.is_empty() || now.duration_since(title_sent) >= SETTLE_TITLE_EVERY) {
+                if trace_loader {
+                    eprintln!("makepad-run: title status [{}] ({} O3 builds waiting)", text, queued);
+                }
+                host.title_status(&text);
+                title_status = text;
+                title_sent = now;
+            }
+            if running && (queued > 0 || !title_status.is_empty()) {
+                wake_in = Some(wake_in.map_or(SETTLE_LOOK, |w: Duration| w.min(SETTLE_LOOK)));
+            }
+        }
         let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
             progress.tick(&mut data);

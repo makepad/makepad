@@ -56,7 +56,7 @@ impl f64 {
     pub const fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f64(self, a, b) } else { libm::fma(self, a, b) } } }
     pub fn div_euclid(self, rhs: f64) -> f64 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f64) -> f64 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f64 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f64 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b: u32 = if n < 0 { !(n as u32) + 1 } else { n as u32 }; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b >>= 1; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f64) -> f64 { unsafe { libm::pow(self, n) } }
     pub fn exp(self) -> f64 { unsafe { libm::exp(self) } }
     pub fn exp2(self) -> f64 { unsafe { libm::exp2(self) } }
@@ -144,7 +144,7 @@ impl f32 {
     pub const fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f32(self, a, b) } else { libm::fmaf(self, a, b) } } }
     pub fn div_euclid(self, rhs: f32) -> f32 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f32) -> f32 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f32 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f32 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b: u32 = if n < 0 { !(n as u32) + 1 } else { n as u32 }; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b >>= 1; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f32) -> f32 { unsafe { libm::powf(self, n) } }
     pub fn exp(self) -> f32 { unsafe { libm::expf(self) } }
     pub fn exp2(self) -> f32 { unsafe { libm::exp2f(self) } }

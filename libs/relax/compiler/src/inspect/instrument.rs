@@ -189,6 +189,24 @@ struct Parked {
     site: u64,
     os_id: u64,
     go: AtomicBool,
+    /// the breakpoint trampoline's register block at the hit (jit.rs REG_WORDS; empty: none):
+    /// `locals break=K<n>` reads the frames' variables from it
+    regs: Vec<u64>,
+}
+
+/// The parked breakpoint hit of thread `os_id`, if any: its id.
+pub fn parked_break_of(os_id: u64) -> Option<u64> {
+    PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|p| p.os_id == os_id).map(|p| p.id)
+}
+
+/// Parked breakpoint hit `id` (the newest with None): (id, thread os id, register block).
+pub fn parked_break(id: Option<u64>) -> Option<(u64, u64, Vec<u64>)> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = match id {
+        Some(k) => list.iter().find(|p| p.id == k)?,
+        None => list.iter().max_by_key(|p| p.id)?,
+    };
+    Some((p.id, p.os_id, p.regs.clone()))
 }
 
 static PARKED: Mutex<Vec<std::sync::Arc<Parked>>> = Mutex::new(Vec::new());
@@ -309,22 +327,40 @@ fn args_json(plan: &ArgPlan, words: &[u64; 5]) -> String {
 
 rt_fn! {
 fn rt_inspect_break(i: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) {
+    break_hit(i, [a0, a1, a2, a3, a4], Vec::new());
+}
+}
+
+rt_fn! {
+/// A breakpoint reached through the register-block trampoline (jit.rs regs_call_tramp).
+#[allow(clippy::too_many_arguments)]
+fn rt_inspect_break_regs(i: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, regs: *const u64, _a7: u64) {
+    let block = if regs.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() };
+    break_hit(i, [a0, a1, a2, a3, a4], block);
+}
+}
+
+fn break_hit(i: u64, a: [u64; 5], regs: Vec<u64>) {
     let Some(s) = site(i) else { return };
     if !s.on.load(Relaxed) {
         return;
     }
     s.hits.fetch_add(1, Relaxed);
-    let args = s.args.get().map(|plan| args_json(plan, &[a0, a1, a2, a3, a4])).unwrap_or_default();
-    park_here(i, &format!("B{}", i), &s.label, &args);
-}
+    let args = s.args.get().map(|plan| args_json(plan, &a)).unwrap_or_default();
+    park_with(i, &format!("B{}", i), &s.label, &args, regs);
 }
 
 /// Parks the calling thread as a breakpoint hit (site index `i`, u64::MAX for none) and raises
 /// the `break` event; returns once an agent continues it (or after 10 minutes).
 pub fn park_here(i: u64, site_tag: &str, label: &str, extra: &str) {
+    park_with(i, site_tag, label, extra, Vec::new())
+}
+
+fn park_with(i: u64, site_tag: &str, label: &str, extra: &str, regs: Vec<u64>) {
     let _k = crate::zone_alloc::kept();
     let id = PARK_IDS.fetch_add(1, SeqCst) + 1;
-    let p = std::sync::Arc::new(Parked { id, site: i, os_id: super::threads::self_os_id(), go: AtomicBool::new(false) });
+    let has_regs = !regs.is_empty();
+    let p = std::sync::Arc::new(Parked { id, site: i, os_id: super::threads::self_os_id(), go: AtomicBool::new(false), regs });
     let me = crate::os::thread::current();
     let thread = if me == crate::jit::MAIN_TID.load(Relaxed) { "main".to_string() } else { crate::os::thread::name(me) };
     let mut list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
@@ -333,7 +369,7 @@ pub fn park_here(i: u64, site_tag: &str, label: &str, extra: &str) {
         "break",
         &format!("K{}", id),
         &format!(
-            "\"id\":\"K{}\",\"site\":\"{}\",\"at\":{},\"thread\":{},\"tid\":\"T{}\"{}{},\"more\":[\"stacks thread=T{}\",\"continue K{}\"]",
+            "\"id\":\"K{}\",\"site\":\"{}\",\"at\":{},\"thread\":{},\"tid\":\"T{}\"{}{},\"more\":[\"stacks thread=T{}\",{}\"continue K{}\"]",
             id,
             site_tag,
             json_str(label),
@@ -342,6 +378,7 @@ pub fn park_here(i: u64, site_tag: &str, label: &str, extra: &str) {
             extra,
             super::script_stack_field("script_stack", me),
             p.os_id,
+            if has_regs { format!("\"locals break=K{}\",", id) } else { String::new() },
             id
         ),
     );
@@ -812,7 +849,12 @@ pub(super) fn edit_break(f: &mut relax_backend::rir::Func, u: &crate::jit::Unit,
         let _ = s.args.set(crate::zone_alloc::kept_with(|| arg_plan(u, slot, f)));
     }
     let mut hit = false;
-    edit(f, u, site, ("inspect_break", rt_inspect_break as *const () as u64), None, line, true, &mut hit);
+    // through the register-block trampoline when this unit makes code: `locals` of the hit
+    let entry = match u.regs_tramp(rt_inspect_break_regs as *const () as u64) {
+        Some(t) => ("inspect_break_regs", t),
+        None => ("inspect_break", rt_inspect_break as *const () as u64),
+    };
+    edit(f, u, site, entry, None, line, true, &mut hit);
     hit
 }
 

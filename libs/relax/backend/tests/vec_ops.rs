@@ -246,6 +246,14 @@ fn lane_ref(op: VX, w: VW, x: u64, y: u64) -> (u64, Cmp) {
         VX::ShlV(_) => (x << y) & m,
         VX::ShrUV(_) => x >> y,
         VX::ShrSV(_) => (sx >> y) as u64 & m,
+        VX::ArmUShl(_) | VX::ArmSShl(_) => {
+            let n = sext(w, y);
+            match op {
+                _ if n >= 0 => (x << n) & m,
+                VX::ArmUShl(_) => x >> -n,
+                _ => (sx >> -n) as u64 & m,
+            }
+        }
         VX::ShlI(_, k) => if k as i64 >= b { 0 } else { (x << k) & m },
         VX::ShrUI(_, k) => if k as i64 >= b { 0 } else { x >> k },
         VX::ShrSI(_, k) => (sx >> (k as i64).min(b - 1)) as u64 & m,
@@ -376,6 +384,7 @@ fn width(op: VX) -> VW {
         VX::AddSatU(w) | VX::SubSatU(w) | VX::AddSatS(w) | VX::SubSatS(w) | VX::AvgU(w) => w,
         VX::ICmp(_, w) | VX::UCmp(_, w) | VX::CmpEq(w) | VX::CmpGtS(w) => w,
         VX::ShlV(w) | VX::ShrSV(w) | VX::ShrUV(w) | VX::ShlI(w, _) | VX::ShrUI(w, _) | VX::ShrSI(w, _) => w,
+        VX::ArmUShl(w) | VX::ArmSShl(w) => w,
         VX::Neg(w) | VX::Abs(w) => w,
         VX::FAdd(w, _) | VX::FSub(w, _) | VX::FMul(w, _) | VX::FDiv(w, _) => w,
         VX::FMinLt(w) | VX::FMaxGt(w) | VX::FMinNum(w) | VX::FMaxNum(w) | VX::FCmp(_, w) => w,
@@ -410,6 +419,16 @@ fn check(op: VX, n: usize, fails: &mut Vec<String>) {
             for k in 0..lanes(w) {
                 let c = get(b, w, k) % bits(w) as u64;
                 put(b, w, k, c);
+            }
+        }
+    }
+    // signed amounts: -(lane bits - 1) ..= lane bits - 1
+    if let VX::ArmUShl(w) | VX::ArmSShl(w) = op {
+        for (_, b) in ins.iter_mut() {
+            for k in 0..lanes(w) {
+                let span = 2 * bits(w) as u64 - 1;
+                let c = (get(b, w, k) % span) as i64 - (bits(w) as i64 - 1);
+                put(b, w, k, c as u64 & mask(w));
             }
         }
     }
@@ -456,6 +475,10 @@ fn int_ops() -> Vec<VX> {
         v.push(VX::MoveMask(w));
     }
     v.extend([VX::AvgU(VW::B), VX::AvgU(VW::H)]);
+    #[cfg(target_arch = "aarch64")]
+    for w in W {
+        v.extend([VX::ArmUShl(w), VX::ArmSShl(w)]);
+    }
     v.extend([0x00, 0x1b, 0x55, 0xc9, 0xd2, 0xe4].map(VX::ShufS));
     v.extend([VX::Narrow(VW::H), VX::Narrow(VW::S), VX::Narrow(VW::D)]);
     v
@@ -532,6 +555,56 @@ fn shuffles_match_the_reference() {
                 if got != want {
                     fails.push(format!("VShuffle {idx:?} [{mode}]: got {} want {}", hex(&got), hex(&want)));
                     break;
+                }
+            }
+        }
+    }
+    report(fails);
+}
+
+/// `a >> (b + c)` and `a >> (b - c)` (32-bit lanes, `c` a constant splat): arm64 turns the amount
+/// into `-c - b` / `c - b` and the shift into ushl / sshl by it (fold_shift_amounts); x86-64 runs
+/// the plain ops. Amounts stay in 0..32.
+#[test]
+fn shifts_by_a_sum_with_a_constant_match_the_reference() {
+    let mut rng = Rng(0x6a09_e667_f3bc_c908);
+    let mut fails = Vec::new();
+    for (shr, signed) in [(VX::ShrUV(VW::S), false), (VX::ShrSV(VW::S), true)] {
+        for (sub, c) in [(false, 4u32), (false, 0), (false, 31), (true, 5), (true, 31)] {
+            let mut f = Func::new("shift_sum".into(), 0);
+            let (pa, pb, pd) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+            f.params = vec![pa, pb, pd];
+            f.rets = vec![];
+            f.block();
+            let (va, vb, k, t, d) = (f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128));
+            let amount = if sub { Inst::VX(VX::Sub(VW::S), t, vb, k) } else { Inst::VX(VX::Add(VW::S), t, vb, k) };
+            for i in [Inst::VLoad(va, pa, 0), Inst::VLoad(vb, pb, 0), Inst::VConst(k, c), amount, Inst::VX(shr, d, va, t), Inst::VStore(pd, 0, d)] {
+                f.blocks[0].insts.push(i);
+                f.blocks[0].pos.push(0);
+            }
+            f.blocks[0].term = Term::Ret(vec![]);
+            f.verify().unwrap();
+            let mut ins = inputs(VW::S, &mut rng, 200);
+            // b in range: b + c (or b - c) in 0..32
+            for (_, b) in ins.iter_mut() {
+                for l in 0..4 {
+                    let x = get(b, VW::S, l) % (32 - if sub { 0 } else { c }) as u64;
+                    let x = if sub { (x % (32 - c as u64)) + c as u64 } else { x };
+                    put(b, VW::S, l, x);
+                }
+            }
+            for (mode, options) in modes() {
+                let (code, _) = compile(&options, &f);
+                for (a, b) in &ins {
+                    let got = run(&code, a, b);
+                    for l in 0..4 {
+                        let (x, y) = (get(a, VW::S, l), get(b, VW::S, l));
+                        let n = if sub { y - c as u64 } else { y + c as u64 };
+                        let want = if signed { ((x as u32 as i32) >> n) as u32 as u64 } else { x >> n };
+                        if get(&got, VW::S, l) != want && fails.len() < 8 {
+                            fails.push(format!("{shr:?} sub {sub} c {c} [{mode}]: x {x:#x} y {y}: got {:#x} want {want:#x}", get(&got, VW::S, l)));
+                        }
+                    }
                 }
             }
         }

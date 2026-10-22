@@ -245,7 +245,6 @@ workspace.members = [
     "libs/relax/types",
     "tools/run/fixture",
     "libs/relax/lex",
-    "platform/codegen",
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     "libs/relax/compiler/rwbench",

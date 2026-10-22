@@ -73,7 +73,7 @@ impl Raw {
     }
 }
 
-pub use imp::{list, tid_of_handle};
+pub use imp::{list, regs_now, tid_of_handle};
 
 thread_local! {
     static SELF_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -336,6 +336,26 @@ mod imp {
         }
         Ok(())
     }
+
+    /// The thread's pc, frame pointer and callee-saved integer registers (x19..x28 as the panic
+    /// trampoline's block holds them: indices 2..), read while it is suspended.
+    pub fn regs_now(t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
+        let mut st = [0u32; 68];
+        let mut count = 68u32;
+        unsafe {
+            if thread_suspend(t.port) != 0 {
+                return None;
+            }
+            let r = thread_get_state(t.port, 6, st.as_mut_ptr(), &mut count);
+            thread_resume(t.port);
+            if r != 0 {
+                return None;
+            }
+        }
+        let w = |k: usize| (st[2 * k] as u64) | ((st[2 * k + 1] as u64) << 32);
+        let ints = (19..=28).map(|r| (2 + (r - 19), w(r))).collect();
+        Some((w(32) & 0x0000_ffff_ffff_ffff, w(29), ints))
+    }
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
@@ -589,6 +609,25 @@ mod imp {
     /// The slot holding `tid` now (a paused thread), if any.
     fn held(tid: u64) -> Option<&'static Slot> {
         HOLDS.iter().find(|h| h.tid.load(Acquire) == tid as i32 && h.state.load(Acquire) == 2)
+    }
+
+    /// A paused thread's pc, frame pointer and callee-saved integer registers (x86_64: rbx,
+    /// r12..r15 as the panic trampoline's block holds them: indices 2..6).
+    /// A thread blocked in a syscall (a pause never signals one: its stack stands still while
+    /// it blocks) gives its syscall's pc and the first frame record above its sp, no registers.
+    pub fn regs_now(t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
+        let Some(slot) = held(t.os_id) else {
+            let (_, _, sp, pc) = read_syscall(t.os_id)?;
+            #[cfg(target_arch = "x86_64")]
+            return find_record(sp, &read).map(|fp| (pc, fp, Vec::new()));
+            #[cfg(not(target_arch = "x86_64"))]
+            return super::arm64_walk::find_record(sp, &super::arm64_walk::code_ranges(), &read).map(|fp| (pc, fp, Vec::new()));
+        };
+        let r = |k: usize| slot.regs[k].load(Relaxed);
+        #[cfg(target_arch = "x86_64")]
+        return Some((r(0), r(2), (3..8).map(|k| (k - 1, r(k))).collect()));
+        #[cfg(not(target_arch = "x86_64"))]
+        return Some((r(0), r(2), Vec::new()));
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -885,6 +924,9 @@ mod arm64_walk {
 
 #[cfg(any(windows, all(target_os = "android", not(target_arch = "aarch64"))))]
 mod imp {
+    pub fn regs_now(_t: &super::Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
+        None
+    }
     use super::{Raw, Thread};
     pub fn self_os_id() -> u64 {
         0

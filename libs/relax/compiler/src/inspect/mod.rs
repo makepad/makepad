@@ -23,6 +23,7 @@ pub mod probes;
 pub mod mem;
 mod prof;
 pub mod timeline;
+pub mod vars;
 pub(crate) mod symbols;
 pub mod threads;
 
@@ -127,7 +128,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] [tier=o1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook, compiled as a child module of the hooked fn's module (its private items, `use`s and `crate::` paths are in scope); std::relax::probe::{emit, count, hist, sample, pause} record for it. A fn is named by its path: `krate::Type::method`, `Type::method`, `crate::Type::method`, `<Type as Trait>::method`"),
     ("eval", "[in=<krate::module>] [panic=P<n>] [mutate=1] <expr>", "evaluates a Rust expression in a module's scope (default: a parked panic's innermost program frame) in the app's domain: its type and {:#?} (bytes when not Debug); reads only unless mutate=1"),
     ("static", "<krate::module::NAME> [debug=1]", "a static's address, type and bytes in the app's domain; a reference or pointer is followed to its target allocation, with whether what it describes fits there"),
-    ("locals", "[panic=P<n>] [frame=N]", "a parked panic's frames; frame N's fn, line and named locals with their types, and the by-name probe that reads their values"),
+    ("locals", "[panic=P<n>|break=K<n>|thread=T<n>] [frame=N]", "a stop's frames (a parked panic, a breakpoint hit, a paused thread); per frame and inline level its fn, line and named locals with their VALUES where the code keeps them at that call ({:#?}, else bytes; 'optimised out' where it does not)"),
     ("probes", "[since=<seq>]", "installed probes and counts with hits and time, parked breakpoints, pause state; each answer is snapshot <seq>: since=<seq> gives every counter's change, rate and started / stopped since then"),
     ("hitch", "[ms=<n>|off]", "frames over the threshold (default 50 ms, always on) are `hitch` events with phases, waits, lazy compiles, critical path and probe deltas: `events on=hitch`, `watch on=hitch`"),
     ("rm", "<G<n>|all>", "removes probe groups: the code they replaced comes back (no recompile)"),
@@ -705,7 +706,7 @@ pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
     }
 }
 
-fn pick_threads(sel: &str) -> Box<dyn Fn(&threads::Thread) -> bool> {
+pub(crate) fn pick_threads(sel: &str) -> Box<dyn Fn(&threads::Thread) -> bool> {
     let sel = sel.to_string();
     Box::new(move |t: &threads::Thread| match sel.as_str() {
         "all" | "" => true,

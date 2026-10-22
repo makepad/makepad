@@ -4475,11 +4475,13 @@ impl Program {
         for pass in 0.. {
             q.memo.clear();
             q.hits.clear();
+            q.tainted.clear();
             let r = self.lookup_in_module_pass(m, name, ns_type, q);
             let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
             if !stale || pass > q.prev.len() + 1 {
                 if cacheable {
-                    self.glob_cache.insert((m, name, ns_type), r);
+                    // (a final answer of the pass is there already)
+                    self.glob_cache.insert_first((m, name, ns_type), r);
                 }
                 return r;
             }
@@ -4504,18 +4506,29 @@ impl Program {
             return given;
         }
         if let Some(r) = q.memo.get(&m) {
+            if q.tainted.contains(&m) { q.taints += 1; }
             return *r;
         }
         // through globs: converged answers of earlier queries (glob graphs are wide and deep)
-        if self.imports_done && !q.precise {
+        let cacheable = self.imports_done && !q.precise;
+        if cacheable {
             if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
                 return r;
             }
         }
+        let (hits, taints) = (q.hits.len(), q.taints);
         q.open.push(m);
         let r = self.lookup_in_module_globs(m, name, ns_type, q);
         q.open.pop();
         q.memo.insert(m, r);
+        // an answer that read no module still being looked through (directly or through an
+        // answer that did) is final: later lookups of the name through this module take it
+        // instead of walking its globs again (a miss walks every module the globs reach)
+        if q.hits.len() != hits || q.taints != taints {
+            q.tainted.insert(m);
+        } else if cacheable {
+            self.glob_cache.insert_first((m, name, ns_type), r);
+        }
         r
     }
 
@@ -5702,6 +5715,10 @@ struct GlobQuery {
     open: Vec<u32>,
     /// (module still being looked through, the answer it gave)
     hits: Vec<(u32, Option<(DefId, BindVis)>)>,
+    /// modules of this pass whose answer read a module still being looked through (not final),
+    /// and how often such an answer was read
+    tainted: std::collections::HashSet<u32>,
+    taints: usize,
 }
 
 /// One walk of trait bindings through glob imports (see GlobQuery).

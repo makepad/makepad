@@ -853,11 +853,23 @@ pub struct CxWindow {
     pub double_click_fullscreen: bool,
     /// The host window manager shows this window fullscreen (`ime::HostedFullscreen`).
     pub(crate) hosted_fullscreen: bool,
+    /// What the window's title carries after the app's own (the HAL's `TitleStatus`, e.g. makepad
+    /// run's "optimizing 62%"; empty: nothing): the OS title shows it already, an app-drawn caption
+    /// shows `<title> — <status>` too (`title_shown`).
+    pub title_status: String,
+}
+
+impl CxWindow {
+    /// `title` as the window shows it: with the window's title status after it.
+    pub fn title_shown(&self, title: &str) -> String {
+        if self.title_status.is_empty() { title.to_string() } else if title.is_empty() { self.title_status.clone() } else { format!("{} \u{2014} {}", title, self.title_status) }
+    }
 }
 
 impl Default for CxWindow {
     fn default() -> Self {
         Self {
+            title_status: String::new(),
             create_title: String::default(),
             create_position: None,
             create_inner_size: None,

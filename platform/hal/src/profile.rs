@@ -120,6 +120,7 @@ pub fn set(enable: bool) {
     if enable == on() {
         return;
     }
+    crate::threadcpu::snapshot();
     if enable {
         let now = crate::clock_ns();
         *lock() = Some(Samples { started: now, printed: now, data: vec![vec![Vec::new(); METRICS.len()]; ACTIVITIES.len()], children: Default::default(), counts: Default::default(), windows: Default::default() });

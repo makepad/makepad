@@ -662,26 +662,27 @@ fn expand_type(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, Stri
     let key = format!("{{ fn k() -> &'static str {{ concat!(module_path!(), \"::{name}\") }} k }}");
     let none = "{ fn s() -> &'static str { \"\" } s }";
     let mut extra = String::new();
-    if plain {
-        // field offsets of a struct, in declaration order
-        let mut offsets = Vec::new();
-        if is_struct {
-            if let Some(TokenTree::Group(g)) = toks[i..].iter().find(|t| matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace || g.delimiter() == Delimiter::Parenthesis)) {
-                let fields: Vec<TokenTree> = g.stream().into_iter().collect();
-                for (n, f) in split_commas(&fields).iter().enumerate() {
-                    let fname = if g.delimiter() == Delimiter::Brace {
-                        let c = first_colon(f).ok_or("cannot read a field")?;
-                        match f[..c].iter().rev().find_map(|t| if let TokenTree::Ident(i) = t { Some(i.to_string()) } else { None }) {
-                            Some(n) => n,
-                            None => continue,
-                        }
-                    } else {
-                        n.to_string()
-                    };
-                    offsets.push(format!("::core::mem::offset_of!({ty}, {fname}) as u64"));
-                }
+    // field offsets of a struct, in declaration order: a plain type's are checked against
+    // Relax's; a handle's let Relax use rustc's layout when it is its own (provided.rs verify)
+    let mut offsets = Vec::new();
+    if is_struct {
+        if let Some(TokenTree::Group(g)) = toks[i..].iter().find(|t| matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace || g.delimiter() == Delimiter::Parenthesis)) {
+            let fields: Vec<TokenTree> = g.stream().into_iter().collect();
+            for (n, f) in split_commas(&fields).iter().enumerate() {
+                let fname = if g.delimiter() == Delimiter::Brace {
+                    let c = first_colon(f).ok_or("cannot read a field")?;
+                    match f[..c].iter().rev().find_map(|t| if let TokenTree::Ident(i) = t { Some(i.to_string()) } else { None }) {
+                        Some(n) => n,
+                        None => continue,
+                    }
+                } else {
+                    n.to_string()
+                };
+                offsets.push(format!("::core::mem::offset_of!({ty}, {fname}) as u64"));
             }
         }
+    }
+    if plain {
         extra.push_str(&format!(
             "{CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static __relax_api_t{id:016x}: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
   kind: ::makepad_relax_api::PLAIN, module: module_path!(), key: {key}, sig: {none},
@@ -695,7 +696,8 @@ fn expand_type(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, Stri
 {CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static __relax_api_t{id:016x}: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
   kind: ::makepad_relax_api::HANDLE, module: module_path!(), key: {key}, sig: {none},
   shim: None, slots: &[], size: ::core::mem::size_of::<{ty}>() as u64, align: ::core::mem::align_of::<{ty}>() as u64,
-  offsets: &[], drop: if ::core::mem::needs_drop::<{ty}>() {{ Some(__relax_api_d{id:016x}) }} else {{ None }} }};"
+  offsets: &[{}], drop: if ::core::mem::needs_drop::<{ty}>() {{ Some(__relax_api_d{id:016x}) }} else {{ None }} }};",
+            offsets.join(", ")
         ));
         if args.iter().any(|a| a == "default") {
             // a derived Default: an ordinary op (JIT code may not build the handle itself)

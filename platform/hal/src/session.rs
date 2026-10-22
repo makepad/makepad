@@ -423,6 +423,8 @@ pub struct World {
     pub exec_log: Vec<ExecRecord>,
     /// the current GPU device, from 1; a device reset makes the next
     pub device_generation: u32,
+    /// session 0's title status (`TitleStatus`): app window titles carry it after their own
+    pub title_status: String,
 }
 
 /// How a session ends.
@@ -502,6 +504,7 @@ impl World {
             domains: BTreeMap::new(),
             ended: Vec::new(),
             next_lent: 0,
+            title_status: String::new(),
             fonts: None,
             font_notify: None,
             next_key: 1,
@@ -1178,6 +1181,42 @@ impl World {
                 }
             }
         }
+    }
+
+    /// `title` as an app window shows it: with session 0's title status after it.
+    pub fn titled(&self, title: &str) -> String {
+        if self.title_status.is_empty() { title.to_string() } else if title.is_empty() { self.title_status.clone() } else { format!("{} \u{2014} {}", title, self.title_status) }
+    }
+
+    /// Sets session 0's title status: every app window (not embedded, not hosted) gets a
+    /// `TitleStatus` event; returns the (session, window, OS title) to retitle.
+    pub fn set_title_status(&mut self, text: &str) -> Vec<(u32, Id, String)> {
+        if self.title_status == text {
+            return Vec::new();
+        }
+        self.title_status = text.to_string();
+        let mut out = Vec::new();
+        let mut sids: Vec<u32> = self.sessions.keys().copied().filter(|&s| s != HOST).collect();
+        sids.sort();
+        for sid in sids {
+            let Some(s) = self.sessions.get(&sid) else { continue };
+            for id in s.windows.keys_of(sid) {
+                let Ok(w) = s.windows.get(sid, id) else { continue };
+                if w.val.embedded.is_some() || w.val.is_hosted() {
+                    continue;
+                }
+                let base = s.string(w.val.title).unwrap_or("").to_string();
+                out.push((sid, id, base));
+            }
+        }
+        let mut retitle = Vec::new();
+        for (sid, id, base) in out {
+            self.to_session(sid, |q| q.title_status(id, text.as_bytes()));
+            if !base.is_empty() {
+                retitle.push((sid, id, self.titled(&base)));
+            }
+        }
+        retitle
     }
 
     /// Whether the host window `id` is lent, and to whom.

@@ -2925,6 +2925,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             // SPEC-V: the edited bodies have no verdict for their new text yet: flagged before any
             // caller of this batch looks at them (unverified code is not inlined)
             let unverified = !u.verdict_clean(id);
+            if unverified { crate::jit::note_unverified(u, id); }
             let f = &mut u.fns[id as usize];
             f.unverified.store(unverified, Ordering::Relaxed);
             f.rir = None;

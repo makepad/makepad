@@ -815,7 +815,8 @@ pub fn allocate(options: &relax_session::Options, f: &Func, cfg: &RegConfig) -> 
     allocate_with(options, f, cfg, true, None)
 }
 
-/// `allocate`; `thorough` adds copy coalescing (allocate_split adds live-range splitting).
+/// `allocate`; `thorough` (or `options.ra_quick_coalesce`) adds copy coalescing (allocate_split adds
+/// live-range splitting, thorough only).
 pub fn allocate_with(options: &relax_session::Options, f: &Func, cfg: &RegConfig, thorough: bool, freq: Option<&[f32]>) -> Alloc {
     allocate_low(options, f, cfg, thorough, freq, None, None)
 }
@@ -938,7 +939,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     let is_low = |v: u32| low.map_or(false, |lw| lw.get(v as usize).copied().unwrap_or(false));
     let mut parent: Vec<u32> = (0..nv).collect();
     let mut merged: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
-    if thorough && coalesce_on(options) {
+    if (thorough || options.ra_quick_coalesce) && coalesce_on(options) {
         fn find(p: &mut [u32], mut x: u32) -> u32 {
             while p[x as usize] != x {
                 let g = p[p[x as usize] as usize];
@@ -1547,8 +1548,10 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 let a = block_start[bi] + 2 * di as u32 + 2; // the definition
                 let z = block_start[bi] + 2 * *us.last().unwrap() as u32 + 1;
                 // free over the defining instruction's operands and the one before it too (deferred
-                // fused compares read at the next instruction)
-                let a0 = if di > 0 { a - 5 } else { a - 1 };
+                // fused compares read at the next instruction); saturating: the entry block's second
+                // instruction has a = 4 (a - 5 wrapped to u32::MAX and indexed far past the bit set:
+                // Stage's kernels, compute's x64 fuzzers)
+                let a0 = if di > 0 { a.saturating_sub(5) } else { a - 1 };
                 for &c in &regs {
                     let o = &mut occ[c as usize];
                     if !o.is_empty() && bits_any(o, a0, z) {
@@ -3403,6 +3406,7 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
     let nv0 = f.vregs.len();
     let mut g = f.clone();
     let mut changed = false;
+    let mut pieces: Vec<(VReg, VReg)> = Vec::new();
     for bi in 0..f.blocks.len() {
         if !cold[bi] {
             continue;
@@ -3471,6 +3475,7 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
             let mut call = g.blocks[bi].insts[ii].clone();
             for v in across {
                 let t = g.vreg(f.vregs[v.0 as usize]);
+                pieces.push((t, v));
                 before.push(Inst::Mov(t, v));
                 after.push(Inst::Mov(v, t));
                 if let Inst::Call(_, args, _) = &mut call {
@@ -3499,6 +3504,7 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
         }
     }
     if changed {
+        g.dbg_add_pieces(&pieces);
         Some(g)
     } else {
         None
@@ -3597,6 +3603,9 @@ fn allocate_split_loops_inner(options: &relax_session::Options, f: &Func, al: Al
             }
         }
     }
+    // the pieces that stay hold their originals' values (debug locations follow them)
+    let pairs: Vec<(VReg, VReg)> = (n_orig..g.vregs.len()).filter(|&v| back[v] as usize == v && origin[v] != u32::MAX).map(|v| (VReg(v as u32), VReg(origin[v]))).collect();
+    g.dbg_add_pieces(&pairs);
     let gf: Option<Vec<f32>> = gfreq.map(|x| x.to_vec());
     (Some(g), al2, through, gf)
 }
@@ -3950,7 +3959,7 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
             } else {
                 let nbk = f.blocks.len() as u32;
                 let n = ins.len();
-                f.blocks.push(Block { insts: ins, pos: vec![tp; n], term: Term::Jump(header), term_pos: tp });
+                f.blocks.push(Block { insts: ins, pos: vec![tp; n], term: Term::Jump(header), term_pos: tp, count: -1.0 });
                 alias.push(header);
                 // member of the loops holding the header and every entering block, except this one
                 let mut m: Vec<u16> = member[header as usize].iter().copied().filter(|x| *x != li as u16).collect();
@@ -4000,7 +4009,7 @@ fn split_loops(f: &mut Func, spilled: &[bool], inreg: Option<&[bool]>, hot: Opti
             let nbk = f.blocks.len() as u32;
             let tp = f.blocks[to as usize].term_pos;
             let n = per_edge[k].len();
-            f.blocks.push(Block { insts: per_edge[k].clone(), pos: vec![tp; n], term: Term::Jump(to), term_pos: tp });
+            f.blocks.push(Block { insts: per_edge[k].clone(), pos: vec![tp; n], term: Term::Jump(to), term_pos: tp, count: -1.0 });
             alias.push(to);
             let m: Vec<u16> = member[from as usize].iter().copied().filter(|x| member[to as usize].contains(x)).collect();
             for &x in &m {
@@ -4575,6 +4584,245 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
         }
     }
     out
+}
+
+/// Loop counters stepped before their last read of the old value (`Range::next`: `old = i;
+/// i = i + 1;` at the top of the body, the body reads `old`, the latch tests `i`): the step moves
+/// down to the first instruction that reads or writes `i` again, along blocks entered only from
+/// the block before, past side exits where `i` is dead (bounds-check panics). `old` then lives only
+/// where `i` still holds the same value, so the allocator joins them (`equal_copies`) and the copy
+/// `mov old, i` per iteration is gone (LLVM: one induction variable, its increment at the latch).
+/// A step is `i = i +- k` in place or `t = i +- k; i = t` (t read only by that move).
+/// MAKEPAD_RUN_OPT=-sinkinc off.
+pub fn sink_increments(options: &relax_session::Options, f: &Func) -> Option<Func> {
+    if crate::stats::opt_off(options, "-sinkinc") {
+        return None;
+    }
+    let nv = f.vregs.len();
+    let mut uses = vec![0u32; nv];
+    let mut ndef = vec![0u32; nv];
+    let mut tu: Vec<VReg> = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_uses(i, |u| uses[u.0 as usize] += 1);
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+        tu.clear();
+        term_uses(&b.term, &mut tu);
+        for u in &tu {
+            uses[u.0 as usize] += 1;
+        }
+    }
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let reach = reachable(f);
+    let preds = preds_of(f, &reach);
+    let touches = |i: &Inst, v: VReg| {
+        let mut t = false;
+        for_uses(i, |u| t |= u == v);
+        for_defs(i, |d| t |= d == v);
+        t
+    };
+    // is v read on some path from the start of block x before it is written?
+    let live_in = |f: &Func, x: u32, v: VReg| -> bool {
+        let mut seen = vec![false; f.blocks.len()];
+        let mut work = vec![x];
+        let mut tu: Vec<VReg> = Vec::new();
+        while let Some(b) = work.pop() {
+            if std::mem::replace(&mut seen[b as usize], true) {
+                continue;
+            }
+            let blk = &f.blocks[b as usize];
+            let mut written = false;
+            for i in &blk.insts {
+                let mut r = false;
+                for_uses(i, |u| r |= u == v);
+                if r {
+                    return true;
+                }
+                let mut w = false;
+                for_defs(i, |d| w |= d == v);
+                if w {
+                    written = true;
+                    break;
+                }
+            }
+            if written {
+                continue;
+            }
+            tu.clear();
+            term_uses(&blk.term, &mut tu);
+            if tu.contains(&v) {
+                return true;
+            }
+            if let Term::Switch(_, t) = &blk.term {
+                work.extend(t.succ.iter().copied());
+            } else {
+                work.extend(blk.term.succs());
+            }
+        }
+        false
+    };
+    let mut g: Option<Func> = None;
+    for bi in 0..f.blocks.len() {
+        if !reach[bi] {
+            continue;
+        }
+        // the block's steps, last first: a step only ever moves down and each is looked at once
+        // (two steps of different counters before a common reader would otherwise keep hopping
+        // over each other)
+        let cands: Vec<usize> = {
+            let b = &f.blocks[bi];
+            (0..b.insts.len()).filter(|&a| matches!(b.insts[a], Inst::IBinI(IOp::Add | IOp::Sub, ..))).collect()
+        };
+        for &a in cands.iter().rev() {
+            let cur = g.as_ref().unwrap_or(f);
+            let b = &cur.blocks[bi];
+            // the step at a: (counter, number of instructions)
+            let step = match b.insts[a] {
+                Inst::IBinI(IOp::Add | IOp::Sub, _, d, x, _) if d == x && ndef[d.0 as usize] >= 2 => Some((d, 1)),
+                Inst::IBinI(IOp::Add | IOp::Sub, _, t, x, _) if t != x && ndef[t.0 as usize] == 1 && uses[t.0 as usize] == 1 && matches!(b.insts.get(a + 1), Some(Inst::Mov(d, s)) if *d == x && *s == t) => Some((x, 2)),
+                _ => None,
+            };
+            let Some((v, n)) = step else { continue };
+            // walk to the first instruction that reads or writes v
+            let (mut c, mut k) = (bi as u32, a + n);
+            let target = loop {
+                let blk = &cur.blocks[c as usize];
+                if let Some(off) = blk.insts[k..].iter().position(|i| touches(i, v)) {
+                    break (c, k + off);
+                }
+                tu.clear();
+                term_uses(&blk.term, &mut tu);
+                // (an Invoke's call stays last: a step stopping in its block goes before the call)
+                let end = (c, if matches!(blk.term, Term::Invoke(..)) { blk.insts.len().saturating_sub(1).max(if c as usize == bi { a + n } else { 0 }) } else { blk.insts.len() });
+                if tu.contains(&v) {
+                    break end;
+                }
+                // one way on: the successor entered only from here, the others side exits where v is dead
+                let succ: Vec<u32> = match &blk.term {
+                    Term::Jump(t) => vec![*t],
+                    Term::Branch(_, t, e) | Term::Invoke(t, e) if t != e => vec![*t, *e],
+                    _ => break end,
+                };
+                let on: Vec<u32> = succ.iter().copied().filter(|&s| s as usize != bi && preds[s as usize].len() == 1 && preds[s as usize][0] == c).collect();
+                // an Invoke continues at its normal successor only (its call is the block's last instruction)
+                // (of two such successors, the one that still needs v: the other is a side exit)
+                let next = match &blk.term {
+                    Term::Invoke(t, _) => on.contains(t).then_some(*t),
+                    _ if on.len() == 1 => Some(on[0]),
+                    _ => {
+                        let live: Vec<u32> = on.iter().copied().filter(|&s| live_in(cur, s, v)).collect();
+                        (live.len() == 1).then(|| live[0])
+                    }
+                };
+                let Some(next) = next else { break end };
+                if succ.iter().any(|&s| s != next && live_in(cur, s, v)) {
+                    break end;
+                }
+                c = next;
+                k = 0;
+            };
+            if target == (bi as u32, a + n) {
+                continue;
+            }
+            let gf = g.get_or_insert_with(|| f.clone());
+            let moved: Vec<Inst> = gf.blocks[bi].insts.drain(a..a + n).collect();
+            let mpos: Vec<u64> = gf.blocks[bi].pos.drain(a..a + n).collect();
+            let at = if target.0 as usize == bi { target.1 - n } else { target.1 };
+            let tb = &mut gf.blocks[target.0 as usize];
+            for (j, (i, p)) in moved.into_iter().zip(mpos).enumerate() {
+                tb.insts.insert(at + j, i);
+                tb.pos.insert(at + j, p);
+            }
+        }
+    }
+    g
+}
+
+/// A compare whose one use is its block's branch moves to the end of the block (with the pure
+/// instruction right before it that computes its one-use operand, `t = x & K`), so the emitters
+/// fuse it into cmp + jcc / b.cond instead of materialising it (`setne; movzx; test; jne` when a
+/// constant or a copy sat between them: `while let Some(ix) = cur`). Not past a call (its
+/// operands would cross it). MAKEPAD_RUN_OPT=-sinkbr off.
+pub fn sink_branch_compares(options: &relax_session::Options, f: &Func) -> Option<Func> {
+    if crate::stats::opt_off(options, "-sinkbr") {
+        return None;
+    }
+    let nv = f.vregs.len();
+    let mut uses = vec![0u32; nv];
+    let mut tu: Vec<VReg> = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_uses(i, |u| uses[u.0 as usize] += 1);
+        }
+        tu.clear();
+        term_uses(&b.term, &mut tu);
+        for u in &tu {
+            uses[u.0 as usize] += 1;
+        }
+    }
+    let mut g: Option<Func> = None;
+    for bi in 0..f.blocks.len() {
+        let b = &f.blocks[bi];
+        let Term::Branch(c, _, _) = b.term else { continue };
+        let n = b.insts.len();
+        if n < 2 || uses[c.0 as usize] != 1 {
+            continue;
+        }
+        let Some(j) = (0..n).rev().find(|&k| {
+            let mut d = false;
+            for_defs(&b.insts[k], |x| d |= x == c);
+            d
+        }) else {
+            continue;
+        };
+        if j + 1 == n {
+            continue;
+        }
+        let ops: Vec<VReg> = match b.insts[j] {
+            Inst::ICmp(_, _, _, x, y) | Inst::FCmp(_, _, _, x, y) => vec![x, y],
+            Inst::ICmpI(_, _, _, x, _) => vec![x],
+            _ => continue,
+        };
+        // the pure one-use operand computed right before it travels along
+        let mut lo = j;
+        if j > 0 {
+            let p = &b.insts[j - 1];
+            let mut d1 = Vec::new();
+            for_defs(p, |x| d1.push(x));
+            if d1.len() == 1 && ops.contains(&d1[0]) && uses[d1[0].0 as usize] == 1 && matches!(p, Inst::IBinI(..) | Inst::IBin(..) | Inst::Conv(Conv::IntToInt(_), ..)) {
+                lo = j - 1;
+            }
+        }
+        let mut reads: Vec<VReg> = Vec::new();
+        let mut writes: Vec<VReg> = Vec::new();
+        for k in lo..=j {
+            for_uses(&b.insts[k], |u| reads.push(u));
+            for_defs(&b.insts[k], |d| writes.push(d));
+        }
+        let blocked = (j + 1..n).any(|k| {
+            let i = &b.insts[k];
+            if matches!(i, Inst::Call(..)) {
+                return true;
+            }
+            let mut bad = false;
+            for_defs(i, |d| bad |= reads.contains(&d) || writes.contains(&d));
+            for_uses(i, |u| bad |= writes.contains(&u));
+            bad
+        });
+        if blocked {
+            continue;
+        }
+        let gf = g.get_or_insert_with(|| f.clone());
+        let blk = &mut gf.blocks[bi];
+        let moved: Vec<Inst> = blk.insts.drain(lo..=j).collect();
+        let mpos: Vec<u64> = blk.pos.drain(lo..=j).collect();
+        blk.insts.extend(moved);
+        blk.pos.extend(mpos);
+    }
+    g
 }
 
 pub fn sink_compares(f: &Func) -> Option<Func> {

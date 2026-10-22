@@ -621,6 +621,8 @@ pub fn compact_vregs(f: &mut Func) {
     for r in f.ranged.iter_mut() {
         r.0 = m(r.0);
     }
+    // (the debug table follows; a vreg no instruction mentions is gone: its leaf is no longer held)
+    f.dbg_map_vregs(&|v| map.get(v.0 as usize).filter(|x| **x != NONE).map(|x| VReg(*x)));
     f.vregs = cls;
 }
 
@@ -1261,6 +1263,17 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
             if alias[v] != v as u32 && kn[v].is_none() {
                 kn[v] = kn[alias[v] as usize];
             }
+        }
+        if !f.dbg.is_empty() {
+            // the debug table follows the renaming (and keeps folded constants)
+            let named = f.dbg_vregs();
+            let copies: Vec<(VReg, VReg)> = named.iter().filter(|&&v| (v as usize) < nv && alias[v as usize] != v).map(|&v| (VReg(v), VReg(alias[v as usize]))).collect();
+            let consts: Vec<(VReg, i64)> = named.iter().filter(|&&v| (v as usize) < nv && single(VReg(v), &ndef)).filter_map(|&v| match kn[v as usize] {
+                Some(K::I(k)) => Some((VReg(v), k)),
+                Some(K::F(bits, _)) => Some((VReg(v), bits as i64)),
+                _ => None,
+            }).collect();
+            f.dbg_salvage(&copies, &consts);
         }
         let mut changed = false;
         let mut edits = Vec::new();
@@ -3055,6 +3068,30 @@ pub fn dce(f: &mut Func) -> bool {
             }
         }
     }
+    if any && !f.dbg.is_empty() {
+        // removed copies / constants of single-definition values the debug table names: the
+        // table keeps their value (side metadata)
+        let named = f.dbg_vregs();
+        let single = |v: VReg| match def_at[v.0 as usize] {
+            (u32::MAX, _) => f.params.contains(&v),
+            (b, _) => b < MULTI && !f.params.contains(&v),
+        };
+        let (mut copies, mut consts) = (Vec::new(), Vec::new());
+        for (bi, rs) in removed.iter().enumerate() {
+            for (k, r) in rs.iter().enumerate() {
+                if !*r {
+                    continue;
+                }
+                match &f.blocks[bi].insts[k] {
+                    Inst::Mov(d, s) if d != s && named.binary_search(&d.0).is_ok() && single(*d) && single(*s) => copies.push((*d, *s)),
+                    Inst::Iconst(d, v) if named.binary_search(&d.0).is_ok() && single(*d) => consts.push((*d, *v)),
+                    Inst::Fconst(d, bits, _) if named.binary_search(&d.0).is_ok() && single(*d) => consts.push((*d, *bits as i64)),
+                    _ => {}
+                }
+            }
+        }
+        f.dbg_salvage(&copies, &consts);
+    }
     if any {
         for (bi, b) in f.blocks.iter_mut().enumerate() {
             let rs = &removed[bi];
@@ -3758,6 +3795,17 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
         if npred[x as usize] != 1 || b.insts.len() > MAX_MOVS + MAX_SPEC {
             return None;
         }
+        // a block an earlier conversion rewrote holds its fresh temporaries (vregs made after the
+        // def / use counts): no counts to judge it by, so it is no arm this time (ndef[d] was out
+        // of bounds: O3 panic compiling wasm::Fx::expr under counted frequencies)
+        let mut fresh = false;
+        for i in &b.insts {
+            for_defs(i, |d| fresh |= d.0 as usize >= nv);
+            for_uses(i, |u| fresh |= u.0 as usize >= nv);
+        }
+        if fresh {
+            return None;
+        }
         let j = match b.term {
             Term::Jump(j) if j != x => j,
             _ => return None,
@@ -4032,7 +4080,7 @@ pub fn merge_blocks(f: &mut Func) -> bool {
                 Term::Jump(t) if t as usize != bi && preds[t as usize] == 1 => t as usize,
                 _ => break,
             };
-            let tb = std::mem::replace(&mut f.blocks[t], Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0 });
+            let tb = std::mem::replace(&mut f.blocks[t], Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0, count: -1.0 });
             let b = &mut f.blocks[bi];
             b.insts.extend(tb.insts);
             b.pos.extend(tb.pos);
@@ -6363,7 +6411,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
             }
             let np = insts.len();
             let nb = f.blocks.len() as u32;
-            f.blocks.push(Block { insts, pos: vec![p; np], term: Term::Jump(*t), term_pos: p });
+            f.blocks.push(Block { insts, pos: vec![p; np], term: Term::Jump(*t), term_pos: p, count: -1.0 });
             *t = nb;
         }
         f.blocks[bi].term = Term::Invoke(targets[0], targets[1]);
@@ -7461,7 +7509,7 @@ pub fn rotate_loops(f: &mut Func) {
         };
         if branch_latch {
             let nb = f.blocks.len() as u32;
-            f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos });
+            f.blocks.push(Block { insts, pos: hb.pos.clone(), term, term_pos: hb.term_pos, count: hb.count });
             if let Term::Branch(_, _, ref mut e) = f.blocks[l].term {
                 *e = nb;
             }

@@ -47,29 +47,12 @@ mod spmd;
 pub mod vm_kernel;
 pub mod wasm;
 
-#[cfg(target_arch = "aarch64")]
-pub mod arm64;
-#[cfg(target_arch = "aarch64")]
-pub mod neon;
-/// Native code through the shared back end (makepad-codegen): AIR -> RIR -> x64 / arm64.
+/// Native code through Relax's shared back end (relax-backend): AIR -> RIR -> x64 / arm64.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub mod native;
 /// Four elements per iteration through the shared back end (SSE4.1/AVX2, NEON).
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub mod native_vec;
-/// The host's scalar native backend: compute's own emitter on AArch64 (until the shared
-/// path replaces it, loader-core.md step 6), the shared back end on x86-64.
-/// (Feature `shared-backend`: the shared back end on AArch64 too.)
-#[cfg(all(target_arch = "aarch64", not(feature = "shared-backend")))]
-pub use arm64 as host_native;
-#[cfg(any(target_arch = "x86_64", all(target_arch = "aarch64", feature = "shared-backend")))]
-pub use native as host_native;
-/// The host's four-wide backend: NEON x4 on AArch64 (until step 3), the shared back end's
-/// SSE4.1/AVX2 vectors on x86-64.
-#[cfg(all(target_arch = "aarch64", not(feature = "shared-backend")))]
-pub use neon as host_simd;
-#[cfg(any(target_arch = "x86_64", all(target_arch = "aarch64", feature = "shared-backend")))]
-pub use native_vec as host_simd;
 
 /// A compile error with a byte span into the source it came from.
 #[derive(Debug)]

@@ -251,6 +251,58 @@ fn same_everywhere(src: &str, out: &str, words: usize) {
     }
 }
 
+/// NaN operands of every float fused multiply-add form (`a * b + c`, `c - a * b`, `a * b - c`;
+/// a factor uniform across lanes too): x4, scalar and the interpreter give the same bits for
+/// NaNs of both signs, quiet and signaling, one or several per element, inf * 0 and inf - inf --
+/// a negated NaN operand's sign flipped, the rest by the host's rule (ir::fma_nan; Rust leaves
+/// mul_add's NaN unspecified, and rustc with the fma feature drops the flip).
+#[test]
+fn fused_multiply_add_nans_agree_with_x4() {
+    let vals: [u32; 12] = [0x3f80_0000, 0xbfc0_0000, 0, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xffc1_2345, 0x7f80_0567, 0xff80_0089, 0x7149_f2ca];
+    let mut abc = Vec::new();
+    for &x in &vals {
+        for &y in &vals {
+            for &z in &vals {
+                abc.extend_from_slice(&[f32::from_bits(x), f32::from_bits(y), f32::from_bits(z)]);
+            }
+        }
+    }
+    let n = abc.len() / 3;
+    let srcs = [
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * v.y + v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.z - v.x * v.y }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * v.y - v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.z - u[0] * v.y }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * u[0] + v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = u[0] * v.y - v.z }",
+    ];
+    for src in srcs {
+        let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
+        assert!(k.simd(), "expected x4 code for:\n{}", src);
+        assert!(format!("{:?}", k.program().body).contains("Fma("), "no fused multiply-add in:\n{}", src);
+        let ki = compile_with(src, &[], Backend::Interp).unwrap();
+        for &u in &vals {
+            let u = [f32::from_bits(u)];
+            let run = |k: &makepad_script_compute::kernel::Kernel, simd: bool| {
+                let mut o = vec![0.0f32; n];
+                let mut c = k.call();
+                c.set_simd(simd);
+                c.input("abc", &abc).unwrap();
+                c.input("u", &u).unwrap();
+                c.output("o", &mut o).unwrap();
+                c.run(n).unwrap();
+                bits(&o)
+            };
+            let (v, s, i) = (run(&k, true), run(&k, false), run(&ki, false));
+            for e in 0..n {
+                let t = (abc[3 * e].to_bits(), abc[3 * e + 1].to_bits(), abc[3 * e + 2].to_bits(), u[0].to_bits());
+                assert_eq!(s[e], i[e], "scalar != interpreter, (x, y, z, u) {:x?}:\n{}", t, src);
+                assert_eq!(v[e], i[e], "x4 != interpreter, (x, y, z, u) {:x?}:\n{}", t, src);
+            }
+        }
+    }
+}
+
 #[test]
 fn kernels_from_source_agree_with_x4() {
     same_everywhere(
@@ -461,7 +513,7 @@ fn x4_store_groups_of_four_words_are_a_transpose_and_lane_stores() {
 #[cfg(target_arch = "aarch64")]
 fn x4_small_tables_are_one_tbl() {
     // tables of up to 16 words (noise gradients, small lookup rows) read at varying indices: on
-    // NEON one ld1 of the table and one TBL by byte indices (neon.rs small_table), not a gather
+    // NEON one ld1 of the table and one TBL by byte indices not a gather
     let src = "let A8 = [0.5, -1.0, 2.0, 3.5, -4.25, 5.0, 6.125, -7.0]\nlet C12 = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]\nlet o = output(vec4)\nfn element(i) {\n let h = hash(i)\n o[i] = vec4(A8[h & 7], C12[h % 12], gradient_noise2(vec2(float(i) * 0.37, float(h & 255) * 0.11)), A8[i]) }";
     let rir = x4_rir(src);
     assert!(rir.contains("VTbl"), "no table lookup in the x4 code of:\n{}", src);

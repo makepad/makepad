@@ -1335,7 +1335,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     let t_ssp = f.vreg(Cls::I);
     let ssp0 = f.vreg(Cls::I);
     let nsp = f.vreg(Cls::I);
-    let mut b0 = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(entry), term_pos: pos0 };
+    let mut b0 = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(entry), term_pos: pos0, count: -1.0 };
     let push0 = |b: &mut relax_backend::rir::Block, i: Inst| {
         b.insts.push(i);
         b.pos.push(pos0);
@@ -1351,7 +1351,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     let nb = f.blocks.len() as u32 + 1; // index of the first appended block (after block 0 is inserted)
     let trap = |f: &mut Func, nbs: &mut Vec<relax_backend::rir::Block>, site: Sym| -> u32 {
         let v = f.vreg(Cls::I);
-        nbs.push(relax_backend::rir::Block { insts: vec![Inst::Addr(v, site), Inst::Call(Callee::Host(panic_site), vec![v], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
+        nbs.push(relax_backend::rir::Block { insts: vec![Inst::Addr(v, site), Inst::Call(Callee::Host(panic_site), vec![v], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0, count: -1.0 });
         nb + nbs.len() as u32 - 1
     };
     if has_frame {
@@ -1364,7 +1364,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
         push0(&mut b0, Inst::ICmpI(Cond::Lt, false, c, rel, SS_LO as i64));
         let t = trap(f, &mut new_blocks, site_stack);
         // the store of the new shadow sp happens in a continuation block
-        let cont = relax_backend::rir::Block { insts: vec![Inst::Store(relax_backend::rir::Mem::Int(8, false), t_ssp, 0, nsp)], pos: vec![pos0], term: Term::Jump(entry + 1), term_pos: pos0 };
+        let cont = relax_backend::rir::Block { insts: vec![Inst::Store(relax_backend::rir::Mem::Int(8, false), t_ssp, 0, nsp)], pos: vec![pos0], term: Term::Jump(entry + 1), term_pos: pos0, count: -1.0 };
         new_blocks.push(cont);
         let cont_ix = nb + new_blocks.len() as u32 - 1;
         b0.term = Term::Branch(c, t, cont_ix);
@@ -1537,7 +1537,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                 pos.push(b.term_pos);
             }
         }
-        out_blocks.push(relax_backend::rir::Block { insts, pos, term: b.term, term_pos: b.term_pos });
+        out_blocks.push(relax_backend::rir::Block { insts, pos, term: b.term, term_pos: b.term_pos, count: b.count });
     }
     let _ = nblocks;
     // assemble: block 0, the rewritten blocks, then the made ones
@@ -1628,7 +1628,7 @@ unsafe fn fn_target(up: *mut Unit, id: u32, sandboxed: &HashSet<u32>) -> Result<
 fn add_fuel(f: &mut Func, arena: VReg, site: Sym, panic_site: Sym, pos0: u64, costs: &[i64]) {
     let trap_ix = f.blocks.len() as u32;
     let tv = f.vreg(Cls::I);
-    f.blocks.push(relax_backend::rir::Block { insts: vec![Inst::Addr(tv, site), Inst::Call(Callee::Host(panic_site), vec![tv], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0 });
+    f.blocks.push(relax_backend::rir::Block { insts: vec![Inst::Addr(tv, site), Inst::Call(Callee::Host(panic_site), vec![tv], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0, count: -1.0 });
     for (k, &cost) in costs.iter().enumerate() {
         let b = k + 1; // block zero is the confinement prologue
         let t = f.vreg(Cls::I);
@@ -1643,7 +1643,7 @@ fn add_fuel(f: &mut Func, arena: VReg, site: Sym, panic_site: Sym, pos0: u64, co
             Inst::Store(relax_backend::rir::Mem::Int(8, true), t, 0, v2),
             Inst::ICmpI(Cond::Lt, true, c, v2, 0),
         ];
-        let meter = relax_backend::rir::Block { pos: vec![pos0; insts.len()], insts, term: Term::Branch(c, trap_ix, cont_ix), term_pos: pos0 };
+        let meter = relax_backend::rir::Block { pos: vec![pos0; insts.len()], insts, term: Term::Branch(c, trap_ix, cont_ix), term_pos: pos0, count: -1.0 };
         let old = std::mem::replace(&mut f.blocks[b], meter);
         f.blocks.push(old);
     }

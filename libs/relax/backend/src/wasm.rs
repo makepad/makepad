@@ -2102,14 +2102,16 @@ impl<'a> Fx<'a> {
                     }
                     self.helper(Helper::Fma64);
                 } else {
-                    // the f32 product is exact in f64; one more rounding of the sum
+                    // the f32 product is exact in f64; one more rounding of the sum. x * a' then
+                    // + c': a NaN operand comes out as the engine's f64 ops pass it on (the first
+                    // NaN of x, a', c' on x86-64 hosts, as the native fused op; rir::fma_nan_f32)
+                    self.value(b, *x, Want::Nat)?;
+                    self.op(F64_PROMOTE);
                     self.value(b, *a, Want::Nat)?;
                     self.op(F64_PROMOTE);
                     if *np {
                         self.op(0x9A);
                     }
-                    self.value(b, *x, Want::Nat)?;
-                    self.op(F64_PROMOTE);
                     self.op(0xA2);
                     self.value(b, *c, Want::Nat)?;
                     self.op(F64_PROMOTE);
@@ -3318,9 +3320,10 @@ fn helper_body(o: &Options, h: Helper, sh: &mut Shared, fn_ix: &HashMap<u32, u32
             };
             split(&mut c, 0, 6, 7);
             split(&mut c, 1, 8, 9);
-            // p = a * b
-            g(&mut c, 0);
+            // p = b * a (a NaN operand: b's, a's, then c's first through the engine's f64 ops on
+            // x86-64, as the native fused op; rir::fma_nan_f64)
             g(&mut c, 1);
+            g(&mut c, 0);
             c.push(0xA2);
             c.push(LSET);
             c.push(3);

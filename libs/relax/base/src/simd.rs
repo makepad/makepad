@@ -486,6 +486,6 @@ pub fn lower_intrinsic(options: &crate::options::Options, name: &str, consts: &[
     let insts = std::mem::take(&mut b.insts);
     drop(b);
     let n = insts.len();
-    f.blocks = vec![Block { insts, pos: vec![pos; n], term: Term::Ret(rets), term_pos: pos }];
+    f.blocks = vec![Block { insts, pos: vec![pos; n], term: Term::Ret(rets), term_pos: pos, count: -1.0 }];
     f
 }

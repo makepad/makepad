@@ -2158,6 +2158,10 @@ fn try_settle(compiled: u64, drops: &mut jit::SettleDrops, trim: bool) -> bool {
     retired.is_some()
 }
 
+/// The background loop's reclamation pass (jit::settle_drop) runs at most this often after the
+/// first present.
+const SETTLE_DROP_EVERY_NS: u64 = 2_000_000_000;
+
 fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::options::Options) {
     let present_forward = std::env::var_os("MAKEPAD_RUN_REPORT_TO");
     let mut present = match present_report() {
@@ -2183,6 +2187,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         let mut settle_note: &'static str = "";
         let mut drops = jit::SettleDrops::default();
         let mut reclaimed = None;
+        let mut last_drop_ns = 0u64;
         let mut reclaim_requested = false;
         let mut present_bytes = Vec::new();
         let (mut quiet, mut seen, mut trimmed) = (0u32, 0u64, 0u64);
@@ -2304,8 +2309,12 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 // inputs stay through the startup frame: evicting them earlier just makes
                 // subsequent startup callers rebuild them. After present, retry shared
                 // reclamation as compilation progresses, without a global quiet gate.
+                // at most every SETTLE_DROP_EVERY_NS (a request goes at once): each pass scans every
+                // slot on the owner, and an O3 tail bumped the generation with every install
+                let now_ns = jit::wall_ns();
                 let settled_d = if (FIRST_PRESENT_WALL.load(Ordering::Acquire) != 0 || reclaim_requested)
-                    && (reclaimed != Some(n) || reclaim_requested) {
+                    && (reclaimed != Some(n) && now_ns.saturating_sub(last_drop_ns) >= SETTLE_DROP_EVERY_NS || reclaim_requested) {
+                    last_drop_ns = now_ns;
                     crate::owner::call_within(crate::owner::Class::Background, 0, || unsafe { jit::settle_drop(RUN_UNIT) })
                 } else { None };
                 if let Some(mut d) = settled_d {
@@ -3259,6 +3268,14 @@ fn summary_inner(why: &str) {
             }
     if !SILENT.load(Ordering::Relaxed) {         verbose!("makepad-run: opt passes (cpu ms): {}", passes); }
             verbose!("makepad-run: invokes {} seen, {} made plain calls", relax_codegen::opt::INVOKES_SEEN.load(Ordering::Relaxed), relax_codegen::opt::INVOKES_DEMOTED.load(Ordering::Relaxed));
+        }
+        if relax_backend::dbgloc::stats_on() {
+            let st = &relax_backend::dbgloc::STATS;
+            let g = |k: usize| st[k].load(Ordering::Relaxed);
+            eprintln!(
+                "makepad-run: variable tables: {} of {} bodies, {} KB of tables, {} KB in pc maps (+{:.1}% on the code entries' {} KB), {:.0} B per body with a table",
+                g(0), g(1), g(2) / 1024, g(3) / 1024, 100.0 * g(3) as f64 / g(4).max(1) as f64, g(4) / 1024, g(3) as f64 / g(0).max(1) as f64
+            );
         }
         if relax_backend::rir::unwind_stats_on() {
             let st = &relax_backend::rir::UNWIND_STATS;

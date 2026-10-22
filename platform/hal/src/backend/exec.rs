@@ -524,8 +524,17 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 if s.windows.get(sid, id).is_ok_and(|w| w.val.is_hosted()) {
                     return;
                 }
-                let text = s.string(title).unwrap_or("").to_string();
+                let text = world.titled(s.string(title).unwrap_or(""));
                 gpu.os(sid, OsCmd::WindowTitle { id, title: text });
+            }
+            return;
+        }
+        HalCmd::TitleStatus { text } => {
+            if sid != HOST { deny(world, sid); return; }
+            let Some(s) = world.session(HOST) else { return };
+            let text = s.string(text).unwrap_or("").to_string();
+            for (wsid, id, title) in world.set_title_status(&text) {
+                gpu.os(wsid, OsCmd::WindowTitle { id, title });
             }
             return;
         }
@@ -744,6 +753,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         | HalCmd::ChildDragReply { .. }
         | HalCmd::ParentMessage { .. }
         | HalCmd::WindowOverlay { .. }
+        | HalCmd::TitleStatus { .. }
         | HalCmd::Frame { .. }
         | HalCmd::ChildGeom { .. }
         | HalCmd::Forward { .. }

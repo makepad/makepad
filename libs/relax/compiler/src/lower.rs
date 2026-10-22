@@ -533,11 +533,12 @@ impl<'a> Lcx<'a> {
     }
 
     /// A field of a provided crate's type is read only when its layout is the same on both
-    /// sides (provided.rs `trusted`); otherwise rustc's fields are the crate's business.
+    /// sides (provided.rs `trusted`, or a handle laid out as rustc does: Unit::provided_rustc_layout);
+    /// otherwise rustc's fields are the crate's business.
     fn check_provided_field(&mut self, t: TyId) {
         if let TyKind::Adt(d, _, _) = self.u.tcx.tys.kind(t) {
             let krate = self.u.prog.def(*d).krate;
-            if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.relax_only_instance(t) {
+            if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.u.provided_rustc_layout(*d) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
                 self.provided_err(krate, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead", ts, ts));
             }
@@ -557,11 +558,13 @@ impl<'a> Lcx<'a> {
     /// A type only JIT-compiled code makes: no bound fn's signature reaches it
     /// (provided::crossing_types), e.g. an inline shell's result or `LiveIdMap<LiveId, X>`.
     /// A provided crate's type whose values reach its rustc code (a bound fn takes or returns
-    /// it) cannot be built here: rustc would read Relax's layout of its non-C-shaped fields.
+    /// it) is built here only when both sides lay it out alike (`trusted`, or a handle laid out
+    /// as rustc does: Unit::provided_rustc_layout); else rustc would read Relax's layout of its
+    /// fields.
     fn check_provided_built(&mut self, t: TyId) {
         if let TyKind::Adt(d, _, _) = self.u.tcx.tys.kind(t) {
             let krate = self.u.prog.def(*d).krate;
-            if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.relax_only_instance(t) {
+            if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.u.provided_rustc_layout(*d) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
                 self.provided_err(krate, format!("`{}` is built in JIT-compiled code, but values of it reach the rustc-built code of its provided crate (a bound fn takes or returns it) and its layout is not C-shaped: build it with a fn of the crate, or keep it out of bound signatures", ts));
             }
@@ -1454,7 +1457,7 @@ impl<'a> Lcx<'a> {
                 // an opaque type of a provided crate (rustc's layout, size only): every way of
                 // reaching a field -- `x.f`, a struct pattern, a derived or written impl body --
                 // ends here, so this is where it is refused (provided.rs)
-                if self.u.provided_types.contains_key(d) {
+                if self.u.provided_types.contains_key(d) && !self.u.provided_rustc_layout(*d) {
                     let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
                     let krate = self.u.prog.def(*d).krate;
                     self.provided_err(krate, format!("a field of `{}` is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and its layout is rustc's alone: call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, ts));
@@ -1664,7 +1667,62 @@ impl<'a> Lcx<'a> {
 
     /// Lowers a fn item body. `params`: ABI parameter vregs are created here.
     /// Puts the drop-flag initialisations at the start of the entry block.
+    /// `Func::dbg`: where each named local of the body lives (makepad inspect `locals`). A
+    /// local in memory names its slot (and offset) when its address is a slot's, else the
+    /// address vreg. Coroutine bodies keep none (their transform moves the slots).
+    fn record_dbg(&mut self) {
+        if self.coro.is_some() || !relax_backend::dbgloc::on() {
+            return;
+        }
+        // single definitions of address vregs: SlotAddr and slot + constant
+        let mut slot_of: std::collections::HashMap<u32, (u32, i32)> = std::collections::HashMap::new();
+        let mut consts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                let (d, a, off) = match i {
+                    Inst::SlotAddr(d, s) => {
+                        slot_of.insert(d.0, (*s, 0));
+                        continue;
+                    }
+                    Inst::Iconst(d, k) => {
+                        consts.insert(d.0, *k);
+                        continue;
+                    }
+                    Inst::IBinI(IOp::Add, _, d, a, off) => (d, a, *off),
+                    Inst::IBin(IOp::Add, _, d, a, k) => match consts.get(&k.0) {
+                        Some(off) => (d, a, *off),
+                        None => continue,
+                    },
+                    _ => continue,
+                };
+                if let Some(&(s, o)) = slot_of.get(&a.0) {
+                    if let Ok(off) = i32::try_from(o as i64 + off) {
+                        slot_of.insert(d.0, (s, off));
+                    }
+                }
+            }
+        }
+        for (li, st) in self.locals.iter().enumerate() {
+            let Some(st) = st else { continue };
+            let n = self.u.prog.syms.str(self.b.locals[li].name);
+            if n.is_empty() || n.starts_with("__") {
+                continue;
+            }
+            let loc = match st {
+                // (a value of no bytes has nothing to show)
+                LocalSt::Regs(r) if r.is_empty() => continue,
+                LocalSt::Regs(r) => DbgLoc::Regs(r.clone()),
+                LocalSt::Slot(a) => match slot_of.get(&a.0) {
+                    Some(&(s, o)) => DbgLoc::Slot(s, o),
+                    None => DbgLoc::Mem(*a, 0),
+                },
+            };
+            self.f.dbg.push(DbgVar { ctx: 0, local: li as u32, loc, k: Vec::new() });
+        }
+    }
+
     pub fn finish(&mut self) {
+        self.record_dbg();
         let inits = std::mem::take(&mut self.entry_inits);
         let flags: Vec<VReg> = if self.coro.is_none() { inits.iter().filter_map(|i| if let Inst::Iconst(f, 0) = i { Some(*f) } else { None }).collect() } else { Vec::new() };
         if !inits.is_empty() {
@@ -13511,7 +13569,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         pb.pos = ps;
         for (target, list) in [(resume, &mut resume_blocks), (cancel, &mut cancel_blocks)] {
             let nbk = f.block();
-            let mut b = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(target), term_pos: pos0 };
+            let mut b = relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Jump(target), term_pos: pos0, count: -1.0 };
             for &(v, x) in &const_at[k] {
                 push(&mut b, Inst::Iconst(v, x));
             }
@@ -13557,7 +13615,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
     }
     // the dispatcher becomes the entry; the old entry continues at `start`
     let start = f.block();
-    let old = std::mem::replace(&mut f.blocks[0], relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: pos0 });
+    let old = std::mem::replace(&mut f.blocks[0], relax_backend::rir::Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: pos0, count: -1.0 });
     f.blocks[start as usize] = old;
     for b in f.blocks.iter_mut() {
         b.term.map_succs(|t| if t == 0 { start } else { t });

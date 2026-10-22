@@ -74,8 +74,9 @@ impl Lines {
 /// Whether a code body's pc map has an instruction in `lines`.
 pub(crate) fn map_holds(u: &Unit, map: &PcMap, lines: &[Lines]) -> bool {
     let mut hit = false;
-    map.each(|_, p| {
-        if lines.iter().any(|l| l.holds(u, p)) {
+    map.each(|o, p| {
+        // (the variable table's entries hold no positions)
+        if o != relax_backend::dbgloc::PC_VARS && lines.iter().any(|l| l.holds(u, p)) {
             hit = true;
             return false;
         }
@@ -275,7 +276,6 @@ pub(crate) struct PcCode {
 pub(crate) struct Inlined {
     /// its slot, when the code's inlined slots name it
     pub slot: Option<u32>,
-    pub def: Option<crate::program::DefId>,
     pub name: String,
     /// the inline stack (the code's line table), innermost first: (fn, its def, file:line:col);
     /// the last level is the slot's own fn at the outermost call site. Empty: code made before
@@ -298,14 +298,14 @@ impl Resolver {
 
     fn file_fns(&mut self, u: &Unit, file: u32) -> &[(u32, u32, crate::program::DefId)] {
         self.by_file.entry(file).or_insert_with(|| {
+            // every fn item of the file (a fn that only runs inlined into code from the disk
+            // cache has no slot of its own)
             let mut v = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for f in u.fns.iter() {
-                if let FnKey::Inst(d, _) = &f.key {
-                    if u.prog.def(*d).file == file && seen.insert(*d) {
-                        if let Some((_, lo, hi)) = def_lines(u, *d) {
-                            v.push((lo, hi, *d));
-                        }
+            for &d in u.prog.defs_in_file(file) {
+                let d = crate::program::DefId(d);
+                if matches!(u.prog.def(d).kind, crate::program::DefKind::Fn | crate::program::DefKind::AssocFn) {
+                    if let Some((_, lo, hi)) = def_lines(u, d) {
+                        v.push((lo, hi, d));
                     }
                 }
             }
@@ -362,7 +362,7 @@ impl Resolver {
         stack.push((super::display_name(u, id, 0), None, pstr(cur)));
         let (name, def) = (stack[0].0.clone(), stack[0].1);
         let slot = def.and_then(|d| u.fns.iter().position(|f| matches!(&f.key, FnKey::Inst(x, _) if *x == d)).map(|i| i as u32));
-        Some(Inlined { slot, def, name, stack, lost })
+        Some(Inlined { slot, name, stack, lost })
     }
 
     pub fn inlined_fn(&mut self, u: &Unit, id: u32, start: u64, p: u64) -> Option<Inlined> {
@@ -403,11 +403,7 @@ impl Resolver {
             }
         }
         if let Some((c, _)) = best {
-            let def = match &u.fns[c as usize].key {
-                FnKey::Inst(d, _) => Some(*d),
-                _ => None,
-            };
-            return Some(Inlined { slot: Some(c), def, name: super::display_name(u, c, 0), stack: Vec::new(), lost: false });
+            return Some(Inlined { slot: Some(c), name: super::display_name(u, c, 0), stack: Vec::new(), lost: false });
         }
         // any fn item of the file that spans the line (innermost)
         let mut inner: Option<(u32, crate::program::DefId)> = None;
@@ -417,8 +413,8 @@ impl Resolver {
             }
         }
         match inner {
-            Some((_, d)) => Some(Inlined { slot: None, def: Some(d), name: crate::lower::display_path(&u.prog, d), stack: Vec::new(), lost: false }),
-            None => Some(Inlined { slot: None, def: None, name: format!("(inlined code of {}:{})", u.prog.file_paths.get(pf as usize).map(String::as_str).unwrap_or("?"), pl), stack: Vec::new(), lost: false }),
+            Some((_, d)) => Some(Inlined { slot: None, name: crate::lower::display_path(&u.prog, d), stack: Vec::new(), lost: false }),
+            None => Some(Inlined { slot: None, name: format!("(inlined code of {}:{})", u.prog.file_paths.get(pf as usize).map(String::as_str).unwrap_or("?"), pl), stack: Vec::new(), lost: false }),
         }
     }
 }

@@ -907,7 +907,7 @@ fn thread_decided(f: &mut Func, ed: &Edges) -> bool {
     }
     for (p, b, to) in plan {
         let src = &f.blocks[b as usize];
-        let nb = Block { insts: src.insts.clone(), pos: src.pos.clone(), term: Term::Jump(to), term_pos: src.term_pos };
+        let nb = Block { insts: src.insts.clone(), pos: src.pos.clone(), term: Term::Jump(to), term_pos: src.term_pos, count: src.count };
         let id = f.blocks.len() as u32;
         f.blocks.push(nb);
         f.blocks[p as usize].term.map_succs(|s| if s == b { id } else { s });

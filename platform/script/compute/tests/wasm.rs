@@ -153,6 +153,39 @@ fn scalar_wasm_fused_multiply_add_is_exact_at_midpoints() {
     }
 }
 
+/// One NaN operand (either sign, quiet or signaling, any payload) of each fused multiply-add
+/// form: the scalar wasm gives the interpreter's NaN -- that NaN quieted, its sign flipped
+/// when the form negates that operand (`c - a * b` negates a, `a * b - c` c), as the native
+/// fused ops (ir::fma_nan). Several NaN operands and an invalid product (inf * 0) with a NaN
+/// addend are left out: wasm's f64 ops pick among NaNs as the engine's host does (wasm leaves
+/// NaN bits nondeterministic), which matches the native rule only on some hosts.
+#[test]
+fn scalar_wasm_fused_multiply_add_keeps_one_nans_sign() {
+    let nans: [u32; 6] = [0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xffc1_2345, 0x7f80_0567, 0xff80_0089];
+    let others: [u32; 4] = [0x3f80_0000, 0xbfc0_0000, 0x7149_f2ca, 0x0000_0001];
+    let mut triples = Vec::new();
+    for &q in &nans {
+        for &x in &others {
+            for &y in &others {
+                triples.extend_from_slice(&[q, x, y, x, q, y, x, y, q]);
+            }
+        }
+    }
+    let n = (triples.len() / 3) as u32;
+    for src in FMA_KERNELS {
+        let case = source_case_with("fma-nan", src, &[], &[], 0.0, n, &|k, w| {
+            if k == 1 {
+                w[..triples.len()].copy_from_slice(&triples);
+            }
+        });
+        match check(&case) {
+            None => panic!("declined"),
+            Some(Err(e)) => panic!("{}: {}", src, e),
+            Some(Ok(())) => {}
+        }
+    }
+}
+
 /// The four-wide code's size against the scalar code's, per kernel (a
 /// diagnostic: the target is 1-2x; a ratio past 3x is reported as a
 /// warning to investigate; only a gross blowup fails).

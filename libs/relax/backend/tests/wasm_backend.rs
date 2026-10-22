@@ -230,6 +230,49 @@ fn floats() {
     assert_eq!(got, a.mul_add(b2, -c));
 }
 
+/// A fused multiply-add with one NaN operand (either sign, quiet or signaling, a payload), every
+/// negation form, f32 and f64: that NaN quieted, its sign flipped when the form negates that
+/// operand (rir::fma_nan_f32 / f64; the native back ends give the same). Several NaNs: as the
+/// engine's f64 ops pick (wasm leaves NaN bits nondeterministic), not pinned.
+#[test]
+fn fma_one_nan_operand() {
+    for w in [false, true] {
+        let cls = if w { Cls::F64 } else { Cls::F32 };
+        let nans: Vec<u64> = if w {
+            vec![0x7ff8_0000_0000_0000, 0xfff8_0000_0000_0000, 0x7ff8_0000_0000_1234, 0xfff0_0000_0000_0089]
+        } else {
+            vec![0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xff80_0089]
+        };
+        let others: Vec<u64> = if w { [1.5f64, -2.0, 3.0].iter().map(|x| x.to_bits()).collect() } else { [1.5f32, -2.0, 3.0].iter().map(|x| x.to_bits() as u64).collect() };
+        for (np, na) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut f = B::new(&[cls, cls, cls], &[cls]);
+            let (a, b2, c) = (f.p(0), f.p(1), f.p(2));
+            let d = f.v(cls);
+            f.i(Inst::FMulAdd(np, na, w, d, a, b2, c));
+            f.term(Term::Ret(vec![d]));
+            let fm = f.done();
+            for &q in &nans {
+                for pos in 0..3 {
+                    let mut args = [others[0], others[1], others[2]];
+                    args[pos] = q;
+                    let got = run(&[fm.clone()], 0, &args).unwrap()[0];
+                    let want = if w {
+                        let x = |k: usize| f64::from_bits(args[k]);
+                        let (a, c) = (if np { -x(0) } else { x(0) }, if na { -x(2) } else { x(2) });
+                        fma_nan_f64(a, x(1), c).unwrap()
+                    } else {
+                        let x = |k: usize| f32::from_bits(args[k] as u32);
+                        let (a, c) = (if np { -x(0) } else { x(0) }, if na { -x(2) } else { x(2) });
+                        fma_nan_f32(a, x(1), c).unwrap() as u64
+                    };
+                    let got = if w { got } else { got & 0xffff_ffff };
+                    assert_eq!(got, want, "w {} np {} na {} NaN {:x} at {}", w, np, na, q, pos);
+                }
+            }
+        }
+    }
+}
+
 /// Sum of 0..n with a loop; nested loops; early exits.
 #[test]
 fn loops_and_branches() {

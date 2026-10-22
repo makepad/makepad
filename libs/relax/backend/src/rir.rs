@@ -171,6 +171,11 @@ pub enum VX {
     ArmSha256H,
     ArmSha256H2,
     ArmSha256Su1,
+    /// shift by the signed amount in each lane (NEON USHL / SSHL): left by n >= 0, right by -n
+    /// (logical / arithmetic) for n < 0, |n| below the lane bits. Made by the arm64 back end only
+    /// (a right shift by `y + c` is `ushl` by `-c - y`: one `sub`, no `neg`).
+    ArmUShl(VW),
+    ArmSShl(VW),
     // ---- unary, V128 -> V128
     FNeg(VW),
     FAbs(VW),
@@ -866,7 +871,9 @@ pub enum Inst {
     /// d = c != 0 ? a : b (c an integer vreg; a, b, d of one class)
     Sel(VReg, VReg, VReg, VReg), // d, c, a, b
     /// fused multiply-add, one rounding: d = (neg_prod ? -a : a) * b + (neg_add ? -c : c), the
-    /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`).
+    /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`). A NaN result
+    /// is [`fma_nan_f32`] / [`fma_nan_f64`] of the negated operands on every tier and register
+    /// assignment (each back end keeps one operand placement).
     /// The only fusion RIR has (the optimiser never fuses).
     FMulAdd(bool, bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, f64?, d, a, b, c
     /// atomic load (Mem::Int only; the value is extended by signedness)
@@ -895,8 +902,8 @@ pub enum Inst {
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
-    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations,
-    /// as `FMulAdd`)
+    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations
+    /// and NaN lanes as `FMulAdd`)
     VFma(bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, d, a, b, c
     /// every lane = the low 32 bits of s (an I or F32 vreg)
     VSplat(VReg, VReg),
@@ -1112,6 +1119,10 @@ pub struct Block {
     pub pos: Vec<u64>,
     pub term: Term,
     pub term_pos: u64,
+    /// how often the block ran in the slot's counted build (PGO: the counted tier's exact
+    /// count of the O3 input block this one came from; copies keep it), negative = unknown.
+    /// A frequency for layout and register allocation only: never a correctness fact.
+    pub count: f32,
 }
 
 #[derive(Clone)]
@@ -1208,6 +1219,140 @@ pub struct Func {
     /// own context is the parent's --, a position inside the inlined fn naming it). Machine code
     /// carries it in its pc map (`inline_pc_entries`).
     pub inl: Vec<(u64, u64)>,
+    /// Where the source's named locals live (makepad inspect `locals`): side metadata only --
+    /// no pass reads it to decide anything, passes that rename vregs or slots map it, and the
+    /// back end turns it into per-call-site locations in the pc map (`vars_pc_entries`).
+    pub dbg: Vec<DbgVar>,
+}
+
+/// A named local of the source and its storage (`Func::dbg`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DbgVar {
+    /// its fn's inline context (`pos_ctx`): 0 the function itself, k an inlined copy
+    pub ctx: u16,
+    /// the local's index in its fn's checked body (`Body::locals`)
+    pub local: u32,
+    pub loc: DbgLoc,
+    /// (leaf, value) of `Regs` leaves the optimiser found constant (their vreg folded away)
+    pub k: Vec<(u32, i64)>,
+}
+
+/// Storage of a `DbgVar`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DbgLoc {
+    /// one vreg per layout leaf (in leaf order); `DBG_NONE` = that leaf is no longer held
+    Regs(Vec<VReg>),
+    /// the bytes of stack slot `slot` from offset `off`
+    Slot(u32, i32),
+    /// the bytes at the address a vreg holds, plus `off` (a by-pointer argument copy)
+    Mem(VReg, i32),
+}
+
+/// A `DbgLoc::Regs` leaf whose value no vreg holds any more.
+pub const DBG_NONE: VReg = VReg(u32::MAX);
+
+impl Func {
+    /// Maps the debug table through a vreg renaming (`map(v)` None: v is gone).
+    pub fn dbg_map_vregs(&mut self, map: &dyn Fn(VReg) -> Option<VReg>) {
+        for d in self.dbg.iter_mut() {
+            match &mut d.loc {
+                DbgLoc::Regs(r) => {
+                    for v in r.iter_mut() {
+                        if *v != DBG_NONE {
+                            *v = map(*v).unwrap_or(DBG_NONE);
+                        }
+                    }
+                }
+                DbgLoc::Mem(v, _) => *v = map(*v).unwrap_or(DBG_NONE),
+                DbgLoc::Slot(..) => {}
+            }
+        }
+    }
+    /// Live-range splits (register allocation): each (piece, original) pair is a vreg made to
+    /// hold the original's value over part of the function. Every debug entry naming the
+    /// original gets a twin naming the piece; where a local is looked up, the leaf's vreg live
+    /// there (original or piece) holds it.
+    pub fn dbg_add_pieces(&mut self, pairs: &[(VReg, VReg)]) {
+        if self.dbg.is_empty() || pairs.is_empty() {
+            return;
+        }
+        let mut of: std::collections::HashMap<u32, Vec<VReg>> = std::collections::HashMap::new();
+        for &(p, o) in pairs {
+            of.entry(o.0).or_default().push(p);
+        }
+        let mut more = Vec::new();
+        for d in &self.dbg {
+            if let DbgLoc::Regs(r) = &d.loc {
+                for (k, v) in r.iter().enumerate() {
+                    for p in of.get(&v.0).map(|x| x.as_slice()).unwrap_or(&[]) {
+                        let mut leaves = vec![DBG_NONE; r.len()];
+                        leaves[k] = *p;
+                        more.push(DbgVar { ctx: d.ctx, local: d.local, loc: DbgLoc::Regs(leaves), k: Vec::new() });
+                    }
+                }
+            }
+        }
+        self.dbg.extend(more);
+    }
+    /// A pass proved, for vregs the debug table may name, `d == s` everywhere (`copies`: both
+    /// single-definition, d a copy of s) or `d == k` (`consts`: single-definition constants)
+    /// before d goes away: its leaves name s, or hold the constant.
+    pub fn dbg_salvage(&mut self, copies: &[(VReg, VReg)], consts: &[(VReg, i64)]) {
+        if self.dbg.is_empty() || copies.is_empty() && consts.is_empty() {
+            return;
+        }
+        let copies: std::collections::HashMap<u32, VReg> = copies.iter().map(|c| (c.0 .0, c.1)).collect();
+        let consts: std::collections::HashMap<u32, i64> = consts.iter().map(|c| (c.0 .0, c.1)).collect();
+        for d in self.dbg.iter_mut() {
+            match &mut d.loc {
+                DbgLoc::Regs(r) => {
+                    for (leaf, v) in r.iter_mut().enumerate() {
+                        if *v == DBG_NONE {
+                            continue;
+                        }
+                        // (a chain of removed copies: to its end)
+                        for _ in 0..64 {
+                            match copies.get(&v.0) {
+                                Some(&s) if s != *v => *v = s,
+                                _ => break,
+                            }
+                        }
+                        if let Some(&k) = consts.get(&v.0) {
+                            *v = DBG_NONE;
+                            d.k.push((leaf as u32, k));
+                        }
+                    }
+                }
+                DbgLoc::Mem(v, _) => {
+                    if let Some(&s) = copies.get(&v.0) {
+                        *v = s;
+                    }
+                }
+                DbgLoc::Slot(..) => {}
+            }
+        }
+    }
+
+    /// The vregs the debug table names (sorted, deduplicated): passes check removals against it.
+    pub fn dbg_vregs(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.dbg.iter().flat_map(|d| match &d.loc {
+            DbgLoc::Regs(r) => r.clone(),
+            DbgLoc::Mem(a, _) => vec![*a],
+            DbgLoc::Slot(..) => Vec::new(),
+        }).filter(|v| *v != DBG_NONE).map(|v| v.0).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Maps the debug table through a slot renumbering (`map(s)` None: s is gone).
+    pub fn dbg_map_slots(&mut self, map: &dyn Fn(u32) -> Option<u32>) {
+        for d in self.dbg.iter_mut() {
+            if let DbgLoc::Slot(s, _) = &mut d.loc {
+                *s = map(*s).unwrap_or(u32::MAX);
+            }
+        }
+    }
 }
 
 /// Source positions are `(file << 32) | byte`, with the inline context in bits 48..63 (0: the
@@ -1245,14 +1390,14 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false, inl: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new(), naked: false, inl: Vec::new(), dbg: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
         VReg(self.vregs.len() as u32 - 1)
     }
     pub fn block(&mut self) -> u32 {
-        self.blocks.push(Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0 });
+        self.blocks.push(Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0, count: -1.0 });
         self.blocks.len() as u32 - 1
     }
     pub fn slot(&mut self, size: u32, align: u32) -> u32 {
@@ -1499,6 +1644,60 @@ impl Func {
 }
 
 /// `v` re-extended to integer type `it` (how RIR keeps narrow integers in registers).
+/// The NaN result of `FMulAdd` / `VFma` lanes: `fma(a, b, c)` with the operands already negated
+/// (`neg_prod` / `neg_add`), on this host (Rust leaves it unspecified; the back ends fix it so
+/// that every tier and register assignment gives the same bits, and compute kernels match their
+/// interpreter, makepad_script_compute::ir::fma_nan):
+/// - x86-64: the first NaN of b, a, c, quieted (vfmadd213 with a in the destination, b in vvvv,
+///   c in r/m -- glibc's fma/fmaf, what rustc calls without the fma feature; the vf*231/132 forms
+///   keep b first too); no NaN operand (inf * 0, inf - inf): the negative default NaN.
+/// - AArch64 (fmadd/fmla: Rn = a, Rm = b, addend c; Arm's FPMulAdd): the first signaling NaN of
+///   c, a, b, else the first quiet NaN of c, a, b, quieted -- except that a quiet NaN c with
+///   inf * 0 gives the default NaN; none: the positive default NaN.
+/// - wasm: as the engine's f64 multiply then add pass NaNs on (`b * a + c`, the x86-64 order on
+///   x86-64 engines); wasm itself leaves NaN signs nondeterministic.
+/// `None` when the result is not a NaN.
+pub fn fma_nan_f32(a: f32, b: f32, c: f32) -> Option<u32> {
+    let r = a.mul_add(b, c);
+    fma_nan(a.to_bits() as u64, b.to_bits() as u64, c.to_bits() as u64, 23, 8, r.is_nan()).map(|x| x as u32)
+}
+
+/// [`fma_nan_f32`] for f64.
+pub fn fma_nan_f64(a: f64, b: f64, c: f64) -> Option<u64> {
+    let r = a.mul_add(b, c);
+    fma_nan(a.to_bits(), b.to_bits(), c.to_bits(), 52, 11, r.is_nan())
+}
+
+/// m mantissa and e exponent bits; `is_nan`: the result's value is a NaN
+fn fma_nan(a: u64, b: u64, c: u64, m: u32, e: u32, is_nan: bool) -> Option<u64> {
+    if !is_nan {
+        return None;
+    }
+    let exp = ((1u64 << e) - 1) << m;
+    let abs = |x: u64| x & (exp | ((1 << m) - 1));
+    let nan = |x: u64| abs(x) > exp;
+    let quiet = 1u64 << (m - 1);
+    let default = exp | quiet;
+    #[cfg(target_arch = "aarch64")]
+    {
+        let snan = |x: u64| nan(x) && x & quiet == 0;
+        if let Some(&x) = [c, a, b].iter().find(|&&x| snan(x)) {
+            return Some(x | quiet);
+        }
+        let (inf, zero) = (|x: u64| abs(x) == exp, |x: u64| abs(x) == 0);
+        if nan(c) && ((inf(a) && zero(b)) || (zero(a) && inf(b))) {
+            return Some(default);
+        }
+        Some([c, a, b].iter().find(|&&x| nan(x)).map_or(default, |&x| x | quiet))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let sign = 1u64 << (m + e);
+        let default = if cfg!(target_arch = "x86_64") { sign | default } else { default };
+        Some([b, a, c].iter().find(|&&x| nan(x)).map_or(default, |&x| x | quiet))
+    }
+}
+
 pub fn extend_const(v: i64, it: IntTy) -> i64 {
     match (it.bits, it.signed) {
         (8, true) => v as i8 as i64,

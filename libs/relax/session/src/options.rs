@@ -299,6 +299,9 @@ pub struct Options {
     pub ra_prio: Priority,
     /// `MAKEPAD_RUN_RA_ORDER`; default `false`.
     pub ra_order: bool,
+    /// `MAKEPAD_RUN_RA_QUICK_COALESCE`; default `false`: the quick allocation round (no live-range
+    /// splitting) also coalesces copies. Compute kernels set it.
+    pub ra_quick_coalesce: bool,
     /// `MAKEPAD_RUN_SPEC_ORDER`; default `false`.
     pub spec_order: bool,
     /// `MAKEPAD_RUN_O3_PROFILE`; default `None`.
@@ -399,6 +402,7 @@ impl Default for Options {
             freq_mode: Frequency::Blend,
             ra_prio: Priority::References,
             ra_order: false,
+            ra_quick_coalesce: false,
             spec_order: false,
             tier1_profile: None,
             tier1_profile_data: None,
@@ -516,6 +520,7 @@ impl Options {
             freq_mode: { let os = get("MAKEPAD_RUN_FREQ_MODE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("sampled") => Frequency::Sampled, Some("static") => Frequency::Static, _ => Frequency::Blend } },
             ra_prio: { let os = get("MAKEPAD_RUN_RA_PRIO"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("len") => Priority::Length, Some("sqrt") => Priority::Sqrt, _ => Priority::References } },
             ra_order: { let os = get("MAKEPAD_RUN_RA_ORDER"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("start") },
+            ra_quick_coalesce: { let os = get("MAKEPAD_RUN_RA_QUICK_COALESCE"); os.is_some() },
             spec_order: { let os = get("MAKEPAD_RUN_SPEC_ORDER"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("lifo") },
             tier1_profile: { let os = get("MAKEPAD_RUN_O3_PROFILE"); os },
             tier1_profile_data: None,
@@ -613,6 +618,7 @@ impl Options {
             freq_mode,
             ra_prio,
             ra_order,
+            ra_quick_coalesce,
             spec_order,
             tier1_profile,
             tier1_profile_data, cfgs, target, cpu,
@@ -791,6 +797,8 @@ impl Options {
         h.u8(*ra_prio as u8);
         h.str("ra_order");
         h.u8(*ra_order as u8);
+        h.str("ra_quick_coalesce");
+        h.u8(*ra_quick_coalesce as u8);
         h.str("spec_order");
         h.u8(*spec_order as u8);
         h.str("o3_profile");
@@ -833,8 +841,9 @@ pub struct RuntimeOptions {
     pub settle_drop: bool,
     /// `MAKEPAD_RUN_BURST_ARENA`; default `true`.
     pub burst_arena: bool,
-    /// `MAKEPAD_RUN_O3_ADAPTIVE`; default `false`.
-    pub tier1_adaptive: bool,
+    /// `MAKEPAD_RUN_O3_BURST` (`0`: off, for A/Bs); default `true`: after the first present, while the O3
+    /// queue is not trivial, more O3 workers run (every performance core but one) until it drains.
+    pub tier1_burst: bool,
     /// `MAKEPAD_RUN_MODULE_FUEL`; default `4_000_000_000`.
     pub module_fuel: i64,
     /// `MAKEPAD_RUN_MODULE_MEM_MB`; default `256`.
@@ -871,7 +880,7 @@ impl Default for RuntimeOptions {
             mem_trim: true,
             settle_drop: true,
             burst_arena: true,
-            tier1_adaptive: false,
+            tier1_burst: true,
             module_fuel: 4_000_000_000,
             module_mem_mb: 256,
             repeat: 1,
@@ -913,7 +922,7 @@ impl RuntimeOptions {
             mem_trim: { let os = get("MAKEPAD_RUN_MEM_TRIM"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             settle_drop: { let os = get("MAKEPAD_RUN_SETTLE_DROP"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             burst_arena: { let os = get("MAKEPAD_RUN_BURST_ARENA"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            tier1_adaptive: { let os = get("MAKEPAD_RUN_O3_ADAPTIVE"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("1") },
+            tier1_burst: { let os = get("MAKEPAD_RUN_O3_BURST"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             module_fuel: { let os = get("MAKEPAD_RUN_MODULE_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(4_000_000_000) },
             module_mem_mb: { let os = get("MAKEPAD_RUN_MODULE_MEM_MB"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(256) },
             repeat: { let os = get("MAKEPAD_RUN_REPEAT"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(1) },

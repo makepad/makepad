@@ -1495,15 +1495,14 @@ impl Window {
     }
 
     fn sync_caption_title(&mut self, cx: &mut Cx) {
-        let title = if self.window.title.is_empty() {
-            &cx.windows[self.window.handle.window_id()].create_title
-        } else {
-            &self.window.title
-        };
+        let window = &cx.windows[self.window.handle.window_id()];
+        let title = if self.window.title.is_empty() { &window.create_title } else { &self.window.title };
+        // with the title status the platform reports (makepad run's "optimizing 62%"), as the OS title
+        let title = window.title_shown(title);
         if self.last_synced_title.as_deref() == Some(title.as_str()) {
             return;
         }
-        let source_title = title.clone();
+        let source_title = title;
         // Under `--remote` the title carries a `[remote]` tag, so a human who
         // finds this window lingering can tell it belongs to an agent. Apps that
         // draw their own caption bar must show it too, not just the OS title bar.

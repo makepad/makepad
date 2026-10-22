@@ -322,7 +322,7 @@ pub(crate) fn kept_scan(u: &Unit) -> Vec<(&'static str, usize)> {
     a.field("retiers");
     a.map(&u.retiers, |_, _, _| {});
     a.field("frequency_profiles");
-    a.map(&u.frequency_profiles, |a, _, p| a.map(&p.positions, |_, _, _| {}));
+    a.map(&u.frequency_profiles, |a, _, p| a.vec(&p.pos_blocks));
     a.field("errors");
     a.vec(&u.errors);
     for e in &u.errors {

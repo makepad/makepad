@@ -113,11 +113,27 @@ static CHECK: AtomicU8 = AtomicU8::new(0);
 const WARM_MAX: usize = 256;
 const WARM_TOUCHED_MAX: usize = 256 << 10;
 const WARM_BYTES_MAX: usize = 32 << 20;
+/// Warm large runs (program heaps only): a freed large block's run (one exclusive allocation,
+/// above the small classes) stays committed for the next large block of the same order, instead
+/// of being decommitted and faulted in again. A program that builds a large Vec each frame (Sandbox:
+/// `collect_lm_movers`, 230 KB a frame by `push`) otherwise paid a commit, a decommit and a page
+/// fault per 4 KB on every growth step, every frame (~350 faults a frame; the system heap keeps
+/// such memory). Bounded like the small warm list; runs above WARM_LARGE_ONE_MAX go back at once.
+const WARM_LARGE_MAX: usize = 64;
+const WARM_LARGE_ONE_MAX: usize = 8 << 20;
+const WARM_LARGE_BYTES_MAX: usize = 32 << 20;
 /// An emptied chunk of a thread that was carved beyond this goes back to the shared state at once
 /// (the warm list or the OS); a lighter one stays the thread's for its next block.
 const OWNED_KEEP_MAX: usize = 32 << 10;
 struct Warm {
     runs: [(usize, usize); WARM_MAX], // (chunk index, touched bytes)
+    len: usize,
+    bytes: usize,
+}
+/// The warm large runs: (chunk index, committed bytes, order). The order is kept here so a take
+/// never locks a chunk while holding this list (a release holds its chunk, then takes the list).
+struct WarmLarge {
+    runs: [(usize, usize, usize); WARM_LARGE_MAX],
     len: usize,
     bytes: usize,
 }
@@ -440,6 +456,9 @@ struct State {
     run: usize,
     order: usize,
     bytes: usize, // requested bytes live in this chunk (burst arena stats only)
+    /// A large block handed out from the warm large list: its pages hold old bytes, so
+    /// `alloc_zeroed` writes the zeros the pool's decommitted runs would have given.
+    dirty: bool,
 }
 
 // A buddy free-chunk list supports both single chunks and contiguous large mappings.
@@ -685,6 +704,8 @@ pub struct Arena {
     committed: AtomicUsize,
     chunks: AtomicUsize,
     warm: Mutex<Warm>,
+    /// Warm large runs (program heaps): (chunk index, committed bytes); see WARM_LARGE_MAX.
+    warm_large: Mutex<WarmLarge>,
     headers: [Chunk; N],
     pool: Mutex<Pool>,
     partial: Mutex<Partial>,
@@ -702,6 +723,14 @@ impl Arena {
             warm: Mutex::with_id(
                 Warm {
                     runs: [(0, 0); WARM_MAX],
+                    len: 0,
+                    bytes: 0,
+                },
+                2,
+            ),
+            warm_large: Mutex::with_id(
+                WarmLarge {
+                    runs: [(0, 0, 0); WARM_LARGE_MAX],
                     len: 0,
                     bytes: 0,
                 },
@@ -729,6 +758,7 @@ impl Arena {
                         run: 0,
                         order: 0,
                         bytes: 0,
+                        dirty: false,
                     }),
                 }
             }; N],
@@ -899,6 +929,9 @@ impl Arena {
             lock(&self.partial).unlink(index, &self.headers);
         }
         if s.stride != 0 && s.bump <= WARM_TOUCHED_MAX && self.warm_put(index, s.bump) {
+            return;
+        }
+        if self.dynamic && s.stride == 0 && index == s.run && s.committed <= WARM_LARGE_ONE_MAX && self.warm_large_put(index, s.committed, s.order) {
             return;
         }
         event(E_DECOMMIT);
@@ -1267,8 +1300,11 @@ impl Arena {
         };
         let units = (span + CHUNK - 1) / CHUNK;
         let order = units.next_power_of_two().trailing_zeros() as usize;
-        // a warm chunk (committed, nothing live) serves a small class without an OS call
-        let warm = if small { self.warm_take() } else { None };
+        // a warm chunk (committed, nothing live) serves a small class without an OS call; a warm
+        // large run of the same order serves a large block (committing only what it lacks)
+        let warm_large = if !small && self.dynamic && l.align() <= CHUNK { self.warm_large_take(order) } else { None };
+        let warm = if small { self.warm_take() } else { warm_large.map(|w| w.0) };
+        let kept = warm_large.map_or(0, |w| w.1);
         let run = match warm {
             Some(i) => i,
             None => match lock(&self.pool).take(order) {
@@ -1287,6 +1323,20 @@ impl Arena {
             lock(&self.pool).release(run, order);
             return null_mut();
         }
+        if warm_large.is_some() && committed > kept && !os::commit((address + kept) as *mut u8, committed - kept) {
+            // the run cannot grow: it goes back to the pool decommitted (zero), and this alloc fails over
+            let mut s = lock(&self.headers[index].state);
+            if os::decommit(p, kept, COMPILER) {
+                self.committed.fetch_sub(kept, Ordering::Relaxed);
+                self.chunks.fetch_sub((kept + CHUNK - 1) / CHUNK, Ordering::Relaxed);
+                s.committed = 0;
+                drop(s);
+                lock(&self.pool).release(run, order);
+            }
+            return null_mut();
+        }
+        // a warm large run keeps what it had committed beyond this block (resize_in_place trims it)
+        let committed = committed.max(kept);
         let h = &self.headers[index];
         let generation;
         let epoch = if self.gen_on() { EPOCH.load(Ordering::Relaxed) } else { 0 };
@@ -1306,11 +1356,15 @@ impl Arena {
                 run,
                 order,
                 bytes: 0,
+                dirty: warm_large.is_some(),
             };
             h.live.store(1, Ordering::Relaxed);
             if warm.is_none() {
                 self.committed.fetch_add(committed, Ordering::Relaxed);
                 self.chunks.fetch_add((committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
+            } else if warm_large.is_some() && committed > kept {
+                self.committed.fetch_add(committed - kept, Ordering::Relaxed);
+                self.chunks.fetch_add((committed + CHUNK - 1) / CHUNK - (kept + CHUNK - 1) / CHUNK, Ordering::Relaxed);
             }
             if COMPILER {
                 h.account.fetch_add(requested, Ordering::Relaxed);
@@ -1359,8 +1413,20 @@ impl Arena {
     }
     pub unsafe fn alloc_zeroed_counted(&self, l: Layout, requested: usize) -> *mut u8 {
         let p = self.alloc_counted(l, requested);
-        if !p.is_null() && !(COMPILER && l.size().max(l.align()).max(16) > 1 << MAX_SHIFT) {
+        if p.is_null() {
+            return p;
+        }
+        if !(COMPILER && l.size().max(l.align()).max(16) > 1 << MAX_SHIFT) {
             std::ptr::write_bytes(p, 0, l.size());
+        } else if self.dynamic {
+            // a large block from the warm large list holds old bytes
+            let index = ((p as usize) - self.base.load(Ordering::Relaxed)) / CHUNK;
+            let mut s = lock(&self.headers[index].state);
+            if s.dirty {
+                s.dirty = false;
+                drop(s);
+                std::ptr::write_bytes(p, 0, l.size());
+            }
         }
         p
     }
@@ -1563,6 +1629,29 @@ impl Arena {
         w.bytes += touched;
         true
     }
+    /// Parks an emptied large run of a program heap committed (see WARM_LARGE_MAX).
+    fn warm_large_put(&self, index: usize, committed: usize, order: usize) -> bool {
+        let mut w = lock(&self.warm_large);
+        if w.len == WARM_LARGE_MAX || w.bytes + committed > WARM_LARGE_BYTES_MAX {
+            return false;
+        }
+        let n = w.len;
+        w.runs[n] = (index, committed, order);
+        w.len += 1;
+        w.bytes += committed;
+        true
+    }
+    /// The most recently parked warm large run of `order`, with its committed bytes.
+    fn warm_large_take(&self, order: usize) -> Option<(usize, usize)> {
+        let mut w = lock(&self.warm_large);
+        let n = w.len;
+        let k = (0..n).rev().find(|&k| w.runs[k].2 == order)?;
+        let e = w.runs[k];
+        w.runs[k] = w.runs[n - 1];
+        w.len -= 1;
+        w.bytes -= e.1;
+        Some((e.0, e.1))
+    }
     /// Decommits the warm chunks and returns them to the pool (settle's heap trim, tests).
     pub fn trim(&self) {
         // the calling thread's own current chunks go back first (the lists are what the trim walks)
@@ -1575,6 +1664,30 @@ impl Arena {
         }
     }
     fn warm_drain(&self) {
+        loop {
+            let e = {
+                let mut w = lock(&self.warm_large);
+                if w.len == 0 {
+                    break;
+                }
+                w.len -= 1;
+                let e = w.runs[w.len];
+                w.bytes -= e.1;
+                e
+            };
+            let mut s = lock(&self.headers[e.0].state);
+            let address = self.base.load(Ordering::Relaxed) + e.0 * CHUNK;
+            event(E_DECOMMIT);
+            if !unsafe { os::decommit(address as *mut u8, s.committed, COMPILER) } {
+                continue;
+            }
+            self.committed.fetch_sub(s.committed, Ordering::Relaxed);
+            self.chunks.fetch_sub((s.committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
+            s.committed = 0;
+            let (run, order) = (s.run, s.order);
+            drop(s);
+            lock(&self.pool).release(run, order);
+        }
         while let Some(index) = self.warm_take() {
             let h = &self.headers[index];
             let mut s = lock(&h.state);

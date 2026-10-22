@@ -1045,8 +1045,8 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
     for x in &rs {
         h.str(x);
     }
-    // (the inline stack entries and contexts are not code: left out)
-    for (o, pos) in pc_map.iter().filter(|x| x.0 != u32::MAX) {
+    // (the variable table, the inline stack entries and contexts are not code: left out)
+    for (o, pos) in pc_map.iter().filter(|x| x.0 < relax_backend::dbgloc::PC_VARS) {
         h.u32(*o);
         h.str(u.prog.file_paths.get(relax_backend::rir::pos_file(*pos) as usize).map_or("", |p| p.as_str()));
         h.u32(*pos as u32);
@@ -1063,7 +1063,7 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
                 format!("{}:{:?}={:#x}", o, r, v)
             }).collect();
             let _ = m.lock().unwrap_or_else(|e| e.into_inner()).write_all(format!("POOL\t{}\t{}\n", name, vals.join(" ")).as_bytes());
-            let pcs: Vec<String> = pc_map.iter().map(|(o, p)| format!("{}:{}:{}", o, relax_backend::rir::pos_file(*p), *p as u32)).collect();
+            let pcs: Vec<String> = pc_map.iter().filter(|x| x.0 < relax_backend::dbgloc::PC_VARS).map(|(o, p)| format!("{}:{}:{}", o, relax_backend::rir::pos_file(*p), *p as u32)).collect();
             let _ = m.lock().unwrap_or_else(|e| e.into_inner()).write_all(format!("CODE\t{}\t{}\t{}\n", name, hex, pcs.join(" ")).as_bytes());
         }
     }

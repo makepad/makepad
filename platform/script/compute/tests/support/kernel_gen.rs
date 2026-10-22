@@ -1,5 +1,5 @@
 //! The random kernel generator the four-wide differential tests share
-//! (tests/neon.rs, tests/wasm.rs, examples/wasm_diff.rs): kernel-shaped AIR
+//! (tests/simd_x4.rs, tests/wasm.rs, examples/wasm_diff.rs): kernel-shaped AIR
 //! programs with divergent and uniform branches, loops with breaks and
 //! continues at every depth, per-lane frames, hostile loads, integer
 //! division, shifts, selects and variables written under masks, and

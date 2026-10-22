@@ -15,8 +15,8 @@
 //!   holds a reference or a raw pointer has its target followed: the allocation it points into
 //!   (a static, a data object, a writable block, code, a malloc block) and whether what it
 //!   describes fits in it. `debug=1` adds the Debug form (an `eval` of the static).
-//! - `locals [panic=P<n>] [frame=N]`: a parked panic's frames, and for frame N its fn, line and
-//!   the locals in scope there with their types.
+//! - `locals [panic=P<n>|break=K<n>|thread=T<n>] [frame=N]`: a stop's frames, and per frame and
+//!   inline level its fn, line and named locals with their values (vars.rs).
 
 use super::{json_str, short, Out, Req};
 use crate::jit::{FnKey, Unit};
@@ -226,9 +226,14 @@ fn compile(up: *mut Unit, module: u32, src: &str, expr: &TokenStream) -> Result<
 
 /// Runs an eval fn on this thread in the domain at `base`: (type, value).
 fn run(up: *mut Unit, entry: u64, base: u64) -> Result<(String, String), String> {
+    run_arg(up, entry, base, 0)
+}
+
+/// `run` of an eval fn taking one argument word (`locals`: `__eval::<T>(&copy)`).
+fn run_arg(up: *mut Unit, entry: u64, base: u64, arg: u64) -> Result<(String, String), String> {
     let _ = RESULT.try_with(|r| *r.borrow_mut() = (None, None));
     let _ = IN_EVAL.try_with(|c| c.set(true));
-    let r = unsafe { crate::jit::call_jit_in(up, base, entry, 0) };
+    let r = unsafe { crate::jit::call_jit_in(up, base, entry, arg) };
     let _ = IN_EVAL.try_with(|c| c.set(false));
     let (t, v) = RESULT.try_with(|r| std::mem::take(&mut *r.borrow_mut())).unwrap_or_default();
     match r {
@@ -472,110 +477,126 @@ pub fn cmd_static(req: &Req, out: &mut Out) {
 
 // ------------------------------------------------------------------ locals
 
-/// `locals [panic=P<n>] [frame=N]`: the parked panic's frames; for frame N (default: the innermost
-/// program frame) its fn, line and the locals in scope there with their types.
+/// `locals [panic=P<n>|break=K<n>|thread=T<n>|main] [frame=N]`: a stop's frames, then for every
+/// frame (or frame N) each inline level (innermost first: the fn, where it is, its code) with
+/// its named locals' VALUES as the code's variable table places them at that call (a register,
+/// a frame slot, a constant; vars.rs), `{:#?}` by the type's Debug (its bytes otherwise), or why
+/// a local has no value there ("optimised out"). Nothing is recompiled; no probe runs.
 pub fn cmd_locals(req: &Req, out: &mut Out) {
-    let panic = req.get("panic").and_then(|p| p.trim_start_matches('P').parse::<u64>().ok());
-    let Some((id, _, frames, _)) = super::events::parked_frames(panic) else {
-        out.err("no parked panic (locals reads a panic's frames: `panics`)");
-        return;
+    let up = crate::jit::current_unit();
+    if up.is_null() {
+        return out.err("no running unit");
+    }
+    // the stop: its label, register block or thread registers, domain
+    enum Src {
+        Block(Vec<u64>),
+        Thread(u64, u64, Vec<(usize, u64)>),
+        None(String),
+    }
+    let (label, src, domain): (String, Src, Option<u32>) = if let Some(k) = req.get("break") {
+        let id = k.trim_start_matches('K').parse::<u64>().ok();
+        match super::instrument::parked_break(id) {
+            Some((id, _, regs)) if !regs.is_empty() => (format!("\"break\":\"K{}\"", id), Src::Block(regs), None),
+            Some((id, _, _)) => (format!("\"break\":\"K{}\"", id), Src::None("this breakpoint hit keeps no register block (prebuilt code)".into()), None),
+            None => return out.err("no parked breakpoint hit (`watch on=break`)"),
+        }
+    } else if let Some(sel) = req.get("thread") {
+        let want = super::pick_threads(sel);
+        let list = super::threads::list();
+        let Some(t) = list.iter().find(|t| want(t)) else { return out.err(&format!("no thread {}", sel)) };
+        if t.os_id == super::threads::self_os_id() {
+            return out.err("that is the inspect thread");
+        }
+        if super::events::panic_parked(t.os_id) || super::instrument::parked_break_of(t.os_id).is_some() {
+            return out.err("that thread is parked at a panic or breakpoint: `locals panic=P<n>` / `locals break=K<n>` read its stop (with its registers)");
+        }
+        if !super::instrument::stopped(t) {
+            return out.err("that thread is running: `pause` first (its stack moves while it runs)");
+        }
+        match super::threads::regs_now(t) {
+            Some((pc, fp, ints)) => (format!("\"thread\":\"T{}\"", t.os_id), Src::Thread(pc, fp, ints), None),
+            None => return out.err("this thread's registers are not readable here (pause it first: `pause`)"),
+        }
+    } else {
+        let panic = req.get("panic").and_then(|p| p.trim_start_matches('P').parse::<u64>().ok());
+        let Some((id, dom, _, _)) = super::events::parked_frames(panic) else {
+            return out.err("no parked panic (locals reads a stop: a parked panic `panics`, break=K<n>, thread=T<n>)");
+        };
+        let regs = super::events::parked_regs(Some(id)).map(|x| x.1).unwrap_or_default();
+        let src = if regs.is_empty() { Src::None("this panic keeps no register block (a fault, not a panic call)".into()) } else { Src::Block(regs) };
+        (format!("\"panic\":\"P{}\"", id), src, dom)
     };
     let want: Option<usize> = req.get("frame").and_then(|f| f.parse().ok());
-    let up = crate::jit::current_unit();
-    let r = crate::owner::call_within(crate::owner::Class::Job, 5_000, move || -> Result<Vec<String>, String> {
+    // on the owner: frames, levels, the locals' bytes; Debug fns for their types
+    let lab = label.clone();
+    let r = crate::owner::call_within(crate::owner::Class::App, 30_000, move || -> Result<(Vec<String>, Vec<(String, Vec<super::vars::Local>, Vec<Option<u64>>)>), String> {
         let u = unsafe { &*up };
-        let mut rows = Vec::new();
-        let chosen = match want {
-            Some(k) => k,
-            None => program_frame(u, &frames).map_or(0, |x| x.0),
+        let stop = match src {
+            Src::Block(b) => super::vars::Stop::from_block(u, &b).ok_or("the register block is short")?,
+            Src::Thread(pc, fp, ints) => super::vars::Stop::from_thread(u, pc, fp, &ints),
+            Src::None(why) => return Err(why),
         };
-        // each frame names its code version (and, in an inlined copy, the inlined fn)
+        if stop.frames.is_empty() {
+            return Err("the stop has no JIT frames".into());
+        }
+        let mut rows = Vec::new();
         let mut res = super::codever::Resolver::new();
-        let described: Vec<Option<super::codever::PcCode>> = frames.iter().map(|&pc| super::codever::describe_pc(u, &mut res, pc)).collect();
-        for (k, d) in described.iter().enumerate() {
-            let (name, at, code) = match d {
+        for (k, &(pc, _)) in stop.frames.iter().enumerate() {
+            let (name, at, code) = match super::codever::describe_pc(u, &mut res, pc) {
                 Some(c) => {
-                    let (n, at, _, code) = super::codever::frame_fields(u, c);
+                    let (n, at, _, code) = super::codever::frame_fields(u, &c);
                     (n, at, code)
                 }
                 None => ("-".to_string(), String::new(), "null".to_string()),
             };
-            rows.push(format!("{{\"frame\":{},\"fn\":{},\"at\":{},\"code\":{}{}}}", k, json_str(&short(&name, 160)), json_str(&at), code, if k == chosen { ",\"chosen\":true" } else { "" }));
+            rows.push(format!("{{\"frame\":{},\"fn\":{},\"at\":{},\"code\":{}{}}}", k, json_str(&short(&name, 160)), json_str(&at), code, if want == Some(k) { ",\"chosen\":true" } else { "" }));
         }
-        let pc = *frames.get(chosen).ok_or("no such frame")?;
-        let slot = u.find_fn(pc).ok_or("frame is not JIT code")?;
-        let at = u.pc_to_src(pc).map(|x| x.1).unwrap_or_default();
-        // an inlined copy: the locals are the inlined fn's (its generic arguments are not known
-        // from the copy: a generic one is listed as its definition's)
-        let inl = described.get(chosen).and_then(|d| d.as_ref()).and_then(|c| c.inlined.as_ref());
-        let inl_note = inl.map(|i| format!(",\"inlined_into\":{},\"note\":{}", json_str(&short(&u.fns[slot as usize].name, 160)), json_str(&format!("this pc is in a copy of {} inlined into slot {}'s code: the line and locals are the inlined fn's", i.name, slot))));
-        let key = match inl {
-            Some(i) => match (i.slot.map(|s| u.fns[s as usize].key.clone()), i.def) {
-                (Some(k @ FnKey::Inst(..)), _) => k,
-                // an instance of the def (a generic fn's copy names no instance: the first one found)
-                (_, Some(d)) => u.fns.iter().find_map(|f| matches!(&f.key, FnKey::Inst(x, _) if *x == d).then(|| f.key.clone())).ok_or("the inlined fn has no instance slot: its locals are not known")?,
-                _ => return Err("the frame is an inlined copy whose fn is not identified: no locals".into()),
-            },
-            None => u.fns[slot as usize].key.clone(),
-        };
-        let FnKey::Inst(d, args) = &key else { return Err("the frame is not a fn instance (a closure or glue): its locals are not listed".into()) };
-        // "file:line:col"
-        let mut parts = at.rsplitn(3, ':');
-        let (_col, line, file_name) = (parts.next(), parts.next().and_then(|l| l.parse::<u32>().ok()).unwrap_or(0), parts.next().unwrap_or("").to_string());
-        let body = crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, *d, args);
-        // the fn's named locals (which are in scope at the line: a by-name probe there says)
-        let mut ls = Vec::new();
-        for l in body.locals.iter() {
-            let n = u.prog.syms.str(l.name);
-            if n.is_empty() || n.starts_with("__") {
-                continue;
-            }
-            let t = u.tcx.tys.erase_regions(u.tcx.tys.subst(l.ty, args));
-            ls.push(format!("{{\"name\":{},\"type\":{}}}", json_str(n), json_str(&crate::typeck::ty_to_string(false, &u.prog, &u.tcx, t))));
-        }
-        // every level of the inline stack: its fn and line, its named locals (outer levels: the
-        // fn's own locals; a generic fn's instance is the first one found)
-        if let Some(i) = inl {
-            for (k, (name, def, at)) in i.stack.iter().enumerate().skip(1) {
-                let key = match def {
-                    Some(d) => u.fns.iter().find_map(|f| matches!(&f.key, FnKey::Inst(x, _) if x == d).then(|| f.key.clone())),
-                    None => Some(u.fns[slot as usize].key.clone()),
-                };
-                let names = match &key {
-                    Some(FnKey::Inst(d, args)) => {
-                        let b = crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, *d, args);
-                        b.locals.iter().filter_map(|l| {
-                            let n = u.prog.syms.str(l.name);
-                            if n.is_empty() || n.starts_with("__") { return None; }
-                            let t = u.tcx.tys.erase_regions(u.tcx.tys.subst(l.ty, args));
-                            Some(format!("{{\"name\":{},\"type\":{}}}", json_str(n), json_str(&crate::typeck::ty_to_string(false, &u.prog, &u.tcx, t))))
-                        }).collect::<Vec<_>>()
-                    }
-                    _ => Vec::new(),
-                };
-                rows.push(format!("{{\"panic\":\"P{}\",\"frame\":{},\"inline_level\":{},\"fn\":{},\"at\":{},\"locals\":[{}]}}", id, chosen, k, json_str(&short(name, 160)), json_str(at), names.join(",")));
+        let mut levels = Vec::new();
+        for (k, lv) in super::vars::levels(u, &stop, want) {
+            for l in lv {
+                let head = format!(
+                    "{{{},\"frame\":{},\"inline_level\":{},\"fn\":{},\"at\":{}{}{}",
+                    lab,
+                    k,
+                    l.level,
+                    json_str(&short(&l.name, 160)),
+                    json_str(&l.at),
+                    l.inlined_into.as_ref().map_or(String::new(), |s| format!(",\"inlined_into\":{}", json_str(&short(s, 160)))),
+                    l.note.as_ref().map_or(String::new(), |s| format!(",\"note\":{}", json_str(s))),
+                );
+                let entries: Vec<Option<u64>> = l.locals.iter().map(|x| match (&x.got, x.t) {
+                    (super::vars::Got::Bytes(..), Some(t)) => super::vars::debug_entry(u, t),
+                    _ => None,
+                }).collect();
+                levels.push((head, l.locals, entries));
             }
         }
-        rows.push(format!(
-            "{{\"panic\":\"P{}\",\"frame\":{},\"fn\":{},\"line\":{}{},\"locals\":[{}],\"values\":{},\"more\":[{}]}}",
-            id,
-            chosen,
-            json_str(&crate::lower::display_path(&u.prog, *d)),
-            line,
-            inl_note.unwrap_or_default(),
-            ls.join(","),
-            json_str("the JIT keeps no variable locations: values come from a by-name probe at this line (it runs at the next pass, e.g. after `resume restart`)"),
-            json_str(&format!("probe add {}:{} 'fn probe(<name>: &<type>, ..) {{ std::relax::probe::emit((<name>, ..)) }}'", file_name, line))
-        ));
-        Ok(rows)
+        Ok((rows, levels))
     });
-    match r.unwrap_or_else(|| Err("the owner did not answer in 5 s".into())) {
-        Ok(rows) => {
-            out.measured(&format!("locals of P{}", id), "owner: frames, checked body", &[]);
-            for l in rows {
-                out.line(&l);
-            }
+    let (rows, levels) = match r.unwrap_or_else(|| Err(format!("the owner did not take the request in 30 s ({})", crate::owner::serving_note()))) {
+        Ok(x) => x,
+        Err(e) => return out.err(&e),
+    };
+    // the values' Debug forms, run here (the inspect thread) in the program's domain on copies
+    let (_, base) = domain_base(unsafe { &*up }, domain);
+    out.measured(&format!("locals of {}", label.replace('"', "")), "owner: frames, variable tables, checked bodies; this thread: Debug of copies", &[]);
+    for l in rows {
+        out.line(&l);
+    }
+    for (head, locals, entries) in levels {
+        let mut ls = Vec::with_capacity(locals.len());
+        for (x, e) in locals.iter().zip(&entries) {
+            let shown = match (&x.got, e) {
+                (super::vars::Got::Bytes(b, _), Some(entry)) => {
+                    // an aligned copy (the frame's bytes stay as they are)
+                    let mut buf = vec![0u128; (b.len() + 15) / 16 + 1];
+                    unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), buf.as_mut_ptr() as *mut u8, b.len()) };
+                    Some(run_arg(up, *entry, base, buf.as_ptr() as u64).map(|v| v.1))
+                }
+                _ => None,
+            };
+            ls.push(super::vars::local_json(x, shown.as_ref()));
         }
-        Err(e) => out.err(&e),
+        out.line(&format!("{},\"locals\":[{}]}}", head, ls.join(",")));
     }
 }

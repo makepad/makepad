@@ -40,6 +40,11 @@ path = "src/unwind_probe.rs"
 name = "relax-inspect-tiers"
 path = "src/inspect_tiers.rs"
 
+# makepad inspect `locals` values at a parked panic / breakpoint, every tier (inspect_locals.sh)
+[[bin]]
+name = "relax-inspect-locals"
+path = "src/inspect_locals.rs"
+
 # makepad inspect probes / eval / static / locals against a live program (inspect_probe.sh)
 [[bin]]
 name = "relax-inspect-probe"

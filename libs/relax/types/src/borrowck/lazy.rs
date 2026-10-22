@@ -78,9 +78,28 @@ fn storable(result: &Result<Option<super::Verdict>, String>) -> Option<StoredVer
 /// Counts the verdicts recorded: a consumer waiting on verdicts (SPEC-V: the JIT's unverified slots)
 /// looks again only when it moved.
 pub static RECORDED: AtomicU64 = AtomicU64::new(0);
+/// The owners recorded since the last `take_recorded_owners`, once a consumer asked for them
+/// (SPEC-V's sweep looks again only at the slots of these owners; None: nobody asked yet).
+static RECORDED_OWNERS: Mutex<Option<Vec<DefId>>> = Mutex::new(None);
 fn record(key: ItemKey, value: FnVerdict) {
     VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value);
+    if let Some(owners) = RECORDED_OWNERS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        crate::zone_alloc::kept_with(|| owners.push(key.1));
+    }
     RECORDED.fetch_add(1, Ordering::Release);
+}
+
+/// The owners whose verdicts were recorded since the last call (None on the first call: from then on
+/// they are logged). Taken before `RECORDED` is read, an owner recorded meanwhile is in the next take.
+pub fn take_recorded_owners() -> Option<Vec<DefId>> {
+    let mut owners = RECORDED_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+    match owners.as_mut() {
+        Some(v) => Some(std::mem::take(v)),
+        None => {
+            *owners = Some(Vec::new());
+            None
+        }
+    }
 }
 
 pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], errors: Vec<BorrowError>, origin: Origin) -> Vec<GandalfEvent> {
