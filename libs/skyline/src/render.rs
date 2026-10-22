@@ -150,6 +150,7 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
         vars.set_uniform(cx, live_id!(lake_n), &[self.z.lakes.len() as f32]);
         vars.set_uniform(cx, live_id!(lake_eye), &[(crate::props::kit::EYE * self.p[P::Size]) as f32]);
+        vars.set_uniform(cx, live_id!(wet), &[l.wet]);
         bind_texture(cx, vars, live_id!(lake_tex), self.lakes);
         bind_texture(cx, vars, live_id!(ring_tex), self.ring);
         bind_texture(cx, vars, live_id!(cols), self.cols);
@@ -230,7 +231,7 @@ impl Skyline {
     /// then the final composite (`tone`: the display tone shoulder; an export keeps the raw HDR).
     /// The scene has the blur's margin, so lights at the edges blur with their real neighbours; the final crops it.
     pub fn draw_view(&mut self, cx: &mut Cx2d, rect: Rect, shown: &ViewSpec, p: &Params, tone: bool, light: &SkyLight) {
-        let view = &self.post.scene_view(p, shown);
+        let view = &self.post.scene_view(p, shown, light);
         self.update_inputs(cx, view, p, light);
         // the picture: every parameter but the view's own (pan, zoom and the field of view only
         // place the view, which its first azimuth, span and size say), the view and the sky's light
@@ -331,12 +332,13 @@ impl Skyline {
         sc.tree_cov = self.trees.coverage().unwrap_or(blank).clone();
         (sc.city, sc.inputs) = (self.city.textures(), [self.trees.pass_id(), self.city.pass_id()]);
         self.props.update(z, p);
-        // the scene, and its mirror image when the water reflects it and the view shows sea (or there are lakes)
+        // the scene, and its mirror image when the water reflects it and the view shows sea (or there are lakes, or the
+        // ground is wet)
         let parts = ScenePainter { glow: &mut self.draw_glow, range: &mut self.draw_range, ground: &mut self.draw_ground };
         let mut parts = (parts, &mut self.props, &mut self.city);
         scene.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));
-        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty();
-        self.mirror = (self.post.wants_mirror(p) && sea).then(|| {
+        let sea = (0..view.w).any(|x| sc.col(x, 6)[0] < 0.35) || !z.lakes.is_empty() || light.wet > 0.0;
+        self.mirror = (self.post.wants_mirror(p, light) && sea).then(|| {
             let mut mirror = self.mirror.take().unwrap_or_else(|| SceneTarget::new(cx, "skyline_mirror", true));
             (sc.mirror, sc.view, sc.up_dy) = (true, &mv, (view.horizon - mv.horizon) * view.h as f64);
             mirror.record(cx, view.w, view.h, |cx| draw_scene(cx, &sc, &mut parts));

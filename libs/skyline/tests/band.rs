@@ -414,7 +414,8 @@ fn lights_by_day_keeps_the_windows_on() {
 /// The band toned for a look: over a sky (the ring by day, toward the high ring above 15 degrees; the example's backdrop
 /// gradient at night), times `exposure`, the tone shoulder of the final pass, sRGB; RGB8.
 fn toned(p: &Params, b: &Band, l: &SkyLight, exposure: f32) -> Vec<u8> {
-    let night = *l == SkyLight::example();
+    // the example's night, wet or dry
+    let night = SkyLight { wet: 0.0, ..l.clone() } == SkyLight::example();
     let srgb = |x: f32| { let x = x.clamp(0.0, 1.0); (255.0 * if x <= 0.0031308 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }).round() as u8 };
     let mut out = Vec::with_capacity(b.w * b.h * 3);
     for y in 0..b.h {
@@ -691,6 +692,12 @@ fn a_held_and_a_released_strip_light_the_facades_alike() {
 fn visual_check_pngs() {
     use makepad_draw::makepad_zune_png::{PngEncoder, makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions}};
     let Some(dir) = std::env::var_os("SKYLINE_VISUAL_DIR") else { eprintln!("SKYLINE_VISUAL_DIR not set, skipped"); return };
+    let write = |file: &str, w: usize, h: usize, px: &[u8]| {
+        let mut png = Vec::new();
+        let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
+        PngEncoder::new(px, o).encode(&mut png).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
+    };
     let p = city_params();
     let mut sunset = noon([0.9, 0.4, 0.2]);
     (sunset.sun_u, sunset.sun_el_deg, sunset.sun_rgb, sunset.ambient_rgb, sunset.ring_high) = (0.55, 3.0, [1.6, 0.8, 0.35], [0.15, 0.13, 0.16], [[0.35, 0.3, 0.45]; RING]);
@@ -698,12 +705,6 @@ fn visual_check_pngs() {
     for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6), ("sunset", sunset, 0.9)] {
         let b = render_band_lit(&p, w, &l);
         let rgb = toned(&p, &b, &l, exposure);
-        let write = |file: &str, w: usize, h: usize, px: &[u8]| {
-            let mut png = Vec::new();
-            let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
-            PngEncoder::new(px, o).encode(&mut png).unwrap();
-            std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
-        };
         write(&format!("{name}_strip.png"), b.w, b.h, &rgb);
         // the city's sector (ctC +- 0.1 of the turn), twice the size
         let (x0, cw) = (((p[P::CtC] - 0.1) * w as f64) as usize, (0.2 * w as f64) as usize);
@@ -724,12 +725,6 @@ fn visual_check_pngs() {
             p.set(P::SeaD as usize, x_sea);
             let b = render_band_lit(&p, w, &l);
             let rgb = toned(&p, &b, &l, exposure);
-            let write = |file: &str, w: usize, h: usize, px: &[u8]| {
-                let mut png = Vec::new();
-                let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
-                PngEncoder::new(px, o).encode(&mut png).unwrap();
-                std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
-            };
             write(&format!("shore_{name}_{x_sea}_strip.png"), b.w, b.h, &rgb);
             let crop: Vec<u8> = (0..3 * b.h).flat_map(|y| (0..3 * cw).flat_map(move |x| { let o = ((y / 3) * b.w + (x0 + x / 3) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
             write(&format!("shore_{name}_{x_sea}_sea.png"), 3 * cw, 3 * b.h, &crop);
@@ -749,12 +744,6 @@ fn visual_check_pngs() {
         for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
             let b = render_band_lit(&p, w, &l);
             let rgb = toned(&p, &b, &l, exposure);
-            let write = |file: &str, w: usize, h: usize, px: &[u8]| {
-                let mut png = Vec::new();
-                let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
-                PngEncoder::new(px, o).encode(&mut png).unwrap();
-                std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
-            };
             write(&format!("lakes_{set}_{name}_strip.png"), b.w, b.h, &rgb);
             let (hy, cw, rows) = ((p[P::Horizon] * b.h as f64) as usize, (0.04 * w as f64) as usize, 60usize);
             for (k, lake) in z.lakes.iter().enumerate() {
@@ -763,6 +752,27 @@ fn visual_check_pngs() {
                 write(&format!("lakes_{set}_{name}_{k}.png"), 4 * cw, 4 * rows, &crop);
             }
             println!("{set} {name}: {} lakes {:?}", z.lakes.len(), z.lakes);
+        }
+    }
+    // the wet ground (plan hdri-6 §5) at wet 0, 0.5 and 1, by day and at night: the denser city on all land (the city's
+    // sector twice the size) and the defaults at Sea distance 0.3 (the open sea's sector, as the shore's, three times),
+    // and the whole strips
+    let (sea_x0, sea_cw) = (x0, cw);
+    let mut land = city_params();
+    land.set(P::Land as usize, 1.0);
+    let mut shore = Params::default();
+    shore.set(P::SeaD as usize, 0.3);
+    let city = (((land[P::CtC] - 0.1) * w as f64) as usize, (0.2 * w as f64) as usize);
+    for (set, p, (x0, cw), k) in [("land", land, city, 2), ("shore", shore, (sea_x0, sea_cw), 3)] {
+        for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
+            for wet in [0.0, 0.5, 1.0] {
+                let l = SkyLight { wet, ..l.clone() };
+                let b = render_band_lit(&p, w, &l);
+                let rgb = toned(&p, &b, &l, exposure);
+                write(&format!("wet_{set}_{name}_{wet}_strip.png"), b.w, b.h, &rgb);
+                let crop: Vec<u8> = (0..k * b.h).flat_map(|y| (0..k * cw).flat_map(move |x| { let o = ((y / k) * b.w + (x0 + x / k) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
+                write(&format!("wet_{set}_{name}_{wet}_sector.png"), k * cw, k * b.h, &crop);
+            }
         }
     }
 }
@@ -1396,4 +1406,34 @@ fn lakes_are_the_cpus_at(size: f64) {
     assert!(n > 20, "Size {size}, the premise: lakes show ({n} texels)");
     assert!(worst <= 0.02, "Size {size}: the shader's lakes are not the CPU's, a texel {:.1} % of the step off", 100.0 * worst);
     assert!(darkest >= 0.9 * sea, "Size {size}: a lake's water at night {darkest} against the night sea's {sea}");
+}
+
+/// Plan hdri-6 §5: the strip's own ground turns to water with the host's wetness. At night (the example's light) wet land
+/// mirrors the city's lights below the horizon. In the city's columns, all land, the light in the rows 0.3 to 3 degrees
+/// down grows with `wet`:
+/// - at wet 1 it is above wet 0's by at least a tenth of the light 0.3 to 3 degrees up;
+/// - at 0.5 it is half way (the water's share is linear).
+#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+fn a_wet_ground_mirrors_the_city_in_step_with_its_wetness() {
+    let mut p = city_params();
+    p.set(P::Land as usize, 1.0);
+    let at = |wet: f32| render_band_lit(&p, 1024, &SkyLight { wet, ..SkyLight::example() });
+    let (dry, half, full) = (at(0.0), at(0.5), at(1.0));
+    let (c, hw) = (p[P::CtC], p[P::CtW] * 0.5);
+    let light_in = |b: &Band, lo: f64, hi: f64| -> f32 {
+        let mut s = 0.0;
+        for x in 0..b.w {
+            if makepad_skyline::rng::wd((x as f64 + 0.5) / b.w as f64, c).abs() >= hw { continue; }
+            for y in 0..b.h {
+                let el = row_el(&p, b, y).to_degrees();
+                if el >= lo && el <= hi { s += lum(&b.texels[y * b.w + x]); }
+            }
+        }
+        s
+    };
+    let up = light_in(&full, 0.3, 3.0);
+    let (d0, d5, d1) = (light_in(&dry, -3.0, -0.3), light_in(&half, -3.0, -0.3), light_in(&full, -3.0, -0.3));
+    println!("above {up}; below: wet 0 {d0}, 0.5 {d5}, 1 {d1}");
+    assert!(up > 0.0 && d1 - d0 > 0.1 * up, "a wet ground mirrors the city: {d0} -> {d1} against {up} above");
+    assert!(((d5 - d0) / (d1 - d0) - 0.5).abs() < 0.1, "in step with the wetness: {d0}, {d5}, {d1}");
 }

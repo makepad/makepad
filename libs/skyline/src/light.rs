@@ -2,7 +2,7 @@
 //! takes as inputs (`Skyline::draw_view`, `request_band`). [`SkyLight::example`] is the example's own night.
 //!
 //! On the GPU (`SceneCtx::set_uniforms`): `sun_u`, `sun_el` (rad), `sun_rgb`, `ambient_rgb`, `lit` ([`SkyLight::lights_factor`])
-//! and `design_gain` as uniforms (`gpu_gain`, and `sil` scaled by it), `host_ground`, the two rings and the host's ground as the texture
+//! and `design_gain` as uniforms (`gpu_gain`, and `sil` scaled by it), `host_ground`, `wet`, the two rings and the host's ground as the texture
 //! `ring_tex` ([`SkyLight::ring_texels`]); the scene shaders read them through `SkyScene`'s `haze_at`, `sky_at` and `sun_dir`. A host that
 //! shows the night as the example's display does (`decode`) gets the band back through [`SkyLight::to_host`].
 use crate::params::{hash_bits, HAZE_COL};
@@ -60,6 +60,10 @@ pub struct SkyLight {
     /// host) hands the sky as it shows it, since the light a far sea mirrors has come through the weather to the water.
     /// None (the example, a clear sky): the sea mirrors the rings.
     pub sea_sky: Option<([[f32; 3]; RING], [[f32; 3]; RING])>,
+    /// The share of the host's ground under standing water (its puddles' mean share, `Weather::puddle_share` in the engine;
+    /// 1 at Wet ground 1.00): the strip's land and shore below the horizon are water by this share, the ground darkened
+    /// through it and the scene mirrored by Fresnel (`DrawSkyGround`, `DrawSkyWater`). 0 in the example.
+    pub wet: f32,
 }
 
 /// The share of a host's own light the buildings take by night (`SkyLight::night_light_share`): on the generator's
@@ -107,7 +111,7 @@ impl SkyLight {
     pub fn example() -> Self {
         Self { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low: [HAZE_COL; RING], ring_high: [HAZE_COL; RING],
             lights_by_day: 0.0, design_gain: 1.0, decode: false, night_haze: 1.0, ground: [[0.0; 3]; RING], host_ground: false, night_light_share: 1.0,
-            sea_sky: None }
+            sea_sky: None, wet: 0.0 }
     }
 
     /// The night's share of the look (`decode`): 0 above +2 degrees sun, 1 below -6, smooth between (the shaders'
@@ -278,11 +282,12 @@ impl SkyLight {
 
     /// A hash of every field's bits, for cache keys.
     pub fn hash(&self) -> u64 {
-        // (the sea's sky only when it is handed: a light without it hashes as it did)
+        // (the sea's sky only when it is handed, the wetness only when there is some: a light without them hashes as it did)
         let sea = self.sea_sky.iter().flat_map(|(low, high)| low.iter().chain(high)).flatten();
         let rings = self.ring_low.iter().chain(&self.ring_high).chain(&self.ground).flatten().chain(sea);
         let floats = [&self.sun_u, &self.sun_el_deg].into_iter().chain(&self.sun_rgb).chain(&self.ambient_rgb).chain(rings).chain([&self.lights_by_day, &self.design_gain, &self.night_haze, &self.night_light_share]);
-        hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64]))
+        hash_bits(0x5c71_19b7_0000_0002, floats.map(|x| x.to_bits() as u64).chain([self.decode as u64, self.host_ground as u64])
+            .chain((self.wet != 0.0).then(|| self.wet.to_bits() as u64)))
     }
 
     /// The rings as the first three rows of the shaders' ring texture (`RING` wide, RGBA): row 0 `ring_low`, row 1
@@ -398,6 +403,7 @@ mod tests {
         assert_eq!(l.ambient_rgb, [0.0; 3]);
         assert!(l.ring_low.iter().all(|c| *c == crate::params::HAZE_COL));
         assert_eq!(l.design_gain, 1.0);
+        assert_eq!(l.wet, 0.0);
     }
     #[test]
     fn the_example_opts_out_of_the_decode() {
@@ -516,5 +522,8 @@ mod tests {
         assert_ne!(a.hash(), gr.hash());
         let mut sh = a.clone(); sh.night_light_share = 0.5;
         assert_ne!(a.hash(), sh.hash());
+        let mut w = a.clone(); w.wet = 0.5;
+        assert_ne!(a.hash(), w.hash());
+        assert_eq!(SkyLight { wet: 0.0, ..a.clone() }.hash(), a.hash(), "a dry light hashes as it did");
     }
 }

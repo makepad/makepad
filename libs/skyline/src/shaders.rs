@@ -57,6 +57,9 @@ script_mod! {
         lake_tex: texture_2d(float)
         lake_n: uniform(0.0)
         lake_eye: uniform(6.3)
+        // the share of the host's ground under standing water (`SkyLight::wet`): the land and the shore below the horizon are
+        // water by it. 0: dry (the example's)
+        wet: uniform(0.0)
         // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
         // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
         ring_tex: texture_2d(float)
@@ -125,11 +128,11 @@ script_mod! {
             return min(m, 1.0)
         }
         // what is water at a pixel al rad below the horizon (world azimuth u, px rad a side) in column g: x the sea from its
-        // near edge out, y a lake on the land, z standing water on the land and the shore
+        // near edge out, y a lake on the land, z standing water on the land and the shore (the host's wetness there)
         water_at: fn(g: vec4, u: float, al: float, px: float) -> vec3 {
             let sea = (1.0 - smoothstep(0.0, 0.35, g.x)) * (1.0 - self.shore_at(al, px))
             // a lake stands on land columns only
-            return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), 0.0)
+            return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), self.wet * (1.0 - sea))
         }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
         sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
@@ -279,9 +282,10 @@ script_mod! {
             // a host's own ground over the land and on out to sea from its coast, so the band's ground is the map's
             // and the land meets the sea without an edge (`SkyLight::host_ground`, `coast_ring`)
             if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
-            // water standing on the land (a lake): (1 - Fresnel) of the ground shows through it, darkened as through a
-            // puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil); the water shader adds what it mirrors
-            if al > 0.0 && self.lake_n > 0.5 {
+            // water standing on the land (a lake, the host's wetness on the land and the shore): (1 - Fresnel) of the ground
+            // shows through it, darkened as through a puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil);
+            // the water shader adds what it mirrors
+            if al > 0.0 && (self.lake_n > 0.5 || self.wet > 0.0) {
                 let v = self.pix_view(self.view_raw()); let ws = self.water_at(g, v.x, al, self.px0() * g.z)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
                 c = c + (c * (0.35 * (1.0 - fr)) + self.sil * (0.5 * fr) - c) * max(ws.y, ws.z)

@@ -1,6 +1,7 @@
 //! After the scene: scene + mirror -> water (the light plus what the sea mirrors) -> blur H -> final (blur V, plus the
 //! colour, then the display tone shoulder; an export keeps the raw HDR). A stage that would do nothing is left out;
 //! the final samples the light target the chain ends in. The blur takes the reflections with the lights, as the page's.
+use crate::light::SkyLight;
 use crate::params::{Params, P};
 use crate::render::{bind_texture, SceneCtx, SceneTarget, ViewSpec};
 use crate::rng::TAU;
@@ -182,15 +183,17 @@ pub struct Post {
 }
 
 impl Post {
-    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea, or lakes
-    /// (render.rs also asks for water in the view).
-    pub fn wants_mirror(&self, p: &Params) -> bool { p[P::PrRefl] > 0.0 && (p[P::Land] < 0.999 || p[P::PrLake] > 0.0) }
+    /// Whether the scene list also runs mirrored (the reflections): the page's rule, some strength and some sea, or lakes;
+    /// or a wet ground (`SkyLight::wet`), which mirrors at full strength (render.rs also asks for water in the view).
+    pub fn wants_mirror(&self, p: &Params, light: &SkyLight) -> bool {
+        (p[P::PrRefl] > 0.0 && (p[P::Land] < 0.999 || p[P::PrLake] > 0.0)) || light.wet > 0.0
+    }
 
-    /// The view to draw the scene at for `v`: widened by the blur's margin, so lights at its edges blur with their real
-    /// neighbours as on the page, and by the water's when it reflects, so the ripple's sideways samples find the mirror
-    /// there (tiles of an export meet without a seam); the final crops the margin off.
-    pub fn scene_view(&mut self, p: &Params, v: &ViewSpec) -> ViewSpec {
-        let pad = if self.wants_mirror(p) { water_margin(p, v) } else { 0 };
+    /// The view to draw the scene at for `v` under `light`: widened by the blur's margin, so lights at its edges blur with
+    /// their real neighbours as on the page, and by the water's when it reflects, so the ripple's sideways samples find the
+    /// mirror there (tiles of an export meet without a seam); the final crops the margin off.
+    pub fn scene_view(&mut self, p: &Params, v: &ViewSpec, light: &SkyLight) -> ViewSpec {
+        let pad = if self.wants_mirror(p, light) { water_margin(p, v) } else { 0 };
         self.margin = blur_margin(p, v) + pad;
         ViewSpec { pad, ..widen(v, self.margin) }
     }
