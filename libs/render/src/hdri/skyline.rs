@@ -389,14 +389,19 @@ pub struct SkylineLight {
     pub ring_high: [[f32; 3]; RING],
     /// The map's own ground round the turn at GROUND_RING_DEG below the horizon (its base as the map
     /// draws it there, without the skyline, before the veil as the rings): what the strip's near
-    /// ground takes in the app, so the band's ground, veiled, is this map's and runs into it without
-    /// an edge.
+    /// ground takes in the app on a dry ground (a wet one hands `ground_damp`), so the band's ground,
+    /// veiled, is this map's and runs into it without an edge.
     pub ground_ring: [[f32; 3]; RING],
     /// The sky round the horizon at 1 and 15 degrees as the map shows it, through its weather's veil (the bolt
     /// aside, as the rings): what the strip's sea mirrors by day, since the light a far sea mirrors has come through
     /// the rain and fog to the water. Without a weather, `ring_low` and `ring_high` exactly.
     pub sea_low: [[f32; 3]; RING],
     pub sea_high: [[f32; 3]; RING],
+    /// The puddles' mean share of the map's ground (`Weather::puddle_share`; 0 without a wet ground, 1 at Wet ground 1.00).
+    pub wet: f32,
+    /// The map's ground ring as `ground_ring`, read with no puddles (`Weather::ground_damp`): what the strip's land takes when
+    /// it draws the water itself (`SkyLight::wet`). `ground_ring` exactly when the ground is dry.
+    pub ground_damp: [[f32; 3]; RING],
 }
 
 /// The ground ring's elevation, degrees below the horizon: inside the strip's own ground (its bottom is
@@ -1097,6 +1102,98 @@ mod tests {
         }
     }
 
+    /// Plan hdri-6 §5: a wet ground mirrors the skyline at the mirrored elevation. Wet ground 1.00 (the whole floor water),
+    /// the night, no light layers: a band clear but for one city light 12 degrees up. At -12 degrees the map shows that
+    /// light by the water's Fresnel term; 10 degrees round the turn it shows none of it.
+    #[test]
+    fn a_puddle_mirrors_a_city_light_above_it() {
+        let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+        sun_at(&mut p, -20.0, 0.0);
+        p.sky.weather = Some(WeatherParams { wet_ground: 1.0, ..WeatherParams::default() });
+        let (w, h, top, bottom) = (360usize, 24usize, 20.0f32, -4.0f32);
+        let row = ((top - 12.0) / (top - bottom) * h as f32 - 0.5).round() as usize;
+        let el = top - (row as f32 + 0.5) * (top - bottom) / h as f32;
+        let mut texels = vec![[0.0f32; 4]; w * h];
+        texels[row * w + 90] = [40.0, 30.0, 20.0, 0.0];
+        let (q, images) = with_band(&p, SkylineBand { w, h, texels, top_deg: top, bottom_deg: bottom });
+        let (plain, city) = (Env::new(&p), Env::new_with(&q, &images));
+        let u = 90.5 / w as f32;
+        let (up, down) = (dir_at_u(u, el), dir_at_u(u, -el));
+        let light = city.radiance(up) - plain.radiance(up);
+        assert!(light.x > city.scale(), "the premise: the light shows above the horizon: {light:?}");
+        let fresnel = 0.02 + 0.98 * (1.0 - el.to_radians().sin()).powi(5);
+        let mirrored = city.radiance(down) - plain.radiance(down);
+        assert!(close3(mirrored, light * fresnel, 1e-3), "the puddle shows {mirrored:?}, the light by Fresnel {:?}", light * fresnel);
+        let aside = dir_at_u(u + 10.0 / 360.0, -el);
+        assert_eq!(city.radiance(aside), plain.radiance(aside), "10 degrees round the turn the puddle shows none of it");
+    }
+
+    /// A caster's bloom asks the base for its fine detail (`Env::base_peak`). A city light a puddle mirrors is as fine as
+    /// the light itself, so under a wet ground the bloom finds it at the mirrored elevation, as bright; on a dry ground
+    /// nothing is there (the band ends 4 degrees down, its bottom row and so its skirt dark).
+    #[test]
+    fn a_casters_bloom_finds_a_city_light_in_the_puddles() {
+        let (w, h) = (360usize, 24usize);
+        let mut texels = vec![[0.0f32; 4]; w * h];
+        // a light 11.5 degrees up, as in `a_puddle_mirrors_a_city_light_above_it`
+        texels[8 * w + 90] = [40.0, 30.0, 20.0, 0.0];
+        let band = SkylineBand { w, h, texels, top_deg: 20.0, bottom_deg: -4.0 };
+        let (u, radius) = (90.5 / w as f32, 0.5f32.to_radians());
+        for wet in [0.0, 1.0] {
+            let mut p = HdriParams { lights: vec![], ..HdriParams::default() };
+            sun_at(&mut p, -20.0, 0.0);
+            p.sky.weather = Some(WeatherParams { wet_ground: wet, ..WeatherParams::default() });
+            let (q, images) = with_band(&p, band.clone());
+            let env = Env::new_with(&q, &images);
+            let light = 40.0 * env.scale();
+            let up = env.base_peak(dir_at_u(u, 11.5), radius);
+            assert!(up.is_some_and(|(most, _)| most >= light), "the premise: the light itself, {up:?}");
+            let down = env.base_peak(dir_at_u(u, -11.5), radius);
+            if wet > 0.0 {
+                assert!(down.is_some_and(|(most, step)| most >= light && step == up.unwrap().1), "the puddle shows it: {down:?}");
+            } else {
+                assert_eq!(down, None, "a dry ground shows nothing there");
+            }
+        }
+    }
+
+    /// Skyline off (or absent): a wet ground mirrors only the sky, bit for bit as before, at Wet ground 1.00 too.
+    #[test]
+    fn without_a_skyline_a_wet_ground_mirrors_only_the_sky() {
+        let mut p = HdriParams::default();
+        p.sky.weather = Some(WeatherParams { wet_ground: 1.0, ..WeatherParams::default() });
+        let base = Env::new(&p).bake(64);
+        let (mut q, images) = with_band(&p, band(20.0, -5.0, [0.5, 0.5, 0.5, 1.0]));
+        q.skyline.as_mut().unwrap().on = false;
+        assert!(Env::new_with(&q, &images).bake(64) == base);
+        assert!(Env::new_with(&p, &images).bake(64) == base);
+    }
+
+    /// The strip's wet ground (plan hdri-6 §5): the light hands it the puddles' share and the damp ground. A dry ground's
+    /// damp ring is its ground ring, bit for bit, and its share is 0.
+    #[test]
+    fn the_strip_gets_the_wetness_and_the_damp_ground() {
+        for (name, p) in skies() {
+            let l = Env::new(&p).skyline_light();
+            let env = Env::new(&p);
+            let dry = env.weather.as_ref().map_or(true, |w| !w.mirrors());
+            if dry {
+                assert!(l.wet == 0.0 && l.ground_damp == l.ground_ring, "{name}");
+                continue;
+            }
+            assert!(l.wet > 0.0 && l.wet == env.weather.as_ref().unwrap().puddle_share(), "{name}: {}", l.wet);
+            let damp = Sampling { bare: true, unveiled: true, damp_ground: true, ..Sampling::default() };
+            let turn = p.skyline.as_ref().map_or(0.0, |b| b.turn_deg);
+            for i in 0..RING {
+                let u = ((i as f32 + 0.5) / RING as f32 + turn / 360.0).rem_euclid(1.0);
+                assert!(vec(l.ground_damp[i]) == env.base_under_skyline(dir_at_u(u, -GROUND_RING_DEG), None, damp), "{name}: {i}");
+            }
+        }
+        let mut soaked = HdriParams::default();
+        soaked.sky.weather = Some(WeatherParams { wet_ground: 1.0, ..WeatherParams::default() });
+        assert_eq!(Env::new(&soaked).skyline_light().wet, 1.0);
+    }
+
     /// The map under `weather` (fog, rain), the sun at 25 degrees: a band built as the app's strip is, from the map's own
     /// light (`skyline_light`): its far rows a fully hazed ridge (the low ring itself, opaque), its near rows the map's
     /// ground (the ground ring, opaque), both read at a column's centre. Veiled once by the map, the ridge is the map's
@@ -1112,7 +1209,7 @@ mod tests {
         const GROUND_STEP: f32 = 0.02;
         // (a wet ground only) round the turn, the band's ground against the map's own wet ground looked up 256 times
         // over each ring entry's span: the puddles' share is the fbm's mean taken as normal (`Weather::ground_even`),
-        // a few per cent off the field's own (measured: fog 4.7 %, rain 2.7 %); one entry's span holds only a few
+        // a few per cent off the field's own (measured: fog 4.7 %, rain 2.2 %); one entry's span holds only a few
         // puddles, so entry by entry the look-ups scatter (up to 18 %) and only the turn's mean is held
         const MEAN_TOL: f32 = 0.06;
         // (a wet ground only) adjacent columns of the band's ground, as RING_STEP in `the_ground_ring_is_even_under_a_wet_ground`

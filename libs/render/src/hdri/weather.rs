@@ -485,7 +485,7 @@ impl Weather {
     /// rain and fog and with the bolt, so the mirror is no brighter than the
     /// sky above it). Above the horizon `ground` passes unchanged.
     pub fn ground(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
-        self.ground_with(d, ground, gain, sky_at, false)
+        self.ground_with(d, ground, gain, sky_at, Puddles::Field)
     }
 
     /// [`Self::ground`] with the puddles at their mean share everywhere (the
@@ -496,10 +496,16 @@ impl Weather {
     /// so this is the mean of `ground` over the puddles. A dry ground is
     /// `ground`'s, bit for bit.
     pub fn ground_even(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
-        self.ground_with(d, ground, gain, sky_at, true)
+        self.ground_with(d, ground, gain, sky_at, Puddles::Even)
     }
 
-    fn ground_with(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f, even: bool) -> Vec3f {
+    /// `ground` with no puddles: the damp ground between them, its dull sheen included. What the skyline's strip takes
+    /// for its land when it draws the water over it itself (plan hdri-6 §5). A dry ground is `ground`'s, bit for bit.
+    pub fn ground_damp(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
+        self.ground_with(d, ground, gain, sky_at, Puddles::Dry)
+    }
+
+    fn ground_with(&self, d: Vec3f, ground: Vec3f, gain: Vec3f, sky_at: &dyn Fn(Vec3f) -> Vec3f, puddles: Puddles) -> Vec3f {
         if !(d.y < 0.0) {
             return ground;
         }
@@ -512,24 +518,47 @@ impl Weather {
         // Schlick's Fresnel for water: a mirror at grazing angles, 2 % head-on.
         let fresnel = WATER_F0 + (1.0 - WATER_F0) * (1.0 - down).powi(5);
         let mirror = sky_at(vec3f(d.x, -d.y, d.z));
-        // Standing water: fbm over the ground plane, an eye height below.
-        let reach = EYE_M / down.max(1.0e-3);
-        let puddle_noise = fbm2(d.x * reach / PUDDLE_M, d.z * reach / PUDDLE_M, 4, self.seed ^ 0x9d01_e5);
-        // More of the ground is under water the wetter it is.
-        let threshold = 0.72 - 0.34 * wet;
-        let puddle = smooth(threshold, threshold + 0.06, puddle_noise);
-        // Far away the puddles are smaller than a texel: their mean share
-        // instead (the fbm is near normal, mean 0.49, deviation 0.12), so the
-        // horizon does not sparkle.
-        let share = smooth(-2.0, 2.0, (0.49 - (threshold + 0.03)) / 0.12);
-        let distance = reach * (1.0 - down * down).max(0.0).sqrt();
-        let detail = if even { 0.0 } else { 1.0 - smooth(PUDDLE_FADE_START_M, PUDDLE_FADE_END_M, distance) };
-        let puddle = share + (puddle - share) * detail;
+        let puddle = self.puddle_cover(d, puddles);
         // Damp ground between the puddles: darker, with a dull sheen. A puddle:
         // a flat mirror over what shows of its bottom.
         let damp = c * (1.0 - WET_DARKEN * wet) + mirror * (fresnel * WET_SHEEN * wet);
         let water = c * (PUDDLE_BOTTOM * (1.0 - fresnel)) + mirror * fresnel;
         damp.mix(water, puddle)
+    }
+
+    /// The puddles' share of the ground along `d` (0..1; 0 above the horizon or on a dry ground).
+    pub(crate) fn puddle_cover(&self, d: Vec3f, puddles: Puddles) -> f32 {
+        let wet = self.effects.wet_ground;
+        if wet <= 0.0 || !(d.y < 0.0) || puddles == Puddles::Dry {
+            return 0.0;
+        }
+        let down = (-d.y).min(1.0);
+        // Far away the puddles are smaller than a texel: their mean share
+        // instead, so the horizon does not sparkle.
+        let share = self.puddle_share();
+        if puddles == Puddles::Even {
+            return share;
+        }
+        // Standing water: fbm over the ground plane, an eye height below.
+        let reach = EYE_M / down.max(1.0e-3);
+        let puddle_noise = fbm2(d.x * reach / PUDDLE_M, d.z * reach / PUDDLE_M, 4, self.seed ^ 0x9d01_e5);
+        // More of the ground is under water the wetter it is (`puddle_threshold`).
+        let threshold = puddle_threshold(wet);
+        let puddle = smooth(threshold, threshold + 0.06, puddle_noise);
+        let distance = reach * (1.0 - down * down).max(0.0).sqrt();
+        let detail = 1.0 - smooth(PUDDLE_FADE_START_M, PUDDLE_FADE_END_M, distance);
+        share + (puddle - share) * detail
+    }
+
+    /// The puddles' mean share (the far ground's), 0 on a dry ground, 1 at Wet ground 1.00.
+    pub fn puddle_share(&self) -> f32 {
+        let wet = self.effects.wet_ground;
+        if wet <= 0.0 {
+            return 0.0;
+        }
+        // the fbm is near normal (mean 0.49, deviation 0.12): the share of it over the threshold, its edge's middle
+        let threshold = puddle_threshold(wet);
+        smooth(-2.0, 2.0, (0.49 - (threshold + 0.03)) / 0.12)
     }
 
     /// The lightning along `d`: the bolt's channel and the flash around its
@@ -718,6 +747,23 @@ impl Weather {
         let noise = fbm2(VIRGA_RING * azimuth.cos(), VIRGA_RING * azimuth.sin(), 4, self.seed ^ 0x51a_f7);
         VIRGA_DARKEN * self.effects.rain.min(1.0) * smooth(0.5, 0.72, noise) * band
     }
+}
+
+/// The puddle noise's threshold at wetness `wet`. Up to 0.5 the old 0.72 - 0.34 wet, bit for bit (the fog kind's 0.2).
+/// Toward 0.9 it drops 0.04 more (a little more water under the rain and storm kinds). Then it falls to -0.10 at 1.00,
+/// where every look is under water (the noise is 0..1 and the puddle's edge 0.06 wide).
+pub(crate) fn puddle_threshold(wet: f32) -> f32 {
+    let top = ((wet - 0.9) / 0.1).clamp(0.0, 1.0);
+    // up to 0.5 both extra terms are 0, and a - 0 is a: the old threshold bit for bit
+    0.72 - 0.34 * wet - 0.04 * smooth(0.5, 0.9, wet) - 0.44 * top * top
+}
+
+/// How a wet ground's puddles are read: their field (the map's own), their mean share everywhere (`ground_even`), or none (`ground_damp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Puddles {
+    Field,
+    Even,
+    Dry,
 }
 
 /// The ground the dry sky drew along `d` (`ground`), lit by the clear sky,
@@ -1188,7 +1234,10 @@ mod tests {
         // At a grazing angle the sky takes over.
         let grazing = wet.ground(dir_from_az_el(30.0, -1.0), ground, one, &sky);
         assert!(grazing.z > 4.0, "{grazing:?}");
-        // Puddles: around the feet some spots mirror far more than others.
+        // Puddles: around the feet some spots mirror far more than others (below Wet ground 1.00, which is all water).
+        let mut puddled = sky_with("clear");
+        puddled.weather.as_mut().unwrap().wet_ground = 0.7;
+        let wet = Weather::new(&puddled, sun()).unwrap();
         let near: Vec<f32> = (0..72).map(|i| wet.ground(dir_from_az_el(i as f32 * 5.0, -20.0), ground, one, &sky).z).collect();
         let lo = near.iter().cloned().fold(f32::MAX, f32::min);
         let hi = near.iter().cloned().fold(0.0, f32::max);
@@ -1203,6 +1252,57 @@ mod tests {
         assert!((lit - ground * gain).length() < 1.0e-6, "{lit:?}");
         let at_the_horizon = weather("hazy").ground(dir_from_az_el(0.0, -0.01), ground, gain, &sky);
         assert!((at_the_horizon - ground).length() < 1.0e-3, "{at_the_horizon:?}");
+    }
+
+    /// Plan hdri-6 §5: below 1.00 the puddles grow with wetness as before. Up to 0.5 the threshold is the old one, bit for
+    /// bit; the rain and storm kinds get a little more water; at 1.00 the whole floor is water, and only there.
+    #[test]
+    fn the_puddles_grow_as_before_and_fill_the_floor_at_one() {
+        let old = |wet: f32| 0.72 - 0.34 * wet;
+        for i in 0..=50 {
+            let w = i as f32 / 100.0;
+            assert_eq!(puddle_threshold(w).to_bits(), old(w).to_bits(), "{w}");
+        }
+        let share = |t: f32| smooth(-2.0, 2.0, (0.49 - (t + 0.03)) / 0.12);
+        let (rain_old, rain) = (share(old(0.7)), share(puddle_threshold(0.7)));
+        let (storm_old, storm) = (share(old(0.9)), share(puddle_threshold(0.9)));
+        println!("rain {rain_old:.3} -> {rain:.3}, storm {storm_old:.3} -> {storm:.3}");
+        assert!(rain > rain_old && rain < rain_old + 0.1, "rain: {rain_old} -> {rain}");
+        assert!(storm > storm_old && storm < storm_old + 0.15, "storm: {storm_old} -> {storm}");
+        assert!(puddle_threshold(1.0) + 0.06 <= 0.0, "every look is under water at 1.00");
+        assert!(puddle_threshold(0.99) + 0.06 > 0.0, "and only there");
+        let mut last = f32::MAX;
+        for i in 0..=100 {
+            let t = puddle_threshold(i as f32 / 100.0);
+            assert!(t < last);
+            last = t;
+        }
+    }
+
+    /// At Wet ground 1.00 no direction below the horizon is dry ground: near and far it is under water, and the ground
+    /// there is the water's (its bottom through it, the mirror by Fresnel).
+    #[test]
+    fn at_wet_ground_one_the_whole_floor_is_water() {
+        let mut soaked = sky_with("clear");
+        soaked.weather.as_mut().unwrap().wet_ground = 1.0;
+        let wet = Weather::new(&soaked, sun()).unwrap();
+        let (ground, one) = (vec3f(0.2, 0.2, 0.2), Vec3f::all(1.0));
+        let sky = |_: Vec3f| vec3f(0.5, 0.6, 2.0);
+        let mut state = 7u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / 16_777_216.0
+        };
+        for _ in 0..4000 {
+            let d = dir_from_az_el(360.0 * next(), -0.05 - 89.9 * next());
+            assert_eq!((wet.puddle_cover(d, Puddles::Field), wet.puddle_cover(d, Puddles::Even)), (1.0, 1.0), "{d:?} is dry");
+            let down = (-d.y).min(1.0);
+            let fresnel = WATER_F0 + (1.0 - WATER_F0) * (1.0 - down).powi(5);
+            let want = relit_ground(d, ground, one) * (PUDDLE_BOTTOM * (1.0 - fresnel)) + sky(d) * fresnel;
+            assert!((wet.ground(d, ground, one, &sky) - want).length() < 1e-6, "{d:?}");
+        }
+        assert_eq!(wet.puddle_share(), 1.0);
+        assert_eq!(wet.puddle_cover(dir_from_az_el(10.0, 5.0), Puddles::Field), 0.0, "above the horizon nothing is ground");
     }
 
     #[test]

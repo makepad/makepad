@@ -190,6 +190,9 @@ pub struct Env {
 /// (`Weather::ground_even`): the strip's ground ring and the skirt's hold, a
 /// few looks that would otherwise land on a puddle or between them. The map's
 /// own ground keeps its puddles. A dry ground is unchanged.
+/// `damp_ground` reads a wet ground without its puddles (`Weather::ground_damp`):
+/// the strip's land, whose water the strip draws itself. It takes precedence
+/// over `even_ground`.
 #[derive(Clone, Copy, Default)]
 struct Sampling<'a> {
     cache: Option<&'a volumetric::CloudCache>,
@@ -197,13 +200,14 @@ struct Sampling<'a> {
     bare: bool,
     unveiled: bool,
     even_ground: bool,
+    damp_ground: bool,
 }
 
 impl<'a> Sampling<'a> {
     /// The lookups of a bake `width` wide (2:1, so a texel is as tall as it
     /// is wide at the equator).
     fn bake(width: usize, cache: Option<&'a volumetric::CloudCache>) -> Sampling<'a> {
-        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false, even_ground: false }
+        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32, bare: false, unveiled: false, even_ground: false, damp_ground: false }
     }
 }
 
@@ -509,6 +513,12 @@ impl Env {
     ///   with its puddles at their mean share (`Weather::ground_even`, the
     ///   owner's ruling): the ground ring's 64 looks would otherwise land on a
     ///   puddle or between them, and the strip's near ground would be striped.
+    /// - `wet` and `ground_damp`: the puddles' mean share of the map's ground
+    ///   (`Weather::puddle_share`, 0 on a dry ground or without a sky) and the
+    ///   ground ring read with no puddles (`Weather::ground_damp`; the ground
+    ///   ring itself when `wet` is 0): the strip lays its own water over its
+    ///   land (`SkyLight::wet`, plan hdri-6 §5), so the puddles are not
+    ///   mirrored twice.
     /// - `sun_rgb`: the sun's irradiance through the cover the key is dimmed
     ///   by (`cover_toward`), times the key's own fade over the horizon, / pi:
     ///   so under a closed deck the strip is as unlit by the sun as the key.
@@ -543,8 +553,11 @@ impl Env {
             }
             None => (ring_low, ring_high),
         };
+        // The strip's wet ground (plan hdri-6 §5): the puddles' share and the ground between them; the strip draws the water.
+        let wet = match &self.weather { Some(weather) if self.atmo.is_some() => weather.puddle_share(), _ => 0.0 };
+        let ground_damp = if wet > 0.0 { ring_seen(-skyline::GROUND_RING_DEG, Sampling { damp_ground: true, ..at }) } else { ground_ring };
         let Some(atmo) = &self.atmo else {
-            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring, sea_low, sea_high };
+            return skyline::SkylineLight { sun_u: 0.0, sun_el_deg: -90.0, sun_rgb: [0.0; 3], ambient_rgb: [0.0; 3], ring_low, ring_high, ground_ring, sea_low, sea_high, wet, ground_damp };
         };
         let pi = std::f32::consts::PI;
         let sun = atmo.sun_dir();
@@ -569,6 +582,8 @@ impl Env {
             ground_ring,
             sea_low,
             sea_high,
+            wet,
+            ground_damp,
         }
     }
 
@@ -624,9 +639,25 @@ impl Env {
         // is not looked up behind it: a held bake's ranges, city and ground.
         let c = if s[3] < 1.0 { self.base_under_skyline(d, without, at) } else { Vec3f::default() };
         match &self.weather {
-            Some(weather) => skyline::over_veiled(s, c, &|x| weather.veil(d, x, self.weather_sun, self.dome)),
+            Some(weather) => skyline::over_veiled(s, c, &|x| self.city_veil(weather, d, x)),
             None => skyline::over_veiled(s, c, &|x| x),
         }
+    }
+
+    /// `seen`, the map's sky along `v` above the horizon (veiled, its bolt in), with the skyline's strip laid over it where
+    /// the strip covers `v`, veiled as `base_at` veils it: what a wet ground mirrors. Without a skyline, `seen` itself.
+    /// The strip is seen only through `city_at`, which is None until the skirt is built, so the dome, the ground gain and
+    /// the skirt's hold never see the mirrored city, and a map built with the band and one it is attached to agree.
+    fn over_city(&self, v: Vec3f, seen: Vec3f, weather: &weather::Weather) -> Vec3f {
+        match self.city_at(v) {
+            Some(s) if s != [0.0; 4] => skyline::over_veiled(s, seen, &|x| self.city_veil(weather, v, x)),
+            _ => seen,
+        }
+    }
+
+    /// The veil the skyline's strip gets along `d` (`base_at`, `over_city`).
+    fn city_veil(&self, weather: &weather::Weather, d: Vec3f, x: Vec3f) -> Vec3f {
+        weather.veil(d, x, self.weather_sun, self.dome)
     }
 
     /// [`Self::base_at`] without the skyline.
@@ -727,7 +758,8 @@ impl Env {
     /// (radians). A base image's (`BaseImage::peak`, under or beside the sky it
     /// replaces), a storm's bolt (`Weather::fine_step_near`, no bound) and
     /// the skyline's lights there (the band's `BandPeaks`, built with the
-    /// band): a city light is far finer than a cell. None where the base
+    /// band; under a wet ground also those over the mirrored direction, which
+    /// the puddles show): a city light is far finer than a cell. None where the base
     /// has no such detail: the sky's discs are sampled apart (`hot_spots`),
     /// and the rest of a generated sky and the backdrop are smooth at a
     /// cell's scale.
@@ -735,7 +767,12 @@ impl Env {
         let image = self.base_image.as_ref().map(|image| image.peak(d, radius)).map(|(lum, step)| (lum * self.scale, step));
         let bolt = self.weather.as_ref().filter(|_| self.atmo.is_some()).and_then(|weather| weather.fine_step_near(d, radius)).map(|step| (f32::INFINITY, step));
         let city = match (&self.skyline, &self.city_peaks) {
-            (Some((_, turn)), Some(peaks)) => peaks.near(d, *turn, radius).map(|(most, step)| (most * self.scale, step)),
+            (Some((_, turn)), Some(peaks)) => {
+                let direct = peaks.near(d, *turn, radius);
+                // a wet ground mirrors the city: its lights show below the horizon at the mirrored elevation
+                let mirrored = self.weather.as_ref().filter(|w| w.mirrors() && d.y < 0.0).and_then(|_| peaks.near(vec3f(d.x, -d.y, d.z), *turn, radius));
+                [direct, mirrored].into_iter().flatten().reduce(|a, b| (a.0.max(b.0), a.1.min(b.1))).map(|(most, step)| (most * self.scale, step))
+            }
             _ => None,
         };
         [image, bolt, city].into_iter().flatten().reduce(|a, b| (a.0.max(b.0), a.1.min(b.1)))
@@ -789,10 +826,19 @@ impl Env {
                     // light does not carry (plan 2's N3 takes out exactly what the key
                     // carries, no more).
                     let seen = |v: Vec3f| {
-                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
-                            + weather.lightning(v, at.texel)
+                        let sky = weather.veil(v, self.sky_layers(v, atmo, None, at.cache, !at.bare), self.weather_sun, self.dome)
+                            + weather.lightning(v, at.texel);
+                        // The skyline stands over the sky it mirrors: a puddle shows the city where it stands above the
+                        // horizon, veiled as the map veils it there (plan hdri-6 §5).
+                        self.over_city(v, sky, weather)
                     };
-                    let c = if at.even_ground { weather.ground_even(d, dry(d), self.ground_gain, &seen) } else { weather.ground(d, dry(d), self.ground_gain, &seen) };
+                    let c = if at.damp_ground {
+                        weather.ground_damp(d, dry(d), self.ground_gain, &seen)
+                    } else if at.even_ground {
+                        weather.ground_even(d, dry(d), self.ground_gain, &seen)
+                    } else {
+                        weather.ground(d, dry(d), self.ground_gain, &seen)
+                    };
                     // The base behind the veil, for the skyline's strip, which the map veils once (`base_at`).
                     if at.unveiled {
                         return c;
