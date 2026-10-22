@@ -417,7 +417,21 @@ impl Env {
             0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
         };
         let bottom = band.bottom_deg;
-        band.skirt().held_to(|u| [bottom, bottom - 0.5 * skyline::SKIRT_DEG, bottom - skyline::SKIRT_DEG].into_iter().map(|el| ground(u, el)).fold(f32::INFINITY, f32::min))
+        // The ground is smooth round the turn: looked up at SKIRT_HOLD_SAMPLES azimuths and read between them, not
+        // at each of the band's columns (three lookups a column cost a held bake about 4 ms, plan hdri-5 Task 8).
+        let n = skyline::SKIRT_HOLD_SAMPLES;
+        let bound: Vec<f32> = (0..n)
+            .map(|i| {
+                let u = i as f32 / n as f32;
+                [bottom, bottom - 0.5 * skyline::SKIRT_DEG, bottom - skyline::SKIRT_DEG].into_iter().map(|el| ground(u, el)).fold(f32::INFINITY, f32::min)
+            })
+            .collect();
+        band.skirt().held_to(|u| {
+            let x = u.rem_euclid(1.0) * n as f32;
+            let i = x.floor() as usize % n;
+            // the darker of the two samples either side, so the hold never lets a column past its ground
+            bound[i].min(bound[(i + 1) % n])
+        })
     }
 
     /// The band and its turn, by the rule the ImageSet path keeps: Sky mode

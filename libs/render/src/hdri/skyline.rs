@@ -24,6 +24,9 @@ pub const FADE_DEG: f32 = 1.0;
 /// the generated one without an edge, short enough that nothing of the strip runs on down.
 pub const SKIRT_DEG: f32 = 4.0;
 
+/// Azimuths a map looks its ground up at to hold its skirt to it (`Env::skirt_for`): every 2.8 degrees.
+pub const SKIRT_HOLD_SAMPLES: usize = 128;
+
 /// The skirt is the bottom row box-blurred over this many degrees of azimuth either side (15
 /// with the 30 degree skirt): over a few degrees, a little blur is enough to keep a single bright
 /// texel of the bottom row from drawing a streak down.
