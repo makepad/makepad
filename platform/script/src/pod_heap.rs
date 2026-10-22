@@ -2465,16 +2465,18 @@ pub fn f16_to_f32(h: u16) -> f32 {
             // in the position within the 10 bits, not the full 16 bits of the u16.
             let shift = (mantissa as u16).leading_zeros() as u32 - 6;
 
-            // Re-bias exponent and shift mantissa
+            // Re-bias exponent and shift mantissa; the mask drops the leading
+            // (now implicit) bit, which would otherwise land in the exponent
             let new_exponent = 127 - 15 - shift;
-            let new_mantissa = (mantissa << (shift + 1)) & 0x7FFFFF;
+            let new_mantissa = (mantissa << (shift + 1)) & 0x3FF;
 
             (sign << 31) | (new_exponent << 23) | (new_mantissa << 13)
         }
     } else {
         // Normal number
-        // Re-bias exponent from 15 to 127
-        let new_exponent = (exponent as u32 - 15) + 127;
+        // Re-bias exponent from 15 to 127 (added first: exponents below 15
+        // must not underflow)
+        let new_exponent = exponent as u32 + (127 - 15);
         // Scale the mantissa
         let new_mantissa = mantissa << 13;
         (sign << 31) | (new_exponent << 23) | new_mantissa
@@ -2518,4 +2520,43 @@ pub fn f32_to_f16(f: f32) -> u16 {
     // Normal number
     let new_mantissa = mantissa >> 13;
     ((sign as u16) << 15) | ((new_exponent as u16) << 10) | (new_mantissa as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The half's value worked out in f64 straight from its fields.
+    fn half_value(h: u16) -> f64 {
+        let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let (e, m) = (((h >> 10) & 0x1F) as i32, (h & 0x3FF) as f64);
+        match e {
+            0 => sign * m * 2f64.powi(-24),
+            0x1F if m == 0.0 => sign * f64::INFINITY,
+            0x1F => f64::NAN,
+            _ => sign * (1.0 + m / 1024.0) * 2f64.powi(e - 15),
+        }
+    }
+
+    #[test]
+    fn every_half_decodes_to_its_exact_value() {
+        for h in 0..=u16::MAX {
+            let (got, want) = (f16_to_f32(h), half_value(h));
+            if want.is_nan() {
+                assert!(got.is_nan(), "{h:#06x}: {got} is not NaN");
+            } else {
+                assert_eq!(got as f64, want, "{h:#06x}");
+                assert_eq!(got.is_sign_negative(), h & 0x8000 != 0, "{h:#06x}: sign");
+            }
+        }
+    }
+
+    #[test]
+    fn every_finite_half_survives_a_round_trip() {
+        for h in 0..=u16::MAX {
+            if (h >> 10) & 0x1F != 0x1F {
+                assert_eq!(f32_to_f16(f16_to_f32(h)), h, "{h:#06x}");
+            }
+        }
+    }
 }
