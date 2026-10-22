@@ -49,7 +49,10 @@ fn expand_pcs(pcs: &[u64], partial: &mut Vec<String>) -> HashMap<u64, Vec<XFrame
                                 None => vec![XFrame { name: own, tier, at: c.at.clone() }],
                             }
                         }
-                        None => vec![XFrame { name: format!("jit {:#x}", pc), tier: "jit".into(), at: String::new() }],
+                        None => match super::codever::glue_name(u, pc) {
+                            Some((name, _)) => vec![XFrame { name, tier: "glue".into(), at: String::new() }],
+                            None => vec![XFrame { name: format!("jit {:#x}", pc), tier: "jit".into(), at: String::new() }],
+                        },
                     };
                     (pc, v)
                 })

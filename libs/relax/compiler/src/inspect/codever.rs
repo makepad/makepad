@@ -504,6 +504,41 @@ pub(crate) fn frame_fields_no_owner(u: &Unit, pc: u64) -> Option<(String, String
     ))
 }
 
+/// JIT code that is no fn body: a slot's thunk (what calls branch to), its lazy stub, or a veneer
+/// (a branch to a host function or a far target): (name, module label). A profile sample on one
+/// is the cost of reaching the callee (a fetch of a thunk line that is not in the i-cache).
+pub(crate) fn glue_name(u: &Unit, pc: u64) -> Option<(String, &'static str)> {
+    for (kind, what, module) in [(0usize, "thunk of", "jit/glue thunk"), (1, "lazy stub of", "jit/glue stub")] {
+        if let Some((id, _)) = u.slots.find(kind, pc).filter(|(id, _)| (*id as usize) < u.fns.len()) {
+            return Some((format!("[{} {}]", what, super::display_name(u, id, 0)), module));
+        }
+    }
+    // a call counter's stub (tier record word 2: where the slot's counting stub is)
+    #[cfg(target_arch = "aarch64")]
+    let cs = relax_backend::arm64::COUNT_STUB_SIZE as u64;
+    #[cfg(not(target_arch = "aarch64"))]
+    let cs = relax_backend::x64::COUNT_STUB_SIZE as u64;
+    for id in 0..u.fns.len() as u32 {
+        if !u.slots.has_seg(relax_backend::rir::SlotTable::locate(id).0) {
+            break;
+        }
+        let stub = unsafe { (*(u.slots.tier(id) as *const std::sync::atomic::AtomicU64).add(2)).load(Relaxed) };
+        if stub != 0 && pc >= stub && pc < stub + cs {
+            return Some((format!("[count stub of {}]", super::display_name(u, id, 0)), "jit/glue count"));
+        }
+    }
+    let v = u.veneers.try_lock().ok()?;
+    let (target, _) = v.iter().find(|(_, &at)| pc >= at && pc < at + 16)?;
+    let to = match u.code.try_read().ok().and_then(|t| t.entry_at(*target)) {
+        Some((_, _, id)) => super::display_name(u, id, 0),
+        None => match u.slots.find(0, *target).filter(|(id, _)| (*id as usize) < u.fns.len()) {
+            Some((id, _)) => format!("thunk of {}", super::display_name(u, id, 0)),
+            None => super::symbols::host_symbol(*target).map_or(format!("{:#x}", target), |s| s.0),
+        },
+    };
+    Some((format!("[veneer to {}]", to), "jit/glue veneer"))
+}
+
 // ------------------------------------------------------------------ inlined copies
 
 /// Slots (other than `skip`) whose code holds an instruction of `lines` (their installed code;

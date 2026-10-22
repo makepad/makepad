@@ -444,6 +444,8 @@ fn activity(names: &[super::Frame]) -> &'static str {
         }
     }
     match names.first() {
+        // a thunk, lazy stub or veneer between a call and its callee: what calls cost to reach
+        Some(f) if f.module.starts_with("jit/glue") => "JIT call glue (thunks, stubs, veneers)",
         Some(f) if f.module.starts_with("jit") => "program",
         Some(f) if f.module == "makepad" => {
             if jit_seen {
@@ -723,7 +725,7 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     let mut phys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in &main_samples {
         // the innermost frame whose physical fn (the code it is in) is the program's
-        if let Some(n) = s.iter().filter(|f| f.module.starts_with("jit")).map(|f| f.levels.last().map_or(f.name.clone(), |l| l.0.clone())).find(|n| !super::is_std_fn(n) && !n.starts_with("jit 0x") && !n.starts_with("slot#")) {
+        if let Some(n) = s.iter().filter(|f| f.module.starts_with("jit")).map(|f| f.levels.last().map_or(f.name.clone(), |l| l.0.clone())).find(|n| !super::is_std_fn(n) && !n.starts_with("jit 0x") && !n.starts_with("slot#") && !n.starts_with('[')) {
             *phys.entry(n).or_default() += 1;
         }
     }

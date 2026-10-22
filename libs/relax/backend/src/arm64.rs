@@ -96,8 +96,28 @@ pub fn reg_config() -> RegConfig {
         sym_class: 0,
         store_imm: |k| k == 0,
         fconst_remat: true,
+        mem_operands: false,
+        remat_cost: arm64_remat_cost,
         float_windows: true,
     }
+}
+
+/// Instructions Gen::remat_into / mov_imm take to recompute a value (RegConfig::remat_cost): a
+/// constant is one orr for a logical immediate, else one movz / movn plus a movk per remaining
+/// halfword that is neither all zeros nor all ones; addresses and slot offsets one.
+fn arm64_remat_cost(r: &Remat) -> u8 {
+    let Remat::Const(v) = *r else { return 1 };
+    let u = v as u64;
+    let (mut zeros, mut ones) = (0u8, 0u8);
+    for k in 0..4 {
+        let h = (u >> (16 * k)) & 0xffff;
+        zeros += (h == 0) as u8;
+        ones += (h == 0xffff) as u8;
+    }
+    if zeros.max(ones) < 3 && bitmask_imm(u).is_some() {
+        return 1;
+    }
+    (4 - zeros.max(ones)).max(1)
 }
 
 /// Registers an instruction overwrites while it runs (RegConfig::clobbers): an asm! block's
@@ -768,6 +788,8 @@ struct Gen<'a> {
     /// loads to emit before the instruction at a position
     win: std::collections::HashMap<u32, Vec<(u32, u32, u8)>>,
     win_start: std::collections::HashMap<u32, Vec<(u32, u8)>>,
+    /// block-local evictions (Alloc::evicts / prestores): transfers before the instruction at a position
+    evict_at: std::collections::HashMap<u32, Vec<regalloc::EvOp>>,
     /// passes::low_bits_only: narrow results whose re-extension nobody reads
     low_only: Vec<bool>,
     /// passes::zero_above: values whose register is zero above that many bits
@@ -920,9 +942,29 @@ impl<'a> Gen<'a> {
         }
         (base, off)
     }
+    /// Eviction stores / reloads before an instruction (regalloc::evict_ops); flags untouched.
+    fn evict_transfers(&mut self, ops: &[regalloc::EvOp]) {
+        for op in ops {
+            match *op {
+                regalloc::EvOp::Store(r, o) => {
+                    let off = self.spill_sp(o);
+                    self.a.ldst(STRX, 8, r, SP, off);
+                }
+                regalloc::EvOp::Load(r, o) => {
+                    let off = self.spill_sp(o);
+                    self.a.ldst(LDRX, 8, r, SP, off);
+                }
+                regalloc::EvOp::Remat(r, k) => self.remat_kind_into(r, k),
+            }
+        }
+    }
     /// Recomputes a value without a location (Alloc::remat) into r.
     fn remat_into(&mut self, r: u8, v: VReg) {
-        match self.al.remat[v.0 as usize] {
+        self.remat_kind_into(r, self.al.remat[v.0 as usize]);
+    }
+    /// remat_into for a recomputation kind (also an evicted constant's reload, Alloc::evicts).
+    fn remat_kind_into(&mut self, r: u8, k: Remat) {
+        match k {
             // never xzr for 0: register 31 is sp in add-immediate and address operands
             Remat::Const(k) => self.a.mov_imm(r, k),
             Remat::Slot(s) => {
@@ -1301,6 +1343,9 @@ impl<'a> Gen<'a> {
                     self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, ii as u32));
                 }
                 self.cur_pos = self.al.inst_pos(bi, ii);
+                if let Some(ops) = self.evict_at.get(&self.cur_pos).cloned() {
+                    self.evict_transfers(&ops);
+                }
                 if let Some(ls) = self.win_start.get(&self.cur_pos).cloned() {
                     for (v, r) in ls {
                         match (self.cls(VReg(v)), self.al.loc[v as usize]) {
@@ -1434,6 +1479,9 @@ impl<'a> Gen<'a> {
             // region windows entered from here: loaded before the terminator (regalloc edge loads)
             if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
                 let tp = self.al.block_end[bi] - 1;
+                if let Some(ops) = self.evict_at.get(&tp).cloned() {
+                    self.evict_transfers(&ops);
+                }
                 if let Some(ls) = self.win_start.get(&tp).cloned() {
                     for (v, r) in ls {
                         if let Loc::Stack(o) = self.al.loc[v as usize] {
@@ -3371,7 +3419,7 @@ impl<'a> Gen<'a> {
     /// windows), distinct, the loads' destinations not the base, the lower offset a multiple of w
     /// within the signed 7-bit scaled range. None: no match.
     fn pair_access(&mut self, options: &relax_session::Options, i1: &Inst, i2: &Inst, pos2: u32) -> Option<()> {
-        if isel_flags(options) & A64_FUSE == 0 || self.win_start.contains_key(&pos2) {
+        if isel_flags(options) & A64_FUSE == 0 || self.win_start.contains_key(&pos2) || self.evict_at.contains_key(&pos2) {
             return None;
         }
         let (load, m1, v1, b1, o1, m2, v2, b2, o2) = match (i1, i2) {
@@ -5275,6 +5323,11 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     crate::stats::pass_time(11, t_ra);
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al0);
+    if crate::stats::opt_env_off("+checkra") {
+        for l in regalloc::check_alloc(options, f, &cfg, &al0) {
+            eprintln!("{}", l);
+        }
+    }
     // a function past the branch ranges is emitted again in long mode: from the same
     // allocation (allocating twice doubled a 3.7 s allocation)
     let mut long = false;
@@ -5307,6 +5360,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         zero_above: Vec::new(),
         switch_in_range: Vec::new(),
         copy_reg: std::collections::HashMap::new(),
+        evict_at: regalloc::evict_ops(&al),
         win_start: {
             let mut ws: std::collections::HashMap<u32, Vec<(u32, u8)>> = std::collections::HashMap::new();
             for &(v, a, _, r) in &al.windows {

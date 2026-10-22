@@ -198,6 +198,115 @@ static NOW_CLASS: AtomicU8 = AtomicU8::new(u8::MAX);
 static NOW_FROM: AtomicU64 = AtomicU64::new(0);
 /// the call site of the request being served (null: none)
 static NOW_SITE: std::sync::atomic::AtomicPtr<std::panic::Location<'static>> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// when the request being served began (wall ns; 0: idle)
+static NOW_T0: AtomicU64 = AtomicU64::new(0);
+
+// ------------------------------------------------------------ recent requests (diagnostics)
+
+/// The owner's recently served requests, always on (a hitch names what the owner served while the
+/// UI thread waited for it: `served_during`). Two rings: every request, and the long ones (>= 1 ms,
+/// so a burst of short requests does not push a long one out). One writer (the owner thread);
+/// readers on any thread use the per-entry sequence (a seqlock: odd while written, retried).
+struct Served {
+    seq: AtomicU64,
+    class: AtomicU8,
+    from: AtomicU64,
+    site: std::sync::atomic::AtomicPtr<std::panic::Location<'static>>,
+    t0: AtomicU64,
+    t1: AtomicU64,
+}
+
+const RECENT_N: usize = 64;
+const LONG_NS: u64 = 1_000_000;
+static RECENT: [Served; RECENT_N] = [const { Served::new() }; RECENT_N];
+static RECENT_LONG: [Served; RECENT_N] = [const { Served::new() }; RECENT_N];
+static RECENT_AT: AtomicU64 = AtomicU64::new(0);
+static RECENT_LONG_AT: AtomicU64 = AtomicU64::new(0);
+
+impl Served {
+    const fn new() -> Served {
+        Served {
+            seq: AtomicU64::new(0),
+            class: AtomicU8::new(0),
+            from: AtomicU64::new(0),
+            site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            t0: AtomicU64::new(0),
+            t1: AtomicU64::new(0),
+        }
+    }
+
+    /// (owner only) the seqlock's writer: odd sequence, fields, even sequence (Release)
+    fn write(&self, class: u8, from: u64, site: &'static std::panic::Location<'static>, t0: u64, t1: u64) {
+        let s = self.seq.load(Ordering::Relaxed);
+        self.seq.store(s + 1, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
+        self.class.store(class, Ordering::Relaxed);
+        self.from.store(from, Ordering::Relaxed);
+        self.site.store(site as *const _ as *mut _, Ordering::Relaxed);
+        self.t0.store(t0, Ordering::Relaxed);
+        self.t1.store(t1, Ordering::Relaxed);
+        self.seq.store(s + 2, Ordering::Release);
+    }
+
+    /// a consistent copy, or None (being written, or never written)
+    fn read(&self) -> Option<(u8, u64, *const std::panic::Location<'static>, u64, u64)> {
+        let s1 = self.seq.load(Ordering::Acquire);
+        if s1 == 0 || s1 & 1 == 1 {
+            return None;
+        }
+        let r = (self.class.load(Ordering::Relaxed), self.from.load(Ordering::Relaxed), self.site.load(Ordering::Relaxed) as *const _, self.t0.load(Ordering::Relaxed), self.t1.load(Ordering::Relaxed));
+        std::sync::atomic::fence(Ordering::Acquire);
+        (self.seq.load(Ordering::Relaxed) == s1).then_some(r)
+    }
+}
+
+fn note_served(class: Class, from: u64, site: &'static std::panic::Location<'static>, t0: u64, t1: u64) {
+    let i = RECENT_AT.fetch_add(1, Ordering::Relaxed) as usize % RECENT_N;
+    RECENT[i].write(class as u8, from, site, t0, t1);
+    if t1.saturating_sub(t0) >= LONG_NS {
+        let i = RECENT_LONG_AT.fetch_add(1, Ordering::Relaxed) as usize % RECENT_N;
+        RECENT_LONG[i].write(class as u8, from, site, t0, t1);
+    }
+}
+
+/// What the owner served while a thread waited from `t0` to `t1` (wall ns) as a JSON array, longest
+/// overlap first (at most 4): class, requester thread, call site, ms into the wait it began
+/// (negative: before), its length and its overlap with the wait; a request still being served is
+/// `"running":true`. Requests the rings no longer hold are missing (a wait behind more than 64
+/// requests of >= 1 ms).
+pub fn served_during(t0: u64, t1: u64) -> String {
+    let mut rows: Vec<(u64, u8, u64, *const std::panic::Location<'static>, u64, u64, bool)> = Vec::new();
+    for e in RECENT.iter().chain(RECENT_LONG.iter()) {
+        if let Some((c, from, site, a, b)) = e.read() {
+            let ov = b.min(t1).saturating_sub(a.max(t0));
+            if ov > 0 && !rows.iter().any(|r| r.4 == a && r.2 == from) {
+                rows.push((ov, c, from, site, a, b, false));
+            }
+        }
+    }
+    // the request on the owner now (the innermost one when it serves nested inside a wait)
+    let (c, from, site, a) = (NOW_CLASS.load(Ordering::Relaxed), NOW_FROM.load(Ordering::Relaxed), NOW_SITE.load(Ordering::Relaxed) as *const _, NOW_T0.load(Ordering::Relaxed));
+    if c != u8::MAX && a != 0 && a < t1 {
+        let now = crate::jit::wall_ns();
+        rows.push((t1.min(now).saturating_sub(a.max(t0)), c, from, site, a, now, true));
+    }
+    rows.sort_by(|x, y| y.0.cmp(&x.0));
+    let ms = |ns: i128| ns as f64 / 1e6;
+    let out: Vec<String> = rows.iter().take(4).map(|&(ov, c, from, site, a, b, running)| {
+        let site = unsafe { site.as_ref() }.map_or("?".to_string(), |l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()));
+        format!(
+            "{{\"class\":\"{}\",\"thread\":{},\"site\":{},\"began_ms\":{:.1},\"ms\":{:.1},\"overlap_ms\":{:.1}{}}}",
+            CLASS_NAMES.get(c as usize).copied().unwrap_or("?"),
+            crate::inspect::json_str(&crate::os::thread::name(from)),
+            crate::inspect::json_str(&site),
+            ms(a as i128 - t0 as i128),
+            ms(b.saturating_sub(a) as i128),
+            ms(ov as i128),
+            if running { ",\"running\":true" } else { "" }
+        )
+    }).collect();
+    format!("[{}]", out.join(","))
+}
 
 thread_local! {
     static IS_OWNER: Cell<bool> = const { Cell::new(false) };
@@ -718,6 +827,7 @@ fn serve(r: usize) {
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
     let prev_now = (NOW_CLASS.swap(req.class as u8, Ordering::Relaxed), NOW_FROM.swap(req.from, Ordering::Relaxed));
     let prev_site = NOW_SITE.swap(req.site as *const std::panic::Location<'static> as *mut _, Ordering::Relaxed);
+    let prev_t0 = NOW_T0.swap(t0.max(1), Ordering::Relaxed);
     DEPTH.with(|d| d.set(d.get() + 1));
     let frame = crate::jit::frame_enter(req.rec);
     // makepad inspect's timeline: the owner's service of this request is a span
@@ -753,11 +863,13 @@ fn serve(r: usize) {
     NOW_CLASS.store(prev_now.0, Ordering::Relaxed);
     NOW_FROM.store(prev_now.1, Ordering::Relaxed);
     NOW_SITE.store(prev_site, Ordering::Relaxed);
+    NOW_T0.store(prev_t0, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
     unsafe { crate::query::swap_context(prev_ctx) };
     OWNER_SERVING.store(was_serving, Ordering::Relaxed);
     let t1 = crate::jit::wall_ns();
     BUSY_NS[req.class as usize].fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
+    note_served(req.class, req.from, req.site, t0, t1);
     crate::postframe::owner_served(req.class as usize, req.site, req.from, t0, t1, FOREGROUND.load(Ordering::Relaxed));
     // the process is ending on another thread: this request is never answered (its requester
     // waits until the process is gone)
@@ -1042,6 +1154,18 @@ mod tests {
         // the owner's top loop serves it once the request ended
         call(Class::Background, || {});
         assert!(BACKGROUND_RAN.load(Ordering::SeqCst));
+    }
+
+    /// The served-request rings name what the owner served during a wait (hitch events).
+    #[test]
+    fn served_during_names_the_owners_requests() {
+        isolated_test!(served_during_names_the_owners_requests);
+        let t0 = crate::jit::wall_ns();
+        call(Class::App, || std::thread::sleep(std::time::Duration::from_millis(3)));
+        let t1 = crate::jit::wall_ns();
+        let s = served_during(t0, t1);
+        assert!(s.contains("\"class\":\"app\"") && s.contains("owner.rs:"), "{s}");
+        assert_eq!(served_during(t1 + 1_000_000_000, t1 + 2_000_000_000), "[]");
     }
 
     /// A thread holding a leaf lock (fn_create) that asks the owner, or pumps, is a lock-order

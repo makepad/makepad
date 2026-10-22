@@ -654,7 +654,10 @@ fn jit_names(pcs: &[u64], partial: &mut Vec<String>, ms: u64) -> Vec<JitName> {
                     let levels = c.inlined.as_ref().map(|i| i.stack.iter().map(|(n, _, at)| (n.clone(), at.clone())).collect()).unwrap_or_default();
                     JitName::of(codever::frame_fields(u, &c), Some(c.slot), levels)
                 }
-                None => JitName::unknown(pc),
+                None => match codever::glue_name(u, pc) {
+                    Some((name, module)) => JitName::of((name, String::new(), module.into(), String::new()), None, Vec::new()),
+                    None => JitName::unknown(pc),
+                },
             })
             .collect::<Vec<_>>()
     });
@@ -716,7 +719,7 @@ pub(crate) fn is_std_fn(name: &str) -> bool {
 
 /// The program's own JIT frame: not std, not a JIT trampoline, not an unidentified inline level.
 pub(crate) fn is_program_frame(f: &Frame) -> bool {
-    f.module.starts_with("jit") && !is_std_fn(&f.name) && !f.name.starts_with("jit 0x") && !f.name.starts_with("(inlined") && !f.name.starts_with("slot#")
+    f.module.starts_with("jit") && !is_std_fn(&f.name) && !f.name.starts_with("jit 0x") && !f.name.starts_with("(inlined") && !f.name.starts_with("slot#") && !f.module.starts_with("jit/glue")
 }
 
 /// One frame as a short JSON object.
